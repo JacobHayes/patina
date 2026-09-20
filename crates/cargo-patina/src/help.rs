@@ -2257,10 +2257,10 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
 const SYSCALLS: Verb = Verb {
     name: "syscalls",
     summary: "Print the target-local kernel-entry inventory and C symbol coverage.",
-    synopsis: &["cargo patina syscalls [--os linux|darwin] [--arch x86_64|aarch64]"],
+    synopsis: &["cargo patina syscalls"],
     prose: "\
 `syscalls` prints the target-local kernel-entry inventory and C symbol layer \
-(default: this host). Linux x86_64/aarch64 rows describe runtime dispositions \
+(this compiled target only). Linux x86_64/aarch64 rows describe runtime dispositions \
 and drive syscall-user-dispatch. Darwin aarch64 inventories pinned BSD, Mach \
 and ARM-specific entries, including guarded alternatives and invalid slots; \
 source status and C symbol interposition are not raw-entry models. Darwin \
@@ -2268,26 +2268,7 @@ x86_64 is not inventoried. MIG messages and commpage APIs are outside the \
 kernel-entry scope. The JSON form \
 emits the shared schema patina.syscalls/v2.",
     families: &[fam(Family::Sole, "`syscalls`", None)],
-    groups: &[Group {
-        title: "Registry selection",
-        families: SOLE,
-        flags: &[
-            f(
-                "--os",
-                None,
-                Value::Required("OS", Kind::Enum(&["linux", "darwin"])),
-                "Operating system whose table to print (default: this host).",
-                false,
-            ),
-            f(
-                "--arch",
-                None,
-                Value::Required("ARCH", Kind::Enum(&["x86_64", "aarch64"])),
-                "Architecture whose numbers to print (default: this host).",
-                false,
-            ),
-        ],
-    }],
+    groups: &[],
     refusals: NO_REFUSALS,
 };
 

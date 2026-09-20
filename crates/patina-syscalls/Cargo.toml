@@ -1,0 +1,9 @@
+[package]
+name = "patina-dst-syscalls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+links = "patina-dst-syscalls"
+build = "build.rs"

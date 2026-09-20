@@ -1,30 +1,23 @@
-//! The registry's completeness gates against the vendored tables (design §3
-//! tests (a) and (b)) and the structural invariants the rows must hold. These
-//! run on every platform: they read the vendored tables and the rows, never
-//! the host kernel.
-//!
-//! Each gate is proven non-vacuous by a planted failure in the builder report
-//! (a removed row, a duplicated number, a mis-numbered row); the assertions
-//! name the offending rows so the failure is actionable.
+//! Active identity/support consistency. Source translation is independently
+//! checked by scripts/test-refresh-syscalls.py; these tests do not parse sources.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::table::linux_table;
 use super::*;
 
-/// (a) Every number the vendored table lists for an arch has exactly one row,
+/// (a) Every number the generated metadata lists for this target has exactly one row,
 /// and (b) every row's number for that arch is in the table under the row's
-/// own name. Runs for both Linux arches.
+/// own name. Runs on the compiled Linux target.
 #[test]
-fn every_table_number_has_exactly_one_row_and_every_row_is_in_the_table() {
-    for &arch in Arch::ALL {
-        let table: BTreeMap<u32, &str> = linux_table(arch)
-            .iter()
-            .map(|entry| (entry.nr, entry.name))
-            .collect();
+fn every_native_entry_has_exactly_one_support_row() {
+    {
+        let arch = Arch::host();
+        let table: BTreeMap<u32, &str> =
+            ENTRIES.iter().map(|entry| (entry.nr, entry.name)).collect();
         let mut seen: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
         for row in SYSCALLS {
-            if let Some(nr) = row.nr.for_arch(arch) {
+            {
+                let nr = row.id.number();
                 seen.entry(nr).or_default().push(row.name);
             }
         }
@@ -41,7 +34,7 @@ fn every_table_number_has_exactly_one_row_and_every_row_is_in_the_table() {
         }
         assert!(
             wrong.is_empty(),
-            "{}: registry rows disagree with the vendored table:\n  {}",
+            "{}: registry rows disagree with the generated metadata:\n  {}",
             arch.name(),
             wrong.join("\n  ")
         );
@@ -58,7 +51,7 @@ fn every_table_number_has_exactly_one_row_and_every_row_is_in_the_table() {
             .collect();
         assert!(
             missing.is_empty() && duplicated.is_empty(),
-            "{}: every number in the vendored table needs exactly one registry row.\n  \
+            "{}: every number in the generated metadata needs exactly one registry row.\n  \
              missing rows: {missing:?}\n  duplicated numbers: {duplicated:?}",
             arch.name()
         );
@@ -71,7 +64,7 @@ fn every_table_number_has_exactly_one_row_and_every_row_is_in_the_table() {
 /// revives moves the row.
 #[test]
 fn removed_rows_are_exactly_the_tables_unimplemented_numbers() {
-    let unimplemented: BTreeSet<&str> = linux_table(Arch::X86_64)
+    let unimplemented: BTreeSet<&str> = ENTRIES
         .iter()
         .filter(|entry| !entry.is_implemented())
         .map(|entry| entry.name)
@@ -103,11 +96,7 @@ fn rows_are_well_formed() {
     let mut names = BTreeSet::new();
     for row in SYSCALLS {
         assert!(names.insert(row.name), "{}: duplicate row", row.name);
-        assert!(
-            row.nr.x86_64.is_some(),
-            "{}: every row is keyed by an x86_64 number",
-            row.name
-        );
+        assert_eq!(row.nr, row.id.number());
         assert!(
             !row.reasoning.is_empty(),
             "{}: reasoning is required",
@@ -184,7 +173,9 @@ fn since_newer_than_virtual_abi_is_exactly_the_absent_rows() {
     assert_eq!(
         absent,
         [
+            #[cfg(target_arch = "x86_64")]
             "uretprobe",
+            #[cfg(target_arch = "x86_64")]
             "uprobe",
             "mseal",
             "setxattrat",
@@ -232,12 +223,8 @@ fn since_newer_than_virtual_abi_is_exactly_the_absent_rows() {
 /// dispatcher vehicle is exactly `syscall`.
 #[test]
 fn symbol_rows_reference_real_rows() {
+    #[cfg(target_arch = "x86_64")]
     let syscall_names: BTreeSet<&str> = SYSCALLS.iter().map(|row| row.name).collect();
-    let darwin_rows = darwin::inventory();
-    let darwin_names: BTreeSet<&str> = darwin_rows
-        .iter()
-        .flat_map(|row| row.variants.iter().map(|v| v.entry.as_str()))
-        .collect();
     let mut names = BTreeSet::new();
     for symbol in SYMBOLS {
         assert!(
@@ -252,10 +239,11 @@ fn symbol_rows_reference_real_rows() {
                     "{}: an empty serves list is LibcOnly",
                     symbol.name
                 );
+                #[cfg(target_arch = "x86_64")]
                 for name in rows {
                     assert!(
                         syscall_names.contains(name),
-                        "{}: serves unknown syscall {name}",
+                        "{}: serves unknown syscall {name:?}",
                         symbol.name
                     );
                 }
@@ -265,20 +253,13 @@ fn symbol_rows_reference_real_rows() {
                     symbol.name
                 );
             }
-            Serves::Darwin(rows) => {
+            Serves::Darwin(_) => {
                 assert_eq!(
                     symbol.platform,
                     Platform::Darwin,
                     "{}: Serves::Darwin is for Darwin-only symbols",
                     symbol.name
                 );
-                for name in rows {
-                    assert!(
-                        darwin_names.contains(name),
-                        "{}: names {name}, which is not in syscalls.master",
-                        symbol.name
-                    );
-                }
             }
             Serves::Dispatcher => assert_eq!(
                 symbol.name, "syscall",
@@ -305,11 +286,10 @@ fn symbol_rows_reference_real_rows() {
 /// The per-arch view is sorted and complete: x86_64 has every row, aarch64 has
 /// exactly the table's count.
 #[test]
-fn rows_for_arch_match_the_table_sizes() {
-    assert_eq!(rows_for(Arch::X86_64).len(), 386);
-    assert_eq!(rows_for(Arch::Aarch64).len(), 328);
-    for &arch in Arch::ALL {
-        let rows = rows_for(arch);
+fn native_rows_are_sorted_and_complete() {
+    assert_eq!(rows_for().len(), ENTRIES.len());
+    {
+        let rows = rows_for();
         assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
     }
 }

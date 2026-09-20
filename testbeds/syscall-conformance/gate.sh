@@ -328,7 +328,8 @@ step "frozen paths" lines check_frozen_paths "$repo_root" "${frozen_paths[@]}"
 step "declarations" lines "$conform" gate "$frozen" "$here/divergences.toml" "$family"
 step "rustfmt" log cargo fmt --all --manifest-path "$repo_root/Cargo.toml" -- --check
 step "clippy" log cargo clippy --workspace --all-targets --manifest-path "$repo_root/Cargo.toml" -- -D warnings
-step "registry cross-gate" log cargo test --manifest-path "$repo_root/Cargo.toml" -p cargo-patina --test syscall_registry
+step "symbol registry cross-gate" log cargo test --manifest-path "$repo_root/Cargo.toml" -p cargo-patina --test syscall_registry
+step "native manifest cross-gate" log cargo test --manifest-path "$here/Cargo.toml" --lib
 step "conformance run" legs "$here/run.sh"
 step "design obligations" lines check_obligations "$repo_root" "$family" "$target_dir/conformance"
 

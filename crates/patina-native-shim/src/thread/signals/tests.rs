@@ -96,11 +96,7 @@ pub(in crate::thread) fn isolated(body: impl FnOnce()) {
     }
 }
 pub(in crate::thread) fn syscall_number(name: &str) -> i64 {
-    crate::registry::syscall(name)
-        .unwrap()
-        .nr
-        .for_arch(crate::registry::Arch::host())
-        .unwrap() as i64
+    crate::registry::syscall(name).unwrap().id.number() as i64
 }
 pub(in crate::thread) fn trace_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("patina-signal-unit-{}.patina", std::process::id()))

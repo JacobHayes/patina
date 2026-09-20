@@ -31,7 +31,13 @@ const fn s(
     }
 }
 
-pub const SYMBOLS: &[SymbolRow] = &[
+pub const SYMBOLS: &[SymbolRow] = {
+    #[cfg(target_os = "macos")]
+    crate::darwin::validate_associations(ROWS, crate::ENTRIES);
+    ROWS
+};
+
+const ROWS: &[SymbolRow] = &[
     s(
         "clock_gettime",
         Platform::Both,

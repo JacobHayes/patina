@@ -1,6 +1,101 @@
 # Arc: Linux x86_64 syscall conformance — every number dispositioned, every model host-checked
 
-Status: design approved 2026-09-08 (user briefing); foundations in flight.
+Status: revised architecture approved; migration requires bounded parent review.
+
+## Revised contract (supersedes conflicting decisions below)
+
+The historical design below describes the existing harness, not an authorization
+to retain foreign-target inspection, vendored-source parsing, or blessed host
+answers. The approved replacement has these boundaries:
+
+- A small dependency-light shared registry crate owns generated syscall identities
+  and immutable upstream provenance. Only the active OS/architecture module is
+  compiled. Its native `Syscall` metadata has a total `number()`; architecture-only
+  variants do not exist on other targets. Darwin identity includes namespace and
+  platform subcode, preserving guarded alternatives, holes and invalid slots.
+  Linux identity is never borrowed to describe a Darwin ABI.
+- An explicit standard-library Python maintainer generator discovers official
+  stable Linux and numeric XNU releases, downloads immutable sources into temporary
+  storage, validates them, and atomically replaces one checked-in Rust artifact.
+  Normal builds are offline and neither parse nor fetch upstream sources. The
+  baseline Linux pair has one coherent revision; refresh refuses a stable-release
+  downgrade that would drop newer mainline entries. Human support metadata and
+  runtime handler bindings remain separate, keyed by generated types rather than
+  duplicated syscall numbers or name joins.
+- Conformance is a normal root-workspace test package depending on the pure
+  registry, not shim source imports or a full runtime linked into the native
+  oracle. Runtime dispositions are not the observation oracle. CLI inspection
+  reports the compiled target only; foreign selectors and host/reference JSON
+  exchanges are removed, not retained as compatibility paths.
+- The same reviewed handwritten scenario runs against the live host kernel and
+  Patina. Raw observations and OS/kernel/capability facts are run artifacts, not
+  committed environment-specific golden answers. Reviewed semantic comparisons
+  admit only permitted variation; record/replay remains strictly identical.
+  Synthetic comparator fixtures test permitted variation and wrong outcomes,
+  never implement a second handwritten kernel. The existing nonempty-directory
+  rename errno and statx validity-mask rules retain meaningful negative controls.
+- Every generated entry requires an exhaustive typed mapping to a reviewed probe
+  or reasoned exclusion. No accepted pending/unwritten state, blanket exception,
+  or catch-all for future entries exists. Shared reason categories are acceptable
+  with explicit per-entry classification. Existing scenario execution evidence
+  may justify several identities; matching names alone does not prove coverage.
+  Reserved/invalid entries and destructive global native effects admit honest
+  exclusions. Missing runtime support or a missing probe is not a safety reason.
+- A safe probe still executes natively when Patina lacks its implementation.
+  Expected Patina failures require the specific known refusal or semantic failure;
+  arbitrary nonzero exit is not an xfail and unexpected success fails the gate.
+  Probe requirements and runtime capability observations are separate from static
+  identity. Unsupported, permission-blocked and unexpected host failures differ.
+  Missing host capability limits native comparison, not automatically simulation.
+- Native probes are trusted, reviewed, unprivileged subprocesses using bounded
+  per-run owned resources and deadlines. Cleanup validates positive PIDs or uses
+  the existing direct process-group API. No global destructive effect, unowned
+  file/process access, privilege change, VM, or sandbox framework is introduced.
+  Temporary directories and timeouts are not a security sandbox for arbitrary code.
+- Frozen review/anti-weakening safeguards and trace obligations survive migration;
+  the parent reviews and pins moved paths before family acceptance. Host libtest
+  retains normal concurrency; deterministic guest serialization is independent.
+  Default reports are quiet summaries with retained logs.
+
+### Bounded migration and acceptance
+
+1. Establish the shared active-target registry, typed support/dispatch seams,
+   maintainer generator, and migrated CLI consumers/tests/docs. This includes
+   replacing the conformance host/reference JSON exchange and shared foreign-name
+   manifest validation with typed target-local probe associations and cfg
+   boundaries: removing selectors cannot leave ordinary conformance commands
+   broken. Vehicle-number detectors compare actual adapters to the pure registry,
+   not shim source imports. Preserve runtime semantics and source pins. Report
+   inherited coverage debt honestly; registry compilation is not a claim of
+   exhaustive conformance.
+2. Move the conformance engine into the root workspace, replace ordinary blessing
+   with live differential observations, and preserve capability, precise-failure,
+   safety, comparator and frozen-trace contracts.
+3. Review every entry's actual exercised probe coverage or explicit exclusion.
+   Coverage acceptance remains red until complete; no grandfathered allowlist or
+   bypass makes it green. Newly required gate regressions need parent review
+   before public intermediate landing.
+
+The installed host-conformance command is a separate distribution-boundary
+checkpoint. Any eventual command shares this engine, but must not recursively
+invoke Cargo in a way that requires an installed user's missing repository.
+No self-sufficient public command is claimed by the workspace migration.
+### Implementation checkpoint
+
+The shared pure crate, cfg-native generated identities, total numbers, typed
+Linux dispositions/SUD bindings, and active-only CLI are implemented. The
+conformance vehicle detector uses the pure crate; the harness and runner no
+longer exchange host/reference JSON. Typed scenario associations distinguish
+architecture-inapplicable calls from unknown names. The explicit maintainer
+generator and offline mutation detectors replace raw vendoring/parsers.
+
+Stage1 acceptance requires independent review, including parent review of
+the moved/frozen test paths. Host fast checks pass; cross compilation is not
+cross-platform execution evidence. Root-workspace conformance relocation,
+live differential oracles and exhaustive reviewed probe/exclusion coverage are
+still outstanding. Inventory counts are not coverage, and inherited gaps remain
+unaccepted. The historical implementation details below are not the current API.
+
 Scouting evidence (file:line inventories per family, native strace demand
 ranking, prior art) lives outside the repo at
 `/cache/jacobhayes/patina-syscall-arc/reports/` — it is a snapshot that rots;
@@ -92,7 +187,7 @@ and every defined public symbol has a row; (e) the audit classification lists
 in `patina-target` agree with the registry (an interposed symbol is never in a
 deny list; a `Trap` symbol is in the deny-trap list).
 
-`cargo patina syscalls [--os linux] [--arch x86_64] [--format json]` prints the
+`cargo patina syscalls [--format json]` prints the
 table with dispositions and reasoning (`patina.syscalls/v2`), so humans and
 agents inspect the live registry, never a doc. `syscall(2)` (the glibc wrapper)
 forwards into the same dispatcher instead of its two-number allowlist.

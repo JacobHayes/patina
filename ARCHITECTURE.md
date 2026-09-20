@@ -556,7 +556,20 @@ pthread_create, pthread_mutex_*, pthread_cond_*
 
 These symbols delegate to Patina drivers and scheduler operations. Direct syscalls, dynamic loading, and platform-specific APIs are denied unless explicitly supported.
 
-**The syscall registry.** Every kernel syscall number the shim's Linux targets can dispatch has a row in `crates/patina-native-shim/src/registry/` (`syscalls.rs`: one row per number in the vendored x86_64 table, arm64 numbers carried by name; `symbols.rs`: every public symbol the C layer defines, mapped onto the rows it serves, plus the known ABI spellings it deliberately does not define). A row's disposition — `Modeled`, `Passthrough`, `Constant`, `SoftDeny`, `Trap(class)`, `Absent` — is what the runtime does today, with its reasoning, the arc that changes it, the conformance probe that host-checks it, and (for numbers newer than the table's baseline) the kernel release that introduced it. The registry declares the virtual kernel's ABI level (`registry::VIRTUAL_ABI`); a row whose `since` is newer than that level is `Absent` and answers `ENOSYS`, exactly as a kernel of the declared level does, so a newer host's syscalls are never half-modeled. The syscall-user-dispatch dispatcher is generated from the rows at compile time (a routed row without a handler, or a trap row with one, does not compile); the libc `syscall(2)` interposer forwards every number into that same dispatcher, so the libc wrapper, `syscall(2)`, and a raw instruction cannot answer one number differently; and `cargo patina syscalls` prints the live rows (`patina.syscalls/v2`). The rows are gated against verbatim copies of the upstream kernel tables under `crates/patina-native-shim/abi/` (`scripts/refresh-syscall-tables.sh` re-fetches and diffs them): every table number has exactly one row, every row's numbers are in the table, every symbol row is defined by the compiled shim objects (and every `Absent` row is not), every defined public symbol has a row, `patina-target`'s deny-trap list is exactly the registry's `Deny` rows, and the rows agree both ways with the conformance testbed's `probes.toml` (every probe id a row names is a probe that covers it; every row the manifest names exists with the right disposition; a `Modeled` row without a probe is reported, and refused under `PATINA_CONFORMANCE_STRICT=1`). The testbed reads the virtual ABI level and each row's `since` from `cargo patina syscalls --format json`, never from a constant of its own. The C layer is one translation unit, `c/patina_posix.c`, assembled from per-family slices under `c/posix/`; the Rust dispatcher's handlers live in per-family modules under `src/sud/`.
+**The syscall registry.** `patina-dst-syscalls` is a dependency-free metadata
+crate. Its checked-in `generated.rs` contains cfg-local Linux x86_64, Linux
+ aarch64 and Darwin aarch64 identities; only the compiled target is available.
+`Syscall::number()` is total. `linux.rs` exhaustively assigns reviewed runtime
+support to native typed IDs; `symbols.rs` separately describes the libc surface.
+The shim re-exports metadata and keys SUD handler bindings by those same IDs,
+with compile-time binding checks. No runtime behavior is derived from an upstream
+source declaration. The explicit Python maintainer generator validates immutable
+source hashes, discards temporary downloads and atomically replaces the single
+Rust artifact. Normal builds neither parse nor fetch upstream source files.
+`cargo patina syscalls` reports only the compiled target. The conformance harness
+reads the pure metadata directly; the symbol/object and probe-association gates
+remain distinct from execution coverage. Its existing expectation-based oracle
+is not yet the approved live differential design.
 
 **The descriptor table.** The shim owns one guest descriptor table (`crates/patina-native-shim/src/fdtable.rs`), shaped like the kernel's: guest numbers are allocated lowest-free with holes and refcount an open file *description* — the kind of object (captured stdin/stdout/stderr, a deterministic-filesystem file, directory or `O_PATH` handle, the `/dev/urandom` device, a virtual socket, a pipe/socketpair/FIFO endpoint, an eventfd, an epoll instance or kqueue), its class handle, and its status flags (access mode, `O_APPEND`, `O_NONBLOCK`) — while `FD_CLOEXEC` is a bit on the number. `dup`/`dup2`/`dup3`/`F_DUPFD[_CLOEXEC]` bind a second number to one description (`F_DUPFD` honors its minimum; `dup2`/`dup3` bind a chosen number, closing what it named), `close` frees the number and the description with its last number, `close_range` covers a range (or marks it close-on-exec), and `EMFILE` falls at `RLIMIT_NOFILE` — the one number `getrlimit`, `sysconf(_SC_OPEN_MAX)` and the table agree on. The class handle a description names (the driver `Fd`, the net module's socket or pipe-end key, a reactor's registry id) is internal: traces record driver handles exactly as before, and a guest number is a pure function of the deterministic call sequence, never recorded. Every descriptor operation — `read`, `write`, `pread`/`pwrite`, `lseek`, `fsync`, `ftruncate`, `flock`, `fcntl`, `close`, the `dup` family — is one universal `patina_*` entry that resolves the number once and dispatches on what it names (a pipe's `lseek` is `ESPIPE`, its `fsync` `EINVAL`, an empty slot `EBADF`, exactly as the kernel answers); the C interposers and the SUD rows call that entry and decide nothing by kind themselves, and `patina_fd_kind` is the single oracle for the few calls whose meaning depends on the kind (a socket op on a file is `ENOTSOCK`, a `*at` dirfd must be a directory, `mmap` of a pipe is `ENODEV`). Redirecting a standard stream works the Linux way: `dup2(fd, 2)` makes number 2 name the file, and a `close(2)` followed by an `open` makes 2 an ordinary file; the runtime's own diagnostics write to the capture *sinks* directly, so a guest cannot redirect them away from the supervisor. A file-backed mapping holds a hidden reference on its description, so its writeback survives the guest closing the number. Standard input is a stream at EOF; the conformance probe `fd/table` host-checks all of it.
 
@@ -637,8 +650,19 @@ Patina maintains these architectural invariants:
 6. Unsupported nondeterminism fails loudly.
 7. The native ABI shim extends compatibility without defining core semantics.
 
-**Cross-platform syscall inventory.** `cargo patina syscalls` emits one
-`patina.syscalls/v2` contract per selected target. On every target,
+**Registry boundary.** The approved registry/conformance architecture separates
+pure generated active-target identity, human runtime support metadata, and the
+live differential observation oracle. The shared registry compiles only the
+native OS/architecture, with total syscall numbers for valid target entries;
+Darwin namespaces and subcodes remain distinct. Runtime support and handler
+bindings use generated types. Conformance belongs to the root workspace without
+linking the shim runtime into the host oracle. See the
+[revised contract](docs/arcs/syscall-conformance.md#revised-contract-supersedes-conflicting-decisions-below)
+for the migration and acceptance boundary. The expectation-based conformance implementation does not yet satisfy the full
+replacement contract.
+
+**Native syscall inventory.** `cargo patina syscalls` emits one
+`patina.syscalls/v2` contract for the compiled target. On every target,
 `summary.symbols` is a status-to-count object (deny classes grouped as `deny`);
 row identity is `(namespace, nr, subcode)`. Variant entry names may be null for
 Linux table slots without an entry point. Linux runtime dispositions

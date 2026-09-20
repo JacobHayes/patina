@@ -127,25 +127,23 @@ variable is never set by `run.sh` itself.
 
 ## The registry and the manifest
 
-`probes.toml` says which rows and symbols each probe covers; the registry
-(`crates/patina-native-shim/src/registry/`) says which probe covers each row.
-The two are gated against each other both ways, and the prelude refuses a
-manifest naming a non-row (`conform check-manifest`). The virtual kernel ABI
-level (`registry::VIRTUAL_ABI`) and each row's first kernel (`since`) reach the
-harness through `cargo patina syscalls --format json` (dumped to
-`$CARGO_TARGET_DIR/conformance/registry.json`), so an expectation header and the host
-gate can never disagree with the registry. The same freshly rebuilt binary also
-writes `reference.json` for the other Linux architecture using `--os`/`--arch`.
-Both reports retain the unchanged public JSON schema and target-local rows.
-Check, host-check, and bless require the complete x86_64/aarch64 inventory,
-verify report target identities and matching virtual ABI, and reject unknown
-names or wrong row kinds. Adding an architecture requires its inventory too.
-Known foreign rows are listed and counted as **nonhost**, not merged into host
-metadata: only host rows supply execution availability, kernel dates, and
-absence checks. Missing or misidentified reports fail closed, including before
-blessing writes. `conform selftest` plants inventory/identity/kind failures and
-contrasting host/foreign dates to enforce this boundary. No applicability
-report establishes oracle coverage or relaxes frozen-family obligations.
+`probes.toml` names the syscall operations and libc symbols associated with each
+probe. The harness reads native identity, runtime support, virtual ABI and kernel
+introduction dates directly from the dependency-free `patina-dst-syscalls` crate;
+it does not link the shim or spawn the CLI to obtain metadata. `conform abi`,
+`check-manifest PROBES_TOML`, `bless` and `host-check` no longer accept registry or
+reference JSON files. `src/associations.rs` maps the existing scenario names to
+typed native IDs, with explicit cfg-local architecture-inapplicable operations.
+Unknown names fail closed; architecture-inapplicable operations are not native
+absence observations or coverage. The vehicle detector compares actual adapter
+numbers with the shared registry, without upstream files or shim source imports.
+`src/registry_gate.rs` preserves the reverse-association gate and its planted
+failures; both check tiers and the frozen family gate run its library tests.
+
+These are migration seams, not exhaustive conformance acceptance. Expected files,
+blessing and the standalone testbed workspace still exist; live differential
+oracles and exhaustive reviewed probe/exclusion mappings remain outstanding.
+The parent must review changed frozen paths before family acceptance.
 `abi/newer-than-virtual` is the
 probe for the rule: a number past the level (`fchroot`, 472, Linux 7.3) is
 `ENOSYS` through every vehicle, and natively the host must lack it too.

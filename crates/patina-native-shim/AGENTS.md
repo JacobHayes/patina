@@ -253,20 +253,13 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   from the registry; the `sys_*` handlers live in per-family modules
   (`time`, `sched_identity`, `fd_io`, `fs`, `mem`, `signal_process`, `net`,
   `readiness`).
-- `src/registry/` is the syscall registry: `syscalls.rs` (one row per number
-  in the vendored x86_64 table, arm64 numbers by name; disposition, reasoning,
-  the arc that closes it, the conformance probe id, and `since` for numbers
-  newer than the table's baseline — a `since` past `VIRTUAL_ABI` makes the
-  row `Absent`), `symbols.rs` (every public symbol the C
-  slices define with the rows it serves and a status, plus `Absent` rows for
-  known ABI spellings the shim does not define), `table.rs` (the parser for
-  the vendored tables under `abi/`, with the per-arch ABI-column rule). Rows
-  are data; dispatch, `cargo patina syscalls`, and the gates read them.
-- `abi/` holds verbatim upstream tables (`linux/syscall_64.tbl`,
-  `linux/syscall.tbl`, `darwin/syscalls.master`). Refresh only through
-  `scripts/refresh-syscall-tables.sh` (it diffs and exits non-zero on change;
-  `--apply` overwrites), then add rows for any new numbers — the completeness
-  gate names them.
+- `src/registry/` re-exports the dependency-free `patina-dst-syscalls` crate.
+  Its `generated.rs` owns cfg-native identities, numbers and immutable provenance;
+  `linux.rs` owns exhaustive typed runtime dispositions; `symbols.rs` describes
+  the separate libc surface. SUD binds typed identities, never copied numbers.
+- Refresh with `scripts/refresh-syscalls.py` (pinned reproduction by default;
+  explicit apply replaces one artifact atomically). No upstream raw files are
+  vendored and normal builds neither parse nor fetch source tables.
 
 Rules that follow:
 
@@ -358,8 +351,7 @@ ARCHITECTURE.md "Native (linked shim)" and `crates/cargo-patina/build.rs`).
   explain, suspect the ambient facts (name, path, size, layout) before the
   code.
 
-Darwin inventory is separate from Linux runtime rows: `registry/darwin.rs` parses
-pinned BSD/Mach sources and inventories ARM64 special/platform entries. Preserve
-guarded alternatives and invalid slots; do not infer a runtime model or a native
-errno from a source declaration. The pinned revision/source list also drives
-refresh. Raw-entry coverage and C symbol status must remain distinct.
+Darwin inventory is separate from Linux runtime rows. The generated native
+Darwin module preserves BSD/Mach/ARM namespace, subcodes, guarded alternatives
+and invalid slots. Never infer runtime support or observed errno from a source
+declaration. Raw-entry coverage and C symbol status remain distinct.

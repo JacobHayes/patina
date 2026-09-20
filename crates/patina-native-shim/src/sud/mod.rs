@@ -781,14 +781,18 @@ type Handler = fn(i64, [u64; 6]) -> i64;
 ///
 /// fd/dirfd registers go through [`arg_fd`]; `AT_FDCWD` and any negative fd are
 /// 32-bit `int`s the kernel reads from the low register bits.
-const BINDINGS: &[(&str, Handler)] = &[
-    ("select", |_, a| {
+use crate::registry::Syscall;
+
+const BINDINGS: &[(Syscall, Handler)] = &[
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_select, |_, a| {
         sys_select(a[0], a[1], a[2], a[3], a[4], None)
     }),
-    ("pselect6", |_, a| {
+    (Syscall::N_pselect6, |_, a| {
         sys_select(a[0], a[1], a[2], a[3], a[4], Some(a[5]))
     }),
-    ("signalfd", |_, a| unsafe {
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_signalfd, |_, a| unsafe {
         crate::thread::signals::fd::patina_signalfd(
             a[0] as i32,
             a[1] as *const u64,
@@ -796,7 +800,7 @@ const BINDINGS: &[(&str, Handler)] = &[
             0,
         )
     }),
-    ("signalfd4", |_, a| unsafe {
+    (Syscall::N_signalfd4, |_, a| unsafe {
         crate::thread::signals::fd::patina_signalfd(
             a[0] as i32,
             a[1] as *const u64,
@@ -805,49 +809,53 @@ const BINDINGS: &[(&str, Handler)] = &[
         )
     }),
     // ---- time ----
-    ("clock_gettime", |_, a| {
+    (Syscall::N_clock_gettime, |_, a| {
         sys_clock_gettime(a[0], a[1] as *mut Timespec)
     }),
-    ("clock_getres", |_, a| {
+    (Syscall::N_clock_getres, |_, a| {
         sys_clock_getres(a[0], a[1] as *mut Timespec)
     }),
-    ("gettimeofday", |_, a| {
+    (Syscall::N_gettimeofday, |_, a| {
         sys_gettimeofday(a[0] as *mut Timeval)
     }),
-    ("nanosleep", |_, a| {
+    (Syscall::N_nanosleep, |_, a| {
         sys_nanosleep(a[0] as *const Timespec, a[1] as *mut Timespec)
     }),
-    ("clock_nanosleep", |_, a| {
+    (Syscall::N_clock_nanosleep, |_, a| {
         sys_clock_nanosleep(a[0], a[1], a[2] as *const Timespec, a[3] as *mut Timespec)
     }),
     // ---- sync / sched / identity / entropy ----
-    ("futex", |_, a| sys_futex(a)),
-    ("getrandom", |_, a| sys_getrandom(a[0], a[1], a[2])),
+    (Syscall::N_futex, |_, a| sys_futex(a)),
+    (Syscall::N_getrandom, |_, a| sys_getrandom(a[0], a[1], a[2])),
     // SAFETY: plain runtime entry, no pointers.
-    ("sched_yield", |_, _| {
+    (Syscall::N_sched_yield, |_, _| {
         ret_i32(unsafe { patina_sched_yield() })
     }),
     // SAFETY: as above.
-    ("gettid", |_, _| unsafe { patina_thread_id() as i64 }),
-    ("set_tid_address", |_, a| unsafe {
+    (Syscall::N_gettid, |_, _| unsafe {
+        patina_thread_id() as i64
+    }),
+    (Syscall::N_set_tid_address, |_, a| unsafe {
         patina_set_tid_address(a[0] as *mut i32)
     }),
-    ("exit", |_, a| unsafe { patina_raw_exit(a[0] as c_int) }),
-    ("exit_group", |_, a| unsafe {
+    (Syscall::N_exit, |_, a| unsafe {
+        patina_raw_exit(a[0] as c_int)
+    }),
+    (Syscall::N_exit_group, |_, a| unsafe {
         patina_raw_exit_group(a[0] as c_int)
     }),
     // ---- memory: process-local, passed through to the host kernel via the
     // glibc `syscall(2)` HOST ALIAS (never the interposed `syscall`). Anonymous
     // only — an fd-backed mapping would bypass the deterministic FS.
-    ("mmap", sys_mmap),
-    ("munmap", mem_passthrough),
-    ("mprotect", mem_passthrough),
-    ("madvise", mem_passthrough),
-    ("mremap", mem_passthrough),
-    ("brk", mem_passthrough),
+    (Syscall::N_mmap, sys_mmap),
+    (Syscall::N_munmap, mem_passthrough),
+    (Syscall::N_mprotect, mem_passthrough),
+    (Syscall::N_madvise, mem_passthrough),
+    (Syscall::N_mremap, mem_passthrough),
+    (Syscall::N_brk, mem_passthrough),
     // ---- signals / process rows owned by the signals conformance family ----
     // `rt_sigaction` for SIGSYS would replace the dispatch handler: fatal.
-    ("rt_sigaction", |_, a| unsafe {
+    (Syscall::N_rt_sigaction, |_, a| unsafe {
         patina_signal_action(
             a[0] as i32,
             a[1] as *const Action,
@@ -855,7 +863,7 @@ const BINDINGS: &[(&str, Handler)] = &[
             a[3] as usize,
         )
     }),
-    ("rt_sigprocmask", |_, a| unsafe {
+    (Syscall::N_rt_sigprocmask, |_, a| unsafe {
         patina_signal_mask(
             a[0] as i32,
             a[1] as *const u64,
@@ -863,13 +871,13 @@ const BINDINGS: &[(&str, Handler)] = &[
             a[3] as usize,
         )
     }),
-    ("rt_sigpending", |_, a| unsafe {
+    (Syscall::N_rt_sigpending, |_, a| unsafe {
         patina_signal_pending(a[0] as *mut u8, a[1] as usize)
     }),
-    ("sigaltstack", |_, a| unsafe {
+    (Syscall::N_sigaltstack, |_, a| unsafe {
         patina_signal_altstack(a[0] as *const Stack, a[1] as *mut Stack)
     }),
-    ("tkill", |_, a| unsafe {
+    (Syscall::N_tkill, |_, a| unsafe {
         generate_signal(
             GenerationTarget::Thread {
                 tgid: None,
@@ -879,14 +887,14 @@ const BINDINGS: &[(&str, Handler)] = &[
             GenerationInfo::Thread,
         )
     }),
-    ("rt_sigqueueinfo", |_, a| unsafe {
+    (Syscall::N_rt_sigqueueinfo, |_, a| unsafe {
         generate_signal(
             GenerationTarget::Process { pid: a[0] as i32 },
             a[1] as i32,
             GenerationInfo::Queued(a[2] as *const Info),
         )
     }),
-    ("rt_tgsigqueueinfo", |_, a| unsafe {
+    (Syscall::N_rt_tgsigqueueinfo, |_, a| unsafe {
         generate_signal(
             GenerationTarget::Thread {
                 tgid: Some(a[0] as i32),
@@ -896,7 +904,8 @@ const BINDINGS: &[(&str, Handler)] = &[
             GenerationInfo::Queued(a[3] as *const Info),
         )
     }),
-    ("pause", |_, _| unsafe {
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_pause, |_, _| unsafe {
         patina_signal_wait(
             std::ptr::null(),
             std::ptr::null_mut(),
@@ -905,7 +914,7 @@ const BINDINGS: &[(&str, Handler)] = &[
             WaitMode::Pause,
         )
     }),
-    ("rt_sigsuspend", |_, a| unsafe {
+    (Syscall::N_rt_sigsuspend, |_, a| unsafe {
         patina_signal_wait(
             a[0] as *const u64,
             std::ptr::null_mut(),
@@ -914,7 +923,7 @@ const BINDINGS: &[(&str, Handler)] = &[
             WaitMode::Suspend,
         )
     }),
-    ("rt_sigtimedwait", |_, a| unsafe {
+    (Syscall::N_rt_sigtimedwait, |_, a| unsafe {
         patina_signal_wait(
             a[0] as *const u64,
             a[1] as *mut Info,
@@ -923,197 +932,290 @@ const BINDINGS: &[(&str, Handler)] = &[
             WaitMode::Dequeue,
         )
     }),
-    ("kill", |_, a| sys_kill(a[0] as i64, a[1] as i64)),
-    ("tgkill", |_, a| {
+    (Syscall::N_kill, |_, a| sys_kill(a[0] as i64, a[1] as i64)),
+    (Syscall::N_tgkill, |_, a| {
         sys_tgkill(a[0] as i64, a[1] as i64, a[2] as i64)
     }),
-    ("wait4", |_, _| sys_wait4()),
-    ("waitid", |_, a| sys_waitid(a[3])),
-    ("getpgid", |_, a| sys_getpgid(a[0] as i64)),
-    ("getsid", |_, a| sys_getsid(a[0] as i64)),
+    (Syscall::N_wait4, |_, _| sys_wait4()),
+    (Syscall::N_waitid, |_, a| sys_waitid(a[3])),
+    (Syscall::N_getpgid, |_, a| sys_getpgid(a[0] as i64)),
+    (Syscall::N_getsid, |_, a| sys_getsid(a[0] as i64)),
     // ---- fd I/O ----
-    ("read", |_, a| sys_read(arg_fd(a[0]), a[1], a[2])),
-    ("write", |_, a| sys_write(arg_fd(a[0]), a[1], a[2])),
-    ("close", |_, a| sys_close(arg_fd(a[0]))),
-    ("lseek", |_, a| sys_lseek(arg_fd(a[0]), a[1] as i64, a[2])),
-    ("pread64", |_, a| {
+    (Syscall::N_read, |_, a| sys_read(arg_fd(a[0]), a[1], a[2])),
+    (Syscall::N_write, |_, a| sys_write(arg_fd(a[0]), a[1], a[2])),
+    (Syscall::N_close, |_, a| sys_close(arg_fd(a[0]))),
+    (Syscall::N_lseek, |_, a| {
+        sys_lseek(arg_fd(a[0]), a[1] as i64, a[2])
+    }),
+    (Syscall::N_pread64, |_, a| {
         sys_pread(arg_fd(a[0]), a[1], a[2], a[3] as i64)
     }),
-    ("pwrite64", |_, a| {
+    (Syscall::N_pwrite64, |_, a| {
         sys_pwrite(arg_fd(a[0]), a[1], a[2], a[3] as i64)
     }),
-    ("readv", |_, a| sys_readv(arg_fd(a[0]), a[1], a[2] as i64)),
-    ("writev", |_, a| sys_writev(arg_fd(a[0]), a[1], a[2] as i64)),
-    ("fsync", |_, a| sys_fsync(arg_fd(a[0]))),
-    ("fdatasync", |_, a| sys_fsync(arg_fd(a[0]))),
-    ("ftruncate", |_, a| sys_ftruncate(arg_fd(a[0]), a[1] as i64)),
-    ("fallocate", |_, a| {
+    (Syscall::N_readv, |_, a| {
+        sys_readv(arg_fd(a[0]), a[1], a[2] as i64)
+    }),
+    (Syscall::N_writev, |_, a| {
+        sys_writev(arg_fd(a[0]), a[1], a[2] as i64)
+    }),
+    (Syscall::N_fsync, |_, a| sys_fsync(arg_fd(a[0]))),
+    (Syscall::N_fdatasync, |_, a| sys_fsync(arg_fd(a[0]))),
+    (Syscall::N_ftruncate, |_, a| {
+        sys_ftruncate(arg_fd(a[0]), a[1] as i64)
+    }),
+    (Syscall::N_fallocate, |_, a| {
         sys_fallocate(arg_fd(a[0]), a[1], a[2] as i64, a[3] as i64)
     }),
-    ("flock", |_, a| sys_flock(arg_fd(a[0]), a[1] as i64)),
-    ("dup", |_, a| sys_dup(arg_fd(a[0]))),
-    ("dup3", |_, a| sys_dup3(arg_fd(a[0]), arg_fd(a[1]), a[2])),
-    ("close_range", |_, a| sys_close_range(a[0], a[1], a[2])),
-    ("fcntl", |_, a| sys_fcntl(arg_fd(a[0]), a[1], a[2])),
-    ("ioctl", |_, a| sys_ioctl(arg_fd(a[0]), a[1], a[2])),
-    ("pipe2", |_, a| sys_pipe2(a[0], a[1])),
+    (Syscall::N_flock, |_, a| {
+        sys_flock(arg_fd(a[0]), a[1] as i64)
+    }),
+    (Syscall::N_dup, |_, a| sys_dup(arg_fd(a[0]))),
+    (Syscall::N_dup3, |_, a| {
+        sys_dup3(arg_fd(a[0]), arg_fd(a[1]), a[2])
+    }),
+    (Syscall::N_close_range, |_, a| {
+        sys_close_range(a[0], a[1], a[2])
+    }),
+    (Syscall::N_fcntl, |_, a| sys_fcntl(arg_fd(a[0]), a[1], a[2])),
+    (Syscall::N_ioctl, |_, a| sys_ioctl(arg_fd(a[0]), a[1], a[2])),
+    (Syscall::N_pipe2, |_, a| sys_pipe2(a[0], a[1])),
     // ---- filesystem ----
-    ("openat", |_, a| sys_openat(arg_fd(a[0]), a[1], a[2], a[3])),
-    ("fstat", |_, a| sys_fstat(arg_fd(a[0]), a[1])),
-    ("newfstatat", |_, a| {
+    (Syscall::N_openat, |_, a| {
+        sys_openat(arg_fd(a[0]), a[1], a[2], a[3])
+    }),
+    (Syscall::N_fstat, |_, a| sys_fstat(arg_fd(a[0]), a[1])),
+    (Syscall::N_newfstatat, |_, a| {
         sys_newfstatat(arg_fd(a[0]), a[1], a[2], a[3])
     }),
-    ("statx", |_, a| {
+    (Syscall::N_statx, |_, a| {
         sys_statx(arg_fd(a[0]), a[1], a[2], a[3], a[4])
     }),
-    ("getdents64", |_, a| {
+    (Syscall::N_getdents64, |_, a| {
         sys_getdents64(arg_fd(a[0]), a[1], a[2])
     }),
-    ("mkdirat", |_, a| sys_mkdirat(arg_fd(a[0]), a[1], a[2])),
-    ("mknodat", |_, a| {
+    (Syscall::N_mkdirat, |_, a| {
+        sys_mkdirat(arg_fd(a[0]), a[1], a[2])
+    }),
+    (Syscall::N_mknodat, |_, a| {
         sys_mknodat(arg_fd(a[0]), a[1], a[2], a[3])
     }),
-    ("unlinkat", |_, a| sys_unlinkat(arg_fd(a[0]), a[1], a[2])),
-    ("symlinkat", |_, a| sys_symlinkat(a[0], arg_fd(a[1]), a[2])),
-    ("readlinkat", |_, a| {
+    (Syscall::N_unlinkat, |_, a| {
+        sys_unlinkat(arg_fd(a[0]), a[1], a[2])
+    }),
+    (Syscall::N_symlinkat, |_, a| {
+        sys_symlinkat(a[0], arg_fd(a[1]), a[2])
+    }),
+    (Syscall::N_readlinkat, |_, a| {
         sys_readlinkat(arg_fd(a[0]), a[1], a[2], a[3])
     }),
-    ("linkat", |_, a| {
+    (Syscall::N_linkat, |_, a| {
         sys_linkat(arg_fd(a[0]), a[1], arg_fd(a[2]), a[3], a[4])
     }),
-    ("renameat", |_, a| {
+    (Syscall::N_renameat, |_, a| {
         sys_renameat(arg_fd(a[0]), a[1], arg_fd(a[2]), a[3], 0)
     }),
-    ("renameat2", |_, a| {
+    (Syscall::N_renameat2, |_, a| {
         sys_renameat(arg_fd(a[0]), a[1], arg_fd(a[2]), a[3], a[4])
     }),
     // `faccessat` carries no flags in the kernel ABI; `faccessat2` adds them.
     // rustix tries `faccessat2` first and falls back to `faccessat` on ENOSYS,
     // so BOTH are routed — a soft deny on `faccessat2` would print its
     // diagnostic on every `..` component a capability-based guest walks.
-    ("faccessat", |_, a| {
+    (Syscall::N_faccessat, |_, a| {
         sys_faccessat(arg_fd(a[0]), a[1], a[2], 0)
     }),
-    ("faccessat2", |_, a| {
+    (Syscall::N_faccessat2, |_, a| {
         sys_faccessat(arg_fd(a[0]), a[1], a[2], a[3])
     }),
     // The working directory and the umask: process state the shim keeps, the
     // same state the C getcwd/chdir/fchdir/umask interposers use.
-    ("getcwd", |_, a| sys_getcwd(a[0], a[1])),
-    ("chdir", |_, a| sys_chdir(a[0])),
-    ("fchdir", |_, a| sys_fchdir(arg_fd(a[0]))),
-    ("umask", |_, a| sys_umask(a[0])),
+    (Syscall::N_getcwd, |_, a| sys_getcwd(a[0], a[1])),
+    (Syscall::N_chdir, |_, a| sys_chdir(a[0])),
+    (Syscall::N_fchdir, |_, a| sys_fchdir(arg_fd(a[0]))),
+    (Syscall::N_umask, |_, a| sys_umask(a[0])),
     // Same shape for `fchmodat`/`fchmodat2`.
-    ("fchmod", |_, a| sys_fchmod(arg_fd(a[0]), a[1])),
-    ("fchmodat", |_, a| sys_fchmodat(arg_fd(a[0]), a[1], a[2], 0)),
-    ("fchmodat2", |_, a| {
+    (Syscall::N_fchmod, |_, a| sys_fchmod(arg_fd(a[0]), a[1])),
+    (Syscall::N_fchmodat, |_, a| {
+        sys_fchmodat(arg_fd(a[0]), a[1], a[2], 0)
+    }),
+    (Syscall::N_fchmodat2, |_, a| {
         sys_fchmodat(arg_fd(a[0]), a[1], a[2], a[3])
     }),
     // Timestamps, ownership and sizes: the same `patina_*` entries the C
     // utimensat/chown/truncate families call.
-    ("utimensat", |_, a| {
+    (Syscall::N_utimensat, |_, a| {
         sys_utimensat(arg_fd(a[0]), a[1], a[2], a[3])
     }),
-    ("fchownat", |_, a| {
+    (Syscall::N_fchownat, |_, a| {
         sys_fchownat(arg_fd(a[0]), a[1], a[2], a[3], a[4])
     }),
-    ("fchown", |_, a| sys_fchown(arg_fd(a[0]), a[1], a[2])),
-    ("truncate", |_, a| sys_truncate(a[0], a[1] as i64)),
+    (Syscall::N_fchown, |_, a| {
+        sys_fchown(arg_fd(a[0]), a[1], a[2])
+    }),
+    (Syscall::N_truncate, |_, a| sys_truncate(a[0], a[1] as i64)),
     // `openat2` is the RESOLVE_BENEATH open: a NAMED soft deny whose ENOSYS is
     // exactly what its callers probe for before falling back to `openat`.
-    ("openat2", |_, _| sud_deny(DENY_OPENAT2)),
+    (Syscall::N_openat2, |_, _| sud_deny(DENY_OPENAT2)),
     // ---- network ----
-    ("socket", |_, a| sys_socket(a[0], a[1], a[2])),
-    ("bind", |_, a| sys_bind(arg_fd(a[0]), a[1], a[2] as u32)),
-    ("listen", |_, a| sys_listen(arg_fd(a[0]), a[1] as i64)),
-    ("connect", |_, a| {
+    (Syscall::N_socket, |_, a| sys_socket(a[0], a[1], a[2])),
+    (Syscall::N_bind, |_, a| {
+        sys_bind(arg_fd(a[0]), a[1], a[2] as u32)
+    }),
+    (Syscall::N_listen, |_, a| {
+        sys_listen(arg_fd(a[0]), a[1] as i64)
+    }),
+    (Syscall::N_connect, |_, a| {
         sys_connect(arg_fd(a[0]), a[1], a[2] as u32)
     }),
-    ("accept", |_, a| sys_accept(arg_fd(a[0]), a[1], a[2], 0)),
-    ("accept4", |_, a| sys_accept(arg_fd(a[0]), a[1], a[2], a[3])),
-    ("sendto", |_, a| {
+    (Syscall::N_accept, |_, a| {
+        sys_accept(arg_fd(a[0]), a[1], a[2], 0)
+    }),
+    (Syscall::N_accept4, |_, a| {
+        sys_accept(arg_fd(a[0]), a[1], a[2], a[3])
+    }),
+    (Syscall::N_sendto, |_, a| {
         sys_sendto(arg_fd(a[0]), a[1], a[2], a[3], a[4], a[5] as u32)
     }),
-    ("recvfrom", |_, a| {
+    (Syscall::N_recvfrom, |_, a| {
         sys_recvfrom(arg_fd(a[0]), a[1], a[2], a[3], a[4], a[5])
     }),
-    ("sendmsg", |_, a| sys_sendmsg(arg_fd(a[0]), a[1], a[2])),
-    ("recvmsg", |_, a| sys_recvmsg(arg_fd(a[0]), a[1], a[2])),
-    ("shutdown", |_, a| sys_shutdown(arg_fd(a[0]), a[1])),
-    ("getsockname", |_, a| {
+    (Syscall::N_sendmsg, |_, a| {
+        sys_sendmsg(arg_fd(a[0]), a[1], a[2])
+    }),
+    (Syscall::N_recvmsg, |_, a| {
+        sys_recvmsg(arg_fd(a[0]), a[1], a[2])
+    }),
+    (Syscall::N_shutdown, |_, a| sys_shutdown(arg_fd(a[0]), a[1])),
+    (Syscall::N_getsockname, |_, a| {
         sys_getsockname(arg_fd(a[0]), a[1], a[2])
     }),
-    ("getpeername", |_, a| {
+    (Syscall::N_getpeername, |_, a| {
         sys_getpeername(arg_fd(a[0]), a[1], a[2])
     }),
-    ("setsockopt", |_, a| {
+    (Syscall::N_setsockopt, |_, a| {
         sys_setsockopt(arg_fd(a[0]), a[1], a[2], a[3], a[4] as u32)
     }),
-    ("getsockopt", |_, a| {
+    (Syscall::N_getsockopt, |_, a| {
         sys_getsockopt(arg_fd(a[0]), a[3], a[4])
     }),
-    ("socketpair", |_, a| sys_socketpair(a[0], a[1], a[2], a[3])),
+    (Syscall::N_socketpair, |_, a| {
+        sys_socketpair(a[0], a[1], a[2], a[3])
+    }),
     // ---- readiness ----
-    ("epoll_create1", |_, a| sys_epoll_create1(a[0])),
-    ("epoll_ctl", |_, a| {
+    (Syscall::N_epoll_create1, |_, a| sys_epoll_create1(a[0])),
+    (Syscall::N_epoll_ctl, |_, a| {
         sys_epoll_ctl(arg_fd(a[0]), a[1] as i64, arg_fd(a[2]), a[3])
     }),
-    ("epoll_wait", |_, a| {
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_epoll_wait, |_, a| {
         sys_epoll_wait(arg_fd(a[0]), a[1], a[2] as i64, a[3] as i64)
     }),
-    ("epoll_pwait", |_, a| {
+    (Syscall::N_epoll_pwait, |_, a| {
         sys_epoll_pwait(arg_fd(a[0]), a[1], a[2] as i64, a[3] as i64, a[4], a[5])
     }),
-    ("epoll_pwait2", |_, a| {
+    (Syscall::N_epoll_pwait2, |_, a| {
         sys_epoll_pwait2(arg_fd(a[0]), a[1], a[2] as i64, a[3], a[4], a[5])
     }),
-    ("eventfd2", |_, a| sys_eventfd2(a[0], a[1] as i64)),
-    ("ppoll", |_, a| sys_ppoll(a[0], a[1], a[2], a[3], a[4])),
+    (Syscall::N_eventfd2, |_, a| sys_eventfd2(a[0], a[1] as i64)),
+    (Syscall::N_ppoll, |_, a| {
+        sys_ppoll(a[0], a[1], a[2], a[3], a[4])
+    }),
     // ---- process: the ONLY prctl option routed is PR_GET_AUXV ----
-    ("prctl", |_, a| sys_prctl(a[0], a[1], a[2], a[3], a[4])),
+    (Syscall::N_prctl, |_, a| {
+        sys_prctl(a[0], a[1], a[2], a[3], a[4])
+    }),
     // ---- x86_64 legacy aliases (route to the SAME modern handler) ----
     // rustix's linux_raw backend and hand-written asm reach for the legacy
     // non-`*at` forms on x86_64; each is exactly its modern form with dirfd =
     // AT_FDCWD (and, for `creat`, synthesized flags). The registry gives these
     // rows no arm64 number, so the bindings are inert there.
-    ("open", |_, a| sys_openat(AT_FDCWD, a[0], a[1], a[2])),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_open, |_, a| {
+        sys_openat(AT_FDCWD, a[0], a[1], a[2])
+    }),
     // `creat(path, mode)` is `open(path, O_CREAT|O_WRONLY|O_TRUNC, mode)`: the
     // mode is the SECOND argument here, not the third.
-    ("creat", |_, a| {
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_creat, |_, a| {
         sys_openat(AT_FDCWD, a[0], O_CREAT | O_WRONLY | O_TRUNC, a[1])
     }),
-    ("stat", |_, a| sys_newfstatat(AT_FDCWD, a[0], a[1], 0)),
-    ("lstat", |_, a| {
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_stat, |_, a| {
+        sys_newfstatat(AT_FDCWD, a[0], a[1], 0)
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_lstat, |_, a| {
         sys_newfstatat(AT_FDCWD, a[0], a[1], AT_SYMLINK_NOFOLLOW)
     }),
-    ("unlink", |_, a| sys_unlinkat(AT_FDCWD, a[0], 0)),
-    ("rmdir", |_, a| sys_unlinkat(AT_FDCWD, a[0], AT_REMOVEDIR)),
-    ("mkdir", |_, a| sys_mkdirat(AT_FDCWD, a[0], a[1])),
-    ("mknod", |_, a| sys_mknodat(AT_FDCWD, a[0], a[1], a[2])),
-    ("rename", |_, a| {
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_unlink, |_, a| sys_unlinkat(AT_FDCWD, a[0], 0)),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_rmdir, |_, a| {
+        sys_unlinkat(AT_FDCWD, a[0], AT_REMOVEDIR)
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_mkdir, |_, a| sys_mkdirat(AT_FDCWD, a[0], a[1])),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_mknod, |_, a| {
+        sys_mknodat(AT_FDCWD, a[0], a[1], a[2])
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_rename, |_, a| {
         sys_renameat(AT_FDCWD, a[0], AT_FDCWD, a[1], 0)
     }),
-    ("link", |_, a| sys_linkat(AT_FDCWD, a[0], AT_FDCWD, a[1], 0)),
-    ("symlink", |_, a| sys_symlinkat(a[0], AT_FDCWD, a[1])),
-    ("readlink", |_, a| {
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_link, |_, a| {
+        sys_linkat(AT_FDCWD, a[0], AT_FDCWD, a[1], 0)
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_symlink, |_, a| {
+        sys_symlinkat(a[0], AT_FDCWD, a[1])
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_readlink, |_, a| {
         sys_readlinkat(AT_FDCWD, a[0], a[1], a[2])
     }),
-    ("access", |_, a| sys_faccessat(AT_FDCWD, a[0], a[1], 0)),
-    ("chmod", |_, a| sys_fchmodat(AT_FDCWD, a[0], a[1], 0)),
-    ("chown", |_, a| sys_fchownat(AT_FDCWD, a[0], a[1], a[2], 0)),
-    ("lchown", |_, a| {
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_access, |_, a| {
+        sys_faccessat(AT_FDCWD, a[0], a[1], 0)
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_chmod, |_, a| {
+        sys_fchmodat(AT_FDCWD, a[0], a[1], 0)
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_chown, |_, a| {
+        sys_fchownat(AT_FDCWD, a[0], a[1], a[2], 0)
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_lchown, |_, a| {
         sys_fchownat(AT_FDCWD, a[0], a[1], a[2], AT_SYMLINK_NOFOLLOW)
     }),
     // The pre-utimensat time rows: whole seconds (`utime`), microseconds
     // (`utimes`, `futimesat`), each decoded onto the one set-times entry.
-    ("utime", |_, a| sys_utime(a[0], a[1])),
-    ("utimes", |_, a| sys_futimesat(AT_FDCWD, a[0], a[1])),
-    ("futimesat", |_, a| sys_futimesat(arg_fd(a[0]), a[1], a[2])),
-    ("dup2", |_, a| sys_dup2(arg_fd(a[0]), arg_fd(a[1]))),
-    ("pipe", |_, a| sys_pipe2(a[0], 0)),
-    ("eventfd", |_, a| sys_eventfd2(a[0], 0)),
-    ("epoll_create", |_, a| sys_epoll_create(a[0])),
-    ("poll", |_, a| sys_poll(a[0], a[1], a[2] as i32 as i64)),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_utime, |_, a| sys_utime(a[0], a[1])),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_utimes, |_, a| {
+        sys_futimesat(AT_FDCWD, a[0], a[1])
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_futimesat, |_, a| {
+        sys_futimesat(arg_fd(a[0]), a[1], a[2])
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_dup2, |_, a| sys_dup2(arg_fd(a[0]), arg_fd(a[1]))),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_pipe, |_, a| sys_pipe2(a[0], 0)),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_eventfd, |_, a| sys_eventfd2(a[0], 0)),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_epoll_create, |_, a| sys_epoll_create(a[0])),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_poll, |_, a| {
+        sys_poll(a[0], a[1], a[2] as i32 as i64)
+    }),
 ];
 
 /// "No row" / "no binding" sentinel in the dispatch index.
@@ -1131,27 +1233,11 @@ struct Dispatch {
 
 const DISPATCH: Dispatch = build_dispatch();
 
-const fn str_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < a.len() {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
 /// Build [`DISPATCH`] from the registry rows for the host arch. Every check
 /// here is a compile error, which is what makes the registry the single source
 /// of dispatch: a row cannot claim `Modeled` without a handler, a `Trap` row
 /// cannot carry one, and a binding cannot name a row that does not exist.
 const fn build_dispatch() -> Dispatch {
-    let arch = Arch::host();
     let mut row_for_nr = [NONE; INDEX_LEN];
     let mut binding_for_row = [NONE; SYSCALLS.len()];
     let mut i = 0;
@@ -1160,7 +1246,7 @@ const fn build_dispatch() -> Dispatch {
         let mut bound = NONE;
         let mut j = 0;
         while j < BINDINGS.len() {
-            if str_eq(BINDINGS[j].0, row.name) {
+            if BINDINGS[j].0 as usize == row.id as usize {
                 if bound != NONE {
                     panic!("a registry row has two handler bindings in sud::BINDINGS");
                 }
@@ -1175,7 +1261,8 @@ const fn build_dispatch() -> Dispatch {
             panic!("a Trap/Absent registry row has a handler binding in sud::BINDINGS");
         }
         binding_for_row[i] = bound;
-        if let Some(nr) = row.nr.for_arch(arch) {
+        {
+            let nr = row.id.number();
             let nr = nr as usize;
             if nr >= INDEX_LEN {
                 panic!("a registry row's syscall number exceeds sud::INDEX_LEN");
@@ -1192,7 +1279,7 @@ const fn build_dispatch() -> Dispatch {
         let mut found = false;
         let mut i = 0;
         while i < SYSCALLS.len() {
-            if str_eq(SYSCALLS[i].name, BINDINGS[j].0) {
+            if SYSCALLS[i].id as usize == BINDINGS[j].0 as usize {
                 found = true;
             }
             i += 1;
@@ -1263,7 +1350,7 @@ fn trap_row(row: &SyscallRow, class: &str, nr: i64, args: [u64; 6]) -> i64 {
 fn not_in_table(nr: i64, args: [u64; 6]) -> i64 {
     crate::trap_fatal(&format!(
         "SUD trapped syscall number {nr}, which is not in the vendored Linux {} syscall table \
-         (args {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}); run scripts/refresh-syscall-tables.sh and \
+         (args {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}); run scripts/refresh-syscalls.py and \
          add a registry row if the kernel has grown a number, or treat this as a corrupt raw \
          syscall",
         Arch::host().name(),
@@ -1288,10 +1375,7 @@ mod tests {
     fn bindings_match_the_registry_rows() {
         let mut problems = Vec::new();
         for row in SYSCALLS {
-            let bound = BINDINGS
-                .iter()
-                .filter(|(name, _)| *name == row.name)
-                .count();
+            let bound = BINDINGS.iter().filter(|(name, _)| *name == row.id).count();
             if row.disposition.is_routed() && bound == 0 {
                 problems.push(format!(
                     "{}: routed row without a handler binding",
@@ -1309,8 +1393,8 @@ mod tests {
             }
         }
         for (name, _) in BINDINGS {
-            if !SYSCALLS.iter().any(|row| row.name == *name) {
-                problems.push(format!("{name}: binding names no registry row"));
+            if !SYSCALLS.iter().any(|row| row.id == *name) {
+                problems.push(format!("{name:?}: binding names no registry row"));
             }
         }
         assert!(
@@ -1319,7 +1403,7 @@ mod tests {
             problems.join("\n  ")
         );
         // Every number the vendored table lists for this arch resolves to its row.
-        for entry in crate::registry::table::linux_table(Arch::host()) {
+        for entry in crate::registry::ENTRIES {
             let (_, row) = row_for(entry.nr as i64).unwrap_or_else(|| {
                 panic!("{} ({}) has no dispatch index entry", entry.name, entry.nr)
             });

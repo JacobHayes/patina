@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 /// order, so keep it stable.
 const SHIM_PACKAGES: &[&str] = &[
     "patina-dst-abi",
+    "patina-dst-syscalls",
     "patina-dst-driver-api",
     "patina-dst-fs-crash",
     "patina-dst-fs-mem",

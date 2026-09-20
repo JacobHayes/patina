@@ -66,6 +66,7 @@ dependencies = [
  "patina-dst-rng-seeded",
  "patina-dst-runtime",
  "patina-dst-sched-det",
+ "patina-dst-syscalls",
  "patina-dst-target",
  "patina-dst-time-virtual",
  "patina-dst-trace",
@@ -421,6 +422,7 @@ dependencies = [
  "patina-dst-fs-mem",
  "patina-dst-runtime",
  "patina-dst-sched-det",
+ "patina-dst-syscalls",
  "patina-dst-trace",
  "serde_json",
 ]
@@ -479,6 +481,10 @@ dependencies = [
  "patina-dst-driver-api",
  "patina-dst-rng-seeded",
 ]
+
+[[package]]
+name = "patina-dst-syscalls"
+version = "0.1.0"
 
 [[package]]
 name = "patina-dst-target"

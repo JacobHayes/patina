@@ -1,12 +1,12 @@
 # The probe manifest: which kernel rows and which libc symbols each probe
-# covers. The registry (crates/patina-native-shim/src/registry/) names a probe
-# id per row; the cross-gate (crates/cargo-patina/tests/syscall_registry.rs)
+# covers. The registry (crates/patina-syscalls/src/) names a probe
+# id per row; the cross-gate (src/registry_gate.rs)
 # checks both directions against this file, and `conform check-manifest`
 # refuses a name that is not a registry row before any leg runs.
 #
 # The virtual ABI level and each row's first kernel (`since`) live in the
 # registry (`registry::VIRTUAL_ABI`, `SyscallRow::since`) and reach the harness
-# through `cargo patina syscalls --format json`, never a constant here.
+# through the pure shared metadata crate, never a constant here.
 #
 # Per probe: `syscalls` are the rows it exercises (the native leg is
 # host-unavailable when the host kernel predates one), `absent` the rows it

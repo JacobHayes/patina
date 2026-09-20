@@ -18,6 +18,7 @@ members = [
     "crates/patina-rng-seeded",
     "crates/patina-runtime",
     "crates/patina-sched-det",
+    "crates/patina-syscalls",
     "crates/patina-target",
     "crates/patina-time-virtual",
     "crates/patina-trace",
@@ -55,6 +56,7 @@ patina-dst-proptest = { path = "crates/patina-proptest", version = "0.1.0" }
 patina-dst-rng-seeded = { path = "crates/patina-rng-seeded", version = "0.1.0" }
 patina-dst-runtime = { path = "crates/patina-runtime", version = "0.1.0" }
 patina-dst-sched-det = { path = "crates/patina-sched-det", version = "0.1.0" }
+patina-dst-syscalls = { path = "crates/patina-syscalls", version = "0.1.0" }
 patina-dst-target = { path = "crates/patina-target", version = "0.1.0" }
 patina-dst-time-virtual = { path = "crates/patina-time-virtual", version = "0.1.0" }
 patina-dst-trace = { path = "crates/patina-trace", version = "0.1.0" }

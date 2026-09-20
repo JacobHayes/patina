@@ -11287,7 +11287,8 @@ mod tests {
     }
 
     /// Every family a group claims is one the verb declares, and every family a
-    /// verb declares owns at least one flag. Without this a typo in a group's
+    /// verb with flag groups declares owns at least one flag. Flagless commands
+    /// have exactly one `Sole` form. Without this a typo in a group's
     /// `families` would silently drop flags from a parser (they would simply
     /// stop being accepted) rather than failing loudly.
     #[test]
@@ -11308,6 +11309,11 @@ mod tests {
                         group.title
                     );
                 }
+            }
+            if verb.groups.is_empty() {
+                assert_eq!(declared, BTreeSet::from([help::Family::Sole]));
+                assert_eq!(verb.families.len(), 1);
+                continue;
             }
             for spec in verb.families {
                 assert!(

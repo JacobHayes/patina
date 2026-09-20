@@ -813,11 +813,29 @@ fn libc_symbol(sys: Sys, a: Args) -> i64 {
             // `_exit(2)` is exit_group's only wrapper and is not interposed
             // (its import would be refused), so the libc spelling of exit_group
             // is syscall(2), like exit's.
-            Sys::Clone | Sys::Clone3 | Sys::Fork | Sys::Vfork | Sys::Execve | Sys::Execveat
-            | Sys::Exit | Sys::ExitGroup | Sys::Sysctl | Sys::Nfsservctl | Sys::Vserver | Sys::Security
-            | Sys::Tuxcall | Sys::AfsSyscall | Sys::Getpmsg | Sys::Putpmsg | Sys::EpollCtlOld
-            | Sys::EpollWaitOld | Sys::LookupDcookie | Sys::CreateModule | Sys::QueryModule
-            | Sys::GetKernelSyms | Sys::Uselib => syscall(
+            Sys::Clone
+            | Sys::Clone3
+            | Sys::Fork
+            | Sys::Vfork
+            | Sys::Execve
+            | Sys::Execveat
+            | Sys::Exit
+            | Sys::ExitGroup
+            | Sys::Sysctl
+            | Sys::Nfsservctl
+            | Sys::Vserver
+            | Sys::Security
+            | Sys::Tuxcall
+            | Sys::AfsSyscall
+            | Sys::Getpmsg
+            | Sys::Putpmsg
+            | Sys::EpollCtlOld
+            | Sys::EpollWaitOld
+            | Sys::LookupDcookie
+            | Sys::CreateModule
+            | Sys::QueryModule
+            | Sys::GetKernelSyms
+            | Sys::Uselib => syscall(
                 sys.require_number_and_args(a).0,
                 a[0] as c_long,
                 a[1] as c_long,
@@ -1020,17 +1038,6 @@ mod tests {
     /// tables, not a second availability map, decide which cases are callable.
     #[test]
     fn legacy_rows_match_architecture_table_and_refuse_before_dispatch() {
-        let (table, abis): (&str, &[&str]) = if cfg!(target_arch = "x86_64") {
-            (
-                include_str!("../../../crates/patina-native-shim/abi/linux/syscall_64.tbl"),
-                &["common", "64"],
-            )
-        } else {
-            (
-                include_str!("../../../crates/patina-native-shim/abi/linux/syscall.tbl"),
-                &["common", "64", "renameat", "rlimit", "memfd_secret"],
-            )
-        };
         for sys in [
             Sys::Signalfd,
             Sys::Fork,
@@ -1053,11 +1060,14 @@ mod tests {
             Sys::LookupDcookie,
             Sys::Signalfd4,
         ] {
-            let nr = table.lines().find_map(|line| {
-                let fields: Vec<_> = line.split_whitespace().collect();
-                (fields.len() >= 3 && abis.contains(&fields[1]) && fields[2] == sys.name())
-                    .then(|| fields[0].parse::<std::ffi::c_long>().unwrap())
-            });
+            let nr = match crate::associations::syscall(sys.name()) {
+                Some(crate::associations::Association::Native(id)) => {
+                    Some(id.number() as std::ffi::c_long)
+                }
+                #[cfg(target_arch = "aarch64")]
+                Some(crate::associations::Association::ArchitectureUnavailable) => None,
+                None => panic!("{}: missing typed vehicle association", sys.name()),
+            };
             assert_eq!(
                 sys.number_and_args([0; 6]).map(|(nr, _)| nr),
                 nr,

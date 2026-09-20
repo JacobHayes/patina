@@ -193,8 +193,8 @@ ALLOWED_FLAGS='
 #   the native oracle leg; under patina it is recorded as a divergence).
 # --family: gate.sh's own option (the frozen family to gate).
 # --name-only: `jj diff --name-only`, gate.sh's frozen-path check.
-# -- syscall-table refresh (scripts/refresh-syscall-tables.sh) --
-# --apply: its own overwrite-the-vendored-copies switch.
+# -- syscall-table refresh (scripts/refresh-syscalls.py) --
+# --apply: its own atomic generated-artifact replacement switch.
 # (--selftest and --seed are REAL registry flags — not allowlisted here.)
 
 tmpdir=$(mktemp -d)

@@ -169,7 +169,7 @@ unknown option.
   inverted is refused rather than obeyed. An external oracle is serial unless
   `--jobs N` opts in, because only a patina-owned oracle is hermetic by
   construction.
-- `cargo patina syscalls [--os linux|darwin] [--arch x86_64|aarch64]`
+- `cargo patina syscalls`
   Print a target-local kernel-entry inventory and its C symbol layer (default:
   this host). Linux x86_64/aarch64 rows carry runtime dispositions; Darwin
   aarch64 inventories pinned BSD, Mach, ARM-special and platform entries,

@@ -1,30 +1,21 @@
-//! Every syscall number the shim's Linux targets dispatch, with its
-//! disposition. One row per x86_64 number (386, the whole `common`+`64` ABI of
-//! the vendored table); arm64 numbers are carried by name. Generated once from
-//! the vendored tables and today's dispatcher, then maintained by hand: a
-//! builder that models a row edits the row.
-//!
-//! Row order is x86_64 number order. `closes_in` names the arc that changes the
-//! disposition (docs/arcs/syscall-conformance.md §6); `None` means final.
+//! Human-reviewed Linux runtime dispositions. Source identity and numbers are
+//! generated; adding an upstream identity makes this exhaustive match fail until
+//! its actual runtime disposition is reviewed. Never infer ENOSYS from novelty.
 
-use super::{Disposition, Family, IDENTITY_GID, IDENTITY_UID, Nr, SyscallRow};
+use super::{Disposition, Family, IDENTITY_GID, IDENTITY_UID, Syscall, SyscallRow};
 use super::{TRAP_PRIVILEGED, TRAP_PROCESS, TRAP_SIGNAL_ABI, TRAP_UNMODELED};
 
 const fn r(
-    name: &'static str,
-    x86_64: u32,
-    aarch64: Option<u32>,
+    id: Syscall,
     family: Family,
     disposition: Disposition,
     reasoning: &'static str,
     closes_in: Option<&'static str>,
 ) -> SyscallRow {
     SyscallRow {
-        name,
-        nr: Nr {
-            x86_64: Some(x86_64),
-            aarch64,
-        },
+        id,
+        name: id.name(),
+        nr: id.number(),
         family,
         disposition,
         reasoning,
@@ -36,2366 +27,1905 @@ const fn r(
 
 const ENOSYS: i32 = 38;
 
-pub const SYSCALLS: &[SyscallRow] = &[
-    r(
-        "read",
-        0,
-        Some(63),
+pub const fn disposition(id: Syscall) -> SyscallRow {
+    match id {
+
+    Syscall::N_read => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_read`, by descriptor class: file, pipe/socketpair, eventfd, socket).",
         None,
     )
     .probe("fs/open_rw"),
-    r(
-        "write",
-        1,
-        Some(64),
+    Syscall::N_write => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_write`; fds 1/2 go to captured stdio).",
         None,
     )
     .probe("fs/open_rw"),
-    r(
-        "open",
-        2,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_open => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `openat(AT_FDCWD, …)` with the same flag decode and creation mode.",
         None,
     ),
-    r(
-        "close",
-        3,
-        Some(57),
+    Syscall::N_close => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_close`, by descriptor class); drops any `getdents64` snapshot.",
         None,
     )
     .probe("fs/open_rw"),
-    r(
-        "stat",
-        4,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_stat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `newfstatat(AT_FDCWD, path, buf, 0)`.",
         None,
     ),
-    r(
-        "fstat",
-        5,
-        Some(80),
+    Syscall::N_fstat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fd_metadata_full`); the kernel `struct stat` layout is filled per arch.",
         None,
     )
     .probe("fs/metadata"),
-    r(
-        "lstat",
-        6,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_lstat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `newfstatat(AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW)`.",
         None,
     ),
-    r(
-        "poll",
-        7,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_poll => r(
+        id,
         Family::Readiness,
         Disposition::Modeled,
         "x86_64 legacy alias of `ppoll` with a millisecond timeout, over the same readiness core the C `poll` uses. Implemented and unit-tested; dedicated network+readiness host oracle is not yet validated.",
         Some("network+readiness"),
     ),
-    r(
-        "lseek",
-        8,
-        Some(62),
+    Syscall::N_lseek => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_seek`); `SEEK_SET 0` on a directory fd rewinds its `getdents64` snapshot.",
         None,
     )
     .probe("fs/open_rw"),
-    r(
-        "mmap",
-        9,
-        Some(222),
+    Syscall::N_mmap => r(
+        id,
         Family::Mem,
         Disposition::Passthrough,
         "Anonymous mappings pass through to the host kernel via the glibc `syscall(2)` host alias; a file-backed mapping (fd != -1) traps, since it would bypass the deterministic filesystem. The C `mmap` interposer models file mappings; the raw row does not yet (VM doors disagree).",
         Some("memory+ipc"),
     ),
-    r(
-        "mprotect",
-        10,
-        Some(226),
+    Syscall::N_mprotect => r(
+        id,
         Family::Mem,
         Disposition::Passthrough,
         "Process-local memory: passed through to the host kernel via the glibc `syscall(2)` host alias.",
         None,
     ),
-    r(
-        "munmap",
-        11,
-        Some(215),
+    Syscall::N_munmap => r(
+        id,
         Family::Mem,
         Disposition::Passthrough,
         "Process-local memory: passed through to the host kernel via the glibc `syscall(2)` host alias.",
         None,
     ),
-    r(
-        "brk",
-        12,
-        Some(214),
+    Syscall::N_brk => r(
+        id,
         Family::Mem,
         Disposition::Passthrough,
         "Process-local memory: passed through to the host kernel via the glibc `syscall(2)` host alias.",
         None,
     ),
-    r(
-        "rt_sigaction",
-        13,
-        Some(134),
+    Syscall::N_rt_sigaction => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "One process disposition table on both doors, with oldact, pending flush and host frame registration; reserved containment signals are fatal.",
         None,
     ),
-    r(
-        "rt_sigprocmask",
-        14,
-        Some(135),
+    Syscall::N_rt_sigprocmask => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "Per-task mask with oldset; unblocking reaches the delivery point before return, and reserved containment signals are stripped.",
         None,
     ),
-    r(
-        "rt_sigreturn",
-        15,
-        Some(139),
+    Syscall::N_rt_sigreturn => r(
+        id,
         Family::Signal,
         Disposition::Trap(TRAP_SIGNAL_ABI),
         "By-design trap for guest-emitted rt_sigreturn: kernel-built handler frames return through the private glibc restorer in the allowed host region; arbitrary guest frame restoration is not modeled.",
         None,
     ),
-    r(
-        "ioctl",
-        16,
-        Some(29),
+    Syscall::N_ioctl => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "FIONBIO/FIOCLEX/FIONCLEX are modeled by descriptor class; every other request answers ENOTTY exactly like the C interposer.",
         None,
     ),
-    r(
-        "pread64",
-        17,
-        Some(67),
+    Syscall::N_pread64 => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_pread`).",
         None,
     ),
-    r(
-        "pwrite64",
-        18,
-        Some(68),
+    Syscall::N_pwrite64 => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_pwrite`).",
         None,
     ),
-    r(
-        "readv",
-        19,
-        Some(65),
+    Syscall::N_readv => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "An iovec loop over the `read` row (each segment its own runtime operation, as the C `readv` does).",
         None,
     ),
-    r(
-        "writev",
-        20,
-        Some(66),
+    Syscall::N_writev => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "An iovec loop over the `write` row (each segment its own runtime operation, as the C `writev` does).",
         None,
     ),
-    r(
-        "access",
-        21,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_access => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `faccessat(AT_FDCWD, path, mode, 0)`.",
         None,
     ),
-    r(
-        "pipe",
-        22,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_pipe => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "x86_64 legacy alias: `pipe2(fds, 0)`.",
         None,
     ),
-    r(
-        "select",
-        23,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_select => r(
+        id,
         Family::Readiness,
         Disposition::Modeled,
         "Descriptor sets over shared readiness queues; virtual timeout and non-restartable signal interruption. Implemented and unit-tested; dedicated network+readiness host oracle is not yet validated.",
         Some("network+readiness"),
     ),
-    r(
-        "sched_yield",
-        24,
-        Some(124),
+    Syscall::N_sched_yield => r(
+        id,
         Family::Sched,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_sched_yield`): a deterministic scheduling point.",
         None,
     ),
-    r(
-        "mremap",
-        25,
-        Some(216),
+    Syscall::N_mremap => r(
+        id,
         Family::Mem,
         Disposition::Passthrough,
         "Process-local memory: passed through to the host kernel via the glibc `syscall(2)` host alias.",
         None,
     ),
-    r(
-        "msync",
-        26,
-        Some(227),
+    Syscall::N_msync => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "mincore",
-        27,
-        Some(232),
+    Syscall::N_mincore => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "madvise",
-        28,
-        Some(233),
+    Syscall::N_madvise => r(
+        id,
         Family::Mem,
         Disposition::Passthrough,
         "Process-local memory: passed through to the host kernel via the glibc `syscall(2)` host alias.",
         None,
     ),
-    r(
-        "shmget",
-        29,
-        Some(194),
+    Syscall::N_shmget => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "shmat",
-        30,
-        Some(196),
+    Syscall::N_shmat => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "shmctl",
-        31,
-        Some(195),
+    Syscall::N_shmctl => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "dup",
-        32,
-        Some(23),
+    Syscall::N_dup => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same universal entry the C interposer calls (`patina_dup`): the lowest free number in the shim's descriptor table, sharing the open file description, for every kind of descriptor.",
         None,
     )
     .probe("fd/pipes"),
-    r(
-        "dup2",
-        33,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_dup2 => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "x86_64 legacy alias of `dup3(old, new, 0)`, except `old == new` validates and returns the number without closing (kernel semantics). Binds a CHOSEN number in the shim's descriptor table (`patina_dup2`), closing what it named; `dup2(fd, 1)` redirects captured stdout.",
         None,
     )
     .probe("fd/table"),
-    r(
-        "pause",
-        34,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_pause => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "Scheduler park until a handler is delivered, then EINTR; never an immediate synthetic interrupt.",
         None,
     ),
-    r(
-        "nanosleep",
-        35,
-        Some(101),
+    Syscall::N_nanosleep => r(
+        id,
         Family::Time,
         Disposition::Modeled,
         "A relative sleep on the virtual clock (`patina_sleep_until`).",
         None,
     )
     .probe("time/clocks"),
-    r(
-        "getitimer",
-        36,
-        Some(102),
+    Syscall::N_getitimer => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The time arc models it on the virtual clock (§6).",
         Some("time+identity"),
     ),
-    r(
-        "alarm",
-        37,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_alarm => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The time arc models it on the virtual clock (§6).",
         Some("time+identity"),
     ),
-    r(
-        "setitimer",
-        38,
-        Some(103),
+    Syscall::N_setitimer => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The time arc models it on the virtual clock (§6).",
         Some("time+identity"),
     ),
-    r(
-        "getpid",
-        39,
-        Some(172),
+    Syscall::N_getpid => r(
+        id,
         Family::Identity,
         Disposition::Constant(1),
         "The one modeled process is pid 1, the same value the C `getpid` interposer returns.",
         Some("time+identity"),
     )
     .probe("fs/metadata"),
-    r(
-        "sendfile",
-        40,
-        Some(71),
+    Syscall::N_sendfile => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "socket",
-        41,
-        Some(198),
+    Syscall::N_socket => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_socket`): AF_INET stream/datagram over SimNet; AF_UNIX and IPv6 answer EAFNOSUPPORT.",
         None,
     )
     .probe("net/udp"),
-    r(
-        "connect",
-        42,
-        Some(203),
+    Syscall::N_connect => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_connect` / `patina_net_tcp_connect`).",
         None,
     )
     .probe("net/udp"),
-    r(
-        "accept",
-        43,
-        Some(202),
+    Syscall::N_accept => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "Alias of `accept4(…, 0)`.",
         None,
     ),
-    r(
-        "sendto",
-        44,
-        Some(206),
+    Syscall::N_sendto => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_sendto` / `patina_net_stream_send`); MSG_NOSIGNAL is the one accepted flag.",
         None,
     )
     .probe("net/udp"),
-    r(
-        "recvfrom",
-        45,
-        Some(207),
+    Syscall::N_recvfrom => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_recvfrom` / `patina_net_stream_recv`).",
         None,
     )
     .probe("net/udp"),
-    r(
-        "sendmsg",
-        46,
-        Some(211),
+    Syscall::N_sendmsg => r(
+        id,
         Family::Net,
         Disposition::SoftDeny(ENOSYS),
         "ENOSYS, exactly what the C `sendmsg` interposer answers: scatter/gather and control messages are not modeled and a partial model would fragment silently.",
         Some("network+readiness"),
     ),
-    r(
-        "recvmsg",
-        47,
-        Some(212),
+    Syscall::N_recvmsg => r(
+        id,
         Family::Net,
         Disposition::SoftDeny(ENOSYS),
         "ENOSYS, exactly what the C `recvmsg` interposer answers: scatter/gather and control messages are not modeled.",
         Some("network+readiness"),
     ),
-    r(
-        "shutdown",
-        48,
-        Some(210),
+    Syscall::N_shutdown => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_shutdown`).",
         None,
     )
     .probe("net/udp"),
-    r(
-        "bind",
-        49,
-        Some(200),
+    Syscall::N_bind => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_bind`).",
         None,
     )
     .probe("net/udp"),
-    r(
-        "listen",
-        50,
-        Some(201),
+    Syscall::N_listen => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_listen`).",
         None,
     )
     .probe("net/tcp"),
-    r(
-        "getsockname",
-        51,
-        Some(204),
+    Syscall::N_getsockname => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_getsockname`).",
         None,
     )
     .probe("net/udp"),
-    r(
-        "getpeername",
-        52,
-        Some(205),
+    Syscall::N_getpeername => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_getpeername`).",
         None,
     )
     .probe("net/udp"),
-    r(
-        "socketpair",
-        53,
-        Some(199),
+    Syscall::N_socketpair => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_socketpair`): AF_UNIX stream pairs as in-process pipe channels.",
         None,
     ),
-    r(
-        "setsockopt",
-        54,
-        Some(208),
+    Syscall::N_setsockopt => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "The bookkeeping subset the C interposer accepts (SO_REUSEADDR/KEEPALIVE/BROADCAST/REUSEPORT, zero timeouts, linger off, TCP_NODELAY); everything else is ENOPROTOOPT.",
         None,
     )
     .probe("net/udp"),
-    r(
-        "getsockopt",
-        55,
-        Some(209),
+    Syscall::N_getsockopt => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "Mirrors the C interposer: zero-fills the caller's buffer and succeeds (SO_ERROR reads 0).",
         None,
     )
     .probe("net/udp"),
-    r(
-        "clone",
-        56,
-        Some(220),
+    Syscall::N_clone => r(
+        id,
         Family::Process,
         Disposition::Trap(TRAP_PROCESS),
         "Process lifecycle stays a named fatal trap: a second process is outside the scheduler, the trace and the fs model; the guest's contract is one process (§7).",
         None,
     ),
-    r(
-        "fork",
-        57,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_fork => r(
+        id,
         Family::Process,
         Disposition::Trap(TRAP_PROCESS),
         "Process lifecycle stays a named fatal trap: a second process is outside the scheduler, the trace and the fs model; the guest's contract is one process (§7).",
         None,
     ),
-    r(
-        "vfork",
-        58,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_vfork => r(
+        id,
         Family::Process,
         Disposition::Trap(TRAP_PROCESS),
         "Process lifecycle stays a named fatal trap: a second process is outside the scheduler, the trace and the fs model; the guest's contract is one process (§7).",
         None,
     ),
-    r(
-        "execve",
-        59,
-        Some(221),
+    Syscall::N_execve => r(
+        id,
         Family::Process,
         Disposition::Trap(TRAP_PROCESS),
         "Process lifecycle stays a named fatal trap: a second process is outside the scheduler, the trace and the fs model; the guest's contract is one process (§7).",
         None,
     ),
-    r(
-        "exit",
-        60,
-        Some(93),
+    Syscall::N_exit => r(
+        id,
         Family::Process,
         Disposition::Modeled,
         "Completes only the calling managed task, clearing its guest tid word and waking futex waiters; the last task finalizes the process without atexit.",
         None,
     ),
-    r(
-        "wait4",
-        61,
-        Some(260),
+    Syscall::N_wait4 => r(
+        id,
         Family::Process,
         Disposition::Modeled,
         "Childless process row: Patina has no child processes, so wait4 answers the kernel's ECHILD without reaching the host.",
         None,
     ),
-    r(
-        "kill",
-        62,
-        Some(129),
+    Syscall::N_kill => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "Recorded process-directed virtual signal generation, deterministic recipient selection and one registered-wait wake.",
         None,
     ),
-    r(
-        "uname",
-        63,
-        Some(160),
+    Syscall::N_uname => r(
+        id,
         Family::Identity,
         Disposition::SoftDeny(ENOSYS),
         "ENOSYS, byte-identical to the C `uname` interposer: no host uname is modeled. The identity arc models it from the `--host-*` knobs.",
         Some("time+identity"),
     ),
-    r(
-        "semget",
-        64,
-        Some(190),
+    Syscall::N_semget => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "semop",
-        65,
-        Some(193),
+    Syscall::N_semop => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "semctl",
-        66,
-        Some(191),
+    Syscall::N_semctl => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "shmdt",
-        67,
-        Some(197),
+    Syscall::N_shmdt => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "msgget",
-        68,
-        Some(186),
+    Syscall::N_msgget => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "msgsnd",
-        69,
-        Some(189),
+    Syscall::N_msgsnd => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "msgrcv",
-        70,
-        Some(188),
+    Syscall::N_msgrcv => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "msgctl",
-        71,
-        Some(187),
+    Syscall::N_msgctl => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "fcntl",
-        72,
-        Some(25),
+    Syscall::N_fcntl => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "F_GETFD/F_SETFD (per number), F_GETFL/F_SETFL (per open file description: access mode, O_APPEND, O_NONBLOCK), F_DUPFD/F_DUPFD_CLOEXEC (lowest free number at or above the minimum; EINVAL past RLIMIT_NOFILE), F_GETPIPE_SZ/F_SETPIPE_SZ, and the record-lock family are modeled through the shim's descriptor table; an unknown command answers EINVAL on an open number and EBADF on a closed one, like the C interposer.",
         None,
     )
     .probe("fd/pipes"),
-    r(
-        "flock",
-        73,
-        Some(32),
+    Syscall::N_flock => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_flock`).",
         None,
     )
     .probe("fd/pipes"),
-    r(
-        "fsync",
-        74,
-        Some(82),
+    Syscall::N_fsync => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fsync`).",
         None,
     ),
-    r(
-        "fdatasync",
-        75,
-        Some(83),
+    Syscall::N_fdatasync => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "Same route as `fsync` (`patina_fsync`).",
         None,
     ),
-    r(
-        "truncate",
-        76,
-        Some(45),
+    Syscall::N_truncate => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_truncate`): a regular file's length by name over the deterministic filesystem, `EISDIR`/`EINVAL`/`EACCES` as the kernel answers, `mtime`/`ctime` stamped.",
         None,
     )
     .probe("fs/size"),
-    r(
-        "ftruncate",
-        77,
-        Some(46),
+    Syscall::N_ftruncate => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_set_len`): EISDIR for a directory, EINVAL for a descriptor not open for writing, `mtime`/`ctime` stamped even when the length is unchanged.",
         None,
     )
     .probe("fs/size"),
-    r(
-        "getdents",
-        78,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_getdents => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "getcwd",
-        79,
-        Some(17),
+    Syscall::N_getcwd => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "The working directory is a NODE the shim holds (a path-only driver handle) and names through the filesystem at every read, so a renamed ancestor moves it and an unlinked one answers ENOENT; ERANGE for a short buffer. Routed into the same `patina_getcwd` the C interposer calls.",
         None,
     )
     .probe("fs/paths"),
-    r(
-        "chdir",
-        80,
-        Some(49),
+    Syscall::N_chdir => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Resolved through the one path resolver (symlinks followed; ENOENT/ENOTDIR/EACCES as the kernel answers) and held as a path-only driver handle; guest-driven and unrecorded like `setenv`. Routed into the same `patina_chdir` the C interposer calls.",
         None,
     )
     .probe("fs/paths"),
-    r(
-        "fchdir",
-        81,
-        Some(50),
+    Syscall::N_fchdir => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "A directory descriptor (plain or O_PATH) becomes the working directory through a shim-held dup of its driver handle; EBADF/ENOTDIR as the kernel answers. Routed into the same `patina_fchdir` the C interposer calls.",
         None,
     )
     .probe("fs/paths"),
-    r(
-        "rename",
-        82,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_rename => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `renameat(AT_FDCWD, old, AT_FDCWD, new)`.",
         None,
     ),
-    r(
-        "mkdir",
-        83,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_mkdir => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `mkdirat(AT_FDCWD, path, mode)`.",
         None,
     ),
-    r(
-        "rmdir",
-        84,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_rmdir => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `unlinkat(AT_FDCWD, path, AT_REMOVEDIR)`.",
         None,
     ),
-    r(
-        "creat",
-        85,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_creat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `open(path, O_CREAT|O_WRONLY|O_TRUNC, mode)`.",
         None,
     ),
-    r(
-        "link",
-        86,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_link => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `linkat(AT_FDCWD, old, AT_FDCWD, new, 0)`.",
         None,
     ),
-    r(
-        "unlink",
-        87,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_unlink => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `unlinkat(AT_FDCWD, path, 0)`.",
         None,
     ),
-    r(
-        "symlink",
-        88,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_symlink => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `symlinkat(target, AT_FDCWD, link)`.",
         None,
     ),
-    r(
-        "readlink",
-        89,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_readlink => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `readlinkat(AT_FDCWD, …)`.",
         None,
     ),
-    r(
-        "chmod",
-        90,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_chmod => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `fchmodat(AT_FDCWD, path, mode, 0)`.",
         None,
     ),
-    r(
-        "fchmod",
-        91,
-        Some(52),
+    Syscall::N_fchmod => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fchmod`): permission bits live on the entry and are enforced.",
         None,
     ),
-    r(
-        "chown",
-        92,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_chown => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `fchownat(AT_FDCWD, path, uid, gid, 0)` (`patina_chown`).",
         None,
     )
     .probe("fs/owner"),
-    r(
-        "fchown",
-        93,
-        Some(55),
+    Syscall::N_fchown => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fchown`): a comparison against the one modeled identity — its own ids or -1 succeed (killing the setuid/setgid bits on a non-directory and moving `ctime`), any other id is `EPERM`. FIFO endpoints mutate retained inode metadata even after unlink; anonymous descriptors without modeled filesystem inodes refuse loudly (ENOSYS), a named remaining gap.",
         None,
     )
     .probe("fs/owner"),
-    r(
-        "lchown",
-        94,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_lchown => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `fchownat(AT_FDCWD, path, uid, gid, AT_SYMLINK_NOFOLLOW)` (`patina_chown`).",
         None,
     )
     .probe("fs/owner"),
-    r(
-        "umask",
-        95,
-        Some(166),
+    Syscall::N_umask => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Process state the shim keeps and applies to every creating call (open, mkdir, mknod) before the driver, so the driver stores what the kernel would; answers the previous mask. Routed into the same `patina_umask` the C interposer calls.",
         None,
     )
     .probe("fs/paths"),
-    r(
-        "gettimeofday",
-        96,
-        Some(169),
+    Syscall::N_gettimeofday => r(
+        id,
         Family::Time,
         Disposition::Modeled,
         "The virtual CLOCK_REALTIME split into seconds/microseconds (`patina_clock_now`); the timezone argument is ignored as glibc does.",
         None,
     )
     .probe("time/clocks"),
-    r(
-        "getrlimit",
-        97,
-        Some(163),
+    Syscall::N_getrlimit => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "getrusage",
-        98,
-        Some(165),
+    Syscall::N_getrusage => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "sysinfo",
-        99,
-        Some(179),
+    Syscall::N_sysinfo => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "times",
-        100,
-        Some(153),
+    Syscall::N_times => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The time arc models it on the virtual clock (§6).",
         Some("time+identity"),
     ),
-    r(
-        "ptrace",
-        101,
-        Some(117),
+    Syscall::N_ptrace => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "getuid",
-        102,
-        Some(174),
+    Syscall::N_getuid => r(
+        id,
         Family::Identity,
         Disposition::Constant(IDENTITY_UID as i64),
         "The one modeled non-root identity (uid 1000), the same value the C interposer returns; the identity arc makes it a `--host-*` knob.",
         Some("time+identity"),
     )
     .probe("fs/metadata"),
-    r(
-        "syslog",
-        103,
-        Some(116),
+    Syscall::N_syslog => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Reads or configures the kernel log (CAP_SYSLOG). The time+identity arc answers EPERM, the unprivileged kernel outcome.",
         Some("time+identity (EPERM)"),
     ),
-    r(
-        "getgid",
-        104,
-        Some(176),
+    Syscall::N_getgid => r(
+        id,
         Family::Identity,
         Disposition::Constant(IDENTITY_GID as i64),
         "The one modeled non-root identity (gid 1000), the same value the C interposer returns.",
         Some("time+identity"),
     )
     .probe("fs/metadata"),
-    r(
-        "setuid",
-        105,
-        Some(146),
+    Syscall::N_setuid => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "setgid",
-        106,
-        Some(144),
+    Syscall::N_setgid => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "geteuid",
-        107,
-        Some(175),
+    Syscall::N_geteuid => r(
+        id,
         Family::Identity,
         Disposition::Constant(IDENTITY_UID as i64),
         "The one modeled non-root identity (euid 1000), the same value the C interposer returns.",
         Some("time+identity"),
     ),
-    r(
-        "getegid",
-        108,
-        Some(177),
+    Syscall::N_getegid => r(
+        id,
         Family::Identity,
         Disposition::Constant(IDENTITY_GID as i64),
         "The one modeled non-root identity (egid 1000), the same value the C interposer returns.",
         Some("time+identity"),
     ),
-    r(
-        "setpgid",
-        109,
-        Some(154),
+    Syscall::N_setpgid => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "getppid",
-        110,
-        Some(173),
+    Syscall::N_getppid => r(
+        id,
         Family::Identity,
         Disposition::Constant(2),
         "The modeled process reports a stable synthetic parent pid (2), distinct from the special pid 0 process-group selector.",
         None,
     ),
-    r(
-        "getpgrp",
-        111,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_getpgrp => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "setsid",
-        112,
-        Some(157),
+    Syscall::N_setsid => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "setreuid",
-        113,
-        Some(145),
+    Syscall::N_setreuid => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "setregid",
-        114,
-        Some(143),
+    Syscall::N_setregid => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "getgroups",
-        115,
-        Some(158),
+    Syscall::N_getgroups => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "setgroups",
-        116,
-        Some(159),
+    Syscall::N_setgroups => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "setresuid",
-        117,
-        Some(147),
+    Syscall::N_setresuid => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "getresuid",
-        118,
-        Some(148),
+    Syscall::N_getresuid => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "setresgid",
-        119,
-        Some(149),
+    Syscall::N_setresgid => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "getresgid",
-        120,
-        Some(150),
+    Syscall::N_getresgid => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "getpgid",
-        121,
-        Some(155),
+    Syscall::N_getpgid => r(
+        id,
         Family::Identity,
         Disposition::Modeled,
         "The one virtual process is its own process-group leader (pgid 1); any other pid is absent.",
         None,
     ),
-    r(
-        "setfsuid",
-        122,
-        Some(151),
+    Syscall::N_setfsuid => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "setfsgid",
-        123,
-        Some(152),
+    Syscall::N_setfsgid => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "getsid",
-        124,
-        Some(156),
+    Syscall::N_getsid => r(
+        id,
         Family::Identity,
         Disposition::Modeled,
         "The one virtual process is its own session leader (sid 1); any other pid is absent.",
         None,
     ),
-    r(
-        "capget",
-        125,
-        Some(90),
+    Syscall::N_capget => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "capset",
-        126,
-        Some(91),
+    Syscall::N_capset => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "rt_sigpending",
-        127,
-        Some(136),
+    Syscall::N_rt_sigpending => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "The calling task's blocked private and shared pending signals; never a host queue query.",
         None,
     ),
-    r(
-        "rt_sigtimedwait",
-        128,
-        Some(137),
+    Syscall::N_rt_sigtimedwait => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "Private-before-shared dequeue, or scheduler park with a virtual timeout; unmatched handled signals return EINTR.",
         None,
     ),
-    r(
-        "rt_sigqueueinfo",
-        129,
-        Some(138),
+    Syscall::N_rt_sigqueueinfo => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "Recorded process-directed generation into virtual pending queues, preserving caller siginfo.",
         None,
     ),
-    r(
-        "rt_sigsuspend",
-        130,
-        Some(133),
+    Syscall::N_rt_sigsuspend => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "Atomic temporary task mask and scheduler park; a delivered handler returns EINTR with the old mask restored.",
         None,
     ),
-    r(
-        "sigaltstack",
-        131,
-        Some(132),
+    Syscall::N_sigaltstack => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "Per-task alternate stack and old_ss, validated and forwarded for kernel-built handler frames.",
         None,
     ),
-    r(
-        "utime",
-        132,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_utime => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: whole-second times onto the same `patina_utimensat` entry as `utimensat`. Gap: unsigned-nanosecond timestamps refuse pre-epoch and overflowing seconds with EINVAL (Linux may clamp wide positive times); NOW samples after modeled latency, OMIT/OMIT skips resolution, and AT_EMPTY_PATH reaches retained inodes.",
         None,
     )
     .probe("fs/times"),
-    r(
-        "mknod",
-        133,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_mknod => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: `mknodat(AT_FDCWD, …)`; only S_IFIFO is modeled, other types print the shared deny and answer ENOSYS.",
         None,
     ),
-    r(
-        "uselib",
-        134,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_uselib => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "personality",
-        135,
-        Some(92),
+    Syscall::N_personality => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "ustat",
-        136,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_ustat => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "statfs",
-        137,
-        Some(43),
+    Syscall::N_statfs => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "fstatfs",
-        138,
-        Some(44),
+    Syscall::N_fstatfs => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "sysfs",
-        139,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_sysfs => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "getpriority",
-        140,
-        Some(141),
+    Syscall::N_getpriority => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "setpriority",
-        141,
-        Some(140),
+    Syscall::N_setpriority => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "sched_setparam",
-        142,
-        Some(118),
+    Syscall::N_sched_setparam => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "sched_getparam",
-        143,
-        Some(121),
+    Syscall::N_sched_getparam => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "sched_setscheduler",
-        144,
-        Some(119),
+    Syscall::N_sched_setscheduler => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "sched_getscheduler",
-        145,
-        Some(120),
+    Syscall::N_sched_getscheduler => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "sched_get_priority_max",
-        146,
-        Some(125),
+    Syscall::N_sched_get_priority_max => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "sched_get_priority_min",
-        147,
-        Some(126),
+    Syscall::N_sched_get_priority_min => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "sched_rr_get_interval",
-        148,
-        Some(127),
+    Syscall::N_sched_rr_get_interval => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "mlock",
-        149,
-        Some(228),
+    Syscall::N_mlock => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "munlock",
-        150,
-        Some(229),
+    Syscall::N_munlock => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "mlockall",
-        151,
-        Some(230),
+    Syscall::N_mlockall => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "munlockall",
-        152,
-        Some(231),
+    Syscall::N_munlockall => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "vhangup",
-        153,
-        Some(58),
+    Syscall::N_vhangup => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "modify_ldt",
-        154,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_modify_ldt => r(
+        id,
         Family::Thread,
         Disposition::Trap(TRAP_UNMODELED),
         "Thread-local kernel state. ld.so issues `set_tid_address`/`arch_prctl` before SUD arms, so the trap only fires for a raw guest emitter; the signals arc models the tid address (D6) and answers the rest.",
         Some("signals+threads+process"),
     ),
-    r(
-        "pivot_root",
-        155,
-        Some(41),
+    Syscall::N_pivot_root => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "_sysctl",
-        156,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N__sysctl => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "prctl",
-        157,
-        Some(167),
+    Syscall::N_prctl => r(
+        id,
         Family::Process,
         Disposition::Modeled,
         "One Rust option table on libc and raw doors: name, pdeathsig, dumpable, no-new-privs, timerslack, scrubbed AUXV, inert VMA/THP controls; unknown options return EINVAL.",
         None,
     ),
-    r(
-        "arch_prctl",
-        158,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_arch_prctl => r(
+        id,
         Family::Thread,
         Disposition::Trap(TRAP_UNMODELED),
         "Thread-local kernel state. ld.so issues `set_tid_address`/`arch_prctl` before SUD arms, so the trap only fires for a raw guest emitter; the signals arc models the tid address (D6) and answers the rest.",
         Some("signals+threads+process"),
     ),
-    r(
-        "adjtimex",
-        159,
-        Some(171),
+    Syscall::N_adjtimex => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Sets or slews the system clock (CAP_SYS_TIME); the virtual clock is not host state. The time+identity arc answers EPERM, the unprivileged kernel outcome.",
         Some("time+identity (EPERM)"),
     ),
-    r(
-        "setrlimit",
-        160,
-        Some(164),
+    Syscall::N_setrlimit => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "chroot",
-        161,
-        Some(51),
+    Syscall::N_chroot => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "sync",
-        162,
-        Some(81),
+    Syscall::N_sync => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "acct",
-        163,
-        Some(89),
+    Syscall::N_acct => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "settimeofday",
-        164,
-        Some(170),
+    Syscall::N_settimeofday => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Sets or slews the system clock (CAP_SYS_TIME); the virtual clock is not host state. The time+identity arc answers EPERM, the unprivileged kernel outcome.",
         Some("time+identity (EPERM)"),
     ),
-    r(
-        "mount",
-        165,
-        Some(40),
+    Syscall::N_mount => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "umount2",
-        166,
-        Some(39),
+    Syscall::N_umount2 => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "swapon",
-        167,
-        Some(224),
+    Syscall::N_swapon => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "swapoff",
-        168,
-        Some(225),
+    Syscall::N_swapoff => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "reboot",
-        169,
-        Some(142),
+    Syscall::N_reboot => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "sethostname",
-        170,
-        Some(161),
+    Syscall::N_sethostname => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "setdomainname",
-        171,
-        Some(162),
+    Syscall::N_setdomainname => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "iopl",
-        172,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_iopl => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "ioperm",
-        173,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_ioperm => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "create_module",
-        174,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_create_module => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "init_module",
-        175,
-        Some(105),
+    Syscall::N_init_module => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "delete_module",
-        176,
-        Some(106),
+    Syscall::N_delete_module => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "get_kernel_syms",
-        177,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_get_kernel_syms => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "query_module",
-        178,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_query_module => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "quotactl",
-        179,
-        Some(60),
+    Syscall::N_quotactl => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "nfsservctl",
-        180,
-        Some(42),
+    Syscall::N_nfsservctl => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "getpmsg",
-        181,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_getpmsg => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "putpmsg",
-        182,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_putpmsg => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "afs_syscall",
-        183,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_afs_syscall => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "tuxcall",
-        184,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_tuxcall => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "security",
-        185,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_security => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "gettid",
-        186,
-        Some(178),
+    Syscall::N_gettid => r(
+        id,
         Family::Thread,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_thread_id`): the managed task id.",
         None,
     ),
-    r(
-        "readahead",
-        187,
-        Some(213),
+    Syscall::N_readahead => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "setxattr",
-        188,
-        Some(5),
+    Syscall::N_setxattr => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "lsetxattr",
-        189,
-        Some(6),
+    Syscall::N_lsetxattr => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "fsetxattr",
-        190,
-        Some(7),
+    Syscall::N_fsetxattr => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "getxattr",
-        191,
-        Some(8),
+    Syscall::N_getxattr => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "lgetxattr",
-        192,
-        Some(9),
+    Syscall::N_lgetxattr => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "fgetxattr",
-        193,
-        Some(10),
+    Syscall::N_fgetxattr => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "listxattr",
-        194,
-        Some(11),
+    Syscall::N_listxattr => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "llistxattr",
-        195,
-        Some(12),
+    Syscall::N_llistxattr => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "flistxattr",
-        196,
-        Some(13),
+    Syscall::N_flistxattr => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "removexattr",
-        197,
-        Some(14),
+    Syscall::N_removexattr => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "lremovexattr",
-        198,
-        Some(15),
+    Syscall::N_lremovexattr => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "fremovexattr",
-        199,
-        Some(16),
+    Syscall::N_fremovexattr => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "tkill",
-        200,
-        Some(130),
+    Syscall::N_tkill => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "Recorded thread-directed virtual signal generation and targeted registered-wait wake.",
         None,
     ),
-    r(
-        "time",
-        201,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_time => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The time arc models it on the virtual clock (§6).",
         Some("time+identity"),
     ),
-    r(
-        "futex",
-        202,
-        Some(98),
+    Syscall::N_futex => r(
+        id,
         Family::Sync,
         Disposition::Modeled,
         "FUTEX_WAIT/WAKE and their BITSET forms park and wake on the deterministic scheduler (the same decode as the libc `syscall(2)` interposer, timeouts on the virtual clock); other ops answer ENOSYS.",
         None,
     )
     .probe("thread/futex"),
-    r(
-        "sched_setaffinity",
-        203,
-        Some(122),
+    Syscall::N_sched_setaffinity => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "sched_getaffinity",
-        204,
-        Some(123),
+    Syscall::N_sched_getaffinity => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "set_thread_area",
-        205,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_set_thread_area => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "io_setup",
-        206,
-        Some(0),
+    Syscall::N_io_setup => r(
+        id,
         Family::AsyncIo,
         Disposition::Trap(TRAP_UNMODELED),
         "Linux AIO; the io_uring arc soft-denies it (ENOSYS) and models rings over the readiness reactor.",
         Some("io_uring"),
     ),
-    r(
-        "io_destroy",
-        207,
-        Some(1),
+    Syscall::N_io_destroy => r(
+        id,
         Family::AsyncIo,
         Disposition::Trap(TRAP_UNMODELED),
         "Linux AIO; the io_uring arc soft-denies it (ENOSYS) and models rings over the readiness reactor.",
         Some("io_uring"),
     ),
-    r(
-        "io_getevents",
-        208,
-        Some(4),
+    Syscall::N_io_getevents => r(
+        id,
         Family::AsyncIo,
         Disposition::Trap(TRAP_UNMODELED),
         "Linux AIO; the io_uring arc soft-denies it (ENOSYS) and models rings over the readiness reactor.",
         Some("io_uring"),
     ),
-    r(
-        "io_submit",
-        209,
-        Some(2),
+    Syscall::N_io_submit => r(
+        id,
         Family::AsyncIo,
         Disposition::Trap(TRAP_UNMODELED),
         "Linux AIO; the io_uring arc soft-denies it (ENOSYS) and models rings over the readiness reactor.",
         Some("io_uring"),
     ),
-    r(
-        "io_cancel",
-        210,
-        Some(3),
+    Syscall::N_io_cancel => r(
+        id,
         Family::AsyncIo,
         Disposition::Trap(TRAP_UNMODELED),
         "Linux AIO; the io_uring arc soft-denies it (ENOSYS) and models rings over the readiness reactor.",
         Some("io_uring"),
     ),
-    r(
-        "get_thread_area",
-        211,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_get_thread_area => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "lookup_dcookie",
-        212,
-        Some(18),
+    Syscall::N_lookup_dcookie => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "epoll_create",
-        213,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_epoll_create => r(
+        id,
         Family::Readiness,
         Disposition::Modeled,
         "x86_64 legacy alias of `epoll_create1(0)`; `size <= 0` is EINVAL as in the kernel.",
         None,
     ),
-    r(
-        "epoll_ctl_old",
-        214,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_epoll_ctl_old => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "epoll_wait_old",
-        215,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_epoll_wait_old => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "remap_file_pages",
-        216,
-        Some(234),
+    Syscall::N_remap_file_pages => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "getdents64",
-        217,
-        Some(61),
+    Syscall::N_getdents64 => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Serves a per-directory-fd snapshot taken through `patina_read_dir`, the entry the C `readdir` uses; `.`/`..` and real `d_ino` are the fs arc.",
         Some("fs"),
     )
     .probe("fs/getdents"),
-    r(
-        "set_tid_address",
-        218,
-        Some(96),
+    Syscall::N_set_tid_address => r(
+        id,
         Family::Thread,
         Disposition::Modeled,
         "Stores the calling task's clear-child-tid word; task exit clears it and wakes one futex waiter.",
         None,
     ),
-    r(
-        "restart_syscall",
-        219,
-        Some(128),
+    Syscall::N_restart_syscall => r(
+        id,
         Family::Signal,
         Disposition::Trap(TRAP_SIGNAL_ABI),
         "By-design trap: restart decisions are implemented at managed wait resumption; no guest-visible kernel restart_block exists to restore.",
         None,
     ),
-    r(
-        "semtimedop",
-        220,
-        Some(192),
+    Syscall::N_semtimedop => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "fadvise64",
-        221,
-        Some(223),
+    Syscall::N_fadvise64 => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "timer_create",
-        222,
-        Some(107),
+    Syscall::N_timer_create => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The time arc models it on the virtual clock (§6).",
         Some("time+identity"),
     ),
-    r(
-        "timer_settime",
-        223,
-        Some(110),
+    Syscall::N_timer_settime => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The time arc models it on the virtual clock (§6).",
         Some("time+identity"),
     ),
-    r(
-        "timer_gettime",
-        224,
-        Some(108),
+    Syscall::N_timer_gettime => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The time arc models it on the virtual clock (§6).",
         Some("time+identity"),
     ),
-    r(
-        "timer_getoverrun",
-        225,
-        Some(109),
+    Syscall::N_timer_getoverrun => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The time arc models it on the virtual clock (§6).",
         Some("time+identity"),
     ),
-    r(
-        "timer_delete",
-        226,
-        Some(111),
+    Syscall::N_timer_delete => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The time arc models it on the virtual clock (§6).",
         Some("time+identity"),
     ),
-    r(
-        "clock_settime",
-        227,
-        Some(112),
+    Syscall::N_clock_settime => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Sets or slews the system clock (CAP_SYS_TIME); the virtual clock is not host state. The time+identity arc answers EPERM, the unprivileged kernel outcome.",
         Some("time+identity (EPERM)"),
     ),
-    r(
-        "clock_gettime",
-        228,
-        Some(113),
+    Syscall::N_clock_gettime => r(
+        id,
         Family::Time,
         Disposition::Modeled,
         "CLOCK_REALTIME/CLOCK_MONOTONIC from the virtual clock (`patina_clock_now`); other clocks answer EINVAL.",
         None,
     )
     .probe("time/clocks"),
-    r(
-        "clock_getres",
-        229,
-        Some(114),
+    Syscall::N_clock_getres => r(
+        id,
         Family::Time,
         Disposition::Modeled,
         "Fixed 1 ns resolution for the modeled clocks; other clocks answer EINVAL. No C face defines `clock_getres` (a libc-only gap the time arc closes).",
         Some("time+identity"),
     ),
-    r(
-        "clock_nanosleep",
-        230,
-        Some(115),
+    Syscall::N_clock_nanosleep => r(
+        id,
         Family::Time,
         Disposition::Modeled,
         "Relative and TIMER_ABSTIME sleeps on the virtual clock (`patina_sleep_until`); other flags answer EINVAL.",
         None,
     )
     .probe("time/clocks"),
-    r(
-        "exit_group",
-        231,
-        Some(94),
+    Syscall::N_exit_group => r(
+        id,
         Family::Process,
         Disposition::Modeled,
         "Finalizes the trace and captured output, then ends every host thread with the supplied status without running guest atexit handlers.",
         None,
     ),
-    r(
-        "epoll_wait",
-        232,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_epoll_wait => r(
+        id,
         Family::Readiness,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_epoll_wait`), a second caller of the readiness reactor, never a second reactor.",
         None,
     )
     .probe("readiness/epoll"),
-    r(
-        "epoll_ctl",
-        233,
-        Some(21),
+    Syscall::N_epoll_ctl => r(
+        id,
         Family::Readiness,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_epoll_ctl`).",
         None,
     )
     .probe("readiness/epoll"),
-    r(
-        "tgkill",
-        234,
-        Some(131),
+    Syscall::N_tgkill => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "Validated thread-group and task identity, then recorded private-queue generation and targeted registered-wait wake.",
         None,
     ),
-    r(
-        "utimes",
-        235,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_utimes => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: microsecond times onto the same `patina_utimensat` entry as `utimensat`. Gap: unsigned-nanosecond timestamps refuse pre-epoch and overflowing seconds with EINVAL (Linux may clamp wide positive times); NOW samples after modeled latency, OMIT/OMIT skips resolution, and AT_EMPTY_PATH reaches retained inodes.",
         None,
     )
     .probe("fs/times"),
-    r(
-        "vserver",
-        236,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_vserver => r(
+        id,
         Family::Removed,
         Disposition::SoftDeny(ENOSYS),
         "The kernel lists this number without an implementation and answers ENOSYS natively; the shim returns ENOSYS byte-identically instead of trapping or reaching the host.",
         None,
     ),
-    r(
-        "mbind",
-        237,
-        Some(235),
+    Syscall::N_mbind => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "NUMA placement reads or sets host memory topology; the memory arc answers the constants a single-node kernel does.",
         Some("memory+ipc"),
     ),
-    r(
-        "set_mempolicy",
-        238,
-        Some(237),
+    Syscall::N_set_mempolicy => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "NUMA placement reads or sets host memory topology; the memory arc answers the constants a single-node kernel does.",
         Some("memory+ipc"),
     ),
-    r(
-        "get_mempolicy",
-        239,
-        Some(236),
+    Syscall::N_get_mempolicy => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "NUMA placement reads or sets host memory topology; the memory arc answers the constants a single-node kernel does.",
         Some("memory+ipc"),
     ),
-    r(
-        "mq_open",
-        240,
-        Some(180),
+    Syscall::N_mq_open => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "mq_unlink",
-        241,
-        Some(181),
+    Syscall::N_mq_unlink => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "mq_timedsend",
-        242,
-        Some(182),
+    Syscall::N_mq_timedsend => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "mq_timedreceive",
-        243,
-        Some(183),
+    Syscall::N_mq_timedreceive => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "mq_notify",
-        244,
-        Some(184),
+    Syscall::N_mq_notify => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "mq_getsetattr",
-        245,
-        Some(185),
+    Syscall::N_mq_getsetattr => r(
+        id,
         Family::Ipc,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. Cross-process IPC is modeled with single-process semantics in the memory+ipc arc (§3).",
         Some("memory+ipc"),
     ),
-    r(
-        "kexec_load",
-        246,
-        Some(104),
+    Syscall::N_kexec_load => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "waitid",
-        247,
-        Some(95),
+    Syscall::N_waitid => r(
+        id,
         Family::Process,
         Disposition::Modeled,
         "Childless process row: invalid waitid option sets answer EINVAL; otherwise Patina has no child processes, so waitid answers ECHILD without reaching the host.",
         None,
     ),
-    r(
-        "add_key",
-        248,
-        Some(217),
+    Syscall::N_add_key => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "request_key",
-        249,
-        Some(218),
+    Syscall::N_request_key => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "keyctl",
-        250,
-        Some(219),
+    Syscall::N_keyctl => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "ioprio_set",
-        251,
-        Some(30),
+    Syscall::N_ioprio_set => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "ioprio_get",
-        252,
-        Some(31),
+    Syscall::N_ioprio_get => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "inotify_init",
-        253,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_inotify_init => r(
+        id,
         Family::Readiness,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The readiness arc models it over the reactor (§6).",
         Some("network+readiness"),
     ),
-    r(
-        "inotify_add_watch",
-        254,
-        Some(27),
+    Syscall::N_inotify_add_watch => r(
+        id,
         Family::Readiness,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The readiness arc models it over the reactor (§6).",
         Some("network+readiness"),
     ),
-    r(
-        "inotify_rm_watch",
-        255,
-        Some(28),
+    Syscall::N_inotify_rm_watch => r(
+        id,
         Family::Readiness,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The readiness arc models it over the reactor (§6).",
         Some("network+readiness"),
     ),
-    r(
-        "migrate_pages",
-        256,
-        Some(238),
+    Syscall::N_migrate_pages => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "NUMA placement reads or sets host memory topology; the memory arc answers the constants a single-node kernel does.",
         Some("memory+ipc"),
     ),
-    r(
-        "openat",
-        257,
-        Some(56),
+    Syscall::N_openat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_openat`): `(dirfd, path)` resolves through the one path resolver (working directory, `..`, symlinks to the 40-hop ELOOP limit) and the entry's kind decides the descriptor; O_PATH and O_DIRECTORY are distinct opens; O_PATH|O_NOFOLLOW on a symlink prints the shared deny and answers ENOSYS.",
@@ -2403,10 +1933,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("fs/open_rw")
     .since("2.6.16"),
-    r(
-        "mkdirat",
-        258,
-        Some(34),
+    Syscall::N_mkdirat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_mkdir`), the creation mode carried and the umask applied by the driver.",
@@ -2414,39 +1942,32 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("fs/dirs")
     .since("2.6.16"),
-    r(
-        "mknodat",
-        259,
-        Some(33),
+    Syscall::N_mknodat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_mkfifo`) for S_IFIFO; other types print the shared deny and answer ENOSYS.",
         None,
     ),
-    r(
-        "fchownat",
-        260,
-        Some(54),
+    Syscall::N_fchownat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_chown`, through the one path resolver; AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH honored, other flags EINVAL): the one-identity ownership rule of `fchown`.",
         None,
     )
     .probe("fs/owner"),
-    r(
-        "futimesat",
-        261,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_futimesat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "x86_64 legacy alias: microsecond times with a dirfd onto the same `patina_utimensat` entry as `utimensat` (a null path names the descriptor). Gap: unsigned-nanosecond timestamps refuse pre-epoch and overflowing seconds with EINVAL (Linux may clamp wide positive times); NOW samples after modeled latency, OMIT/OMIT skips resolution, and AT_EMPTY_PATH reaches retained inodes.",
         None,
     )
     .probe("fs/times"),
-    r(
-        "newfstatat",
-        262,
-        Some(79),
+    Syscall::N_newfstatat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver); AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH/AT_NO_AUTOMOUNT honored, other flags EINVAL.",
@@ -2454,10 +1975,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("fs/metadata")
     .since("2.6.16"),
-    r(
-        "unlinkat",
-        263,
-        Some(35),
+    Syscall::N_unlinkat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_unlink` / `patina_rmdir` by AT_REMOVEDIR).",
@@ -2465,10 +1984,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("fs/dirs")
     .since("2.6.16"),
-    r(
-        "renameat",
-        264,
-        Some(38),
+    Syscall::N_renameat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_rename`).",
@@ -2476,10 +1993,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("fs/dirs")
     .since("2.6.16"),
-    r(
-        "linkat",
-        265,
-        Some(37),
+    Syscall::N_linkat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_link`); AT_SYMLINK_FOLLOW/AT_EMPTY_PATH honored.",
@@ -2487,10 +2002,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("fs/links")
     .since("2.6.16"),
-    r(
-        "symlinkat",
-        266,
-        Some(36),
+    Syscall::N_symlinkat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_symlink`).",
@@ -2498,10 +2011,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("fs/links")
     .since("2.6.16"),
-    r(
-        "readlinkat",
-        267,
-        Some(78),
+    Syscall::N_readlinkat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_read_link`).",
@@ -2509,38 +2020,30 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("fs/links")
     .since("2.6.16"),
-    r(
-        "fchmodat",
-        268,
-        Some(53),
+    Syscall::N_fchmodat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_chmod`); the kernel form carries no flags.",
         None,
     ),
-    r(
-        "faccessat",
-        269,
-        Some(48),
+    Syscall::N_faccessat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Modeled against the entry's permission bits, the owner triad of the one identity: R_OK/W_OK/X_OK are each a mode fact (`X_OK` on a file honors its `x` bit; exec itself stays a process-family trap); the kernel form carries no flags.",
         None,
     )
     .probe("fs/owner"),
-    r(
-        "pselect6",
-        270,
-        Some(72),
+    Syscall::N_pselect6 => r(
+        id,
         Family::Readiness,
         Disposition::Modeled,
         "Descriptor sets over shared readiness queues; virtual timeout and non-restartable signal interruption. Implemented and unit-tested; dedicated network+readiness host oracle is not yet validated.",
         Some("network+readiness"),
     ),
-    r(
-        "ppoll",
-        271,
-        Some(73),
+    Syscall::N_ppoll => r(
+        id,
         Family::Readiness,
         Disposition::Modeled,
         "Shared readiness queues with a virtual timeout and temporary task signal mask; EINTR is never restarted.",
@@ -2548,156 +2051,124 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("readiness/ppoll")
     .since("2.6.16"),
-    r(
-        "unshare",
-        272,
-        Some(97),
+    Syscall::N_unshare => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "set_robust_list",
-        273,
-        Some(99),
+    Syscall::N_set_robust_list => r(
+        id,
         Family::Sync,
         Disposition::SoftDeny(ENOSYS),
         "ENOSYS: a kernel without robust futexes is a configuration every libc handles, and passing the list through would leak host-kernel behavior into the schedule.",
         None,
     ),
-    r(
-        "get_robust_list",
-        274,
-        Some(100),
+    Syscall::N_get_robust_list => r(
+        id,
         Family::Sync,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The signals+threads arc models it on the scheduler.",
         Some("signals+threads+process"),
     ),
-    r(
-        "splice",
-        275,
-        Some(76),
+    Syscall::N_splice => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "tee",
-        276,
-        Some(77),
+    Syscall::N_tee => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "sync_file_range",
-        277,
-        Some(84),
+    Syscall::N_sync_file_range => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "vmsplice",
-        278,
-        Some(75),
+    Syscall::N_vmsplice => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "move_pages",
-        279,
-        Some(239),
+    Syscall::N_move_pages => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "NUMA placement reads or sets host memory topology; the memory arc answers the constants a single-node kernel does.",
         Some("memory+ipc"),
     ),
-    r(
-        "utimensat",
-        280,
-        Some(88),
+    Syscall::N_utimensat => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_utimensat`/`patina_futimens`, through the one path resolver): UTIME_NOW resolves to the virtual clock, UTIME_OMIT leaves a time alone, both OMIT is the kernel's early success, `ctime` moves with either time; AT_SYMLINK_NOFOLLOW honored, other flags EINVAL, a null path names the descriptor. Gap: unsigned-nanosecond timestamps refuse pre-epoch and overflowing seconds with EINVAL (Linux may clamp wide positive times); NOW samples after modeled latency, OMIT/OMIT skips resolution, and AT_EMPTY_PATH reaches retained inodes. FIFO endpoints mutate retained inode metadata even after unlink; anonymous descriptors without modeled filesystem inodes refuse loudly (ENOSYS), a named remaining gap.",
         None,
     )
     .probe("fs/times"),
-    r(
-        "epoll_pwait",
-        281,
-        Some(22),
+    Syscall::N_epoll_pwait => r(
+        id,
         Family::Readiness,
         Disposition::Modeled,
         "Shared readiness wait with a temporary task signal mask; EINTR is never restarted.",
         None,
     ),
-    r(
-        "signalfd",
-        282,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_signalfd => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "Virtual signal queue descriptor on the unified descriptor table.",
         None,
     ),
-    r(
-        "timerfd_create",
-        283,
-        Some(85),
+    Syscall::N_timerfd_create => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The time arc models it on the virtual clock (§6).",
         Some("time+identity"),
     ),
-    r(
-        "eventfd",
-        284,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_eventfd => r(
+        id,
         Family::Readiness,
         Disposition::Modeled,
         "x86_64 legacy alias of `eventfd2(initval, 0)`.",
         None,
     ),
-    r(
-        "fallocate",
-        285,
-        Some(47),
+    Syscall::N_fallocate => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fallocate`): mode 0 and KEEP_SIZE reserve, PUNCH_HOLE|KEEP_SIZE and ZERO_RANGE zero the range, the range-shifting modes are EOPNOTSUPP; EINVAL/EBADF/ESPIPE/EISDIR/ENODEV in the kernel's order; one recorded operation whatever the range. Modeled modes are 0, KEEP_SIZE, PUNCH_HOLE|KEEP_SIZE, ZERO_RANGE and ZERO_RANGE|KEEP_SIZE; Linux itself refuses unknown/self-contradictory combinations, while valid COLLAPSE_RANGE/INSERT_RANGE remain unmodeled EOPNOTSUPP. No allocation extent accounting is claimed via statx BLOCKS.",
         None,
     )
     .probe("fs/size"),
-    r(
-        "timerfd_settime",
-        286,
-        Some(86),
+    Syscall::N_timerfd_settime => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The time arc models it on the virtual clock (§6).",
         Some("time+identity"),
     ),
-    r(
-        "timerfd_gettime",
-        287,
-        Some(87),
+    Syscall::N_timerfd_gettime => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The time arc models it on the virtual clock (§6).",
         Some("time+identity"),
     ),
-    r(
-        "accept4",
-        288,
-        Some(242),
+    Syscall::N_accept4 => r(
+        id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_accept`); SOCK_NONBLOCK/SOCK_CLOEXEC honored.",
@@ -2705,19 +2176,15 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("net/tcp")
     .since("2.6.28"),
-    r(
-        "signalfd4",
-        289,
-        Some(74),
+    Syscall::N_signalfd4 => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "Virtual signal queue descriptor on the unified descriptor table.",
         None,
     ),
-    r(
-        "eventfd2",
-        290,
-        Some(19),
+    Syscall::N_eventfd2 => r(
+        id,
         Family::Readiness,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_eventfd`).",
@@ -2725,10 +2192,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("readiness/epoll")
     .since("2.6.27"),
-    r(
-        "epoll_create1",
-        291,
-        Some(20),
+    Syscall::N_epoll_create1 => r(
+        id,
         Family::Readiness,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_epoll_create1`).",
@@ -2736,20 +2201,16 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("readiness/epoll")
     .since("2.6.27"),
-    r(
-        "dup3",
-        292,
-        Some(24),
+    Syscall::N_dup3 => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "Binds a chosen number to `oldfd`'s open file description in the shim's descriptor table (`patina_dup3`), closing what it named; equal numbers are EINVAL, a target past RLIMIT_NOFILE is EBADF, O_CLOEXEC lands on the new number only.",
         None,
     )
     .probe("fd/table"),
-    r(
-        "pipe2",
-        293,
-        Some(59),
+    Syscall::N_pipe2 => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_pipe`): an in-process pipe channel; O_NONBLOCK honored.",
@@ -2757,226 +2218,176 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("fd/pipes")
     .since("2.6.27"),
-    r(
-        "inotify_init1",
-        294,
-        Some(26),
+    Syscall::N_inotify_init1 => r(
+        id,
         Family::Readiness,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The readiness arc models it over the reactor (§6).",
         Some("network+readiness"),
     ),
-    r(
-        "preadv",
-        295,
-        Some(69),
+    Syscall::N_preadv => r(
+        id,
         Family::FdIo,
         Disposition::Trap(TRAP_UNMODELED),
         "Positional vectored I/O; the C `preadv`/`pwritev` interposers loop over `patina_pread`/`patina_pwrite`, the raw row does not exist yet.",
         Some("fs"),
     ),
-    r(
-        "pwritev",
-        296,
-        Some(70),
+    Syscall::N_pwritev => r(
+        id,
         Family::FdIo,
         Disposition::Trap(TRAP_UNMODELED),
         "Positional vectored I/O; the C `preadv`/`pwritev` interposers loop over `patina_pread`/`patina_pwrite`, the raw row does not exist yet.",
         Some("fs"),
     ),
-    r(
-        "rt_tgsigqueueinfo",
-        297,
-        Some(240),
+    Syscall::N_rt_tgsigqueueinfo => r(
+        id,
         Family::Signal,
         Disposition::Modeled,
         "Recorded thread-directed generation into the named task's private pending queue, preserving caller siginfo.",
         None,
     ),
-    r(
-        "perf_event_open",
-        298,
-        Some(241),
+    Syscall::N_perf_event_open => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "recvmmsg",
-        299,
-        Some(243),
+    Syscall::N_recvmmsg => r(
+        id,
         Family::Net,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The network arc models it over SimNet (§6).",
         Some("network+readiness"),
     ),
-    r(
-        "fanotify_init",
-        300,
-        Some(262),
+    Syscall::N_fanotify_init => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "fanotify_mark",
-        301,
-        Some(263),
+    Syscall::N_fanotify_mark => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "prlimit64",
-        302,
-        Some(261),
+    Syscall::N_prlimit64 => r(
+        id,
         Family::Identity,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers it from the virtual credential/limit state the `--host-*` knobs seed (§6).",
         Some("time+identity"),
     ),
-    r(
-        "name_to_handle_at",
-        303,
-        Some(264),
+    Syscall::N_name_to_handle_at => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "open_by_handle_at",
-        304,
-        Some(265),
+    Syscall::N_open_by_handle_at => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "clock_adjtime",
-        305,
-        Some(266),
+    Syscall::N_clock_adjtime => r(
+        id,
         Family::Time,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Sets or slews the system clock (CAP_SYS_TIME); the virtual clock is not host state. The time+identity arc answers EPERM, the unprivileged kernel outcome.",
         Some("time+identity (EPERM)"),
     ),
-    r(
-        "syncfs",
-        306,
-        Some(267),
+    Syscall::N_syncfs => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "sendmmsg",
-        307,
-        Some(269),
+    Syscall::N_sendmmsg => r(
+        id,
         Family::Net,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The network arc models it over SimNet (§6).",
         Some("network+readiness"),
     ),
-    r(
-        "setns",
-        308,
-        Some(268),
+    Syscall::N_setns => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "getcpu",
-        309,
-        Some(168),
+    Syscall::N_getcpu => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "process_vm_readv",
-        310,
-        Some(270),
+    Syscall::N_process_vm_readv => r(
+        id,
         Family::Process,
         Disposition::Trap(TRAP_UNMODELED),
         "Self-process only: the signals arc answers these for pid 1 (a pidfd kind, dup-of-self, self-readv/writev) and ESRCH/EBADF for any other process.",
         Some("signals+threads+process"),
     ),
-    r(
-        "process_vm_writev",
-        311,
-        Some(271),
+    Syscall::N_process_vm_writev => r(
+        id,
         Family::Process,
         Disposition::Trap(TRAP_UNMODELED),
         "Self-process only: the signals arc answers these for pid 1 (a pidfd kind, dup-of-self, self-readv/writev) and ESRCH/EBADF for any other process.",
         Some("signals+threads+process"),
     ),
-    r(
-        "kcmp",
-        312,
-        Some(272),
+    Syscall::N_kcmp => r(
+        id,
         Family::Process,
         Disposition::Trap(TRAP_UNMODELED),
         "Self-process only: the signals arc answers these for pid 1 (a pidfd kind, dup-of-self, self-readv/writev) and ESRCH/EBADF for any other process.",
         Some("signals+threads+process"),
     ),
-    r(
-        "finit_module",
-        313,
-        Some(273),
+    Syscall::N_finit_module => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "sched_setattr",
-        314,
-        Some(274),
+    Syscall::N_sched_setattr => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "sched_getattr",
-        315,
-        Some(275),
+    Syscall::N_sched_getattr => r(
+        id,
         Family::Sched,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The identity arc answers the constants a single-CPU SCHED_OTHER process sees (§6).",
         Some("time+identity"),
     ),
-    r(
-        "renameat2",
-        316,
-        Some(276),
+    Syscall::N_renameat2 => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Flags 0 route like `renameat`; RENAME_* flags answer EINVAL.",
         None,
     ),
-    r(
-        "seccomp",
-        317,
-        Some(277),
+    Syscall::N_seccomp => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "getrandom",
-        318,
-        Some(278),
+    Syscall::N_getrandom => r(
+        id,
         Family::Entropy,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_entropy`): seeded bytes; GRND_* flags are irrelevant to a source that never blocks.",
@@ -2984,127 +2395,99 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("entropy/getrandom")
     .since("3.17"),
-    r(
-        "memfd_create",
-        319,
-        Some(279),
+    Syscall::N_memfd_create => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "kexec_file_load",
-        320,
-        Some(294),
+    Syscall::N_kexec_file_load => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "bpf",
-        321,
-        Some(280),
+    Syscall::N_bpf => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "execveat",
-        322,
-        Some(281),
+    Syscall::N_execveat => r(
+        id,
         Family::Process,
         Disposition::Trap(TRAP_PROCESS),
         "Process lifecycle stays a named fatal trap: a second process is outside the scheduler, the trace and the fs model; the guest's contract is one process (§7).",
         None,
     ),
-    r(
-        "userfaultfd",
-        323,
-        Some(282),
+    Syscall::N_userfaultfd => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "membarrier",
-        324,
-        Some(283),
+    Syscall::N_membarrier => r(
+        id,
         Family::Sync,
         Disposition::SoftDeny(ENOSYS),
         "ENOSYS: a kernel without membarrier is a configuration every runtime handles by falling back to a full fence, and passing it through would make the schedule depend on host-kernel behavior.",
         None,
     ),
-    r(
-        "mlock2",
-        325,
-        Some(284),
+    Syscall::N_mlock2 => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "copy_file_range",
-        326,
-        Some(285),
+    Syscall::N_copy_file_range => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "preadv2",
-        327,
-        Some(286),
+    Syscall::N_preadv2 => r(
+        id,
         Family::FdIo,
         Disposition::Trap(TRAP_UNMODELED),
         "Positional vectored I/O; the C `preadv`/`pwritev` interposers loop over `patina_pread`/`patina_pwrite`, the raw row does not exist yet.",
         Some("fs"),
     ),
-    r(
-        "pwritev2",
-        328,
-        Some(287),
+    Syscall::N_pwritev2 => r(
+        id,
         Family::FdIo,
         Disposition::Trap(TRAP_UNMODELED),
         "Positional vectored I/O; the C `preadv`/`pwritev` interposers loop over `patina_pread`/`patina_pwrite`, the raw row does not exist yet.",
         Some("fs"),
     ),
-    r(
-        "pkey_mprotect",
-        329,
-        Some(288),
+    Syscall::N_pkey_mprotect => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "pkey_alloc",
-        330,
-        Some(289),
+    Syscall::N_pkey_alloc => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "pkey_free",
-        331,
-        Some(290),
+    Syscall::N_pkey_free => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "statx",
-        332,
-        Some(291),
+    Syscall::N_statx => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver): an honest mask — STATX_BASIC_STATS and STATX_MNT_ID always, STATX_BTIME when requested — with the owner from the one identity and all four timestamps from the model; the device numbers (`stx_dev_*`) stay zero until the volume model of the fs arc.",
@@ -3112,156 +2495,124 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("fs/metadata")
     .since("4.11"),
-    r(
-        "io_pgetevents",
-        333,
-        Some(292),
+    Syscall::N_io_pgetevents => r(
+        id,
         Family::AsyncIo,
         Disposition::Trap(TRAP_UNMODELED),
         "Linux AIO; the io_uring arc soft-denies it (ENOSYS) and models rings over the readiness reactor.",
         Some("io_uring"),
     ),
-    r(
-        "rseq",
-        334,
-        Some(293),
+    Syscall::N_rseq => r(
+        id,
         Family::Sync,
         Disposition::SoftDeny(ENOSYS),
         "ENOSYS: a kernel without restartable sequences is a configuration glibc handles at startup; registering one would tie the guest to host CPU identity.",
         None,
     ),
-    r(
-        "uretprobe",
-        335,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_uretprobe => r(
+        id,
         Family::Privileged,
         Disposition::Absent,
         "Absent: the number first appears in Linux 6.11, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.11 or later returns it to the privileged trap (§7): a kernel probe trampoline entry, not a user-callable operation.",
         None,
     )
     .since("6.11"),
-    r(
-        "uprobe",
-        336,
-        None,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_uprobe => r(
+        id,
         Family::Privileged,
         Disposition::Absent,
         "Absent: the number first appears in Linux 6.18, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.18 or later returns it to the privileged trap (§7): a kernel probe entry, not a user-callable operation.",
         None,
     )
     .since("6.18"),
-    r(
-        "pidfd_send_signal",
-        424,
-        Some(424),
+    Syscall::N_pidfd_send_signal => r(
+        id,
         Family::Signal,
         Disposition::Trap(TRAP_PROCESS),
         "By-design trap: the descriptor table has no pidfd kind, including a self pidfd; pidfd signal delivery is not implemented. Use modeled kill/tgkill for the virtual process/tasks.",
         None,
     ),
-    r(
-        "io_uring_setup",
-        425,
-        Some(425),
+    Syscall::N_io_uring_setup => r(
+        id,
         Family::AsyncIo,
         Disposition::Trap(TRAP_UNMODELED),
         "A submission/completion ring model over the readiness reactor is its own arc; until then `io_uring_setup` answers ENOSYS, which tokio/mio/monoio probe for (§7).",
         Some("io_uring"),
     ),
-    r(
-        "io_uring_enter",
-        426,
-        Some(426),
+    Syscall::N_io_uring_enter => r(
+        id,
         Family::AsyncIo,
         Disposition::Trap(TRAP_UNMODELED),
         "A submission/completion ring model over the readiness reactor is its own arc; until then `io_uring_setup` answers ENOSYS, which tokio/mio/monoio probe for (§7).",
         Some("io_uring"),
     ),
-    r(
-        "io_uring_register",
-        427,
-        Some(427),
+    Syscall::N_io_uring_register => r(
+        id,
         Family::AsyncIo,
         Disposition::Trap(TRAP_UNMODELED),
         "A submission/completion ring model over the readiness reactor is its own arc; until then `io_uring_setup` answers ENOSYS, which tokio/mio/monoio probe for (§7).",
         Some("io_uring"),
     ),
-    r(
-        "open_tree",
-        428,
-        Some(428),
+    Syscall::N_open_tree => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "move_mount",
-        429,
-        Some(429),
+    Syscall::N_move_mount => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "fsopen",
-        430,
-        Some(430),
+    Syscall::N_fsopen => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "fsconfig",
-        431,
-        Some(431),
+    Syscall::N_fsconfig => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "fsmount",
-        432,
-        Some(432),
+    Syscall::N_fsmount => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "fspick",
-        433,
-        Some(433),
+    Syscall::N_fspick => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "pidfd_open",
-        434,
-        Some(434),
+    Syscall::N_pidfd_open => r(
+        id,
         Family::Process,
         Disposition::Trap(TRAP_UNMODELED),
         "Self-process only: the signals arc answers these for pid 1 (a pidfd kind, dup-of-self, self-readv/writev) and ESRCH/EBADF for any other process.",
         Some("signals+threads+process"),
     ),
-    r(
-        "clone3",
-        435,
-        Some(435),
+    Syscall::N_clone3 => r(
+        id,
         Family::Process,
         Disposition::Trap(TRAP_PROCESS),
         "Process lifecycle stays a named fatal trap: a second process is outside the scheduler, the trace and the fs model; the guest's contract is one process (§7).",
         None,
     ),
-    r(
-        "close_range",
-        436,
-        Some(436),
+    Syscall::N_close_range => r(
+        id,
         Family::FdIo,
         Disposition::Modeled,
         "A range close over the shim's descriptor table (`patina_close_range`): every open number in [first, last] (clamped to the table) is closed, or marked close-on-exec under CLOSE_RANGE_CLOEXEC; CLOSE_RANGE_UNSHARE is a no-op with one process; first > last or an unknown flag is EINVAL.",
@@ -3269,336 +2620,264 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("fd/table")
     .since("5.9"),
-    r(
-        "openat2",
-        437,
-        Some(437),
+    Syscall::N_openat2 => r(
+        id,
         Family::Fs,
         Disposition::SoftDeny(ENOSYS),
         "Named soft deny (prints the shared diagnostic, answers ENOSYS): its RESOLVE_* guarantees are a kernel-side sandbox the deterministic filesystem does not model, and ENOSYS is exactly what callers (cap-primitives, rustix) probe for before falling back to component-wise `openat`, which is modeled.",
         None,
     ),
-    r(
-        "pidfd_getfd",
-        438,
-        Some(438),
+    Syscall::N_pidfd_getfd => r(
+        id,
         Family::Process,
         Disposition::Trap(TRAP_UNMODELED),
         "Self-process only: the signals arc answers these for pid 1 (a pidfd kind, dup-of-self, self-readv/writev) and ESRCH/EBADF for any other process.",
         Some("signals+threads+process"),
     ),
-    r(
-        "faccessat2",
-        439,
-        Some(439),
+    Syscall::N_faccessat2 => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "The flagged form of `faccessat` (AT_EACCESS/AT_SYMLINK_NOFOLLOW); both are routed because callers probe this one first and fall back on ENOSYS.",
         None,
     )
     .probe("fs/owner"),
-    r(
-        "process_madvise",
-        440,
-        Some(440),
+    Syscall::N_process_madvise => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "epoll_pwait2",
-        441,
-        Some(441),
+    Syscall::N_epoll_pwait2 => r(
+        id,
         Family::Readiness,
         Disposition::Modeled,
         "`epoll_pwait` with a timespec timeout on the virtual clock.",
         None,
     ),
-    r(
-        "mount_setattr",
-        442,
-        Some(442),
+    Syscall::N_mount_setattr => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "quotactl_fd",
-        443,
-        Some(443),
+    Syscall::N_quotactl_fd => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "landlock_create_ruleset",
-        444,
-        Some(444),
+    Syscall::N_landlock_create_ruleset => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "landlock_add_rule",
-        445,
-        Some(445),
+    Syscall::N_landlock_add_rule => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "landlock_restrict_self",
-        446,
-        Some(446),
+    Syscall::N_landlock_restrict_self => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "memfd_secret",
-        447,
-        Some(447),
+    Syscall::N_memfd_secret => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "process_mrelease",
-        448,
-        Some(448),
+    Syscall::N_process_mrelease => r(
+        id,
         Family::Process,
         Disposition::Trap(TRAP_UNMODELED),
         "Self-process only: the signals arc answers these for pid 1 (a pidfd kind, dup-of-self, self-readv/writev) and ESRCH/EBADF for any other process.",
         Some("signals+threads+process"),
     ),
-    r(
-        "futex_waitv",
-        449,
-        Some(449),
+    Syscall::N_futex_waitv => r(
+        id,
         Family::Sync,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The signals+threads arc models it on the scheduler.",
         Some("signals+threads+process"),
     ),
-    r(
-        "set_mempolicy_home_node",
-        450,
-        Some(450),
+    Syscall::N_set_mempolicy_home_node => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "NUMA placement reads or sets host memory topology; the memory arc answers the constants a single-node kernel does.",
         Some("memory+ipc"),
     ),
-    r(
-        "cachestat",
-        451,
-        Some(451),
+    Syscall::N_cachestat => r(
+        id,
         Family::Fs,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
         Some("fs"),
     ),
-    r(
-        "fchmodat2",
-        452,
-        Some(452),
+    Syscall::N_fchmodat2 => r(
+        id,
         Family::Fs,
         Disposition::Modeled,
         "The flagged form of `fchmodat`; both are routed because callers probe this one first and fall back on ENOSYS.",
         None,
     ),
-    r(
-        "map_shadow_stack",
-        453,
-        Some(453),
+    Syscall::N_map_shadow_stack => r(
+        id,
         Family::Mem,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
         Some("memory+ipc"),
     ),
-    r(
-        "futex_wake",
-        454,
-        Some(454),
+    Syscall::N_futex_wake => r(
+        id,
         Family::Sync,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The signals+threads arc models it on the scheduler.",
         Some("signals+threads+process"),
     ),
-    r(
-        "futex_wait",
-        455,
-        Some(455),
+    Syscall::N_futex_wait => r(
+        id,
         Family::Sync,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The signals+threads arc models it on the scheduler.",
         Some("signals+threads+process"),
     ),
-    r(
-        "futex_requeue",
-        456,
-        Some(456),
+    Syscall::N_futex_requeue => r(
+        id,
         Family::Sync,
         Disposition::Trap(TRAP_UNMODELED),
         "Not modeled yet: a raw emitter aborts by name. The signals+threads arc models it on the scheduler.",
         Some("signals+threads+process"),
     ),
-    r(
-        "statmount",
-        457,
-        Some(457),
+    Syscall::N_statmount => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "listmount",
-        458,
-        Some(458),
+    Syscall::N_listmount => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "lsm_get_self_attr",
-        459,
-        Some(459),
+    Syscall::N_lsm_get_self_attr => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "lsm_set_self_attr",
-        460,
-        Some(460),
+    Syscall::N_lsm_set_self_attr => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "lsm_list_modules",
-        461,
-        Some(461),
+    Syscall::N_lsm_list_modules => r(
+        id,
         Family::Privileged,
         Disposition::Trap(TRAP_PRIVILEGED),
         "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
         None,
     ),
-    r(
-        "mseal",
-        462,
-        Some(462),
+    Syscall::N_mseal => r(
+        id,
         Family::Mem,
         Disposition::Absent,
         "Absent: the number first appears in Linux 6.10, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.10 or later returns it to the memory arc (single-process sealing semantics, §6).",
         Some("memory+ipc"),
     )
     .since("6.10"),
-    r(
-        "setxattrat",
-        463,
-        Some(463),
+    Syscall::N_setxattrat => r(
+        id,
         Family::Fs,
         Disposition::Absent,
         "Absent: the number first appears in Linux 6.13, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.13 or later returns it to the fs arc (dirfd/flags xattrs over the deterministic filesystem, §6).",
         Some("fs"),
     )
     .since("6.13"),
-    r(
-        "getxattrat",
-        464,
-        Some(464),
+    Syscall::N_getxattrat => r(
+        id,
         Family::Fs,
         Disposition::Absent,
         "Absent: the number first appears in Linux 6.13, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.13 or later returns it to the fs arc (dirfd/flags xattrs over the deterministic filesystem, §6).",
         Some("fs"),
     )
     .since("6.13"),
-    r(
-        "listxattrat",
-        465,
-        Some(465),
+    Syscall::N_listxattrat => r(
+        id,
         Family::Fs,
         Disposition::Absent,
         "Absent: the number first appears in Linux 6.13, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.13 or later returns it to the fs arc (dirfd/flags xattrs over the deterministic filesystem, §6).",
         Some("fs"),
     )
     .since("6.13"),
-    r(
-        "removexattrat",
-        466,
-        Some(466),
+    Syscall::N_removexattrat => r(
+        id,
         Family::Fs,
         Disposition::Absent,
         "Absent: the number first appears in Linux 6.13, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.13 or later returns it to the fs arc (dirfd/flags xattrs over the deterministic filesystem, §6).",
         Some("fs"),
     )
     .since("6.13"),
-    r(
-        "open_tree_attr",
-        467,
-        Some(467),
+    Syscall::N_open_tree_attr => r(
+        id,
         Family::Privileged,
         Disposition::Absent,
         "Absent: the number first appears in Linux 6.15, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.15 or later returns it to the privileged trap (§7): mount-tree configuration.",
         None,
     )
     .since("6.15"),
-    r(
-        "file_getattr",
-        468,
-        Some(468),
+    Syscall::N_file_getattr => r(
+        id,
         Family::Privileged,
         Disposition::Absent,
         "Absent: the number first appears in Linux 6.17, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.17 or later returns it to the privileged trap (§7): inode attribute flags previously behind ioctls.",
         None,
     )
     .since("6.17"),
-    r(
-        "file_setattr",
-        469,
-        Some(469),
+    Syscall::N_file_setattr => r(
+        id,
         Family::Privileged,
         Disposition::Absent,
         "Absent: the number first appears in Linux 6.17, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.17 or later returns it to the privileged trap (§7): inode attribute flags previously behind ioctls.",
         None,
     )
     .since("6.17"),
-    r(
-        "listns",
-        470,
-        Some(470),
+    Syscall::N_listns => r(
+        id,
         Family::Privileged,
         Disposition::Absent,
         "Absent: the number first appears in Linux 6.19, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.19 or later returns it to the privileged trap (§7): namespace enumeration.",
         None,
     )
     .since("6.19"),
-    r(
-        "rseq_slice_yield",
-        471,
-        Some(471),
+    Syscall::N_rseq_slice_yield => r(
+        id,
         Family::Sync,
         Disposition::Absent,
         "Absent: the number first appears in Linux 7.0, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 7.0 or later returns it to the signals+threads arc (the rseq time-slice extension protocol on the scheduler).",
         Some("signals+threads+process"),
     )
     .since("7.0"),
-    r(
-        "fchroot",
-        472,
-        Some(472),
+    Syscall::N_fchroot => r(
+        id,
         Family::Privileged,
         Disposition::Absent,
         "Absent: the number first appears in Linux 7.3, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 7.3 or later returns it to the privileged trap (§7): an fd-based root change.",
@@ -3606,4 +2885,18 @@ pub const SYSCALLS: &[SyscallRow] = &[
     )
     .probe("abi/newer-than-virtual")
     .since("7.3"),
-];
+
+    }
+}
+
+const fn rows() -> [SyscallRow; Syscall::ALL.len()] {
+    let mut rows = [disposition(Syscall::ALL[0]); Syscall::ALL.len()];
+    let mut i = 0;
+    while i < rows.len() {
+        rows[i] = disposition(Syscall::ALL[i]);
+        i += 1;
+    }
+    rows
+}
+
+pub const SYSCALLS: &[SyscallRow] = &rows();

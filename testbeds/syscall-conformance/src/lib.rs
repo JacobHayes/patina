@@ -51,3 +51,9 @@ macro_rules! probe_main {
         }
     };
 }
+
+#[cfg(target_os = "linux")]
+mod associations;
+
+#[cfg(all(test, target_os = "linux"))]
+mod registry_gate;

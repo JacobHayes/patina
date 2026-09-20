@@ -225,6 +225,7 @@ name = "selftest-leak"
 path = "probes/selftest/leak.rs"
 
 [dependencies]
+patina-dst-syscalls = { path = "../../crates/patina-syscalls" }
 # Pinned exactly, per testbeds convention (the versions the root lockfile pins).
 libc = "=0.2.189"
 serde = { version = "=1.0.229", features = ["derive"] }

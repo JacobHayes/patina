@@ -83,6 +83,15 @@ Replay of real external I/O is useful, but narrower than simulation. It reproduc
 
 Patina prefers explicit failure over silent nondeterminism.
 
+Native syscall identity belongs to the active compile target, not a portable
+union of foreign ABIs. Generated upstream identity is separate from runtime
+support and from conformance evidence. A modeled disposition alone does not prove
+kernel fidelity: reviewed scenarios compare the live host and Patina, preserving
+raw observations and strict replay identity. Every inventoried entry requires a
+reviewed probe or an explicit, reasoned exclusion; missing implementation is not
+a safety exclusion. Host capability limits are reported independently of what
+Patina can simulate.
+
 Unsupported effects are pre-run refusals when they can be detected statically (the default-deny import audit and instruction scan) and loud runtime errors otherwise. Examples include:
 
 - unsupported FFI and un-interposed host symbols;

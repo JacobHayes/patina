@@ -8,10 +8,11 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 
-use patina_dst_native_shim::registry::table::{linux_source, linux_table};
 use patina_dst_native_shim::registry::{
-    self, Arch, Disposition, Os, Serves, SymbolRow, SymbolStatus, SyscallRow, VIRTUAL_ABI,
+    self, Arch, Disposition, Os, Serves, SymbolRow, SymbolStatus, VIRTUAL_ABI,
 };
+#[cfg(target_os = "linux")]
+use registry::SyscallRow;
 use serde_json::{Value, json};
 
 use crate::CliError;
@@ -21,10 +22,7 @@ use crate::output;
 
 pub(crate) const SYSCALLS_SCHEMA: &str = "patina.syscalls/v2";
 
-pub(crate) struct SyscallsInvocation {
-    os: Os,
-    arch: Arch,
-}
+pub(crate) struct SyscallsInvocation;
 
 pub(crate) fn parse(arguments: Vec<OsString>) -> Result<SyscallsInvocation, CliError> {
     if arguments.iter().any(|argument| argument == "--") {
@@ -32,77 +30,62 @@ pub(crate) fn parse(arguments: Vec<OsString>) -> Result<SyscallsInvocation, CliE
             "syscalls takes no guest arguments or `--` separator",
         ));
     }
-    let args = cli::parse("syscalls", help::Family::Sole, arguments)?;
-    // The grammar already restricted both values to the registry's spellings.
-    let os = args
-        .text("--os")
-        .map(|value| Os::parse(value).expect("registry grammar"))
-        .unwrap_or(Os::host());
-    let arch = args
-        .text("--arch")
-        .map(|value| Arch::parse(value).expect("registry grammar"))
-        .unwrap_or(Arch::host());
-    Ok(SyscallsInvocation { os, arch })
+    cli::parse("syscalls", help::Family::Sole, arguments)?;
+    Ok(SyscallsInvocation)
 }
 
-pub(crate) fn execute(invocation: SyscallsInvocation) -> Result<i32, CliError> {
-    let SyscallsInvocation { os, arch } = invocation;
-    if os == Os::Darwin {
-        if arch != Arch::Aarch64 {
-            return Err(CliError("Darwin inventory supports aarch64 only; x86_64 machine entries are not inventoried".into()));
-        }
+pub(crate) fn execute(_: SyscallsInvocation) -> Result<i32, CliError> {
+    #[cfg(target_os = "linux")]
+    let (report, text) = {
+        let report = Report::linux();
+        (report.to_json(), report.render())
+    };
+    #[cfg(target_os = "macos")]
+    let (report, text) = {
         let report = darwin_report();
-        if output::options().is_json() {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&report).map_err(|e| CliError(e.to_string()))?
-            );
-        } else {
-            print!("{}", render_darwin(&report));
-        }
-        return Ok(0);
-    }
-    let report = Report::linux(arch);
+        let text = render_darwin(&report);
+        (report, text)
+    };
     if output::options().is_json() {
         println!(
             "{}",
-            serde_json::to_string_pretty(&report.to_json())
-                .map_err(|error| CliError(format!("serializing the syscall registry: {error}")))?
+            serde_json::to_string_pretty(&report).map_err(|e| CliError(e.to_string()))?
         );
     } else {
-        print!("{}", report.render());
+        print!("{text}");
     }
     Ok(0)
 }
 
 /// One report: the rows for an (os, arch), the table they are gated against,
 /// and the symbol layer for that OS.
+#[cfg(target_os = "linux")]
 struct Report {
     os: Os,
     arch: Arch,
     rows: Vec<(u32, &'static SyscallRow)>,
-    table_path: &'static str,
-    table_url: &'static str,
     table_abis: &'static [&'static str],
     table_numbers: usize,
     symbols: Vec<&'static SymbolRow>,
 }
 
+#[cfg(target_os = "linux")]
 impl Report {
-    fn linux(arch: Arch) -> Self {
-        let source = linux_source(arch);
+    fn linux() -> Self {
         let symbols = registry::SYMBOLS
             .iter()
             .filter(|symbol| symbol.platform.defines_on(Os::Linux))
             .collect();
         Report {
             os: Os::Linux,
-            arch,
-            rows: registry::rows_for(arch),
-            table_path: source.path,
-            table_url: source.url,
-            table_abis: source.abis,
-            table_numbers: linux_table(arch).len(),
+            arch: Arch::host(),
+            rows: registry::rows_for(),
+            table_abis: if cfg!(target_arch = "x86_64") {
+                &["common", "64"]
+            } else {
+                &["common", "64", "renameat", "rlimit", "memfd_secret"]
+            },
+            table_numbers: registry::ENTRIES.len(),
             symbols,
         }
     }
@@ -139,7 +122,7 @@ impl Report {
     }
 
     fn to_json(&self) -> Value {
-        let table = linux_table(self.arch);
+        let table = registry::ENTRIES;
         let rows: Vec<Value> = self
             .rows
             .iter()
@@ -181,7 +164,8 @@ impl Report {
                     "status": symbol.status.render(),
                     "probe": symbol.probe,
                     "serves": match symbol.serves {
-                        Serves::Syscalls(names) | Serves::Darwin(names) => {
+                        Serves::Syscalls(ids) => json!(ids),
+                        Serves::Darwin(names) => {
                             Value::Array(names.iter().map(|name| json!(name)).collect())
                         }
                         Serves::Dispatcher => json!("*"),
@@ -197,12 +181,7 @@ impl Report {
             "arch": self.arch.name(),
             "metadata": {"linux": {"virtual_abi": VIRTUAL_ABI}},
             "scope": {"namespaces": ["linux"], "unit": "kernel-entry"},
-            "sources": [{
-                "path": format!("crates/patina-native-shim/{}", self.table_path),
-                "url": self.table_url,
-                "abis": self.table_abis,
-                "numbers": self.table_numbers,
-            }],
+            "sources": source_json("linux"),
             "summary": {
                 "rows": self.rows.len(),
                 "dispositions": self.disposition_counts(),
@@ -226,11 +205,10 @@ impl Report {
     fn render(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
-            "syscall registry: {} {} — {} numbers in crates/patina-native-shim/{} (abi columns {}); virtual ABI {VIRTUAL_ABI}\n",
+            "syscall registry: {} {} — {} numbers (abi columns {}); virtual ABI {VIRTUAL_ABI}\n",
             self.os.name(),
             self.arch.name(),
             self.table_numbers,
-            self.table_path,
             self.table_abis.join(",")
         ));
         out.push_str("dispositions:");
@@ -311,6 +289,26 @@ impl Report {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn source_revision(os: &str) -> &'static str {
+    registry::generated::SOURCES
+        .iter()
+        .find(|s| s.0 == os)
+        .unwrap()
+        .2
+}
+
+fn source_json(os: &str) -> Value {
+    json!(
+        registry::generated::SOURCES
+            .iter()
+            .filter(|s| s.0 == os)
+            .map(|s| json!({"path": s.3, "url": s.4, "version": s.1,
+            "revision": s.2, "sha256": s.5}))
+            .collect::<Vec<_>>()
+    )
+}
+
 fn symbol_status_counts(symbols: &[&SymbolRow]) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for symbol in symbols {
@@ -325,9 +323,9 @@ fn symbol_status_counts(symbols: &[&SymbolRow]) -> BTreeMap<String, usize> {
 
 /// Darwin source declarations and interception facts intentionally do not use
 /// Linux runtime dispositions. A symbol model is not a raw-entry model.
+#[cfg(target_os = "macos")]
 fn darwin_report() -> Value {
-    use registry::darwin;
-    let inventory = darwin::inventory();
+    let inventory = registry::ENTRIES;
     let symbols: Vec<_> = registry::SYMBOLS
         .iter()
         .filter(|s| s.platform.defines_on(Os::Darwin))
@@ -338,10 +336,7 @@ fn darwin_report() -> Value {
             let bindings: Vec<_> = symbols
                 .iter()
                 .filter(|s| match s.serves {
-                    Serves::Darwin(names) => row
-                        .variants
-                        .iter()
-                        .any(|v| names.contains(&v.entry.as_str())),
+                    Serves::Darwin(names) => row.variants.iter().any(|v| names.contains(&v.entry)),
                     _ => false,
                 })
                 .map(|s| json!({"name": s.name, "status": s.status.render()}))
@@ -365,15 +360,11 @@ fn darwin_report() -> Value {
         .collect();
     json!({
         "schema": SYSCALLS_SCHEMA, "os": "darwin", "arch": "aarch64",
-        "metadata": {"darwin": {"reference_revision": darwin::REVISION}},
+        "metadata": {"darwin": {"reference_revision": source_revision("darwin")}},
         "scope": {"unit": "kernel-entry", "namespaces": ["bsd", "mach", "arm-special", "arm-platform"],
             "excludes": ["MIG message IDs", "commpage APIs", "unassigned selectors"],
             "note": "Reference-source inventory, not a host configuration or a whole-kernel model. Guards and invalid slots are retained; status is not an observed errno. Raw entries are not interposed; symbol statuses describe only their C surface."},
-        "sources": darwin::SOURCES.iter().map(|(file, path)| json!({
-            "path": format!("crates/patina-native-shim/abi/darwin/{file}"),
-            "url": format!("https://raw.githubusercontent.com/apple-oss-distributions/xnu/{}/{path}", darwin::REVISION),
-            "revision": darwin::REVISION,
-        })).collect::<Vec<_>>(),
+        "sources": source_json("darwin"),
         "summary": {"rows": rows.len(), "symbols": symbol_status_counts(&symbols)},
         "rows": rows,
         "symbols": symbols.iter().map(|s| json!({
@@ -384,11 +375,12 @@ fn darwin_report() -> Value {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn render_darwin(report: &Value) -> String {
     let mut out = format!(
         "syscall inventory: darwin aarch64 — {} entries; XNU {}\n{}\n",
         report["summary"]["rows"],
-        registry::darwin::REVISION,
+        source_revision("darwin"),
         report["scope"]["note"].as_str().unwrap()
     );
     out.push_str("scope: BSD, Mach table, ARM special traps, ARM platform subcodes; excludes MIG message IDs, commpage APIs, unassigned selectors\n");
@@ -438,12 +430,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shared_report_contract_all_targets() {
-        for (os, arch, report) in [
-            ("linux", "x86_64", Report::linux(Arch::X86_64).to_json()),
-            ("linux", "aarch64", Report::linux(Arch::Aarch64).to_json()),
-            ("darwin", "aarch64", darwin_report()),
-        ] {
+    fn foreign_selectors_are_refused() {
+        for args in [["--os", "linux"], ["--arch", "x86_64"]] {
+            assert!(parse(args.into_iter().map(OsString::from).collect()).is_err());
+        }
+    }
+
+    #[test]
+    fn shared_report_contract_active_target() {
+        #[cfg(target_os = "linux")]
+        let report = Report::linux().to_json();
+        #[cfg(target_os = "macos")]
+        let report = darwin_report();
+        let os = Os::host().name();
+        let arch = Arch::host().name();
+        {
             assert_eq!(report["schema"], SYSCALLS_SCHEMA);
             assert_eq!(report["os"], os);
             assert_eq!(report["arch"], arch);
@@ -500,6 +501,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn darwin_report_preserves_namespaces_guards_and_interposition_boundary() {
         let report = darwin_report();
@@ -538,21 +540,15 @@ mod tests {
                 .any(|s| s["name"] == "mach_timebase_info")
         );
         assert!(render_darwin(&report).contains("not a host configuration"));
-        assert!(
-            execute(SyscallsInvocation {
-                os: Os::Darwin,
-                arch: Arch::X86_64
-            })
-            .is_err()
-        );
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn json_report_carries_every_row_and_the_symbol_inventory() {
-        let report = Report::linux(Arch::X86_64).to_json();
+        let report = Report::linux().to_json();
         assert_eq!(report["schema"], SYSCALLS_SCHEMA);
         assert_eq!(report["rows"].as_array().unwrap().len(), 386);
-        assert_eq!(report["sources"][0]["numbers"], 386);
+        assert!(!report["sources"][0]["sha256"].as_str().unwrap().is_empty());
         let read = &report["rows"][0];
         assert_eq!(read["name"], "read");
         assert_eq!(read["namespace"], "linux");
@@ -616,19 +612,12 @@ mod tests {
                 .iter()
                 .any(|name| name == "read")
         );
-        // The aarch64 view is the generic table's 328 numbers.
-        assert_eq!(
-            Report::linux(Arch::Aarch64).to_json()["rows"]
-                .as_array()
-                .unwrap()
-                .len(),
-            328
-        );
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn human_report_lists_rows_and_absent_symbols() {
-        let text = Report::linux(Arch::X86_64).render();
+        let text = Report::linux().render();
         assert!(text.contains("386 numbers"));
         assert!(text.contains(&format!("virtual ABI {VIRTUAL_ABI}")));
         assert!(text.contains("modeled rows without a probe: "));
