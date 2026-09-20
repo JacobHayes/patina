@@ -356,8 +356,18 @@ pub const SYMBOLS: &[SymbolRow] = &[
     ),
     s(
         "realpath",
-        Platform::Both,
+        Platform::Linux,
         Serves::Syscalls(&["readlinkat", "newfstatat"]),
+        SymbolStatus::Modeled,
+    ),
+    // Darwin's _DARWIN_C_SOURCE headers give this implementation the extended
+    // ABI name (including malloc-on-NULL). The legacy plain import is NOT an
+    // alias we define or allow. Class pairing: the compiled-object registry gate
+    // and native_abi::realpath_buffer_conventions_agree.
+    s(
+        "realpath$DARWIN_EXTSN",
+        Platform::Darwin,
+        Serves::Darwin(&["readlinkat", "fstatat"]),
         SymbolStatus::Modeled,
     ),
     s(

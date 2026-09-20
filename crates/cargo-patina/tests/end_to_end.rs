@@ -10487,7 +10487,8 @@ unsafe extern "C" {
     fn gethostbyname(name: *const u8) -> *mut u8;
     fn select(n: i32, r: *mut u8, w: *mut u8, e: *mut u8, t: *mut u8) -> i32;
     fn semaphore_wait(s: u32) -> i32;
-    fn time(t: *mut i64) -> i64;
+    // time() is modeled; tzset still reads the host timezone database.
+    fn tzset();
     fn arc4random() -> u32;
     fn killpg(pgrp: i32, sig: i32) -> i32;
     fn dlopen(path: *const u8, mode: i32) -> *mut u8;
@@ -10498,7 +10499,7 @@ unsafe extern "C" {
 fn main() {
     let ptrs: &[*const ()] = &[
         acct as *const (), gethostbyname as *const (), select as *const (),
-        semaphore_wait as *const (), time as *const (), arc4random as *const (),
+        semaphore_wait as *const (), tzset as *const (), arc4random as *const (),
         killpg as *const (), dlopen as *const (), shm_open as *const (),
         setitimer as *const (), syscall as *const (),
     ];
@@ -12797,6 +12798,54 @@ fn two_axis_shrunk_line(output: &Output) -> String {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+fn two_axis_replay_oracle(exe: &Path, bin: &Path, spec: &str) -> String {
+    format!(
+        "#!/bin/sh\nout=$(\"{}\" replay \"{}\" \"$PATINA_MINIMIZE_TRACE\" -- --replay-commands \"{}\" 2>/dev/null)\ncode=$?\nif [ \"$code\" -eq 7 ] && printf '%s' \"$out\" | grep -q 'TWOAXIS_FAIL'; then\n  exit 1\nfi\nexit 0\n",
+        exe.display(),
+        bin.display(),
+        spec
+    )
+}
+
+// Class detector: an oracle must not preserve infrastructure/replay failures
+// merely because the guest printed its marker before the later refusal.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn two_axis_replay_oracle_requires_exact_failure_code_and_marker() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir().unwrap();
+    let fake = dir.path().join("replay");
+    fs::write(
+        &fake,
+        "#!/bin/sh\nprintf '%s\\n' \"$TEST_MARKER\"\nexit \"$TEST_CODE\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let oracle = dir.path().join("oracle.sh");
+    fs::write(
+        &oracle,
+        two_axis_replay_oracle(&fake, Path::new("guest"), "I0.0,R1"),
+    )
+    .unwrap();
+    for code in [0, 1, 7, 134] {
+        for marker in ["", "TWOAXIS_FAIL planted failure"] {
+            let status = Command::new("/bin/sh")
+                .arg(&oracle)
+                .env("TEST_CODE", code.to_string())
+                .env("TEST_MARKER", marker)
+                .status()
+                .unwrap();
+            let expected = i32::from(code == 7 && !marker.is_empty());
+            assert_eq!(
+                status.code(),
+                Some(expected),
+                "code={code}, marker={marker:?}"
+            );
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn native_two_axis_stateful_shrink_then_schedule_minimize() {
     let directory = tempdir().unwrap();
@@ -12891,20 +12940,30 @@ fn native_two_axis_stateful_shrink_then_schedule_minimize() {
         String::from_utf8_lossy(&recorded.stderr)
     );
     assert!(String::from_utf8_lossy(&recorded.stdout).contains("TWOAXIS_FAIL"));
+    // Separate strict replay soundness from the schedule oracle's verdict.
+    let original_replay = invoke_unchecked(
+        exe,
+        workspace,
+        &[
+            "replay",
+            bin.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--",
+            "--replay-commands",
+            spec,
+        ],
+    );
+    assert_eq!(
+        original_replay.status.code(),
+        Some(7),
+        "original replay: {}",
+        String::from_utf8_lossy(&original_replay.stderr)
+    );
 
-    // The oracle replays each candidate trace and treats a nonzero exit carrying
-    // the marker as failure-preserved (exit 1), anything else as not (exit 0).
+    // Class pairing: two_axis_replay_oracle_requires_exact_failure_code_and_marker.
+    // Reject a later replay abort even if the guest already printed the marker.
     let oracle = directory.path().join("oracle.sh");
-    fs::write(
-        &oracle,
-        format!(
-            "#!/bin/sh\nout=$(\"{}\" replay \"{}\" \"$PATINA_MINIMIZE_TRACE\" -- --replay-commands \"{}\" 2>/dev/null)\ncode=$?\nif [ \"$code\" -ne 0 ] && printf '%s' \"$out\" | grep -q 'TWOAXIS_FAIL'; then\n  exit 1\nfi\nexit 0\n",
-            exe,
-            bin.display(),
-            spec
-        ),
-    )
-    .unwrap();
+    fs::write(&oracle, two_axis_replay_oracle(Path::new(exe), &bin, spec)).unwrap();
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&oracle, fs::Permissions::from_mode(0o755)).unwrap();

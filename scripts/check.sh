@@ -18,6 +18,7 @@ export CARGO_TARGET_DIR="$check_target_base/serial"
 usage() {
   cat <<'EOF'
 Usage: scripts/check.sh <full|fast|msrv>
+       scripts/check.sh --selftest
 
   full  Full local pre-landing gate. Cheap checks run first, the e2e-heavy
         workspace test rung runs alone, then independent runtime/testbed gates
@@ -38,6 +39,7 @@ EOF
 
 case ${1:-} in
   full|fast|msrv) profile=$1 ;;
+  --selftest) profile=selftest ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -199,12 +201,40 @@ run_conformance() {
     testbeds/syscall-conformance/run.sh "$@"
 }
 
+# The frozen signals oracle is the Linux syscall ABI, on either architecture.
+# Keep the selector independent of SUD availability and of checkout/VCS state.
+start_signals_family_rung() {
+  if [[ $1 == Linux ]]; then
+    start_rung 'signals family gate' testbeds/syscall-conformance/gate.sh --family signals
+  else
+    printf 'SKIP  signals family gate (Linux-only; host=%s; skipped=1)\n' "$1"
+  fi
+}
+
+platform_rungs_selftest() (
+  # Exercise the same scheduling seam without launching any heavy child jobs.
+  start_rung() { printf 'RUN %s\n' "$*"; }
+  local linux darwin
+  linux="$(start_signals_family_rung Linux)"
+  darwin="$(start_signals_family_rung Darwin)"
+  if [[ "$linux" != 'RUN signals family gate testbeds/syscall-conformance/gate.sh --family signals' ]]; then
+    echo "FAIL: Linux must schedule the signals family gate: $linux" >&2
+    return 1
+  fi
+  if [[ "$darwin" != 'SKIP  signals family gate (Linux-only; host=Darwin; skipped=1)' ]]; then
+    echo "FAIL: Darwin must report a counted skip, not run the Linux oracle: $darwin" >&2
+    return 1
+  fi
+  echo 'CHECK_PLATFORM_SELFTEST_RAN cases=linux-family,darwin-counted-skip'
+)
+
 run_full() {
   local total_start
   total_start=$(date +%s)
   printf 'TARGET_BASE %s\n' "$check_target_base"
 
   # Cheap, high-signal failures stay serial and stop before expensive work.
+  run_rung 'platform rung selection selftest' platform_rungs_selftest || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?
@@ -236,7 +266,7 @@ run_full() {
   start_rung 'cross-target smoke' scripts/smoke-cross-target.sh
   # Includes the full conformance run and obligations, replacing the standalone
   # conformance rung. gate.sh and run.sh both inherit this rung's target dir.
-  start_rung 'signals family gate' testbeds/syscall-conformance/gate.sh --family signals
+  start_signals_family_rung "$(uname -s)"
   wait_rungs || return $?
 
   printf 'PASS  full landing gate (%ss total)\n' "$(( $(date +%s) - total_start ))"
@@ -246,6 +276,7 @@ run_fast() {
   local total_start
   total_start=$(date +%s)
   printf 'TARGET_BASE %s\n' "$check_target_base"
+  run_rung 'platform rung selection selftest' platform_rungs_selftest || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?
@@ -271,6 +302,7 @@ run_fast() {
 }
 
 case $profile in
+  selftest) platform_rungs_selftest ;;
   full) run_full ;;
   fast) run_fast ;;
   msrv) run_rung 'MSRV full compatibility suite' run_msrv_full ;;

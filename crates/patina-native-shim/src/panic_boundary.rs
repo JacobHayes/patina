@@ -94,6 +94,29 @@ pub(crate) fn install() {
 
 #[cfg(test)]
 mod tests {
+    // Class pairing: real-ABI panic injection in native_signals exercises the
+    // fatal policy; this checks nesting/callback ownership on every platform.
+    #[test]
+    fn panic_scopes_restore_ownership_across_callbacks_and_threads() {
+        use super::{PanicScope, in_shim};
+        assert!(!in_shim());
+        let outer = PanicScope::enter();
+        assert!(in_shim());
+        {
+            let _guest = PanicScope::suspend();
+            assert!(!in_shim());
+            {
+                let _entry = PanicScope::enter();
+                assert!(in_shim());
+            }
+            assert!(!in_shim());
+        }
+        assert!(in_shim());
+        std::thread::spawn(|| assert!(!in_shim())).join().unwrap();
+        drop(outer);
+        assert!(!in_shim());
+    }
+
     // Class pairing: the real-ABI panic injection in native_signals. A new
     // export must not bypass panic ownership merely because no panic was tested.
     #[test]

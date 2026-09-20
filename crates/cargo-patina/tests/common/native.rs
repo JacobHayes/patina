@@ -313,7 +313,6 @@ impl Guest {
     }
 
     /// Internal containment refusals must abort without publishing a complete trace.
-    #[cfg(target_os = "linux")]
     pub fn assert_internal_fatal(&self, args: &[&str], diagnostics: &[&str]) {
         use std::os::unix::process::ExitStatusExt;
         let (output, trace) = self.record_standalone(args);

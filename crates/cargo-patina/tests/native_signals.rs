@@ -1,8 +1,9 @@
 //! Real C/raw doors paired with the signals state/wait and fatal-policy detectors.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 mod common;
 use common::native::*;
 
+#[cfg(target_os = "linux")]
 fn assert_interruptible_wait(case: &str) {
     let g = assert_build_c_guest("signals/blocking_readiness.c", CLink::PosixShim);
     let output = assert_standalone_success(
@@ -13,32 +14,38 @@ fn assert_interruptible_wait(case: &str) {
     assert_eq!(output.stdout, b"NATIVE_SIGNAL_READINESS_OK\n");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn libc_poll_is_eintr_even_with_sa_restart() {
     assert_interruptible_wait("poll");
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn libc_ppoll_restores_mask_and_preserves_timeout_on_eintr() {
     assert_interruptible_wait("ppoll");
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn libc_select_writes_remaining_timeout_on_eintr() {
     assert_interruptible_wait("select");
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn libc_pselect_restores_mask_and_preserves_timeout_on_eintr() {
     assert_interruptible_wait("pselect");
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn libc_epoll_pwait_restores_mask_on_eintr() {
     assert_interruptible_wait("epoll");
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn libc_sleep_returns_remaining_seconds_on_signal() {
     assert_interruptible_wait("sleep");
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod raw {
     use super::*;
     use patina_dst_trace::TraceBundle;
@@ -168,12 +175,13 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
         );
         std::fs::write(source, source_text.replace(anchor, &planted)).unwrap();
         let target = dir.path().join("build");
-        assert_success(
+        let built = assert_success(
             Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
                 .args([
                     "rustc",
                     "--lib",
                     "--offline",
+                    "--message-format=json",
                     "-p",
                     "patina-dst-native-shim",
                     "--manifest-path",
@@ -185,21 +193,43 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
                 .output()
                 .unwrap(),
         );
+        // Cargo can redirect intermediates separately from target-dir. Consume
+        // its artifact messages rather than guessing where dependency rlibs live.
+        let dependency_dirs: std::collections::BTreeSet<std::path::PathBuf> = text(&built.stdout)
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).expect("Cargo artifact JSON")
+            })
+            .filter(|message| message["reason"] == "compiler-artifact")
+            .flat_map(|message| {
+                message["filenames"]
+                    .as_array()
+                    .expect("artifact filenames")
+                    .iter()
+                    .filter_map(|name| {
+                        let path = Path::new(name.as_str().expect("artifact path"));
+                        (path.extension().is_some_and(|ext| ext == "rlib"))
+                            .then(|| path.parent().unwrap().to_owned())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            !dependency_dirs.is_empty(),
+            "non-vacuous dependency artifacts"
+        );
         let binary = dir.path().join("panic-guest");
         let posix = common::compile_posix_object(dir.path());
-        assert_success(
-            common::c_compiler()
-                .arg("-I")
-                .arg(shim.join("include"))
-                .arg(guest_source("signals/internal_panic.c"))
-                .arg(posix)
-                .arg(target.join("debug/libpatina_dst_native_shim.a"))
-                .arg("-Wl,--wrap=dlsym")
-                .arg("-o")
-                .arg(&binary)
-                .output()
-                .unwrap(),
-        );
+        let mut cc = common::c_compiler();
+        cc.arg("-I")
+            .arg(shim.join("include"))
+            .arg(guest_source("signals/internal_panic.c"))
+            .arg(posix)
+            .arg(target.join("debug/libpatina_dst_native_shim.a"));
+        if cfg!(target_os = "linux") {
+            cc.arg("-Wl,--wrap=dlsym");
+        }
+        assert_success(cc.arg("-o").arg(&binary).output().unwrap());
         let guest = Guest { dir, binary };
         let (output, trace) = guest.record_standalone(&[]);
         assert_eq!(output.status.signal(), Some(6), "{}", text(&output.stderr));
@@ -238,31 +268,39 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
                     .join("debug/libpatina_dst_native_shim.rlib")
                     .display()
             ))
-            .arg("-L")
-            .arg(format!(
-                "dependency={}",
-                target.join("debug/deps").display()
-            ))
             .arg("-C")
             .arg(format!(
                 "link-arg={}",
                 guest.dir.path().join("patina_posix.o").display()
             ))
-            .args(["-C", "link-arg=-Wl,--wrap=dlsym", "-o"])
+            .arg("-o")
             .arg(&binary);
+        for directory in dependency_dirs {
+            rustc
+                .arg("-L")
+                .arg(format!("dependency={}", directory.display()));
+        }
+        if cfg!(target_os = "linux") {
+            // Class pairing: the real-ABI link detector above. MSRV rustc puts
+            // libc before late link-arg objects; atexit needs libc after ours.
+            rustc.args(["-C", "link-arg=-Wl,--wrap=dlsym", "-C", "link-arg=-lc"]);
+        }
         assert_success(rustc.output().unwrap());
         let replacement = Guest {
             dir: guest.dir,
             binary,
         };
-        replacement.assert_internal_fatal(
-            &["replace-internal"],
-            &[if strategy == "unwind" {
-                "patina native shim panic: unwinding an owned boundary"
-            } else {
-                "patina native shim panic: aborting an owned boundary"
-            }],
-        );
+        let diagnostics: &[&str] = if strategy == "unwind" {
+            &["patina native shim panic: unwinding an owned boundary"]
+        } else if cfg!(target_os = "linux") {
+            &["patina native shim panic: aborting an owned boundary"]
+        } else {
+            // Darwin has no guest abort interposer. With a replaced hook and
+            // panic=abort, libc aborts directly: signal + incomplete trace are
+            // the contract, not the Linux interposer's diagnostic.
+            &[]
+        };
+        replacement.assert_internal_fatal(&["replace-internal"], diagnostics);
     }
 }
 
@@ -272,10 +310,48 @@ fn guest_panics_remain_catchable_in_main_and_callbacks() {
     for mode in ["prior", "replace"] {
         let (output, trace) = guest.record_standalone(&[mode]);
         let output = assert_success(output);
-        assert_exact_line(&output.stdout, "GUEST_PANICS_CAUGHT=4");
+        assert_exact_line(
+            &output.stdout,
+            if cfg!(target_os = "linux") {
+                "GUEST_PANICS_CAUGHT=4"
+            } else {
+                "GUEST_PANICS_CAUGHT=2"
+            },
+        );
         patina_dst_trace::TraceBundle::load(&trace)
             .unwrap()
             .validate()
             .unwrap();
     }
+}
+
+// Class pairing: Linux interruption cases above plus the shared process/time
+// adapters. This deliberately requires no raw-syscall or signal-delivery support.
+#[test]
+fn portable_process_answers_and_uninterrupted_sleep_replay() {
+    let guest = assert_build_c_guest("signals/process_sleep.c", CLink::PosixShim);
+    let (first, trace) = guest.record_standalone(&[]);
+    assert_exact_line(&assert_success(first).stdout, "PROCESS_SLEEP_OK");
+    let bytes = std::fs::read(&trace).unwrap();
+    patina_dst_trace::TraceBundle::load(&trace)
+        .unwrap()
+        .validate()
+        .unwrap();
+    let (second, _) = guest.record_standalone(&[]);
+    assert_exact_line(&assert_success(second).stdout, "PROCESS_SLEEP_OK");
+    assert_eq!(bytes, std::fs::read(&trace).unwrap(), "record identity");
+    let mut command = std::process::Command::new("/bin/sh");
+    command
+        .env_clear()
+        .args(["-c", "exec 3<\"$1\"; shift; exec \"$@\"", "native-boundary"])
+        .arg(&trace)
+        .arg(&guest.binary)
+        .envs([
+            ("PATINA_MODE", "replay"),
+            ("PATINA_TRACE_FD", "3"),
+            ("PATINA_FINGERPRINT", "native-boundary"),
+        ]);
+    let replay = common::output_with_deadline(&mut command, std::time::Duration::from_secs(20))
+        .expect("standalone replay exceeded 20s");
+    assert_exact_line(&assert_success(replay).stdout, "PROCESS_SLEEP_OK");
 }

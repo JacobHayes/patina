@@ -66,10 +66,13 @@ unmask_delivers_pending_before_return`):
 Run the gate early and often — its lines are the work that is left.
 `gate.sh --selftest` proves each mechanism can refuse, beside a control that
 passes: a frozen-path edit (in a scratch checkout), a relabeled declaration, a
-required test that is missing and one that is `#[ignore]`d (a real scratch
-crate), a recorded trace with no `signal_generated` op for a generating probe,
+required test that is missing, ignored, failing, or filtered to zero executions
+(a real scratch crate), a recorded trace with no `signal_generated` op for a generating probe,
 and a termination that was not observed — or is `exited 143` where the blessing
-died by SIGTERM — refused by the differ.
+died by SIGTERM — refused by the differ. A passing serial test with raw child
+stderr is a positive control: verdicts are read from stdout only, never merged
+with compiler diagnostics. Nonzero cargo status still refuses, and failures
+retain both streams for diagnosis.
 
 ## Filesystem attribute coverage
 

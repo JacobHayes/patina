@@ -9,7 +9,7 @@ Each guest's internal assertions and its harness assertions form the proof.
 | `native_containment` | Import/instruction refusals, host env/envp isolation, dlsym routing, SUD arming/refusal, auxv, SIGSYS, TSC, real faults and handler protection | Both OSes; SUD/auxv Linux; TSC/vsyscall x86_64 Linux |
 | `native_workloads` | std, independent entropy sources, locks/timers, UDP/TCP, tokio signal driver + parking_lot + product-selected rustix backend | Linux x86_64 + arm64, macOS |
 | `native_raw` | Mixed raw/libc descriptor parity, legacy syscall aliases, exact virtual identity, soft refusals, prctl state/refusals, raw ppoll timeout writeback and pipe readiness | x86_64 Linux; unsupported SUD executes refusal assertions |
-| `native_signals` | C readiness EINTR/mask/timeout contracts; libc/raw signal state, sigwait retry, guest abort versus internal-fatal trace finalization | Linux; inline raw cases x86_64 with SUD |
+| `native_signals` | Linux C readiness EINTR/mask/timeout contracts, libc/raw signal state, sigwait retry and guest-abort finalization; Linux/macOS internal-panic ownership, catchable guest panics and process/sleep repeat/replay | Linux + macOS shared cases; interruption Linux-only; inline raw cases x86_64 Linux with SUD |
 | `native_trace` | Whole-run std syscall containment and a planted host open through the same filter; explicit unsupported-ktrace policy | strace on both Linux architectures; static containment evidence on macOS |
 
 All six targets run in `mise run check` and the workspace-test CI jobs:

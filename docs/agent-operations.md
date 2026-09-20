@@ -48,7 +48,9 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   corpus breadth. For runtime/shim/trace/target changes, the native acceptance
   targets (`native_abi`, `native_containment`, `native_raw`, `native_signals`, `native_trace`,
   `native_workloads`) and WASI/cross-target checks are part of the evidence, not optional
-  cleanup.
+  cleanup. The frozen signals-family oracle is Linux-only (both architectures);
+  macOS receives an explicit counted skip for that rung, while shared native
+  signal/panic coverage and gate selftests still execute.
 - A green gate is only evidence if it can fail. Selftests and planted fixtures
   should prove classifiers, drift detectors, default-deny audits, and vacuity
   checks actually bite.
@@ -174,6 +176,10 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   family's plumbing from ONE table keyed to the flag registry, and gate that
   table against the registry with a test. Two silent-inertness bugs of this shape
   were found and structurally removed while unifying the fault knobs.
+- A replay/minimization oracle must require the intended terminal outcome, not
+  just a failure marker and any nonzero exit: a guest can print its marker before
+  a later replay divergence aborts. Pair the real replay with planted outcomes
+  that include marker-then-abort and the exact expected guest failure.
 - Failure classifiers must be deterministic and self-tested. A new class should
   have a fixture that fires it, and a clean run should not hide unclassified or
   infrastructure failures.

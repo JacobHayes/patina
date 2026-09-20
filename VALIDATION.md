@@ -182,9 +182,11 @@ integration testing, with reviewable guests in `testbeds/native-boundary/`:
   privileged prctl options. Raw ppoll pins remaining-time writeback and pipe
   readiness before/after a write. Patina-specific identity/refusal pins are not
   claims of host equivalence.
-- `native_signals`: focused C readiness interruption, temporary masks and timeout
+- `native_signals`: Linux C readiness interruption, temporary masks and timeout
   contracts; x86_64 Linux libc/raw prctl sharing, handler/mask visibility, sigwait
-  retry, and complete guest-abort versus incomplete internal-fatal traces.
+  retry, and complete guest-abort versus incomplete internal-fatal traces. Shared
+  Linux/macOS cases check internal panic ownership, catchable guest panics, and
+  process answers plus uninterrupted virtual sleep with repeat/replay identity.
 - `native_trace`: the whole-run std strace detector with a planted escape on
   both Linux architectures; explicit unsupported ktrace policy on macOS.
 - `shim_host_alias`: compiled-object doctrine scan and planted leak.
@@ -641,9 +643,15 @@ The native internal-panic detector injects a panic into a scratch copy of a real
 Rust ABI entry, after ownership entry but before locks. Its RED control loads and
 validates the incorrectly finalized trace; its passing cases require SIGABRT and
 an unloadable trace for unwind and abort strategies, with original and replaced
-hooks. An export-scope audit pairs with that behavioral detector. Positive controls
-catch guest panics in main, pthread start, pthread once and signal callbacks, then
-validate complete traces. The production hook and guard backstops apply to
+hooks. On macOS, replaced-hook panic=abort uses libc directly (there is no
+public guest-abort interposer), so that case asserts SIGABRT and an incomplete
+trace without requiring the Linux interposer's diagnostic. An export-scope audit
+and portable nested-scope/thread-isolation unit test pair with the behavioral
+detector. Positive controls catch guest panics in main and pthread start on both
+platforms, plus pthread once and signal callbacks on Linux, then validate complete
+traces. The direct Rust/C link places libc after the late C object on Linux;
+MSRV rustc otherwise cannot resolve that object's atexit reference. The production
+hook and guard backstops apply to
 POSIX-interposed binaries; alias-free prefixed-C links and libtest retain their
 own panic handling.
 
@@ -662,8 +670,38 @@ sending remains a process trap (no virtual pidfds), a stated deviation from the
 frozen spec's self-pidfd mention. Ambient host signals and siglongjmp escape from
 a handler remain outside verified deterministic behavior.
 
-macOS execution of waitpid's ECHILD answer, getppid=2, sleep and panic ownership is
-unverified. Linux interruption/frame semantics are cfg-bounded; macOS keeps
-virtual-time sleep without Linux signal interruption. Source/cfg review and
-Linux-host cross-target compilation are not macOS runtime evidence. Guest abort finalization is Linux-only; internal fatalities
-on both platforms must bypass the public interposer and leave incomplete traces.
+The portable `native_signals` process/sleep detector checks waitpid's ECHILD
+answer without modifying status, getppid=2, and exact virtual-time sleep, including
+byte-identical records and strict replay. Linux interruption/frame semantics
+remain cfg-bounded; these portable checks do not promise Linux signal delivery on
+macOS. Guest abort finalization is Linux-only; internal fatalities on both
+platforms must bypass the public interposer and leave incomplete traces.
+
+The two-axis stateful/schedule minimization test pairs with
+`two_axis_replay_oracle_requires_exact_failure_code_and_marker`: planted replay
+outcomes distinguish the exact guest failure from success, other failures, and a
+replay abort *after* the failure marker. The integration case checks the original
+strict replay before reduction and the final replay afterward. The macOS
+per-escape-class gate plants `tzset` for time; modeled `time` cannot exercise an
+undefined-import refusal.
+
+The realpath registry rows name the actual per-platform exports: `realpath` on
+Linux and `realpath$DARWIN_EXTSN` on Darwin (the SDK's `_DARWIN_C_SOURCE` ABI).
+The compiled-object registry gate pairs with
+`native_abi::realpath_buffer_conventions_agree` and the native canonicalize e2e:
+both caller-buffer and allocated-result paths must resolve virtual filesystem
+entries. Darwin's legacy plain `realpath` remains uninterposed and audit-refused;
+the registry does not normalize it into the supported extended ABI.
+
+The signals-family gate's required-test selftest includes raw child stderr during
+a passing serial test, plus missing, ignored, failed and filtered-to-empty tests.
+Only stdout carries per-test verdicts; a nonzero cargo status still fails, and
+both diagnostic streams are retained on failure. Frozen-path integrity remains
+a separate mandatory check, including the gate script itself.
+
+The full check runner schedules the frozen signals-family gate only on Linux,
+including Linux arm64 regardless of SUD availability. Non-Linux hosts emit a
+counted `SKIP` for that Linux-ABI oracle, not a passing signal-model receipt.
+The runner's platform-selection selftest, the gate's own selftest, and shared
+native signal/panic tests still run on macOS. Direct family-gate invocations
+retain their frozen-path integrity and all Linux obligations.
