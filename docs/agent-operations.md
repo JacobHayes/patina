@@ -117,10 +117,13 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   artifacts are single-writer resources while a campaign is running. Rebuilding
   or deleting them mid-run can poison otherwise deterministic evidence.
 - Tests must locate Cargo artifacts through `cargo metadata` (or compiler
-  artifact messages), not assume a fixture's `target/` directory. Target-dir
-  redirection also makes independent fixture packages share output names: keep
-  those test builds single-writer, and use a serial test run when the build
-  environment redirects them into one target directory.
+  artifact messages), not assume a fixture's `target/` directory. If redirected
+  fixture builds collide, reproduce the collision and fix artifact ownership at
+  the fixture/cache boundary; do not serialize the host acceptance suite as a
+  workaround. Host tests use normal libtest concurrency. Patina's serial guest
+  libtest execution is a separate deterministic execution contract.
+- Heavy validation batteries are single-occupancy per host to avoid memory and
+  build-artifact contention. This does not serialize tests within a battery.
 - Before updating canonical outputs or hashes, verify them from a clean build and
   on every platform the claim covers.
 - Concurrent builders on one machine share more than they think: session-shared

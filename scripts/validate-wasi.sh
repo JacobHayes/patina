@@ -310,8 +310,4 @@ fi
 cmp "$tmp/hashmap-record" "$tmp/hashmap-replay"
 cmp "$tmp/hashmap-seed-1" "$tmp/hashmap-replay"
 
-printf 'Validated imports:\n'
-cat "$tmp/imports"
-printf 'Deterministic output:\n'
-cat "$tmp/replay"
-cat "$tmp/network-replay"
+echo "WASI validation: PASS"

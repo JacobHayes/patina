@@ -82,7 +82,6 @@ JOBS=24
 ARGS=(--seed 7 --jobs "$JOBS" --workers 3 --producers 2 --base-port 5001 --data-dir /workq --timeout-secs 90)
 
 cd "$repo_root"
-echo "==> building cargo-patina and the workq harness under Patina"
 # The legs below run without `set -e` (each handles its own nonzero exits), so
 # the build prelude must fail CLOSED explicitly: a gate that cannot build must
 # certify nothing — silently reusing a stale prebuilt binary would be a false
@@ -111,7 +110,7 @@ fi
 rm -f "$sites_err"
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+trap 'printf "Logs: %s\n" "$work"' EXIT
 fail=0
 start_secs=$SECONDS
 
@@ -129,7 +128,6 @@ violated() { /usr/bin/grep -q '^PATINA_VERDICT .*kind=violation ' "$1"; }
 # Surface a guest stderr tail on FAIL (a bare FAIL is undiagnosable from CI logs).
 stderr_tail() { [[ -s "$1" ]] && sed -n '1,20p' "$1" | sed 's/^/      stderr| /'; }
 
-echo "==> [1] clean run: 5 seeds x 3 repeats byte-identical (result + trace), all completed"
 for s in 1 2 3 4 5; do
   ref_res=""; ref_trace=""
   for rep in 1 2 3; do
@@ -148,47 +146,37 @@ for s in 1 2 3 4 5; do
       echo "    FAIL: seed $s rep $rep not byte-identical to rep 1"; fail=1
     fi
   done
-  echo "    seed $s: $ref_res | trace=$ref_trace"
 done
 
-echo "==> [2] record + strict replay is byte-identical"
 rec="$work/replay.trace"
 run --seed 2 --record "$rec" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" >/dev/null 2>"$work/rec.err"
 r1="$(result_of "$work/rec.err")"
 replay "$rec" ${ALLOW[@]+"${ALLOW[@]}"} >/dev/null 2>"$work/rep.err"
 r2="$(result_of "$work/rep.err")"
-echo "    record: $r1"
-echo "    replay: $r2"
 if [[ "$r1" != "$r2" || -z "$r1" ]]; then echo "    FAIL: replay differs from record"; fail=1; fi
 
-echo "==> [3] net-jitter + net-drop: converge (all terminal), zero invariant violations"
 converged() { # pass-verdict line -> 0 if enqueued==JOBS and completed+failed==enqueued
   local res="$1" e c d
   e="$(field_of enqueued "$res")"; c="$(field_of completed "$res")"; d="$(field_of failed "$res")"
   [[ "${e:-0}" == "$JOBS" && $(( ${c:-0} + ${d:-0} )) -eq "${e:-0}" ]]
 }
-echo "    -- net-jitter reorder --"
 for s in 1 2 3 4 5; do
   err="$work/j.$s.err"
   run --seed "$s" ${ALLOW[@]+"${ALLOW[@]}"} --net-jitter-nanos 1000000..80000000 -- "${ARGS[@]}" >/dev/null 2>"$err" || true
   if violated "$err"; then echo "      FAIL: violation verdict under jitter seed $s"; fail=1; fi
   res="$(result_of "$err")"
-  echo "      seed $s: ${res#*detail=}"
   converged "$res" || { echo "      FAIL: jitter did not converge (seed $s)"; fail=1; }
 done
-echo "    -- net-drop sweep (permille) --"
 for d in 100 200 300; do
   for s in 1 2 3; do
     err="$work/d.$d.$s.err"
     run --seed "$s" ${ALLOW[@]+"${ALLOW[@]}"} --net-drop-permille "$d" -- "${ARGS[@]}" >/dev/null 2>"$err" || true
     if violated "$err"; then echo "      FAIL: violation verdict drop $d seed $s"; fail=1; fi
     res="$(result_of "$err")"
-    echo "      drop $d seed $s: ${res#*detail=}"
     converged "$res" || { echo "      FAIL: drop $d should converge (seed $s)"; fail=1; }
   done
 done
 
-echo "==> [4] native fs-crash restart sweep: every configured crash reaches one restart, violation verdict never"
 crash_restarts=0; crash_violations=0
 for spec in write:1 write:5 write:12 write:40 sync:1 sync:4 sync:16 close:1 close:3; do
   for s in 1 2 3; do
@@ -213,10 +201,7 @@ fi
 if [[ $crash_violations -ne 0 ]]; then
   echo "    FAIL: expected zero fs-crash violation verdicts, saw $crash_violations"; fail=1
 fi
-echo "    fs-crash restarts reached=$crash_restarts violations=$crash_violations"
 
-echo "==> [5] crash-RECOVERY: kill+restart in-process on the same WAL, converge, byte-identical"
-echo "    -- (a) crash at completed=10 + restart: 5 seeds x 3 repeats byte-identical, all converge --"
 for s in 1 2 3 4 5; do
   ref_res=""; ref_trace=""
   for rep in 1 2 3; do
@@ -234,27 +219,20 @@ for s in 1 2 3 4 5; do
       echo "    FAIL: recovery seed $s rep $rep not byte-identical to rep 1"; fail=1
     fi
   done
-  echo "    seed $s: $ref_res | trace=$ref_trace"
 done
-echo "    -- (b) a recovery run records + replays byte-identically --"
 rrec="$work/recover.trace"
 run --seed 1 --record "$rrec" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" --crash-at-completed 10 >/dev/null 2>"$work/rrec.err"
 rr1="$(result_of "$work/rrec.err")"
 replay "$rrec" ${ALLOW[@]+"${ALLOW[@]}"} >/dev/null 2>"$work/rrep.err"
 rr2="$(result_of "$work/rrep.err")"
-echo "    record: $rr1"; echo "    replay: $rr2"
 if [[ "$rr1" != "$rr2" || -z "$rr1" ]]; then echo "    FAIL: recovery replay differs from record"; fail=1; fi
-echo "    -- (c) in-process fail-closed-recovery self-test (invariant 5) --"
 serr="$work/self.err"
 if sout="$(run ${ALLOW[@]+"${ALLOW[@]}"} -- --check-recovery-fail-closed 2>"$serr")"; then scode=0; else scode=$?; fi
 if violated "$serr"; then echo "    FAIL: recovery self-test reported a violation verdict"; fail=1; stderr_tail "$serr"; fi
 if [[ $scode -ne 0 ]] || ! grep -q 'WORKQ_RECOVERY_SELFTEST ok' <<<"$sout"; then
   echo "    FAIL: recovery self-test did not pass (exit=$scode)"; fail=1
-else
-  echo "    ${sout}"
 fi
 
-echo "==> [6] buggify sweep via ../buggify-campaign.sh (ALWAYS_VIOLATION / SOMETIMES_UNMET classes)"
 BUGGIFY_GENS="${WORKQ_BUGGIFY_GENS:-30}"
 CAMPAIGN_STATE="$work/campaign-state.json"
 rm -f "$CAMPAIGN_STATE"
@@ -286,21 +264,10 @@ done
 # Campaign-level SOMETIMES_UNMET: a sometimes! site reached but never satisfied.
 unmet=()
 while IFS= read -r line; do [[ -n "$line" ]] && unmet+=("$line"); done < <(campaign_sometimes_unmet "$CAMPAIGN_STATE")
-echo "    buggify campaign: gens=$BUGGIFY_GENS always_violations=$always_violations sometimes_unmet=${#unmet[@]}"
 if (( ${#unmet[@]} > 0 )); then
   echo "    FAIL: unmet sometimes-sites:"; for line in "${unmet[@]}"; do echo "      $line"; done; fail=1
 fi
-python3 - "$CAMPAIGN_STATE" <<'PY' 2>/dev/null || true
-import json, sys
-s = json.load(open(sys.argv[1]))
-print(f"    per-site coverage (generations={s.get('generations',0)} gens_with_report={s.get('gens_with_report',0)}):")
-for label, r in sorted(s.get("sites", {}).items()):
-    extra = f" satisfied={r['sometimes_satisfied']}" if r["kind"] == "sometimes" else \
-            (f" fired_gens={r['fired_gens']} total_fires={r['total_fires']}" if r["kind"] in ("fault","delay") else "")
-    print(f"      {label} [{r['kind']}] reached={r['reached']} activated_gens={r['activated_gens']}{extra}")
-PY
 
-echo "==> [7] seeded-bug catch: each --bug MUST be caught within a bounded seed sweep"
 # Each entry: NAME | first seed | extra Patina knobs | extra guest args | the
 # expected CATCH pattern, matched against the run's stderr. Two of the three are
 # caught by a `violation` verdict -- the verdict ABI's own wire line -- and the
@@ -327,11 +294,9 @@ bug_leg() {
   # Every verdict the failing run reported, in order: the recorded outcome
   # stream the strict replay below must reproduce exactly.
   local res; res="$(grep '^PATINA_VERDICT ' "$err" 2>/dev/null || true)"
-  echo "    -- $name (seed $bseed): exit=$code verdicts=$(printf '%s' "$res" | grep -c . || true)"
   if [[ $caught -ne 1 ]]; then
     echo "    FAIL: bug '$name' NOT caught by seeds $first..$((first + BUG_SEED_WINDOW - 1)) (expected '$marker') -- demo went vacuous"; fail=1; stderr_tail "$err"; return
   fi
-  echo "        caught: $(grep -Em1 "$marker" "$err")"
   # Strict replay must reproduce the failing run byte-identically (result + trace).
   local th rerr rth
   th="$(shasum -a256 "$tr" | cut -d' ' -f1)"
@@ -342,8 +307,6 @@ bug_leg() {
     echo "    FAIL: bug '$name' replay did not reproduce the verdict stream + trace identically"; fail=1
   elif ! grep -Eq "$marker" "$rerr"; then
     echo "    FAIL: bug '$name' replay did not reproduce '$marker'"; fail=1
-  else
-    echo "        replay reproduced identically (trace=$th)"
   fi
 }
 # dedup-ignore-producer: two producers reuse client_seq, so half the jobs are
@@ -359,34 +322,28 @@ bug_leg skip-redelivery-commit 2 "--buggify=500 --buggify-after-setup" "--bug sk
 # shrinks redelivery latency into the apply window so the race is deterministic.
 bug_leg apply-check-outside-lock 1 "--buggify=500 --buggify-after-setup" "--tick-ms 2 --bug apply-check-outside-lock" '^PATINA_VERDICT .*kind=violation '
 
-echo "==> [8] --server-host resolves via --dns-entry: converges, replays byte-identically, survives an injected dns fault"
 DNS_ARGS=(--seed 1 --jobs "$JOBS" --workers 3 --producers 2 --base-port 5001 --data-dir /workq \
           --timeout-secs 90 --server-host workq-server)
 run --seed 1 --dns-entry workq-server=127.0.0.1 ${ALLOW[@]+"${ALLOW[@]}"} -- "${DNS_ARGS[@]}" >/dev/null 2>"$work/dns.err" || true
 if violated "$work/dns.err"; then echo "    FAIL: violation verdict under --server-host"; fail=1; stderr_tail "$work/dns.err"; fi
 dres="$(result_of "$work/dns.err")"
-echo "    -- (a) resolved: $dres"
 converged "$dres" || { echo "    FAIL: --server-host run did not converge"; fail=1; stderr_tail "$work/dns.err"; }
 dtrace="$work/dns.trace"
 run --seed 1 --dns-entry workq-server=127.0.0.1 --record "$dtrace" ${ALLOW[@]+"${ALLOW[@]}"} -- "${DNS_ARGS[@]}" >/dev/null 2>"$work/dnsrec.err"
 dr1="$(result_of "$work/dnsrec.err")"
 replay "$dtrace" ${ALLOW[@]+"${ALLOW[@]}"} >/dev/null 2>"$work/dnsrep.err"
 dr2="$(result_of "$work/dnsrep.err")"
-echo "    -- (b) record: $dr1"; echo "       replay: $dr2"
 if [[ "$dr1" != "$dr2" || -z "$dr1" ]]; then echo "    FAIL: --server-host replay differs from record"; fail=1; fi
-echo "    -- (c) injected --dns-fail-permille still converges (the resolve retry must not wedge) --"
 for s in 1 2 3; do
   ferr="$work/dnsfail.$s.err"
   run --seed "$s" --dns-entry workq-server=127.0.0.1 --dns-fail-permille 400 ${ALLOW[@]+"${ALLOW[@]}"} -- "${DNS_ARGS[@]}" >/dev/null 2>"$ferr" || true
   if violated "$ferr"; then echo "      FAIL: violation verdict under --dns-fail-permille seed $s"; fail=1; stderr_tail "$ferr"; fi
   fres="$(result_of "$ferr")"
-  echo "      seed $s: ${fres#*detail=}"
   converged "$fres" || { echo "      FAIL: --dns-fail-permille seed $s did not converge"; fail=1; stderr_tail "$ferr"; }
 done
 
 elapsed=$(( SECONDS - start_secs ))
-echo "==> wall time: ${elapsed}s"
 if [[ "$fail" -ne 0 ]]; then
   echo "==> FAILED"; exit 1
 fi
-echo "==> all Patina checks passed"
+echo "workq: PASS (${elapsed}s)"

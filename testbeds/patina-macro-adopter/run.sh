@@ -40,14 +40,12 @@ fi
 
 mkdir -p "$OUT"
 
-echo "==> patina macro adopter: build cargo-patina"
-cargo build -p cargo-patina --locked >/dev/null
+cargo build --quiet -p cargo-patina --locked
 if [[ ! -x "$CLI" ]]; then
   echo "patina-macro-adopter: expected executable $CLI" >&2
   exit 1
 fi
 
-echo "==> patina macro adopter: assert macro crate has no dependencies"
 cargo tree -p patina-dst --locked >"$OUT/tree-patina-dst.txt"
 cargo tree -p patina-dst-macros --locked >"$OUT/tree-patina-dst-macros.txt"
 if [[ $(wc -l <"$OUT/tree-patina-dst.txt" | tr -d ' ') != 1 ]]; then
@@ -60,11 +58,12 @@ if [[ $(wc -l <"$OUT/tree-patina-dst-macros.txt" | tr -d ' ') != 1 ]]; then
   cat "$OUT/tree-patina-dst-macros.txt" >&2
   exit 1
 fi
-cat "$OUT/tree-patina-dst-macros.txt"
 
 run_pass() {
   local out="$1"
-  PATINA_CLI="$CLI" cargo test --manifest-path "$MANIFEST" deterministic_pass -- --exact >"$out" 2>&1
+  PATINA_CLI="$CLI" cargo test --manifest-path "$MANIFEST" deterministic_pass -- --exact >"$out" 2>&1 || {
+    cat "$out" >&2; return 1;
+  }
 }
 
 run_seeded_failure() {
@@ -110,14 +109,11 @@ assert_contains() {
   fi
 }
 
-echo "==> patina macro adopter: passing macro test under plain cargo test"
 PASS1="$OUT/pass-1.out"
 PASS2="$OUT/pass-2.out"
 run_pass "$PASS1"
 run_pass "$PASS2"
-tail -n 12 "$PASS1"
 
-echo "==> patina macro adopter: seeded failure block under plain cargo test"
 FAIL1="$OUT/seeded-failure-1.out"
 FAIL2="$OUT/seeded-failure-2.out"
 BLOCK1="$OUT/seeded-failure-1.block"
@@ -133,9 +129,7 @@ assert_contains "$BLOCK1" "--harness-target dst_macro"
 assert_contains "$BLOCK1" "--exact seeded_failure_reports_repro"
 assert_contains "$BLOCK1" "cargo patina replay"
 assert_contains "$FAIL1" "DST_MACRO_PLANTED_FAILURE"
-cat "$BLOCK1"
 
-echo "==> patina macro adopter: PATH-scrubbed missing-CLI refusal"
 SCRUB_BIN="$OUT/path-scrub-bin"
 rm -rf "$SCRUB_BIN"
 mkdir -p "$SCRUB_BIN"
@@ -172,7 +166,5 @@ assert_contains "$PATH_OUT" "could not find cargo-patina"
 assert_contains "$PATH_OUT" "set PATINA_CLI"
 assert_contains "$PATH_OUT" "put cargo-patina on PATH"
 assert_contains "$PATH_OUT" "DST tests never skip"
-grep -F "could not find cargo-patina" "$PATH_OUT" | head -1
-grep -F "DST tests never skip" "$PATH_OUT" | head -1
 
-echo "patina macro adopter: PASS"
+echo "patina macro adopter: PASS; logs: $OUT"

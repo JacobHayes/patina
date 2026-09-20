@@ -166,14 +166,12 @@ if [[ $selftest == 1 ]]; then
   # Each case sets $out/$rc from a run, then judges it: `accepted` for the
   # control, `refused` for the plant (it must fail AND say why).
   accepted() {
-    if [[ $rc == 0 ]]; then echo "GATE SELFTEST ok: control: $1"; else
+    if [[ $rc != 0 ]]; then
       echo "GATE SELFTEST FAILED: control: $1:" >&2; echo "$out" >&2; status=1
     fi
   }
   refused() {
-    if [[ $rc != 0 ]] && grep -qF -- "$2" <<<"$out"; then
-      echo "GATE SELFTEST ok: $1: refused ($2)"
-    else
+    if [[ $rc == 0 ]] || ! grep -qF -- "$2" <<<"$out"; then
       echo "GATE SELFTEST FAILED: $1 was not refused with '$2':" >&2; echo "$out" >&2; status=1
     fi
   }
@@ -309,7 +307,6 @@ step() {
   local name=$1 kind=$2 log line
   shift 2
   log="$logs/${name// /-}.log"
-  echo "==> $name"
   "$@" >"$log" 2>&1 && return 0
   case "$kind" in
     lines) mapfile -t -O "${#work[@]}" work <"$log" ;;

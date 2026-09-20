@@ -69,7 +69,11 @@ fetched. For local development, `mise run setup` installs the Rust
 toolchains/targets needed by these gates. After cheap failure checks, the full
 local gate runs the e2e-heavy stable workspace test rung alone, then overlaps
 runtime/testbed rungs with independent scratch/output paths. Successful rung logs
-are suppressed, every rung is timed, and a failed rung's complete log is replayed.
+are retained with commands and timings; the console shows one overall result
+and the log directory, plus a failed rung's complete log.
+`scripts/check.sh --selftest` is the output-contract class detector: planted
+serial and parallel children prove success silence, retained logs/counts, and
+failure status/diagnostic propagation.
 The mise workflow intentionally excludes the audit corpus from the local landing
 gate; run `mise run audit-corpus` or let CI/final gates cover it.
 

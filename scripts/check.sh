@@ -29,7 +29,8 @@ Usage: scripts/check.sh <full|fast|msrv>
   msrv  Execute the complete Rust 1.86 suite. This is CI/final-gate evidence,
         not part of the ordinary local landing gate.
 
-Successful rung logs are hidden. On failure, the complete rung log and exact
+Successful rungs are silent; the overall result includes retained logs with
+per-rung commands and timings. On failure, the complete rung log and exact
 command are printed. The runner uses one Cargo target dir for serial work and one
 under target/check/parallel/ for each parallel rung. PATINA_CHECK_JOBS is
 intentionally not exposed: the full profile uses bounded, reviewed concurrency
@@ -44,7 +45,10 @@ case ${1:-} in
   *) usage >&2; exit 2 ;;
 esac
 
-logs=$(mktemp -d "${TMPDIR:-/tmp}/patina-check.XXXXXX")
+logs=$(mktemp -d "${TMPDIR:-/tmp}/patina-check.XXXXXX") || exit 1
+total_start=$(date +%s)
+passed=0
+skipped=0
 pids=()
 labels=()
 commands=()
@@ -52,8 +56,12 @@ log_paths=()
 status_paths=()
 start_times=()
 
-cleanup() {
-  rm -rf "$logs"
+finish() {
+  local status=$?
+  local result=PASS
+  ((status == 0)) || result=FAIL
+  printf 'OVERALL %s %s (passed=%s skipped=%s; %ss); logs: %s\n' \
+    "$result" "$profile" "$passed" "$skipped" "$(( $(date +%s) - total_start ))" "$logs"
 }
 
 stop_children() {
@@ -64,7 +72,7 @@ stop_children() {
   wait 2>/dev/null || true
 }
 
-trap cleanup EXIT
+trap finish EXIT
 trap 'stop_children; exit 130' INT
 trap 'stop_children; exit 143' TERM
 
@@ -82,13 +90,14 @@ rung_slug() {
 run_rung() {
   local label=$1
   shift
-  local log="$logs/serial.log"
+  local log="$logs/$(rung_slug "$label").log"
   local start end status
-  printf 'START %s\n' "$label"
   start=$(date +%s)
-  "$@" >"$log" 2>&1
+  { printf 'command:'; quote_command "$@"; printf '\n'; } >"$log"
+  "$@" >>"$log" 2>&1
   status=$?
   end=$(date +%s)
+  printf 'exit=%s elapsed=%ss\n' "$status" "$((end - start))" >>"$log"
   if ((status != 0)); then
     printf 'FAIL  %s (%ss; exit %d)\ncommand:' "$label" "$((end - start))" "$status" >&2
     quote_command "$@" >&2
@@ -96,14 +105,14 @@ run_rung() {
     cat "$log" >&2
     return "$status"
   fi
-  printf 'PASS  %s (%ss)\n' "$label" "$((end - start))"
+  passed=$((passed + 1))
 }
 
 start_rung() {
   local label=$1
   shift
   local index=${#pids[@]}
-  local log="$logs/parallel-$index.log"
+  local log="$logs/$(rung_slug "$label").log"
   local status_file="$logs/parallel-$index.status"
   local arg command target_dir
   target_dir="$check_target_base/parallel/$(rung_slug "$label")"
@@ -111,14 +120,14 @@ start_rung() {
   for arg in "$@"; do
     printf -v command '%s %q' "$command" "$arg"
   done
-  printf 'START %s [parallel]\n' "$label"
   labels+=("$label")
   commands+=("$command")
   log_paths+=("$log")
   status_paths+=("$status_file")
   start_times+=("$(date +%s)")
   (
-    CARGO_TARGET_DIR="$target_dir" "$@" >"$log" 2>&1
+    printf 'command: %s\n' "$command" >"$log"
+    CARGO_TARGET_DIR="$target_dir" "$@" >>"$log" 2>&1
     local_status=$?
     printf '%s %s\n' "$local_status" "$(date +%s)" >"$status_file"
     exit "$local_status"
@@ -137,8 +146,9 @@ wait_rungs() {
     else
       read -r status end <"${status_paths[$i]}"
     fi
+    printf 'exit=%s elapsed=%ss\n' "$status" "$((end - start_times[$i]))" >>"${log_paths[$i]}"
     if ((status == 0)); then
-      printf 'PASS  %s (%ss)\n' "${labels[$i]}" "$((end - start_times[$i]))"
+      passed=$((passed + 1))
     else
       failed=1
       printf 'FAIL  %s (%ss; exit %d)\ncommand: %s\n--- failure log ---\n' \
@@ -168,9 +178,9 @@ run_fast_workspace_tests() {
     cargo_patina_targets+=(--test "$test_name")
   done < <(find crates/cargo-patina/tests -maxdepth 1 -type f -name '*.rs' ! -name end_to_end.rs | LC_ALL=C sort)
 
-  cargo test --workspace --exclude cargo-patina --locked &&
-    cargo test -p cargo-patina --locked "${cargo_patina_targets[@]}" &&
-    cargo test -p cargo-patina --locked --doc
+  cargo test --quiet --workspace --exclude cargo-patina --locked &&
+    cargo test --quiet -p cargo-patina --locked "${cargo_patina_targets[@]}" &&
+    cargo test --quiet -p cargo-patina --locked --doc
 }
 
 run_msrv_check() {
@@ -178,12 +188,12 @@ run_msrv_check() {
 }
 
 run_msrv_detector() {
-  cargo +1.86.0 test --target-dir "$check_target_base/msrv-check" -p cargo-patina \
+  cargo +1.86.0 test --quiet --target-dir "$check_target_base/msrv-check" -p cargo-patina \
     --test self_sufficient_binary --locked
 }
 
 run_msrv_macro_feature_test() {
-  cargo +1.86.0 test --target-dir "$check_target_base/msrv-check" -p patina-dst \
+  cargo +1.86.0 test --quiet --target-dir "$check_target_base/msrv-check" -p patina-dst \
     --features macros --locked
 }
 
@@ -192,8 +202,8 @@ run_msrv_full() {
   # cargo-patina's internal shim cache independently keys itself by the complete
   # toolchain.
   local msrv_target="$check_target_base/msrv"
-  cargo +1.86.0 test --target-dir "$msrv_target" --workspace --locked &&
-    cargo +1.86.0 test --target-dir "$msrv_target" -p patina-dst --features macros --locked
+  cargo +1.86.0 test --quiet --target-dir "$msrv_target" --workspace --locked &&
+    cargo +1.86.0 test --quiet --target-dir "$msrv_target" -p patina-dst --features macros --locked
 }
 
 run_conformance() {
@@ -207,7 +217,7 @@ start_signals_family_rung() {
   if [[ $1 == Linux ]]; then
     start_rung 'signals family gate' testbeds/syscall-conformance/gate.sh --family signals
   else
-    printf 'SKIP  signals family gate (Linux-only; host=%s; skipped=1)\n' "$1"
+    skipped=$((skipped + 1))
   fi
 }
 
@@ -216,25 +226,53 @@ platform_rungs_selftest() (
   start_rung() { printf 'RUN %s\n' "$*"; }
   local linux darwin
   linux="$(start_signals_family_rung Linux)"
-  darwin="$(start_signals_family_rung Darwin)"
+  darwin="$(start_signals_family_rung Darwin; printf 'skipped=%s\n' "$skipped")"
   if [[ "$linux" != 'RUN signals family gate testbeds/syscall-conformance/gate.sh --family signals' ]]; then
     echo "FAIL: Linux must schedule the signals family gate: $linux" >&2
     return 1
   fi
-  if [[ "$darwin" != 'SKIP  signals family gate (Linux-only; host=Darwin; skipped=1)' ]]; then
+  if [[ "$darwin" != 'skipped=1' ]]; then
     echo "FAIL: Darwin must report a counted skip, not run the Linux oracle: $darwin" >&2
     return 1
   fi
   echo 'CHECK_PLATFORM_SELFTEST_RAN cases=linux-family,darwin-counted-skip'
 )
 
-run_full() {
-  local total_start
-  total_start=$(date +%s)
-  printf 'TARGET_BASE %s\n' "$check_target_base"
+# Class detector: successful child chatter stays in retained logs, while failed
+# children preserve their status, command, and original stdout/stderr.
+output_selftest() (
+  local output="$logs/output-selftest.console" status
+  passed=0
+  run_rung 'planted success' bash -c 'echo success-stdout; echo success-stderr >&2' >"$output" 2>&1
+  if [[ -s "$output" || $passed != 1 ]] ||
+      ! grep -q success-stderr "$logs/planted-success.log"; then
+    echo 'FAIL: successful rung was noisy or lost its log/count' >&2; return 1
+  fi
+  run_rung 'planted failure' bash -c 'echo failure-stdout; echo failure-stderr >&2; exit 7' >"$output" 2>&1
+  status=$?
+  if [[ $status != 7 ]] || ! grep -q failure-stdout "$output" ||
+      ! grep -q failure-stderr "$output" || ! grep -q 'command:' "$output"; then
+    echo 'FAIL: failed rung lost its status, command, or output' >&2; return 1
+  fi
+  start_rung 'parallel success' bash -c 'echo parallel-success' >"$output" 2>&1
+  wait_rungs >>"$output" 2>&1
+  if [[ -s "$output" || $passed != 2 ]] ||
+      ! grep -q parallel-success "$logs/parallel-success.log"; then
+    echo 'FAIL: successful parallel rung was noisy or lost its log/count' >&2; return 1
+  fi
+  start_rung 'parallel failure' bash -c 'echo parallel-stderr >&2; exit 9' >"$output" 2>&1
+  wait_rungs >>"$output" 2>&1
+  status=$?
+  if [[ $status == 0 || $passed != 2 ]] || ! grep -q parallel-stderr "$output" ||
+      ! grep -q 'exit 9' "$output"; then
+    echo 'FAIL: failed parallel rung lost its failure or output' >&2; return 1
+  fi
+)
 
+run_full() {
   # Cheap, high-signal failures stay serial and stop before expensive work.
   run_rung 'platform rung selection selftest' platform_rungs_selftest || return $?
+  run_rung 'output contract selftest' output_selftest || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?
@@ -256,7 +294,7 @@ run_full() {
   # contends badly with other CPU-heavy cargo/check rungs, so the full workspace
   # test rung runs alone. The post-test group below gets one Cargo target dir per
   # rung through start_rung, plus each script's own runtime scratch paths.
-  run_rung 'stable workspace tests (includes e2e)' cargo test --workspace --locked || return $?
+  run_rung 'stable workspace tests (includes e2e)' cargo test --quiet --workspace --locked || return $?
 
   start_rung 'native ecosystem testbeds' scripts/check-native-testbeds.sh
   start_rung 'macro adopter testbed' testbeds/patina-macro-adopter/run.sh
@@ -268,15 +306,11 @@ run_full() {
   # conformance rung. gate.sh and run.sh both inherit this rung's target dir.
   start_signals_family_rung "$(uname -s)"
   wait_rungs || return $?
-
-  printf 'PASS  full landing gate (%ss total)\n' "$(( $(date +%s) - total_start ))"
 }
 
 run_fast() {
-  local total_start
-  total_start=$(date +%s)
-  printf 'TARGET_BASE %s\n' "$check_target_base"
   run_rung 'platform rung selection selftest' platform_rungs_selftest || return $?
+  run_rung 'output contract selftest' output_selftest || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?
@@ -297,12 +331,11 @@ run_fast() {
   start_rung 'WASI validation' scripts/validate-wasi.sh
   start_rung 'cross-target smoke' scripts/smoke-cross-target.sh
   wait_rungs || return $?
-
-  printf 'PASS  fast check (%ss total)\n' "$(( $(date +%s) - total_start ))"
 }
 
 case $profile in
-  selftest) platform_rungs_selftest ;;
+  selftest) run_rung 'platform rung selection selftest' platform_rungs_selftest &&
+    run_rung 'output contract selftest' output_selftest ;;
   full) run_full ;;
   fast) run_fast ;;
   msrv) run_rung 'MSRV full compatibility suite' run_msrv_full ;;

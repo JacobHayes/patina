@@ -84,8 +84,8 @@ toolchains/targets, including the 1.86 MSRV toolchain with `wasm32-wasip1`):
   test suite including `end_to_end`, native acceptance tests, WASI/cross smoke,
   the workq/pubsub/macro-adopter and FIFO/rustix-default/cap-std testbeds, and the full syscall-conformance run plus its planted-failure selftest. Cheap failure checks run first; the e2e-heavy workspace test rung runs
   alone; independent runtime/testbed rungs then overlap. The runner prints
-  per-rung timings, suppresses successful command chatter, and replays a failed
-  rung's complete log. **This is the local landing gate.** CI/final gates add
+  one overall result and a retained log directory (commands and per-rung timings),
+  suppresses successful command chatter, and replays a failed rung's complete log. **This is the local landing gate.** CI/final gates add
   `mise run msrv` and the audit corpus.
 - `mise run msrv` — the complete Rust 1.86 workspace suite. This is CI/final-gate
   evidence, not part of the ordinary local landing gate.

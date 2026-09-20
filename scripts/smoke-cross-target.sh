@@ -202,5 +202,4 @@ for tgt in wasi native; do
   fi
 done
 
-echo "Cross-target deterministic output ($(uname -s) + wasm32-wasip1):"
-cat "$tmp/native-line"
+echo "Cross-target smoke: PASS ($(uname -s) + wasm32-wasip1)"

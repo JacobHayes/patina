@@ -19,6 +19,11 @@ testbeds/syscall-conformance/gate.sh --family signals                 # the froz
 testbeds/syscall-conformance/gate.sh --selftest     # prove the gate can fail
 ```
 
+Successful legs and known gaps are silent. The summary counts passed, failed,
+skipped, and host-unavailable coverage and names the output directory. Raw
+streams, differ reports, and `skips.log` retain the details; failures still print
+their diagnostics.
+
 ## The frozen oracle and the family gate
 
 A family whose runtime is built after its probes (the signals family:

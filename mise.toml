@@ -24,7 +24,7 @@ echo "Patina local toolchains are ready."
 '''
 
 # The check runner keeps cheap, high-signal failures serial, runs only measured
-# overlap groups concurrently, reports one timing line per rung, hides successful
+# overlap groups concurrently, retains per-rung timings in logs, hides successful
 # command chatter, and replays complete failure logs. That last failure-log
 # contract is the mise feature gap that keeps the small shell runner in place.
 [tasks.check]

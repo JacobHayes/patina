@@ -19,8 +19,8 @@ require_receipt() {
     echo "FAIL: $script exited unsuccessfully" >&2
     return 1
   fi
-  cat "$tmp/child.log"
   if [[ $(grep -Fxc "$expected" "$tmp/child.log" || true) != 1 ]]; then
+    cat "$tmp/child.log" >&2
     echo "FAIL: $script did not print exactly one receipt: $expected" >&2
     return 1
   fi
@@ -102,3 +102,5 @@ else
       "$name: SKIPPED 1 (host lacks syscall-user-dispatch: $(uname -s) $(uname -m); SUD is x86_64 Linux >= 5.11)"
   done
 fi
+
+printf 'native ecosystem: passed=%s skipped=%s\n' "$((1 + 2 * sud))" "$((2 - 2 * sud))"
