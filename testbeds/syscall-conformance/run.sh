@@ -58,6 +58,7 @@ conform="$target_dir/release/conform"
 divergences="$here/divergences.toml"
 manifest="$here/probes.toml"
 registry="$out/registry.json"
+reference="$out/reference.json"
 leg_timeout="${PATINA_CONFORMANCE_LEG_TIMEOUT:-60}"
 
 usage() {
@@ -141,15 +142,21 @@ fi
 if [[ ! -x "$conform" ]]; then
   echo "FATAL: $conform missing after the build" >&2; exit 3
 fi
-# The registry is the source of the virtual ABI level and every row's `since`;
-# the manifest must name only registry rows (and of the right kind).
-if ! "$PATINA" patina syscalls --os linux --arch "$host_arch" --format json >"$registry" 2>"$registry.err"; then
-  echo "FATAL: cargo patina syscalls --format json failed:" >&2; cat "$registry.err" >&2; exit 3
-fi
+# Both target-local inventories come from this same freshly rebuilt binary.
+case "$host_arch" in
+  x86_64) reference_arch=aarch64 ;;
+  aarch64) reference_arch=x86_64 ;;
+  *) echo "FATAL: no conformance inventory for $host_arch" >&2; exit 3 ;;
+esac
+for target in "$host_arch:$registry" "$reference_arch:$reference"; do
+  if ! "$PATINA" patina syscalls --os linux --arch "${target%%:*}" --format json >"${target#*:}" 2>"${target#*:}.err"; then
+    echo "FATAL: registry generation failed for ${target%%:*}" >&2; cat "${target#*:}.err" >&2; exit 3
+  fi
+done
 if ! virtual_abi="$("$conform" abi "$registry")"; then
   echo "FATAL: $registry is not a patina.syscalls/v1 registry" >&2; exit 3
 fi
-if ! "$conform" check-manifest "$manifest" "$registry" >/dev/null; then
+if ! "$conform" check-manifest "$manifest" "$registry" "$reference" >/dev/null; then
   echo "FATAL: probes.toml disagrees with the registry (see above)" >&2; exit 3
 fi
 mapfile -t all_probes < <("$conform" list "$manifest")
@@ -474,7 +481,7 @@ for probe in "${probes[@]}"; do
       fail_leg "$probe[bless]" "wall-clock timeout ($leg_timeout s); refusing to bless" "$legdir/bless.err"
       continue
     fi
-    if ! "$conform" bless "$probe" "$legdir/bless.raw.jsonl" "$expected" linux "$host_arch" "$host_kernel" "$host_glibc" "$manifest" "$registry" 2>"$legdir/bless.conform.err"; then
+    if ! "$conform" bless "$probe" "$legdir/bless.raw.jsonl" "$expected" linux "$host_arch" "$host_kernel" "$host_glibc" "$manifest" "$registry" "$reference" 2>"$legdir/bless.conform.err"; then
       cat "$legdir/bless.conform.err" "$legdir/bless.err" >"$legdir/bless.refused" 2>/dev/null
       fail_leg "$probe[bless]" "the probe does not pass natively; refusing to bless" "$legdir/bless.refused"
       continue
@@ -485,7 +492,7 @@ for probe in "${probes[@]}"; do
     skip_leg "$probe" "UNBLESSED on $platform (no $expected; run --bless on a $platform host)"
     continue
   fi
-  gate="$("$conform" host-check "$probe" "$manifest" "$registry" "$expected" "$host_kernel" 2>&1)"
+  gate="$("$conform" host-check "$probe" "$manifest" "$registry" "$expected" "$host_kernel" "$reference" 2>&1)"
   gate_rc=$?
   if [[ $gate_rc == 5 ]]; then
     unavailable=$((unavailable + 1))

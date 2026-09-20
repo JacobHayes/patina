@@ -426,6 +426,8 @@ pub fn load_manifest(text: &str) -> Result<Manifest, String> {
 /// every row's disposition kind and `since`, and the symbol rows.
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
+    pub os: String,
+    pub arch: String,
     pub virtual_abi: String,
     /// row name → disposition kind (`modeled`, `absent`, …).
     pub dispositions: BTreeMap<String, String>,
@@ -456,6 +458,14 @@ pub fn load_registry(text: &str) -> Result<Registry, String> {
         ));
     }
     let mut registry = Registry {
+        os: json["os"]
+            .as_str()
+            .ok_or("registry json: no os")?
+            .to_string(),
+        arch: json["arch"]
+            .as_str()
+            .ok_or("registry json: no arch")?
+            .to_string(),
         virtual_abi,
         ..Registry::default()
     };
@@ -493,15 +503,67 @@ pub fn load_registry(text: &str) -> Result<Registry, String> {
     Ok(registry)
 }
 
+/// Required target-local inventories. Adding an architecture requires its report here
+/// and in the runner; an incomplete inventory is never a permissive fallback.
+pub const REGISTRY_ARCHES: &[&str] = &["x86_64", "aarch64"];
+
+pub fn validate_platforms(host: &Registry, references: &[Registry]) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for registry in std::iter::once(host).chain(references) {
+        if registry.os != "linux" || !REGISTRY_ARCHES.contains(&registry.arch.as_str()) {
+            return Err(format!(
+                "unsupported registry target {}-{}",
+                registry.os, registry.arch
+            ));
+        }
+        if registry.virtual_abi != host.virtual_abi {
+            return Err("registry virtual ABI mismatch".into());
+        }
+        if !seen.insert(registry.arch.as_str()) {
+            return Err(format!(
+                "duplicate registry target {}-{}",
+                registry.os, registry.arch
+            ));
+        }
+    }
+    if seen.len() != REGISTRY_ARCHES.len() {
+        return Err("missing reference registry target".into());
+    }
+    Ok(())
+}
+
 /// Every name the manifest uses is a registry row of the right kind: an
 /// exercised row exists and is not `absent`, an `absent` row is `absent` and
 /// dated, a symbol is a symbol row. Fails closed before any leg runs; the
 /// cargo cross-gate (`cargo-patina/tests/syscall_registry.rs`) holds the other
 /// direction (every registry `probe` id is a probe here).
-pub fn validate_manifest(manifest: &Manifest, registry: &Registry) -> Result<(), String> {
+pub fn validate_manifest(
+    manifest: &Manifest,
+    registry: &Registry,
+    references: &[Registry],
+) -> Result<Vec<String>, String> {
+    validate_platforms(registry, references)?;
+    let mut nonhost = Vec::new();
     let mut problems = Vec::new();
     for (id, spec) in &manifest.probe {
+        let row_registry = |name: &str| {
+            if registry.dispositions.contains_key(name) {
+                registry
+            } else {
+                references
+                    .iter()
+                    .find(|r| r.dispositions.contains_key(name))
+                    .unwrap_or(registry)
+            }
+        };
+        for name in spec.syscalls.iter().chain(&spec.absent) {
+            let owner = row_registry(name);
+            if owner.arch != registry.arch {
+                nonhost.push(format!("{id}: {name} nonhost on {}-{} (known on {}-{}; not executed or observed absent)", registry.os, registry.arch, owner.os, owner.arch));
+            }
+        }
         for name in &spec.syscalls {
+            let registry = row_registry(name);
             match registry.dispositions.get(name).map(String::as_str) {
                 None => problems.push(format!("{id}: {name} is not a registry row")),
                 Some("absent") => problems.push(format!(
@@ -511,6 +573,7 @@ pub fn validate_manifest(manifest: &Manifest, registry: &Registry) -> Result<(),
             }
         }
         for name in &spec.absent {
+            let registry = row_registry(name);
             match registry.dispositions.get(name).map(String::as_str) {
                 None => problems.push(format!("{id}: {name} is not a registry row")),
                 Some("absent") => {
@@ -532,7 +595,7 @@ pub fn validate_manifest(manifest: &Manifest, registry: &Registry) -> Result<(),
         }
     }
     if problems.is_empty() {
-        Ok(())
+        Ok(nonhost)
     } else {
         Err(format!(
             "probes.toml disagrees with the registry:\n  {}",
@@ -1372,10 +1435,20 @@ pub enum HostGate {
 pub fn host_gate(
     manifest: &Manifest,
     registry: &Registry,
+    references: &[Registry],
     probe: &str,
     blessed: &Header,
     host_kernel: &str,
 ) -> HostGate {
+    if let Err(error) = validate_manifest(manifest, registry, references) {
+        return HostGate::Error(error);
+    }
+    if blessed.os != registry.os
+        || blessed.arch != registry.arch
+        || blessed.virtual_abi != registry.virtual_abi
+    {
+        return HostGate::Error("blessing target/virtual ABI does not match host registry".into());
+    }
     let Some(host) = kernel_version(host_kernel) else {
         return HostGate::Error(format!("cannot parse host kernel version {host_kernel:?}"));
     };
@@ -1396,7 +1469,11 @@ pub fn host_gate(
             .and_then(|s| kernel_version(s))
             .unwrap_or((0, 0, 0))
     };
-    for syscall in &spec.syscalls {
+    for syscall in spec
+        .syscalls
+        .iter()
+        .filter(|name| registry.dispositions.contains_key(*name))
+    {
         let since = since_of(syscall);
         if host < since {
             return HostGate::Unavailable(format!(
@@ -1405,7 +1482,11 @@ pub fn host_gate(
             ));
         }
     }
-    for syscall in &spec.absent {
+    for syscall in spec
+        .absent
+        .iter()
+        .filter(|name| registry.dispositions.contains_key(*name))
+    {
         let Some(since) = registry.since.get(syscall).and_then(|s| kernel_version(s)) else {
             return HostGate::Error(format!(
                 "absent row {syscall} has no `since` in the registry; the host gate cannot date it"
@@ -2299,6 +2380,8 @@ pub fn selftest() -> Outcome {
         ]),
     };
     let registry = Registry {
+        os: "linux".into(),
+        arch: "x86_64".into(),
         virtual_abi: "6.8".to_string(),
         dispositions: BTreeMap::from([
             ("openat".to_string(), "modeled".to_string()),
@@ -2311,15 +2394,26 @@ pub fn selftest() -> Outcome {
         ]),
         symbols: BTreeSet::new(),
     };
+    let references = [Registry {
+        arch: "aarch64".into(),
+        ..registry.clone()
+    }];
     let gate_case = |host: &str, want: fn(&HostGate) -> bool| -> Outcome {
-        let gate = host_gate(&manifest, &registry, probe, &header, host);
+        let gate = host_gate(&manifest, &registry, &references, probe, &header, host);
         Outcome {
             ok: want(&gate),
             lines: vec![format!("{gate:?}")],
         }
     };
     let absent_case = |host: &str, want: fn(&HostGate) -> bool| -> Outcome {
-        let gate = host_gate(&manifest, &registry, absent_probe, &header, host);
+        let gate = host_gate(
+            &manifest,
+            &registry,
+            &references,
+            absent_probe,
+            &header,
+            host,
+        );
         Outcome {
             ok: want(&gate),
             lines: vec![format!("{gate:?}")],
@@ -2367,6 +2461,7 @@ pub fn selftest() -> Outcome {
             )]),
         },
         &registry,
+        &references,
     );
     case(
         "manifest check: an unknown row, an exercised absent row, an absent modeled row, and an unknown symbol are refused",
@@ -2381,8 +2476,118 @@ pub fn selftest() -> Outcome {
         "manifest check: the control passes",
         true,
         Outcome {
-            ok: validate_manifest(&manifest, &registry).is_ok(),
+            ok: validate_manifest(&manifest, &registry, &references).is_ok(),
             lines: vec![],
+        },
+        "",
+    );
+
+    // Class pairing: architecture-local coverage and host metadata isolation.
+    // Synthetic future dates distinguish inventory knowledge from host availability.
+    let mut foreign = references[0].clone();
+    foreign
+        .dispositions
+        .insert("foreign_call".into(), "modeled".into());
+    foreign
+        .dispositions
+        .insert("foreign_absent".into(), "absent".into());
+    foreign.since.insert("foreign_call".into(), "99.0".into());
+    foreign.since.insert("foreign_absent".into(), "1.0".into());
+    let mut mixed = manifest.clone();
+    mixed
+        .probe
+        .get_mut(probe)
+        .unwrap()
+        .syscalls
+        .push("foreign_call".into());
+    mixed
+        .probe
+        .get_mut(probe)
+        .unwrap()
+        .absent
+        .push("foreign_absent".into());
+    let refs = [foreign];
+    let coverage = validate_manifest(&mixed, &registry, &refs);
+    case(
+        "manifest platforms: foreign names explicitly nonhost",
+        true,
+        Outcome {
+            ok: matches!(&coverage, Ok(rows) if rows.len() == 2 && rows.iter().any(|r| r.contains("foreign_call")) && rows.iter().any(|r| r.contains("foreign_absent"))),
+            lines: vec![format!("{coverage:?}")],
+        },
+        "",
+    );
+    let gate = host_gate(&mixed, &registry, &refs, probe, &header, "6.8");
+    case(
+        "manifest platforms: foreign future and absent dates never gate the host",
+        true,
+        Outcome {
+            ok: gate == HostGate::Ok,
+            lines: vec![format!("{gate:?}")],
+        },
+        "",
+    );
+    for (label, bad_refs) in [
+        ("missing reference", vec![]),
+        ("misidentified reference", vec![registry.clone()]),
+        (
+            "wrong OS",
+            vec![Registry {
+                os: "darwin".into(),
+                ..refs[0].clone()
+            }],
+        ),
+        (
+            "wrong ABI",
+            vec![Registry {
+                virtual_abi: "99.0".into(),
+                ..refs[0].clone()
+            }],
+        ),
+    ] {
+        let result = validate_manifest(&mixed, &registry, &bad_refs);
+        case(
+            &format!("manifest platforms: refuses {label}"),
+            true,
+            Outcome {
+                ok: result.is_err(),
+                lines: vec![format!("{result:?}")],
+            },
+            "",
+        );
+    }
+    for (label, name, absent) in [
+        ("foreign wrong kind", "foreign_absent", false),
+        ("foreign modeled as absent", "foreign_call", true),
+        ("typo", "foreign_typo", false),
+    ] {
+        let mut bad = mixed.clone();
+        let spec = bad.probe.get_mut(probe).unwrap();
+        if absent {
+            spec.absent.push(name.into());
+        } else {
+            spec.syscalls.push(name.into());
+        }
+        let result = validate_manifest(&bad, &registry, &refs);
+        case(
+            &format!("manifest platforms: refuses {label}"),
+            true,
+            Outcome {
+                ok: result.is_err(),
+                lines: vec![format!("{result:?}")],
+            },
+            "",
+        );
+    }
+    let mut future_host = registry.clone();
+    future_host.since.insert("openat".into(), "99.0".into());
+    let gate = host_gate(&mixed, &future_host, &refs, probe, &header, "6.8");
+    case(
+        "manifest platforms: host future date still gates",
+        true,
+        Outcome {
+            ok: matches!(gate, HostGate::Unavailable(_)),
+            lines: vec![format!("{gate:?}")],
         },
         "",
     );

@@ -23,7 +23,7 @@ fn usage() -> String {
          \n\
          abi        REGISTRY_JSON                                 print the registry's virtual ABI level\n\
          list       PROBES_TOML                                   print every probe id\n\
-         check-manifest PROBES_TOML REGISTRY_JSON                 every row/symbol the manifest names is a registry\n\
+         check-manifest PROBES_TOML REGISTRY_JSON REFERENCE_JSON  every row/symbol the manifest names is a registry\n\
                                                                   row of the right kind (exit 1 otherwise)\n\
          supervise  native|patina TIMEOUT_S OUT_JSONL ERR_FILE -- CMD…\n\
                                                                   run CMD in its own process group with a wall-clock\n\
@@ -33,7 +33,7 @@ fn usage() -> String {
                                                                   line; `patina` expects CMD to print a patina.result/v1\n\
                                                                   envelope and unpacks its guest stdout/stderr and\n\
                                                                   guest_exit into OUT/ERR the same way\n\
-         bless      PROBE RAW_JSONL OUT_JSONL OS ARCH KERNEL GLIBC PROBES_TOML REGISTRY_JSON\n\
+         bless      PROBE RAW_JSONL OUT_JSONL OS ARCH KERNEL GLIBC PROBES_TOML REGISTRY_JSON REFERENCE_JSON\n\
                                                                   normalize RAW (a supervised native stream: every check\n\
                                                                   passed, exited 0 or an announced signal death) and\n\
                                                                   write OUT with a blessing header\n\
@@ -45,7 +45,7 @@ fn usage() -> String {
                                                                   compare ACTUAL (raw, with its __termination line)\n\
                                                                   with EXPECTED; exit 1 on any undeclared or stale\n\
                                                                   divergence, count drift, or termination mismatch\n\
-         host-check PROBE PROBES_TOML REGISTRY_JSON EXPECTED_JSONL HOST_KERNEL\n\
+         host-check PROBE PROBES_TOML REGISTRY_JSON EXPECTED_JSONL HOST_KERNEL REFERENCE_JSON\n\
                                                                   exit 0 usable, {EXIT_HOST_UNAVAILABLE} host-unavailable (the host\n\
                                                                   lacks an exercised row or implements an absent one),\n\
                                                                   1 host older than the blessing kernel\n\
@@ -106,6 +106,40 @@ fn registry_from(path: &str) -> syscall_conformance::expect::Registry {
             exit(1)
         }
     }
+}
+
+// Reports are generated together by the runner's freshly rebuilt cargo-patina.
+// Never infer identity from their filenames.
+fn checked_registry(
+    manifest: &syscall_conformance::expect::Manifest,
+    host: &str,
+    reference: &str,
+) -> (
+    syscall_conformance::expect::Registry,
+    Vec<syscall_conformance::expect::Registry>,
+) {
+    let registry = registry_from(host);
+    let references = vec![registry_from(reference)];
+    if registry.os != std::env::consts::OS || registry.arch != std::env::consts::ARCH {
+        eprintln!("conform: host registry target does not match this executable");
+        exit(1);
+    }
+    match validate_manifest(manifest, &registry, &references) {
+        Ok(nonhost) => {
+            eprintln!(
+                "manifest applicability: {} nonhost row instances",
+                nonhost.len()
+            );
+            for line in nonhost {
+                eprintln!("{line}");
+            }
+        }
+        Err(error) => {
+            eprintln!("conform: {error}");
+            exit(1);
+        }
+    }
+    (registry, references)
 }
 
 fn expectation_from(path: &str) -> syscall_conformance::expect::Expectation {
@@ -325,13 +359,9 @@ fn main() {
             println!("{}", registry_from(&rest[0]).virtual_abi);
         }
         "check-manifest" => {
-            need(rest, 2, "check-manifest");
+            need(rest, 3, "check-manifest");
             let manifest = manifest_from(&rest[0]);
-            let registry = registry_from(&rest[1]);
-            if let Err(error) = validate_manifest(&manifest, &registry) {
-                eprintln!("conform check-manifest: {error}");
-                exit(1);
-            }
+            let (registry, _) = checked_registry(&manifest, &rest[1], &rest[2]);
             println!(
                 "ok: {} probes, every name a registry row (virtual ABI {})",
                 manifest.probe.len(),
@@ -361,9 +391,13 @@ fn main() {
             exit(supervise(&head[0], timeout, &head[2], &head[3], &cmd[1..]));
         }
         "bless" => {
-            need(rest, 9, "bless");
+            need(rest, 10, "bless");
             let manifest = manifest_from(&rest[7]);
-            let registry = registry_from(&rest[8]);
+            let (registry, _) = checked_registry(&manifest, &rest[8], &rest[9]);
+            if rest[3] != registry.os || rest[4] != registry.arch {
+                eprintln!("conform bless: requested target does not match host registry");
+                exit(1);
+            }
             if !manifest.probe.contains_key(&rest[0]) {
                 eprintln!("conform bless: probe {:?} is not in probes.toml", rest[0]);
                 exit(1);
@@ -561,11 +595,18 @@ fn main() {
             }
         }
         "host-check" => {
-            need(rest, 5, "host-check");
+            need(rest, 6, "host-check");
             let manifest = manifest_from(&rest[1]);
-            let registry = registry_from(&rest[2]);
+            let (registry, references) = checked_registry(&manifest, &rest[2], &rest[5]);
             let expected = expectation_from(&rest[3]);
-            match host_gate(&manifest, &registry, &rest[0], &expected.header, &rest[4]) {
+            match host_gate(
+                &manifest,
+                &registry,
+                &references,
+                &rest[0],
+                &expected.header,
+                &rest[4],
+            ) {
                 HostGate::Ok => println!("ok"),
                 HostGate::Unavailable(reason) => {
                     println!("host-unavailable: {reason}");

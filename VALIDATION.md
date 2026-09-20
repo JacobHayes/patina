@@ -716,3 +716,13 @@ arm64 compile regression and the architecture-local legacy sections in
 synthetic ENOSYS observations. Partial-probe omissions are named on stderr,
 not counted as passing row coverage or as whole-leg skips (see the testbed
 README). A planted wrong-number mapping makes the detector fail.
+
+The manifest's architecture-applicability detector (`conform selftest`, run by
+`run.sh --selftest`) pairs with shared-manifest validation on ARM. Separate
+complete Linux x86_64/aarch64 reports from the same rebuilt binary preserve the
+public syscall JSON and target-local numbered rows. Planted missing/wrong-target
+inventories, ABI mismatches, typos and wrong row kinds must fail; known foreign
+rows must be explicitly reported as nonhost. Contrasting future host/foreign
+kernel dates and foreign absent rows enforce that only host metadata can gate
+execution or absence observations. Check, host-check and bless share coverage
+validation; this does not bless ARM outputs or waive frozen trace obligations.
