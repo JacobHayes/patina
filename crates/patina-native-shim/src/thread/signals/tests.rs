@@ -129,8 +129,19 @@ pub(in crate::thread) fn install_handler(
     flags: u64,
     mask: u64,
 ) -> Action {
-    // The unit binary does not link C interposers: obtain glibc's real restorer,
-    // then install and observe the action through the production kernel ABI.
+    let mut action = native_handler_action(sig, handler);
+    action.flags = (action.flags & SA_RESTORER) | flags;
+    action.mask = mask;
+    assert_eq!(
+        unsafe { patina_signal_action(sig, &action, std::ptr::null_mut(), SIGSET_BYTES) },
+        0
+    );
+    action
+}
+
+fn native_handler_action(sig: i32, handler: extern "C" fn(i32)) -> Action {
+    // No C interposers are linked into the unit binary. Query the native kernel
+    // action, including the flag that says whether its restorer slot is valid.
     unsafe extern "C" {
         fn signal(sig: i32, handler: usize) -> usize;
     }
@@ -152,14 +163,27 @@ pub(in crate::thread) fn install_handler(
         ),
         0
     );
-    action.flags = SA_RESTORER | flags;
-    action.mask = mask;
-    assert_eq!(
-        unsafe { patina_signal_action(sig, &action, std::ptr::null_mut(), SIGSET_BYTES) },
-        0
-    );
     action
 }
+
+// Class detector for native-to-fixture ABI drift: compare restorer validity
+// against libc's kernel action, then actually return through the handler frame.
+#[test]
+fn fixture_preserves_native_restorer_validity() {
+    isolated(|| {
+        let native = native_handler_action(SIGUSR1, handler);
+        let installed = install_handler(SIGUSR1, handler, SA_RESTART, 0);
+        assert_eq!(installed.flags & SA_RESTORER, native.flags & SA_RESTORER);
+        if native.flags & SA_RESTORER != 0 {
+            assert_ne!(native.restorer, 0);
+            assert_eq!(installed.restorer, native.restorer);
+        }
+        generate(SIGUSR1);
+        patina_signal_deliver();
+        assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
+    });
+}
+
 pub(in crate::thread) fn action(restart: bool) {
     install_handler(SIGUSR1, handler, if restart { SA_RESTART } else { 0 }, 0);
 }

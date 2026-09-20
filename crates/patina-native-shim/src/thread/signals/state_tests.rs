@@ -243,14 +243,19 @@ fn stacked_delivery_releases_frames_with_one_host_unblock() {
 fn raw_rt_sigaction_installs_and_reports_oldact() {
     isolated(|| {
         let original = install_handler(SIGUSR1, handler, SA_RESTART, bit(SIGUSR2));
-        assert_ne!(original.restorer, 0);
+        // Paired with fixture_preserves_native_restorer_validity: a restorer
+        // pointer is meaningful only when the native action marks it valid.
+        if original.flags & SA_RESTORER != 0 {
+            assert_ne!(original.restorer, 0);
+        }
+        #[cfg(target_arch = "x86_64")]
         assert_ne!(original.flags & SA_RESTORER, 0);
         set_mask(SIG_BLOCK, bit(SIGUSR1));
         generate(SIGUSR1);
         directed(current_task(), SIGUSR1);
         let ignore = Action {
             handler: SIG_IGN,
-            flags: SA_RESTORER,
+            flags: original.flags & SA_RESTORER,
             restorer: original.restorer,
             mask: bit(SIGUSR2),
         };
