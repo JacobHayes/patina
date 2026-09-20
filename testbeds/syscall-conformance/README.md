@@ -166,8 +166,8 @@ the others before recording anything; the runner counts those legs as skips.
 
 | `--mode` | leg | what must hold |
 |---|---|---|
-| `native` | the plain binary with `--strict` under `conform supervise` | the normalized stream — including the `__termination` line the supervisor appended from `waitpid` — equals `expected/<probe>.<os>-<arch>.jsonl` exactly; host kernel ≥ the blessing kernel; a host lacking an exercised row's number, or implementing a row the probe asserts `absent`, is `HOST-UNAVAILABLE` (counted, not failed) |
-| `patina` | `cargo patina run … --seed 1 --format json -- --vehicle V` under `conform supervise` | the guest stream is unpacked from the `patina.result/v1` envelope and its `guest_exit` becomes the `__termination` line; every field difference from the blessing is declared in `divergences.toml`, and every declaration still diverges (a stale one fails) |
+| `native` | the plain binary with `--strict` under `conform supervise` | the normalized stream — including the `__termination` line the supervisor appended from `waitpid` — matches `expected/<probe>.<os>-<arch>.jsonl` under the semantic comparison below; host kernel ≥ the blessing kernel; a host lacking an exercised row's number, or implementing a row the probe asserts `absent`, is `HOST-UNAVAILABLE` (counted, not failed) |
+| `patina` | `cargo patina run … --seed 1 --format json -- --vehicle V` under `conform supervise` | the guest stream is unpacked from the `patina.result/v1` envelope and its `guest_exit` becomes the `__termination` line; every semantic field difference from the blessing is declared in `divergences.toml`, and every declaration still diverges (a stale one fails) |
 | `replay` | `run --record --format json` then `replay --format json` | the two guest streams (termination included) are byte-identical and the recorded one passes the patina diff |
 | `leak` | the shim-linked binary directly under `strace`; a probe blessed to die by a signal is also run DIRECTLY (no `cargo patina`, no strace) and its `waitpid` outcome — signal and core flag — must be the blessed one, so an exit code a supervisor translates into "signaled" does not pass | zero host syscalls outside the loader prelude (the local `run.sh` default-deny filter (a separate filter from `native-boundary/containment.awk`, but expanded for conformance), trace set widened to `%process,%signal,%ipc`) plus the ONE signal allowance — `tgkill`/`tkill`/`rt_tgsigqueueinfo` whose target is the calling thread itself, any signal number, never a name list, never a uid, never a process-directed `kill` — and the process ends the way the blessing says (strace re-raises the tracee's terminating signal on itself) |
 
@@ -224,6 +224,27 @@ the differ applies before comparing (never regex over text):
 | `identity` | pid/uid/gid, same labeling (`id@0`) |
 | `monotonic` | a clock reading: `mono:first`, `mono:>=`, `mono:-` relative to the previous reading of the same op/field |
 | `mask:0oNNN` | keep only these bits |
+
+Both native and patina diffs allow only these Linux-documented host alternatives
+([rename(2)](https://man7.org/linux/man-pages/man2/rename.2.html),
+[statx(2)](https://man7.org/linux/man-pages/man2/statx.2.html)):
+
+- Failed `renameat` with identical arguments and return `-1` compares `EEXIST`
+  and `ENOTEMPTY` equally: both mean a nonempty destination directory. This does
+  not apply to other operations (notably `renameat2` with NOREPLACE), or to
+  `ENOTDIR` when a directory is renamed onto a regular file.
+- Successful `statx` with identical arguments compares returned mask bits for
+  every requested field AND every observed field: TYPE/kind, MODE/perm,
+  NLINK/nlink, UID/uid, GID/gid, INO/ino, SIZE/size (not emitted for directories),
+  BTIME/btime_present. Other unrequested validity bits may differ. All field
+  values and checks still compare; unknown fields or missing/malformed masks
+  refuse this allowance. Requested BLOCKS omissions remain declared gaps.
+
+These are comparison relations, not normalization tags: raw errnos and masks
+remain in captured streams and expectations for diagnosis. Record/replay remains
+byte-exact. The differ selftest exercises both directions and plants wrong
+errnos, requested/observed-bit loss, value/argument/return/error drift, malformed
+masks and unknown fields; none may be hidden by these relations.
 
 Semantic properties are `p.check(label, cond)` events (`op: check`, `ret`
 1/0). Natively (`--strict`) a false check panics; under patina it is recorded

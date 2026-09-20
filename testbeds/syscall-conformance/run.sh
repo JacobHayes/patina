@@ -8,7 +8,8 @@
 # typed observation events as JSONL on stdout. The same binary runs in four
 # modes, and every leg either passes, fails loudly, or is a COUNTED skip:
 #   native  as a plain program — the host kernel is the oracle. The normalized
-#           stream must equal expected/<probe>.<os>-<arch>.jsonl exactly; the
+#           stream must match expected/<probe>.<os>-<arch>.jsonl under the
+#           README semantic comparison (raw replay stays byte-exact); the
 #           host kernel must be at least the blessing kernel; a host kernel that
 #           predates one of the probe's rows, or implements a row the probe
 #           asserts absent (past the virtual ABI level), marks it

@@ -584,6 +584,16 @@ detector that "would fire" is only evidence if it actually executes.
 
 ### Filesystem fixup confidence boundary
 
+The conformance differ compares Linux-permitted host alternatives semantically:
+`renameat` EEXIST/ENOTEMPTY for a nonempty destination (never ENOTDIR or other
+operations), and successful `statx` validity masks on requested plus observed
+fields. Raw observations and record/replay byte identity are unchanged. The
+class-level differ selftest pairs the x86 host-oracle regression with both-way
+controls and planted wrong errnos, lost requested/observed validity bits,
+field/argument/return/error drift and malformed/unknown mask contracts. See the
+testbed README for the exact field mapping; filesystem allocation and
+directory-onto-file gaps remain declared, not waived.
+
 The fs probes cover missing-path/closed-fd OMIT, AT_EMPTY_PATH, symlink chown,
 retained FIFO timestamps/ownership, zero I/O, EOF after truncation, fallocate
 overflow and truthful allocation masks across all three vehicles. Planted dropped

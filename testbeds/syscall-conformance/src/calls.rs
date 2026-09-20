@@ -408,8 +408,9 @@ impl Probe {
         (result, view)
     }
 
-    /// `statx`; the returned mask is recorded raw (which bits a kernel fills is
-    /// a conformance fact), the struct members through the shared stat view.
+    /// `statx`; retain the raw returned mask for diagnosis. The differ compares
+    /// requested/observed validity bits; extra unrequested bits are host policy.
+    /// Struct members are recorded through the shared stat view.
     #[allow(clippy::unnecessary_cast)]
     pub fn statx(
         &self,

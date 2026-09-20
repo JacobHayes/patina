@@ -818,6 +818,74 @@ fn flatten(event: &Event) -> BTreeMap<String, Value> {
     map
 }
 
+/// Linux rename(2)/statx(2) permit these alternatives independently of the
+/// host filesystem. This is a comparison relation, NOT a raw-stream rewrite:
+/// record/replay still compares every byte, and diagnostics retain both values.
+fn permitted_host_variation(expected: &Event, actual: &Event, path: &str) -> bool {
+    if expected.op != actual.op || expected.args != actual.args || expected.ret != actual.ret {
+        return false;
+    }
+    if path == "errno" && expected.op == "renameat" && expected.ret.as_i64() == Some(-1) {
+        // renameat has no NOREPLACE flag: both errnos designate a nonempty
+        // destination directory. In particular ENOTDIR is NOT in this pair.
+        return matches!(
+            (expected.errno.as_deref(), actual.errno.as_deref()),
+            (Some("EEXIST"), Some("ENOTEMPTY")) | (Some("ENOTEMPTY"), Some("EEXIST"))
+        );
+    }
+    if path != "fields.mask"
+        || expected.op != "statx"
+        || expected.ret.as_i64() != Some(0)
+        || expected.errno.is_some()
+        || actual.errno.is_some()
+    {
+        return false;
+    }
+    let Some(requested) = expected
+        .args
+        .get("mask")
+        .and_then(Value::as_u64)
+        .filter(|mask| *mask <= u32::MAX as u64)
+    else {
+        return false;
+    };
+    let Some(expected_mask) = expected
+        .fields
+        .get("mask")
+        .and_then(Value::as_u64)
+        .filter(|mask| *mask <= u32::MAX as u64)
+    else {
+        return false;
+    };
+    let Some(actual_mask) = actual
+        .fields
+        .get("mask")
+        .and_then(Value::as_u64)
+        .filter(|mask| *mask <= u32::MAX as u64)
+    else {
+        return false;
+    };
+    // Validity bits for every field emitted by Probe::stat_fields/statx in
+    // calls.rs. Values remain compared normally, even when not requested.
+    // Unknown fields fail closed until their validity mapping is specified.
+    let mut relevant = requested;
+    for field in expected.fields.keys().chain(actual.fields.keys()) {
+        relevant |= match field.as_str() {
+            "mask" => 0,
+            "kind" => 0x001,          // STATX_TYPE
+            "perm" => 0x002,          // STATX_MODE
+            "nlink" => 0x004,         // STATX_NLINK
+            "uid" => 0x008,           // STATX_UID
+            "gid" => 0x010,           // STATX_GID
+            "ino" => 0x100,           // STATX_INO
+            "size" => 0x200,          // STATX_SIZE (not emitted for directories)
+            "btime_present" => 0x800, // STATX_BTIME, even when false
+            _ => return false,
+        };
+    }
+    expected_mask & relevant == actual_mask & relevant
+}
+
 fn describe_event(event: &Event) -> String {
     let args: Vec<String> = event
         .args
@@ -1024,7 +1092,7 @@ pub fn diff(
         for path in paths {
             let av = a.get(path).cloned().unwrap_or(Value::Null);
             let ev = e.get(path).cloned().unwrap_or(Value::Null);
-            if av == ev {
+            if av == ev || permitted_host_variation(&expected_event, &actual_event, path) {
                 continue;
             }
             let declared = if mode == Mode::Patina {
@@ -1698,6 +1766,164 @@ pub fn selftest() -> Outcome {
             }
         }
     };
+
+    // Class detector: host-permitted answers versus required syscall semantics.
+    let rename: Event = serde_json::from_value(serde_json::json!({
+        "seq": 0, "op": "renameat", "args": {"old": "a", "new": "b",
+        "olddirfd": "AT_FDCWD", "newdirfd": "AT_FDCWD"},
+        "ret": -1, "errno": "EEXIST", "fields": {}, "norm": {}
+    }))
+    .unwrap();
+    let statx: Event = serde_json::from_value(serde_json::json!({
+        "seq": 0, "op": "statx", "args": {"dirfd": "AT_FDCWD", "path": "a",
+        "flags": 0, "mask": 2048}, "ret": 0, "errno": null,
+        "fields": {"mask": 8191, "kind": "file", "perm": 416, "nlink": 1,
+        "uid": "id@0", "gid": "id@0", "ino": "ino@0", "size": 0,
+        "btime_present": true}, "norm": {}
+    }))
+    .unwrap();
+    let mut variants = Vec::new();
+    let mut allowed = rename.clone();
+    allowed.errno = Some("ENOTEMPTY".into());
+    variants.push((
+        "renameat nonempty destination",
+        rename.clone(),
+        allowed,
+        true,
+    ));
+    for errno in ["ENOTDIR", "ENOENT", "EACCES"] {
+        let mut wrong = rename.clone();
+        wrong.errno = Some(errno.into());
+        variants.push(("renameat unrelated errno", rename.clone(), wrong, false));
+    }
+    let mut allowed = statx.clone();
+    allowed.fields.insert("mask".into(), Value::from(7999));
+    variants.push((
+        "statx unrequested extra bits",
+        statx.clone(),
+        allowed.clone(),
+        true,
+    ));
+    for bit in [0x1, 0x2, 0x4, 0x8, 0x10, 0x100, 0x200, 0x800] {
+        let mut wrong = allowed.clone();
+        wrong.fields.insert("mask".into(), Value::from(7999 & !bit));
+        variants.push((
+            "statx requested/observed validity bit",
+            statx.clone(),
+            wrong,
+            false,
+        ));
+    }
+    for bit in [0x20, 0x40, 0x80, 0x400, 0x1000] {
+        let mut requested = statx.clone();
+        requested.args.insert("mask".into(), Value::from(bit));
+        let mut wrong = requested.clone();
+        wrong.fields.insert("mask".into(), Value::from(8191 & !bit));
+        variants.push(("statx requested bit", requested, wrong, false));
+    }
+    for field in [
+        "kind",
+        "perm",
+        "nlink",
+        "uid",
+        "gid",
+        "ino",
+        "size",
+        "btime_present",
+    ] {
+        let mut wrong = allowed.clone();
+        wrong.fields.insert(field.into(), Value::Null);
+        variants.push(("statx observed value drift", statx.clone(), wrong, false));
+    }
+    for op in ["renameat2", "unlinkat", "openat"] {
+        let mut expected = rename.clone();
+        expected.op = op.into();
+        expected.args.insert("flags".into(), Value::from(1));
+        let mut wrong = expected.clone();
+        wrong.errno = Some("ENOTEMPTY".into());
+        variants.push(("unrelated operation errno", expected, wrong, false));
+    }
+    for base in [rename.clone(), statx.clone()] {
+        for field in ["ret", "args", "errno"] {
+            let mut wrong = base.clone();
+            match field {
+                "ret" => wrong.ret = Value::from(7),
+                "args" => {
+                    wrong.args.insert("path".into(), Value::from("other"));
+                }
+                _ => wrong.errno = Some("EIO".into()),
+            }
+            variants.push(("operation contract drift", base.clone(), wrong, false));
+        }
+    }
+    for bad_mask in [Value::Null, Value::from("bad"), Value::from(-1)] {
+        let mut expected = statx.clone();
+        expected.args.insert("mask".into(), bad_mask);
+        let mut actual = expected.clone();
+        actual.fields.insert("mask".into(), Value::from(7999));
+        variants.push(("statx malformed request", expected, actual, false));
+    }
+    for mutation in [
+        "missing request",
+        "missing mask",
+        "unknown field",
+        "wide mask",
+    ] {
+        let mut expected = statx.clone();
+        match mutation {
+            "missing request" => {
+                expected.args.remove("mask");
+            }
+            "missing mask" => {
+                expected.fields.remove("mask");
+            }
+            "unknown field" => {
+                expected.fields.insert("future".into(), Value::from(1));
+            }
+            _ => {
+                expected.args.insert("mask".into(), Value::from(u64::MAX));
+            }
+        }
+        let mut actual = expected.clone();
+        actual.fields.insert("mask".into(), Value::from(7999));
+        variants.push(("statx incomplete/unknown contract", expected, actual, false));
+    }
+    // Narrow directory request: SIZE is not observed, BTIME presence still is.
+    let mut directory = statx.clone();
+    directory.args.insert("mask".into(), Value::from(3));
+    directory.fields.remove("size");
+    directory.fields.insert("kind".into(), Value::from("dir"));
+    directory
+        .fields
+        .insert("btime_present".into(), Value::from(false));
+    directory.fields.insert("mask".into(), Value::from(6143));
+    let mut other = directory.clone();
+    other.fields.insert("mask".into(), Value::from(5951));
+    variants.push(("statx narrow directory request", directory, other, true));
+    for (name, left, right, want_ok) in variants {
+        for (e, a) in [(left.clone(), right.clone()), (right, left)] {
+            for mode in [Mode::Native, Mode::Patina] {
+                let expected = Expectation {
+                    header: header.clone(),
+                    events: with_term(vec![e.clone()], Termination::Exited(0)),
+                };
+                case(
+                    name,
+                    want_ok,
+                    diff(
+                        mode,
+                        "semantic/contract",
+                        "libc",
+                        &expected,
+                        with_term(vec![a.clone()], Termination::Exited(0)),
+                        &[],
+                        None,
+                    ),
+                    "",
+                );
+            }
+        }
+    }
 
     let probe = "selftest/synthetic";
     let d = |mode, actual: Vec<Event>, divs: &[Divergence], stderr: Option<&str>| {
