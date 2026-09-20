@@ -55,8 +55,8 @@ crates/patina-native-shim/
   abi/linux/syscall_64.tbl    vendored upstream x86_64 table (mainline snapshot;
                               scripts/refresh-syscall-tables.sh diffs/refreshes)
   abi/linux/syscall.tbl       vendored generic table (arm64 uses it since 6.11)
-  abi/darwin/syscalls.master  vendored xnu table (parsed by a later arc; present so the
-                              (os, arch) keying is real from day one)
+  abi/darwin/                 pinned XNU BSD/Mach/ARM64 reference sources
+  src/registry/darwin.rs      guarded source inventory, independent of Linux models
   src/registry/table.rs       the table parser and the per-arch ABI-column rule
   src/registry/syscalls.rs    const SYSCALLS: &[SyscallRow]
   src/registry/symbols.rs     const SYMBOLS: &[SymbolRow]
@@ -93,7 +93,7 @@ in `patina-target` agree with the registry (an interposed symbol is never in a
 deny list; a `Trap` symbol is in the deny-trap list).
 
 `cargo patina syscalls [--os linux] [--arch x86_64] [--format json]` prints the
-table with dispositions and reasoning (`patina.syscalls/v1`), so humans and
+table with dispositions and reasoning (`patina.syscalls/v2`), so humans and
 agents inspect the live registry, never a doc. `syscall(2)` (the glibc wrapper)
 forwards into the same dispatcher instead of its two-number allowlist.
 
@@ -227,3 +227,41 @@ table parse. One targeted jj commit per builder, pushed in batches, CI as the
 confirmation layer; shim/runtime diffs also run the macOS ladder on jrh-mini.
 Doc updates ride each commit: ARCHITECTURE native-shim list, ESCAPE-CLASSES
 residual 5, VALIDATION gate taxonomy, testbeds/README row, `llms.txt` verb map.
+
+## Cross-platform entry inventory
+
+`patina.syscalls/v2` is one target-local report contract for Linux x86_64,
+Linux aarch64, and Darwin aarch64. Darwin x86_64 is explicitly unavailable.
+Common fields are `os`, `arch`, `scope`, `sources`, `metadata`, `rows`,
+`symbols`, and `summary`. Row identity is `(namespace, nr, subcode)`; `variants`
+retain source entry names, conditions, and table status. Linux runtime fields
+(`disposition`, `family`, `reasoning`, `closes_in`, `probe`, `since`) live under
+the row's `linux` object, and its virtual ABI lives at
+`metadata.linux.virtual_abi`. Reports contain only the selected target's rows;
+the conformance harness still loads host and reference Linux inventories
+separately. Frozen expectations and host/reference acceptance policy do not change.
+
+Darwin references one pinned XNU revision (`registry/darwin.rs::REVISION`). Its
+BSD slots, Mach table slots (negative selectors), ARM special time traps, and
+ARM platform selector/subcodes are inventoried, including conditional alternatives,
+obsolete/invalid slots, and Mach slots shadowed by ARM dispatch. Mach table slot
+0 is not selected by the negative-trap route; slots 3/4 are shadowed by ARM time
+traps. `nosys`, `enosys`, `invalid`, and `removed` describe source declarations,
+not observed native errno or a Patina runtime disposition. Build guards remain
+visible rather than guessing the running host's configuration. The ARM64 Mach
+47 branch is explicitly identified; platform subcodes use x3.
+
+Darwin rows say raw entries are `not-interposed`; C symbol statuses are a separate
+layer. Explicit Darwin mappings are checked against parsed entries, while shared
+symbols carrying Linux semantic associations are reported as not mapped on Darwin
+rather than guessed by name. No Linux ABI date or disposition is borrowed. This
+inventory does not expand runtime support or establish whole-run containment.
+MIG message IDs, commpage APIs, and unassigned selectors are outside this
+kernel-entry inventory, not silently counted as supported syscalls.
+
+The parsers refuse malformed/unknown row syntax, duplicate selectors, missing
+slots, and lost conditional alternatives. Inventory mutation tests plant dropped
+rows/variants and changed namespace/number/status. These are the class-level
+pairing for individual source-row regression pins. Refresh reads the pinned
+revision and source list from the registry; changing that reference is deliberate
+and reviewed, not an ambient kernel-version update.

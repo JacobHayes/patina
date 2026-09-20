@@ -18,8 +18,7 @@
 //!   and the remaining columns (`arc`, `csky`, `nios2`, `or1k`, `riscv`) are
 //!   other architectures' private numbers.
 //!
-//! The Darwin table (`syscalls.master`) is vendored so the `(os, arch)` keying
-//! is real from day one; it is not parsed yet (a later arc adds the rows).
+//! Darwin BSD, Mach, and ARM-specific entries are parsed by [`super::darwin`].
 
 use super::Arch;
 
@@ -27,7 +26,7 @@ use super::Arch;
 pub const LINUX_X86_64_TABLE: &str = include_str!("../../abi/linux/syscall_64.tbl");
 /// The vendored generic table (`scripts/syscall.tbl`), used by arm64.
 pub const LINUX_GENERIC_TABLE: &str = include_str!("../../abi/linux/syscall.tbl");
-/// The vendored xnu table (`bsd/kern/syscalls.master`); present, not parsed.
+/// The vendored XNU BSD table (`bsd/kern/syscalls.master`).
 pub const DARWIN_TABLE: &str = include_str!("../../abi/darwin/syscalls.master");
 
 /// One line of a Linux table that the arch's ABI rule selects.

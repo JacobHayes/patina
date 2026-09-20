@@ -2256,18 +2256,17 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
 
 const SYSCALLS: Verb = Verb {
     name: "syscalls",
-    summary: "Print the native shim's syscall registry: every kernel number, its disposition, and the symbols that serve it.",
-    synopsis: &["cargo patina syscalls [--os linux] [--arch x86_64|aarch64]"],
+    summary: "Print the target-local kernel-entry inventory and C symbol coverage.",
+    synopsis: &["cargo patina syscalls [--os linux|darwin] [--arch x86_64|aarch64]"],
     prose: "\
-`syscalls` prints the live registry the native shim's syscall-user-dispatch table is \
-generated from: one row per number in the vendored kernel table for the selected OS and \
-architecture (default: this host), with its family, disposition (modeled, passthrough, \
-constant, soft-deny, trap(class), absent), the reasoning, the arc that changes it, and the \
-libc/pthread symbols that serve it; then the symbol inventory for that OS, including the \
-known ABI spellings the shim does NOT define. The registry is code, gated against the \
-vendored tables, so this output is the truth about what a raw syscall or a libc call does \
-under patina — never a doc that could drift. Only Linux has rows today; `--os darwin` is \
-refused by name until the xnu table gets rows. The JSON form emits schema patina.syscalls/v1.",
+`syscalls` prints the target-local kernel-entry inventory and C symbol layer \
+(default: this host). Linux x86_64/aarch64 rows describe runtime dispositions \
+and drive syscall-user-dispatch. Darwin aarch64 inventories pinned BSD, Mach \
+and ARM-specific entries, including guarded alternatives and invalid slots; \
+source status and C symbol interposition are not raw-entry models. Darwin \
+x86_64 is not inventoried. MIG messages and commpage APIs are outside the \
+kernel-entry scope. The JSON form \
+emits the shared schema patina.syscalls/v2.",
     families: &[fam(Family::Sole, "`syscalls`", None)],
     groups: &[Group {
         title: "Registry selection",

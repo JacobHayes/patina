@@ -169,20 +169,18 @@ unknown option.
   inverted is refused rather than obeyed. An external oracle is serial unless
   `--jobs N` opts in, because only a patina-owned oracle is hermetic by
   construction.
-- `cargo patina syscalls [--os linux] [--arch x86_64|aarch64]`
-  Print the native shim's syscall registry — the code the SUD dispatcher is
-  generated from: one row per number in the vendored kernel table (default:
-  this host's OS/arch) with family, disposition (`modeled`, `passthrough`,
-  `constant(v)`, `soft-deny(errno)`, `trap(class)`, `absent`), reasoning, the
-  arc that changes it, and the libc symbols that serve it; then the symbol
-  inventory, including known ABI spellings the shim does NOT define (`absent`).
-  Linux only today (`--os darwin` is refused by name). The header carries the
-  virtual kernel ABI level (`virtual_abi`; a row whose `since` is newer is
-  `absent` = ENOSYS) and the summary counts and names the modeled rows no
-  conformance probe covers yet (`modeled rows without a probe: N (...)`;
-  `summary.modeled_without_probe`). JSON output is schema `patina.syscalls/v1`
-  (per row: `probe`, `since`). Consult this, not a doc, for what a raw syscall
-  or a libc call does under patina.
+- `cargo patina syscalls [--os linux|darwin] [--arch x86_64|aarch64]`
+  Print a target-local kernel-entry inventory and its C symbol layer (default:
+  this host). Linux x86_64/aarch64 rows carry runtime dispositions; Darwin
+  aarch64 inventories pinned BSD, Mach, ARM-special and platform entries,
+  preserving guards and invalid slots without claiming raw-entry models.
+  Darwin x86_64 is not inventoried. Shared JSON schema: `patina.syscalls/v2`.
+  Row identity is `(namespace, nr, subcode)`; `variants` carry source status.
+  Linux runtime fields are under each row's `linux` object (`disposition`,
+  `probe`, `since`, etc.); ABI is `metadata.linux.virtual_abi`, and unprobed
+  models remain in `summary.modeled_without_probe`. Darwin has no virtual ABI;
+  `darwin.raw_entry` is `not-interposed`, independent of C symbol status.
+  MIG messages and commpage APIs are outside the kernel-entry scope.
 
 ## Fault + buggify knobs (seed-driven, default off)
 

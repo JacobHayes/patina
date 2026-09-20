@@ -43,12 +43,22 @@ cd "$(dirname "$0")/.."
 # vendored path -> upstream URL. The Linux tables come from torvalds/linux
 # master (x86_64: arch/x86/entry/syscalls/syscall_64.tbl; the generic table
 # arm64 has used since 6.11: scripts/syscall.tbl); the Darwin table from
-# apple-oss-distributions/xnu main.
+# apple-oss-distributions/xnu at the registry-pinned reference revision.
 tables=(
   'crates/patina-native-shim/abi/linux/syscall_64.tbl=https://raw.githubusercontent.com/torvalds/linux/master/arch/x86/entry/syscalls/syscall_64.tbl'
   'crates/patina-native-shim/abi/linux/syscall.tbl=https://raw.githubusercontent.com/torvalds/linux/master/scripts/syscall.tbl'
-  'crates/patina-native-shim/abi/darwin/syscalls.master=https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/kern/syscalls.master'
 )
+
+# The Rust source is authoritative for the revision and source-path pairs.
+darwin_registry=crates/patina-native-shim/src/registry/darwin.rs
+revision=$(sed -n 's/^pub const REVISION: &str = "\([^"]*\)";/\1/p' "$darwin_registry")
+[[ $revision =~ ^[0-9a-f]{40}$ ]] || { echo "invalid Darwin revision" >&2; exit 2; }
+source_count=0
+while IFS=' ' read -r file upstream; do
+  tables+=("crates/patina-native-shim/abi/darwin/$file=https://raw.githubusercontent.com/apple-oss-distributions/xnu/$revision/$upstream")
+  source_count=$((source_count + 1))
+done < <(sed -n '/^pub const SOURCES:/,/^];/s/^    ("\([^"]*\)", "\([^"]*\)"),/\1 \2/p' "$darwin_registry")
+[[ $source_count -eq 6 ]] || { echo "incomplete Darwin source list" >&2; exit 2; }
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT

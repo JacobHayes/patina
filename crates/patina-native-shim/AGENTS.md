@@ -357,3 +357,9 @@ ARCHITECTURE.md "Native (linked shim)" and `crates/cargo-patina/build.rs`).
   the version digit, but when a fresh probe fails in a way its source cannot
   explain, suspect the ambient facts (name, path, size, layout) before the
   code.
+
+Darwin inventory is separate from Linux runtime rows: `registry/darwin.rs` parses
+pinned BSD/Mach sources and inventories ARM64 special/platform entries. Preserve
+guarded alternatives and invalid slots; do not infer a runtime model or a native
+errno from a source declaration. The pinned revision/source list also drives
+refresh. Raw-entry coverage and C symbol status must remain distinct.

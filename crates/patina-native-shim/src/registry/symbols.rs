@@ -11,8 +11,8 @@
 //!
 //! `Serves::Syscalls` names Linux rows (the semantic operation a wrapper is the
 //! libc face of, not a claim that glibc issues that exact instruction);
-//! `Serves::Darwin` names xnu `syscalls.master` entries for Darwin-only symbols
-//! until the Darwin table gets rows of its own.
+//! `Serves::Darwin` binds Darwin-only symbols to validated XNU entry names.
+//! These associations are not claims that raw traps reach the symbol model.
 
 use super::{Platform, Serves, SymbolRow, SymbolStatus};
 
@@ -1495,19 +1495,19 @@ pub const SYMBOLS: &[SymbolRow] = &[
     s(
         "mach_absolute_time",
         Platform::Darwin,
-        Serves::LibcOnly,
+        Serves::Darwin(&["handle_mach_absolute_time_trap"]),
         SymbolStatus::Partial,
     ),
     s(
         "mach_timebase_info",
         Platform::Darwin,
-        Serves::LibcOnly,
+        Serves::Darwin(&["mach_timebase_info_trap"]),
         SymbolStatus::Modeled,
     ),
     s(
         "mach_wait_until",
         Platform::Darwin,
-        Serves::LibcOnly,
+        Serves::Darwin(&["mach_wait_until_trap"]),
         SymbolStatus::Partial,
     ),
     s(
@@ -1639,7 +1639,7 @@ pub const SYMBOLS: &[SymbolRow] = &[
     s(
         "mach_host_self",
         Platform::Darwin,
-        Serves::LibcOnly,
+        Serves::Darwin(&["host_self_trap"]),
         SymbolStatus::Modeled,
     ),
     s(

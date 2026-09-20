@@ -154,7 +154,7 @@ for target in "$host_arch:$registry" "$reference_arch:$reference"; do
   fi
 done
 if ! virtual_abi="$("$conform" abi "$registry")"; then
-  echo "FATAL: $registry is not a patina.syscalls/v1 registry" >&2; exit 3
+  echo "FATAL: $registry is not a patina.syscalls/v2 registry" >&2; exit 3
 fi
 if ! "$conform" check-manifest "$manifest" "$registry" "$reference" >/dev/null; then
   echo "FATAL: probes.toml disagrees with the registry (see above)" >&2; exit 3

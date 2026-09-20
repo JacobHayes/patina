@@ -27,6 +27,7 @@
 //!   (`syscalls::tests`): the virtual kernel answers `ENOSYS` exactly as a
 //!   kernel of that release does.
 
+pub mod darwin;
 pub mod symbols;
 pub mod syscalls;
 pub mod table;
@@ -406,8 +407,8 @@ pub enum Serves {
     /// rows — the semantic operation, not a claim that glibc issues exactly
     /// that instruction.
     Syscalls(&'static [&'static str]),
-    /// A Darwin-only symbol's xnu operations (`syscalls.master` names), kept as
-    /// names until the Darwin table gets rows of its own.
+    /// A Darwin-only symbol's explicit BSD, Mach, or ARM-special entry names.
+    /// These semantic associations do not claim raw-entry interposition.
     Darwin(&'static [&'static str]),
     /// The libc `syscall(2)` vehicle: every row, through the dispatcher.
     Dispatcher,

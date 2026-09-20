@@ -422,7 +422,7 @@ pub fn load_manifest(text: &str) -> Result<Manifest, String> {
 }
 
 /// The registry as `cargo patina syscalls --format json` (schema
-/// `patina.syscalls/v1`) reports it for the host arch: the virtual ABI level,
+/// `patina.syscalls/v2`) reports it for the host arch: the virtual ABI level,
 /// every row's disposition kind and `since`, and the symbol rows.
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
@@ -437,7 +437,7 @@ pub struct Registry {
     pub symbols: BTreeSet<String>,
 }
 
-pub const REGISTRY_SCHEMA: &str = "patina.syscalls/v1";
+pub const REGISTRY_SCHEMA: &str = "patina.syscalls/v2";
 
 pub fn load_registry(text: &str) -> Result<Registry, String> {
     let json: Value =
@@ -448,7 +448,10 @@ pub fn load_registry(text: &str) -> Result<Registry, String> {
             json["schema"]
         ));
     }
-    let virtual_abi = json["virtual_abi"]
+    if json["os"] != "linux" {
+        return Err("conformance requires a Linux target-local inventory".into());
+    }
+    let virtual_abi = json["metadata"]["linux"]["virtual_abi"]
         .as_str()
         .ok_or("registry json: no virtual_abi")?
         .to_string();
@@ -470,15 +473,18 @@ pub fn load_registry(text: &str) -> Result<Registry, String> {
         ..Registry::default()
     };
     for row in json["rows"].as_array().ok_or("registry json: no rows")? {
+        if row["namespace"] != "linux" {
+            return Err("registry json: non-Linux row namespace".into());
+        }
         let name = row["name"]
             .as_str()
             .ok_or("registry json: a row has no name")?
             .to_string();
-        let kind = row["disposition"]["kind"]
+        let kind = row["linux"]["disposition"]["kind"]
             .as_str()
             .ok_or_else(|| format!("registry json: row {name} has no disposition kind"))?
             .to_string();
-        if let Some(since) = row["since"].as_str() {
+        if let Some(since) = row["linux"]["since"].as_str() {
             if kernel_version(since).is_none() {
                 return Err(format!(
                     "registry json: row {name} since {since:?} is not a kernel release"
@@ -486,7 +492,9 @@ pub fn load_registry(text: &str) -> Result<Registry, String> {
             }
             registry.since.insert(name.clone(), since.to_string());
         }
-        registry.dispositions.insert(name, kind);
+        if registry.dispositions.insert(name, kind).is_some() {
+            return Err("registry json: duplicate row name".into());
+        }
     }
     for symbol in json["symbols"]
         .as_array()
@@ -2593,4 +2601,33 @@ pub fn selftest() -> Outcome {
     );
 
     Outcome { ok: all_ok, lines }
+}
+
+#[cfg(test)]
+mod registry_schema_tests {
+    use super::*;
+    #[test]
+    fn shared_inventory_loads_linux_metadata_and_refuses_other_contracts() {
+        let report = serde_json::json!({"schema": REGISTRY_SCHEMA, "os": "linux", "arch": "aarch64",
+            "metadata": {"linux": {"virtual_abi": "6.8"}},
+            "rows": [{"namespace": "linux", "name": "read", "nr": 63,
+                "linux": {"disposition": {"kind": "modeled"}, "since": null}}],
+            "symbols": [{"name": "read"}]});
+        assert_eq!(
+            load_registry(&report.to_string()).unwrap().dispositions["read"],
+            "modeled"
+        );
+        for mutation in 0..4 {
+            let mut bad = report.clone();
+            match mutation {
+                0 => bad["schema"] = serde_json::json!("unknown"),
+                1 => bad["os"] = serde_json::json!("darwin"),
+                2 => bad["rows"][0]["namespace"] = serde_json::json!("bsd"),
+                _ => {
+                    bad["metadata"] = Value::Null;
+                }
+            }
+            assert!(load_registry(&bad.to_string()).is_err());
+        }
+    }
 }

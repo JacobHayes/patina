@@ -154,7 +154,7 @@ usage forms, the global flags, and the environment protocol), while
 `cargo patina <verb> --help --format json` returns that one verb's full flag
 detail — handy for scripts and AI agents. Results are available as JSON via
 `--format json` (usually a single `patina.result/v1` envelope; `coverage` emits
-`patina.coverage/v1`; `syscalls` emits `patina.syscalls/v1`; `trace events`
+`patina.coverage/v1`; `syscalls` emits `patina.syscalls/v2`; `trace events`
 streams `patina.trace.events/v1` JSON Lines;
 `trace info|stats|diff` nest their trace payloads in the normal result envelope),
 and `--render out.html` writes a self-contained HTML timeline of any traced run.

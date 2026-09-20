@@ -233,13 +233,10 @@ fn since_newer_than_virtual_abi_is_exactly_the_absent_rows() {
 #[test]
 fn symbol_rows_reference_real_rows() {
     let syscall_names: BTreeSet<&str> = SYSCALLS.iter().map(|row| row.name).collect();
-    let darwin_names: BTreeSet<&str> = table::DARWIN_TABLE
-        .lines()
-        .filter_map(|line| {
-            let inner = line.split_once('{')?.1;
-            let before_paren = inner.split_once('(')?.0;
-            before_paren.rsplit([' ', '*']).next()
-        })
+    let darwin_rows = darwin::inventory();
+    let darwin_names: BTreeSet<&str> = darwin_rows
+        .iter()
+        .flat_map(|row| row.variants.iter().map(|v| v.entry.as_str()))
         .collect();
     let mut names = BTreeSet::new();
     for symbol in SYMBOLS {
