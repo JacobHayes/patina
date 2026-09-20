@@ -27,7 +27,8 @@
 #
 #   gate.sh --selftest    prove each mechanism can refuse: a frozen-path edit,
 #                         a relabeled declaration, a missing and an #[ignore]d
-#                         required test, a recorded trace without the required
+#                         required test, a filtered/failed run, raw child stderr,
+#                         a recorded trace without the required
 #                         op, a termination the guest did not have.
 #
 # Exit codes: 0 PASS, 1 FAIL, 2 usage, 3 FATAL (a check could not run).
@@ -90,9 +91,12 @@ check_frozen_paths() {
 check_unit_tests() {
   local manifest=$1 due=$2 rc=0 crate
   for crate in $(cut -f1 "$due" | sort -u); do
-    local list run c test path matches verdict
-    if ! list="$(cargo test --manifest-path "$manifest" -p "$crate" -- --list 2>/dev/null)"; then
+    local list run c test path matches verdict stderr_file run_status crate_failed
+    stderr_file="$(mktemp "${TMPDIR:-/tmp}/gate-unit-stderr.XXXXXX")" || return 1
+    if ! list="$(cargo test --manifest-path "$manifest" -p "$crate" -- --list 2>"$stderr_file")"; then
       echo "unit tests do not build: $crate (cargo test -p $crate)"
+      cat "$stderr_file" >&2
+      rm -f "$stderr_file"
       rc=1; continue
     fi
     local paths=()
@@ -105,16 +109,34 @@ check_unit_tests() {
         *) echo "unit test ambiguous: $crate $test matches $(tr '\n' ' ' <<<"$matches")"; rc=1 ;;
       esac
     done <"$due"
-    [[ ${#paths[@]} -gt 0 ]] || continue
-    run="$(cargo test --manifest-path "$manifest" -p "$crate" -- --exact "${paths[@]}" 2>&1)"
+    if [[ ${#paths[@]} == 0 ]]; then
+      rm -f "$stderr_file"
+      continue
+    fi
+    # Serial libtest prints `test NAME ...` before running the body. A child's
+    # compiler stderr can arrive before `ok`; never parse the merged streams.
+    run="$(cargo test --manifest-path "$manifest" -p "$crate" -- --exact "${paths[@]}" 2>"$stderr_file")"
+    run_status=$?
+    crate_failed=0
     for path in "${paths[@]}"; do
       verdict="$(awk -v p="$path" '$1 == "test" && $2 == p && / \.\.\. / { print $NF }' <<<"$run" | sort | tr '\n' ' ')"
       case "$verdict" in
         "ok ") ;;
-        "ignored ") echo "unit test ignored: $crate $path (it must run and pass)"; rc=1 ;;
-        *) echo "unit test failing: $crate $path (${verdict:-it did not run})"; rc=1 ;;
+        "ignored ") echo "unit test ignored: $crate $path (it must run and pass)"; crate_failed=1 ;;
+        *) echo "unit test failing: $crate $path (${verdict:-it did not run})"; crate_failed=1 ;;
       esac
     done
+    if [[ $run_status != 0 ]]; then
+      echo "unit test command failed: $crate (exit $run_status)"
+      crate_failed=1
+    fi
+    if [[ $crate_failed == 1 ]]; then
+      printf 'unit test stdout (%s):\n%s\n' "$crate" "$run" >&2
+      printf 'unit test stderr (%s):\n' "$crate" >&2
+      cat "$stderr_file" >&2
+      rc=1
+    fi
+    rm -f "$stderr_file"
   done
   return $rc
 }
@@ -183,10 +205,54 @@ if [[ $selftest == 1 ]]; then
   #    missing, one is #[ignore]d.
   mkdir -p "$tmp/crate/src"
   printf '[workspace]\n[package]\nname = "gate-selftest"\nversion = "0.0.0"\nedition = "2021"\n' >"$tmp/crate/Cargo.toml"
-  printf '#[cfg(test)]\nmod tests {\n    #[test]\n    fn present_and_passing() {}\n    #[test]\n    #[ignore]\n    fn present_but_ignored() {}\n}\n' >"$tmp/crate/src/lib.rs"
+  cat >"$tmp/crate/src/lib.rs" <<'RS'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn present_and_passing() {}
+    #[test]
+    fn passing_with_child_stderr() {
+        assert!(std::process::Command::new("sh")
+            .args(["-c", "printf 'child compiler chatter build.rs\\n' >&2"])
+            .status().unwrap().success());
+    }
+    #[test]
+    fn present_but_failing() {
+        println!("planted stdout diagnostic");
+        assert!(std::process::Command::new("sh")
+            .args(["-c", "printf 'planted stderr diagnostic\\n' >&2"])
+            .status().unwrap().success());
+        panic!("planted body failure");
+    }
+    #[test]
+    #[ignore]
+    fn present_but_ignored() {}
+}
+RS
   printf 'gate-selftest\tpresent_and_passing\n' >"$tmp/due.tsv"
   out="$(check_unit_tests "$tmp/crate/Cargo.toml" "$tmp/due.tsv" 2>&1)"; rc=$?
   accepted "a required unit test that exists, runs and passes is met"
+  printf 'gate-selftest\tpassing_with_child_stderr\n' >"$tmp/due.tsv"
+  out="$(RUST_TEST_THREADS=1 check_unit_tests "$tmp/crate/Cargo.toml" "$tmp/due.tsv" 2>&1)"; rc=$?
+  accepted "serial test verdict survives raw child stderr"
+  printf 'gate-selftest\tpresent_but_failing\n' >"$tmp/due.tsv"
+  out="$(check_unit_tests "$tmp/crate/Cargo.toml" "$tmp/due.tsv" 2>&1)"; rc=$?
+  refused "planted body failure" "unit test failing: gate-selftest tests::present_but_failing"
+  refused "failed test keeps stdout" "planted stdout diagnostic"
+  refused "failed test keeps stderr" "planted stderr diagnostic"
+  printf 'gate-selftest\tpresent_and_passing\n' >"$tmp/due.tsv"
+  # A real zero-test cargo run, despite a successful --list lookup, must refuse.
+  out="$(
+    cargo() {
+      if [[ " $* " == *" --list "* ]]; then
+        command cargo "$@"
+      else
+        command cargo "$@" --skip tests::present_and_passing
+      fi
+    }
+    check_unit_tests "$tmp/crate/Cargo.toml" "$tmp/due.tsv" 2>&1
+  )"; rc=$?
+  refused "planted filtered-to-empty run" "it did not run"
   printf 'gate-selftest\tunmask_delivers_pending_before_return\ngate-selftest\tpresent_but_ignored\n' >"$tmp/due.tsv"
   out="$(check_unit_tests "$tmp/crate/Cargo.toml" "$tmp/due.tsv" 2>&1)"; rc=$?
   refused "planted missing required test" "unit test missing: gate-selftest unmask_delivers_pending_before_return"
@@ -228,7 +294,7 @@ if [[ $selftest == 1 ]]; then
   if [[ $status != 0 ]]; then
     echo "gate.sh: SELFTEST FAILED — the gate cannot fail" >&2; exit 1
   fi
-  echo "GATE_SELFTEST_RAN cases=frozen-path-edit,relabeled-declaration,missing-and-ignored-unit-test,trace-without-required-op,unobserved-termination"
+  echo "GATE_SELFTEST_RAN cases=frozen-path-edit,relabeled-declaration,missing-and-ignored-unit-test,child-stderr,failed-and-empty-unit-test,trace-without-required-op,unobserved-termination"
   exit 0
 fi
 
