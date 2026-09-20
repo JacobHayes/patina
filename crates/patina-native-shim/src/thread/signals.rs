@@ -512,13 +512,13 @@ pub unsafe extern "C" fn patina_signal_action_libc(
     old: *mut Action,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let mut converted = if action.is_null() {
+    let converted = if action.is_null() {
         None
     } else {
         Some(unsafe { *action })
     };
-    if let Some(action) = converted.as_mut() {
-        #[cfg(target_arch = "x86_64")]
+    #[cfg(target_arch = "x86_64")]
+    let converted = converted.map(|mut action| {
         if action.flags & SA_RESTORER == 0 {
             action.restorer = RESTORER.load(Ordering::Relaxed);
             if action.restorer == 0 {
@@ -526,7 +526,8 @@ pub unsafe extern "C" fn patina_signal_action_libc(
             }
             action.flags |= SA_RESTORER;
         }
-    }
+        action
+    });
     unsafe {
         patina_signal_action(
             sig,

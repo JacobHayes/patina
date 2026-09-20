@@ -649,9 +649,10 @@ trace without requiring the Linux interposer's diagnostic. An export-scope audit
 and portable nested-scope/thread-isolation unit test pair with the behavioral
 detector. Positive controls catch guest panics in main and pthread start on both
 platforms, plus pthread once and signal callbacks on Linux, then validate complete
-traces. The direct Rust/C link places libc after the late C object on Linux;
-MSRV rustc otherwise cannot resolve that object's atexit reference. The production
-hook and guard backstops apply to
+traces. The Rust/C detector links its C object as a native static library so
+rustc orders it before the compiler and system runtimes; late link-argument
+objects can leave libc or architecture-specific atomic helpers unresolved.
+The production hook and guard backstops apply to
 POSIX-interposed binaries; alias-free prefixed-C links and libtest retain their
 own panic handling.
 

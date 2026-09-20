@@ -4,26 +4,19 @@
 // way a libc-backend crate declares them, so an uninterposed one would be an
 // unknown import the pre-run audit refuses.
 use std::io::Write;
+use std::os::fd::AsRawFd;
 
 unsafe extern "C" {
-    fn open(path: *const u8, flags: i32, ...) -> i32;
-    fn close(fd: i32) -> i32;
     fn symlinkat(target: *const u8, dirfd: i32, link_path: *const u8) -> i32;
     fn readlinkat(dirfd: i32, path: *const u8, buf: *mut u8, len: usize) -> isize;
 }
 
-// O_RDONLY | O_DIRECTORY (Linux 0o200000, macOS 0x100000).
-#[cfg(target_os = "linux")]
-const O_DIRECTORY: i32 = 0o200000;
-#[cfg(not(target_os = "linux"))]
-const O_DIRECTORY: i32 = 0x0010_0000;
-
 fn main() {
     std::fs::create_dir("/state").unwrap();
     std::fs::write("/state/target.txt", b"pointed-at").unwrap();
-    // SAFETY: NUL-terminated literals and a valid descriptor throughout.
-    let dirfd = unsafe { open(c"/state".as_ptr().cast(), O_DIRECTORY) };
-    assert!(dirfd >= 0, "opening the directory failed");
+    // Let std select the host ABI's open flags; Linux flag values vary by arch.
+    let directory = std::fs::File::open("/state").unwrap();
+    let dirfd = directory.as_raw_fd();
 
     // symlinkat resolves only the LINK side against the descriptor; the target
     // is a string the filesystem stores verbatim.
@@ -43,7 +36,7 @@ fn main() {
 
     // The link resolves to the file it names, through the same directory.
     let contents = std::fs::read_to_string("/state/link").unwrap();
-    assert_eq!(unsafe { close(dirfd) }, 0);
+    drop(directory);
 
     // AT_FDCWD keeps working through the same interposers.
     let rc = unsafe {

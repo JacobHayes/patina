@@ -31,6 +31,7 @@ pub(in crate::thread) const SIGPIPE: i32 = 13;
 pub(in crate::thread) const SI_USER: i32 = 0;
 #[cfg(test)]
 pub(in crate::thread) const SI_QUEUE: i32 = -1;
+#[cfg(target_arch = "x86_64")]
 pub(in crate::thread) const SA_RESTORER: u64 = 0x0400_0000;
 pub(in crate::thread) const SA_NODEFER: u64 = 0x4000_0000;
 

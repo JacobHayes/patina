@@ -256,6 +256,17 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
         )
         .unwrap();
         let binary = guest.dir.path().join("replacement-hook-guest");
+        // Native libraries precede the compiler/system runtimes. A late
+        // link-arg object can leave libc or outlined atomic helpers unresolved.
+        let posix_archive = guest.dir.path().join("libpatina_test_posix.a");
+        assert_success(
+            Command::new("ar")
+                .arg("crs")
+                .arg(&posix_archive)
+                .arg(guest.dir.path().join("patina_posix.o"))
+                .output()
+                .unwrap(),
+        );
         let mut rustc = Command::new("rustc");
         rustc
             .arg("--edition=2024")
@@ -268,11 +279,9 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
                     .join("debug/libpatina_dst_native_shim.rlib")
                     .display()
             ))
-            .arg("-C")
-            .arg(format!(
-                "link-arg={}",
-                guest.dir.path().join("patina_posix.o").display()
-            ))
+            .arg("-L")
+            .arg(format!("native={}", guest.dir.path().display()))
+            .args(["-l", "static=patina_test_posix"])
             .arg("-o")
             .arg(&binary);
         for directory in dependency_dirs {
@@ -281,9 +290,7 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
                 .arg(format!("dependency={}", directory.display()));
         }
         if cfg!(target_os = "linux") {
-            // Class pairing: the real-ABI link detector above. MSRV rustc puts
-            // libc before late link-arg objects; atexit needs libc after ours.
-            rustc.args(["-C", "link-arg=-Wl,--wrap=dlsym", "-C", "link-arg=-lc"]);
+            rustc.args(["-C", "link-arg=-Wl,--wrap=dlsym"]);
         }
         assert_success(rustc.output().unwrap());
         let replacement = Guest {
