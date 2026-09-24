@@ -1,0 +1,185 @@
+//! net/getifaddrs — `getifaddrs(3)`/`freeifaddrs(3)` for the loopback
+//! interface, cross-checked with the ioctls (getifaddrs(3), netdevice(7)):
+//!
+//! * the list holds an AF_INET entry for `lo`: `127.0.0.1`, netmask
+//!   `255.0.0.0`, flags `IFF_UP|IFF_LOOPBACK|IFF_RUNNING` — the flags
+//!   `SIOCGIFFLAGS` reports for it;
+//! * and an AF_PACKET entry for `lo` whose link address names interface 1
+//!   (`SIOCGIFINDEX`), hardware type `ARPHRD_LOOPBACK`, six address bytes,
+//!   with link statistics in `ifa_data`;
+//! * `freeifaddrs` releases the list.
+//!
+//! libc only: there is no kernel row under the list (glibc builds it from
+//! netlink dumps, net/netlink covers those). The registry lists both
+//! symbols `Absent` — the shim does not define them, so the probe binary
+//! cannot import them (the pre-run audit would refuse the whole binary) —
+//! and the scenario reaches glibc's definitions through `dlsym`, which
+//! under patina answers only what the shim defines.
+
+use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
+use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::probe::{ARPHRD_LOOPBACK, IfField, Probe, SIOCGIFFLAGS, SIOCGIFINDEX, family_name};
+use crate::vehicle::Vehicle;
+use libc::*;
+use patina_dst_syscalls::Syscall;
+use serde_json::Value;
+use std::net::Ipv4Addr;
+
+/// The flags every up loopback device carries.
+const LOOPBACK_FLAGS: u32 = (IFF_UP | IFF_LOOPBACK | IFF_RUNNING) as u32;
+
+type GetIfAddrs = unsafe extern "C" fn(*mut *mut ifaddrs) -> c_int;
+type FreeIfAddrs = unsafe extern "C" fn(*mut ifaddrs);
+
+fn ipv4(addr: *const sockaddr) -> Option<Ipv4Addr> {
+    // SAFETY: a non-null AF_INET entry is a sockaddr_in.
+    unsafe {
+        (!addr.is_null() && i32::from((*addr).sa_family) == AF_INET).then(|| {
+            let sin = &*(addr as *const sockaddr_in);
+            Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))
+        })
+    }
+}
+
+pub fn run(p: &Probe) {
+    let fd = p.socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    p.require("a socket to ask through", fd >= 0);
+    let (_, index) = p.ifreq(fd, SIOCGIFINDEX, "SIOCGIFINDEX", "lo", 0, IfField::Index);
+    let (_, flags) = p.ifreq(
+        fd,
+        SIOCGIFFLAGS,
+        "SIOCGIFFLAGS",
+        "lo",
+        0,
+        IfField::Flags(LOOPBACK_FLAGS as u16),
+    );
+    p.close(fd);
+
+    let get = p.resolve("getifaddrs");
+    let free = p.resolve("freeifaddrs");
+    p.require(
+        "getifaddrs and freeifaddrs resolve",
+        get.is_some() && free.is_some(),
+    );
+    // SAFETY: glibc's getifaddrs and freeifaddrs, by their documented types.
+    let (get, free): (GetIfAddrs, FreeIfAddrs) = unsafe {
+        (
+            std::mem::transmute::<*mut c_void, GetIfAddrs>(get.unwrap()),
+            std::mem::transmute::<*mut c_void, FreeIfAddrs>(free.unwrap()),
+        )
+    };
+    let mut list: *mut ifaddrs = std::ptr::null_mut();
+    // SAFETY: an out-pointer for the list.
+    let result = crate::vehicle::fold_errno(i64::from(unsafe { get(&mut list) }));
+    let mut inet = None;
+    let mut packet = None;
+    let mut at = list;
+    while !at.is_null() {
+        // SAFETY: a node of the list getifaddrs returned.
+        let entry = unsafe { &*at };
+        // SAFETY: a NUL-terminated interface name.
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) }.to_string_lossy();
+        if name == "lo" && !entry.ifa_addr.is_null() {
+            // SAFETY: a non-null address.
+            let family = i32::from(unsafe { (*entry.ifa_addr).sa_family });
+            if family == AF_INET && inet.is_none() {
+                inet = Some((
+                    ipv4(entry.ifa_addr),
+                    ipv4(entry.ifa_netmask),
+                    entry.ifa_flags & LOOPBACK_FLAGS,
+                ));
+            } else if family == AF_PACKET && packet.is_none() {
+                // SAFETY: an AF_PACKET entry is a sockaddr_ll.
+                let ll = unsafe { &*(entry.ifa_addr as *const sockaddr_ll) };
+                packet = Some((
+                    ll.sll_ifindex,
+                    ll.sll_hatype,
+                    ll.sll_halen,
+                    !entry.ifa_data.is_null(),
+                ));
+            }
+        }
+        at = entry.ifa_next;
+    }
+    // SAFETY: the list getifaddrs returned, freed once.
+    unsafe { free(list) };
+    let mut builder = p.rec.event("getifaddrs", result);
+    if let Some((addr, mask, flags)) = inet {
+        builder = builder
+            .field(
+                "lo_inet_addr",
+                addr.map_or(Value::Null, |a| Value::from(a.to_string())),
+            )
+            .field(
+                "lo_inet_netmask",
+                mask.map_or(Value::Null, |a| Value::from(a.to_string())),
+            )
+            .field("lo_inet_flags", flags);
+    }
+    if let Some((ifindex, hatype, halen, stats)) = packet {
+        builder = builder
+            .field("lo_packet_family", family_name(AF_PACKET))
+            .field("lo_packet_ifindex", ifindex)
+            .field("lo_packet_hatype", hatype)
+            .field("lo_packet_halen", halen)
+            .field("lo_packet_stats", stats);
+    }
+    builder.emit();
+    p.rec.event("freeifaddrs", 0).emit();
+    p.check("getifaddrs succeeds", result == 0);
+    p.check(
+        "lo's AF_INET entry: 127.0.0.1/255.0.0.0, the flags SIOCGIFFLAGS reports",
+        inet == Some((
+            Some(Ipv4Addr::LOCALHOST),
+            Some(Ipv4Addr::new(255, 0, 0, 0)),
+            u32::from(flags.flags) & LOOPBACK_FLAGS,
+        )) && u32::from(flags.flags) & LOOPBACK_FLAGS == LOOPBACK_FLAGS,
+    );
+    p.check(
+        "lo's AF_PACKET entry: the SIOCGIFINDEX index, ARPHRD_LOOPBACK, six bytes, statistics",
+        packet == Some((index.index, ARPHRD_LOOPBACK, 6, true)),
+    );
+}
+
+pub const SCENARIO: Scenario = Scenario {
+    name: "net/getifaddrs",
+    run,
+    vehicles: &[Vehicle::Libc],
+    covers: &[Syscall::N_socket, Syscall::N_ioctl, Syscall::N_close],
+    symbols: &["getifaddrs", "freeifaddrs", "socket", "ioctl", "close"],
+    gaps: &[
+        Gap {
+            status: Status::Pending(Arc::NetworkReadiness),
+            vehicles: &[Vehicle::Libc],
+            what: "SIOCGIFINDEX and SIOCGIFFLAGS on a socket answer ENOTTY (c/posix/fd_io.c ioctl, sud/fd_io.rs sys_ioctl model FIONBIO/FIOCLEX/FIONCLEX alone): no interface table serves the SIOCGIF* requests",
+            failure: Failure::Differs(&[
+                Difference::field(1, "ioctl", "errno", Observed::Str("ENOTTY")),
+                Difference::field(1, "ioctl", "ret", Observed::Int(-1)),
+                Difference::field(1, "ioctl", "fields.ifindex", Observed::Null),
+                Difference::field(2, "ioctl", "errno", Observed::Str("ENOTTY")),
+                Difference::field(2, "ioctl", "ret", Observed::Int(-1)),
+                Difference::field(2, "ioctl", "fields.flags", Observed::Null),
+            ]),
+        },
+        Gap {
+            status: Status::Pending(Arc::NetworkReadiness),
+            vehicles: &[Vehicle::Libc],
+            what: "the shim defines no getifaddrs/freeifaddrs (registry `Absent`), so `dlsym` finds neither (c/posix/entropy.c `__wrap_dlsym` answers the shim's own definitions alone) and the scenario stops: nothing serves the list the arc's virtual interface table (`lo` + `eth0`/24) is to answer",
+            failure: Failure::Differs(&[
+                Difference::field(4, "dlsym", "fields.resolved", Observed::Bool(false)),
+                Difference::field(5, "dlsym", "fields.resolved", Observed::Bool(false)),
+            ]),
+        },
+        Gap {
+            status: Status::Pending(Arc::NetworkReadiness),
+            vehicles: &[Vehicle::Libc],
+            what: "with neither symbol resolved the scenario cannot continue",
+            failure: Failure::Stops {
+                events: 6,
+                ending: Ending::Exit(101),
+                diagnostic: "net/getifaddrs: cannot continue: getifaddrs and freeifaddrs resolve",
+            },
+        },
+    ],
+    ..DEFAULTS
+};

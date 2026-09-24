@@ -355,9 +355,30 @@ forwards into the same dispatcher instead of its two-number allowlist.
   vs SimNet-acting); MSG_PEEK/DONTWAIT/NOSIGNAL/TRUNC; sendmmsg/recvmmsg;
   pending connect (EINPROGRESS → SO_ERROR); interface table (`lo` + `eth0`/24,
   no default route → ENETUNREACH; `--net-default-route`) serving getifaddrs,
-  SIOCGIF*, AF_NETLINK RTM_GETLINK/GETADDR; UDP-to-nowhere = drop + counter;
+  SIOCGIF*, AF_NETLINK RTM_GETLINK/GETADDR; UDP-to-nowhere = drop + counter
+  (a connected socket then reports the port-unreachable answer as
+  ECONNREFUSED, as the loopback kernel does);
   SHUT_RD keeps queued data; epoll ET arrival counters; select/pselect6 over
   the reactor; inotify from the runtime fs funnel; fanotify → named trap.
+  Its scenarios are `net/*` and `readiness/*`, one per row group. The native
+  oracle is the host's loopback stack only — `127.0.0.1`, `::1`, AF_UNIX
+  paths under the run directory and abstract names derived from it, the
+  kernel's rtnetlink — so nothing leaves the host, and an off-table
+  destination (patina's ENETUNREACH) is never exercised. Host-allocated
+  values (ports, netlink port ids, autobind names) compare as labels,
+  host-configured ones (the buffer sizes the kernel doubles, MTUs, every
+  interface but `lo`) by relation; the virtual table's `eth0` is never
+  compared. IPv6 on `lo`, an unprivileged caller and an unprivileged
+  fanotify group are declared needs. The privileged network operations (raw
+  and packet sockets, `SO_PRIORITY` above 6, `SO_MARK`, `SO_RCVBUFFORCE`,
+  rebinding `SO_BINDTODEVICE`, another process's `SCM_CREDENTIALS`) are
+  asserted as the EPERM an unprivileged caller gets, not excluded. The
+  symbols the shim leaves `Absent` (`getifaddrs`/`freeifaddrs`, the
+  `__recv_chk`/`__recvfrom_chk`/`__poll_chk`/`__ppoll_chk` fortify
+  spellings) are reached through `dlsym`, which under patina answers the
+  shim's own definitions alone, so defining one means answering it there
+  too. `uname`, `gethostname` and `res_init` are host identity (the time +
+  identity family).
 - **process lifecycle + privileged** (data only): every row `Trap(class)` with
   its one-line reasoning in the registry; `execve`/`arch_prctl`/`set_tid_address`
   pre-arm rows documented as never-trapping.

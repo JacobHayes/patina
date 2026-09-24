@@ -255,6 +255,58 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
                 a[2] as c_int,
                 a[3] as *mut c_int,
             ) as i64,
+            Syscall::N_accept => {
+                accept(a[0] as c_int, a[1] as *mut sockaddr, a[2] as *mut socklen_t) as i64
+            }
+            Syscall::N_sendmsg => {
+                sendmsg(a[0] as c_int, a[1] as *const msghdr, a[2] as c_int) as i64
+            }
+            Syscall::N_recvmsg => recvmsg(a[0] as c_int, a[1] as *mut msghdr, a[2] as c_int) as i64,
+            // glibc's pselect takes the mask itself where the kernel row takes
+            // a pointer to `{mask, size}`; it always passes the kernel's size.
+            Syscall::N_pselect6 => {
+                let pair = a[5] as *const [usize; 2];
+                let mask = if pair.is_null() { 0 } else { (*pair)[0] };
+                pselect(
+                    a[0] as c_int,
+                    a[1] as *mut fd_set,
+                    a[2] as *mut fd_set,
+                    a[3] as *mut fd_set,
+                    a[4] as *const timespec,
+                    mask as *const sigset_t,
+                ) as i64
+            }
+            // glibc's epoll_pwait passes the kernel's sigset size itself.
+            Syscall::N_epoll_pwait => epoll_pwait(
+                a[0] as c_int,
+                a[1] as *mut epoll_event,
+                a[2] as c_int,
+                a[3] as c_int,
+                a[4] as *const sigset_t,
+            ) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_poll => poll(a[0] as *mut pollfd, a[1] as nfds_t, a[2] as c_int) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_select => select(
+                a[0] as c_int,
+                a[1] as *mut fd_set,
+                a[2] as *mut fd_set,
+                a[3] as *mut fd_set,
+                a[4] as *mut timeval,
+            ) as i64,
+            // Network and readiness rows whose glibc wrapper the shim does not
+            // define (`sendmmsg`, `recvmmsg`, `epoll_pwait2`, `epoll_create`)
+            // or that glibc no longer issues (`eventfd`, which its wrapper
+            // spells `eventfd2`): the libc spelling is glibc's `syscall(2)`
+            // until the shim defines the wrapper.
+            Syscall::N_sendmmsg | Syscall::N_recvmmsg | Syscall::N_epoll_pwait2 => {
+                syscall_door(row, a)
+            }
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_epoll_create | Syscall::N_eventfd => syscall_door(row, a),
+            // fanotify: glibc wraps both rows, the shim defines neither (they
+            // are named traps).
+            Syscall::N_fanotify_init | Syscall::N_fanotify_mark => syscall_door(row, a),
             Syscall::N_epoll_create1 => epoll_create1(a[0] as c_int) as i64,
             Syscall::N_epoll_ctl => epoll_ctl(
                 a[0] as c_int,
@@ -757,6 +809,7 @@ pub fn errno_name(code: i32) -> String {
         libc::EROFS => "EROFS",
         libc::EMLINK => "EMLINK",
         libc::EPIPE => "EPIPE",
+        libc::EDOM => "EDOM",
         libc::ERANGE => "ERANGE",
         libc::ENAMETOOLONG => "ENAMETOOLONG",
         libc::ENOSYS => "ENOSYS",

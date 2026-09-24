@@ -376,6 +376,15 @@ fn decode_sockaddr_in(raw: &libc::sockaddr_in) -> SocketAddrV4 {
     )
 }
 
+// The network rows past the IPv4 core (`impl Probe` block and its types).
+mod net;
+pub use net::{
+    ARPHRD_LOOPBACK, AddrInfo, Control, IFNAMSIZ, IFREQ, IfAnswer, IfField, Incoming, NlMsg,
+    OptionShown, Outgoing, Ready, Received, RecvSpec, SIOCGIFADDR, SIOCGIFBRDADDR, SIOCGIFCONF,
+    SIOCGIFFLAGS, SIOCGIFHWADDR, SIOCGIFINDEX, SIOCGIFMTU, SIOCGIFNAME, SIOCGIFNETMASK,
+    SOCKADDR_UN, SUN_PATH, Sets, SockAddr, attributes, eai_name, family_name, nl,
+};
+
 impl Probe {
     pub fn new(name: &'static str, vehicle: Vehicle, strict: bool, dir: String) -> Probe {
         Probe {
@@ -1162,6 +1171,9 @@ impl Probe {
     }
 
     // ---- network ------------------------------------------------------------
+    //
+    // The IPv4 core; every other family, the message rows, options beyond one
+    // int, interfaces, netlink and readiness over sockets are in `net`.
 
     fn addr_args<'a>(
         &self,

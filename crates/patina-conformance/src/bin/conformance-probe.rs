@@ -49,7 +49,9 @@ fn main() {
             catalog::planted(&name).unwrap_or_else(|| fail(format!("unknown scenario {name:?}")))
         }
     };
-    run(&Probe::new(name, vehicle, strict, dir).with_declared_absent(declared_absent));
+    let probe = Probe::new(name, vehicle, strict, dir).with_declared_absent(declared_absent);
+    patina_dst_conformance::journal::start();
+    run(&probe);
 }
 
 #[cfg(not(target_os = "linux"))]

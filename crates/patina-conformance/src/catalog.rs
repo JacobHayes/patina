@@ -82,6 +82,23 @@ pub struct KernelFloor {
 /// the detected reason), never passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Need {
+    /// IPv6 on the loopback interface: an AF_INET6 datagram socket binds
+    /// `[::1]:0` (a kernel without IPv6 answers `EAFNOSUPPORT`, IPv6 disabled
+    /// on `lo` answers `EADDRNOTAVAIL`). Both are configuration a runner is
+    /// set up with — every distribution kernel builds IPv6, and `lo` carries
+    /// `::1` unless a sysctl disabled it — so, as with `Membarrier` and
+    /// `PosixMqueue`, a prerequisite, not a machine fact.
+    Ipv6Loopback,
+    /// An unprivileged fanotify group with file-handle events on the run
+    /// directory (Linux 5.13's unprivileged fanotify, `CONFIG_FANOTIFY`,
+    /// within the caller's `max_user_groups`): the run directory's
+    /// filesystem must export file handles with a non-zero fsid
+    /// (`fanotify_test_fsid`).
+    Fanotify,
+    /// Binding to an address no interface has is refused: the host's
+    /// `net.ipv4.ip_nonlocal_bind` and `net.ipv6.ip_nonlocal_bind` are 0
+    /// (their default), so the `EADDRNOTAVAIL` scenarios assert is the answer.
+    LocalBindOnly,
     /// `user.*` extended attributes on the run directory's filesystem, and a
     /// fresh file there listing no attribute at all (no security label the
     /// listing would carry).
@@ -168,10 +185,18 @@ impl Need {
             | Need::LockedPages(_)
             | Need::Membarrier
             | Need::NiceZero
-            | Need::DefaultPersona => false,
+            | Need::DefaultPersona
+            | Need::Ipv6Loopback
+            | Need::Fanotify
+            | Need::LocalBindOnly => false,
         }
     }
 }
+
+/// The longest a declared hang (`Failure::Hangs`) may let its patina leg run
+/// before the harness starts confirming it: a quarter of the harness's 60 s
+/// run deadline, so a hang gap's cost stays visible where it is declared.
+pub const MAX_HANG_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The family arc (docs/arcs/syscall-conformance.md §6) that models a
 /// pending gap away.
@@ -401,8 +426,24 @@ pub const SCENARIOS: &[&Scenario] = &[
     &mem::remap_file_pages::SCENARIO,
     &mem::secret::SCENARIO,
     &mem::shadow_stack::SCENARIO,
+    &net::fortify::SCENARIO,
+    &net::getaddrinfo::SCENARIO,
+    &net::getifaddrs::SCENARIO,
+    &net::ifconfig::SCENARIO,
+    &net::inet6::SCENARIO,
+    &net::mmsg::SCENARIO,
+    &net::msg::SCENARIO,
+    &net::netlink::SCENARIO,
+    &net::pending::SCENARIO,
+    &net::privileged::SCENARIO,
+    &net::scm::SCENARIO,
+    &net::sockopt::SCENARIO,
+    &net::sockopt_fault::SCENARIO,
     &net::tcp::SCENARIO,
     &net::udp::SCENARIO,
+    &net::unix_dgram::SCENARIO,
+    &net::unix_seqpacket::SCENARIO,
+    &net::unix_stream::SCENARIO,
     &proc::absent::SCENARIO,
     &proc::ids::SCENARIO,
     &proc::pgrp::SCENARIO,
@@ -410,7 +451,13 @@ pub const SCENARIOS: &[&Scenario] = &[
     &proc::traps::SCENARIO,
     &proc::wait::SCENARIO,
     &readiness::epoll::SCENARIO,
+    &readiness::epoll_edges::SCENARIO,
+    &readiness::fanotify::SCENARIO,
+    &readiness::inotify::SCENARIO,
+    &readiness::poll::SCENARIO,
+    &readiness::poll_fault::SCENARIO,
     &readiness::ppoll::SCENARIO,
+    &readiness::select::SCENARIO,
     &sched::affinity::SCENARIO,
     &sched::attr::SCENARIO,
     &sched::ioprio::SCENARIO,
@@ -590,7 +637,7 @@ mod tests {
             for vehicle in scenario.vehicles {
                 let stops = scenario
                     .gaps_for(*vehicle)
-                    .filter(|gap| matches!(gap.failure, Failure::Stops { .. }))
+                    .filter(|gap| gap.failure.ends_early())
                     .count();
                 assert!(
                     stops <= 1,
@@ -598,6 +645,21 @@ mod tests {
                     scenario.name,
                     vehicle.name()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn a_declared_hang_is_watched_within_the_bound() {
+        for scenario in SCENARIOS {
+            for gap in scenario.gaps {
+                if let Some(within) = gap.failure.hang_deadline() {
+                    assert!(
+                        !within.is_zero() && within <= MAX_HANG_WITHIN,
+                        "{}: a hang watched from {within:?} (at most {MAX_HANG_WITHIN:?})",
+                        scenario.name
+                    );
+                }
             }
         }
     }
@@ -611,7 +673,7 @@ mod tests {
                 assert!(
                     !scenario
                         .gaps_for(*vehicle)
-                        .any(|gap| matches!(gap.failure, Failure::Stops { .. })),
+                        .any(|gap| gap.failure.ends_early()),
                     "{}[{}]: trace facts and a stopping gap",
                     scenario.name,
                     vehicle.name()

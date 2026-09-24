@@ -46,3 +46,12 @@ Adding a scenario: write `src/scenarios/<family>/<name>.rs` with its `run`
 function and `SCENARIO` declaration, list it in `catalog::SCENARIOS`, add its
 `#[test]` to `native_conformance.rs`, run the test, and declare what patina
 does differently as gaps naming the responsible code.
+
+The network scenarios (`net/*`, `readiness/*`) use the host's loopback stack
+only — loopback addresses, AF_UNIX paths in the run directory and abstract
+names derived from it, the kernel's rtnetlink — and compare host-allocated or
+host-configured values (ports, buffer sizes, MTUs, interfaces other than `lo`)
+by relation; IPv6 on `lo` and an unprivileged fanotify group are their needs. A libc symbol the shim leaves undefined cannot be imported by the
+probe binary (the pre-run audit would refuse all of it), so its scenario
+reaches glibc's definition through `dlsym` (`Probe::resolve`), which under
+patina answers only what the shim defines.

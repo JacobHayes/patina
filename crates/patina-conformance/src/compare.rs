@@ -11,6 +11,7 @@ use crate::observe::{CHECK_OP, EXPECT_DEATH_OP, Event, ParsedNorm};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::time::Duration;
 
 /// How a process ended, as its supervisor observed it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +24,12 @@ pub enum Termination {
     },
     /// The supervisor reported no guest outcome (a refusal before the guest ran).
     Unreported,
+    /// The run was confirmed stuck and killed: the guest had started (its
+    /// journal's start marker), and then neither its recorded events nor its
+    /// scheduling state changed for a whole no-progress window (see
+    /// `crates/cargo-patina/tests/native_conformance.rs`, `HangWatch`). A run
+    /// that is merely slow is never this: it keeps the normal deadline.
+    Hung,
 }
 
 impl fmt::Display for Termination {
@@ -39,6 +46,7 @@ impl fmt::Display for Termination {
                 }
             ),
             Termination::Unreported => write!(f, "no guest outcome reported"),
+            Termination::Hung => write!(f, "hung (confirmed stuck, killed)"),
         }
     }
 }
@@ -283,6 +291,33 @@ pub enum Failure {
         ending: Ending,
         diagnostic: &'static str,
     },
+    /// The patina run records `events` events — the native run's first, but
+    /// for the declared differences, as for `Stops`; read back from the
+    /// probe's in-memory journal (`crate::journal`), since a killed run has
+    /// no envelope — and then makes no progress: the harness starts watching
+    /// `within` after the run began, confirms the hang positively
+    /// ([`Termination::Hung`]) and kills it, so a declared hang costs about
+    /// `within`, not the full run deadline. `within` is the smallest bound
+    /// reliably past what a completed run needs (at most
+    /// `catalog::MAX_HANG_WITHIN`).
+    Hangs { events: usize, within: Duration },
+}
+
+impl Failure {
+    /// Whether the patina run ends before the native one does (`Stops`,
+    /// `Hangs`): at most one such gap per vehicle, and no record, replay or
+    /// strace run after it.
+    pub fn ends_early(&self) -> bool {
+        matches!(self, Failure::Stops { .. } | Failure::Hangs { .. })
+    }
+
+    /// When the harness starts confirming a declared hang.
+    pub fn hang_deadline(&self) -> Option<Duration> {
+        match self {
+            Failure::Hangs { within, .. } => Some(*within),
+            _ => None,
+        }
+    }
 }
 
 /// How a stopping patina run ends.
@@ -453,9 +488,8 @@ pub fn judge(
 ) -> Result<Vec<String>, Vec<String>> {
     let native_events = normalize(native.events.clone());
     let patina_events = normalize(patina.events.clone());
-    let (stops, differs): (Vec<&Expected<'_>>, Vec<&Expected<'_>>) = gaps
-        .iter()
-        .partition(|gap| matches!(gap.failure, Failure::Stops { .. }));
+    let (stops, differs): (Vec<&Expected<'_>>, Vec<&Expected<'_>>) =
+        gaps.iter().partition(|gap| gap.failure.ends_early());
     let mut failures = Vec::new();
     let mut confirmed = Vec::new();
     let compared = match stops.as_slice() {
@@ -526,7 +560,7 @@ pub fn judge(
     for found in &observed {
         let declared = differs.iter().any(|gap| match gap.failure {
             Failure::Differs(declared) => declared.iter().any(|d| declared_matches(d, found)),
-            Failure::Stops { .. } => false,
+            Failure::Stops { .. } | Failure::Hangs { .. } => false,
         });
         if !declared {
             failures.push(format!("undeclared difference: {found}"));
@@ -549,14 +583,38 @@ fn check_stop(
     confirmed: &mut Vec<String>,
     failures: &mut Vec<String>,
 ) -> usize {
-    let Failure::Stops {
-        events,
-        ending,
-        diagnostic,
-    } = *gap.failure
-    else {
-        unreachable!("check_stop takes a stopping gap")
+    let (events, ending, diagnostic) = match *gap.failure {
+        Failure::Stops {
+            events,
+            ending,
+            diagnostic,
+        } => (events, Some(ending), diagnostic),
+        Failure::Hangs { events, within } => {
+            let before = failures.len();
+            if observation.termination != Termination::Hung {
+                failures.push(format!(
+                    "declared to hang after {events} events (watched from {within:?}), but patina {} with {recorded} events; the gap is stale: {}",
+                    observation.termination, gap.reason
+                ));
+                return events;
+            }
+            if recorded != events {
+                failures.push(format!(
+                    "declared to hang after {events} events, hung after {recorded}: {}",
+                    gap.reason
+                ));
+            }
+            if failures.len() == before {
+                confirmed.push(format!(
+                    "hangs after {events} events as declared (confirmed stuck from {within:?}): {}",
+                    gap.reason
+                ));
+            }
+            return events;
+        }
+        Failure::Differs(_) => unreachable!("check_stop takes a stopping gap"),
     };
+    let ending = ending.expect("a stop declares its ending");
     let before = failures.len();
     if observation.termination == Termination::Exited(0) {
         failures.push(format!(
@@ -574,7 +632,7 @@ fn check_stop(
     let ended = match observation.termination {
         Termination::Signaled { signal, .. } => Some(Ending::Signal(signal)),
         Termination::Exited(code) => Some(Ending::Exit(code)),
-        Termination::Unreported => None,
+        Termination::Unreported | Termination::Hung => None,
     };
     if ended != Some(ending) {
         failures.push(format!(
@@ -807,6 +865,64 @@ mod tests {
     fn a_declared_stop_is_stale_once_patina_completes() {
         let failures = judge(&native(), &native(), &[gap(&STOP)]).unwrap_err();
         assert!(failures[0].contains("stale"), "{failures:?}");
+    }
+
+    const HANG: Failure = Failure::Hangs {
+        events: 1,
+        within: Duration::from_secs(5),
+    };
+
+    fn hung(events: usize) -> Observation {
+        Observation {
+            events: native().events.into_iter().take(events).collect(),
+            termination: Termination::Hung,
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_declared_hang_is_confirmed() {
+        assert!(judge(&native(), &hung(1), &[gap(&HANG)]).is_ok());
+    }
+
+    #[test]
+    fn a_hang_with_no_event_is_confirmed_by_its_marker_alone() {
+        const AT_START: Failure = Failure::Hangs {
+            events: 0,
+            within: Duration::from_secs(5),
+        };
+        assert!(judge(&native(), &hung(0), &[gap(&AT_START)]).is_ok());
+        assert!(judge(&native(), &hung(1), &[gap(&AT_START)]).is_err());
+    }
+
+    #[test]
+    fn a_declared_hang_pins_its_event_count() {
+        let failures = judge(&native(), &hung(0), &[gap(&HANG)]).unwrap_err();
+        assert!(failures[0].contains("hung after 0"), "{failures:?}");
+    }
+
+    #[test]
+    fn a_declared_hang_is_stale_once_patina_ends() {
+        let failures = judge(&native(), &native(), &[gap(&HANG)]).unwrap_err();
+        assert!(failures[0].contains("stale"), "{failures:?}");
+        let failures = judge(&native(), &stopped("trapped fork"), &[gap(&HANG)]).unwrap_err();
+        assert!(failures[0].contains("stale"), "{failures:?}");
+    }
+
+    #[test]
+    fn an_undeclared_hang_fails_a_stop() {
+        let failures = judge(&native(), &hung(1), &[gap(&STOP)]).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("declared to end")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn a_hang_compares_the_prefix_before_it() {
+        let mut hung = hung(1);
+        hung.events[0].ret = Value::from(4);
+        assert!(judge(&native(), &hung, &[gap(&HANG)]).is_err());
     }
 
     #[test]

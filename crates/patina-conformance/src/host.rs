@@ -159,6 +159,9 @@ pub fn needs_unmet(scenario: &Scenario, dir: &Path) -> Option<(Need, NotRun)> {
 /// does not define would make the pre-run audit refuse it.
 pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
     match need {
+        Need::Ipv6Loopback => ipv6_loopback(),
+        Need::Fanotify => fanotify(dir),
+        Need::LocalBindOnly => local_bind_only(),
         Need::UserXattrs => user_xattrs(dir),
         Need::Inotify => inotify(dir),
         Need::FileHandles => file_handles(dir),
@@ -179,6 +182,151 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         Need::SysfsSyscall => timeid::sysfs_syscall(),
         Need::HighResTimers => timeid::high_res_timers(),
     }
+}
+
+/// An AF_INET6 datagram socket bound to `[::1]:0`, through `syscall(2)`.
+fn ipv6_loopback() -> Result<(), NotRun> {
+    // SAFETY: integer arguments.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_socket,
+            libc::AF_INET6,
+            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if fd < 0 {
+        let errno = crate::vehicle::errno();
+        return Err(NotRun {
+            cause: if errno == libc::EAFNOSUPPORT {
+                Cause::Absent
+            } else {
+                refusal("", errno).cause
+            },
+            detail: format!(
+                "socket(AF_INET6, SOCK_DGRAM) answered {}",
+                errno_name(errno)
+            ),
+        });
+    }
+    // SAFETY: an all-zero sockaddr_in6 is a valid value.
+    let mut addr: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+    addr.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+    addr.sin6_addr.s6_addr[15] = 1;
+    // SAFETY: a sockaddr_in6 of the length passed; the descriptor opened above.
+    let bound = unsafe {
+        libc::syscall(
+            libc::SYS_bind,
+            fd,
+            &addr as *const libc::sockaddr_in6,
+            std::mem::size_of::<libc::sockaddr_in6>(),
+        )
+    };
+    let errno = crate::vehicle::errno();
+    // SAFETY: the descriptor opened above.
+    unsafe { libc::syscall(libc::SYS_close, fd) };
+    if bound < 0 {
+        return Err(NotRun {
+            cause: if errno == libc::EADDRNOTAVAIL {
+                Cause::Absent
+            } else {
+                refusal("", errno).cause
+            },
+            detail: format!("bind([::1]:0) answered {}", errno_name(errno)),
+        });
+    }
+    Ok(())
+}
+
+/// An unprivileged fanotify group reporting file handles, and an inode mark
+/// on the run directory the scenario will mark (`<dir>/run`, made for the
+/// look and removed), through `syscall(2)`. A filesystem that cannot report
+/// file handles — a zero fsid (`fanotify_test_fsid`: `ENODEV`) or one the
+/// group cannot encode across (`EXDEV`) — lacks the capability; it is no
+/// broken detection.
+fn fanotify(dir: &Path) -> Result<(), NotRun> {
+    let run = dir.join("run");
+    std::fs::create_dir_all(&run).map_err(|error| NotRun {
+        cause: Cause::Unexpected,
+        detail: format!("create {}: {error}", run.display()),
+    })?;
+    let result = fanotify_mark_on(&run);
+    let _ = std::fs::remove_dir(&run);
+    result
+}
+
+fn fanotify_mark_on(run: &Path) -> Result<(), NotRun> {
+    // SAFETY: integer arguments.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_fanotify_init,
+            libc::FAN_CLASS_NOTIF | libc::FAN_CLOEXEC | libc::FAN_NONBLOCK | libc::FAN_REPORT_FID,
+            libc::O_RDONLY,
+        )
+    };
+    if fd < 0 {
+        return Err(refusal(
+            "fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_FID)",
+            crate::vehicle::errno(),
+        ));
+    }
+    let c = path_of(run);
+    // SAFETY: a NUL-terminated path; the descriptor opened above.
+    let marked = unsafe {
+        libc::syscall(
+            libc::SYS_fanotify_mark,
+            fd,
+            libc::FAN_MARK_ADD,
+            libc::FAN_CREATE,
+            libc::AT_FDCWD,
+            c.as_ptr(),
+        )
+    };
+    let errno = crate::vehicle::errno();
+    // SAFETY: the descriptor opened above.
+    unsafe { libc::syscall(libc::SYS_close, fd) };
+    if marked < 0 {
+        let what = "fanotify_mark on the run directory";
+        return Err(match errno {
+            libc::ENODEV | libc::EXDEV => NotRun {
+                cause: Cause::Absent,
+                detail: format!(
+                    "{what} answered {}: its filesystem reports no file handles",
+                    errno_name(errno)
+                ),
+            },
+            _ => refusal(what, errno),
+        });
+    }
+    Ok(())
+}
+
+/// `net.ipv4.ip_nonlocal_bind` and `net.ipv6.ip_nonlocal_bind` are 0 (a host
+/// without IPv6 has no IPv6 knob: nothing to allow).
+fn local_bind_only() -> Result<(), NotRun> {
+    for knob in ["ipv4", "ipv6"] {
+        let path = format!("/proc/sys/net/{knob}/ip_nonlocal_bind");
+        match std::fs::read_to_string(&path) {
+            Ok(value) if value.trim() == "0" => {}
+            Ok(value) => {
+                return Err(NotRun {
+                    cause: Cause::Absent,
+                    detail: format!(
+                        "net.{knob}.ip_nonlocal_bind is {}: a bind to an address no interface has succeeds",
+                        value.trim()
+                    ),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && knob == "ipv6" => {}
+            Err(error) => {
+                return Err(NotRun {
+                    cause: Cause::Unexpected,
+                    detail: format!("read {path}: {error}"),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn path_of(path: &Path) -> CString {

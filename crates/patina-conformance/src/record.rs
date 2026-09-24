@@ -101,6 +101,7 @@ impl Recorder {
         let line = serde_json::to_string(&event).expect("event serializes");
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
+        crate::journal::append(line.as_bytes());
         out.write_all(line.as_bytes()).expect("stdout write");
         out.write_all(b"\n").expect("stdout write");
         out.flush().expect("stdout flush");

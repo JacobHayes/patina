@@ -232,6 +232,48 @@ pub fn invoke_with_deadline(
 /// Capture a configured command using the same process-group deadline as CLI runs.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn output_with_deadline(command: &mut Command, deadline: Duration) -> Option<Output> {
+    match output_by_deadline(command, deadline) {
+        Deadlined::Finished(output) => Some(output),
+        Deadlined::Killed { stdout, stderr } => {
+            eprintln!(
+                "deadline exceeded: {command:?}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
+            );
+            None
+        }
+    }
+}
+
+/// How [`output_by_deadline`] ended.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub enum Deadlined {
+    Finished(Output),
+    /// The deadline passed: the whole process group was killed and the child
+    /// reaped; this is what it wrote until then.
+    Killed {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
+}
+
+/// [`output_with_deadline`], answering a killed run's partial output rather
+/// than dropping it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn output_by_deadline(command: &mut Command, deadline: Duration) -> Deadlined {
+    output_until(command, deadline, |_| false)
+}
+
+/// [`output_by_deadline`] with an early stop: `stop` sees the child's pid
+/// every poll and, answering true, has the run killed then (the same group
+/// kill and reap as the deadline). A caller that confirms a hang this way
+/// tells the two kills apart itself.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn output_until(
+    command: &mut Command,
+    deadline: Duration,
+    mut stop: impl FnMut(u32) -> bool,
+) -> Deadlined {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -244,21 +286,17 @@ pub fn output_with_deadline(command: &mut Command, deadline: Duration) -> Option
     let stderr = std::thread::spawn(move || read_pipe(stderr));
     let give_up = Instant::now() + deadline;
     while child.try_wait().unwrap().is_none() || !stdout.is_finished() || !stderr.is_finished() {
-        if Instant::now() >= give_up {
+        if Instant::now() >= give_up || stop(child.id()) {
             process_group::kill(child.id()).expect("kill deadline child process group");
             child.wait().expect("reap deadline child");
-            let stdout = stdout.join().unwrap();
-            let stderr = stderr.join().unwrap();
-            eprintln!(
-                "deadline exceeded: {command:?}\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&stdout),
-                String::from_utf8_lossy(&stderr),
-            );
-            return None;
+            return Deadlined::Killed {
+                stdout: stdout.join().unwrap(),
+                stderr: stderr.join().unwrap(),
+            };
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    Some(Output {
+    Deadlined::Finished(Output {
         status: child.wait().unwrap(),
         stdout: stdout.join().unwrap(),
         stderr: stderr.join().unwrap(),

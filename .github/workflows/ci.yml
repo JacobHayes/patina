@@ -66,6 +66,12 @@ jobs:
       # dropping the containment gate.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y strace && uname -r
+      # The oracle host's network-scenario prerequisites, on record for when a
+      # need goes unmet (IPv6 on lo, fanotify groups, non-local binds).
+      - if: runner.os == 'Linux'
+        run: |
+          sysctl net.ipv6.conf.lo.disable_ipv6 net.ipv4.ip_nonlocal_bind net.ipv6.ip_nonlocal_bind || true
+          cat /proc/sys/fs/fanotify/max_user_groups || true
       - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
