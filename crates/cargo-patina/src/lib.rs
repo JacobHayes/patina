@@ -226,9 +226,9 @@ const NATIVE_SHIM_STATICLIB: &str = "libpatina_dst_native_shim.a";
 /// POSIX/yield helper objects are staged, so their `-Clink-arg` paths stay stable
 /// across builds and Cargo's crate fingerprints stay warm.
 const NATIVE_SHIM_OBJECTS_DIR: &str = "patina-shim-objects";
-/// Lock file in the shim target dir, held from the shim's `cargo build` until
-/// its staticlib is published; see [`publish_native_shim`].
-const NATIVE_SHIM_LOCK: &str = "patina-shim.lock";
+/// Lock file in every Cargo target dir cargo-patina builds in; see
+/// [`lock_target_dir`].
+const TARGET_DIR_LOCK: &str = ".patina-build.lock";
 const DEFAULT_NATIVE_EDITION: &str = "2024";
 const DEFAULT_NATIVE_FINGERPRINT: &str = "patina-native";
 static NATIVE_TRACE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -3470,6 +3470,7 @@ fn run_wasi_build(
     if invocation.release {
         command.arg("--release");
     }
+    let _lock = lock_target_dir(&selected.target_dir)?;
     let built = command
         .output()
         .map_err(|error| CliError(format!("failed to run WASI cargo build: {error}")))?;
@@ -3744,11 +3745,7 @@ fn build_native_harness(
     let sancov_stub = stage_sancov_stub(&objects_base, yield_object.is_some(), &host_target)?;
     let rustflags = native_package_rustflags(sancov_stub.as_deref(), &host_target);
     let metadata = cargo_metadata(&invocation.manifest, Some(&rustc))?;
-    let target_dir = metadata
-        .get("target_directory")
-        .and_then(serde_json::Value::as_str)
-        .map(PathBuf::from)
-        .ok_or_else(|| CliError("cargo metadata did not report target_directory".into()))?;
+    let target_dir = metadata_target_dir(&metadata)?;
     let selected = select_native_harness_target(
         &metadata,
         &invocation.harness_target,
@@ -3785,6 +3782,7 @@ fn build_native_harness(
         &staticlib,
         yield_object.as_deref(),
     ));
+    let _lock = lock_target_dir(&target_dir)?;
     let built = command.output().map_err(|error| {
         CliError(format!(
             "failed to run cargo rustc for native harness: {error}"
@@ -3865,6 +3863,14 @@ fn cargo_metadata(
     }
     serde_json::from_slice(&output.stdout)
         .map_err(|error| CliError(format!("failed to parse cargo metadata: {error}")))
+}
+
+fn metadata_target_dir(metadata: &serde_json::Value) -> Result<PathBuf, CliError> {
+    metadata
+        .get("target_directory")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| CliError("cargo metadata did not report target_directory".into()))
 }
 
 fn metadata_package_name(metadata: &serde_json::Value, package_id: &str) -> Option<String> {
@@ -4867,15 +4873,9 @@ fn build_native_shim(
         shim.bundle_hash,
         &rustc.identity,
     );
-    fs::create_dir_all(&target_dir).map_err(|error| {
-        CliError(format!(
-            "failed to create the shim target dir {}: {error}",
-            target_dir.display()
-        ))
-    })?;
     // Held until the staticlib is published: every Cargo run that can rewrite
     // Cargo's copy happens under this lock, so the copy is never read mid-write.
-    let _lock = lock_exclusive(&target_dir.join(NATIVE_SHIM_LOCK))?;
+    let _lock = lock_target_dir(&target_dir)?;
     let mut command = Command::new(&rustc.cargo_command);
     command
         .current_dir(&shim.dir)
@@ -4914,7 +4914,7 @@ fn build_native_shim(
 /// hard-linking its outputs (always on macOS; elsewhere when the build directory
 /// is on another filesystem). A guest linking that path while another
 /// cargo-patina builds the same shim reads a half-written archive. The caller
-/// holds the shim lock, so no Cargo is writing the source while it is copied,
+/// holds [`lock_target_dir`], so no Cargo is writing the source while it is copied,
 /// and the copy is published by rename, so its path always holds the complete
 /// archive whose bytes name it.
 fn publish_native_shim(staticlib: &Path) -> Result<PathBuf, CliError> {
@@ -4938,41 +4938,64 @@ fn publish_native_shim(staticlib: &Path) -> Result<PathBuf, CliError> {
     Ok(published)
 }
 
-/// Open (creating) `path` and hold an exclusive advisory lock on it until the
-/// returned file is dropped; the kernel releases it if the process dies.
-#[cfg(unix)]
-fn lock_exclusive(path: &Path) -> Result<fs::File, CliError> {
-    use std::os::fd::AsRawFd;
-    const LOCK_EX: i32 = 2;
-    unsafe extern "C" {
-        fn flock(fd: i32, operation: i32) -> i32;
-    }
-    let file = fs::OpenOptions::new()
+/// Hold `target_dir`'s build lock until the returned file is dropped; the
+/// kernel releases it if the process dies.
+///
+/// Cargo rewrites every output in its target dir on every invocation, fresh or
+/// not, wherever it copies rather than hard-links (always on macOS; on Linux
+/// when the build dir is on another filesystem), and its own lock ends when
+/// Cargo exits. A caller that reads an output back after Cargo returns — the
+/// shim archive it publishes, the guest executable it copies out — therefore
+/// holds this from before its Cargo invocation until that read is done, or a
+/// concurrent build's Cargo can rewrite the file mid-read.
+fn lock_target_dir(target_dir: &Path) -> Result<fs::File, CliError> {
+    fs::create_dir_all(target_dir).map_err(|error| {
+        CliError(format!(
+            "failed to create target dir {}: {error}",
+            target_dir.display()
+        ))
+    })?;
+    let path = target_dir.join(TARGET_DIR_LOCK);
+    let file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
-        .open(path)
+        .open(&path)
         .map_err(|error| CliError(format!("failed to open {}: {error}", path.display())))?;
+    lock_exclusive(&file, true)
+        .map_err(|error| CliError(format!("failed to lock {}: {error}", path.display())))?;
+    Ok(file)
+}
+
+/// Take an exclusive `flock(2)` on `file`, held until it is closed. With `wait`
+/// false a lock held elsewhere is [`io::ErrorKind::WouldBlock`].
+#[cfg(unix)]
+pub(crate) fn lock_exclusive(file: &fs::File, wait: bool) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    let operation = if wait { LOCK_EX } else { LOCK_EX | LOCK_NB };
     loop {
-        if unsafe { flock(file.as_raw_fd(), LOCK_EX) } == 0 {
-            return Ok(file);
+        // SAFETY: `flock` only reads the descriptor, which `file` keeps open.
+        if unsafe { flock(file.as_raw_fd(), operation) } == 0 {
+            return Ok(());
         }
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
-            return Err(CliError(format!(
-                "failed to lock {}: {error}",
-                path.display()
-            )));
+            return Err(error);
         }
     }
 }
 
 #[cfg(not(unix))]
-fn lock_exclusive(path: &Path) -> Result<fs::File, CliError> {
-    Err(CliError(format!(
-        "file locking is unsupported on this platform: {}",
-        path.display()
-    )))
+pub(crate) fn lock_exclusive(_file: &fs::File, _wait: bool) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "file locking is unsupported on this platform",
+    ))
 }
 
 /// Select the shim's Cargo target directory.
@@ -5743,6 +5766,7 @@ fn build_native_package(
     command
         .arg("--")
         .args(native_package_link_args(object, staticlib, yield_object));
+    let _lock = lock_target_dir(&selected.target_dir)?;
     let built = command
         .output()
         .map_err(|error| CliError(format!("failed to run cargo rustc: {error}")))?;
@@ -5768,10 +5792,12 @@ fn build_native_package(
     Ok(final_path)
 }
 
-/// The package and binary a package `native-build` resolves to.
+/// The package and binary a package `native-build` resolves to, and the
+/// target dir Cargo builds it in.
 struct SelectedNativeBin {
     package: String,
     bin: String,
+    target_dir: PathBuf,
 }
 
 /// Resolve which package and which binary target `native-build` should compile,
@@ -5873,6 +5899,7 @@ fn select_native_package_bin(
     Ok(SelectedNativeBin {
         package: package_name,
         bin: chosen,
+        target_dir: metadata_target_dir(&metadata)?,
     })
 }
 

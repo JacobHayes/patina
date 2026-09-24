@@ -1898,6 +1898,189 @@ fn a_relative_cargo_path_is_anchored_before_the_shim_build_changes_directory() {
     );
 }
 
+/// A concurrent cargo-patina build caught mid-uplift: it holds `dir`'s build
+/// lock and its Cargo has put back only a prefix of `artifact`. Dropping it
+/// finishes the uplift and releases the lock.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct TornUplift {
+    artifact: PathBuf,
+    whole: PathBuf,
+    _lock: fs::File,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl TornUplift {
+    /// Start one, unless a build already holds `dir`'s lock — a concurrent build
+    /// would wait for it rather than uplift.
+    fn begin(dir: &Path, artifact: &Path) -> Option<Self> {
+        use std::os::fd::AsRawFd;
+        const LOCK_EX: i32 = 2;
+        const LOCK_NB: i32 = 4;
+        unsafe extern "C" {
+            fn flock(fd: i32, operation: i32) -> i32;
+        }
+        let lock = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join(".patina-build.lock"))
+            .unwrap();
+        // SAFETY: `flock` only reads the descriptor, which `lock` keeps open.
+        if unsafe { flock(lock.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock,
+                "flock in {}: {error}",
+                dir.display()
+            );
+            return None;
+        }
+        let mut whole = artifact.as_os_str().to_owned();
+        whole.push(".whole");
+        let whole = PathBuf::from(whole);
+        fs::rename(artifact, &whole).unwrap();
+        let bytes = fs::read(&whole).unwrap();
+        fs::write(artifact, &bytes[..bytes.len() / 2]).unwrap();
+        Some(Self {
+            artifact: artifact.to_path_buf(),
+            whole,
+            _lock: lock,
+        })
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for TornUplift {
+    fn drop(&mut self) {
+        let finished = fs::rename(&self.whole, &self.artifact);
+        if !std::thread::panicking() {
+            finished.unwrap();
+        }
+    }
+}
+
+// Cargo rewrites every output in its target dir on every invocation, fresh or
+// not, wherever it copies rather than hard-links (always on macOS; on Linux when
+// the build dir is on another filesystem): for a moment the path holds only a
+// prefix. `build --output` copies the guest executable out AFTER its Cargo has
+// exited, so a concurrent build of the same package in the same target dir
+// could hand it a truncated binary — every generation of a campaign over that
+// guest then classified INFRA, and `campaign_extend_equals_fresh_campaign` lost
+// its NOVEL line. This forces the window: a stand-in Cargo pauses the build
+// between the executable's uplift and the copy-out, and the test plays a
+// concurrent build mid-uplift whenever the target dir's lock allows one.
+//
+// Class pairing: every build that reads a Cargo output back (native package,
+// native harness, WASI, and the shim publish that
+// `guest_link_is_immune_to_cargo_rewriting_its_shim_copy` pins) holds
+// `lock_target_dir` from before its Cargo invocation through the read.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn guest_copy_out_is_immune_to_a_concurrent_uplift() {
+    use std::io::{BufRead, BufReader};
+
+    let directory = tempdir().unwrap();
+    let sync = directory.path();
+    let bin = "patina-uplift-race-fixture";
+    let package = sync.join("guest");
+    write_plain_package(&package, bin, "fn main() {}\n");
+    let target = common::guest_target_dir("uplift-race");
+    for fifo in ["to-test", "to-cargo"] {
+        let made = Command::new("mkfifo")
+            .arg(sync.join(fifo))
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo {fifo} failed");
+    }
+    let cargo = sync.join("cargo");
+    fs::write(
+        &cargo,
+        format!(
+            "#!/bin/sh\n\
+             real=\"{real}\"\n\
+             [ \"$1\" = rustc ] || exec \"$real\" \"$@\"\n\
+             \"$real\" \"$@\"; status=$?\n\
+             echo uplifted > \"{sync}/to-test\"; read _ < \"{sync}/to-cargo\"\n\
+             exit $status\n",
+            real = active_toolchain_binary("cargo").display(),
+            sync = sync.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Both FIFOs are held open read-write, so no open on either side blocks.
+    let fifo = |name: &str| {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(sync.join(name))
+            .unwrap()
+    };
+    let mut to_test = BufReader::new(fifo("to-test"));
+    let mut to_cargo = fifo("to-cargo");
+    let output_path = sync.join("built");
+    let child = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        .current_dir(&package)
+        .args([
+            "build",
+            package.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .env("RUSTC", active_toolchain_binary("rustc"))
+        .env("CARGO", &cargo)
+        .env("CARGO_TARGET_DIR", &target)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A build that exits before the pause must not leave the test waiting.
+    let exited = fifo("to-test");
+    let build = std::thread::spawn(move || {
+        let output = child.wait_with_output().unwrap();
+        writeln!(&exited, "exited").unwrap();
+        output
+    });
+    let mut line = String::new();
+    to_test.read_line(&mut line).unwrap();
+    let report = |output: &Output| {
+        format!(
+            "exit {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+    assert_eq!(
+        line.trim_end(),
+        "uplifted",
+        "the build never finished its guest Cargo run: {}",
+        report(&build.join().unwrap())
+    );
+    let executable = fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("debug").join(bin))
+        .find(|path| path.is_file())
+        .expect("the guest Cargo run uplifted no executable");
+    let torn = TornUplift::begin(&target, &executable);
+    writeln!(to_cargo, "go").unwrap();
+    let built = build.join().unwrap();
+    drop(torn);
+
+    assert!(
+        built.status.success(),
+        "the build failed: {}",
+        report(&built)
+    );
+    assert!(
+        fs::read(&output_path).unwrap() == fs::read(&executable).unwrap(),
+        "the build copied out a torn executable"
+    );
+}
+
 // Source-first `audit` and `run` honor `--package`/`--bin` against a WORKSPACE
 // manifest — the exact form the help advertises (`audit <Cargo.toml> --package X
 // --bin Y`) and the one the bug report showed rejected. A virtual workspace (no

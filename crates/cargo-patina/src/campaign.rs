@@ -40,8 +40,6 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -4752,36 +4750,20 @@ impl CampaignLock {
     }
 }
 
-#[cfg(unix)]
 fn acquire_flock(file: &File, out_dir: &Path) -> Result<(), CliError> {
-    const LOCK_EX: i32 = 2;
-    const LOCK_NB: i32 = 4;
-    unsafe extern "C" {
-        fn flock(fd: i32, operation: i32) -> i32;
-    }
-    let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
-    if rc == 0 {
-        return Ok(());
-    }
-    let error = std::io::Error::last_os_error();
-    if error.kind() == std::io::ErrorKind::WouldBlock {
-        return Err(CliError(format!(
-            "another campaign is writing this out-dir: {}",
-            out_dir.display()
-        )));
-    }
-    Err(CliError(format!(
-        "failed to lock campaign out-dir {}: {error}",
-        out_dir.display()
-    )))
-}
-
-#[cfg(not(unix))]
-fn acquire_flock(_file: &File, out_dir: &Path) -> Result<(), CliError> {
-    Err(CliError(format!(
-        "campaign out-dir locking is unsupported on this platform: {}",
-        out_dir.display()
-    )))
+    crate::lock_exclusive(file, false).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            CliError(format!(
+                "another campaign is writing this out-dir: {}",
+                out_dir.display()
+            ))
+        } else {
+            CliError(format!(
+                "failed to lock campaign out-dir {}: {error}",
+                out_dir.display()
+            ))
+        }
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
