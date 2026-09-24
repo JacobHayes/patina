@@ -49,6 +49,10 @@ thread_local! {
     /// process: a helper thread's quiet window must never swallow an event the
     /// thread under test emits meanwhile.
     static QUIET: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Why THIS thread's data events are not compared, inside
+    /// [`Recorder::not_compared`].
+    static NOT_COMPARED: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 impl Default for Recorder {
@@ -85,6 +89,7 @@ impl Recorder {
                 errno,
                 fields: BTreeMap::new(),
                 norm: BTreeMap::new(),
+                not_compared: None,
             },
         }
     }
@@ -98,6 +103,10 @@ impl Recorder {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         event.seq = self.seq.fetch_add(1, Ordering::SeqCst);
+        // A check stays compared: each side asserts its own kernel's answer.
+        if event.not_compared.is_none() && event.op != crate::observe::CHECK_OP {
+            event.not_compared = NOT_COMPARED.with(|reason| reason.borrow().clone());
+        }
         let line = serde_json::to_string(&event).expect("event serializes");
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
@@ -114,6 +123,16 @@ impl Recorder {
         QUIET.with(|depth| depth.set(depth.get() + 1));
         let value = body();
         QUIET.with(|depth| depth.set(depth.get() - 1));
+        value
+    }
+
+    /// Run `body` with every data event this thread records (not its
+    /// checks) marked not compared for `reason` (none: recorded as usual).
+    /// Other threads are unaffected.
+    pub fn not_compared<T>(&self, reason: Option<String>, body: impl FnOnce() -> T) -> T {
+        let outer = NOT_COMPARED.with(|slot| slot.replace(reason));
+        let value = body();
+        NOT_COMPARED.with(|slot| slot.replace(outer));
         value
     }
 }

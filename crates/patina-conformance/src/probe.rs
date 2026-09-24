@@ -427,6 +427,35 @@ impl Probe {
         ok
     }
 
+    /// A behaviour known from kernel `release` on: the release it began in
+    /// where that is known (`why` then cites the change), or simply the
+    /// oldest kernel it was verified on — a ratchet a later ABI bump moves.
+    /// `why` names the behaviour. `body` learns whether this kernel has it — the
+    /// host's release natively, the virtual ABI level under patina (its
+    /// `uname`) — and checks this kernel's own answer. Where this kernel and
+    /// the virtual ABI level are on the same side of `release`, the events
+    /// `body` records compare strictly; on different sides the native answer
+    /// is no oracle for the virtual kernel's, and every data event (syscall
+    /// result and fields) `body` records on this thread is marked not
+    /// compared (the comparison reports it, a gap difference on it included,
+    /// rather than passing it). Its checks still compare: each side asserts
+    /// its own kernel's answer, so both hold, and a wrong patina answer fails
+    /// its check on every host.
+    pub fn since<T>(
+        &self,
+        release: &'static str,
+        why: &'static str,
+        body: impl FnOnce(bool) -> T,
+    ) -> T {
+        let (has, reason) = crate::host::floor(
+            release,
+            why,
+            &crate::host::kernel_release(),
+            patina_dst_syscalls::VIRTUAL_ABI,
+        );
+        self.rec.not_compared(reason, || body(has))
+    }
+
     /// A precondition the scenario cannot continue without.
     pub fn require(&self, label: &str, ok: bool) {
         if !ok {

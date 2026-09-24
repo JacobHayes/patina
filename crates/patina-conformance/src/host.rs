@@ -71,6 +71,24 @@ pub fn kernel_release() -> String {
         .into_owned()
 }
 
+/// A behaviour known from kernel `since` on (`why` names it), as a kernel of
+/// release `this` sees it next to a virtual kernel at `virtual_abi`: whether
+/// `this` has the behaviour, and — when `this` and `virtual_abi` are on
+/// different sides of `since`, so this kernel's answer is no oracle for the
+/// virtual kernel's — why its observation is not compared. On the same side
+/// (both have the behaviour or neither does) it compares strictly. A release
+/// that does not parse is on neither side: never compared.
+pub fn floor(since: &str, why: &str, this: &str, virtual_abi: &str) -> (bool, Option<String>) {
+    let first = parse_release(since).expect("a kernel floor is a release");
+    let has = |release: &str| parse_release(release).map(|release| release >= first);
+    let compared = matches!((has(this), has(virtual_abi)), (Some(a), Some(b)) if a == b);
+    (
+        has(this).unwrap_or(false),
+        (!compared)
+            .then(|| format!("{why} (since {since}; kernel {this}, virtual ABI {virtual_abi})")),
+    )
+}
+
 fn since(row: Syscall) -> Option<(u64, u64, u64)> {
     SYSCALLS
         .iter()
@@ -1028,6 +1046,54 @@ mod tests {
         let unmet = unmet_on(&NEEDS_6_4, "6.1.100").expect("unmet");
         assert_eq!(unmet.cause, Cause::Absent);
         assert_eq!(unmet_on(&NEEDS_6_4, "6.4.0"), None);
+    }
+
+    /// A per-check floor below the virtual ABI level (a behaviour the virtual
+    /// kernel has): a host older than the floor lacks it and is no oracle for
+    /// it; a host at the floor or past it compares strictly.
+    #[test]
+    fn a_host_older_than_a_check_floor_does_not_compare_it() {
+        let (has, reason) = floor("6.13", "planted", "6.8.0-139-generic", "7.0");
+        assert!(!has);
+        let reason = reason.expect("not compared");
+        assert!(reason.contains("6.8.0-139-generic"), "{reason}");
+    }
+
+    #[test]
+    fn a_host_at_a_check_floor_compares_it() {
+        assert_eq!(floor("6.13", "planted", "6.13.0", "7.0"), (true, None));
+    }
+
+    #[test]
+    fn a_host_newer_than_a_check_floor_compares_it() {
+        assert_eq!(
+            floor("6.13", "planted", "6.17.0-1-azure", "7.0"),
+            (true, None)
+        );
+        assert_eq!(floor("6.13", "planted", "7.3.0", "7.0"), (true, None));
+    }
+
+    /// Under patina this kernel is the virtual one: always compared.
+    #[test]
+    fn the_virtual_kernel_compares_every_floor_it_reports() {
+        assert_eq!(
+            floor("6.13", "planted", "7.0.0-patina", "7.0"),
+            (true, None)
+        );
+        assert_eq!(
+            floor("7.3", "planted", "7.0.0-patina", "7.0"),
+            (false, None)
+        );
+    }
+
+    /// A floor past the virtual ABI level (a behaviour the virtual kernel
+    /// lacks) compares only on hosts that lack it too; a host release that
+    /// does not parse is never an oracle.
+    #[test]
+    fn a_floor_past_the_virtual_abi_compares_only_hosts_before_it() {
+        assert_eq!(floor("7.3", "planted", "6.8.0", "7.0"), (false, None));
+        assert!(floor("7.3", "planted", "7.3.1", "7.0").1.is_some());
+        assert!(floor("6.13", "planted", "", "7.0").1.is_some());
     }
 
     /// Detection fails closed: a run directory that does not exist meets no

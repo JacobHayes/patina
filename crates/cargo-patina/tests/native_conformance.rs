@@ -16,8 +16,12 @@
 //! the native run (only their native observation is not run);
 //! `PATINA_REQUIRE_HOST_ORACLE=1`, `PATINA_REQUIRE_SUD=1` and
 //! `PATINA_REQUIRE_STRACE=1` (set in CI) make the host, SUD and strace cases
-//! failures instead. Every run's streams and logs are kept under the target
-//! dir's `conformance/<scenario>/<vehicle>/`.
+//! failures instead. A check floored at the release a behaviour is known from
+//! (`Probe::since`) is compared only where the host kernel and the virtual ABI
+//! level are on the same side of that release; elsewhere each of its data
+//! events prints `NOT COMPARED` with why, never a pass, while its checks
+//! (each side asserting its own kernel's answer) still compare. Every run's streams and logs
+//! are kept under the target dir's `conformance/<scenario>/<vehicle>/`.
 #![cfg(target_os = "linux")]
 mod common;
 
@@ -219,6 +223,13 @@ fn pin_process_state() -> std::io::Result<()> {
 #[allow(clippy::explicit_write)]
 fn not_run(what: &str, reason: &NotRun) {
     writeln!(std::io::stderr(), "NOT RUN {what}: {reason}").unwrap();
+}
+
+/// Report a floored check this host is no oracle for, past the capture as
+/// [`not_run`] is.
+#[allow(clippy::explicit_write)]
+fn not_compared(what: &str, line: &str) {
+    writeln!(std::io::stderr(), "NOT COMPARED {what}: {line}").unwrap();
 }
 
 fn required(variable: &str) -> bool {
@@ -684,8 +695,11 @@ impl Leg<'_> {
         let patina = self
             .patina(None)
             .map_err(|error| vec![format!("patina run: {error}")])?;
-        compare::judge(&native, &patina, &expected)
+        let verdict = compare::judge(&native, &patina, &expected)
             .map_err(|failures| with_stderr(prefixed("patina: ", failures), &patina))?;
+        for line in &verdict.not_compared {
+            not_compared(&self.name(), line);
+        }
         if gaps.iter().any(|gap| gap.failure.ends_early()) {
             // A stopped run leaves no complete trace, and the direct run would
             // be the same refusal outside the supervisor.

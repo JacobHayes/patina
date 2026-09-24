@@ -231,7 +231,14 @@ forwards into the same dispatcher instead of its two-number allowlist.
   run answers that row with its declared ENOSYS and only that row's native
   observation is not run (`PATINA_REQUIRE_HOST_ORACLE=1`,
   `PATINA_REQUIRE_SUD=1` and `PATINA_REQUIRE_STRACE=1`, set in CI, turn those
-  into failures). Every run owns a
+  into failures). A behaviour known only from some release on (the one it
+  began in, or the kernel it was verified on) is a per-check floor
+  (`Probe::since`): the scenario asserts each kernel's own
+  answer, and the floored events compare only where the host kernel and the
+  virtual ABI level are on the same side of the release; elsewhere the data
+  events (and gap differences declared on them) print `NOT COMPARED` with the
+  reason, while the checks — each side asserting its own kernel's answer —
+  still compare. Every run owns a
   temporary directory and runs under a deadline; a scenario's forked children
   are reaped within one.
 - The tests run in the full workspace suite (`mise run check`, CI on Linux
