@@ -966,6 +966,10 @@ mod hostapi {
     unsafe extern "C" {
         fn __real_dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     }
+    // Weak in the staticlib, where only the wrap resolves it. The unit-test
+    // binary defines it strongly (thread/signals/tests.rs), and a weak
+    // directive in the same object as that definition is an assembler error.
+    #[cfg(not(test))]
     core::arch::global_asm!(".weak __real_dlsym");
 
     // `<dlfcn.h>`: `RTLD_NEXT == (void *)-1`. Resolve against the images that
