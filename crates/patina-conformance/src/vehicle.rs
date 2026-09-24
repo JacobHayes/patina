@@ -38,6 +38,15 @@ impl Vehicle {
         Vehicle::Raw,
     ];
 
+    /// The vehicles that issue the row's number: a scenario whose rows glibc
+    /// has no wrapper for, where the libc spelling would be `syscall(2)`
+    /// again.
+    pub const KERNEL: &'static [Vehicle] = &[
+        Vehicle::Syscall,
+        #[cfg(target_arch = "x86_64")]
+        Vehicle::Raw,
+    ];
+
     pub fn parse(text: &str) -> Option<Vehicle> {
         Vehicle::ALL
             .iter()
@@ -847,4 +856,78 @@ pub fn errno_name(code: i32) -> String {
         _ => return format!("E#{code}"),
     };
     name.to_string()
+}
+
+/// glibc's wrappers for privileged rows. The shim defines none of them
+/// (registry `Absent`), so the probe binary cannot import them (the pre-run
+/// audit would refuse the whole binary): the libc vehicle reaches each
+/// through `dlsym` at its row's first call (`Probe::call`), and under patina
+/// that lookup answers NULL.
+const WRAPPERS: &[(Syscall, &str)] = &[
+    (Syscall::N_mount, "mount"),
+    (Syscall::N_umount2, "umount2"),
+    (Syscall::N_open_tree, "open_tree"),
+    (Syscall::N_fsopen, "fsopen"),
+    (Syscall::N_fspick, "fspick"),
+    (Syscall::N_fsmount, "fsmount"),
+    (Syscall::N_fsconfig, "fsconfig"),
+    (Syscall::N_move_mount, "move_mount"),
+    (Syscall::N_mount_setattr, "mount_setattr"),
+];
+
+/// The glibc wrapper the libc vehicle reaches `row` through, if it has one.
+pub fn wrapper(row: Syscall) -> Option<&'static str> {
+    WRAPPERS
+        .iter()
+        .find(|(wrapped, _)| *wrapped == row)
+        .map(|(_, symbol)| *symbol)
+}
+
+/// Call glibc's wrapper for `row`, found at `address`, with the row's
+/// arguments in the wrapper's own types; the kernel result convention.
+///
+/// # Safety
+///
+/// `address` is glibc's definition of `wrapper(row)`, and the caller owns
+/// every pointer in `a`.
+pub unsafe fn wrapper_door(row: Syscall, address: *mut std::ffi::c_void, a: Args) -> i64 {
+    use libc::*;
+    /// Call `address` as `unsafe extern "C" fn(params) -> ret`.
+    macro_rules! call {
+        (($($param:ty),*) -> $ret:ty, $($arg:expr),*) => {{
+            // SAFETY: the caller's contract: `address` is this wrapper.
+            let wrapper = unsafe {
+                std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($param),*) -> $ret>(
+                    address,
+                )
+            };
+            // SAFETY: the caller's contract: it owns every pointer passed.
+            i64::from(unsafe { wrapper($($arg as $param),*) })
+        }};
+    }
+    let result = match row {
+        Syscall::N_mount => call!(
+            (*const c_char, *const c_char, *const c_char, c_ulong, *const c_void) -> c_int,
+            a[0], a[1], a[2], a[3], a[4]
+        ),
+        Syscall::N_umount2 => call!((*const c_char, c_int) -> c_int, a[0], a[1]),
+        Syscall::N_open_tree => call!((c_int, *const c_char, c_uint) -> c_int, a[0], a[1], a[2]),
+        Syscall::N_fsopen => call!((*const c_char, c_uint) -> c_int, a[0], a[1]),
+        Syscall::N_fspick => call!((c_int, *const c_char, c_uint) -> c_int, a[0], a[1], a[2]),
+        Syscall::N_fsmount => call!((c_int, c_uint, c_uint) -> c_int, a[0], a[1], a[2]),
+        Syscall::N_fsconfig => call!(
+            (c_int, c_uint, *const c_char, *const c_void, c_int) -> c_int,
+            a[0], a[1], a[2], a[3], a[4]
+        ),
+        Syscall::N_move_mount => call!(
+            (c_int, *const c_char, c_int, *const c_char, c_uint) -> c_int,
+            a[0], a[1], a[2], a[3], a[4]
+        ),
+        Syscall::N_mount_setattr => call!(
+            (c_int, *const c_char, c_uint, *mut c_void, size_t) -> c_int,
+            a[0], a[1], a[2], a[3], a[4]
+        ),
+        other => panic!("{}: no glibc wrapper", other.name()),
+    };
+    fold_errno(result)
 }

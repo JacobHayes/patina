@@ -62,7 +62,11 @@ host-configured values (ports, buffer sizes, MTUs, interfaces other than `lo`)
 by relation; IPv6 on `lo` and an unprivileged fanotify group are their needs. A libc symbol the shim leaves undefined cannot be imported by the
 probe binary (the pre-run audit would refuse all of it), so its scenario
 reaches glibc's definition through `dlsym` (`Probe::resolve`) and names it in
-`resolves`. Under patina that lookup answers NULL: the shim's `__wrap_dlsym`
+`resolves` (the libc vehicle resolves a privileged row's glibc wrapper,
+`mount` or `open_tree`, this way at the row's first call: `vehicle::WRAPPERS`;
+a scenario whose rows glibc has no wrapper for runs through
+`Vehicle::KERNEL` only, not `syscall(2)` twice). Under patina that lookup
+answers NULL: the shim's `__wrap_dlsym`
 (`c/posix/entropy.c`) routes only a fixed list of names (`getrandom`,
 `getentropy`), not every name the shim defines, so such a scenario's gap
 lifts only when the shim both defines the symbol and routes it. A catalog

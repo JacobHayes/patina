@@ -444,18 +444,34 @@ forwards into the same dispatcher instead of its two-number allowlist.
   headers (named fatals), a packet-information interface index (checked to
   exist, not routed by: the virtual network delivers by address), and wakeups between two epoll scans are queued in
   descriptor order (the model keeps no clock across sources).
-- **process lifecycle + privileged** (data only): every row `Trap(class)` with
-  its one-line reasoning in the registry; `execve`/`arch_prctl`/`set_tid_address`
+- **process lifecycle** (data only): every row `Trap(class)` with its
+  one-line reasoning in the registry; `execve`/`arch_prctl`/`set_tid_address`
   pre-arm rows documented as never-trapping.
+- **privileged** (user decision, superseding §2.3 for these rows): a
+  privileged row answers what the kernel answers an unprivileged caller,
+  not a fatal trap. Each row declares the capability the kernel checks and
+  the checks that come before it; one virtual credential (uid/gid/groups and
+  capability sets; today uid 1000 with none) decides the answer, and a
+  capability granted but not modeled is a named fatal. Rows the kernel
+  allows an unprivileged caller (keyrings, Landlock, the LSM attribute
+  calls, `statmount`/`listmount`, `open_tree` without a clone, seccomp with
+  `no_new_privs`) get a real model; rows whose answer is host configuration
+  (`perf_event_paranoid`, `unprivileged_bpf_disabled`,
+  `vm.unprivileged_userfaultfd`, Yama, the distribution's user-namespace
+  policy) take one fixed, declared configuration. The scenarios assert only
+  arguments harmless even to a caller whose capability check passed (a bad
+  reboot magic, an empty module image, a filesystem type that does not
+  exist) and never restrict or kill the probe (no successful
+  `landlock_restrict_self`, seccomp install, `unshare` or `setns`).
 
 ## 7. Why the exclusions stay excluded
 
 - **Process lifecycle.** A second process is outside the scheduler, the trace
   and the fs model; the guest's contract is "one process". `wait*` answers
   ECHILD (the exact childless-kernel answer, cannot hide an escape).
-- **Privileged / kernel-config.** They change kernel state or need `CAP_*`;
-  nothing a DST guest legitimately needs. Removed numbers answer ENOSYS because
-  the kernel cannot answer anything else.
+- **Privileged / kernel-config** no longer stay excluded: they answer as the
+  kernel answers an unprivileged caller (§6, privileged). Removed numbers
+  answer ENOSYS because the kernel cannot answer anything else.
 - **Host-network escape.** Any address outside the virtual interface table is
   ENETUNREACH; that is a model answer, not a hole.
 - **io_uring.** A submission/completion ring model over the readiness reactor

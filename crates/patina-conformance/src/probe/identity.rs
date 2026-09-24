@@ -915,6 +915,29 @@ impl Probe {
 
     // ---- credentials ---------------------------------------------------------------
 
+    /// Go no further unless this caller is unprivileged: a nonzero effective
+    /// uid and empty effective and permitted capability sets, read without
+    /// recording. The harness runs a scenario that needs `Need::Unprivileged`
+    /// only for such a caller; this second guard stops a probe binary started
+    /// by hand as root before any call whose capability check would pass
+    /// (rebooting, loading modules, swapping, changing namespaces).
+    pub fn require_unprivileged(&self) {
+        let (euid, (read, _, sets)) = self.rec.quiet(|| {
+            (
+                self.geteuid(),
+                self.capget(CAPABILITY_V3, Who::Caller, true),
+            )
+        });
+        self.require(
+            "an unprivileged caller: euid is not 0 and no capability is effective or permitted",
+            euid > 0
+                && read == 0
+                && sets
+                    .iter()
+                    .all(|set| set.effective == 0 && set.permitted == 0),
+        );
+    }
+
     pub fn geteuid(&self) -> i64 {
         let result = self.call(Syscall::N_geteuid, [0; 6]);
         self.event(Syscall::N_geteuid, result)

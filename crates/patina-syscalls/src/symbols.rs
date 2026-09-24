@@ -2393,4 +2393,59 @@ const ROWS: &[SymbolRow] = &[
         Serves::Syscalls(&["removexattr"]),
         SymbolStatus::Absent,
     ),
+    // glibc's wrappers for the privileged rows (a guest importing one is audit-refused).
+    s(
+        "mount",
+        Platform::Linux,
+        Serves::Syscalls(&["mount"]),
+        SymbolStatus::Absent,
+    ),
+    s(
+        "umount2",
+        Platform::Linux,
+        Serves::Syscalls(&["umount2"]),
+        SymbolStatus::Absent,
+    ),
+    s(
+        "open_tree",
+        Platform::Linux,
+        Serves::Syscalls(&["open_tree"]),
+        SymbolStatus::Absent,
+    ),
+    s(
+        "fsopen",
+        Platform::Linux,
+        Serves::Syscalls(&["fsopen"]),
+        SymbolStatus::Absent,
+    ),
+    s(
+        "fspick",
+        Platform::Linux,
+        Serves::Syscalls(&["fspick"]),
+        SymbolStatus::Absent,
+    ),
+    s(
+        "fsmount",
+        Platform::Linux,
+        Serves::Syscalls(&["fsmount"]),
+        SymbolStatus::Absent,
+    ),
+    s(
+        "fsconfig",
+        Platform::Linux,
+        Serves::Syscalls(&["fsconfig"]),
+        SymbolStatus::Absent,
+    ),
+    s(
+        "move_mount",
+        Platform::Linux,
+        Serves::Syscalls(&["move_mount"]),
+        SymbolStatus::Absent,
+    ),
+    s(
+        "mount_setattr",
+        Platform::Linux,
+        Serves::Syscalls(&["mount_setattr"]),
+        SymbolStatus::Absent,
+    ),
 ];

@@ -212,6 +212,7 @@ pub enum Arc {
     TimeTimersSchedIdentity,
     SignalsThreadsProcess,
     NetworkReadiness,
+    Privileged,
 }
 
 impl Arc {
@@ -223,6 +224,7 @@ impl Arc {
             Arc::TimeTimersSchedIdentity => "time+timers+sched+identity",
             Arc::SignalsThreadsProcess => "signals+threads+process",
             Arc::NetworkReadiness => "network+readiness",
+            Arc::Privileged => "privileged",
         }
     }
 }
@@ -401,8 +403,12 @@ pub const SCENARIOS: &[&Scenario] = &[
     &fs::libc_times::SCENARIO,
     &fs::links::SCENARIO,
     &fs::metadata::SCENARIO,
+    &fs::mount::SCENARIO,
+    &fs::mount_api::SCENARIO,
+    &fs::mount_query::SCENARIO,
     &fs::newer_than_virtual::SCENARIO,
     &fs::open_rw::SCENARIO,
+    &fs::open_tree::SCENARIO,
     &fs::openat2::SCENARIO,
     &fs::owner::SCENARIO,
     &fs::paths::SCENARIO,

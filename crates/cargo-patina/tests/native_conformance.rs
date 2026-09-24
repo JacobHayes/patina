@@ -1157,6 +1157,21 @@ fn fs_metadata() {
 }
 
 #[test]
+fn fs_mount() {
+    conform("fs/mount");
+}
+
+#[test]
+fn fs_mount_api() {
+    conform("fs/mount_api");
+}
+
+#[test]
+fn fs_mount_query() {
+    conform("fs/mount_query");
+}
+
+#[test]
 fn fs_newer_than_virtual() {
     conform("fs/newer_than_virtual");
 }
@@ -1164,6 +1179,11 @@ fn fs_newer_than_virtual() {
 #[test]
 fn fs_open_rw() {
     conform("fs/open_rw");
+}
+
+#[test]
+fn fs_open_tree() {
+    conform("fs/open_tree");
 }
 
 #[test]
