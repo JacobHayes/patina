@@ -379,6 +379,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &fs::cache::SCENARIO,
     &fs::chmod::SCENARIO,
     &fs::copy::SCENARIO,
+    &fs::dirent::SCENARIO,
     &fs::dirs::SCENARIO,
     &fs::getdents::SCENARIO,
     #[cfg(target_arch = "x86_64")]

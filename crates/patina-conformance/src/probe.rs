@@ -18,6 +18,9 @@ mod ipc;
 mod memory;
 pub use ipc::{Deadline, Key, MsgArg, Notify, SemArg, ShmArg, Window, perm_mode};
 pub use memory::{At, MapSpec, Region};
+// The directory-stream API (libc only).
+mod dirent;
+pub use dirent::{Dir, DirEntry, ReadSpelling};
 // The timer, identity, scheduling and limit rows.
 mod identity;
 mod timers;
@@ -230,6 +233,17 @@ const _: () = assert!(std::mem::size_of::<Statfs>() == std::mem::size_of::<libc:
 /// `statfs(2)`'s `ST_VALID`: set in every `f_flags` the kernel reports
 /// (`statfs_by_dentry` → `calculate_f_flags`).
 pub const ST_VALID: i64 = 0x0020;
+
+/// The kernel's `O_LARGEFILE` bit, which a 64-bit kernel forces into every
+/// open (`force_o_largefile`) and `F_GETFL` reports. The libc crate's
+/// constant is glibc's userspace spelling (0 on x86_64), so it is spelled
+/// here per architecture (x86's 0o100000; arm64's own 0o400000).
+#[cfg(target_arch = "x86_64")]
+pub const KERNEL_O_LARGEFILE: i64 = 0o100000;
+#[cfg(target_arch = "aarch64")]
+pub const KERNEL_O_LARGEFILE: i64 = 0o400000;
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("KERNEL_O_LARGEFILE: spell this architecture's kernel O_LARGEFILE");
 
 /// A `readv`-family read: `(result, the bytes each segment received)`.
 pub type SegmentsRead = (i64, Vec<Vec<u8>>);

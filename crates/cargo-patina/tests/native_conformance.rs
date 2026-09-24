@@ -1059,6 +1059,11 @@ fn fs_dirs() {
 }
 
 #[test]
+fn fs_dirent() {
+    conform("fs/dirent");
+}
+
+#[test]
 fn fs_getdents() {
     conform("fs/getdents");
 }

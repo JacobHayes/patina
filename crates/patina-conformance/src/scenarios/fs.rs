@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod chmod;
 pub mod copy;
+pub mod dirent;
 pub mod dirs;
 pub mod getdents;
 #[cfg(target_arch = "x86_64")]
