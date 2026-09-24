@@ -14,7 +14,8 @@
 //! symbols `Absent` — the shim does not define them, so the probe binary
 //! cannot import them (the pre-run audit would refuse the whole binary) —
 //! and the scenario reaches glibc's definitions through `dlsym`, which
-//! under patina answers only what the shim defines.
+//! under patina finds neither: the shim's `__wrap_dlsym` routes only its
+//! entropy names.
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{ARPHRD_LOOPBACK, IfField, Probe, SIOCGIFFLAGS, SIOCGIFINDEX, family_name};

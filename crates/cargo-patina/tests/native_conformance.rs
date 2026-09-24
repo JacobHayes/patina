@@ -1095,6 +1095,11 @@ fn fs_legacy_paths() {
 }
 
 #[test]
+fn fs_lfs64() {
+    conform("fs/lfs64");
+}
+
+#[test]
 fn fs_links() {
     conform("fs/links");
 }
@@ -1135,6 +1140,11 @@ fn fs_positional_io() {
 }
 
 #[test]
+fn fs_posix_fadvise() {
+    conform("fs/posix_fadvise");
+}
+
+#[test]
 fn fs_renameat2() {
     conform("fs/renameat2");
 }
@@ -1157,6 +1167,11 @@ fn fs_statfs() {
 #[test]
 fn fs_statfs_fault() {
     conform("fs/statfs_fault");
+}
+
+#[test]
+fn fs_statvfs() {
+    conform("fs/statvfs");
 }
 
 #[test]
@@ -1592,6 +1607,11 @@ fn sys_personality() {
 #[test]
 fn sys_rlimit() {
     conform("sys/rlimit");
+}
+
+#[test]
+fn sys_rlimit64() {
+    conform("sys/rlimit64");
 }
 
 #[test]

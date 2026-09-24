@@ -21,12 +21,15 @@ pub use memory::{At, MapSpec, Region};
 // The directory-stream API (libc only).
 mod dirent;
 pub use dirent::{Dir, DirEntry, ReadSpelling};
+// glibc's large-file (`*64`) spellings of the file rows (libc only).
+mod lfs;
+pub use lfs::StatBy;
 // The timer, identity, scheduling and limit rows.
 mod identity;
 mod timers;
 pub use identity::{
-    CAPABILITY_V3, CapData, Cred, GroupsSize, INFINITY, SCHED_ATTR_SIZE_VER0, SCHED_ATTR_SIZE_VER1,
-    SchedAttr, Shown, Sysinfo, Uts, Who,
+    CAPABILITY_V3, CapData, Cred, GetRlimit64, GroupsSize, INFINITY, SCHED_ATTR_SIZE_VER0,
+    SCHED_ATTR_SIZE_VER1, SchedAttr, SetRlimit64, Shown, Sysinfo, Uts, Who,
 };
 pub use timers::{
     Arm, ClockArg, Count, MISSING_PID, Micros, Res, SI_KERNEL, SI_TIMER, SetTo, Sigev, Spec,

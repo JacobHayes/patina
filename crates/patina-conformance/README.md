@@ -61,5 +61,10 @@ names derived from it, the kernel's rtnetlink — and compare host-allocated or
 host-configured values (ports, buffer sizes, MTUs, interfaces other than `lo`)
 by relation; IPv6 on `lo` and an unprivileged fanotify group are their needs. A libc symbol the shim leaves undefined cannot be imported by the
 probe binary (the pre-run audit would refuse all of it), so its scenario
-reaches glibc's definition through `dlsym` (`Probe::resolve`), which under
-patina answers only what the shim defines.
+reaches glibc's definition through `dlsym` (`Probe::resolve`) and names it in
+`resolves`. Under patina that lookup answers NULL: the shim's `__wrap_dlsym`
+(`c/posix/entropy.c`) routes only a fixed list of names (`getrandom`,
+`getentropy`), not every name the shim defines, so such a scenario's gap
+lifts only when the shim both defines the symbol and routes it. A catalog
+test fails once a `resolves` name stops being registry-`Absent`: the
+scenario then imports it directly.

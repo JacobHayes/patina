@@ -34,6 +34,10 @@ pub struct Scenario {
     pub asserts_absent: &'static [Syscall],
     /// libc symbols the `libc` vehicle goes through.
     pub symbols: &'static [&'static str],
+    /// Those of `symbols` the scenario reaches through `dlsym`
+    /// (`Probe::resolve`) rather than importing: exactly the registry's
+    /// `Absent` ones, which the pre-run audit would refuse as imports.
+    pub resolves: &'static [&'static str],
     /// Host capabilities beyond the covered rows the native oracle needs
     /// (detected live on the run directory; see [`crate::host::need_unmet`]).
     pub needs: &'static [Need],
@@ -63,6 +67,7 @@ pub const DEFAULTS: Scenario = Scenario {
     covers: &[],
     asserts_absent: &[],
     symbols: &[],
+    resolves: &[],
     needs: &[],
     kernel_floor: None,
     gaps: &[],
@@ -388,6 +393,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &fs::inotify::SCENARIO,
     &fs::ioctl::SCENARIO,
     &fs::legacy_paths::SCENARIO,
+    &fs::lfs64::SCENARIO,
     &fs::links::SCENARIO,
     &fs::metadata::SCENARIO,
     &fs::newer_than_virtual::SCENARIO,
@@ -396,11 +402,13 @@ pub const SCENARIOS: &[&Scenario] = &[
     &fs::owner::SCENARIO,
     &fs::paths::SCENARIO,
     &fs::positional_io::SCENARIO,
+    &fs::posix_fadvise::SCENARIO,
     &fs::renameat2::SCENARIO,
     &fs::size::SCENARIO,
     &fs::splice::SCENARIO,
     &fs::statfs::SCENARIO,
     &fs::statfs_fault::SCENARIO,
+    &fs::statvfs::SCENARIO,
     &fs::sync::SCENARIO,
     &fs::times::SCENARIO,
     &fs::vectored_io::SCENARIO,
@@ -488,6 +496,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &sys::hostname::SCENARIO,
     &sys::personality::SCENARIO,
     &sys::rlimit::SCENARIO,
+    &sys::rlimit64::SCENARIO,
     #[cfg(target_arch = "x86_64")]
     &sys::sysfs::SCENARIO,
     &sys::sysinfo::SCENARIO,
@@ -536,7 +545,7 @@ fn planted_escape(p: &Probe) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patina_dst_syscalls::{Disposition, Os, SYMBOLS, SYSCALLS};
+    use patina_dst_syscalls::{Disposition, Os, SYMBOLS, SYSCALLS, SymbolStatus};
     use std::collections::BTreeSet;
 
     fn disposition(row: Syscall) -> Disposition {
@@ -609,6 +618,56 @@ mod tests {
                     "{} names symbol {symbol}, which has no registry row",
                     scenario.name
                 );
+            }
+        }
+    }
+
+    fn symbol_status(symbol: &str) -> Option<SymbolStatus> {
+        SYMBOLS
+            .iter()
+            .find(|row| row.name == symbol && row.platform.defines_on(Os::host()))
+            .map(|row| row.status)
+    }
+
+    /// A symbol reached through `dlsym` is one the shim leaves `Absent`. Once
+    /// the shim defines it (the registry row moves off `Absent`), the
+    /// scenario imports it directly instead: under patina `dlsym` still
+    /// answers NULL for it (`__wrap_dlsym` routes only its entropy names), so
+    /// the scenario would keep stopping at the lookup and never judge the
+    /// new definition.
+    #[test]
+    fn resolved_symbols_are_absent_from_the_shim() {
+        for scenario in SCENARIOS {
+            for symbol in scenario.resolves {
+                assert!(
+                    scenario.symbols.contains(symbol),
+                    "{} resolves {symbol} without naming it in `symbols`",
+                    scenario.name
+                );
+                assert_eq!(
+                    symbol_status(symbol),
+                    Some(SymbolStatus::Absent),
+                    "{} reaches {symbol} through dlsym, but the shim now defines it: \
+                     import it directly in the scenario and drop it from `resolves`",
+                    scenario.name
+                );
+            }
+        }
+    }
+
+    /// An `Absent` symbol a scenario names is one it resolves: imported, the
+    /// pre-run audit would refuse the whole probe binary.
+    #[test]
+    fn absent_symbols_are_resolved() {
+        for scenario in SCENARIOS {
+            for symbol in scenario.symbols {
+                if symbol_status(symbol) == Some(SymbolStatus::Absent) {
+                    assert!(
+                        scenario.resolves.contains(symbol),
+                        "{} names {symbol}, which the shim leaves Absent, without resolving it",
+                        scenario.name
+                    );
+                }
             }
         }
     }

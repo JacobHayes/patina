@@ -10,8 +10,9 @@
 //!
 //! libc only, and through `dlsym`: the registry lists the four `Absent`
 //! (the shim does not define them), so the probe binary cannot import them
-//! (the pre-run audit would refuse the whole binary), and under patina
-//! `dlsym` answers only what the shim defines. The overflow path
+//! (the pre-run audit would refuse the whole binary). Under patina `dlsym`
+//! finds none: the shim's `__wrap_dlsym` routes only its entropy names. The
+//! overflow path
 //! (`__chk_fail`, SIGABRT) is not exercised.
 //!
 //! Reads right after a send rely on loopback delivery before the send
