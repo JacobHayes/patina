@@ -1693,6 +1693,11 @@ fn sys_ioport() {
 }
 
 #[test]
+fn sys_keys() {
+    conform("sys/keys");
+}
+
+#[test]
 fn sys_personality() {
     conform("sys/personality");
 }

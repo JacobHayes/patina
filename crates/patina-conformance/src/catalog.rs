@@ -517,6 +517,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &sys::hostname::SCENARIO,
     #[cfg(target_arch = "x86_64")]
     &sys::ioport::SCENARIO,
+    &sys::keys::SCENARIO,
     &sys::personality::SCENARIO,
     &sys::quota::SCENARIO,
     &sys::rlimit::SCENARIO,
