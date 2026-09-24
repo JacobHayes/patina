@@ -1370,6 +1370,11 @@ fn net_unix_dgram() {
 }
 
 #[test]
+fn net_unix_edges() {
+    conform("net/unix_edges");
+}
+
+#[test]
 fn net_unix_seqpacket() {
     conform("net/unix_seqpacket");
 }

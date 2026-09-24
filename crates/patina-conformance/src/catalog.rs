@@ -443,6 +443,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &net::tcp::SCENARIO,
     &net::udp::SCENARIO,
     &net::unix_dgram::SCENARIO,
+    &net::unix_edges::SCENARIO,
     &net::unix_seqpacket::SCENARIO,
     &net::unix_stream::SCENARIO,
     &proc::absent::SCENARIO,

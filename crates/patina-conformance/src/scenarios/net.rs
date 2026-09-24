@@ -38,6 +38,7 @@ pub mod sockopt_fault;
 pub mod tcp;
 pub mod udp;
 pub mod unix_dgram;
+pub mod unix_edges;
 pub mod unix_seqpacket;
 pub mod unix_stream;
 
