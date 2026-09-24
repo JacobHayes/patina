@@ -1038,12 +1038,12 @@ fn collect_files(directory: &Path, into: &mut Vec<std::path::PathBuf>) {
 }
 
 // The converse of the cache-hit test above: when the shim staticlib's BYTES
-// change, the guest must relink. Cargo fingerprints the injected
-// `CARGO_ENCODED_RUSTFLAGS` string, never the files it names, and the staticlib
-// has one canonical path — so a shim/runtime change once left the flag string
-// identical, Cargo reported the guest fresh ("Finished in 0.01s"), and `build`
-// handed back a binary still linked against the PREVIOUS shim. Two builders lost
-// a day to that false "the fix didn't work" evidence.
+// change, the guest must relink. Cargo fingerprints the link arguments, never
+// the files they name, so a guest that links a staticlib at an unchanging path
+// is reported fresh ("Finished in 0.01s") after a shim/runtime change and
+// `build` hands back a binary still linked against the PREVIOUS shim. The guest
+// links the copy `publish_native_shim` names by its bytes, so changed bytes are
+// a changed link argument.
 //
 // The assertion is the GUEST'S OWN OUTPUT, which is the one observable the
 // staleness under test cannot fake: the fixture calls `patina_relink_probe()`,
@@ -1179,6 +1179,98 @@ fn changed_shim_staticlib_bytes_relink_the_guest() {
         "the guest did not relink against the changed shim staticlib: it still runs code \
          from the previous archive, so a shim or runtime change silently produces a stale \
          binary"
+    );
+}
+
+// Cargo owns the shim's `<profile>/libpatina_dst_native_shim.a` and republishes
+// it on every `cargo build`, fresh or not, wherever it copies instead of
+// hard-linking (always on macOS; on Linux when the build dir is on another
+// filesystem): remove, then stream a new copy in. Concurrent guest builds of the
+// same shim therefore linked a half-written archive (`ld: malformed archive`)
+// whenever another process's shim build landed inside their link. This pins
+// that interleaving deterministically: a `cargo` stub leaves the shim build
+// alone and, before every later Cargo invocation of the same `build`, replaces
+// Cargo's copy with its first 4 KiB, which is what a linker opening the path
+// mid-copy reads.
+//
+// Class pairing: a link input must never be read through a path another process
+// can rewrite. Every shim link input is published immutably under a name derived
+// from its content (`stage_shim_object`, `publish_native_shim`), and
+// `changed_shim_staticlib_bytes_relink_the_guest` holds the converse, that
+// changed bytes still relink.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn guest_link_is_immune_to_cargo_rewriting_its_shim_copy() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let shim_target = directory.path().join("shim-target");
+    let package = directory.path().join("guest-pkg");
+    write_plain_package(
+        &package,
+        "patina-shim-rewrite-fixture",
+        "fn main() { println!(\"LINKED_AGAINST_WHOLE_SHIM\"); }\n",
+    );
+
+    let rewrites = directory.path().join("rewrites.log");
+    let stub = directory.path().join("cargo-stub.sh");
+    fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"patina-dst-native-shim\" ]; then \
+             exec {cargo} \"$@\"; fi\ndone\nfor archive in $(find {target} -name \
+             libpatina_dst_native_shim.a); do\n  head -c 4096 \"$archive\" > \"$archive.torn\"\n  \
+             mv -f \"$archive.torn\" \"$archive\"\n  echo \"$archive\" >> {rewrites}\ndone\nexec \
+             {cargo} \"$@\"\n",
+            target = shim_target.display(),
+            rewrites = rewrites.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    let envs: &[(&str, &str)] = &[
+        ("CARGO", stub.to_str().unwrap()),
+        ("CARGO_TARGET_DIR", shim_target.to_str().unwrap()),
+    ];
+
+    let output = package.join("guest");
+    let built = invoke_unchecked_clean_env(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "build",
+            package.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ],
+        envs,
+    );
+    assert!(
+        built.status.success(),
+        "the guest build read Cargo's rewritten shim copy instead of an immutable one: {}\n\
+         stdout:\n{}\nstderr:\n{}",
+        built.status,
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let rewritten = fs::read_to_string(&rewrites).unwrap_or_default();
+    assert!(
+        !rewritten.is_empty(),
+        "the stub never rewrote Cargo's shim copy after the shim build, so the link was not \
+         exposed to a rewrite"
+    );
+    let ran = invoke_unchecked_clean_env(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["run", output.to_str().unwrap(), "--seed", "5"],
+        &[],
+    );
+    let stdout = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success() && stdout.contains("LINKED_AGAINST_WHOLE_SHIM"),
+        "the guest linked during the rewrite did not run: {}\nstdout:\n{stdout}\nstderr:\n{}",
+        ran.status,
+        String::from_utf8_lossy(&ran.stderr)
     );
 }
 

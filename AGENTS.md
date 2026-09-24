@@ -73,7 +73,8 @@ With [mise](https://mise.jdx.dev/) (one-time `mise run setup` installs
 toolchains/targets, including the 1.86 MSRV toolchain with `wasm32-wasip1`):
 
 - `mise run check:fast` — the inner-loop tier: fmt, clippy (host +
-  cross-target `x86_64-unknown-linux-gnu` for Linux-cfg code), every workspace
+  cross-target `x86_64-unknown-linux-gnu` for Linux-cfg code and
+  `aarch64-apple-darwin` for Darwin-cfg code), every workspace
   test except `cargo-patina`'s `end_to_end` and six native execution targets, syscall
   conformance `--fast`, the cheap classifier/gate selftests, CLI flag drift,
   MSRV `cargo check`, WASI validation, and cross-target smoke. It is designed to

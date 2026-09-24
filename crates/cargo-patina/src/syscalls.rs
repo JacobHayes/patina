@@ -8,11 +8,9 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 
-use patina_dst_native_shim::registry::{
-    self, Arch, Disposition, Os, Serves, SymbolRow, SymbolStatus, VIRTUAL_ABI,
-};
+use patina_dst_native_shim::registry::{self, Os, Serves, SymbolRow, SymbolStatus};
 #[cfg(target_os = "linux")]
-use registry::SyscallRow;
+use registry::{Arch, Disposition, SyscallRow, VIRTUAL_ABI};
 use serde_json::{Value, json};
 
 use crate::CliError;
@@ -410,6 +408,7 @@ fn render_darwin(report: &Value) -> String {
     out
 }
 
+#[cfg(target_os = "linux")]
 fn disposition_json(disposition: Disposition) -> Value {
     match disposition {
         Disposition::Modeled | Disposition::Passthrough | Disposition::Absent => {
@@ -443,7 +442,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         let report = darwin_report();
         let os = Os::host().name();
-        let arch = Arch::host().name();
+        let arch = registry::Arch::host().name();
         {
             assert_eq!(report["schema"], SYSCALLS_SCHEMA);
             assert_eq!(report["os"], os);
