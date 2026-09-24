@@ -31,7 +31,7 @@ use super::owned::Owned;
 use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
 use crate::compare::{Ending, Failure};
 use crate::owned;
-use crate::probe::{Key, Probe, SemArg, neg};
+use crate::probe::{Key, Probe, SemArg, Window, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -94,6 +94,7 @@ pub fn run(p: &Probe) {
         i64::from(p.semget(key, 0, 0)) == neg(ENOENT),
     );
     // ---- values ----
+    let from = p.realtime_seconds();
     let id = p.semget(Key::PRIVATE, 3, IPC_CREAT | 0o600);
     p.require("create a set of three", id >= 0);
     let set = Owned::sysv(Syscall::N_semctl, id);
@@ -122,15 +123,20 @@ pub fn run(p: &Probe) {
         "an unknown command is EINVAL",
         p.semctl(id, 0, UNKNOWN_CMD, &SemArg::None).0 == neg(EINVAL),
     );
+    // Creation and every SETVAL/SETALL since stamp `sem_ctime`.
+    let changed = Window {
+        from,
+        to: p.realtime_seconds(),
+    };
     let (r, ds) = p.semctl_stat(id);
     p.check(
-        "IPC_STAT: three semaphores, the mode, created but never operated on",
+        "IPC_STAT: three semaphores, the mode, never operated on, changed since creation",
         r == 0
             && ds.is_some_and(|ds| {
                 ds.sem_nsems == 3
                     && u32::from(ds.sem_perm.mode) & 0o777 == 0o600
                     && ds.sem_otime == 0
-                    && ds.sem_ctime != 0
+                    && changed.holds(ds.sem_ctime)
             }),
     );
     p.check(
@@ -144,16 +150,14 @@ pub fn run(p: &Probe) {
     );
 
     // ---- semop ----
-    p.check(
-        "decrements and increments apply together",
-        p.semop(id, &[(0, 1, 0), (1, -2, 0)], None) == 0,
-    );
+    let (applied, operated) = p.stamped(|| p.semop(id, &[(0, 1, 0), (1, -2, 0)], None));
+    p.check("decrements and increments apply together", applied == 0);
     let (r, values) = p.semctl(id, 0, GETALL, &SemArg::GetAll(3));
     p.check("to every semaphore", r == 0 && values == [2, 0, 3]);
     let (r, ds) = p.semctl_stat(id);
     p.check(
-        "IPC_STAT: the operation is timed",
-        r == 0 && ds.is_some_and(|ds| ds.sem_otime != 0),
+        "IPC_STAT: stamped at the operation",
+        r == 0 && ds.is_some_and(|ds| operated.holds(ds.sem_otime)),
     );
     p.check(
         "GETPID names this process",

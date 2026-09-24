@@ -28,7 +28,7 @@ use super::owned::Owned;
 use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
 use crate::compare::{Ending, Failure};
 use crate::owned;
-use crate::probe::{Key, MsgArg, Probe, neg};
+use crate::probe::{Key, MsgArg, Probe, Window, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -63,12 +63,12 @@ pub fn run(p: &Probe) {
     );
 
     // ---- a private queue ----
-    let id = p.msgget(Key::PRIVATE, IPC_CREAT | 0o600);
+    let (id, created) = p.stamped(|| p.msgget(Key::PRIVATE, IPC_CREAT | 0o600));
     p.require("create a private queue", id >= 0);
     let queue = Owned::sysv(Syscall::N_msgctl, id);
     let (r, ds) = p.msgctl(id, IPC_STAT, MsgArg::Stat);
     p.check(
-        "a new queue is empty and never used",
+        "a new queue is empty, never sent to or received from, changed at creation",
         r == 0
             && ds.is_some_and(|ds| {
                 ds.msg_qnum == 0
@@ -76,25 +76,31 @@ pub fn run(p: &Probe) {
                     && ds.msg_lspid == 0
                     && ds.msg_lrpid == 0
                     && ds.msg_stime == 0
+                    && ds.msg_rtime == 0
+                    && created.holds(ds.msg_ctime)
                     && u32::from(ds.msg_perm.mode) & 0o777 == 0o600
             }),
     );
-    for (mtype, text) in [(1, &b"a"[..]), (2, b"bb"), (3, b"ccc"), (1, b"dddd")] {
-        p.check("send a message", p.msgsnd(id, mtype, text, IPC_NOWAIT) == 0);
-    }
+    let ((), sent) = p.stamped(|| {
+        for (mtype, text) in [(1, &b"a"[..]), (2, b"bb"), (3, b"ccc"), (1, b"dddd")] {
+            p.check("send a message", p.msgsnd(id, mtype, text, IPC_NOWAIT) == 0);
+        }
+    });
     let (r, ds) = p.msgctl(id, IPC_STAT, MsgArg::Stat);
     p.check(
-        "IPC_STAT counts the messages and bytes, names the sender",
+        "IPC_STAT counts the messages and bytes, names the sender, stamped at the sends",
         r == 0
             && ds.is_some_and(|ds| {
                 ds.msg_qnum == 4
                     && ds.__msg_cbytes == 10
                     && ds.msg_lspid == pid
-                    && ds.msg_stime != 0
+                    && sent.holds(ds.msg_stime)
+                    && ds.msg_rtime == 0
             }),
     );
 
     // ---- selection ----
+    let received_from = p.realtime_seconds();
     let (_, got) = p.msgrcv(id, 16, 3, IPC_NOWAIT);
     p.check(
         "a positive type takes the first of that type",
@@ -127,12 +133,19 @@ pub fn run(p: &Probe) {
         "and consumes it",
         p.msgrcv(id, 16, 0, IPC_NOWAIT).0 == neg(ENOMSG),
     );
+    let received = Window {
+        from: received_from,
+        to: p.realtime_seconds(),
+    };
     let (r, ds) = p.msgctl(id, IPC_STAT, MsgArg::Stat);
     p.check(
-        "IPC_STAT: empty again, this process received last",
+        "IPC_STAT: empty again, this process received last, stamped at the receives",
         r == 0
             && ds.is_some_and(|ds| {
-                ds.msg_qnum == 0 && ds.__msg_cbytes == 0 && ds.msg_lrpid == pid && ds.msg_rtime != 0
+                ds.msg_qnum == 0
+                    && ds.__msg_cbytes == 0
+                    && ds.msg_lrpid == pid
+                    && received.holds(ds.msg_rtime)
             }),
     );
 

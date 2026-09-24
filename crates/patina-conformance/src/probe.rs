@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 // The memory and IPC rows (`impl Probe` blocks and their argument types).
 mod ipc;
 mod memory;
-pub use ipc::{Deadline, Key, MsgArg, Notify, SemArg, ShmArg};
+pub use ipc::{Deadline, Key, MsgArg, Notify, SemArg, ShmArg, Window};
 pub use memory::{At, MapSpec, Region};
 
 pub const AT_FDCWD: i32 = libc::AT_FDCWD;

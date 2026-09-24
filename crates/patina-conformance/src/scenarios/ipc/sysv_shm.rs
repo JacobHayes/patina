@@ -97,12 +97,12 @@ pub fn run(p: &Probe) {
     );
 
     // ---- a private segment ----
-    let id = p.shmget(Key::PRIVATE, size, IPC_CREAT | 0o600);
+    let (id, created) = p.stamped(|| p.shmget(Key::PRIVATE, size, IPC_CREAT | 0o600));
     p.require("create a private segment", id >= 0);
     let private = Owned::sysv(Syscall::N_shmctl, id);
     let (r, ds) = p.shmctl(id, IPC_STAT, ShmArg::Stat);
     p.check(
-        "IPC_STAT: the size asked, the mode, no attachment yet",
+        "IPC_STAT: the size asked, the mode, never attached or detached, changed at creation",
         r == 0
             && ds.is_some_and(|ds| {
                 ds.shm_segsz == size
@@ -111,14 +111,15 @@ pub fn run(p: &Probe) {
                     && ds.shm_cpid == pid
                     && ds.shm_lpid == 0
                     && ds.shm_atime == 0
-                    && ds.shm_ctime != 0
+                    && ds.shm_dtime == 0
+                    && created.holds(ds.shm_ctime)
             }),
     );
     let (r, x) = p.shmat("x", id, size, &null, 0);
     p.require("attach it", r >= 0);
     let x = x.unwrap();
     p.check("a new segment is zero-filled", x.zeroed(0, size));
-    let (r, y) = p.shmat("y", id, size, &null, 0);
+    let ((r, y), attached) = p.stamped(|| p.shmat("y", id, size, &null, 0));
     p.require("attach it again", r >= 0);
     let y = y.unwrap();
     x.fill(0, b"shared");
@@ -129,9 +130,14 @@ pub fn run(p: &Probe) {
     );
     let (r, ds) = p.shmctl(id, IPC_STAT, ShmArg::Stat);
     p.check(
-        "IPC_STAT: two attachments, this process attached last",
+        "IPC_STAT: two attachments, this process attached last, at the last attach",
         r == 0
-            && ds.is_some_and(|ds| ds.shm_nattch == 2 && ds.shm_lpid == pid && ds.shm_atime != 0),
+            && ds.is_some_and(|ds| {
+                ds.shm_nattch == 2
+                    && ds.shm_lpid == pid
+                    && attached.holds(ds.shm_atime)
+                    && ds.shm_dtime == 0
+            }),
     );
     let (r, reader) = p.shmat("r", id, size, &null, SHM_RDONLY);
     p.check(
@@ -149,7 +155,8 @@ pub fn run(p: &Probe) {
         "shmdt of an address inside an attachment is EINVAL",
         p.shmdt(&y.at(1)) == neg(EINVAL),
     );
-    p.check("detach the second view", p.shmdt(&y.at(0)) == 0);
+    let (detached, dropped) = p.stamped(|| p.shmdt(&y.at(0)));
+    p.check("detach the second view", detached == 0);
     let (r, placed) = p.shmat("z", id, size, &y.at(0), 0);
     p.check(
         "an attachment lands on a chosen free address",
@@ -161,8 +168,8 @@ pub fn run(p: &Probe) {
     );
     let (r, ds) = p.shmctl(id, IPC_STAT, ShmArg::Stat);
     p.check(
-        "IPC_STAT: a detach is timed",
-        r == 0 && ds.is_some_and(|ds| ds.shm_nattch == 2 && ds.shm_dtime != 0),
+        "IPC_STAT: stamped at the last detach",
+        r == 0 && ds.is_some_and(|ds| ds.shm_nattch == 2 && dropped.holds(ds.shm_dtime)),
     );
     p.check(
         "IPC_SET changes the mode",

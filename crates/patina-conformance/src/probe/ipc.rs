@@ -6,7 +6,10 @@
 //! by relation (`Norm::Relative`), keys by the scenario's label, and the
 //! `IPC_STAT` members that are kernel facts rather than host facts: sizes,
 //! counts, permission bits, the creator's and last operator's identities by
-//! relation, and whether each timestamp is set (never its value).
+//! relation. Timestamps are not recorded: a clock's absolute reading is the
+//! host's business, and a virtual realtime clock that starts at the epoch
+//! legitimately stamps 0. A scenario relates each stamp to [`Window`]s it
+//! reads through its own door.
 
 use super::{Probe, printable};
 use crate::observe::{Id, Norm};
@@ -118,6 +121,22 @@ impl Deadline {
     }
 }
 
+/// Whole seconds of `CLOCK_REALTIME` read before and after an operation: the
+/// kernel stamps IPC times with the realtime seconds at the moment it acts
+/// (`ktime_get_real_seconds`), so a stamp the operation set lies within.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    pub from: i64,
+    pub to: i64,
+}
+
+impl Window {
+    /// Whether `stamp` (seconds) lies within the window.
+    pub fn holds(self, stamp: i64) -> bool {
+        self.from <= stamp && stamp <= self.to
+    }
+}
+
 /// What `mq_notify` registers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Notify {
@@ -147,6 +166,23 @@ impl Probe {
             .quiet(|| crate::owned::key(std::path::Path::new(&dir), proj))
             .unwrap_or_else(|error| panic!("{}: stat the run directory: {error}", self.name));
         Key { raw, label }
+    }
+
+    /// The whole seconds of `CLOCK_REALTIME`, read through this probe's own
+    /// door (unrecorded): the clock the kernel, or patina, stamps IPC times
+    /// with.
+    pub fn realtime_seconds(&self) -> i64 {
+        let (_, ns) = self.rec.quiet(|| self.clock_gettime(libc::CLOCK_REALTIME));
+        ns.div_euclid(1_000_000_000) as i64
+    }
+
+    /// Run `operation` between two realtime readings; answer its result and
+    /// the window a stamp it sets must lie within.
+    pub fn stamped<T>(&self, operation: impl FnOnce() -> T) -> (T, Window) {
+        let from = self.realtime_seconds();
+        let value = operation();
+        let to = self.realtime_seconds();
+        (value, Window { from, to })
     }
 
     fn ipc_id_arg<'a>(
@@ -274,9 +310,6 @@ impl Probe {
                 .norm("fields.cpid", Norm::Identity(Id::Process))
                 .field("lpid", ds.shm_lpid)
                 .norm("fields.lpid", Norm::Identity(Id::Process))
-                .field("atime_set", ds.shm_atime != 0)
-                .field("dtime_set", ds.shm_dtime != 0)
-                .field("ctime_set", ds.shm_ctime != 0)
         } else {
             builder
         };
@@ -422,10 +455,9 @@ impl Probe {
         };
         let builder = match arg {
             SemArg::GetAll(_) if result >= 0 => builder.field("values", values.clone()),
-            SemArg::Stat if result >= 0 => Self::perm_fields(builder, &ds.sem_perm)
-                .field("nsems", ds.sem_nsems)
-                .field("otime_set", ds.sem_otime != 0)
-                .field("ctime_set", ds.sem_ctime != 0),
+            SemArg::Stat if result >= 0 => {
+                Self::perm_fields(builder, &ds.sem_perm).field("nsems", ds.sem_nsems)
+            }
             _ => builder,
         };
         builder.emit();
@@ -588,9 +620,6 @@ impl Probe {
                 .norm("fields.lspid", Norm::Identity(Id::Process))
                 .field("lrpid", ds.msg_lrpid)
                 .norm("fields.lrpid", Norm::Identity(Id::Process))
-                .field("stime_set", ds.msg_stime != 0)
-                .field("rtime_set", ds.msg_rtime != 0)
-                .field("ctime_set", ds.msg_ctime != 0)
         } else {
             builder
         };
