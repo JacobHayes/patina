@@ -1,5 +1,6 @@
-//! entropy/getrandom — getrandom: lengths, the flag vocabulary, and that two
-//! draws differ (the bytes themselves are never recorded).
+//! entropy/getrandom — getrandom: lengths, the flag vocabulary, that two draws
+//! differ (the bytes themselves are never recorded), and the buffer: NULL is
+//! EFAULT unless the length is 0 (drivers/char/random.c copies nothing then).
 
 use crate::catalog::{DEFAULTS, Scenario};
 use patina_dst_syscalls::Syscall;
@@ -26,6 +27,14 @@ pub fn run(p: &Probe) {
     p.check(
         "a large draw is served in full",
         r == 4096 && large.iter().any(|&b| b != 0),
+    );
+    p.check(
+        "a NULL buffer is EFAULT",
+        p.getrandom_null(16, 0) == neg(EFAULT),
+    );
+    p.check(
+        "a NULL buffer of zero length is 0",
+        p.getrandom_null(0, 0) == 0,
     );
 }
 

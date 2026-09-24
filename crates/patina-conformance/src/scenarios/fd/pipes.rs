@@ -1,11 +1,16 @@
 //! fd/pipes — pipe2 / dup / fcntl / flock: descriptor flags versus description
 //! flags, sharing through dup, EOF/EPIPE/EAGAIN on pipes, and advisory locks.
 
-use crate::catalog::{DEFAULTS, Scenario};
+use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Scenario, Status};
+use crate::compare::{Difference, Failure, Observed};
+use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{AT_FDCWD, Probe, neg};
 use libc::*;
+
+/// uapi/asm-generic/fcntl.h LOCK_MAND (the libc crate does not export it).
+const LOCK_MAND: i32 = 32;
 
 pub fn run(p: &Probe) {
     let root = p.dir();
@@ -215,6 +220,18 @@ pub fn run(p: &Probe) {
     p.check("socketpair receives reply", n == 4 && bytes == b"PONG");
     p.close(a);
     p.close(b);
+
+    // Linux 5.19 dropped LOCK_MAND and answers 0 to it before the
+    // descriptor is resolved (fs/locks.c flock), so even a closed number
+    // succeeds; without it a closed number is EBADF.
+    p.check(
+        "flock LOCK_MAND is 0 even on a closed descriptor",
+        p.flock(4000, LOCK_MAND) == 0,
+    );
+    p.check(
+        "without LOCK_MAND a closed descriptor is EBADF",
+        p.flock(4000, LOCK_EX | LOCK_NB) == neg(EBADF),
+    );
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -242,5 +259,19 @@ pub const SCENARIO: Scenario = Scenario {
         "openat",
         "socketpair",
     ],
+    kernel_floor: Some(KernelFloor {
+        release: "5.19",
+        why: "flock ignores LOCK_MAND before resolving the descriptor",
+    }),
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Fs),
+        vehicles: Vehicle::ALL,
+        what: "flock: LOCK_MAND is judged after the descriptor, so a closed number is EBADF, where Linux 5.19+ ignores LOCK_MAND and answers 0 before resolving the descriptor (fs/locks.c flock); patina_flock checks the operation after the fd table lookup",
+        failure: Failure::Differs(&[
+            Difference::field(131, "flock", "errno", Observed::Str("EBADF")),
+            Difference::field(131, "flock", "ret", Observed::Int(-1)),
+            Difference::check(132, "flock LOCK_MAND is 0 even on a closed descriptor"),
+        ]),
+    }],
     ..DEFAULTS
 };

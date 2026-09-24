@@ -34,8 +34,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       PATINA_REQUIRE_SUD: ${{ matrix.runner == 'ubuntu-latest' && '1' || '0' }}
-      # Every syscall conformance scenario must find the runner's kernel an
-      # oracle (covered rows present, asserted-absent rows absent).
+      # Every syscall conformance scenario must find the runner an oracle
+      # (covered rows present, needed capabilities present); rows past the
+      # virtual ABI that a newer runner kernel implements answer their declared
+      # ENOSYS natively instead.
       PATINA_REQUIRE_HOST_ORACLE: '1'
     steps:
       - uses: actions/checkout@v7
@@ -61,7 +63,7 @@ jobs:
       # below) so a runner image without strace hard-fails instead of silently
       # dropping the containment gate.
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y strace
+        run: sudo apt-get update && sudo apt-get install -y strace && uname -r
       - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - if: matrix.toolchain == 'stable' && runner.os == 'Linux'

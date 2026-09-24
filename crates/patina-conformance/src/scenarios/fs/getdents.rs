@@ -1,6 +1,9 @@
 //! fs/getdents — getdents64 over a directory descriptor: the entry set, `.`
-//! and `..`, d_type per kind, the cursor (EOF and rewind through lseek), and
-//! the errno vocabulary. The libc door is glibc's `getdents64`.
+//! and `..`, d_type per kind, the cursor (EOF and rewind through lseek; the
+//! position after a call is its last record's d_off, and seeking to a d_off
+//! resumes after that record; SEEK_END is filesystem-specific — refused, or a
+//! position whose listing is a suffix of the whole), and the errno vocabulary. The libc
+//! door is glibc's `getdents64`.
 
 use crate::catalog::{DEFAULTS, Scenario};
 
@@ -86,6 +89,76 @@ pub fn run(p: &Probe) {
     );
     p.close(file);
     p.close(dirfd);
+
+    // ---- the directory cursor ----------------------------------------------
+    // A directory's positions are cookies its filesystem chooses (lseek(2):
+    // directory offsets are filesystem-specific), so they are never recorded,
+    // only related: a fresh descriptor is at 0; after a call the cursor is
+    // the last record's d_off (fs/readdir.c getdents64 stores ctx.pos there);
+    // seeking to a record's d_off resumes right after that record; SEEK_END
+    // is refused (EINVAL: tmpfs's dcache_dir_lseek) or lands at a position
+    // whose listing is a suffix of the whole one, in order (ext4: 2^63-1,
+    // past every hash, so nothing follows; XFS: generic_file_llseek at the
+    // directory's VFS size, 0 here, so the whole listing follows).
+    let lseek_raw = |fd: i32, offset: i64, whence: i32| {
+        p.call_unrecorded(
+            Syscall::N_lseek,
+            [fd as i64, offset, whence as i64, 0, 0, 0],
+        )
+    };
+    let fresh = p.openat(AT_FDCWD, &root, O_RDONLY | O_DIRECTORY, 0);
+    p.require("reopen the directory", fresh >= 0);
+    p.check(
+        "a fresh directory descriptor is at 0",
+        p.lseek(fresh, 0, SEEK_CUR) == 0,
+    );
+    let (r, all) = p.getdents64_cookies(fresh, 4096);
+    p.check("the whole listing in one call", r > 0 && all.len() == 5);
+    p.check(
+        "after a call the cursor is the last record's d_off",
+        all.last()
+            .is_some_and(|last| last.off == lseek_raw(fresh, 0, SEEK_CUR)),
+    );
+    p.check("rewind", p.lseek(fresh, 0, SEEK_SET) == 0);
+    // Every name here is at most four bytes (19 + len + 1 rounds to 24), so
+    // every record is 24 bytes and this buffer holds exactly two.
+    let (r, first) = p.getdents64_cookies(fresh, 48);
+    p.check(
+        "a two-record buffer gets two records",
+        r == 48 && first.len() == 2,
+    );
+    p.check(
+        "a partial call leaves the cursor at its last record's d_off",
+        first.len() == 2 && first[1].off == lseek_raw(fresh, 0, SEEK_CUR),
+    );
+    let resumed = first
+        .first()
+        .map_or(-1, |entry| lseek_raw(fresh, entry.off, SEEK_SET));
+    p.check(
+        "seeking to a record's d_off lands there",
+        first.first().is_some_and(|entry| resumed == entry.off),
+    );
+    let (r, rest) = p.getdents64_cookies(fresh, 4096);
+    let names = |entries: &[crate::probe::Dirent]| -> Vec<String> {
+        entries.iter().map(|entry| entry.name.clone()).collect()
+    };
+    p.check(
+        "and resumes right after that record",
+        r > 0 && all.len() == 5 && names(&rest) == names(&all[1..]),
+    );
+    let end = lseek_raw(fresh, 0, SEEK_END);
+    let after_end = if end >= 0 {
+        p.rec.quiet(|| p.getdents64_cookies(fresh, 4096))
+    } else {
+        (end, Vec::new())
+    };
+    let listed = names(&all);
+    p.check(
+        "SEEK_END is refused, or lands where what follows is a suffix of the listing",
+        end == neg(EINVAL)
+            || (end >= 0 && after_end.0 >= 0 && listed.ends_with(&names(&after_end.1))),
+    );
+    p.close(fresh);
 }
 
 pub const SCENARIO: Scenario = Scenario {

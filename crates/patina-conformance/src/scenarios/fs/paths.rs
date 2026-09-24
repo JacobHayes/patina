@@ -3,7 +3,7 @@
 //! ELOOP limit, ENAMETOOLONG, ENOTDIR through a file and on a trailing slash,
 //! getcwd ERANGE/ENOENT, chdir/fchdir errno, umask applied to open/mkdir/mknod.
 
-use crate::catalog::{DEFAULTS, Scenario};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -404,5 +404,6 @@ pub const SCENARIO: Scenario = Scenario {
         "mknodat",
         "close",
     ],
+    needs: &[Need::Unprivileged],
     ..DEFAULTS
 };

@@ -342,6 +342,80 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             Syscall::N_fallocate => {
                 fallocate(a[0] as c_int, a[1] as c_int, a[2] as off_t, a[3] as off_t) as i64
             }
+            Syscall::N_fchmod => fchmod(a[0] as c_int, a[1] as mode_t) as i64,
+            // The kernel row carries no flags; glibc's fchmodat with flags 0
+            // issues exactly it.
+            Syscall::N_fchmodat => {
+                fchmodat(a[0] as c_int, a[1] as *const c_char, a[2] as mode_t, 0) as i64
+            }
+            Syscall::N_renameat2 => renameat2(
+                a[0] as c_int,
+                a[1] as *const c_char,
+                a[2] as c_int,
+                a[3] as *const c_char,
+                a[4] as c_uint,
+            ) as i64,
+            Syscall::N_pread64 => pread64(
+                a[0] as c_int,
+                a[1] as *mut c_void,
+                a[2] as size_t,
+                a[3] as off64_t,
+            ) as i64,
+            Syscall::N_pwrite64 => pwrite64(
+                a[0] as c_int,
+                a[1] as *const c_void,
+                a[2] as size_t,
+                a[3] as off64_t,
+            ) as i64,
+            Syscall::N_readv => readv(a[0] as c_int, a[1] as *const iovec, a[2] as c_int) as i64,
+            Syscall::N_writev => writev(a[0] as c_int, a[1] as *const iovec, a[2] as c_int) as i64,
+            // The kernel rows split the position into (pos_l, pos_h); on a
+            // 64-bit kernel pos_l is the whole position and pos_h is ignored.
+            Syscall::N_preadv => preadv(
+                a[0] as c_int,
+                a[1] as *const iovec,
+                a[2] as c_int,
+                a[3] as off_t,
+            ) as i64,
+            Syscall::N_pwritev => pwritev(
+                a[0] as c_int,
+                a[1] as *const iovec,
+                a[2] as c_int,
+                a[3] as off_t,
+            ) as i64,
+            Syscall::N_fsync => fsync(a[0] as c_int) as i64,
+            Syscall::N_fdatasync => fdatasync(a[0] as c_int) as i64,
+            Syscall::N_ioctl => ioctl(a[0] as c_int, a[1] as c_ulong, a[2] as *mut c_void) as i64,
+            Syscall::N_statfs => statfs(a[0] as *const c_char, a[1] as *mut statfs) as i64,
+            Syscall::N_fstatfs => fstatfs(a[0] as c_int, a[1] as *mut statfs) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_open => open(a[0] as *const c_char, a[1] as c_int, a[2] as c_uint) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_creat => creat(a[0] as *const c_char, a[1] as mode_t) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_stat => stat(a[0] as *const c_char, a[1] as *mut stat) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_lstat => lstat(a[0] as *const c_char, a[1] as *mut stat) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_rename => rename(a[0] as *const c_char, a[1] as *const c_char) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_mkdir => mkdir(a[0] as *const c_char, a[1] as mode_t) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_rmdir => rmdir(a[0] as *const c_char) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_link => link(a[0] as *const c_char, a[1] as *const c_char) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_unlink => unlink(a[0] as *const c_char) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_symlink => symlink(a[0] as *const c_char, a[1] as *const c_char) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_readlink => {
+                readlink(a[0] as *const c_char, a[1] as *mut c_char, a[2] as size_t) as i64
+            }
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_chmod => chmod(a[0] as *const c_char, a[1] as mode_t) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_mknod => mknod(a[0] as *const c_char, a[1] as mode_t, a[2] as dev_t) as i64,
             #[cfg(target_arch = "x86_64")]
             Syscall::N_dup2 => dup2(a[0] as c_int, a[1] as c_int) as i64,
             #[cfg(target_arch = "x86_64")]
@@ -415,6 +489,58 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_query_module
             | Syscall::N_get_kernel_syms
             | Syscall::N_uselib => syscall_door(row, a),
+            // Rows with no glibc wrapper at all (openat2, cachestat, the rows
+            // past the virtual ABI level; fchmodat2, whose flags glibc's
+            // fchmodat emulates over it), and rows whose glibc wrapper the
+            // shim does not define (a symbol row that is `Absent`, or none):
+            // the probe binary importing such a wrapper would be refused whole
+            // by the pre-run import audit, so until the shim defines it the
+            // libc spelling is glibc's own `syscall(2)`, and the symbol stays
+            // in the coverage report.
+            Syscall::N_fchmodat2
+            | Syscall::N_openat2
+            | Syscall::N_cachestat
+            | Syscall::N_setxattrat
+            | Syscall::N_getxattrat
+            | Syscall::N_listxattrat
+            | Syscall::N_removexattrat
+            | Syscall::N_file_getattr
+            | Syscall::N_file_setattr
+            | Syscall::N_sync
+            | Syscall::N_syncfs
+            | Syscall::N_sync_file_range
+            | Syscall::N_readahead
+            | Syscall::N_fadvise64
+            | Syscall::N_preadv2
+            | Syscall::N_pwritev2
+            | Syscall::N_copy_file_range
+            | Syscall::N_sendfile
+            | Syscall::N_splice
+            | Syscall::N_tee
+            | Syscall::N_vmsplice
+            | Syscall::N_setxattr
+            | Syscall::N_lsetxattr
+            | Syscall::N_fsetxattr
+            | Syscall::N_getxattr
+            | Syscall::N_lgetxattr
+            | Syscall::N_fgetxattr
+            | Syscall::N_listxattr
+            | Syscall::N_llistxattr
+            | Syscall::N_flistxattr
+            | Syscall::N_removexattr
+            | Syscall::N_lremovexattr
+            | Syscall::N_fremovexattr
+            | Syscall::N_inotify_init1
+            | Syscall::N_inotify_add_watch
+            | Syscall::N_inotify_rm_watch
+            | Syscall::N_name_to_handle_at => syscall_door(row, a),
+            // Legacy rows glibc has no wrapper for (`getdents`; `ustat`, whose
+            // wrapper glibc 2.28 dropped) or whose wrapper the shim does not
+            // define (`inotify_init`).
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_getdents | Syscall::N_ustat | Syscall::N_inotify_init => {
+                syscall_door(row, a)
+            }
             other => panic!("{}: no libc spelling in the probe API", other.name()),
         }
     };

@@ -5,7 +5,7 @@
 //! lchown names a link itself; fchownat's flag vocabulary; fchown on O_PATH is
 //! EBADF; access/faccessat/faccessat2 answer from the mode bits, X_OK included.
 
-use crate::catalog::{DEFAULTS, Scenario};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -336,5 +336,6 @@ pub const SCENARIO: Scenario = Scenario {
         "getuid",
         "getgid",
     ],
+    needs: &[Need::Unprivileged],
     ..DEFAULTS
 };

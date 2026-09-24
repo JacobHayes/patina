@@ -159,6 +159,15 @@ pub fn run(p: &Probe) {
     p.check("statx with an unknown flag is EINVAL", r == neg(EINVAL));
     let (r, _, _) = p.statx(dirfd, "sub", 0, STATX_TYPE | STATX_MODE);
     p.check("statx relative to a dirfd with a narrow mask", r == 0);
+    // vfs_fstatat judges the flags before the dirfd or the path: an absolute
+    // path with a closed dirfd and an unknown flag is EINVAL, not success.
+    let (r, _) = p.newfstatat(-1, &file, 0x1);
+    p.check(
+        "an unknown flag is EINVAL before an ignored dirfd",
+        r == neg(EINVAL),
+    );
+    let (r, _) = p.newfstatat(-1, &file, 0);
+    p.check("an absolute path ignores a closed dirfd", r == 0);
 
     p.close(fd);
     p.close(dirfd);

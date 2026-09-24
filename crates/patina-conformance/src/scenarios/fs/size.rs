@@ -4,7 +4,7 @@
 //! O_PATH), and fallocate (reserve, KEEP_SIZE, PUNCH_HOLE|KEEP_SIZE, ZERO_RANGE,
 //! the kernel's order of refusals: EINVAL, EOPNOTSUPP, EBADF, ESPIPE).
 
-use crate::catalog::{DEFAULTS, Scenario};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -321,5 +321,6 @@ pub const SCENARIO: Scenario = Scenario {
         "pipe2",
         "nanosleep",
     ],
+    needs: &[Need::Unprivileged],
     ..DEFAULTS
 };

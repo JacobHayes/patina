@@ -218,10 +218,15 @@ forwards into the same dispatcher instead of its two-number allowlist.
   calling thread itself); a native signal death is re-checked on the
   shim-linked binary's own wait status.
 - A scenario declares the rows it covers and the rows it asserts absent (past
-  the virtual ABI level); a host kernel predating a covered row, or
-  implementing an asserted-absent one, makes the scenario not run, printed with
-  the reason — as does a host without SUD for the raw vehicle under patina or
-  without strace for the leak run (`PATINA_REQUIRE_HOST_ORACLE=1`,
+  the virtual ABI level); a host kernel predating a covered row or the
+  scenario's kernel floor makes the scenario not run, printed with the reason —
+  as does a host capability the scenario declares it needs and the run
+  directory's filesystem, the caller's limits or privileges lack (user xattrs,
+  inotify, file handles, whiteouts, an unprivileged caller), a host without SUD
+  for the raw vehicle under patina, or one without strace for the leak run. A
+  host kernel implementing an asserted-absent row stays an oracle: the native
+  run answers that row with its declared ENOSYS and only that row's native
+  observation is not run (`PATINA_REQUIRE_HOST_ORACLE=1`,
   `PATINA_REQUIRE_SUD=1` and `PATINA_REQUIRE_STRACE=1`, set in CI, turn those
   into failures). Every run owns a
   temporary directory and runs under a deadline; a scenario's forked children

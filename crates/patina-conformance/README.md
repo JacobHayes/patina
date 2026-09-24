@@ -19,8 +19,15 @@ starts passing, until the gap is removed. A patina run that completes is also
 recorded and replayed and run directly under strace.
 
 A scenario declares the registry rows it covers (`covers`, `asserts_absent`),
-the libc symbols its `libc` vehicle goes through, its gaps, and the facts its
-recorded trace must show; `EXCLUSIONS` lists registry entries deliberately
+the libc symbols its `libc` vehicle goes through, the host capabilities its
+native oracle needs beyond those rows (`needs`: user xattrs, file handles or
+whiteouts on the run directory's filesystem, inotify within the caller's
+limits, an unprivileged caller — detected live, an unmet one is reported not
+run and a detection that fails unexpectedly is a failure), the oldest kernel
+whose behaviour its checks assert (`kernel_floor`), its gaps, and the facts its
+recorded trace must show. A host kernel that implements an asserted-absent row
+is still an oracle: the native run answers that row with the declared ENOSYS
+(the probe binary's declared-absent mode) and patina is judged against it; `EXCLUSIONS` lists registry entries deliberately
 left without a scenario. `mise run conformance` runs the tests;
 `mise run conformance:coverage` lists every registry entry of this target that
 neither a scenario nor an exclusion accounts for, and exits 1 while any remain.

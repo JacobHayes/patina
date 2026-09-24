@@ -7,9 +7,15 @@
 //! scenario's gaps declare. A patina run that completes is also recorded and
 //! replayed (identical streams; the scenario's trace facts) and run directly
 //! under strace (no host syscall escapes; the process ends as it did
-//! natively). A host that cannot be the oracle prints `NOT RUN` with the
-//! detected reason; `PATINA_REQUIRE_HOST_ORACLE=1`, `PATINA_REQUIRE_SUD=1` and
-//! `PATINA_REQUIRE_STRACE=1` (set in CI) make the kernel, SUD and strace cases
+//! natively). A host that cannot be the oracle (a kernel lacking a covered
+//! row or older than the scenario's kernel floor, or a run-directory
+//! filesystem, per-user limit or privilege level lacking what the scenario
+//! needs) prints `NOT RUN` with the detected reason; a detection that fails
+//! unexpectedly is a failure. A host kernel implementing rows past the virtual
+//! ABI level is still an oracle: those rows answer their declared ENOSYS in
+//! the native run (only their native observation is not run);
+//! `PATINA_REQUIRE_HOST_ORACLE=1`, `PATINA_REQUIRE_SUD=1` and
+//! `PATINA_REQUIRE_STRACE=1` (set in CI) make the host, SUD and strace cases
 //! failures instead. Every run's streams and logs are kept under the target
 //! dir's `conformance/<scenario>/<vehicle>/`.
 #![cfg(target_os = "linux")]
@@ -249,6 +255,9 @@ struct Leg<'a> {
     /// it exists only in the virtual filesystem.
     dir: &'a Path,
     logs: PathBuf,
+    /// The host implements rows the scenario asserts absent: the native run
+    /// answers them with the declared ENOSYS (`--declared-absent`).
+    declared_absent: bool,
 }
 
 impl Leg<'_> {
@@ -280,6 +289,9 @@ impl Leg<'_> {
         }
         let mut command = Command::new(&probes().native);
         command.args(self.args()).arg("--strict");
+        if self.declared_absent {
+            command.arg("--declared-absent");
+        }
         // SAFETY: the hook only calls async-signal-safe libc functions.
         unsafe { command.pre_exec(pin_process_state) };
         let output = run(&mut command)?;
@@ -556,6 +568,25 @@ fn conform(name: &str) {
         .prefix("patina-conformance-")
         .tempdir()
         .expect("create the scenario's directory");
+    if let Some(reason) = host::needs_unmet(scenario, owned.path()) {
+        assert!(
+            reason.cause != Cause::Unexpected,
+            "detecting what {name} needs failed: {reason}"
+        );
+        assert!(
+            !required("PATINA_REQUIRE_HOST_ORACLE"),
+            "PATINA_REQUIRE_HOST_ORACLE=1 but this host is no oracle for {name}: {reason}"
+        );
+        not_run(name, &reason);
+        return;
+    }
+    // A host kernel newer than the virtual ABI level is no broken oracle: the
+    // rows it implements past that level answer the declared ENOSYS natively,
+    // and only their native observation is not run.
+    let declared_absent = host::declared_absent(scenario);
+    if let Some(reason) = &declared_absent {
+        not_run(&format!("{name}: native observation"), reason);
+    }
     let dir = owned.path().join("run");
     let mut reference = None;
     let mut failures = Vec::new();
@@ -565,6 +596,7 @@ fn conform(name: &str) {
             vehicle,
             dir: &dir,
             logs: logs.join(vehicle.name()),
+            declared_absent: declared_absent.is_some(),
         };
         std::fs::create_dir_all(&leg.logs).unwrap();
         if let Err(leg_failures) = leg.check(&mut reference) {
@@ -644,6 +676,21 @@ fn fd_table() {
 }
 
 #[test]
+fn fs_cache() {
+    conform("fs/cache");
+}
+
+#[test]
+fn fs_chmod() {
+    conform("fs/chmod");
+}
+
+#[test]
+fn fs_copy() {
+    conform("fs/copy");
+}
+
+#[test]
 fn fs_dirs() {
     conform("fs/dirs");
 }
@@ -651,6 +698,32 @@ fn fs_dirs() {
 #[test]
 fn fs_getdents() {
     conform("fs/getdents");
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn fs_getdents_legacy() {
+    conform("fs/getdents_legacy");
+}
+
+#[test]
+fn fs_handles() {
+    conform("fs/handles");
+}
+
+#[test]
+fn fs_inotify() {
+    conform("fs/inotify");
+}
+
+#[test]
+fn fs_ioctl() {
+    conform("fs/ioctl");
+}
+
+#[test]
+fn fs_legacy_paths() {
+    conform("fs/legacy_paths");
 }
 
 #[test]
@@ -664,8 +737,18 @@ fn fs_metadata() {
 }
 
 #[test]
+fn fs_newer_than_virtual() {
+    conform("fs/newer_than_virtual");
+}
+
+#[test]
 fn fs_open_rw() {
     conform("fs/open_rw");
+}
+
+#[test]
+fn fs_openat2() {
+    conform("fs/openat2");
 }
 
 #[test]
@@ -679,13 +762,53 @@ fn fs_paths() {
 }
 
 #[test]
+fn fs_positional_io() {
+    conform("fs/positional_io");
+}
+
+#[test]
+fn fs_renameat2() {
+    conform("fs/renameat2");
+}
+
+#[test]
 fn fs_size() {
     conform("fs/size");
 }
 
 #[test]
+fn fs_splice() {
+    conform("fs/splice");
+}
+
+#[test]
+fn fs_statfs() {
+    conform("fs/statfs");
+}
+
+#[test]
+fn fs_statfs_fault() {
+    conform("fs/statfs_fault");
+}
+
+#[test]
+fn fs_sync() {
+    conform("fs/sync");
+}
+
+#[test]
 fn fs_times() {
     conform("fs/times");
+}
+
+#[test]
+fn fs_vectored_io() {
+    conform("fs/vectored_io");
+}
+
+#[test]
+fn fs_xattr() {
+    conform("fs/xattr");
 }
 
 #[test]

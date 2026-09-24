@@ -32,6 +32,13 @@ pub struct Scenario {
     pub asserts_absent: &'static [Syscall],
     /// libc symbols the `libc` vehicle goes through.
     pub symbols: &'static [&'static str],
+    /// Host capabilities beyond the covered rows the native oracle needs
+    /// (detected live on the run directory; see [`crate::host::need_unmet`]).
+    pub needs: &'static [Need],
+    /// The oldest host kernel whose answers every check asserts, when a
+    /// behaviour is newer than the rows' own `since` (an older host is no
+    /// oracle and the scenario is not run).
+    pub kernel_floor: Option<KernelFloor>,
     pub gaps: &'static [Gap],
     /// Facts the patina run's recorded trace must show.
     pub trace: Option<TraceFacts>,
@@ -54,9 +61,41 @@ pub const DEFAULTS: Scenario = Scenario {
     covers: &[],
     asserts_absent: &[],
     symbols: &[],
+    needs: &[],
+    kernel_floor: None,
     gaps: &[],
     trace: None,
 };
+
+/// A kernel release a scenario's checks need, and the behaviour that needs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KernelFloor {
+    pub release: &'static str,
+    pub why: &'static str,
+}
+
+/// A host capability a scenario's native oracle needs that a kernel
+/// implementing the covered rows can still lack: a filesystem feature of the
+/// run directory, or a per-user limit. Unmet, the scenario is not run (with
+/// the detected reason), never passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Need {
+    /// `user.*` extended attributes on the run directory's filesystem, and a
+    /// fresh file there listing no attribute at all (no security label the
+    /// listing would carry).
+    UserXattrs,
+    /// One more inotify instance and one watch within the caller's
+    /// `max_user_instances`/`max_user_watches`.
+    Inotify,
+    /// File handles (`name_to_handle_at`) on the run directory's filesystem.
+    FileHandles,
+    /// Whiteouts (`renameat2(RENAME_WHITEOUT)`) on the run directory's
+    /// filesystem; overlayfs refuses them.
+    Whiteouts,
+    /// An unprivileged caller (euid ≠ 0, no effective capability): the EPERM
+    /// and EACCES a scenario asserts are what capabilities bypass.
+    Unprivileged,
+}
 
 /// The family arc (docs/arcs/syscall-conformance.md §6) that models a
 /// pending gap away.
@@ -223,22 +262,44 @@ pub enum Entry {
 }
 
 /// Registry entries excluded from conformance coverage, with their reasons.
-pub const EXCLUSIONS: &[Exclusion] = &[];
+pub const EXCLUSIONS: &[Exclusion] = &[Exclusion {
+    entry: Entry::Syscall(Syscall::N_open_by_handle_at),
+    reason: "privileged: opening by handle bypasses path permission checks, so it needs CAP_DAC_READ_SEARCH in the mount's user namespace (fs/fhandle.c may_decode_fh); an unprivileged native oracle observes only the EPERM refusal. Its unprivileged half, name_to_handle_at, is covered by fs/handles",
+}];
 
 pub const SCENARIOS: &[&Scenario] = &[
     &abi::newer_than_virtual::SCENARIO,
     &entropy::getrandom::SCENARIO,
     &fd::pipes::SCENARIO,
     &fd::table::SCENARIO,
+    &fs::cache::SCENARIO,
+    &fs::chmod::SCENARIO,
+    &fs::copy::SCENARIO,
     &fs::dirs::SCENARIO,
     &fs::getdents::SCENARIO,
+    #[cfg(target_arch = "x86_64")]
+    &fs::getdents_legacy::SCENARIO,
+    &fs::handles::SCENARIO,
+    &fs::inotify::SCENARIO,
+    &fs::ioctl::SCENARIO,
+    &fs::legacy_paths::SCENARIO,
     &fs::links::SCENARIO,
     &fs::metadata::SCENARIO,
+    &fs::newer_than_virtual::SCENARIO,
     &fs::open_rw::SCENARIO,
+    &fs::openat2::SCENARIO,
     &fs::owner::SCENARIO,
     &fs::paths::SCENARIO,
+    &fs::positional_io::SCENARIO,
+    &fs::renameat2::SCENARIO,
     &fs::size::SCENARIO,
+    &fs::splice::SCENARIO,
+    &fs::statfs::SCENARIO,
+    &fs::statfs_fault::SCENARIO,
+    &fs::sync::SCENARIO,
     &fs::times::SCENARIO,
+    &fs::vectored_io::SCENARIO,
+    &fs::xattr::SCENARIO,
     &net::tcp::SCENARIO,
     &net::udp::SCENARIO,
     &proc::absent::SCENARIO,
