@@ -4143,7 +4143,9 @@ impl Probe {
     /// the kernel reported (the required size on EOVERFLOW), the handle
     /// (type then bytes) and the mount id. Sizes, handles and mount ids are
     /// the filesystem's business: only whether a size was reported is
-    /// recorded; the scenario checks their relations.
+    /// recorded, and the declared size is compared by relation because a
+    /// scenario may declare the size the filesystem reported; the scenario
+    /// checks the rest.
     pub fn name_to_handle_at(
         &self,
         dirfd: i32,
@@ -4176,6 +4178,7 @@ impl Probe {
             .fd_arg(builder, "dirfd", dirfd)
             .arg("path", path)
             .arg("handle_bytes", handle_bytes)
+            .norm("args.handle_bytes", Norm::Relative("handle_bytes"))
             .arg("flags", flags);
         let builder = if result == neg(libc::EOVERFLOW) {
             builder.field(
