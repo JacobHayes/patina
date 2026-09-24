@@ -14,8 +14,10 @@ on:
     - cron: "17 7 * * *"
   workflow_dispatch:
 
+# Per event as well as per ref: the scheduled run and a push to main run
+# different jobs, so neither may cancel the other.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
