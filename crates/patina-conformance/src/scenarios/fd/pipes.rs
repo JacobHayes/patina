@@ -1,4 +1,4 @@
-//! fd/pipes — pipe2 / dup / fcntl / flock: descriptor flags versus description
+//! fd/pipes — pipe2 / pipe / dup / fcntl / flock: descriptor flags versus description
 //! flags, sharing through dup, EOF/EPIPE/EAGAIN on pipes, and advisory locks.
 
 use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
@@ -19,15 +19,13 @@ pub fn run(p: &Probe) {
     p.check("write into the pipe", p.write(wr, b"hello") == 5);
     let (n, data) = p.read(rd, 16);
     p.check("read what was written", n == 5 && data == b"hello");
-    let getfl = p.fcntl(rd, F_GETFL, 0);
     p.check(
-        "the read end is O_RDONLY",
-        getfl >= 0 && getfl as i32 & O_ACCMODE == O_RDONLY,
+        "the read end is O_RDONLY, no other flag",
+        p.fcntl(rd, F_GETFL, 0) == i64::from(O_RDONLY),
     );
-    let getfl = p.fcntl(wr, F_GETFL, 0);
     p.check(
-        "the write end is O_WRONLY",
-        getfl >= 0 && getfl as i32 & O_ACCMODE == O_WRONLY,
+        "the write end is O_WRONLY, no other flag",
+        p.fcntl(wr, F_GETFL, 0) == i64::from(O_WRONLY),
     );
     p.check(
         "O_CLOEXEC shows as FD_CLOEXEC",
@@ -45,10 +43,9 @@ pub fn run(p: &Probe) {
         "an empty non-blocking read is EAGAIN",
         p.read(rd, 4).0 == neg(EAGAIN),
     );
-    let getfl = p.fcntl(rd, F_GETFL, 0);
     p.check(
         "F_GETFL reports O_NONBLOCK",
-        getfl >= 0 && getfl as i32 & O_NONBLOCK != 0,
+        p.fcntl(rd, F_GETFL, 0) == i64::from(O_RDONLY | O_NONBLOCK),
     );
 
     let d = p.dup(rd) as i32;
@@ -56,10 +53,9 @@ pub fn run(p: &Probe) {
     p.write(wr, b"ab");
     let (n, data) = p.read(d, 8);
     p.check("the dup reads the same pipe", n == 2 && data == b"ab");
-    let getfl = p.fcntl(d, F_GETFL, 0);
     p.check(
         "O_NONBLOCK is shared through the dup (description flag)",
-        getfl >= 0 && getfl as i32 & O_NONBLOCK != 0,
+        p.fcntl(d, F_GETFL, 0) == i64::from(O_RDONLY | O_NONBLOCK),
     );
     p.check(
         "F_SETFD FD_CLOEXEC on the original",
@@ -230,6 +226,29 @@ pub fn run(p: &Probe) {
         "without LOCK_MAND a closed descriptor is EBADF",
         p.flock(4000, LOCK_EX | LOCK_NB) == neg(EBADF),
     );
+
+    // ---- pipe(2) -----------------------------------------------------------
+    let (r, [rd, wr]) = p.pipe(false);
+    p.require("pipe", r == 0);
+    let flags = (p.fcntl(rd, F_GETFL, 0), p.fcntl(wr, F_GETFL, 0));
+    p.check(
+        "pipe's ends are a blocking O_RDONLY and O_WRONLY, no other flag",
+        flags == (i64::from(O_RDONLY), i64::from(O_WRONLY)),
+    );
+    p.check(
+        "without FD_CLOEXEC",
+        p.fcntl(rd, F_GETFD, 0) == 0 && p.fcntl(wr, F_GETFD, 0) == 0,
+    );
+    p.check("pipe carries a write", p.write(wr, b"pipe") == 4);
+    let (n, data) = p.read(rd, 16);
+    p.check("to its read end", n == 4 && data == b"pipe");
+    p.close(wr);
+    p.check("EOF once the write end closes", p.read(rd, 16).0 == 0);
+    p.close(rd);
+    p.check(
+        "pipe into a NULL array is EFAULT",
+        p.pipe(true).0 == neg(EFAULT),
+    );
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -237,6 +256,8 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[
         Syscall::N_pipe2,
+        #[cfg(target_arch = "x86_64")]
+        Syscall::N_pipe,
         Syscall::N_dup,
         Syscall::N_fcntl,
         Syscall::N_flock,
@@ -248,6 +269,7 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &[
         "pipe2",
+        "pipe",
         "dup",
         "fcntl",
         "flock",

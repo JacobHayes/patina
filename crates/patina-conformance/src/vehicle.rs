@@ -441,6 +441,8 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             Syscall::N_statfs => statfs(a[0] as *const c_char, a[1] as *mut statfs) as i64,
             Syscall::N_fstatfs => fstatfs(a[0] as c_int, a[1] as *mut statfs) as i64,
             #[cfg(target_arch = "x86_64")]
+            Syscall::N_pipe => pipe(a[0] as *mut c_int) as i64,
+            #[cfg(target_arch = "x86_64")]
             Syscall::N_open => open(a[0] as *const c_char, a[1] as c_int, a[2] as c_uint) as i64,
             #[cfg(target_arch = "x86_64")]
             Syscall::N_creat => creat(a[0] as *const c_char, a[1] as mode_t) as i64,
@@ -520,9 +522,10 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
                 a[3] as c_int,
                 a[4] as *mut c_void,
             ) as i64,
+            Syscall::N_memfd_create => memfd_create(a[0] as *const c_char, a[1] as c_uint) as i64,
             // Memory and IPC rows whose glibc wrapper the shim does not define
             // (`brk`, `mincore`, the `mlock` family, SysV shm/sem/msg, the
-            // kernel rows under glibc's `mq_*`, `memfd_create`, `pkey_*`,
+            // kernel rows under glibc's `mq_*`, `pkey_*`,
             // `remap_file_pages`, `pidfd_open`, `process_madvise`) or that
             // glibc does not wrap at all (`membarrier`, `memfd_secret`,
             // `map_shadow_stack`, the NUMA rows libnuma wraps, `mseal`):
@@ -554,7 +557,6 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_mq_timedreceive
             | Syscall::N_mq_notify
             | Syscall::N_mq_getsetattr
-            | Syscall::N_memfd_create
             | Syscall::N_memfd_secret
             | Syscall::N_membarrier
             | Syscall::N_remap_file_pages

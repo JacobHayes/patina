@@ -217,7 +217,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mmap,
     ],
     symbols: &[
-        "syscall",
+        "memfd_create",
         "fcntl",
         "fstat",
         "write",

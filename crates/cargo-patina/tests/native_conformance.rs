@@ -1054,6 +1054,11 @@ fn fs_copy() {
 }
 
 #[test]
+fn fs_copy_libc() {
+    conform("fs/copy_libc");
+}
+
+#[test]
 fn fs_dirs() {
     conform("fs/dirs");
 }
@@ -1061,6 +1066,11 @@ fn fs_dirs() {
 #[test]
 fn fs_dirent() {
     conform("fs/dirent");
+}
+
+#[test]
+fn fs_fifo() {
+    conform("fs/fifo");
 }
 
 #[test]
@@ -1102,6 +1112,16 @@ fn fs_legacy_paths() {
 #[test]
 fn fs_lfs64() {
     conform("fs/lfs64");
+}
+
+#[test]
+fn fs_libc_io() {
+    conform("fs/libc_io");
+}
+
+#[test]
+fn fs_libc_times() {
+    conform("fs/libc_times");
 }
 
 #[test]
@@ -1147,6 +1167,11 @@ fn fs_positional_io() {
 #[test]
 fn fs_posix_fadvise() {
     conform("fs/posix_fadvise");
+}
+
+#[test]
+fn fs_realpath() {
+    conform("fs/realpath");
 }
 
 #[test]
@@ -1197,6 +1222,11 @@ fn fs_vectored_io() {
 #[test]
 fn fs_xattr() {
     conform("fs/xattr");
+}
+
+#[test]
+fn fs_xattr_libc() {
+    conform("fs/xattr_libc");
 }
 
 #[test]

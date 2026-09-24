@@ -971,6 +971,38 @@ impl Probe {
         (result, fds)
     }
 
+    /// `pipe(fds)`, or a NULL array (`null`). An x86_64 legacy row; the
+    /// generic table's shape is `pipe2(fds, 0)`, and only the libc vehicle
+    /// calls `pipe` itself there.
+    pub fn pipe(&self, null: bool) -> (i64, [i32; 2]) {
+        let mut fds = [-1i32; 2];
+        let array = if null { 0 } else { fds.as_mut_ptr() as i64 };
+        #[cfg(target_arch = "x86_64")]
+        let result = self.call(Syscall::N_pipe, [array, 0, 0, 0, 0, 0]);
+        #[cfg(not(target_arch = "x86_64"))]
+        let result = self.legacy(
+            // SAFETY: a two-int array, or NULL.
+            || unsafe { libc::pipe(array as *mut i32) } as i64,
+            Syscall::N_pipe2,
+            [array, 0, 0, 0, 0, 0],
+        );
+        let builder = self
+            .rec
+            .event("pipe", result)
+            .arg("fds", if null { "NULL" } else { "fds" });
+        let builder = if result >= 0 && !null {
+            builder
+                .field("read_end", fds[0])
+                .norm("fields.read_end", Norm::Relative("fd"))
+                .field("write_end", fds[1])
+                .norm("fields.write_end", Norm::Relative("fd"))
+        } else {
+            builder
+        };
+        builder.emit();
+        (result, fds)
+    }
+
     pub fn dup(&self, fd: i32) -> i64 {
         let result = self.call(Syscall::N_dup, [fd as i64, 0, 0, 0, 0, 0]);
         let builder = self.event(Syscall::N_dup, result);
@@ -2338,6 +2370,34 @@ impl Probe {
             )
         };
         let builder = self.rec.event("utimes", result).arg("path", path);
+        self.timeval_args(builder, times).emit();
+        result
+    }
+
+    /// glibc's `lutimes(3)`: `utimes` of a symlink itself (no row of its own;
+    /// glibc issues `utimensat(AT_FDCWD, path, …, AT_SYMLINK_NOFOLLOW)`).
+    /// libc only.
+    pub fn lutimes(&self, path: &str, times: Option<[(i64, i64); 2]>) -> i64 {
+        let c = cstr(path);
+        let tv = Self::timeval_pair(times);
+        let tv_ptr = tv.as_ref().map_or(std::ptr::null(), |t| t.as_ptr());
+        // SAFETY: a NUL-terminated path and two timevals or NULL.
+        let result =
+            crate::vehicle::fold_errno(unsafe { libc::lutimes(c.as_ptr(), tv_ptr) }.into());
+        let builder = self.rec.event("lutimes", result).arg("path", path);
+        self.timeval_args(builder, times).emit();
+        result
+    }
+
+    /// glibc's `futimes(3)`: `utimes` of a descriptor (glibc issues
+    /// `utimensat(fd, NULL, …, 0)`). libc only.
+    pub fn futimes(&self, fd: i32, times: Option<[(i64, i64); 2]>) -> i64 {
+        let tv = Self::timeval_pair(times);
+        let tv_ptr = tv.as_ref().map_or(std::ptr::null(), |t| t.as_ptr());
+        // SAFETY: two timevals or NULL.
+        let result = crate::vehicle::fold_errno(unsafe { libc::futimes(fd, tv_ptr) }.into());
+        let builder = self.rec.event("futimes", result);
+        let builder = self.fd_arg(builder, "fd", fd);
         self.timeval_args(builder, times).emit();
         result
     }
