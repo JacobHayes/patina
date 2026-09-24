@@ -13237,16 +13237,14 @@ fn main() {
 }
 "#;
 
+/// Build the crash-restart canary into `directory`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn native_fs_crash_at_restarts_fresh_incarnation() {
-    let directory = tempdir().unwrap();
-    let source = directory.path().join("crash_restart.rs");
+fn build_crash_restart_canary(directory: &Path) -> PathBuf {
+    let source = directory.join("crash_restart.rs");
     fs::write(&source, NATIVE_CRASH_RESTART_CANARY_SOURCE).unwrap();
-    let workspace = native_workspace();
-    let bin = directory.path().join("crash_restart");
+    let bin = directory.join("crash_restart");
     invoke(
-        workspace,
+        native_workspace(),
         &[
             "build",
             source.to_str().unwrap(),
@@ -13254,6 +13252,54 @@ fn native_fs_crash_at_restarts_fresh_incarnation() {
             bin.to_str().unwrap(),
         ],
     );
+    bin
+}
+
+/// The canary's crash selector: the unsynced overwrite of `/b`, its sixth write.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const CANARY_CRASH_SELECTOR: &str = "write:6";
+
+/// Record the canary's crash-restart run at seed 11 into `trace`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn record_crash_restart_canary(bin: &Path, trace: &Path) -> Output {
+    invoke(
+        native_workspace(),
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "11",
+            "--fs-crash-at",
+            CANARY_CRASH_SELECTOR,
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    )
+}
+
+/// The `operations=` count on a run's one `PATINA_FS_CRASH_RESTART` line: how
+/// many operations incarnation 0 completed before its crash.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn crash_restart_operations(stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with("PATINA_FS_CRASH_RESTART "))
+        .collect();
+    assert_eq!(lines.len(), 1, "expected one restart line:\n{stderr}");
+    lines[0]
+        .split(' ')
+        .find_map(|field| field.strip_prefix("operations="))
+        .unwrap_or_else(|| panic!("restart line carries no operations=: {}", lines[0]))
+        .to_owned()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fs_crash_at_restarts_fresh_incarnation() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let bin = build_crash_restart_canary(directory.path());
     let output = invoke(
         workspace,
         &[
@@ -13359,6 +13405,268 @@ fn native_fs_crash_at_restarts_fresh_incarnation() {
         String::from_utf8_lossy(&unreached.stderr).contains("PATINA_FS_CRASH_SELECTOR_UNREACHED"),
         "{}",
         String::from_utf8_lossy(&unreached.stderr)
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fs_crash_restart_record_replays_both_incarnations() {
+    let directory = tempdir().unwrap();
+    let bin = build_crash_restart_canary(directory.path());
+    let trace = directory.path().join("crash-restart.patina");
+    let recorded = record_crash_restart_canary(&bin, &trace);
+    let replayed = invoke(
+        native_workspace(),
+        &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
+    );
+
+    let recorded_stdout = String::from_utf8_lossy(&recorded.stdout);
+    assert!(
+        recorded_stdout.contains("CANARY incarnation=1"),
+        "{recorded_stdout}"
+    );
+    assert_eq!(
+        recorded_stdout,
+        String::from_utf8_lossy(&replayed.stdout),
+        "the replay's guest output differs from the recording's"
+    );
+    assert_eq!(
+        crash_restart_operations(&recorded.stderr),
+        crash_restart_operations(&replayed.stderr),
+        "the replay crashed at a different point than the recording"
+    );
+    let bundle: serde_json::Value = serde_json::from_slice(&fs::read(&trace).unwrap()).unwrap();
+    let lifecycle: Vec<&str> = bundle["timelines"][0]["lifecycle"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|marker| marker["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(lifecycle, ["start", "crash", "restart", "start", "end"]);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fs_crash_restart_records_are_byte_identical() {
+    let directory = tempdir().unwrap();
+    let bin = build_crash_restart_canary(directory.path());
+    let first = directory.path().join("first.patina");
+    let second = directory.path().join("second.patina");
+    record_crash_restart_canary(&bin, &first);
+    record_crash_restart_canary(&bin, &second);
+    assert!(
+        fs::read(&first).unwrap() == fs::read(&second).unwrap(),
+        "two records of one seeded crash-restart run produced different traces"
+    );
+}
+
+/// Rewrite `trace` through `edit` into `tampered.patina` beside it. Traces are
+/// compact JSON, so an edit here is exactly a hand-altered artifact.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn tamper_trace(trace: &Path, edit: impl FnOnce(&mut serde_json::Value)) -> PathBuf {
+    let mut bundle: serde_json::Value = serde_json::from_slice(&fs::read(trace).unwrap()).unwrap();
+    edit(&mut bundle);
+    let tampered = trace.with_file_name("tampered.patina");
+    fs::write(&tampered, serde_json::to_vec(&bundle).unwrap()).unwrap();
+    tampered
+}
+
+/// Replay `trace` against `bin`, expecting a named crash-replay divergence, and
+/// return the replay's stderr.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn replay_crash_divergence(bin: &Path, trace: &Path) -> String {
+    let replayed = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
+    );
+    let stderr = String::from_utf8_lossy(&replayed.stderr).into_owned();
+    assert!(
+        !replayed.status.success(),
+        "the divergent trace replayed:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("PATINA_FS_CRASH_REPLAY_DIVERGENCE"),
+        "missing the named divergence:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&replayed.stdout).contains("CANARY incarnation=1"),
+        "incarnation 1 ran after a divergence at or before the crash"
+    );
+    stderr
+}
+
+/// A well-formed digest no recovered filesystem has.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const FORGED_SNAPSHOT_DIGEST: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fs_crash_restart_replay_refuses_a_forged_handoff_digest() {
+    let directory = tempdir().unwrap();
+    let bin = build_crash_restart_canary(directory.path());
+    let trace = directory.path().join("crash-restart.patina");
+    record_crash_restart_canary(&bin, &trace);
+
+    // Forge the digest on both the Crash and the Restart marker, so the trace
+    // stays structurally valid and only the handed-over state disagrees.
+    let tampered = tamper_trace(&trace, |bundle| {
+        let mut forged = 0;
+        for marker in bundle["timelines"][0]["lifecycle"].as_array_mut().unwrap() {
+            if let Some(digest) = marker.get_mut("snapshot_digest") {
+                *digest = FORGED_SNAPSHOT_DIGEST.into();
+                forged += 1;
+            }
+        }
+        assert_eq!(forged, 2, "expected a Crash and a Restart marker");
+    });
+    let stderr = replay_crash_divergence(&bin, &tampered);
+    assert!(stderr.contains(FORGED_SNAPSHOT_DIGEST), "{stderr}");
+}
+
+/// The canary's fifth write, the durable `B-stable!!`: a successful write one
+/// before the recorded crash selector.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const CANARY_EARLIER_WRITE_ORDINAL: u64 = 5;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fs_crash_restart_replay_refuses_a_crash_at_a_different_operation() {
+    let directory = tempdir().unwrap();
+    let bin = build_crash_restart_canary(directory.path());
+    let trace = directory.path().join("crash-restart.patina");
+    record_crash_restart_canary(&bin, &trace);
+
+    // Move the recorded selector one write earlier: incarnation 0's replayed
+    // operations still match, but its crash now comes before the recorded one.
+    let tampered = tamper_trace(&trace, |bundle| {
+        bundle["metadata"]["faults"]["crash_at"]["ordinal"] = CANARY_EARLIER_WRITE_ORDINAL.into();
+    });
+    let stderr = replay_crash_divergence(&bin, &tampered);
+    assert!(
+        stderr.contains("the recorded crash followed operation"),
+        "{stderr}"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fs_crash_restart_replay_refuses_a_crash_the_recording_never_had() {
+    let directory = tempdir().unwrap();
+    let bin = build_crash_restart_canary(directory.path());
+    let trace = directory.path().join("no-crash.patina");
+    invoke(
+        native_workspace(),
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "11",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+
+    // Claim the crash-free recording was made with the canary's selector: its
+    // replay crashes where the recording kept running.
+    let tampered = tamper_trace(&trace, |bundle| {
+        bundle["metadata"]["faults"]["crash_at"] = serde_json::json!({"op": "write", "ordinal": 6});
+    });
+    let stderr = replay_crash_divergence(&bin, &tampered);
+    assert!(
+        stderr.contains("the recorded run never crashed"),
+        "{stderr}"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fs_crash_restart_replay_refuses_a_divergence_in_the_restarted_incarnation() {
+    let directory = tempdir().unwrap();
+    let bin = build_crash_restart_canary(directory.path());
+    let trace = directory.path().join("crash-restart.patina");
+    record_crash_restart_canary(&bin, &trace);
+
+    // Alter the outcome of incarnation 1's first operation (its look-up of
+    // `/pid0`); only a replay of incarnation 1's own segment can notice. The
+    // diverged operation fails in the guest and the runtime reports the
+    // unconsumed remainder of the segment.
+    let tampered = tamper_trace(&trace, |bundle| {
+        let first_restarted = bundle["timelines"][0]["decisions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|event| event["incarnation"] == 1)
+            .expect("incarnation 1 recorded operations");
+        let len = &mut first_restarted["outcome"]["value"]["len"];
+        *len = (len.as_u64().expect("a metadata outcome") + 1).into();
+    });
+    let replayed = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &["replay", bin.to_str().unwrap(), tampered.to_str().unwrap()],
+    );
+    let stderr = String::from_utf8_lossy(&replayed.stderr);
+    assert!(
+        !replayed.status.success(),
+        "a tampered incarnation 1 replayed:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("PATINA_FS_CRASH_RESTART ") && stderr.contains("replay consumed"),
+        "incarnation 1 did not replay its segment past the restart:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&replayed.stdout).contains("CANARY incarnation=1"),
+        "incarnation 1 ran past its diverged operation"
+    );
+}
+
+/// A seed whose swarm draw deselects the canary's one fault class, the crash
+/// (the run's `PATINA_SWARM_REPORT` says `class=crash|0`, asserted below).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const SWARM_DROPS_CRASH_SEED: &str = "1";
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fs_crash_restart_swarm_dropped_crash_records_and_replays_one_incarnation() {
+    let directory = tempdir().unwrap();
+    let bin = build_crash_restart_canary(directory.path());
+    let trace = directory.path().join("swarm.patina");
+    let recorded = invoke(
+        native_workspace(),
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            SWARM_DROPS_CRASH_SEED,
+            "--fs-crash-at",
+            CANARY_CRASH_SELECTOR,
+            "--swarm",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    let recorded_stderr = String::from_utf8_lossy(&recorded.stderr);
+    assert!(
+        recorded_stderr.contains("class=crash|0"),
+        "the seed no longer deselects the crash class:\n{recorded_stderr}"
+    );
+    let bundle: serde_json::Value = serde_json::from_slice(&fs::read(&trace).unwrap()).unwrap();
+    let lifecycle: Vec<&str> = bundle["timelines"][0]["lifecycle"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|marker| marker["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(lifecycle, ["start", "end"]);
+    let replayed = invoke(
+        native_workspace(),
+        &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&recorded.stdout),
+        String::from_utf8_lossy(&replayed.stdout)
     );
 }
 

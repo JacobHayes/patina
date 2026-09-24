@@ -30,9 +30,11 @@
 #
 # The outcome is classified by a PURE function (testable via --selftest) that is
 # deliberately not vacuous: a planted violation VERDICT is a SAFETY_BUG even on
-# exit 0; an exit 1 (liveness) is only tolerated for a "heavy" config; an exit 2
-# (a fail-closed abort_intent verdict) only when an fs-crash is present; any other exit, or
-# a crash marker, is a failure. The campaign NEVER injects --bug: it fuzzes the
+# exit 0; an exit 1 (liveness) is only tolerated for a "heavy" config; any other
+# exit (including an exit-2 fail-closed abort, fs-crash or not), a crash marker,
+# or a cargo-patina error line (TOOL_ERROR) is a failure. An fs-crash restarts
+# workq as a fresh process that recovers its WAL, so a crash generation is held
+# to the same bar as any other. The campaign NEVER injects --bug: it fuzzes the
 # CLEAN app (the two seeded bugs live in run-patina.sh leg [7]).
 #
 # On OK the gen dir is deleted; every other class is kept for reproduction.
@@ -63,7 +65,7 @@
 # analog and are deliberately NOT ported: a client-side pacing window and its
 # window-0 workload-shape discriminator (the 10x converge-or-confirm keeps the
 # false-positive guard without it), and a storage-fault recovery dimension (workq
-# has no storage-recovery flag -- an fs-crash always fails closed).
+# has no storage-recovery flag: every fs-crash restart recovers the WAL).
 ###############################################################################
 set -uo pipefail
 
@@ -100,6 +102,13 @@ FUZZ_LOCK="$target_dir/patina/.fuzz-sweep.lock"
 # Virtual-clock budget base (Instant is virtual under Patina, so this is generous
 # without costing wall time) and base port (SimNet, so never really bound).
 TIMEOUT_BASE=120
+# workq's certain file-boundary operations, which bound a reachable fs-crash
+# selector (see sample_breadth): each job appends an enqueue and a terminal WAL
+# record, one write each (src/wal.rs `Wal::append`); and every run closes the
+# directory-fsync handle, the WAL segment at shutdown, and the final recovery
+# read (`fsync_dir`, `Wal::open`, main.rs `report`).
+WAL_RECORDS_PER_JOB=2
+CERTAIN_CLOSES=3
 BASE_PORT=5001
 DATA_DIR=/workq
 
@@ -112,13 +121,22 @@ DATA_DIR=/workq
 # scheduler marker must be an ERROR context so the benign vacuous-schedule
 # WARNING (which contains the bare word "scheduler") never misfires. The
 # "patina: the deterministic runtime" phrase matches the runtime init failure,
-# NOT the tool's own "cargo-patina: ..." infra prefix (handled by is_infra).
+# NOT the tool's own "cargo-patina: ..." error line (TOOL_ERROR_LINE below).
 CRASH_MARKERS='panicked|internal error|patina: the deterministic runtime|patina native shim fatal|native shim fatal|unsupported native imports|scheduler (panic|error|stall|fault|deadlock)|deadlock detected|SIGSEGV|SIGABRT'
 
+# cargo-patina prints exactly one `cargo-patina: <error>` line when it fails the
+# run itself. That error is patina's answer about this generation -- a usage
+# refusal, an unsupported combination, a replay divergence -- and so a product
+# failure (TOOL_ERROR), never an environment problem to retry past.
+TOOL_ERROR_LINE='^cargo-patina: '
+
 # Infrastructure/environment failure signatures (NOT a workq or patina bug): the
-# cargo-patina wrapper or its build subprocess died, a binary is missing, the
-# target dir is contended, disk full, etc. Never reported as UNEXPECTED_CRASH.
-INFRA_MARKERS='cargo-patina: |Cargo process terminated|terminated by a signal|could not compile|No such file or directory|native-build failed|Resource temporarily unavailable|Cannot allocate memory'
+# host ran out of a resource under the supervisor -- processes, memory, disk, or
+# descriptors -- so the generation never got a fair run. Only the tool's own
+# error line counts: the guest can print the same errno text about its own
+# (injected) faults. The sweep builds every binary up front (build_all), so no
+# build failure can surface here.
+INFRA_MARKERS='^cargo-patina: .*(Resource temporarily unavailable|Cannot allocate memory|No space left on device|Too many open files)'
 is_infra() { printf '%s\n%s' "$1" "$2" | /usr/bin/grep -Eq "$INFRA_MARKERS"; }
 
 # workq's OWN verdict labels: every invariant `report()` and the recovery gate
@@ -130,9 +148,9 @@ is_infra() { printf '%s\n%s' "$1" "$2" | /usr/bin/grep -Eq "$INFRA_MARKERS"; }
 WORKQ_VERDICT_LABELS='durability|no-loss|exactly-once|wal-integrity|recovery-not-fail-closed'
 
 classify() {
-  # args: exit enqueued completed failed jobs heavy fs_crash stdout stderr
-  local exit_code="$1" enq="$2" comp="$3" failed="$4" jobs="$5" heavy="$6" fs_crash="$7"
-  local out="$8" err="$9"
+  # args: exit enqueued completed failed jobs heavy stdout stderr
+  local exit_code="$1" enq="$2" comp="$3" failed="$4" jobs="$5" heavy="$6"
+  local out="$7" err="$8"
   local combined="$out
 $err"
 
@@ -166,10 +184,20 @@ $err"
   #     marker never appears on any other mode.
   if printf '%s' "$combined" | grep -q 'patina: starvation stall'; then echo STARVATION_STALL; return; fi
 
-  # 2. A hard crash marker anywhere is UNEXPECTED_CRASH even if the exit looks OK.
+  # 1. A hard crash marker anywhere is UNEXPECTED_CRASH even if the exit looks OK.
   if printf '%s' "$combined" | grep -Eq "$CRASH_MARKERS"; then echo UNEXPECTED_CRASH; return; fi
 
-  # 3. Exit-code semantics (0 converged / 1 liveness / 2 fail-closed abort).
+  # 2. cargo-patina failed the run itself (it reaches here only when is_infra
+  #    ruled out host exhaustion). Named apart from the exit-code rules, which
+  #    would file the tool's exit 2 as a guest abort.
+  if printf '%s' "$combined" | grep -Eq "$TOOL_ERROR_LINE"; then echo TOOL_ERROR; return; fi
+
+  # 2b. An armed fs-crash selector the run never reached: the runtime's named
+  #     refusal. The config never exercised the crash it asked for, so this is
+  #     a sampler/workload drift, named apart from the abort it exits with.
+  if printf '%s' "$combined" | grep -q 'PATINA_FS_CRASH_SELECTOR_UNREACHED'; then echo VACUOUS_CRASH; return; fi
+
+  # 3. Exit-code semantics (0 converged / 1 liveness / anything else a failure).
   case "$exit_code" in
     0)
       # workq exits 0 only when fully converged; re-verify from the result line
@@ -186,9 +214,9 @@ $err"
       if [[ "$heavy" == 1 ]]; then echo LIVENESS_TIMEOUT; else echo UNEXPECTED_LIVENESS; fi
       ;;
     2)
-      # A fail-closed abort is by-design only when an fs-crash is injected
-      # (workq has no storage-recovery mode -- an fs-crash always fails closed).
-      if [[ "$fs_crash" == 1 ]]; then echo FAILCLOSED_ABORT; else echo UNEXPECTED_ABORT; fi
+      # A fail-closed abort (an abort_intent verdict): workq recovers its WAL on
+      # every start, fs-crash restarts included, so no config expects one.
+      echo UNEXPECTED_ABORT
       ;;
     *)
       echo UNEXPECTED_CRASH
@@ -256,7 +284,7 @@ swarm_check() {
 # a wedged generation the backstop killed, not a workq/patina safety bug.
 is_failure() {
   case "$1" in
-    OK|LIVENESS_TIMEOUT|FAILCLOSED_ABORT|STARVATION_STALL) return 1 ;;
+    OK|LIVENESS_TIMEOUT|STARVATION_STALL) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -271,7 +299,7 @@ is_failure() {
 # Net over all G: SCHEDULE ~20%, BREADTH ~64%, TRAFFIC ~12%, DETERMINISM ~4%.
 #
 # Every sampler sets: PKNOBS[] (patina knobs, before --), HARGS[] (guest args,
-# after --), CFG_SUMMARY, HEAVY, FS_CRASH, JOBS_N, CFG_TIMEOUT. derive_config
+# after --), CFG_SUMMARY, HEAVY, JOBS_N, CFG_TIMEOUT. derive_config
 # additionally sets TIER, DET_RUN, IS_SCHEDULE, BIN.
 ###############################################################################
 
@@ -307,17 +335,6 @@ sample_breadth() {
     (( smax_ms > 80 )) && smax_ms=80
     smin_ns=$(( smin_ms * 1000000 )); smax_ns=$(( smax_ms * 1000000 )); sspec="${smin_ms}-${smax_ms}ms"
   fi
-  # fs-crash (~35%)
-  FS_CRASH=0; local fspec="off" fs_op="" fs_n=0
-  if (( BYTE[7] < 90 )); then
-    FS_CRASH=1
-    local op_tbl=(write sync close); fs_op=${op_tbl[$(( BYTE[8] % 3 ))]}
-    fs_n=$(( 1 + BYTE[9] % 40 )); fspec="${fs_op}:${fs_n}"
-  fi
-  # in-process crash-recovery (~35%): crash + restart the server on the same WAL
-  # once `completed` first reaches K.
-  local crash_at=0 kspec="off"
-  if (( BYTE[10] < 90 )); then crash_at=$(( 4 + BYTE[11] % 8 )); kspec="completed@${crash_at}"; fi
   # cooperative buggify (~40%): the guest calls setup_complete(), so after-setup
   # is valid. Fire is kept moderate (<=400) so buggify combined with net loss +
   # crash-recovery still converges within the virtual budget -- a maxed fire rate
@@ -328,6 +345,29 @@ sample_breadth() {
     buggify=1; fire=$(( 150 + (BYTE[14] % 6) * 50 )); act=$(( 300 + (BYTE[15] % 5) * 100 ))
     bspec="fire${fire}/act${act}"
   fi
+  # fs-crash (~35%): a selector every run of this config reaches, because an
+  # armed selector the run never reaches is a named failure (VACUOUS_CRASH).
+  # Every job appends WAL_RECORDS_PER_JOB records, one write each, and without
+  # buggify each append is fsync'd; a buggify wal-fsync-skip instead defers
+  # fsyncs to one shared flush per tick, which leaves no job count of syncs
+  # certain, so sync is drawn only when buggify is off. A run closes
+  # CERTAIN_CLOSES files.
+  local fs_crash=0 fspec="off" fs_op="" fs_n=0 fs_reach=0
+  if (( BYTE[7] < 90 )); then
+    fs_crash=1
+    local op_tbl=(write close)
+    (( buggify )) || op_tbl+=(sync)
+    fs_op=${op_tbl[$(( BYTE[8] % ${#op_tbl[@]} ))]}
+    case "$fs_op" in
+      write | sync) fs_reach=$(( WAL_RECORDS_PER_JOB * JOBS_N )) ;;
+      close) fs_reach=$CERTAIN_CLOSES ;;
+    esac
+    fs_n=$(( 1 + BYTE[9] % fs_reach )); fspec="${fs_op}:${fs_n}"
+  fi
+  # in-process crash-recovery (~35%): crash + restart the server on the same WAL
+  # once `completed` first reaches K.
+  local crash_at=0 kspec="off"
+  if (( BYTE[10] < 90 )); then crash_at=$(( 4 + BYTE[11] % 8 )); kspec="completed@${crash_at}"; fi
   # small segment sometimes, to force WAL rotation
   local seg=4096; (( BYTE[25] % 3 == 0 )) && seg=256
 
@@ -338,7 +378,7 @@ sample_breadth() {
   (( drop > 0 ))  && PKNOBS+=(--net-drop-permille "$drop")
   (( jitter_on )) && PKNOBS+=(--net-jitter-nanos "${jmin_ns}..${jmax_ns}")
   (( sleep_on ))  && PKNOBS+=(--sleep-jitter-nanos "${smin_ns}..${smax_ns}")
-  (( FS_CRASH ))  && PKNOBS+=(--fs-crash-at "${fs_op}:${fs_n}")
+  (( fs_crash ))  && PKNOBS+=(--fs-crash-at "${fs_op}:${fs_n}")
   (( buggify ))   && PKNOBS+=(--buggify="$fire" --buggify-activation-permille "$act" --buggify-after-setup)
 
   HARGS=(--seed "$G" --jobs "$JOBS_N" --workers "$workers" --producers "$producers"
@@ -365,7 +405,6 @@ sample_traffic() {
   (( jmax_ms > 100 )) && jmax_ms=100
   local jmin_ns=$(( jmin_ms * 1000000 )) jmax_ns=$(( jmax_ms * 1000000 ))
 
-  FS_CRASH=0
   local crash_at=0 kspec="off"
   if (( BYTE[10] % 2 == 0 )); then crash_at=$(( 6 + BYTE[11] % 12 )); kspec="completed@${crash_at}"; fi
   local buggify=0 bspec="off" fire=0 act=0
@@ -405,7 +444,6 @@ sample_schedule() {
   local tick_tbl=(10 20 30); local tick=${tick_tbl[$(( BYTE[24] % 3 ))]}
   local drop_tbl=(0 0 0 0 50 100); local drop=${drop_tbl[$(( BYTE[0] % 6 ))]}
 
-  FS_CRASH=0
   local timeout=$(( TIMEOUT_BASE * JOBS_N / 16 )); CFG_TIMEOUT=$timeout
 
   PKNOBS=(--seed "$G")
@@ -506,24 +544,24 @@ selftest() {
   local ok='PATINA_VERDICT seq=0 kind=pass label=workq-outcome detail=workload_seed=7\senqueued=24\scompleted=24\sfailed=0\sattempts=24\sapplied_hash=deadbeef'
 
   # OK, and OK even with the benign vacuous-schedule WARNING.
-  assert_class OK "$(classify 0 24 24 0 24 0 0 '' "$ok
+  assert_class OK "$(classify 0 24 24 0 24 0 '' "$ok
 $sched")" "ok-converged"
   local vac_warn='PATINA WARNING: vacuous schedule exploration -- 1 spawned thread(s) ran to completion; their internal interleavings were not explored.'
-  assert_class OK "$(classify 0 24 24 0 24 0 0 '' "$ok
+  assert_class OK "$(classify 0 24 24 0 24 0 '' "$ok
 $sched
 $vac_warn")" "ok-vacuous-warn"
 
   # SAFETY_BUG: a planted violation verdict under one of workq's OWN invariant
   # labels, on exit 0 fully-converged, is STILL a bug.
   assert_class SAFETY_BUG \
-    "$(classify 0 24 24 0 24 0 0 '' "$ok
+    "$(classify 0 24 24 0 24 0 '' "$ok
 PATINA_VERDICT seq=1 kind=violation label=no-loss detail=acked-job-3-never-terminated")" \
     "safety-on-exit0"
   # ... and the recovery gate's fail-closed corruption reports under its own
   # label, so the abort surface of the planted short-write bug is a SAFETY_BUG
   # rather than a bare exit-2 abort.
   assert_class SAFETY_BUG \
-    "$(classify 2 '' '' '' 24 0 1 '' 'PATINA_VERDICT seq=0 kind=violation label=wal-integrity detail=final-wal\swal\scorruption:\sbad\srecord')" \
+    "$(classify 2 '' '' '' 24 0 '' 'PATINA_VERDICT seq=0 kind=violation label=wal-integrity detail=final-wal\swal\scorruption:\sbad\srecord')" \
     "safety-wal-integrity-abort"
 
   # STARVATION_STALL: the opt-in --starve backstop killed a wedged run (distinct
@@ -531,49 +569,47 @@ PATINA_VERDICT seq=1 kind=violation label=no-loss detail=acked-job-3-never-termi
   # the exit-code verdict -- so a starvation campaign records a hung gen instead of
   # hanging or misfiling it.
   local stall='patina: starvation stall — no scheduler progress in 60s under --starve; the guest is likely spinning inside an uninstrumented atomic critical section'
-  assert_class STARVATION_STALL "$(classify 111 '' '' '' 24 0 0 '' "$stall")" "starvation-stall"
-  assert_class STARVATION_STALL "$(classify 1 '' '' '' 24 0 0 '' "$stall")" "starvation-stall-not-liveness"
+  assert_class STARVATION_STALL "$(classify 111 '' '' '' 24 0 '' "$stall")" "starvation-stall"
+  assert_class STARVATION_STALL "$(classify 1 '' '' '' 24 0 '' "$stall")" "starvation-stall-not-liveness"
 
   # LIVENESS: heavy config tolerated, non-heavy is a regression. A convergence
   # timeout reports NO verdict (the ABI has no liveness kind and only the sweep
   # knows whether this config should have converged), so the exit code is the
   # whole signal -- which is exactly why the `heavy` argument decides it.
   assert_class LIVENESS_TIMEOUT \
-    "$(classify 1 24 18 0 24 1 0 '' 'WORKQ_FAILURE not-converged enqueued=24 completed=18 failed=0 target=24')" \
+    "$(classify 1 24 18 0 24 1 '' 'WORKQ_FAILURE not-converged enqueued=24 completed=18 failed=0 target=24')" \
     "liveness-heavy"
   assert_class UNEXPECTED_LIVENESS \
-    "$(classify 1 24 18 0 24 0 0 '' 'WORKQ_FAILURE not-converged enqueued=24 completed=18 failed=0 target=24')" \
+    "$(classify 1 24 18 0 24 0 '' 'WORKQ_FAILURE not-converged enqueued=24 completed=18 failed=0 target=24')" \
     "liveness-unexpected"
 
-  # ABORT: exit 2 tolerated with fs-crash, unexpected without. The guest
-  # attributes its deliberate stop with an `abort_intent` verdict, which is NOT
-  # a violation and so must not be promoted to SAFETY_BUG by rule 0.
-  assert_class FAILCLOSED_ABORT \
-    "$(classify 2 '' '' '' 24 0 1 '' 'PATINA_VERDICT seq=0 kind=abort_intent label=storage-fault detail=storage-fault\swal\sio\serror:\sinjected\scrash\sat\swrite:5')" \
-    "abort-failclosed"
+  # ABORT: exit 2 is a failure in every generation, fs-crash included. The
+  # guest attributes its deliberate stop with an `abort_intent` verdict, which
+  # is NOT a violation and so must not be promoted to SAFETY_BUG by rule 0.
   assert_class UNEXPECTED_ABORT \
-    "$(classify 2 '' '' '' 24 0 0 '' 'PATINA_VERDICT seq=0 kind=abort_intent label=storage-fault detail=final-wal\swal\sio\serror:\sbad')" "abort-unexpected"
+    "$(classify 2 '' '' '' 24 0 '' 'PATINA_VERDICT seq=0 kind=abort_intent label=storage-fault detail=storage-fault\swal\sio\serror:\sinjected\scrash\sat\swrite:5')" \
+    "fail-closed-abort-is-failure"
 
   # UNEXPECTED_CRASH vectors: panic marker, patina fatal, scheduler ERROR, exit
   # 0 but partial (contract break), out-of-band exit code.
   assert_class UNEXPECTED_CRASH \
-    "$(classify 0 24 24 0 24 0 0 "$ok" "thread 'main' panicked at src/server.rs:42: bad")" "crash-panic"
+    "$(classify 0 24 24 0 24 0 "$ok" "thread 'main' panicked at src/server.rs:42: bad")" "crash-panic"
   assert_class UNEXPECTED_CRASH \
-    "$(classify 0 24 24 0 24 0 0 '' 'patina: the deterministic runtime failed to initialize: bad mount')" "crash-patina-fatal"
+    "$(classify 0 24 24 0 24 0 '' 'patina: the deterministic runtime failed to initialize: bad mount')" "crash-patina-fatal"
   assert_class UNEXPECTED_CRASH \
-    "$(classify 0 24 24 0 24 0 0 '' 'scheduler deadlock: all tasks parked with pending work')" "crash-scheduler-err"
+    "$(classify 0 24 24 0 24 0 '' 'scheduler deadlock: all tasks parked with pending work')" "crash-scheduler-err"
   assert_class UNEXPECTED_CRASH \
-    "$(classify 0 24 18 0 24 0 0 '' 'PATINA_VERDICT seq=0 kind=pass label=workq-outcome detail=workload_seed=7\senqueued=24\scompleted=18\sfailed=0\sattempts=30\sapplied_hash=x')" "crash-exit0-partial"
-  assert_class UNEXPECTED_CRASH "$(classify 134 '' '' '' 24 0 0 '' 'Abort trap: 6')" "crash-exit134"
+    "$(classify 0 24 18 0 24 0 '' 'PATINA_VERDICT seq=0 kind=pass label=workq-outcome detail=workload_seed=7\senqueued=24\scompleted=18\sfailed=0\sattempts=30\sapplied_hash=x')" "crash-exit0-partial"
+  assert_class UNEXPECTED_CRASH "$(classify 134 '' '' '' 24 0 '' 'Abort trap: 6')" "crash-exit134"
 
   # ALWAYS_VIOLATION integrated into classify(): fireable on exit 0, not
   # downgraded. `always!` lowers to the verdict ABI, so the run's structured
   # `PATINA_VERDICT ... kind=violation` line is what fires the class -- under a
   # SITE label, which is what keeps it distinct from workq's own findings above.
   assert_class ALWAYS_VIOLATION \
-    "$(classify 0 24 24 0 24 0 0 "$ok" 'PATINA_VERDICT seq=0 kind=violation label=terminal-le-enqueued detail=src/main.rs:42')" "always-violation-exit0"
+    "$(classify 0 24 24 0 24 0 "$ok" 'PATINA_VERDICT seq=0 kind=violation label=terminal-le-enqueued detail=src/main.rs:42')" "always-violation-exit0"
   assert_class ALWAYS_VIOLATION \
-    "$(classify 0 24 24 0 24 0 0 "$ok" "PATINA_SDK_REPORT enabled=1 sites_registered=8
+    "$(classify 0 24 24 0 24 0 "$ok" "PATINA_SDK_REPORT enabled=1 sites_registered=8
 PATINA_VERDICT seq=0 kind=violation label=x detail=src/main.rs:42")" "always-violation-not-downgraded"
 
   # DETERMINISM_BUG via the pure det_check helper.
@@ -657,12 +693,29 @@ PATINA_VERDICT seq=0 kind=violation label=x detail=src/main.rs:42")" "always-vio
     "swarm-field-vacuous"
   rm -f "$wf"
 
-  # is_infra recognizes environment/build failures and only those; and a
-  # "cargo-patina: ..." infra line must NOT be swallowed as a patina crash.
-  assert_class UNEXPECTED_ABORT \
-    "$(classify 2 '' '' '' 24 0 0 '' 'cargo-patina: Cargo process terminated by a signal')" "cargo-prefix-not-crash"
-  if is_infra '' 'cargo-patina: Cargo process terminated by a signal'; then printf '  ok   %-24s -> true\n' "infra-detects-signal"
-  else printf '  FAIL %-24s\n' "infra-detects-signal"; SELFTEST_FAIL=1; fi
+  # is_infra recognizes host exhaustion under the supervisor and only that. A
+  # cargo-patina refusal is patina's answer about the generation: never infra,
+  # and TOOL_ERROR (a failure) even though the tool exits 2.
+  local refusal='cargo-patina: native --fs-crash-at crash-restart with --starve is not implemented; refusing rather than mixing the restart supervisor with the starvation stall backstop'
+  if is_infra '' "$refusal"; then printf '  FAIL %-24s (refusal read as infra)\n' "infra-refusal-negative"; SELFTEST_FAIL=1
+  else printf '  ok   %-24s -> false\n' "infra-refusal-negative"; fi
+  assert_class TOOL_ERROR "$(classify 2 '' '' '' 24 0 '' "$refusal")" "refusal-is-tool-error"
+  if is_failure TOOL_ERROR; then printf '  ok   %-24s -> failure\n' "tool-error-is-failure"
+  else printf '  FAIL %-24s (tolerated)\n' "tool-error-is-failure"; SELFTEST_FAIL=1; fi
+  # VACUOUS_CRASH: the runtime's named refusal of an armed selector the run
+  # never reached, a failure the exit-134 abort would otherwise file as a crash.
+  local unreached='patina: runtime shutdown failed: PATINA_FS_CRASH_SELECTOR_UNREACHED requested Close:20 but only observed open=3 write=48 sync=49 close=3 successful boundary operations guest_exit_code=0'
+  assert_class VACUOUS_CRASH "$(classify 134 24 24 0 24 0 '' "$ok
+$unreached")" "unreached-selector"
+  # A crash marker outranks both named classes: a worker panic that left the
+  # selector unreached is a crash first.
+  assert_class UNEXPECTED_CRASH "$(classify 134 24 24 0 24 0 '' "thread 'worker' panicked at src/worker.rs:9: bad
+$unreached")" "crash-marker-wins-over-vacuous-crash"
+
+  if is_infra '' 'cargo-patina: failed to run native program /w/workq: Resource temporarily unavailable (os error 11)'; then printf '  ok   %-24s -> true\n' "infra-detects-exhaustion"
+  else printf '  FAIL %-24s\n' "infra-detects-exhaustion"; SELFTEST_FAIL=1; fi
+  if is_infra "$ok" 'WORKQ_FAILURE wal io error: No space left on device (os error 28)'; then printf '  FAIL %-24s (guest errno read as infra)\n' "infra-guest-errno-negative"; SELFTEST_FAIL=1
+  else printf '  ok   %-24s -> false\n' "infra-guest-errno-negative"; fi
   if is_infra "$ok" "$sched"; then printf '  FAIL %-24s (false positive)\n' "infra-clean-negative"; SELFTEST_FAIL=1
   else printf '  ok   %-24s -> false\n' "infra-clean-negative"; fi
 
@@ -673,7 +726,7 @@ PATINA_VERDICT seq=0 kind=violation label=x detail=src/main.rs:42")" "always-vio
 
   echo
   if (( SELFTEST_FAIL )); then echo "SELFTEST FAILED"; return 1; fi
-  echo "SELFTEST PASSED (every class covered, incl. a planted workq violation verdict -> SAFETY_BUG, an always! site verdict -> ALWAYS_VIOLATION, STARVATION_STALL, VACUOUS_SCHEDULE, VACUOUS_SWARM, SCHEDULE_DIVERGENCE, and policy bug_depth/starve_vacuous parsing)"
+  echo "SELFTEST PASSED (every class covered, incl. a planted workq violation verdict -> SAFETY_BUG, an always! site verdict -> ALWAYS_VIOLATION, STARVATION_STALL, VACUOUS_SCHEDULE, VACUOUS_SWARM, SCHEDULE_DIVERGENCE, a cargo-patina refusal -> TOOL_ERROR, VACUOUS_CRASH, and policy bug_depth/starve_vacuous parsing)"
   return 0
 }
 
@@ -723,9 +776,9 @@ jobs_of() { local i; for (( i = 0; i < ${#HARGS[@]}; i++ )); do [[ "${HARGS[i]}"
 
 # per-class counters (bash 3.2: no associative arrays)
 c_OK=0; c_SAFETY_BUG=0; c_LIVENESS_TIMEOUT=0; c_UNEXPECTED_LIVENESS=0
-c_FAILCLOSED_ABORT=0; c_UNEXPECTED_ABORT=0; c_UNEXPECTED_CRASH=0; c_DETERMINISM_BUG=0
+c_UNEXPECTED_ABORT=0; c_UNEXPECTED_CRASH=0; c_DETERMINISM_BUG=0
 c_INFRA_ERROR=0; c_VACUOUS_SCHEDULE=0; c_SCHEDULE_DIVERGENCE=0; c_ALWAYS_VIOLATION=0
-c_STARVATION_STALL=0; c_VACUOUS_SWARM=0
+c_STARVATION_STALL=0; c_VACUOUS_SWARM=0; c_TOOL_ERROR=0; c_VACUOUS_CRASH=0
 bump() {
   case "$1" in
     OK) c_OK=$(( c_OK + 1 )) ;;
@@ -734,11 +787,12 @@ bump() {
     SAFETY_BUG) c_SAFETY_BUG=$(( c_SAFETY_BUG + 1 )) ;;
     LIVENESS_TIMEOUT) c_LIVENESS_TIMEOUT=$(( c_LIVENESS_TIMEOUT + 1 )) ;;
     UNEXPECTED_LIVENESS) c_UNEXPECTED_LIVENESS=$(( c_UNEXPECTED_LIVENESS + 1 )) ;;
-    FAILCLOSED_ABORT) c_FAILCLOSED_ABORT=$(( c_FAILCLOSED_ABORT + 1 )) ;;
     UNEXPECTED_ABORT) c_UNEXPECTED_ABORT=$(( c_UNEXPECTED_ABORT + 1 )) ;;
     UNEXPECTED_CRASH) c_UNEXPECTED_CRASH=$(( c_UNEXPECTED_CRASH + 1 )) ;;
     DETERMINISM_BUG) c_DETERMINISM_BUG=$(( c_DETERMINISM_BUG + 1 )) ;;
     INFRA_ERROR) c_INFRA_ERROR=$(( c_INFRA_ERROR + 1 )) ;;
+    TOOL_ERROR) c_TOOL_ERROR=$(( c_TOOL_ERROR + 1 )) ;;
+    VACUOUS_CRASH) c_VACUOUS_CRASH=$(( c_VACUOUS_CRASH + 1 )) ;;
     VACUOUS_SCHEDULE) c_VACUOUS_SCHEDULE=$(( c_VACUOUS_SCHEDULE + 1 )) ;;
     VACUOUS_SWARM) c_VACUOUS_SWARM=$(( c_VACUOUS_SWARM + 1 )) ;;
     SCHEDULE_DIVERGENCE) c_SCHEDULE_DIVERGENCE=$(( c_SCHEDULE_DIVERGENCE + 1 )) ;;
@@ -784,13 +838,13 @@ run_gen() {
   local code=0
   if "$PATINA" patina run "$BIN" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}" >"$out" 2>"$err"; then code=0; else code=$?; fi
 
-  # Infrastructure guard: a cargo-patina/build/environment failure is NOT a bug.
+  # Infrastructure guard: host exhaustion under the supervisor is NOT a bug.
   # Retry ONCE; if it recurs mark INFRA_ERROR (surfaced, kept, but not a finding).
   if is_infra "$(cat "$out")" "$(cat "$err")"; then
     if "$PATINA" patina run "$BIN" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}" >"$out" 2>"$err"; then code=0; else code=$?; fi
     if is_infra "$(cat "$out")" "$(cat "$err")"; then
       bump INFRA_ERROR
-      local iline="gen=$G tier=$TIER class=INFRA_ERROR exit=$code config='$CFG_SUMMARY' (environment/build failure, NOT a bug -- re-run this gen isolated)"
+      local iline="gen=$G tier=$TIER class=INFRA_ERROR exit=$code config='$CFG_SUMMARY' (host resource exhaustion, NOT a bug -- re-run this gen isolated)"
       echo "$iline" >> "$SWEEP_LOG"; echo "$iline"; return
     fi
   fi
@@ -798,7 +852,7 @@ run_gen() {
   local enq comp failed
   enq=$(field_of enqueued "$err"); comp=$(field_of completed "$err"); failed=$(field_of failed "$err")
   local class
-  class=$(classify "$code" "${enq:-}" "${comp:-}" "${failed:-}" "$jobs" "$HEAVY" "$FS_CRASH" "$(cat "$out")" "$(cat "$err")")
+  class=$(classify "$code" "${enq:-}" "${comp:-}" "${failed:-}" "$jobs" "$HEAVY" "$(cat "$out")" "$(cat "$err")")
 
   # Self-confirming liveness check. A NON-heavy config that timed out (exit 1 ->
   # UNEXPECTED_LIVENESS) may be genuinely non-live OR merely slow: the per-run
@@ -819,7 +873,7 @@ run_gen() {
     if "$PATINA" patina run "$BIN" "${PKNOBS[@]}" -- "${eargs[@]}" >"$eout" 2>"$eerr"; then ecode=0; else ecode=$?; fi
     local ee ec ef everdict
     ee=$(field_of enqueued "$eerr"); ec=$(field_of completed "$eerr"); ef=$(field_of failed "$eerr")
-    everdict=$(classify "$ecode" "${ee:-}" "${ec:-}" "${ef:-}" "$jobs" "$HEAVY" "$FS_CRASH" "$(cat "$eout")" "$(cat "$eerr")")
+    everdict=$(classify "$ecode" "${ee:-}" "${ec:-}" "${ef:-}" "$jobs" "$HEAVY" "$(cat "$eout")" "$(cat "$eerr")")
     if [[ "$everdict" == OK ]]; then
       class=OK
       live_note=" (slow-converge: ${comp:-?}/${jobs} at ${CFG_TIMEOUT}s -> ${ec:-?}/${jobs} at 10x=${big}s)"
@@ -952,13 +1006,12 @@ sweep() {
   local c_SOMETIMES_UNMET=${#unmet_sites[@]}
 
   local total=$(( end - start + 1 ))
-  local failures=$(( c_SAFETY_BUG + c_ALWAYS_VIOLATION + c_UNEXPECTED_LIVENESS + c_UNEXPECTED_ABORT + c_UNEXPECTED_CRASH + c_DETERMINISM_BUG + c_VACUOUS_SCHEDULE + c_VACUOUS_SWARM + c_SCHEDULE_DIVERGENCE + c_SOMETIMES_UNMET ))
+  local failures=$(( c_SAFETY_BUG + c_ALWAYS_VIOLATION + c_UNEXPECTED_LIVENESS + c_UNEXPECTED_ABORT + c_UNEXPECTED_CRASH + c_TOOL_ERROR + c_VACUOUS_CRASH + c_DETERMINISM_BUG + c_VACUOUS_SCHEDULE + c_VACUOUS_SWARM + c_SCHEDULE_DIVERGENCE + c_SOMETIMES_UNMET ))
   echo
   echo "==> sweep summary (generations $start..$end, $total total)"
   echo "    tiers: SCHEDULE=$c_t_schedule BREADTH=$c_t_breadth TRAFFIC=$c_t_traffic DETERMINISM=$c_t_determinism"
   echo "    OK                  = $c_OK"
   echo "    LIVENESS_TIMEOUT    = $c_LIVENESS_TIMEOUT   (tolerated: heavy config)"
-  echo "    FAILCLOSED_ABORT    = $c_FAILCLOSED_ABORT   (tolerated: fs-crash fails closed)"
   echo "    STARVATION_STALL    = $c_STARVATION_STALL   (diagnostic: opt-in --starve backstop killed a wedged gen)"
   echo "    -- failures --"
   echo "    SAFETY_BUG          = $c_SAFETY_BUG"
@@ -967,9 +1020,11 @@ sweep() {
   echo "    UNEXPECTED_LIVENESS = $c_UNEXPECTED_LIVENESS"
   echo "    UNEXPECTED_ABORT    = $c_UNEXPECTED_ABORT"
   echo "    UNEXPECTED_CRASH    = $c_UNEXPECTED_CRASH"
+  echo "    TOOL_ERROR          = $c_TOOL_ERROR   (cargo-patina refused or failed the run)"
   echo "    DETERMINISM_BUG     = $c_DETERMINISM_BUG"
   echo "    VACUOUS_SCHEDULE    = $c_VACUOUS_SCHEDULE   (SCHEDULE gen did not explore)"
   echo "    VACUOUS_SWARM       = $c_VACUOUS_SWARM   (--swarm gen had no candidate fault class)"
+  echo "    VACUOUS_CRASH       = $c_VACUOUS_CRASH   (fs-crash selector never reached)"
   echo "    SCHEDULE_DIVERGENCE = $c_SCHEDULE_DIVERGENCE   (yield-points double-run non-deterministic)"
   echo "    TOTAL FAILURES      = $failures"
   if (( c_SOMETIMES_UNMET > 0 )); then

@@ -675,6 +675,78 @@ pub struct CrashPoint {
     pub ordinal: u64,
 }
 
+impl CrashPoint {
+    /// Parse a `close:1`/`write:3`/`sync:2`/`open:1` crash point. A bare op
+    /// name (`close`) means the first occurrence.
+    pub fn parse(value: &str) -> Result<Self, RuntimeError> {
+        let (op_text, ordinal) = match value.split_once(':') {
+            Some((op_text, ordinal_text)) => {
+                let ordinal = ordinal_text.parse::<u64>().map_err(|_| {
+                    RuntimeError::Config(format!(
+                        "{ENV_FS_CRASH_AT} ordinal must be a positive integer: {value:?}"
+                    ))
+                })?;
+                (op_text, ordinal)
+            }
+            None => (value, 1),
+        };
+        if ordinal == 0 {
+            return Err(RuntimeError::Config(format!(
+                "{ENV_FS_CRASH_AT} ordinal is 1-based and must be at least 1: {value:?}"
+            )));
+        }
+        let op = match op_text {
+            "open" => CrashOp::Open,
+            "write" => CrashOp::Write,
+            "sync" => CrashOp::Sync,
+            "close" => CrashOp::Close,
+            other => {
+                return Err(RuntimeError::Config(format!(
+                    "{ENV_FS_CRASH_AT} op must be open, write, sync, or close; got {other:?}"
+                )));
+            }
+        };
+        Ok(Self { op, ordinal })
+    }
+}
+
+/// The canonical `op:ordinal` spelling [`CrashPoint::parse`] reads back.
+impl fmt::Display for CrashPoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}:{}", self.op, self.ordinal)
+    }
+}
+
+impl From<CrashPoint> for patina_dst_trace::CrashPointRecord {
+    fn from(point: CrashPoint) -> Self {
+        let op = match point.op {
+            CrashOp::Open => patina_dst_trace::FaultCrashOp::Open,
+            CrashOp::Write => patina_dst_trace::FaultCrashOp::Write,
+            CrashOp::Sync => patina_dst_trace::FaultCrashOp::Sync,
+            CrashOp::Close => patina_dst_trace::FaultCrashOp::Close,
+        };
+        Self {
+            op,
+            ordinal: point.ordinal,
+        }
+    }
+}
+
+impl From<patina_dst_trace::CrashPointRecord> for CrashPoint {
+    fn from(record: patina_dst_trace::CrashPointRecord) -> Self {
+        let op = match record.op {
+            patina_dst_trace::FaultCrashOp::Open => CrashOp::Open,
+            patina_dst_trace::FaultCrashOp::Write => CrashOp::Write,
+            patina_dst_trace::FaultCrashOp::Sync => CrashOp::Sync,
+            patina_dst_trace::FaultCrashOp::Close => CrashOp::Close,
+        };
+        Self {
+            op,
+            ordinal: record.ordinal,
+        }
+    }
+}
+
 /// How a task's schedule accounting ended. Derived purely from the task-lifecycle
 /// shadow at report time — driven by the same recorded ops on record and replay,
 /// so it reproduces exactly. There is no panic/abort cause at this layer: a guest
@@ -1411,7 +1483,7 @@ impl RuntimeConfig {
     fn apply_one_knob(&mut self, knob: FaultKnob, value: &str) -> Result<(), RuntimeError> {
         let env = knob.meta().env;
         match knob {
-            FaultKnob::FsCrashAt => self.faults.fs.crash_at = Some(parse_crash_point(value)?),
+            FaultKnob::FsCrashAt => self.faults.fs.crash_at = Some(CrashPoint::parse(value)?),
             FaultKnob::FsTornGranularity => {
                 self.faults.fs.torn_granularity = parse_torn_granularity(value)?;
             }
@@ -2299,7 +2371,8 @@ impl RuntimeBuilder {
                             .with_dns(dns_record(&self.config))
                             .with_sud(self.config.sud)
                             .with_tsc(self.config.tsc),
-                    ),
+                    )
+                    .with_incarnation(self.config.incarnation),
                     sink: RecordSink::Path {
                         path: path.clone(),
                         _reservation: RecordReservation::acquire(path)?,
@@ -2322,7 +2395,8 @@ impl RuntimeBuilder {
                             .with_dns(dns_record(&self.config))
                             .with_sud(self.config.sud)
                             .with_tsc(self.config.tsc),
-                    ),
+                    )
+                    .with_incarnation(self.config.incarnation),
                     sink: RecordSink::Transport(
                         self.trace_transport.take().expect("transport was checked"),
                     ),
@@ -2621,7 +2695,9 @@ impl RuntimeBuilder {
             rescued: Vec::new(),
             crash_at: self.config.faults.fs.crash_at,
             crash_counts: CrashCounts::default(),
-            crash_fired: false,
+            // A run has one crash selector and incarnation 0 is the one it
+            // fires in; every later incarnation starts after it has fired.
+            crash_fired: self.config.incarnation > 0,
             incarnation: self.config.incarnation,
             require_crash_selector_reached: self.config.require_crash_selector_reached,
             sleep_jitter_nanos: self.config.faults.clock.sleep_jitter_nanos,
@@ -5906,14 +5982,15 @@ recording was produced by a guest whose result type no longer matches this one"
                 "filesystem driver exported an invalid crash-restart snapshot: {error}"
             ))
         })?;
+        // The crash ends this incarnation's process without finalization, so its
+        // recording (which ends with the triggering operation) is written now;
+        // the supervisor joins it with the next incarnation's.
+        self.flush_recording();
         Err(RuntimeError::InjectedFsCrash(Box::new(InjectedFsCrash {
             compatibility_fingerprint: self.execution_fingerprint().to_string(),
             from_incarnation: self.incarnation,
             to_incarnation: self.incarnation.saturating_add(1),
-            selector: patina_dst_trace::CrashPointRecord {
-                op: crash_op_to_record(point.op),
-                ordinal: point.ordinal,
-            },
+            selector: point.into(),
             consumed: HandoffConsumedState {
                 operations: self.steps,
                 lifecycle_order: self.steps,
@@ -6998,9 +7075,10 @@ publish. Give the loop a wait the runtime can see (sleep/yield/park), or bound t
     /// ([`Context::recording_flushed`]): the native transport is append-only.
     ///
     /// Scoped to stops the RUNTIME initiates (step-budget exhaustion,
-    /// frozen-clock churn), not arbitrary shim failures or panics. Explicit
-    /// Linux guest `abort()` separately finalizes a healthy context; other
-    /// internal fatalities leave the trace incomplete.
+    /// frozen-clock churn, the crash that ends an incarnation), not arbitrary
+    /// shim failures or panics. Explicit Linux guest `abort()` separately
+    /// finalizes a healthy context; other internal fatalities leave the trace
+    /// incomplete.
     fn flush_recording(&mut self) {
         if self.recording_flushed || !matches!(self.execution, Execution::Record { .. }) {
             return;
@@ -7440,39 +7518,6 @@ pub fn trace_fd_from_env() -> Result<Option<i32>, RuntimeError> {
     }
 }
 
-/// Parse a `close:1`/`write:3`/`sync:2`/`open:1` crash point. A bare op name
-/// (`close`) means the first occurrence.
-fn parse_crash_point(value: &str) -> Result<CrashPoint, RuntimeError> {
-    let (op_text, ordinal) = match value.split_once(':') {
-        Some((op_text, ordinal_text)) => {
-            let ordinal = ordinal_text.parse::<u64>().map_err(|_| {
-                RuntimeError::Config(format!(
-                    "{ENV_FS_CRASH_AT} ordinal must be a positive integer: {value:?}"
-                ))
-            })?;
-            (op_text, ordinal)
-        }
-        None => (value, 1),
-    };
-    if ordinal == 0 {
-        return Err(RuntimeError::Config(format!(
-            "{ENV_FS_CRASH_AT} ordinal is 1-based and must be at least 1: {value:?}"
-        )));
-    }
-    let op = match op_text {
-        "open" => CrashOp::Open,
-        "write" => CrashOp::Write,
-        "sync" => CrashOp::Sync,
-        "close" => CrashOp::Close,
-        other => {
-            return Err(RuntimeError::Config(format!(
-                "{ENV_FS_CRASH_AT} op must be open, write, sync, or close; got {other:?}"
-            )));
-        }
-    };
-    Ok(CrashPoint { op, ordinal })
-}
-
 fn parse_torn_granularity(value: &str) -> Result<TornGranularity, RuntimeError> {
     match value {
         "block" => Ok(TornGranularity::Block),
@@ -7480,25 +7525,6 @@ fn parse_torn_granularity(value: &str) -> Result<TornGranularity, RuntimeError> 
         other => Err(RuntimeError::Config(format!(
             "{ENV_FS_TORN_GRANULARITY} must be block or byte; got {other:?}"
         ))),
-    }
-}
-
-/// Map the runtime crash op to the serializable trace-record op.
-fn crash_op_to_record(op: CrashOp) -> patina_dst_trace::FaultCrashOp {
-    match op {
-        CrashOp::Open => patina_dst_trace::FaultCrashOp::Open,
-        CrashOp::Write => patina_dst_trace::FaultCrashOp::Write,
-        CrashOp::Sync => patina_dst_trace::FaultCrashOp::Sync,
-        CrashOp::Close => patina_dst_trace::FaultCrashOp::Close,
-    }
-}
-
-fn crash_op_from_record(op: patina_dst_trace::FaultCrashOp) -> CrashOp {
-    match op {
-        patina_dst_trace::FaultCrashOp::Open => CrashOp::Open,
-        patina_dst_trace::FaultCrashOp::Write => CrashOp::Write,
-        patina_dst_trace::FaultCrashOp::Sync => CrashOp::Sync,
-        patina_dst_trace::FaultCrashOp::Close => CrashOp::Close,
     }
 }
 
@@ -7559,14 +7585,7 @@ fn dns_record(config: &RuntimeConfig) -> Option<patina_dst_trace::DnsConfigRecor
 /// it as well.
 fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultConfigRecord {
     patina_dst_trace::FaultConfigRecord {
-        crash_at: config
-            .faults
-            .fs
-            .crash_at
-            .map(|point| patina_dst_trace::CrashPointRecord {
-                op: crash_op_to_record(point.op),
-                ordinal: point.ordinal,
-            }),
+        crash_at: config.faults.fs.crash_at.map(Into::into),
         torn_granularity: torn_granularity_to_record(config.faults.fs.torn_granularity),
         fs_error_permille: config.faults.fs.error_permille,
         fs_short_permille: config.faults.fs.short_permille,
@@ -7593,10 +7612,7 @@ fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultConfigRecord {
 fn fault_config_from_record(record: &patina_dst_trace::FaultConfigRecord) -> FaultConfig {
     FaultConfig {
         fs: FsFaultConfig {
-            crash_at: record.crash_at.map(|point| CrashPoint {
-                op: crash_op_from_record(point.op),
-                ordinal: point.ordinal,
-            }),
+            crash_at: record.crash_at.map(Into::into),
             torn_granularity: torn_granularity_from_record(record.torn_granularity),
             error_permille: record.fs_error_permille,
             short_permille: record.fs_short_permille,
@@ -10811,6 +10827,30 @@ class=crash|0 class=buggify|0"
     }
 
     #[test]
+    fn crash_writes_the_incarnation_recording_ending_with_the_trigger() {
+        let transport = SharedTransport::default();
+        let mut record = RuntimeBuilder::new(
+            RuntimeConfig::record_transport(3, "fixture-v1").with_crash_at(CrashOp::Open, 1),
+        )
+        .with_default_drivers()
+        .with_trace_transport(transport.clone())
+        .build()
+        .unwrap();
+        let trigger = Operation::FsOpen {
+            path: "/".into(),
+            flags: OpenFlags::read_only(),
+        };
+        let crash = record.fs_open("/", OpenFlags::read_only()).unwrap_err();
+        assert!(matches!(crash, RuntimeError::InjectedFsCrash(_)));
+        let recorded = TraceBundle::from_slice(&transport.stored()).unwrap();
+        let last = recorded.timelines[0]
+            .decisions
+            .last()
+            .map(|event| &event.operation);
+        assert_eq!(last, Some(&trigger));
+    }
+
+    #[test]
     fn trace_transport_configuration_fails_loudly() {
         assert!(matches!(
             RuntimeBuilder::new(RuntimeConfig::record_transport(1, "fixture-v1"))
@@ -11615,6 +11655,20 @@ class=crash|0 class=buggify|0"
             }
             other => panic!("expected unreached crash selector, got {other}"),
         }
+    }
+
+    #[test]
+    fn restarted_incarnation_never_fires_the_crash_selector() {
+        let mut context = Context::from_config(
+            RuntimeConfig::seeded(1)
+                .with_crash_at(CrashOp::Open, 1)
+                .with_incarnation(1),
+        )
+        .unwrap();
+        context
+            .fs_open("/", OpenFlags::read_only())
+            .expect("incarnation 1 starts after the selector fired");
+        context.finish().unwrap();
     }
 
     // The single choke point builds the crash filesystem from the fault config:

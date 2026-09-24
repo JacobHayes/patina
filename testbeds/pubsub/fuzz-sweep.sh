@@ -49,7 +49,13 @@ EXPECTED_HASH=8b988e7c57005dac2b5144ba9a6d1ffea7a789719bff6f0a7478e05786664a3d
 # Pure classifiers — no global state, no I/O, so --selftest can prove they bite.
 ###############################################################################
 CRASH_MARKERS='panicked|internal error|patina: the deterministic runtime|native shim fatal|unsupported native imports|scheduler (panic|error|stall|fault|deadlock)|deadlock detected|SIGSEGV|SIGABRT'
-INFRA_MARKERS='cargo-patina: |Cargo process terminated|terminated by a signal|could not compile|No such file or directory|native-build failed|Resource temporarily unavailable|Cannot allocate memory'
+# cargo-patina prints exactly one `cargo-patina: <error>` line when it fails the
+# run itself: a usage refusal, an unsupported combination, a replay divergence.
+# That is patina's answer about the generation, a product failure (TOOL_ERROR).
+TOOL_ERROR_LINE='^cargo-patina: '
+# Environment failure: the host ran out of a resource under the supervisor. Only
+# the tool's own error line counts; the guest can print the same errno text.
+INFRA_MARKERS='^cargo-patina: .*(Resource temporarily unavailable|Cannot allocate memory|No space left on device|Too many open files)'
 is_infra() { printf '%s\n%s' "$1" "$2" | /usr/bin/grep -Eq "$INFRA_MARKERS"; }
 
 # pubsub's OWN verdict labels: every self-detected breach is announced through
@@ -70,6 +76,9 @@ $err"
   if printf '%s' "$combined" | grep -Eq "^PATINA_VERDICT .*kind=violation label=($PUBSUB_VERDICT_LABELS) "; then echo SAFETY_BUG; return; fi
   # A hard crash marker anywhere is UNEXPECTED_CRASH even if the exit looks OK.
   if printf '%s' "$combined" | grep -Eq "$CRASH_MARKERS"; then echo UNEXPECTED_CRASH; return; fi
+  # cargo-patina failed the run itself (is_infra already ruled out host
+  # exhaustion).
+  if printf '%s' "$combined" | grep -Eq "$TOOL_ERROR_LINE"; then echo TOOL_ERROR; return; fi
   case "$code" in
     0)
       # Exit 0 means converged; re-verify the outcome from the result line so a
@@ -167,6 +176,20 @@ PATINA_NET_FAULT_REPORT send_ops=222 drops_applied=33 jitter_applied=222 vacuous
   local plane_file; plane_file="$(mktemp)"; printf '%s\n' "$two_planes" > "$plane_file"
   assert_class 0 "$(net_field vacuous "$plane_file")" "net-field-reads-its-own-plane"
   rm -f "$plane_file"
+
+  # A cargo-patina refusal is patina's answer about the generation: a failure
+  # class, never INFRA_ERROR. Host exhaustion under the supervisor is infra; the
+  # same errno text from the guest is not.
+  local refusal='cargo-patina: native --fs-crash-at crash-restart with --starve is not implemented; refusing rather than mixing the restart supervisor with the starvation stall backstop'
+  assert_class TOOL_ERROR "$(classify 2 '' '' 32 64 "$EXPECTED_HASH" '' '' "$refusal")" "refusal-is-tool-error"
+  if is_infra '' "$refusal"; then printf '  FAIL %-26s (refusal read as infra)\n' "infra-refusal-negative"; SELFTEST_FAIL=1
+  else printf '  ok   %-26s -> false\n' "infra-refusal-negative"; fi
+  if is_failure TOOL_ERROR; then printf '  ok   %-26s -> failure\n' "tool-error-is-failure"
+  else printf '  FAIL %-26s (tolerated)\n' "tool-error-is-failure"; SELFTEST_FAIL=1; fi
+  if is_infra '' 'cargo-patina: failed to run native program /p/pubsub: Resource temporarily unavailable (os error 11)'; then printf '  ok   %-26s -> true\n' "infra-detects-exhaustion"
+  else printf '  FAIL %-26s\n' "infra-detects-exhaustion"; SELFTEST_FAIL=1; fi
+  if is_infra "$ok" 'PUBSUB_FAILURE broker io error: Too many open files (os error 24)'; then printf '  FAIL %-26s (guest errno read as infra)\n' "infra-guest-errno-negative"; SELFTEST_FAIL=1
+  else printf '  ok   %-26s -> false\n' "infra-guest-errno-negative"; fi
 
   # det_check()
   assert_class OK "$(det_check OK "$ok" "$ok" aa aa)" "determinism-ok"
@@ -329,7 +352,7 @@ else
 fi
 
 c_OK=0; c_SAFETY_BUG=0; c_UNEXPECTED_LIVENESS=0; c_UNEXPECTED_ABORT=0
-c_UNEXPECTED_CRASH=0; c_DETERMINISM_BUG=0; c_VACUOUS_NET_FAULT=0; c_INFRA_ERROR=0
+c_UNEXPECTED_CRASH=0; c_DETERMINISM_BUG=0; c_VACUOUS_NET_FAULT=0; c_INFRA_ERROR=0; c_TOOL_ERROR=0
 c_t_net=0; c_t_sched=0; c_t_det=0
 FAIL_GENS=()
 bump() {
@@ -342,6 +365,7 @@ bump() {
     DETERMINISM_BUG) c_DETERMINISM_BUG=$(( c_DETERMINISM_BUG + 1 )) ;;
     VACUOUS_NET_FAULT) c_VACUOUS_NET_FAULT=$(( c_VACUOUS_NET_FAULT + 1 )) ;;
     INFRA_ERROR) c_INFRA_ERROR=$(( c_INFRA_ERROR + 1 )) ;;
+    TOOL_ERROR) c_TOOL_ERROR=$(( c_TOOL_ERROR + 1 )) ;;
   esac
 }
 tier_bump() {
@@ -367,7 +391,7 @@ run_gen() {
     if "$PATINA" patina run "$built" "${PKNOBS[@]}" --record "$trace" -- "${GUEST_ARGS[@]}" >"$out" 2>"$err"; then code=0; else code=$?; fi
     if is_infra "$(cat "$out")" "$(cat "$err")"; then
       bump INFRA_ERROR
-      local il="gen=$G tier=$TIER class=INFRA_ERROR (environment/build failure, NOT a bug)"
+      local il="gen=$G tier=$TIER class=INFRA_ERROR (host resource exhaustion, NOT a bug)"
       echo "$il" >> "$SWEEP_LOG"; echo "$il"; return
     fi
   fi
@@ -426,11 +450,12 @@ echo "    SAFETY_BUG        = $c_SAFETY_BUG"
 echo "    UNEXPECTED_LIVENESS = $c_UNEXPECTED_LIVENESS"
 echo "    UNEXPECTED_ABORT  = $c_UNEXPECTED_ABORT"
 echo "    UNEXPECTED_CRASH  = $c_UNEXPECTED_CRASH"
+echo "    TOOL_ERROR        = $c_TOOL_ERROR   (cargo-patina refused or failed the run)"
 echo "    DETERMINISM_BUG   = $c_DETERMINISM_BUG"
 echo "    VACUOUS_NET_FAULT = $c_VACUOUS_NET_FAULT   (task #37 regression: faults went inert)"
-echo "    INFRA_ERROR       = $c_INFRA_ERROR   (tolerated; environment/build)"
+echo "    INFRA_ERROR       = $c_INFRA_ERROR   (tolerated; host resource exhaustion)"
 echo "    log: $SWEEP_LOG"
-total_failures=$(( c_SAFETY_BUG + c_UNEXPECTED_LIVENESS + c_UNEXPECTED_ABORT + c_UNEXPECTED_CRASH + c_DETERMINISM_BUG + c_VACUOUS_NET_FAULT ))
+total_failures=$(( c_SAFETY_BUG + c_UNEXPECTED_LIVENESS + c_UNEXPECTED_ABORT + c_UNEXPECTED_CRASH + c_TOOL_ERROR + c_DETERMINISM_BUG + c_VACUOUS_NET_FAULT ))
 if (( total_failures > 0 )); then
   echo "==> FAILED: ${#FAIL_GENS[@]} finding(s): ${FAIL_GENS[*]}"
   echo "    (out kept at $OUTDIR)"

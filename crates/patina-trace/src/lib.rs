@@ -20,7 +20,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use patina_dst_abi::{Operation, Outcome, TaskId};
 use serde::{Deserialize, Serialize};
 
+mod crash_restart;
 mod handoff;
+pub use crash_restart::CrashRestartSegments;
 pub use handoff::{
     HandoffConsumedState, HandoffError, HandoffSealKey, IncarnationHandoff,
     MAX_HANDOFF_PAYLOAD_BYTES, VerifiedIncarnationHandoff,
@@ -760,6 +762,19 @@ pub struct TraceBundle {
 
 impl TraceBundle {
     pub fn new(metadata: RunMetadata, decisions: Vec<TraceEvent>) -> Self {
+        Self::linear(metadata, 0, decisions)
+    }
+
+    /// A trace of one incarnation from start to end: every decision belongs to
+    /// `incarnation`, between its `Start` and `End` markers.
+    pub fn linear(metadata: RunMetadata, incarnation: u64, mut decisions: Vec<TraceEvent>) -> Self {
+        for event in &mut decisions {
+            event.incarnation = incarnation;
+        }
+        let start_order = decisions
+            .first()
+            .map(|event| event.order.saturating_sub(1))
+            .unwrap_or(0);
         Self {
             format_version: TRACE_FORMAT_VERSION,
             metadata,
@@ -768,7 +783,11 @@ impl TraceBundle {
                 parent: None,
                 from_sequence: None,
                 branch_seed: None,
-                lifecycle: linear_lifecycle_for(&decisions),
+                lifecycle: linear_lifecycle_from_start_and_incarnation(
+                    start_order,
+                    incarnation,
+                    &decisions,
+                ),
                 decisions,
             }],
         }
@@ -1254,7 +1273,7 @@ fn validate_lifecycle_events(
                 incarnation,
                 snapshot_digest,
             } => {
-                require_snapshot_digest(snapshot_digest)?;
+                Sha256Digest::parse(snapshot_digest)?;
                 if active != Some(*incarnation) {
                     return Err(TraceError::Invalid(format!(
                         "{label} crashes inactive incarnation {incarnation}"
@@ -1268,7 +1287,7 @@ fn validate_lifecycle_events(
                 to_incarnation,
                 snapshot_digest,
             } => {
-                require_snapshot_digest(snapshot_digest)?;
+                Sha256Digest::parse(snapshot_digest)?;
                 if active.is_some() {
                     return Err(TraceError::Invalid(format!(
                         "{label} restarts while an incarnation is still active"
@@ -1356,22 +1375,46 @@ fn active_incarnation_at_order(lifecycle: &[LifecycleEvent], order: u64) -> Opti
     active
 }
 
-fn require_snapshot_digest(value: &str) -> Result<(), TraceError> {
-    let Some(hex) = value.strip_prefix("sha256:") else {
-        return Err(TraceError::Invalid(
-            "snapshot digest must use sha256:<64 lowercase hex>".into(),
-        ));
-    };
-    if hex.len() != 64
-        || !hex
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        return Err(TraceError::Invalid(
-            "snapshot digest must use sha256:<64 lowercase hex>".into(),
-        ));
+/// A SHA-256 digest in its one text form, `sha256:` followed by 64 lowercase
+/// hex digits: how a lifecycle marker names the recovered filesystem snapshot,
+/// and how the supervisor reports digests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sha256Digest(pub [u8; 32]);
+
+impl Sha256Digest {
+    const PREFIX: &'static str = "sha256:";
+
+    pub fn parse(text: &str) -> Result<Self, TraceError> {
+        let invalid = || {
+            TraceError::Invalid(format!(
+                "digest {text:?} must use sha256:<64 lowercase hex>"
+            ))
+        };
+        let hex = text.strip_prefix(Self::PREFIX).ok_or_else(invalid)?;
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(invalid());
+        }
+        let mut digest = [0_u8; 32];
+        for (byte, pair) in digest.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+            let pair = std::str::from_utf8(pair).map_err(|_| invalid())?;
+            *byte = u8::from_str_radix(pair, 16).map_err(|_| invalid())?;
+        }
+        Ok(Self(digest))
     }
-    Ok(())
+}
+
+impl fmt::Display for Sha256Digest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(Self::PREFIX)?;
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
 }
 
 /// A `Write` sink that counts bytes instead of keeping them, so a value can be
@@ -1526,6 +1569,7 @@ impl EventLedger {
 
 pub struct Recorder {
     metadata: RunMetadata,
+    incarnation: u64,
     decisions: Vec<TraceEvent>,
     ledger: EventLedger,
 }
@@ -1545,9 +1589,18 @@ impl Recorder {
     fn with_limits(metadata: RunMetadata, max_bytes: u64, max_events: u64) -> Self {
         Self {
             metadata,
+            incarnation: 0,
             decisions: Vec::new(),
             ledger: EventLedger::with_limits(max_bytes, max_events),
         }
+    }
+
+    /// Record the operations of `incarnation` of a crash-restart run; every
+    /// other recording is incarnation 0.
+    #[must_use]
+    pub fn with_incarnation(mut self, incarnation: u64) -> Self {
+        self.incarnation = incarnation;
+        self
     }
 
     /// Record one boundary decision — unless this trace has already been
@@ -1557,7 +1610,8 @@ impl Recorder {
         if self.ledger.overflowed() {
             return;
         }
-        let event = TraceEvent::new(self.decisions.len() as u64, operation, outcome);
+        let mut event = TraceEvent::new(self.decisions.len() as u64, operation, outcome);
+        event.incarnation = self.incarnation;
         if self.ledger.admit(&event, MAIN_TIMELINE) {
             self.decisions.push(event);
         } else {
@@ -1598,7 +1652,11 @@ impl Recorder {
     pub fn into_bundle(self) -> Result<TraceBundle, TraceError> {
         match self.ledger.overflow_error() {
             Some(error) => Err(error),
-            None => Ok(TraceBundle::new(self.metadata, self.decisions)),
+            None => Ok(TraceBundle::linear(
+                self.metadata,
+                self.incarnation,
+                self.decisions,
+            )),
         }
     }
 
@@ -1611,8 +1669,9 @@ impl Recorder {
     pub fn to_bundle(&self) -> Result<TraceBundle, TraceError> {
         match self.ledger.overflow_error() {
             Some(error) => Err(error),
-            None => Ok(TraceBundle::new(
+            None => Ok(TraceBundle::linear(
                 self.metadata.clone(),
+                self.incarnation,
                 self.decisions.clone(),
             )),
         }
@@ -1980,18 +2039,6 @@ impl BranchSession {
         });
         bundle.write_atomic(self.path)
     }
-}
-
-fn linear_lifecycle_for(decisions: &[TraceEvent]) -> Vec<LifecycleEvent> {
-    let start_order = decisions
-        .first()
-        .map(|event| event.order.saturating_sub(1))
-        .unwrap_or(0);
-    linear_lifecycle_from_start(start_order, decisions)
-}
-
-fn linear_lifecycle_from_start(start_order: u64, decisions: &[TraceEvent]) -> Vec<LifecycleEvent> {
-    linear_lifecycle_from_start_and_incarnation(start_order, 0, decisions)
 }
 
 fn linear_lifecycle_from_start_and_incarnation(
@@ -3355,6 +3402,37 @@ mod tests {
         let migrated = TraceBundle::from_slice(&bytes).unwrap();
         assert_eq!(migrated.format_version, TRACE_FORMAT_VERSION);
         assert_eq!(migrated.metadata.faults, None);
+    }
+
+    #[test]
+    fn recorder_stamps_its_incarnation_on_every_event_and_marker() {
+        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint")).with_incarnation(1);
+        recorder.observe(operation(), Outcome::U64(0));
+        let bundle = recorder.into_bundle().unwrap();
+        let main = &bundle.timelines[0];
+        assert_eq!(main.decisions[0].incarnation, 1);
+        assert_eq!(
+            main.lifecycle[0].kind,
+            LifecycleEventKind::Start { incarnation: 1 }
+        );
+        assert_eq!(
+            main.lifecycle[1].kind,
+            LifecycleEventKind::End { incarnation: 1 }
+        );
+    }
+
+    #[test]
+    fn sha256_digest_text_round_trips() {
+        let digest = Sha256Digest([0xab; 32]);
+        let text = digest.to_string();
+        assert_eq!(text, format!("sha256:{}", "ab".repeat(32)));
+        assert_eq!(Sha256Digest::parse(&text).unwrap(), digest);
+    }
+
+    #[test]
+    fn sha256_digest_refuses_uppercase_hex() {
+        let text = format!("sha256:{}", "AB".repeat(32));
+        assert!(Sha256Digest::parse(&text).is_err());
     }
 
     #[test]

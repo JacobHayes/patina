@@ -22,6 +22,8 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use patina_dst_fs_mem::{FsImage, FsImageEntry};
+#[cfg(unix)]
+use patina_dst_runtime::CrashPoint;
 use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_COVERAGE_FD,
@@ -40,7 +42,8 @@ use patina_dst_target::{
     shim_control_plane_symbols,
 };
 use patina_dst_trace::{
-    HandoffSealKey, IncarnationHandoff, TraceBundle, TraceError, parse_abandoned_trace_marker,
+    CrashRestartSegments, HandoffSealKey, IncarnationHandoff, Sha256Digest, TraceBundle,
+    TraceError, abandoned_trace_marker, parse_abandoned_trace_marker, resource_limit_infra_line,
 };
 use patina_dst_wasi_host::{
     DEFAULT_WASM_FUEL, MountPolicy, Preview1Host, ResourceLimits, execute_preview1_with_fuel,
@@ -3044,7 +3047,9 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
     // `--buggify`, so the trace metadata is authoritative — mirror the native
     // `trace_has_buggify` reconciliation so the recomputed fingerprint matches.
     let buggify_enabled = invocation.buggify.is_some()
-        || replay_trace_path(&invocation.mode).is_some_and(trace_has_buggify);
+        || replay_trace_path(&invocation.mode).is_some_and(|path| {
+            TraceBundle::load(path).is_ok_and(|bundle| trace_has_buggify(&bundle))
+        });
     let fingerprint = wasi_compatibility_fingerprint(&bytes, &invocation, buggify_enabled);
     let mut config = match &invocation.mode {
         Mode::Seeded { seed } => RuntimeConfig::seeded(*seed),
@@ -6269,34 +6274,21 @@ impl SchedulePolicyFingerprint {
 /// Whether a recorded trace carries buggify metadata. Used at replay so the
 /// `+buggify` fingerprint component is reconstructed from the trace itself,
 /// keeping replay self-contained (the operator need not re-pass `--buggify`).
-/// A read/parse failure reports `false`; the runtime surfaces any genuine error.
-fn trace_has_buggify(path: &Path) -> bool {
-    patina_dst_trace::TraceBundle::load(path)
-        .map(|bundle| bundle.metadata.buggify.is_some())
-        .unwrap_or(false)
+fn trace_has_buggify(bundle: &TraceBundle) -> bool {
+    bundle.metadata.buggify.is_some()
 }
 
 /// Reconstruct the exploration-policy fingerprint components from a recorded
 /// trace's metadata, so a flag-free replay recomputes the same fingerprint the
 /// record run folded (`+pct`/`+starve`/`+swarm`) and a cross-policy replay fails
-/// closed. A read/parse failure reports the inert default; the runtime surfaces
-/// any genuine error.
-fn native_policy_from_trace(path: &Path) -> SchedulePolicyFingerprint {
-    patina_dst_trace::TraceBundle::load(path)
-        .map(|bundle| SchedulePolicyFingerprint {
-            pct: bundle
-                .metadata
-                .schedule_policy
-                .as_ref()
-                .is_some_and(|policy| policy.pct.is_some()),
-            starvation: bundle
-                .metadata
-                .schedule_policy
-                .as_ref()
-                .is_some_and(|policy| policy.starvation.is_some()),
-            swarm: bundle.metadata.swarm.is_some(),
-        })
-        .unwrap_or_default()
+/// closed.
+fn native_policy_from_trace(bundle: &TraceBundle) -> SchedulePolicyFingerprint {
+    let policy = bundle.metadata.schedule_policy.as_ref();
+    SchedulePolicyFingerprint {
+        pct: policy.is_some_and(|policy| policy.pct.is_some()),
+        starvation: policy.is_some_and(|policy| policy.starvation.is_some()),
+        swarm: bundle.metadata.swarm.is_some(),
+    }
 }
 
 /// An encoded filesystem image held open in a temporary file, ready to be
@@ -6818,13 +6810,25 @@ impl NativeTraceSink {
     }
 
     #[cfg(unix)]
-    fn raw_fd(&self) -> std::os::unix::io::RawFd {
-        use std::os::unix::io::AsRawFd;
+    fn file(&self) -> &fs::File {
+        self.file.as_ref().expect("trace sink is live until commit")
+    }
+
+    /// Write a trace the supervisor assembled itself (a crash-restart run's
+    /// joined incarnations) into the channel a guest otherwise writes.
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), CliError> {
+        use std::io::Write;
 
         self.file
-            .as_ref()
+            .as_mut()
             .expect("trace sink is live until commit")
-            .as_raw_fd()
+            .write_all(bytes)
+            .map_err(|error| {
+                CliError(format!(
+                    "failed to write temporary trace {}: {error}",
+                    self.temp_path.display()
+                ))
+            })
     }
 
     fn commit(mut self) -> Result<PathBuf, TraceCommitFailure> {
@@ -7003,14 +7007,12 @@ arguments so they round-trip through the trace metadata"
 /// divergence). A trace recorded before argv capture carries no recorded argv, so
 /// the arguments are taken from the command line exactly as before — no new error
 /// for old traces.
-fn reconcile_replay_argv(trace: &Path, passed: &[OsString]) -> Result<Vec<OsString>, CliError> {
-    let bundle = TraceBundle::load(trace).map_err(|error| {
-        CliError(format!(
-            "failed to read trace {} for guest-argument restoration: {error}",
-            trace.display()
-        ))
-    })?;
-    let Some(recorded) = bundle.metadata.guest_argv else {
+fn reconcile_replay_argv(
+    trace: &Path,
+    bundle: &TraceBundle,
+    passed: &[OsString],
+) -> Result<Vec<OsString>, CliError> {
+    let Some(recorded) = &bundle.metadata.guest_argv else {
         // Pre-argv trace: honor the historical contract (arguments from the
         // command line, and their absence behaves exactly as today).
         return Ok(passed.to_vec());
@@ -7217,44 +7219,465 @@ fn wait_native_child_once(
     }
 }
 
+/// How a `--fs-crash-at` run is supervised: the one crash selector, the seed
+/// its handoff seal key derives from, and what each incarnation's trace
+/// channel carries.
 #[cfg(unix)]
-fn crash_handoff_key(seed: u64, selector: &str) -> HandoffSealKey {
-    let mut hasher = Sha256::new();
-    hasher.update(b"patina-native-crash-restart-handoff-key/v1");
-    hasher.update(seed.to_le_bytes());
-    hasher.update(selector.as_bytes());
-    let digest = hasher.finalize();
-    let mut bytes = [0_u8; 32];
-    bytes.copy_from_slice(&digest);
-    HandoffSealKey::from_bytes(bytes)
+struct CrashRestartPlan {
+    selector: CrashPoint,
+    seed: u64,
+    trace: CrashRestartTrace,
 }
 
 #[cfg(unix)]
-fn crash_handoff_key_hex(seed: u64, selector: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"patina-native-crash-restart-handoff-key/v1");
-    hasher.update(seed.to_le_bytes());
-    hasher.update(selector.as_bytes());
-    hex_lower(&hasher.finalize())
+enum CrashRestartTrace {
+    /// A seeded run has no trace channel.
+    Seeded,
+    /// Each incarnation records its own linear trace; the supervisor joins
+    /// them into the run's one crash-restart trace.
+    Record,
+    /// Each incarnation replays its own segment of the recorded trace.
+    /// `restarted` is `None` when the recorded run never crashed.
+    Replay {
+        crashed: Box<TraceBundle>,
+        restarted: Option<(Sha256Digest, Box<TraceBundle>)>,
+    },
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
+/// The crash-restart plan for a native run, or `None` when the run has no
+/// crash selector. Seeded and record runs take the selector from
+/// `--fs-crash-at`; a replay takes it, and the incarnations it replays, from
+/// its already-loaded trace.
+#[cfg(unix)]
+fn crash_restart_plan(
+    invocation: &NativeRunInvocation,
+    replay_trace: Option<TraceBundle>,
+) -> Result<Option<CrashRestartPlan>, CliError> {
+    let (seed, trace) = match (&invocation.mode, replay_trace) {
+        (NativeRunMode::Replay { path, .. }, Some(bundle)) => {
+            return crash_restart_replay_plan(path, bundle);
+        }
+        (NativeRunMode::Replay { .. }, None) => {
+            unreachable!("a native replay loads its trace before planning")
+        }
+        (NativeRunMode::Seeded { seed }, _) => (*seed, CrashRestartTrace::Seeded),
+        (NativeRunMode::Record { seed, .. }, _) => (*seed, CrashRestartTrace::Record),
+    };
+    let Some(text) = invocation.knobs.get(FaultKnob::FsCrashAt).first() else {
+        return Ok(None);
+    };
+    let selector = CrashPoint::parse(text).map_err(|error| CliError::usage(error.to_string()))?;
+    Ok(Some(CrashRestartPlan {
+        selector,
+        seed,
+        trace,
+    }))
+}
+
+#[cfg(unix)]
+fn crash_restart_replay_plan(
+    path: &Path,
+    bundle: TraceBundle,
+) -> Result<Option<CrashRestartPlan>, CliError> {
+    let segments = bundle
+        .crash_restart_segments()
+        .map_err(|error| CliError(format!("failed to load trace {}: {error}", path.display())))?;
+    let selector = bundle
+        .metadata
+        .faults
+        .as_ref()
+        .and_then(|faults| faults.crash_at);
+    let Some(selector) = selector else {
+        if segments.is_some() {
+            return Err(CliError(format!(
+                "trace {} records a crash-restart lifecycle but no --fs-crash-at selector",
+                path.display()
+            )));
+        }
+        return Ok(None);
+    };
+    let seed = bundle.metadata.root_seed;
+    let trace = match segments {
+        Some(segments) => CrashRestartTrace::Replay {
+            crashed: Box::new(segments.crashed),
+            restarted: Some((segments.snapshot_digest, Box::new(segments.restarted))),
+        },
+        None => CrashRestartTrace::Replay {
+            crashed: Box::new(bundle),
+            restarted: None,
+        },
+    };
+    Ok(Some(CrashRestartPlan {
+        selector: selector.into(),
+        seed,
+        trace,
+    }))
+}
+
+/// The descriptors one incarnation is launched with. Everything else about the
+/// launch is common to the run.
+#[cfg(unix)]
+struct IncarnationLaunch<'a> {
+    incarnation: u64,
+    /// The incarnation's trace channel, for a record or replay.
+    trace: Option<&'a fs::File>,
+    /// Incarnation 0's crash handoff channel and its seal key (hex).
+    handoff: Option<(&'a fs::File, &'a str)>,
+    /// The recovered filesystem a restarted incarnation boots from, in place of
+    /// the run's base image.
+    restart_snapshot: Option<&'a fs::File>,
+}
+
+/// A supervised crash-restart run: its merged guest output and status, the
+/// `crash_restart` envelope field, and, for a record, the trace bytes to
+/// commit.
+#[cfg(unix)]
+struct CrashRestartRun {
+    captured: output::Captured,
+    report: serde_json::Value,
+    trace: Option<Vec<u8>>,
+}
+
+/// A replay that departed from the recording at or before the crash: incarnation
+/// 1 never runs, and the run keeps incarnation 0's output and envelope, with
+/// the named divergence as its last stderr line and a failing status.
+#[cfg(unix)]
+fn crash_replay_divergence(
+    mut first: output::Captured,
+    first_host_pid: u32,
+    selector: CrashPoint,
+    reached: bool,
+    detail: &str,
+) -> CrashRestartRun {
+    append_supervisor_line(
+        &mut first,
+        &format!("PATINA_FS_CRASH_REPLAY_DIVERGENCE selector={selector} {detail}"),
+    );
+    if first.exit_code == 0 || first.exit_code == NATIVE_FS_CRASH_RESTART_EXIT {
+        first.exit_code = 2;
     }
-    out
+    let report = serde_json::json!({
+        "selector": selector_json(selector),
+        "reached": reached,
+        "crash_count": u8::from(reached),
+        "restart_count": 0,
+        "incarnations": [{"id": 0, "host_pid": first_host_pid}],
+        "terminal_outcome": {"kind": "replay_diverged", "exit_code": first.exit_code, "signal": first.signal},
+    });
+    CrashRestartRun {
+        captured: first,
+        report,
+        trace: None,
+    }
+}
+
+/// Supervise incarnation 0 until its crash, verify the handoff, and run
+/// incarnation 1 from the recovered filesystem.
+///
+/// A record gives each incarnation its own trace channel and joins the two
+/// segments with the handoff's snapshot digest. A replay gives each
+/// incarnation its recorded segment, and refuses by name when the replayed
+/// crash comes at a different point, or hands over a different filesystem,
+/// than the recorded one: the recovered filesystem is re-derived by the
+/// replay, never read from the trace.
+#[cfg(unix)]
+fn supervise_crash_restart(
+    plan: &CrashRestartPlan,
+    mut launch: impl FnMut(IncarnationLaunch<'_>) -> Result<(output::Captured, u32), CliError>,
+) -> Result<CrashRestartRun, CliError> {
+    let selector = plan.selector;
+    let key = crash_handoff_key(plan.seed, selector);
+    let key_hex = hex(&key);
+    let handoff = scratch_file("crash-restart handoff channel", &[])?;
+    let crashed_trace = match &plan.trace {
+        CrashRestartTrace::Seeded => None,
+        CrashRestartTrace::Record => Some(scratch_file("incarnation 0 trace channel", &[])?),
+        CrashRestartTrace::Replay { crashed, .. } => Some(scratch_file(
+            "incarnation 0 trace channel",
+            &crashed.to_bytes().map_err(|error| {
+                CliError(format!("failed to encode incarnation 0's trace: {error}"))
+            })?,
+        )?),
+    };
+    let (first, first_host_pid) = launch(IncarnationLaunch {
+        incarnation: 0,
+        trace: crashed_trace.as_ref(),
+        handoff: Some((&handoff, &key_hex)),
+        restart_snapshot: None,
+    })?;
+    let recorded_crash = match &plan.trace {
+        CrashRestartTrace::Replay { crashed, restarted } => Some((crashed, restarted.as_ref())),
+        CrashRestartTrace::Seeded | CrashRestartTrace::Record => None,
+    };
+
+    if first.exit_code != NATIVE_FS_CRASH_RESTART_EXIT {
+        if let Some((_, Some(_))) = recorded_crash {
+            let detail = format!(
+                "incarnation 0 exited with status {} before the recorded crash",
+                first.exit_code
+            );
+            return Ok(crash_replay_divergence(
+                first,
+                first_host_pid,
+                selector,
+                false,
+                &detail,
+            ));
+        }
+        let report = serde_json::json!({
+            "selector": selector_json(selector),
+            "reached": false,
+            "crash_count": 0,
+            "restart_count": 0,
+            "incarnations": [{"id": 0, "host_pid": first_host_pid}],
+            "terminal_outcome": {"kind": "exited_without_crash", "exit_code": first.exit_code, "signal": first.signal},
+        });
+        let trace = match (&plan.trace, &crashed_trace) {
+            (CrashRestartTrace::Record, Some(file)) => {
+                Some(read_scratch_file(file, "incarnation 0 trace channel")?)
+            }
+            _ => None,
+        };
+        return Ok(CrashRestartRun {
+            captured: first,
+            report,
+            trace,
+        });
+    }
+
+    let handoff_bytes = read_scratch_file(&handoff, "crash-restart handoff channel")?;
+    let handoff_digest = Sha256Digest(Sha256::digest(&handoff_bytes).into());
+    let verified = IncarnationHandoff::open(&handoff_bytes, &HandoffSealKey::from_bytes(key))
+        .map_err(|error| CliError(format!("PATINA_FS_CRASH_INVALID_HANDOFF {error}")))?;
+    if verified.from_incarnation != 0 || verified.to_incarnation != 1 {
+        return Err(CliError(format!(
+            "PATINA_FS_CRASH_INVALID_HANDOFF expected 0->1 restart, got {}->{}",
+            verified.from_incarnation, verified.to_incarnation
+        )));
+    }
+    let handed_selector = CrashPoint::from(verified.selector);
+    if handed_selector != selector {
+        return Err(CliError(format!(
+            "PATINA_FS_CRASH_INVALID_HANDOFF selector mismatch: expected {selector}, got {handed_selector}"
+        )));
+    }
+    let snapshot_digest = Sha256Digest(verified.snapshot_digest);
+
+    let restarted_trace = match recorded_crash {
+        None if matches!(plan.trace, CrashRestartTrace::Record) => {
+            Some(scratch_file("incarnation 1 trace channel", &[])?)
+        }
+        None => None,
+        Some((_, None)) => {
+            let detail = format!(
+                "the recorded run never crashed, but the replay crashed after {} operations",
+                verified.consumed.operations
+            );
+            return Ok(crash_replay_divergence(
+                first,
+                first_host_pid,
+                selector,
+                true,
+                &detail,
+            ));
+        }
+        Some((crashed, Some((recorded_digest, restarted)))) => {
+            let recorded_operations = crashed.timelines[0].decisions.len() as u64;
+            if verified.consumed.operations != recorded_operations {
+                let detail = format!(
+                    "the replay crashed after {} operations; the recorded crash followed operation {recorded_operations}",
+                    verified.consumed.operations
+                );
+                return Ok(crash_replay_divergence(
+                    first,
+                    first_host_pid,
+                    selector,
+                    true,
+                    &detail,
+                ));
+            }
+            if snapshot_digest != *recorded_digest {
+                let detail = format!(
+                    "the replay handed incarnation 1 a recovered filesystem with digest {snapshot_digest}; the recording handed over {recorded_digest}"
+                );
+                return Ok(crash_replay_divergence(
+                    first,
+                    first_host_pid,
+                    selector,
+                    true,
+                    &detail,
+                ));
+            }
+            Some(scratch_file(
+                "incarnation 1 trace channel",
+                &restarted.to_bytes().map_err(|error| {
+                    CliError(format!("failed to encode incarnation 1's trace: {error}"))
+                })?,
+            )?)
+        }
+    };
+
+    let snapshot = scratch_file("restart snapshot channel", &verified.snapshot_bytes)?;
+    let (second, second_host_pid) = launch(IncarnationLaunch {
+        incarnation: 1,
+        trace: restarted_trace.as_ref(),
+        handoff: None,
+        restart_snapshot: Some(&snapshot),
+    })?;
+
+    let terminal_kind = if second.exit_code == 0 && second.signal.is_none() {
+        "completed_after_restart"
+    } else {
+        "restart_child_failed"
+    };
+    let report = serde_json::json!({
+        "selector": selector_json(selector),
+        "reached": true,
+        "crash_count": 1,
+        "restart_count": 1,
+        "incarnations": [
+            {"id": verified.from_incarnation, "host_pid": first_host_pid},
+            {"id": verified.to_incarnation, "host_pid": second_host_pid}
+        ],
+        "handoff_digest": handoff_digest.to_string(),
+        "snapshot_digest": snapshot_digest.to_string(),
+        "consumed": {
+            "operations": verified.consumed.operations,
+            "lifecycle_order": verified.consumed.lifecycle_order
+        },
+        "terminal_outcome": {"kind": terminal_kind, "exit_code": second.exit_code, "signal": second.signal},
+    });
+    let mut captured = first;
+    captured.stdout.extend_from_slice(&second.stdout);
+    captured.stderr.extend_from_slice(&second.stderr);
+    append_supervisor_line(
+        &mut captured,
+        &format!(
+            "PATINA_FS_CRASH_RESTART selector={selector} host_pid0={first_host_pid} host_pid1={second_host_pid} incarnation0=0 incarnation1=1 operations={} result=restarted",
+            verified.consumed.operations
+        ),
+    );
+    captured.exit_code = second.exit_code;
+    captured.signal = second.signal;
+    captured.core = second.core;
+    let trace = match (&plan.trace, &crashed_trace, &restarted_trace) {
+        (CrashRestartTrace::Record, Some(crashed), Some(restarted)) => {
+            Some(join_recorded_incarnations(
+                read_scratch_file(crashed, "incarnation 0 trace channel")?,
+                &verified,
+                read_scratch_file(restarted, "incarnation 1 trace channel")?,
+                &mut captured,
+            )?)
+        }
+        _ => None,
+    };
+    Ok(CrashRestartRun {
+        captured,
+        report,
+        trace,
+    })
+}
+
+/// The recorded run's one trace: incarnation 0's segment, the crash, and
+/// incarnation 1's segment. A segment that is not a bundle (empty, truncated,
+/// or an abandoned-trace marker) means the run's trace was lost, and its bytes
+/// are what the trace channel carries, so the commit reports the loss exactly
+/// as it would for a run that never restarted. A joined trace over the size
+/// budget is abandoned, with its `PATINA_INFRA` line in the run's stderr.
+#[cfg(unix)]
+fn join_recorded_incarnations(
+    crashed: Vec<u8>,
+    handoff: &patina_dst_trace::VerifiedIncarnationHandoff,
+    restarted: Vec<u8>,
+    captured: &mut output::Captured,
+) -> Result<Vec<u8>, CliError> {
+    let Ok(crashed_bundle) = TraceBundle::from_slice(&crashed) else {
+        return Ok(crashed);
+    };
+    let recorded_operations = crashed_bundle.timelines[0].decisions.len() as u64;
+    if recorded_operations != handoff.consumed.operations {
+        return Err(CliError(format!(
+            "PATINA_FS_CRASH_INVALID_HANDOFF incarnation 0 recorded {recorded_operations} operations but its handoff consumed {}",
+            handoff.consumed.operations
+        )));
+    }
+    let Ok(restarted_bundle) = TraceBundle::from_slice(&restarted) else {
+        return Ok(restarted);
+    };
+    let joined = CrashRestartSegments {
+        crashed: crashed_bundle,
+        snapshot_digest: Sha256Digest(handoff.snapshot_digest),
+        restarted: restarted_bundle,
+    }
+    .join()
+    .map_err(|error| CliError(format!("failed to join the crash-restart trace: {error}")))?;
+    match joined.to_bytes() {
+        Ok(bytes) => Ok(bytes),
+        Err(error) if error.is_resource_limit() => {
+            append_supervisor_line(captured, resource_limit_infra_line(&error).trim_end());
+            Ok(abandoned_trace_marker("resource-limit", &error.to_string()))
+        }
+        Err(error) => Err(CliError(format!(
+            "failed to encode the crash-restart trace: {error}"
+        ))),
+    }
+}
+
+/// An anonymous host file holding `contents`, rewound for the child to read.
+#[cfg(unix)]
+fn scratch_file(purpose: &str, contents: &[u8]) -> Result<fs::File, CliError> {
+    use std::io::{Seek, Write};
+
+    let mut file = tempfile::tempfile()
+        .map_err(|error| CliError(format!("failed to create the {purpose}: {error}")))?;
+    file.write_all(contents)
+        .and_then(|()| file.rewind())
+        .map_err(|error| CliError(format!("failed to fill the {purpose}: {error}")))?;
+    Ok(file)
+}
+
+/// Everything a child wrote into a scratch channel.
+#[cfg(unix)]
+fn read_scratch_file(file: &fs::File, purpose: &str) -> Result<Vec<u8>, CliError> {
+    use std::io::{Read, Seek};
+
+    let mut file = file;
+    let mut bytes = Vec::new();
+    file.rewind()
+        .and_then(|()| file.read_to_end(&mut bytes))
+        .map_err(|error| CliError(format!("failed to read the {purpose}: {error}")))?;
+    Ok(bytes)
+}
+
+/// A supervisor line in the run's stderr: appended to captured output, or
+/// printed where the guest's own stderr went.
+#[cfg(unix)]
+fn append_supervisor_line(captured: &mut output::Captured, line: &str) {
+    if captured.captured {
+        captured.stderr.extend_from_slice(line.as_bytes());
+        captured.stderr.push(b'\n');
+    } else {
+        eprintln!("{line}");
+    }
+}
+
+/// The handoff seal key: a function of the run's seed and crash selector, so
+/// the record and the replay of one run derive the same key.
+#[cfg(unix)]
+fn crash_handoff_key(seed: u64, selector: CrashPoint) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"patina-native-crash-restart-handoff-key/v1");
+    hasher.update(seed.to_le_bytes());
+    hasher.update(selector.to_string().as_bytes());
+    hasher.finalize().into()
 }
 
 #[cfg(unix)]
-fn selector_json(selector: &str) -> serde_json::Value {
-    let (op, ordinal) = selector.split_once(':').unwrap_or((selector, "1"));
+fn selector_json(selector: CrashPoint) -> serde_json::Value {
     serde_json::json!({
-        "op": op,
-        "ordinal": ordinal.parse::<u64>().unwrap_or(1),
-        "text": selector,
+        "op": selector.op.to_string(),
+        "ordinal": selector.ordinal,
+        "text": selector.to_string(),
     })
 }
 
@@ -7398,186 +7821,69 @@ liveness-safe."
         None
     };
 
+    // A replay reads its trace once: the guest arguments, the fingerprint
+    // components and the crash-restart plan all come from this one load.
+    let replay_trace = match &invocation.mode {
+        NativeRunMode::Replay { path, .. } => Some(TraceBundle::load(path).map_err(|error| {
+            CliError(format!("failed to read trace {}: {error}", path.display()))
+        })?),
+        NativeRunMode::Seeded { .. } | NativeRunMode::Record { .. } => None,
+    };
+
     // Restore the guest arguments for a replay from the trace's recorded argv, so
     // a bare replay reproduces them without the `--` section being re-passed; a
     // mismatched `--` section is refused upfront (see `reconcile_replay_argv`).
     // For seeded/record runs the arguments are the ones supplied on the command
     // line, unchanged.
-    let program_args = match &invocation.mode {
-        NativeRunMode::Replay { path, .. } => {
-            reconcile_replay_argv(path, &invocation.program_args)?
+    let program_args = match (&invocation.mode, &replay_trace) {
+        (NativeRunMode::Replay { path, .. }, Some(bundle)) => {
+            reconcile_replay_argv(path, bundle, &invocation.program_args)?
         }
-        NativeRunMode::Seeded { .. } | NativeRunMode::Record { .. } => {
-            invocation.program_args.clone()
-        }
+        _ => invocation.program_args.clone(),
     };
 
-    let native_crash_selector = invocation.knobs.get(FaultKnob::FsCrashAt).first().cloned();
-    if let Some(selector) = &native_crash_selector {
-        if !matches!(invocation.mode, NativeRunMode::Seeded { .. }) {
-            return Err(CliError(format!(
-                "native --fs-crash-at crash-restart record/replay is not implemented in this slice; {selector} must not rollback-and-continue. Re-run without --record/replay or omit --fs-crash-at."
-            )));
-        }
-        if invocation.schedule.starve.is_some() {
-            return Err(CliError::usage(
-                "native --fs-crash-at crash-restart with --starve is not implemented; refusing rather than mixing the restart supervisor with the starvation stall backstop",
-            ));
-        }
-    }
-
-    let mut command = Command::new(&binary);
-    // Stamp a fixed, machine-independent `argv[0]`: the guest is exec'd from an
-    // absolute host path, but that path must not leak into the guest's
-    // `std::env::args()` as a non-portable string. The guest's own arguments live
-    // in `argv[1..]`.
-    command
-        .args(&program_args)
-        .arg0(NATIVE_GUEST_ARGV0)
-        .env_clear();
-    // A `patina-dst-harness` binary (usage mode 2) defers runtime installation to
-    // its `run`/`run_with` call: tell the packaged constructor to capture/scrub the
-    // control plane and register finalization but NOT install the runtime. Applies
-    // uniformly to seeded/record and replay so the harness owns installation on
-    // every path. An interposed effect before the harness installs fails closed.
-    if invocation.harness {
-        command.env(ENV_DEFER_INIT, "1");
-    }
-    if let Some(image) = &image_file {
-        command.env(ENV_FS_IMAGE_FD, image.file.as_raw_fd().to_string());
-    }
-    if let Some(file) = &coverage_file {
-        command.env(ENV_COVERAGE_FD, file.as_raw_fd().to_string());
-    }
-    if let Some(file) = &facts_file {
-        command.env(
-            patina_dst_runtime::ENV_FACTS_FD,
-            file.as_raw_fd().to_string(),
-        );
-    }
-    // The guest's environment is cleared above, so every end-of-run report knob
-    // the operator set has to be forwarded explicitly or it never reaches the
-    // guest at all. Driven by `Report::ALL` rather than a hand-kept list, so a
-    // report added to the runtime is silenceable on native the day it exists —
-    // only `PATINA_COVERAGE_REPORT` used to be carried, which is why every other
-    // knob read as inert on this family.
-    for report in patina_dst_runtime::Report::ALL {
-        if let Some(value) = env::var_os(report.env()) {
-            command.env(report.env(), value);
-        }
-    }
-    if !invocation.environment.is_empty() {
-        let encoded = serde_json::to_string(&invocation.environment).map_err(|error| {
-            CliError(format!(
-                "failed to encode native guest environment: {error}"
-            ))
-        })?;
-        command.env(ENV_GUEST_ENV, encoded);
-    }
-    if let Some(cwd) = &invocation.cwd {
-        command.env(ENV_GUEST_CWD, cwd);
-    }
-    // The boundary-operation budget is a supervisor-side bound, not recorded run
-    // semantics, so it is supplied per invocation on every family alike.
-    if let Some(budget) = invocation.step_budget {
-        command.env(ENV_STEP_BUDGET, budget.to_string());
-    }
-    // Forward whatever fault knobs the operator supplied to the guest, scrubbing
-    // every knob's variable first so an ambient value cannot leak into a run that
-    // set none. On record and seeded runs these configure the faults and are
-    // recorded into the trace metadata. Native replay does not accept semantic
-    // re-supply; the trace's recorded configuration is authoritative and restored
-    // by the runtime.
-    for variable in knob_env_vars() {
-        command.env_remove(variable);
-    }
-    for (name, value) in knob_env_pairs(&invocation.knobs)? {
-        command.env(name, value);
-    }
-    // Forward the cooperative-SUT (buggify) knobs. Presence of `PATINA_BUGGIFY`
-    // enables buggify; its value (if any) is the firing per-mille. Like the fault
-    // knobs, these are recorded into trace metadata and restored from the trace on
-    // native replay, rather than re-supplied as semantic flags.
-    if let Some(buggify) = &invocation.buggify {
-        command.env(ENV_BUGGIFY, buggify.fire_permille.as_deref().unwrap_or(""));
-        if let Some(value) = &buggify.activation_permille {
-            command.env(ENV_BUGGIFY_ACTIVATION, value);
-        }
-        if let Some(value) = &buggify.cutoff_nanos {
-            command.env(ENV_BUGGIFY_CUTOFF, value);
-        }
-        if buggify.after_setup {
-            command.env(ENV_BUGGIFY_AFTER_SETUP, "1");
-        }
-    }
-    // Forward the exploration scheduling-policy (PCT / starvation) and swarm
-    // knobs through the same control plane. Recorded into the trace metadata and
-    // restored from the trace on native replay; the fingerprint suffix rejects a
-    // cross-policy replay.
-    for (name, value) in schedule_env_pairs(&invocation.schedule) {
-        command.env(name, value);
-    }
-    // Forward the liveness-watchdog knobs through the same control plane. The
-    // watchdog is schedule-invariant: recorded (informational) but not
-    // fingerprinted, so a watchdog trace replays against any build.
-    for (name, value) in liveness_env_pairs(&invocation.liveness) {
-        command.env(name, value);
-    }
-
-    // Hold the trace transport file open until the child exits so the inherited
-    // descriptor named by `PATINA_TRACE_FD` remains valid. Record mode writes to
-    // a sibling temporary file first; the supervisor validates and renames it to
-    // the requested path only after the guest reaches trace finalization.
-    let mut replay_trace_file: Option<fs::File> = None;
-    let trace_sink = match &invocation.mode {
+    // What a record or replay tells the guest about its mode, identical for
+    // every incarnation of the run.
+    let mode_env: Vec<(&str, String)> = match &invocation.mode {
         NativeRunMode::Seeded { seed } => {
-            command
-                .env(ENV_MODE, "seeded")
-                .env(ENV_SEED, seed.to_string());
-            None
+            vec![(ENV_MODE, "seeded".into()), (ENV_SEED, seed.to_string())]
         }
         NativeRunMode::Record {
-            seed,
-            path,
-            fingerprint,
-        } => {
-            let sink = NativeTraceSink::create(path)?;
-            command
-                .env(ENV_MODE, "record")
-                .env(ENV_SEED, seed.to_string())
-                .env(
-                    ENV_FINGERPRINT,
-                    native_run_fingerprint(
-                        fingerprint,
-                        instrumentation,
-                        image_hash.as_deref(),
-                        invocation.buggify.is_some(),
-                        &SchedulePolicyFingerprint::from_schedule(&invocation.schedule),
-                    ),
-                )
-                .env(ENV_TRACE_FD, sink.raw_fd().to_string())
-                // Record the guest arguments into the trace metadata so a later
-                // `replay` restores them without the `--` section being
-                // re-passed. Always forwarded (even when empty) so a
-                // zero-argument run records `[]` — distinct from an old trace's
-                // absent field, so replaying it reproduces zero arguments rather
-                // than inheriting whatever the command line supplies.
-                .env(ENV_GUEST_ARGV, encode_guest_argv(&program_args)?);
-            Some(sink)
-        }
-        NativeRunMode::Replay { path, fingerprint } => {
-            let file = fs::File::open(path).map_err(|error| {
-                CliError(format!("failed to open trace {}: {error}", path.display()))
-            })?;
-            // Reconstruct the `+buggify` and `+pct`/`+starve`/`+swarm` fingerprint
-            // components from the trace so replay is self-contained; a policy
-            // trace replayed against a plain build still fails closed on the
-            // fingerprint.
-            let buggify = invocation.buggify.is_some() || trace_has_buggify(path);
-            let policy = native_policy_from_trace(path);
-            command
-                .env(ENV_MODE, "replay")
-                .env(
+            seed, fingerprint, ..
+        } => vec![
+            (ENV_MODE, "record".into()),
+            (ENV_SEED, seed.to_string()),
+            (
+                ENV_FINGERPRINT,
+                native_run_fingerprint(
+                    fingerprint,
+                    instrumentation,
+                    image_hash.as_deref(),
+                    invocation.buggify.is_some(),
+                    &SchedulePolicyFingerprint::from_schedule(&invocation.schedule),
+                ),
+            ),
+            // Record the guest arguments into the trace metadata so a later
+            // `replay` restores them without the `--` section being re-passed.
+            // Always forwarded (even when empty) so a zero-argument run records
+            // `[]` — distinct from an old trace's absent field, so replaying it
+            // reproduces zero arguments rather than inheriting whatever the
+            // command line supplies.
+            (ENV_GUEST_ARGV, encode_guest_argv(&program_args)?),
+        ],
+        NativeRunMode::Replay { fingerprint, .. } => {
+            // Reconstruct the `+buggify` and `+pct`/`+starve`/`+swarm`
+            // fingerprint components from the trace so replay is self-contained;
+            // a policy trace replayed against a plain build still fails closed on
+            // the fingerprint.
+            let bundle = replay_trace
+                .as_ref()
+                .expect("a native replay loads its trace first");
+            let buggify = invocation.buggify.is_some() || trace_has_buggify(bundle);
+            let policy = native_policy_from_trace(bundle);
+            vec![
+                (ENV_MODE, "replay".into()),
+                (
                     ENV_FINGERPRINT,
                     native_run_fingerprint(
                         fingerprint,
@@ -7586,417 +7892,293 @@ liveness-safe."
                         buggify,
                         &policy,
                     ),
-                )
-                .env(ENV_TRACE_FD, file.as_raw_fd().to_string());
-            replay_trace_file = Some(file);
-            None
+                ),
+            ]
         }
     };
 
-    let mut handoff_file = if native_crash_selector.is_some() {
-        Some(tempfile::tempfile().map_err(|error| {
-            CliError(format!(
-                "failed to create crash-restart handoff channel: {error}"
-            ))
-        })?)
-    } else {
-        None
-    };
-    if let (Some(selector), Some(file), NativeRunMode::Seeded { seed }) = (
-        native_crash_selector.as_ref(),
-        handoff_file.as_ref(),
-        &invocation.mode,
-    ) {
+    let crash_restart_plan = crash_restart_plan(&invocation, replay_trace)?;
+    if crash_restart_plan.is_some() && invocation.schedule.starve.is_some() {
+        return Err(CliError::usage(
+            "native --fs-crash-at crash-restart with --starve is not implemented; refusing rather than mixing the restart supervisor with the starvation stall backstop",
+        ));
+    }
+
+    // Every incarnation of the run is launched from this one description; only
+    // its descriptors (trace channel, base filesystem, crash handoff) differ. A
+    // run without a crash selector is the single incarnation 0. Returns the
+    // command and the descriptors it inherits: the shim reads only the ones the
+    // control plane names, and they stay inheritable for the child's lifetime.
+    let incarnation_command = |launch: IncarnationLaunch<'_>| -> Result<
+        (Command, Vec<std::os::unix::io::RawFd>),
+        CliError,
+    > {
+        let mut command = Command::new(&binary);
+        let mut fds = Vec::new();
+        // Stamp a fixed, machine-independent `argv[0]`: the guest is exec'd from
+        // an absolute host path, but that path must not leak into the guest's
+        // `std::env::args()` as a non-portable string. The guest's own arguments
+        // live in `argv[1..]`.
         command
-            .env(
-                patina_dst_runtime::ENV_HANDOFF_FD,
+            .args(&program_args)
+            .arg0(NATIVE_GUEST_ARGV0)
+            .env_clear();
+        // A `patina-dst-harness` binary (usage mode 2) defers runtime
+        // installation to its `run`/`run_with` call: tell the packaged
+        // constructor to capture/scrub the control plane and register
+        // finalization but NOT install the runtime. Applies uniformly to
+        // seeded/record and replay so the harness owns installation on every
+        // path. An interposed effect before the harness installs fails closed.
+        if invocation.harness {
+            command.env(ENV_DEFER_INIT, "1");
+        }
+        if let Some(file) = &coverage_file {
+            command.env(ENV_COVERAGE_FD, file.as_raw_fd().to_string());
+            fds.push(file.as_raw_fd());
+        }
+        if let Some(file) = &facts_file {
+            command.env(
+                patina_dst_runtime::ENV_FACTS_FD,
                 file.as_raw_fd().to_string(),
-            )
-            .env(
-                patina_dst_runtime::ENV_HANDOFF_KEY,
-                crash_handoff_key_hex(*seed, selector),
-            )
-            .env(patina_dst_runtime::ENV_INCARNATION, "0");
-    }
-
-    // The shim reads inherited host descriptors named by `PATINA_TRACE_FD` and
-    // `PATINA_FS_IMAGE_FD`. Make only those already-open descriptors inheritable
-    // for the child, then restore the supervisor's close-on-exec state after the
-    // child exits.
-    let mut inherited_fds: Vec<std::os::unix::io::RawFd> = Vec::new();
-    if let Some(sink) = &trace_sink {
-        inherited_fds.push(sink.raw_fd());
-    }
-    if let Some(file) = &replay_trace_file {
-        inherited_fds.push(file.as_raw_fd());
-    }
-    if let Some(image) = &image_file {
-        inherited_fds.push(image.file.as_raw_fd());
-    }
-    if let Some(file) = &coverage_file {
-        inherited_fds.push(file.as_raw_fd());
-    }
-    if let Some(file) = &facts_file {
-        inherited_fds.push(file.as_raw_fd());
-    }
-    if let Some(file) = &handoff_file {
-        inherited_fds.push(file.as_raw_fd());
-    }
-
-    // Starvation stall backstop (diagnostic, NOT a liveness guarantee; armed only
-    // when starvation is enabled, so it has zero effect on any other mode). The
-    // scheduler's aging bounds starvation for interposed synchronization, but a
-    // guest spinning inside a std-internal atomic critical section — which is NOT
-    // yield-point instrumented, so cooperative scheduling has no edge to preempt
-    // it while the lock holder is starved — can livelock. A hung generation
-    // silently eats a sweep slot, so the supervisor (uninterposed, real
-    // wall-clock) converts an already-hung run into a LOUD named fatal with a
-    // distinct nonzero exit so sweeps classify STARVATION_STALL instead of
-    // hanging. The threshold is deliberately generous (default 60 real seconds,
-    // `PATINA_STARVATION_STALL_SECS` override) so a healthy run normally finishes
-    // far inside it — a 10,000-iteration `turso_stress` generation takes about
-    // 30 s — though a busy enough host can still cross it; it never touches the
-    // recorded operation stream of a run that completes.
-    // It is an ELAPSED-TIME deadline, not a progress detector: the supervisor
-    // cannot see the scheduler's decision counter, so it cannot separate a wedge
-    // from a run that is merely slower than the deadline. That is exactly why a
-    // campaign files exit 111 under a class that is NOT counted as a bug found
-    // (`CampaignClass::is_finding`), and why the counter is the signal to publish
-    // if the two ever need telling apart from the outside.
-    let mut crash_restart = None;
-
-    // The kill-able wait loop mirrors `output::execute_command`'s capture
-    // semantics (piped when the JSON envelope / render wants guest output,
-    // inherited otherwise) so `--starve` composes with `--format json`.
-    let mut captured = if let Some(selector) = &native_crash_selector {
-        let seed = match &invocation.mode {
-            NativeRunMode::Seeded { seed } => *seed,
-            _ => unreachable!("non-seeded crash restart was refused above"),
-        };
-        let (mut first, first_host_pid) =
-            wait_native_child_once(&mut command, &binary, &inherited_fds)?;
-        if first.exit_code != NATIVE_FS_CRASH_RESTART_EXIT {
-            if first.exit_code == 0 {
-                let line = format!(
-                    "PATINA_FS_CRASH_SELECTOR_UNREACHED selector={selector:?} — native supervisor expected a crash handoff but incarnation 0 exited cleanly\n"
-                );
-                if first.captured {
-                    first.stderr.extend_from_slice(line.as_bytes());
-                } else {
-                    eprint!("{line}");
-                }
-                first.exit_code = 2;
-                crash_restart = Some(serde_json::json!({
-                    "selector": selector_json(selector),
-                    "reached": false,
-                    "crash_count": 0,
-                    "restart_count": 0,
-                    "incarnations": [{"id": 0, "host_pid": first_host_pid}],
-                    "terminal_outcome": {"kind": "selector_unreached", "exit_code": first.exit_code, "signal": first.signal},
-                }));
-            } else {
-                crash_restart = Some(serde_json::json!({
-                    "selector": selector_json(selector),
-                    "reached": false,
-                    "crash_count": 0,
-                    "restart_count": 0,
-                    "incarnations": [{"id": 0, "host_pid": first_host_pid}],
-                    "terminal_outcome": {"kind": "child_exited_before_crash", "exit_code": first.exit_code, "signal": first.signal},
-                }));
-            }
-            first
-        } else {
-            let Some(mut file) = handoff_file.take() else {
-                return Err(CliError(
-                    "PATINA_FS_CRASH_INVALID_HANDOFF missing supervisor handoff channel".into(),
-                ));
-            };
-            use std::io::{Read, Seek, Write};
-            file.rewind().map_err(|error| {
-                CliError(format!("failed to rewind crash-restart handoff: {error}"))
-            })?;
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes).map_err(|error| {
-                CliError(format!("failed to read crash-restart handoff: {error}"))
-            })?;
-            let handoff_digest = hex_lower(&Sha256::digest(&bytes));
-            let key = crash_handoff_key(seed, selector);
-            let verified = IncarnationHandoff::open(&bytes, &key)
-                .map_err(|error| CliError(format!("PATINA_FS_CRASH_INVALID_HANDOFF {error}")))?;
-            if verified.from_incarnation != 0 || verified.to_incarnation != 1 {
-                return Err(CliError(format!(
-                    "PATINA_FS_CRASH_INVALID_HANDOFF expected 0->1 restart, got {}->{}",
-                    verified.from_incarnation, verified.to_incarnation
-                )));
-            }
-            let expected_selector = selector;
-            let actual_selector = format!(
-                "{}:{}",
-                match verified.selector.op {
-                    patina_dst_trace::FaultCrashOp::Open => "open",
-                    patina_dst_trace::FaultCrashOp::Write => "write",
-                    patina_dst_trace::FaultCrashOp::Sync => "sync",
-                    patina_dst_trace::FaultCrashOp::Close => "close",
-                },
-                verified.selector.ordinal
             );
-            if &actual_selector != expected_selector {
-                return Err(CliError(format!(
-                    "PATINA_FS_CRASH_INVALID_HANDOFF selector mismatch: expected {expected_selector}, got {actual_selector}"
-                )));
+            fds.push(file.as_raw_fd());
+        }
+        // The guest's environment is cleared above, so every end-of-run report
+        // knob the operator set has to be forwarded explicitly or it never
+        // reaches the guest at all. Driven by `Report::ALL` rather than a
+        // hand-kept list, so a report added to the runtime is silenceable on
+        // native the day it exists.
+        for report in patina_dst_runtime::Report::ALL {
+            if let Some(value) = env::var_os(report.env()) {
+                command.env(report.env(), value);
             }
-
-            let mut snapshot_file = tempfile::tempfile().map_err(|error| {
+        }
+        if !invocation.environment.is_empty() {
+            let encoded = serde_json::to_string(&invocation.environment).map_err(|error| {
                 CliError(format!(
-                    "failed to create restart snapshot channel: {error}"
+                    "failed to encode native guest environment: {error}"
                 ))
             })?;
-            snapshot_file
-                .write_all(&verified.snapshot_bytes)
-                .map_err(|error| CliError(format!("failed to write restart snapshot: {error}")))?;
-            snapshot_file
-                .rewind()
-                .map_err(|error| CliError(format!("failed to rewind restart snapshot: {error}")))?;
-
-            let mut restart = Command::new(&binary);
-            restart
-                .args(&program_args)
-                .arg0(NATIVE_GUEST_ARGV0)
-                .env_clear();
-            if invocation.harness {
-                restart.env(ENV_DEFER_INIT, "1");
+            command.env(ENV_GUEST_ENV, encoded);
+        }
+        if let Some(cwd) = &invocation.cwd {
+            command.env(ENV_GUEST_CWD, cwd);
+        }
+        // The boundary-operation budget is a supervisor-side bound, not recorded
+        // run semantics, so it is supplied per invocation on every family alike.
+        if let Some(budget) = invocation.step_budget {
+            command.env(ENV_STEP_BUDGET, budget.to_string());
+        }
+        // Forward whatever fault knobs the operator supplied to the guest,
+        // scrubbing every knob's variable first so an ambient value cannot leak
+        // into a run that set none. On record and seeded runs these configure
+        // the faults and are recorded into the trace metadata. Native replay
+        // does not accept semantic re-supply; the trace's recorded configuration
+        // is authoritative and restored by the runtime.
+        for variable in knob_env_vars() {
+            command.env_remove(variable);
+        }
+        for (name, value) in knob_env_pairs(&invocation.knobs)? {
+            command.env(name, value);
+        }
+        // Forward the cooperative-SUT (buggify) knobs. Presence of
+        // `PATINA_BUGGIFY` enables buggify; its value (if any) is the firing
+        // per-mille. Like the fault knobs, these are recorded into trace metadata
+        // and restored from the trace on native replay, rather than re-supplied
+        // as semantic flags.
+        if let Some(buggify) = &invocation.buggify {
+            command.env(ENV_BUGGIFY, buggify.fire_permille.as_deref().unwrap_or(""));
+            if let Some(value) = &buggify.activation_permille {
+                command.env(ENV_BUGGIFY_ACTIVATION, value);
             }
-            restart
-                .env(ENV_MODE, "seeded")
-                .env(ENV_SEED, seed.to_string())
-                .env(patina_dst_runtime::ENV_INCARNATION, "1")
+            if let Some(value) = &buggify.cutoff_nanos {
+                command.env(ENV_BUGGIFY_CUTOFF, value);
+            }
+            if buggify.after_setup {
+                command.env(ENV_BUGGIFY_AFTER_SETUP, "1");
+            }
+        }
+        // Forward the exploration scheduling-policy (PCT / starvation) and swarm
+        // knobs through the same control plane. Recorded into the trace metadata
+        // and restored from the trace on native replay; the fingerprint suffix
+        // rejects a cross-policy replay.
+        for (name, value) in schedule_env_pairs(&invocation.schedule) {
+            command.env(name, value);
+        }
+        // Forward the liveness-watchdog knobs through the same control plane. The
+        // watchdog is schedule-invariant: recorded (informational) but not
+        // fingerprinted, so a watchdog trace replays against any build.
+        for (name, value) in liveness_env_pairs(&invocation.liveness) {
+            command.env(name, value);
+        }
+        for (name, value) in &mode_env {
+            command.env(name, value);
+        }
+        command.env(
+            patina_dst_runtime::ENV_INCARNATION,
+            launch.incarnation.to_string(),
+        );
+        if let Some(file) = launch.trace {
+            command.env(ENV_TRACE_FD, file.as_raw_fd().to_string());
+            fds.push(file.as_raw_fd());
+        }
+        if let Some((file, key)) = launch.handoff {
+            command
                 .env(
+                    patina_dst_runtime::ENV_HANDOFF_FD,
+                    file.as_raw_fd().to_string(),
+                )
+                .env(patina_dst_runtime::ENV_HANDOFF_KEY, key);
+            fds.push(file.as_raw_fd());
+        }
+        // A restarted incarnation boots from the recovered filesystem instead of
+        // the run's base image.
+        match (launch.restart_snapshot, &image_file) {
+            (Some(file), _) => {
+                command.env(
                     patina_dst_runtime::ENV_RESTART_SNAPSHOT_FD,
-                    snapshot_file.as_raw_fd().to_string(),
-                );
-            if let Some(file) = &coverage_file {
-                restart.env(ENV_COVERAGE_FD, file.as_raw_fd().to_string());
-            }
-            if let Some(file) = &facts_file {
-                restart.env(
-                    patina_dst_runtime::ENV_FACTS_FD,
                     file.as_raw_fd().to_string(),
                 );
+                fds.push(file.as_raw_fd());
             }
-            for report in patina_dst_runtime::Report::ALL {
-                if let Some(value) = env::var_os(report.env()) {
-                    restart.env(report.env(), value);
-                }
+            (None, Some(image)) => {
+                command.env(ENV_FS_IMAGE_FD, image.file.as_raw_fd().to_string());
+                fds.push(image.file.as_raw_fd());
             }
-            if !invocation.environment.is_empty() {
-                let encoded = serde_json::to_string(&invocation.environment).map_err(|error| {
-                    CliError(format!(
-                        "failed to encode native guest environment: {error}"
-                    ))
-                })?;
-                restart.env(ENV_GUEST_ENV, encoded);
-            }
-            if let Some(cwd) = &invocation.cwd {
-                restart.env(ENV_GUEST_CWD, cwd);
-            }
-            if let Some(budget) = invocation.step_budget {
-                restart.env(ENV_STEP_BUDGET, budget.to_string());
-            }
-            for variable in knob_env_vars() {
-                restart.env_remove(variable);
-            }
-            let mut restart_knobs = invocation.knobs.clone();
-            restart_knobs.0.remove(&FaultKnob::FsCrashAt);
-            for (name, value) in knob_env_pairs(&restart_knobs)? {
-                restart.env(name, value);
-            }
-            if let Some(buggify) = &invocation.buggify {
-                restart.env(ENV_BUGGIFY, buggify.fire_permille.as_deref().unwrap_or(""));
-                if let Some(value) = &buggify.activation_permille {
-                    restart.env(ENV_BUGGIFY_ACTIVATION, value);
-                }
-                if let Some(value) = &buggify.cutoff_nanos {
-                    restart.env(ENV_BUGGIFY_CUTOFF, value);
-                }
-                if buggify.after_setup {
-                    restart.env(ENV_BUGGIFY_AFTER_SETUP, "1");
-                }
-            }
-            for (name, value) in schedule_env_pairs(&invocation.schedule) {
-                restart.env(name, value);
-            }
-            for (name, value) in liveness_env_pairs(&invocation.liveness) {
-                restart.env(name, value);
-            }
-            let mut restart_fds: Vec<std::os::unix::io::RawFd> = Vec::new();
-            restart_fds.push(snapshot_file.as_raw_fd());
-            if let Some(file) = &coverage_file {
-                restart_fds.push(file.as_raw_fd());
-            }
-            if let Some(file) = &facts_file {
-                restart_fds.push(file.as_raw_fd());
-            }
-            let (second, second_host_pid) =
-                wait_native_child_once(&mut restart, &binary, &restart_fds)?;
-            let terminal_kind = if second.exit_code == 0 && second.signal.is_none() {
-                "completed_after_restart"
-            } else {
-                "restart_child_failed"
-            };
-            crash_restart = Some(serde_json::json!({
-                "selector": selector_json(selector),
-                "reached": true,
-                "crash_count": 1,
-                "restart_count": 1,
-                "incarnations": [
-                    {"id": verified.from_incarnation, "host_pid": first_host_pid},
-                    {"id": verified.to_incarnation, "host_pid": second_host_pid}
-                ],
-                "handoff_digest": format!("sha256:{handoff_digest}"),
-                "snapshot_digest": format!("sha256:{}", hex_lower(&verified.snapshot_digest)),
-                "consumed": {
-                    "operations": verified.consumed.operations,
-                    "lifecycle_order": verified.consumed.lifecycle_order
-                },
-                "terminal_outcome": {"kind": terminal_kind, "exit_code": second.exit_code, "signal": second.signal},
-            }));
-            if first.captured {
-                first.stdout.extend_from_slice(&second.stdout);
-                first.stderr.extend_from_slice(&second.stderr);
-                first.stderr.extend_from_slice(
-                    format!(
-                        "PATINA_FS_CRASH_RESTART selector={selector} host_pid0={first_host_pid} host_pid1={second_host_pid} incarnation0=0 incarnation1=1 operations={} result=restarted\n",
-                        verified.consumed.operations
-                    )
-                    .as_bytes(),
-                );
-            } else {
-                eprintln!(
-                    "PATINA_FS_CRASH_RESTART selector={selector} host_pid0={first_host_pid} host_pid1={second_host_pid} incarnation0=0 incarnation1=1 operations={} result=restarted",
-                    verified.consumed.operations
-                );
-            }
-            first.exit_code = second.exit_code;
-            first.signal = second.signal;
-            first.core = second.core;
-            first
+            (None, None) => {}
         }
-    } else if invocation.schedule.starve.is_some() {
-        let stall_secs: u64 = std::env::var("PATINA_STARVATION_STALL_SECS")
-            .ok()
-            .and_then(|value| value.trim().parse().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(60);
-        let capture = output::capture_active();
-        if capture {
-            command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        }
-        let (mut child, inherited_guard) =
-            spawn_native_child(&mut command, &binary, &inherited_fds)?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(stall_secs);
-        loop {
-            match child.try_wait() {
-                Ok(Some(_status)) => break,
-                Ok(None) => {
-                    if std::time::Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        eprintln!(
-                            "patina: starvation stall — the run did not finish within {stall_secs}s \
-under --starve. What this backstop measures is elapsed wall clock, not scheduler progress: the \
-supervisor cannot see the decision counter, so it cannot tell a guest spinning inside an \
-uninstrumented atomic critical section (std carries no yield point, so cooperative scheduling \
-cannot preempt a spinner while the lock holder is starved — the documented starvation limitation, \
-and the likely cause) from a run that is merely slower than this deadline. Not a liveness \
-guarantee, and not a verdict on the guest — see IMPLEMENTATION.md \"Slice 7: exploration tier\". \
-Killed with a nonzero exit."
-                        );
-                        inherited_guard.restore()?;
-                        drop(trace_sink);
-                        drop(replay_trace_file);
-                        drop(image_file);
-                        drop(coverage_file);
-                        drop(facts_file);
-                        return Ok(STARVATION_STALL_EXIT);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-                Err(error) => {
-                    return Err(CliError(format!(
-                        "failed while waiting on native program {}: {error}",
-                        binary.display()
-                    )));
-                }
-            }
-        }
-        let output = child.wait_with_output().map_err(|error| {
-            CliError(format!(
-                "failed while waiting on native program {}: {error}",
-                binary.display()
-            ))
+        Ok((command, fds))
+    };
+
+    // Record mode writes to a sibling temporary file first; the supervisor
+    // validates and renames it to the requested path only after the run ends.
+    let mut trace_sink = match &invocation.mode {
+        NativeRunMode::Record { path, .. } => Some(NativeTraceSink::create(path)?),
+        NativeRunMode::Seeded { .. } | NativeRunMode::Replay { .. } => None,
+    };
+
+    let mut crash_restart = None;
+    let mut captured = if let Some(plan) = &crash_restart_plan {
+        let run = supervise_crash_restart(plan, |launch| {
+            let (mut command, fds) = incarnation_command(launch)?;
+            wait_native_child_once(&mut command, &binary, &fds)
         })?;
-        inherited_guard.restore()?;
-        let NativeChildStatus {
-            exit_code,
-            signal,
-            core,
-        } = native_child_status(output.status);
-        output::Captured {
-            exit_code,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            captured: capture,
-            signal,
-            core,
+        if let (Some(sink), Some(bytes)) = (trace_sink.as_mut(), &run.trace) {
+            sink.write_all(bytes)?;
         }
-    } else if output::capture_active() {
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let (child, inherited_guard) = spawn_native_child(&mut command, &binary, &inherited_fds)?;
-        let output = child.wait_with_output().map_err(|error| {
-            CliError(format!(
-                "failed while waiting on native program {}: {error}",
-                binary.display()
-            ))
-        })?;
-        inherited_guard.restore()?;
-        let NativeChildStatus {
-            exit_code,
-            signal,
-            core,
-        } = native_child_status(output.status);
-        output::Captured {
-            exit_code,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            captured: true,
-            signal,
-            core,
-        }
+        crash_restart = Some(run.report);
+        run.captured
     } else {
-        let (mut child, inherited_guard) =
-            spawn_native_child(&mut command, &binary, &inherited_fds)?;
-        let status = child.wait().map_err(|error| {
-            CliError(format!(
-                "failed while waiting on native program {}: {error}",
-                binary.display()
-            ))
+        // Hold the trace channel open until the child exits so the inherited
+        // descriptor named by `PATINA_TRACE_FD` stays valid.
+        let replay_trace_file = match &invocation.mode {
+            NativeRunMode::Replay { path, .. } => Some(fs::File::open(path).map_err(|error| {
+                CliError(format!("failed to open trace {}: {error}", path.display()))
+            })?),
+            NativeRunMode::Seeded { .. } | NativeRunMode::Record { .. } => None,
+        };
+        let trace = trace_sink
+            .as_ref()
+            .map(NativeTraceSink::file)
+            .or(replay_trace_file.as_ref());
+        let (mut command, inherited_fds) = incarnation_command(IncarnationLaunch {
+            incarnation: 0,
+            trace,
+            handoff: None,
+            restart_snapshot: None,
         })?;
-        inherited_guard.restore()?;
-        let NativeChildStatus {
-            exit_code,
-            signal,
-            core,
-        } = native_child_status(status);
-        output::Captured {
-            exit_code,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            captured: false,
-            signal,
-            core,
+        // Starvation stall backstop (diagnostic, NOT a liveness guarantee; armed only
+        // when starvation is enabled, so it has zero effect on any other mode). The
+        // scheduler's aging bounds starvation for interposed synchronization, but a
+        // guest spinning inside a std-internal atomic critical section — which is NOT
+        // yield-point instrumented, so cooperative scheduling has no edge to preempt
+        // it while the lock holder is starved — can livelock. A hung generation
+        // silently eats a sweep slot, so the supervisor (uninterposed, real
+        // wall-clock) converts an already-hung run into a LOUD named fatal with a
+        // distinct nonzero exit so sweeps classify STARVATION_STALL instead of
+        // hanging. The threshold is deliberately generous (default 60 real seconds,
+        // `PATINA_STARVATION_STALL_SECS` override) so a healthy run normally finishes
+        // far inside it — a 10,000-iteration `turso_stress` generation takes about
+        // 30 s — though a busy enough host can still cross it; it never touches the
+        // recorded operation stream of a run that completes.
+        // It is an ELAPSED-TIME deadline, not a progress detector: the supervisor
+        // cannot see the scheduler's decision counter, so it cannot separate a wedge
+        // from a run that is merely slower than the deadline. That is exactly why a
+        // campaign files exit 111 under a class that is NOT counted as a bug found
+        // (`CampaignClass::is_finding`), and why the counter is the signal to publish
+        // if the two ever need telling apart from the outside.
+        if invocation.schedule.starve.is_some() {
+            let stall_secs: u64 = std::env::var("PATINA_STARVATION_STALL_SECS")
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(60);
+            let capture = output::capture_active();
+            if capture {
+                command.stdout(Stdio::piped()).stderr(Stdio::piped());
+            }
+            let (mut child, inherited_guard) =
+                spawn_native_child(&mut command, &binary, &inherited_fds)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(stall_secs);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_status)) => break,
+                    Ok(None) => {
+                        if std::time::Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            eprintln!(
+                                "patina: starvation stall — the run did not finish within {stall_secs}s \
+    under --starve. What this backstop measures is elapsed wall clock, not scheduler progress: the \
+    supervisor cannot see the decision counter, so it cannot tell a guest spinning inside an \
+    uninstrumented atomic critical section (std carries no yield point, so cooperative scheduling \
+    cannot preempt a spinner while the lock holder is starved — the documented starvation limitation, \
+    and the likely cause) from a run that is merely slower than this deadline. Not a liveness \
+    guarantee, and not a verdict on the guest — see IMPLEMENTATION.md \"Slice 7: exploration tier\". \
+    Killed with a nonzero exit."
+                            );
+                            inherited_guard.restore()?;
+                            drop(trace_sink);
+                            drop(replay_trace_file);
+                            drop(image_file);
+                            drop(coverage_file);
+                            drop(facts_file);
+                            return Ok(STARVATION_STALL_EXIT);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    Err(error) => {
+                        return Err(CliError(format!(
+                            "failed while waiting on native program {}: {error}",
+                            binary.display()
+                        )));
+                    }
+                }
+            }
+            let output = child.wait_with_output().map_err(|error| {
+                CliError(format!(
+                    "failed while waiting on native program {}: {error}",
+                    binary.display()
+                ))
+            })?;
+            inherited_guard.restore()?;
+            let NativeChildStatus {
+                exit_code,
+                signal,
+                core,
+            } = native_child_status(output.status);
+            output::Captured {
+                exit_code,
+                stdout: output.stdout,
+                stderr: output.stderr,
+                captured: capture,
+                signal,
+                core,
+            }
+        } else {
+            wait_native_child_once(&mut command, &binary, &inherited_fds)?.0
         }
     };
-    drop(replay_trace_file);
     let mut committed_record_trace = None;
     let mut trace_finalization_error: Option<(PathBuf, String)> = None;
     let mut channel_unavailable: Option<i32> = None;
@@ -8052,7 +8234,6 @@ Killed with a nonzero exit."
         channel_unavailable,
     );
     drop(image_file);
-    drop(handoff_file);
     drop(coverage_file);
     // Read the facts document back off the inherited descriptor. The child wrote
     // through the same open file description, so the offset is at the end —
@@ -11139,6 +11320,33 @@ mod tests {
     /// This is a shipped bug pinned as a class: `campaign --report` was
     /// documented and unreachable, because the global `--report OUT.html`
     /// consumed both it and whatever came next.
+    #[cfg(unix)]
+    #[test]
+    fn crash_restart_replay_plan_refuses_a_crash_lifecycle_without_a_selector() {
+        let metadata = patina_dst_trace::RunMetadata::new(7, "fingerprint");
+        assert!(
+            metadata.faults.is_none(),
+            "the fixture must carry no selector"
+        );
+        let joined = CrashRestartSegments {
+            crashed: TraceBundle::linear(metadata.clone(), 0, Vec::new()),
+            snapshot_digest: Sha256Digest([0; 32]),
+            restarted: TraceBundle::linear(metadata, 1, Vec::new()),
+        }
+        .join()
+        .unwrap();
+        let error = crash_restart_replay_plan(Path::new("joined.patina"), joined)
+            .err()
+            .expect("a crash lifecycle without a selector must be refused");
+        assert!(
+            error
+                .0
+                .contains("crash-restart lifecycle but no --fs-crash-at selector"),
+            "{}",
+            error.0
+        );
+    }
+
     #[test]
     fn corrupt_crash_restart_handoff_is_refused_by_codec_not_env_hook() {
         let key = HandoffSealKey::from_bytes([3; 32]);

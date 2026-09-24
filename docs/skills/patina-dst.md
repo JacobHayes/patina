@@ -71,12 +71,11 @@ against an oracle you supply.
 **Fault domains** are seed-driven and off by default. Most are recorded into the
 trace so replay reproduces them: I/O errors, short writes and latency; network drop,
 latency, and jitter; name resolution failure and latency; sleep jitter; scheduler
-preemption and task starvation; liveness watchdogs. The current exception is
-native `--fs-crash-at`: it performs a real fresh-process restart in seeded native
-runs, while record/replay and Cargo/WASI refuse it; campaigns do not draw it.
-Filesystem write tearing is therefore currently meaningful only with that seeded
-native crash selector. A *swarm* mode deselects a seeded subset of enabled fault
-classes per run. Which controls a verb and family accept is registry-defined — do
+preemption and task starvation; liveness watchdogs. Native `--fs-crash-at`
+performs a real fresh-process restart and records and replays across both
+incarnations, while Cargo/WASI refuse it; campaigns do not draw it. Filesystem
+write tearing is therefore meaningful only with that native crash selector. A
+*swarm* mode deselects a seeded subset of enabled fault classes per run. Which controls a verb and family accept is registry-defined — do
 not assume.
 
 **The SDK** (`patina-dst`, used as `patina_dst::` in code) instruments a

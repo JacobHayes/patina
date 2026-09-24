@@ -189,9 +189,8 @@ unknown option.
 - `--dns-entry NAME=ADDR` (repeatable), `--dns-fail-permille N`, `--dns-latency-nanos MIN..MAX`
 - Most knobs above are accepted by `run` and `test` in all families and refused by `replay`,
   which restores them from the trace. Exceptions: `--fs-crash-at` and torn granularity are
-  currently native seeded-run only (native record/replay and Cargo/WASI refuse them; campaigns
-  do not draw them), and `--dns-*` is unavailable under `--target wasi` because wasip1 has no
-  name-resolution surface.
+  native-only (Cargo/WASI refuse them; campaigns do not draw them), and `--dns-*` is
+  unavailable under `--target wasi` because wasip1 has no name-resolution surface.
 - `--buggify[=PERMILLE]`, `--buggify-activation-permille N`, `--buggify-cutoff-nanos N`, `--buggify-after-setup`
 
 ## Output options (all verbs; stripped before routing, never reach the guest)

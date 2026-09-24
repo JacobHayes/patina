@@ -168,17 +168,17 @@ Replay refuses `[defaults.replay]` because traces are authoritative.
 
 ### Fault injection and schedule exploration
 
-Faults are seed-driven and default-off. Most fault configurations are recorded
-into the trace so replay reproduces them flag-free; native crash-restart is the
-current exception: `--fs-crash-at` has fresh-incarnation semantics only for
-native seeded runs, while native crash record/replay, Cargo-family crash, and
-WASI crash refuse by name until their v5 lifecycle/restart paths are wired.
+Faults are seed-driven and default-off. Fault configurations are recorded
+into the trace so replay reproduces them flag-free. `--fs-crash-at` has
+fresh-incarnation semantics on native runs, and its record/replay carries both
+incarnations; Cargo-family and WASI crash refuse by name until their restart
+paths are wired.
 
-- **Filesystem faults**: native seeded `--fs-crash-at open|write|sync|close[:N]`
+- **Filesystem faults**: native `--fs-crash-at open|write|sync|close[:N]`
   terminates the current incarnation and restarts once from the recovered
   durable image, with block- or byte-granularity torn writes
-  (`--fs-torn-granularity`). Other families/refined replay modes refuse crash
-  restart rather than emulate it with rollback-and-continue. The remaining fs
+  (`--fs-torn-granularity`). Other families refuse crash restart rather than
+  emulate it with rollback-and-continue. The remaining fs
   faults are
   rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR),
   `--fs-short-permille` (short reads/writes), and `--fs-latency-nanos MIN..MAX`

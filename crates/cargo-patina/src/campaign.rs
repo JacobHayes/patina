@@ -3739,10 +3739,11 @@ mod gen_byte {
 /// bypassed the table with a literal index.
 fn campaign_band(knob: FaultKnob) -> Option<&'static [usize]> {
     match knob {
-        // Suspended until crash-restart lifecycle record/replay lands. Campaign
-        // generations are recorded and replayed for minimization; emitting native
-        // seeded-only --fs-crash-at here would make those replay artifacts fail by
-        // design, and emitting it on WASI/Cargo would hit their explicit refusal.
+        // Not drawn: crash placement is native-only (WASI/Cargo refuse
+        // --fs-crash-at by name), and a native crash band still needs a
+        // reachable crash point, classifier awareness of the named crash
+        // errors, and `minimize` on two-incarnation traces
+        // (docs/DECISIONS.md row 12).
         FaultKnob::FsCrashAt | FaultKnob::FsTornGranularity => None,
         FaultKnob::FsErrorPermille => Some(&[gen_byte::FS_ERROR]),
         FaultKnob::FsShortPermille => Some(&[gen_byte::FS_SHORT]),
@@ -3788,9 +3789,11 @@ const BAND_WAIVERS: &[(FaultKnob, &str)] = &[
     (
         FaultKnob::FsCrashAt,
         concat!(
-            "temporarily suspended: campaign generations rely on record/replay, ",
-            "while crash-restart is currently native seeded-only and other ",
-            "families/refined replay modes refuse --fs-crash-at by name"
+            "not drawn: crash restart is native-only (WASI/Cargo refuse ",
+            "--fs-crash-at by name), and a native crash band still needs a ",
+            "reachable crash point, classifier awareness of the named crash ",
+            "errors, and minimize on two-incarnation traces ",
+            "(docs/DECISIONS.md row 12)"
         ),
     ),
     (
@@ -4046,9 +4049,8 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
                 hi: fs_latency_hi,
             },
         );
-        // Crash-restart generation is deliberately suspended until v5 lifecycle
-        // record/replay is wired. Keep explicit native seeded crash coverage in
-        // the e2e suite; campaigns must not auto-draw a flag they cannot replay.
+        // Crash-restart placement is not drawn (see `campaign_band`); explicit
+        // native crash coverage lives in the e2e suite.
         let drop = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::NetDropPermille, 0)) * 200 / 255, // [0, 200] permille
             scale,
@@ -6855,7 +6857,7 @@ fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
 
     // (3) IT ACTUALLY DAMPENS. The point of the flag: the summed injected rate
     // across a sweep must fall by roughly the scale. Crash-restart is not part of
-    // the campaign band while lifecycle record/replay is unsupported.
+    // the campaign band.
     let rate_of = |spec: &CampaignSpec| -> u64 {
         let mut total = 0;
         for generation in 0..256u64 {
@@ -7604,8 +7606,7 @@ mod tests {
     /// actively wrong to scale: `--net-tcp-buffer-bytes` is a capacity whose SMALL
     /// end is the harsh one, so multiplying it down would make a rare-fault
     /// campaign harsher than the default it was asked to be gentler than.
-    /// Crash/torn-write generation is separately suspended until lifecycle
-    /// record/replay lands.
+    /// Crash/torn-write placement is not drawn at all.
     #[test]
     fn the_fault_scale_leaves_the_tcp_buffer_shape_band_alone() {
         let at = |permille: u64, generation: u64| {
@@ -7855,7 +7856,7 @@ mod tests {
     }
 
     #[test]
-    fn campaign_fault_bands_do_not_emit_crash_restart_until_lifecycle_replay_lands() {
+    fn campaign_fault_bands_do_not_emit_crash_restart() {
         let spec = CampaignSpec {
             faults: true,
             ..CampaignSpec::default()
