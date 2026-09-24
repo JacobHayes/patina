@@ -1677,13 +1677,29 @@ fn signal_wait() {
 }
 
 #[test]
+fn sys_admin() {
+    conform("sys/admin");
+}
+
+#[test]
 fn sys_hostname() {
     conform("sys/hostname");
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
+fn sys_ioport() {
+    conform("sys/ioport");
+}
+
+#[test]
 fn sys_personality() {
     conform("sys/personality");
+}
+
+#[test]
+fn sys_quota() {
+    conform("sys/quota");
 }
 
 #[test]
@@ -1694,6 +1710,11 @@ fn sys_rlimit() {
 #[test]
 fn sys_rlimit64() {
     conform("sys/rlimit64");
+}
+
+#[test]
+fn sys_root() {
+    conform("sys/root");
 }
 
 #[test]

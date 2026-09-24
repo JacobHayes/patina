@@ -1,7 +1,12 @@
+pub mod admin;
 pub mod hostname;
+#[cfg(target_arch = "x86_64")]
+pub mod ioport;
 pub mod personality;
+pub mod quota;
 pub mod rlimit;
 pub mod rlimit64;
+pub mod root;
 #[cfg(target_arch = "x86_64")]
 pub mod sysfs;
 pub mod sysinfo;

@@ -121,6 +121,11 @@ pub enum Need {
     /// scenario asserts are what capabilities bypass, and its own capability
     /// sets read back empty.
     Unprivileged,
+    /// The native run has no controlling terminal (`/dev/tty` answers
+    /// `ENXIO`): a row that acts on the caller's terminal (`vhangup`) then
+    /// has nothing to act on, whatever the caller's privilege. A run started
+    /// from a terminal session inherits one.
+    NoControllingTerminal,
     /// A System V shared memory segment can be created and removed
     /// (`CONFIG_SYSVIPC`; the IPC namespace's `shmmni`/`shmall`).
     SysvShm,
@@ -183,6 +188,7 @@ impl Need {
             | Need::FileHandles
             | Need::Whiteouts
             | Need::Unprivileged
+            | Need::NoControllingTerminal
             | Need::SysvShm
             | Need::SysvSem
             | Need::SysvMsg
@@ -507,10 +513,15 @@ pub const SCENARIOS: &[&Scenario] = &[
     &signal::rt_order::SCENARIO,
     &signal::unmask::SCENARIO,
     &signal::wait::SCENARIO,
+    &sys::admin::SCENARIO,
     &sys::hostname::SCENARIO,
+    #[cfg(target_arch = "x86_64")]
+    &sys::ioport::SCENARIO,
     &sys::personality::SCENARIO,
+    &sys::quota::SCENARIO,
     &sys::rlimit::SCENARIO,
     &sys::rlimit64::SCENARIO,
+    &sys::root::SCENARIO,
     #[cfg(target_arch = "x86_64")]
     &sys::sysfs::SCENARIO,
     &sys::sysinfo::SCENARIO,

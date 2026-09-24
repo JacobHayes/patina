@@ -766,6 +766,15 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             Syscall::N_getdents | Syscall::N_ustat | Syscall::N_inotify_init => {
                 syscall_door(row, a)
             }
+            // `chroot` is the shim's own definition (a deny-trap).
+            Syscall::N_chroot => chroot(a[0] as *const c_char) as i64,
+            // Privileged rows glibc has no wrapper for, in scenarios whose
+            // libc leg goes through the wrappers of their other rows
+            // (`WRAPPERS`): glibc's own spelling is `syscall(2)`.
+            Syscall::N_finit_module
+            | Syscall::N_kexec_load
+            | Syscall::N_kexec_file_load
+            | Syscall::N_quotactl_fd => syscall_door(row, a),
             other => panic!("{}: no libc spelling in the probe API", other.name()),
         }
     };
@@ -873,6 +882,19 @@ const WRAPPERS: &[(Syscall, &str)] = &[
     (Syscall::N_fsconfig, "fsconfig"),
     (Syscall::N_move_mount, "move_mount"),
     (Syscall::N_mount_setattr, "mount_setattr"),
+    (Syscall::N_acct, "acct"),
+    (Syscall::N_vhangup, "vhangup"),
+    (Syscall::N_swapon, "swapon"),
+    (Syscall::N_swapoff, "swapoff"),
+    (Syscall::N_reboot, "reboot"),
+    (Syscall::N_init_module, "init_module"),
+    (Syscall::N_delete_module, "delete_module"),
+    (Syscall::N_pivot_root, "pivot_root"),
+    (Syscall::N_quotactl, "quotactl"),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_iopl, "iopl"),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_ioperm, "ioperm"),
 ];
 
 /// The glibc wrapper the libc vehicle reaches `row` through, if it has one.
@@ -927,6 +949,27 @@ pub unsafe fn wrapper_door(row: Syscall, address: *mut std::ffi::c_void, a: Args
             (c_int, *const c_char, c_uint, *mut c_void, size_t) -> c_int,
             a[0], a[1], a[2], a[3], a[4]
         ),
+        Syscall::N_acct => call!((*const c_char) -> c_int, a[0]),
+        Syscall::N_vhangup => call!(() -> c_int,),
+        Syscall::N_swapon => call!((*const c_char, c_int) -> c_int, a[0], a[1]),
+        Syscall::N_swapoff => call!((*const c_char) -> c_int, a[0]),
+        // glibc's `reboot(howto)` passes both magic numbers itself: the
+        // row's command is its one argument.
+        Syscall::N_reboot => call!((c_int) -> c_int, a[2]),
+        Syscall::N_init_module => call!(
+            (*mut c_void, c_ulong, *const c_char) -> c_int,
+            a[0], a[1], a[2]
+        ),
+        Syscall::N_delete_module => call!((*const c_char, c_uint) -> c_int, a[0], a[1]),
+        Syscall::N_pivot_root => call!((*const c_char, *const c_char) -> c_int, a[0], a[1]),
+        Syscall::N_quotactl => call!(
+            (c_int, *const c_char, c_int, *mut c_char) -> c_int,
+            a[0], a[1], a[2], a[3]
+        ),
+        #[cfg(target_arch = "x86_64")]
+        Syscall::N_iopl => call!((c_int) -> c_int, a[0]),
+        #[cfg(target_arch = "x86_64")]
+        Syscall::N_ioperm => call!((c_ulong, c_ulong, c_int) -> c_int, a[0], a[1], a[2]),
         other => panic!("{}: no glibc wrapper", other.name()),
     };
     fold_errno(result)

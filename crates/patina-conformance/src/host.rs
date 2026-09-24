@@ -185,6 +185,7 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         Need::FileHandles => file_handles(dir),
         Need::Whiteouts => whiteouts(dir),
         Need::Unprivileged => unprivileged(),
+        Need::NoControllingTerminal => no_controlling_terminal(),
         Need::SysvShm => memipc::sysv_shm(),
         Need::SysvSem => memipc::sysv_sem(),
         Need::SysvMsg => memipc::sysv_msg(),
@@ -558,6 +559,30 @@ fn unprivileged() -> Result<(), NotRun> {
         }
     }
     Ok(())
+}
+
+/// `/dev/tty` opens only for a process with a controlling terminal
+/// (drivers/tty/tty_io.c `tty_open_current_tty`: `ENXIO` without one).
+fn no_controlling_terminal() -> Result<(), NotRun> {
+    // SAFETY: a NUL-terminated path; the descriptor is closed at once.
+    let fd = unsafe {
+        libc::open(
+            c"/dev/tty".as_ptr(),
+            libc::O_RDONLY | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if fd >= 0 {
+        // SAFETY: the descriptor just opened.
+        unsafe { libc::close(fd) };
+        return Err(NotRun {
+            cause: Cause::Inherited,
+            detail: "/dev/tty opens: the run has a controlling terminal".into(),
+        });
+    }
+    match crate::vehicle::errno() {
+        libc::ENXIO => Ok(()),
+        errno => Err(refusal("open(/dev/tty)", errno)),
+    }
 }
 
 /// The time, scheduling and identity needs: a process attribute the native
