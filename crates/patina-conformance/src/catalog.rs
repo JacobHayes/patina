@@ -386,6 +386,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &fs::copy::SCENARIO,
     &fs::dirent::SCENARIO,
     &fs::dirs::SCENARIO,
+    &fs::fortify::SCENARIO,
     &fs::getdents::SCENARIO,
     #[cfg(target_arch = "x86_64")]
     &fs::getdents_legacy::SCENARIO,

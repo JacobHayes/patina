@@ -3,6 +3,7 @@ pub mod chmod;
 pub mod copy;
 pub mod dirent;
 pub mod dirs;
+pub mod fortify;
 pub mod getdents;
 #[cfg(target_arch = "x86_64")]
 pub mod getdents_legacy;

@@ -1064,6 +1064,11 @@ fn fs_dirent() {
 }
 
 #[test]
+fn fs_fortify() {
+    conform("fs/fortify");
+}
+
+#[test]
 fn fs_getdents() {
     conform("fs/getdents");
 }
