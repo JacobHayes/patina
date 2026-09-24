@@ -891,6 +891,8 @@ const WRAPPERS: &[(Syscall, &str)] = &[
     (Syscall::N_delete_module, "delete_module"),
     (Syscall::N_pivot_root, "pivot_root"),
     (Syscall::N_quotactl, "quotactl"),
+    (Syscall::N_unshare, "unshare"),
+    (Syscall::N_setns, "setns"),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_iopl, "iopl"),
     #[cfg(target_arch = "x86_64")]
@@ -966,6 +968,8 @@ pub unsafe fn wrapper_door(row: Syscall, address: *mut std::ffi::c_void, a: Args
             (c_int, *const c_char, c_int, *mut c_char) -> c_int,
             a[0], a[1], a[2], a[3]
         ),
+        Syscall::N_unshare => call!((c_int) -> c_int, a[0]),
+        Syscall::N_setns => call!((c_int, c_int) -> c_int, a[0], a[1]),
         #[cfg(target_arch = "x86_64")]
         Syscall::N_iopl => call!((c_int) -> c_int, a[0]),
         #[cfg(target_arch = "x86_64")]

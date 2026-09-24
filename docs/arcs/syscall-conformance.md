@@ -462,7 +462,8 @@ forwards into the same dispatcher instead of its two-number allowlist.
   arguments harmless even to a caller whose capability check passed (a bad
   reboot magic, an empty module image, a filesystem type that does not
   exist) and never restrict or kill the probe (no successful
-  `landlock_restrict_self`, seccomp install, `unshare` or `setns`).
+  `landlock_restrict_self` or seccomp install; no namespace is created or
+  joined).
 
 ## 7. Why the exclusions stay excluded
 

@@ -1497,6 +1497,11 @@ fn proc_ids() {
 }
 
 #[test]
+fn proc_namespaces() {
+    conform("proc/namespaces");
+}
+
+#[test]
 fn proc_pgrp() {
     conform("proc/pgrp");
 }

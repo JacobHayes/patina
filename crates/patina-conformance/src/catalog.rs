@@ -477,6 +477,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &net::unix_stream::SCENARIO,
     &proc::absent::SCENARIO,
     &proc::ids::SCENARIO,
+    &proc::namespaces::SCENARIO,
     &proc::pgrp::SCENARIO,
     &proc::prctl::SCENARIO,
     &proc::traps::SCENARIO,

@@ -2514,4 +2514,16 @@ const ROWS: &[SymbolRow] = &[
         Serves::Syscalls(&["ioperm"]),
         SymbolStatus::Absent,
     ),
+    s(
+        "unshare",
+        Platform::Linux,
+        Serves::Syscalls(&["unshare"]),
+        SymbolStatus::Absent,
+    ),
+    s(
+        "setns",
+        Platform::Linux,
+        Serves::Syscalls(&["setns"]),
+        SymbolStatus::Absent,
+    ),
 ];
