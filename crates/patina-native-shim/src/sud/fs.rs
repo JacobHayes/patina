@@ -949,15 +949,6 @@ impl DirentFormat {
         };
         (self.header() + name_len + trailer + 7) & !7
     }
-
-    /// Where a record keeps its type byte.
-    fn type_offset(self, reclen: usize) -> usize {
-        match self {
-            DirentFormat::Dirent64 => 18,
-            #[cfg(target_arch = "x86_64")]
-            DirentFormat::Dirent => reclen - 1,
-        }
-    }
 }
 
 /// Fill the guest buffer with directory records from the fd's snapshot,
@@ -1078,7 +1069,14 @@ pub(super) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFormat) -> 
             // d_off: the position after this entry, which `lseek` resumes from.
             (rec.add(8) as *mut i64).write_unaligned((dir.position + 1) as i64);
             (rec.add(16) as *mut u16).write_unaligned(reclen as u16); // d_reclen
-            rec.add(format.type_offset(reclen)).write(dt_for_kind(kind));
+            // d_type: after d_reclen in `linux_dirent64`, the record's last
+            // byte in the legacy layout.
+            let type_offset = match format {
+                DirentFormat::Dirent64 => 18,
+                #[cfg(target_arch = "x86_64")]
+                DirentFormat::Dirent => reclen - 1,
+            };
+            rec.add(type_offset).write(dt_for_kind(kind));
             let dst = rec.add(format.header());
             std::ptr::copy_nonoverlapping(name.as_ptr(), dst, name.len());
         }

@@ -245,6 +245,7 @@ run_full() {
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?
   run_rung 'Darwin-cfg clippy' cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings || return $?
+  run_rung 'aarch64-Linux clippy' cargo clippy --workspace --all-targets --locked --target aarch64-unknown-linux-gnu -- -D warnings || return $?
   run_rung 'documentation' cargo doc --workspace --no-deps --locked || return $?
   run_rung 'CLI flag drift' scripts/check-flag-drift.sh || return $?
   # Every workspace member packages cleanly (manifest metadata, readme paths,
@@ -280,6 +281,7 @@ run_fast() {
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?
   run_rung 'Darwin-cfg clippy' cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings || return $?
+  run_rung 'aarch64-Linux clippy' cargo clippy --workspace --all-targets --locked --target aarch64-unknown-linux-gnu -- -D warnings || return $?
 
   # The fast test rung is cargo-heavy enough to inflate every other cargo-using
   # smoke when overlapped, even though it no longer contains the e2e binary.

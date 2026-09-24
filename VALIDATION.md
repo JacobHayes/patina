@@ -37,8 +37,9 @@ Required locally before landing (`mise run check`):
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings` (plus the same run with
-  `--target x86_64-unknown-linux-gnu` and with `--target aarch64-apple-darwin`,
-  so Linux-cfg and Darwin-cfg code lint from any host)
+  `--target x86_64-unknown-linux-gnu`, `--target aarch64-unknown-linux-gnu` and
+  `--target aarch64-apple-darwin`, so Linux-cfg, per-architecture and Darwin-cfg
+  code lint from any host)
 - `cargo doc --workspace --no-deps`
 - `cargo test --workspace` on the stable toolchain, including the
   `cargo-patina` `end_to_end` integration-test binary
@@ -54,7 +55,7 @@ Required locally before landing (`mise run check`):
 - the workq/pubsub/macro-adopter and FIFO/rustix-default/cap-std testbeds; the
   syscall conformance scenarios run with the native acceptance tests
 
-`mise run check:fast` is the inner loop: fmt, the three clippy passes, every workspace
+`mise run check:fast` is the inner loop: fmt, the four clippy passes, every workspace
 test except cargo-patina's e2e/native execution targets (conformance among them),
 the cheap selftests, CLI flag drift, MSRV `cargo check`, WASI validation, and
 cross-target smoke. It is intentionally not landing evidence.

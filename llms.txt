@@ -362,7 +362,7 @@ dev-dependency use under plain `cargo test`.
 
 ## Docs
 
-- Validation ladder: `mise run check:fast` is the inner loop (fmt, the three
+- Validation ladder: `mise run check:fast` is the inner loop (fmt, the four
   clippy passes, workspace tests except cargo-patina's e2e/native execution targets,
   cheap selftests, flag drift, MSRV cargo check, WASI, cross smoke).
   `mise run check` is the local landing gate (adds docs, packaging, full stable

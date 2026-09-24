@@ -18,7 +18,7 @@ rustup toolchain install stable --component rustfmt --component clippy --target 
 # x86_64 Linux std and aarch64 Darwin std let clippy check each OS's cfg code
 # (the shim's SUD dispatcher, the Darwin syscall inventory) from the other; no
 # cross C toolchain or SDK is needed because clippy never links.
-rustup target add x86_64-unknown-linux-gnu aarch64-apple-darwin
+rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin
 rustup toolchain install 1.86.0 --target wasm32-wasip1
 cc --version >/dev/null
 echo "Patina local toolchains are ready."
@@ -32,7 +32,7 @@ echo "Patina local toolchains are ready."
 description = "Full local pre-landing validation (audit-corpus and full MSRV suite run in CI/final gates)"
 run = "scripts/check.sh full"
 
-# Inner-loop tier: fmt, the three clippy passes, all workspace tests except the
+# Inner-loop tier: fmt, the four clippy passes, all workspace tests except the
 # cargo-patina end_to_end and native execution targets (conformance included),
 # cheap selftests, flag drift, MSRV cargo check, WASI validation, and
 # cross-target smoke.

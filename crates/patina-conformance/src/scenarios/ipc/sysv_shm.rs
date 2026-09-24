@@ -27,7 +27,7 @@ use super::owned::Owned;
 use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
 use crate::compare::{Ending, Failure};
 use crate::owned;
-use crate::probe::{At, Key, Probe, ShmArg, neg, page_size};
+use crate::probe::{At, Key, Probe, ShmArg, neg, page_size, perm_mode};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -69,7 +69,7 @@ pub fn run(p: &Probe) {
         "it is marked SHM_DEST, its key gone, still attached",
         r == 0
             && ds.is_some_and(|ds| {
-                u32::from(ds.shm_perm.mode) & SHM_DEST == SHM_DEST
+                perm_mode(&ds.shm_perm) & SHM_DEST == SHM_DEST
                     && ds.shm_perm.__key == IPC_PRIVATE
                     && ds.shm_nattch == 1
             }),
@@ -106,7 +106,7 @@ pub fn run(p: &Probe) {
         r == 0
             && ds.is_some_and(|ds| {
                 ds.shm_segsz == size
-                    && u32::from(ds.shm_perm.mode) & 0o777 == 0o600
+                    && perm_mode(&ds.shm_perm) & 0o777 == 0o600
                     && ds.shm_nattch == 0
                     && ds.shm_cpid == pid
                     && ds.shm_lpid == 0
@@ -178,7 +178,7 @@ pub fn run(p: &Probe) {
     let (r, ds) = p.shmctl(id, IPC_STAT, ShmArg::Stat);
     p.check(
         "IPC_STAT shows it",
-        r == 0 && ds.is_some_and(|ds| u32::from(ds.shm_perm.mode) & 0o777 == 0o640),
+        r == 0 && ds.is_some_and(|ds| perm_mode(&ds.shm_perm) & 0o777 == 0o640),
     );
     p.check(
         "an unknown command is EINVAL",

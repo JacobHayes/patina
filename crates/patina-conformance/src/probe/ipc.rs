@@ -121,6 +121,20 @@ impl Deadline {
     }
 }
 
+/// The `ipc_perm` mode word, which glibc's ABI makes 16 bits wide on x86_64
+/// and 32 bits wide on aarch64.
+#[cfg(target_arch = "x86_64")]
+pub fn perm_mode(perm: &libc::ipc_perm) -> u32 {
+    u32::from(perm.mode)
+}
+
+/// The `ipc_perm` mode word, which glibc's ABI makes 16 bits wide on x86_64
+/// and 32 bits wide on aarch64.
+#[cfg(not(target_arch = "x86_64"))]
+pub fn perm_mode(perm: &libc::ipc_perm) -> u32 {
+    perm.mode
+}
+
 /// Whole seconds of `CLOCK_REALTIME` read before and after an operation: the
 /// kernel stamps IPC times with the realtime seconds at the moment it acts
 /// (`ktime_get_real_seconds`), so a stamp the operation set lies within.

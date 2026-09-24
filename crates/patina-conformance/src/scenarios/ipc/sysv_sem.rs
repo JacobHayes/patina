@@ -31,7 +31,7 @@ use super::owned::Owned;
 use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
 use crate::compare::{Ending, Failure};
 use crate::owned;
-use crate::probe::{Key, Probe, SemArg, Window, neg};
+use crate::probe::{Key, Probe, SemArg, Window, neg, perm_mode};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -134,7 +134,7 @@ pub fn run(p: &Probe) {
         r == 0
             && ds.is_some_and(|ds| {
                 ds.sem_nsems == 3
-                    && u32::from(ds.sem_perm.mode) & 0o777 == 0o600
+                    && perm_mode(&ds.sem_perm) & 0o777 == 0o600
                     && ds.sem_otime == 0
                     && changed.holds(ds.sem_ctime)
             }),
@@ -146,7 +146,7 @@ pub fn run(p: &Probe) {
     let (r, ds) = p.semctl_stat(id);
     p.check(
         "IPC_STAT shows it",
-        r == 0 && ds.is_some_and(|ds| u32::from(ds.sem_perm.mode) & 0o777 == 0o640),
+        r == 0 && ds.is_some_and(|ds| perm_mode(&ds.sem_perm) & 0o777 == 0o640),
     );
 
     // ---- semop ----

@@ -562,15 +562,18 @@ mod memipc {
         Ok(())
     }
 
-    /// `pkey_alloc` answers ENOSPC when no key is free — on a CPU without
-    /// protection keys, always (only key 0 exists and it is taken).
+    /// With valid arguments `pkey_alloc` refuses only for want of keys: ENOSPC
+    /// when no key is free (always, where only key 0 exists), and on x86_64
+    /// EINVAL when the CPU lacks OSPKE (`arch_set_user_pkey_access`).
     pub(super) fn protection_keys() -> Result<(), NotRun> {
         let key = sys(Syscall::N_pkey_alloc, [0; 6]);
-        if key == -i64::from(libc::ENOSPC) {
-            return Err(unmet(
-                Cause::Absent,
-                "pkey_alloc answered ENOSPC (no allocatable protection key)".into(),
-            ));
+        for (errno, name) in [(libc::ENOSPC, "ENOSPC"), (libc::EINVAL, "EINVAL")] {
+            if key == -i64::from(errno) {
+                return Err(unmet(
+                    Cause::Absent,
+                    format!("pkey_alloc answered {name} (no allocatable protection key)"),
+                ));
+            }
         }
         let key = check("pkey_alloc", key)?;
         check("pkey_free", sys(Syscall::N_pkey_free, [key, 0, 0, 0, 0, 0])).map(drop)

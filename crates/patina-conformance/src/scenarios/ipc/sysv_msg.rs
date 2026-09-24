@@ -28,7 +28,7 @@ use super::owned::Owned;
 use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
 use crate::compare::{Ending, Failure};
 use crate::owned;
-use crate::probe::{Key, MsgArg, Probe, Window, neg};
+use crate::probe::{Key, MsgArg, Probe, Window, neg, perm_mode};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -78,7 +78,7 @@ pub fn run(p: &Probe) {
                     && ds.msg_stime == 0
                     && ds.msg_rtime == 0
                     && created.holds(ds.msg_ctime)
-                    && u32::from(ds.msg_perm.mode) & 0o777 == 0o600
+                    && perm_mode(&ds.msg_perm) & 0o777 == 0o600
             }),
     );
     let ((), sent) = p.stamped(|| {
