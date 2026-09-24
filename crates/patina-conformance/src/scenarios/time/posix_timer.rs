@@ -29,13 +29,11 @@
 //! `rt_sigtimedwait`. Timer ids are the kernel's allocation, recorded by
 //! relation; none is deleted before the last is created.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{
     Arm, Count, MISSING_PID, Probe, SIGSET_BYTES, Sigev, TimerId, ms, neg, spec_ns,
 };
 use crate::signals::{FIRST_RT, PROGRESS_DEADLINE, empty_set, gettid, has, set_of, spin_until};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
@@ -347,15 +345,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_timer_delete,
     ],
     symbols: &["syscall", "nanosleep", "clock_gettime"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: Vehicle::ALL,
-        what: "timer_create is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no timer_create wrapper)",
-        failure: Failure::Stops {
-            events: 2,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall timer_create (nr",
-        },
-    }],
     ..DEFAULTS
 };

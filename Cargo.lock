@@ -480,6 +480,7 @@ dependencies = [
  "patina-dst-net-sim",
  "patina-dst-rng-seeded",
  "patina-dst-sched-det",
+ "patina-dst-syscalls",
  "patina-dst-time-virtual",
  "patina-dst-trace",
  "patina-dst-wrapper-fault",

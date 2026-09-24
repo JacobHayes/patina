@@ -21,18 +21,12 @@ use serde::{Deserialize, Serialize};
 /// integers they cost several characters per byte (and far more once pretty
 /// printed); base64 costs ~1.37 characters per byte while staying valid,
 /// greppable JSON. Fields tagged `#[serde(with = "bytes_base64")]` therefore
-/// always *write* a base64 string.
-///
-/// On *read* the visitor also accepts a JSON array of integers. That single
-/// tolerance is what lets a bundle recorded before base64 existed migrate
-/// losslessly: the trace migration only needs to bump the version tag, and the
-/// legacy number-array payloads decode here without a per-payload rewrite of the
-/// JSON tree. Decoding is fail-closed - a malformed base64 string or an
-/// out-of-range array element is a hard deserialization error.
+/// always write, and only read, a base64 string. Decoding is fail-closed: a
+/// malformed base64 string is a hard deserialization error.
 mod bytes_base64 {
     use std::fmt;
 
-    use serde::de::{self, SeqAccess, Visitor};
+    use serde::de::{self, Visitor};
     use serde::{Deserializer, Serializer};
 
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -126,7 +120,7 @@ mod bytes_base64 {
         type Value = Vec<u8>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("a base64 string or a legacy array of byte values")
+            formatter.write_str("a base64 string")
         }
 
         fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
@@ -136,20 +130,11 @@ mod bytes_base64 {
         fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
             Ok(value.to_vec())
         }
-
-        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-            while let Some(byte) = seq.next_element::<u8>()? {
-                out.push(byte);
-            }
-            Ok(out)
-        }
     }
 }
 
 /// `Option` wrapper over [`bytes_base64`]: `None` serializes as JSON null,
-/// `Some(bytes)` as the base64 payload (accepting the legacy integer-array
-/// form on read, exactly like `bytes_base64`).
+/// `Some(bytes)` as the base64 payload, exactly like `bytes_base64`.
 mod option_bytes_base64 {
     use std::fmt;
 
@@ -178,7 +163,7 @@ mod option_bytes_base64 {
         type Value = Option<Vec<u8>>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("null or a base64 string or legacy array of byte values")
+            formatter.write_str("null or a base64 string")
         }
 
         fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
@@ -228,6 +213,27 @@ pub enum ClockKind {
     Monotonic,
     Realtime,
 }
+
+/// The default virtual realtime epoch: the Unix time, in nanoseconds, that
+/// [`ClockKind::Realtime`] reads at monotonic zero unless a run configures its
+/// own (`--realtime-epoch`).
+///
+/// It is the author timestamp of Patina's first commit, 2026-07-22T23:00:09Z
+/// (Unix seconds 1784761209): a fixed present-day wall clock, so a guest that
+/// formats or validates dates sees a plausible time rather than 1970, while
+/// every run still starts at the same instant. Every default construction path
+/// — `VirtualClock::default` and the runtime's default drivers — uses this one
+/// constant.
+pub const DEFAULT_REALTIME_EPOCH_NANOS: u64 = 1_784_761_209_000_000_000;
+
+/// The modeled CPU time, in nanoseconds, a Linux process has already used when
+/// `main` starts. A real process reaches `main` only after `exec`, the dynamic
+/// loader and libc's own setup have run on its CPU clock; the model runs none
+/// of them, so the virtual CPU clocks of the process and of its main thread
+/// start here instead of at zero. A model constant (like the virtual kernel's
+/// `HZ` or its memory size), not a recorded run fact: no trace carries it, so
+/// changing it changes what every earlier recording's guest read.
+pub const STARTUP_CPU_NANOS: u64 = 1_000_000;
 
 /// When a read updates an entry's access time — the kernel's `atime` mount
 /// policy, applied by the filesystem driver on every reading operation.
@@ -1597,14 +1603,10 @@ mod tests {
     }
 
     #[test]
-    fn byte_payloads_still_accept_the_legacy_number_array_form() {
-        // Bundles recorded before base64 stored payloads as arrays of integers;
-        // the tolerant reader keeps migration lossless without rewriting them.
-        let legacy = "{\"kind\":\"bytes\",\"value\":[1,2,3,4]}";
-        assert_eq!(
-            serde_json::from_str::<Outcome>(legacy).unwrap(),
-            Outcome::Bytes(vec![1, 2, 3, 4])
-        );
+    fn byte_payloads_refuse_a_number_array() {
+        // Base64 is the only payload encoding read.
+        let array = "{\"kind\":\"bytes\",\"value\":[1,2,3,4]}";
+        assert!(serde_json::from_str::<Outcome>(array).is_err());
     }
 
     #[test]

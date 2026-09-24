@@ -7,10 +7,8 @@
 //! The native run must start in the default persona (`Need::DefaultPersona`:
 //! no `setarch` launcher), as the virtual kernel's process does.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::Probe;
-use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
 const QUERY: u32 = 0xffff_ffff;
@@ -50,15 +48,5 @@ pub const SCENARIO: Scenario = Scenario {
     covers: &[Syscall::N_personality],
     symbols: &["syscall"],
     needs: &[Need::DefaultPersona],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: Vehicle::ALL,
-        what: "personality is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no personality wrapper)",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall personality (nr",
-        },
-    }],
     ..DEFAULTS
 };

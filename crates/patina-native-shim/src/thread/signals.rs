@@ -88,6 +88,42 @@ impl Info {
     fn value(self) -> i64 {
         self.words[3] as i64
     }
+    /// `SEND_SIG_PRIV`: a signal the kernel sends itself (`SI_KERNEL`, no
+    /// sender), as the interval timers do.
+    pub(crate) fn kernel(sig: u8) -> Self {
+        let mut info = Self::new(sig, SI_KERNEL);
+        info.words[2] = 0;
+        info
+    }
+    /// A POSIX timer's signal (`SI_TIMER`): the timer id, an overrun of 0,
+    /// its value, and the arming generation in `si_sys_private` (which the
+    /// dequeue clears before the guest sees the record).
+    pub(crate) fn timer(sig: u8, id: i32, value: u64, generation: u32) -> Self {
+        let mut info = Self::new(sig, SI_TIMER);
+        info.words[2] = u64::from(id as u32);
+        info.words[3] = value;
+        info.words[4] = u64::from(generation);
+        info
+    }
+    pub(crate) fn signo(&self) -> u8 {
+        self.words[0] as u8
+    }
+    /// The timer id of an `SI_TIMER` record.
+    pub(crate) fn timer_id(&self) -> Option<i32> {
+        (self.code() == SI_TIMER).then_some(self.words[2] as u32 as i32)
+    }
+    pub(crate) fn overrun(&self) -> i32 {
+        (self.words[2] >> 32) as u32 as i32
+    }
+    pub(crate) fn set_overrun(&mut self, overrun: i32) {
+        self.words[2] = (self.words[2] & 0xffff_ffff) | (u64::from(overrun as u32) << 32);
+    }
+    pub(crate) fn generation(&self) -> u32 {
+        self.words[4] as u32
+    }
+    pub(crate) fn clear_generation(&mut self) {
+        self.words[4] &= !0xffff_ffff;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,6 +200,15 @@ impl Default for SignalRuntime {
 impl SignalRuntime {
     pub(super) fn is_empty(&self) -> bool {
         self.tasks.is_empty()
+    }
+    pub(super) fn has_task(&self, task: TaskId) -> bool {
+        self.tasks.contains_key(&task)
+    }
+    pub(super) fn task_count(&self) -> usize {
+        self.tasks.len()
+    }
+    pub(super) fn task_ids(&self) -> impl Iterator<Item = TaskId> + '_ {
+        self.tasks.keys().copied()
     }
     pub(super) fn mask(&self, task: TaskId) -> u64 {
         self.tasks[&task].mask
@@ -259,6 +304,35 @@ impl SignalRuntime {
         self.blocked.remove(&task);
         self.interrupted.remove(&task);
     }
+    /// Whether a generation of `sig` for `target` is discarded: the signal is
+    /// ignored and no task it could reach blocks it.
+    pub(super) fn discards(&self, sig: u8, target: SignalTarget) -> bool {
+        let action = self.actions[sig as usize];
+        let blocked = match target {
+            SignalTarget::Process => self.tasks.values().any(|task| task.mask & bit(sig) != 0),
+            SignalTarget::Task(task) => self
+                .tasks
+                .get(&task)
+                .is_some_and(|task| task.mask & bit(sig) != 0),
+        };
+        !blocked && (action.handler == SIG_IGN || (action.handler == SIG_DFL && ignored(sig)))
+    }
+    /// The queued record of POSIX timer `id`'s signal `sig`, if one is still
+    /// pending (a timer queues at most one: `send_sigqueue`).
+    pub(super) fn queued_timer(&mut self, sig: u8, id: i32) -> Option<&mut Info> {
+        let queues = std::iter::once(&mut self.shared)
+            .chain(self.tasks.values_mut().map(|task| &mut task.private));
+        for pending in queues {
+            if let Some(instance) = pending.0.get_mut(&sig).and_then(|queue| {
+                queue
+                    .iter_mut()
+                    .find(|instance| instance.info.timer_id() == Some(id))
+            }) {
+                return Some(&mut instance.info);
+            }
+        }
+        None
+    }
     fn enqueue(&mut self, sig: u8, target: SignalTarget, info: Info) -> (Instance, Option<TaskId>) {
         let instance = Instance {
             seq: self.next_seq,
@@ -266,12 +340,7 @@ impl SignalRuntime {
             info,
         };
         self.next_seq += 1;
-        let action = self.actions[sig as usize];
-        let blocked = match target {
-            SignalTarget::Process => self.tasks.values().any(|task| task.mask & bit(sig) != 0),
-            SignalTarget::Task(task) => self.tasks[&task].mask & bit(sig) != 0,
-        };
-        if !blocked && (action.handler == SIG_IGN || (action.handler == SIG_DFL && ignored(sig))) {
+        if self.discards(sig, target) {
             return (instance, None);
         }
         match target {
@@ -392,6 +461,7 @@ pub(crate) fn deliver() {
     if crate::in_shim_bootstrap() || task_completed() || main_returned() {
         return;
     }
+    super::timers::fire_due();
     refresh_handler_mask();
     loop {
         let me = current_task();
@@ -412,7 +482,7 @@ pub(crate) fn deliver() {
             state.signals.tasks.get_mut(&me).unwrap().mask = mask;
             let mut batch = Vec::new();
             let mut eligible = !mask;
-            while let Some(instance) = state.signals.dequeue_delivery(me, eligible) {
+            while let Some(instance) = state.dequeue_signal(me, eligible, true) {
                 let action = state.signals.actions[instance.sig as usize];
                 if action.handler == SIG_IGN || (action.handler == SIG_DFL && ignored(instance.sig))
                 {
@@ -669,6 +739,7 @@ pub unsafe extern "C" fn patina_signal_pending(set: *mut u8, size: usize) -> i64
         return -i64::from(EFAULT);
     }
     let me = activate();
+    super::timers::fire_due();
     let mut state = lock_state();
     state.signals.tasks.get_mut(&me).unwrap().mask = read_mask();
     let pending = state.signals.pending(me).to_ne_bytes();
@@ -745,28 +816,44 @@ pub(crate) unsafe fn generate_signal(
             unsafe { *ptr }
         }
     };
+    // `do_rt_sigqueueinfo`/`do_rt_tgsigqueueinfo`: a caller may forge a
+    // kernel or `tkill` code only to itself, judged by its own thread id.
+    let forged = queued && (info.code() >= 0 || info.code() == SI_TKILL);
     let target = match target {
         GenerationTarget::Process { pid } => {
-            if !matches!(pid, -1..=1) {
-                if queued && (info.code() >= 0 || info.code() == SI_TKILL) {
-                    return -i64::from(EPERM);
-                }
-                return -i64::from(ESRCH);
+            if forged && pid != current_tid() {
+                return -i64::from(EPERM);
             }
-            SignalTarget::Process
+            // A queued signal names one process; `kill` also names groups.
+            match crate::identity::signal_target(pid, !queued) {
+                Some(crate::identity::Process::Guest) => SignalTarget::Process,
+                // Init takes no handlers, and the kernel drops what a member
+                // of its namespace sends it by default.
+                Some(crate::identity::Process::Init) => return 0,
+                None => return -i64::from(ESRCH),
+            }
         }
         GenerationTarget::Thread { tgid, tid } => {
             if tid <= 0 || tgid.is_some_and(|pid| pid <= 0) {
                 return -i64::from(EINVAL);
             }
-            if tgid.is_some_and(|pid| pid != 1) {
-                return -i64::from(if queued && (info.code() >= 0 || info.code() == SI_TKILL) {
-                    EPERM
-                } else {
-                    ESRCH
-                });
+            if forged && tid != current_tid() {
+                return -i64::from(EPERM);
             }
-            SignalTarget::Task(TaskId(tid as u64))
+            let init = crate::registry::INIT_PID as i32;
+            let guest = crate::registry::IDENTITY_PID as i32;
+            if tid == init {
+                // Init's one thread, reached by `tkill` or with its own tgid.
+                return if tgid.is_none_or(|pid| pid == init) {
+                    0
+                } else {
+                    -i64::from(ESRCH)
+                };
+            }
+            match task_of(tid) {
+                Some(task) if tgid.is_none_or(|pid| pid == guest) => SignalTarget::Task(task),
+                _ => return -i64::from(ESRCH),
+            }
         }
     };
     activate();
@@ -779,23 +866,7 @@ pub(crate) unsafe fn generate_signal(
     if sig == 0 {
         return 0;
     }
-    let (instance, wake) = state.signals.enqueue(sig as u8, target, info);
-    with_context_raw(|context| {
-        context.signal_generated(
-            instance.seq,
-            instance.sig,
-            target,
-            info.code(),
-            info.value(),
-        )
-    })
-    .unwrap_or_else(|errno| fatal(&format!("recording signal generation failed ({errno})")));
-    for fd in state.signals.signalfds.values_mut() {
-        if fd.mask & bit(instance.sig) != 0 {
-            fd.arrivals += 1;
-        }
-    }
-    let wakes = state.prepare_signal_wakes(instance, wake);
+    let wakes = state.generate_locked(target, info);
     drop(state);
     for task in wakes {
         RealScheduler
@@ -803,6 +874,49 @@ pub(crate) unsafe fn generate_signal(
             .unwrap_or_else(|error| fatal(&error));
     }
     0
+}
+
+impl ThreadRuntime {
+    /// Generate `info` for `target` under the runtime lock the caller holds:
+    /// queue it (unless discarded), record the generation, count signalfd
+    /// arrivals, and answer the tasks to wake once the lock is released.
+    pub(in crate::thread) fn generate_locked(
+        &mut self,
+        target: SignalTarget,
+        info: Info,
+    ) -> Vec<TaskId> {
+        let (instance, wake) = self.signals.enqueue(info.signo(), target, info);
+        with_context_raw(|context| {
+            context.signal_generated(
+                instance.seq,
+                instance.sig,
+                target,
+                info.code(),
+                info.value(),
+            )
+        })
+        .unwrap_or_else(|errno| fatal(&format!("recording signal generation failed ({errno})")));
+        for fd in self.signals.signalfds.values_mut() {
+            if fd.mask & bit(instance.sig) != 0 {
+                fd.arrivals += 1;
+            }
+        }
+        self.prepare_signal_wakes(instance, wake)
+    }
+
+    /// `dequeue_signal`: take the next pending signal in `eligible` (for
+    /// delivery, only one the process-wide target rule sends this task), and
+    /// let the timers rearm on its dequeue — `ITIMER_REAL` on `SIGALRM`, a
+    /// periodic POSIX timer on its own `SI_TIMER` record.
+    fn dequeue_signal(&mut self, task: TaskId, eligible: u64, delivery: bool) -> Option<Instance> {
+        let mut instance = if delivery {
+            self.signals.dequeue_delivery(task, eligible)
+        } else {
+            self.signals.dequeue(task, eligible)
+        }?;
+        self.timers.dequeued(&mut instance.info);
+        Some(instance)
+    }
 }
 
 /// Register the guest word without replacing glibc's host clear-child-tid.
@@ -818,7 +932,7 @@ pub unsafe extern "C" fn patina_set_tid_address(address: *mut i32) -> i64 {
         .get_mut(&me)
         .unwrap()
         .clear_child_tid = (!address.is_null()).then_some(address as usize);
-    me.0 as i64
+    i64::from(tid_of(me))
 }
 
 pub(super) fn clear_tid(task: TaskId) {
@@ -878,8 +992,8 @@ pub extern "C" fn patina_pthread_kill(handle: usize, sig: i32) -> i32 {
     let rc = unsafe {
         generate_signal(
             GenerationTarget::Thread {
-                tgid: Some(1),
-                tid: task.0 as i32,
+                tgid: Some(crate::registry::IDENTITY_PID as i32),
+                tid: tid_of(task),
             },
             sig,
             GenerationInfo::Thread,

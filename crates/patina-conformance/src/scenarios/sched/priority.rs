@@ -14,10 +14,8 @@
 //! does (`Need::NiceZero`): a harness that runs its tests niced cannot give
 //! the priority back, so such a host reports the scenario not run.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, Who, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -92,15 +90,5 @@ pub const SCENARIO: Scenario = Scenario {
     covers: &[Syscall::N_getpriority, Syscall::N_setpriority],
     symbols: &["syscall", "getpid", "setrlimit"],
     needs: &[Need::Unprivileged, Need::NiceZero],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: Vehicle::ALL,
-        what: "getpriority is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no getpriority wrapper)",
-        failure: Failure::Stops {
-            events: 1,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall getpriority (nr",
-        },
-    }],
     ..DEFAULTS
 };

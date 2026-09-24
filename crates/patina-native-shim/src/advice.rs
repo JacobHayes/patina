@@ -53,6 +53,7 @@ fn has_mapping(resolved: &Resolved) -> bool {
         | FdKind::Socket
         | FdKind::Pipe
         | FdKind::EventFd
+        | FdKind::TimerFd
         | FdKind::SignalFd
         | FdKind::Epoll => false,
     }
@@ -142,6 +143,7 @@ pub extern "C" fn patina_syncfs(raw_fd: c_int) -> c_int {
             | FdKind::Urandom
             | FdKind::Socket
             | FdKind::EventFd
+            | FdKind::TimerFd
             | FdKind::SignalFd
             | FdKind::Epoll
             | FdKind::MessageQueue => false,

@@ -133,12 +133,18 @@ pub(crate) fn resume() -> Resumed {
     resume_with(|| {})
 }
 
+/// The resume of a blocking call is a delivery point: a signal that came
+/// pending while the task waited without interrupting it (one generated as
+/// its own deadline ended the wait) is delivered before the call returns, as
+/// the kernel delivers on the way back to user space.
 pub(in crate::thread) fn resume_with(before_delivery: impl FnOnce()) -> Resumed {
     let me = current_task();
     let outcome = {
         let mut state = lock_state();
         state.remove_signal_wait(me);
         let Some(interrupt) = state.signals.interrupted.remove(&me) else {
+            drop(state);
+            deliver();
             return Resumed::Normal;
         };
         let restart =
@@ -212,9 +218,10 @@ pub unsafe extern "C" fn patina_signal_wait(
         )
     };
     loop {
+        super::super::timers::fire_due();
         let mut state = lock_state();
         if mode == WaitMode::Dequeue {
-            if let Some(instance) = state.signals.dequeue(me, wanted) {
+            if let Some(instance) = state.dequeue_signal(me, wanted, false) {
                 if !info.is_null() {
                     unsafe {
                         info.write(instance.info);

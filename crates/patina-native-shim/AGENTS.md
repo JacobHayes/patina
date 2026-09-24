@@ -275,6 +275,17 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   is added to the umbrella AND to `POSIX_C_FAMILY_SOURCES` in `src/lib.rs`
   (the installed `cargo-patina` stages only the exported slices — a lint pins
   the three lists together).
+- The time and identity models are Rust modules both doors call:
+  `src/clocks.rs` (every clock id decoded once, CPU time, the clock-setting
+  rows, `times`/`getrusage`), `src/identity.rs` (credentials, groups,
+  capabilities, process group and session, `uname`, `sysinfo`),
+  `src/thread/sched.rs` (per-thread scheduling attributes, affinity,
+  I/O priority, persona) and `src/thread/timers.rs` (interval timers, POSIX
+  timers, timer descriptors). A timer expires where virtual time is next
+  observed (`timers::fire_due`, called from signal delivery and the rows that
+  read timers or pending signals) and while every task waits
+  (`ThreadRuntime::next_task`); a new path that waits on the scheduler has to
+  go through `block`/`block_timed` so idle time reaches the timers.
 - The memory and IPC models are Rust modules both doors call: `src/mem/`
   (mappings and page caches in `mod.rs`, `cache.rs`, `ranges.rs`;
   `memfd_create` and seals in `memfd.rs`; `membarrier` in `barrier.rs`),

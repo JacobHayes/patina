@@ -12,8 +12,18 @@ fn main() {
     let uid = unsafe { sc(102, 0) };
     let mut utsname = [0u8; 390];
     let uname_rc = unsafe { sc(63, utsname.as_mut_ptr() as i64) };
-    assert_eq!(pid, 1, "getpid");
+    assert_eq!(pid, 2, "getpid");
     assert_eq!(uid, 1000, "getuid");
-    assert_eq!(uname_rc, -i64::from(libc::ENOSYS), "uname");
-    println!("RAW_PROCSTATE pid={pid} uid={uid} uname_rc={uname_rc}");
+    assert_eq!(uname_rc, 0, "uname");
+    // `struct new_utsname`: six 65-byte fields; sysname, then the node name.
+    let field = |index: usize| {
+        let bytes = &utsname[index * 65..(index + 1) * 65];
+        String::from_utf8_lossy(&bytes[..bytes.iter().position(|b| *b == 0).unwrap_or(65)])
+            .into_owned()
+    };
+    println!(
+        "RAW_PROCSTATE pid={pid} uid={uid} uname_rc={uname_rc} sysname={} nodename={}",
+        field(0),
+        field(1)
+    );
 }

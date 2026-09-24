@@ -4013,13 +4013,15 @@ mod tests {
         host.fd_filestat_set_times(fd, Some(11), Some(22)).unwrap();
         assert_eq!(host.fd_metadata(fd).unwrap().0.atime_nanos, 11);
         assert_eq!(host.fd_metadata(fd).unwrap().0.mtime_nanos, 22);
-        host.sleep_until(WasiClock::Realtime, 77).unwrap();
+        // A realtime deadline 77ns past the (default) epoch: NOW resolves to it.
+        let wake = patina_dst_runtime::DEFAULT_REALTIME_EPOCH_NANOS + 77;
+        host.sleep_until(WasiClock::Realtime, wake).unwrap();
         let (atime, mtime) = host
             .filestat_set_times_values(0, 0, WASI_FSTFLAG_ATIM_NOW | WASI_FSTFLAG_MTIM_NOW)
             .unwrap();
-        assert_eq!((atime, mtime), (Some(77), Some(77)));
+        assert_eq!((atime, mtime), (Some(wake), Some(wake)));
         host.fd_filestat_set_times(fd, atime, mtime).unwrap();
-        assert_eq!(host.fd_metadata(fd).unwrap().0.atime_nanos, 77);
+        assert_eq!(host.fd_metadata(fd).unwrap().0.atime_nanos, wake);
         assert!(matches!(
             host.filestat_set_times_values(1, 2, WASI_FSTFLAG_ATIM | WASI_FSTFLAG_ATIM_NOW),
             Err(WasiHostError::InvalidInput)

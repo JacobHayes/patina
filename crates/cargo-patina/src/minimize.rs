@@ -1187,7 +1187,7 @@ mod tests {
         let decisions = (0..6)
             .map(|sequence| clock_event(sequence, if sequence == 4 { 999 } else { sequence }))
             .collect();
-        TraceBundle::new(RunMetadata::new(1, "fixture"), decisions)
+        TraceBundle::new(RunMetadata::new(1, "fixture", 0, "patina"), decisions)
             .write_atomic(&input)
             .unwrap();
         execute_trace(TraceMinimize {
@@ -1221,7 +1221,7 @@ mod tests {
         let decisions = (0..6)
             .map(|sequence| clock_event(sequence, if sequence == 4 { 999 } else { sequence }))
             .collect();
-        TraceBundle::new(RunMetadata::new(1, "fixture"), decisions)
+        TraceBundle::new(RunMetadata::new(1, "fixture", 0, "patina"), decisions)
             .write_atomic(&input)
             .unwrap();
         // The same oracle as above with its exits swapped — the footgun a
@@ -1276,7 +1276,10 @@ mod tests {
         use patina_dst_trace::{RunMetadata, Timeline};
         // main -> keeper (holds the 999 marker plus a removable suffix) and
         // main -> disposable (dead weight the oracle never needs).
-        let mut bundle = TraceBundle::new(RunMetadata::new(1, "fixture"), vec![clock_event(0, 0)]);
+        let mut bundle = TraceBundle::new(
+            RunMetadata::new(1, "fixture", 0, "patina"),
+            vec![clock_event(0, 0)],
+        );
         let mut keeper = vec![clock_event(1, 999), clock_event(2, 2), clock_event(3, 3)];
         for (index, event) in keeper.iter_mut().enumerate() {
             event.order = 3 + index as u64;

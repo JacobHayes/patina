@@ -20,11 +20,97 @@ fn std_runs_seeded_and_replayable_but_not_standalone() {
         "NATIVE_STD_RESULT ",
         &["epoch_ns", "first_hash", "second_hash", "fs"],
     );
-    assert_eq!(fields["epoch_ns"], "0");
+    assert_eq!(
+        fields["epoch_ns"],
+        patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS.to_string()
+    );
     assert_lower_hex(fields["first_hash"], 16);
     assert_lower_hex(fields["second_hash"], 16);
     assert_eq!(fields["fs"], "link:symlink,nested:dir,value:file");
     g.assert_seed_variation(&[9, 10], &[]);
+}
+
+#[test]
+fn realtime_epoch_defaults_overrides_and_replays_flag_free() {
+    const TEXT: &str = "2001-09-09T01:46:40Z";
+    let g = Guest::assert_build("realtime_epoch_probe.rs");
+    g.assert_audit_clean();
+    let default = g.assert_run_success(3, &[]).stdout;
+    let fields = assert_fields(
+        &default,
+        "NATIVE_REALTIME_EPOCH_RESULT ",
+        &["epoch_ns", "mtime_ns"],
+    );
+    assert_eq!(
+        fields["epoch_ns"],
+        patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS.to_string()
+    );
+
+    // The flag moves the guest's wall clock, is recorded into the trace, and a
+    // flag-free replay reproduces it (the identity helper replays flag-free).
+    let flags = ["--realtime-epoch", TEXT];
+    let baseline = g.assert_seed_repeatability(3, 2, &flags);
+    let fields = assert_fields(
+        &baseline,
+        "NATIVE_REALTIME_EPOCH_RESULT ",
+        &["epoch_ns", "mtime_ns"],
+    );
+    assert_eq!(fields["epoch_ns"], "1000000000000000000");
+    let trace = g.assert_record_replay_identity(3, &flags, &baseline);
+    assert_eq!(
+        patina_dst_trace::TraceBundle::load(&trace)
+            .unwrap()
+            .metadata
+            .realtime_epoch_nanos,
+        1_000_000_000_000_000_000
+    );
+    assert_refused(
+        g.command(
+            "replay",
+            &[trace.to_str().unwrap(), "--realtime-epoch", TEXT],
+        ),
+        &["--realtime-epoch"],
+    );
+}
+
+#[test]
+fn hostname_defaults_overrides_and_replays_flag_free() {
+    const NAME: &str = "db-1.internal";
+    let g = Guest::assert_build("hostname_probe.rs");
+    g.assert_audit_clean();
+    let default = g.assert_run_success(3, &[]).stdout;
+    let fields = assert_fields(
+        &default,
+        "NATIVE_HOSTNAME_RESULT ",
+        &["hostname", "nodename"],
+    );
+    assert_eq!(fields["hostname"], patina_dst_syscalls::IDENTITY_HOSTNAME);
+    assert_eq!(fields["nodename"], patina_dst_syscalls::IDENTITY_HOSTNAME);
+
+    // The flag renames the virtual machine for both readers, is recorded into
+    // the trace, and a flag-free replay reproduces it (the identity helper
+    // replays flag-free).
+    let flags = ["--hostname", NAME];
+    let baseline = g.assert_seed_repeatability(3, 2, &flags);
+    let fields = assert_fields(
+        &baseline,
+        "NATIVE_HOSTNAME_RESULT ",
+        &["hostname", "nodename"],
+    );
+    assert_eq!(fields["hostname"], NAME);
+    assert_eq!(fields["nodename"], NAME);
+    let trace = g.assert_record_replay_identity(3, &flags, &baseline);
+    assert_eq!(
+        patina_dst_trace::TraceBundle::load(&trace)
+            .unwrap()
+            .metadata
+            .hostname,
+        NAME
+    );
+    assert_refused(
+        g.command("replay", &[trace.to_str().unwrap(), "--hostname", NAME]),
+        &["--hostname"],
+    );
 }
 
 #[test]
@@ -224,4 +310,32 @@ mod darwin {
             3,
         );
     }
+}
+
+/// A process timer and a waiter's own deadline at one virtual instant: the
+/// deadlock rescue wakes the waiter, and the timer's expiry, fired right
+/// after, must not wake it a second time (an invalid scheduler transition
+/// that aborted the run). An interval timer against `nanosleep`.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_interval_timer_and_a_sleep_ending_together_wake_the_sleeper_once() {
+    let g = Guest::assert_build("itimer_deadline_probe.rs");
+    g.assert_audit_clean();
+    let out = g.assert_seeded_record_replay_identity(5, &[]);
+    let fields = assert_fields(&out, "ITIMER_DEADLINE ", &["slept", "alarms"]);
+    assert!(["0", "EINTR"].contains(&fields["slept"]), "{fields:?}");
+    assert_eq!(fields["alarms"], "1");
+}
+
+/// The timer-descriptor twin: an expiration and a `poll` timeout at one
+/// virtual instant wake the poller once, and the expiration is not lost.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_timerfd_and_a_poll_ending_together_wake_the_poller_once() {
+    let g = Guest::assert_build("timerfd_deadline_probe.rs");
+    g.assert_audit_clean();
+    let out = g.assert_seeded_record_replay_identity(5, &[]);
+    let fields = assert_fields(&out, "TIMERFD_DEADLINE ", &["ready", "expirations"]);
+    assert!(["0", "1"].contains(&fields["ready"]), "{fields:?}");
+    assert_eq!(fields["expirations"], "1");
 }

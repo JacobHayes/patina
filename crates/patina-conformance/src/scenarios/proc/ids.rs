@@ -1,7 +1,9 @@
 //! proc/ids — process/thread id relations for a single-process guest, including
 //! process-group/session ids and kill(0)/kill(-1) process selection semantics.
 
-use crate::catalog::{DEFAULTS, Scenario};
+use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
+use crate::compare::{Difference, Failure, Observed};
+use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::Probe;
@@ -43,5 +45,18 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_kill,
     ],
     symbols: &["getpid", "syscall", "getppid", "kill"],
+    gaps: &[Gap {
+        status: Status::ByDesign,
+        vehicles: Vehicle::ALL,
+        what: "the virtual pid namespace holds two processes, its init (pid 1) and the guest (pid 2, init's child; registry::INIT_PID/IDENTITY_PID, src/identity.rs): kill(-1, sig) reaches every process but init and the caller, of which there are none, so the kernel's answer for that tree is ESRCH (kill_something_info), where the native oracle's host has other processes of the caller's",
+        failure: Failure::Differs(&[
+            Difference::field(17, "kill", "errno", Observed::Str("ESRCH")),
+            Difference::field(17, "kill", "ret", Observed::Int(-1)),
+            Difference::check(
+                18,
+                "kill(-1,0) succeeds when at least one process is signalable",
+            ),
+        ]),
+    }],
     ..DEFAULTS
 };

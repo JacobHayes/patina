@@ -346,9 +346,18 @@ pub(crate) unsafe fn mbind(
     0
 }
 
-/// Whether `pid` names the virtual process (0 is the caller).
-fn is_self(pid: i32) -> bool {
-    pid == 0 || pid == crate::registry::IDENTITY_PID as i32
+/// Whose memory a pid names (`find_mm_struct`, `kernel_migrate_pages`): 0,
+/// the guest or one of its threads is the guest's; a pid no process has is
+/// `ESRCH`; init is not dumpable, so ptrace-mode access to it is `EPERM`.
+fn memory_of(pid: i32) -> Result<(), c_int> {
+    match pid {
+        0 => Ok(()),
+        pid => match crate::identity::lookup(pid) {
+            Some((crate::identity::Process::Guest, _)) => Ok(()),
+            Some((crate::identity::Process::Init, _)) => Err(EPERM),
+            None => Err(ESRCH),
+        },
+    }
 }
 
 /// `move_pages(2)`.
@@ -370,8 +379,8 @@ pub(crate) unsafe fn move_pages(
     if flags as u32 & MPOL_MF_MOVE_ALL != 0 {
         return fail(EPERM);
     }
-    if !is_self(pid) {
-        return fail(ESRCH);
+    if let Err(errno) = memory_of(pid) {
+        return fail(errno);
     }
     if count > 0 && (pages.is_null() || status.is_null()) {
         return fail(EFAULT);
@@ -420,8 +429,8 @@ pub(crate) unsafe fn migrate_pages(
         Ok(nodes) => nodes,
         Err(errno) => return fail(errno),
     };
-    if !is_self(pid) {
-        return fail(ESRCH);
+    if let Err(errno) = memory_of(pid) {
+        return fail(errno);
     }
     // A target node outside the caller's allowed set needs CAP_SYS_NICE.
     if new.others {

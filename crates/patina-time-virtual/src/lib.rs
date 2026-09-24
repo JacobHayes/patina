@@ -3,6 +3,10 @@
 use patina_dst_abi::{ClockKind, EffectError, ErrorCode};
 use patina_dst_driver_api::{ClockDriver, DriverResult};
 
+/// Re-exported beside the clock that defaults to it; defined in
+/// `patina-dst-abi` so crates below the drivers can name it too.
+pub use patina_dst_abi::DEFAULT_REALTIME_EPOCH_NANOS;
+
 /// A clock that advances only when instructed by the deterministic runtime.
 pub struct VirtualClock {
     monotonic_nanos: u64,
@@ -10,6 +14,8 @@ pub struct VirtualClock {
 }
 
 impl VirtualClock {
+    /// A clock at monotonic zero whose realtime reading is
+    /// `realtime_epoch_nanos` plus the monotonic time.
     pub const fn new(realtime_epoch_nanos: u64) -> Self {
         Self {
             monotonic_nanos: 0,
@@ -38,8 +44,9 @@ impl VirtualClock {
 }
 
 impl Default for VirtualClock {
+    /// A clock at monotonic zero on the [`DEFAULT_REALTIME_EPOCH_NANOS`] epoch.
     fn default() -> Self {
-        Self::new(0)
+        Self::new(DEFAULT_REALTIME_EPOCH_NANOS)
     }
 }
 
@@ -61,6 +68,24 @@ impl ClockDriver for VirtualClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_clock_reads_the_default_epoch_at_monotonic_zero() {
+        let mut clock = VirtualClock::default();
+        assert_eq!(clock.now(ClockKind::Monotonic).unwrap(), 0);
+        assert_eq!(
+            clock.now(ClockKind::Realtime).unwrap(),
+            DEFAULT_REALTIME_EPOCH_NANOS
+        );
+        // 2026-07-22T23:00:09Z, Patina's first commit.
+        assert_eq!(DEFAULT_REALTIME_EPOCH_NANOS / 1_000_000_000, 1_784_761_209);
+        assert_eq!(DEFAULT_REALTIME_EPOCH_NANOS % 1_000_000_000, 0);
+        // A realtime deadline on the default epoch converts back to monotonic.
+        clock
+            .sleep_until(ClockKind::Realtime, DEFAULT_REALTIME_EPOCH_NANOS + 5)
+            .unwrap();
+        assert_eq!(clock.now(ClockKind::Monotonic).unwrap(), 5);
+    }
 
     #[test]
     fn sleeping_advances_both_clock_domains() {

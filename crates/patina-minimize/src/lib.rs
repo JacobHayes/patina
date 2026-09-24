@@ -1340,7 +1340,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         decisions[6].outcome = Outcome::U64(999);
-        let bundle = TraceBundle::new(RunMetadata::new(1, "fixture"), decisions);
+        let bundle = TraceBundle::new(RunMetadata::new(1, "fixture", 0, "patina"), decisions);
         let mut calls = 0;
         let minimized = minimize_main(&bundle, &mut |candidate: &TraceBundle| {
             calls += 1;
@@ -1374,7 +1374,8 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let mut bundle = TraceBundle::new(RunMetadata::new(1, "fixture"), main.clone());
+        let mut bundle =
+            TraceBundle::new(RunMetadata::new(1, "fixture", 0, "patina"), main.clone());
         bundle.timelines.push(test_timeline(
             "failure",
             "main",
@@ -1409,7 +1410,7 @@ mod tests {
 
     #[test]
     fn refuses_to_minimize_a_timeline_with_children() {
-        let mut bundle = TraceBundle::new(RunMetadata::new(1, "fixture"), Vec::new());
+        let mut bundle = TraceBundle::new(RunMetadata::new(1, "fixture", 0, "patina"), Vec::new());
         bundle
             .timelines
             .push(test_timeline("parent", "main", 0, 2, Vec::new()));
@@ -1425,7 +1426,7 @@ mod tests {
 
     #[test]
     fn refuses_to_minimize_when_the_original_does_not_fail() {
-        let bundle = TraceBundle::new(RunMetadata::new(1, "fixture"), Vec::new());
+        let bundle = TraceBundle::new(RunMetadata::new(1, "fixture", 0, "patina"), Vec::new());
         let result = minimize_main(&bundle, &mut |_candidate: &TraceBundle| {
             Ok::<_, Infallible>(false)
         });
@@ -1477,7 +1478,7 @@ mod tests {
     /// event, so a scripted oracle can be written as a predicate over `Vec<u64>`.
     fn value_bundle(values: &[u64]) -> TraceBundle {
         TraceBundle::new(
-            RunMetadata::new(1, "fixture"),
+            RunMetadata::new(1, "fixture", 0, "patina"),
             values
                 .iter()
                 .enumerate()
@@ -1985,7 +1986,7 @@ mod tests {
         // remaining decisions (sequences 4..8) are a reducible suffix no
         // descendant depends on. The failure marker sits in the protected prefix.
         let mut bundle = TraceBundle::new(
-            RunMetadata::new(1, "fixture"),
+            RunMetadata::new(1, "fixture", 0, "patina"),
             vec![clock_event(0, 0), clock_event(1, 1)],
         );
         bundle.timelines.push(test_timeline(
@@ -2050,7 +2051,7 @@ mod tests {
     fn tree_minimization_matches_leaf_minimization_for_a_single_timeline() {
         let mut decisions: Vec<TraceEvent> = (0..8).map(|s| clock_event(s, s)).collect();
         decisions[5].outcome = Outcome::U64(999);
-        let bundle = TraceBundle::new(RunMetadata::new(1, "fixture"), decisions);
+        let bundle = TraceBundle::new(RunMetadata::new(1, "fixture", 0, "patina"), decisions);
         let mut oracle = |candidate: &TraceBundle| {
             Ok::<_, Infallible>(
                 candidate.timelines[0]
@@ -2068,7 +2069,7 @@ mod tests {
         // main -> keeper (carries the 999 marker) and main -> disposable, plus
         // disposable -> grandchild so pruning must drop a whole subtree.
         let mut bundle = TraceBundle::new(
-            RunMetadata::new(1, "fixture"),
+            RunMetadata::new(1, "fixture", 0, "patina"),
             vec![clock_event(0, 0), clock_event(1, 1)],
         );
         bundle.timelines.push(test_timeline(
@@ -2167,7 +2168,7 @@ mod tests {
     #[test]
     fn schedule_reduction_collapses_a_ping_pong_into_longer_runs() {
         let bundle = TraceBundle::new(
-            RunMetadata::new(1, "fixture"),
+            RunMetadata::new(1, "fixture", 0, "patina"),
             vec![
                 sched_event(0, 1),
                 sched_event(1, 2),
@@ -2201,7 +2202,7 @@ mod tests {
         // to the lowest observed id, overriding switch-collapsing's own bias
         // toward extending the earlier - here higher - task's run.
         let bundle = TraceBundle::new(
-            RunMetadata::new(1, "fixture"),
+            RunMetadata::new(1, "fixture", 0, "patina"),
             vec![sched_event(0, 2), sched_event(1, 1)],
         );
         let reduced = reduce_schedule(&bundle, &mut |candidate: &TraceBundle| {
@@ -2218,7 +2219,7 @@ mod tests {
         // survive byte-for-byte even though the all-accepting marker would
         // tolerate rewriting them.
         let mut bundle = TraceBundle::new(
-            RunMetadata::new(1, "fixture"),
+            RunMetadata::new(1, "fixture", 0, "patina"),
             vec![
                 sched_event(0, 2),
                 sched_event(1, 2),
@@ -2254,7 +2255,7 @@ mod tests {
     #[test]
     fn schedule_reduction_leaves_the_bundle_unchanged_when_every_rewrite_is_rejected() {
         let bundle = TraceBundle::new(
-            RunMetadata::new(1, "fixture"),
+            RunMetadata::new(1, "fixture", 0, "patina"),
             vec![sched_event(0, 1), sched_event(1, 2), sched_event(2, 1)],
         );
         // The oracle demands the exact original schedule, so the up-front check
@@ -2270,7 +2271,7 @@ mod tests {
     #[test]
     fn schedule_reduction_reaches_a_fixed_point() {
         let bundle = TraceBundle::new(
-            RunMetadata::new(1, "fixture"),
+            RunMetadata::new(1, "fixture", 0, "patina"),
             vec![
                 sched_event(0, 1),
                 sched_event(1, 2),
@@ -2292,7 +2293,10 @@ mod tests {
 
     #[test]
     fn schedule_reduction_rejects_an_input_that_does_not_fail() {
-        let bundle = TraceBundle::new(RunMetadata::new(1, "fixture"), vec![sched_event(0, 1)]);
+        let bundle = TraceBundle::new(
+            RunMetadata::new(1, "fixture", 0, "patina"),
+            vec![sched_event(0, 1)],
+        );
         let result = reduce_schedule(&bundle, &mut |_c: &TraceBundle| Ok::<_, Infallible>(false));
         assert!(matches!(result, Err(MinimizeError::OriginalDoesNotFail)));
     }
@@ -2302,7 +2306,7 @@ mod tests {
         // A single main timeline with a ping-pong schedule followed by removable
         // filler clock events; the failure needs the 999 marker and both tasks.
         let bundle = TraceBundle::new(
-            RunMetadata::new(1, "fixture"),
+            RunMetadata::new(1, "fixture", 0, "patina"),
             vec![
                 sched_event(0, 1),
                 sched_event(1, 2),

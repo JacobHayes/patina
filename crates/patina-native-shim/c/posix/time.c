@@ -11,6 +11,15 @@
 
 int clock_gettime(clockid_t clock_id, struct timespec *time) {
     patina_note_boundary_symbol("clock_gettime");
+#ifdef __linux__
+    /* Every Linux clock id is decoded once, in Rust, for both doors. */
+    int64_t result = patina_clock_gettime((int)clock_id, time);
+    if (result < 0) {
+        errno = (int)-result;
+        return -1;
+    }
+    return 0;
+#else
     uint32_t patina_clock;
     if (clock_id == CLOCK_REALTIME) patina_clock = PATINA_CLOCK_REALTIME;
     else if (clock_id == CLOCK_MONOTONIC
@@ -30,6 +39,7 @@ int clock_gettime(clockid_t clock_id, struct timespec *time) {
     time->tv_sec = (time_t)(nanos / UINT64_C(1000000000));
     time->tv_nsec = (long)(nanos % UINT64_C(1000000000));
     return 0;
+#endif
 }
 
 /*
@@ -101,35 +111,15 @@ int nanosleep(const struct timespec *duration, struct timespec *remaining) {
 /*
  * Rust's std::thread::sleep on Linux sleeps through clock_nanosleep rather
  * than nanosleep. Unlike nanosleep, this call returns the error number
- * directly and never sets errno. Darwin has no clock_nanosleep.
+ * directly and never sets errno. Darwin has no clock_nanosleep. glibc's
+ * wrapper refuses the calling thread's CPU clock itself (EINVAL) and passes
+ * everything else to the kernel row, which answers here from the one Rust
+ * decode of the clock id.
  */
 int clock_nanosleep(clockid_t clock_id, int flags, const struct timespec *request,
                     struct timespec *remain) {
-    uint32_t patina_clock;
-    if (clock_id == CLOCK_REALTIME) patina_clock = PATINA_CLOCK_REALTIME;
-    else if (clock_id == CLOCK_MONOTONIC) patina_clock = PATINA_CLOCK_MONOTONIC;
-    else return EINVAL;
-    if ((flags & ~TIMER_ABSTIME) != 0) return EINVAL;
-    if (request == NULL || request->tv_sec < 0 || request->tv_nsec < 0 ||
-        request->tv_nsec >= 1000000000L) {
-        return EINVAL;
-    }
-    uint64_t seconds = (uint64_t)request->tv_sec;
-    if (seconds > UINT64_MAX / UINT64_C(1000000000)) return EINVAL;
-    uint64_t request_nanos = seconds * UINT64_C(1000000000) + (uint64_t)request->tv_nsec;
-    uint64_t deadline = request_nanos;
-    if ((flags & TIMER_ABSTIME) == 0) {
-        uint64_t now = 0;
-        if (patina_clock_now(patina_clock, &now) != 0) return patina_errno();
-        if (request_nanos > UINT64_MAX - now) return EINVAL;
-        deadline = now + request_nanos;
-    }
-    if (patina_sleep_until_remaining(patina_clock, deadline,
-                                    (flags & TIMER_ABSTIME) ? NULL : (int64_t *)remain) != 0) {
-        return patina_errno();
-    }
-
-    return 0;
+    if (clock_id == CLOCK_THREAD_CPUTIME_ID) return EINVAL;
+    return (int)-patina_clock_nanosleep((int)clock_id, flags, request, remain);
 }
 
 #endif
@@ -213,10 +203,11 @@ unsigned int sleep(unsigned int seconds) {
     return seconds;
 }
 
-/* Split a nanosecond count into a `struct timeval`. The CPU-time model attributes
- * ALL modeled time to user time (ru_utime); system time (ru_stime) stays 0 by
- * convention — the runtime does not partition guest work into user/kernel phases. */
+#ifndef __linux__
+/* Split a nanosecond count into a `struct timeval` (the Darwin getrusage; the
+ * Linux rows fill theirs in Rust). All virtual CPU time is user time. */
 static void patina_timeval_from_nanos(uint64_t nanos, struct timeval *out) {
     out->tv_sec = (time_t)(nanos / UINT64_C(1000000000));
     out->tv_usec = (suseconds_t)((nanos % UINT64_C(1000000000)) / 1000);
 }
+#endif

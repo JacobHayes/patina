@@ -74,6 +74,9 @@ pub(crate) enum FdKind {
     /// queue table of the IPC model.
     #[cfg(target_os = "linux")]
     MessageQueue,
+    /// A timer descriptor (`timerfd_create`); `handle` keys the timer table.
+    #[cfg(target_os = "linux")]
+    TimerFd,
     /// A virtual kqueue; `handle` is the registry id.
     #[cfg(target_os = "macos")]
     Kqueue,
@@ -101,6 +104,8 @@ impl FdKind {
             FdKind::Epoll => 10,
             #[cfg(target_os = "linux")]
             FdKind::MessageQueue => 13,
+            #[cfg(target_os = "linux")]
+            FdKind::TimerFd => 14,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => 11,
         }
@@ -118,7 +123,11 @@ impl FdKind {
             | FdKind::Socket
             | FdKind::Pipe => false,
             #[cfg(target_os = "linux")]
-            FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::MessageQueue => false,
+            FdKind::EventFd
+            | FdKind::Epoll
+            | FdKind::SignalFd
+            | FdKind::MessageQueue
+            | FdKind::TimerFd => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }

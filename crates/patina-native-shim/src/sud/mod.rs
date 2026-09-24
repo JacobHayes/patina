@@ -386,8 +386,6 @@ const EFAULT: i64 = errno::EFAULT as i64;
 
 const ECHILD: i64 = errno::ECHILD as i64;
 
-const ESRCH: i64 = errno::ESRCH as i64;
-
 const ENOTDIR: i64 = errno::ENOTDIR as i64;
 
 const EINVAL: i64 = errno::EINVAL as i64;
@@ -509,9 +507,6 @@ const O_DIRECT: u64 = uapi::O_DIRECT as u64;
 const O_PATH: u64 = uapi::O_PATH as u64;
 
 const AT_FDCWD: i64 = uapi::AT_FDCWD as i64;
-
-// `clock_nanosleep(2)` absolute-deadline flag.
-const TIMER_ABSTIME: u64 = uapi::TIMER_ABSTIME as u64;
 
 // `futex(2)` op decode (mirrors the libc `syscall()` interposer in
 // patina_posix.c so the raw and wrapped paths route identically).
@@ -722,20 +717,10 @@ struct SockaddrIn {
 
 /// Kernel `struct timespec` on 64-bit Linux (`time_t` and `long` are both 8
 /// bytes). Read from and written to guest memory during dispatch.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Timespec {
-    tv_sec: i64,
-    tv_nsec: i64,
-}
+use crate::clocks::Timespec;
 
 /// Kernel `struct timeval` on 64-bit Linux.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Timeval {
-    tv_sec: i64,
-    tv_usec: i64,
-}
+use crate::clocks::Timeval;
 
 thread_local! {
     /// Set while this thread is inside [`patina_sud_dispatch`]. A nested SIGSYS
@@ -926,7 +911,194 @@ const BINDINGS: &[(Syscall, Handler)] = &[
         sys_clock_getres(a[0], a[1] as *mut Timespec)
     }),
     (Syscall::N_gettimeofday, |_, a| {
-        sys_gettimeofday(a[0] as *mut Timeval)
+        sys_gettimeofday(a[0] as *mut Timeval, a[1] as *mut [i32; 2])
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_time, |_, a| sys_time(a[0] as *mut i64)),
+    // SAFETY: guest pointers, NULL-checked by the entries.
+    (Syscall::N_settimeofday, |_, a| unsafe {
+        crate::clocks::settimeofday(a[0] as *const [i64; 2])
+    }),
+    (Syscall::N_clock_settime, |_, a| unsafe {
+        crate::clocks::clock_settime(a[0] as c_int, a[1] as *const Timespec)
+    }),
+    (Syscall::N_adjtimex, |_, a| unsafe {
+        crate::clocks::adjtimex(a[0] as *mut crate::clocks::Timex)
+    }),
+    (Syscall::N_clock_adjtime, |_, a| unsafe {
+        crate::clocks::clock_adjtime(a[0] as c_int, a[1] as *mut crate::clocks::Timex)
+    }),
+    // ---- the process's timers (`thread::timers`) ----
+    (Syscall::N_getitimer, |_, a| unsafe {
+        crate::thread::timers::getitimer(a[0] as i32, a[1] as *mut _)
+    }),
+    (Syscall::N_setitimer, |_, a| unsafe {
+        crate::thread::timers::setitimer(a[0] as i32, a[1] as *const _, a[2] as *mut _)
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_alarm, |_, a| {
+        crate::thread::timers::alarm(a[0] as u32)
+    }),
+    (Syscall::N_timer_create, |_, a| unsafe {
+        crate::thread::timers::timer_create(a[0] as i32, a[1] as *const _, a[2] as *mut i32)
+    }),
+    (Syscall::N_timer_settime, |_, a| unsafe {
+        crate::thread::timers::timer_settime(
+            a[0] as i32,
+            a[1] as i32,
+            a[2] as *const _,
+            a[3] as *mut _,
+        )
+    }),
+    (Syscall::N_timer_gettime, |_, a| unsafe {
+        crate::thread::timers::timer_gettime(a[0] as i32, a[1] as *mut _)
+    }),
+    (Syscall::N_timer_getoverrun, |_, a| {
+        crate::thread::timers::timer_getoverrun(a[0] as i32)
+    }),
+    (Syscall::N_timer_delete, |_, a| {
+        crate::thread::timers::timer_delete(a[0] as i32)
+    }),
+    (Syscall::N_timerfd_create, |_, a| {
+        crate::thread::timers::timerfd_create(a[0] as i32, a[1] as c_int)
+    }),
+    (Syscall::N_timerfd_settime, |_, a| unsafe {
+        crate::thread::timers::timerfd_settime(
+            arg_fd(a[0]) as c_int,
+            a[1] as i32,
+            a[2] as *const _,
+            a[3] as *mut _,
+        )
+    }),
+    (Syscall::N_timerfd_gettime, |_, a| unsafe {
+        crate::thread::timers::timerfd_gettime(arg_fd(a[0]) as c_int, a[1] as *mut _)
+    }),
+    (Syscall::N_times, |_, a| unsafe {
+        crate::clocks::times(a[0] as *mut [i64; 4])
+    }),
+    (Syscall::N_getrusage, |_, a| unsafe {
+        crate::clocks::getrusage(a[0] as i32, a[1] as *mut crate::clocks::Rusage)
+    }),
+    // ---- identity: the one unprivileged identity (`crate::identity`) ----
+    (Syscall::N_getresuid, |_, a| unsafe {
+        crate::identity::getres(
+            crate::identity::Id::User,
+            a[0] as *mut u32,
+            a[1] as *mut u32,
+            a[2] as *mut u32,
+        )
+    }),
+    (Syscall::N_getresgid, |_, a| unsafe {
+        crate::identity::getres(
+            crate::identity::Id::Group,
+            a[0] as *mut u32,
+            a[1] as *mut u32,
+            a[2] as *mut u32,
+        )
+    }),
+    (Syscall::N_setuid, |_, a| {
+        crate::identity::set(crate::identity::Id::User, a[0] as u32)
+    }),
+    (Syscall::N_setgid, |_, a| {
+        crate::identity::set(crate::identity::Id::Group, a[0] as u32)
+    }),
+    (Syscall::N_setreuid, |_, a| {
+        crate::identity::set_many(crate::identity::Id::User, &[a[0] as u32, a[1] as u32])
+    }),
+    (Syscall::N_setregid, |_, a| {
+        crate::identity::set_many(crate::identity::Id::Group, &[a[0] as u32, a[1] as u32])
+    }),
+    (Syscall::N_setresuid, |_, a| {
+        crate::identity::set_many(
+            crate::identity::Id::User,
+            &[a[0] as u32, a[1] as u32, a[2] as u32],
+        )
+    }),
+    (Syscall::N_setresgid, |_, a| {
+        crate::identity::set_many(
+            crate::identity::Id::Group,
+            &[a[0] as u32, a[1] as u32, a[2] as u32],
+        )
+    }),
+    (Syscall::N_setfsuid, |_, _| {
+        crate::identity::set_fs(crate::identity::Id::User)
+    }),
+    (Syscall::N_setfsgid, |_, _| {
+        crate::identity::set_fs(crate::identity::Id::Group)
+    }),
+    (Syscall::N_getgroups, |_, a| unsafe {
+        crate::identity::getgroups(a[0] as i32, a[1] as *mut u32)
+    }),
+    (Syscall::N_setgroups, |_, _| crate::identity::setgroups()),
+    (Syscall::N_capget, |_, a| unsafe {
+        crate::identity::capget(a[0] as *mut _, a[1] as *mut _)
+    }),
+    (Syscall::N_capset, |_, a| unsafe {
+        crate::identity::capset(a[0] as *mut _, a[1] as *const _)
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_getpgrp, |_, _| crate::identity::getpgrp()),
+    (Syscall::N_setpgid, |_, a| {
+        crate::identity::setpgid(a[0] as i32, a[1] as i32)
+    }),
+    (Syscall::N_setsid, |_, _| crate::identity::setsid()),
+    (Syscall::N_uname, |_, a| unsafe {
+        crate::identity::uname(a[0] as *mut _, crate::thread::sched::persona())
+    }),
+    (Syscall::N_sysinfo, |_, a| unsafe {
+        crate::identity::sysinfo(a[0] as *mut _)
+    }),
+    // ---- scheduling attributes, affinity and persona (`thread::sched`) ----
+    (Syscall::N_personality, |_, a| {
+        crate::thread::sched::personality(a[0] as u32)
+    }),
+    (Syscall::N_getpriority, |_, a| {
+        crate::thread::sched::getpriority(a[0] as i32, a[1] as i32)
+    }),
+    (Syscall::N_setpriority, |_, a| {
+        crate::thread::sched::setpriority(a[0] as i32, a[1] as i32, a[2] as i32)
+    }),
+    (Syscall::N_sched_setparam, |_, a| unsafe {
+        crate::thread::sched::setscheduler_param(a[0] as i32, None, a[1] as *const i32)
+    }),
+    (Syscall::N_sched_getparam, |_, a| unsafe {
+        crate::thread::sched::getparam(a[0] as i32, a[1] as *mut i32)
+    }),
+    (Syscall::N_sched_setscheduler, |_, a| unsafe {
+        crate::thread::sched::setscheduler_param(a[0] as i32, Some(a[1] as i32), a[2] as *const i32)
+    }),
+    (Syscall::N_sched_getscheduler, |_, a| {
+        crate::thread::sched::getscheduler(a[0] as i32)
+    }),
+    (Syscall::N_sched_get_priority_max, |_, a| {
+        crate::thread::sched::priority_bound(a[0] as i32, true)
+    }),
+    (Syscall::N_sched_get_priority_min, |_, a| {
+        crate::thread::sched::priority_bound(a[0] as i32, false)
+    }),
+    (Syscall::N_sched_rr_get_interval, |_, a| unsafe {
+        crate::thread::sched::rr_interval(a[0] as i32, a[1] as *mut Timespec)
+    }),
+    (Syscall::N_sched_setattr, |_, a| unsafe {
+        crate::thread::sched::setattr(a[0] as i32, a[1] as *mut u8, a[2] as u32)
+    }),
+    (Syscall::N_sched_getattr, |_, a| unsafe {
+        crate::thread::sched::getattr(a[0] as i32, a[1] as *mut u8, a[2] as u32, a[3] as u32)
+    }),
+    (Syscall::N_sched_setaffinity, |_, a| unsafe {
+        crate::thread::sched::setaffinity(a[0] as i32, a[1] as u32, a[2] as *const u8)
+    }),
+    (Syscall::N_sched_getaffinity, |_, a| unsafe {
+        crate::thread::sched::getaffinity(a[0] as i32, a[1] as u32, a[2] as *mut u8)
+    }),
+    (Syscall::N_getcpu, |_, a| unsafe {
+        crate::thread::sched::getcpu(a[0] as *mut u32, a[1] as *mut u32)
+    }),
+    (Syscall::N_ioprio_set, |_, a| {
+        crate::thread::sched::ioprio_set(a[0] as i32, a[1] as i32, a[2] as i32)
+    }),
+    (Syscall::N_ioprio_get, |_, a| {
+        crate::thread::sched::ioprio_get(a[0] as i32, a[1] as i32)
     }),
     (Syscall::N_nanosleep, |_, a| {
         sys_nanosleep(a[0] as *const Timespec, a[1] as *mut Timespec)
@@ -1205,8 +1377,12 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     }),
     (Syscall::N_wait4, |_, _| sys_wait4()),
     (Syscall::N_waitid, |_, a| sys_waitid(a[3])),
-    (Syscall::N_getpgid, |_, a| sys_getpgid(a[0] as i64)),
-    (Syscall::N_getsid, |_, a| sys_getsid(a[0] as i64)),
+    (Syscall::N_getpgid, |_, a| {
+        crate::identity::getpgid(a[0] as i32)
+    }),
+    (Syscall::N_getsid, |_, a| {
+        crate::identity::getsid(a[0] as i32)
+    }),
     // ---- fd I/O ----
     (Syscall::N_read, |_, a| sys_read(arg_fd(a[0]), a[1], a[2])),
     (Syscall::N_write, |_, a| sys_write(arg_fd(a[0]), a[1], a[2])),

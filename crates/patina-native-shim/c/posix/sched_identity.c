@@ -11,11 +11,11 @@
  */
 
 pid_t getpid(void) {
-    return (pid_t)1;
+    return (pid_t)patina_pid();
 }
 
 pid_t getppid(void) {
-    return (pid_t)2;
+    return (pid_t)patina_ppid();
 }
 
 #ifdef __linux__
@@ -44,11 +44,19 @@ int pthread_threadid_np(pthread_t thread, uint64_t *thread_id) {
 
 #endif
 
+#ifdef __linux__
+/* The virtual kernel's self-description, from the one Rust model (the SUD
+ * `uname` row); gethostname below reads its node name. */
+int uname(struct utsname *name) {
+    return signal_result(patina_sud_dispatch(SYS_uname, (uintptr_t)name, 0, 0, 0, 0, 0, 0));
+}
+#else
 int uname(struct utsname *name) {
     (void)name;
     errno = ENOSYS;
     return -1;
 }
+#endif
 
 /*
  * sched_yield / std::thread::yield_now. std's mpsc/mpmc backoff spins through
@@ -69,14 +77,11 @@ int sched_getcpu(void) {
     return 0;
 }
 
-/* CPU affinity is inert under the single-baton scheduler — exactly one managed
- * thread runs at a time regardless — so setting it is a deterministic no-op
- * success rather than a real host scheduling effect. */
+/* The virtual machine's one CPU (the SUD `sched_setaffinity` row): a mask
+ * naming it changes nothing, one naming no CPU the machine has is EINVAL. */
 int sched_setaffinity(pid_t pid, size_t cpusetsize, const cpu_set_t *mask) {
-    (void)pid;
-    (void)cpusetsize;
-    (void)mask;
-    return 0;
+    return signal_result(patina_sud_dispatch(SYS_sched_setaffinity, (uint64_t)pid,
+        (uint64_t)cpusetsize, (uintptr_t)mask, 0, 0, 0, 0));
 }
 
 #endif
@@ -111,7 +116,8 @@ long sysconf(int name) {
     if (name == _SC_OPEN_MAX) return patina_fd_limit();
 #endif
 #ifdef _SC_NGROUPS_MAX
-    if (name == _SC_NGROUPS_MAX) return 16;
+    /* The kernel's NGROUPS_MAX, the bound setgroups(2) enforces. */
+    if (name == _SC_NGROUPS_MAX) return 65536;
 #endif
     errno = EINVAL;
     return -1;
@@ -135,44 +141,31 @@ long sysconf(int name) {
  * ==========================================================================
  */
 
-/* Fixed physical-memory world-model constant (8 GiB). mimalloc's arena sizing
- * and sysinfo's total-memory probe read it; neither value is guest-observable
- * output, but a fixed nonzero constant keeps their heuristics deterministic
- * regardless of the host's real RAM. */
+/* Fixed physical-memory world-model constant of the Darwin interposers
+ * (8 GiB; the Linux virtual machine's is src/limits.rs MACHINE_MEMORY).
+ * mimalloc's arena sizing reads it; a fixed nonzero constant keeps its
+ * heuristics deterministic regardless of the host's real RAM. */
 #define PATINA_PHYSICAL_MEMORY_BYTES (UINT64_C(8) * 1024 * 1024 * 1024)
 
 /*
- * getrusage(): per-process resource accounting is host state (real CPU time,
- * peak RSS, page faults) that varies run to run. Report a value that is a pure
- * function of the deterministic virtual clock instead: ru_utime is the modeled
- * CPU time (elapsed virtual monotonic time via patina_cpu_time_nanos — see its
- * ABI note for why the monotonic clock is the process's summed run-slice total),
- * all attributed to user time (ru_stime = 0, by the split convention above). A
- * guest that branches on its own CPU usage (mimalloc's process-info probe reads
- * ru_utime/ru_stime) then sees a deterministic, monotonically advancing counter
- * instead of live host counters, identical across same-seed runs. Both platforms.
- *
- * Only RUSAGE_SELF carries the modeled CPU time. RUSAGE_CHILDREN stays zeroed
- * (the runtime models no child processes), and on Linux RUSAGE_THREAD stays
- * zeroed too: per-thread run-slices are not separately accumulated (the model is
- * a single process-wide CPU timeline), so a truthful deterministic zero is
- * reported rather than mislabeling the whole-process timeline as one thread's.
- *
- * ru_maxrss stays 0: the shim models no deterministic memory high-water. Guest
- * allocations reach the host allocator / an anonymous-mmap passthrough (Linux
- * SUD; macOS has no mmap interposer at all), so any peak-RSS figure would reflect
- * host allocator/version/platform state — not simulation state — and could not be
- * made a pure function of the seed. A deterministic 0 (mimalloc reads it as
- * peak_rss) is preferable to a non-reproducible number.
+ * getrusage(): the virtual CPU time — the virtual time the process's tasks
+ * computed through while holding the baton — never the host's accounting, all
+ * of it user time. RUSAGE_CHILDREN is zero (no child is ever waited for), and
+ * so is every counter the runtime does not model: ru_maxrss (guest memory
+ * reaches the host allocator, so a peak-RSS figure would be host state, not a
+ * function of the seed), faults, blocks and context switches.
  *
  * The first-argument type follows the platform's own prototype: glibc types it as
  * `__rusage_who_t` (an enum under _GNU_SOURCE), Darwin as plain `int`.
  */
 #ifdef __linux__
+/* The virtual CPU time from the one Rust model (the SUD `getrusage` row). */
 int getrusage(__rusage_who_t who, struct rusage *usage) {
+    return signal_result(patina_sud_dispatch(SYS_getrusage, (uint64_t)(int64_t)who,
+        (uintptr_t)usage, 0, 0, 0, 0, 0));
+}
 #else
 int getrusage(int who, struct rusage *usage) {
-#endif
     if (usage == NULL) {
         errno = EFAULT;
         return -1;
@@ -186,33 +179,12 @@ int getrusage(int who, struct rusage *usage) {
     }
     return 0;
 }
+#endif
 
 #ifdef __linux__
-/*
- * sysinfo(2): Linux host memory/uptime/load summary (mimalloc's physical-memory
- * probe on Linux). Report a fixed deterministic struct — uptime from the virtual
- * monotonic clock, total memory = the 8 GiB world-model constant with a 1-byte
- * mem_unit, one process — so a guest reading it sees the same values regardless
- * of the host. freeram stays a fixed half of totalram rather than
- * `totalram - high-water`: the shim models no deterministic memory high-water
- * (see getrusage's ru_maxrss), so there is no seed-stable figure to subtract, and
- * a fixed fraction keeps the value a pure function of the world model.
- */
+/* sysinfo(2): the virtual machine, from the one Rust model (the SUD row). */
 int sysinfo(struct sysinfo *info) {
-    if (info == NULL) {
-        errno = EFAULT;
-        return -1;
-    }
-    memset(info, 0, sizeof *info);
-    uint64_t nanos = 0;
-    if (patina_clock_now(PATINA_CLOCK_MONOTONIC, &nanos) == 0) {
-        info->uptime = (long)(nanos / UINT64_C(1000000000));
-    }
-    info->mem_unit = 1;
-    info->totalram = (unsigned long)PATINA_PHYSICAL_MEMORY_BYTES;
-    info->freeram = (unsigned long)(PATINA_PHYSICAL_MEMORY_BYTES / 2);
-    info->procs = 1;
-    return 0;
+    return signal_result(patina_sud_dispatch(SYS_sysinfo, (uintptr_t)info, 0, 0, 0, 0, 0, 0));
 }
 
 int prctl(int option, ...) {
@@ -258,22 +230,16 @@ int setrlimit(__rlimit_resource_t resource, const struct rlimit *rlim) {
 }
 
 /*
- * std::thread::available_parallelism reads the CPU affinity mask. Return a fixed
- * single-CPU set so the guest sees a deterministic core count regardless of the
- * host; the deterministic scheduler runs one baton at a time anyway, and every
- * testbed forces stable output ordering, so the value never
- * perturbs results. This is interposed (not trapped) because it IS reached at
- * startup, unlike the inert spawn surface above.
+ * std::thread::available_parallelism reads the CPU affinity mask: the virtual
+ * machine's one CPU, from the SUD `sched_getaffinity` row, in glibc's shape
+ * (the kernel answers the bytes it wrote; the wrapper zeroes the rest of the
+ * caller's set and answers 0).
  */
 int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask) {
-    (void)pid;
-    if (mask == NULL || cpusetsize == 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    memset(mask, 0, cpusetsize);
-    /* CPU 0 present, all others absent: a deterministic one-core affinity. */
-    ((unsigned char *)mask)[0] = 1;
+    int written = signal_result(patina_sud_dispatch(SYS_sched_getaffinity, (uint64_t)pid,
+        (uint64_t)(cpusetsize > INT_MAX ? INT_MAX : cpusetsize), (uintptr_t)mask, 0, 0, 0, 0));
+    if (written < 0) return -1;
+    memset((char *)mask + written, 0, cpusetsize - (size_t)written);
     return 0;
 }
 
@@ -286,6 +252,21 @@ int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask) {
  * Being strong definitions, the guest references bind here and the libc symbols
  * drop off the import table.
  */
+#ifdef __linux__
+/* glibc's gethostname: uname's node name, ENAMETOOLONG (with the prefix that
+ * fits copied) when it does not fit with its NUL. */
+int gethostname(char *name, size_t len) {
+    struct utsname buf;
+    if (uname(&buf) != 0) return -1;
+    size_t node_len = strlen(buf.nodename) + 1;
+    memcpy(name, buf.nodename, len < node_len ? len : node_len);
+    if (node_len > len) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+#else
 int gethostname(char *name, size_t len) {
     static const char host[] = "patina";
     /* `name` is declared nonnull by glibc (comparing it to NULL is a
@@ -302,6 +283,7 @@ int gethostname(char *name, size_t len) {
     name[copied] = '\0';
     return 0;
 }
+#endif
 int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen,
                struct passwd **result) {
     (void)uid;

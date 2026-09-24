@@ -10,6 +10,9 @@ pub(in crate::thread) const SIGTTIN: u8 = 21;
 pub(in crate::thread) const SIGTTOU: u8 = 22;
 pub(in crate::thread) const SIGURG: u8 = 23;
 pub(in crate::thread) const SIGWINCH: u8 = 28;
+pub(in crate::thread) const SIGALRM: u8 = 14;
+pub(in crate::thread) const SIGVTALRM: u8 = 26;
+pub(in crate::thread) const SIGPROF: u8 = 27;
 pub(in crate::thread) const SIGSYS: u8 = 31;
 pub(in crate::thread) const KERNEL_SIGRTMIN: u8 = 32;
 pub(in crate::thread) const SIGNAL_MAX: i32 = 64;
@@ -29,6 +32,10 @@ pub(in crate::thread) const EFAULT: i32 = 14;
 
 pub(in crate::thread) const SIGPIPE: i32 = 13;
 pub(in crate::thread) const SI_USER: i32 = 0;
+/// `SI_KERNEL`: a signal the kernel sends itself (`SEND_SIG_PRIV`).
+pub(in crate::thread) const SI_KERNEL: i32 = 0x80;
+/// `SI_TIMER`: a POSIX timer's expiry.
+pub(in crate::thread) const SI_TIMER: i32 = -2;
 #[cfg(test)]
 pub(in crate::thread) const SI_QUEUE: i32 = -1;
 #[cfg(target_arch = "x86_64")]

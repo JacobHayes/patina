@@ -17,10 +17,8 @@
 //!   The generic (arm64) table has no `time` row: there the libc vehicle
 //!   calls glibc's `time` and the syscall vehicle reads `CLOCK_REALTIME`.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{ClockArg, Probe, Res, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
@@ -114,63 +112,5 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &["syscall", "time", "getpid", "sleep", "clock_gettime"],
     needs: &[Need::HighResTimers],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: Vehicle::ALL,
-            what: "clock_getres answers only CLOCK_REALTIME and CLOCK_MONOTONIC (SUD sys_clock_getres over clock_from_raw, src/sud/time.rs; its libc spelling is syscall(2), the symbol row being Absent): MONOTONIC_RAW, BOOTTIME, TAI, both CPU-time clocks, both coarse clocks and a process CPU clock id answer EINVAL",
-            failure: Failure::Differs(&[
-                Difference::field(4, "clock_getres", "errno", Observed::Str("EINVAL")),
-                Difference::field(4, "clock_getres", "fields.res_ns", Observed::Null),
-                Difference::field(4, "clock_getres", "ret", Observed::Int(-1)),
-                Difference::check(5, "a high-resolution clock resolves to 1 ns"),
-                Difference::field(6, "clock_getres", "errno", Observed::Str("EINVAL")),
-                Difference::field(6, "clock_getres", "fields.res_ns", Observed::Null),
-                Difference::field(6, "clock_getres", "ret", Observed::Int(-1)),
-                Difference::check(7, "a high-resolution clock resolves to 1 ns"),
-                Difference::field(8, "clock_getres", "errno", Observed::Str("EINVAL")),
-                Difference::field(8, "clock_getres", "fields.res_ns", Observed::Null),
-                Difference::field(8, "clock_getres", "ret", Observed::Int(-1)),
-                Difference::check(9, "a high-resolution clock resolves to 1 ns"),
-                Difference::field(10, "clock_getres", "errno", Observed::Str("EINVAL")),
-                Difference::field(10, "clock_getres", "fields.res_ns", Observed::Null),
-                Difference::field(10, "clock_getres", "ret", Observed::Int(-1)),
-                Difference::check(11, "a high-resolution clock resolves to 1 ns"),
-                Difference::field(12, "clock_getres", "errno", Observed::Str("EINVAL")),
-                Difference::field(12, "clock_getres", "fields.res_ns", Observed::Null),
-                Difference::field(12, "clock_getres", "ret", Observed::Int(-1)),
-                Difference::check(13, "a high-resolution clock resolves to 1 ns"),
-                Difference::field(14, "clock_getres", "errno", Observed::Str("EINVAL")),
-                Difference::field(14, "clock_getres", "fields.res_is_a_tick", Observed::Null),
-                Difference::field(14, "clock_getres", "ret", Observed::Int(-1)),
-                Difference::check(15, "a coarse clock resolves to one tick"),
-                Difference::field(16, "clock_getres", "errno", Observed::Str("EINVAL")),
-                Difference::field(16, "clock_getres", "fields.res_is_a_tick", Observed::Null),
-                Difference::field(16, "clock_getres", "ret", Observed::Int(-1)),
-                Difference::check(17, "a coarse clock resolves to one tick"),
-                Difference::field(25, "clock_getres", "errno", Observed::Str("EINVAL")),
-                Difference::field(25, "clock_getres", "fields.res_ns", Observed::Null),
-                Difference::field(25, "clock_getres", "ret", Observed::Int(-1)),
-                Difference::check(26, "the caller's own process CPU clock resolves to 1 ns"),
-            ]),
-        },
-        // The generic (arm64) table has no time row: its syscall vehicle reads
-        // CLOCK_REALTIME, which is modeled.
-        #[cfg(target_arch = "x86_64")]
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[
-                Vehicle::Syscall,
-                #[cfg(target_arch = "x86_64")]
-                Vehicle::Raw,
-            ],
-            what: "time is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the syscall(2) and raw doors abort by name (the libc door reaches the shim's modeled time interposer)",
-            failure: Failure::Stops {
-                events: 31,
-                ending: crate::compare::Ending::Signal(libc::SIGABRT),
-                diagnostic: "patina: SUD trapped unsupported syscall time (nr",
-            },
-        },
-    ],
     ..DEFAULTS
 };

@@ -1,9 +1,7 @@
 //! time/clocks — clock_gettime / gettimeofday / nanosleep / clock_nanosleep:
 //! clock ids, monotonicity, sleep advancing the clock, and the errno vocabulary.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{Probe, neg};
@@ -115,36 +113,5 @@ pub const SCENARIO: Scenario = Scenario {
         "nanosleep",
         "clock_nanosleep",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: Vehicle::ALL,
-        what: "CLOCK_BOOTTIME, CLOCK_MONOTONIC_RAW, CLOCK_MONOTONIC_COARSE, CLOCK_REALTIME_COARSE, CLOCK_PROCESS_CPUTIME_ID and CLOCK_THREAD_CPUTIME_ID answer EINVAL (patina_posix.c clock_gettime routes only REALTIME/MONOTONIC)",
-        failure: Failure::Differs(&[
-            Difference::field(6, "clock_gettime", "errno", Observed::Str("EINVAL")),
-            Difference::field(6, "clock_gettime", "fields.ns", Observed::Null),
-            Difference::field(6, "clock_gettime", "ret", Observed::Int(-1)),
-            Difference::field(8, "clock_gettime", "errno", Observed::Str("EINVAL")),
-            Difference::field(8, "clock_gettime", "fields.ns", Observed::Null),
-            Difference::field(8, "clock_gettime", "ret", Observed::Int(-1)),
-            Difference::field(10, "clock_gettime", "errno", Observed::Str("EINVAL")),
-            Difference::field(10, "clock_gettime", "fields.ns", Observed::Null),
-            Difference::field(10, "clock_gettime", "ret", Observed::Int(-1)),
-            Difference::field(12, "clock_gettime", "errno", Observed::Str("EINVAL")),
-            Difference::field(12, "clock_gettime", "fields.ns", Observed::Null),
-            Difference::field(12, "clock_gettime", "ret", Observed::Int(-1)),
-            Difference::field(14, "clock_gettime", "errno", Observed::Str("EINVAL")),
-            Difference::field(14, "clock_gettime", "fields.ns", Observed::Null),
-            Difference::field(14, "clock_gettime", "ret", Observed::Int(-1)),
-            Difference::field(16, "clock_gettime", "errno", Observed::Str("EINVAL")),
-            Difference::field(16, "clock_gettime", "fields.ns", Observed::Null),
-            Difference::field(16, "clock_gettime", "ret", Observed::Int(-1)),
-            Difference::check(7, "every standard clock id reads"),
-            Difference::check(9, "every standard clock id reads"),
-            Difference::check(11, "every standard clock id reads"),
-            Difference::check(13, "every standard clock id reads"),
-            Difference::check(15, "every standard clock id reads"),
-            Difference::check(17, "every standard clock id reads"),
-        ]),
-    }],
     ..DEFAULTS
 };

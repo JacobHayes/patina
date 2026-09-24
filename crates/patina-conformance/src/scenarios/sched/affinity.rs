@@ -18,10 +18,8 @@
 //! kernel's is a model constant): masks and CPU numbers are related, never
 //! recorded.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, Who, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
@@ -166,32 +164,6 @@ pub const SCENARIO: Scenario = Scenario {
         "sysconf",
         "getpid",
         "syscall",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim's sched_getaffinity interposer (c/posix/sched_identity.c) answers the libc door with its one-CPU set, and getcpu (no shim wrapper: syscall(2)) is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the run aborts by name there",
-            failure: Failure::Stops {
-                events: 5,
-                ending: Ending::Signal(libc::SIGABRT),
-                diagnostic: "patina: SUD trapped unsupported syscall getcpu (nr",
-            },
-        },
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[
-                Vehicle::Syscall,
-                #[cfg(target_arch = "x86_64")]
-                Vehicle::Raw,
-            ],
-            what: "sched_getaffinity is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the syscall(2) and raw doors abort by name (only the libc door reaches the C interposer)",
-            failure: Failure::Stops {
-                events: 1,
-                ending: Ending::Signal(libc::SIGABRT),
-                diagnostic: "patina: SUD trapped unsupported syscall sched_getaffinity (nr",
-            },
-        },
     ],
     ..DEFAULTS
 };

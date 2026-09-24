@@ -1319,7 +1319,7 @@ mod tests {
             .enumerate()
             .map(|(i, (operation, outcome))| TraceEvent::new(i as u64, operation, outcome))
             .collect();
-        TraceBundle::new(RunMetadata::new(7, "fp-test"), decisions)
+        TraceBundle::new(RunMetadata::new(7, "fp-test", 0, "patina"), decisions)
     }
 
     /// An `fs_open` line has to SAY what the open asked for. The flag word and
@@ -1459,7 +1459,7 @@ mod tests {
             Outcome::Bytes(vec![9]),
         );
         branch_event.order = 3;
-        let mut bundle = TraceBundle::new(RunMetadata::new(7, "fp-test"), main);
+        let mut bundle = TraceBundle::new(RunMetadata::new(7, "fp-test", 0, "patina"), main);
         bundle.timelines.push(patina_dst_trace::Timeline {
             id: "branch".into(),
             parent: Some("main".into()),
@@ -1518,7 +1518,7 @@ mod tests {
         let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let bundle = TraceBundle {
             format_version: patina_dst_trace::TRACE_FORMAT_VERSION,
-            metadata: RunMetadata::new(7, "fp-test+crash-restart"),
+            metadata: RunMetadata::new(7, "fp-test+crash-restart", 0, "patina"),
             timelines: vec![patina_dst_trace::Timeline {
                 id: "main".into(),
                 parent: None,

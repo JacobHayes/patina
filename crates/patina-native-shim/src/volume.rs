@@ -171,7 +171,9 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
             None => Err(EBADF),
         },
         FdKind::Socket => Ok(Filesystem::Sockfs),
-        FdKind::EventFd | FdKind::SignalFd | FdKind::Epoll => Ok(Filesystem::AnonInodefs),
+        FdKind::EventFd | FdKind::TimerFd | FdKind::SignalFd | FdKind::Epoll => {
+            Ok(Filesystem::AnonInodefs)
+        }
         FdKind::MessageQueue => Ok(Filesystem::Mqueue),
         FdKind::Urandom => Ok(Filesystem::Devtmpfs),
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Err(EBADF),

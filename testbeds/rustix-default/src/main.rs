@@ -19,9 +19,15 @@ use rustix::net::{
 };
 use rustix::time::{clock_gettime, ClockId};
 
-/// The virtual clock starts near zero and only advances via sleeps; a wall clock
-/// would read ~1.7e18 ns. Anything under this bound proves the read was virtual.
+/// The virtual monotonic clock starts near zero and only advances via sleeps; a
+/// host monotonic clock reads the host's uptime. Anything under this bound
+/// proves the read was virtual.
 const VIRTUAL_BOUND: u64 = 1_000_000_000_000_000;
+
+/// Patina's default virtual realtime epoch (2026-07-22T23:00:09Z): virtual
+/// realtime is exactly this plus virtual monotonic time, a relation the host's
+/// wall clock (offset from its uptime by the boot time) does not satisfy.
+const DEFAULT_REALTIME_EPOCH_NANOS: u64 = 1_784_761_209_000_000_000;
 
 fn mono_nanos() -> u64 {
     let ts = clock_gettime(ClockId::Monotonic);
@@ -34,9 +40,11 @@ fn main() {
     // A realtime read also routes through the virtual clock.
     let real = clock_gettime(ClockId::Realtime);
     assert!(t0 < VIRTUAL_BOUND, "monotonic clock must be virtual: {t0}");
-    assert!(
-        (real.tv_sec as u64) < VIRTUAL_BOUND / 1_000_000_000,
-        "realtime clock must be virtual"
+    let real_nanos = real.tv_sec as u64 * 1_000_000_000 + real.tv_nsec as u64;
+    assert_eq!(
+        real_nanos,
+        DEFAULT_REALTIME_EPOCH_NANOS + t0,
+        "realtime clock must be virtual: the default epoch plus monotonic time"
     );
 
     // ---- sleep (raw clock_nanosleep) advances virtual time ----

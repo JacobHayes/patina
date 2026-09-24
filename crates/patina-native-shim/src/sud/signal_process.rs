@@ -271,14 +271,6 @@ pub(super) fn sys_waitid(options: u64) -> i64 {
     }
 }
 
-pub(super) fn sys_getpgid(pid: i64) -> i64 {
-    if pid == 0 || pid == 1 { 1 } else { -ESRCH }
-}
-
-pub(super) fn sys_getsid(pid: i64) -> i64 {
-    if pid == 0 || pid == 1 { 1 } else { -ESRCH }
-}
-
 pub(super) fn sys_kill(pid: i64, sig: i64) -> i64 {
     unsafe {
         generate_signal(

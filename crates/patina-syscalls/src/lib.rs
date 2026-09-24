@@ -70,10 +70,20 @@ pub const VIRTUAL_ABI: &str = "6.8";
 /// interposers) and every `st_uid` are answered from, and what `chown` is a
 /// comparison against. The identity arc makes it a `--host-*` knob.
 pub const IDENTITY_UID: u32 = 1000;
-/// The sole virtual process; also its group/session leader.
-pub const IDENTITY_PID: u32 = 1;
+/// The guest process: the child of the pid namespace's init
+/// ([`INIT_PID`]), leading its own process group in init's session, as a
+/// program a container's init started. Its main thread's id is its pid.
+pub const IDENTITY_PID: u32 = 2;
+/// The pid namespace's init: the guest's parent, leader of process group 1
+/// and session 1, running as [`IDENTITY_UID`] with no signal handlers (so
+/// every signal the guest sends it is dropped), not dumpable (so ptrace-mode
+/// access to it is refused), and asleep (its CPU time is its startup's).
+pub const INIT_PID: u32 = 1;
 /// The group of [`IDENTITY_UID`]; see there.
 pub const IDENTITY_GID: u32 = 1000;
+/// The virtual machine's node name: what `uname` reports and `gethostname`
+/// answers.
+pub const IDENTITY_HOSTNAME: &str = "patina";
 
 /// `6.8.0-139-generic` → `(6, 8, 0)`; `6.10` → `(6, 10, 0)`. `None` when the
 /// text does not start with a dotted release number.

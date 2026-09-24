@@ -5,8 +5,10 @@
 //! * `sched_getattr` answers a normal task's policy, flags, nice and
 //!   priority; it writes `min(size, the kernel's size)` bytes and says so in
 //!   `size` (48 for the first version, 56 — the kernel's own — for anything
-//!   larger), leaving the rest of a larger buffer alone; a size under the
-//!   first version, above a page, a flag, or a negative pid is `EINVAL`, a
+//!   larger); the rest of a larger buffer is left alone up to Linux 6.12
+//!   and zeroed from 6.13 (a host on the other side of that change from the
+//!   virtual ABI level records the virtual ABI's answer and checks its own:
+//!   `getattr_larger`); a size under the first version, above a page, a flag, or a negative pid is `EINVAL`, a
 //!   pid no process has `ESRCH`;
 //! * `sched_setattr` takes a size of 0 as the first version; a size under it
 //!   is `E2BIG` with the kernel's size written back into `size`, and so is a
@@ -20,15 +22,81 @@
 //! The utilization clamps (`sched_util_min`/`max`) are the host's kernel
 //! configuration and are not recorded.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::probe::{Probe, SCHED_ATTR_SIZE_VER0, SCHED_ATTR_SIZE_VER1, SchedAttr, Who, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
+use patina_dst_syscalls::{VIRTUAL_ABI, parse_release};
 
 /// A `sched_flags` bit past `SCHED_FLAG_ALL`.
 const UNKNOWN_SCHED_FLAG: u64 = 1 << 20;
+
+/// The release whose `sched_getattr` zeroes a larger buffer past the
+/// kernel's struct: Linux 6.13, commit 112cca098a70 ("sched_getattr: port to
+/// copy_struct_to_user", merged through vfs-6.13.usercopy). Up to 6.12 those
+/// bytes were left alone (`sched_attr_copy_to_user` copied `min(usize,
+/// ksize)` bytes only); a smaller buffer is written up to its size on both.
+const ZEROES_TAIL_SINCE: &str = "6.13";
+
+fn zeroes_tail(release: &str) -> bool {
+    parse_release(release) >= parse_release(ZEROES_TAIL_SINCE)
+}
+
+fn tail_answer(zeroed: bool) -> &'static str {
+    if zeroed { "zeroed" } else { "untouched" }
+}
+
+/// `sched_getattr(0, buf, 128, 0)` into a 128-byte buffer filled with
+/// `0xa5`: the attribute and what became of the 72 bytes past the kernel's
+/// 56 (`untouched`, `zeroed` or `written`), and the answer this host's
+/// release gives. A host on the other side of 6.13 from the virtual ABI
+/// level answers by declaration: its event records the virtual ABI's answer
+/// (the declared-absent pattern, for one field), while its own answer is
+/// still checked against its release. The virtual kernel's `uname` reports
+/// its ABI level, so under patina the observation itself is recorded.
+fn getattr_larger(p: &Probe) -> (i64, SchedAttr, &'static str, &'static str) {
+    let host = zeroes_tail(&crate::host::kernel_release());
+    let virtual_abi = zeroes_tail(VIRTUAL_ABI);
+    let mut buf = vec![0xa5u8; 128];
+    let result = p.call_unrecorded(
+        Syscall::N_sched_getattr,
+        [0, buf.as_mut_ptr() as i64, 128, 0, 0, 0],
+    );
+    // SAFETY: `buf` holds at least one SchedAttr; read unaligned.
+    let attr: SchedAttr = unsafe { std::ptr::read_unaligned(buf.as_ptr().cast()) };
+    let tail = &buf[SCHED_ATTR_SIZE_VER1 as usize..];
+    let observed = if tail.iter().all(|b| *b == 0xa5) {
+        "untouched"
+    } else if tail.iter().all(|b| *b == 0) {
+        "zeroed"
+    } else {
+        "written"
+    };
+    let recorded = if host == virtual_abi {
+        observed
+    } else {
+        tail_answer(virtual_abi)
+    };
+    let builder = p
+        .rec
+        .event("sched_getattr", result)
+        .arg("pid", 0)
+        .arg("size", 128)
+        .arg("flags", 0);
+    let builder = if result == 0 {
+        builder
+            .field("attr_size", attr.size)
+            .field("policy", attr.policy)
+            .field("sched_flags", attr.flags)
+            .field("nice", attr.nice)
+            .field("priority", attr.priority)
+            .field("tail", recorded)
+    } else {
+        builder
+    };
+    builder.emit();
+    (result, attr, observed, tail_answer(host))
+}
 
 fn normal(size: u32, nice: i32) -> SchedAttr {
     SchedAttr {
@@ -56,10 +124,14 @@ pub fn run(p: &Probe) {
         "the first version's size writes 48 bytes and says so",
         r == 0 && attr.size == SCHED_ATTR_SIZE_VER0,
     );
-    let (r, attr) = p.sched_getattr(Who::Caller, 128, 128, 0);
+    let (r, attr, tail, expected) = getattr_larger(p);
     p.check(
         "a larger size writes the kernel's 56 and says so",
         r == 0 && attr.size == SCHED_ATTR_SIZE_VER1,
+    );
+    p.check(
+        "the bytes past the kernel's struct are left alone (zeroed from 6.13)",
+        r == 0 && tail == expected,
     );
     p.check(
         "a size under the first version is EINVAL",
@@ -179,15 +251,5 @@ pub const SCENARIO: Scenario = Scenario {
         release: "5.3",
         why: "struct sched_attr's second version (56 bytes, the utilization clamps) first appears in Linux 5.3",
     }),
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: Vehicle::ALL,
-        what: "sched_getattr is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no sched_getattr wrapper)",
-        failure: Failure::Stops {
-            events: 1,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall sched_getattr (nr",
-        },
-    }],
     ..DEFAULTS
 };

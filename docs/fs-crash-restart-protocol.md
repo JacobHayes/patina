@@ -4,7 +4,7 @@ This note pins the crash-restart protocol surface for `--fs-crash-at`. Native ru
 
 ## Trace contract
 
-Trace format v5 records incarnation state explicitly:
+The trace records incarnation state explicitly:
 
 - every operation has an operation `sequence`, a global logical `order`, and an `incarnation` id;
 - every timeline has lifecycle markers in the same `order` namespace;
@@ -23,8 +23,6 @@ End(1)
 ```
 
 Operation `sequence` numbers run contiguously across both incarnations (incarnation 1's first operation follows incarnation 0's last); `order` also gives each lifecycle marker a slot, so it skips the `Crash`, `Restart` and `Start(1)` slots between the incarnations.
-
-Non-crash v1-v4 traces migrate to v5 by adding a linear `Start(0)` / `End(0)` lifecycle and putting existing operations in incarnation 0. Legacy v1-v4 traces that contain `Operation::FsCrash` fail closed with `LegacyCrashSemantics`, because those recordings used the old rollback-and-continue hybrid semantics.
 
 ## Handoff contract
 

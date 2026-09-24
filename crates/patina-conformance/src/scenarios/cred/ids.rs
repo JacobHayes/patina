@@ -16,11 +16,9 @@
 //! the guest as its identity knob, the host as whoever runs the test.
 //! "Another" id is the caller's plus one, which it does not hold.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::observe::Id;
 use crate::probe::{Cred, Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -151,15 +149,5 @@ pub const SCENARIO: Scenario = Scenario {
         "getuid", "getgid", "geteuid", "getegid", "setuid", "setgid", "syscall",
     ],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: Vehicle::ALL,
-        what: "getresuid is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so after the Constant getuid/getgid/geteuid/getegid rows the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no getresuid wrapper)",
-        failure: Failure::Stops {
-            events: 6,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall getresuid (nr",
-        },
-    }],
     ..DEFAULTS
 };

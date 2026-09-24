@@ -71,8 +71,8 @@ fn directed(task: TaskId, sig: i32) {
         unsafe {
             generate_signal(
                 GenerationTarget::Thread {
-                    tgid: Some(1),
-                    tid: task.0 as i32,
+                    tgid: Some(crate::registry::IDENTITY_PID as i32),
+                    tid: tid_of(task),
                 },
                 sig,
                 GenerationInfo::Thread,
@@ -156,7 +156,7 @@ fn same_task_kill_delivers_at_syscall_return() {
             unsafe {
                 crate::sud::patina_sud_dispatch(
                     syscall_number("kill"),
-                    1,
+                    u64::from(crate::registry::IDENTITY_PID),
                     SIGUSR1 as u64,
                     0,
                     0,
@@ -355,8 +355,8 @@ fn dequeue_private_before_shared_lowest_first_fifo() {
                 unsafe {
                     generate_signal(
                         GenerationTarget::Thread {
-                            tgid: Some(1),
-                            tid: current_task().0 as i32,
+                            tgid: Some(crate::registry::IDENTITY_PID as i32),
+                            tid: tid_of(current_task()),
                         },
                         SIGRTMIN,
                         GenerationInfo::Queued(&info),
@@ -512,7 +512,7 @@ fn no_pending_syscall_tail_and_unchanged_frame_issue_no_host_calls() {
             unsafe {
                 crate::sud::patina_sud_dispatch(syscall_number("getpid"), 0, 0, 0, 0, 0, 0, 0)
             },
-            1
+            i64::from(crate::registry::IDENTITY_PID)
         );
         unsafe {
             patina_signal_frame(&mut mask, &mut stack);

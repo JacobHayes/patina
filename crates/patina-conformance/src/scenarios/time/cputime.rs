@@ -21,12 +21,14 @@
 //!
 //! How much CPU time the process has used is the host's business: every
 //! figure is related, never recorded.
+//!
+//! Under patina the first reading is the virtual kernel's modeled startup
+//! cost (`patina_dst_abi::STARTUP_CPU_NANOS`), and the spin advances CPU time
+//! through the runtime's advance-on-spin rescue.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
 use crate::signals::spin_until;
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
@@ -106,15 +108,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[Syscall::N_times, Syscall::N_getrusage],
     symbols: &["syscall", "getrusage", "sysconf", "clock_gettime"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: Vehicle::ALL,
-        what: "times is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no times wrapper)",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall times (nr",
-        },
-    }],
     ..DEFAULTS
 };

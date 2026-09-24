@@ -593,7 +593,7 @@ mod tests {
             .enumerate()
             .map(|(i, (operation, outcome))| TraceEvent::new(i as u64, operation, outcome))
             .collect();
-        TraceBundle::new(RunMetadata::new(7, "fp-test"), decisions)
+        TraceBundle::new(RunMetadata::new(7, "fp-test", 0, "patina"), decisions)
     }
 
     fn render_bundle(bundle: &TraceBundle) -> String {

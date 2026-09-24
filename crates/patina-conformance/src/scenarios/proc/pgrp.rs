@@ -9,10 +9,8 @@
 //!   process of its session leads `EPERM`;
 //! * `setsid` of a group leader is `EPERM`.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, Who, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -58,40 +56,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_setsid,
     ],
     symbols: &["getpid", "setpgid", "setsid", "syscall"],
-    gaps: &[
-        #[cfg(target_arch = "x86_64")]
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: Vehicle::ALL,
-            what: "getpgrp is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no getpgrp wrapper)",
-            failure: Failure::Stops {
-                events: 3,
-                ending: Ending::Signal(libc::SIGABRT),
-                diagnostic: "patina: SUD trapped unsupported syscall getpgrp (nr",
-            },
-        },
-        #[cfg(not(target_arch = "x86_64"))]
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim strong-defines setpgid as a process deny-trap (symbol row Deny(process), c/posix/signal_process.c patina_process_trap), so the libc door aborts by name where the row, Trap(unmodeled) until the identity arc, has a kernel answer",
-            failure: Failure::Stops {
-                events: 3,
-                ending: Ending::Signal(libc::SIGABRT),
-                diagnostic: "patina: process spawn reached under patina: setpgid;",
-            },
-        },
-        #[cfg(not(target_arch = "x86_64"))]
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[Vehicle::Syscall],
-            what: "setpgid is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the syscall(2) door aborts by name",
-            failure: Failure::Stops {
-                events: 3,
-                ending: Ending::Signal(libc::SIGABRT),
-                diagnostic: "patina: SUD trapped unsupported syscall setpgid (nr",
-            },
-        },
-    ],
     ..DEFAULTS
 };

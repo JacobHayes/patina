@@ -337,6 +337,21 @@ forwards into the same dispatcher instead of its two-number allowlist.
   unprivileged answer is what capabilities bypass (set*id, groups, caps,
   priority raises, realtime policies, hard-limit raises, clock setting, the
   kernel log) need an unprivileged caller and are reported not run as root.
+  Status: the clocks decode every clock id once (`src/clocks.rs`), the timers
+  run on the virtual clock and CPU time (`src/thread/timers.rs`, timer
+  descriptors an `FdKind`), the identity rows answer an unprivileged caller
+  of the one identity in a two-process pid namespace (init pid 1, the guest
+  pid 2; `src/identity.rs`), and per-thread scheduling attributes follow
+  `__sched_setscheduler` (`src/thread/sched.rs`), all behind both doors;
+  virtual CPU time is a 1 ms modeled startup cost plus the advance-on-spin
+  rescues charged to the baton holder, and idle time advances to a timer's
+  deadline. The node name is the run's `--hostname` (default `patina`,
+  recorded in the trace), and `sethostname`/`setdomainname` answer the
+  unprivileged `EPERM`. Every scenario of the family runs without a gap but
+  `sys/sysfs` (its fs-arc gap); `proc/ids` declares `kill(-1, 0)` a
+  by-design difference, since the two-process tree has no process for it to
+  reach. The `--host-*` knob group beyond the node name and the virtual
+  `/proc`/`/sys` tree are not built.
 - **signals + threads + process** (spec and suggested order M1–M5:
   [syscall-conformance-signals.md](syscall-conformance-signals.md)): D1 state in `ThreadRuntime` (dispositions,
   per-task mask, pending sets, altstack); D2 generation records a trace op and

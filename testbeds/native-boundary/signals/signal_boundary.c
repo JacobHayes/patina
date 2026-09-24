@@ -46,9 +46,9 @@ static void *sender(void *arg) {
     (void)arg;
     struct timespec delay = {0, 10};
     assert(nanosleep(&delay, NULL) == 0);
-    assert(kill(1, SIGUSR1) == 0);
+    assert(kill(getpid(), SIGUSR1) == 0);
     assert(nanosleep(&delay, NULL) == 0);
-    assert(kill(1, SIGUSR2) == 0);
+    assert(kill(getpid(), SIGUSR2) == 0);
     return NULL;
 }
 static void prctl_state(void) {
@@ -79,7 +79,7 @@ static void install_handler(void) {
 
 static void handler_visibility(void) {
     install_handler();
-    assert(tgkill(1, (pid_t)patina_thread_id(), SIGUSR1) == 0);
+    assert(tgkill(getpid(), (pid_t)patina_thread_id(), SIGUSR1) == 0);
     assert(tkill((pid_t)patina_thread_id(), SIGUSR1) == 0);
     assert(handled == 2);
 }
@@ -99,7 +99,7 @@ static void nested_unblock(void) {
     install_handler();
     uint64_t mask = UINT64_C(1) << (SIGUSR1 - 1);
     assert(raw4(SYS_rt_sigprocmask, SIG_BLOCK, (long)&mask, 0, sizeof mask) == 0);
-    assert(kill(1, SIGUSR1) == 0);
+    assert(kill(getpid(), SIGUSR1) == 0);
     assert(handled == 0);
     assert(raw4(SYS_rt_sigprocmask, SIG_UNBLOCK, (long)&mask, 0, sizeof mask) == 0);
     assert(handled == 1);
@@ -110,7 +110,7 @@ static void nested_unblock(void) {
         write(2, diagnostic, sizeof diagnostic - 1);
         _exit(81);
     }
-    assert(kill(1, SIGUSR1) == 0);
+    assert(kill(getpid(), SIGUSR1) == 0);
     assert(handled == 2);
 }
 

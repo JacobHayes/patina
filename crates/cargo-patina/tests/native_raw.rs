@@ -21,7 +21,10 @@ mod linux {
 
     #[test]
     fn raw_process_identity_is_fixed() {
-        assert_raw_output("raw_procstate", "RAW_PROCSTATE pid=1 uid=1000 uname_rc=-38");
+        assert_raw_output(
+            "raw_procstate",
+            "RAW_PROCSTATE pid=2 uid=1000 uname_rc=0 sysname=Linux nodename=patina",
+        );
     }
 
     #[test]

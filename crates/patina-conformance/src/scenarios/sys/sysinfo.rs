@@ -12,10 +12,8 @@
 //! those relations. Declared modeled difference: the virtual kernel's
 //! memory and uptime are its own constants and clock.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -45,30 +43,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[Syscall::N_sysinfo],
     symbols: &["sysinfo", "clock_gettime"],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[Vehicle::Libc],
-            what: "the libc door reaches the shim's fixed sysinfo interposer (c/posix/sched_identity.c), whose uptime is virtual monotonic seconds, while CLOCK_BOOTTIME answers EINVAL (the C clock_gettime interposer routes only REALTIME/MONOTONIC, c/posix/time.c), so the boot-clock relation cannot hold",
-            failure: Failure::Differs(&[Difference::check(
-                2,
-                "the uptime is the boot clock's seconds rounded up, read between two readings",
-            )]),
-        },
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[
-                Vehicle::Syscall,
-                #[cfg(target_arch = "x86_64")]
-                Vehicle::Raw,
-            ],
-            what: "sysinfo is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the syscall(2) and raw doors abort by name (the libc door reaches the shim's fixed sysinfo interposer, whose answers hold every relation)",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Signal(libc::SIGABRT),
-                diagnostic: "patina: SUD trapped unsupported syscall sysinfo (nr",
-            },
-        },
-    ],
     ..DEFAULTS
 };

@@ -426,8 +426,8 @@ static const char patina_cf_empty_array = 0;
 static const char patina_cf_system_timezone = 0;
 static const char patina_cf_timezone_name = 0;
 static const char patina_cf_utc_name[] = "UTC";
-/* The guest's fixed virtual executable path (proc_pidpath for pid 1). */
-static const char patina_proc_pid1_path[] = "/patina/guest";
+/* The guest's fixed virtual executable path (proc_pidpath of the guest). */
+static const char patina_proc_guest_path[] = "/patina/guest";
 
 /* --- rustls-native-certs / security-framework trust-root surface ---
  *
@@ -552,70 +552,73 @@ PATINA_INTROSPECTION_TRAP(IOServiceGetMatchingServices)
 
 /* --- BSD per-process introspection (sysinfo process refresh) ---
  *
- * The deterministic world is a single process — the guest, pid 1 (getpid()==1,
- * getppid()==2). proc_listallpids honestly enumerates that one pid: the sizing
- * call (buffer==NULL) reports one pid; the fill call writes pid 1. (sysinfo's
- * get_proc_list treats a fill that exactly reaches the reported capacity as "the
- * list grew, retry" and drops it, so under sysinfo the *detailed* list ends up
- * empty and proc_pidpath/proc_pidinfo/proc_pid_rusage are not reached via
- * new_all — that is sysinfo's own capacity heuristic, not a fabricated count
- * here; the honest pid count is 1.) The three per-pid queries are still
- * converted to honest deterministic results so any DIRECT caller runs
- * deterministically rather than aborting. */
+ * The same process tree as Linux: the guest is pid 2 (patina_pid()), the child
+ * of init, pid 1 (patina_ppid()), which runs as the same user, has no signal
+ * handlers and may not be inspected. proc_listallpids enumerates both, newest
+ * first: the sizing call (buffer==NULL) reports two pids; the fill call writes
+ * as many as the buffer holds. (sysinfo's get_proc_list treats a fill that
+ * exactly reaches the reported capacity as "the list grew, retry" and drops it,
+ * so under sysinfo the *detailed* list ends up empty and proc_pidpath/
+ * proc_pidinfo/proc_pid_rusage are not reached via new_all — that is sysinfo's
+ * own capacity heuristic, not a fabricated count here.) The three per-pid
+ * queries answer the guest deterministically, init with EPERM, and any other
+ * pid with ESRCH, so any DIRECT caller runs deterministically rather than
+ * aborting. */
 int proc_listallpids(void *buffer, int buffersize) {
+    const int pids[2] = {patina_pid(), patina_ppid()};
     if (buffer == NULL || buffersize <= 0) {
-        return 1; /* one pid exists: the guest, pid 1 */
+        return 2;
     }
-    if ((size_t)buffersize < sizeof(int)) {
-        return 0;
+    int count = 0;
+    while (count < 2 && (size_t)buffersize >= (size_t)(count + 1) * sizeof(int)) {
+        ((int *)buffer)[count] = pids[count];
+        count++;
     }
-    *(int *)buffer = 1;
-    return 1;
+    return count;
+}
+
+/* The answer of a per-pid query that names no process the guest may read:
+ * EPERM for init, ESRCH for a pid no process has. */
+static int patina_proc_refuse(int pid) {
+    errno = pid == patina_ppid() ? EPERM : ESRCH;
+    return -1;
 }
 /* proc_pidpath: the guest's virtual executable path (a fixed deterministic
  * identity, never the host's real path — the gethostname/_NSGetExecutablePath
- * doctrine). Other pids: no such process. */
+ * doctrine). Init: EPERM; other pids: no such process. */
 int proc_pidpath(int pid, void *buffer, uint32_t buffersize) {
-    if (pid != 1) {
-        errno = ESRCH;
-        return -1;
-    }
+    if (pid != patina_pid()) return patina_proc_refuse(pid);
     if (buffer == NULL) {
         errno = EFAULT;
         return -1;
     }
-    size_t len = sizeof(patina_proc_pid1_path) - 1;
+    size_t len = sizeof(patina_proc_guest_path) - 1;
     if ((size_t)buffersize < len + 1) {
         errno = ENOMEM;
         return -1;
     }
-    memcpy(buffer, patina_proc_pid1_path, len + 1);
+    memcpy(buffer, patina_proc_guest_path, len + 1);
     return (int)len; /* real proc_pidpath returns the length, excluding the NUL */
 }
-/* proc_pidinfo: pid 1 exists, but its kernel-internal BSD/task/vnode info is not
+/* proc_pidinfo: the guest exists, but its kernel-internal BSD/task/vnode info is not
  * modeled — report zero bytes filled. A caller (sysinfo's get_bsd_info /
  * get_cwd_root) reads that as "no info for this flavor" and degrades gracefully
- * (falls back to the proc_pidpath name) rather than aborting. Other pids: ESRCH. */
+ * (falls back to the proc_pidpath name) rather than aborting. Init: EPERM;
+ * other pids: ESRCH. */
 int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize) {
     (void)flavor;
     (void)arg;
     (void)buffer;
     (void)buffersize;
-    if (pid != 1) {
-        errno = ESRCH;
-        return -1;
-    }
+    if (pid != patina_pid()) return patina_proc_refuse(pid);
     return 0;
 }
-/* proc_pid_rusage: pid 1 has no modeled per-process resource accounting, so
+/* proc_pid_rusage: the guest has no modeled per-process resource accounting, so
  * report an all-zero rusage for the one flavor real consumers request
  * (RUSAGE_INFO_V2, sysinfo's disk-io read); zeroing only that known-size struct
  * keeps the write in bounds. Other flavors/pids: deterministic error. */
 int proc_pid_rusage(int pid, int flavor, rusage_info_t *buffer) {
-    if (pid != 1) {
-        errno = ESRCH;
-        return -1;
-    }
+    if (pid != patina_pid()) return patina_proc_refuse(pid);
     if (buffer == NULL) {
         errno = EFAULT;
         return -1;

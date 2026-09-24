@@ -319,8 +319,8 @@ then `run` the resulting artifact.
   and deterministic process-state constants.
 - **Stock tokio** on macOS and Linux: kqueue/epoll readiness reactors are
   interposed over virtual sockets, pipes, and the virtual clock.
-- **Record/replay** with byte-identical traces, trace-format migration, branch
-  timelines (Cargo/WASI), and failure-oracle **trace minimization**.
+- **Record/replay** with byte-identical traces, branch timelines
+  (Cargo/WASI), and failure-oracle **trace minimization**.
 - **Default-deny audit gate**: before a native guest runs, every externally
   resolved symbol must be interposed or provably effect-free; unknown imports
   and raw syscall/clock/entropy instructions are refusals
@@ -359,7 +359,8 @@ Honesty is a feature. Current limits, all of which fail loudly rather than
 silently:
 
 - **Experimental**: APIs, CLI, and the trace format are unstable; traces are
-  tied to the exact binary and config that produced them (by design).
+  tied to the exact binary and config that produced them (by design), and a
+  trace from another format version is refused rather than upgraded.
 - **Not on crates.io**: build from source. The workspace crates are published
   under `patina-dst-*` names; the SDK crate is `patina-dst`, used as
   `patina_dst::` in code.

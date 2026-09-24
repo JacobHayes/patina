@@ -134,6 +134,108 @@ fn run_accepts_options_before_the_wasi_artifact() {
     );
 }
 
+// The WASI family's realtime epoch: the default, the `--realtime-epoch`
+// override applied to the in-process clock, recorded into the trace, restored by
+// a flag-free replay, and refused when re-supplied to `replay`.
+#[test]
+fn wasi_realtime_epoch_defaults_overrides_and_replays_flag_free() {
+    let directory = tempdir().unwrap();
+    let cwd = directory.path();
+    // `_start` reads the realtime clock and exits 9 on the default epoch's
+    // second (2026-07-22T23:00:09Z), 7 on 2001-09-09T01:46:40Z, 1 otherwise —
+    // an exit code that is a pure function of the wall clock the guest saw.
+    let module = directory.path().join("epoch.wasm");
+    fs::write(
+        &module,
+        wat::parse_str(
+            r#"(module
+                (import "wasi_snapshot_preview1" "clock_time_get"
+                    (func $clock_time_get (param i32 i64 i32) (result i32)))
+                (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+                (memory (export "memory") 1)
+                (func (export "_start")
+                    (local $secs i64)
+                    (drop (call $clock_time_get (i32.const 0) (i64.const 1) (i32.const 0)))
+                    (local.set $secs
+                        (i64.div_u (i64.load (i32.const 0)) (i64.const 1000000000)))
+                    (call $proc_exit
+                        (select
+                            (i32.const 7)
+                            (select
+                                (i32.const 9)
+                                (i32.const 1)
+                                (i64.eq (local.get $secs) (i64.const 1784761209)))
+                            (i64.eq (local.get $secs) (i64.const 1000000000))))))"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let module = module.to_str().unwrap();
+
+    let default = invoke_unchecked(patina, cwd, &["run", module, "--seed", "1"]);
+    assert_eq!(
+        default.status.code(),
+        Some(9),
+        "{}",
+        String::from_utf8_lossy(&default.stderr)
+    );
+
+    let trace = directory.path().join("epoch.patina");
+    let recorded = invoke_unchecked(
+        patina,
+        cwd,
+        &[
+            "run",
+            module,
+            "--seed",
+            "1",
+            "--realtime-epoch",
+            "2001-09-09T01:46:40Z",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        recorded.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    assert_eq!(
+        patina_dst_trace::TraceBundle::load(&trace)
+            .unwrap()
+            .metadata
+            .realtime_epoch_nanos,
+        1_000_000_000_000_000_000
+    );
+
+    let replayed = invoke_unchecked(patina, cwd, &["replay", module, trace.to_str().unwrap()]);
+    assert_eq!(
+        replayed.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    let refused = invoke_unchecked(
+        patina,
+        cwd,
+        &[
+            "replay",
+            module,
+            trace.to_str().unwrap(),
+            "--realtime-epoch",
+            "2001-09-09T01:46:40Z",
+        ],
+    );
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("--realtime-epoch"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
+
 // A WASI record→`replay` round-trip: the `replay` verb restores the recorded
 // guest argv (the `--arg` values) and fault configuration from the trace, so a
 // replay is flag-free and byte-identical. A re-supplied `--arg` must match the
@@ -596,9 +698,82 @@ fn separate_processes_repeat_record_and_replay() {
     let first_result = result_line(&first);
     assert_eq!(result_line(&repeated), first_result);
     assert!(first_result.contains("cfg=true"));
+    // The wall clock starts on the default realtime epoch (Patina's first
+    // commit, 2026-07-22T23:00:09Z) and has advanced by the 10ns slept.
+    // The node name is the virtual kernel's default.
+    assert!(
+        first_result.contains(" time=10 wall=1784761209000000010 host=patina "),
+        "{first_result}"
+    );
     assert_ne!(result_line(&different), first_result);
     let parameterized = invoke(&fixture, &["run", "--seed", "123", "--param", "zone=a"]);
     assert!(result_line(&parameterized).contains("zone=Some(\"a\")"));
+
+    // `--realtime-epoch` and `--hostname` move the guest's wall clock and node
+    // name and nothing else.
+    let facts_args = [
+        "run",
+        "--seed",
+        "123",
+        "--realtime-epoch",
+        "2001-09-09T01:46:40Z",
+        "--hostname",
+        "db-1",
+    ];
+    let shifted = result_line(&invoke(&fixture, &facts_args)).to_string();
+    assert!(
+        shifted.contains(" wall=1000000000000000010 host=db-1 "),
+        "{shifted}"
+    );
+    assert_eq!(
+        shifted.replace(
+            " wall=1000000000000000010 host=db-1 ",
+            " wall=1784761209000000010 host=patina "
+        ),
+        first_result
+    );
+    // Recorded into the trace, restored by a flag-free replay, and immune to
+    // ambient control-plane values (the Cargo family scrubs them).
+    let facts_trace = directory.path().join("facts.patina");
+    let mut record_args = facts_args.to_vec();
+    record_args.extend(["--record", facts_trace.to_str().unwrap()]);
+    assert_eq!(result_line(&invoke(&fixture, &record_args)), shifted);
+    let metadata = patina_dst_trace::TraceBundle::load(&facts_trace)
+        .unwrap()
+        .metadata;
+    assert_eq!(metadata.realtime_epoch_nanos, 1_000_000_000_000_000_000);
+    assert_eq!(metadata.hostname, "db-1");
+    let replayed_facts = invoke_unchecked_clean_env(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        &fixture,
+        &["replay", ".", facts_trace.to_str().unwrap()],
+        &[
+            ("PATINA_REALTIME_EPOCH_NANOS", "7"),
+            ("PATINA_GUEST_HOSTNAME", "ambient"),
+        ],
+    );
+    assert!(
+        replayed_facts.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replayed_facts.stderr)
+    );
+    assert_eq!(result_line(&replayed_facts), shifted);
+    for (flag, value) in [
+        ("--realtime-epoch", "2001-09-09T01:46:40Z"),
+        ("--hostname", "db-1"),
+    ] {
+        let refused = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            &fixture,
+            &["replay", ".", facts_trace.to_str().unwrap(), flag, value],
+        );
+        assert!(!refused.status.success(), "replay accepted {flag}");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains(flag),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+    }
 
     let budgeted = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
@@ -2768,7 +2943,7 @@ fn main() {
 // Host-inventory surface (sysinfo's `System::new_all()`): the shim returns fixed
 // deterministic Mach/BSD values — `host_statistics64` KERN_SUCCESS with the 8 GiB
 // VM model, `host_processor_info` a single-CPU load block (so `cpus().len() == 1`
-// consistent with sysctl HW_NCPU=1), `proc_listallpids` the self-only pid, and a
+// consistent with sysctl HW_NCPU=1), `proc_listallpids` the guest and init, and a
 // NULL `IOServiceMatching` (CPU frequency unknown). The guest exercises that
 // reachable set directly. Before the conversion each was a host-introspection
 // deny-trap and the run aborted before printing.
@@ -2828,7 +3003,7 @@ fn main() {
 "#,
     );
     assert!(
-        out.contains("vm=0 cpu=0 ncpu=1 pids=1 iokit_null=true"),
+        out.contains("vm=0 cpu=0 ncpu=1 pids=2 iokit_null=true"),
         "host-inventory surface did not resolve to the fixed deterministic values:\n{out}"
     );
 }
@@ -2877,7 +3052,7 @@ fn main() {
 }
 
 // Cross-platform members: `kill` in the single-process world is an existence
-// probe (self/pid 1 alive; any other pid ESRCH) and `if_nametoindex` reports no
+// probe (self alive; any pid no process has ESRCH) and `if_nametoindex` reports no
 // such interface (0 + ENXIO). Before the conversion both were deny-traps that
 // aborted the run.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2894,7 +3069,7 @@ unsafe extern "C" {
 }
 
 fn main() {
-    let self_alive = unsafe { kill(1, 0) };
+    let self_alive = unsafe { kill(std::process::id() as c_int, 0) };
     let other = unsafe { kill(4242, 0) };
     let other_errno = Error::last_os_error().raw_os_error().unwrap_or(0);
     let idx = unsafe { if_nametoindex(b"patina-nope0\0".as_ptr() as *const c_char) };
@@ -2959,23 +3134,22 @@ fn main() {
     );
 }
 
-// `getrusage(RUSAGE_SELF)` reports MODEL-DERIVED CPU time, not a fixed zero: the
-// interposer fills ru_utime from the deterministic virtual clock
-// (patina_cpu_time_nanos). A guest that does virtual-clock work between two reads
-// sees the second reading STRICTLY GREATER, and two same-seed runs are
-// byte-identical. Before the model wiring both reads were 0 (static memset) and
-// the strict-increase assertion failed — the RED that pinned this behavior. ru_sec
-// is the first field of `struct timeval` / `struct rusage` (a `time_t`, 8 bytes,
-// on both platforms), so reading offset 0 as an i64 is layout-portable.
+// `getrusage(RUSAGE_SELF)` reports the virtual CPU time, never the host's
+// accounting: the modeled startup cost (1 ms, `STARTUP_CPU_NANOS`), then what
+// the advance-on-spin rescues charge. A sleep advances the clock but is not
+// charged; a busy-wait on the clock is charged every rescue. Under the earlier model (CPU time = elapsed monotonic time) the sleep
+// moved ru_utime by five seconds — the RED this pins. `struct rusage` begins with
+// ru_utime (`time_t` seconds, then microseconds, 8 bytes each on both platforms).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn native_getrusage_reports_deterministic_model_cpu_time() {
+fn native_getrusage_reports_virtual_cpu_time() {
     let directory = tempdir().unwrap();
     let workspace = native_workspace();
     let source = directory.path().join("rusage.rs");
     fs::write(
         &source,
         r#"use std::os::raw::c_int;
+use std::time::{Duration, Instant};
 
 unsafe extern "C" {
     fn getrusage(who: c_int, usage: *mut u8) -> c_int;
@@ -2984,23 +3158,26 @@ unsafe extern "C" {
 
 const RUSAGE_SELF: c_int = 0;
 
-// Read ru_utime.tv_sec — the first 8 bytes of `struct rusage` on both platforms.
-fn utime_secs() -> i64 {
+// ru_utime in microseconds: the first two 8-byte words of `struct rusage`.
+fn utime_us() -> i64 {
     let mut buf = [0u8; 256];
     let rc = unsafe { getrusage(RUSAGE_SELF, buf.as_mut_ptr()) };
     assert_eq!(rc, 0, "getrusage failed");
-    i64::from_ne_bytes(buf[0..8].try_into().unwrap())
+    let seconds = i64::from_ne_bytes(buf[0..8].try_into().unwrap());
+    let micros = i64::from_ne_bytes(buf[8..16].try_into().unwrap());
+    seconds * 1_000_000 + micros
 }
 
 fn main() {
-    let before = utime_secs();
-    // Advance the virtual clock deterministically (whole seconds so tv_sec moves).
+    let before = utime_us();
     let _ = unsafe { sleep(5) };
-    let after = utime_secs();
-    println!("RU before={before} after={after}");
-    assert!(
-        after > before,
-        "getrusage CPU time did not strictly advance: {before} -> {after}"
+    let slept = utime_us();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(200) {}
+    let spun = utime_us();
+    println!(
+        "RU before={before} slept={slept} spun_200ms={}",
+        spun - slept >= 200_000
     );
 }
 "#,
@@ -3020,8 +3197,11 @@ fn main() {
     let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let out = String::from_utf8_lossy(&ran.stdout);
     assert!(
-        out.contains("RU before=0 after=5"),
-        "getrusage did not report the modeled virtual-clock CPU time:\nstdout:\n{out}\nstderr:\n{}",
+        out.contains(&format!(
+            "RU before={startup} slept={startup} spun_200ms=true",
+            startup = patina_dst_abi::STARTUP_CPU_NANOS / 1000
+        )),
+        "getrusage did not report the virtual CPU time:\nstdout:\n{out}\nstderr:\n{}",
         String::from_utf8_lossy(&ran.stderr)
     );
 
@@ -3029,22 +3209,22 @@ fn main() {
     assert_eq!(ran.stdout, again.stdout, "getrusage run is not seed-stable");
 }
 
-// task_info(MACH_TASK_BASIC_INFO) reports MODEL-DERIVED user_time from the same
-// deterministic clock model as getrusage (patina_cpu_time_nanos), not a fixed
-// zero. Same shape as the getrusage RED: a guest that does virtual-clock work
-// between two reads sees user_time strictly increase, byte-identically across
-// same-seed runs. macOS only (task_info is Mach). user_time.seconds sits at byte
-// offset 24 of `struct mach_task_basic_info` (after three 8-byte vm sizes) and is
-// an `integer_t` (i32); the flavor is 20 with a 12-word count.
+// task_info(MACH_TASK_BASIC_INFO) reports the same virtual CPU time as getrusage
+// (patina_cpu_time_nanos): the startup cost, unmoved by a sleep, advanced by a
+// busy-wait on the clock, byte-identically across same-seed runs. macOS only (task_info is Mach).
+// user_time sits at byte offset 24 of `struct mach_task_basic_info` (after three
+// 8-byte vm sizes) as two `integer_t`s, seconds then microseconds; the flavor is
+// 20 with a 12-word count.
 #[cfg(target_os = "macos")]
 #[test]
-fn native_task_info_reports_deterministic_model_cpu_time() {
+fn native_task_info_reports_virtual_cpu_time() {
     let directory = tempdir().unwrap();
     let workspace = native_workspace();
     let source = directory.path().join("taskinfo.rs");
     fs::write(
         &source,
         r#"use std::os::raw::c_int;
+use std::time::{Duration, Instant};
 
 unsafe extern "C" {
     fn task_info(target: u32, flavor: u32, info: *mut u8, count: *mut u32) -> c_int;
@@ -3055,23 +3235,27 @@ const MACH_TASK_BASIC_INFO: u32 = 20;
 const MACH_TASK_BASIC_INFO_COUNT: u32 = 12;
 const KERN_SUCCESS: c_int = 0;
 
-// user_time.seconds is at offset 24 (three 8-byte vm sizes precede it).
-fn user_time_secs() -> i32 {
+// user_time in microseconds, at offset 24 (three 8-byte vm sizes precede it).
+fn user_time_us() -> i64 {
     let mut buf = [0u8; 256];
     let mut count = MACH_TASK_BASIC_INFO_COUNT;
     let rc = unsafe { task_info(0, MACH_TASK_BASIC_INFO, buf.as_mut_ptr(), &mut count) };
     assert_eq!(rc, KERN_SUCCESS, "task_info failed");
-    i32::from_ne_bytes(buf[24..28].try_into().unwrap())
+    let seconds = i32::from_ne_bytes(buf[24..28].try_into().unwrap());
+    let micros = i32::from_ne_bytes(buf[28..32].try_into().unwrap());
+    i64::from(seconds) * 1_000_000 + i64::from(micros)
 }
 
 fn main() {
-    let before = user_time_secs();
+    let before = user_time_us();
     let _ = unsafe { sleep(5) };
-    let after = user_time_secs();
-    println!("TI before={before} after={after}");
-    assert!(
-        after > before,
-        "task_info user_time did not strictly advance: {before} -> {after}"
+    let slept = user_time_us();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(200) {}
+    let spun = user_time_us();
+    println!(
+        "TI before={before} slept={slept} spun_200ms={}",
+        spun - slept >= 200_000
     );
 }
 "#,
@@ -3091,8 +3275,11 @@ fn main() {
     let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let out = String::from_utf8_lossy(&ran.stdout);
     assert!(
-        out.contains("TI before=0 after=5"),
-        "task_info did not report the modeled virtual-clock CPU time:\nstdout:\n{out}\nstderr:\n{}",
+        out.contains(&format!(
+            "TI before={startup} slept={startup} spun_200ms=true",
+            startup = patina_dst_abi::STARTUP_CPU_NANOS / 1000
+        )),
+        "task_info did not report the virtual CPU time:\nstdout:\n{out}\nstderr:\n{}",
         String::from_utf8_lossy(&ran.stderr)
     );
 
@@ -7656,7 +7843,7 @@ fn native_replay_refuses_incomplete_traces_before_guest_exec() {
         ("truncated", b"{\"format_version\":4,", "truncated JSON"),
         (
             "incomplete-metadata",
-            br#"{"format_version":4,"metadata":{"root_seed":1,"decision_policy":"splitmix64-v1"},"timelines":[]}"#,
+            br#"{"format_version":11,"metadata":{"root_seed":1,"decision_policy":"splitmix64-v1"},"timelines":[]}"#,
             "trace metadata is missing required field `fingerprint`",
         ),
     ];
@@ -12198,7 +12385,8 @@ fn scenario() -> Result<String, RuntimeError> {
         context.sleep_for(10)?;
         let stored = context.read_file("/state/value")?;
         let time = context.now(ClockKind::Monotonic)?;
-        Ok(format!("PATINA_RESULT seed={} prefix={prefix:?} suffix={stored:?} time={time} zone={:?} cfg={}", context.root_seed(), context.param("zone"), cfg!(all(patina, dst))))
+        let wall = context.now(ClockKind::Realtime)?;
+        Ok(format!("PATINA_RESULT seed={} prefix={prefix:?} suffix={stored:?} time={time} wall={wall} host={} zone={:?} cfg={}", context.root_seed(), context.hostname(), context.param("zone"), cfg!(all(patina, dst))))
     })
 }
 
@@ -14592,7 +14780,8 @@ mod tests {
             .unwrap()
             .as_secs();
         println!("HARNESS_PASS epoch={epoch}");
-        assert_eq!(epoch, 0);
+        // Patina's default virtual realtime epoch, 2026-07-22T23:00:09Z.
+        assert_eq!(epoch, 1_784_761_209);
     }
 
 
@@ -14651,7 +14840,10 @@ fn native_run_json_envelope_has_stable_shape() {
     assert_eq!(value["result"], "ok");
     assert_eq!(value["exit_code"], 0);
     assert_eq!(value["seed"], 7);
-    assert_eq!(value["trace"]["format_version"], 10);
+    assert_eq!(
+        value["trace"]["format_version"],
+        patina_dst_trace::TRACE_FORMAT_VERSION
+    );
     assert!(value["trace"]["event_count"].as_u64().unwrap() > 0);
     // The guest's PATINA_RESULT line is captured and surfaced as a marker.
     assert!(

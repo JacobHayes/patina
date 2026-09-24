@@ -48,6 +48,12 @@ unknown option.
   starting environment) and `--cwd PATH` (its starting working directory, an
   absolute path that must exist in the deterministic image; default `/`); both
   are recorded into the trace and restored flag-free on replay.
+  `--realtime-epoch 2001-09-09T01:46:40Z` (every family) sets the virtual wall
+  clock's start, an RFC 3339 UTC timestamp (default 2026-07-22T23:00:09Z,
+  Patina's first commit); `--hostname NAME` (native and Cargo; wasip1 has no
+  hostname) sets the node name `uname`/`gethostname` report (default
+  `patina`, at most 64 bytes); both are recorded and restored flag-free on
+  replay.
   Native yield-point binaries emit
   `PATINA_COVERAGE_REPORT`; `--coverage-out PATH` writes a `patina.covmap/v1`
   edge-counter map and refuses plain native binaries with a

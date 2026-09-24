@@ -561,7 +561,7 @@ check ladder; Linux 8-gate at wave boundaries.
 
   The future fix, should the dialed address ever be wanted (a guest asserting on `getsockname`,
   or a multi-homed model where the IP a client reached is meaningful): add a `local` field to
-  `TcpAccepted` and bump the trace format with a migration — a DELIBERATE format decision taken
+  `TcpAccepted` and bump the trace format — a DELIBERATE format decision taken
   on its own terms rather than folded into a domain wave. The endpoint pairing would no longer
   NEED the client's address at that point, though there is no reason to change it back.
 - **Wave E — TCP connect/reset, partition CLI, duplication, tcp-buffer flag, net per-class

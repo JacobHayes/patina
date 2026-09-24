@@ -135,7 +135,7 @@ pub(crate) unsafe fn read(handle: u64, nonblocking: bool, buf: *mut c_void, len:
         let mask = fd.mask & state.signals.mask(me);
         let mut count = 0;
         while count + 128 <= len {
-            let Some(instance) = state.signals.dequeue(me, mask) else {
+            let Some(instance) = state.dequeue_signal(me, mask, false) else {
                 break;
             };
             let bytes = record(instance.info, instance.sig);

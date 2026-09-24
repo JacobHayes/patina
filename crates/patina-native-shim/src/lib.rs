@@ -101,6 +101,10 @@ mod iov;
 #[cfg(target_os = "linux")]
 mod advice;
 #[cfg(target_os = "linux")]
+mod clocks;
+#[cfg(target_os = "linux")]
+mod identity;
+#[cfg(target_os = "linux")]
 mod limits;
 #[cfg(target_os = "linux")]
 mod mem;
@@ -479,6 +483,11 @@ fn release_description(release: Release) -> Result<(), c_int> {
         #[cfg(target_os = "linux")]
         FdKind::EventFd => {
             thread::eventfd_close(release.handle);
+            Ok(())
+        }
+        #[cfg(target_os = "linux")]
+        FdKind::TimerFd => {
+            thread::timers::timerfd_close(release.handle);
             Ok(())
         }
         #[cfg(target_os = "linux")]
@@ -2043,6 +2052,12 @@ fn set_errno(errno: c_int) {
     LAST_ERRNO.with(|value| value.set(errno));
 }
 
+/// A raw-ABI error return: `-errno`.
+#[cfg(target_os = "linux")]
+pub(crate) fn neg_errno(errno: c_int) -> i64 {
+    -i64::from(errno)
+}
+
 fn fail(errno: c_int) -> c_int {
     set_errno(errno);
     -1
@@ -2863,6 +2878,8 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     // The guest's initial working directory travels the same control plane and
     // is recorded the same way; `install` opens it before the run starts.
     config = config.apply_guest_cwd_env(control_env)?;
+    config = config.apply_realtime_epoch_env(control_env)?;
+    config = config.apply_hostname_env(control_env)?;
     // End-of-run report suppression comes from the SAME pre-scrub snapshot, once,
     // and is carried in the config: by finalization the context is out of the slot
     // and the interposed `getenv` returns NULL for everything, so a knob read then
@@ -3807,7 +3824,9 @@ pub unsafe extern "C" fn patina_clock_now(clock_id: u32, nanos: *mut u64) -> c_i
     // constructor reads the clock for internal timing (tikv-jemallocator's
     // `arena_new` calls `nstime_update` -> `mach_absolute_time`) BEFORE the shim
     // has installed the runtime. That value is allocator-internal, never
-    // guest-observable, so answer a fixed zero without touching the runtime — going
+    // guest-observable, so answer a fixed zero without touching the runtime —
+    // for the realtime clock too, which then reads 1970 rather than the run's
+    // epoch: an allocator timing itself there is not a clock bug — going
     // through `with_context`/`ensure_runtime` here would try to auto-install the
     // runtime in the middle of the allocator's own initialization and re-enter it.
     if in_shim_bootstrap() {
@@ -3886,19 +3905,12 @@ pub unsafe extern "C" fn patina_sleep_until_remaining(
     }
 }
 
-/// Deterministic per-process CPU-time proxy in nanoseconds, backing the libc
-/// resource-accounting interposers (`getrusage`/`task_info`/`sysinfo`).
-///
-/// The model is elapsed virtual monotonic time. Under the deterministic
-/// scheduler at most one task is runnable at a time and virtual time advances
-/// only through recorded `SleepUntil`/deadlock-rescue, so the sum of every
-/// thread's run-slices between two observations equals the monotonic delta — the
-/// monotonic clock IS the process's summed CPU time. It is read UNRECORDED (the
-/// same `monotonic_now_unrecorded` the kqueue reactor uses for deadline scans),
-/// so this read emits no trace op, takes no scheduling point, and leaves every
-/// existing fingerprint/replay stream byte-for-byte unchanged; the returned value
-/// is nonetheless a pure function of simulation state (the guest reaches this
-/// call at a deterministic virtual time on record and replay alike).
+/// The process's virtual CPU time in nanoseconds, backing the Darwin resource
+/// accounting interposers (`getrusage`/`task_info`): the modeled startup cost
+/// plus what the advance-on-spin rescue charged its tasks
+/// (`Context::cpu_time_nanos`; the Linux rows read it through `clocks`). Read UNRECORDED, so this read
+/// emits no trace op and takes no scheduling point; the value is a pure
+/// function of the recorded stream.
 ///
 /// Always succeeds writing a value. Before the runtime is installed (a custom
 /// allocator's bootstrap timing, or a binary run outside the supervisor) it
@@ -3922,7 +3934,7 @@ pub unsafe extern "C" fn patina_cpu_time_nanos(nanos: *mut u64) -> c_int {
     let value = if in_shim_bootstrap() {
         0
     } else {
-        with_context_raw(|context| context.monotonic_now_unrecorded()).unwrap_or(0)
+        with_context_raw(|context| Ok(context.cpu_time_nanos())).unwrap_or(0)
     };
     // SAFETY: `nanos` was checked non-null and is writable per the C ABI.
     unsafe { nanos.write(value) };
@@ -4521,6 +4533,11 @@ unsafe fn read_resolved(
         FdKind::EventFd => unsafe {
             thread::eventfd_read(resolved.handle, nonblocking, destination, length)
         },
+        // SAFETY: as above.
+        #[cfg(target_os = "linux")]
+        FdKind::TimerFd => unsafe {
+            thread::timers::timerfd_read(resolved.handle, nonblocking, destination, length)
+        },
         #[cfg(target_os = "linux")]
         FdKind::Epoll => fail(EINVAL) as isize,
         // SAFETY: forwarded from this function's own contract.
@@ -4606,7 +4623,7 @@ unsafe fn write_resolved(
         #[cfg(target_os = "linux")]
         FdKind::EventFd => unsafe { thread::eventfd_write(resolved.handle, source, length) },
         #[cfg(target_os = "linux")]
-        FdKind::Epoll | FdKind::SignalFd => fail(EINVAL) as isize,
+        FdKind::Epoll | FdKind::SignalFd | FdKind::TimerFd => fail(EINVAL) as isize,
         // A queue file has no write method: EBADF without write access, EINVAL
         // with it.
         #[cfg(target_os = "linux")]
@@ -4643,7 +4660,7 @@ fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved, u64), c_in
         | FdKind::Socket
         | FdKind::Pipe => Err(ESPIPE),
         #[cfg(target_os = "linux")]
-        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd => Err(ESPIPE),
+        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::TimerFd => Err(ESPIPE),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => Err(ESPIPE),
     }
@@ -5082,6 +5099,21 @@ fn write_metadata(metadata: patina_dst_abi::FsMetadata, out: *mut PatinaMetadata
         });
     }
     0
+}
+
+/// The guest's pid (`registry::IDENTITY_PID`): the one value `getpid`
+/// answers on both doors.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_pid() -> i32 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    registry::IDENTITY_PID as i32
+}
+
+/// The guest's parent, the pid namespace's init (`registry::INIT_PID`).
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_ppid() -> i32 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    registry::INIT_PID as i32
 }
 
 /// The one modeled identity's user id — the ONE accessor every `st_uid`,
@@ -5673,7 +5705,9 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         | FdKind::Urandom
         | FdKind::Socket => return fail(ENODEV),
         #[cfg(target_os = "linux")]
-        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd => return fail(ENODEV),
+        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::TimerFd => {
+            return fail(ENODEV);
+        }
         // A queue is a regular file (judged after the range, below).
         #[cfg(target_os = "linux")]
         FdKind::MessageQueue => {}
@@ -7103,7 +7137,11 @@ mod thread {
     #[cfg(target_os = "linux")]
     pub(crate) mod readiness;
     #[cfg(target_os = "linux")]
+    pub(crate) mod sched;
+    #[cfg(target_os = "linux")]
     pub(crate) mod signals;
+    #[cfg(target_os = "linux")]
+    pub(crate) mod timers;
     use std::cell::Cell;
     use std::collections::{BTreeMap, VecDeque};
     use std::ffi::c_char;
@@ -7148,9 +7186,11 @@ mod thread {
             | FdKind::Urandom
             | FdKind::Pipe => Err(super::ENOTSOCK),
             #[cfg(target_os = "linux")]
-            FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::MessageQueue => {
-                Err(super::ENOTSOCK)
-            }
+            FdKind::EventFd
+            | FdKind::Epoll
+            | FdKind::SignalFd
+            | FdKind::MessageQueue
+            | FdKind::TimerFd => Err(super::ENOTSOCK),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::ENOTSOCK),
         }
@@ -7175,9 +7215,11 @@ mod thread {
             | FdKind::Urandom
             | FdKind::Socket => Err(super::EBADF),
             #[cfg(target_os = "linux")]
-            FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::MessageQueue => {
-                Err(super::EBADF)
-            }
+            FdKind::EventFd
+            | FdKind::Epoll
+            | FdKind::SignalFd
+            | FdKind::MessageQueue
+            | FdKind::TimerFd => Err(super::EBADF),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::EBADF),
         }
@@ -7323,13 +7365,62 @@ mod thread {
         CURRENT_TASK.with(Cell::get).unwrap_or(UNMANAGED_TASK)
     }
 
-    pub(crate) fn deterministic_thread_id() -> c_int {
-        let task = current_task();
+    /// How far thread ids sit above task ids: the scheduler numbers the main
+    /// task 1, and the main thread's id is the guest's pid.
+    const TID_OFFSET: u64 = crate::registry::IDENTITY_PID as u64 - 1;
+
+    /// The thread id of `task`: the guest's pid for the main thread (and for
+    /// the unmanaged main thread before the thread subsystem activates).
+    pub(crate) fn tid_of(task: TaskId) -> c_int {
         if task == UNMANAGED_TASK {
-            1
+            crate::registry::IDENTITY_PID as c_int
         } else {
-            c_int::try_from(task.0).unwrap_or(i32::MAX)
+            c_int::try_from(task.0 + TID_OFFSET).unwrap_or(c_int::MAX)
         }
+    }
+
+    /// The task a thread id names, if it is one a task could have (the
+    /// thread ids below the guest's pid belong to no thread of the guest).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn task_of(tid: c_int) -> Option<TaskId> {
+        u64::try_from(tid)
+            .ok()
+            .filter(|tid| *tid > TID_OFFSET)
+            .map(|tid| TaskId(tid - TID_OFFSET))
+    }
+
+    pub(crate) fn deterministic_thread_id() -> c_int {
+        tid_of(current_task())
+    }
+
+    /// The calling thread's tid (the main thread's is the pid).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn current_tid() -> i32 {
+        deterministic_thread_id()
+    }
+
+    /// Whether `tid` names a live thread of the guest: the main thread (whose
+    /// tid is the pid) before the thread subsystem activates, any task the
+    /// signal state holds after.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn live_tid(tid: i32) -> bool {
+        let state = lock_state();
+        live_tid_locked(&state, tid)
+    }
+
+    /// [`live_tid`] under the runtime lock the caller holds.
+    #[cfg(target_os = "linux")]
+    fn live_tid_locked(state: &ThreadRuntime, tid: i32) -> bool {
+        if state.signals.is_empty() {
+            return tid == crate::registry::IDENTITY_PID as i32;
+        }
+        task_of(tid).is_some_and(|task| state.signals.has_task(task))
+    }
+
+    /// The live threads of the virtual process.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn live_threads() -> usize {
+        lock_state().signals.task_count().max(1)
     }
 
     /// Detach the thread subsystem from the runtime at shutdown. Later boundary
@@ -8169,6 +8260,12 @@ mod thread {
         /// System V IPC objects and their waiters.
         #[cfg(target_os = "linux")]
         ipc: ipc::Ipc,
+        /// Per-thread scheduling attributes and persona.
+        #[cfg(target_os = "linux")]
+        sched: sched::SchedRuntime,
+        /// The interval timers, POSIX timers and timer descriptors.
+        #[cfg(target_os = "linux")]
+        timers: timers::Timers,
         /// Real host `pthread_t` bits mapped to the managed task they run.
         handles: BTreeMap<usize, TaskId>,
         /// Per-task baton semaphores.
@@ -8245,6 +8342,27 @@ mod thread {
             self.active = true;
             set_current_task(main);
             Ok(())
+        }
+
+        /// Pick the next task. On Linux the process's timers come first: what
+        /// virtual time reached fires, and while every task waits idle time
+        /// advances to a timer ahead of every parked deadline, whose expiry may
+        /// wake one (`timers`). The pick may run the deadlock rescue, which
+        /// wakes the tasks whose own deadlines came due; they are settled
+        /// (unlinked from every wait) before the timers that came due with
+        /// them fire, so an expiry never wakes a task the rescue already woke.
+        fn next_task(&mut self) -> Result<Option<TaskId>, ThreadError> {
+            #[cfg(target_os = "linux")]
+            for task in self.idle_timers()? {
+                RealScheduler.wake(task)?;
+            }
+            let next = RealScheduler.next()?;
+            self.settle_rescued()?;
+            #[cfg(target_os = "linux")]
+            for task in self.fire_timers().map_err(ThreadError::Posix)? {
+                RealScheduler.wake(task)?;
+            }
+            Ok(next)
         }
 
         fn reschedule(&mut self, me: TaskId) -> Result<Option<TaskId>, ThreadError> {
@@ -8328,8 +8446,7 @@ mod thread {
             let _ = (wait.class, wait.locs);
             let mut scheduler = RealScheduler;
             scheduler.park(me, reason)?;
-            let next = scheduler.next()?;
-            self.settle_rescued()?;
+            let next = self.next_task()?;
             match next {
                 Some(next) => Ok(Step::Switch(next)),
                 None => Err(ThreadError::Fatal(
@@ -8360,8 +8477,7 @@ mod thread {
             #[cfg(not(target_os = "linux"))]
             let _ = (wait.class, wait.locs);
             scheduler.park_timed(me, reason, clock, deadline)?;
-            let next = scheduler.next()?;
-            self.settle_rescued()?;
+            let next = self.next_task()?;
             match next {
                 Some(picked) if picked == me => Ok(Step::Continue),
                 Some(picked) => Ok(Step::Switch(picked)),
@@ -8454,6 +8570,10 @@ mod thread {
                 signals: signals::SignalRuntime::default(),
                 #[cfg(target_os = "linux")]
                 ipc: ipc::Ipc::default(),
+                #[cfg(target_os = "linux")]
+                sched: sched::SchedRuntime::default(),
+                #[cfg(target_os = "linux")]
+                timers: timers::Timers::default(),
                 handles: BTreeMap::new(),
                 sems: BTreeMap::new(),
                 net: NetState::new(),
@@ -8681,6 +8801,8 @@ mod thread {
         }
         #[cfg(target_os = "linux")]
         state.signals.finish(task);
+        #[cfg(target_os = "linux")]
+        state.sched.finish(task);
         // Detached handles remain targetable while live, then disappear with
         // their ThreadEntry; completed joinable handles remain until reaped.
         if !state.table.threads.contains_key(&task) {
@@ -8690,19 +8812,13 @@ mod thread {
         // instrumented teardown (TLS destructors under `--yield-points`) takes no
         // scheduling point rather than rescheduling a task that no longer exists.
         mark_task_completed();
-        let next = match scheduler.next() {
+        let next = match state.next_task() {
             Ok(next) => next,
-            Err(message) => fatal(&message),
-        };
-        // Completing the last runnable task can leave only timed waiters, so the
-        // `next()` above may have run the rescue; settle it before handing off.
-        match state.settle_rescued() {
-            Ok(()) => {}
-            Err(ThreadError::Fatal(message)) => fatal(&message),
-            Err(ThreadError::Posix(errno)) => fatal(&format!(
-                "settling timers after task completion failed ({errno})"
+            Err(error) => fatal(&format!(
+                "picking the next task after completion failed ({})",
+                error.into_posix()
             )),
-        }
+        };
         #[cfg(target_os = "linux")]
         if state.signals.is_empty() {
             drop(state);
@@ -8750,12 +8866,11 @@ mod thread {
         state.table.register(task);
         #[cfg(target_os = "linux")]
         state.signals.spawn(task, Some(current_task()));
+        #[cfg(target_os = "linux")]
+        state.sched.spawn(task, current_task());
         // A new thread inherits its creator's memory policy.
         #[cfg(target_os = "linux")]
-        crate::numa::spawned(
-            deterministic_thread_id(),
-            c_int::try_from(task.0).unwrap_or(c_int::MAX),
-        );
+        crate::numa::spawned(deterministic_thread_id(), tid_of(task));
         // The semaphore must exist before the host thread parks on it.
         state.sems.insert(task, Arc::new(baton::Semaphore::new()));
         let payload = Box::into_raw(Box::new(ThreadStart {
@@ -11968,8 +12083,8 @@ mod thread {
             let rc = unsafe {
                 signals::generate_signal(
                     signals::GenerationTarget::Thread {
-                        tgid: Some(1),
-                        tid: current_task().0 as i32,
+                        tgid: Some(crate::registry::IDENTITY_PID as i32),
+                        tid: tid_of(current_task()),
                     },
                     signals::SIGPIPE,
                     signals::GenerationInfo::User,
@@ -12692,6 +12807,13 @@ mod thread {
                 write_eof: false,
             },
             #[cfg(target_os = "linux")]
+            FdKind::TimerFd => FdReadiness {
+                readable: timers::timerfd_readable(state, resolved.handle),
+                writable: false,
+                read_eof: false,
+                write_eof: false,
+            },
+            #[cfg(target_os = "linux")]
             FdKind::EventFd => {
                 // Deterministic eventfd counter: readable iff nonzero; always
                 // writable (a write that would overflow fails closed loudly
@@ -12851,6 +12973,9 @@ mod thread {
         /// Linux: parked on a System V IPC object's wait queue.
         #[cfg(target_os = "linux")]
         Ipc(ipc::IpcWait),
+        /// Linux: parked on a timer descriptor's readers.
+        #[cfg(target_os = "linux")]
+        TimerFdRecv(u64),
     }
 
     /// Register `me` on the waiter queue of every watched `(direction, fd)`
@@ -12892,6 +13017,13 @@ mod thread {
                 if let Some(loc) = ipc::mq_watch(state, resolved.handle, me, dir == ReadyDir::Read)
                 {
                     locs.push(loc);
+                }
+                continue;
+            }
+            #[cfg(target_os = "linux")]
+            if resolved.kind == FdKind::TimerFd {
+                if dir == ReadyDir::Read {
+                    locs.extend(timers::timerfd_watch(state, resolved.handle, me));
                 }
                 continue;
             }
@@ -13036,6 +13168,8 @@ mod thread {
                 }
                 #[cfg(target_os = "linux")]
                 WaiterLoc::Ipc(wait) => state.ipc.unwait(wait, me),
+                #[cfg(target_os = "linux")]
+                WaiterLoc::TimerFdRecv(handle) => timers::timerfd_unwatch(state, handle, me),
             }
         }
     }
@@ -13921,6 +14055,7 @@ mod thread {
                 | FdKind::EventFd
                 | FdKind::SignalFd
                 | FdKind::MessageQueue
+                | FdKind::TimerFd
                 | FdKind::Stdin
                 | FdKind::Stdout
                 | FdKind::Stderr => {}

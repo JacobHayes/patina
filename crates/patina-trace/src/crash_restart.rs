@@ -325,7 +325,7 @@ mod tests {
     }
 
     fn segments() -> CrashRestartSegments {
-        let metadata = RunMetadata::new(7, "fingerprint");
+        let metadata = RunMetadata::new(7, "fingerprint", 0, "patina");
         CrashRestartSegments {
             crashed: segment(&metadata, 0, &[b"before", b"trigger"]),
             snapshot_digest: DIGEST,
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn a_trace_without_a_crash_has_no_segments() {
-        let metadata = RunMetadata::new(7, "fingerprint");
+        let metadata = RunMetadata::new(7, "fingerprint", 0, "patina");
         let linear = segment(&metadata, 0, &[b"only"]);
         assert_eq!(linear.crash_restart_segments().unwrap(), None);
     }

@@ -117,6 +117,7 @@ use patina_dst_fs_mem::{FsSnapshot, MemFs};
 use patina_dst_net_sim::SimNet;
 use patina_dst_rng_seeded::{SeededEntropy, SplitMix64, domain_seed, fault_domain};
 use patina_dst_sched_det::{DetScheduler, PctConfig, SchedulePolicy, StarvationConfig};
+pub use patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS;
 use patina_dst_time_virtual::VirtualClock;
 pub use patina_dst_trace::MAX_TRACE_BYTES;
 use patina_dst_trace::{
@@ -218,6 +219,19 @@ pub const ENV_GUEST_ENV: &str = "PATINA_GUEST_ENV_JSON";
 /// `/`. A relative path, an empty one, a NUL byte, or a `..` component fails
 /// closed; the value is canonicalized lexically (`.` and `//` dropped).
 pub const ENV_GUEST_CWD: &str = "PATINA_GUEST_CWD";
+/// The run's virtual realtime epoch as Unix-time nanoseconds (decimal `u64`):
+/// what `ClockKind::Realtime` reads at monotonic zero. Set by `run
+/// --realtime-epoch`, which accepts an RFC 3339 UTC timestamp and forwards its
+/// nanosecond value here; recorded into trace metadata and restored on replay.
+/// Absent means [`DEFAULT_REALTIME_EPOCH_NANOS`]. A malformed value fails closed.
+pub const ENV_REALTIME_EPOCH_NANOS: &str = "PATINA_REALTIME_EPOCH_NANOS";
+/// The node name the guest's virtual kernel reports (`uname`'s `nodename`,
+/// `gethostname`). Set by `run --hostname`; recorded into trace metadata and
+/// restored on replay. Absent means `patina_dst_syscalls::IDENTITY_HOSTNAME`.
+/// A value [`validate_hostname`] refuses fails closed.
+pub const ENV_GUEST_HOSTNAME: &str = "PATINA_GUEST_HOSTNAME";
+/// The longest node name the kernel stores, in bytes (`__NEW_UTS_LEN`).
+pub const HOSTNAME_MAX_BYTES: usize = 64;
 /// Base link latency in nanoseconds applied to the default `SimNet` network
 /// (datagrams and TCP segments). Blocking receives under a non-zero value park
 /// on the virtual-clock timer queue until delivery. Invalid values are rejected fail-closed.
@@ -1037,6 +1051,20 @@ pub struct RuntimeConfig {
     /// restored on replay. Not a fingerprint input. The live cwd (`chdir`) is
     /// process state the native shim keeps; only the starting point is here.
     guest_cwd: Option<String>,
+    /// The run's virtual realtime epoch (Unix-time nanoseconds read by
+    /// `ClockKind::Realtime` at monotonic zero), or `None` for
+    /// [`DEFAULT_REALTIME_EPOCH_NANOS`]. `Some` only when supplied explicitly
+    /// (or adopted from a replayed trace), which is what lets replay tell a
+    /// conflicting operator value from the default. Recorded into trace
+    /// metadata on every run and authoritative on replay. Not a fingerprint
+    /// input.
+    realtime_epoch_nanos: Option<u64>,
+    /// The node name the guest's virtual kernel reports, or `None` for
+    /// `patina_dst_syscalls::IDENTITY_HOSTNAME`. `Some` only when supplied
+    /// explicitly (or adopted from a replayed trace), exactly like
+    /// `realtime_epoch_nanos`. Recorded on every run, authoritative on replay,
+    /// not a fingerprint input.
+    hostname: Option<String>,
     /// The DNS host table: the names this run resolves, and the virtual IPv4
     /// address each resolves to. Semantic configuration rather than a fault knob
     /// (like `params`): an undefined name is NXDOMAIN deterministically, and the
@@ -1091,6 +1119,8 @@ impl RuntimeConfig {
             guest_argv: None,
             guest_env: BTreeMap::new(),
             guest_cwd: None,
+            realtime_epoch_nanos: None,
+            hostname: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -1116,6 +1146,8 @@ impl RuntimeConfig {
             guest_argv: None,
             guest_env: BTreeMap::new(),
             guest_cwd: None,
+            realtime_epoch_nanos: None,
+            hostname: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -1146,6 +1178,8 @@ impl RuntimeConfig {
             guest_argv: None,
             guest_env: BTreeMap::new(),
             guest_cwd: None,
+            realtime_epoch_nanos: None,
+            hostname: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -1177,6 +1211,8 @@ impl RuntimeConfig {
             guest_argv: None,
             guest_env: BTreeMap::new(),
             guest_cwd: None,
+            realtime_epoch_nanos: None,
+            hostname: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -1209,6 +1245,8 @@ impl RuntimeConfig {
             guest_argv: None,
             guest_env: BTreeMap::new(),
             guest_cwd: None,
+            realtime_epoch_nanos: None,
+            hostname: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -1247,6 +1285,8 @@ impl RuntimeConfig {
             guest_argv: None,
             guest_env: BTreeMap::new(),
             guest_cwd: None,
+            realtime_epoch_nanos: None,
+            hostname: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -1673,6 +1713,76 @@ impl RuntimeConfig {
         Ok(self)
     }
 
+    /// The run's virtual realtime epoch: the Unix-time nanoseconds
+    /// `ClockKind::Realtime` reads at monotonic zero. The explicitly configured
+    /// value, else [`DEFAULT_REALTIME_EPOCH_NANOS`].
+    pub fn realtime_epoch_nanos(&self) -> u64 {
+        self.realtime_epoch_nanos
+            .unwrap_or(DEFAULT_REALTIME_EPOCH_NANOS)
+    }
+
+    /// Set the run's virtual realtime epoch explicitly (tests and embedders).
+    /// The default clock starts on it, the trace records it, and a replay whose
+    /// trace recorded a different one is refused.
+    #[must_use]
+    pub fn with_realtime_epoch_nanos(mut self, realtime_epoch_nanos: u64) -> Self {
+        self.realtime_epoch_nanos = Some(realtime_epoch_nanos);
+        self
+    }
+
+    /// The node name the guest's virtual kernel reports: the explicitly
+    /// configured one, else `patina_dst_syscalls::IDENTITY_HOSTNAME`.
+    pub fn hostname(&self) -> &str {
+        self.hostname
+            .as_deref()
+            .unwrap_or(patina_dst_syscalls::IDENTITY_HOSTNAME)
+    }
+
+    /// Set the guest's node name explicitly (tests and embedders), validated by
+    /// [`validate_hostname`]. Recorded into the trace; a replay whose trace
+    /// recorded a different name is refused.
+    pub fn with_hostname(mut self, hostname: &str) -> Result<Self, RuntimeError> {
+        validate_hostname(hostname).map_err(RuntimeError::Config)?;
+        self.hostname = Some(hostname.to_owned());
+        Ok(self)
+    }
+
+    /// Apply the guest's node name from a control-plane accessor. Presence of
+    /// [`ENV_GUEST_HOSTNAME`] sets it (validated by [`validate_hostname`]);
+    /// absence leaves the default. Shared by [`RuntimeConfig::from_env`] and the
+    /// native shim.
+    pub fn apply_hostname_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(value) = get(ENV_GUEST_HOSTNAME) {
+            validate_hostname(&value)
+                .map_err(|error| RuntimeError::Config(format!("{ENV_GUEST_HOSTNAME}: {error}")))?;
+            self.hostname = Some(value);
+        }
+        Ok(self)
+    }
+
+    /// Apply the run's virtual realtime epoch from a control-plane accessor.
+    /// Presence of [`ENV_REALTIME_EPOCH_NANOS`] sets it (a decimal `u64` of
+    /// nanoseconds; anything else fails closed); absence leaves the default.
+    /// Shared by [`RuntimeConfig::from_env`] and the native shim.
+    pub fn apply_realtime_epoch_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(value) = get(ENV_REALTIME_EPOCH_NANOS) {
+            let nanos = value.trim().parse::<u64>().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{ENV_REALTIME_EPOCH_NANOS} must be an unsigned 64-bit count of \
+                     nanoseconds since the Unix epoch, got {value:?}"
+                ))
+            })?;
+            self.realtime_epoch_nanos = Some(nanos);
+        }
+        Ok(self)
+    }
+
     /// Whether syscall-user-dispatch was armed for this run, or `None` when SUD
     /// is not applicable.
     pub const fn sud(&self) -> Option<bool> {
@@ -2086,6 +2196,8 @@ impl RuntimeConfig {
         let config = config.apply_guest_argv_env(|name| env::var(name).ok())?;
         let config = config.apply_guest_env_env(|name| env::var(name).ok())?;
         let config = config.apply_guest_cwd_env(|name| env::var(name).ok())?;
+        let config = config.apply_realtime_epoch_env(|name| env::var(name).ok())?;
+        let config = config.apply_hostname_env(|name| env::var(name).ok())?;
         // The report-suppression knobs are resolved HERE, with every other knob,
         // and never again: finalization must not reach for the process
         // environment (see `ReportConfig`).
@@ -2297,6 +2409,28 @@ impl RuntimeBuilder {
             ));
         }
         validate_guest_env(&self.config.guest_env)?;
+        // An explicitly installed clock owns its epoch. Read it now, unrecorded
+        // (exactly as `Context::fs_clock` reads realtime), so the trace records
+        // the epoch the run really reads and a configured epoch that the
+        // installed clock would silently ignore is refused.
+        let installed_clock_epoch = match self.clock.as_mut() {
+            Some(clock) => Some(installed_clock_epoch(clock.as_mut())?),
+            None => None,
+        };
+        if let (Some(installed), Some(configured)) =
+            (installed_clock_epoch, self.config.realtime_epoch_nanos)
+        {
+            if installed != configured {
+                return Err(RuntimeError::Config(format!(
+                    "the installed clock runs on realtime epoch {installed} ns but the \
+                     configured realtime epoch is {configured} ns; the configured epoch \
+                     would be silently ignored. Configure the epoch on the clock or drop \
+                     the explicit clock so the runtime builds it."
+                )));
+            }
+        }
+        let recorded_realtime_epoch =
+            installed_clock_epoch.unwrap_or_else(|| self.config.realtime_epoch_nanos());
 
         match self.config.mode {
             ExecutionMode::RecordTransport | ExecutionMode::ReplayTransport { .. } => {
@@ -2351,6 +2485,9 @@ impl RuntimeBuilder {
         let mut replay_guest_env_override: Option<BTreeMap<String, String>> = None;
         // Same contract for the guest's initial working directory.
         let mut replay_guest_cwd_override: Option<String> = None;
+        // Same contract for the virtual realtime epoch and the node name.
+        let mut replay_realtime_epoch_override: Option<u64> = None;
+        let mut replay_hostname_override: Option<String> = None;
         let mut replay_dns_override: Option<BTreeMap<String, String>> = None;
         // Same contract for the exploration scheduling policy.
         let mut replay_schedule_override: Option<SchedulePolicy> = None;
@@ -2359,18 +2496,23 @@ impl RuntimeBuilder {
             ExecutionMode::Record { path } => (
                 Execution::Record {
                     recorder: Recorder::new(
-                        RunMetadata::new(self.config.seed, self.config.fingerprint.clone())
-                            .with_faults(Some(fault_record(&self.config)))
-                            .with_buggify(buggify_record(&self.config))
-                            .with_schedule_policy(schedule_policy_record(&self.config))
-                            .with_swarm(swarm_record.clone())
-                            .with_watchdog(watchdog_record(&self.config))
-                            .with_guest_argv(self.config.guest_argv.clone())
-                            .with_guest_env(guest_env_record(&self.config))
-                            .with_guest_cwd(self.config.guest_cwd.clone())
-                            .with_dns(dns_record(&self.config))
-                            .with_sud(self.config.sud)
-                            .with_tsc(self.config.tsc),
+                        RunMetadata::new(
+                            self.config.seed,
+                            self.config.fingerprint.clone(),
+                            recorded_realtime_epoch,
+                            self.config.hostname(),
+                        )
+                        .with_faults(Some(fault_record(&self.config)))
+                        .with_buggify(buggify_record(&self.config))
+                        .with_schedule_policy(schedule_policy_record(&self.config))
+                        .with_swarm(swarm_record.clone())
+                        .with_watchdog(watchdog_record(&self.config))
+                        .with_guest_argv(self.config.guest_argv.clone())
+                        .with_guest_env(guest_env_record(&self.config))
+                        .with_guest_cwd(self.config.guest_cwd.clone())
+                        .with_dns(dns_record(&self.config))
+                        .with_sud(self.config.sud)
+                        .with_tsc(self.config.tsc),
                     )
                     .with_incarnation(self.config.incarnation),
                     sink: RecordSink::Path {
@@ -2383,18 +2525,23 @@ impl RuntimeBuilder {
             ExecutionMode::RecordTransport => (
                 Execution::Record {
                     recorder: Recorder::new(
-                        RunMetadata::new(self.config.seed, self.config.fingerprint.clone())
-                            .with_faults(Some(fault_record(&self.config)))
-                            .with_buggify(buggify_record(&self.config))
-                            .with_schedule_policy(schedule_policy_record(&self.config))
-                            .with_swarm(swarm_record.clone())
-                            .with_watchdog(watchdog_record(&self.config))
-                            .with_guest_argv(self.config.guest_argv.clone())
-                            .with_guest_env(guest_env_record(&self.config))
-                            .with_guest_cwd(self.config.guest_cwd.clone())
-                            .with_dns(dns_record(&self.config))
-                            .with_sud(self.config.sud)
-                            .with_tsc(self.config.tsc),
+                        RunMetadata::new(
+                            self.config.seed,
+                            self.config.fingerprint.clone(),
+                            recorded_realtime_epoch,
+                            self.config.hostname(),
+                        )
+                        .with_faults(Some(fault_record(&self.config)))
+                        .with_buggify(buggify_record(&self.config))
+                        .with_schedule_policy(schedule_policy_record(&self.config))
+                        .with_swarm(swarm_record.clone())
+                        .with_watchdog(watchdog_record(&self.config))
+                        .with_guest_argv(self.config.guest_argv.clone())
+                        .with_guest_env(guest_env_record(&self.config))
+                        .with_guest_cwd(self.config.guest_cwd.clone())
+                        .with_dns(dns_record(&self.config))
+                        .with_sud(self.config.sud)
+                        .with_tsc(self.config.tsc),
                     )
                     .with_incarnation(self.config.incarnation),
                     sink: RecordSink::Transport(
@@ -2415,6 +2562,15 @@ impl RuntimeBuilder {
                     reconcile_replay_guest_env(&self.config, replayer.guest_env())?;
                 replay_guest_cwd_override =
                     reconcile_replay_guest_cwd(&self.config, replayer.guest_cwd())?;
+                replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(
+                    &self.config,
+                    installed_clock_epoch,
+                    replayer.realtime_epoch_nanos(),
+                )?);
+                replay_hostname_override = Some(reconcile_replay_hostname(
+                    &self.config,
+                    replayer.hostname(),
+                )?);
                 replay_dns_override = reconcile_replay_dns(&self.config, replayer.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
@@ -2444,6 +2600,15 @@ impl RuntimeBuilder {
                     reconcile_replay_guest_env(&self.config, replayer.guest_env())?;
                 replay_guest_cwd_override =
                     reconcile_replay_guest_cwd(&self.config, replayer.guest_cwd())?;
+                replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(
+                    &self.config,
+                    installed_clock_epoch,
+                    replayer.realtime_epoch_nanos(),
+                )?);
+                replay_hostname_override = Some(reconcile_replay_hostname(
+                    &self.config,
+                    replayer.hostname(),
+                )?);
                 replay_dns_override = reconcile_replay_dns(&self.config, replayer.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
@@ -2478,6 +2643,13 @@ impl RuntimeBuilder {
                     reconcile_replay_guest_env(&self.config, session.guest_env())?;
                 replay_guest_cwd_override =
                     reconcile_replay_guest_cwd(&self.config, session.guest_cwd())?;
+                replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(
+                    &self.config,
+                    installed_clock_epoch,
+                    session.realtime_epoch_nanos(),
+                )?);
+                replay_hostname_override =
+                    Some(reconcile_replay_hostname(&self.config, session.hostname())?);
                 replay_dns_override = reconcile_replay_dns(&self.config, session.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, session.schedule_policy())?;
@@ -2514,6 +2686,17 @@ impl RuntimeBuilder {
         // resolves the recording's relative paths against the same directory.
         if let Some(guest_cwd) = replay_guest_cwd_override {
             self.config.guest_cwd = Some(guest_cwd);
+        }
+        // Likewise the realtime epoch, so the default clock below reads the
+        // recording's wall-clock times — the filesystem stamps its times from it
+        // without a recorded read, so a different epoch would change them.
+        if let Some(epoch) = replay_realtime_epoch_override {
+            self.config.realtime_epoch_nanos = Some(epoch);
+        }
+        // Likewise the node name, so a flag-free replay's guest reads the name
+        // the recording's did.
+        if let Some(hostname) = replay_hostname_override {
+            self.config.hostname = Some(hostname);
         }
         // Likewise the trace's authoritative DNS host table, so a flag-free
         // replay resolves exactly the names the recording could.
@@ -2596,8 +2779,9 @@ impl RuntimeBuilder {
                         .latency_live(self.config.faults.fs.latency_nanos.is_some()),
                 ));
             }
+            let realtime_epoch = self.config.realtime_epoch_nanos();
             self.clock
-                .get_or_insert_with(|| Box::new(VirtualClock::default()));
+                .get_or_insert_with(|| Box::new(VirtualClock::new(realtime_epoch)));
             self.entropy.get_or_insert_with(|| {
                 Box::new(SeededEntropy::new(domain_seed(
                     root_seed,
@@ -2680,6 +2864,10 @@ impl RuntimeBuilder {
             params: self.config.params,
             guest_env: self.config.guest_env,
             guest_cwd: self.config.guest_cwd,
+            hostname: self
+                .config
+                .hostname
+                .unwrap_or_else(|| patina_dst_syscalls::IDENTITY_HOSTNAME.to_owned()),
             execution,
             filesystem: self.filesystem,
             filesystem_is_capture: self.filesystem_is_capture,
@@ -2735,6 +2923,9 @@ impl RuntimeBuilder {
             facts,
             facts_emitted: false,
             spin: SpinRescue::default(),
+            cpu: CpuTime::default(),
+            alarm: None,
+            cpu_alarm: None,
             recording_flushed: false,
         })
     }
@@ -3156,6 +3347,44 @@ impl SpinRescue {
 advanced_ns={} clock_ops_per_rescue={}",
             vtime_nanos, self.rescues, self.advanced_nanos, SPIN_RESCUE_CLOCK_OPS,
         )
+    }
+}
+
+/// Virtual CPU time. The process and its main thread start at
+/// [`patina_dst_abi::STARTUP_CPU_NANOS`], the modeled cost of the exec, loader
+/// and libc startup a Linux process has run before `main`. From there, CPU
+/// time is charged by one thing only: the advance-on-spin rescue, i.e. a task
+/// observing the clock again and again at frozen virtual time. Virtual time
+/// also moves on a guest sleep or wait, the deadlock rescue, and injected
+/// latency, but no task computes through those. A loop that computes without
+/// reading the clock (a hash, a compression pass, a spin on a flag) is not
+/// charged, because virtual time does not move under it. Each rescue is
+/// charged to the task the scheduler last selected, or to `None`, the main
+/// thread before the embedder first schedules a task. Every input is a
+/// recorded op or the rescue that replays with it, so the figures are
+/// identical on record and replay.
+#[derive(Debug)]
+struct CpuTime {
+    running: Option<TaskId>,
+    by_task: BTreeMap<Option<TaskId>, u64>,
+    total: u64,
+}
+
+impl Default for CpuTime {
+    fn default() -> Self {
+        CpuTime {
+            running: None,
+            by_task: BTreeMap::from([(None, patina_dst_abi::STARTUP_CPU_NANOS)]),
+            total: patina_dst_abi::STARTUP_CPU_NANOS,
+        }
+    }
+}
+
+impl CpuTime {
+    fn charge(&mut self, nanos: u64) {
+        self.total = self.total.saturating_add(nanos);
+        let task = self.by_task.entry(self.running).or_default();
+        *task = task.saturating_add(nanos);
     }
 }
 
@@ -3948,6 +4177,7 @@ pub struct Context {
     params: BTreeMap<String, String>,
     guest_env: BTreeMap<String, String>,
     guest_cwd: Option<String>,
+    hostname: String,
     execution: Execution,
     filesystem: Option<Box<dyn FsDriver>>,
     filesystem_is_capture: bool,
@@ -4083,6 +4313,18 @@ pub struct Context {
     /// Advance-on-spin state. See [`SpinRescue`]; inert until a guest actually
     /// churns on the clock, so a run that never spins is byte-for-byte unchanged.
     spin: SpinRescue,
+    /// Virtual CPU time. See [`CpuTime`].
+    cpu: CpuTime,
+    /// The earliest monotonic deadline of the embedder's process timers (the
+    /// native shim's interval timers, POSIX timers and timer descriptors), set
+    /// through [`Context::set_alarm`]. The advance-on-spin rescue never steps
+    /// over it, as it never steps over a parked task's deadline.
+    alarm: Option<u64>,
+    /// The CPU time the embedder's earliest CPU-time timer still needs, as
+    /// published through [`Context::set_cpu_alarm`], with the process CPU
+    /// time it was published at: the advance-on-spin rescue advances toward
+    /// it in whole steps.
+    cpu_alarm: Option<(u64, u64)>,
     /// Whether the recording has already been written out by
     /// [`Context::flush_recording`] on a runtime-initiated stop. The trace
     /// transport is an append-only descriptor in the interposed families, so a
@@ -4191,6 +4433,13 @@ impl Context {
     /// the starting point the run was configured with.
     pub fn guest_cwd(&self) -> Option<&str> {
         self.guest_cwd.as_deref()
+    }
+
+    /// The node name the guest's virtual kernel reports (`uname`'s
+    /// `nodename`, `gethostname`): the run's configured or replayed name,
+    /// else `patina_dst_syscalls::IDENTITY_HOSTNAME`.
+    pub fn hostname(&self) -> &str {
+        &self.hostname
     }
 
     // ---- Cooperative-SUT (buggify) surface -----------------------------------
@@ -6485,7 +6734,10 @@ recording was produced by a guest whose result type no longer matches this one"
     /// monotonic domain used by the timer registry. Realtime deadlines read
     /// both clocks (recorded boundary observations) so the epoch is consistent
     /// across record and replay; monotonic deadlines pass through unchanged.
-    fn monotonic_deadline(
+    /// The one realtime-to-monotonic mapping of absolute deadlines: a sleep's
+    /// and an embedder timer's (`TIMER_ABSTIME` on a realtime clock) resolve
+    /// alike, including under an epoch jump, which the realtime read carries.
+    pub fn monotonic_deadline(
         &mut self,
         clock: ClockKind,
         deadline_nanos: u64,
@@ -6585,7 +6837,63 @@ recording was produced by a guest whose result type no longer matches this one"
             Err(error) => Outcome::Error(error),
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
-        decode_optional_task(&operation, outcome)
+        let selected = decode_optional_task(&operation, outcome)?;
+        self.cpu.running = selected;
+        Ok(selected)
+    }
+
+    /// The process's virtual CPU time in nanoseconds (see [`CpuTime`]).
+    /// Unrecorded: a pure function of the recorded stream.
+    pub fn cpu_time_nanos(&self) -> u64 {
+        self.cpu.total
+    }
+
+    /// The virtual CPU time charged to `task`; `None` is the main thread
+    /// before the embedder first scheduled a task, and holds the startup
+    /// cost.
+    pub fn task_cpu_time_nanos(&self, task: Option<TaskId>) -> u64 {
+        self.cpu.by_task.get(&task).copied().unwrap_or(0)
+    }
+
+    /// Set the earliest monotonic deadline of the embedder's process timers
+    /// (`None`: none armed). Unrecorded bookkeeping the embedder derives from
+    /// the guest's own calls, so it is identical on record and replay; the
+    /// advance-on-spin rescue does not step over it.
+    pub fn set_alarm(&mut self, deadline: Option<u64>) {
+        self.alarm = deadline;
+    }
+
+    /// Set the CPU time the embedder's earliest CPU-time timer still needs
+    /// (`None`: none armed). Unrecorded bookkeeping the embedder derives from
+    /// the guest's own calls, like [`Context::set_alarm`]. While it is set,
+    /// the advance-on-spin rescue's token is what the timer still needs, up
+    /// to the token ceiling, from the first rescue: the task computes toward a
+    /// deadline it declared, so the rescue lands on it instead of ramping.
+    pub fn set_cpu_alarm(&mut self, remaining: Option<u64>) {
+        self.cpu_alarm = remaining.map(|remaining| (remaining, self.cpu.total));
+    }
+
+    /// Idle time up to a process timer's deadline: when every task is parked
+    /// and `deadline` lies ahead of both the clock and every parked task's
+    /// own deadline, advance virtual time to it (a recorded `SleepUntil`, as
+    /// the deadlock rescue does) and answer `true`, so the embedder fires the
+    /// timer — which may wake a task — before it asks for the next task. A
+    /// deadline a parked task shares is left to the deadlock rescue.
+    pub fn advance_idle_to(&mut self, deadline: u64) -> Result<bool, RuntimeError> {
+        if self.clock.is_none() || !self.scheduler_would_deadlock() {
+            return Ok(false);
+        }
+        let now = self.current_monotonic()?;
+        let before_tasks = self
+            .timers
+            .keys()
+            .next()
+            .is_none_or(|(task_deadline, _)| deadline < *task_deadline);
+        if deadline <= now || !before_tasks {
+            return Ok(false);
+        }
+        self.sleep_until(ClockKind::Monotonic, deadline)?;
+        Ok(true)
     }
 
     pub fn net_bind(&mut self, address: &str) -> Result<SocketId, RuntimeError> {
@@ -7364,17 +7672,33 @@ a recorded result or a replay fetch",
         if self.spin.rescues >= SPIN_CHURN_ABORT_RESCUES {
             return Err(self.frozen_clock_churn(now));
         }
-        let token = self.spin.token_nanos();
-        let target = now.saturating_add(token);
-        // Never advance past the earliest still-future timer deadline.
-        let target = match self.timers.keys().next() {
-            Some((deadline, _)) if *deadline > now => target.min(*deadline),
-            _ => target,
+        // Toward a CPU-time timer, the time it still needs (charged since it
+        // was published counts), up to the ceiling; otherwise the escalating
+        // token.
+        let token = match self.cpu_alarm {
+            Some((remaining, at)) => {
+                match remaining.saturating_sub(self.cpu.total.saturating_sub(at)) {
+                    0 => self.spin.token_nanos(),
+                    remaining => remaining.min(SPIN_RESCUE_TOKEN_MAX_NANOS),
+                }
+            }
+            None => self.spin.token_nanos(),
         };
+        let target = now.saturating_add(token);
+        // Never advance past the earliest still-future timer deadline, a
+        // parked task's or the embedder's process timers'.
+        let task_deadline = self.timers.keys().next().map(|(deadline, _)| *deadline);
+        let target = [task_deadline, self.alarm]
+            .into_iter()
+            .flatten()
+            .filter(|deadline| *deadline > now)
+            .fold(target, u64::min);
         self.spin.rescuing = true;
         let result = self.sleep_until(ClockKind::Monotonic, target);
         self.spin.rescuing = false;
         result?;
+        // The baton holder observed the clock through this advance: CPU time.
+        self.cpu.charge(target.saturating_sub(now));
         self.spin.on_rescued(target, target.saturating_sub(now));
         Ok(())
     }
@@ -8115,6 +8439,91 @@ fn reconcile_replay_guest_cwd(
         ));
     }
     Ok(Some(stored.to_owned()))
+}
+
+/// The realtime epoch an installed clock driver runs on: its realtime reading
+/// minus its monotonic one, both read unrecorded (the values are a pure
+/// function of the clock's configuration, as `Context::fs_clock` relies on).
+fn installed_clock_epoch(clock: &mut dyn ClockDriver) -> Result<u64, RuntimeError> {
+    let realtime = clock.now(ClockKind::Realtime)?;
+    let monotonic = clock.now(ClockKind::Monotonic)?;
+    realtime.checked_sub(monotonic).ok_or_else(|| {
+        RuntimeError::Config(
+            "the installed clock reads realtime behind monotonic, so it has no \
+             realtime epoch to record"
+                .into(),
+        )
+    })
+}
+
+/// Reconcile the trace's recorded realtime epoch against this run's. The trace
+/// is authoritative: an explicitly configured epoch (`--realtime-epoch` /
+/// [`ENV_REALTIME_EPOCH_NANOS`]) or an explicitly installed clock on any other
+/// epoch is refused rather than replayed with different wall-clock reads. An
+/// unconfigured run adopts the recorded epoch, whatever the current default is.
+fn reconcile_replay_realtime_epoch(
+    config: &RuntimeConfig,
+    installed_clock_epoch: Option<u64>,
+    recorded: u64,
+) -> Result<u64, RuntimeError> {
+    if let Some(supplied) = config.realtime_epoch_nanos {
+        if supplied != recorded {
+            return Err(RuntimeError::Config(format!(
+                "replay --realtime-epoch ({supplied} ns) conflicts with the trace's recorded \
+                 realtime epoch ({recorded} ns); the trace is authoritative, so omit the \
+                 flag (or supply the matching value)"
+            )));
+        }
+    }
+    if let Some(installed) = installed_clock_epoch {
+        if installed != recorded {
+            return Err(RuntimeError::Config(format!(
+                "the installed clock runs on realtime epoch {installed} ns but the trace \
+                 was recorded on {recorded} ns; install a clock on the recorded epoch or \
+                 let the runtime build it"
+            )));
+        }
+    }
+    Ok(recorded)
+}
+
+/// Reconcile the trace's recorded node name against this run's. The trace is
+/// authoritative: an explicitly configured name (`--hostname` /
+/// [`ENV_GUEST_HOSTNAME`]) that differs is refused; an unconfigured run adopts
+/// the recorded one.
+fn reconcile_replay_hostname(
+    config: &RuntimeConfig,
+    recorded: &str,
+) -> Result<String, RuntimeError> {
+    if let Some(supplied) = config.hostname.as_deref() {
+        if supplied != recorded {
+            return Err(RuntimeError::Config(format!(
+                "replay --hostname ({supplied:?}) conflicts with the trace's recorded node \
+                 name ({recorded:?}); the trace is authoritative, so omit the flag (or \
+                 supply the matching value)"
+            )));
+        }
+    }
+    Ok(recorded.to_owned())
+}
+
+/// The kernel's rules for a node name, as `sethostname` applies them: at most
+/// [`HOSTNAME_MAX_BYTES`] bytes (`__NEW_UTS_LEN`), and no NUL byte — the name
+/// travels as a C string and an environment variable, where a NUL would
+/// silently truncate it. The empty name is the kernel's to allow, so it is
+/// allowed. Shared by the runtime and the CLI registry's value grammar, so the
+/// flag and the control plane accept exactly the same names.
+pub fn validate_hostname(hostname: &str) -> Result<(), String> {
+    if hostname.contains('\0') {
+        return Err(format!("hostname {hostname:?} contains a NUL byte"));
+    }
+    if hostname.len() > HOSTNAME_MAX_BYTES {
+        return Err(format!(
+            "hostname {hostname:?} is {} bytes; the kernel stores at most {HOSTNAME_MAX_BYTES}",
+            hostname.len()
+        ));
+    }
+    Ok(())
 }
 
 /// The deterministic guest environment recorded into a trace. `None` when no
@@ -11771,7 +12180,11 @@ class=crash|0 class=buggify|0"
         let mut context =
             Context::from_config(RuntimeConfig::seeded(1).with_fs_latency_nanos(10, 10)).unwrap();
         context.fs_create_directory("/d", 0o755).unwrap();
-        assert_eq!(context.fs_metadata("/d").unwrap().btime_nanos, 10);
+        // Realtime stamps: the default epoch plus the 10ns of modeled latency.
+        assert_eq!(
+            context.fs_metadata("/d").unwrap().btime_nanos,
+            DEFAULT_REALTIME_EPOCH_NANOS + 10
+        );
         let fd = context
             .fs_open("/d/f", OpenFlags::create_truncate_write())
             .unwrap();
@@ -12345,6 +12758,88 @@ class=crash|0 class=buggify|0"
     }
 
     #[test]
+    fn cpu_time_is_the_spin_rescues_charged_to_the_baton_holder() {
+        // A sleep moves virtual time but computes nothing; a busy-wait computes
+        // through every advance-on-spin rescue.
+        // The process starts at its modeled startup cost, and a sleep moves
+        // virtual time without charging it.
+        const STARTUP: u64 = patina_dst_abi::STARTUP_CPU_NANOS;
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        assert_eq!(context.cpu_time_nanos(), STARTUP);
+        context.sleep_for(5_000_000).unwrap();
+        assert_eq!(context.cpu_time_nanos(), STARTUP);
+        let (_, elapsed) = calibration_spin(&mut context, 10_000_000).unwrap();
+        assert_eq!(context.cpu_time_nanos(), STARTUP + elapsed);
+        // Before the embedder schedules a task, the main thread is `None`.
+        assert_eq!(context.task_cpu_time_nanos(None), STARTUP + elapsed);
+        let task = context.task_spawn("main").unwrap();
+        assert_eq!(context.scheduler_next().unwrap(), Some(task));
+        let (_, more) = calibration_spin(&mut context, 1_000_000).unwrap();
+        assert_eq!(context.task_cpu_time_nanos(Some(task)), more);
+        assert_eq!(context.cpu_time_nanos(), STARTUP + elapsed + more);
+        context.finish().unwrap();
+    }
+
+    #[test]
+    fn the_spin_rescue_stops_at_an_alarm() {
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        context.set_alarm(Some(1_500));
+        // 1 µs, then the doubled 2 µs token is clamped to the alarm at 1.5 µs.
+        let (_, elapsed) = calibration_spin(&mut context, 1_000).unwrap();
+        assert_eq!(elapsed, 1_500);
+        context.finish().unwrap();
+    }
+
+    /// Spin on the clock until `cpu` nanoseconds of CPU time are charged;
+    /// the rescues it took.
+    fn spin_for_cpu(context: &mut Context, cpu: u64) -> u64 {
+        let start = context.cpu_time_nanos();
+        while context.cpu_time_nanos() - start < cpu {
+            context.now(ClockKind::Monotonic).unwrap();
+        }
+        context.spin.rescues
+    }
+
+    #[test]
+    fn a_cpu_alarm_is_reached_in_whole_rescues_without_the_ramp() {
+        // An 11 ms CPU-time timer. Without an alarm the ramp takes ten
+        // escalating rescues (1.023 ms) and ten more at the ceiling; toward a
+        // declared CPU deadline each rescue is the ceiling or what is left,
+        // and the last lands on the deadline exactly.
+        const DEADLINE: u64 = 11_000_000;
+        let mut ramp = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        assert_eq!(spin_for_cpu(&mut ramp, DEADLINE), 20);
+        ramp.finish().unwrap();
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        let start = context.cpu_time_nanos();
+        context.set_cpu_alarm(Some(DEADLINE - 500_000));
+        assert_eq!(spin_for_cpu(&mut context, DEADLINE - 500_000), 11);
+        assert_eq!(context.cpu_time_nanos() - start, DEADLINE - 500_000);
+        context.finish().unwrap();
+    }
+
+    #[test]
+    fn idle_time_advances_to_an_alarm_ahead_of_every_parked_deadline() {
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        let task = context.task_spawn("main").unwrap();
+        assert_eq!(context.scheduler_next().unwrap(), Some(task));
+        // A runnable task: nothing is idle.
+        assert!(!context.advance_idle_to(100).unwrap());
+        context
+            .task_park_timed(task, "wait", ClockKind::Monotonic, 300)
+            .unwrap();
+        assert!(context.advance_idle_to(100).unwrap());
+        assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 100);
+        // Not behind the clock, not at or past a parked task's own deadline.
+        assert!(!context.advance_idle_to(100).unwrap());
+        assert!(!context.advance_idle_to(300).unwrap());
+        // The parked task's deadline stays the deadlock rescue's.
+        assert_eq!(context.scheduler_next().unwrap(), Some(task));
+        assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 300);
+        context.finish().unwrap();
+    }
+
+    #[test]
     fn advance_on_spin_records_and_replays_byte_identically() {
         let directory = tempdir().unwrap();
         let first = directory.path().join("spin-a.patina");
@@ -12591,8 +13086,10 @@ class=crash|0 class=buggify|0"
             .unwrap();
         record.finish().unwrap();
 
+        // The explicit clock must run on the recorded (default) epoch; one on
+        // any other epoch is refused up front, before any outcome is compared.
         let mut replay = RuntimeBuilder::new(RuntimeConfig::replay(&path, "fixture-v1"))
-            .with_clock(VirtualClock::new(0))
+            .with_clock(VirtualClock::default())
             .with_filesystem(WrongHandleFs)
             .build()
             .unwrap();

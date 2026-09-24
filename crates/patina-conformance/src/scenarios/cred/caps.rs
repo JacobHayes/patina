@@ -16,10 +16,8 @@
 //! The deprecated 32-bit versions are never used: the kernel logs a
 //! warning for them.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{CAPABILITY_V3, CapData, Probe, Who, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -106,15 +104,5 @@ pub const SCENARIO: Scenario = Scenario {
     covers: &[Syscall::N_capget, Syscall::N_capset],
     symbols: &["syscall", "getpid"],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: Vehicle::ALL,
-        what: "capget is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no capget wrapper)",
-        failure: Failure::Stops {
-            events: 1,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall capget (nr",
-        },
-    }],
     ..DEFAULTS
 };

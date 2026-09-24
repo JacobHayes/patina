@@ -47,13 +47,11 @@ comparator.
   all readable without touching the event stream. Note the brief's list plus
   two the brief omitted: `decision_policy` and `sud`.
 - **Loading is strict and fail-closed**: `TraceBundle::load` enforces the 256 MiB
-  cap, migrates non-crash v1..v4 → v5 in memory, then *typed*-deserializes and
+  cap, refuses any format version but the current one, then *typed*-deserializes and
   runs the structural `validate()` oracle (contiguous sequences, lifecycle
   state, main-timeline shape, 1M-event cap). `RunMetadata` is
   `deny_unknown_fields`; `Operation`/`Outcome` are name-tagged enums, so an
-  unknown op tag is a hard parse error. Legacy v1..v4 traces containing
-  `Operation::FsCrash` fail closed instead of being reinterpreted as
-  crash-restart. **A
+  unknown op tag is a hard parse error. **A
   successfully loaded bundle therefore contains only op tags this build knows.**
   (`render.rs`'s generic raw-JSON walk is forward-compat with *concurrent
   in-tree* additions, not with newer trace files — `render_trace_file` calls the
@@ -382,9 +380,8 @@ Fail loud, no partial stdout — matching the crate's fail-closed doctrine:
   as truth is exactly the "silently lying tool" the detection-before-fixes
   doctrine forbids. If corrupt-trace triage becomes a recurring need, that is a
   new decision, not a default.
-- `diff` with two differently-versioned but loadable traces works (supported
-  non-crash prior formats migrate to v5 in memory); version difference shows up
-  in the metadata diff via `format_version`.
+- `diff` loads both traces strictly, so a trace of another format version is
+  refused like any other load.
 
 ## 8. Registry / help / drift-gate impact (complete checklist)
 
@@ -483,5 +480,4 @@ this arc picks the new surfaces up in its full battery for free.
 - Lenient decoding of corrupt traces — see §7.
 - Per-subcommand `--help` topics (first real registry-shape change; not needed
   at four subcommands).
-- Cross-version tolerance beyond the existing migration chain (strict load is
-  the oracle, same as replay).
+- Cross-version tolerance (strict load is the oracle, same as replay).

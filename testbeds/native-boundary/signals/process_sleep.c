@@ -14,7 +14,8 @@ int main(void) {
     assert(waitpid(-1, &status, WNOHANG) == -1);
     assert(errno == ECHILD);
     assert(status == 123);
-    assert(getppid() == 2);
+    /* The parent is the pid namespace's init. */
+    assert(getppid() == 1);
     struct timespec before, after;
     assert(clock_gettime(CLOCK_MONOTONIC, &before) == 0);
     assert(sleep(2) == 0);

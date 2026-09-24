@@ -133,10 +133,11 @@ _Noreturn void abort(void) { patina_abort(); }
 int pthread_kill(pthread_t thread, int sig) {
     return patina_pthread_kill((uintptr_t)thread, sig);
 }
+/* glibc's killpg: kill of the negated group (0: the caller's). */
 int killpg(pid_t group, int sig) {
     if (group < 0) { errno = EINVAL; return -1; }
-    if (group > 1) { errno = ESRCH; return -1; }
-    return signal_result(patina_sud_dispatch(SYS_kill, 0, (uint64_t)sig, 0, 0, 0, 0, 0));
+    return signal_result(patina_sud_dispatch(SYS_kill, (uint64_t)(int64_t)-group,
+        (uint64_t)sig, 0, 0, 0, 0, 0));
 }
 int siginterrupt(int sig, int interrupt) {
     struct patina_signal_action act;
@@ -155,13 +156,14 @@ int tkill(pid_t tid, int sig) {
         (uint64_t)sig, 0, 0, 0, 0, 0));
 }
 int raise(int sig) {
-    return signal_result(patina_sud_dispatch(SYS_tgkill, 1, patina_thread_id(), (uint64_t)sig, 0, 0, 0, 0));
+    return signal_result(patina_sud_dispatch(SYS_tgkill, (uint64_t)patina_pid(),
+        (uint64_t)patina_thread_id(), (uint64_t)sig, 0, 0, 0, 0));
 }
 #endif
 
 /*
- * Process-class deny-traps. The fork/exec/spawn/reap/credential/session surface
- * is a deterministic-runtime non-goal: a managed guest never legitimately enters
+ * Process-class deny-traps. The fork/exec/spawn/reap surface (and chroot) is a
+ * deterministic-runtime non-goal: a managed guest never legitimately enters
  * it and the runtime models none of it. Real guests still LINK this
  * surface (std::process and dormant subprocess helper paths that a plain
  * run never triggers), and a reachability audit cannot clear it — the spawn
@@ -204,29 +206,57 @@ pid_t waitpid(pid_t pid, int *status, int options) {
     return -1;
 #endif
 }
-pid_t setsid(void) { patina_process_trap("setsid"); }
+#ifdef __linux__
+/*
+ * The credential and session rows an unprivileged caller meets, answered by
+ * the one Rust model (the SUD rows; src/identity.rs): the own ids and the own
+ * group succeed and change nothing, everything else is refused as the kernel
+ * refuses it.
+ */
+pid_t setsid(void) {
+    return signal_result(patina_sud_dispatch(SYS_setsid, 0, 0, 0, 0, 0, 0, 0));
+}
 int setgid(gid_t gid) {
-    (void)gid;
-    patina_process_trap("setgid");
+    return signal_result(patina_sud_dispatch(SYS_setgid, (uint64_t)gid, 0, 0, 0, 0, 0, 0));
 }
 int setuid(uid_t uid) {
-    (void)uid;
-    patina_process_trap("setuid");
+    return signal_result(patina_sud_dispatch(SYS_setuid, (uint64_t)uid, 0, 0, 0, 0, 0, 0));
 }
 int setpgid(pid_t pid, pid_t pgid) {
-    (void)pid;
-    (void)pgid;
-    patina_process_trap("setpgid");
+    return signal_result(patina_sud_dispatch(SYS_setpgid, (uint64_t)pid, (uint64_t)pgid,
+        0, 0, 0, 0, 0));
 }
-#ifdef __APPLE__
-int setgroups(int count, const gid_t *groups) {
-#else
 int setgroups(size_t count, const gid_t *groups) {
-#endif
+    return signal_result(patina_sud_dispatch(SYS_setgroups, (uint64_t)count,
+        (uintptr_t)groups, 0, 0, 0, 0, 0));
+}
+#else
+/*
+ * The same identity under XNU's rules (bsd/kern/kern_prot.c): setuid/setgid
+ * accept the caller's own id and refuse anything else without privilege (no
+ * `-1` special case); a process-group leader cannot start a session; setpgid
+ * keeps the group the process leads (a negative group EINVAL, any other pid
+ * ESRCH, any other group EPERM); setgroups needs privilege.
+ */
+static int patina_refuse(int error) {
+    errno = error;
+    return -1;
+}
+pid_t setsid(void) { return patina_refuse(EPERM); }
+int setgid(gid_t gid) { return gid == (gid_t)patina_gid() ? 0 : patina_refuse(EPERM); }
+int setuid(uid_t uid) { return uid == (uid_t)patina_uid() ? 0 : patina_refuse(EPERM); }
+int setpgid(pid_t pid, pid_t pgid) {
+    if (pgid < 0) return patina_refuse(EINVAL);
+    if (pid != 0 && pid != getpid()) return patina_refuse(ESRCH);
+    if (pgid != 0 && pgid != getpid()) return patina_refuse(EPERM);
+    return 0;
+}
+int setgroups(int count, const gid_t *groups) {
     (void)count;
     (void)groups;
-    patina_process_trap("setgroups");
+    return patina_refuse(EPERM);
 }
+#endif
 int chroot(const char *path) {
     (void)path;
     patina_process_trap("chroot");
@@ -341,12 +371,14 @@ int __libc_current_sigrtmax(void) { return 64; }
  * results: a runtime abort is not "support"; where the API admits an honest
  * answer, return it so a guest that reaches the path runs deterministically.
  *
- * `kill` in the single-process deterministic world: the guest is pid 1
- * (with a stable synthetic parent pid) and no other process exists. A signal-0 probe
- * (an existence/permission check that delivers nothing) reports the guest alive
- * and every other pid absent (ESRCH) — this is the shape sysinfo's
+ * `kill` against the virtual process tree (on Linux the dispatcher's row;
+ * the Darwin model here): the guest is pid 2, the child of init, pid 1, which
+ * runs as the same user and has no handlers. A signal-0 probe (an
+ * existence/permission check that delivers nothing) reports the guest and init
+ * alive and every other pid absent (ESRCH) — the shape sysinfo's
  * `check_if_pid_is_alive` and libc liveness probes rely on. A real signal to
- * ANOTHER pid is ESRCH (no such process). A real signal to SELF is not modeled:
+ * init answers 0 and is dropped; to any other pid it is ESRCH (no such
+ * process). On Darwin a real signal to SELF is not modeled:
  * the runtime delivers no asynchronous signals beyond its own SIGSYS
  * containment, so rather than silently claim delivery (a lie) or abort (not
  * support) it fails closed with a loud line and a recoverable ENOSYS.
@@ -359,10 +391,13 @@ int kill(pid_t pid, int sig) {
         errno = EINVAL;
         return -1;
     }
-    if (sig == 0 && (pid == 1 || pid == 0 || pid == -1)) {
+    if (sig == 0 && (pid == getpid() || pid == 0 || pid == -1)) {
         return 0; /* the guest process/group exists; signal 0 delivers nothing */
     }
-    if (pid != 1) {
+    if (pid == getppid()) {
+        return 0; /* init exists and takes nothing (no handlers) */
+    }
+    if (pid != getpid()) {
         errno = ESRCH;
         return -1;
     }

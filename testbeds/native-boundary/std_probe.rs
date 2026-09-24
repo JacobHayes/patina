@@ -6,12 +6,6 @@ fn main() {
 
     println!("PATINA_STRACE_MARKER");
 
-    let Ok(system) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
-        std::process::exit(21);
-    };
-    if system.as_nanos() != 0 {
-        std::process::exit(30);
-    }
     let mut first_hash = std::collections::hash_map::RandomState::new().build_hasher();
     first_hash.write(b"patina");
     let mut second_hash = std::collections::hash_map::RandomState::new().build_hasher();
@@ -19,6 +13,16 @@ fn main() {
     let (first_hash, second_hash) = (first_hash.finish(), second_hash.finish());
     if first_hash == second_hash {
         std::process::exit(32);
+    }
+    let Ok(system) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+        std::process::exit(21);
+    };
+    // Patina's default virtual realtime epoch, 2026-07-22T23:00:09Z, read at
+    // monotonic zero. Read after the entropy draws: a run with no runtime
+    // installed is refused at its first entropy request, while a clock read
+    // there answers from the shim's bootstrap window.
+    if system.as_nanos() != 1_784_761_209_000_000_000 {
+        std::process::exit(30);
     }
     let started = std::time::Instant::now();
     std::thread::sleep(std::time::Duration::from_millis(2));

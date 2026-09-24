@@ -26,11 +26,9 @@
 //! never a timing assertion. The generic (arm64) table has no `alarm` row
 //! (glibc spells it `setitimer`), so that section is x86_64-only.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, SIGSET_BYTES, micros, ms_us, neg};
 use crate::signals::{PROGRESS_DEADLINE, empty_set, has, one_set, set_of, spin_until};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
@@ -240,15 +238,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_alarm,
     ],
     symbols: &["syscall", "nanosleep", "clock_gettime"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: Vehicle::ALL,
-        what: "getitimer is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no getitimer wrapper)",
-        failure: Failure::Stops {
-            events: 2,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall getitimer (nr",
-        },
-    }],
     ..DEFAULTS
 };

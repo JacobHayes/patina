@@ -51,6 +51,12 @@ pub enum Kind {
     CrashSpec,
     /// A `KEY=VALUE` pair with a non-empty key.
     KeyValue,
+    /// An RFC 3339 UTC timestamp `YYYY-MM-DDTHH:MM:SS[.FRACTION]Z` between the
+    /// Unix epoch and the last instant `u64` nanoseconds can hold.
+    UtcTimestamp,
+    /// A node name under the kernel's rules: at most 64 bytes, no NUL
+    /// (`patina_dst_runtime::validate_hostname`).
+    Hostname,
     /// `NAME=IPV4`: a DNS host-table entry. Distinct from [`Kind::KeyValue`]
     /// because the value half must be a dotted-quad address, and a typo there is
     /// worth catching at parse time rather than at the guest's first lookup.
@@ -91,6 +97,8 @@ impl Kind {
             Kind::TaskSelector => "task-selector",
             Kind::CrashSpec => "crash-spec",
             Kind::KeyValue => "key-value",
+            Kind::UtcTimestamp => "utc-timestamp",
+            Kind::Hostname => "hostname",
             Kind::DnsEntry => "dns-entry",
             Kind::AddressPair => "address-pair",
             Kind::Socket => "socket",
@@ -892,6 +900,26 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     "Maximum boundary operations before explicit failure.",
                     false,
                 ),
+                f(
+                    "--realtime-epoch",
+                    None,
+                    Value::Required("RFC3339", Kind::UtcTimestamp),
+                    "Virtual wall-clock time at the start of the run, as an RFC 3339 UTC timestamp (default 2026-07-22T23:00:09Z; recorded and restored on replay).",
+                    false,
+                ),
+                // wasip1 has no hostname surface at all, so the WASI family is
+                // absent and `run <MODULE.wasm> --hostname` is refused rather
+                // than accepted as a knob that could never be observed.
+                only(
+                    f(
+                        "--hostname",
+                        None,
+                        Value::Required("NAME", Kind::Hostname),
+                        "The node name the guest's virtual kernel reports through uname/gethostname (default patina; at most 64 bytes, no NUL; recorded and restored on replay).",
+                        false,
+                    ),
+                    &[Family::Cargo, Family::Native],
+                ),
                 only(
                     f(
                         "--param",
@@ -1081,6 +1109,20 @@ copy-paste `test` and `replay` repro commands.",
                     None,
                     Value::Required("STEPS", Kind::U64),
                     "Maximum boundary operations before explicit failure.",
+                    false,
+                ),
+                f(
+                    "--realtime-epoch",
+                    None,
+                    Value::Required("RFC3339", Kind::UtcTimestamp),
+                    "Virtual wall-clock time at the start of the run, as an RFC 3339 UTC timestamp (default 2026-07-22T23:00:09Z; recorded and restored on replay).",
+                    false,
+                ),
+                f(
+                    "--hostname",
+                    None,
+                    Value::Required("NAME", Kind::Hostname),
+                    "The node name the guest's virtual kernel reports through uname/gethostname (default patina; at most 64 bytes, no NUL; recorded and restored on replay).",
                     false,
                 ),
                 only(
@@ -1379,7 +1421,7 @@ const REPLAY: Verb = Verb {
 families: a wasm module replays under WASI, a native binary under the native \
 supervisor, and a directory/Cargo.toml (no --target) under the Cargo package \
 family. Each restores every recorded semantic input (seed, fault knobs, buggify, \
-guest argv, and native `--env` values) from the trace — the trace is authoritative \
+realtime epoch, hostname, guest argv, and native `--env` values) from the trace — the trace is authoritative \
 — so replay exposes no semantic flags; any re-supplied value must match the \
 recording or the replay is refused.\n\
 \n\
@@ -1469,7 +1511,14 @@ only --fingerprint, --mount, --coverage-out, --harness, and the \
         Refusal {
             families: &[Family::Cargo, Family::Wasi, Family::Native],
             flags: &[FAULT_FLAGS, DNS_FLAGS, BUGGIFY_FLAGS, NATIVE_SCHEDULE_FLAGS],
-            names: &["--seed", "--record", "--env", "--cwd"],
+            names: &[
+                "--seed",
+                "--record",
+                "--env",
+                "--cwd",
+                "--realtime-epoch",
+                "--hostname",
+            ],
             message: "replay restores run semantics from the trace and does not accept {flag}; the trace is authoritative",
         },
         // Native traces are single-timeline and a native run cannot branch.
@@ -2374,6 +2423,16 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         name: "PATINA_GUEST_CWD",
         scope: "protocol",
         doc: "Recorded native guest initial working directory from run --cwd, restored on replay.",
+    },
+    EnvVar {
+        name: "PATINA_REALTIME_EPOCH_NANOS",
+        scope: "protocol",
+        doc: "Virtual realtime epoch in Unix-time nanoseconds (mirrors --realtime-epoch); recorded and restored on replay.",
+    },
+    EnvVar {
+        name: "PATINA_GUEST_HOSTNAME",
+        scope: "protocol",
+        doc: "Node name the guest's virtual kernel reports (mirrors --hostname); recorded and restored on replay.",
     },
     EnvVar {
         name: "PATINA_FS_CRASH_AT / PATINA_FS_TORN_GRANULARITY / PATINA_FS_ERROR_PERMILLE / PATINA_FS_SHORT_PERMILLE",

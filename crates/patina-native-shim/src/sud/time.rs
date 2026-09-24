@@ -1,76 +1,56 @@
-//! SUD rows — clocks and sleeps: `clock_gettime`/`clock_getres`/`gettimeofday`,
-//! `nanosleep`/`clock_nanosleep`. Routed to the virtual clock through the same
-//! `patina_clock_now`/`patina_sleep_until` entries the C interposers call.
+//! SUD rows — clocks, sleeps and the clock-setting rows:
+//! `clock_gettime`/`clock_getres`/`gettimeofday`/`time`,
+//! `nanosleep`/`clock_nanosleep`, and `settimeofday`/`clock_settime`/
+//! `adjtimex`/`clock_adjtime`. Every clock id is decoded once, in
+//! `crate::clocks`, which the C interposers call too.
 
 use super::*;
 
-pub(super) fn clock_from_raw(raw: u64) -> Option<u32> {
-    // Mirror the C `clock_gettime` interposer: only REALTIME/MONOTONIC route.
-    match raw {
-        0 => Some(PATINA_CLOCK_REALTIME),
-        1 => Some(PATINA_CLOCK_MONOTONIC),
-        _ => None,
-    }
+pub(super) fn sys_clock_gettime(clock: u64, out: *mut Timespec) -> i64 {
+    // SAFETY: `out` is the guest's `struct timespec` pointer (NULL: EFAULT).
+    unsafe { crate::clocks::patina_clock_gettime(clock as c_int, out) }
 }
 
-pub(super) fn sys_clock_gettime(clock_raw: u64, out: *mut Timespec) -> i64 {
-    let Some(clock) = clock_from_raw(clock_raw) else {
-        return -EINVAL;
-    };
-    if out.is_null() {
-        return -EINVAL;
-    }
-    let mut nanos: u64 = 0;
-    // SAFETY: `nanos` is local, writable storage.
-    let rc = unsafe { patina_clock_now(clock, &mut nanos) };
-    if rc != 0 {
-        return ret_i32(rc);
-    }
-    // SAFETY: `out` is a guest pointer to `struct timespec` storage.
-    unsafe {
-        out.write(Timespec {
-            tv_sec: (nanos / NANOS_PER_SEC) as i64,
-            tv_nsec: (nanos % NANOS_PER_SEC) as i64,
-        });
-    }
-    0
+pub(super) fn sys_clock_getres(clock: u64, out: *mut Timespec) -> i64 {
+    // SAFETY: `out` is NULL or the guest's `struct timespec`.
+    unsafe { crate::clocks::patina_clock_getres(clock as c_int, out) }
 }
 
-pub(super) fn sys_clock_getres(clock_raw: u64, out: *mut Timespec) -> i64 {
-    // Resolution of the virtual clock is 1ns; report it deterministically.
-    if clock_from_raw(clock_raw).is_none() {
-        return -EINVAL;
-    }
+/// `gettimeofday(2)`: the realtime clock into a non-NULL `tv`; a non-NULL
+/// `tz` gets the kernel's time zone, which nobody set (0 minutes west, no
+/// DST correction).
+pub(super) fn sys_gettimeofday(out: *mut Timeval, zone: *mut [i32; 2]) -> i64 {
     if !out.is_null() {
-        // SAFETY: `out` is a guest `struct timespec` pointer.
-        unsafe {
-            out.write(Timespec {
-                tv_sec: 0,
-                tv_nsec: 1,
-            });
-        }
+        let nanos = match crate::clocks::read(crate::clocks::Clock::Realtime) {
+            Ok(nanos) => nanos,
+            Err(errno) => return crate::neg_errno(errno),
+        };
+        // SAFETY: `out` is a guest `struct timeval` pointer.
+        unsafe { out.write(crate::clocks::Timeval::from_nanos(nanos)) };
+    }
+    if !zone.is_null() {
+        // SAFETY: `zone` is a guest `struct timezone` pointer.
+        unsafe { zone.write_unaligned([0, 0]) };
     }
     0
 }
 
-pub(super) fn sys_gettimeofday(out: *mut Timeval) -> i64 {
-    if out.is_null() {
-        return 0;
+/// `time(2)`: whole seconds of the realtime clock, stored through a
+/// non-NULL pointer too. The kernel answers the timekeeper's seconds as of
+/// its last tick (`ktime_get_real_seconds`), i.e. the coarse realtime clock,
+/// which may trail a fine reading across a second boundary by up to a tick.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn sys_time(out: *mut i64) -> i64 {
+    let nanos = match crate::clocks::read(crate::clocks::Clock::RealtimeCoarse) {
+        Ok(nanos) => nanos,
+        Err(errno) => return crate::neg_errno(errno),
+    };
+    let seconds = (nanos / NANOS_PER_SEC) as i64;
+    if !out.is_null() {
+        // SAFETY: `out` is the guest's `time_t`.
+        unsafe { out.write_unaligned(seconds) };
     }
-    let mut nanos: u64 = 0;
-    // SAFETY: local storage.
-    let rc = unsafe { patina_clock_now(PATINA_CLOCK_REALTIME, &mut nanos) };
-    if rc != 0 {
-        return ret_i32(rc);
-    }
-    // SAFETY: `out` is a guest `struct timeval` pointer.
-    unsafe {
-        out.write(Timeval {
-            tv_sec: (nanos / NANOS_PER_SEC) as i64,
-            tv_usec: ((nanos % NANOS_PER_SEC) / 1000) as i64,
-        });
-    }
-    0
+    seconds
 }
 
 /// Read a `struct timespec` from guest memory and validate it, returning its
@@ -80,15 +60,7 @@ pub(super) fn read_timespec_nanos(ptr: *const Timespec) -> Result<u64, i64> {
         return Err(-EINVAL);
     }
     // SAFETY: `ptr` is a guest `struct timespec` pointer.
-    let ts = unsafe { ptr.read() };
-    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= NANOS_PER_SEC as i64 {
-        return Err(-EINVAL);
-    }
-    let seconds = ts.tv_sec as u64;
-    if seconds > u64::MAX / NANOS_PER_SEC {
-        return Err(-EINVAL);
-    }
-    Ok(seconds * NANOS_PER_SEC + ts.tv_nsec as u64)
+    unsafe { ptr.read() }.valid_nanos().ok_or(-EINVAL)
 }
 
 pub(super) fn sys_nanosleep(req: *const Timespec, rem: *mut Timespec) -> i64 {
@@ -109,39 +81,11 @@ pub(super) fn sys_nanosleep(req: *const Timespec, rem: *mut Timespec) -> i64 {
 }
 
 pub(super) fn sys_clock_nanosleep(
-    clock_raw: u64,
+    clock: u64,
     flags: u64,
     req: *const Timespec,
     rem: *mut Timespec,
 ) -> i64 {
-    let Some(clock) = clock_from_raw(clock_raw) else {
-        return -EINVAL;
-    };
-    let requested = match read_timespec_nanos(req) {
-        Ok(nanos) => nanos,
-        Err(errno) => return errno,
-    };
-    let deadline = if flags & TIMER_ABSTIME != 0 {
-        requested
-    } else {
-        let mut now: u64 = 0;
-        // SAFETY: local storage.
-        let rc = unsafe { patina_clock_now(clock, &mut now) };
-        if rc != 0 {
-            return ret_i32(rc);
-        }
-        now.saturating_add(requested)
-    };
-    // SAFETY: no pointers.
-    ret_i32(unsafe {
-        patina_sleep_until_remaining(
-            clock,
-            deadline,
-            if flags & TIMER_ABSTIME == 0 {
-                rem.cast()
-            } else {
-                std::ptr::null_mut()
-            },
-        )
-    })
+    // SAFETY: guest pointers, NULL-checked by the entry.
+    unsafe { crate::clocks::patina_clock_nanosleep(clock as c_int, flags as c_int, req, rem) }
 }

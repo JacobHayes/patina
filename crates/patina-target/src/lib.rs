@@ -639,7 +639,7 @@ pub type NativeDenyTrapSymbol = (&'static str, &'static str);
 /// from the shim's C — so a trap converted to a real model (or a new one) must
 /// move all three in lockstep or the gate fails closed.
 const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
-    // process (patina_process_trap): spawn/exec/wait/identity mutation.
+    // process (patina_process_trap): spawn/exec/wait and chroot.
     ("chroot", "process"),
     ("execvp", "process"),
     ("fork", "process"),
@@ -656,11 +656,6 @@ const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
     ("posix_spawnattr_setpgroup", "process"),
     ("posix_spawnattr_setsigdefault", "process"),
     ("posix_spawnp", "process"),
-    ("setgid", "process"),
-    ("setgroups", "process"),
-    ("setpgid", "process"),
-    ("setsid", "process"),
-    ("setuid", "process"),
     // host-introspection (patina_native_trap explicit sites + PATINA_INTROSPECTION_TRAP):
     // IOKit registry walk, unreachable while IOServiceMatching returns NULL.
     ("IOIteratorNext", "host-introspection"),

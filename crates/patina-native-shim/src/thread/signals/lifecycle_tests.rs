@@ -177,10 +177,15 @@ fn thread_directed_signal_targets_only_that_task() {
         for (index, row) in ["tgkill", "tkill"].iter().enumerate() {
             delay();
             assert!(parked_class(task).is_some());
+            let tid = tid_of(task) as u64;
             let args = if *row == "tgkill" {
-                [1, task.0, SIGUSR1 as u64]
+                [
+                    u64::from(crate::registry::IDENTITY_PID),
+                    tid,
+                    SIGUSR1 as u64,
+                ]
             } else {
-                [task.0, SIGUSR1 as u64, 0]
+                [tid, SIGUSR1 as u64, 0]
             };
             assert_eq!(
                 unsafe {
@@ -257,8 +262,8 @@ fn pending_for_a_blocking_task_is_invisible_to_another_tasks_sigpending() {
             unsafe {
                 generate_signal(
                     GenerationTarget::Thread {
-                        tgid: Some(1),
-                        tid: task.0 as i32,
+                        tgid: Some(crate::registry::IDENTITY_PID as i32),
+                        tid: tid_of(task),
                     },
                     SIGUSR1,
                     GenerationInfo::Thread,
@@ -296,12 +301,12 @@ fn set_tid_address_is_cleared_and_woken_at_thread_finish() {
         let me = current_task();
         assert_eq!(
             unsafe { patina_set_tid_address(own_word.as_ptr()) },
-            me.0 as i64
+            i64::from(tid_of(me))
         );
         let child_word = word.clone();
         let worker = spawn(move || {
             let tid = unsafe { patina_set_tid_address(child_word.as_ptr()) };
-            assert_eq!(tid, current_task().0 as i64);
+            assert_eq!(tid, i64::from(tid_of(current_task())));
             delay();
             assert!(lock_state().futexes[&(child_word.as_ptr() as usize)].contains(&me));
         });
@@ -430,29 +435,36 @@ fn raw_exit_from_main_keeps_the_process_alive() {
 #[test]
 fn generation_validates_typed_targets_before_recording() {
     isolated(|| {
+        // The tree: init (1) and the guest (2), whose main thread is 2.
+        const INIT: i32 = crate::registry::INIT_PID as i32;
+        const GUEST: i32 = crate::registry::IDENTITY_PID as i32;
         let mut info = Info::new(SIGUSR1 as u8, SI_QUEUE);
         let process = |pid| GenerationTarget::Process { pid };
         let thread = |tgid, tid| GenerationTarget::Thread { tgid, tid };
         for (target, sig, expected) in [
-            (process(1), -1, EINVAL),
-            (process(1), 65, EINVAL),
-            (process(2), 0, ESRCH),
-            (process(-2), 0, ESRCH),
+            (process(GUEST), -1, EINVAL),
+            (process(GUEST), 65, EINVAL),
+            (process(3), 0, ESRCH),
+            (process(-3), 0, ESRCH),
+            // Every process but init and the caller: none.
+            (process(-1), 0, ESRCH),
             (thread(None, 0), 0, EINVAL),
             (thread(None, -1), 0, EINVAL),
             (thread(None, 999), 0, ESRCH),
-            (thread(Some(0), 1), 0, EINVAL),
-            (thread(Some(-1), 1), 0, EINVAL),
-            (thread(Some(2), 1), 0, ESRCH),
-            (thread(Some(1), 0), 0, EINVAL),
-            (thread(Some(1), 999), 0, ESRCH),
+            (thread(Some(0), GUEST), 0, EINVAL),
+            (thread(Some(-1), GUEST), 0, EINVAL),
+            (thread(Some(3), GUEST), 0, ESRCH),
+            (thread(Some(INIT), GUEST), 0, ESRCH),
+            (thread(Some(GUEST), INIT), 0, ESRCH),
+            (thread(Some(GUEST), 0), 0, EINVAL),
+            (thread(Some(GUEST), 999), 0, ESRCH),
         ] {
             assert_eq!(
                 unsafe { generate_signal(target, sig, GenerationInfo::Thread) },
                 -i64::from(expected)
             );
         }
-        for target in [process(1), thread(Some(1), 1)] {
+        for target in [process(GUEST), thread(Some(GUEST), GUEST)] {
             assert_eq!(
                 unsafe {
                     generate_signal(target, SIGUSR1, GenerationInfo::Queued(std::ptr::null()))
@@ -460,28 +472,36 @@ fn generation_validates_typed_targets_before_recording() {
                 -i64::from(EFAULT)
             );
         }
+        // A forged kernel or tkill code only to the caller's own thread id.
         for (pid, code, expected) in [
-            (2, SI_QUEUE, ESRCH),
-            (2, SI_USER, EPERM),
-            (2, SI_TKILL, EPERM),
+            (3, SI_QUEUE, ESRCH),
+            (3, SI_USER, EPERM),
+            (3, SI_TKILL, EPERM),
+            (INIT, SI_USER, EPERM),
+            (INIT, SI_QUEUE, 0),
         ] {
             info.words[1] = code as u32 as u64;
-            for target in [process(pid), thread(Some(pid), 1)] {
+            for target in [process(pid), thread(Some(pid), pid)] {
                 assert_eq!(
                     unsafe { generate_signal(target, SIGUSR1, GenerationInfo::Queued(&info)) },
                     -i64::from(expected)
                 );
             }
         }
-        for target in [
-            process(-1),
-            process(0),
-            process(1),
-            thread(None, 1),
-            thread(Some(1), 1),
+        // Existence probes, and a real signal to init, which takes nothing.
+        for (target, sig) in [
+            (process(0), 0),
+            (process(GUEST), 0),
+            (process(-GUEST), 0),
+            (thread(None, GUEST), 0),
+            (thread(Some(GUEST), GUEST), 0),
+            (process(INIT), 0),
+            (process(INIT), SIGUSR1),
+            (thread(None, INIT), SIGUSR1),
+            (thread(Some(INIT), INIT), SIGUSR1),
         ] {
             assert_eq!(
-                unsafe { generate_signal(target, 0, GenerationInfo::User) },
+                unsafe { generate_signal(target, sig, GenerationInfo::User) },
                 0
             );
         }
@@ -509,5 +529,25 @@ fn detached_handles_live_until_completion_then_are_removed() {
             unsafe { patina_thread_join(worker, std::ptr::null_mut()) },
             ESRCH
         );
+    });
+}
+
+/// `setpgid(0, …)` names the caller's process by its leader's pid, so a
+/// thread other than the main one moves the whole process (`sys.c`
+/// `setpgid`: `task_pid_vnr(group_leader)`), while naming that thread's own
+/// id is `EINVAL` (not a thread-group leader).
+#[test]
+fn setpgid_of_zero_from_a_non_main_thread_names_the_process() {
+    isolated(|| {
+        let worker = spawn(|| {
+            let me = crate::thread::current_tid();
+            assert_ne!(me, crate::registry::IDENTITY_PID as i32);
+            assert_eq!(crate::identity::setpgid(0, 0), 0);
+            assert_eq!(crate::identity::setpgid(me, 0), -i64::from(EINVAL));
+            assert_eq!(crate::identity::setpgid(0, 77), -i64::from(EPERM));
+            assert_eq!(crate::identity::setpgid(0, 1), 0);
+            assert_eq!(crate::identity::getpgid(0), 1);
+        });
+        join(worker);
     });
 }

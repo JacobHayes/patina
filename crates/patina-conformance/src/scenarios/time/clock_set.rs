@@ -25,10 +25,8 @@
 //! Root answers differently and a root run would really set the clock, so
 //! the scenario needs an unprivileged caller.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{ClockArg, Probe, SetTo, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -150,15 +148,5 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &["syscall", "getpid", "clock_gettime"],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: Vehicle::ALL,
-        what: "settimeofday is Trap(privileged) in the registry (patina-syscalls linux.rs), so every door aborts by name where an unprivileged kernel caller is answered EINVAL or EPERM (its libc spelling is syscall(2))",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall settimeofday (nr",
-        },
-    }],
     ..DEFAULTS
 };

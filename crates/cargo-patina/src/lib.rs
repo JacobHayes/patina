@@ -27,10 +27,10 @@ use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_COVERAGE_FD,
     ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_IMAGE_FD, ENV_GUEST_ARGV, ENV_GUEST_CWD, ENV_GUEST_ENV,
-    ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE,
-    ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN,
-    ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE,
-    ENV_TRACE_FD, FaultKnob, Plumbing, RuntimeConfig,
+    ENV_GUEST_HOSTNAME, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_PARAMS_JSON,
+    ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
+    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_STEP_BUDGET,
+    ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, FaultKnob, Plumbing, RuntimeConfig,
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -296,6 +296,11 @@ struct WasiInvocation {
     /// sets, and distinct from `--fuel`, which bounds wasm execution rather than
     /// recorded boundary operations.
     step_budget: Option<u64>,
+    /// The run's virtual realtime epoch in Unix-time nanoseconds
+    /// (`--realtime-epoch`), or `None` for the runtime default. Applied to the
+    /// in-process runtime on a seeded/`--record` run and recorded into the
+    /// trace; `replay` restores it from the trace and carries `None`.
+    realtime_epoch_nanos: Option<u64>,
     /// Seed-driven fault-injection knobs applied to the in-process runtime before
     /// `Context::from_config`, so a WASI guest's filesystem and datagram sockets
     /// see the same seeded crash/jitter/drop drivers the native family does.
@@ -391,6 +396,15 @@ struct Invocation {
     cargo_args: Vec<OsString>,
     mode: Mode,
     step_budget: Option<u64>,
+    /// The run's virtual realtime epoch in Unix-time nanoseconds
+    /// (`--realtime-epoch`), forwarded as [`ENV_REALTIME_EPOCH_NANOS`]; `None`
+    /// leaves the runtime default. Recorded into the trace on `--record`; the
+    /// `replay` verb carries `None` and the trace restores it.
+    realtime_epoch_nanos: Option<u64>,
+    /// The guest's node name (`--hostname`), forwarded as
+    /// [`ENV_GUEST_HOSTNAME`] and observable through `Context::hostname`;
+    /// `None` leaves the runtime default. Recorded and restored like the epoch.
+    hostname: Option<String>,
     params: BTreeMap<String, String>,
     /// Seed-driven fault-injection knobs forwarded to the guest through the
     /// `PATINA_*` control plane (the same knobs the native and WASI families
@@ -444,6 +458,11 @@ struct NativeHarnessInvocation {
     instrumentation: GuestInstrumentation,
     /// Boundary-operation budget forwarded to each seed's child `run`.
     step_budget: Option<u64>,
+    /// The `--realtime-epoch` timestamp, re-emitted verbatim onto each seed's
+    /// child `run`.
+    realtime_epoch: Option<String>,
+    /// The `--hostname` name, re-emitted verbatim onto each seed's child `run`.
+    hostname: Option<String>,
     /// Every fault knob this invocation set, re-emitted onto each seed's child
     /// `run` command line by [`knob_flag_pairs`].
     knobs: KnobValues,
@@ -608,6 +627,15 @@ struct NativeRunInvocation {
     /// forwarded over the control plane. Family-neutral: the same
     /// `RuntimeConfig::step_budget` the Cargo and WASI families set.
     step_budget: Option<u64>,
+    /// The run's virtual realtime epoch in Unix-time nanoseconds
+    /// (`--realtime-epoch`), forwarded as [`ENV_REALTIME_EPOCH_NANOS`]; `None`
+    /// leaves the runtime default. Recorded into trace metadata on `--record`
+    /// and restored by replay like the working directory.
+    realtime_epoch_nanos: Option<u64>,
+    /// The guest's node name (`--hostname`), forwarded as
+    /// [`ENV_GUEST_HOSTNAME`] for the shim's `uname`/`gethostname`; `None`
+    /// leaves the runtime default. Recorded and restored like the epoch.
+    hostname: Option<String>,
     /// Fault-injection knobs forwarded to the guest through the `PATINA_*`
     /// control plane. Each is a validated raw value stored verbatim; the runtime
     /// re-parses it identically on record and replay, so a mismatched flag on
@@ -1705,6 +1733,8 @@ fn parse_native_harness_from(
         },
         instrumentation: instrumentation_of(&args)?,
         step_budget: args.u64("--budget"),
+        realtime_epoch: args.string("--realtime-epoch"),
+        hostname: args.string("--hostname"),
         knobs: knobs_of(&args)?,
         buggify: buggify_of(&args),
         schedule: schedule_of(&args),
@@ -1814,6 +1844,8 @@ fn parse_cargo(command: String, arguments: Vec<OsString>) -> Result<ParseResult,
             None => Mode::Seeded { seed },
         },
         step_budget: args.u64("--budget"),
+        realtime_epoch_nanos: realtime_epoch_of(&args),
+        hostname: args.string("--hostname"),
         params: key_values(&args, "--param")?,
         knobs: knobs_of(&args)?,
         buggify: buggify_of(&args),
@@ -1852,6 +1884,10 @@ fn parse_cargo_replay(
         cargo_args,
         mode: replay_mode(&args, trace)?,
         step_budget: None,
+        // The trace restores the recorded epoch and node name; `replay`
+        // refuses both flags.
+        realtime_epoch_nanos: None,
+        hostname: None,
         params: BTreeMap::new(),
         knobs: KnobValues::default(),
         buggify: None,
@@ -1910,6 +1946,8 @@ fn wasi_invocation_from(
         preopens: inputs.preopens,
         resource_limits: inputs.resource_limits,
         step_budget,
+        // Set by `run` only; `replay` restores the recorded epoch.
+        realtime_epoch_nanos: None,
         knobs,
         buggify,
         liveness,
@@ -1933,15 +1971,18 @@ fn parse_wasi_run_from(
         Some(path) => Mode::Record { seed, path },
         None => Mode::Seeded { seed },
     };
-    Ok(wasi_invocation_from(
-        module,
-        mode,
-        wasi_host_inputs_of(&args)?,
-        args.u64("--budget"),
-        knobs_of(&args)?,
-        buggify_of(&args),
-        liveness_of(&args),
-    ))
+    Ok(WasiInvocation {
+        realtime_epoch_nanos: realtime_epoch_of(&args),
+        ..wasi_invocation_from(
+            module,
+            mode,
+            wasi_host_inputs_of(&args)?,
+            args.u64("--budget"),
+            knobs_of(&args)?,
+            buggify_of(&args),
+            liveness_of(&args),
+        )
+    })
 }
 
 /// Parse the WASI `replay <MODULE.wasm> <TRACE>` verb given an already-resolved
@@ -2599,6 +2640,16 @@ fn parse_native_run(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation,
     parse_native_run_from(binary, arguments)
 }
 
+/// The `--realtime-epoch` timestamp as Unix-time nanoseconds, or `None` when
+/// the flag is absent. The registry's `UtcTimestamp` grammar has already
+/// validated the text, so the conversion cannot fail here.
+fn realtime_epoch_of(args: &cli::Args) -> Option<u64> {
+    args.string("--realtime-epoch").map(|text| {
+        values::utc_timestamp_nanos("--realtime-epoch", &text)
+            .expect("the registry validated --realtime-epoch as a UtcTimestamp")
+    })
+}
+
 /// Parse the flags of a native `run` given an already-resolved binary reference
 /// (an existing binary or a build-on-the-fly spec). A trailing `-- ARGS` section
 /// is the guest argument vector.
@@ -2632,6 +2683,8 @@ fn parse_native_run_from(
         environment: key_values(&args, "--env")?,
         cwd: args.string("--cwd"),
         step_budget: args.u64("--budget"),
+        realtime_epoch_nanos: realtime_epoch_of(&args),
+        hostname: args.string("--hostname"),
         knobs: knobs_of(&args)?,
         buggify: buggify_of(&args),
         schedule: schedule_of(&args),
@@ -2759,6 +2812,9 @@ fn parse_native_replay(
         // `replay` registers no --budget: it re-executes a recorded operation
         // stream whose length is already fixed by the trace.
         step_budget: None,
+        // Nor --realtime-epoch/--hostname: the trace restores both.
+        realtime_epoch_nanos: None,
+        hostname: None,
         // Like the fault knobs, the repeatable semantic knobs come from the
         // trace.
         knobs: KnobValues::default(),
@@ -3077,6 +3133,12 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
     // CrashFs/SimNet the recording used.
     if let Some(budget) = invocation.step_budget {
         config = config.with_step_budget(budget);
+    }
+    // The realtime epoch configures the in-process clock on a seeded or
+    // `--record` run and is recorded into the trace; replay carries none and
+    // the runtime restores the recorded one.
+    if let Some(nanos) = invocation.realtime_epoch_nanos {
+        config = config.with_realtime_epoch_nanos(nanos);
     }
     if matches!(invocation.mode, Mode::Seeded { .. } | Mode::Record { .. }) {
         let pairs = knob_env_pairs(&invocation.knobs)?;
@@ -4163,6 +4225,14 @@ fn append_native_harness_run_flags(args: &mut Vec<OsString>, invocation: &Native
     if let Some(budget) = invocation.step_budget {
         args.push(OsString::from("--budget"));
         args.push(OsString::from(budget.to_string()));
+    }
+    if let Some(epoch) = &invocation.realtime_epoch {
+        args.push(OsString::from("--realtime-epoch"));
+        args.push(OsString::from(epoch));
+    }
+    if let Some(hostname) = &invocation.hostname {
+        args.push(OsString::from("--hostname"));
+        args.push(OsString::from(hostname));
     }
     // Every knob the registry defines, from the shared table: a flag the harness
     // parsed but did not re-emit would be silently inert here. That includes the
@@ -7911,6 +7981,12 @@ liveness-safe."
         if let Some(cwd) = &invocation.cwd {
             command.env(ENV_GUEST_CWD, cwd);
         }
+        if let Some(nanos) = invocation.realtime_epoch_nanos {
+            command.env(ENV_REALTIME_EPOCH_NANOS, nanos.to_string());
+        }
+        if let Some(hostname) = &invocation.hostname {
+            command.env(ENV_GUEST_HOSTNAME, hostname);
+        }
         // The boundary-operation budget is a supervisor-side bound, not recorded
         // run semantics, so it is supplied per invocation on every family alike.
         if let Some(budget) = invocation.step_budget {
@@ -8346,6 +8422,8 @@ and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)
         .env_remove(ENV_BRANCH_ID)
         .env_remove(ENV_PARENT_TIMELINE)
         .env_remove(ENV_STEP_BUDGET)
+        .env_remove(ENV_REALTIME_EPOCH_NANOS)
+        .env_remove(ENV_GUEST_HOSTNAME)
         .env_remove(ENV_PARAMS_JSON);
     // Scrub the fault-injection control plane so only the flags this invocation
     // parsed reach the child; an ambient `PATINA_FS_CRASH_AT` (or any sibling) in
@@ -8375,6 +8453,12 @@ and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)
     }
     if let Some(budget) = invocation.step_budget {
         command.env(ENV_STEP_BUDGET, budget.to_string());
+    }
+    if let Some(nanos) = invocation.realtime_epoch_nanos {
+        command.env(ENV_REALTIME_EPOCH_NANOS, nanos.to_string());
+    }
+    if let Some(hostname) = &invocation.hostname {
+        command.env(ENV_GUEST_HOSTNAME, hostname);
     }
     if !invocation.params.is_empty() {
         command.env(
@@ -10969,6 +11053,40 @@ mod tests {
                 vec!["k=v", "key=", "a=b=c", "x=1"],
                 vec!["=v", "novalue", "", "= "],
             ),
+            Kind::UtcTimestamp => (
+                vec![
+                    "2026-07-22T23:00:09Z",
+                    "1970-01-01T00:00:00Z",
+                    "2000-02-29t12:34:56.5z",
+                    "2554-07-21T23:34:33.709551615Z",
+                ],
+                vec![
+                    "",
+                    "1784761209",
+                    "2026-07-22 23:00:09Z",
+                    "2026-07-22T23:00:09",
+                    "2026-07-22T23:00:09+00:00",
+                    "2026-07-22T23:00:09.Z",
+                    "2026-07-22T23:00:09.1234567890Z",
+                    "2026-13-01T00:00:00Z",
+                    "2026-02-29T00:00:00Z",
+                    "2026-07-22T23:00:60Z",
+                    "1969-12-31T23:59:59Z",
+                    "2554-07-21T23:34:33.709551616Z",
+                ],
+            ),
+            Kind::Hostname => (
+                vec![
+                    "patina",
+                    "db-1.internal",
+                    "",
+                    "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+                ],
+                vec![
+                    "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+                    "a\0b",
+                ],
+            ),
             Kind::DnsEntry => (
                 vec!["db.internal=10.0.0.5", "a=0.0.0.0", "x=255.255.255.255"],
                 vec![
@@ -11282,7 +11400,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn crash_restart_replay_plan_refuses_a_crash_lifecycle_without_a_selector() {
-        let metadata = patina_dst_trace::RunMetadata::new(7, "fingerprint");
+        let metadata = patina_dst_trace::RunMetadata::new(7, "fingerprint", 0, "patina");
         assert!(
             metadata.faults.is_none(),
             "the fixture must carry no selector"
@@ -11339,6 +11457,8 @@ mod tests {
             cargo_args: Vec::new(),
             mode: Mode::Seeded { seed: 0 },
             step_budget: None,
+            realtime_epoch_nanos: None,
+            hostname: None,
             params: BTreeMap::new(),
             knobs: knobs.clone(),
             buggify: None,
@@ -11358,6 +11478,7 @@ mod tests {
             preopens: Vec::new(),
             resource_limits: WasiResourceLimitOverrides::default(),
             step_budget: None,
+            realtime_epoch_nanos: None,
             knobs,
             buggify: None,
             liveness: NativeLiveness::default(),
@@ -11663,6 +11784,12 @@ mod tests {
             tokens.push(OsString::from(knob.meta().flag));
             tokens.push(OsString::from(knob_sample(*knob)));
         }
+        // The realtime epoch is run configuration, not a fault knob, but the
+        // child `run` drops it just as silently if it is not re-emitted.
+        tokens.push(OsString::from("--realtime-epoch"));
+        tokens.push(OsString::from("2001-09-09T01:46:40Z"));
+        tokens.push(OsString::from("--hostname"));
+        tokens.push(OsString::from("db-1"));
 
         let args = cli::parse("test", help::Family::Harness, tokens).expect("harness parse");
         let invocation = NativeHarnessInvocation {
@@ -11676,6 +11803,8 @@ mod tests {
             features: HarnessFeatures::default(),
             instrumentation: GuestInstrumentation::None,
             step_budget: Some(9),
+            realtime_epoch: args.string("--realtime-epoch"),
+            hostname: args.string("--hostname"),
             knobs: knobs_of(&args).expect("harness knob parse"),
             buggify: None,
             schedule: NativeSchedule::default(),
@@ -11699,6 +11828,136 @@ mod tests {
             );
         }
         assert!(emitted.iter().any(|token| token == "--budget"));
+        for (flag, value) in [
+            ("--realtime-epoch", "2001-09-09T01:46:40Z"),
+            ("--hostname", "db-1"),
+        ] {
+            let at = emitted
+                .iter()
+                .position(|token| token == flag)
+                .unwrap_or_else(|| {
+                    panic!("native harness dropped {flag} on the way to its child run")
+                });
+            assert_eq!(
+                emitted.get(at + 1).map(OsString::as_os_str),
+                Some(OsStr::new(value))
+            );
+        }
+    }
+
+    #[test]
+    fn realtime_epoch_timestamps_convert_to_exact_unix_nanoseconds() {
+        let nanos = |text: &str| values::utc_timestamp_nanos("--realtime-epoch", text);
+        // The default epoch is spelled by the timestamp it documents.
+        assert_eq!(
+            nanos("2026-07-22T23:00:09Z"),
+            Ok(patina_dst_runtime::DEFAULT_REALTIME_EPOCH_NANOS)
+        );
+        assert_eq!(nanos("1970-01-01T00:00:00Z"), Ok(0));
+        assert_eq!(nanos("2001-09-09T01:46:40Z"), Ok(1_000_000_000_000_000_000));
+        // Leap day, lowercase separators, a short fraction scaled to nanoseconds.
+        assert_eq!(nanos("2000-02-29t12:34:56.5z"), Ok(951_827_696_500_000_000));
+        assert_eq!(nanos("1970-01-01T00:00:00.000000001Z"), Ok(1));
+        assert_eq!(nanos("2554-07-21T23:34:33.709551615Z"), Ok(u64::MAX));
+        // Unix seconds, a numeric offset, ten fraction digits, a non-leap-year
+        // Feb 29, a leap second, pre-epoch, and one nanosecond past u64.
+        for text in [
+            "1784761209",
+            "2026-07-22T23:00:09+00:00",
+            "2026-07-22T23:00:09.1234567890Z",
+            "2100-02-29T00:00:00Z",
+            "2026-07-22T23:00:60Z",
+            "1969-12-31T23:59:59Z",
+            "2554-07-21T23:34:33.709551616Z",
+        ] {
+            let error = nanos(text).expect_err(text);
+            assert!(error.contains("--realtime-epoch"), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn realtime_epoch_reaches_every_run_family_and_replay_refuses_it() {
+        const TEXT: &str = "2001-09-09T01:46:40Z";
+        const NANOS: u64 = 1_000_000_000_000_000_000;
+        let native = parse_native_run(strings(&["guest", "--realtime-epoch", TEXT])).unwrap();
+        assert_eq!(native.realtime_epoch_nanos, Some(NANOS));
+        let wasi = parse_wasi_run(strings(&["guest.wasm", "--realtime-epoch", TEXT])).unwrap();
+        assert_eq!(wasi.realtime_epoch_nanos, Some(NANOS));
+        for command in ["run", "test"] {
+            let ParseResult::Run(cargo) =
+                parse_cargo(command.into(), strings(&["--realtime-epoch", TEXT])).unwrap()
+            else {
+                panic!("the Cargo family parses to a Run invocation");
+            };
+            assert_eq!(cargo.realtime_epoch_nanos, Some(NANOS), "{command}");
+        }
+        // Absent means the runtime default, not an explicit value.
+        assert_eq!(
+            parse_native_run(strings(&["guest"]))
+                .unwrap()
+                .realtime_epoch_nanos,
+            None
+        );
+        // Unix seconds are not the grammar: the flag is refused by name.
+        let error = parse_native_run(strings(&["guest", "--realtime-epoch", "1784761209"]))
+            .err()
+            .expect("unix seconds are refused");
+        assert!(error.to_string().contains("--realtime-epoch"), "{error}");
+        assert_replay_refuses("--realtime-epoch", TEXT);
+    }
+
+    /// `replay` refuses a re-supplied run fact in every family, by name.
+    fn assert_replay_refuses(flag: &str, value: &str) {
+        for family in [
+            help::Family::Cargo,
+            help::Family::Wasi,
+            help::Family::Native,
+        ] {
+            match cli::parse("replay", family, strings(&[flag, value])) {
+                Err(error) => assert!(error.to_string().contains(flag), "{family:?}: {error}"),
+                Ok(_) => panic!("{family:?} replay accepted a re-supplied {flag}"),
+            }
+        }
+    }
+
+    #[test]
+    fn hostname_reaches_every_family_that_can_observe_it_and_replay_refuses_it() {
+        const NAME: &str = "db-1.internal";
+        let native = parse_native_run(strings(&["guest", "--hostname", NAME])).unwrap();
+        assert_eq!(native.hostname.as_deref(), Some(NAME));
+        for command in ["run", "test"] {
+            let ParseResult::Run(cargo) =
+                parse_cargo(command.into(), strings(&["--hostname", NAME])).unwrap()
+            else {
+                panic!("the Cargo family parses to a Run invocation");
+            };
+            assert_eq!(cargo.hostname.as_deref(), Some(NAME), "{command}");
+        }
+        assert_eq!(
+            parse_native_run(strings(&["guest"])).unwrap().hostname,
+            None
+        );
+        // wasip1 has no hostname surface, so the WASI family refuses the flag.
+        let error = parse_wasi_run(strings(&["guest.wasm", "--hostname", NAME]))
+            .expect_err("WASI refuses --hostname");
+        assert!(error.to_string().contains("--hostname"), "{error}");
+        // The kernel's rules: 64 bytes fit, 65 do not, and a NUL never does.
+        let longest = "h".repeat(patina_dst_runtime::HOSTNAME_MAX_BYTES);
+        let too_long = "h".repeat(patina_dst_runtime::HOSTNAME_MAX_BYTES + 1);
+        assert_eq!(
+            parse_native_run(strings(&["guest", "--hostname", &longest]))
+                .unwrap()
+                .hostname
+                .as_deref(),
+            Some(longest.as_str())
+        );
+        for refused in [too_long.as_str(), "a\0b"] {
+            let error = parse_native_run(strings(&["guest", "--hostname", refused]))
+                .err()
+                .expect("refused hostname");
+            assert!(error.to_string().contains("--hostname"), "{error}");
+        }
+        assert_replay_refuses("--hostname", NAME);
     }
 
     #[test]

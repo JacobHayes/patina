@@ -27,8 +27,8 @@ pub(crate) const RLIMIT_NOFILE: u32 = 7;
 pub(crate) const RLIMIT_MEMLOCK: u32 = 8;
 const RLIMIT_SIGPENDING: u32 = 11;
 pub(crate) const RLIMIT_MSGQUEUE: u32 = 12;
-const RLIMIT_NICE: u32 = 13;
-const RLIMIT_RTPRIO: u32 = 14;
+pub(crate) const RLIMIT_NICE: u32 = 13;
+pub(crate) const RLIMIT_RTPRIO: u32 = 14;
 const RLIM_NLIMITS: usize = 16;
 const RLIM_INFINITY: u64 = u64::MAX;
 
@@ -41,6 +41,9 @@ const NOFILE_HARD: u64 = 4096;
 const MEMLOCK_DEFAULT: u64 = 8 << 20;
 /// `MQ_BYTES_MAX`: 819200 bytes of POSIX message queues.
 const MSGQUEUE_DEFAULT: u64 = 819_200;
+/// The virtual machine's memory: 4 GiB (what `sysinfo` reports, and what
+/// the limits the kernel sizes from memory are sized from).
+pub(crate) const MACHINE_MEMORY: u64 = 4 << 30;
 /// `set_max_threads` on the virtual machine (4 GiB of 4 KiB pages, 16 KiB
 /// thread stacks: `max_threads` 32768) gives `RLIMIT_NPROC` and
 /// `RLIMIT_SIGPENDING` `max_threads / 2`.
@@ -75,11 +78,15 @@ const INITIAL: [Rlimit; RLIM_NLIMITS] = {
     limits
 };
 
-static LIMITS: SpinMutex<[Rlimit; RLIM_NLIMITS]> = SpinMutex::new(INITIAL);
+/// The guest's limits, then init's: `prlimit64` reaches init too (it runs
+/// as the same user), and changes there change nothing the guest sees.
+static LIMITS: SpinMutex<[[Rlimit; RLIM_NLIMITS]; 2]> = SpinMutex::new([INITIAL, INITIAL]);
+const GUEST: usize = 0;
+const INIT: usize = 1;
 
-/// The soft limit of `resource` now.
+/// The guest's soft limit of `resource` now.
 pub(crate) fn soft(resource: u32) -> u64 {
-    LIMITS.lock()[resource as usize].cur
+    LIMITS.lock()[GUEST][resource as usize].cur
 }
 
 /// `do_prlimit` on the table: `old` is the limit before, `new` replaces it.
@@ -123,15 +130,20 @@ pub unsafe extern "C" fn patina_prlimit(
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: per this function's contract.
     let new = (!new.is_null()).then(|| unsafe { new.read_unaligned() });
-    if pid != 0 && pid != crate::registry::IDENTITY_PID as c_int {
-        return -i64::from(crate::ESRCH);
-    }
-    let result = exchange(&mut LIMITS.lock(), resource, new);
+    let process = match pid {
+        0 => GUEST,
+        pid => match crate::identity::lookup(pid) {
+            Some((crate::identity::Process::Guest, _)) => GUEST,
+            Some((crate::identity::Process::Init, _)) => INIT,
+            None => return -i64::from(crate::ESRCH),
+        },
+    };
+    let result = exchange(&mut LIMITS.lock()[process], resource, new);
     let previous = match result {
         Ok(previous) => previous,
         Err(errno) => return -i64::from(errno),
     };
-    if let (Some(new), RLIMIT_NOFILE) = (new, resource) {
+    if let (Some(new), RLIMIT_NOFILE, GUEST) = (new, resource, process) {
         crate::set_fd_limit(new.cur);
     }
     if !old.is_null() {

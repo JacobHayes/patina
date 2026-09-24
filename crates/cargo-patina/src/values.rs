@@ -47,6 +47,10 @@ pub(crate) fn validate(kind: Kind, name: &str, value: &str) -> Result<(), String
             Some((key, _)) if !key.is_empty() => Ok(()),
             _ => Err(format!("{name} requires KEY=VALUE")),
         },
+        Kind::UtcTimestamp => utc_timestamp_nanos(name, value).map(drop),
+        Kind::Hostname => {
+            patina_dst_runtime::validate_hostname(value).map_err(|error| format!("{name}: {error}"))
+        }
         Kind::DnsEntry => dns_entry(name, value).map(drop),
         Kind::AddressPair => address_pair(name, value).map(drop),
         Kind::Socket => socket(name, value).map(drop),
@@ -116,6 +120,115 @@ fn crash_spec(name: &str, value: &str) -> Result<(), String> {
         )),
         Ok(_) => Ok(()),
     }
+}
+
+/// An RFC 3339 UTC timestamp `YYYY-MM-DDTHH:MM:SS[.FRACTION]Z` as Unix-time
+/// nanoseconds. UTC only (`Z`, either case, as is the `T`): an offset would make
+/// the same flag spell different instants on different machines' habits, and
+/// the virtual clock has no zone. The fraction carries at most nine digits (the
+/// clock's resolution), a leap second (`:60`) is refused because Unix time has
+/// none, and the instant must be representable as `u64` nanoseconds: from
+/// 1970-01-01T00:00:00Z through 2554-07-21T23:34:33.709551615Z.
+pub(crate) fn utc_timestamp_nanos(name: &str, value: &str) -> Result<u64, String> {
+    let malformed = || {
+        format!(
+            "{name} must be an RFC 3339 UTC timestamp YYYY-MM-DDTHH:MM:SS[.FRACTION]Z \
+             (e.g. 2026-07-22T23:00:09Z); got {value:?}"
+        )
+    };
+    let bytes = value.as_bytes();
+    let digits = |range: std::ops::Range<usize>| -> Result<u64, String> {
+        let field = bytes.get(range).ok_or_else(malformed)?;
+        if field.is_empty() || !field.iter().all(u8::is_ascii_digit) {
+            return Err(malformed());
+        }
+        Ok(field
+            .iter()
+            .fold(0u64, |acc, digit| acc * 10 + u64::from(digit - b'0')))
+    };
+    let separator = |at: usize, allowed: &[u8]| -> Result<(), String> {
+        match bytes.get(at) {
+            Some(byte) if allowed.contains(byte) => Ok(()),
+            _ => Err(malformed()),
+        }
+    };
+    separator(4, b"-")?;
+    separator(7, b"-")?;
+    separator(10, b"Tt")?;
+    separator(13, b":")?;
+    separator(16, b":")?;
+    let (year, month, day) = (digits(0..4)?, digits(5..7)?, digits(8..10)?);
+    let (hour, minute, second) = (digits(11..13)?, digits(14..16)?, digits(17..19)?);
+    let mut rest = &value[19..];
+    let mut fraction_nanos = 0u64;
+    if let Some(fraction) = rest.strip_prefix('.') {
+        let end = fraction
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(fraction.len());
+        if end == 0 || end > 9 {
+            return Err(format!(
+                "{name} takes 1 to 9 fractional-second digits (nanosecond resolution); got {value:?}"
+            ));
+        }
+        fraction_nanos = fraction[..end]
+            .bytes()
+            .chain(std::iter::repeat(b'0'))
+            .take(9)
+            .fold(0u64, |acc, digit| acc * 10 + u64::from(digit - b'0'));
+        rest = &fraction[end..];
+    }
+    if !matches!(rest, "Z" | "z") {
+        return Err(if rest.starts_with(['+', '-']) {
+            format!("{name} must be in UTC (end in Z), not a numeric offset; got {value:?}")
+        } else {
+            malformed()
+        });
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return Err(format!("{name} month must be 01..12; got {value:?}")),
+    };
+    if day == 0 || day > month_days {
+        return Err(format!(
+            "{name} has no day {day:02} in that month; got {value:?}"
+        ));
+    }
+    if hour > 23 || minute > 59 || second > 59 {
+        return Err(format!(
+            "{name} time must be within 00:00:00..23:59:59 (Unix time has no leap second); got {value:?}"
+        ));
+    }
+    if year < 1970 {
+        return Err(format!(
+            "{name} must not be before the Unix epoch (1970-01-01T00:00:00Z); got {value:?}"
+        ));
+    }
+    // Days since 1970-01-01 of a proleptic Gregorian civil date (the
+    // `days_from_civil` construction, on a March-based year).
+    let (y, m) = if month <= 2 {
+        (year - 1, month + 9)
+    } else {
+        (year, month - 3)
+    };
+    let era = y / 400;
+    let year_of_era = y % 400;
+    let day_of_year = (153 * m + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    let seconds = u128::from(days) * 86_400
+        + u128::from(hour) * 3_600
+        + u128::from(minute) * 60
+        + u128::from(second);
+    u64::try_from(seconds * 1_000_000_000 + u128::from(fraction_nanos)).map_err(|_| {
+        format!(
+            "{name} is past the last instant u64 nanoseconds can hold \
+             (2554-07-21T23:34:33.709551615Z); got {value:?}"
+        )
+    })
 }
 
 /// A DNS host-table entry `NAME=IPV4`. The address half must be a dotted quad:

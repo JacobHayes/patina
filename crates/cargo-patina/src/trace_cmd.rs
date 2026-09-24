@@ -1099,13 +1099,6 @@ fn metadata_diff(
     b_raw: &Value,
 ) -> Vec<MetadataDiff> {
     let mut diffs = Vec::new();
-    if a_bundle.format_version != b_bundle.format_version {
-        diffs.push(MetadataDiff {
-            field: "format_version".into(),
-            a: Value::from(a_bundle.format_version),
-            b: Value::from(b_bundle.format_version),
-        });
-    }
     let a_meta = a_raw
         .get("metadata")
         .cloned()
@@ -1331,7 +1324,7 @@ mod tests {
             .enumerate()
             .map(|(i, (operation, outcome))| TraceEvent::new(i as u64, operation, outcome))
             .collect();
-        TraceBundle::new(RunMetadata::new(7, "fp-test"), decisions)
+        TraceBundle::new(RunMetadata::new(7, "fp-test", 0, "patina"), decisions)
     }
 
     fn sample_flat() -> FlatTrace {
@@ -1560,7 +1553,7 @@ mod tests {
             },
             Outcome::U64(5),
         )];
-        let mut bundle = TraceBundle::new(RunMetadata::new(9, "fp"), main);
+        let mut bundle = TraceBundle::new(RunMetadata::new(9, "fp", 0, "patina"), main);
         bundle.timelines.push(patina_dst_trace::Timeline {
             id: "b1".into(),
             parent: Some("main".into()),

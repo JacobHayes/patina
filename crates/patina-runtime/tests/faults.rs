@@ -9,7 +9,9 @@ use patina_dst_driver_api::{
     ClockFaultReport, CustomOpFaultReport, DnsFaultReport, EntropyFaultReport, FsFaultReport,
     NetFaultReport,
 };
-use patina_dst_runtime::{Context, CrashOp, RuntimeConfig, RuntimeError, TornGranularity};
+use patina_dst_runtime::{
+    Context, CrashOp, DEFAULT_REALTIME_EPOCH_NANOS, RuntimeConfig, RuntimeError, TornGranularity,
+};
 use tempfile::tempdir;
 
 fn sync_directory(context: &mut Context, path: &str) {
@@ -698,8 +700,11 @@ fn entropy_failure_replays_self_contained_without_re_supplying_the_flag() {
 // Realtime-epoch jump injection
 // ---------------------------------------------------------------------------
 
-/// Read `ClockKind::Realtime` once, after advancing the monotonic clock (and
-/// therefore, at epoch 0, the true realtime value) to `advance_to`.
+/// The true realtime value at monotonic 1ms on the default epoch.
+const TRUE_REALTIME_AT_1MS: u64 = DEFAULT_REALTIME_EPOCH_NANOS + 1_000_000;
+
+/// Read `ClockKind::Realtime` once, after advancing the monotonic clock to
+/// `advance_to` (so the true realtime value is the run's epoch plus that).
 fn realtime_once(config: RuntimeConfig, advance_to: u64) -> (u64, Option<ClockFaultReport>) {
     let mut context = Context::from_config(config).unwrap();
     if advance_to > 0 {
@@ -717,7 +722,7 @@ fn realtime_once(config: RuntimeConfig, advance_to: u64) -> (u64, Option<ClockFa
 fn realtime_now_resolves_without_a_knob_and_reports_nothing() {
     let (value, report) = realtime_once(RuntimeConfig::seeded(1), 1_000_000);
     assert_eq!(
-        value, 1_000_000,
+        value, TRUE_REALTIME_AT_1MS,
         "no jump knob was live, so the true epoch is untouched"
     );
     assert!(
@@ -736,14 +741,17 @@ fn the_epoch_jump_knob_fires_and_is_reported() {
                 RuntimeConfig::seeded(seed).with_epoch_jump_nanos(1_000),
                 1_000_000,
             )
-            .0 != 1_000_000
+            .0 != TRUE_REALTIME_AT_1MS
         })
         .expect("some seed in range must draw a nonzero offset");
     let (value, report) = realtime_once(
         RuntimeConfig::seeded(seed).with_epoch_jump_nanos(1_000),
         1_000_000,
     );
-    assert_ne!(value, 1_000_000, "the knob must have perturbed this read");
+    assert_ne!(
+        value, TRUE_REALTIME_AT_1MS,
+        "the knob must have perturbed this read"
+    );
     let report = report.expect("a live knob reports");
     assert_eq!(report.reads, 1);
     assert_eq!(report.jumps_applied, 1);
@@ -881,11 +889,17 @@ fn epoch_jump_saturates_at_zero_rather_than_wrapping_negative() {
                 RuntimeConfig::seeded(seed).with_epoch_jump_nanos(hi),
                 1_000_000,
             )
-            .0 < 1_000_000
+            .0 < TRUE_REALTIME_AT_1MS
         })
         .expect("some seed in range must draw a negative offset");
 
-    let (at_zero, report) = realtime_once(RuntimeConfig::seeded(seed).with_epoch_jump_nanos(hi), 0);
+    // True epoch 0 needs a run configured onto the Unix epoch itself.
+    let (at_zero, report) = realtime_once(
+        RuntimeConfig::seeded(seed)
+            .with_epoch_jump_nanos(hi)
+            .with_realtime_epoch_nanos(0),
+        0,
+    );
     assert_eq!(
         at_zero, 0,
         "a negative draw at true epoch 0 must saturate, not wrap"

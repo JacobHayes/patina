@@ -11,10 +11,8 @@
 //! reach every process of the user. What a task that never set one reads is
 //! not asserted (the default changed across releases).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, Who, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -91,15 +89,5 @@ pub const SCENARIO: Scenario = Scenario {
     covers: &[Syscall::N_ioprio_set, Syscall::N_ioprio_get],
     symbols: &["syscall", "getpid"],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: Vehicle::ALL,
-        what: "ioprio_set is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no ioprio_set wrapper)",
-        failure: Failure::Stops {
-            events: 1,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall ioprio_set (nr",
-        },
-    }],
     ..DEFAULTS
 };

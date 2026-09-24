@@ -25,11 +25,9 @@
 //!   id), an unknown create or settime flag, a `tv_nsec` of a second, and a
 //!   descriptor that is not a timer (a pipe); a closed descriptor is `EBADF`.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Arm, Count, Probe, ms, neg, spec_ns};
 use crate::signals::PROGRESS_DEADLINE;
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -226,15 +224,5 @@ pub const SCENARIO: Scenario = Scenario {
         "pipe2",
         "close",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: Vehicle::ALL,
-        what: "timerfd_create is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no timerfd_create wrapper)",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall timerfd_create (nr",
-        },
-    }],
     ..DEFAULTS
 };

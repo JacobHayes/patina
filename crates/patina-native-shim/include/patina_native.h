@@ -76,6 +76,7 @@ enum {
     PATINA_FD_KQUEUE = 11, /* a kqueue (Darwin) */
     PATINA_FD_SIGNALFD = 12, /* a virtual signal queue reader (Linux) */
     PATINA_FD_MQUEUE = 13,   /* a POSIX message queue (Linux) */
+    PATINA_FD_TIMERFD = 14,  /* a timer descriptor (Linux) */
 };
 
 enum {
@@ -179,17 +180,27 @@ int32_t patina_clock_now(uint32_t clock, uint64_t *nanos);
 int32_t patina_sleep_until(uint32_t clock, uint64_t deadline_nanos);
 int patina_sleep_until_remaining(uint32_t clock_id, uint64_t deadline_nanos, int64_t *remaining);
 /*
- * Deterministic per-process CPU-time proxy in nanoseconds, for the resource
- * accounting interposers (`getrusage`/`task_info`/Linux `sysinfo`). Reports the
- * current virtual monotonic time UNRECORDED (like the kqueue reactor's deadline
- * scans) — under the single-runnable-task world model the process's summed
- * per-thread run-slices equal the monotonic delta, so elapsed virtual time is
- * the deterministic CPU-time model. Always succeeds writing a value: 0 before a
- * runtime is installed (allocator bootstrap / run outside the supervisor) so an
- * accounting read never forces init or aborts. Pure function of simulation
+ * The process's virtual CPU time in nanoseconds, for the Darwin resource
+ * accounting interposers (`getrusage`/`task_info`): the modeled startup cost
+ * plus what the runtime's advance-on-spin rescues charged, read UNRECORDED. Always succeeds writing a value: 0 before a
+ * runtime is installed (allocator bootstrap / run outside the supervisor) so
+ * an accounting read never forces init or aborts. Pure function of simulation
  * state: identical across same-seed runs, monotonic within a run.
  */
 int32_t patina_cpu_time_nanos(uint64_t *nanos);
+#ifdef __linux__
+/*
+ * The clocks (Linux): every clock id decoded once, in Rust (`src/clocks.rs`),
+ * for both doors. Each answers 0 or -errno; a NULL `time` is EFAULT to
+ * clock_gettime, a NULL `rem` is not written. `patina_clock_nanosleep` takes
+ * the kernel's flags (TIMER_ABSTIME) and writes the time left of an
+ * interrupted relative sleep.
+ */
+struct timespec;
+int64_t patina_clock_gettime(int clock, struct timespec *time);
+int64_t patina_clock_nanosleep(int clock, int flags, const struct timespec *request,
+                               struct timespec *remain);
+#endif
 /*
  * Path resolution. Every entry below that takes a (dirfd, path) pair resolves
  * it through ONE resolver in the runtime: the working directory for
@@ -521,6 +532,9 @@ int32_t patina_syncfs(int32_t fd);
  * The one modeled identity (uid/gid 1000): the ONE accessor getuid/geteuid,
  * getgid/getegid, every st_uid/st_gid, and the chown comparison read.
  */
+/* The guest's pid and its parent's (the pid namespace's init). */
+int32_t patina_pid(void);
+int32_t patina_ppid(void);
 uint32_t patina_uid(void);
 uint32_t patina_gid(void);
 /*

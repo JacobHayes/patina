@@ -1,8 +1,8 @@
 //! Versioned trace bundles and strict replay matching.
 //!
 //! Internal crate: the `.patina` trace format — recording boundary events into a
-//! versioned JSON bundle (run metadata, timelines, branch sessions), migrating
-//! older format versions forward, and replaying with strict reconciliation
+//! versioned JSON bundle (run metadata, timelines, branch sessions), refusing
+//! any other format version, and replaying with strict reconciliation
 //! (any operation/outcome divergence fails closed rather than lying). Adopters
 //! produce and consume traces through `cargo patina run --record` / `replay`
 //! and the `patina-dst-runtime` execution modes, not this crate directly.
@@ -29,84 +29,23 @@ pub use handoff::{
     MAX_HANDOFF_PAYLOAD_BYTES, VerifiedIncarnationHandoff,
 };
 
-/// The trace bundle format this runtime writes. It is the only version ever
-/// serialized; older supported versions are upgraded in memory on load.
-///
-/// Format 3 keeps the JSON bundle shape of format 2 but changes only its
-/// on-disk encoding: byte payloads are base64 strings rather than JSON number
-/// arrays (see `bytes_base64` in `patina-dst-abi`) and the bundle is serialized
-/// compactly rather than pretty printed. Both changes shrink the dominant cost
-/// (recorded byte payloads) by several times while keeping the file valid,
-/// greppable JSON. Additive ABI variants, such as the TCP operations and
-/// outcomes, do not require a format bump because older traces never contain
-/// those enum tags and serde's name-tagged representation preserves old events.
-///
-/// Format 4 records the run's fault-injection configuration in the bundle
-/// metadata ([`RunMetadata::faults`]) so a fault run replays self-contained: the
-/// stored config is authoritative and no `--fs-crash-at`/jitter/drop flags need
-/// re-supplying. A format 3 (or earlier) bundle carries no such field — its
-/// `faults` migrates to `None`, which the runtime reads as "pre-metadata trace"
-/// and falls back to the historical re-supply contract. The metadata field is a
-/// new struct key, not a new operation, so recorded event streams are byte-for-
-/// byte unchanged across the bump.
-///
-/// Format 5 adds explicit incarnation/lifecycle ordering. Each operation records
-/// the guest incarnation that issued it and an order slot in the same logical
-/// namespace as lifecycle markers, allowing a trace to state: Start(0), a
-/// successful triggering operation, Crash(0,digest), Restart(0->1,digest),
-/// Start(1), and final End(1). Legacy v1-v4 traces that contain `Operation::FsCrash`
-/// are refused as [`TraceError::LegacyCrashSemantics`] rather than migrated with
-/// silently changed crash meaning.
-///
-/// Format 6 carries the CREATION MODE on every creating filesystem operation:
-/// `fs_open`'s flags gain `mode` (POSIX `open`'s third argument) and
-/// `fs_create_directory` gains one, joining `fs_make_fifo`, which already had
-/// one. A format-5 recorder dropped the caller's mode and every new entry got
-/// the fixed umasked default for its kind, so the upgrade fills in exactly the
-/// request that produced that default — `0o666` for a creating open, `0o777`
-/// for a directory, and `0` (unread) for an open that creates nothing.
-///
-/// Format 7 adds `O_PATH` to `fs_open`'s flags (`path_only`). A format-6
-/// recorder had no way to say it: every open in its vocabulary opened the file,
-/// so a directory handle a guest asked for as a mere LOCATION was recorded as a
-/// read-only open of the directory and charged accordingly. Nothing a format-6
-/// run recorded was path-only, so the upgrade writes `false` — the flag the
-/// recorder behaved as if it had.
-///
-/// Format 8 adds the change and birth times to every recorded metadata outcome
-/// (`ctime_nanos`, `btime_nanos`). A format-7 runtime reported a file's change
-/// time AS its modification time (the stat fill copied `mtime` into `st_ctime`)
-/// and never reported a birth time (`STATX_BTIME` was never set), so the
-/// upgrade writes `ctime_nanos = mtime_nanos` and `btime_nanos = 0`: exactly
-/// what the recorded run answered.
-///
-/// Format 9 adds `SignalGenerated` with sequence, signal, process/task target,
-/// siginfo code and payload. Format-8 bundles contain no such variant, so
-/// migration preserves their observations and advances only the version tag.
-/// This does not promise replay compatibility with changed signal semantics.
-///
-/// Format 10 names the operations the filesystem and memory families added
-/// since format 9. The filesystem rows' `fs_sync_all`, `fs_make_node`,
-/// `fs_rename_whiteout`, `fs_exchange`, the four xattr operations and the
-/// `socket` and `char_device` entry kinds shipped under format 9 without a
-/// bump, so a format-9 bundle recorded after them may carry them (and a
-/// reader from before them fails on such a bundle by operation, not by
-/// version); format 10 bumps for them together with the page cache's and
-/// anonymous files' `fs_write_back_at`, `fs_create_anonymous`, `fs_seals` and
-/// `fs_add_seals`. Every one of these variants is unchanged by the bump, so a
-/// format-9 bundle, with or without them, migrates by its version tag alone,
-/// and a format-9 reader refuses a format-10 bundle as an unsupported
-/// version. This does not promise replay compatibility for a run whose
-/// recorded operations changed: a guest that maps a file records its page
-/// cache's operations now.
-pub const TRACE_FORMAT_VERSION: u32 = 10;
-/// The oldest trace format version this runtime can read. A bundle at this
-/// version, or any later supported version, is migrated in memory through the
-/// `MIGRATIONS` chain up to [`TRACE_FORMAT_VERSION`] and then validated by
-/// the normal structural oracle. Versions below this floor, or above
-/// [`TRACE_FORMAT_VERSION`], are rejected with
+/// The trace bundle format this runtime writes and the only one it reads: a
+/// bundle declaring any other `format_version` is refused with
 /// [`TraceError::UnsupportedVersion`].
-pub const MIN_SUPPORTED_FORMAT_VERSION: u32 = 1;
+///
+/// What each version added:
+/// - 2: named timelines with branch metadata.
+/// - 3: compact JSON with base64 byte payloads.
+/// - 4: the fault-injection configuration in [`RunMetadata::faults`].
+/// - 5: incarnation and order on every event, and lifecycle markers.
+/// - 6: the creation mode on every creating filesystem operation.
+/// - 7: `path_only` (`O_PATH`) in `fs_open`'s flags.
+/// - 8: change and birth times on every metadata outcome.
+/// - 9: the `signal_generated` operation.
+/// - 10: the filesystem and memory families' operations.
+/// - 11: the required [`RunMetadata::realtime_epoch_nanos`] and
+///   [`RunMetadata::hostname`].
+pub const TRACE_FORMAT_VERSION: u32 = 11;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 
@@ -506,9 +445,8 @@ pub struct RunMetadata {
     /// replay. Additive: absent (`None`) in traces recorded without buggify,
     /// which the runtime treats as buggify-disabled. A native trace whose textual
     /// fingerprint declares `+buggify` must not omit this field; that would claim
-    /// SDK-fault coverage without an armed SDK config. An old trace therefore
-    /// migrates clean unless it also carries the `+buggify` capability suffix, and
-    /// a conflicting explicit knob at replay fails closed exactly like
+    /// SDK-fault coverage without an armed SDK config. A conflicting explicit
+    /// knob at replay fails closed exactly like
     /// [`RunMetadata::faults`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buggify: Option<BuggifyConfigRecord>,
@@ -590,10 +528,33 @@ pub struct RunMetadata {
     /// replayed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tsc: Option<bool>,
+    /// The run's virtual realtime epoch: the Unix time in nanoseconds that
+    /// `ClockKind::Realtime` read at monotonic zero (`--realtime-epoch`, default
+    /// `patina_dst_abi::DEFAULT_REALTIME_EPOCH_NANOS`). Required, not additive:
+    /// every bundle states it. Authoritative on replay — the
+    /// runtime rebuilds its default clock on this epoch, and an explicitly
+    /// configured epoch that differs is refused — because filesystem timestamps
+    /// are stamped from the realtime clock without a recorded read. Not a
+    /// fingerprint input: a replay already reconciles it field-for-field.
+    pub realtime_epoch_nanos: u64,
+    /// The node name the guest's virtual kernel reports (`uname`,
+    /// `gethostname`; `--hostname`, default `patina`). Required exactly like
+    /// [`realtime_epoch_nanos`](RunMetadata::realtime_epoch_nanos).
+    /// Authoritative on replay; a conflicting explicit name is refused.
+    /// Not a fingerprint input.
+    pub hostname: String,
 }
 
 impl RunMetadata {
-    pub fn new(root_seed: u64, fingerprint: impl Into<String>) -> Self {
+    /// The metadata every recording carries. The realtime epoch and the node
+    /// name are required run facts, so the caller states them rather than
+    /// inheriting a default the trace crate would have to guess.
+    pub fn new(
+        root_seed: u64,
+        fingerprint: impl Into<String>,
+        realtime_epoch_nanos: u64,
+        hostname: impl Into<String>,
+    ) -> Self {
         Self {
             root_seed,
             decision_policy: "splitmix64-v1".into(),
@@ -609,6 +570,8 @@ impl RunMetadata {
             watchdog: None,
             sud: None,
             tsc: None,
+            realtime_epoch_nanos,
+            hostname: hostname.into(),
         }
     }
 
@@ -877,20 +840,15 @@ impl TraceBundle {
         Self::decode(value, path)
     }
 
-    /// Upgrade a decoded bundle to the current format, then deserialize and
-    /// validate it.
+    /// Check a decoded bundle's version, then deserialize and validate it.
     ///
-    /// A bundle already at [`TRACE_FORMAT_VERSION`] is deserialized unchanged.
-    /// A supported prior version is walked forward through the [`MIGRATIONS`]
-    /// chain in memory - the source file is never rewritten - and the upgraded
-    /// value is then subjected to the same structural [`validate`](Self::validate)
-    /// oracle as a natively current bundle. Unsupported versions are rejected by
-    /// [`migrate_to_current`] before any structural interpretation.
+    /// Only a bundle at [`TRACE_FORMAT_VERSION`] is deserialized; any other
+    /// declared version is refused before any structural interpretation.
     fn decode(value: serde_json::Value, path: PathBuf) -> Result<Self, TraceError> {
         // An abandoned-trace marker is a valid JSON document that is not a
         // bundle. Recognize it FIRST so the refusal names what actually
         // happened — the recorder gave up on this trace, and why — instead of
-        // the "missing format_version" confusion the migration chain would
+        // the "missing format_version" confusion the version check would
         // otherwise report for a file that is not corrupt at all.
         if let Some(abandoned) = value
             .get(ABANDONED_TRACE_KEY)
@@ -905,7 +863,11 @@ impl TraceBundle {
                 ),
             });
         }
-        let value = migrate_to_current(value)?;
+        if let Some(found) = format_version_of(&value) {
+            if found != TRACE_FORMAT_VERSION {
+                return Err(TraceError::UnsupportedVersion { found });
+            }
+        }
         require_complete_current_bundle(&value, &path)?;
         let bundle: Self =
             serde_json::from_value(value).map_err(|source| TraceError::Parse { path, source })?;
@@ -999,7 +961,6 @@ impl TraceBundle {
         if self.format_version != TRACE_FORMAT_VERSION {
             return Err(TraceError::UnsupportedVersion {
                 found: self.format_version,
-                supported: TRACE_FORMAT_VERSION,
             });
         }
         if self.metadata.fingerprint.is_empty() {
@@ -1799,6 +1760,18 @@ impl Replayer {
         self.metadata.tsc
     }
 
+    /// The virtual realtime epoch the trace was recorded on (see
+    /// [`RunMetadata::realtime_epoch_nanos`]).
+    pub const fn realtime_epoch_nanos(&self) -> u64 {
+        self.metadata.realtime_epoch_nanos
+    }
+
+    /// The node name the trace was recorded under (see
+    /// [`RunMetadata::hostname`]).
+    pub fn hostname(&self) -> &str {
+        &self.metadata.hostname
+    }
+
     pub fn expect(&mut self, operation: &Operation) -> Result<Outcome, TraceError> {
         let event = self
             .decisions
@@ -1982,6 +1955,16 @@ impl BranchSession {
         self.bundle.metadata.guest_cwd.as_deref()
     }
 
+    /// The virtual realtime epoch inherited from the parent trace.
+    pub const fn realtime_epoch_nanos(&self) -> u64 {
+        self.bundle.metadata.realtime_epoch_nanos
+    }
+
+    /// The node name inherited from the parent trace.
+    pub fn hostname(&self) -> &str {
+        &self.bundle.metadata.hostname
+    }
+
     /// The DNS host table inherited from the parent trace.
     pub const fn dns_config(&self) -> Option<&DnsConfigRecord> {
         self.bundle.metadata.dns.as_ref()
@@ -2096,16 +2079,10 @@ pub enum TraceError {
         reason: String,
     },
     Serialize(serde_json::Error),
+    /// The bundle declares a `format_version` other than
+    /// [`TRACE_FORMAT_VERSION`].
     UnsupportedVersion {
         found: u32,
-        supported: u32,
-    },
-    /// A pre-v5 trace recorded `Operation::FsCrash`, whose old meaning was the
-    /// known hybrid rollback-and-continue model. Migrating it into v5 would
-    /// silently reinterpret a crash boundary, so loading refuses with this named
-    /// error instead.
-    LegacyCrashSemantics {
-        format_version: u32,
     },
     Invalid(String),
     /// A *budget* refusal: the trace is larger than a configured limit allows.
@@ -2177,13 +2154,9 @@ impl fmt::Display for TraceError {
                 write!(f, "incomplete trace {}: {reason}", path.display())
             }
             Self::Serialize(source) => write!(f, "failed to serialize trace: {source}"),
-            Self::UnsupportedVersion { found, supported } => write!(
+            Self::UnsupportedVersion { found } => write!(
                 f,
-                "unsupported trace format version {found}; this runtime supports {supported}"
-            ),
-            Self::LegacyCrashSemantics { format_version } => write!(
-                f,
-                "legacy trace format version {format_version} contains Operation::FsCrash with pre-v5 crash semantics; refuse to migrate it as crash-restart"
+                "trace format version {found} is not supported; this runtime reads format {TRACE_FORMAT_VERSION}"
             ),
             Self::Invalid(message) => write!(f, "invalid trace: {message}"),
             Self::ResourceLimit { message, .. } => {
@@ -2236,490 +2209,12 @@ impl std::error::Error for TraceError {
     }
 }
 
-/// A pure, total upgrade of a trace bundle's JSON representation from one
-/// format version to the next. Migrations run entirely in memory and never
-/// rewrite the source file.
-type Migration = fn(serde_json::Value) -> Result<serde_json::Value, TraceError>;
-
-/// Ordered migration steps bridging every supported prior format up to
-/// [`TRACE_FORMAT_VERSION`]. Element `i` upgrades version
-/// `MIN_SUPPORTED_FORMAT_VERSION + i` to the following version, so a future
-/// format bump needs exactly one new step appended here (and the constant
-/// [`TRACE_FORMAT_VERSION`] raised). No plugin system: the chain is a fixed,
-/// auditable slice.
-const MIGRATIONS: &[Migration] = &[
-    migrate_v1_to_v2,
-    migrate_v2_to_v3,
-    migrate_v3_to_v4,
-    migrate_v4_to_v5,
-    migrate_v5_to_v6,
-    migrate_v6_to_v7,
-    migrate_v7_to_v8,
-    migrate_v8_to_v9,
-    migrate_v9_to_v10,
-];
-
-// One migration step must exist for each supported prior version; this keeps
-// the chain and the version window from drifting apart on a future bump.
-const _: () = assert!(
-    MIGRATIONS.len() == (TRACE_FORMAT_VERSION - MIN_SUPPORTED_FORMAT_VERSION) as usize,
-    "MIGRATIONS must contain one step per supported prior format version",
-);
-
 /// Read the declared format version from a decoded bundle when it is present as
 /// a non-negative integer. A missing or non-integer field yields `None`, so the
 /// caller defers to typed deserialization for a precise parse error rather than
 /// guessing a version.
 fn format_version_of(value: &serde_json::Value) -> Option<u32> {
     u32::try_from(value.get("format_version")?.as_u64()?).ok()
-}
-
-/// Upgrade a decoded bundle to [`TRACE_FORMAT_VERSION`].
-///
-/// The current version is returned untouched. A supported prior version is
-/// walked forward through [`MIGRATIONS`]. Any other declared version - below
-/// [`MIN_SUPPORTED_FORMAT_VERSION`] or newer than this runtime understands - is
-/// rejected with [`TraceError::UnsupportedVersion`] rather than a generic parse
-/// failure, keeping the distinction visible in the error taxonomy.
-fn migrate_to_current(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
-    let Some(found) = format_version_of(&value) else {
-        return Ok(value);
-    };
-    if !(MIN_SUPPORTED_FORMAT_VERSION..=TRACE_FORMAT_VERSION).contains(&found) {
-        return Err(TraceError::UnsupportedVersion {
-            found,
-            supported: TRACE_FORMAT_VERSION,
-        });
-    }
-    if found < 5 && value_contains_legacy_fs_crash(&value) {
-        return Err(TraceError::LegacyCrashSemantics {
-            format_version: found,
-        });
-    }
-    let start = (found - MIN_SUPPORTED_FORMAT_VERSION) as usize;
-    for migrate in &MIGRATIONS[start..] {
-        value = migrate(value)?;
-    }
-    Ok(value)
-}
-
-/// Upgrade the pre-branching format 1 layout to format 2.
-///
-/// Format 1 stored a single flat `decisions` array with no timelines and no
-/// branch metadata. In format 2 terms that is exactly one unbranched `main`
-/// timeline, so the upgrade is lossless: the decisions move verbatim into a
-/// `main` timeline with absent parent, branch point, and branch seed. The
-/// upgraded value is validated by the normal structural oracle after the chain
-/// completes.
-fn migrate_v1_to_v2(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| TraceError::Invalid("format 1 trace is not a JSON object".into()))?;
-    let decisions = object.remove("decisions").ok_or_else(|| {
-        TraceError::Invalid("format 1 trace is missing its decisions array".into())
-    })?;
-    if !decisions.is_array() {
-        return Err(TraceError::Invalid(
-            "format 1 trace decisions must be an array".into(),
-        ));
-    }
-    let main = serde_json::json!({
-        "id": MAIN_TIMELINE,
-        "parent": null,
-        "from_sequence": null,
-        "branch_seed": null,
-        "decisions": decisions,
-    });
-    object.insert("timelines".into(), serde_json::Value::Array(vec![main]));
-    object.insert("format_version".into(), serde_json::Value::from(2u32));
-    Ok(value)
-}
-
-/// Upgrade the format 2 layout to format 3.
-///
-/// Format 3 changes only the on-disk encoding, not the logical schema: byte
-/// payloads become base64 strings instead of JSON number arrays and the bundle
-/// is serialized compactly. The decoded `Value` tree is structurally identical
-/// across the two versions, so this step only rewrites the version tag. The
-/// legacy number-array payloads a format 2 bundle carries are decoded by the
-/// tolerant `bytes_base64` reader in `patina-dst-abi` when the migrated value is
-/// finally deserialized, which is what keeps the upgrade lossless without a
-/// per-payload rewrite here.
-fn migrate_v2_to_v3(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| TraceError::Invalid("format 2 trace is not a JSON object".into()))?;
-    object.insert("format_version".into(), serde_json::Value::from(3u32));
-    Ok(value)
-}
-
-/// Upgrade the format 3 layout to format 4.
-///
-/// Format 4 adds the optional `faults` key to the bundle metadata. A format 3
-/// bundle carries no such key, and its absence deserializes to `None` through
-/// `serde(default)` once the version tag is bumped — the runtime reads that
-/// `None` as a pre-metadata trace and keeps the historical fault re-supply
-/// contract. So the upgrade is purely a version-tag bump, exactly like v2→v3;
-/// no recorded event is touched.
-fn migrate_v3_to_v4(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| TraceError::Invalid("format 3 trace is not a JSON object".into()))?;
-    object.insert("format_version".into(), serde_json::Value::from(4u32));
-    Ok(value)
-}
-
-/// Upgrade format 4 to format 5 by adding explicit operation incarnation/order
-/// fields and a linear Start(0)/End(0) lifecycle to each timeline. A legacy
-/// bundle containing `Operation::FsCrash` is refused before this function runs:
-/// those events were recorded under the pre-v5 hybrid crash semantics and cannot
-/// be safely reinterpreted as crash-restart.
-fn migrate_v4_to_v5(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| TraceError::Invalid("format 4 trace is not a JSON object".into()))?;
-    let timelines = object
-        .get_mut("timelines")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or_else(|| TraceError::Invalid("format 4 trace timelines must be an array".into()))?;
-    for index in 0..timelines.len() {
-        let (previous, current) = timelines.split_at_mut(index);
-        migrate_timeline_to_v5(&mut current[0], previous)?;
-    }
-    object.insert("format_version".into(), serde_json::Value::from(5u32));
-    Ok(value)
-}
-
-fn migrate_timeline_to_v5(
-    timeline: &mut serde_json::Value,
-    previous_timelines: &[serde_json::Value],
-) -> Result<(), TraceError> {
-    let object = timeline
-        .as_object_mut()
-        .ok_or_else(|| TraceError::Invalid("format 4 timeline is not a JSON object".into()))?;
-    let start_sequence = object
-        .get("from_sequence")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let parent_id = object
-        .get("parent")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let start_order = if let Some(parent_id) = &parent_id {
-        let parent_events = resolved_migrated_decision_orders(previous_timelines, parent_id)?;
-        parent_events
-            .get((start_sequence as usize).saturating_sub(1))
-            .map(|(_, order)| order.saturating_add(1))
-            .unwrap_or(1)
-    } else {
-        start_sequence
-    };
-    let decisions = object
-        .get_mut("decisions")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or_else(|| {
-            TraceError::Invalid("format 4 timeline decisions must be an array".into())
-        })?;
-    let mut last_order = start_order;
-    for event in decisions.iter_mut() {
-        let event_object = event.as_object_mut().ok_or_else(|| {
-            TraceError::Invalid("format 4 trace event is not a JSON object".into())
-        })?;
-        let sequence = event_object
-            .get("sequence")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| {
-                TraceError::Invalid("format 4 trace event is missing sequence".into())
-            })?;
-        let order = if parent_id.is_some() {
-            start_order
-                .saturating_add(1)
-                .saturating_add(sequence.saturating_sub(start_sequence))
-        } else {
-            sequence.saturating_add(1)
-        };
-        event_object.insert("order".into(), serde_json::Value::from(order));
-        event_object.insert("incarnation".into(), serde_json::Value::from(0u64));
-        last_order = order;
-    }
-    let end_order = decisions
-        .last()
-        .and_then(|event| event.get("order"))
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(start_order)
-        .saturating_add(1);
-    object.insert(
-        "lifecycle".into(),
-        serde_json::json!([
-            {"order": start_order, "kind": "start", "incarnation": 0},
-            {"order": end_order.max(last_order.saturating_add(1)), "kind": "end", "incarnation": 0}
-        ]),
-    );
-    Ok(())
-}
-
-fn resolved_migrated_decision_orders(
-    timelines: &[serde_json::Value],
-    id: &str,
-) -> Result<Vec<(u64, u64)>, TraceError> {
-    let timeline = timelines
-        .iter()
-        .find(|timeline| timeline.get("id").and_then(serde_json::Value::as_str) == Some(id))
-        .ok_or_else(|| {
-            TraceError::Invalid(format!(
-                "format 4 timeline refers to missing or later parent {id}"
-            ))
-        })?;
-    let mut resolved =
-        if let Some(parent) = timeline.get("parent").and_then(serde_json::Value::as_str) {
-            let mut parent_events = resolved_migrated_decision_orders(timelines, parent)?;
-            let from = timeline
-                .get("from_sequence")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as usize;
-            parent_events.truncate(from);
-            parent_events
-        } else {
-            Vec::new()
-        };
-    let decisions = timeline
-        .get("decisions")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            TraceError::Invalid("format 5 timeline decisions must be an array".into())
-        })?;
-    for event in decisions {
-        let sequence = event
-            .get("sequence")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| {
-                TraceError::Invalid("format 5 trace event is missing sequence".into())
-            })?;
-        let order = event
-            .get("order")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| TraceError::Invalid("format 5 trace event is missing order".into()))?;
-        resolved.push((sequence, order));
-    }
-    Ok(resolved)
-}
-
-/// Upgrade the mode-less format 5 layout to format 6.
-///
-/// Format 5 recorded no creation mode: `open(path, O_CREAT, mode)` and
-/// `mkdir(path, mode)` dropped the caller's argument and the driver minted every
-/// new entry at the fixed umasked default for its kind. That default is exactly
-/// what `0o666` (file) and `0o777` (directory) produce under the modeled `0o022`
-/// umask, so writing those requests in is not a fabricated value: it is the
-/// request the recorded run behaved as if it had made. A non-creating `open`
-/// gets `0`, the argument POSIX says the kernel never reads.
-fn migrate_v5_to_v6(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| TraceError::Invalid("format 5 trace is not a JSON object".into()))?;
-    let timelines = object
-        .get_mut("timelines")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or_else(|| TraceError::Invalid("format 5 trace timelines must be an array".into()))?;
-    for timeline in timelines.iter_mut() {
-        let decisions = timeline
-            .get_mut("decisions")
-            .and_then(serde_json::Value::as_array_mut)
-            .ok_or_else(|| {
-                TraceError::Invalid("format 5 timeline decisions must be an array".into())
-            })?;
-        for event in decisions.iter_mut() {
-            let Some(operation) = event
-                .get_mut("operation")
-                .and_then(serde_json::Value::as_object_mut)
-            else {
-                continue;
-            };
-            match operation.get("kind").and_then(serde_json::Value::as_str) {
-                Some("fs_open") => {
-                    let Some(flags) = operation
-                        .get_mut("flags")
-                        .and_then(serde_json::Value::as_object_mut)
-                    else {
-                        return Err(TraceError::Invalid(
-                            "format 5 fs_open is missing its flags object".into(),
-                        ));
-                    };
-                    let creates = flags
-                        .get("create")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false);
-                    let mode = if creates {
-                        patina_dst_abi::DEFAULT_FILE_CREATE_MODE
-                    } else {
-                        patina_dst_abi::CREATE_MODE_UNUSED
-                    };
-                    flags.insert("mode".into(), serde_json::Value::from(mode));
-                }
-                Some("fs_create_directory") => {
-                    operation.insert(
-                        "mode".into(),
-                        serde_json::Value::from(patina_dst_abi::DEFAULT_DIRECTORY_CREATE_MODE),
-                    );
-                }
-                _ => {}
-            }
-        }
-    }
-    object.insert("format_version".into(), serde_json::Value::from(6u32));
-    Ok(value)
-}
-
-/// Upgrade the `O_PATH`-less format 6 layout to format 7.
-///
-/// Format 6's flag vocabulary had one directory open, so a guest that asked for
-/// a location (`O_PATH`) and a guest that asked to read the directory recorded
-/// the same operation. Every format-6 `fs_open` therefore opened the entry:
-/// `path_only` is `false` for all of them, which is exactly what the recorder
-/// behaved as if it had asked for.
-fn migrate_v6_to_v7(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| TraceError::Invalid("format 6 trace is not a JSON object".into()))?;
-    let timelines = object
-        .get_mut("timelines")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or_else(|| TraceError::Invalid("format 6 trace timelines must be an array".into()))?;
-    for timeline in timelines.iter_mut() {
-        let decisions = timeline
-            .get_mut("decisions")
-            .and_then(serde_json::Value::as_array_mut)
-            .ok_or_else(|| {
-                TraceError::Invalid("format 6 timeline decisions must be an array".into())
-            })?;
-        for event in decisions.iter_mut() {
-            let Some(operation) = event
-                .get_mut("operation")
-                .and_then(serde_json::Value::as_object_mut)
-            else {
-                continue;
-            };
-            if operation.get("kind").and_then(serde_json::Value::as_str) != Some("fs_open") {
-                continue;
-            }
-            let Some(flags) = operation
-                .get_mut("flags")
-                .and_then(serde_json::Value::as_object_mut)
-            else {
-                return Err(TraceError::Invalid(
-                    "format 6 fs_open is missing its flags object".into(),
-                ));
-            };
-            flags.insert("path_only".into(), serde_json::Value::from(false));
-        }
-    }
-    object.insert("format_version".into(), serde_json::Value::from(7u32));
-    Ok(value)
-}
-
-/// Upgrade the two-timestamp format 7 layout to format 8.
-///
-/// Every recorded metadata outcome gains the change time the format-7 runtime
-/// reported to its guest — the modification time, which its stat fill copied
-/// into `st_ctime` — and a birth time of `0`, the value a run that never set
-/// `STATX_BTIME` behaved as if it had.
-fn migrate_v7_to_v8(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| TraceError::Invalid("format 7 trace is not a JSON object".into()))?;
-    let timelines = object
-        .get_mut("timelines")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or_else(|| TraceError::Invalid("format 7 trace timelines must be an array".into()))?;
-    for timeline in timelines.iter_mut() {
-        let decisions = timeline
-            .get_mut("decisions")
-            .and_then(serde_json::Value::as_array_mut)
-            .ok_or_else(|| {
-                TraceError::Invalid("format 7 timeline decisions must be an array".into())
-            })?;
-        for event in decisions.iter_mut() {
-            let Some(outcome) = event
-                .get_mut("outcome")
-                .and_then(serde_json::Value::as_object_mut)
-            else {
-                continue;
-            };
-            if outcome.get("kind").and_then(serde_json::Value::as_str) != Some("metadata") {
-                continue;
-            }
-            let Some(metadata) = outcome
-                .get_mut("value")
-                .and_then(serde_json::Value::as_object_mut)
-            else {
-                return Err(TraceError::Invalid(
-                    "format 7 metadata outcome is missing its value object".into(),
-                ));
-            };
-            let Some(mtime) = metadata.get("mtime_nanos").cloned() else {
-                return Err(TraceError::Invalid(
-                    "format 7 metadata outcome is missing mtime_nanos".into(),
-                ));
-            };
-            metadata.insert("ctime_nanos".into(), mtime);
-            metadata.insert("btime_nanos".into(), serde_json::Value::from(0u64));
-        }
-    }
-    object.insert("format_version".into(), serde_json::Value::from(8u32));
-    Ok(value)
-}
-
-/// Upgrade format 8 to format 9.
-///
-/// Format 9 adds the `signal_generated` operation variant. Existing format-8
-/// traces contain no such operations, so the migration is an identity transform
-/// apart from the version tag.
-fn migrate_v8_to_v9(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| TraceError::Invalid("format 8 trace is not a JSON object".into()))?;
-    object.insert("format_version".into(), serde_json::Value::from(9u32));
-    Ok(value)
-}
-
-/// Upgrade format 9 to format 10.
-///
-/// Format 10 names the filesystem and memory families' operation variants,
-/// some of which format-9 bundles already carry unchanged, so the migration
-/// is an identity transform apart from the version tag.
-fn migrate_v9_to_v10(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| TraceError::Invalid("format 9 trace is not a JSON object".into()))?;
-    object.insert("format_version".into(), serde_json::Value::from(10u32));
-    Ok(value)
-}
-
-fn value_contains_legacy_fs_crash(value: &serde_json::Value) -> bool {
-    fn event_is_fs_crash(event: &serde_json::Value) -> bool {
-        event
-            .get("operation")
-            .and_then(|operation| operation.get("kind"))
-            .and_then(serde_json::Value::as_str)
-            == Some("fs_crash")
-    }
-
-    if let Some(decisions) = value.get("decisions").and_then(serde_json::Value::as_array) {
-        if decisions.iter().any(event_is_fs_crash) {
-            return true;
-        }
-    }
-    value
-        .get("timelines")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|timelines| {
-            timelines.iter().any(|timeline| {
-                timeline
-                    .get("decisions")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|decisions| decisions.iter().any(event_is_fs_crash))
-            })
-        })
 }
 
 fn require_complete_current_bundle(
@@ -2784,21 +2279,47 @@ mod tests {
     }
 
     #[test]
-    fn format_9_migrates_to_10() {
-        let bytes = include_bytes!("../tests/fixtures/format-9.patina");
-        let format9: TraceBundle = serde_json::from_slice(bytes).unwrap();
-        assert_eq!(format9.format_version, 9);
-        let migrated = TraceBundle::from_slice(bytes).unwrap();
-        assert_eq!(TRACE_FORMAT_VERSION, 10);
-        assert_eq!(migrated.format_version, 10);
-        assert_eq!(
-            migrated.resolved_timeline("main").unwrap(),
-            format9.timelines[0].decisions
-        );
+    fn a_current_bundle_must_state_its_run_facts() {
+        // The realtime epoch and the node name are required: a bundle missing
+        // either does not parse.
+        let bytes = include_bytes!("../tests/fixtures/format-11.patina");
+        for field in ["realtime_epoch_nanos", "hostname"] {
+            let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            assert!(
+                value["metadata"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(field)
+                    .is_some()
+            );
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert!(
+                matches!(
+                    TraceBundle::from_slice(&bytes),
+                    Err(TraceError::Parse { .. })
+                ),
+                "a bundle without {field} must not parse"
+            );
+        }
+    }
 
+    #[test]
+    fn run_facts_round_trip_through_the_metadata() {
+        let metadata = RunMetadata::new(7, "fingerprint", 1_000_000_000, "db-1");
+        let bundle = TraceBundle::new(metadata, Vec::new());
+        let reloaded = TraceBundle::from_slice(&bundle.to_bytes().unwrap()).unwrap();
+        assert_eq!(reloaded.metadata.realtime_epoch_nanos, 1_000_000_000);
+        assert_eq!(reloaded.metadata.hostname, "db-1");
+        let replay = Replayer::from_bundle(reloaded, "fingerprint", "main").unwrap();
+        assert_eq!(replay.realtime_epoch_nanos(), 1_000_000_000);
+        assert_eq!(replay.hostname(), "db-1");
+    }
+
+    #[test]
+    fn memory_operations_fixture_decodes_and_replays() {
         // Checked-in feature fixture pins the page cache's and anonymous
         // files' operations and one of the filesystem family's.
-        let bytes = include_bytes!("../tests/fixtures/format-10-memory.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-11-memory.patina");
         let bundle = TraceBundle::from_slice(bytes).unwrap();
         bundle.validate().unwrap();
         assert_eq!(bundle.to_bytes().unwrap(), bytes);
@@ -2845,31 +2366,17 @@ mod tests {
     }
 
     #[test]
-    fn format_8_migrates_to_9() {
-        let bytes = include_bytes!("../tests/fixtures/format-8.patina");
-        let format8: TraceBundle = serde_json::from_slice(bytes).unwrap();
-        assert_eq!(format8.format_version, 8);
-        let migrated = TraceBundle::from_slice(bytes).unwrap();
-        assert_eq!(migrated.format_version, TRACE_FORMAT_VERSION);
-        assert_eq!(
-            migrated.resolved_timeline("main").unwrap(),
-            format8.timelines[0].decisions
-        );
-
+    fn signal_operations_fixture_decodes_and_replays() {
         // Checked-in feature fixture pins both target encodings and every field.
         const SIGUSR1: u8 = 10;
         const SIGUSR2: u8 = 12;
         const SI_USER: i32 = 0;
         const SI_TKILL: i32 = -6;
-        let bytes = include_bytes!("../tests/fixtures/format-9-signals.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-11-signals.patina");
         let bundle = TraceBundle::from_slice(bytes).unwrap();
         bundle.validate().unwrap();
         assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
-        // The migrated bundle re-encodes to the fixture under the current tag.
-        let current = String::from_utf8(bytes.to_vec())
-            .unwrap()
-            .replace("\"format_version\":9,", "\"format_version\":10,");
-        assert_eq!(bundle.to_bytes().unwrap(), current.into_bytes());
+        assert_eq!(bundle.to_bytes().unwrap(), bytes);
         let expected = [
             Operation::SignalGenerated {
                 seq: 1,
@@ -2897,7 +2404,7 @@ mod tests {
     fn byte_encoding_round_trips_and_matches_files() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("run.patina");
-        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint"));
+        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
         recorder.observe(operation(), Outcome::U64(10));
         recorder.observe(Operation::FsDup { fd: Fd(3) }, Outcome::Handle(Fd(4)));
         let bundle = recorder.into_bundle().unwrap();
@@ -2925,7 +2432,7 @@ mod tests {
     fn records_loads_and_strictly_replays() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("run.patina");
-        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint"));
+        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
         recorder.observe(operation(), Outcome::U64(10));
         recorder.finish(&path).unwrap();
 
@@ -2956,7 +2463,7 @@ mod tests {
             let name = format!(".run.patina.tmp-{}-{counter}", std::process::id());
             File::create(directory.path().join(name)).unwrap();
         }
-        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint"));
+        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
         recorder.observe(operation(), Outcome::U64(10));
         recorder.finish(&path).unwrap();
         TraceBundle::load(&path).unwrap();
@@ -2974,7 +2481,7 @@ mod tests {
         let other_trace = directory.path().join(".run.patina2.tmp.dead");
         File::create(&other_trace).unwrap();
 
-        TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new())
+        TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new())
             .write_atomic(&path)
             .unwrap();
         assert!(!dead.exists(), "a dead writer's scratch is swept");
@@ -2987,7 +2494,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let path = directory.path().join("oversized.patina");
         let event = TraceEvent::new(0, operation(), Outcome::U64(10));
-        let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint"), vec![event]);
+        let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), vec![event]);
         let serialized_len = {
             let mut bytes = serde_json::to_vec(&bundle).unwrap();
             bytes.push(b'\n');
@@ -3016,7 +2523,7 @@ mod tests {
             "save-time refusal must not leave a temporary file"
         );
 
-        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint"));
+        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
         recorder.observe(operation(), Outcome::U64(10));
         let error = recorder.finish_with_limit(&path, limit).unwrap_err();
         assert!(
@@ -3030,7 +2537,7 @@ mod tests {
     fn rejects_fingerprint_operation_and_trailing_event_mismatches() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("run.patina");
-        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint"));
+        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
         recorder.observe(operation(), Outcome::U64(10));
         recorder.finish(&path).unwrap();
 
@@ -3056,7 +2563,7 @@ mod tests {
     fn branches_replay_an_exact_prefix_and_append_a_suffix() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("run.patina");
-        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint"));
+        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
         recorder.observe(operation(), Outcome::U64(10));
         recorder.observe(Operation::EntropyFill { len: 1 }, Outcome::Bytes(vec![1]));
         recorder.finish(&path).unwrap();
@@ -3117,7 +2624,7 @@ mod tests {
         branch_event.incarnation = 1;
         let bundle = TraceBundle {
             format_version: TRACE_FORMAT_VERSION,
-            metadata: RunMetadata::new(7, "fingerprint"),
+            metadata: RunMetadata::new(7, "fingerprint", 0, "patina"),
             timelines: vec![
                 Timeline {
                     id: MAIN_TIMELINE.into(),
@@ -3175,7 +2682,8 @@ mod tests {
             net_drop_permille: 250,
             ..FaultConfigRecord::default()
         };
-        let metadata = RunMetadata::new(7, "fingerprint").with_faults(Some(faults.clone()));
+        let metadata =
+            RunMetadata::new(7, "fingerprint", 0, "patina").with_faults(Some(faults.clone()));
         let bundle = TraceBundle::new(metadata, Vec::new());
         let bytes = bundle.to_bytes().unwrap();
         let text = String::from_utf8(bytes.clone()).unwrap();
@@ -3193,7 +2701,8 @@ mod tests {
         // A fault-free run records a compact empty object, still distinct from a
         // pre-metadata trace whose field is absent (None).
         let empty = TraceBundle::new(
-            RunMetadata::new(7, "fingerprint").with_faults(Some(FaultConfigRecord::default())),
+            RunMetadata::new(7, "fingerprint", 0, "patina")
+                .with_faults(Some(FaultConfigRecord::default())),
             Vec::new(),
         );
         let text = String::from_utf8(empty.to_bytes().unwrap()).unwrap();
@@ -3212,8 +2721,8 @@ mod tests {
             active_sites: vec!["commit-early-return".to_string()],
             knobs,
         };
-        let metadata =
-            RunMetadata::new(7, "fingerprint+buggify").with_buggify(Some(buggify.clone()));
+        let metadata = RunMetadata::new(7, "fingerprint+buggify", 0, "patina")
+            .with_buggify(Some(buggify.clone()));
         let bundle = TraceBundle::new(metadata, Vec::new());
         let bytes = bundle.to_bytes().unwrap();
         let reloaded = TraceBundle::from_slice(&bytes).unwrap();
@@ -3221,7 +2730,7 @@ mod tests {
 
         // A trace recorded without buggify keeps the field absent, so an old
         // trace and a buggify-disabled run are indistinguishable (both None).
-        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
         let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
         assert!(!text.contains("buggify"), "{text}");
         let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
@@ -3238,7 +2747,9 @@ mod tests {
             "metadata": {
                 "root_seed": 7,
                 "decision_policy": "splitmix64-v1",
-                "fingerprint": "fingerprint+buggify"
+                "fingerprint": "fingerprint+buggify",
+                "realtime_epoch_nanos": 0,
+                "hostname": "patina"
             },
             "timelines": [{
                 "id": MAIN_TIMELINE,
@@ -3275,8 +2786,8 @@ mod tests {
                 window: 256,
             }),
         };
-        let metadata =
-            RunMetadata::new(7, "fingerprint+pct+starve").with_schedule_policy(Some(policy));
+        let metadata = RunMetadata::new(7, "fingerprint+pct+starve", 0, "patina")
+            .with_schedule_policy(Some(policy));
         let bundle = TraceBundle::new(metadata, Vec::new());
         let bytes = bundle.to_bytes().unwrap();
         let text = String::from_utf8(bytes.clone()).unwrap();
@@ -3288,7 +2799,7 @@ mod tests {
 
         // A default-policy run keeps the field absent, indistinguishable from an
         // old trace (both None).
-        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
         let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
         assert!(!text.contains("schedule_policy"), "{text}");
         let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
@@ -3305,13 +2816,14 @@ mod tests {
             ],
             selected_classes: vec!["crash".to_string(), "sleep_jitter".to_string()],
         };
-        let metadata = RunMetadata::new(7, "fingerprint+swarm").with_swarm(Some(swarm.clone()));
+        let metadata =
+            RunMetadata::new(7, "fingerprint+swarm", 0, "patina").with_swarm(Some(swarm.clone()));
         let bundle = TraceBundle::new(metadata, Vec::new());
         let bytes = bundle.to_bytes().unwrap();
         let reloaded = TraceBundle::from_slice(&bytes).unwrap();
         assert_eq!(reloaded.metadata.swarm, Some(swarm));
 
-        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
         let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
         assert!(!text.contains("swarm"), "{text}");
     }
@@ -3338,7 +2850,7 @@ mod tests {
         assert!(!swarm.was_candidate("fs_error"));
         assert!(!swarm.deselected("fs_error"));
         TraceBundle::new(
-            RunMetadata::new(7, "fingerprint+swarm").with_swarm(Some(swarm)),
+            RunMetadata::new(7, "fingerprint+swarm", 0, "patina").with_swarm(Some(swarm)),
             Vec::new(),
         )
         .validate()
@@ -3351,7 +2863,7 @@ mod tests {
             selected_classes: vec!["buggify".to_string()],
         };
         let error = TraceBundle::new(
-            RunMetadata::new(7, "fingerprint+swarm").with_swarm(Some(broken)),
+            RunMetadata::new(7, "fingerprint+swarm", 0, "patina").with_swarm(Some(broken)),
             Vec::new(),
         )
         .validate()
@@ -3367,7 +2879,7 @@ mod tests {
             selected_classes: Vec::new(),
         };
         let error = TraceBundle::new(
-            RunMetadata::new(7, "fingerprint+swarm").with_swarm(Some(duplicated)),
+            RunMetadata::new(7, "fingerprint+swarm", 0, "patina").with_swarm(Some(duplicated)),
             Vec::new(),
         )
         .validate()
@@ -3397,7 +2909,7 @@ mod tests {
     #[test]
     fn sud_metadata_round_trips_and_is_additive() {
         // An armed run records `sud:true` and round-trips.
-        let metadata = RunMetadata::new(7, "fingerprint").with_sud(Some(true));
+        let metadata = RunMetadata::new(7, "fingerprint", 0, "patina").with_sud(Some(true));
         let bundle = TraceBundle::new(metadata, Vec::new());
         let text = String::from_utf8(bundle.to_bytes().unwrap()).unwrap();
         assert!(text.contains("\"sud\":true"), "{text}");
@@ -3408,7 +2920,7 @@ mod tests {
         // records nothing: the field is omitted, so old and new traces are
         // byte-identical.
         let plain = TraceBundle::new(
-            RunMetadata::new(7, "fingerprint").with_sud(None),
+            RunMetadata::new(7, "fingerprint", 0, "patina").with_sud(None),
             Vec::new(),
         );
         let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
@@ -3421,7 +2933,7 @@ mod tests {
     fn tsc_metadata_round_trips_and_is_additive() {
         // A run that armed the timestamp-counter trap records `tsc:true` and
         // round-trips, independently of the SUD field.
-        let metadata = RunMetadata::new(7, "fingerprint").with_tsc(Some(true));
+        let metadata = RunMetadata::new(7, "fingerprint", 0, "patina").with_tsc(Some(true));
         let bundle = TraceBundle::new(metadata, Vec::new());
         let text = String::from_utf8(bundle.to_bytes().unwrap()).unwrap();
         assert!(text.contains("\"tsc\":true"), "{text}");
@@ -3432,7 +2944,7 @@ mod tests {
         // Every run that did not arm it records nothing, so a trace taken before
         // the trap existed stays byte-identical.
         let plain = TraceBundle::new(
-            RunMetadata::new(7, "fingerprint").with_tsc(None),
+            RunMetadata::new(7, "fingerprint", 0, "patina").with_tsc(None),
             Vec::new(),
         );
         let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
@@ -3445,7 +2957,8 @@ mod tests {
     fn guest_argv_metadata_round_trips_and_is_additive() {
         // A recorded argument list round-trips exactly, including order.
         let argv = vec!["--replay-commands".to_string(), "3,1,2".to_string()];
-        let metadata = RunMetadata::new(7, "fingerprint").with_guest_argv(Some(argv.clone()));
+        let metadata =
+            RunMetadata::new(7, "fingerprint", 0, "patina").with_guest_argv(Some(argv.clone()));
         let bundle = TraceBundle::new(metadata, Vec::new());
         let bytes = bundle.to_bytes().unwrap();
         let reloaded = TraceBundle::from_slice(&bytes).unwrap();
@@ -3455,7 +2968,7 @@ mod tests {
         // from an old trace's absent field: a zero-argument run must reproduce
         // zero arguments on replay, not inherit whatever the command line gives.
         let empty = TraceBundle::new(
-            RunMetadata::new(7, "fingerprint").with_guest_argv(Some(Vec::new())),
+            RunMetadata::new(7, "fingerprint", 0, "patina").with_guest_argv(Some(Vec::new())),
             Vec::new(),
         );
         let text = String::from_utf8(empty.to_bytes().unwrap()).unwrap();
@@ -3465,7 +2978,7 @@ mod tests {
 
         // A trace recorded before argv capture keeps the field absent, so it and
         // the "no arguments recorded" case are distinguishable (None vs Some([])).
-        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
         let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
         assert!(!text.contains("guest_argv"), "{text}");
         let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
@@ -3474,14 +2987,15 @@ mod tests {
 
     #[test]
     fn guest_cwd_metadata_round_trips_and_is_additive() {
-        let metadata = RunMetadata::new(7, "fingerprint").with_guest_cwd(Some("/work".into()));
+        let metadata =
+            RunMetadata::new(7, "fingerprint", 0, "patina").with_guest_cwd(Some("/work".into()));
         let bundle = TraceBundle::new(metadata, Vec::new());
         let text = String::from_utf8(bundle.to_bytes().unwrap()).unwrap();
         assert!(text.contains("\"guest_cwd\":\"/work\""), "{text}");
         let reloaded = TraceBundle::from_slice(bundle.to_bytes().unwrap().as_slice()).unwrap();
         assert_eq!(reloaded.metadata.guest_cwd.as_deref(), Some("/work"));
 
-        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
         let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
         assert!(!text.contains("guest_cwd"), "{text}");
         let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
@@ -3491,7 +3005,8 @@ mod tests {
     #[test]
     fn guest_env_metadata_round_trips_and_is_additive() {
         let env = BTreeMap::from([("RUST_LOG".to_string(), "debug".to_string())]);
-        let metadata = RunMetadata::new(7, "fingerprint").with_guest_env(Some(env.clone()));
+        let metadata =
+            RunMetadata::new(7, "fingerprint", 0, "patina").with_guest_env(Some(env.clone()));
         let bundle = TraceBundle::new(metadata, Vec::new());
         let text = String::from_utf8(bundle.to_bytes().unwrap()).unwrap();
         assert!(text.contains("\"guest_env\":{"), "{text}");
@@ -3499,7 +3014,7 @@ mod tests {
         let reloaded = TraceBundle::from_slice(bundle.to_bytes().unwrap().as_slice()).unwrap();
         assert_eq!(reloaded.metadata.guest_env, Some(env));
 
-        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
         let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
         assert!(!text.contains("guest_env"), "{text}");
         let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
@@ -3507,24 +3022,9 @@ mod tests {
     }
 
     #[test]
-    fn pre_metadata_trace_migrates_to_absent_fault_config() {
-        // A format-3 bundle carries no `faults` key; after migration it is None,
-        // the runtime's signal to fall back to the re-supply contract.
-        let mut v3 = TraceBundle::new(RunMetadata::new(1, "fingerprint"), Vec::new());
-        v3.format_version = 3;
-        let mut value = serde_json::to_value(&v3).unwrap();
-        // Emulate an on-disk v3 trace: strip the additive metadata field.
-        value["metadata"].as_object_mut().unwrap().remove("faults");
-        value["format_version"] = serde_json::Value::from(3u32);
-        let bytes = serde_json::to_vec(&value).unwrap();
-        let migrated = TraceBundle::from_slice(&bytes).unwrap();
-        assert_eq!(migrated.format_version, TRACE_FORMAT_VERSION);
-        assert_eq!(migrated.metadata.faults, None);
-    }
-
-    #[test]
     fn recorder_stamps_its_incarnation_on_every_event_and_marker() {
-        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint")).with_incarnation(1);
+        let mut recorder =
+            Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina")).with_incarnation(1);
         recorder.observe(operation(), Outcome::U64(0));
         let bundle = recorder.into_bundle().unwrap();
         let main = &bundle.timelines[0];
@@ -3558,7 +3058,7 @@ mod tests {
         let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let bundle = TraceBundle {
             format_version: TRACE_FORMAT_VERSION,
-            metadata: RunMetadata::new(7, "fingerprint+crash-restart"),
+            metadata: RunMetadata::new(7, "fingerprint+crash-restart", 0, "patina"),
             timelines: vec![Timeline {
                 id: MAIN_TIMELINE.into(),
                 parent: None,
@@ -3628,7 +3128,7 @@ mod tests {
     #[test]
     fn lifecycle_ordering_and_incarnation_mismatches_are_refused() {
         let mut bundle = TraceBundle::new(
-            RunMetadata::new(1, "fingerprint"),
+            RunMetadata::new(1, "fingerprint", 0, "patina"),
             vec![TraceEvent::new(0, operation(), Outcome::U64(0))],
         );
         bundle.timelines[0].decisions[0].order = 0;
@@ -3639,7 +3139,7 @@ mod tests {
         );
 
         let mut bundle = TraceBundle::new(
-            RunMetadata::new(1, "fingerprint"),
+            RunMetadata::new(1, "fingerprint", 0, "patina"),
             vec![TraceEvent::new(0, operation(), Outcome::U64(0))],
         );
         bundle.timelines[0].decisions[0].incarnation = 1;
@@ -3693,7 +3193,7 @@ mod tests {
     fn crash_restart_bundle(digest: &str) -> TraceBundle {
         TraceBundle {
             format_version: TRACE_FORMAT_VERSION,
-            metadata: RunMetadata::new(7, "fingerprint+crash-restart"),
+            metadata: RunMetadata::new(7, "fingerprint+crash-restart", 0, "patina"),
             timelines: vec![Timeline {
                 id: MAIN_TIMELINE.into(),
                 parent: None,
@@ -3754,7 +3254,7 @@ mod tests {
     #[test]
     fn rejects_non_contiguous_sequences() {
         let mut bundle = TraceBundle::new(
-            RunMetadata::new(1, "fingerprint"),
+            RunMetadata::new(1, "fingerprint", 0, "patina"),
             vec![TraceEvent::new(4, operation(), Outcome::U64(0))],
         );
         bundle.timelines[0].decisions[0].sequence = 4;
@@ -3780,7 +3280,7 @@ mod tests {
         );
 
         let truncated = directory.path().join("truncated.patina");
-        fs::write(&truncated, b"{\"format_version\":4,").unwrap();
+        fs::write(&truncated, b"{\"format_version\":11,").unwrap();
         let error = TraceBundle::load(&truncated).unwrap_err();
         assert!(
             matches!(&error, TraceError::Incomplete { reason, .. } if reason.contains("truncated JSON")),
@@ -3790,7 +3290,7 @@ mod tests {
         let incomplete_metadata = directory.path().join("incomplete-metadata.patina");
         fs::write(
             &incomplete_metadata,
-            br#"{"format_version":4,"metadata":{"root_seed":1,"decision_policy":"splitmix64-v1"},"timelines":[]}"#,
+            br#"{"format_version":11,"metadata":{"root_seed":1,"decision_policy":"splitmix64-v1"},"timelines":[]}"#,
         )
         .unwrap();
         let error = TraceBundle::load(&incomplete_metadata).unwrap_err();
@@ -3805,7 +3305,8 @@ mod tests {
         ));
 
         let unsupported = directory.path().join("unsupported.patina");
-        let mut bundle = TraceBundle::new(RunMetadata::new(1, "fingerprint"), Vec::new());
+        let mut bundle =
+            TraceBundle::new(RunMetadata::new(1, "fingerprint", 0, "patina"), Vec::new());
         bundle.format_version = TRACE_FORMAT_VERSION + 1;
         fs::write(&unsupported, serde_json::to_vec(&bundle).unwrap()).unwrap();
         assert!(matches!(
@@ -3830,7 +3331,7 @@ mod tests {
     /// on every other one, so this is the seam that decision rests on.
     #[test]
     fn a_budget_refusal_is_classifiable_and_carries_its_numbers() {
-        let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
         let serialized_len = bundle.to_bytes().unwrap().len() as u64;
         let limit = serialized_len - 1;
 
@@ -3838,7 +3339,8 @@ mod tests {
         assert!(error.is_resource_limit(), "unexpected error: {error}");
         assert_eq!(error.resource_limit_bytes(), Some((serialized_len, limit)));
 
-        let mut oversized = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let mut oversized =
+            TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
         oversized.timelines[0].decisions =
             vec![TraceEvent::new(0, operation(), Outcome::U64(0)); MAX_TIMELINE_EVENTS + 1];
         let error = oversized.validate().unwrap_err();
@@ -3878,7 +3380,8 @@ mod tests {
             + 1;
 
         let record = || {
-            let mut recorder = Recorder::with_limit(RunMetadata::new(7, "fingerprint"), limit);
+            let mut recorder =
+                Recorder::with_limit(RunMetadata::new(7, "fingerprint", 0, "patina"), limit);
             let mut crossed_at = None;
             for index in 0..4_096u64 {
                 recorder.observe(operation(), Outcome::Bytes(payload.clone()));
@@ -3947,8 +3450,11 @@ mod tests {
     /// events are too small to reach the byte budget first.
     #[test]
     fn an_over_long_recording_is_abandoned_at_the_event_budget() {
-        let mut recorder =
-            Recorder::with_limits(RunMetadata::new(7, "fingerprint"), MAX_TRACE_BYTES, 8);
+        let mut recorder = Recorder::with_limits(
+            RunMetadata::new(7, "fingerprint", 0, "patina"),
+            MAX_TRACE_BYTES,
+            8,
+        );
         for index in 0..64u64 {
             recorder.observe(operation(), Outcome::U64(index));
             assert!(recorder.decisions.len() <= 8);
@@ -3974,7 +3480,7 @@ mod tests {
     /// recording that would have fit.
     #[test]
     fn an_under_budget_recording_is_byte_identical_and_exactly_tallied() {
-        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint"));
+        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
         let mut events = Vec::new();
         for index in 0..64u64 {
             let outcome = Outcome::Bytes(vec![index as u8; index as usize]);
@@ -3991,7 +3497,7 @@ mod tests {
             - 1;
         assert_eq!(tallied, expected, "the ledger must tally events exactly");
 
-        let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint"), events);
+        let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), events);
         let expected_bytes = bundle.to_bytes().unwrap();
         assert!(
             tallied < expected_bytes.len() as u64,
@@ -4040,7 +3546,7 @@ mod tests {
         );
 
         // A real bundle is never mistaken for a marker.
-        let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
         assert_eq!(
             parse_abandoned_trace_marker(&bundle.to_bytes().unwrap()),
             None

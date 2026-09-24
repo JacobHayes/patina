@@ -234,7 +234,9 @@ pub(in crate::thread) fn generate(sig: i32) {
     assert_eq!(
         unsafe {
             generate_signal(
-                GenerationTarget::Process { pid: 1 },
+                GenerationTarget::Process {
+                    pid: crate::registry::IDENTITY_PID as i32,
+                },
                 sig,
                 GenerationInfo::User,
             )
@@ -951,7 +953,11 @@ fn signalfd_readable_iff_matching_pending() {
             u32::from_ne_bytes(record[0..4].try_into().unwrap()),
             SIGUSR1 as u32
         );
-        assert_eq!(u32::from_ne_bytes(record[12..16].try_into().unwrap()), 1);
+        // `ssi_pid`: the sender, the guest itself.
+        assert_eq!(
+            u32::from_ne_bytes(record[12..16].try_into().unwrap()),
+            crate::registry::IDENTITY_PID
+        );
         assert!(!ready());
         assert_eq!(HANDLERS.load(Ordering::SeqCst), 0);
         let helper = spawn(move || {
@@ -1046,8 +1052,8 @@ fn signalfd_watchers_wake_once_only_for_visible_pending() {
             unsafe {
                 generate_signal(
                     GenerationTarget::Thread {
-                        tgid: Some(1),
-                        tid: ids[0].0 as i32,
+                        tgid: Some(crate::registry::IDENTITY_PID as i32),
+                        tid: tid_of(ids[0]),
                     },
                     SIGUSR1,
                     GenerationInfo::Thread,
