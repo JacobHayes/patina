@@ -127,15 +127,6 @@ static int patina_posix_deny(const char *message) {
     return -1;
 }
 
-/* Deny strings shared with the SUD dispatcher (crates/patina-native-shim/src/sud/).
- * A raw-syscall guest and a libc guest that hit the same refusal must record the
- * SAME captured-stderr bytes, or their traces diverge on the refusal alone. (The
- * O_PATH|O_NOFOLLOW-on-a-symlink deny is emitted by the one Rust open entry both
- * doors call, so it has no C spelling.) */
-#define PATINA_DENY_MKNOD_TYPE \
-    "patina: mknod models only S_IFIFO (a named pipe); no other special file has a " \
-    "deterministic representation here; failing closed\n"
-
 #ifdef __linux__
 /*
  * zstd's static library references these weak tracing hooks (Linux corpus only;

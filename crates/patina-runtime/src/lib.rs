@@ -107,8 +107,8 @@ use std::path::{Path, PathBuf};
 pub use patina_dst_abi::VerdictKind;
 use patina_dst_abi::{
     AtimePolicy, ClockKind, Datagram, EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry,
-    FsMetadata, OpenFlags, Operation, Outcome, SeekWhence, SendReport, ShutdownHow, SocketId,
-    TaskId, TcpAccepted, verdict_line,
+    FsMetadata, FsNode, OpenFlags, Operation, Outcome, SeekWhence, SendReport, ShutdownHow,
+    SocketId, TaskId, TcpAccepted, XattrTarget, verdict_line,
 };
 use patina_dst_driver_api::{ClockDriver, EntropyDriver, FsDriver, NetDriver, SchedulerDriver};
 use patina_dst_fs_crash::CrashFs;
@@ -5149,6 +5149,14 @@ recording was produced by a guest whose result type no longer matches this one"
         })
     }
 
+    /// The instant [`Self::fs_clock`] would hand a filesystem operation now,
+    /// for a node that lives outside the filesystem driver (a pipe's pipefs
+    /// inode, stamped by the native shim). Unrecorded for the same reason the
+    /// filesystem's own reads are.
+    pub fn fs_time_unrecorded(&mut self) -> Result<u64, RuntimeError> {
+        Ok(self.fs_clock()?.now_nanos)
+    }
+
     pub fn fs_open(&mut self, path: &str, flags: OpenFlags) -> Result<Fd, RuntimeError> {
         if self.filesystem.is_none() {
             return Err(EffectError::missing_driver("filesystem").into());
@@ -5738,6 +5746,153 @@ recording was produced by a guest whose result type no longer matches this one"
             },
             |filesystem, clock| filesystem.rename(clock, from, to),
         )
+    }
+
+    /// `renameat2(RENAME_EXCHANGE)`: swap two existing entries atomically.
+    pub fn fs_exchange(&mut self, first: &str, second: &str) -> Result<(), RuntimeError> {
+        self.filesystem_unit_clocked(
+            Operation::FsExchange {
+                first: first.into(),
+                second: second.into(),
+            },
+            |filesystem, clock| filesystem.exchange(clock, first, second),
+        )
+    }
+
+    /// `mknod`: the NAME and its node, at the caller's requested mode; a
+    /// device other than the whiteout is refused by the driver.
+    pub fn fs_make_node(
+        &mut self,
+        path: &str,
+        node: FsNode,
+        mode: u32,
+    ) -> Result<(), RuntimeError> {
+        self.filesystem_unit_clocked(
+            Operation::FsMakeNode {
+                path: path.into(),
+                node,
+                mode,
+            },
+            |filesystem, clock| filesystem.make_node(clock, path, node, mode),
+        )
+    }
+
+    /// `renameat2(RENAME_WHITEOUT)`: a rename leaving a whiteout at `from`, as
+    /// one change.
+    pub fn fs_rename_whiteout(&mut self, from: &str, to: &str) -> Result<(), RuntimeError> {
+        self.filesystem_unit_clocked(
+            Operation::FsRenameWhiteout {
+                from: from.into(),
+                to: to.into(),
+            },
+            |filesystem, clock| filesystem.rename_whiteout(clock, from, to),
+        )
+    }
+
+    /// `sync(2)`/`syncfs(2)`: every change on the volume made durable. A sync,
+    /// so it counts toward the `sync` crash ordinal like a descriptor's.
+    pub fn fs_sync_all(&mut self) -> Result<(), RuntimeError> {
+        let result = self.filesystem_unit(Operation::FsSyncAll, |filesystem| filesystem.sync_all());
+        if result.is_ok() {
+            self.maybe_inject_crash(CrashOp::Sync)?;
+        }
+        result
+    }
+
+    /// One extended attribute's value (`getxattr` family).
+    pub fn fs_get_xattr(
+        &mut self,
+        target: &XattrTarget,
+        name: &str,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        self.filesystem_bytes(
+            Operation::FsGetXattr {
+                target: target.clone(),
+                name: name.into(),
+            },
+            |filesystem| filesystem.get_xattr(target, name),
+        )
+    }
+
+    /// The extended attribute names the caller may see (`listxattr` family),
+    /// as the kernel lists them: each name NUL-terminated, back to back.
+    pub fn fs_list_xattr(&mut self, target: &XattrTarget) -> Result<Vec<u8>, RuntimeError> {
+        self.filesystem_bytes(
+            Operation::FsListXattr {
+                target: target.clone(),
+            },
+            |filesystem| {
+                filesystem.list_xattr(target).map(|names| {
+                    names
+                        .into_iter()
+                        .flat_map(|name| name.into_bytes().into_iter().chain([0]))
+                        .collect()
+                })
+            },
+        )
+    }
+
+    /// Set one extended attribute (`setxattr` family).
+    pub fn fs_set_xattr(
+        &mut self,
+        target: &XattrTarget,
+        name: &str,
+        value: &[u8],
+        flags: u32,
+    ) -> Result<(), RuntimeError> {
+        self.filesystem_unit_clocked(
+            Operation::FsSetXattr {
+                target: target.clone(),
+                name: name.into(),
+                value: value.to_vec(),
+                flags,
+            },
+            |filesystem, clock| filesystem.set_xattr(clock, target, name, value, flags),
+        )
+    }
+
+    /// Remove one extended attribute (`removexattr` family).
+    pub fn fs_remove_xattr(
+        &mut self,
+        target: &XattrTarget,
+        name: &str,
+    ) -> Result<(), RuntimeError> {
+        self.filesystem_unit_clocked(
+            Operation::FsRemoveXattr {
+                target: target.clone(),
+                name: name.into(),
+            },
+            |filesystem, clock| filesystem.remove_xattr(clock, target, name),
+        )
+    }
+
+    /// The byte-outcome filesystem choke point for fault-eligible reads that
+    /// take no clock.
+    fn filesystem_bytes(
+        &mut self,
+        operation: Operation,
+        invoke: impl FnOnce(&mut dyn FsDriver) -> Result<Vec<u8>, EffectError>,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        if self.filesystem.is_none() {
+            return Err(EffectError::missing_driver("filesystem").into());
+        }
+        self.apply_fs_latency()?;
+        let expected = match self.filesystem_expected(&operation)? {
+            FilesystemExpected::Execute(expected) => expected,
+            FilesystemExpected::Captured(outcome) => return decode_bytes(&operation, outcome),
+        };
+        let result = invoke(
+            self.filesystem
+                .as_mut()
+                .expect("driver was checked")
+                .as_mut(),
+        );
+        let actual = match result {
+            Ok(bytes) => Outcome::Bytes(bytes),
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_bytes(&operation, outcome)
     }
 
     pub fn fs_link(&mut self, from: &str, to: &str) -> Result<(), RuntimeError> {

@@ -10,9 +10,7 @@
 //! (and, from a read end, copies out); a descriptor that is not a pipe is
 //! EBADF, past UIO_MAXIOV EINVAL, an unknown flag EINVAL.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -204,15 +202,5 @@ pub const SCENARIO: Scenario = Scenario {
     symbols: &[
         "syscall", "openat", "read", "write", "pread64", "lseek", "pipe2", "close",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::ALL,
-        what: "splice, tee and vmsplice are unmodeled Trap rows: the first splice aborts",
-        failure: Failure::Stops {
-            events: 7,
-            ending: Ending::Signal(6),
-            diagnostic: "unsupported syscall splice",
-        },
-    }],
     ..DEFAULTS
 };

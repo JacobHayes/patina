@@ -16,9 +16,7 @@
 //! type EINVAL before the path is looked at — fs/namei.c may_mknod — while
 //! S_IFCHR is EPERM for an unprivileged caller after it: vfs_mknod).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Need, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -447,102 +445,5 @@ pub const SCENARIO: Scenario = Scenario {
         "readlink", "chmod", "mknod", "chdir", "read", "write", "fstat", "close",
     ],
     needs: &[Need::Unprivileged],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "rmdir (unlinkat AT_REMOVEDIR) resolves a final `.` or `..` instead of refusing it: `d/sub/.` removes d/sub (kernel: EINVAL for LAST_DOT) and `d/sub/..` is ENOENT (kernel: ENOTEMPTY for LAST_DOTDOT, fs/namei.c do_rmdir); the later rmdir of d/sub then finds nothing",
-            failure: Failure::Differs(&[
-                Difference::field(80, "rmdir", "errno", Observed::Null),
-                Difference::field(80, "rmdir", "ret", Observed::Int(0)),
-                Difference::check(81, "rmdir with a final `.` is EINVAL"),
-                Difference::field(82, "rmdir", "errno", Observed::Str("ENOENT")),
-                Difference::check(83, "rmdir with a final `..` is ENOTEMPTY"),
-                Difference::field(86, "rmdir", "errno", Observed::Str("ENOENT")),
-                Difference::field(86, "rmdir", "ret", Observed::Int(-1)),
-                Difference::check(87, "rmdir of an empty directory"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "rename of a directory onto an EMPTY directory is EEXIST, where the kernel replaces it (the target's emptiness is the only condition); patina-fs-mem rename refuses any existing directory target, so the source stays",
-            failure: Failure::Differs(&[
-                Difference::field(110, "rename", "errno", Observed::Str("EEXIST")),
-                Difference::field(110, "rename", "ret", Observed::Int(-1)),
-                Difference::check(111, "rename of a directory onto an empty one replaces it"),
-                Difference::field(112, "lstat", "errno", Observed::Null),
-                Difference::field(112, "lstat", "fields.gid", Observed::Str("gid@24")),
-                Difference::field(112, "lstat", "fields.ino", Observed::Str("ino@112")),
-                Difference::field(112, "lstat", "fields.kind", Observed::Str("dir")),
-                Difference::field(112, "lstat", "fields.nlink", Observed::Int(2)),
-                Difference::field(112, "lstat", "fields.perm", Observed::Int(0o750)),
-                Difference::field(112, "lstat", "fields.uid", Observed::Str("uid@24")),
-                Difference::field(112, "lstat", "ret", Observed::Int(0)),
-                Difference::check(113, "the source directory is gone"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "link of a symlink copies the link instead of hard-linking it: the new name has nlink 1 and its own inode (patina-fs-mem link: a symlink is a path-keyed entry, not an inode; the same gap as fs/links)",
-            failure: Failure::Differs(&[
-                Difference::field(128, "lstat", "fields.nlink", Observed::Int(1)),
-                Difference::check(
-                    129,
-                    "the new name is a symlink sharing the link's inode (nlink 2)",
-                ),
-                Difference::field(160, "lstat", "fields.ino", Observed::Str("ino@160")),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "mknod models only S_IFIFO: a zero type or S_IFREG (a regular file), S_IFSOCK (a socket inode) answer ENOSYS, and so do S_IFDIR and an unknown type, which the kernel refuses before the path (EPERM, EINVAL: fs/namei.c may_mknod); S_IFCHR under a missing parent is EPERM where the kernel looks the path up first (ENOENT; vfs_mknod checks CAP_MKNOD after); patina_mknodat's type switch",
-            failure: Failure::Differs(&[
-                Difference::field(168, "mknod", "errno", Observed::Str("ENOSYS")),
-                Difference::field(168, "mknod", "ret", Observed::Int(-1)),
-                Difference::check(169, "mknod with a zero type makes a regular file"),
-                Difference::field(170, "lstat", "errno", Observed::Str("ENOENT")),
-                Difference::field(170, "lstat", "fields.gid", Observed::Null),
-                Difference::field(170, "lstat", "fields.ino", Observed::Null),
-                Difference::field(170, "lstat", "fields.kind", Observed::Null),
-                Difference::field(170, "lstat", "fields.nlink", Observed::Null),
-                Difference::field(170, "lstat", "fields.perm", Observed::Null),
-                Difference::field(170, "lstat", "fields.size", Observed::Null),
-                Difference::field(170, "lstat", "fields.uid", Observed::Null),
-                Difference::field(170, "lstat", "ret", Observed::Int(-1)),
-                Difference::check(171, "the zero-type node is a regular file"),
-                Difference::field(172, "mknod", "errno", Observed::Str("ENOSYS")),
-                Difference::field(172, "mknod", "ret", Observed::Int(-1)),
-                Difference::check(173, "mknod S_IFREG makes a regular file"),
-                Difference::field(174, "mknod", "errno", Observed::Str("ENOSYS")),
-                Difference::field(174, "mknod", "ret", Observed::Int(-1)),
-                Difference::check(175, "mknod S_IFSOCK needs no privilege"),
-                Difference::field(176, "lstat", "errno", Observed::Str("ENOENT")),
-                Difference::field(176, "lstat", "fields.gid", Observed::Null),
-                Difference::field(176, "lstat", "fields.ino", Observed::Null),
-                Difference::field(176, "lstat", "fields.kind", Observed::Null),
-                Difference::field(176, "lstat", "fields.nlink", Observed::Null),
-                Difference::field(176, "lstat", "fields.perm", Observed::Null),
-                Difference::field(176, "lstat", "fields.size", Observed::Null),
-                Difference::field(176, "lstat", "fields.uid", Observed::Null),
-                Difference::field(176, "lstat", "ret", Observed::Int(-1)),
-                Difference::check(177, "the socket node stats as sock"),
-                Difference::field(180, "mknod", "errno", Observed::Str("ENOSYS")),
-                Difference::check(181, "mknod S_IFDIR is EPERM, judged before the path exists"),
-                Difference::field(182, "mknod", "errno", Observed::Str("ENOSYS")),
-                Difference::check(
-                    183,
-                    "mknod of an unknown type is EINVAL, judged before the path exists",
-                ),
-                Difference::field(186, "mknod", "errno", Observed::Str("EPERM")),
-                Difference::check(
-                    187,
-                    "mknod S_IFCHR under a missing parent is ENOENT (the path first)",
-                ),
-            ]),
-        },
-    ],
     ..DEFAULTS
 };

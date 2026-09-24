@@ -6,9 +6,7 @@
 //! ksys_pread64 judges it first); ESPIPE on a pipe, EISDIR on a directory,
 //! EBADF for the wrong access mode or a closed descriptor.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -153,43 +151,6 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &[
         "pread64", "pwrite64", "openat", "write", "lseek", "pipe2", "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "pwrite64 on an O_APPEND descriptor writes at the given position, where Linux appends whatever the position (pwrite(2) BUGS; generic_write_checks sets the position to i_size under IOCB_APPEND); patina_pwrite",
-            failure: Failure::Differs(&[
-                Difference::field(
-                    42,
-                    "pread64",
-                    "fields.data",
-                    Observed::Str("++LLO world\0\0\0\0\0\0\0\0\0!"),
-                ),
-                Difference::field(42, "pread64", "ret", Observed::Int(21)),
-                Difference::check(43, "Linux appends whatever the position"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "pread64 refuses a directory and an O_PATH descriptor with EINVAL, where the kernel answers EISDIR (vfs_read on a directory) and EBADF (fdget refuses O_PATH); patina_pread's descriptor-kind dispatch",
-            failure: Failure::Differs(&[
-                Difference::field(57, "pread64", "errno", Observed::Str("EINVAL")),
-                Difference::check(58, "pread64 on a directory is EISDIR"),
-                Difference::field(60, "pread64", "errno", Observed::Str("EINVAL")),
-                Difference::check(61, "pread64 on an O_PATH descriptor is EBADF"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "pread64 judges the descriptor before the position: a closed descriptor with position -1 is EBADF, where ksys_pread64 refuses the negative position first (EINVAL); patina_pread",
-            failure: Failure::Differs(&[
-                Difference::field(66, "pread64", "errno", Observed::Str("EBADF")),
-                Difference::check(67, "the position is judged before the descriptor"),
-            ]),
-        },
     ],
     ..DEFAULTS
 };

@@ -10,9 +10,7 @@
 //! call, RWF_NOWAIT (EAGAIN on an empty pipe), and refuse an unknown RWF_*
 //! bit with EOPNOTSUPP (fs/read_write.c, kiocb_set_rw_flags).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -300,67 +298,5 @@ pub const SCENARIO: Scenario = Scenario {
         release: "6.4",
         why: "RWF_NOWAIT on a pipe (pipes gained FMODE_NOWAIT)",
     }),
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "the iovec is not validated as lib/iov_iter.c does: a count past UIO_MAXIOV and a segment length negative as ssize_t succeed (kernel: EINVAL), and a NULL vector with a count is EINVAL (kernel: EFAULT); the readv/writev loops in the C interposers and the SUD rows",
-            failure: Failure::Differs(&[
-                Difference::field(17, "writev", "errno", Observed::Null),
-                Difference::field(17, "writev", "ret", Observed::Int(0)),
-                Difference::check(18, "one segment past UIO_MAXIOV is EINVAL"),
-                Difference::field(21, "readv", "errno", Observed::Null),
-                Difference::field(21, "readv", "ret", Observed::Int(0)),
-                Difference::check(22, "a segment length negative as ssize_t is EINVAL"),
-                Difference::field(23, "writev", "errno", Observed::Str("EINVAL")),
-                Difference::check(24, "a NULL vector with a count is EFAULT"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "the C pwritev writes at the given position on an O_APPEND descriptor (Linux appends) and the C preadv accepts a count past UIO_MAXIOV; the preadv/pwritev loops over patina_pread/patina_pwrite",
-            failure: Failure::Differs(&[
-                Difference::field(
-                    67,
-                    "preadv",
-                    "fields.segments",
-                    Observed::Json("[\"+Bcdefg\\u0000\\u0000!\"]"),
-                ),
-                Difference::field(67, "preadv", "ret", Observed::Int(10)),
-                Difference::check(
-                    68,
-                    "pwritev on an O_APPEND descriptor appends whatever the position",
-                ),
-                Difference::field(69, "preadv", "errno", Observed::Null),
-                Difference::field(69, "preadv", "ret", Observed::Int(0)),
-                Difference::check(70, "preadv past UIO_MAXIOV is EINVAL"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "preadv2/pwritev2 are unmodeled Trap rows and the libc door is syscall(2) until the shim defines the wrappers: it aborts at the first preadv2",
-            failure: Failure::Stops {
-                events: 72,
-                ending: Ending::Signal(6),
-                diagnostic: "unsupported syscall preadv2",
-            },
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[
-                Vehicle::Syscall,
-                #[cfg(target_arch = "x86_64")]
-                Vehicle::Raw,
-            ],
-            what: "preadv/pwritev/preadv2/pwritev2 are unmodeled Trap rows on the raw doors (the C preadv/pwritev interposers exist): the first raw preadv aborts",
-            failure: Failure::Stops {
-                events: 45,
-                ending: Ending::Signal(6),
-                diagnostic: "unsupported syscall preadv",
-            },
-        },
-    ],
     ..DEFAULTS
 };

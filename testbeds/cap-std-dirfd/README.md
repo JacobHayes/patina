@@ -77,10 +77,10 @@ half (`a creation mode must be the caller's`), and dropping the bookkeeping that
 moves an open description with its node through a rename fails the pinning leg
 (`the descriptor must survive the rename: PermissionDenied`).
 
-## What stays fail-closed
+## `openat2`
 
-`openat2` is **not** modeled: its `RESOLVE_*` flags are a kernel-side sandbox the
-deterministic filesystem does not implement. It is a named deny (one diagnostic
-line on the captured stderr, then `ENOSYS`), which is exactly the answer
-`cap-primitives` probes for before taking its component-wise `openat` fallback —
-so the refusal is visible in the recorded stderr rather than silent.
+`cap-primitives` opens through `openat2(RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS)`
+first and takes its component-wise `openat` walk only on `ENOSYS`. `openat2` is
+modeled — its restrictions are rules of the one path resolver — so the guest's
+opens take the `openat2` path, and an escape is the kernel's `EXDEV`, which
+`cap-primitives` reports as its escape-attempt error.

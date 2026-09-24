@@ -519,13 +519,13 @@ const ROWS: &[SymbolRow] = &[
         "mknod",
         Platform::Both,
         Serves::Syscalls(&["mknod", "mknodat"]),
-        SymbolStatus::Partial,
+        SymbolStatus::Modeled,
     ),
     s(
         "mknodat",
         Platform::Both,
         Serves::Syscalls(&["mknodat"]),
-        SymbolStatus::Partial,
+        SymbolStatus::Modeled,
     ),
     s(
         "unlink",
@@ -561,7 +561,7 @@ const ROWS: &[SymbolRow] = &[
         "renameat2",
         Platform::Linux,
         Serves::Syscalls(&["renameat2"]),
-        SymbolStatus::Partial,
+        SymbolStatus::Modeled,
     ),
     s(
         "link",

@@ -1,9 +1,7 @@
 //! fs/links — symlinkat / readlinkat / linkat: link targets and truncation,
 //! dangling links, hard-link counts, and AT_SYMLINK_FOLLOW.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -180,16 +178,5 @@ pub const SCENARIO: Scenario = Scenario {
         "mkdirat",
         "unlinkat",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::ALL,
-        what: "linkat of a symlink without AT_SYMLINK_FOLLOW copies the link instead of hard-linking it: the new name's nlink is 1, not 2 (patina-fs-mem link: a symlink is a path-keyed entry, not an inode)",
-        failure: Failure::Differs(&[Difference::field(
-            47,
-            "newfstatat",
-            "fields.nlink",
-            Observed::Int(1),
-        )]),
-    }],
     ..DEFAULTS
 };

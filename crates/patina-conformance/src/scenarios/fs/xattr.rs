@@ -13,9 +13,7 @@
 //! ENODATA to read). The `f*` rows need no access mode but refuse O_PATH
 //! (EBADF). Needs `user.*` attributes on the run directory's filesystem.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Need, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -338,15 +336,5 @@ pub const SCENARIO: Scenario = Scenario {
         "renameat",
     ],
     needs: &[Need::UserXattrs, Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::ALL,
-        what: "the xattr family is unmodeled (Trap rows; the libc door is syscall(2) until the shim defines the wrappers): the first listxattr aborts",
-        failure: Failure::Stops {
-            events: 12,
-            ending: Ending::Signal(6),
-            diagnostic: "unsupported syscall listxattr",
-        },
-    }],
     ..DEFAULTS
 };

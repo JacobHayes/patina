@@ -496,6 +496,63 @@ pub enum FsEntryKind {
     /// pipe channel the openers share, exactly as a kernel FIFO's do — so an
     /// entry of this kind never carries contents and reports length 0.
     Fifo,
+    /// A socket node (`mknod(S_IFSOCK)`): a name with no bytes behind it that
+    /// no `open` can reach (`ENXIO`).
+    Socket,
+    /// A character device. The one an unprivileged caller can create is the
+    /// whiteout, device 0:0 (`mknod(S_IFCHR, 0)`, `renameat2(RENAME_WHITEOUT)`),
+    /// which is all this kind models: no driver answers it, so an `open` is
+    /// `ENXIO`.
+    CharDevice,
+}
+
+/// What `mknod` asks to make at a name. Every kind but a device is made for
+/// anyone who may create the name; a device other than the whiteout needs
+/// `CAP_MKNOD`, which the one modeled identity lacks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FsNode {
+    /// An empty regular file (`S_IFREG`, or no type).
+    File,
+    Fifo,
+    Socket,
+    /// The character device 0:0 overlay filesystems use as a whiteout.
+    Whiteout,
+    /// Any other character device, by its kernel device word.
+    CharDevice {
+        device: u32,
+    },
+    /// A block device, by its kernel device word.
+    BlockDevice {
+        device: u32,
+    },
+}
+
+impl FsNode {
+    /// The entry kind the node is, or `None` for a device no entry here can
+    /// be (nothing but the whiteout is ever made).
+    pub fn kind(self) -> Option<FsEntryKind> {
+        match self {
+            Self::File => Some(FsEntryKind::File),
+            Self::Fifo => Some(FsEntryKind::Fifo),
+            Self::Socket => Some(FsEntryKind::Socket),
+            Self::Whiteout => Some(FsEntryKind::CharDevice),
+            Self::CharDevice { .. } | Self::BlockDevice { .. } => None,
+        }
+    }
+}
+
+/// Which node an extended-attribute operation names: the entry a resolved
+/// path names (a final symlink NOT followed — the path resolver above the
+/// driver has already decided that), the node an open descriptor holds, or a
+/// bare inode (a FIFO endpoint's node, which the filesystem holds no
+/// descriptor for).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum XattrTarget {
+    Path(String),
+    Fd(Fd),
+    Inode(u64),
 }
 
 /// Deterministic filesystem metadata exposed at the effect boundary.
@@ -857,6 +914,8 @@ pub enum Operation {
     FsSync {
         fd: Fd,
     },
+    /// `sync(2)`/`syncfs(2)`: every change on the volume made durable at once.
+    FsSyncAll,
     FsSetLength {
         fd: Fd,
         len: u64,
@@ -929,6 +988,51 @@ pub enum Operation {
     FsMakeFifo {
         path: String,
         mode: u32,
+    },
+    /// `mknod`: create `node` at the caller's requested mode (the caller
+    /// applied the process umask). A device other than the whiteout is refused
+    /// after the name is judged. A FIFO is [`Operation::FsMakeFifo`].
+    FsMakeNode {
+        path: String,
+        node: FsNode,
+        mode: u32,
+    },
+    /// `renameat2(RENAME_WHITEOUT)`: a rename that leaves a whiteout at the
+    /// source name, as one change.
+    FsRenameWhiteout {
+        from: String,
+        to: String,
+    },
+    /// `renameat2(RENAME_EXCHANGE)`: swap two existing entries atomically,
+    /// whatever their kinds.
+    FsExchange {
+        first: String,
+        second: String,
+    },
+    /// Read one extended attribute's value. The outcome carries the value as
+    /// [`Outcome::Bytes`].
+    FsGetXattr {
+        target: XattrTarget,
+        name: String,
+    },
+    /// Every extended attribute name the caller may see, as the kernel lists
+    /// them: NUL-terminated names in one [`Outcome::Bytes`].
+    FsListXattr {
+        target: XattrTarget,
+    },
+    /// Set one extended attribute. `flags` are `XATTR_CREATE` (1: the name must
+    /// be new) and `XATTR_REPLACE` (2: it must exist).
+    FsSetXattr {
+        target: XattrTarget,
+        name: String,
+        #[serde(with = "bytes_base64")]
+        value: Vec<u8>,
+        flags: u32,
+    },
+    /// Remove one extended attribute.
+    FsRemoveXattr {
+        target: XattrTarget,
+        name: String,
     },
     /// Change the permission bits of the entry `path` NAMES. Trailing-symlink
     /// resolution — the only difference between `chmod` and

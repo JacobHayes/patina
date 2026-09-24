@@ -53,21 +53,23 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   the same way — a path-only driver handle, never a string — so `getcwd` asks
   the filesystem for its current name and answers `ENOENT` once it is unlinked.
 - There is ONE path resolver (`src/paths.rs`), and every `patina_*` entry that
-  takes a `(dirfd, path)` pair goes through it, so the C interposers and the
-  SUD rows are two spellings of one resolution: the working directory for
+  takes a `(dirfd, path)` pair goes through it, so the C interposers and the SUD
+  rows are two spellings of one resolution: the working directory for
   `AT_FDCWD`, a directory descriptor's node otherwise, `.`/`..` applied to the
   resolved directory AFTER symlink expansion (never lexically across a link),
   symlinks walked to the kernel's 40-hop `ELOOP`, `ENAMETOOLONG` at
   `PATH_MAX`/`NAME_MAX`, `ENOTDIR` for a component through a non-directory, and
-  the trailing-slash rule. The driver keeps its strict canonical-only contract
-  underneath (it refuses `..` and an intermediate symlink), which is defense in
-  depth, not a second resolver. Resolution costs one driver `metadata` on the
-  common path and walks component by component only when that lookup cannot
-  decide (a missing name, a refusal, a `..`); the resolved entry's KIND is what
-  the open entry routes on, so a directory opened without `O_DIRECTORY` is still
-  a directory descriptor. The umask is process state applied by the creating
-  entries before the driver call, so the driver stores — and the trace records
-  — the mode the kernel would.
+  the trailing-slash rule. `openat2`'s `RESOLVE_*` restrictions are rules of
+  that same walk (the scope's root bounds `..` and absolute symlinks, a symlink
+  met under `NO_SYMLINKS` is `ELOOP`), never a second resolver. The driver keeps
+  its strict canonical-only contract underneath (it refuses `..` and an
+  intermediate symlink), which is defense in depth, not a second resolver.
+  Resolution costs one driver `metadata` on the common path and walks component
+  by component only when that lookup cannot decide (a missing name, a refusal, a
+  `..`); the resolved entry's KIND is what the open entry routes on, so a
+  directory opened without `O_DIRECTORY` is still a directory descriptor. The
+  umask is process state applied by the creating entries before the driver call,
+  so the driver stores — and the trace records — the mode the kernel would.
 - Metadata a guest can CHANGE has to be modeled, not synthesized. `st_mode` was a
   per-kind constant until a sandbox's own test suite needed `EACCES` to be
   distinguishable from `NotFound`; permission bits now live on the entry, change
@@ -151,9 +153,8 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   (`faccessat`/`faccessat2`, `stat`/`statx`), model BOTH. Denying the newer one
   is technically fail-closed but the deny diagnostic then prints on every call in
   a hot loop, which is its own kind of nondeterminism-shaped noise. Reserve the
-  named deny for a form with no modeled fallback (`openat2`, whose `RESOLVE_*`
-  guarantees nothing here implements — and whose callers probe for exactly that
-  `ENOSYS` before taking their component-wise path).
+  named deny for a form with no modeled fallback (`O_PATH|O_NOFOLLOW` on a
+  symlink, which names a link entry nothing here has a descriptor for).
 - Bootstrap and reentrancy paths are load-bearing. Avoid allocations, locks, or
   formatting in early-init/fatal paths unless the path is proven safe under the
   custom allocator and host-collection rules.

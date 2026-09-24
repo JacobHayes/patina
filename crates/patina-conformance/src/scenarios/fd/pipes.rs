@@ -1,9 +1,7 @@
 //! fd/pipes — pipe2 / dup / fcntl / flock: descriptor flags versus description
 //! flags, sharing through dup, EOF/EPIPE/EAGAIN on pipes, and advisory locks.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{AT_FDCWD, Probe, neg};
@@ -263,15 +261,5 @@ pub const SCENARIO: Scenario = Scenario {
         release: "5.19",
         why: "flock ignores LOCK_MAND before resolving the descriptor",
     }),
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::ALL,
-        what: "flock: LOCK_MAND is judged after the descriptor, so a closed number is EBADF, where Linux 5.19+ ignores LOCK_MAND and answers 0 before resolving the descriptor (fs/locks.c flock); patina_flock checks the operation after the fd table lookup",
-        failure: Failure::Differs(&[
-            Difference::field(131, "flock", "errno", Observed::Str("EBADF")),
-            Difference::field(131, "flock", "ret", Observed::Int(-1)),
-            Difference::check(132, "flock LOCK_MAND is 0 even on a closed descriptor"),
-        ]),
-    }],
     ..DEFAULTS
 };

@@ -89,8 +89,32 @@ mod tsc;
 // `patina_read`/`patina_close`/`patina_dup*` entries); the data structure and
 // its allocation/refcount rules are the module's own. See `fdtable.rs`.
 mod fdtable;
+// `ioctl(2)`'s generic descriptor requests (`FIOCLEX`/`FIONCLEX`/`FIONBIO`/
+// `FIONREAD`), one entry both doors call. See `ioctl.rs`.
+mod ioctl;
+// Vectored I/O (`readv`/`writev`/`preadv`/`pwritev` and the `*v2` flags): the
+// iovec import the kernel's `lib/iov_iter.c` does, over the single-buffer
+// transfers below. See `iov.rs`.
+mod iov;
+// Page-cache advice and writeback (`readahead`, `fadvise64`,
+// `sync_file_range`, `sync`, `syncfs`). See `advice.rs`.
+#[cfg(target_os = "linux")]
+mod advice;
 mod panic_boundary;
 mod paths;
+// What `statfs`/`fstatfs`/`ustat` report: the one deterministic volume and the
+// kernel's pseudo-filesystems. See `volume.rs`.
+// In-kernel copies (`copy_file_range`, `sendfile`, `splice`, `tee`,
+// `vmsplice`) over the positional file I/O and the pipe channels. See
+// `transfer.rs`.
+#[cfg(target_os = "linux")]
+mod transfer;
+#[cfg(target_os = "linux")]
+mod volume;
+// Extended attributes: the `fs/xattr.c` syscall half over the filesystem's
+// attribute store. See `xattr.rs`.
+#[cfg(target_os = "linux")]
+mod xattr;
 
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::BTreeMap;
@@ -104,8 +128,8 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use fdtable::{DescId, FdKind, GuestFdTable, Release, Resolved};
 
 use patina_dst_abi::{
-    ClockKind, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, OpenFlags, SeekWhence,
-    TaskId,
+    ClockKind, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsNode, OpenFlags,
+    SeekWhence, TaskId,
 };
 
 use patina_dst_fs_crash::CrashFs;
@@ -226,6 +250,11 @@ const ENODEV: c_int = 19;
 const ERANGE: c_int = 34;
 const E2BIG: c_int = 7;
 const EXDEV: c_int = 18;
+
+/// The modeled page size: what `sysconf(_SC_PAGESIZE)` answers (the C layer
+/// pins it), so what every page-granular kernel rule reads.
+#[cfg(target_os = "linux")]
+pub(crate) const PAGE_SIZE: usize = 4096;
 #[cfg(target_os = "macos")]
 const ENAMETOOLONG: c_int = 63;
 #[cfg(not(target_os = "macos"))]
@@ -380,9 +409,21 @@ fn fd_table() -> &'static SpinMutex<GuestFdTable> {
     })
 }
 
-/// What a guest number names right now, or `EBADF`.
+/// What a guest number names right now, or `EBADF` — the kernel's
+/// `fdget_raw`, which an `O_PATH` descriptor passes (`fstat`, `fstatfs`,
+/// `fcntl`, the base of a `*at` path).
 fn resolve_fd(raw_fd: c_int) -> Result<Resolved, c_int> {
     fd_table().lock().resolve(raw_fd).ok_or(EBADF)
+}
+
+/// What a guest number names for an operation on an OPENED file — the kernel's
+/// `fdget`, which refuses an `O_PATH` descriptor with `EBADF` exactly as it
+/// refuses an empty slot (`read`, `ioctl`, `fsync`, the `f*xattr` rows, ...).
+fn fdget(raw_fd: c_int) -> Result<Resolved, c_int> {
+    match resolve_fd(raw_fd)? {
+        resolved if resolved.kind == FdKind::OPath => Err(EBADF),
+        resolved => Ok(resolved),
+    }
 }
 
 /// The driver handle behind a deterministic-filesystem descriptor. Any other
@@ -2471,6 +2512,18 @@ fn with_context<T>(
     with_context_raw(invoke)
 }
 
+/// The instant the deterministic filesystem would stamp an entry with now, for
+/// a node the shim keeps itself (a pipe's pipefs inode); 0 with no runtime
+/// installed. A clock read, not a boundary effect: it neither marks a boundary
+/// nor records anything.
+fn fs_time_unrecorded() -> u64 {
+    slot()
+        .lock()
+        .as_mut()
+        .and_then(|context| context.fs_time_unrecorded().ok())
+        .unwrap_or(0)
+}
+
 fn control_env(name: &str) -> Option<String> {
     if let Some(value) = control_plane().lock().get(name).cloned() {
         return Some(value);
@@ -3916,8 +3969,51 @@ pub unsafe extern "C" fn patina_openat(
     mode: u32,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: forwarded from the caller.
+    unsafe { open_at(dirfd, path, flags, mode, 0) }
+}
+
+/// `openat2(2)` past its `struct open_how` checks: [`patina_openat`] with the
+/// resolution confined by `resolve`, `PATINA_RESOLVE_*` restriction bits
+/// (`paths::RESOLVE_SCOPE_FLAGS`); any other bit is `EINVAL`.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_openat2(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: u32,
+    mode: u32,
+    resolve: u32,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if resolve & !paths::RESOLVE_SCOPE_FLAGS != 0 {
+        return fail(EINVAL);
+    }
+    // SAFETY: forwarded from the caller.
+    unsafe { open_at(dirfd, path, flags, mode, resolve) }
+}
+
+/// The one open behind [`patina_openat`] and `patina_openat2`.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string.
+unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scope: u32) -> c_int {
     if flags & !O_ALL != 0 {
         return fail(EINVAL);
+    }
+    // `O_CREAT|O_DIRECTORY` names no open (Linux `build_open_flags`, XNU
+    // `open1`); under `O_PATH` the creating flag was never read.
+    if flags & (O_CREATE | O_DIRECTORY | O_PATH) == O_CREATE | O_DIRECTORY {
+        return fail(EINVAL);
+    }
+    if scope & paths::RESOLVE_CACHED != 0
+        && flags & O_PATH == 0
+        && flags & (O_CREATE | O_TRUNCATE) != 0
+    {
+        return fail(EWOULDBLOCK);
     }
     let path = match path_from_c(path) {
         Ok(path) => path,
@@ -3932,7 +4028,7 @@ pub unsafe extern "C" fn patina_openat(
     let resolved = match paths::resolve(
         dirfd,
         &path,
-        if nofollow { paths::RESOLVE_NOFOLLOW } else { 0 },
+        scope | if nofollow { paths::RESOLVE_NOFOLLOW } else { 0 },
     ) {
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
@@ -3971,7 +4067,7 @@ pub unsafe extern "C" fn patina_openat(
             0
         },
     };
-    if resolved.path == "/dev/urandom" {
+    if paths::is_urandom(&resolved.path) {
         if open_flags.read
             && !open_flags.write
             && !open_flags.create
@@ -4021,7 +4117,9 @@ pub unsafe extern "C" fn patina_openat(
                 Err(errno) => fail(errno),
             }
         }
-        Some(FsEntryKind::File | FsEntryKind::Fifo) if directory => fail(ENOTDIR),
+        Some(
+            FsEntryKind::File | FsEntryKind::Fifo | FsEntryKind::Socket | FsEntryKind::CharDevice,
+        ) if directory => fail(ENOTDIR),
         None if directory => fail(ENOENT),
         Some(FsEntryKind::Fifo) => {
             // A FIFO has no filesystem descriptor, because its bytes are not
@@ -4039,6 +4137,17 @@ pub unsafe extern "C" fn patina_openat(
                     status,
                     cloexec,
                 ),
+                Err(errno) => fail(errno),
+            }
+        }
+        // A socket node or a whiteout has nothing behind it: past the
+        // driver's existence and permission answers, and short of an `O_PATH`
+        // descriptor, the open is the `ENXIO` the kernel's does (a socket
+        // inode's `sock_no_open`, a device number no driver serves).
+        Some(FsEntryKind::Socket | FsEntryKind::CharDevice) => {
+            match with_context(|context| context.fs_open(&resolved.path, open_flags)) {
+                Ok(fd) => bind_fs_handle(fd, kind, status, cloexec),
+                Err(errno) if errno == EINVAL && !path_only => fail(ENXIO),
                 Err(errno) => fail(errno),
             }
         }
@@ -4389,6 +4498,22 @@ pub unsafe extern "C" fn patina_read(
         Err(errno) => return fail(errno) as isize,
     };
     let nonblocking = resolved.status & O_NONBLOCK != 0;
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { read_resolved(resolved, destination, length, nonblocking) }
+}
+
+/// The transfer `read(2)` makes on what a number names, by kind. `nonblocking`
+/// is the call's own answer to "may this wait": the description's `O_NONBLOCK`,
+/// or a vectored read that already has bytes in hand.
+///
+/// # Safety
+/// `destination` must be writable for `length` bytes when nonzero.
+unsafe fn read_resolved(
+    resolved: Resolved,
+    destination: *mut c_void,
+    length: usize,
+    nonblocking: bool,
+) -> isize {
     match resolved.kind {
         FdKind::Stdin => stdin_read(),
         // The captured streams are write-only, like the pipe a supervisor
@@ -4463,6 +4588,21 @@ pub unsafe extern "C" fn patina_write(
         Err(errno) => return fail(errno) as isize,
     };
     let nonblocking = resolved.status & O_NONBLOCK != 0;
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { write_resolved(resolved, source, length, nonblocking) }
+}
+
+/// The transfer `write(2)` makes on what a number names, by kind; see
+/// [`read_resolved`] for `nonblocking`.
+///
+/// # Safety
+/// `source` must be readable for `length` bytes when nonzero.
+unsafe fn write_resolved(
+    resolved: Resolved,
+    source: *const c_void,
+    length: usize,
+    nonblocking: bool,
+) -> isize {
     match resolved.kind {
         FdKind::Stdin | FdKind::Urandom => fail(EBADF) as isize,
         // SAFETY: forwarded from this function's own contract.
@@ -4488,10 +4628,65 @@ pub unsafe extern "C" fn patina_write(
     }
 }
 
-/// Positional read (`pread`): read at `offset` without moving the file cursor.
-/// A negative offset is rejected, matching the kernel `pread` contract; a
+/// What a positional transfer may address: the driver handle of a regular
+/// file, in the kernel's order of refusals (`ksys_pread64`/`ksys_pwrite64`):
+/// a negative position is `EINVAL` before the descriptor is looked at, an
+/// empty slot or an `O_PATH` descriptor is `EBADF` (`fdget`), and a
 /// description without offset addressing (a pipe, a socket, the captured
-/// streams) is `ESPIPE`.
+/// streams) is `ESPIPE`. A directory is addressable — its refusal is the read
+/// itself (`EISDIR`), or the write mode it was never opened with (`EBADF`).
+fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved, u64), c_int> {
+    let Ok(offset) = u64::try_from(offset) else {
+        return Err(EINVAL);
+    };
+    let resolved = fdget(raw_fd)?;
+    match resolved.kind {
+        FdKind::File | FdKind::Dir => Ok((resolved, offset)),
+        FdKind::OPath
+        | FdKind::Stdin
+        | FdKind::Stdout
+        | FdKind::Stderr
+        | FdKind::Urandom
+        | FdKind::Socket
+        | FdKind::Pipe => Err(ESPIPE),
+        #[cfg(target_os = "linux")]
+        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd => Err(ESPIPE),
+        #[cfg(target_os = "macos")]
+        FdKind::Kqueue => Err(ESPIPE),
+    }
+}
+
+/// # Safety
+/// `destination` must be writable for `length` bytes when nonzero.
+unsafe fn fs_pread(
+    resolved: Resolved,
+    destination: *mut c_void,
+    length: usize,
+    offset: u64,
+) -> isize {
+    if resolved.status & O_READ == 0 {
+        return fail(EBADF) as isize;
+    }
+    if resolved.kind == FdKind::Dir {
+        return fail(EISDIR) as isize;
+    }
+    match with_context(|context| context.fs_read_at(Fd(resolved.handle), offset, length)) {
+        Ok(bytes) => {
+            if !bytes.is_empty() {
+                // SAFETY: Guaranteed by this function's contract.
+                unsafe {
+                    slice::from_raw_parts_mut(destination.cast::<u8>(), length)[..bytes.len()]
+                        .copy_from_slice(&bytes);
+                }
+            }
+            isize::try_from(bytes.len()).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
+        }
+        Err(errno) => fail(errno) as isize,
+    }
+}
+
+/// Positional read (`pread`): read at `offset` without moving the file cursor;
+/// see [`positional_target`] for the refusals.
 ///
 /// # Safety
 /// `destination` must be writable for `length` bytes when nonzero.
@@ -4503,31 +4698,15 @@ pub unsafe extern "C" fn patina_pread(
     offset: i64,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if length != 0 && destination.is_null() {
-        return fail(EINVAL) as isize;
-    }
-    let handle = match resolve_fd(raw_fd) {
-        Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
-        Ok(_) => return fail(ESPIPE) as isize,
+    let (resolved, offset) = match positional_target(raw_fd, offset) {
+        Ok(target) => target,
         Err(errno) => return fail(errno) as isize,
     };
-    let offset = match u64::try_from(offset) {
-        Ok(offset) => offset,
-        Err(_) => return fail(EINVAL) as isize,
-    };
-    match with_context(|context| context.fs_read_at(handle, offset, length)) {
-        Ok(bytes) => {
-            if !bytes.is_empty() {
-                // SAFETY: Guaranteed by this function's C ABI contract.
-                unsafe {
-                    slice::from_raw_parts_mut(destination.cast::<u8>(), length)[..bytes.len()]
-                        .copy_from_slice(&bytes);
-                }
-            }
-            isize::try_from(bytes.len()).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
-        }
-        Err(errno) => fail(errno) as isize,
+    if length != 0 && destination.is_null() {
+        return fail(EFAULT) as isize;
     }
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { fs_pread(resolved, destination, length, offset) }
 }
 
 /// # Safety
@@ -4549,9 +4728,49 @@ unsafe fn fs_pwrite(handle: Fd, source: *const c_void, length: usize, offset: i6
     }
 }
 
+/// Where a positional write lands. On Linux a write through an `O_APPEND`
+/// description goes to the end of the file whatever the position (pwrite(2)
+/// BUGS: `generic_write_checks` sets the position to `i_size` under
+/// `IOCB_APPEND`), and so does one carrying `RWF_APPEND`; the file's cursor
+/// stays where it was either way. Darwin's `pwrite` writes at the position.
+fn positional_write_offset(resolved: Resolved, offset: u64, append: bool) -> Result<u64, c_int> {
+    let append = append || (cfg!(target_os = "linux") && resolved.status & O_APPEND != 0);
+    if !append || resolved.kind != FdKind::File {
+        return Ok(offset);
+    }
+    with_context(|context| context.fs_fd_metadata(Fd(resolved.handle))).map(|metadata| metadata.len)
+}
+
+/// # Safety
+/// `source` must be readable for `length` bytes when nonzero.
+unsafe fn fs_pwrite_resolved(
+    resolved: Resolved,
+    source: *const c_void,
+    length: usize,
+    offset: u64,
+    append: bool,
+) -> isize {
+    if resolved.status & O_WRITE == 0 {
+        return fail(EBADF) as isize;
+    }
+    let offset = if length == 0 {
+        offset
+    } else {
+        match positional_write_offset(resolved, offset, append) {
+            Ok(offset) => offset,
+            Err(errno) => return fail(errno) as isize,
+        }
+    };
+    let Ok(offset) = i64::try_from(offset) else {
+        return fail(EFBIG) as isize;
+    };
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { fs_pwrite(Fd(resolved.handle), source, length, offset) }
+}
+
 /// Positional write (`pwrite`): write at `offset` without moving the file
-/// cursor. A negative offset is rejected, matching the kernel `pwrite`
-/// contract; a description without offset addressing is `ESPIPE`.
+/// cursor; see [`positional_target`] for the refusals and
+/// [`positional_write_offset`] for `O_APPEND`.
 ///
 /// # Safety
 /// `source` must be readable for `length` bytes when nonzero.
@@ -4563,16 +4782,15 @@ pub unsafe extern "C" fn patina_pwrite(
     offset: i64,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if length != 0 && source.is_null() {
-        return fail(EINVAL) as isize;
-    }
-    let handle = match resolve_fd(raw_fd) {
-        Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
-        Ok(_) => return fail(ESPIPE) as isize,
+    let (resolved, offset) = match positional_target(raw_fd, offset) {
+        Ok(target) => target,
         Err(errno) => return fail(errno) as isize,
     };
+    if length != 0 && source.is_null() {
+        return fail(EFAULT) as isize;
+    }
     // SAFETY: forwarded from this function's own contract.
-    unsafe { fs_pwrite(handle, source, length, offset) }
+    unsafe { fs_pwrite_resolved(resolved, source, length, offset, false) }
 }
 
 /// `LOCK_SH`/`LOCK_EX`/`LOCK_NB`/`LOCK_UN` from `<sys/file.h>` — identical values
@@ -4602,31 +4820,33 @@ const LOCK_UN: c_int = 8;
 /// advisory-lock waiting, and no supported guest blocks on a contended `flock`
 /// (std's `File::try_lock*` is always `LOCK_NB`).
 ///
-/// On Linux a request carrying `LOCK_MAND` on an open descriptor answers 0 and
-/// is ignored (`fs/locks.c`).
+/// The refusals come in the kernel's order (`fs/locks.c`): on Linux a request
+/// carrying `LOCK_MAND` answers 0 and is ignored before anything else is looked
+/// at (Linux 5.19+), an unknown operation is `EINVAL` before the descriptor,
+/// and an empty slot or an `O_PATH` descriptor is `EBADF` (`fdget`).
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let resolved = match resolve_fd(raw_fd) {
-        Ok(resolved) => resolved,
-        Err(errno) => return fail(errno),
-    };
     #[cfg(target_os = "linux")]
     if operation & linux_raw_sys::general::LOCK_MAND as c_int != 0 {
         set_errno(0);
         return 0;
     }
     let non_blocking = operation & LOCK_NB != 0;
-    let request = operation & !LOCK_NB;
-    if request == LOCK_UN {
+    let mode = match operation & !LOCK_NB {
+        LOCK_UN => None,
+        LOCK_SH => Some(FlockMode::Shared),
+        LOCK_EX => Some(FlockMode::Exclusive),
+        _ => return fail(EINVAL),
+    };
+    let resolved = match fdget(raw_fd) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno),
+    };
+    let Some(mode) = mode else {
         flock_release(resolved.desc);
         set_errno(0);
         return 0;
-    }
-    let mode = match request {
-        LOCK_SH => FlockMode::Shared,
-        LOCK_EX => FlockMode::Exclusive,
-        _ => return fail(EINVAL),
     };
     // Resolve a file's inode through the recorded metadata path so the conflict
     // decision keys on the same file identity under record and replay.
@@ -4746,12 +4966,41 @@ impl ReadDirState {
 
 /// The `PATINA_ENTRY_*` wire values (`include/patina_native.h`). The C side ORs
 /// the corresponding `S_IF*` bit onto the entry's permission bits.
+const PATINA_ENTRY_FILE: u32 = 1;
+const PATINA_ENTRY_DIRECTORY: u32 = 2;
+const PATINA_ENTRY_SYMLINK: u32 = 3;
+const PATINA_ENTRY_FIFO: u32 = 4;
+const PATINA_ENTRY_SOCKET: u32 = 5;
+const PATINA_ENTRY_CHAR: u32 = 6;
+
 fn metadata_kind(kind: FsEntryKind) -> u32 {
     match kind {
-        FsEntryKind::File => 1,
-        FsEntryKind::Directory => 2,
-        FsEntryKind::Symlink => 3,
-        FsEntryKind::Fifo => 4,
+        FsEntryKind::File => PATINA_ENTRY_FILE,
+        FsEntryKind::Directory => PATINA_ENTRY_DIRECTORY,
+        FsEntryKind::Symlink => PATINA_ENTRY_SYMLINK,
+        FsEntryKind::Fifo => PATINA_ENTRY_FIFO,
+        FsEntryKind::Socket => PATINA_ENTRY_SOCKET,
+        FsEntryKind::CharDevice => PATINA_ENTRY_CHAR,
+    }
+}
+
+/// The `PATINA_FS_*` wire values: which filesystem a node is on. The
+/// deterministic volume holds every entry a path can name; an anonymous pipe's
+/// node is on pipefs and a socketpair end's on sockfs, as on Linux.
+const PATINA_FS_VOLUME: u32 = 0;
+const PATINA_FS_PIPEFS: u32 = 1;
+const PATINA_FS_SOCKFS: u32 = 2;
+
+/// The `(major, minor)` device a `PATINA_FS_*` filesystem reports through
+/// `st_dev`/`stx_dev_*` (`PATINA_*_DEV_*` in `patina_native.h`): the volume is
+/// an ext4-like filesystem on block device 8:1, pipefs and sockfs anonymous
+/// devices of their own.
+#[cfg(target_os = "linux")]
+pub(crate) fn fs_device(fs: u32) -> (u32, u32) {
+    match fs {
+        PATINA_FS_PIPEFS => (0, 14),
+        PATINA_FS_SOCKFS => (0, 8),
+        _ => (8, 1),
     }
 }
 
@@ -4767,7 +5016,9 @@ pub struct PatinaMetadata {
     /// The permission bits (`0o7777`) WITHOUT the file-type bits `kind` carries.
     pub mode: u32,
     pub nlink: u32,
-    pub reserved: u32,
+    /// The `PATINA_FS_*` filesystem the node is on, which decides the device
+    /// `st_dev` reports.
+    pub fs: u32,
     pub length: u64,
     pub ino: u64,
     pub atime_nanos: u64,
@@ -4787,7 +5038,7 @@ fn write_metadata(metadata: patina_dst_abi::FsMetadata, out: *mut PatinaMetadata
             kind: metadata_kind(metadata.kind),
             mode: metadata.mode,
             nlink: metadata.nlink,
-            reserved: 0,
+            fs: PATINA_FS_VOLUME,
             length: metadata.len,
             ino: metadata.ino,
             atime_nanos: metadata.atime_nanos,
@@ -4836,7 +5087,7 @@ pub unsafe extern "C" fn patina_metadata_at(
     out: *mut PatinaMetadata,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if flags & !paths::RESOLVE_ALL != 0 {
+    if flags & !paths::RESOLVE_AT_FLAGS != 0 {
         return fail(EINVAL);
     }
     let path = match path_from_c(path) {
@@ -4878,6 +5129,17 @@ pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut Patina
             Err(errno) => fail(errno),
         };
     }
+    // An anonymous pipe or socketpair end is on pipefs/sockfs: its node is the
+    // shim's own, and answers without a trip to the filesystem.
+    if let Some(metadata) = thread::pipe_inode_metadata(raw_fd) {
+        if out.is_null() {
+            return fail(EINVAL);
+        }
+        // SAFETY: `out` was checked and is writable per the C ABI contract.
+        unsafe { out.write(metadata) };
+        set_errno(0);
+        return 0;
+    }
     let fd = match fs_handle(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
@@ -4904,7 +5166,7 @@ pub unsafe extern "C" fn patina_chmod(
     flags: u32,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if flags & !paths::RESOLVE_ALL != 0 {
+    if flags & !paths::RESOLVE_AT_FLAGS != 0 {
         return fail(EINVAL);
     }
     let path = match path_from_c(path) {
@@ -4918,7 +5180,13 @@ pub unsafe extern "C" fn patina_chmod(
     match resolved.metadata.map(|metadata| metadata.kind) {
         None => return fail(ENOENT),
         Some(FsEntryKind::Symlink) => return fail(EOPNOTSUPP),
-        Some(FsEntryKind::File | FsEntryKind::Directory | FsEntryKind::Fifo) => {}
+        Some(
+            FsEntryKind::File
+            | FsEntryKind::Directory
+            | FsEntryKind::Fifo
+            | FsEntryKind::Socket
+            | FsEntryKind::CharDevice,
+        ) => {}
     }
     match with_context(|context| context.fs_set_mode(&resolved.path, mode)) {
         Ok(()) => {
@@ -4945,6 +5213,10 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
             }
             Err(errno) => fail(errno),
         };
+    }
+    if thread::pipe_inode_set_mode(raw_fd, mode).is_some() {
+        set_errno(0);
+        return 0;
     }
     let fd = match fs_handle(raw_fd) {
         Ok(fd) => fd,
@@ -5017,7 +5289,7 @@ pub unsafe extern "C" fn patina_utimensat(
         set_errno(0);
         return 0;
     }
-    if flags & !paths::RESOLVE_ALL != 0 {
+    if flags & !paths::RESOLVE_AT_FLAGS != 0 {
         return fail(EINVAL);
     }
     let path = match path_from_c(path) {
@@ -5168,7 +5440,7 @@ pub unsafe extern "C" fn patina_chown(
     gid: u32,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if flags & !paths::RESOLVE_ALL != 0 {
+    if flags & !paths::RESOLVE_AT_FLAGS != 0 {
         return fail(EINVAL);
     }
     let path = match path_from_c(path) {
@@ -5279,7 +5551,12 @@ pub unsafe extern "C" fn patina_truncate(dirfd: c_int, path: *const c_char, leng
     match resolved.metadata.map(|metadata| metadata.kind) {
         None => return fail(ENOENT),
         Some(FsEntryKind::Directory) => return fail(EISDIR),
-        Some(FsEntryKind::Fifo | FsEntryKind::Symlink) => return fail(EINVAL),
+        Some(
+            FsEntryKind::Fifo
+            | FsEntryKind::Symlink
+            | FsEntryKind::Socket
+            | FsEntryKind::CharDevice,
+        ) => return fail(EINVAL),
         Some(FsEntryKind::File) => {}
     }
     match with_context(|context| context.fs_set_len_by_path(&resolved.path, length)) {
@@ -5548,14 +5825,96 @@ pub unsafe extern "C" fn patina_mkfifo(dirfd: c_int, path: *const c_char, mode: 
     }
 }
 
+/// `S_IFMT` and the file types a `mknod` mode carries (identical on Linux and
+/// Darwin).
+const S_IFMT: u32 = 0o170000;
+const S_IFIFO: u32 = 0o010000;
+const S_IFCHR: u32 = 0o020000;
+const S_IFDIR: u32 = 0o040000;
+const S_IFBLK: u32 = 0o060000;
+const S_IFREG: u32 = 0o100000;
+const S_IFSOCK: u32 = 0o140000;
+
+/// `mknod(2)`/`mknodat(2)`, in the kernel's order of refusals (Linux
+/// `do_mknodat`): the type first (`may_mknod`: a directory is `EPERM`, an
+/// unknown type `EINVAL`), then the name (`ENOENT` for a missing parent,
+/// `EEXIST` for a taken name); the driver judges the rest (the parent's
+/// `w`+`x`, then the `CAP_MKNOD` a device other than the whiteout needs). A
+/// zero type or `S_IFREG` makes an empty regular file, `S_IFSOCK` a socket
+/// node, `S_IFCHR` with device 0 a whiteout. `dev` is the kernel's 32-bit
+/// device word. The mode's permission bits are applied under the process
+/// umask. On Darwin (`mknod` in XNU) a FIFO is `mkfifo` and every other type
+/// needs a privilege the one modeled identity lacks (`EPERM`, before the
+/// path).
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_mknod(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: u32,
+    dev: u32,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let kind = mode & S_IFMT;
+    if cfg!(target_os = "macos") && kind != S_IFIFO {
+        return fail(EPERM);
+    }
+    let node = match kind {
+        0 | S_IFREG => FsNode::File,
+        S_IFIFO => FsNode::Fifo,
+        S_IFSOCK => FsNode::Socket,
+        S_IFCHR if dev == 0 => FsNode::Whiteout,
+        S_IFCHR => FsNode::CharDevice { device: dev },
+        S_IFBLK => FsNode::BlockDevice { device: dev },
+        S_IFDIR => return fail(EPERM),
+        _ => return fail(EINVAL),
+    };
+    let spelled = match path_from_c(path) {
+        Ok(path) => path,
+        Err(errno) => return fail(errno),
+    };
+    let resolved = match paths::resolve(dirfd, &spelled, paths::RESOLVE_NOFOLLOW) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno),
+    };
+    if resolved.metadata.is_some() || paths::last_component(&spelled) != paths::Last::Name {
+        return fail(EEXIST);
+    }
+    let mode = (mode & 0o7777) & !paths::umask();
+    let result = if node == FsNode::Fifo {
+        with_context(|context| context.fs_make_fifo(&resolved.path, mode))
+    } else {
+        with_context(|context| context.fs_make_node(&resolved.path, node, mode))
+    };
+    match result {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
 /// Remove a name (`unlink`/`unlinkat`). Never follows a trailing symlink: the
-/// link entry itself is what goes.
+/// link entry itself is what goes. A final `.`, `..` or `/` names no entry to
+/// unlink: `EISDIR` once the parent resolved (`do_unlinkat`).
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_unlink(dirfd: c_int, path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let spelled = match path_from_c(path) {
+        Ok(path) => path,
+        Err(errno) => return fail(errno),
+    };
+    match paths::final_component(dirfd, &spelled) {
+        Ok(paths::Last::Name) => {}
+        Ok(paths::Last::Dot | paths::Last::DotDot | paths::Last::Root) => return fail(EISDIR),
+        Err(errno) => return fail(errno),
+    }
     // SAFETY: Forwarded from this function's C ABI contract.
     unsafe {
         path_unit(
@@ -5568,12 +5927,26 @@ pub unsafe extern "C" fn patina_unlink(dirfd: c_int, path: *const c_char) -> c_i
 }
 
 /// Remove an empty deterministic directory (`rmdir`/`unlinkat(AT_REMOVEDIR)`).
+/// A final component that names no entry is refused once the parent resolved
+/// (`do_rmdir`): `.` is `EINVAL`, `..` is `ENOTEMPTY` (the directory it names
+/// holds at least the one it was reached through), the root `EBUSY`.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_rmdir(dirfd: c_int, path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let spelled = match path_from_c(path) {
+        Ok(path) => path,
+        Err(errno) => return fail(errno),
+    };
+    match paths::final_component(dirfd, &spelled) {
+        Ok(paths::Last::Name) => {}
+        Ok(paths::Last::Dot) => return fail(EINVAL),
+        Ok(paths::Last::DotDot) => return fail(ENOTEMPTY),
+        Ok(paths::Last::Root) => return fail(EBUSY),
+        Err(errno) => return fail(errno),
+    }
     // SAFETY: Forwarded from this function's C ABI contract.
     unsafe {
         path_unit(
@@ -5585,20 +5958,92 @@ pub unsafe extern "C" fn patina_rmdir(dirfd: c_int, path: *const c_char) -> c_in
     }
 }
 
-/// Rename a deterministic filesystem entry (`rename`/`renameat`). Neither
-/// side follows a trailing symlink: the kernel renames link entries as
-/// entries.
+/// `renameat2(2)`'s flags (Linux values).
+pub(crate) const RENAME_NOREPLACE: u32 = 1 << 0;
+pub(crate) const RENAME_EXCHANGE: u32 = 1 << 1;
+pub(crate) const RENAME_WHITEOUT: u32 = 1 << 2;
+
+/// Judge a `renameat2` flag word as `do_renameat2` does before any path is
+/// looked at: an unknown bit, or `RENAME_EXCHANGE` with either of the others,
+/// is `EINVAL`.
+pub(crate) fn rename_flags_valid(flags: u32) -> bool {
+    flags & !(RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT) == 0
+        && !(flags & RENAME_EXCHANGE != 0 && flags & (RENAME_NOREPLACE | RENAME_WHITEOUT) != 0)
+}
+
+#[cfg(test)]
+mod open_flag_tests {
+    use super::*;
+
+    /// RED before: the shared open read `O_CREAT|O_DIRECTORY` as a directory
+    /// open and went on to resolve the path (here `ENAMETOOLONG`).
+    #[test]
+    fn a_creating_directory_open_is_einval_before_the_path() {
+        let long = std::ffi::CString::new("a".repeat(paths::PATH_MAX)).unwrap();
+        let flags = O_READ | O_CREATE | O_DIRECTORY;
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(
+            unsafe { patina_openat(-1, long.as_ptr(), flags, 0o644) },
+            -1
+        );
+        assert_eq!(patina_errno(), EINVAL);
+    }
+}
+
+#[cfg(test)]
+mod rename_flag_tests {
+    use super::*;
+
+    #[test]
+    fn renameat2_flags_are_judged_as_do_renameat2_judges_them() {
+        for accepted in [
+            0,
+            RENAME_NOREPLACE,
+            RENAME_EXCHANGE,
+            RENAME_WHITEOUT,
+            RENAME_NOREPLACE | RENAME_WHITEOUT,
+        ] {
+            assert!(
+                rename_flags_valid(accepted),
+                "{accepted:#x} is a kernel flag set"
+            );
+        }
+        for refused in [
+            RENAME_NOREPLACE | RENAME_EXCHANGE,
+            RENAME_WHITEOUT | RENAME_EXCHANGE,
+            1 << 3,
+            RENAME_NOREPLACE | 1 << 31,
+        ] {
+            assert!(!rename_flags_valid(refused), "{refused:#x} is EINVAL");
+        }
+    }
+}
+
+/// Rename a deterministic filesystem entry (`rename`/`renameat`, which pass no
+/// flags, and `renameat2`). Neither side follows a trailing symlink: the kernel
+/// renames link entries as entries. The refusals come in `do_renameat2`'s
+/// order: the flag word, both paths' parents, a final `.`/`..`/`/` on either
+/// side (`EBUSY`; `EEXIST` on the destination under `RENAME_NOREPLACE`), a
+/// missing source (`ENOENT`), then the flag's own rule — `RENAME_NOREPLACE`
+/// refuses an existing destination (`EEXIST`), `RENAME_EXCHANGE` needs one
+/// (`ENOENT`) and swaps the two entries atomically, `RENAME_WHITEOUT` leaves a
+/// whiteout (a 0:0 character device) at the old name — and last the rename's
+/// own (`EISDIR`, `ENOTDIR`, `ENOTEMPTY`, `EINVAL` into itself).
 ///
 /// # Safety
 /// `from` and `to` must point to valid NUL-terminated UTF-8 strings.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_rename(
+pub unsafe extern "C" fn patina_renameat2(
     fromfd: c_int,
     from: *const c_char,
     tofd: c_int,
     to: *const c_char,
+    flags: u32,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if !rename_flags_valid(flags) {
+        return fail(EINVAL);
+    }
     let from = match path_from_c(from) {
         Ok(path) => path,
         Err(errno) => return fail(errno),
@@ -5607,15 +6052,47 @@ pub unsafe extern "C" fn patina_rename(
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
+    let (from_last, to_last) = match (
+        paths::final_component(fromfd, &from),
+        paths::final_component(tofd, &to),
+    ) {
+        (Ok(from_last), Ok(to_last)) => (from_last, to_last),
+        (Err(errno), _) | (_, Err(errno)) => return fail(errno),
+    };
+    if from_last != paths::Last::Name {
+        return fail(EBUSY);
+    }
+    if to_last != paths::Last::Name {
+        return fail(if flags & RENAME_NOREPLACE != 0 {
+            EEXIST
+        } else {
+            EBUSY
+        });
+    }
     let from = match paths::resolve(fromfd, &from, paths::RESOLVE_NOFOLLOW) {
-        Ok(resolved) => resolved.path,
+        Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
     };
     let to = match paths::resolve(tofd, &to, paths::RESOLVE_NOFOLLOW) {
-        Ok(resolved) => resolved.path,
+        Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
     };
-    match with_context(|context| context.fs_rename(&from, &to)) {
+    if from.metadata.is_none() {
+        return fail(ENOENT);
+    }
+    let result = if flags & RENAME_EXCHANGE != 0 {
+        if to.metadata.is_none() {
+            return fail(ENOENT);
+        }
+        with_context(|context| context.fs_exchange(&from.path, &to.path))
+    } else if flags & RENAME_NOREPLACE != 0 && to.metadata.is_some() {
+        Err(EEXIST)
+    } else if flags & RENAME_WHITEOUT != 0 {
+        with_context(|context| context.fs_rename_whiteout(&from.path, &to.path))
+    } else {
+        with_context(|context| context.fs_rename(&from.path, &to.path))
+    };
+    match result {
         Ok(()) => {
             set_errno(0);
             0
@@ -5747,7 +6224,13 @@ pub unsafe extern "C" fn patina_read_link(
     match resolved.metadata.map(|metadata| metadata.kind) {
         None => return fail(ENOENT) as isize,
         Some(FsEntryKind::Symlink) => {}
-        Some(FsEntryKind::File | FsEntryKind::Directory | FsEntryKind::Fifo) => {
+        Some(
+            FsEntryKind::File
+            | FsEntryKind::Directory
+            | FsEntryKind::Fifo
+            | FsEntryKind::Socket
+            | FsEntryKind::CharDevice,
+        ) => {
             return fail(EINVAL) as isize;
         }
     }
@@ -5816,7 +6299,7 @@ pub unsafe extern "C" fn patina_resolve_path(
     kind: *mut u32,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if flags & !paths::RESOLVE_ALL != 0 || kind.is_null() {
+    if flags & !paths::RESOLVE_AT_FLAGS != 0 || kind.is_null() {
         return fail(EINVAL) as isize;
     }
     let path = match path_from_c(path) {
@@ -9142,6 +9625,10 @@ mod thread {
         /// exists only while some descriptor is open on the FIFO.
         fifo_channels: BTreeMap<u64, u64>,
         next_channel: u64,
+        /// The pipefs and sockfs nodes behind anonymous pipes and socketpair
+        /// ends ([`PipeInode`]), keyed by their inode number.
+        pipe_inodes: BTreeMap<u64, PipeInode>,
+        next_pipe_ino: u64,
         // Virtual kqueue readiness reactors, keyed by registry id. The
         // descriptor table holds the description (a `dup`/`F_DUPFD` of a kqueue
         // fd — tokio's IO driver clones its selector this way — is a second
@@ -9182,6 +9669,8 @@ mod thread {
                 pipe_channels: BTreeMap::new(),
                 fifo_channels: BTreeMap::new(),
                 next_channel: 0,
+                pipe_inodes: BTreeMap::new(),
+                next_pipe_ino: 1,
                 #[cfg(target_os = "macos")]
                 kqueues: BTreeMap::new(),
                 #[cfg(target_os = "macos")]
@@ -10687,6 +11176,111 @@ mod thread {
         /// endpoint) is what keeps it answerable even after the last name for it
         /// is unlinked.
         fifo_ino: Option<u64>,
+        /// The pipefs/sockfs node an anonymous pipe or socketpair end is on
+        /// (`net.pipe_inodes`); `None` for a FIFO end, whose node is
+        /// `fifo_ino`'s.
+        inode: Option<u64>,
+    }
+
+    /// The node behind an anonymous pipe (both ends share one, on pipefs) or a
+    /// socketpair end (each its own, on sockfs): what `fstat` reports, what
+    /// `fchmod` changes, and what the filesystem-level answers (`fstatfs`,
+    /// `syncfs`) are about. It holds no bytes — those are the channel's.
+    struct PipeInode {
+        socket: bool,
+        /// Permission bits: `0o600` for a pipe, `0o777` for a socket, as the
+        /// kernel creates them; `fchmod` changes them.
+        mode: u32,
+        atime_nanos: u64,
+        mtime_nanos: u64,
+        ctime_nanos: u64,
+        /// Endpoints naming this node; it is freed with the last.
+        ends: usize,
+    }
+
+    /// Mint a pipefs/sockfs node stamped with the filesystem clock's now.
+    fn mint_pipe_inode(state: &mut ThreadRuntime, socket: bool, now: u64, ends: usize) -> u64 {
+        let ino = state.net.next_pipe_ino;
+        state.net.next_pipe_ino = ino.wrapping_add(1);
+        state.net.pipe_inodes.insert(
+            ino,
+            PipeInode {
+                socket,
+                mode: if socket { 0o777 } else { 0o600 },
+                atime_nanos: now,
+                mtime_nanos: now,
+                ctime_nanos: now,
+                ends,
+            },
+        );
+        ino
+    }
+
+    /// The instant a new pipefs/sockfs node is stamped with: the time the
+    /// deterministic filesystem stamps its own entries with (0 before a runtime
+    /// is installed, which only a unit test reaches).
+    fn pipe_inode_time() -> u64 {
+        super::fs_time_unrecorded()
+    }
+
+    /// The pipefs/sockfs node behind `fd`, if it is an anonymous pipe or
+    /// socketpair end: its metadata as `fstat` reports it.
+    pub(crate) fn pipe_inode_metadata(fd: c_int) -> Option<super::PatinaMetadata> {
+        let (end, _) = pipe_entry(fd).ok()?;
+        let state = lock_state();
+        let ino = state.net.pipe_ends.get(&end)?.inode?;
+        let inode = state.net.pipe_inodes.get(&ino)?;
+        Some(super::PatinaMetadata {
+            kind: if inode.socket {
+                super::PATINA_ENTRY_SOCKET
+            } else {
+                super::PATINA_ENTRY_FIFO
+            },
+            mode: inode.mode,
+            nlink: 1,
+            fs: if inode.socket {
+                super::PATINA_FS_SOCKFS
+            } else {
+                super::PATINA_FS_PIPEFS
+            },
+            length: 0,
+            ino,
+            atime_nanos: inode.atime_nanos,
+            mtime_nanos: inode.mtime_nanos,
+            ctime_nanos: inode.ctime_nanos,
+            btime_nanos: 0,
+        })
+    }
+
+    /// `fchmod` on an anonymous pipe or socketpair end: the node's permission
+    /// bits change and its `ctime` moves. `None` for any other descriptor.
+    pub(crate) fn pipe_inode_set_mode(fd: c_int, mode: u32) -> Option<()> {
+        let now = pipe_inode_time();
+        let (end, _) = pipe_entry(fd).ok()?;
+        let mut state = lock_state();
+        let ino = state.net.pipe_ends.get(&end)?.inode?;
+        let inode = state.net.pipe_inodes.get_mut(&ino)?;
+        inode.mode = mode & 0o7777;
+        inode.ctime_nanos = now;
+        Some(())
+    }
+
+    /// Which filesystem a pipe-kind descriptor is on: a FIFO end is on the
+    /// deterministic volume, an anonymous pipe on pipefs, a socketpair end on
+    /// sockfs. `None` for a number that is not a pipe end.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn pipe_filesystem(fd: c_int) -> Option<u32> {
+        let (end, _) = pipe_entry(fd).ok()?;
+        let state = lock_state();
+        let end = state.net.pipe_ends.get(&end)?;
+        match end.inode {
+            None => Some(super::PATINA_FS_VOLUME),
+            Some(ino) => Some(if state.net.pipe_inodes.get(&ino)?.socket {
+                super::PATINA_FS_SOCKFS
+            } else {
+                super::PATINA_FS_PIPEFS
+            }),
+        }
     }
 
     fn drain_channel_recv_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<TaskId> {
@@ -10727,10 +11321,12 @@ mod thread {
         if read_fd_out.is_null() || write_fd_out.is_null() {
             return super::fail(EINVAL);
         }
+        let now = pipe_inode_time();
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
             return super::fail(error.into_posix());
         }
+        let inode = mint_pipe_inode(&mut state, false, now, 2);
         let channel = state.net.next_channel;
         state.net.next_channel = state.net.next_channel.wrapping_add(1);
         state
@@ -10745,6 +11341,7 @@ mod thread {
                 read_channel: Some(channel),
                 write_channel: None,
                 fifo_ino: None,
+                inode: Some(inode),
             },
         );
         state.net.pipe_ends.insert(
@@ -10753,6 +11350,7 @@ mod thread {
                 read_channel: None,
                 write_channel: Some(channel),
                 fifo_ino: None,
+                inode: Some(inode),
             },
         );
         let nonblock = if nonblocking != 0 { O_NONBLOCK } else { 0 };
@@ -10827,10 +11425,13 @@ mod thread {
         if fd0_out.is_null() || fd1_out.is_null() {
             return super::fail(EINVAL);
         }
+        let now = pipe_inode_time();
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
             return super::fail(error.into_posix());
         }
+        let inode0 = mint_pipe_inode(&mut state, true, now, 1);
+        let inode1 = mint_pipe_inode(&mut state, true, now, 1);
         let channel_0to1 = state.net.next_channel;
         let channel_1to0 = channel_0to1.wrapping_add(1);
         state.net.next_channel = channel_1to0.wrapping_add(1);
@@ -10850,6 +11451,7 @@ mod thread {
                 read_channel: Some(channel_1to0),
                 write_channel: Some(channel_0to1),
                 fifo_ino: None,
+                inode: Some(inode0),
             },
         );
         state.net.pipe_ends.insert(
@@ -10858,6 +11460,7 @@ mod thread {
                 read_channel: Some(channel_0to1),
                 write_channel: Some(channel_1to0),
                 fifo_ino: None,
+                inode: Some(inode1),
             },
         );
         let status = O_READ | O_WRITE | if nonblocking != 0 { O_NONBLOCK } else { 0 };
@@ -10982,6 +11585,7 @@ mod thread {
                 read_channel: read.then_some(channel_id),
                 write_channel: write.then_some(channel_id),
                 fifo_ino: Some(ino),
+                inode: None,
             },
         );
         // The guest number is reserved BEFORE the rendezvous, as the kernel's
@@ -11060,6 +11664,19 @@ mod thread {
         }
         super::set_errno(0);
         fd
+    }
+
+    /// The bytes a pipe or socketpair end's `FIONREAD` reports: what is queued
+    /// in the channel it reads (a pipe's write end, the pipe's one channel).
+    pub(crate) fn pipe_queued(handle: u64) -> Option<usize> {
+        let state = lock_state();
+        let end = state.net.pipe_ends.get(&(handle as c_int))?;
+        let channel = end.read_channel.or(end.write_channel)?;
+        state
+            .net
+            .pipe_channels
+            .get(&channel)
+            .map(|channel| channel.buffer.len())
     }
 
     /// What `fstat` should report for `fd` when it is a FIFO descriptor.
@@ -11288,6 +11905,264 @@ mod thread {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Splicing (`splice`, `tee`, `vmsplice`, and `sendfile`/`copy` into a
+    // pipe): the kernel moves bytes between a pipe and a file, or between two
+    // pipes, without a user copy. Here they are the SAME channel buffers the
+    // reads and writes above use, under the same baton park, so a splice is
+    // observable exactly as the equivalent read and write would be.
+
+    /// The pipe an endpoint belongs to — the one channel of an anonymous pipe
+    /// or a FIFO — or `None` for a socketpair end, which `splice` treats as a
+    /// socket (`get_pipe_info` answers NULL for it).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn splice_pipe(handle: u64) -> Option<u64> {
+        let state = lock_state();
+        let end = state.net.pipe_ends.get(&(handle as c_int))?;
+        let socket = end
+            .inode
+            .and_then(|ino| state.net.pipe_inodes.get(&ino))
+            .is_some_and(|inode| inode.socket);
+        if socket {
+            return None;
+        }
+        end.read_channel.or(end.write_channel)
+    }
+
+    /// What a splice waits for on one pipe.
+    #[cfg(target_os = "linux")]
+    #[derive(Clone, Copy)]
+    enum PipeWant {
+        /// Bytes to read, or the last writer gone.
+        Data(u64),
+        /// Room to write, or the last reader gone.
+        Space(u64),
+    }
+
+    /// Park until every `want` is met — the ordinary pipe park, on each
+    /// channel's queue — or answer at once under `nonblocking` (`EAGAIN`).
+    /// A write side whose readers are all gone is `EPIPE`, raised as `SIGPIPE`
+    /// first. `Ok(false)` when a read side is empty with no writer left: there
+    /// is nothing to wait for.
+    #[cfg(target_os = "linux")]
+    fn pipe_await(wants: &[PipeWant], nonblocking: bool) -> Result<bool, c_int> {
+        let me = current_task();
+        loop {
+            let mut state = lock_state();
+            let mut locs = Vec::new();
+            for want in wants {
+                match *want {
+                    PipeWant::Data(channel) => {
+                        let Some(ch) = state.net.pipe_channels.get(&channel) else {
+                            return Ok(false);
+                        };
+                        if ch.buffer.is_empty() {
+                            if ch.write_closed() {
+                                return Ok(false);
+                            }
+                            locs.push(WaiterLoc::PipeRecv(channel));
+                        }
+                    }
+                    PipeWant::Space(channel) => {
+                        let Some(ch) = state.net.pipe_channels.get(&channel) else {
+                            return Err(super::EPIPE);
+                        };
+                        if ch.read_closed() {
+                            drop(state);
+                            broken_pipe_signal();
+                            return Err(super::EPIPE);
+                        }
+                        if ch.buffer.len() >= ch.capacity {
+                            locs.push(WaiterLoc::PipeSend(channel));
+                        }
+                    }
+                }
+            }
+            if locs.is_empty() {
+                return Ok(true);
+            }
+            if nonblocking {
+                return Err(EWOULDBLOCK);
+            }
+            for loc in &locs {
+                match *loc {
+                    WaiterLoc::PipeRecv(channel) => {
+                        if let Some(ch) = state.net.pipe_channels.get_mut(&channel) {
+                            ch.recv_waiters.push_back(me);
+                        }
+                    }
+                    WaiterLoc::PipeSend(channel) => {
+                        if let Some(ch) = state.net.pipe_channels.get_mut(&channel) {
+                            ch.send_waiters.push_back(me);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let step = state.block(me, "pipe-splice", Wait::new(BlockClass::Io, locs.clone()));
+            match step {
+                Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+                Ok(Step::Continue) => drop(state),
+                Err(error) => return Err(error.into_posix()),
+            }
+            let mut state = lock_state();
+            state.timed_out.remove(&me);
+            unregister_waiters(&mut state, me, &locs);
+            drop(state);
+            #[cfg(target_os = "linux")]
+            if signals::resume() == signals::Resumed::Eintr {
+                return Err(super::EINTR);
+            }
+        }
+    }
+
+    /// Wait until the pipe `handle` reads from has bytes (`Ok(0)`: none will
+    /// come, its last writer is gone).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn pipe_await_data(handle: u64, nonblocking: bool) -> Result<usize, c_int> {
+        sched_point()?;
+        let channel = splice_pipe(handle).ok_or(super::EINVAL)?;
+        if !pipe_await(&[PipeWant::Data(channel)], nonblocking)? {
+            return Ok(0);
+        }
+        Ok(lock_state()
+            .net
+            .pipe_channels
+            .get(&channel)
+            .map_or(0, |channel| channel.buffer.len()))
+    }
+
+    /// Wait until the pipe `handle` writes to has room: the free bytes.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn pipe_await_space(handle: u64, nonblocking: bool) -> Result<usize, c_int> {
+        sched_point()?;
+        let channel = splice_pipe(handle).ok_or(super::EINVAL)?;
+        pipe_await(&[PipeWant::Space(channel)], nonblocking)?;
+        Ok(lock_state()
+            .net
+            .pipe_channels
+            .get(&channel)
+            .map_or(0, |channel| {
+                channel.capacity.saturating_sub(channel.buffer.len())
+            }))
+    }
+
+    /// Drain up to `max` bytes from the pipe `handle` belongs to, waking its
+    /// writers. Never waits.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn pipe_take(handle: u64, max: usize) -> Vec<u8> {
+        let Some(channel) = splice_pipe(handle) else {
+            return Vec::new();
+        };
+        let mut state = lock_state();
+        let Some(ch) = state.net.pipe_channels.get_mut(&channel) else {
+            return Vec::new();
+        };
+        let count = max.min(ch.buffer.len());
+        let bytes: Vec<u8> = ch.buffer.drain(..count).collect();
+        if !bytes.is_empty() {
+            #[cfg(target_os = "linux")]
+            {
+                ch.write_events = ch.write_events.wrapping_add(1);
+            }
+        }
+        let waiters = drain_channel_send_waiters(&mut state, channel);
+        drop(state);
+        wake_all(waiters);
+        bytes
+    }
+
+    /// Put bytes a splice took back at the head of the pipe, ahead of anything
+    /// written since: the part of a transfer its destination did not accept.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn pipe_untake(handle: u64, bytes: &[u8]) {
+        let Some(channel) = splice_pipe(handle) else {
+            return;
+        };
+        let mut state = lock_state();
+        if let Some(ch) = state.net.pipe_channels.get_mut(&channel) {
+            for byte in bytes.iter().rev() {
+                ch.buffer.push_front(*byte);
+            }
+        }
+    }
+
+    /// Push as many of `bytes` as fit into the pipe `handle` belongs to,
+    /// waking its readers. Never waits.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn pipe_put(handle: u64, bytes: &[u8]) -> usize {
+        let Some(channel) = splice_pipe(handle) else {
+            return 0;
+        };
+        let mut state = lock_state();
+        let written = match state
+            .net
+            .pipe_channels
+            .get_mut(&channel)
+            .map(|ch| ch.try_write(bytes))
+        {
+            Some(PipeWrite::Wrote(count)) => count,
+            _ => 0,
+        };
+        let waiters = drain_channel_recv_waiters(&mut state, channel);
+        drop(state);
+        wake_all(waiters);
+        written
+    }
+
+    /// `splice` between two pipes (`consume`) or `tee` (`!consume`): wait for
+    /// input and for room, then move — or copy — up to `len` bytes in one step.
+    /// `Ok(0)` when the input is empty with no writer left.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn pipe_to_pipe(
+        input: u64,
+        output: u64,
+        len: usize,
+        nonblocking: bool,
+        consume: bool,
+    ) -> Result<usize, c_int> {
+        sched_point()?;
+        let (Some(from), Some(to)) = (splice_pipe(input), splice_pipe(output)) else {
+            return Err(super::EINVAL);
+        };
+        if !pipe_await(&[PipeWant::Data(from), PipeWant::Space(to)], nonblocking)? {
+            return Ok(0);
+        }
+        let mut state = lock_state();
+        let available = state
+            .net
+            .pipe_channels
+            .get(&from)
+            .map_or(0, |ch| ch.buffer.len());
+        let room = state
+            .net
+            .pipe_channels
+            .get(&to)
+            .map_or(0, |ch| ch.capacity.saturating_sub(ch.buffer.len()));
+        let count = len.min(available).min(room);
+        let bytes: Vec<u8> = match state.net.pipe_channels.get_mut(&from) {
+            Some(ch) if consume => {
+                #[cfg(target_os = "linux")]
+                {
+                    ch.write_events = ch.write_events.wrapping_add(1);
+                }
+                ch.buffer.drain(..count).collect()
+            }
+            Some(ch) => ch.buffer.iter().take(count).copied().collect(),
+            None => Vec::new(),
+        };
+        if let Some(ch) = state.net.pipe_channels.get_mut(&to) {
+            ch.try_write(&bytes);
+        }
+        let mut waiters = drain_channel_recv_waiters(&mut state, to);
+        if consume {
+            waiters.extend(drain_channel_send_waiters(&mut state, from));
+        }
+        drop(state);
+        wake_all(waiters);
+        Ok(count)
+    }
+
     /// Free a pipe/socketpair endpoint whose description's last reference went
     /// (the universal `patina_close` path). A channel SIDE closes — waking the
     /// peer with EPIPE (readers gone) or EOF (writers gone) — only on the LAST
@@ -11303,6 +12178,14 @@ mod thread {
         let Some(end) = state.net.pipe_ends.remove(&fd) else {
             return Err(super::EBADF);
         };
+        if let Some(ino) = end.inode {
+            if let Some(inode) = state.net.pipe_inodes.get_mut(&ino) {
+                inode.ends -= 1;
+                if inode.ends == 0 {
+                    state.net.pipe_inodes.remove(&ino);
+                }
+            }
+        }
         let mut waiters = Vec::new();
         let mut released_ino = None;
         // Dropping a READER reference: writers get EPIPE only once the last one

@@ -547,12 +547,17 @@ truncate, ftruncate, fallocate, posix_fallocate (sizes by name and by descriptor
 stat, fstat, fstatat, statx (kind, mode, link count, owner, the four timestamps, an honest statx mask)
 mkdir, mkdirat (creation mode carried, umask applied)
 getcwd, chdir, fchdir, umask (modeled process state: the working directory is a node, the umask applies to every creating call)
-mkfifo, mkfifoat, mknod/mknodat with S_IFIFO (named pipes)
+mkfifo, mkfifoat, mknod/mknodat (FIFOs, socket nodes, whiteouts; devices are EPERM for the one non-root identity)
+rename, renameat, renameat2 (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT)
+readv, writev, preadv, pwritev (one iovec decode; preadv2/pwritev2 RWF_* flags on the raw rows)
+ioctl (FIOCLEX, FIONCLEX, FIONBIO, FIONREAD), statfs, fstatfs
 socket, bind, connect, send, recv
 clock_gettime, gettimeofday, nanosleep
 getrandom, getentropy, /dev/urandom reads (and `dlsym`-resolved getrandom on Linux)
 pthread_create, pthread_mutex_*, pthread_cond_*
 ```
+
+Linux rows with no interposed wrapper are modeled on the raw-syscall door, which `syscall(2)` reaches too: `openat2` (its `RESOLVE_*` restrictions applied by the one path resolver), the extended-attribute family, `sync`/`syncfs`/`sync_file_range`/`fadvise64`/`readahead`, `copy_file_range`/`sendfile`/`splice`/`tee`/`vmsplice`, `ustat`, `name_to_handle_at` and the legacy `getdents`.
 
 These symbols delegate to Patina drivers and scheduler operations. Direct syscalls, dynamic loading, and platform-specific APIs are denied unless explicitly supported.
 

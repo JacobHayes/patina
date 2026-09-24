@@ -37,14 +37,19 @@
 //!   `directory_loss_probability` — the classic "you must fsync the directory"
 //!   bug class.
 //!
-//! Files, directories, symlinks, and named pipes are all carried through the
-//! durable baseline and recomputed on crash with the same namespace-durability
-//! rules, so a symlink is never silently dropped. A FIFO's NAME is durable
-//! namespace state; the bytes in flight through one are process state, so a
-//! crash drops them exactly as a real one does. Per-entry timestamps captured at the
-//! last durability point are restored on reconstruction. Hard-link groups are
-//! reconstructed as one inode per surviving source inode, so shared `nlink`
-//! identity survives crash recovery.
+//! Files, directories, symlinks, named pipes, socket nodes and whiteouts are all
+//! carried through the durable baseline and recomputed on crash with the same
+//! namespace-durability rules, so no kind is silently dropped. A FIFO's NAME is
+//! durable namespace state; the bytes in flight through one are process state,
+//! so a crash drops them exactly as a real one does. Timestamps are restored
+//! from the last durability point (an fsync of the node, or the baseline).
+//! Permission bits and extended attributes are taken to be durable the moment
+//! they change: a surviving entry keeps its live mode and attributes, and only
+//! an entry the crash brought back (a lost rename, exchange or removal) gets
+//! the baseline's. Hard-link groups — of any
+//! non-directory kind, a symlink's included — are reconstructed as one inode
+//! per surviving source inode, so shared `nlink` identity survives crash
+//! recovery.
 //!
 //! - **Open descriptors survive.** A crash rebuilds the image, but it never
 //!   invalidates a descriptor the guest is holding: an open file description is
@@ -63,8 +68,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use patina_dst_abi::{
-    EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsEntryKind, FsMetadata, OpenFlags,
-    SeekWhence,
+    EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsEntryKind, FsMetadata, FsNode,
+    OpenFlags, SeekWhence, XattrTarget,
 };
 use patina_dst_driver_api::{DriverResult, FsDriver};
 use patina_dst_fs_mem::{FsSnapshot, MemFs};
@@ -137,6 +142,14 @@ enum PendingKind {
         from: String,
         to: String,
         kind: FsEntryKind,
+        /// `RENAME_WHITEOUT`: a whiteout takes `from` in the same change.
+        whiteout: bool,
+    },
+    /// `renameat2(RENAME_EXCHANGE)`: two names swap their entries in one
+    /// all-or-nothing step, governed by both parents.
+    Exchange {
+        first: String,
+        second: String,
     },
 }
 
@@ -157,6 +170,14 @@ struct PendingOp {
 struct BaselineFile {
     inode: u64,
     contents: Vec<u8>,
+}
+
+/// A symlink name captured in the durable baseline: the node it names (two
+/// names of one link node come back as one) and the target.
+#[derive(Clone, Debug)]
+struct BaselineSymlink {
+    inode: u64,
+    target: String,
 }
 
 /// The four timestamps of one durable entry, restored verbatim onto a
@@ -188,13 +209,14 @@ impl From<FsMetadata> for DurableTimes {
 struct Baseline {
     dirs: BTreeSet<String>,
     files: BTreeMap<String, BaselineFile>,
-    symlinks: BTreeMap<String, String>,
-    /// Named pipes, by path, with their inode identity. A FIFO's NAME is
-    /// durable namespace state like any other, and its INODE is what a second
-    /// hard link names, so the two names come back as one node; the bytes in
-    /// flight through it are process state, so nothing here holds them and a
-    /// crash simply drops them, exactly as a real one does.
-    fifos: BTreeMap<String, u64>,
+    symlinks: BTreeMap<String, BaselineSymlink>,
+    /// Named pipes, socket nodes and whiteouts, by path, with their inode
+    /// identity and kind. Their NAME is durable namespace state like any other,
+    /// and the INODE is what a second hard link names, so the two names come
+    /// back as one node; a FIFO's bytes in flight are process state, so nothing
+    /// here holds them and a crash simply drops them, exactly as a real one
+    /// does.
+    specials: BTreeMap<String, (u64, FsEntryKind)>,
     /// All four timestamps, by path. A crash cannot reset a surviving entry's
     /// change or birth time any more than its modification time.
     times: BTreeMap<String, DurableTimes>,
@@ -203,6 +225,10 @@ struct Baseline {
     /// metadata like a symlink's target — a crash reverts a lost entry, never a
     /// surviving entry's bits to a per-kind constant.
     modes: BTreeMap<String, u32>,
+    /// Extended attributes, by path, for every entry that has any. Metadata
+    /// like a mode: a surviving entry keeps its live attributes, a resurrected
+    /// one the durable baseline's.
+    xattrs: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
 }
 
 /// A configurable crash-consistency filesystem model.
@@ -216,8 +242,9 @@ pub struct CrashFs {
     live: MemFs,
     /// The durable baseline: entries, contents, symlink targets, and times.
     durable: Baseline,
-    /// Per-file content made durable by an explicit file `sync`.
-    staged_content: BTreeMap<String, Vec<u8>>,
+    /// File content made durable by an explicit file `sync`, by inode: the
+    /// bytes belong to the node, whatever later happens to any of its names.
+    staged_content: BTreeMap<u64, Vec<u8>>,
     /// Fsynced timestamps belong to the inode, not any one hard-link name.
     staged_times: BTreeMap<u64, DurableTimes>,
     /// Namespace operations since the baseline, in observation order.
@@ -416,6 +443,14 @@ impl CrashFs {
                         op.source_committed = true;
                     }
                 }
+                PendingKind::Exchange { first, second } => {
+                    if parent_path(second) == path {
+                        op.committed = true;
+                    }
+                    if parent_path(first) == path {
+                        op.source_committed = true;
+                    }
+                }
             }
         }
         Ok(())
@@ -549,18 +584,22 @@ impl CrashFs {
 
     fn recompute_after_crash(&mut self) -> DriverResult<()> {
         let pending = self.pending.clone();
-        let mut dirs = self.durable.dirs.clone();
-        let mut files: BTreeSet<String> = self.durable.files.keys().cloned().collect();
-        let mut symlinks: BTreeSet<String> = self.durable.symlinks.keys().cloned().collect();
-        let mut fifos: BTreeSet<String> = self.durable.fifos.keys().cloned().collect();
+        let mut sets = Survivors {
+            dirs: self.durable.dirs.clone(),
+            files: self.durable.files.keys().cloned().collect(),
+            symlinks: self.durable.symlinks.keys().cloned().collect(),
+            specials: self.durable.specials.keys().cloned().collect(),
+        };
+        let mut reverted = Reverted::default();
 
         for op in &pending {
             match &op.kind {
                 PendingKind::Create { path, kind } => {
                     let survive = self.entry_survives(op.committed);
-                    let set = survival_set(*kind, &mut dirs, &mut files, &mut symlinks, &mut fifos);
+                    let set = sets.of(*kind);
                     if survive {
                         set.insert(path.clone());
+                        reverted.forget(path);
                     } else {
                         set.remove(path);
                     }
@@ -569,23 +608,43 @@ impl CrashFs {
                     // A surviving unlink persists the removal; a lost unlink
                     // resurrects the durable entry.
                     let persist = self.entry_survives(op.committed);
-                    let set = survival_set(*kind, &mut dirs, &mut files, &mut symlinks, &mut fifos);
+                    let set = sets.of(*kind);
                     if persist {
                         set.remove(path);
                     } else {
                         set.insert(path.clone());
+                        reverted.bring_back(path);
                     }
                 }
-                PendingKind::Rename { from, to, kind } => {
+                PendingKind::Rename {
+                    from,
+                    to,
+                    kind,
+                    whiteout,
+                } => {
                     if self.policy.model_rename_atomicity || *kind == FsEntryKind::Directory {
                         // Atomic (or directory) renames are all-or-nothing and
                         // fully durable only when both governing directories are
                         // committed; otherwise a single seeded decision applies.
+                        // A lost one brings both names' durable entries back —
+                        // a replaced destination included.
                         if self.entry_survives(op.committed && op.source_committed) {
-                            rewrite_prefix(&mut dirs, from, to);
-                            rewrite_prefix(&mut files, from, to);
-                            rewrite_prefix(&mut symlinks, from, to);
-                            rewrite_prefix(&mut fifos, from, to);
+                            // A directory replaces only an EMPTY one, and a
+                            // durable rename frees the replaced node: nothing
+                            // still beneath `to` (a removal this crash lost)
+                            // was ever the moved node's.
+                            if *kind == FsEntryKind::Directory {
+                                sets.drop_beneath(to);
+                            }
+                            sets.rewrite_prefix(from, to);
+                            reverted.forget(to);
+                            if *whiteout {
+                                sets.specials.insert(from.clone());
+                                reverted.forget(from);
+                            }
+                        } else {
+                            reverted.bring_back(from);
+                            reverted.bring_back(to);
                         }
                     } else {
                         // Non-atomic: the destination link and the source unlink
@@ -595,14 +654,36 @@ impl CrashFs {
                         // side, for a stable decision order.
                         let link_new = self.entry_survives(op.committed);
                         let unlink_old = self.entry_survives(op.source_committed);
-                        let set =
-                            survival_set(*kind, &mut dirs, &mut files, &mut symlinks, &mut fifos);
+                        let set = sets.of(*kind);
                         if unlink_old {
                             set.remove(from);
+                            // The whiteout replaces the old name's entry.
+                            if *whiteout {
+                                sets.specials.insert(from.clone());
+                                reverted.forget(from);
+                            }
                         }
+                        let set = sets.of(*kind);
                         if link_new {
                             set.insert(to.clone());
+                            reverted.forget(to);
+                        } else {
+                            reverted.bring_back(to);
                         }
+                    }
+                }
+                // An exchange has no half-done state to expose: the kernel
+                // swaps both names in one step whatever the rename-atomicity
+                // model says, so it is all-or-nothing, durable once both
+                // parents are committed.
+                PendingKind::Exchange { first, second } => {
+                    if self.entry_survives(op.committed && op.source_committed) {
+                        sets.swap_prefixes(first, second);
+                        reverted.forget(first);
+                        reverted.forget(second);
+                    } else {
+                        reverted.bring_back(first);
+                        reverted.bring_back(second);
                     }
                 }
             }
@@ -617,30 +698,24 @@ impl CrashFs {
         // child fit.
         let mut resurrected: BTreeSet<String> = BTreeSet::new();
         for (path, kind) in self.live.open_entries() {
-            let fresh = survival_set(kind, &mut dirs, &mut files, &mut symlinks, &mut fifos)
-                .insert(path.clone());
+            let fresh = sets.of(kind).insert(path.clone());
             if fresh && kind == FsEntryKind::File {
                 resurrected.insert(path);
             }
         }
-        prune_to_surviving_parents(&mut dirs, &mut files, &mut symlinks, &mut fifos);
+        sets.prune_to_surviving_parents();
+        let Survivors {
+            dirs,
+            files,
+            symlinks,
+            specials,
+        } = sets;
 
         let mut durable_content_by_inode: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
         for file in self.durable.files.values() {
             durable_content_by_inode
                 .entry(file.inode)
                 .or_insert_with(|| file.contents.clone());
-        }
-        let mut staged_content_by_inode: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
-        let staged_content: Vec<(String, Vec<u8>)> = self
-            .staged_content
-            .iter()
-            .map(|(path, bytes)| (path.clone(), bytes.clone()))
-            .collect();
-        for (path, bytes) in staged_content {
-            if let Some(inode) = self.file_source_inode(&path) {
-                staged_content_by_inode.insert(inode, bytes);
-            }
         }
 
         // The final unsynced write is eligible for a sub-block partial tear
@@ -649,7 +724,7 @@ impl CrashFs {
         let last_write = self.last_write.clone();
         let final_write = match self.policy.torn_granularity {
             TornGranularity::Byte => last_write.as_ref().and_then(|(path, offset, len)| {
-                self.file_source_inode(path)
+                self.file_source_inode(path, &reverted)
                     .map(|inode| (inode, *offset, offset.saturating_add(*len)))
             }),
             TornGranularity::Block => None,
@@ -657,13 +732,14 @@ impl CrashFs {
         let mut file_contents_by_inode: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
         let mut file_paths_by_inode: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
         for path in &files {
-            let source_inode = self.file_source_inode(path).ok_or_else(|| {
+            let source_inode = self.file_source_inode(path, &reverted).ok_or_else(|| {
                 EffectError::new(
                     ErrorCode::InvalidState,
                     format!("surviving file has no source inode: {path}"),
                 )
             })?;
-            let baseline = staged_content_by_inode
+            let baseline = self
+                .staged_content
                 .get(&source_inode)
                 .or_else(|| durable_content_by_inode.get(&source_inode))
                 .cloned()
@@ -672,11 +748,13 @@ impl CrashFs {
                 Some((inode, start, end)) if inode == source_inode => Some((start, end)),
                 _ => None,
             };
-            let content = if resurrected.contains(path) {
+            let content = if resurrected.contains(path) || reverted.covers(path) {
                 // Only open-descriptor pinning put this name back: the crash
                 // decided its creation did not survive, so nothing it ever held
                 // is durable. The name exists for the descriptor's sake; the
                 // contents are the durable baseline (empty for a lost create).
+                // A name a lost rename or exchange brought back is its durable
+                // entry, whatever the live image holds there now.
                 baseline
             } else {
                 match self.live.contents(path) {
@@ -695,17 +773,22 @@ impl CrashFs {
                 .or_default()
                 .insert(path.clone());
         }
-        let mut symlink_targets: BTreeMap<String, String> = BTreeMap::new();
+        // A symlink's target is metadata, not torn data: the live target if the
+        // link is still there, else the durable baseline's. Names of one link
+        // node come back as one node.
+        let mut symlinks_by_inode: BTreeMap<u64, (String, BTreeSet<String>)> = BTreeMap::new();
         for path in &symlinks {
-            // A symlink's target is metadata, not torn data: keep the live
-            // target if still present, else the durable baseline target.
-            let target = self
-                .live
-                .symlink_target(path)
-                .map(str::to_owned)
-                .or_else(|| self.durable.symlinks.get(path).cloned())
-                .unwrap_or_default();
-            symlink_targets.insert(path.clone(), target);
+            let (source_inode, target) = self.symlink_source(path, &reverted).ok_or_else(|| {
+                EffectError::new(
+                    ErrorCode::InvalidState,
+                    format!("surviving symlink has no source inode: {path}"),
+                )
+            })?;
+            symlinks_by_inode
+                .entry(source_inode)
+                .or_insert_with(|| (target, BTreeSet::new()))
+                .1
+                .insert(path.clone());
         }
 
         let mut next = MemFs::new();
@@ -725,28 +808,40 @@ impl CrashFs {
                 next.link(FsClock::EPOCH, first, path)?;
             }
         }
-        for (path, target) in &symlink_targets {
-            next.symlink(FsClock::EPOCH, target, path)?;
+        for (target, paths) in symlinks_by_inode.values() {
+            let first = paths.iter().next().expect("symlink group is non-empty");
+            next.symlink(FsClock::EPOCH, target, first)?;
+            for path in paths.iter().skip(1) {
+                next.link(FsClock::EPOCH, first, path)?;
+            }
         }
-        // A FIFO's name is what survives; its buffered bytes never were durable.
-        // Names that share an inode are ONE node — a hard link to a FIFO is the
-        // same pipe — so they are grouped exactly as a file's links are.
-        let mut fifo_paths_by_inode: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
-        for path in &fifos {
-            let source_inode = self.fifo_source_inode(path).ok_or_else(|| {
+        // A FIFO's, a socket node's or a whiteout's name is what survives; a
+        // FIFO's buffered bytes never were durable. Names that share an inode
+        // are ONE node — a hard link to a FIFO is the same pipe — so they are
+        // grouped exactly as a file's links are.
+        let mut special_paths_by_inode: BTreeMap<u64, (FsEntryKind, BTreeSet<String>)> =
+            BTreeMap::new();
+        for path in &specials {
+            let (source_inode, kind) = self.special_source(path, &reverted).ok_or_else(|| {
                 EffectError::new(
                     ErrorCode::InvalidState,
-                    format!("surviving fifo has no source inode: {path}"),
+                    format!("surviving special node has no source inode: {path}"),
                 )
             })?;
-            fifo_paths_by_inode
+            special_paths_by_inode
                 .entry(source_inode)
-                .or_default()
+                .or_insert_with(|| (kind, BTreeSet::new()))
+                .1
                 .insert(path.clone());
         }
-        for paths in fifo_paths_by_inode.values() {
-            let first = paths.iter().next().expect("fifo group is non-empty");
-            next.make_fifo(FsClock::EPOCH, first, RECONSTRUCTION_FILE_MODE)?;
+        for (kind, paths) in special_paths_by_inode.values() {
+            let first = paths.iter().next().expect("special group is non-empty");
+            let node = match kind {
+                FsEntryKind::Fifo => FsNode::Fifo,
+                FsEntryKind::Socket => FsNode::Socket,
+                _ => FsNode::Whiteout,
+            };
+            next.make_node(FsClock::EPOCH, first, node, RECONSTRUCTION_FILE_MODE)?;
             for path in paths.iter().skip(1) {
                 next.link(FsClock::EPOCH, first, path)?;
             }
@@ -758,11 +853,12 @@ impl CrashFs {
         // and could not restore a birth time at all.
         // enumerate includes symlinks, unlike paths_with_modes.
         for path in enumerate(&next).times.keys() {
-            let live = self.live.entry_metadata(path).ok();
+            let live = self.live_entry(path, &reverted);
             let source_ino = live
                 .map(|m| m.ino)
                 .or_else(|| self.durable.files.get(path).map(|f| f.inode))
-                .or_else(|| self.durable.fifos.get(path).copied());
+                .or_else(|| self.durable.symlinks.get(path).map(|link| link.inode))
+                .or_else(|| self.durable.specials.get(path).map(|(ino, _)| *ino));
             let times = source_ino
                 .and_then(|ino| self.staged_times.get(&ino).copied())
                 .or_else(|| self.durable.times.get(path).copied())
@@ -776,6 +872,14 @@ impl CrashFs {
                     times.btime_nanos,
                 )?;
             }
+            // Extended attributes are metadata like a mode: the live set if the
+            // entry is still there, else the durable baseline's.
+            let xattrs = if live.is_some() {
+                self.live.entry_xattrs(path)
+            } else {
+                self.durable.xattrs.get(path).cloned().unwrap_or_default()
+            };
+            next.restore_xattrs(path, xattrs)?;
         }
         // Permission bits last, and deepest name first. A mode is metadata like
         // a symlink's target — the live value if the entry is still there, else
@@ -787,9 +891,7 @@ impl CrashFs {
         let mut restored_modes: BTreeMap<String, u32> = BTreeMap::new();
         for path in next.paths_with_modes() {
             let mode = self
-                .live
-                .entry_metadata(&path)
-                .ok()
+                .live_entry(&path, &reverted)
                 .map(|metadata| metadata.mode)
                 .or_else(|| self.durable.modes.get(&path).copied());
             if let Some(mode) = mode {
@@ -823,26 +925,75 @@ impl CrashFs {
         !self.decide(self.policy.directory_loss_probability)
     }
 
-    /// The inode a surviving FIFO name belongs to: the live one if the entry is
-    /// still there, else the durable baseline's. The mirror of
-    /// [`CrashFs::file_source_inode`], and for the same reason — two names of
-    /// one node must come back as one node.
-    fn fifo_source_inode(&mut self, path: &str) -> Option<u64> {
-        self.live
-            .entry_metadata(path)
-            .ok()
-            .filter(|metadata| metadata.kind == FsEntryKind::Fifo)
-            .map(|metadata| metadata.ino)
-            .or_else(|| self.durable.fifos.get(path).copied())
+    /// The inode and kind a surviving FIFO, socket-node or whiteout name
+    /// belongs to: the live one if the entry is still there, else the durable
+    /// baseline's. The mirror of [`CrashFs::file_source_inode`], and for the
+    /// same reason — two names of one node must come back as one node.
+    fn special_source(&mut self, path: &str, reverted: &Reverted) -> Option<(u64, FsEntryKind)> {
+        self.live_entry(path, reverted)
+            .filter(|metadata| is_special(metadata.kind))
+            .map(|metadata| (metadata.ino, metadata.kind))
+            .or_else(|| self.durable.specials.get(path).copied())
     }
 
-    fn file_source_inode(&mut self, path: &str) -> Option<u64> {
-        self.live
-            .entry_metadata(path)
-            .ok()
+    /// The link node and target a surviving symlink name has: the live link
+    /// if it is still there, else the durable baseline's.
+    fn symlink_source(&mut self, path: &str, reverted: &Reverted) -> Option<(u64, String)> {
+        let live = self
+            .live_entry(path, reverted)
+            .filter(|metadata| metadata.kind == FsEntryKind::Symlink)
+            .and_then(|metadata| {
+                self.live
+                    .symlink_target(path)
+                    .map(|target| (metadata.ino, target.to_owned()))
+            });
+        live.or_else(|| {
+            self.durable
+                .symlinks
+                .get(path)
+                .map(|link| (link.inode, link.target.clone()))
+        })
+    }
+
+    fn file_source_inode(&mut self, path: &str, reverted: &Reverted) -> Option<u64> {
+        self.live_entry(path, reverted)
             .filter(|metadata| metadata.kind == FsEntryKind::File)
             .map(|metadata| metadata.ino)
             .or_else(|| self.durable.files.get(path).map(|file| file.inode))
+    }
+
+    /// The live entry at a surviving name — unless the crash brought the
+    /// name's durable entry back over it, in which case the live node there is
+    /// not the one that survived and nothing is read off it.
+    fn live_entry(&self, path: &str, reverted: &Reverted) -> Option<FsMetadata> {
+        if reverted.covers(path) {
+            return None;
+        }
+        self.live.entry_metadata(path).ok()
+    }
+
+    /// Journal a rename the live image took, moving the open descriptors'
+    /// attribution with it. Durable and staged bytes are the node's, keyed by
+    /// inode, so they need no move.
+    fn record_rename(&mut self, from: &str, to: &str, whiteout: bool) -> DriverResult<()> {
+        let from = normalize_entry_path(from).expect("rename normalized the source already");
+        let to = normalize_entry_path(to).expect("rename normalized the destination already");
+        let kind = self.live.metadata(&to)?.kind;
+        let prefix = format!("{from}/");
+        for path in self.open_paths.values_mut() {
+            if *path == from {
+                path.clone_from(&to);
+            } else if path.starts_with(&prefix) {
+                *path = format!("{to}{}", &path[from.len()..]);
+            }
+        }
+        self.journal(PendingKind::Rename {
+            from,
+            to,
+            kind,
+            whiteout,
+        });
+        Ok(())
     }
 
     /// Record a namespace mutation in the pending journal, initially uncommitted
@@ -1004,18 +1155,23 @@ impl FsDriver for CrashFs {
         let metadata = self.live.fd_metadata(fd)?;
         self.staged_times
             .insert(metadata.ino, DurableTimes::from(metadata));
-        if let Some(path) = self.open_paths.get(&fd).cloned() {
-            match self.live.metadata(&path)?.kind {
-                FsEntryKind::File => {
-                    if let Ok(bytes) = self.live.contents(&path) {
-                        self.staged_content.insert(path, bytes.to_vec());
-                    }
-                }
-                FsEntryKind::Directory => self.sync_directory(&path)?,
-                // Neither a symlink's target nor a FIFO's buffer is file data
-                // this model stages: there is nothing to make durable.
-                FsEntryKind::Symlink | FsEntryKind::Fifo => {}
+        match metadata.kind {
+            FsEntryKind::File => {
+                let bytes = self.live.fd_contents(fd)?.to_vec();
+                self.staged_content.insert(metadata.ino, bytes);
             }
+            FsEntryKind::Directory => {
+                if let Some(path) = self.open_paths.get(&fd).cloned() {
+                    self.sync_directory(&path)?;
+                }
+            }
+            // Neither a symlink's target nor a FIFO's buffer is file data this
+            // model stages, and a socket node or a whiteout holds none: there
+            // is nothing to make durable.
+            FsEntryKind::Symlink
+            | FsEntryKind::Fifo
+            | FsEntryKind::Socket
+            | FsEntryKind::CharDevice => {}
         }
         Ok(())
     }
@@ -1067,51 +1223,25 @@ impl FsDriver for CrashFs {
 
     fn rename(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
         self.live.rename(clock, from, to)?;
-        let from = normalize_entry_path(from).expect("rename normalized the source already");
-        let to = normalize_entry_path(to).expect("rename normalized the destination already");
-        let kind = self.live.metadata(&to)?.kind;
+        self.record_rename(from, to, false)
+    }
 
-        // Carry durable data along the rename so a plain rename does not tear
-        // its unmodified bytes, while the durable baseline still holds the old
-        // name for the rolled-back case. Symlinks carry no content.
-        match kind {
-            FsEntryKind::Directory => {
-                let prefix = format!("{from}/");
-                let moved: Vec<String> = self
-                    .staged_content
-                    .keys()
-                    .filter(|key| key.starts_with(&prefix))
-                    .cloned()
-                    .collect();
-                for key in moved {
-                    let bytes = self.staged_content.remove(&key).expect("key was listed");
-                    self.staged_content
-                        .insert(format!("{to}{}", &key[from.len()..]), bytes);
-                }
-            }
-            FsEntryKind::File => {
-                if let Some(bytes) = self.staged_content.remove(&from).or_else(|| {
-                    self.durable
-                        .files
-                        .get(&from)
-                        .map(|file| file.contents.clone())
-                }) {
-                    self.staged_content.insert(to.clone(), bytes);
-                }
-            }
-            FsEntryKind::Symlink | FsEntryKind::Fifo => {}
-        }
+    /// One journal entry for the rename and its whiteout, decided together.
+    fn rename_whiteout(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
+        self.live.rename_whiteout(clock, from, to)?;
+        self.record_rename(from, to, true)
+    }
 
-        let prefix = format!("{from}/");
+    /// An exchange moves the open descriptors' attribution with the names;
+    /// staged (fsynced) bytes are the nodes' and need no move.
+    fn exchange(&mut self, clock: FsClock, first: &str, second: &str) -> DriverResult<()> {
+        self.live.exchange(clock, first, second)?;
+        let first = normalize_entry_path(first).expect("exchange normalized the path already");
+        let second = normalize_entry_path(second).expect("exchange normalized the path already");
         for path in self.open_paths.values_mut() {
-            if *path == from {
-                path.clone_from(&to);
-            } else if path.starts_with(&prefix) {
-                *path = format!("{to}{}", &path[from.len()..]);
-            }
+            *path = swapped(path, &first, &second);
         }
-
-        self.journal(PendingKind::Rename { from, to, kind });
+        self.journal(PendingKind::Exchange { first, second });
         Ok(())
     }
 
@@ -1177,6 +1307,64 @@ impl FsDriver for CrashFs {
         Ok(())
     }
 
+    /// A special node (a regular file made by `mknod`, a socket node, a
+    /// whiteout) is a NAME appearing, like a FIFO's.
+    fn make_node(
+        &mut self,
+        clock: FsClock,
+        path: &str,
+        node: FsNode,
+        mode: u32,
+    ) -> DriverResult<()> {
+        self.live.make_node(clock, path, node, mode)?;
+        let normalized = normalize_entry_path(path).expect("make_node normalized the path already");
+        self.journal(PendingKind::Create {
+            path: normalized,
+            kind: node.kind().expect("the live image made the node"),
+        });
+        Ok(())
+    }
+
+    /// `sync(2)`/`syncfs(2)`: the whole live image becomes the durable
+    /// baseline — every staged file, every namespace change — as one
+    /// checkpoint.
+    fn sync_all(&mut self) -> DriverResult<()> {
+        self.live.sync_all()?;
+        self.checkpoint();
+        Ok(())
+    }
+
+    /// Extended attributes are metadata on an existing node, like a mode: the
+    /// live image takes a change, and reconstruction reads them back off it
+    /// (or off the durable baseline for a resurrected entry).
+    fn get_xattr(&mut self, target: &XattrTarget, name: &str) -> DriverResult<Vec<u8>> {
+        self.live.get_xattr(target, name)
+    }
+
+    fn list_xattr(&mut self, target: &XattrTarget) -> DriverResult<Vec<String>> {
+        self.live.list_xattr(target)
+    }
+
+    fn set_xattr(
+        &mut self,
+        clock: FsClock,
+        target: &XattrTarget,
+        name: &str,
+        value: &[u8],
+        flags: u32,
+    ) -> DriverResult<()> {
+        self.live.set_xattr(clock, target, name, value, flags)
+    }
+
+    fn remove_xattr(
+        &mut self,
+        clock: FsClock,
+        target: &XattrTarget,
+        name: &str,
+    ) -> DriverResult<()> {
+        self.live.remove_xattr(clock, target, name)
+    }
+
     fn symlink(&mut self, clock: FsClock, target: &str, link_path: &str) -> DriverResult<()> {
         self.live.symlink(clock, target, link_path)?;
         let normalized =
@@ -1235,39 +1423,140 @@ fn copy_range(result: &mut [u8], source: &[u8], start: usize, end: usize) {
     }
 }
 
-/// Select the survival set matching an entry kind, so files, directories,
-/// symlinks, and named pipes each apply their namespace decisions to the right
-/// table.
-fn survival_set<'a>(
-    kind: FsEntryKind,
-    dirs: &'a mut BTreeSet<String>,
-    files: &'a mut BTreeSet<String>,
-    symlinks: &'a mut BTreeSet<String>,
-    fifos: &'a mut BTreeSet<String>,
-) -> &'a mut BTreeSet<String> {
-    match kind {
-        FsEntryKind::Directory => dirs,
-        FsEntryKind::File => files,
-        FsEntryKind::Symlink => symlinks,
-        FsEntryKind::Fifo => fifos,
+/// Whether a kind is a special node: a FIFO, a socket node or a whiteout —
+/// an inode-backed name with no bytes of its own.
+fn is_special(kind: FsEntryKind) -> bool {
+    matches!(
+        kind,
+        FsEntryKind::Fifo | FsEntryKind::Socket | FsEntryKind::CharDevice
+    )
+}
+
+/// The names a crash reconstruction keeps, by the table each kind belongs to,
+/// so files, directories, symlinks, and special nodes each apply their
+/// namespace decisions to the right set.
+struct Survivors {
+    dirs: BTreeSet<String>,
+    files: BTreeSet<String>,
+    symlinks: BTreeSet<String>,
+    specials: BTreeSet<String>,
+}
+
+impl Survivors {
+    fn of(&mut self, kind: FsEntryKind) -> &mut BTreeSet<String> {
+        match kind {
+            FsEntryKind::Directory => &mut self.dirs,
+            FsEntryKind::File => &mut self.files,
+            FsEntryKind::Symlink => &mut self.symlinks,
+            FsEntryKind::Fifo | FsEntryKind::Socket | FsEntryKind::CharDevice => &mut self.specials,
+        }
+    }
+
+    fn all(&mut self) -> [&mut BTreeSet<String>; 4] {
+        [
+            &mut self.dirs,
+            &mut self.files,
+            &mut self.symlinks,
+            &mut self.specials,
+        ]
+    }
+
+    /// Drop every entry strictly beneath `root`.
+    fn drop_beneath(&mut self, root: &str) {
+        for set in self.all() {
+            set.retain(|path| path == root || !within(path, root));
+        }
+    }
+
+    /// Move every entry rooted at `from` to be rooted at `to`.
+    fn rewrite_prefix(&mut self, from: &str, to: &str) {
+        for set in self.all() {
+            let moved: Vec<String> = set
+                .iter()
+                .filter(|path| within(path, from))
+                .cloned()
+                .collect();
+            for path in moved {
+                set.remove(&path);
+                set.insert(format!("{to}{}", &path[from.len()..]));
+            }
+        }
+    }
+
+    /// Swap the entries rooted at `first` with those rooted at `second`.
+    fn swap_prefixes(&mut self, first: &str, second: &str) {
+        for set in self.all() {
+            let moved: Vec<String> = set
+                .iter()
+                .filter(|path| within(path, first) || within(path, second))
+                .cloned()
+                .collect();
+            for path in &moved {
+                set.remove(path);
+            }
+            for path in moved {
+                set.insert(swapped(&path, first, second));
+            }
+        }
+    }
+
+    /// Remove entries whose parent directories did not survive the crash. A
+    /// child name is not independently meaningful without its full parent
+    /// chain, and reconstruction must not create implicit ancestor directories
+    /// just to make a selected child fit.
+    fn prune_to_surviving_parents(&mut self) {
+        let selected_dirs = self.dirs.clone();
+        self.dirs
+            .retain(|path| path == "/" || full_parent_chain_survives(path, &selected_dirs));
+        let dirs = self.dirs.clone();
+        for set in [&mut self.files, &mut self.symlinks, &mut self.specials] {
+            set.retain(|path| full_parent_chain_survives(path, &dirs));
+        }
     }
 }
 
-/// Remove entries whose parent directories did not survive the crash. A child
-/// name is not independently meaningful without its full parent chain, and
-/// reconstruction must not create implicit ancestor directories just to make a
-/// selected child fit.
-fn prune_to_surviving_parents(
-    dirs: &mut BTreeSet<String>,
-    files: &mut BTreeSet<String>,
-    symlinks: &mut BTreeSet<String>,
-    fifos: &mut BTreeSet<String>,
-) {
-    let selected_dirs = dirs.clone();
-    dirs.retain(|path| path == "/" || full_parent_chain_survives(path, &selected_dirs));
-    files.retain(|path| full_parent_chain_survives(path, dirs));
-    symlinks.retain(|path| full_parent_chain_survives(path, dirs));
-    fifos.retain(|path| full_parent_chain_survives(path, dirs));
+/// Names whose DURABLE entry a crash brought back: the source and destination
+/// of a rename or an exchange the crash lost, a removal it lost. The live image
+/// may hold a different node at such a name (the moved one, a replacement), so
+/// reconstruction reads the name's entry off the durable baseline — until a
+/// later surviving change puts a live entry there again.
+#[derive(Default)]
+struct Reverted(BTreeSet<String>);
+
+impl Reverted {
+    fn bring_back(&mut self, root: &str) {
+        self.0.insert(root.to_owned());
+    }
+
+    /// A surviving change put a live entry at `root`: nothing at or beneath it
+    /// is the durable entry any more.
+    fn forget(&mut self, root: &str) {
+        self.0.retain(|path| !within(path, root));
+    }
+
+    fn covers(&self, path: &str) -> bool {
+        self.0.iter().any(|root| within(path, root))
+    }
+}
+
+/// Whether `path` is `root` or lies beneath it.
+fn within(path: &str, root: &str) -> bool {
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// `path` with an exchange of `first` and `second` applied: a name at or
+/// beneath one now lies at or beneath the other.
+fn swapped(path: &str, first: &str, second: &str) -> String {
+    if within(path, first) {
+        format!("{second}{}", &path[first.len()..])
+    } else if within(path, second) {
+        format!("{first}{}", &path[second.len()..])
+    } else {
+        path.to_owned()
+    }
 }
 
 fn full_parent_chain_survives(path: &str, dirs: &BTreeSet<String>) -> bool {
@@ -1281,28 +1570,10 @@ fn full_parent_chain_survives(path: &str, dirs: &BTreeSet<String>) -> bool {
     dirs.contains("/")
 }
 
-/// Move every entry rooted at `from` to be rooted at `to`.
-fn rewrite_prefix(set: &mut BTreeSet<String>, from: &str, to: &str) {
-    let prefix = format!("{from}/");
-    let moved: Vec<String> = set
-        .iter()
-        .filter(|path| *path == from || path.starts_with(&prefix))
-        .cloned()
-        .collect();
-    for path in moved {
-        set.remove(&path);
-        let rewritten = if path == from {
-            to.to_owned()
-        } else {
-            format!("{to}{}", &path[from.len()..])
-        };
-        set.insert(rewritten);
-    }
-}
-
 /// Snapshot a filesystem into a durable baseline: directories, file contents,
-/// symlink targets, permission bits, and per-entry timestamps. Every entry kind
-/// is captured so none is silently lost across a crash.
+/// symlink targets, special nodes, permission bits, extended attributes, and
+/// per-entry timestamps. Every entry kind is captured so none is silently lost
+/// across a crash.
 ///
 /// The image is read through [`MemFs::inventory`], the storage layer's own
 /// unenforced view. A crash journal is not a process: it must see a `0o000`
@@ -1325,6 +1596,10 @@ fn enumerate(fs: &MemFs) -> Baseline {
         if metadata.kind != FsEntryKind::Symlink {
             baseline.modes.insert(path.clone(), metadata.mode);
         }
+        let xattrs = fs.entry_xattrs(&path);
+        if !xattrs.is_empty() {
+            baseline.xattrs.insert(path.clone(), xattrs);
+        }
         match metadata.kind {
             FsEntryKind::Directory => {
                 baseline.dirs.insert(path);
@@ -1341,10 +1616,18 @@ fn enumerate(fs: &MemFs) -> Baseline {
             }
             FsEntryKind::Symlink => {
                 let target = fs.symlink_target(&path).unwrap_or_default().to_owned();
-                baseline.symlinks.insert(path, target);
+                baseline.symlinks.insert(
+                    path,
+                    BaselineSymlink {
+                        inode: metadata.ino,
+                        target,
+                    },
+                );
             }
-            FsEntryKind::Fifo => {
-                baseline.fifos.insert(path, metadata.ino);
+            FsEntryKind::Fifo | FsEntryKind::Socket | FsEntryKind::CharDevice => {
+                baseline
+                    .specials
+                    .insert(path, (metadata.ino, metadata.kind));
             }
         }
     }
@@ -2612,5 +2895,303 @@ mod tests {
             .open(FsClock::EPOCH, "/a", OpenFlags::create_truncate_write())
             .unwrap();
         assert_ne!(fresh, held);
+    }
+
+    fn lossy() -> CrashFs {
+        let mut base = MemFs::new();
+        base.create_directory(FsClock::EPOCH, "/d", 0o777).unwrap();
+        CrashFs::builder()
+            .filesystem(base)
+            .seed(7)
+            .model_directory_durability(true)
+            .directory_loss_probability(1.0)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn sync_all_makes_every_change_durable_at_once() {
+        let mut fs = lossy();
+        let fd = write(&mut fs, "/d/f", b"data");
+        fs.close(fd).unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/d/pipe", 0o600).unwrap();
+        fs.sync_all().unwrap();
+        fs.crash().unwrap();
+        assert_eq!(fs.contents("/d/f").unwrap(), b"data");
+        assert_eq!(fs.metadata("/d/pipe").unwrap().kind, FsEntryKind::Fifo);
+    }
+
+    #[test]
+    fn an_exchange_is_all_or_nothing_across_a_crash() {
+        for commit in [false, true] {
+            let mut fs = lossy();
+            let fd = write(&mut fs, "/d/a", b"A");
+            fs.close(fd).unwrap();
+            fs.create_directory(FsClock::EPOCH, "/d/b", 0o755).unwrap();
+            fs.sync_all().unwrap();
+            fs.exchange(FsClock::EPOCH, "/d/a", "/d/b").unwrap();
+            if commit {
+                fs.sync_directory("/d").unwrap();
+            }
+            fs.crash().unwrap();
+            let (a, b) = (fs.metadata("/d/a").unwrap(), fs.metadata("/d/b").unwrap());
+            if commit {
+                assert_eq!(
+                    (a.kind, b.kind),
+                    (FsEntryKind::Directory, FsEntryKind::File)
+                );
+                assert_eq!(fs.contents("/d/b").unwrap(), b"A");
+            } else {
+                assert_eq!(
+                    (a.kind, b.kind),
+                    (FsEntryKind::File, FsEntryKind::Directory)
+                );
+                assert_eq!(fs.contents("/d/a").unwrap(), b"A");
+            }
+        }
+    }
+
+    #[test]
+    fn linked_symlinks_and_special_nodes_come_back_as_one_node_each() {
+        let mut fs = lossy();
+        fs.symlink(FsClock::EPOCH, "t", "/d/l").unwrap();
+        fs.link(FsClock::EPOCH, "/d/l", "/d/l2").unwrap();
+        fs.make_node(FsClock::EPOCH, "/d/s", FsNode::Socket, 0o600)
+            .unwrap();
+        fs.make_node(FsClock::EPOCH, "/d/w", FsNode::Whiteout, 0)
+            .unwrap();
+        fs.sync_directory("/d").unwrap();
+        fs.crash().unwrap();
+        let (first, second) = (fs.metadata("/d/l").unwrap(), fs.metadata("/d/l2").unwrap());
+        assert_eq!(first.ino, second.ino);
+        assert_eq!(first.nlink, 2);
+        assert_eq!(fs.read_link(FsClock::EPOCH, "/d/l2").unwrap(), "t");
+        assert_eq!(fs.metadata("/d/s").unwrap().kind, FsEntryKind::Socket);
+        let whiteout = fs.metadata("/d/w").unwrap();
+        assert_eq!((whiteout.kind, whiteout.mode), (FsEntryKind::CharDevice, 0));
+    }
+
+    #[test]
+    fn attributes_survive_a_crash_with_their_node() {
+        let mut fs = lossy();
+        let fd = write(&mut fs, "/d/f", b"x");
+        fs.close(fd).unwrap();
+        fs.sync_directory("/d").unwrap();
+        fs.set_xattr(
+            FsClock::EPOCH,
+            &XattrTarget::Path("/d/f".into()),
+            "user.k",
+            b"v",
+            0,
+        )
+        .unwrap();
+        fs.crash().unwrap();
+        assert_eq!(
+            fs.get_xattr(&XattrTarget::Path("/d/f".into()), "user.k")
+                .unwrap(),
+            b"v"
+        );
+    }
+
+    #[test]
+    fn a_directory_replacing_an_empty_one_is_undone_by_a_lost_rename() {
+        let mut fs = lossy();
+        fs.create_directory(FsClock::EPOCH, "/d/a", 0o700).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/d/b", 0o755).unwrap();
+        fs.sync_all().unwrap();
+        fs.rename(FsClock::EPOCH, "/d/a", "/d/b").unwrap();
+        fs.crash().unwrap();
+        assert_eq!(fs.metadata("/d/a").unwrap().mode, 0o700);
+        assert_eq!(fs.metadata("/d/b").unwrap().mode, 0o755);
+    }
+
+    /// RED before: a name a lost rename brought back was rebuilt from the LIVE
+    /// node at that name — the file that had been moved over it.
+    #[test]
+    fn a_lost_rename_over_a_file_brings_the_replaced_file_back() {
+        let mut fs = lossy();
+        for (path, bytes) in [("/d/a", b"A"), ("/d/b", b"B")] {
+            let fd = write(&mut fs, path, bytes);
+            fs.close(fd).unwrap();
+        }
+        fs.sync_all().unwrap();
+        fs.rename(FsClock::EPOCH, "/d/a", "/d/b").unwrap();
+        fs.crash().unwrap();
+        assert_eq!(fs.contents("/d/a").unwrap(), b"A");
+        assert_eq!(fs.contents("/d/b").unwrap(), b"B");
+    }
+
+    /// A crash model where every uncommitted namespace change is a coin flip,
+    /// so a run over many seeds reaches every combination of survived and
+    /// lost changes.
+    fn coin_flips(seed: u64) -> CrashFs {
+        let mut base = MemFs::new();
+        base.create_directory(FsClock::EPOCH, "/d", 0o777).unwrap();
+        CrashFs::builder()
+            .filesystem(base)
+            .seed(seed)
+            .model_directory_durability(true)
+            .directory_loss_probability(0.5)
+            .build()
+            .unwrap()
+    }
+
+    /// Every state `observe` reads after `run` and a crash, over enough seeds
+    /// to decide each of a handful of changes both ways.
+    fn crash_states<T: Ord>(
+        run: impl Fn(&mut CrashFs),
+        observe: impl Fn(&mut CrashFs) -> T,
+    ) -> BTreeSet<T> {
+        (0..64)
+            .map(|seed| {
+                let mut fs = coin_flips(seed);
+                run(&mut fs);
+                fs.crash().unwrap();
+                observe(&mut fs)
+            })
+            .collect()
+    }
+
+    fn bytes_at(fs: &mut CrashFs, path: &str) -> Option<Vec<u8>> {
+        fs.contents(path).ok().map(<[u8]>::to_vec)
+    }
+
+    /// Overwrite `path`'s bytes in place and `fsync` them.
+    fn write_and_fsync(fs: &mut CrashFs, path: &str, bytes: &[u8]) {
+        let fd = fs.open(FsClock::EPOCH, path, write_only()).unwrap();
+        fs.write(FsClock::EPOCH, fd, bytes).unwrap();
+        fs.sync(fd).unwrap();
+        fs.close(fd).unwrap();
+    }
+
+    fn seed_file(fs: &mut CrashFs, path: &str, bytes: &[u8]) {
+        let fd = write(fs, path, bytes);
+        fs.close(fd).unwrap();
+    }
+
+    /// `fsync` makes a node's bytes durable whatever later happens to its
+    /// name: a rename of the file, of its directory, or an exchange, survived
+    /// or lost, leaves the fsynced bytes at whichever name the node has.
+    #[test]
+    fn fsynced_bytes_survive_a_later_rename_either_way() {
+        let file = crash_states(
+            |fs| {
+                seed_file(fs, "/d/f", b"old");
+                fs.sync_all().unwrap();
+                write_and_fsync(fs, "/d/f", b"new");
+                fs.rename(FsClock::EPOCH, "/d/f", "/d/g").unwrap();
+            },
+            |fs| (bytes_at(fs, "/d/f"), bytes_at(fs, "/d/g")),
+        );
+        assert_eq!(
+            file,
+            BTreeSet::from([(Some(b"new".to_vec()), None), (None, Some(b"new".to_vec()))])
+        );
+        let parent = crash_states(
+            |fs| {
+                fs.create_directory(FsClock::EPOCH, "/d/a", 0o755).unwrap();
+                seed_file(fs, "/d/a/f", b"old");
+                fs.sync_all().unwrap();
+                write_and_fsync(fs, "/d/a/f", b"new");
+                fs.rename(FsClock::EPOCH, "/d/a", "/d/b").unwrap();
+            },
+            |fs| (bytes_at(fs, "/d/a/f"), bytes_at(fs, "/d/b/f")),
+        );
+        assert_eq!(
+            parent,
+            BTreeSet::from([(Some(b"new".to_vec()), None), (None, Some(b"new".to_vec()))])
+        );
+        let exchange = crash_states(
+            |fs| {
+                seed_file(fs, "/d/f", b"old");
+                seed_file(fs, "/d/g", b"G");
+                fs.sync_all().unwrap();
+                write_and_fsync(fs, "/d/f", b"new");
+                fs.exchange(FsClock::EPOCH, "/d/f", "/d/g").unwrap();
+            },
+            |fs| (bytes_at(fs, "/d/f"), bytes_at(fs, "/d/g")),
+        );
+        assert_eq!(
+            exchange,
+            BTreeSet::from([
+                (Some(b"new".to_vec()), Some(b"G".to_vec())),
+                (Some(b"G".to_vec()), Some(b"new".to_vec())),
+            ])
+        );
+    }
+
+    /// A rename onto an empty directory needs the replaced node empty, and a
+    /// durable rename frees that node: a lost removal of its former child
+    /// cannot put the child back beneath the directory that moved in.
+    #[test]
+    fn a_durable_rename_over_a_directory_leaves_none_of_its_children() {
+        for child_is_directory in [false, true] {
+            let states = crash_states(
+                |fs| {
+                    fs.create_directory(FsClock::EPOCH, "/d/a", 0o700).unwrap();
+                    fs.create_directory(FsClock::EPOCH, "/d/b", 0o750).unwrap();
+                    if child_is_directory {
+                        fs.create_directory(FsClock::EPOCH, "/d/b/c", 0o755)
+                            .unwrap();
+                    } else {
+                        seed_file(fs, "/d/b/c", b"C");
+                    }
+                    fs.sync_all().unwrap();
+                    if child_is_directory {
+                        fs.remove_directory(FsClock::EPOCH, "/d/b/c").unwrap();
+                    } else {
+                        fs.remove_file(FsClock::EPOCH, "/d/b/c").unwrap();
+                    }
+                    fs.rename(FsClock::EPOCH, "/d/a", "/d/b").unwrap();
+                },
+                |fs| {
+                    let mode =
+                        |fs: &mut CrashFs, path: &str| fs.metadata(path).ok().map(|m| m.mode);
+                    (
+                        mode(fs, "/d/a"),
+                        mode(fs, "/d/b"),
+                        fs.metadata("/d/b/c").is_ok(),
+                    )
+                },
+            );
+            assert_eq!(
+                states,
+                BTreeSet::from([
+                    // Both lost.
+                    (Some(0o700), Some(0o750), true),
+                    // The removal survived, the rename lost.
+                    (Some(0o700), Some(0o750), false),
+                    // The rename survived, whatever the removal did.
+                    (None, Some(0o700), false),
+                ]),
+                "child is a directory: {child_is_directory}"
+            );
+        }
+    }
+
+    /// `RENAME_WHITEOUT` is one change: the name moves and the whiteout takes
+    /// its old place together, or neither happens.
+    #[test]
+    fn a_whiteout_rename_is_all_or_nothing_across_a_crash() {
+        let states = crash_states(
+            |fs| {
+                seed_file(fs, "/d/f", b"F");
+                fs.sync_all().unwrap();
+                fs.rename_whiteout(FsClock::EPOCH, "/d/f", "/d/g").unwrap();
+            },
+            |fs| {
+                let kind = |fs: &mut CrashFs, path: &str| {
+                    fs.metadata(path).ok().map(|m| format!("{:?}", m.kind))
+                };
+                (kind(fs, "/d/f"), bytes_at(fs, "/d/g"))
+            },
+        );
+        assert_eq!(
+            states,
+            BTreeSet::from([
+                (Some("File".to_owned()), None),
+                (Some("CharDevice".to_owned()), Some(b"F".to_vec())),
+            ])
+        );
     }
 }

@@ -2,9 +2,9 @@
 //!
 //! Unlike [`crate::FsImage`], which is an input-only mount/corpus format,
 //! [`FsSnapshot`] captures a live deterministic filesystem image for a fresh
-//! incarnation: namespace, file contents, hard-link identity, metadata, and the
-//! inode allocator state. It deliberately excludes open descriptors and other
-//! process-local state.
+//! incarnation: namespace, file contents, hard-link identity, metadata,
+//! extended attributes, and the inode allocator state. It deliberately excludes
+//! open descriptors and other process-local state.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -19,16 +19,13 @@ use patina_dst_abi::FsEntryKind;
 const MAGIC: &[u8; 8] = b"PATFSSNP";
 /// Wire-format version. Bump on any incompatible layout change.
 ///
-/// Version 4 makes a FIFO an inode-backed name like a regular file's: the fifo
-/// section carries an inode id instead of a private metadata record, so a hard
-/// link to a FIFO is a second name for the same node across a restart, and the
-/// mode, timestamps and link count live where every other inode's do.
-///
-/// Version 5 carries all four timestamps (`atime`, `mtime`, `ctime`, `btime`)
-/// on every inode and entry-metadata record, in that order, where version 4
-/// carried the first two: a restart must not reset a change or birth time to
-/// zero any more than it may reset a modification time.
-const VERSION: u32 = 5;
+/// Version 6 makes every non-directory name one section naming an inode that
+/// carries its own KIND — a regular file, a symlink (whose target is its
+/// contents), a FIFO, a socket node or a whiteout — so a hard link to any of
+/// them is a second name for one node across a restart, and adds the extended
+/// attributes, by the node they belong to. Version 5 kept symlinks as
+/// per-path records and FIFOs as a section of their own.
+const VERSION: u32 = 6;
 
 /// Deliberately conservative structural bounds for a restart handoff. The
 /// decoder checks them before allocating from untrusted bytes, so corrupt
@@ -37,6 +34,32 @@ const MAX_SNAPSHOT_BYTES: usize = 128 * 1024 * 1024;
 const MAX_ENTRIES: u64 = 1_000_000;
 const MAX_FIELD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PATH_BYTES: u64 = 4096;
+/// `XATTR_NAME_MAX` and `XATTR_SIZE_MAX`: what one extended attribute can be.
+const MAX_XATTR_NAME_BYTES: usize = 255;
+const MAX_XATTR_VALUE_BYTES: usize = 65536;
+
+/// The wire code of an inode's kind. A directory is never an inode-table node.
+fn kind_code(kind: FsEntryKind) -> u8 {
+    match kind {
+        FsEntryKind::File => 0,
+        FsEntryKind::Symlink => 1,
+        FsEntryKind::Fifo => 2,
+        FsEntryKind::Socket => 3,
+        FsEntryKind::CharDevice => 4,
+        FsEntryKind::Directory => unreachable!("a directory is not an inode-table node"),
+    }
+}
+
+fn kind_from_code(code: u8) -> Result<FsEntryKind, FsSnapshotError> {
+    match code {
+        0 => Ok(FsEntryKind::File),
+        1 => Ok(FsEntryKind::Symlink),
+        2 => Ok(FsEntryKind::Fifo),
+        3 => Ok(FsEntryKind::Socket),
+        4 => Ok(FsEntryKind::CharDevice),
+        _ => Err(FsSnapshotError::Malformed("inode kind is unknown")),
+    }
+}
 
 /// A canonical, versioned snapshot of a [`MemFs`] suitable for constructing a
 /// fresh incarnation's filesystem.
@@ -50,10 +73,9 @@ impl fmt::Debug for FsSnapshot {
         formatter
             .debug_struct("FsSnapshot")
             .field("directories", &self.filesystem.directories.len())
-            .field("files", &self.filesystem.files.len())
+            .field("names", &self.filesystem.names.len())
             .field("inodes", &self.filesystem.inodes.len())
-            .field("symlinks", &self.filesystem.symlinks.len())
-            .field("fifos", &self.filesystem.fifos.len())
+            .field("xattrs", &self.filesystem.xattrs.len())
             .field("next_inode", &self.filesystem.next_inode)
             .finish()
     }
@@ -67,6 +89,14 @@ impl FsSnapshot {
         // unlinked-but-open entry has no name to write down.
         filesystem.forget_open_state();
         Self { filesystem }
+    }
+
+    fn xattr_entries(&self) -> impl Iterator<Item = (InodeId, &String, &Vec<u8>)> {
+        self.filesystem.xattrs.iter().flat_map(|(ino, attributes)| {
+            attributes
+                .iter()
+                .map(move |(name, value)| (*ino, name, value))
+        })
     }
 
     /// Encode this snapshot into its canonical wire format.
@@ -83,9 +113,8 @@ impl FsSnapshot {
         bytes.extend_from_slice(&self.filesystem.next_inode.to_le_bytes());
         bytes.extend_from_slice(&(self.filesystem.directories.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(self.filesystem.inodes.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(self.filesystem.files.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(self.filesystem.symlinks.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(self.filesystem.fifos.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(self.filesystem.names.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(self.xattr_entries().count() as u64).to_le_bytes());
 
         for (path, metadata) in &self.filesystem.directories {
             encode_path(&mut bytes, path);
@@ -93,28 +122,20 @@ impl FsSnapshot {
         }
         for (inode_id, inode) in &self.filesystem.inodes {
             bytes.extend_from_slice(&inode_id.to_le_bytes());
+            bytes.push(kind_code(inode.kind));
             bytes.extend_from_slice(&(inode.links as u64).to_le_bytes());
             encode_times(&mut bytes, &inode.times);
             bytes.extend_from_slice(&inode.mode.to_le_bytes());
             encode_field(&mut bytes, &inode.contents);
         }
-        for (path, inode_id) in &self.filesystem.files {
+        for (path, inode_id) in &self.filesystem.names {
             encode_path(&mut bytes, path);
             bytes.extend_from_slice(&inode_id.to_le_bytes());
         }
-        for (path, target) in &self.filesystem.symlinks {
-            encode_path(&mut bytes, path);
-            encode_field(&mut bytes, target.as_bytes());
-            let metadata = self
-                .filesystem
-                .symlink_metadata
-                .get(path)
-                .expect("symlink has metadata");
-            encode_metadata(&mut bytes, metadata);
-        }
-        for (path, inode_id) in &self.filesystem.fifos {
-            encode_path(&mut bytes, path);
-            bytes.extend_from_slice(&inode_id.to_le_bytes());
+        for (ino, name, value) in self.xattr_entries() {
+            bytes.extend_from_slice(&ino.to_le_bytes());
+            encode_field(&mut bytes, name.as_bytes());
+            encode_field(&mut bytes, value);
         }
         debug_assert_eq!(bytes.len(), encoded_len);
         Ok(bytes)
@@ -125,39 +146,32 @@ impl FsSnapshot {
             self.filesystem.next_inode,
             &self.filesystem.directories,
             &self.filesystem.inodes,
-            &self.filesystem.files,
-            &self.filesystem.symlinks,
-            &self.filesystem.symlink_metadata,
-            &self.filesystem.fifos,
+            &self.filesystem.names,
+            &self.filesystem.xattrs,
         )?;
 
         preflight_count(self.filesystem.directories.len(), "directory count")?;
         preflight_count(self.filesystem.inodes.len(), "inode count")?;
-        preflight_count(self.filesystem.files.len(), "file count")?;
-        preflight_count(self.filesystem.symlinks.len(), "symlink count")?;
-        preflight_count(self.filesystem.fifos.len(), "fifo count")?;
+        preflight_count(self.filesystem.names.len(), "name count")?;
+        preflight_count(self.xattr_entries().count(), "xattr count")?;
 
-        let mut total = MAGIC.len() + 4 + 8 + 8 + 8 + 8 + 8 + 8;
+        let mut total = MAGIC.len() + 4 + 8 + 8 + 8 + 8 + 8;
         for path in self.filesystem.directories.keys() {
             add_path_len(&mut total, path)?;
             add_len(&mut total, METADATA_BYTES)?;
         }
         for inode in self.filesystem.inodes.values() {
-            add_len(&mut total, 8 + 8 + TIMES_BYTES + 4)?;
+            add_len(&mut total, 8 + 1 + 8 + TIMES_BYTES + 4)?;
             add_field_len(&mut total, inode.contents.len(), "field length")?;
         }
-        for path in self.filesystem.files.keys() {
+        for path in self.filesystem.names.keys() {
             add_path_len(&mut total, path)?;
             add_len(&mut total, 8)?;
         }
-        for (path, target) in &self.filesystem.symlinks {
-            add_path_len(&mut total, path)?;
-            add_field_len(&mut total, target.len(), "field length")?;
-            add_len(&mut total, METADATA_BYTES)?;
-        }
-        for path in self.filesystem.fifos.keys() {
-            add_path_len(&mut total, path)?;
+        for (_, name, value) in self.xattr_entries() {
             add_len(&mut total, 8)?;
+            add_field_len(&mut total, name.len(), "field length")?;
+            add_field_len(&mut total, value.len(), "field length")?;
         }
         Ok(total)
     }
@@ -180,9 +194,8 @@ impl FsSnapshot {
         let next_inode = reader.take_u64()?;
         let directory_count = reader.take_count("directory count")?;
         let inode_count = reader.take_count("inode count")?;
-        let file_count = reader.take_count("file count")?;
-        let symlink_count = reader.take_count("symlink count")?;
-        let fifo_count = reader.take_count("fifo count")?;
+        let name_count = reader.take_count("name count")?;
+        let xattr_count = reader.take_count("xattr count")?;
 
         let mut directories = BTreeMap::new();
         let mut previous_path = None;
@@ -204,6 +217,7 @@ impl FsSnapshot {
                 ));
             }
             previous_inode = Some(inode_id);
+            let kind = kind_from_code(reader.take(1)?[0])?;
             let links = reader.take_u64()?;
             let links = u32::try_from(links)
                 .map_err(|_| FsSnapshotError::Malformed("inode link count overflows u32"))?;
@@ -216,10 +230,7 @@ impl FsSnapshot {
             inodes.insert(
                 inode_id,
                 Inode {
-                    // Provisional: the name tables below say what each node IS,
-                    // and validation refuses a node no name claims — so nothing
-                    // leaves this function still holding the placeholder.
-                    kind: FsEntryKind::File,
+                    kind,
                     contents,
                     links,
                     openers: 0,
@@ -229,78 +240,47 @@ impl FsSnapshot {
             );
         }
 
-        let mut files = BTreeMap::new();
+        let mut names = BTreeMap::new();
         previous_path = None;
-        for _ in 0..file_count {
+        for _ in 0..name_count {
             let path = reader.take_path(false)?;
             require_strict_path_order(previous_path.as_deref(), &path)?;
             previous_path = Some(path.clone());
             let inode_id = reader.take_u64()?;
-            if !inodes.contains_key(&inode_id) {
-                return Err(FsSnapshotError::Malformed(
-                    "file references an unknown inode",
-                ));
-            }
-            files.insert(path, inode_id);
+            names.insert(path, inode_id);
         }
 
-        let mut symlinks = BTreeMap::new();
-        let mut symlink_metadata = BTreeMap::new();
-        previous_path = None;
-        for _ in 0..symlink_count {
-            let path = reader.take_path(false)?;
-            require_strict_path_order(previous_path.as_deref(), &path)?;
-            previous_path = Some(path.clone());
-            let target = reader.take_string("symlink target")?;
-            if target.contains('\0') {
-                return Err(FsSnapshotError::Malformed("symlink target contains NUL"));
-            }
-            let metadata = reader.take_metadata()?;
-            symlinks.insert(path.clone(), target);
-            symlink_metadata.insert(path, metadata);
-        }
-
-        let mut fifos = BTreeMap::new();
-        previous_path = None;
-        for _ in 0..fifo_count {
-            let path = reader.take_path(false)?;
-            require_strict_path_order(previous_path.as_deref(), &path)?;
-            previous_path = Some(path.clone());
-            let inode_id = reader.take_u64()?;
-            if !inodes.contains_key(&inode_id) {
+        let mut xattrs: BTreeMap<InodeId, BTreeMap<String, Vec<u8>>> = BTreeMap::new();
+        let mut previous_key: Option<(InodeId, String)> = None;
+        for _ in 0..xattr_count {
+            let ino = reader.take_u64()?;
+            let name = reader.take_string("xattr name is not UTF-8")?;
+            let value = reader.take_field()?;
+            let key = (ino, name.clone());
+            if previous_key
+                .as_ref()
+                .is_some_and(|previous| key <= *previous)
+            {
                 return Err(FsSnapshotError::Malformed(
-                    "fifo references an unknown inode",
+                    "xattrs are not strictly sorted by node and name",
                 ));
             }
-            inodes
-                .get_mut(&inode_id)
-                .expect("fifo inode was checked")
-                .kind = FsEntryKind::Fifo;
-            fifos.insert(path, inode_id);
+            previous_key = Some(key);
+            xattrs.entry(ino).or_default().insert(name, value);
         }
 
         if !reader.is_empty() {
             return Err(FsSnapshotError::Malformed("trailing bytes after snapshot"));
         }
 
-        validate_snapshot_state(
-            next_inode,
-            &directories,
-            &inodes,
-            &files,
-            &symlinks,
-            &symlink_metadata,
-            &fifos,
-        )?;
+        validate_snapshot_state(next_inode, &directories, &inodes, &names, &xattrs)?;
 
         Ok(Self {
             filesystem: MemFs {
-                files,
+                names,
                 inodes,
-                symlinks,
-                symlink_metadata,
-                fifos,
                 directories,
+                xattrs,
                 handles: BTreeMap::new(),
                 descriptions: BTreeMap::new(),
                 next_fd: 3,
@@ -320,10 +300,8 @@ fn validate_snapshot_state(
     next_inode: InodeId,
     directories: &BTreeMap<String, EntryMetadata>,
     inodes: &BTreeMap<InodeId, Inode>,
-    files: &BTreeMap<String, InodeId>,
-    symlinks: &BTreeMap<String, String>,
-    symlink_metadata: &BTreeMap<String, EntryMetadata>,
-    fifos: &BTreeMap<String, InodeId>,
+    names: &BTreeMap<String, InodeId>,
+    xattrs: &BTreeMap<InodeId, BTreeMap<String, Vec<u8>>>,
 ) -> Result<(), FsSnapshotError> {
     if !directories.contains_key("/") {
         return Err(FsSnapshotError::Malformed("root directory is missing"));
@@ -342,74 +320,74 @@ fn validate_snapshot_state(
             require_parent_directory(path, directories)?;
         }
     }
-    for path in files.keys() {
+    for (path, inode_id) in names {
         validate_entry_path(path, false)?;
         insert_unique_path(&mut paths, path)?;
         require_parent_directory(path, directories)?;
-    }
-    for inode_id in inodes.keys().copied() {
-        insert_unique_inode(&mut metadata_ids, inode_id)?;
-        max_inode = max_inode.max(inode_id);
-    }
-    for (path, target) in symlinks {
-        validate_entry_path(path, false)?;
-        insert_unique_path(&mut paths, path)?;
-        require_parent_directory(path, directories)?;
-        if target.contains('\0') {
-            return Err(FsSnapshotError::Malformed("symlink target contains NUL"));
-        }
-        let metadata = symlink_metadata
-            .get(path)
-            .ok_or(FsSnapshotError::Malformed("symlink metadata is missing"))?;
-        insert_unique_inode(&mut metadata_ids, metadata.ino)?;
-        max_inode = max_inode.max(metadata.ino);
-    }
-    if symlink_metadata.len() != symlinks.len() {
-        return Err(FsSnapshotError::Malformed("orphan symlink metadata entry"));
-    }
-    for path in fifos.keys() {
-        validate_entry_path(path, false)?;
-        insert_unique_path(&mut paths, path)?;
-        require_parent_directory(path, directories)?;
-    }
-    // An inode is one KIND. A node named by both a file and a fifo would make
-    // `metadata_for_path` answer two different kinds for one identity, so the
-    // decoder refuses it rather than letting the name tables disagree.
-    for inode_id in fifos.values() {
-        if files.values().any(|file| file == inode_id) {
+        if !inodes.contains_key(inode_id) {
             return Err(FsSnapshotError::Malformed(
-                "inode is named as both a file and a fifo",
+                "name references an unknown inode",
             ));
         }
     }
-    // A FIFO holds no filesystem bytes: its inode exists for identity, the link
-    // count and the mode. Contents there would be state no reader can ever see.
-    for inode_id in fifos.values() {
-        if inodes
-            .get(inode_id)
-            .is_some_and(|inode| !inode.contents.is_empty())
-        {
-            return Err(FsSnapshotError::Malformed("fifo inode carries contents"));
+    for (inode_id, inode) in inodes {
+        insert_unique_inode(&mut metadata_ids, *inode_id)?;
+        max_inode = max_inode.max(*inode_id);
+        match inode.kind {
+            // A symlink's contents are its target: a path string, never NUL.
+            FsEntryKind::Symlink => {
+                if std::str::from_utf8(&inode.contents).is_err() || inode.contents.contains(&0) {
+                    return Err(FsSnapshotError::Malformed(
+                        "symlink target is not a NUL-free string",
+                    ));
+                }
+            }
+            // A FIFO, a socket node or a whiteout holds no filesystem bytes:
+            // its inode exists for identity, the link count and the mode.
+            // Contents there would be state no reader can ever see.
+            FsEntryKind::Fifo | FsEntryKind::Socket | FsEntryKind::CharDevice => {
+                if !inode.contents.is_empty() {
+                    return Err(FsSnapshotError::Malformed(
+                        "a node without bytes carries contents",
+                    ));
+                }
+            }
+            FsEntryKind::File => {}
+            FsEntryKind::Directory => {
+                return Err(FsSnapshotError::Malformed("inode kind is unknown"));
+            }
         }
     }
 
     let mut actual_links: BTreeMap<InodeId, u32> = BTreeMap::new();
-    for inode_id in files.values().chain(fifos.values()).copied() {
+    for inode_id in names.values().copied() {
         *actual_links.entry(inode_id).or_default() += 1;
     }
     for (inode_id, inode) in inodes {
         let actual = actual_links.get(inode_id).copied().unwrap_or(0);
         if actual == 0 {
-            return Err(FsSnapshotError::Malformed("inode has no file names"));
+            return Err(FsSnapshotError::Malformed("inode has no names"));
         }
         if actual != inode.links {
             return Err(FsSnapshotError::Malformed("inode link count mismatch"));
         }
     }
-    if actual_links.len() != inodes.len() {
-        return Err(FsSnapshotError::Malformed(
-            "file references an unknown inode",
-        ));
+
+    for (ino, attributes) in xattrs {
+        if !metadata_ids.contains(ino) {
+            return Err(FsSnapshotError::Malformed("xattr names an unknown node"));
+        }
+        if attributes.is_empty() {
+            return Err(FsSnapshotError::Malformed("node has an empty xattr set"));
+        }
+        for (name, value) in attributes {
+            if name.is_empty() || name.len() > MAX_XATTR_NAME_BYTES || name.contains('\0') {
+                return Err(FsSnapshotError::Malformed("xattr name is out of range"));
+            }
+            if value.len() > MAX_XATTR_VALUE_BYTES {
+                return Err(FsSnapshotError::Malformed("xattr value is too large"));
+            }
+        }
     }
 
     if next_inode == u64::MAX {
@@ -762,12 +740,15 @@ mod tests {
         fs
     }
 
+    /// A hand-built v6 stream. Every case below probes namespace structure,
+    /// so each inode is a regular file at its ordinary creation mode, each
+    /// directory at its own, change and birth times are zero, and no node
+    /// carries attributes.
     fn hand_encode(
         next_inode: u64,
         directories: &[(&str, u64, u64, u64)],
         inodes: &[(u64, u64, u64, u64, &[u8])],
-        files: &[(&str, u64)],
-        symlinks: &[(&str, &str, u64, u64, u64)],
+        names: &[(&str, u64)],
     ) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
@@ -775,17 +756,8 @@ mod tests {
         bytes.extend_from_slice(&next_inode.to_le_bytes());
         bytes.extend_from_slice(&(directories.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(inodes.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(files.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(symlinks.len() as u64).to_le_bytes());
-        // Every hand-encoded case below probes namespace structure, so none of
-        // them plants a FIFO; the section is still written (empty) because the
-        // decoder reads its count unconditionally.
+        bytes.extend_from_slice(&(names.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes());
-        // Modes are not part of the hand-encoded tuples: every case below
-        // probes structure (ordering, identity, bounds), so each entry carries
-        // its ordinary creation mode.
-        // Change and birth times are not part of the tuples either: every
-        // case probes structure, so they are written as zero.
         for (path, ino, atime, mtime) in directories {
             encode_path(&mut bytes, path);
             bytes.extend_from_slice(&ino.to_le_bytes());
@@ -796,6 +768,7 @@ mod tests {
         }
         for (ino, links, atime, mtime, contents) in inodes {
             bytes.extend_from_slice(&ino.to_le_bytes());
+            bytes.push(kind_code(FsEntryKind::File));
             bytes.extend_from_slice(&links.to_le_bytes());
             bytes.extend_from_slice(&atime.to_le_bytes());
             bytes.extend_from_slice(&mtime.to_le_bytes());
@@ -803,18 +776,9 @@ mod tests {
             bytes.extend_from_slice(&crate::FILE_MODE.to_le_bytes());
             encode_field(&mut bytes, contents);
         }
-        for (path, ino) in files {
+        for (path, ino) in names {
             encode_path(&mut bytes, path);
             bytes.extend_from_slice(&ino.to_le_bytes());
-        }
-        for (path, target, ino, atime, mtime) in symlinks {
-            encode_path(&mut bytes, path);
-            encode_field(&mut bytes, target.as_bytes());
-            bytes.extend_from_slice(&ino.to_le_bytes());
-            bytes.extend_from_slice(&atime.to_le_bytes());
-            bytes.extend_from_slice(&mtime.to_le_bytes());
-            bytes.extend_from_slice(&[0u8; 16]);
-            bytes.extend_from_slice(&crate::SYMLINK_MODE.to_le_bytes());
         }
         bytes
     }
@@ -953,11 +917,11 @@ mod tests {
     fn decode_rejects_exhausted_inode_allocator_and_valid_decode_can_allocate() {
         let root = ("/", 1, 0, 0);
         assert_eq!(
-            FsSnapshot::decode(&hand_encode(u64::MAX, &[root], &[], &[], &[])).unwrap_err(),
+            FsSnapshot::decode(&hand_encode(u64::MAX, &[root], &[], &[])).unwrap_err(),
             FsSnapshotError::Malformed("next inode allocator state is exhausted")
         );
 
-        let mut imported = FsSnapshot::decode(&hand_encode(2, &[root], &[], &[], &[]))
+        let mut imported = FsSnapshot::decode(&hand_encode(2, &[root], &[], &[]))
             .unwrap()
             .into_memfs();
         let fd = imported
@@ -980,54 +944,42 @@ mod tests {
 
         // Unsorted paths in one section.
         assert!(matches!(
-            FsSnapshot::decode(&hand_encode(
-                5,
-                &[root, b, a],
-                &[inode],
-                &[("/a/f", 4)],
-                &[]
-            )),
+            FsSnapshot::decode(&hand_encode(5, &[root, b, a], &[inode], &[("/a/f", 4)])),
             Err(FsSnapshotError::Malformed(
                 "paths are not strictly sorted (unsorted or duplicate)"
             ))
         ));
         // Duplicate path within a section.
         assert!(matches!(
-            FsSnapshot::decode(&hand_encode(5, &[root, a, a], &[], &[], &[])),
+            FsSnapshot::decode(&hand_encode(5, &[root, a, a], &[], &[])),
             Err(FsSnapshotError::Malformed(
                 "paths are not strictly sorted (unsorted or duplicate)"
             ))
         ));
         // Same path across two sections.
         assert!(matches!(
-            FsSnapshot::decode(&hand_encode(5, &[root, a], &[inode], &[("/a", 4)], &[])),
+            FsSnapshot::decode(&hand_encode(5, &[root, a], &[inode], &[("/a", 4)])),
             Err(FsSnapshotError::Malformed(
                 "path appears in more than one section"
             ))
         ));
         // Non-canonical path.
         assert!(matches!(
-            FsSnapshot::decode(&hand_encode(5, &[root, ("/a//b", 2, 0, 0)], &[], &[], &[])),
+            FsSnapshot::decode(&hand_encode(5, &[root, ("/a//b", 2, 0, 0)], &[], &[])),
             Err(FsSnapshotError::Malformed("entry path is not canonical"))
         ));
         // Missing parent directory.
         assert!(matches!(
-            FsSnapshot::decode(&hand_encode(
-                5,
-                &[root],
-                &[inode],
-                &[("/missing/file", 4)],
-                &[]
-            )),
+            FsSnapshot::decode(&hand_encode(5, &[root], &[inode], &[("/missing/file", 4)])),
             Err(FsSnapshotError::Malformed(
                 "entry parent directory is missing"
             ))
         ));
-        // File references unknown inode.
+        // A name references an unknown inode.
         assert!(matches!(
-            FsSnapshot::decode(&hand_encode(5, &[root], &[], &[("/file", 4)], &[])),
+            FsSnapshot::decode(&hand_encode(5, &[root], &[], &[("/file", 4)])),
             Err(FsSnapshotError::Malformed(
-                "file references an unknown inode"
+                "name references an unknown inode"
             ))
         ));
         // Inode link count does not match names.
@@ -1037,7 +989,6 @@ mod tests {
                 &[root],
                 &[(4, 2, 0, 0, b"x")],
                 &[("/file", 4)],
-                &[]
             )),
             Err(FsSnapshotError::Malformed("inode link count mismatch"))
         ));
@@ -1045,10 +996,9 @@ mod tests {
         assert!(matches!(
             FsSnapshot::decode(&hand_encode(
                 5,
-                &[root],
+                &[root, ("/d", 4, 0, 0)],
                 &[inode],
                 &[("/file", 4)],
-                &[("/sym", "x", 4, 0, 0)]
             )),
             Err(FsSnapshotError::Malformed(
                 "metadata inode id is duplicated"
@@ -1056,7 +1006,7 @@ mod tests {
         ));
         // Allocator state would reuse an existing metadata id.
         assert!(matches!(
-            FsSnapshot::decode(&hand_encode(4, &[root], &[inode], &[("/file", 4)], &[])),
+            FsSnapshot::decode(&hand_encode(4, &[root], &[inode], &[("/file", 4)])),
             Err(FsSnapshotError::Malformed(
                 "next inode allocator state does not advance past existing metadata"
             ))

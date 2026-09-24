@@ -1,8 +1,8 @@
 //! Deterministic fault injection around data-plane drivers.
 
 use patina_dst_abi::{
-    Datagram, EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsMetadata, OpenFlags,
-    SeekWhence, SendDisposition, SendReport, ShutdownHow, SocketId, TcpAccepted,
+    Datagram, EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsMetadata, FsNode, OpenFlags,
+    SeekWhence, SendDisposition, SendReport, ShutdownHow, SocketId, TcpAccepted, XattrTarget,
 };
 use patina_dst_driver_api::{
     DriverResult, FsDriver, FsFaultOpKind, FsFaultReport, NetDriver, NetFaultReport, NetReadiness,
@@ -422,10 +422,90 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
     /// are "a new name appears in a directory", which is the failure the
     /// injector is modeling.
     fn make_fifo(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
-        if let Some(error) = self.maybe_error(FsFaultOp::CreateDirectory) {
+        if let Some(error) = self.maybe_error(FsFaultOp::MakeNode) {
             return Err(error);
         }
         self.inner.make_fifo(clock, path, mode)
+    }
+
+    fn make_node(
+        &mut self,
+        clock: FsClock,
+        path: &str,
+        node: FsNode,
+        mode: u32,
+    ) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(FsFaultOp::MakeNode) {
+            return Err(error);
+        }
+        self.inner.make_node(clock, path, node, mode)
+    }
+
+    /// A whiteout rename is a rename: the rename fault kind.
+    fn rename_whiteout(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(FsFaultOp::Rename) {
+            return Err(error);
+        }
+        self.inner.rename_whiteout(clock, from, to)
+    }
+
+    /// An exchange is a rename in both directions: the rename fault kind.
+    fn exchange(&mut self, clock: FsClock, first: &str, second: &str) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(FsFaultOp::Rename) {
+            return Err(error);
+        }
+        self.inner.exchange(clock, first, second)
+    }
+
+    /// Whole-volume durability fails the way a descriptor's does: the sync
+    /// fault kind.
+    fn sync_all(&mut self) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(FsFaultOp::Sync) {
+            return Err(error);
+        }
+        self.inner.sync_all()
+    }
+
+    /// Reading attributes is a metadata read of the node named.
+    fn get_xattr(&mut self, target: &XattrTarget, name: &str) -> DriverResult<Vec<u8>> {
+        if let Some(error) = self.maybe_error(xattr_read_fault(target)) {
+            return Err(error);
+        }
+        self.inner.get_xattr(target, name)
+    }
+
+    fn list_xattr(&mut self, target: &XattrTarget) -> DriverResult<Vec<String>> {
+        if let Some(error) = self.maybe_error(xattr_read_fault(target)) {
+            return Err(error);
+        }
+        self.inner.list_xattr(target)
+    }
+
+    /// Writing attributes is a metadata change, like a mode change.
+    fn set_xattr(
+        &mut self,
+        clock: FsClock,
+        target: &XattrTarget,
+        name: &str,
+        value: &[u8],
+        flags: u32,
+    ) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(xattr_write_fault(target)) {
+            return Err(error);
+        }
+        self.inner.set_xattr(clock, target, name, value, flags)
+    }
+
+    fn remove_xattr(
+        &mut self,
+        clock: FsClock,
+        target: &XattrTarget,
+        name: &str,
+    ) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(xattr_write_fault(target)) {
+            return Err(error);
+        }
+        self.inner.remove_xattr(clock, target, name)
     }
 
     fn symlink(&mut self, clock: FsClock, target: &str, link_path: &str) -> DriverResult<()> {
@@ -500,6 +580,24 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
     }
 }
 
+/// The metadata-read fault kind an attribute read of `target` draws from: by
+/// name for a path, by descriptor for a descriptor or a node.
+fn xattr_read_fault(target: &XattrTarget) -> FsFaultOp {
+    match target {
+        XattrTarget::Path(_) => FsFaultOp::Metadata,
+        XattrTarget::Fd(_) | XattrTarget::Inode(_) => FsFaultOp::FdMetadata,
+    }
+}
+
+/// The metadata-change fault kind an attribute write of `target` draws from,
+/// the one a mode change of the same target draws from.
+fn xattr_write_fault(target: &XattrTarget) -> FsFaultOp {
+    match target {
+        XattrTarget::Path(_) => FsFaultOp::SetTimesByPath,
+        XattrTarget::Fd(_) | XattrTarget::Inode(_) => FsFaultOp::SetTimes,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum FsFaultOp {
     Open { allocating: bool },
@@ -510,6 +608,7 @@ enum FsFaultOp {
     Metadata,
     FdMetadata,
     CreateDirectory,
+    MakeNode,
     RemoveFile,
     Sync,
     SetLen,
@@ -538,6 +637,7 @@ impl FsFaultOp {
             FsFaultOp::Metadata => FsFaultOpKind::Metadata,
             FsFaultOp::FdMetadata => FsFaultOpKind::FdMetadata,
             FsFaultOp::CreateDirectory => FsFaultOpKind::CreateDirectory,
+            FsFaultOp::MakeNode => FsFaultOpKind::MakeNode,
             FsFaultOp::RemoveFile => FsFaultOpKind::RemoveFile,
             FsFaultOp::Sync => FsFaultOpKind::Sync,
             FsFaultOp::SetLen => FsFaultOpKind::SetLen,
@@ -566,6 +666,7 @@ impl FsFaultOp {
             | FsFaultOp::WriteAt
             | FsFaultOp::Sync
             | FsFaultOp::CreateDirectory
+            | FsFaultOp::MakeNode
             | FsFaultOp::SetLen
             | FsFaultOp::Rename
             | FsFaultOp::Link
@@ -609,23 +710,23 @@ impl FsFaultOp {
 ///
 /// **Never an error the syscall cannot return.** The per-operation predicates
 /// above are checked against the Linux man-page ERRORS sections (`fsync(2)`,
-/// `write(2)`, `read(2)`, `open(2)`, `rename(2)`, `unlink(2)`, `mkdir(2)`,
+/// `write(2)`, `read(2)`, `open(2)`, `rename(2)`, `unlink(2)`, `mkdir(2)`, `mknod(2)`,
 /// `link(2)`, `symlink(2)`, `ftruncate(2)`, `stat(2)`) and POSIX.1-2017, which
 /// is where `EIO` comes from for the metadata and namespace calls whose Linux
 /// pages omit it. The resulting sets, in the vocabulary of the errno an
 /// `unreliable-libc`-style shim injects:
 ///
-/// | operation                         | injected                       |
-/// |-----------------------------------|--------------------------------|
-/// | read, pread                       | `EIO`, `EINTR`                 |
-/// | write, pwrite                     | `EIO`, `ENOSPC`, `EINTR`       |
-/// | fsync                             | `EIO`, `ENOSPC`, `EINTR`       |
-/// | open (creating)                   | `EIO`, `ENOSPC`                |
-/// | open (existing), stat, fstat      | `EIO`                          |
-/// | ftruncate                         | `EIO`, `ENOSPC`                |
-/// | mkdir, rename, link, symlink      | `EIO`, `ENOSPC`                |
-/// | unlink, rmdir, readdir, readlink  | `EIO`                          |
-/// | utimensat                         | `EIO`                          |
+/// | operation                           | injected                       |
+/// |-------------------------------------|--------------------------------|
+/// | read, pread                         | `EIO`, `EINTR`                 |
+/// | write, pwrite                       | `EIO`, `ENOSPC`, `EINTR`       |
+/// | fsync                               | `EIO`, `ENOSPC`, `EINTR`       |
+/// | open (creating)                     | `EIO`, `ENOSPC`                |
+/// | open (existing), stat, fstat        | `EIO`                          |
+/// | ftruncate                           | `EIO`, `ENOSPC`                |
+/// | mkdir, mknod, rename, link, symlink | `EIO`, `ENOSPC`                |
+/// | unlink, rmdir, readdir, readlink    | `EIO`                          |
+/// | utimensat                           | `EIO`                          |
 ///
 /// **Never an error that indicts the CALLER rather than the storage.** `EBADF`,
 /// `EFAULT` and `EINVAL` say the program passed a bad descriptor, pointer or
@@ -936,7 +1037,7 @@ mod tests {
         // Every fault-eligible operation, `open` in both of its shapes. Pinned
         // against the shared kind table below so a new operation cannot slip in
         // untested.
-        const ALL_FAULT_OPS: [FsFaultOp; 20] = [
+        const ALL_FAULT_OPS: [FsFaultOp; 21] = [
             FsFaultOp::Open { allocating: true },
             FsFaultOp::Open { allocating: false },
             FsFaultOp::Read,
@@ -946,6 +1047,7 @@ mod tests {
             FsFaultOp::Metadata,
             FsFaultOp::FdMetadata,
             FsFaultOp::CreateDirectory,
+            FsFaultOp::MakeNode,
             FsFaultOp::RemoveFile,
             FsFaultOp::Sync,
             FsFaultOp::SetLen,
@@ -1057,6 +1159,9 @@ mod tests {
             FsFaultOpKind::CreateDirectory => {
                 fs.create_directory(FsClock::EPOCH, "/d", 0o777).err()
             }
+            FsFaultOpKind::MakeNode => fs
+                .make_node(FsClock::EPOCH, "/n", FsNode::Socket, 0o644)
+                .err(),
             FsFaultOpKind::RemoveFile => fs.remove_file(FsClock::EPOCH, "/f").err(),
             FsFaultOpKind::Sync => fs.sync(fd).err(),
             FsFaultOpKind::SetLen => fs.set_len(FsClock::EPOCH, fd, 1).err(),

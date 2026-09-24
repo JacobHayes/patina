@@ -158,18 +158,123 @@ pub(super) const OPENAT_SUPPORTED_FLAGS: u64 = O_ACCMODE
     | O_PATH
     | O_NONBLOCK;
 
-/// The deny a `mknodat` of anything but a FIFO gets. Byte-identical to the C
-/// `PATINA_DENY_MKNOD_TYPE`, so a raw-syscall guest and a libc guest record the
-/// same captured stderr for the same refusal.
-pub(super) const DENY_MKNOD_TYPE: &str = "patina: mknod models only S_IFIFO (a named pipe); no other special file has a \
-     deterministic representation here; failing closed\n";
+/// Every flag `open(2)` defines (`VALID_OPEN_FLAGS`): what `openat2` accepts
+/// before refusing the rest, where `openat` silently drops unknown bits.
+const OPEN_VALID_FLAGS: u64 = OPENAT_SUPPORTED_FLAGS
+    | uapi::O_NOCTTY as u64
+    | uapi::__O_SYNC as u64
+    | uapi::O_DSYNC as u64
+    | uapi::FASYNC as u64
+    | O_DIRECT
+    | uapi::O_NOATIME as u64
+    | uapi::__O_TMPFILE as u64;
 
-/// The deny `openat2` gets. It has no C counterpart (glibc exports no `openat2`
-/// wrapper, so no interposer can be reached), which is exactly why the raw row
-/// must name it: otherwise the only signal would be an unexplained `ENOSYS`.
-pub(super) const DENY_OPENAT2: &str = "patina: openat2 is not modeled (its RESOLVE_* resolution guarantees are a kernel-side \
-     sandbox the deterministic filesystem does not implement); failing closed so callers take \
-     their component-wise openat fallback\n";
+/// `O_PATH_FLAGS`: what may accompany `O_PATH` in an `openat2`.
+const OPEN_PATH_FLAGS: u64 = O_DIRECTORY | O_NOFOLLOW | O_PATH | O_CLOEXEC;
+
+/// `S_IALLUGO`: the mode bits a creating `openat2` may carry.
+const OPEN_HOW_MODE: u64 = 0o7777;
+
+/// `OPEN_HOW_SIZE_VER0`: `struct open_how`'s `flags`, `mode` and `resolve`.
+const OPEN_HOW_SIZE: usize = size_of::<uapi::open_how>();
+
+const RESOLVE_NO_XDEV: u64 = uapi::RESOLVE_NO_XDEV as u64;
+const RESOLVE_NO_MAGICLINKS: u64 = uapi::RESOLVE_NO_MAGICLINKS as u64;
+const RESOLVE_NO_SYMLINKS: u64 = uapi::RESOLVE_NO_SYMLINKS as u64;
+const RESOLVE_BENEATH: u64 = uapi::RESOLVE_BENEATH as u64;
+const RESOLVE_IN_ROOT: u64 = uapi::RESOLVE_IN_ROOT as u64;
+const RESOLVE_CACHED: u64 = uapi::RESOLVE_CACHED as u64;
+
+/// `openat2(2)`: `copy_struct_from_user` of the guest's `struct open_how`
+/// (smaller than its first version is `EINVAL`, larger than a page `E2BIG`,
+/// and any nonzero byte past the known fields `E2BIG`), then
+/// `build_open_flags`' strict checks, then the one open entry with its
+/// resolution restricted. A restriction with nothing to refuse here is
+/// accepted as the no-op it is: no entry is a magic link, and the volume is
+/// memory, so every lookup `RESOLVE_CACHED` allows is cached.
+pub(super) fn sys_openat2(dirfd: i64, path: u64, how: u64, size: u64) -> i64 {
+    let Ok(size) = usize::try_from(size) else {
+        return -E2BIG;
+    };
+    if size < OPEN_HOW_SIZE {
+        return -EINVAL;
+    }
+    if size > crate::PAGE_SIZE {
+        return -E2BIG;
+    }
+    if how == 0 {
+        return -EFAULT;
+    }
+    // SAFETY: the guest's `size`-byte `struct open_how`.
+    let bytes = unsafe { core::slice::from_raw_parts(how as *const u8, size) };
+    if bytes[OPEN_HOW_SIZE..].iter().any(|&byte| byte != 0) {
+        return -E2BIG;
+    }
+    let field = |index: usize| {
+        let at = index * size_of::<u64>();
+        u64::from_ne_bytes(
+            bytes[at..at + size_of::<u64>()]
+                .try_into()
+                .expect("8 bytes"),
+        )
+    };
+    let (flags, mode, resolve) = (field(0), field(1), field(2));
+    if flags & !OPEN_VALID_FLAGS != 0 {
+        return -EINVAL;
+    }
+    if resolve
+        & !(RESOLVE_NO_XDEV
+            | RESOLVE_NO_MAGICLINKS
+            | RESOLVE_NO_SYMLINKS
+            | RESOLVE_BENEATH
+            | RESOLVE_IN_ROOT
+            | RESOLVE_CACHED)
+        != 0
+    {
+        return -EINVAL;
+    }
+    if resolve & RESOLVE_BENEATH != 0 && resolve & RESOLVE_IN_ROOT != 0 {
+        return -EINVAL;
+    }
+    let creating = flags & (O_CREAT | uapi::__O_TMPFILE as u64) != 0;
+    if (creating && mode & !OPEN_HOW_MODE != 0) || (!creating && mode != 0) {
+        return -EINVAL;
+    }
+    // `O_PATH` takes only the flags that shape a location; `openat` strips
+    // the rest, `openat2` refuses them.
+    if flags & O_PATH != 0 && flags & !OPEN_PATH_FLAGS != 0 {
+        return -EINVAL;
+    }
+    if flags & !OPENAT_SUPPORTED_FLAGS != 0 {
+        return -ENOSYS;
+    }
+    let path = match guest_path(path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    let mut scope = 0;
+    for (bit, restriction) in [
+        (RESOLVE_NO_XDEV, PATINA_RESOLVE_NO_XDEV),
+        (RESOLVE_NO_SYMLINKS, PATINA_RESOLVE_NO_SYMLINKS),
+        (RESOLVE_BENEATH, PATINA_RESOLVE_BENEATH),
+        (RESOLVE_IN_ROOT, PATINA_RESOLVE_IN_ROOT),
+        (RESOLVE_CACHED, PATINA_RESOLVE_CACHED),
+    ] {
+        if resolve & bit != 0 {
+            scope |= restriction;
+        }
+    }
+    // SAFETY: `path` is the guest's NUL-terminated string pointer.
+    ret_i32(unsafe {
+        patina_openat2(
+            dirfd as c_int,
+            path,
+            openat_patina_flags(flags),
+            mode as u32,
+            scope,
+        )
+    })
+}
 
 /// `openat(2)`: one decode of the flag word, then the one open entry the C
 /// interposer calls too. The creation mode is the raw syscall's fourth
@@ -254,7 +359,7 @@ const fn empty_metadata() -> PatinaMetadata {
         kind: 0,
         mode: 0,
         nlink: 0,
-        reserved: 0,
+        fs: 0,
         length: 0,
         ino: 0,
         atime_nanos: 0,
@@ -283,16 +388,23 @@ pub(super) fn stat_mode(values: &StatValues) -> u32 {
         PATINA_ENTRY_DIRECTORY => S_IFDIR,
         PATINA_ENTRY_SYMLINK => S_IFLNK,
         PATINA_ENTRY_FIFO => S_IFIFO,
+        PATINA_ENTRY_SOCKET => S_IFSOCK,
+        PATINA_ENTRY_CHAR => S_IFCHR,
         _ => S_IFREG,
     };
     kind | (values.mode & 0o7777)
 }
 
+/// The kernel's `new_encode_dev`: the 32-bit device word `struct stat` carries.
+fn encode_dev((major, minor): (u32, u32)) -> u64 {
+    u64::from((minor & 0xff) | (major << 8) | ((minor & !0xff) << 12))
+}
+
 /// The kernel `struct stat` for the `fstat`/`newfstatat` syscalls. The layout is
 /// arch-specific (x86_64 vs the arm64 generic layout); the fields the C
-/// `fill_stat` sets are populated (mode, link count, inode, size, the owner
-/// from the one modeled identity, the three timestamps, the block geometry),
-/// the rest (`st_dev`, `st_rdev`) stay zero.
+/// `fill_stat` sets are populated (the device of the node's filesystem, mode,
+/// link count, inode, size, the owner from the one modeled identity, the three
+/// timestamps, the block geometry); `st_rdev` stays zero.
 #[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Default)]
@@ -345,6 +457,7 @@ pub(super) struct KernelStat {
 impl KernelStat {
     fn from_values(values: &StatValues) -> Self {
         Self {
+            st_dev: encode_dev(crate::fs_device(values.fs)),
             st_mode: stat_mode(values),
             st_nlink: values.nlink as _,
             st_ino: values.ino,
@@ -526,6 +639,8 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
         stx_mtime: timestamp(values.mtime_nanos),
         stx_ctime: timestamp(values.ctime_nanos),
         stx_mnt_id: STATX_MNT_ID_VALUE,
+        stx_dev_major: crate::fs_device(values.fs).0,
+        stx_dev_minor: crate::fs_device(values.fs).1,
         ..Statx::default()
     };
     if mask & STATX_BTIME != 0 {
@@ -537,6 +652,256 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
     0
 }
 
+// ---- statfs / fstatfs ----
+
+/// `statfs(2)`: the one description the C `statfs` answers too.
+pub(super) fn sys_statfs(path: u64, buf: u64) -> i64 {
+    let path = match guest_path(path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    // SAFETY: `path` is a guest C string; `buf` the guest's `struct statfs`.
+    ret_i32(unsafe { patina_statfs(path, buf as *mut c_void) })
+}
+
+/// `fstatfs(2)`.
+pub(super) fn sys_fstatfs(fd: i64, buf: u64) -> i64 {
+    if let Some(err) = fd_out_of_range(fd) {
+        return err;
+    }
+    // SAFETY: `buf` is the guest's `struct statfs` storage.
+    ret_i32(unsafe { patina_fstatfs(fd as c_int, buf as *mut c_void) })
+}
+
+// ---- extended attributes ----
+
+/// The path rows (`getxattr`, `lgetxattr`, ...): a NULL path is `EFAULT`;
+/// the entry's descriptor argument is unused.
+fn xattr_path(path: u64) -> Result<*const c_char, i64> {
+    guest_path(path)
+}
+
+pub(super) fn sys_getxattr(path: u64, name: u64, value: u64, size: u64, follow: bool) -> i64 {
+    let path = match xattr_path(path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    // SAFETY: guest pointers per the getxattr(2) contract.
+    ret_isize(unsafe {
+        patina_getxattr(
+            -1,
+            path,
+            c_int::from(follow),
+            name as *const c_char,
+            value as *mut c_void,
+            size as usize,
+        )
+    })
+}
+
+pub(super) fn sys_fgetxattr(fd: i64, name: u64, value: u64, size: u64) -> i64 {
+    // SAFETY: guest pointers per the fgetxattr(2) contract.
+    ret_isize(unsafe {
+        patina_getxattr(
+            fd as c_int,
+            std::ptr::null(),
+            0,
+            name as *const c_char,
+            value as *mut c_void,
+            size as usize,
+        )
+    })
+}
+
+pub(super) fn sys_listxattr(path: u64, list: u64, size: u64, follow: bool) -> i64 {
+    let path = match xattr_path(path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    // SAFETY: guest pointers per the listxattr(2) contract.
+    ret_isize(unsafe {
+        patina_listxattr(
+            -1,
+            path,
+            c_int::from(follow),
+            list as *mut c_void,
+            size as usize,
+        )
+    })
+}
+
+pub(super) fn sys_flistxattr(fd: i64, list: u64, size: u64) -> i64 {
+    // SAFETY: guest pointers per the flistxattr(2) contract.
+    ret_isize(unsafe {
+        patina_listxattr(
+            fd as c_int,
+            std::ptr::null(),
+            0,
+            list as *mut c_void,
+            size as usize,
+        )
+    })
+}
+
+pub(super) fn sys_setxattr(
+    path: u64,
+    name: u64,
+    value: u64,
+    size: u64,
+    flags: u64,
+    follow: bool,
+) -> i64 {
+    let path = match xattr_path(path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    // SAFETY: guest pointers per the setxattr(2) contract.
+    ret_i32(unsafe {
+        patina_setxattr(
+            -1,
+            path,
+            c_int::from(follow),
+            name as *const c_char,
+            value as *const c_void,
+            size as usize,
+            flags as c_int,
+        )
+    })
+}
+
+pub(super) fn sys_fsetxattr(fd: i64, name: u64, value: u64, size: u64, flags: u64) -> i64 {
+    // SAFETY: guest pointers per the fsetxattr(2) contract.
+    ret_i32(unsafe {
+        patina_setxattr(
+            fd as c_int,
+            std::ptr::null(),
+            0,
+            name as *const c_char,
+            value as *const c_void,
+            size as usize,
+            flags as c_int,
+        )
+    })
+}
+
+pub(super) fn sys_removexattr(path: u64, name: u64, follow: bool) -> i64 {
+    let path = match xattr_path(path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    // SAFETY: guest pointers per the removexattr(2) contract.
+    ret_i32(unsafe { patina_removexattr(-1, path, c_int::from(follow), name as *const c_char) })
+}
+
+pub(super) fn sys_fremovexattr(fd: i64, name: u64) -> i64 {
+    // SAFETY: guest pointers per the fremovexattr(2) contract.
+    ret_i32(unsafe { patina_removexattr(fd as c_int, std::ptr::null(), 0, name as *const c_char) })
+}
+
+// ---- name_to_handle_at ----
+
+/// `name_to_handle_at`'s flags: `AT_SYMLINK_FOLLOW`, `AT_EMPTY_PATH`, and
+/// `AT_HANDLE_FID` (Linux 6.5; the value `AT_REMOVEDIR` has).
+const AT_HANDLE_FID: u64 = AT_REMOVEDIR;
+const NAME_TO_HANDLE_FLAGS: u64 = AT_SYMLINK_FOLLOW | AT_EMPTY_PATH | AT_HANDLE_FID;
+
+/// `MAX_HANDLE_SZ`: the largest handle a caller may declare room for.
+const MAX_HANDLE_SZ: u32 = 128;
+
+/// ext4's handle shape (`FILEID_INO32_GEN`): the inode number and its
+/// generation, two 32-bit words; `FILEID_INVALID` when the caller's room is
+/// short.
+const FILEID_INO32_GEN: i32 = 1;
+const FILEID_INVALID: i32 = 255;
+const HANDLE_BYTES: u32 = 8;
+
+/// The volume's mount id, the one `statx` reports.
+const MOUNT_ID: i32 = STATX_MNT_ID_VALUE as i32;
+
+/// The fixed header of a guest `struct file_handle`.
+#[repr(C)]
+struct FileHandleHeader {
+    handle_bytes: u32,
+    handle_type: i32,
+}
+
+/// `name_to_handle_at(2)` (`fs/fhandle.c`): the flags first (`EINVAL`), then
+/// the path (`AT_SYMLINK_FOLLOW` follows a final symlink, `AT_EMPTY_PATH`
+/// names the descriptor), then whether the node's filesystem can encode one
+/// at all (`EOPNOTSUPP` on a pseudo-filesystem, before the handle is read),
+/// then the caller's declared room (`EINVAL` past `MAX_HANDLE_SZ`). A handle
+/// names the node: the inode number and a zero generation, as ext4 encodes
+/// one; room for less than that is `EOVERFLOW` with the size it needs written
+/// back. The mount id is the volume's.
+pub(super) fn sys_name_to_handle_at(
+    dirfd: i64,
+    path: u64,
+    handle: u64,
+    mount_id: u64,
+    flags: u64,
+) -> i64 {
+    if flags & !NAME_TO_HANDLE_FLAGS != 0 {
+        return -EINVAL;
+    }
+    let resolve = if flags & AT_SYMLINK_FOLLOW != 0 {
+        0
+    } else {
+        PATINA_RESOLVE_NOFOLLOW
+    } | if flags & AT_EMPTY_PATH != 0 {
+        PATINA_RESOLVE_EMPTY_PATH
+    } else {
+        0
+    };
+    let values = if dirfd as c_int != AT_FDCWD as c_int && is_empty_path(path, flags) {
+        fd_stat_values(dirfd as c_int)
+    } else {
+        path_stat_values(dirfd, path, resolve)
+    };
+    let values = match values {
+        Ok(values) => values,
+        Err(errno) => return errno,
+    };
+    // A filesystem with no export operations refuses before the handle is
+    // read (`exportfs_can_encode_fh`).
+    if values.fs != crate::PATINA_FS_VOLUME {
+        return -EOPNOTSUPP;
+    }
+    if handle == 0 {
+        return -EFAULT;
+    }
+    let header = handle as *mut FileHandleHeader;
+    // SAFETY: `handle` is the guest's `struct file_handle`.
+    let room = unsafe { header.read_unaligned() }.handle_bytes;
+    if room > MAX_HANDLE_SZ {
+        return -EINVAL;
+    }
+    let fits = room >= HANDLE_BYTES;
+    // SAFETY: the header is the guest's; the payload follows it and has
+    // `room >= HANDLE_BYTES` bytes when written.
+    unsafe {
+        header.write_unaligned(FileHandleHeader {
+            handle_bytes: HANDLE_BYTES,
+            handle_type: if fits {
+                FILEID_INO32_GEN
+            } else {
+                FILEID_INVALID
+            },
+        });
+        if fits {
+            let payload = (handle as *mut u8).add(std::mem::size_of::<FileHandleHeader>());
+            let mut words = [0u8; HANDLE_BYTES as usize];
+            words[..4].copy_from_slice(&(values.ino as u32).to_ne_bytes());
+            std::ptr::copy_nonoverlapping(words.as_ptr(), payload, words.len());
+        }
+    }
+    if mount_id == 0 {
+        return -EFAULT;
+    }
+    // SAFETY: `mount_id` is the guest's `int`.
+    unsafe { (mount_id as *mut i32).write_unaligned(MOUNT_ID) };
+    if fits { 0 } else { -EOVERFLOW }
+}
+
 // ---- getdents64 ----
 
 pub(super) fn dt_for_kind(kind: u32) -> u8 {
@@ -544,14 +909,65 @@ pub(super) fn dt_for_kind(kind: u32) -> u8 {
         PATINA_ENTRY_DIRECTORY => DT_DIR,
         PATINA_ENTRY_SYMLINK => DT_LNK,
         PATINA_ENTRY_FIFO => DT_FIFO,
+        PATINA_ENTRY_SOCKET => DT_SOCK,
+        PATINA_ENTRY_CHAR => DT_CHR,
         _ => DT_REG,
     }
 }
 
-/// Fill the guest buffer with `linux_dirent64` records from the fd's snapshot,
+/// The directory-record layout a `getdents` row fills.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DirentFormat {
+    /// `struct linux_dirent64` (`getdents64`): `d_ino`, `d_off`, `d_reclen`,
+    /// `d_type`, then the name.
+    Dirent64,
+    /// The legacy `struct linux_dirent` (x86_64 `getdents`): `d_ino`, `d_off`,
+    /// `d_reclen`, the name, and the type in the record's LAST byte, after the
+    /// name's padding (`fs/readdir.c filldir`).
+    #[cfg(target_arch = "x86_64")]
+    Dirent,
+}
+
+impl DirentFormat {
+    /// The fixed header before the name: `d_ino` and `d_off` (8 bytes each on
+    /// a 64-bit kernel), `d_reclen`, and for `linux_dirent64` `d_type`.
+    fn header(self) -> usize {
+        match self {
+            DirentFormat::Dirent64 => 19,
+            #[cfg(target_arch = "x86_64")]
+            DirentFormat::Dirent => 18,
+        }
+    }
+
+    /// A record's length: header, name, its NUL (and, for the legacy layout,
+    /// the type byte), 8-byte aligned.
+    fn reclen(self, name_len: usize) -> usize {
+        let trailer = match self {
+            DirentFormat::Dirent64 => 1,
+            #[cfg(target_arch = "x86_64")]
+            DirentFormat::Dirent => 2,
+        };
+        (self.header() + name_len + trailer + 7) & !7
+    }
+
+    /// Where a record keeps its type byte.
+    fn type_offset(self, reclen: usize) -> usize {
+        match self {
+            DirentFormat::Dirent64 => 18,
+            #[cfg(target_arch = "x86_64")]
+            DirentFormat::Dirent => reclen - 1,
+        }
+    }
+}
+
+/// Fill the guest buffer with directory records from the fd's snapshot,
 /// advancing `patina_read_dir_next` past every entry that fits. Returns the
 /// number of bytes written (0 at end-of-directory) or `-errno`.
 pub(super) fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
+    getdents(fd, dirp, count, DirentFormat::Dirent64)
+}
+
+pub(super) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFormat) -> i64 {
     // Linux directory iteration needs a directory descriptor: a number that
     // names nothing is EBADF, anything else (a file, a socket) is ENOTDIR.
     match fd_kind(fd) {
@@ -564,7 +980,7 @@ pub(super) fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
     }
     // The kernel reads the length as an unsigned int.
     let cap = count as u32 as usize;
-    // The snapshot is taken by the FIRST getdents64 on the descriptor (and after
+    // The snapshot is taken by the FIRST getdents on the descriptor (and after
     // a seek), through the same `patina_read_dir` entry the interposed
     // `opendir` uses — a second caller, never a second directory model.
     let Ok(fd) = c_int::try_from(fd) else {
@@ -608,8 +1024,6 @@ pub(super) fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
     }
     let snapshot = dir.snapshot as *mut c_void;
     let mut written = 0usize;
-    // linux_dirent64 header: d_ino(8) d_off(8) d_reclen(2) d_type(1) then name.
-    const HEADER: usize = 19;
     loop {
         // Next entry: the pushed-back one first, else consume from the snapshot.
         // `patina_read_dir_next` only advances (no peek), so an entry that does
@@ -641,7 +1055,7 @@ pub(super) fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
                 }
             }
         };
-        let reclen = (HEADER + name.len() + 1 + 7) & !7; // 8-byte aligned
+        let reclen = format.reclen(name.len());
         if written + reclen > cap {
             // No room: push the entry back for the next call and stop. If nothing
             // fit at all, the caller's buffer is too small for even one entry.
@@ -652,20 +1066,21 @@ pub(super) fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
             }
             break;
         }
-        // Commit: write the linux_dirent64 record into the guest buffer.
+        // Commit: write the record into the guest buffer, zeroed first so the
+        // padding carries nothing.
         // SAFETY: `dirp+written` has `reclen` bytes of room (checked above).
         unsafe {
             let rec = (dirp as *mut u8).add(written);
+            std::ptr::write_bytes(rec, 0, reclen);
             // d_ino: the snapshot exposes no inode; the one-based snapshot index
             // is nonzero and the one the C `readdir` reports.
-            (rec as *mut u64).write(dir.position + 1);
+            (rec as *mut u64).write_unaligned(dir.position + 1);
             // d_off: the position after this entry, which `lseek` resumes from.
-            (rec.add(8) as *mut i64).write((dir.position + 1) as i64);
-            (rec.add(16) as *mut u16).write(reclen as u16); // d_reclen
-            rec.add(18).write(dt_for_kind(kind)); // d_type
-            let dst = rec.add(HEADER);
+            (rec.add(8) as *mut i64).write_unaligned((dir.position + 1) as i64);
+            (rec.add(16) as *mut u16).write_unaligned(reclen as u16); // d_reclen
+            rec.add(format.type_offset(reclen)).write(dt_for_kind(kind));
+            let dst = rec.add(format.header());
             std::ptr::copy_nonoverlapping(name.as_ptr(), dst, name.len());
-            dst.add(name.len()).write(0); // NUL
         }
         written += reclen;
         dir.position += 1;
@@ -684,29 +1099,17 @@ pub(super) fn sys_mkdirat(dirfd: i64, path: u64, mode: u64) -> i64 {
     ret_i32(unsafe { patina_mkdir(dirfd as c_int, path, (mode & 0o7777) as u32) })
 }
 
-/// `mknodat(2)`, the only door a raw-syscall guest has to a FIFO: glibc's
-/// `mkfifo`/`mkfifoat` are library wrappers over this number, and rustix lowers
-/// its own onto it. Only `S_IFIFO` is modeled — see the C `patina_mknod_impl`,
-/// whose type dispatch and deny string this mirrors byte for byte.
+/// `mknodat(2)`, the only door a raw-syscall guest has to a FIFO, a socket
+/// node or a whiteout (glibc's `mkfifo`/`mkfifoat` are library wrappers over
+/// this number, and rustix lowers its own onto it): the one entry the C
+/// `mknod` calls too. The kernel reads the device as an `unsigned int`.
 pub(super) fn sys_mknodat(dirfd: i64, path: u64, mode: u64, device: u64) -> i64 {
-    let kind = mode & S_IFMT;
-    if kind == S_IFCHR || kind == S_IFBLK {
-        // What the single non-root identity this runtime models would get on a
-        // real kernel; a device node is a host escape by construction.
-        return -EPERM;
-    }
-    if kind != S_IFIFO as u64 {
-        return sud_deny(DENY_MKNOD_TYPE);
-    }
-    if device != 0 {
-        return -EINVAL;
-    }
     let path = match guest_path(path) {
         Ok(path) => path,
         Err(errno) => return errno,
     };
     // SAFETY: `path` is a valid NUL-terminated guest string pointer.
-    ret_i32(unsafe { patina_mkfifo(dirfd as c_int, path, (mode & 0o7777) as u32) })
+    ret_i32(unsafe { patina_mknod(dirfd as c_int, path, mode as u32, device as u32) })
 }
 
 pub(super) fn sys_unlinkat(dirfd: i64, path: u64, flags: u64) -> i64 {
@@ -782,10 +1185,11 @@ pub(super) fn sys_faccessat(dirfd: i64, path: u64, mode: u64, flags: u64) -> i64
 ///
 /// The kernel's `fchmodat` takes no flag argument at all — glibc's four-argument
 /// wrapper emulates `AT_SYMLINK_NOFOLLOW` above it — so the flags here are
-/// always `fchmodat2`'s. `AT_SYMLINK_NOFOLLOW` is the only defined one;
-/// anything else is `EINVAL` rather than silently ignored.
+/// always `fchmodat2`'s (`do_fchmodat`): `AT_SYMLINK_NOFOLLOW` and
+/// `AT_EMPTY_PATH` (an empty path names the descriptor, `O_PATH` included);
+/// anything else is `EINVAL` before the path is looked at.
 pub(super) fn sys_fchmodat(dirfd: i64, path: u64, mode: u64, flags: u64) -> i64 {
-    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return -EINVAL;
     }
     let path = match guest_path(path) {
@@ -865,17 +1269,22 @@ pub(super) fn sys_renameat(
     newpath: u64,
     flags: u64,
 ) -> i64 {
-    // The deterministic rename models no flags (RENAME_NOREPLACE/EXCHANGE/…);
-    // a nonzero renameat2 flag fails closed, mirroring the C interposer.
-    if flags != 0 {
-        return -EINVAL;
-    }
     let (oldpath, newpath) = match (guest_path(oldpath), guest_path(newpath)) {
         (Ok(oldpath), Ok(newpath)) => (oldpath, newpath),
         (Err(errno), _) | (_, Err(errno)) => return errno,
     };
+    // The kernel reads the flags as an `unsigned int`; the one rename entry
+    // judges them (`crate::patina_renameat2`).
     // SAFETY: both are valid NUL-terminated string pointers.
-    ret_i32(unsafe { patina_rename(olddirfd as c_int, oldpath, newdirfd as c_int, newpath) })
+    ret_i32(unsafe {
+        patina_renameat2(
+            olddirfd as c_int,
+            oldpath,
+            newdirfd as c_int,
+            newpath,
+            flags as u32,
+        )
+    })
 }
 
 // ---- The working directory and the umask ----
@@ -1067,4 +1476,74 @@ pub(super) fn sys_fallocate(fd: i64, mode: u64, offset: i64, length: i64) -> i64
     }
     // SAFETY: no pointers.
     ret_i32(unsafe { patina_fallocate(fd as c_int, mode as u32, offset, length) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `openat2(AT_FDCWD, path, how, size)` for a `how` of `fields` followed by
+    /// zeroes out to a page, with a path past `PATH_MAX`: every answer here is
+    /// decided before the path is resolved, and one that is not is
+    /// `ENAMETOOLONG`, so no runtime is needed.
+    fn openat2(fields: [u64; 4], size: usize) -> i64 {
+        let mut how = vec![0u64; crate::PAGE_SIZE / 8 + 1];
+        how[..4].copy_from_slice(&fields);
+        let path = std::ffi::CString::new("a".repeat(crate::paths::PATH_MAX)).unwrap();
+        sys_openat2(
+            AT_FDCWD,
+            path.as_ptr() as u64,
+            how.as_ptr() as u64,
+            size as u64,
+        )
+    }
+
+    #[test]
+    fn open_how_is_copied_as_copy_struct_from_user_copies_it() {
+        assert_eq!(openat2([0; 4], OPEN_HOW_SIZE - 1), -EINVAL);
+        assert_eq!(openat2([0; 4], crate::PAGE_SIZE + 1), -E2BIG);
+        assert_eq!(openat2([0, 0, 0, 1], OPEN_HOW_SIZE + 8), -E2BIG);
+        let resolved = -(errno::ENAMETOOLONG as i64);
+        assert_eq!(openat2([0; 4], OPEN_HOW_SIZE + 8), resolved);
+        assert_eq!(
+            sys_openat2(AT_FDCWD, c"/".as_ptr() as u64, 0, OPEN_HOW_SIZE as u64),
+            -EFAULT
+        );
+    }
+
+    #[test]
+    fn open_how_is_judged_as_build_open_flags_judges_it() {
+        assert_eq!(openat2([1 << 40, 0, 0, 0], OPEN_HOW_SIZE), -EINVAL);
+        assert_eq!(openat2([0, 0o644, 0, 0], OPEN_HOW_SIZE), -EINVAL);
+        assert_eq!(openat2([O_CREAT, 0o10644, 0, 0], OPEN_HOW_SIZE), -EINVAL);
+        assert_eq!(
+            openat2([O_CREAT | O_DIRECTORY, 0o644, 0, 0], OPEN_HOW_SIZE),
+            -EINVAL
+        );
+        assert_eq!(openat2([0, 0, 0x80, 0], OPEN_HOW_SIZE), -EINVAL);
+        assert_eq!(
+            openat2([0, 0, RESOLVE_BENEATH | RESOLVE_IN_ROOT, 0], OPEN_HOW_SIZE),
+            -EINVAL
+        );
+        assert_eq!(
+            openat2([O_PATH | O_WRONLY, 0, 0, 0], OPEN_HOW_SIZE),
+            -EINVAL
+        );
+        assert_eq!(
+            openat2([O_PATH | O_TRUNC, 0, RESOLVE_CACHED, 0], OPEN_HOW_SIZE),
+            -EINVAL
+        );
+        assert_eq!(
+            openat2([O_CREAT, 0o644, RESOLVE_CACHED, 0], OPEN_HOW_SIZE),
+            -(errno::EAGAIN as i64)
+        );
+        assert_eq!(
+            openat2([O_TRUNC, 0, RESOLVE_CACHED, 0], OPEN_HOW_SIZE),
+            -(errno::EAGAIN as i64)
+        );
+        assert_eq!(
+            openat2([uapi::O_NOATIME as u64, 0, 0, 0], OPEN_HOW_SIZE),
+            -ENOSYS
+        );
+    }
 }

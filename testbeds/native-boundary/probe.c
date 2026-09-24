@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
     if (!check(fd >= 0, "reopen") ||
         !check(patina_read(fd, contents, sizeof contents) == 6, "read checkpoint") ||
         !check(patina_close(fd) == 0, "close") ||
-        !check(patina_rename(PATINA_AT_FDCWD, "/state/value", PATINA_AT_FDCWD, "/state/renamed") == 0, "rename") ||
+        !check(patina_renameat2(PATINA_AT_FDCWD, "/state/value", PATINA_AT_FDCWD, "/state/renamed", 0) == 0, "rename") ||
         !check(patina_unlink(PATINA_AT_FDCWD, "/state/renamed") == 0, "unlink") ||
         !check(patina_rmdir(PATINA_AT_FDCWD, "/state") == 0, "rmdir") ||
         !check(patina_shutdown() == 0, "shutdown")) return 1;

@@ -11,9 +11,7 @@
 //! the filesystem's business and are compared only by relation. Needs file
 //! handles on the run directory's filesystem.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -154,15 +152,5 @@ pub const SCENARIO: Scenario = Scenario {
         release: "6.5",
         why: "AT_HANDLE_FID",
     }),
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::ALL,
-        what: "name_to_handle_at is an unmodeled Trap row (the libc door is syscall(2) until the shim defines the wrapper): the first call aborts",
-        failure: Failure::Stops {
-            events: 8,
-            ending: Ending::Signal(6),
-            diagnostic: "unsupported syscall name_to_handle_at",
-        },
-    }],
     ..DEFAULTS
 };

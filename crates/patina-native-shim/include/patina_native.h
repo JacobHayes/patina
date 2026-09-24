@@ -200,12 +200,22 @@ int32_t patina_cpu_time_nanos(uint64_t *nanos);
  * ENOTDIR for a component resolved through a non-directory, and the
  * trailing-slash rule. PATINA_RESOLVE_NOFOLLOW names a trailing symlink
  * itself; PATINA_RESOLVE_EMPTY_PATH lets an empty path name the base (the
- * AT_EMPTY_PATH form), where it is otherwise ENOENT.
+ * AT_EMPTY_PATH form), where it is otherwise ENOENT. The restrictions only
+ * patina_openat2 takes (openat2's RESOLVE_*): BENEATH refuses leaving the base
+ * (a `..` out of it, an absolute path or symlink: EXDEV); IN_ROOT makes the
+ * base the root; NO_SYMLINKS refuses any symlink (ELOOP); NO_XDEV refuses
+ * leaving the volume (/dev/urandom: EXDEV); CACHED refuses a creating or
+ * truncating open (EAGAIN).
  */
 #define PATINA_AT_FDCWD (-100)
 enum {
     PATINA_RESOLVE_NOFOLLOW = 1u << 0,
     PATINA_RESOLVE_EMPTY_PATH = 1u << 1,
+    PATINA_RESOLVE_BENEATH = 1u << 2,
+    PATINA_RESOLVE_IN_ROOT = 1u << 3,
+    PATINA_RESOLVE_NO_SYMLINKS = 1u << 4,
+    PATINA_RESOLVE_NO_XDEV = 1u << 5,
+    PATINA_RESOLVE_CACHED = 1u << 6,
 };
 /*
  * The resolver itself, for the callers that want the canonical NAME
@@ -248,6 +258,15 @@ uint32_t patina_umask(uint32_t mask);
  */
 int32_t patina_openat(int32_t dirfd, const char *path, uint32_t flags, uint32_t mode);
 /*
+ * openat2(2) past its struct open_how checks: patina_openat with the
+ * resolution restricted by `resolve` (PATINA_RESOLVE_BENEATH, _IN_ROOT,
+ * _NO_SYMLINKS, _NO_XDEV, _CACHED; any other bit is EINVAL).
+ */
+#ifdef __linux__
+int32_t patina_openat2(int32_t dirfd, const char *path, uint32_t flags, uint32_t mode,
+                       uint32_t resolve);
+#endif
+/*
  * The universal descriptor operations: each resolves the guest number once and
  * dispatches on what it names, answering what the kernel answers for a kind
  * that has no such operation (ESPIPE for a positional op or lseek on a pipe,
@@ -259,6 +278,22 @@ intptr_t patina_read(int32_t fd, void *destination, size_t length);
 intptr_t patina_write(int32_t fd, const void *source, size_t length);
 intptr_t patina_pread(int32_t fd, void *destination, size_t length, int64_t offset);
 intptr_t patina_pwrite(int32_t fd, const void *source, size_t length, int64_t offset);
+/*
+ * Vectored I/O over a `struct iovec` array of `count` segments: readv/writev at
+ * the cursor, preadv/pwritev at `offset` (which never moves the cursor). The
+ * vector is judged as the kernel's lib/iov_iter.c judges it (a count past
+ * UIO_MAXIOV or negative, and a segment length negative as an ssize_t, are
+ * EINVAL; a NULL vector with a count is EFAULT) after the descriptor and its
+ * access mode. `flags` are the Linux RWF_* bits of preadv2/pwritev2 (0 for the
+ * plain rows): an unknown bit is EOPNOTSUPP, RWF_NOWAIT never waits,
+ * RWF_APPEND writes at the end, RWF_DSYNC/RWF_SYNC make the bytes durable.
+ */
+intptr_t patina_readv(int32_t fd, const void *vector, int64_t count, int32_t flags);
+intptr_t patina_writev(int32_t fd, const void *vector, int64_t count, int32_t flags);
+intptr_t patina_preadv(int32_t fd, const void *vector, int64_t count, int64_t offset,
+                       int32_t flags);
+intptr_t patina_pwritev(int32_t fd, const void *vector, int64_t count, int64_t offset,
+                        int32_t flags);
 int32_t patina_close(int32_t fd);
 int64_t patina_seek(int32_t fd, int64_t offset, uint32_t whence);
 int32_t patina_fsync(int32_t fd);
@@ -273,6 +308,15 @@ int32_t patina_set_len(int32_t fd, uint64_t length);
  * a real kernel. The lock clears on LOCK_UN and with the description.
  */
 int32_t patina_flock(int32_t fd, int32_t operation);
+/*
+ * ioctl(2)'s generic descriptor requests, `request` in the platform's own
+ * numbering: FIOCLEX/FIONCLEX set/clear FD_CLOEXEC, FIONBIO reads an int
+ * through `arg` (EFAULT for NULL) into the description's O_NONBLOCK, FIONREAD
+ * writes an int (a regular file's size minus its position, a pipe's queued
+ * bytes; EFAULT for NULL). An O_PATH descriptor is EBADF; any other request,
+ * and FIONREAD on a descriptor with no such answer, is ENOTTY.
+ */
+int32_t patina_ioctl(int32_t fd, uint64_t request, void *arg);
 /*
  * The descriptor table itself. patina_fd_kind answers PATINA_FD_* or -1/EBADF.
  * patina_fd_limit is RLIMIT_NOFILE as the table enforces it (EMFILE at and
@@ -331,6 +375,30 @@ enum {
      * like any other name); the bytes flowing through it are not, so one always
      * reports length 0. */
     PATINA_ENTRY_FIFO = 4,
+    /* A socket node: mknod(S_IFSOCK), or a socketpair end's sockfs inode. */
+    PATINA_ENTRY_SOCKET = 5,
+    /* A character device: the whiteout (0:0) mknod(S_IFCHR, 0) and
+     * renameat2(RENAME_WHITEOUT) leave. */
+    PATINA_ENTRY_CHAR = 6,
+};
+
+/*
+ * The filesystem a node is on (`fs` of struct patina_metadata), which decides
+ * the device st_dev/stx_dev_* report: the deterministic volume (an ext4-like
+ * filesystem on block device 8:1) holds every entry a path can name; an
+ * anonymous pipe's node is on pipefs and a socketpair end's on sockfs, each an
+ * anonymous device of its own, as on Linux.
+ */
+enum {
+    PATINA_FS_VOLUME = 0,
+    PATINA_FS_PIPEFS = 1,
+    PATINA_FS_SOCKFS = 2,
+};
+enum {
+    PATINA_VOLUME_DEV_MAJOR = 8,
+    PATINA_VOLUME_DEV_MINOR = 1,
+    PATINA_PIPEFS_DEV_MINOR = 14,
+    PATINA_SOCKFS_DEV_MINOR = 8,
 };
 
 /*
@@ -347,7 +415,7 @@ struct patina_metadata {
     uint32_t kind;
     uint32_t mode;
     uint32_t nlink;
-    uint32_t reserved;
+    uint32_t fs; /* PATINA_FS_* */
     uint64_t length;
     uint64_t ino;
     uint64_t atime_nanos;
@@ -363,6 +431,61 @@ struct patina_metadata {
 int32_t patina_metadata_at(int32_t dirfd, const char *path, uint32_t flags,
                            struct patina_metadata *out);
 int32_t patina_fd_metadata_full(int32_t fd, struct patina_metadata *out);
+#ifdef __linux__
+/*
+ * Linux statfs(2)/fstatfs(2)/ustat(2): the filesystem a path (a trailing
+ * symlink followed) or a descriptor (O_PATH included) is on, written into the
+ * kernel's 64-bit `struct statfs` (glibc's layout too) or x86_64 `struct
+ * ustat`. The deterministic volume is one constant ext4-like description;
+ * a pipe, a socket, an eventfd/signalfd/epoll descriptor answer their
+ * pseudo-filesystem's (PIPEFS_MAGIC, SOCKFS_MAGIC, ANON_INODE_FS_MAGIC).
+ * f_flags carries ST_VALID. A NULL buffer is EFAULT once everything else was
+ * judged; ustat of a device no filesystem is on is EINVAL before the buffer.
+ */
+int32_t patina_statfs(const char *path, void *out);
+int32_t patina_fstatfs(int32_t fd, void *out);
+int32_t patina_ustat(uint32_t dev, void *out);
+/*
+ * Linux extended attributes. A non-NULL `path` names the entry (`follow`
+ * nonzero follows a final symlink, zero is the l* rows), a NULL one the
+ * descriptor `fd` (O_PATH is EBADF). setxattr judges flags (XATTR_CREATE/
+ * XATTR_REPLACE, EINVAL otherwise), the name (1..=255 bytes, ERANGE) and the
+ * value (XATTR_SIZE_MAX, E2BIG) before the path; getxattr/removexattr after
+ * it. get/list answer the size protocol: a zero size asks for the length, a
+ * short buffer is ERANGE.
+ */
+intptr_t patina_getxattr(int32_t fd, const char *path, int32_t follow, const char *name,
+                         void *value, size_t size);
+intptr_t patina_listxattr(int32_t fd, const char *path, int32_t follow, void *list, size_t size);
+int32_t patina_setxattr(int32_t fd, const char *path, int32_t follow, const char *name,
+                        const void *value, size_t size, int32_t flags);
+int32_t patina_removexattr(int32_t fd, const char *path, int32_t follow, const char *name);
+/*
+ * Linux in-kernel copies, each with its syscall's contract and refusal order:
+ * copy_file_range between two regular files (offsets read and advanced
+ * through the pointers, or the cursors when NULL), sendfile from a regular
+ * file into anything writable, splice/tee between pipes and files, and
+ * vmsplice of a `struct iovec` vector into or out of a pipe.
+ */
+intptr_t patina_copy_file_range(int32_t fd_in, int64_t *off_in, int32_t fd_out, int64_t *off_out,
+                                size_t len, uint32_t flags);
+intptr_t patina_sendfile(int32_t out_fd, int32_t in_fd, int64_t *offset, size_t count);
+intptr_t patina_splice(int32_t fd_in, int64_t *off_in, int32_t fd_out, int64_t *off_out,
+                       size_t len, uint32_t flags);
+intptr_t patina_tee(int32_t fd_in, int32_t fd_out, size_t len, uint32_t flags);
+intptr_t patina_vmsplice(int32_t fd, const void *vector, int64_t count, uint32_t flags);
+/*
+ * Linux page-cache advice and writeback, validated as the kernel validates
+ * them over a filesystem with no page cache: posix_fadvise/readahead/
+ * sync_file_range are no-ops past their refusals; sync makes the volume
+ * durable and never fails; syncfs makes the descriptor's filesystem durable.
+ */
+int32_t patina_fadvise(int32_t fd, int64_t offset, int64_t length, int32_t advice);
+int32_t patina_readahead(int32_t fd, int64_t offset, size_t count);
+int32_t patina_sync_file_range(int32_t fd, int64_t offset, int64_t length, uint32_t flags);
+int32_t patina_sync(void);
+int32_t patina_syncfs(int32_t fd);
+#endif
 /*
  * The one modeled identity (uid/gid 1000): the ONE accessor getuid/geteuid,
  * getgid/getegid, every st_uid/st_gid, and the chown comparison read.
@@ -447,9 +570,26 @@ void patina_read_dir_free(void *state);
  */
 int32_t patina_mkdir(int32_t dirfd, const char *path, uint32_t mode);
 int32_t patina_mkfifo(int32_t dirfd, const char *path, uint32_t mode);
+/*
+ * mknod(2)/mknodat(2) in the kernel's order: the type (S_IFDIR EPERM, an
+ * unknown type EINVAL) before the path, then the name (ENOENT, EEXIST), the
+ * parent's write access (EACCES), and the privilege a real device needs
+ * (EPERM; the 0:0 whiteout needs none). A zero type or S_IFREG makes a regular
+ * file, S_IFIFO a FIFO, S_IFSOCK a socket node, S_IFCHR 0:0 a whiteout. `dev`
+ * is the kernel's 32-bit device word; the mode is applied under the umask.
+ * Darwin: a FIFO is mkfifo, every other type EPERM.
+ */
+int32_t patina_mknod(int32_t dirfd, const char *path, uint32_t mode, uint32_t dev);
 int32_t patina_unlink(int32_t dirfd, const char *path);
 int32_t patina_rmdir(int32_t dirfd, const char *path);
-int32_t patina_rename(int32_t fromfd, const char *from, int32_t tofd, const char *to);
+/*
+ * rename/renameat (flags 0) and renameat2(2): RENAME_NOREPLACE, RENAME_EXCHANGE
+ * (an atomic swap of any two kinds) or RENAME_WHITEOUT (a 0:0 whiteout left at
+ * the old name, in the same change); an unknown bit, or EXCHANGE with either
+ * other flag, is EINVAL before the paths.
+ */
+int32_t patina_renameat2(int32_t fromfd, const char *from, int32_t tofd, const char *to,
+                         uint32_t flags);
 int32_t patina_symlink(const char *target, int32_t dirfd, const char *link_path);
 int32_t patina_link(int32_t fromfd, const char *from, int32_t tofd, const char *to,
                     int32_t follow);

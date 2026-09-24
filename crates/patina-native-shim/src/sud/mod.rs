@@ -82,10 +82,33 @@ unsafe extern "C" {
     // The one open entry (`openat(2)` shape): resolves `(dirfd, path)` through
     // the runtime's resolver and decides the descriptor's kind from the entry's.
     fn patina_openat(dirfd: c_int, path: *const c_char, flags: u32, mode: u32) -> c_int;
+    fn patina_openat2(
+        dirfd: c_int,
+        path: *const c_char,
+        flags: u32,
+        mode: u32,
+        resolve: u32,
+    ) -> c_int;
     fn patina_read(fd: c_int, destination: *mut c_void, length: usize) -> isize;
     fn patina_write(fd: c_int, source: *const c_void, length: usize) -> isize;
     fn patina_pread(fd: c_int, destination: *mut c_void, length: usize, offset: i64) -> isize;
     fn patina_pwrite(fd: c_int, source: *const c_void, length: usize, offset: i64) -> isize;
+    fn patina_readv(fd: c_int, vector: *const c_void, count: i64, flags: i32) -> isize;
+    fn patina_writev(fd: c_int, vector: *const c_void, count: i64, flags: i32) -> isize;
+    fn patina_preadv(
+        fd: c_int,
+        vector: *const c_void,
+        count: i64,
+        offset: i64,
+        flags: i32,
+    ) -> isize;
+    fn patina_pwritev(
+        fd: c_int,
+        vector: *const c_void,
+        count: i64,
+        offset: i64,
+        flags: i32,
+    ) -> isize;
     fn patina_close(fd: c_int) -> c_int;
     fn patina_seek(fd: c_int, offset: i64, whence: u32) -> i64;
     fn patina_fsync(fd: c_int) -> c_int;
@@ -98,7 +121,6 @@ unsafe extern "C" {
     fn patina_raw_exit(status: c_int) -> !;
     fn patina_raw_exit_group(status: c_int) -> !;
     fn patina_set_tid_address(address: *mut i32) -> i64;
-    fn patina_stdio_write(fd: c_int, source: *const c_void, length: usize) -> isize;
     fn patina_futex_wait(addr: usize, expected: u32) -> c_int;
     fn patina_futex_wait_timed(
         addr: usize,
@@ -118,6 +140,66 @@ unsafe extern "C" {
         out: *mut PatinaMetadata,
     ) -> c_int;
     fn patina_fd_metadata_full(fd: c_int, out: *mut PatinaMetadata) -> c_int;
+    fn patina_statfs(path: *const c_char, out: *mut c_void) -> c_int;
+    // Extended attributes: a non-null `path` names the entry (`follow`
+    // choosing the `l*` rows), a NULL one the descriptor `fd`.
+    fn patina_getxattr(
+        fd: c_int,
+        path: *const c_char,
+        follow: c_int,
+        name: *const c_char,
+        value: *mut c_void,
+        size: usize,
+    ) -> isize;
+    fn patina_listxattr(
+        fd: c_int,
+        path: *const c_char,
+        follow: c_int,
+        list: *mut c_void,
+        size: usize,
+    ) -> isize;
+    fn patina_setxattr(
+        fd: c_int,
+        path: *const c_char,
+        follow: c_int,
+        name: *const c_char,
+        value: *const c_void,
+        size: usize,
+        flags: c_int,
+    ) -> c_int;
+    fn patina_removexattr(
+        fd: c_int,
+        path: *const c_char,
+        follow: c_int,
+        name: *const c_char,
+    ) -> c_int;
+    // In-kernel copies.
+    fn patina_copy_file_range(
+        fd_in: c_int,
+        off_in: *mut i64,
+        fd_out: c_int,
+        off_out: *mut i64,
+        len: usize,
+        flags: u32,
+    ) -> isize;
+    fn patina_sendfile(out_fd: c_int, in_fd: c_int, offset: *mut i64, count: usize) -> isize;
+    fn patina_splice(
+        fd_in: c_int,
+        off_in: *mut i64,
+        fd_out: c_int,
+        off_out: *mut i64,
+        len: usize,
+        flags: u32,
+    ) -> isize;
+    fn patina_tee(fd_in: c_int, fd_out: c_int, len: usize, flags: u32) -> isize;
+    fn patina_vmsplice(fd: c_int, vector: *const c_void, count: i64, flags: u32) -> isize;
+    // Page-cache advice and writeback.
+    fn patina_fadvise(fd: c_int, offset: i64, length: i64, advice: c_int) -> c_int;
+    fn patina_readahead(fd: c_int, offset: i64, count: usize) -> c_int;
+    fn patina_sync_file_range(fd: c_int, offset: i64, length: i64, flags: u32) -> c_int;
+    fn patina_sync() -> c_int;
+    fn patina_syncfs(fd: c_int) -> c_int;
+    fn patina_fstatfs(fd: c_int, out: *mut c_void) -> c_int;
     // The one modeled identity, for st_uid/st_gid.
     fn patina_uid() -> u32;
     fn patina_gid() -> u32;
@@ -155,10 +237,10 @@ unsafe extern "C" {
     fn patina_fd_setfd(fd: c_int, cloexec: c_int) -> c_int;
     fn patina_fd_getfl(fd: c_int) -> c_int;
     fn patina_fd_setfl(fd: c_int, flags: u32) -> c_int;
-    fn patina_fd_set_nonblocking(fd: c_int, nonblocking: c_int) -> c_int;
     fn patina_dupfd(fd: c_int, minimum: c_int, cloexec: c_int) -> c_int;
     fn patina_dup3(oldfd: c_int, newfd: c_int, cloexec: c_int) -> c_int;
     fn patina_close_range(first: u32, last: u32, flags: u32) -> c_int;
+    fn patina_ioctl(fd: c_int, request: u64, arg: *mut c_void) -> c_int;
     fn patina_pipe_size(fd: c_int) -> c_int;
     fn patina_pipe_set_size(fd: c_int, size: c_int) -> c_int;
     fn patina_read_dir_next(
@@ -171,10 +253,16 @@ unsafe extern "C" {
     // The namespace operations, each on a `(dirfd, path)` the runtime resolves
     // — the same entries the C interposers of the same names call.
     fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u32) -> c_int;
-    fn patina_mkfifo(dirfd: c_int, path: *const c_char, mode: u32) -> c_int;
+    fn patina_mknod(dirfd: c_int, path: *const c_char, mode: u32, dev: u32) -> c_int;
     fn patina_unlink(dirfd: c_int, path: *const c_char) -> c_int;
     fn patina_rmdir(dirfd: c_int, path: *const c_char) -> c_int;
-    fn patina_rename(fromfd: c_int, from: *const c_char, tofd: c_int, to: *const c_char) -> c_int;
+    fn patina_renameat2(
+        fromfd: c_int,
+        from: *const c_char,
+        tofd: c_int,
+        to: *const c_char,
+        flags: u32,
+    ) -> c_int;
     fn patina_symlink(target: *const c_char, dirfd: c_int, link_path: *const c_char) -> c_int;
     fn patina_link(
         fromfd: c_int,
@@ -253,8 +341,6 @@ unsafe extern "C" {
 // The kernel ABI's own values, from its uapi headers for the target
 // architecture (`linux-raw-sys`): errno values shape raw-syscall returns
 // (`-errno`), and every flag word below is decoded with them.
-const EPERM: i64 = errno::EPERM as i64;
-
 const ERANGE: i64 = errno::ERANGE as i64;
 
 const EBADF: i64 = errno::EBADF as i64;
@@ -270,8 +356,6 @@ const ESRCH: i64 = errno::ESRCH as i64;
 const ENOTDIR: i64 = errno::ENOTDIR as i64;
 
 const EINVAL: i64 = errno::EINVAL as i64;
-
-const ENOTTY: i64 = errno::ENOTTY as i64;
 
 const ENOSYS: i64 = errno::ENOSYS as i64;
 
@@ -290,6 +374,10 @@ const EPROTONOSUPPORT: i64 = errno::EPROTONOSUPPORT as i64;
 const EPROTOTYPE: i64 = errno::EPROTOTYPE as i64;
 
 const EIO: i64 = errno::EIO as i64;
+
+const EOVERFLOW: i64 = errno::EOVERFLOW as i64;
+
+const E2BIG: i64 = errno::E2BIG as i64;
 
 // The descriptor kinds `patina_fd_kind` answers (`PATINA_FD_*` in
 // `patina_native.h`): the one oracle a row consults when its meaning depends
@@ -335,6 +423,16 @@ const PATINA_O_DIRECTORY: u32 = 1 << 11;
 const PATINA_RESOLVE_NOFOLLOW: u32 = 1 << 0;
 
 const PATINA_RESOLVE_EMPTY_PATH: u32 = 1 << 1;
+
+const PATINA_RESOLVE_BENEATH: u32 = 1 << 2;
+
+const PATINA_RESOLVE_IN_ROOT: u32 = 1 << 3;
+
+const PATINA_RESOLVE_NO_SYMLINKS: u32 = 1 << 4;
+
+const PATINA_RESOLVE_NO_XDEV: u32 = 1 << 5;
+
+const PATINA_RESOLVE_CACHED: u32 = 1 << 6;
 
 // Kernel `open(2)` flag bits: x86_64 and arm64 disagree on `O_DIRECTORY`,
 // `O_NOFOLLOW`, `O_DIRECT` and `O_LARGEFILE`.
@@ -408,6 +506,10 @@ const PATINA_ENTRY_SYMLINK: u32 = 3;
 
 const PATINA_ENTRY_FIFO: u32 = 4;
 
+const PATINA_ENTRY_SOCKET: u32 = 5;
+
+const PATINA_ENTRY_CHAR: u32 = 6;
+
 // getdents64 `d_type` values (linux_dirent64).
 const DT_FIFO: u8 = uapi::DT_FIFO as u8;
 
@@ -416,6 +518,10 @@ const DT_DIR: u8 = uapi::DT_DIR as u8;
 const DT_REG: u8 = uapi::DT_REG as u8;
 
 const DT_LNK: u8 = uapi::DT_LNK as u8;
+
+const DT_SOCK: u8 = uapi::DT_SOCK as u8;
+
+const DT_CHR: u8 = uapi::DT_CHR as u8;
 
 // File-mode bits for the kernel `struct stat`/`struct statx` (mirrors the C
 // `patina_mode_for_kind`).
@@ -427,12 +533,9 @@ const S_IFREG: u32 = uapi::S_IFREG;
 
 const S_IFLNK: u32 = uapi::S_IFLNK;
 
-/// `S_IFMT`: the file-type field of a `mode_t`, which `mknodat` carries.
-const S_IFMT: u64 = uapi::S_IFMT as u64;
+const S_IFSOCK: u32 = uapi::S_IFSOCK;
 
-const S_IFCHR: u64 = uapi::S_IFCHR as u64;
-
-const S_IFBLK: u64 = uapi::S_IFBLK as u64;
+const S_IFCHR: u32 = uapi::S_IFCHR;
 
 // `*at` flag bits.
 const AT_SYMLINK_NOFOLLOW: u64 = uapi::AT_SYMLINK_NOFOLLOW as u64;
@@ -522,15 +625,6 @@ struct KernelFlock {
 }
 
 const FD_CLOEXEC: i64 = uapi::FD_CLOEXEC as i64;
-
-// `ioctl(2)` request numbers used by nonblocking-flag toggling on virtual fds.
-// (No FIONREAD row: the C ioctl models none, so a raw FIONREAD must fall to the
-// same `-ENOTTY` an interposed one gets, not a fabricated 0.)
-const FIONBIO: u64 = 0x5421;
-
-const FIOCLEX: u64 = 0x5451;
-
-const FIONCLEX: u64 = 0x5450;
 
 // `socket(2)` domain / type / protocol constants (Linux, arch-independent).
 const AF_INET: u16 = 2;
@@ -675,26 +769,6 @@ fn ret_isize(result: isize) -> i64 {
     } else {
         result as i64
     }
-}
-
-/// A soft, DIAGNOSTIC deny — the SUD counterpart of the C `patina_posix_deny`.
-/// It writes the byte-identical line to the CAPTURED stderr (fd 2, the recorded
-/// stream) through the same `patina_stdio_write` entry the fd-2 write row uses,
-/// then returns `-ENOSYS`. This is what gives a raw-backend guest and a
-/// libc-backend guest the SAME recorded stderr when they hit the same refusal,
-/// so trace / fingerprint comparison across the two backends does not diverge.
-/// (Distinct from [`crate::trap_fatal`], which aborts and writes to the REAL host
-/// stderr; a deny is a recoverable soft error the guest observes as `-ENOSYS`.)
-/// `message` must be byte-for-byte identical to the C interposer's deny string,
-/// including the `patina: ` prefix and trailing newline.
-fn sud_deny(message: &str) -> i64 {
-    // SAFETY: writing a byte slice to the captured-stderr runtime entry; when no
-    // runtime is installed (unit tests) `patina_stdio_write` still appends to the
-    // global capture buffer and returns, so this is side-effect-safe there too.
-    unsafe {
-        let _ = patina_stdio_write(2, message.as_ptr() as *const c_void, message.len());
-    }
-    -ENOSYS
 }
 
 /// The SIGSYS dispatch entry point. The C handler passes the decoded syscall
@@ -958,10 +1032,22 @@ const BINDINGS: &[(Syscall, Handler)] = &[
         sys_pwrite(arg_fd(a[0]), a[1], a[2], a[3] as i64)
     }),
     (Syscall::N_readv, |_, a| {
-        sys_readv(arg_fd(a[0]), a[1], a[2] as i64)
+        sys_readv(arg_fd(a[0]), a[1], a[2], 0)
     }),
     (Syscall::N_writev, |_, a| {
-        sys_writev(arg_fd(a[0]), a[1], a[2] as i64)
+        sys_writev(arg_fd(a[0]), a[1], a[2], 0)
+    }),
+    (Syscall::N_preadv, |_, a| {
+        sys_preadv(arg_fd(a[0]), a[1], a[2], a[3] as i64, 0)
+    }),
+    (Syscall::N_pwritev, |_, a| {
+        sys_pwritev(arg_fd(a[0]), a[1], a[2], a[3] as i64, 0)
+    }),
+    (Syscall::N_preadv2, |_, a| {
+        sys_preadv2(arg_fd(a[0]), a[1], a[2], a[3] as i64, a[5])
+    }),
+    (Syscall::N_pwritev2, |_, a| {
+        sys_pwritev2(arg_fd(a[0]), a[1], a[2], a[3] as i64, a[5])
     }),
     (Syscall::N_fsync, |_, a| sys_fsync(arg_fd(a[0]))),
     (Syscall::N_fdatasync, |_, a| sys_fsync(arg_fd(a[0]))),
@@ -988,6 +1074,9 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_openat, |_, a| {
         sys_openat(arg_fd(a[0]), a[1], a[2], a[3])
     }),
+    (Syscall::N_openat2, |_, a| {
+        sys_openat2(arg_fd(a[0]), a[1], a[2], a[3])
+    }),
     (Syscall::N_fstat, |_, a| sys_fstat(arg_fd(a[0]), a[1])),
     (Syscall::N_newfstatat, |_, a| {
         sys_newfstatat(arg_fd(a[0]), a[1], a[2], a[3])
@@ -995,6 +1084,128 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_statx, |_, a| {
         sys_statx(arg_fd(a[0]), a[1], a[2], a[3], a[4])
     }),
+    (Syscall::N_statfs, |_, a| sys_statfs(a[0], a[1])),
+    (Syscall::N_name_to_handle_at, |_, a| {
+        sys_name_to_handle_at(arg_fd(a[0]), a[1], a[2], a[3], a[4])
+    }),
+    // ---- extended attributes ----
+    (Syscall::N_getxattr, |_, a| {
+        sys_getxattr(a[0], a[1], a[2], a[3], true)
+    }),
+    (Syscall::N_lgetxattr, |_, a| {
+        sys_getxattr(a[0], a[1], a[2], a[3], false)
+    }),
+    (Syscall::N_fgetxattr, |_, a| {
+        sys_fgetxattr(arg_fd(a[0]), a[1], a[2], a[3])
+    }),
+    (Syscall::N_listxattr, |_, a| {
+        sys_listxattr(a[0], a[1], a[2], true)
+    }),
+    (Syscall::N_llistxattr, |_, a| {
+        sys_listxattr(a[0], a[1], a[2], false)
+    }),
+    (Syscall::N_flistxattr, |_, a| {
+        sys_flistxattr(arg_fd(a[0]), a[1], a[2])
+    }),
+    (Syscall::N_setxattr, |_, a| {
+        sys_setxattr(a[0], a[1], a[2], a[3], a[4], true)
+    }),
+    (Syscall::N_lsetxattr, |_, a| {
+        sys_setxattr(a[0], a[1], a[2], a[3], a[4], false)
+    }),
+    (Syscall::N_fsetxattr, |_, a| {
+        sys_fsetxattr(arg_fd(a[0]), a[1], a[2], a[3], a[4])
+    }),
+    (Syscall::N_removexattr, |_, a| {
+        sys_removexattr(a[0], a[1], true)
+    }),
+    (Syscall::N_lremovexattr, |_, a| {
+        sys_removexattr(a[0], a[1], false)
+    }),
+    (Syscall::N_fremovexattr, |_, a| {
+        sys_fremovexattr(arg_fd(a[0]), a[1])
+    }),
+    // ---- in-kernel copies ----
+    // SAFETY (all five): the pointers are the guest's per each row's contract.
+    (Syscall::N_copy_file_range, |_, a| {
+        ret_isize(unsafe {
+            patina_copy_file_range(
+                arg_fd(a[0]) as c_int,
+                a[1] as *mut i64,
+                arg_fd(a[2]) as c_int,
+                a[3] as *mut i64,
+                a[4] as usize,
+                a[5] as u32,
+            )
+        })
+    }),
+    (Syscall::N_sendfile, |_, a| {
+        ret_isize(unsafe {
+            patina_sendfile(
+                arg_fd(a[0]) as c_int,
+                arg_fd(a[1]) as c_int,
+                a[2] as *mut i64,
+                a[3] as usize,
+            )
+        })
+    }),
+    (Syscall::N_splice, |_, a| {
+        ret_isize(unsafe {
+            patina_splice(
+                arg_fd(a[0]) as c_int,
+                a[1] as *mut i64,
+                arg_fd(a[2]) as c_int,
+                a[3] as *mut i64,
+                a[4] as usize,
+                a[5] as u32,
+            )
+        })
+    }),
+    (Syscall::N_tee, |_, a| {
+        ret_isize(unsafe {
+            patina_tee(
+                arg_fd(a[0]) as c_int,
+                arg_fd(a[1]) as c_int,
+                a[2] as usize,
+                a[3] as u32,
+            )
+        })
+    }),
+    (Syscall::N_vmsplice, |_, a| {
+        ret_isize(unsafe {
+            patina_vmsplice(
+                arg_fd(a[0]) as c_int,
+                a[1] as *const c_void,
+                a[2] as i64,
+                a[3] as u32,
+            )
+        })
+    }),
+    // ---- page-cache advice and writeback ----
+    // SAFETY (all five): plain runtime entries with no pointers.
+    (Syscall::N_sync, |_, _| ret_i32(unsafe { patina_sync() })),
+    (Syscall::N_syncfs, |_, a| {
+        ret_i32(unsafe { patina_syncfs(arg_fd(a[0]) as c_int) })
+    }),
+    (Syscall::N_sync_file_range, |_, a| {
+        ret_i32(unsafe {
+            patina_sync_file_range(arg_fd(a[0]) as c_int, a[1] as i64, a[2] as i64, a[3] as u32)
+        })
+    }),
+    (Syscall::N_readahead, |_, a| {
+        ret_i32(unsafe { patina_readahead(arg_fd(a[0]) as c_int, a[1] as i64, a[2] as usize) })
+    }),
+    (Syscall::N_fadvise64, |_, a| {
+        ret_i32(unsafe {
+            patina_fadvise(
+                arg_fd(a[0]) as c_int,
+                a[1] as i64,
+                a[2] as i64,
+                a[3] as c_int,
+            )
+        })
+    }),
+    (Syscall::N_fstatfs, |_, a| sys_fstatfs(arg_fd(a[0]), a[1])),
     (Syscall::N_getdents64, |_, a| {
         sys_getdents64(arg_fd(a[0]), a[1], a[2])
     }),
@@ -1058,9 +1269,6 @@ const BINDINGS: &[(Syscall, Handler)] = &[
         sys_fchown(arg_fd(a[0]), a[1], a[2])
     }),
     (Syscall::N_truncate, |_, a| sys_truncate(a[0], a[1] as i64)),
-    // `openat2` is the RESOLVE_BENEATH open: a NAMED soft deny whose ENOSYS is
-    // exactly what its callers probe for before falling back to `openat`.
-    (Syscall::N_openat2, |_, _| sud_deny(DENY_OPENAT2)),
     // ---- network ----
     (Syscall::N_socket, |_, a| sys_socket(a[0], a[1], a[2])),
     (Syscall::N_bind, |_, a| {
@@ -1208,6 +1416,12 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_dup2, |_, a| sys_dup2(arg_fd(a[0]), arg_fd(a[1]))),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_ustat, |_, a| sys_ustat(a[0], a[1])),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_getdents, |_, a| {
+        sys_getdents(arg_fd(a[0]), a[1], a[2])
+    }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_pipe, |_, a| sys_pipe2(a[0], 0)),
     #[cfg(target_arch = "x86_64")]
@@ -1437,51 +1651,6 @@ mod tests {
         assert_eq!(arg_fd(0x4000_0005), 0x4000_0005);
     }
 
-    /// The deny strings SUD and the C interposers emit for the same refusal must
-    /// be byte-identical, or a raw-syscall guest and a libc guest record
-    /// different stderr for the same event and their traces diverge on the
-    /// refusal alone. `sud_deny`'s doc comment states the rule; this makes it a
-    /// gate. RED: change either spelling and the assertion names both.
-    #[test]
-    fn every_shared_deny_matches_the_c_interposer_byte_for_byte() {
-        // (The O_PATH|O_NOFOLLOW-on-a-symlink deny has no row: it is emitted
-        // by the one Rust open entry both doors call, so there is no second
-        // spelling to keep in step.) Adding a deny that BOTH doors can reach
-        // means adding an assertion here.
-        assert_eq!(
-            c_deny_macro("PATINA_DENY_MKNOD_TYPE"),
-            DENY_MKNOD_TYPE,
-            "the SUD and C deny strings for a mknod of a special file that is not a FIFO \
-             differ; a raw-syscall guest and a libc guest would record different stderr"
-        );
-    }
-
-    /// Expand a `#define`d C deny string from the shim's C (the shared deny
-    /// strings live in `c/posix/core.c`), concatenating its continuation lines'
-    /// string literals exactly as the preprocessor does.
-    fn c_deny_macro(macro_name: &str) -> String {
-        const C_SOURCE: &str = include_str!("../../c/posix/core.c");
-        let define = format!("#define {macro_name}");
-        let start = C_SOURCE
-            .find(&define)
-            .unwrap_or_else(|| panic!("{macro_name} is not defined in c/posix/core.c"));
-        let mut message = String::new();
-        for line in C_SOURCE[start..].lines() {
-            let mut rest = line;
-            while let Some(open) = rest.find('"') {
-                let tail = &rest[open + 1..];
-                let close = tail.find('"').expect("unterminated C string literal");
-                message.push_str(&tail[..close]);
-                rest = &tail[close + 1..];
-            }
-            if !line.trim_end().ends_with('\\') {
-                break;
-            }
-        }
-        // The only escape either spelling uses is the trailing newline.
-        message.replace("\\n", "\n")
-    }
-
     #[test]
     fn sendmsg_recvmsg_mirror_the_interposer_enosys_never_fragment() {
         // The C sendmsg/recvmsg interposers fail closed with ENOSYS; the SUD
@@ -1649,13 +1818,13 @@ mod tests {
         assert_eq!(sys_fcntl(2, F_SETFL, 0), 0);
         assert_eq!(sys_fcntl(2, F_GETFL, 0), O_WRONLY as i64);
         // ioctl: FIOCLEX/FIONCLEX are the FD_CLOEXEC bit; an unknown request is
-        // a soft -ENOTTY on an open number (never fatal, never a fake
-        // FIONREAD=0) and -EBADF on a closed one.
+        // a soft -ENOTTY on an open number and -EBADF on a closed one.
+        use crate::ioctl::request::{FIOCLEX, FIONCLEX};
         assert_eq!(sys_ioctl(2, FIOCLEX, 0), 0);
         assert_eq!(sys_fcntl(2, F_GETFD, 0), FD_CLOEXEC);
         assert_eq!(sys_ioctl(2, FIONCLEX, 0), 0);
         assert_eq!(sys_fcntl(2, F_GETFD, 0), 0);
-        assert_eq!(sys_ioctl(2, 0x1234, 0), -ENOTTY);
+        assert_eq!(sys_ioctl(2, 0x1234, 0), -(errno::ENOTTY as i64));
         assert_eq!(sys_ioctl(5, 0x1234, 0), -EBADF);
         assert_eq!(sys_ioctl(5, FIOCLEX, 0), -EBADF);
     }
@@ -1702,11 +1871,11 @@ mod tests {
         assert_eq!(sys_statx(bad_fd, path, unknown_at, 0, 0), -EINVAL);
         assert_eq!(sys_statx(bad_fd, path, AT_STATX_SYNC_TYPE, 0, 0), -EINVAL);
         assert_eq!(sys_statx(bad_fd, path, 0, STATX__RESERVED, 0), -EINVAL);
-        // flock: LOCK_MAND on an open descriptor is answered 0 and ignored; on
-        // a closed one the descriptor is judged first.
+        // flock: LOCK_MAND is answered 0 and ignored before anything else is
+        // judged (`fs/locks.c`), so a closed descriptor is 0 too.
         let mand = LOCK_MAND as i64 | LOCK_SH as i64;
         assert_eq!(sys_flock(2, mand), 0);
-        assert_eq!(sys_flock(5, mand), -EBADF);
+        assert_eq!(sys_flock(5, mand), 0);
     }
 
     #[test]

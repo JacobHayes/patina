@@ -8,9 +8,7 @@
 //! do_fchmodat) takes AT_SYMLINK_NOFOLLOW (EOPNOTSUPP on a symlink itself,
 //! harmless on anything else) and AT_EMPTY_PATH, and any other flag is EINVAL.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -270,71 +268,5 @@ pub const SCENARIO: Scenario = Scenario {
         release: "6.6",
         why: "fchmodat2",
     }),
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "anonymous pipes have no inode: fstat and fchmod on a pipe descriptor are EBADF, where the kernel answers from the pipe's own pipefs inode (S_IFIFO 0600, owned by the caller, chmod-able); patina_fd_metadata_full / patina_fchmod refuse a pipe kind",
-            failure: Failure::Differs(&[
-                Difference::field(38, "fstat", "errno", Observed::Str("EBADF")),
-                Difference::field(38, "fstat", "fields.gid", Observed::Null),
-                Difference::field(38, "fstat", "fields.ino", Observed::Null),
-                Difference::field(38, "fstat", "fields.kind", Observed::Null),
-                Difference::field(38, "fstat", "fields.nlink", Observed::Null),
-                Difference::field(38, "fstat", "fields.perm", Observed::Null),
-                Difference::field(38, "fstat", "fields.size", Observed::Null),
-                Difference::field(38, "fstat", "fields.uid", Observed::Null),
-                Difference::field(38, "fstat", "ret", Observed::Int(-1)),
-                Difference::check(39, "a pipe starts at 0600"),
-                Difference::field(40, "fchmod", "errno", Observed::Str("EBADF")),
-                Difference::field(40, "fchmod", "ret", Observed::Int(-1)),
-                Difference::check(41, "fchmod on a pipe reaches its inode"),
-                Difference::field(42, "fstat", "errno", Observed::Str("EBADF")),
-                Difference::field(42, "fstat", "fields.gid", Observed::Null),
-                Difference::field(42, "fstat", "fields.ino", Observed::Null),
-                Difference::field(42, "fstat", "fields.kind", Observed::Null),
-                Difference::field(42, "fstat", "fields.nlink", Observed::Null),
-                Difference::field(42, "fstat", "fields.perm", Observed::Null),
-                Difference::field(42, "fstat", "fields.size", Observed::Null),
-                Difference::field(42, "fstat", "fields.uid", Observed::Null),
-                Difference::field(42, "fstat", "ret", Observed::Int(-1)),
-                Difference::check(43, "both ends see the pipe inode's new mode"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "path resolution order: an empty path relative to a file descriptor is ENOTDIR, where the kernel refuses the empty name first (getname: ENOENT) unless AT_EMPTY_PATH (crates/patina-native-shim/src/paths.rs judges the dirfd's kind before the path)",
-            failure: Failure::Differs(&[
-                Difference::field(70, "fchmodat", "errno", Observed::Str("ENOTDIR")),
-                Difference::check(71, "fchmodat of an empty path is ENOENT"),
-                Difference::field(98, "fchmodat2", "errno", Observed::Str("ENOTDIR")),
-                Difference::check(
-                    99,
-                    "fchmodat2 of an empty path without AT_EMPTY_PATH is ENOENT",
-                ),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "fchmodat2 AT_EMPTY_PATH is EINVAL (only AT_SYMLINK_NOFOLLOW is accepted), where Linux 6.6+ changes the descriptor's own inode, O_PATH included (fs/open.c do_fchmodat); the SUD fchmodat2 row and the C fchmodat flag decode",
-            failure: Failure::Differs(&[
-                Difference::field(90, "fchmodat2", "errno", Observed::Str("EINVAL")),
-                Difference::field(90, "fchmodat2", "ret", Observed::Int(-1)),
-                Difference::check(91, "fchmodat2 AT_EMPTY_PATH names the descriptor"),
-                Difference::field(92, "newfstatat", "fields.perm", Observed::Int(0o604)),
-                Difference::check(93, "the bits changed"),
-                Difference::field(94, "fchmodat2", "errno", Observed::Str("EINVAL")),
-                Difference::field(94, "fchmodat2", "ret", Observed::Int(-1)),
-                Difference::check(
-                    95,
-                    "fchmodat2 AT_EMPTY_PATH works through an O_PATH descriptor",
-                ),
-                Difference::field(96, "newfstatat", "fields.perm", Observed::Int(0o604)),
-                Difference::check(97, "the bits changed"),
-            ]),
-        },
-    ],
     ..DEFAULTS
 };

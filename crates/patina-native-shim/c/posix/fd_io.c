@@ -237,80 +237,37 @@ int close_range(unsigned int first, unsigned int last, int flags) {
 
 #endif
 
+/* Vectored I/O: thin marshaling over the one Rust implementation the SUD rows
+ * call too (the iovec import, the access-mode and position refusals, the
+ * segment-by-segment transfer). Database file backends batch a transaction's
+ * WAL frames with ONE pwritev (turso's UnixFile::pwritev is the live example),
+ * so these reach the same deterministic positional I/O as pread/pwrite. */
 ssize_t writev(int fd, const struct iovec *vectors, int count) {
-    if (count < 0 || (count > 0 && vectors == NULL)) {
-        errno = EINVAL;
-        return -1;
-    }
-    ssize_t total = 0;
-    for (int index = 0; index < count; ++index) {
-        ssize_t written = write(fd, vectors[index].iov_base, vectors[index].iov_len);
-        if (written < 0) return total > 0 ? total : -1;
-        total += written;
-        if ((size_t)written < vectors[index].iov_len) break;
-    }
-    return total;
+    return fail_size(patina_writev(fd, vectors, count, 0));
 }
 
-/* Positional vectored I/O. Database file backends batch a transaction's WAL
- * frames with ONE pwritev (turso's UnixFile::pwritev is the live example), so
- * these must reach the same deterministic positional I/O as pread/pwrite rather
- * than be denied. Each vector is one positional runtime op at an advancing
- * offset; like writev/readv, stop at the first short or failed transfer and
- * return the running total (a short transfer here is how an injected short
- * write surfaces to a vectored caller). A description without offset
- * addressing answers ESPIPE from the first vector. */
+ssize_t readv(int fd, const struct iovec *vectors, int count) {
+    return fail_size(patina_readv(fd, vectors, count, 0));
+}
+
 ssize_t preadv(int fd, const struct iovec *vectors, int count, off_t offset) {
-    if (count < 0 || (count > 0 && vectors == NULL)) { errno = EINVAL; return -1; }
-    ssize_t total = 0;
-    for (int index = 0; index < count; ++index) {
-        ssize_t consumed = fail_size(patina_pread(
-            fd, vectors[index].iov_base, vectors[index].iov_len, (int64_t)offset + (int64_t)total));
-        if (consumed < 0) return total > 0 ? total : -1;
-        total += consumed;
-        if ((size_t)consumed < vectors[index].iov_len) break;
-    }
-    return total;
+    return fail_size(patina_preadv(fd, vectors, count, (int64_t)offset, 0));
 }
 
 ssize_t pwritev(int fd, const struct iovec *vectors, int count, off_t offset) {
-    if (count < 0 || (count > 0 && vectors == NULL)) { errno = EINVAL; return -1; }
-    ssize_t total = 0;
-    for (int index = 0; index < count; ++index) {
-        ssize_t written = fail_size(patina_pwrite(
-            fd, vectors[index].iov_base, vectors[index].iov_len, (int64_t)offset + (int64_t)total));
-        if (written < 0) return total > 0 ? total : -1;
-        total += written;
-        if ((size_t)written < vectors[index].iov_len) break;
-    }
-    return total;
+    return fail_size(patina_pwritev(fd, vectors, count, (int64_t)offset, 0));
 }
 
 #ifdef __linux__
 /* Large-file variants, the same way pread64/pwrite64 mirror pread/pwrite. */
 ssize_t preadv64(int fd, const struct iovec *vectors, int count, off64_t offset) {
-    return preadv(fd, vectors, count, (off_t)offset);
+    return fail_size(patina_preadv(fd, vectors, count, (int64_t)offset, 0));
 }
 ssize_t pwritev64(int fd, const struct iovec *vectors, int count, off64_t offset) {
-    return pwritev(fd, vectors, count, (off_t)offset);
+    return fail_size(patina_pwritev(fd, vectors, count, (int64_t)offset, 0));
 }
 
 #endif
-
-ssize_t readv(int fd, const struct iovec *vectors, int count) {
-    if (count < 0 || (count > 0 && vectors == NULL)) {
-        errno = EINVAL;
-        return -1;
-    }
-    ssize_t total = 0;
-    for (int index = 0; index < count; ++index) {
-        ssize_t consumed = read(fd, vectors[index].iov_base, vectors[index].iov_len);
-        if (consumed < 0) return total > 0 ? total : -1;
-        total += consumed;
-        if ((size_t)consumed < vectors[index].iov_len) break;
-    }
-    return total;
-}
 
 off_t lseek(int fd, off_t offset, int whence) {
     uint32_t patina_whence;
@@ -414,29 +371,15 @@ static int patina_fcntl_record_lock(int fd, int command, struct flock *lock) {
 #endif
 }
 
+/* ioctl: the generic descriptor requests (FIOCLEX/FIONCLEX/FIONBIO/FIONREAD)
+ * are answered by the one Rust entry the SUD row calls too; anything else is
+ * ENOTTY there. */
 int ioctl(int fd, unsigned long request, ...) {
     va_list ap;
     va_start(ap, request);
     void *arg = va_arg(ap, void *);
     va_end(ap);
-#ifdef FIONBIO
-    if (request == (unsigned long)FIONBIO) {
-        int on = arg != NULL ? *(int *)arg : 0;
-        return fail_int(patina_fd_set_nonblocking(fd, on ? 1 : 0));
-    }
-#endif
-#ifdef FIOCLEX
-    if (request == (unsigned long)FIOCLEX) return fail_int(patina_fd_setfd(fd, 1));
-#endif
-#ifdef FIONCLEX
-    if (request == (unsigned long)FIONCLEX) return fail_int(patina_fd_setfd(fd, 0));
-#endif
-    if (patina_fd_kind(fd) < 0) {
-        errno = EBADF;
-        return -1;
-    }
-    errno = ENOTTY;
-    return -1;
+    return fail_int(patina_ioctl(fd, (uint64_t)request, arg));
 }
 
 /*

@@ -121,6 +121,8 @@ static unsigned char patina_dirent_type(uint32_t kind) {
         case PATINA_ENTRY_DIRECTORY: return DT_DIR;
         case PATINA_ENTRY_SYMLINK: return DT_LNK;
         case PATINA_ENTRY_FIFO: return DT_FIFO;
+        case PATINA_ENTRY_SOCKET: return DT_SOCK;
+        case PATINA_ENTRY_CHAR: return DT_CHR;
         case PATINA_ENTRY_FILE:
         default: return DT_REG;
     }
@@ -493,10 +495,45 @@ static mode_t patina_stat_mode(const struct patina_metadata *values) {
         case PATINA_ENTRY_DIRECTORY: type = S_IFDIR; break;
         case PATINA_ENTRY_SYMLINK: type = S_IFLNK; break;
         case PATINA_ENTRY_FIFO: type = S_IFIFO; break;
+        case PATINA_ENTRY_SOCKET: type = S_IFSOCK; break;
+        case PATINA_ENTRY_CHAR: type = S_IFCHR; break;
         case PATINA_ENTRY_FILE:
         default: type = S_IFREG; break;
     }
     return type | (mode_t)(values->mode & 07777);
+}
+
+/* The device a PATINA_FS_* filesystem reports (st_dev, stx_dev_*). */
+static void patina_fs_device(uint32_t fs, unsigned *major, unsigned *minor) {
+    switch (fs) {
+        case PATINA_FS_PIPEFS:
+            *major = 0;
+            *minor = PATINA_PIPEFS_DEV_MINOR;
+            break;
+        case PATINA_FS_SOCKFS:
+            *major = 0;
+            *minor = PATINA_SOCKFS_DEV_MINOR;
+            break;
+        case PATINA_FS_VOLUME:
+        default:
+            *major = PATINA_VOLUME_DEV_MAJOR;
+            *minor = PATINA_VOLUME_DEV_MINOR;
+            break;
+    }
+}
+
+/* The libc's own dev_t encoding of (major, minor), spelled out rather than
+ * through glibc's makedev, which is an out-of-line import (gnu_dev_makedev). */
+static dev_t patina_st_dev(const struct patina_metadata *values) {
+    unsigned major, minor;
+    patina_fs_device(values->fs, &major, &minor);
+#ifdef __APPLE__
+    return (dev_t)((major << 24) | minor);
+#else
+    uint64_t major64 = major, minor64 = minor;
+    return (dev_t)(((major64 & 0xfffff000u) << 32) | ((major64 & 0xfffu) << 8) |
+                   ((minor64 & 0xffffff00u) << 12) | (minor64 & 0xffu));
+#endif
 }
 
 static void patina_split_nanos(uint64_t nanos, time_t *seconds, long *subseconds) {
@@ -544,6 +581,7 @@ static int fill_stat(int result, const struct patina_metadata *values, struct st
     }
     memset(status, 0, sizeof *status);
     status->st_mode = patina_stat_mode(values);
+    status->st_dev = patina_st_dev(values);
     status->st_nlink = (nlink_t)values->nlink;
     status->st_ino = (ino_t)values->ino;
     status->st_size = (off_t)values->length;
@@ -667,25 +705,19 @@ int fchmod(int fd, mode_t mode) {
 }
 
 int fchmodat(int directory, const char *path, mode_t mode, int flags) {
-    if ((flags & ~AT_SYMLINK_NOFOLLOW) != 0) {
+    if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) != 0) {
         errno = EINVAL;
         return -1;
     }
     uint32_t resolve_flags = (flags & AT_SYMLINK_NOFOLLOW) != 0 ? PATINA_RESOLVE_NOFOLLOW : 0;
+    if ((flags & AT_EMPTY_PATH) != 0) resolve_flags |= PATINA_RESOLVE_EMPTY_PATH;
     return fail_int(patina_chmod(patina_at(directory), path, (uint32_t)mode, resolve_flags));
 }
 
 /*
  * mkfifo/mkfifoat, and the mknod pair that glibc's mkfifo is sometimes a thin
- * wrapper over. A FIFO is the one special file the deterministic filesystem
- * models, so these are real interposers rather than a host escape.
- *
- * mknod's other types are NOT modeled and must not look modeled: a device node
- * is a host escape by construction, and the single non-root identity this
- * runtime models could not create one on a real kernel either, so S_IFCHR /
- * S_IFBLK answer the EPERM an unprivileged process gets. Every remaining type
- * (regular file, socket, directory, or an unknown bit pattern) is a loud named
- * deny.
+ * wrapper over. The type decision, the refusals and their order are the one
+ * Rust entry the SUD mknodat row calls too.
  */
 int mkfifo(const char *path, mode_t mode) {
     return fail_int(patina_mkfifo(PATINA_AT_FDCWD, path, (uint32_t)mode));
@@ -695,22 +727,15 @@ int mkfifoat(int directory, const char *path, mode_t mode) {
     return fail_int(patina_mkfifo(patina_at(directory), path, (uint32_t)mode));
 }
 
+/* glibc's __mknodat: the kernel takes a 32-bit device word, so a dev_t that
+ * does not fit is EINVAL before the call. */
 static int patina_mknod_impl(int dirfd, const char *path, mode_t mode, dev_t device) {
-    mode_t type = mode & S_IFMT;
-    if (type == S_IFIFO) {
-        /* A FIFO has no device number; a caller passing one is confused about
-         * what it is creating, and honoring it would be inventing a field. */
-        if (device != 0) {
-            errno = EINVAL;
-            return -1;
-        }
-        return fail_int(patina_mkfifo(dirfd, path, (uint32_t)(mode & 07777)));
-    }
-    if (type == S_IFCHR || type == S_IFBLK) {
-        errno = EPERM;
+    uint32_t kernel_device = (uint32_t)device;
+    if ((dev_t)kernel_device != device) {
+        errno = EINVAL;
         return -1;
     }
-    return patina_posix_deny(PATINA_DENY_MKNOD_TYPE);
+    return fail_int(patina_mknod(dirfd, path, (uint32_t)mode, kernel_device));
 }
 
 int mknod(const char *path, mode_t mode, dev_t device) {
@@ -766,61 +791,23 @@ int fstatat(int directory, const char *restrict path, struct stat *restrict stat
 }
 
 #ifdef __linux__
-/* Filesystem-level metadata (statfs/fstatfs). The virtual filesystem answers as
- * ONE ext4-like volume (EXT4_SUPER_MAGIC, 4 KiB blocks, 255-byte names) for any
- * path or descriptor that resolves; a missing path is ENOENT exactly as stat().
- * Storage engines probe this to decide whether a path's filesystem supports
- * their multi-process coordination (turso's shared-WAL probe on every open is
- * the live example); left unmodeled, the call reaches the HOST with a virtual
- * path and the engine refuses to open at all. The profile is a constant, so it
- * is the same on record and replay and on every host. */
-static void patina_fill_statfs_profile(struct statfs *out) {
-    memset(out, 0, sizeof *out);
-    out->f_type = 0xEF53; /* EXT4_SUPER_MAGIC */
-    out->f_bsize = 4096;
-    out->f_frsize = 4096;
-    out->f_blocks = 1u << 20;
-    out->f_bfree = 1u << 19;
-    out->f_bavail = 1u << 19;
-    out->f_files = 1u << 20;
-    out->f_ffree = 1u << 19;
-    out->f_namelen = 255;
-}
-static void patina_fill_statfs64_profile(struct statfs64 *out) {
-    memset(out, 0, sizeof *out);
-    out->f_type = 0xEF53; /* EXT4_SUPER_MAGIC */
-    out->f_bsize = 4096;
-    out->f_frsize = 4096;
-    out->f_blocks = 1u << 20;
-    out->f_bfree = 1u << 19;
-    out->f_bavail = 1u << 19;
-    out->f_files = 1u << 20;
-    out->f_ffree = 1u << 19;
-    out->f_namelen = 255;
-}
+/* Filesystem-level metadata (statfs/fstatfs): the one description the SUD
+ * rows answer too. glibc's `struct statfs` and `struct statfs64` are the
+ * kernel's 64-bit layout on every 64-bit target, so the entry fills the
+ * caller's struct directly. Storage engines probe this to decide whether a
+ * path's filesystem supports their multi-process coordination (turso's
+ * shared-WAL probe on every open is the live example). */
 int statfs(const char *path, struct statfs *out) {
-    struct patina_metadata values;
-    if (patina_metadata_values(PATINA_AT_FDCWD, path, 0, &values) < 0) return -1;
-    patina_fill_statfs_profile(out);
-    return 0;
+    return fail_int(patina_statfs(path, out));
 }
 int statfs64(const char *path, struct statfs64 *out) {
-    struct patina_metadata values;
-    if (patina_metadata_values(PATINA_AT_FDCWD, path, 0, &values) < 0) return -1;
-    patina_fill_statfs64_profile(out);
-    return 0;
+    return fail_int(patina_statfs(path, out));
 }
 int fstatfs(int fd, struct statfs *out) {
-    struct patina_metadata values;
-    if (patina_fd_metadata_values(fd, &values) < 0) return -1;
-    patina_fill_statfs_profile(out);
-    return 0;
+    return fail_int(patina_fstatfs(fd, out));
 }
 int fstatfs64(int fd, struct statfs64 *out) {
-    struct patina_metadata values;
-    if (patina_fd_metadata_values(fd, &values) < 0) return -1;
-    patina_fill_statfs64_profile(out);
-    return 0;
+    return fail_int(patina_fstatfs(fd, out));
 }
 
 static int fill_stat64(int result, const struct patina_metadata *values, struct stat64 *status) {
@@ -831,6 +818,7 @@ static int fill_stat64(int result, const struct patina_metadata *values, struct 
     }
     memset(status, 0, sizeof *status);
     status->st_mode = patina_stat_mode(values);
+    status->st_dev = patina_st_dev(values);
     status->st_nlink = (nlink_t)values->nlink;
     status->st_ino = (ino64_t)values->ino;
     status->st_size = (off64_t)values->length;
@@ -910,6 +898,10 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
         patina_statx_time(&status->stx_btime, values.btime_nanos);
     }
     status->stx_mnt_id = PATINA_STATX_MNT_ID;
+    unsigned major, minor;
+    patina_fs_device(values.fs, &major, &minor);
+    status->stx_dev_major = major;
+    status->stx_dev_minor = minor;
     return 0;
 }
 
@@ -1161,14 +1153,13 @@ int rmdir(const char *path) {
 }
 
 int rename(const char *from, const char *to) {
-    return fail_int(patina_rename(PATINA_AT_FDCWD, from, PATINA_AT_FDCWD, to));
+    return fail_int(patina_renameat2(PATINA_AT_FDCWD, from, PATINA_AT_FDCWD, to, 0));
 }
 
 /*
  * *at removal/rename. unlinkat routes to rmdir when AT_REMOVEDIR is set,
  * otherwise unlink (AT_REMOVEDIR is the only flag Linux defines). renameat resolves both dirfds
- * (cap-std's `Dir::rename` is dir-fd-relative on both sides); renameat2 models
- * only flags==0 and otherwise fails closed, then routes through renameat.
+ * (cap-std's `Dir::rename` is dir-fd-relative on both sides).
  */
 int unlinkat(int dirfd, const char *path, int flags) {
     if ((flags & ~AT_REMOVEDIR) != 0) {
@@ -1180,21 +1171,19 @@ int unlinkat(int dirfd, const char *path, int flags) {
 }
 
 int renameat(int olddirfd, const char *old_path, int newdirfd, const char *new_path) {
-    return fail_int(patina_rename(patina_at(olddirfd), old_path, patina_at(newdirfd), new_path));
+    return fail_int(
+        patina_renameat2(patina_at(olddirfd), old_path, patina_at(newdirfd), new_path, 0));
 }
 
 #ifdef __linux__
 /*
- * glibc exports renameat2 (the flags-carrying rename). Only the plain
- * flags==0 case maps onto the deterministic rename; RENAME_EXCHANGE/NOREPLACE
- * are not modeled and fail closed.
+ * glibc exports renameat2 (the flags-carrying rename): the flags —
+ * RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT — are the kernel's, and
+ * the one rename entry judges them as do_renameat2 does.
  */
 int renameat2(int olddirfd, const char *old_path, int newdirfd, const char *new_path,
               unsigned int flags) {
-    if (flags != 0) {
-        errno = ENOSYS;
-        return -1;
-    }
-    return renameat(olddirfd, old_path, newdirfd, new_path);
+    return fail_int(
+        patina_renameat2(patina_at(olddirfd), old_path, patina_at(newdirfd), new_path, flags));
 }
 #endif

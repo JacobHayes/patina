@@ -5,9 +5,7 @@
 //! buffer too small for one record, ENOTDIR for a file, EBADF for a closed
 //! descriptor. The generic (arm64) table has no such row.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -101,15 +99,5 @@ pub const SCENARIO: Scenario = Scenario {
         "symlinkat",
         "mknodat",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::ALL,
-        what: "the legacy getdents row is unmodeled (getdents64 is): the first getdents aborts",
-        failure: Failure::Stops {
-            events: 9,
-            ending: Ending::Signal(6),
-            diagnostic: "unsupported syscall getdents",
-        },
-    }],
     ..DEFAULTS
 };

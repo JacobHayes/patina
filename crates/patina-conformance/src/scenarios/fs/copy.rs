@@ -11,9 +11,7 @@
 //! a pipe as input is EINVAL; EBADF for the wrong access mode or a closed
 //! descriptor; a negative offset is EINVAL.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -206,15 +204,5 @@ pub const SCENARIO: Scenario = Scenario {
     symbols: &[
         "syscall", "openat", "read", "write", "pread64", "lseek", "pipe2", "close",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::ALL,
-        what: "copy_file_range and sendfile are unmodeled Trap rows (the libc door is syscall(2) until the shim defines the wrappers): the first copy_file_range aborts",
-        failure: Failure::Stops {
-            events: 5,
-            ending: Ending::Signal(6),
-            diagnostic: "unsupported syscall copy_file_range",
-        },
-    }],
     ..DEFAULTS
 };

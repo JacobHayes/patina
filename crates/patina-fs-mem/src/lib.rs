@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use patina_dst_abi::{
     AtimePolicy, EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsEntryKind, FsMetadata,
-    OpenFlags, SeekWhence,
+    FsNode, OpenFlags, SeekWhence, XattrTarget,
 };
-use patina_dst_driver_api::{DriverResult, FsDriver};
+use patina_dst_driver_api::{DriverResult, FsDriver, XattrNamespace, xattr_permission};
 
 type InodeId = u64;
 type DescriptionId = u64;
@@ -178,6 +178,8 @@ struct Inode {
     /// through a descriptor on an unlinked entry has to answer `S_IFIFO` or
     /// `S_IFREG` with nothing left to look it up by.
     kind: FsEntryKind,
+    /// A regular file's bytes, or a symlink's target; empty for every other
+    /// kind.
     contents: Vec<u8>,
     /// Names referencing this node — POSIX `st_nlink`.
     links: u32,
@@ -204,11 +206,14 @@ struct EntryMetadata {
 ///
 /// It models regular files, hard links, inert symlink leaves, named pipes
 /// (`mkfifo` — the NAME and its inode; the bytes belong to the openers' pipe
-/// channel, not to the filesystem), directories, cursors, basic metadata, and
-/// POSIX permission bits. MemFs has no clock of its own: every reading or
-/// mutating operation is handed the runtime's virtual clock ([`FsClock`]) and
-/// stamps `atime`/`mtime`/`ctime`/`btime` by the kernel's rules — creation sets
-/// all four, a data change `mtime`+`ctime`, a metadata change `ctime`, a read
+/// channel, not to the filesystem), socket nodes and whiteouts (`mknod`),
+/// directories, cursors, basic metadata, POSIX permission bits, and extended
+/// attributes. Every non-directory NAME names an inode whose kind lives on the
+/// node, so a hard link to any of them — a symlink included — is a second name
+/// for the same node. MemFs has no clock of its own: every reading or mutating
+/// operation is handed the runtime's virtual clock ([`FsClock`]) and stamps
+/// `atime`/`mtime`/`ctime`/`btime` by the kernel's rules — creation sets all
+/// four, a data change `mtime`+`ctime`, a metadata change `ctime`, a read
 /// `atime` under the clock's `relatime`/`strictatime`/`noatime` policy — so the
 /// times a guest reads back are a pure function of the run.
 ///
@@ -227,24 +232,45 @@ struct EntryMetadata {
 /// directory needs `x` on that directory, listing one needs `r`, and creating,
 /// removing, or renaming a name inside one needs `w` and `x`. There is no
 /// root-bypass identity, so a mode change is always enforced.
+///
+/// # Extended attributes
+///
+/// Attributes belong to the NODE (so they follow hard links and renames) and
+/// are judged by the kernel's namespace rules for an unprivileged caller
+/// (`xattr_permission`, `cap_inode_setxattr`): `user.*` exists only on regular
+/// files and directories (on anything else a write is `EPERM` and a read
+/// `ENODATA`) and is charged against the mode's `r`/`w` bits; `trusted.*` needs
+/// `CAP_SYS_ADMIN` (`EPERM` to write, `ENODATA` to read, never listed);
+/// `security.*` can be read and listed but not written (`EPERM`); `system.*`
+/// has no handler here (`EOPNOTSUPP`, a volume mounted without ACLs), and
+/// neither has a name outside the four namespaces.
 #[derive(Clone, Default)]
 pub struct MemFs {
-    files: BTreeMap<String, InodeId>,
+    /// Every non-directory name, by path: the node it names. The node says what
+    /// the entry is — a regular file, a symlink (its contents are the target),
+    /// a FIFO, a socket node or a whiteout.
+    names: BTreeMap<String, InodeId>,
     inodes: BTreeMap<InodeId, Inode>,
-    symlinks: BTreeMap<String, String>,
-    symlink_metadata: BTreeMap<String, EntryMetadata>,
-    /// Named pipes, by path, each naming an [`Inode`] exactly as a file name
-    /// does. A FIFO holds no bytes — those live in the openers' pipe channel,
-    /// not in the filesystem — but it IS an inode: that is what a second hard
-    /// link to one names, what its mode and link count belong to, and what the
-    /// pipe channel is keyed by, so two names for one FIFO meet on one pipe.
-    fifos: BTreeMap<String, InodeId>,
     directories: BTreeMap<String, EntryMetadata>,
+    /// Extended attributes, by the node they belong to (a directory's by its
+    /// `ino`). A node without attributes has no entry.
+    xattrs: BTreeMap<InodeId, BTreeMap<String, Vec<u8>>>,
     handles: BTreeMap<Fd, DescriptionId>,
     descriptions: BTreeMap<DescriptionId, Description>,
     next_fd: u64,
     next_description: DescriptionId,
     next_inode: InodeId,
+}
+
+/// `setxattr(2)`'s flags: the name must be new / must exist.
+pub const XATTR_CREATE: u32 = 1;
+pub const XATTR_REPLACE: u32 = 2;
+
+/// Is an attribute access a read or a write (`MAY_READ`/`MAY_WRITE`)?
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum XattrAccess {
+    Read,
+    Write,
 }
 
 impl MemFs {
@@ -273,7 +299,7 @@ impl MemFs {
             contents.into(),
             FILE_MODE,
         );
-        self.files.insert(path, inode);
+        self.names.insert(path, inode);
         Ok(self)
     }
 
@@ -289,6 +315,22 @@ impl MemFs {
             .as_slice())
     }
 
+    /// The bytes of the regular file `fd` is open on, whatever names it has
+    /// now (none, once unlinked).
+    pub fn fd_contents(&self, fd: Fd) -> DriverResult<&[u8]> {
+        let node = self.description(fd)?.node;
+        self.inodes
+            .get(&node)
+            .filter(|inode| inode.kind == FsEntryKind::File)
+            .map(|inode| inode.contents.as_slice())
+            .ok_or_else(|| {
+                EffectError::new(
+                    ErrorCode::InvalidInput,
+                    format!("virtual descriptor is not open on a regular file: {fd:?}"),
+                )
+            })
+    }
+
     /// Clone persistent filesystem state without carrying open handles across
     /// a modeled process restart.
     pub fn persistent_snapshot(&self) -> Self {
@@ -299,7 +341,8 @@ impl MemFs {
 
     /// Export a canonical, versioned restart snapshot. Open descriptors and
     /// descriptions are deliberately omitted; inode identity, timestamps, names,
-    /// contents, and future inode allocation state are preserved.
+    /// contents, extended attributes, and future inode allocation state are
+    /// preserved.
     pub fn export_snapshot(&self) -> FsSnapshot {
         FsSnapshot::from_memfs(self)
     }
@@ -339,9 +382,7 @@ impl MemFs {
     /// mode change quietly deleting data.
     pub fn inventory(&self) -> Vec<(String, FsMetadata)> {
         let mut paths: BTreeSet<&String> = self.directories.keys().collect();
-        paths.extend(self.files.keys());
-        paths.extend(self.symlinks.keys());
-        paths.extend(self.fifos.keys());
+        paths.extend(self.names.keys());
         paths
             .into_iter()
             .map(|path| {
@@ -363,7 +404,39 @@ impl MemFs {
     /// A symlink's stored target WITHOUT permission enforcement.
     pub fn symlink_target(&self, path: &str) -> Option<&str> {
         let path = normalize_entry_path(path).ok()?;
-        self.symlinks.get(&path).map(String::as_str)
+        let inode = self
+            .leaf(&path)
+            .filter(|inode| inode.kind == FsEntryKind::Symlink)?;
+        std::str::from_utf8(&inode.contents).ok()
+    }
+
+    /// The extended attributes of the entry at `path` WITHOUT permission
+    /// enforcement — the storage layer's own view, for a crash model carrying
+    /// them onto a rebuilt image.
+    pub fn entry_xattrs(&self, path: &str) -> BTreeMap<String, Vec<u8>> {
+        normalize_entry_path(path)
+            .ok()
+            .and_then(|path| self.node_id(&path))
+            .and_then(|ino| self.xattrs.get(&ino).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Write the extended attributes of the entry at `path` back verbatim —
+    /// the storage layer's own setter, the mirror of [`MemFs::entry_xattrs`]
+    /// for a rebuild. It stamps nothing.
+    pub fn restore_xattrs(
+        &mut self,
+        path: &str,
+        xattrs: BTreeMap<String, Vec<u8>>,
+    ) -> DriverResult<()> {
+        let path = normalize_entry_path(path)?;
+        let ino = self.node_id(&path).ok_or_else(|| not_found(&path))?;
+        if xattrs.is_empty() {
+            self.xattrs.remove(&ino);
+        } else {
+            self.xattrs.insert(ino, xattrs);
+        }
+        Ok(())
     }
 
     /// Write all four timestamps of the entry at `path` back verbatim — the
@@ -396,12 +469,7 @@ impl MemFs {
     pub fn restore_mode(&mut self, path: &str, mode: u32) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
         let mode = mode & MODE_MASK;
-        if let Some(inode) = self
-            .files
-            .get(&path)
-            .or_else(|| self.fifos.get(&path))
-            .copied()
-        {
+        if let Some(inode) = self.names.get(&path).copied() {
             self.inodes
                 .get_mut(&inode)
                 .expect("name references an inode")
@@ -415,7 +483,7 @@ impl MemFs {
         Err(not_found(&path))
     }
 
-    /// Every path that OWNS a mode — directories, files and FIFOs — in path
+    /// Every path that OWNS a mode — every entry but a symlink — in path
     /// order. A symlink leaf is excluded: Linux ignores a link's own mode and
     /// this filesystem has none to set.
     ///
@@ -423,8 +491,12 @@ impl MemFs {
     /// reconstructed image without inventing a per-kind constant.
     pub fn paths_with_modes(&self) -> Vec<String> {
         let mut paths: BTreeSet<&String> = self.directories.keys().collect();
-        paths.extend(self.files.keys());
-        paths.extend(self.fifos.keys());
+        paths.extend(
+            self.names
+                .iter()
+                .filter(|(_, ino)| self.kind_of(**ino) != Some(FsEntryKind::Symlink))
+                .map(|(path, _)| path),
+        );
         paths.into_iter().cloned().collect()
     }
 
@@ -489,8 +561,11 @@ impl MemFs {
     fn node_at(&self, path: &str, kind: FsEntryKind) -> Option<InodeId> {
         match kind {
             FsEntryKind::Directory => self.directories.get(path).map(|metadata| metadata.ino),
-            FsEntryKind::Fifo => self.fifos.get(path).copied(),
-            _ => self.files.get(path).copied(),
+            _ => self
+                .names
+                .get(path)
+                .copied()
+                .filter(|ino| self.kind_of(*ino) == Some(kind)),
         }
     }
 
@@ -530,6 +605,14 @@ impl MemFs {
             inode.openers = 0;
         }
         self.inodes.retain(|_, inode| inode.links > 0);
+        let directories: BTreeSet<InodeId> = self
+            .directories
+            .values()
+            .map(|metadata| metadata.ino)
+            .collect();
+        let inodes = &self.inodes;
+        self.xattrs
+            .retain(|ino, _| inodes.contains_key(ino) || directories.contains(ino));
     }
 
     fn allocate_entry_metadata(&mut self, clock: FsClock, mode: u32) -> EntryMetadata {
@@ -573,20 +656,35 @@ impl MemFs {
         }
     }
 
+    /// The node a non-directory name refers to.
+    fn leaf(&self, path: &str) -> Option<&Inode> {
+        self.names.get(path).and_then(|ino| self.inodes.get(ino))
+    }
+
+    fn kind_of(&self, ino: InodeId) -> Option<FsEntryKind> {
+        self.inodes.get(&ino).map(|inode| inode.kind)
+    }
+
+    /// The kind of the non-directory entry at `path`.
+    fn leaf_kind(&self, path: &str) -> Option<FsEntryKind> {
+        self.leaf(path).map(|inode| inode.kind)
+    }
+
+    /// The node id of the entry at `path`, whatever its kind (a directory's
+    /// `ino` included).
+    fn node_id(&self, path: &str) -> Option<InodeId> {
+        self.names
+            .get(path)
+            .copied()
+            .or_else(|| self.directories.get(path).map(|metadata| metadata.ino))
+    }
+
     /// The timestamps of the entry at `path`, whatever its kind.
     fn times_mut(&mut self, path: &str) -> Option<&mut Times> {
-        if let Some(inode) = self
-            .files
-            .get(path)
-            .or_else(|| self.fifos.get(path))
-            .copied()
-        {
+        if let Some(inode) = self.names.get(path).copied() {
             return self.inodes.get_mut(&inode).map(|inode| &mut inode.times);
         }
-        if let Some(metadata) = self.directories.get_mut(path) {
-            return Some(&mut metadata.times);
-        }
-        self.symlink_metadata
+        self.directories
             .get_mut(path)
             .map(|metadata| &mut metadata.times)
     }
@@ -615,26 +713,10 @@ impl MemFs {
     /// there. Symlink leaves answer [`SYMLINK_MODE`]: Linux never consults a
     /// link's own mode.
     fn entry_mode(&self, path: &str) -> Option<u32> {
-        if let Some(inode) = self.files.get(path) {
-            return Some(
-                self.inodes
-                    .get(inode)
-                    .expect("file references an inode")
-                    .mode,
-            );
+        if let Some(inode) = self.leaf(path) {
+            return Some(inode.mode);
         }
-        if let Some(metadata) = self.directories.get(path) {
-            return Some(metadata.mode);
-        }
-        if let Some(inode) = self.fifos.get(path) {
-            return Some(
-                self.inodes
-                    .get(inode)
-                    .expect("fifo references an inode")
-                    .mode,
-            );
-        }
-        self.symlinks.get(path).map(|_| SYMLINK_MODE)
+        self.directories.get(path).map(|metadata| metadata.mode)
     }
 
     /// Resolving a path walks every directory ABOVE the final component, and
@@ -666,7 +748,7 @@ impl MemFs {
                 if !owner_allows(metadata.mode, SEARCH) {
                     return Err(denied(&current, "search"));
                 }
-            } else if self.files.contains_key(&current) || self.fifos.contains_key(&current) {
+            } else if self.names.contains_key(&current) {
                 // A component resolved THROUGH a non-directory is `ENOTDIR`,
                 // never "not found": the name is there, it just cannot be
                 // walked into. (An intermediate symlink is refused before this
@@ -755,8 +837,14 @@ impl MemFs {
         Ok(fd)
     }
 
+    /// The node a regular-file name refers to; any other entry, or none, is
+    /// `NotFound` to a caller that asked for a file.
     fn file_inode(&self, path: &str) -> DriverResult<InodeId> {
-        self.files.get(path).copied().ok_or_else(|| not_found(path))
+        self.names
+            .get(path)
+            .copied()
+            .filter(|ino| self.kind_of(*ino) == Some(FsEntryKind::File))
+            .ok_or_else(|| not_found(path))
     }
 
     /// The node an open descriptor holds. A directory description names an ino
@@ -787,13 +875,23 @@ impl MemFs {
     /// Free a node once NOTHING references it — no name and no descriptor. This
     /// is the whole of inode lifetime: a kernel drops the on-disk inode when
     /// `i_nlink` and `i_count` both reach zero, and until then an unlinked entry
-    /// stays fully alive behind every descriptor that holds it.
+    /// stays fully alive behind every descriptor that holds it. Its attributes
+    /// go with it.
     fn release_if_unreferenced(&mut self, inode: InodeId) {
         let Some(entry) = self.inodes.get(&inode) else {
             return;
         };
         if entry.links == 0 && entry.openers == 0 {
             self.inodes.remove(&inode);
+            self.xattrs.remove(&inode);
+        }
+    }
+
+    /// Remove the directory at `path` (which the caller checked is empty),
+    /// its attributes with it.
+    fn drop_directory(&mut self, path: &str) {
+        if let Some(metadata) = self.directories.remove(path) {
+            self.xattrs.remove(&metadata.ino);
         }
     }
 
@@ -807,14 +905,14 @@ impl MemFs {
                 .iter()
                 .find_map(|(path, metadata)| (metadata.ino == node).then(|| path.clone()));
         }
-        self.files
+        self.names
             .iter()
-            .chain(self.fifos.iter())
             .find_map(|(path, inode)| (*inode == node).then(|| path.clone()))
     }
 
     /// Metadata straight off a node, with no name involved — what a descriptor
-    /// on an unlinked entry answers.
+    /// on an unlinked entry answers. A regular file's length is its bytes, a
+    /// symlink's its target's; every other node holds none.
     fn metadata_for_inode(&self, node: InodeId) -> DriverResult<FsMetadata> {
         let inode = self.inodes.get(&node).ok_or_else(|| {
             EffectError::new(
@@ -824,10 +922,12 @@ impl MemFs {
         })?;
         Ok(FsMetadata {
             kind: inode.kind,
-            len: if inode.kind == FsEntryKind::Fifo {
-                0
-            } else {
-                inode.contents.len() as u64
+            len: match inode.kind {
+                FsEntryKind::File | FsEntryKind::Symlink => inode.contents.len() as u64,
+                FsEntryKind::Directory
+                | FsEntryKind::Fifo
+                | FsEntryKind::Socket
+                | FsEntryKind::CharDevice => 0,
             },
             ino: node,
             nlink: inode.links,
@@ -843,17 +943,11 @@ impl MemFs {
     fn has_children(&self, path: &str) -> bool {
         let prefix = format!("{path}/");
         let under = |candidate: &String| candidate.starts_with(&prefix);
-        self.directories.keys().any(under)
-            || self.files.keys().any(under)
-            || self.symlinks.keys().any(under)
-            || self.fifos.keys().any(under)
+        self.directories.keys().any(under) || self.names.keys().any(under)
     }
 
     fn path_exists(&self, path: &str) -> bool {
-        self.directories.contains_key(path)
-            || self.files.contains_key(path)
-            || self.symlinks.contains_key(path)
-            || self.fifos.contains_key(path)
+        self.directories.contains_key(path) || self.names.contains_key(path)
     }
 
     fn ensure_no_intermediate_symlink(&self, path: &str) -> DriverResult<()> {
@@ -865,7 +959,7 @@ impl MemFs {
         {
             current.push('/');
             current.push_str(component);
-            if current != path && self.symlinks.contains_key(&current) {
+            if current != path && self.leaf_kind(&current) == Some(FsEntryKind::Symlink) {
                 return Err(EffectError::new(
                     ErrorCode::Denied,
                     format!(
@@ -894,6 +988,101 @@ impl MemFs {
             let metadata = self.allocate_entry_metadata(clock, DIRECTORY_MODE);
             self.directories.insert("/".into(), metadata);
         }
+    }
+
+    /// The checks every creating call runs on the NAME: resolvable, the parent
+    /// writable, the name free, the parent a directory.
+    fn check_new_name(&self, path: &str) -> DriverResult<()> {
+        self.resolve_guard(path)?;
+        self.check_directory_write(parent_path(path))?;
+        if self.path_exists(path) {
+            return Err(EffectError::new(
+                ErrorCode::AlreadyExists,
+                format!("virtual filesystem entry already exists: {path}"),
+            ));
+        }
+        let parent = parent_path(path);
+        if !self.directories.contains_key(parent) {
+            return Err(EffectError::new(
+                ErrorCode::NotFound,
+                format!("virtual parent directory does not exist: {parent}"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The node an attribute operation names, and its kind and mode.
+    fn xattr_node(&self, target: &XattrTarget) -> DriverResult<(InodeId, FsEntryKind, u32)> {
+        match target {
+            XattrTarget::Path(path) => {
+                let path = normalize_entry_path(path)?;
+                self.resolve_guard(&path)?;
+                let metadata = self.metadata_for_path(&path)?;
+                Ok((metadata.ino, metadata.kind, metadata.mode))
+            }
+            XattrTarget::Fd(fd) => {
+                let description = self.description(*fd)?;
+                if description.path_only {
+                    return Err(EffectError::new(
+                        ErrorCode::InvalidHandle,
+                        format!("virtual handle {} names a location", fd.0),
+                    ));
+                }
+                let (node, kind) = (description.node, description.kind);
+                let metadata = if kind == FsEntryKind::Directory {
+                    let path = self
+                        .node_path(node, kind)
+                        .ok_or_else(|| not_found("<removed directory>"))?;
+                    self.metadata_for_path(&path)?
+                } else {
+                    self.metadata_for_inode(node)?
+                };
+                Ok((node, metadata.kind, metadata.mode))
+            }
+            XattrTarget::Inode(ino) => {
+                let metadata = self.metadata_for_inode(*ino)?;
+                Ok((*ino, metadata.kind, metadata.mode))
+            }
+        }
+    }
+
+    /// The kernel's judgment of the access ([`xattr_permission`], one judge for
+    /// every filesystem), then the handler lookup `xattr_resolve_name` does
+    /// here: a name in no namespace, or in `system.*` (no ACL handler on this
+    /// volume), has none, and a namespace prefix alone names nothing.
+    fn check_xattr(
+        kind: FsEntryKind,
+        mode: u32,
+        name: &str,
+        access: XattrAccess,
+    ) -> DriverResult<XattrNamespace> {
+        let file_or_directory = matches!(kind, FsEntryKind::File | FsEntryKind::Directory);
+        let namespace =
+            xattr_permission(file_or_directory, mode, name, access == XattrAccess::Write).map_err(
+                |code| match code {
+                    ErrorCode::Denied => denied(name, "access the extended attribute"),
+                    code => EffectError::new(
+                        code,
+                        format!(
+                            "virtual extended attribute {name} is not available to this caller"
+                        ),
+                    ),
+                },
+            )?;
+        if matches!(namespace, XattrNamespace::System | XattrNamespace::Unknown) {
+            return Err(EffectError::new(
+                ErrorCode::Unsupported,
+                format!("no virtual extended attribute handler for {name}"),
+            ));
+        }
+        let suffix = name.split_once('.').map_or("", |(_, suffix)| suffix);
+        if suffix.is_empty() {
+            return Err(EffectError::new(
+                ErrorCode::InvalidInput,
+                format!("virtual extended attribute name has no suffix: {name}"),
+            ));
+        }
+        Ok(namespace)
     }
 }
 
@@ -967,55 +1156,65 @@ impl FsDriver for MemFs {
             };
             return self.allocate_handle(metadata.ino, 0, access, FsEntryKind::Directory);
         }
-        if let Some(inode) = self.fifos.get(&path).copied() {
-            // `O_PATH` is the one FIFO open that never reaches the pipe: it
-            // names the entry without opening it, so there is no rendezvous, no
-            // permission on the entry to charge, and the descriptor IS a
-            // filesystem descriptor — the only kind of FIFO handle this
-            // filesystem can hold itself.
-            if flags.path_only {
-                return self.allocate_handle(inode, 0, Access::LOCATION, FsEntryKind::Fifo);
+        if let Some(inode) = self.names.get(&path).copied() {
+            let (kind, mode) = {
+                let node = self.inodes.get(&inode).expect("name references an inode");
+                (node.kind, node.mode)
+            };
+            match kind {
+                FsEntryKind::Symlink => {
+                    return Err(EffectError::new(
+                        ErrorCode::InvalidInput,
+                        format!(
+                            "virtual symlink cannot be opened without host-level follow: {path}"
+                        ),
+                    ));
+                }
+                // `O_PATH` is the one open of a FIFO, a socket node or a
+                // whiteout that never reaches past the name: it names the entry
+                // without opening it, so there is no rendezvous, no permission
+                // on the entry to charge, and the descriptor IS a filesystem
+                // descriptor — the only kind of handle this filesystem can hold
+                // on one.
+                FsEntryKind::Fifo | FsEntryKind::Socket | FsEntryKind::CharDevice => {
+                    if flags.path_only {
+                        return self.allocate_handle(inode, 0, Access::LOCATION, kind);
+                    }
+                    // The permission decision belongs HERE — one enforcement
+                    // point for every kind — even though no filesystem
+                    // descriptor comes back: opening for reading needs `r` and
+                    // for writing `w`, exactly as a regular file does.
+                    if flags.exclusive {
+                        return Err(EffectError::new(
+                            ErrorCode::AlreadyExists,
+                            format!("virtual filesystem entry already exists: {path}"),
+                        ));
+                    }
+                    if flags.read && !owner_allows(mode, READ) {
+                        return Err(denied(&path, "read"));
+                    }
+                    if flags.write && !owner_allows(mode, WRITE) {
+                        return Err(denied(&path, "write"));
+                    }
+                    // A FIFO carries no filesystem bytes, so there is no
+                    // filesystem description to hand back: the caller opens the
+                    // pipe the FIFO's openers share. A socket node or a whiteout
+                    // has nothing behind it at all, and the caller answers the
+                    // `ENXIO` the kernel's open does. The permission and
+                    // existence answers above are the part that IS filesystem
+                    // state, and they have been given.
+                    return Err(EffectError::new(
+                        ErrorCode::InvalidInput,
+                        format!(
+                            "virtual {kind:?} node is not opened as a filesystem descriptor: {path}"
+                        ),
+                    ));
+                }
+                FsEntryKind::File | FsEntryKind::Directory => {}
             }
-            // The permission decision belongs HERE — one enforcement point for
-            // every kind — even though the descriptor itself is not a filesystem
-            // descriptor. Opening a FIFO for reading needs `r` and for writing
-            // needs `w`, exactly as a regular file does.
-            if flags.exclusive {
-                return Err(EffectError::new(
-                    ErrorCode::AlreadyExists,
-                    format!("virtual filesystem entry already exists: {path}"),
-                ));
-            }
-            let mode = self
-                .inodes
-                .get(&inode)
-                .expect("fifo references an inode")
-                .mode;
-            if flags.read && !owner_allows(mode, READ) {
-                return Err(denied(&path, "read"));
-            }
-            if flags.write && !owner_allows(mode, WRITE) {
-                return Err(denied(&path, "write"));
-            }
-            // A FIFO carries no filesystem bytes, so there is no filesystem
-            // description to hand back: the caller opens the pipe the FIFO's
-            // openers share. The permission and existence answers above are the
-            // part that IS filesystem state, and they have been given.
-            return Err(EffectError::new(
-                ErrorCode::InvalidInput,
-                format!(
-                    "virtual named pipe is opened through the pipe boundary, not as a filesystem descriptor: {path}"
-                ),
-            ));
-        }
-        if self.symlinks.contains_key(&path) {
-            return Err(EffectError::new(
-                ErrorCode::InvalidInput,
-                format!("virtual symlink cannot be opened without host-level follow: {path}"),
-            ));
         }
 
-        if !self.files.contains_key(&path) {
+        if !self.names.contains_key(&path) {
             // A path-only open creates nothing, so a missing name is missing.
             if flags.create {
                 self.check_directory_write(parent_path(&path))?;
@@ -1024,7 +1223,7 @@ impl FsDriver for MemFs {
                 // the kernel reads only on the branch that actually creates the
                 // entry, already under the caller's umask.
                 let inode = self.allocate_inode(clock, FsEntryKind::File, Vec::new(), flags.mode);
-                self.files.insert(path.clone(), inode);
+                self.names.insert(path.clone(), inode);
                 self.stamp_directory(clock, parent_path(&path));
             } else {
                 return Err(not_found(&path));
@@ -1361,28 +1560,48 @@ impl FsDriver for MemFs {
     }
 
     fn make_fifo(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
-        let path = normalize_entry_path(path)?;
-        self.resolve_guard(&path)?;
-        self.check_directory_write(parent_path(&path))?;
-        if self.path_exists(&path) {
-            return Err(EffectError::new(
-                ErrorCode::AlreadyExists,
-                format!("virtual filesystem entry already exists: {path}"),
-            ));
-        }
-        let parent = parent_path(&path);
-        if !self.directories.contains_key(parent) {
-            return Err(EffectError::new(
-                ErrorCode::NotFound,
-                format!("virtual parent directory does not exist: {parent}"),
-            ));
-        }
         // A FIFO is an inode with no bytes: hard links, the link count, the
         // mode and the identity the openers' pipe channel is keyed by all live
         // there, exactly as they do for a regular file.
-        let inode = self.allocate_inode(clock, FsEntryKind::Fifo, Vec::new(), mode);
-        self.fifos.insert(path.clone(), inode);
+        self.make_node(clock, path, FsNode::Fifo, mode)
+    }
+
+    /// `mknod`: a new name for a fresh node with no bytes, at the mode the
+    /// caller asked for (already under its umask). The name and the parent's
+    /// `w`+`x` are judged first, then the privilege a device other than the
+    /// whiteout needs, which the one modeled identity does not have.
+    fn make_node(
+        &mut self,
+        clock: FsClock,
+        path: &str,
+        node: FsNode,
+        mode: u32,
+    ) -> DriverResult<()> {
+        let path = normalize_entry_path(path)?;
+        self.check_new_name(&path)?;
+        let kind = node.kind().ok_or_else(|| {
+            EffectError::new(
+                ErrorCode::NotPermitted,
+                format!("a device node needs CAP_MKNOD: {path}"),
+            )
+        })?;
+        let inode = self.allocate_inode(clock, kind, Vec::new(), mode);
+        self.names.insert(path.clone(), inode);
         self.stamp_directory(clock, parent_path(&path));
+        Ok(())
+    }
+
+    /// `renameat2(RENAME_WHITEOUT)`: the rename, then a whiteout (a 0:0
+    /// character device, mode 0) at the name it vacated, in one call. A rename
+    /// between two names of one node changes nothing, whiteout included.
+    fn rename_whiteout(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
+        self.rename(clock, from, to)?;
+        let from = normalize_entry_path(from)?;
+        if self.path_exists(&from) {
+            return Ok(());
+        }
+        let inode = self.allocate_inode(clock, FsEntryKind::CharDevice, Vec::new(), 0);
+        self.names.insert(from, inode);
         Ok(())
     }
 
@@ -1396,25 +1615,11 @@ impl FsDriver for MemFs {
                 format!("virtual filesystem path is a directory: {path}"),
             ));
         }
-        if self.symlinks.remove(&path).is_some() {
-            self.symlink_metadata.remove(&path);
-            self.stamp_directory(clock, parent_path(&path));
-            return Ok(());
-        }
-        // A FIFO name goes away on unlink whatever is open on it: the openers
-        // hold the pipe, not the name, so nothing is lost by unlinking one and
-        // the kernel does not refuse it either. The inode outlives the name only
-        // as long as another link names it.
-        if let Some(inode) = self.fifos.remove(&path) {
-            self.drop_name(clock, inode);
-            self.stamp_directory(clock, parent_path(&path));
-            return Ok(());
-        }
-        let inode = self.file_inode(&path)?;
         // Unlink removes the NAME, never the node. Whatever still holds the node
         // — another name, or an open descriptor — keeps it alive, and the last
-        // reference of either kind is what frees it.
-        self.files.remove(&path).expect("file was checked");
+        // reference of either kind is what frees it. A FIFO name goes the same
+        // way whatever is open on it: the openers hold the pipe, not the name.
+        let inode = self.names.remove(&path).ok_or_else(|| not_found(&path))?;
         self.drop_name(clock, inode);
         self.stamp_directory(clock, parent_path(&path));
         Ok(())
@@ -1466,8 +1671,9 @@ impl FsDriver for MemFs {
         Self::truncate_inode(self.inodes.get_mut(&inode), clock, len)
     }
 
-    /// `truncate(2)`: `EISDIR` for a directory, `EINVAL` for a FIFO or a
-    /// symlink the caller declined to follow, `EACCES` without `w`.
+    /// `truncate(2)`: `EISDIR` for a directory, `EINVAL` for any other
+    /// non-regular entry (a FIFO, a socket node, a whiteout, or a symlink the
+    /// caller declined to follow), `EACCES` without `w`.
     fn set_len_by_path(&mut self, clock: FsClock, path: &str, len: u64) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
@@ -1477,7 +1683,10 @@ impl FsDriver for MemFs {
                 format!("virtual filesystem path is a directory: {path}"),
             ));
         }
-        if self.fifos.contains_key(&path) || self.symlinks.contains_key(&path) {
+        if self
+            .leaf_kind(&path)
+            .is_some_and(|kind| kind != FsEntryKind::File)
+        {
             return Err(EffectError::new(
                 ErrorCode::InvalidInput,
                 format!("virtual filesystem entry is not a regular file: {path}"),
@@ -1593,7 +1802,6 @@ impl FsDriver for MemFs {
             &mut self
                 .directories
                 .values_mut()
-                .chain(self.symlink_metadata.values_mut())
                 .find(|entry| entry.ino == ino)
                 .ok_or_else(|| not_found("<inode>"))?
                 .times
@@ -1623,10 +1831,7 @@ impl FsDriver for MemFs {
     ) -> DriverResult<Vec<FsDirectoryEntry>> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
-        if self.files.contains_key(&path)
-            || self.symlinks.contains_key(&path)
-            || self.fifos.contains_key(&path)
-        {
+        if self.names.contains_key(&path) {
             return Err(EffectError::new(
                 ErrorCode::NotDirectory,
                 format!("virtual filesystem path is not a directory: {path}"),
@@ -1697,10 +1902,7 @@ impl FsDriver for MemFs {
                 "cannot remove the virtual filesystem root",
             ));
         }
-        if self.files.contains_key(&path)
-            || self.symlinks.contains_key(&path)
-            || self.fifos.contains_key(&path)
-        {
+        if self.names.contains_key(&path) {
             return Err(EffectError::new(
                 ErrorCode::NotDirectory,
                 format!("virtual filesystem path is not a directory: {path}"),
@@ -1715,11 +1917,17 @@ impl FsDriver for MemFs {
                 format!("virtual directory is not empty: {path}"),
             ));
         }
-        self.directories.remove(&path);
+        self.drop_directory(&path);
         self.stamp_directory(clock, parent_path(&path));
         Ok(())
     }
 
+    /// `rename`. A name moves onto a free name or replaces what is there: a
+    /// non-directory replaces a non-directory (`EISDIR` onto a directory), a
+    /// directory replaces an EMPTY directory (`ENOTDIR` onto anything else,
+    /// `ENOTEMPTY` onto a directory with entries). Two names for one node (a
+    /// file onto its own hard link, a name onto itself) are the kernel's
+    /// no-op success. A directory cannot move beneath itself (`EINVAL`).
     fn rename(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
         let from = normalize_entry_path(from)?;
         let to = normalize_entry_path(to)?;
@@ -1736,138 +1944,101 @@ impl FsDriver for MemFs {
         if !self.directories.contains_key(parent_path(&to)) {
             return Err(not_found(parent_path(&to)));
         }
-        if let Some(inode) = self.files.remove(&from) {
+        if let Some(inode) = self.names.get(&from).copied() {
             if self.directories.contains_key(&to) {
-                self.files.insert(from, inode);
                 return Err(EffectError::new(
                     ErrorCode::IsDirectory,
                     format!("virtual rename destination is a directory: {to}"),
                 ));
             }
+            if self.names.get(&to) == Some(&inode) {
+                return Ok(());
+            }
+            self.names.remove(&from);
             self.unlink_leaf_at(clock, &to);
-            self.files.insert(to.clone(), inode);
+            self.names.insert(to.clone(), inode);
             // Nothing else to do: a description holds the NODE, so every
             // descriptor on this entry moved with it by construction.
-            self.stamp_renamed(clock, &from, &to);
-            return Ok(());
-        }
-        if let Some(target) = self.symlinks.remove(&from) {
-            let mut metadata = self
-                .symlink_metadata
-                .remove(&from)
-                .expect("symlink metadata exists");
-            if self.directories.contains_key(&to) {
-                self.symlinks.insert(from.clone(), target);
-                self.symlink_metadata.insert(from, metadata);
-                return Err(EffectError::new(
-                    ErrorCode::IsDirectory,
-                    format!("virtual rename destination is a directory: {to}"),
-                ));
-            }
-            self.unlink_leaf_at(clock, &to);
-            metadata.times.metadata_changed(clock);
-            self.symlinks.insert(to.clone(), target);
-            self.symlink_metadata.insert(to.clone(), metadata);
-            self.stamp_renamed(clock, &from, &to);
-            return Ok(());
-        }
-        // A FIFO renames like any other leaf: the NAME moves and the entry keeps
-        // its inode identity and mode. Anything already open on it holds the
-        // pipe, not the name, so nothing about the transfer changes.
-        if let Some(inode) = self.fifos.remove(&from) {
-            if self.directories.contains_key(&to) {
-                self.fifos.insert(from, inode);
-                return Err(EffectError::new(
-                    ErrorCode::IsDirectory,
-                    format!("virtual rename destination is a directory: {to}"),
-                ));
-            }
-            self.unlink_leaf_at(clock, &to);
-            self.fifos.insert(to.clone(), inode);
             self.stamp_renamed(clock, &from, &to);
             return Ok(());
         }
         if !self.directories.contains_key(&from) {
             return Err(not_found(&from));
         }
-        if self.path_exists(&to) {
-            // Over a non-directory the kernel answers ENOTDIR, and over a
-            // non-empty directory ENOTEMPTY. It replaces an empty directory,
-            // which is not modeled here (EEXIST).
-            return Err(if !self.directories.contains_key(&to) {
-                EffectError::new(
-                    ErrorCode::NotDirectory,
-                    format!("virtual rename of a directory onto a non-directory: {to}"),
-                )
-            } else if self.has_children(&to) {
-                EffectError::new(
+        if from == to {
+            return Ok(());
+        }
+        if self.names.contains_key(&to) {
+            return Err(EffectError::new(
+                ErrorCode::NotDirectory,
+                format!("virtual rename of a directory onto a non-directory: {to}"),
+            ));
+        }
+        if self.directories.contains_key(&to) {
+            if self.has_children(&to) {
+                return Err(EffectError::new(
                     ErrorCode::DirectoryNotEmpty,
                     format!("virtual rename destination is not empty: {to}"),
-                )
-            } else {
-                EffectError::new(
-                    ErrorCode::AlreadyExists,
-                    format!("virtual rename destination already exists: {to}"),
-                )
-            });
+                ));
+            }
+            // An empty directory is replaced: its name now belongs to the
+            // moved directory, and the node it named is gone.
+            self.drop_directory(&to);
         }
-        let prefix = format!("{from}/");
-        let moved_directories = self
-            .directories
-            .keys()
-            .filter(|path| **path == from || path.starts_with(&prefix))
-            .cloned()
-            .collect::<Vec<_>>();
-        let moved_files = self
-            .files
-            .keys()
-            .filter(|path| path.starts_with(&prefix))
-            .cloned()
-            .collect::<Vec<_>>();
-        let moved_symlinks = self
-            .symlinks
-            .keys()
-            .filter(|path| path.starts_with(&prefix))
-            .cloned()
-            .collect::<Vec<_>>();
-        let moved_fifos = self
-            .fifos
-            .keys()
-            .filter(|path| path.starts_with(&prefix))
-            .cloned()
-            .collect::<Vec<_>>();
-        for path in moved_directories {
-            let times = self
-                .directories
-                .remove(&path)
-                .expect("directory was enumerated");
-            self.directories
-                .insert(format!("{to}{}", &path[from.len()..]), times);
-        }
-        for path in moved_files {
-            let inode = self.files.remove(&path).expect("file was enumerated");
-            self.files
-                .insert(format!("{to}{}", &path[from.len()..]), inode);
-        }
-        for path in moved_symlinks {
-            let target = self.symlinks.remove(&path).expect("symlink was enumerated");
-            let metadata = self
-                .symlink_metadata
-                .remove(&path)
-                .expect("symlink metadata exists");
-            let moved = format!("{to}{}", &path[from.len()..]);
-            self.symlinks.insert(moved.clone(), target);
-            self.symlink_metadata.insert(moved, metadata);
-        }
-        for path in moved_fifos {
-            let inode = self.fifos.remove(&path).expect("fifo was enumerated");
-            self.fifos
-                .insert(format!("{to}{}", &path[from.len()..]), inode);
-        }
+        let moved = self.take_subtree(&from);
+        self.place_subtree(moved, &to);
         self.stamp_renamed(clock, &from, &to);
         Ok(())
     }
 
+    /// `renameat2(RENAME_EXCHANGE)`: both names must exist; each takes the
+    /// other's entry — a directory's whole subtree with it — whatever the two
+    /// kinds are. One cannot hold the other (`EINVAL`); a name exchanged with
+    /// itself, or with another name for the same node, changes nothing.
+    fn exchange(&mut self, clock: FsClock, first: &str, second: &str) -> DriverResult<()> {
+        let first = normalize_entry_path(first)?;
+        let second = normalize_entry_path(second)?;
+        self.resolve_guard(&first)?;
+        self.resolve_guard(&second)?;
+        self.check_directory_write(parent_path(&first))?;
+        self.check_directory_write(parent_path(&second))?;
+        for path in [&first, &second] {
+            if !self.path_exists(path) {
+                return Err(not_found(path));
+            }
+        }
+        if first == "/"
+            || second == "/"
+            || second.starts_with(&format!("{first}/"))
+            || first.starts_with(&format!("{second}/"))
+        {
+            return Err(EffectError::new(
+                ErrorCode::InvalidInput,
+                format!("invalid virtual exchange of {first} and {second}"),
+            ));
+        }
+        if first == second || self.node_id(&first) == self.node_id(&second) {
+            return Ok(());
+        }
+        let first_tree = self.take_subtree(&first);
+        let second_tree = self.take_subtree(&second);
+        self.place_subtree(first_tree, &second);
+        self.place_subtree(second_tree, &first);
+        for path in [&first, &second] {
+            if let Some(times) = self.times_mut(path) {
+                times.metadata_changed(clock);
+            }
+        }
+        self.stamp_directory(clock, parent_path(&first));
+        if parent_path(&second) != parent_path(&first) {
+            self.stamp_directory(clock, parent_path(&second));
+        }
+        Ok(())
+    }
+
+    /// `link`: a second name for the node `from` names, whatever its kind but
+    /// a directory's (`EPERM`) — a symlink's included: without
+    /// `AT_SYMLINK_FOLLOW` the kernel links the link itself.
     fn link(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
         let from = normalize_entry_path(from)?;
         let to = normalize_entry_path(to)?;
@@ -1889,28 +2060,12 @@ impl FsDriver for MemFs {
                 format!("virtual hard link to a directory: {from}"),
             ));
         }
-        if let Some(target) = self.symlinks.get(&from).cloned() {
-            self.symlinks.insert(to.clone(), target);
-            let metadata = self.allocate_entry_metadata(clock, SYMLINK_MODE);
-            self.symlink_metadata.insert(to.clone(), metadata);
-            self.stamp_directory(clock, parent_path(&to));
-            return Ok(());
-        }
-        // A hard link to a FIFO is a second NAME for the same inode, and the
-        // inode is what the openers' pipe channel is keyed by — so the two names
-        // are one pipe, as they are on a real kernel. Nothing else differs from
-        // a file's link: the count lives on the inode either way.
-        let inode = match self.fifos.get(&from).copied() {
-            Some(inode) => {
-                self.fifos.insert(to.clone(), inode);
-                inode
-            }
-            None => {
-                let inode = self.file_inode(&from)?;
-                self.files.insert(to.clone(), inode);
-                inode
-            }
-        };
+        let inode = self
+            .names
+            .get(&from)
+            .copied()
+            .ok_or_else(|| not_found(&from))?;
+        self.names.insert(to.clone(), inode);
         let entry = self
             .inodes
             .get_mut(&inode)
@@ -1931,20 +2086,14 @@ impl FsDriver for MemFs {
             ));
         }
         let link_path = normalize_entry_path(link_path)?;
-        self.resolve_guard(&link_path)?;
-        self.check_directory_write(parent_path(&link_path))?;
-        if self.path_exists(&link_path) {
-            return Err(EffectError::new(
-                ErrorCode::AlreadyExists,
-                format!("virtual filesystem entry already exists: {link_path}"),
-            ));
-        }
-        if !self.directories.contains_key(parent_path(&link_path)) {
-            return Err(not_found(parent_path(&link_path)));
-        }
-        self.symlinks.insert(link_path.clone(), target.into());
-        let metadata = self.allocate_entry_metadata(clock, SYMLINK_MODE);
-        self.symlink_metadata.insert(link_path.clone(), metadata);
+        self.check_new_name(&link_path)?;
+        let inode = self.allocate_inode(
+            clock,
+            FsEntryKind::Symlink,
+            target.as_bytes().to_vec(),
+            SYMLINK_MODE,
+        );
+        self.names.insert(link_path.clone(), inode);
         self.stamp_directory(clock, parent_path(&link_path));
         Ok(())
     }
@@ -1952,14 +2101,16 @@ impl FsDriver for MemFs {
     fn read_link(&mut self, clock: FsClock, path: &str) -> DriverResult<String> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
-        if let Some(target) = self.symlinks.get(&path).cloned() {
+        if let Some(ino) = self
+            .names
+            .get(&path)
+            .copied()
+            .filter(|ino| self.kind_of(*ino) == Some(FsEntryKind::Symlink))
+        {
+            let inode = self.inodes.get_mut(&ino).expect("name references an inode");
             // Reading a link is a read of the link: `atime`, under the policy.
-            self.symlink_metadata
-                .get_mut(&path)
-                .expect("symlink has metadata")
-                .times
-                .accessed(clock);
-            return Ok(target);
+            inode.times.accessed(clock);
+            return Ok(String::from_utf8_lossy(&inode.contents).into_owned());
         }
         // An entry that exists but is not a symlink is `EINVAL` (readlink(2)),
         // distinguishable from a name that is not there at all.
@@ -1983,7 +2134,7 @@ impl FsDriver for MemFs {
     fn set_mode(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
-        if self.symlinks.contains_key(&path) {
+        if self.leaf_kind(&path) == Some(FsEntryKind::Symlink) {
             return Err(EffectError::new(
                 ErrorCode::Denied,
                 format!("virtual symlink has no mode of its own: {path}"),
@@ -2027,6 +2178,89 @@ impl FsDriver for MemFs {
         self.node_path(node, kind)
             .ok_or_else(|| not_found("<unlinked node>"))
     }
+
+    /// `sync(2)`: nothing to write back — every change is already the image.
+    fn sync_all(&mut self) -> DriverResult<()> {
+        Ok(())
+    }
+
+    fn get_xattr(&mut self, target: &XattrTarget, name: &str) -> DriverResult<Vec<u8>> {
+        let (ino, kind, mode) = self.xattr_node(target)?;
+        Self::check_xattr(kind, mode, name, XattrAccess::Read)?;
+        self.xattrs
+            .get(&ino)
+            .and_then(|attributes| attributes.get(name))
+            .cloned()
+            .ok_or_else(|| no_xattr(name))
+    }
+
+    /// The names a caller may see: every attribute but a `trusted.*` one, which
+    /// is listed only to `CAP_SYS_ADMIN`. Listing checks no permission bits.
+    fn list_xattr(&mut self, target: &XattrTarget) -> DriverResult<Vec<String>> {
+        let (ino, _, _) = self.xattr_node(target)?;
+        Ok(self
+            .xattrs
+            .get(&ino)
+            .map(|attributes| {
+                attributes
+                    .keys()
+                    .filter(|name| XattrNamespace::of(name) != XattrNamespace::Trusted)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// `XATTR_CREATE` on a name that exists is `EEXIST`, `XATTR_REPLACE` on
+    /// one that does not `ENODATA` (with both, whichever applies). The node's
+    /// `ctime` moves.
+    fn set_xattr(
+        &mut self,
+        clock: FsClock,
+        target: &XattrTarget,
+        name: &str,
+        value: &[u8],
+        flags: u32,
+    ) -> DriverResult<()> {
+        let (ino, kind, mode) = self.xattr_node(target)?;
+        Self::check_xattr(kind, mode, name, XattrAccess::Write)?;
+        let exists = self
+            .xattrs
+            .get(&ino)
+            .is_some_and(|attributes| attributes.contains_key(name));
+        if exists && flags & XATTR_CREATE != 0 {
+            return Err(EffectError::new(
+                ErrorCode::AlreadyExists,
+                format!("virtual extended attribute already exists: {name}"),
+            ));
+        }
+        if !exists && flags & XATTR_REPLACE != 0 {
+            return Err(no_xattr(name));
+        }
+        self.xattrs
+            .entry(ino)
+            .or_default()
+            .insert(name.to_owned(), value.to_vec());
+        self.stamp_node(clock, ino, kind);
+        Ok(())
+    }
+
+    fn remove_xattr(
+        &mut self,
+        clock: FsClock,
+        target: &XattrTarget,
+        name: &str,
+    ) -> DriverResult<()> {
+        let (ino, kind, mode) = self.xattr_node(target)?;
+        Self::check_xattr(kind, mode, name, XattrAccess::Write)?;
+        let attributes = self.xattrs.get_mut(&ino).ok_or_else(|| no_xattr(name))?;
+        attributes.remove(name).ok_or_else(|| no_xattr(name))?;
+        if attributes.is_empty() {
+            self.xattrs.remove(&ino);
+        }
+        self.stamp_node(clock, ino, kind);
+        Ok(())
+    }
 }
 
 impl MemFs {
@@ -2039,33 +2273,21 @@ impl MemFs {
         } else {
             format!("{path}/")
         };
+        let child = |candidate: &String| {
+            candidate
+                .strip_prefix(&prefix)
+                .filter(|relative| !relative.is_empty() && !relative.contains('/'))
+                .map(str::to_owned)
+        };
         let mut entries = BTreeMap::new();
         for directory in self.directories.keys() {
-            if let Some(relative) = directory.strip_prefix(&prefix) {
-                if !relative.is_empty() && !relative.contains('/') {
-                    entries.insert(relative.to_owned(), FsEntryKind::Directory);
-                }
+            if let Some(name) = child(directory) {
+                entries.insert(name, FsEntryKind::Directory);
             }
         }
-        for file in self.files.keys() {
-            if let Some(relative) = file.strip_prefix(&prefix) {
-                if !relative.is_empty() && !relative.contains('/') {
-                    entries.insert(relative.to_owned(), FsEntryKind::File);
-                }
-            }
-        }
-        for symlink in self.symlinks.keys() {
-            if let Some(relative) = symlink.strip_prefix(&prefix) {
-                if !relative.is_empty() && !relative.contains('/') {
-                    entries.insert(relative.to_owned(), FsEntryKind::Symlink);
-                }
-            }
-        }
-        for fifo in self.fifos.keys() {
-            if let Some(relative) = fifo.strip_prefix(&prefix) {
-                if !relative.is_empty() && !relative.contains('/') {
-                    entries.insert(relative.to_owned(), FsEntryKind::Fifo);
-                }
+        for (name, ino) in &self.names {
+            if let Some(name) = child(name) {
+                entries.insert(name, self.kind_of(*ino).expect("name references an inode"));
             }
         }
         Ok(entries
@@ -2074,17 +2296,58 @@ impl MemFs {
             .collect())
     }
 
-    /// Drop whatever LEAF name sits at `path` — a file, a symlink, or a FIFO —
-    /// releasing its inode reference. The one place a rename's destination is
-    /// overwritten, so no kind can be dropped without its link count following.
+    /// Drop whatever non-directory NAME sits at `path`, releasing its node
+    /// reference. The one place a rename's destination is overwritten, so no
+    /// kind can be dropped without its link count following.
     fn unlink_leaf_at(&mut self, clock: FsClock, path: &str) {
-        if let Some(replaced) = self.files.remove(path) {
+        if let Some(replaced) = self.names.remove(path) {
             self.drop_name(clock, replaced);
         }
-        self.symlinks.remove(path);
-        self.symlink_metadata.remove(path);
-        if let Some(replaced) = self.fifos.remove(path) {
-            self.drop_name(clock, replaced);
+    }
+
+    /// Detach every entry at or beneath `root` — the entry itself and, for a
+    /// directory, its whole subtree — as `(relative suffix, entry)` pairs.
+    fn take_subtree(&mut self, root: &str) -> Subtree {
+        let prefix = format!("{root}/");
+        let within = |path: &String| *path == root || path.starts_with(&prefix);
+        let directory_paths: Vec<String> = self
+            .directories
+            .keys()
+            .filter(|path| within(path))
+            .cloned()
+            .collect();
+        let name_paths: Vec<String> = self
+            .names
+            .keys()
+            .filter(|path| within(path))
+            .cloned()
+            .collect();
+        Subtree {
+            directories: directory_paths
+                .into_iter()
+                .map(|path| {
+                    let metadata = self.directories.remove(&path).expect("path was listed");
+                    (path[root.len()..].to_owned(), metadata)
+                })
+                .collect(),
+            names: name_paths
+                .into_iter()
+                .map(|path| {
+                    let ino = self.names.remove(&path).expect("path was listed");
+                    (path[root.len()..].to_owned(), ino)
+                })
+                .collect(),
+        }
+    }
+
+    /// Re-attach a detached subtree under `root`. Nodes keep their identity, so
+    /// every descriptor on one moves with it by construction.
+    fn place_subtree(&mut self, subtree: Subtree, root: &str) {
+        for (suffix, metadata) in subtree.directories {
+            self.directories.insert(format!("{root}{suffix}"), metadata);
+        }
+        for (suffix, ino) in subtree.names {
+            self.names.insert(format!("{root}{suffix}"), ino);
         }
     }
 
@@ -2101,16 +2364,26 @@ impl MemFs {
         }
     }
 
+    /// A node's metadata changed (an attribute set or removed): its `ctime`.
+    fn stamp_node(&mut self, clock: FsClock, ino: InodeId, kind: FsEntryKind) {
+        let times = if kind == FsEntryKind::Directory {
+            self.directories
+                .values_mut()
+                .find(|metadata| metadata.ino == ino)
+                .map(|metadata| &mut metadata.times)
+        } else {
+            self.inodes.get_mut(&ino).map(|inode| &mut inode.times)
+        };
+        if let Some(times) = times {
+            times.metadata_changed(clock);
+        }
+    }
+
     /// Write `mode`'s permission bits onto the entry `path` names, stamping
     /// `ctime`: the kernel writes the inode whether or not the bits changed.
     fn apply_mode(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
         let mode = mode & MODE_MASK;
-        if let Some(inode) = self
-            .files
-            .get(path)
-            .or_else(|| self.fifos.get(path))
-            .copied()
-        {
+        if let Some(inode) = self.names.get(path).copied() {
             let inode = self
                 .inodes
                 .get_mut(&inode)
@@ -2153,22 +2426,8 @@ impl MemFs {
     }
 
     fn metadata_for_path(&self, path: &str) -> DriverResult<FsMetadata> {
-        if let Some(inode_id) = self.files.get(path) {
-            let inode = self
-                .inodes
-                .get(inode_id)
-                .expect("file path references an inode");
-            return Ok(FsMetadata {
-                kind: FsEntryKind::File,
-                len: inode.contents.len() as u64,
-                ino: *inode_id,
-                nlink: inode.links,
-                atime_nanos: inode.times.atime_nanos,
-                mtime_nanos: inode.times.mtime_nanos,
-                ctime_nanos: inode.times.ctime_nanos,
-                btime_nanos: inode.times.btime_nanos,
-                mode: inode.mode,
-            });
+        if let Some(inode_id) = self.names.get(path) {
+            return self.metadata_for_inode(*inode_id);
         }
         if let Some(metadata) = self.directories.get(path) {
             return Ok(FsMetadata {
@@ -2183,40 +2442,15 @@ impl MemFs {
                 mode: metadata.mode,
             });
         }
-        if let Some(inode_id) = self.fifos.get(path) {
-            let inode = self.inodes.get(inode_id).expect("fifo references an inode");
-            return Ok(FsMetadata {
-                kind: FsEntryKind::Fifo,
-                len: 0,
-                ino: *inode_id,
-                nlink: inode.links,
-                atime_nanos: inode.times.atime_nanos,
-                mtime_nanos: inode.times.mtime_nanos,
-                ctime_nanos: inode.times.ctime_nanos,
-                btime_nanos: inode.times.btime_nanos,
-                mode: inode.mode,
-            });
-        }
-        if let Some(target) = self.symlinks.get(path) {
-            let metadata = self
-                .symlink_metadata
-                .get(path)
-                .copied()
-                .expect("symlink metadata exists");
-            return Ok(FsMetadata {
-                kind: FsEntryKind::Symlink,
-                len: target.len() as u64,
-                ino: metadata.ino,
-                nlink: 1,
-                atime_nanos: metadata.times.atime_nanos,
-                mtime_nanos: metadata.times.mtime_nanos,
-                ctime_nanos: metadata.times.ctime_nanos,
-                btime_nanos: metadata.times.btime_nanos,
-                mode: SYMLINK_MODE,
-            });
-        }
         Err(not_found(path))
     }
+}
+
+/// The entries at and beneath one path, detached for a move: each keyed by its
+/// suffix relative to that path (`""` for the entry itself).
+struct Subtree {
+    directories: Vec<(String, EntryMetadata)>,
+    names: Vec<(String, InodeId)>,
 }
 
 fn normalize_path(path: &str) -> DriverResult<String> {
@@ -2271,6 +2505,14 @@ fn invalid_fd(fd: Fd) -> EffectError {
     EffectError::new(
         ErrorCode::InvalidHandle,
         format!("virtual file handle {} is not open", fd.0),
+    )
+}
+
+/// A missing extended attribute (`ENODATA`).
+fn no_xattr(name: &str) -> EffectError {
+    EffectError::new(
+        ErrorCode::NoData,
+        format!("virtual extended attribute does not exist: {name}"),
     )
 }
 
@@ -4158,5 +4400,406 @@ mod tests {
             fs.restore_times("/missing", 1, 2, 3, 4).unwrap_err().code,
             ErrorCode::NotFound
         );
+    }
+
+    fn create(fs: &mut MemFs, path: &str, mode: u32) {
+        let fd = fs
+            .open(
+                FsClock::EPOCH,
+                path,
+                OpenFlags {
+                    mode,
+                    ..OpenFlags::create_truncate_write()
+                },
+            )
+            .unwrap();
+        fs.close(fd).unwrap();
+    }
+
+    /// RED before: rename refused any existing directory target (`EEXIST`), so
+    /// a directory could never replace an empty one the way the kernel's
+    /// `rename` does.
+    #[test]
+    fn a_directory_replaces_an_empty_directory_and_nothing_else() {
+        let mut fs = MemFs::new();
+        for directory in ["/a", "/a/inner", "/b", "/full", "/full/child"] {
+            fs.create_directory(FsClock::EPOCH, directory, 0o755)
+                .unwrap();
+        }
+        let replaced = fs.metadata("/b").unwrap().ino;
+        let moved = fs.metadata("/a").unwrap().ino;
+        fs.rename(FsClock::at(5), "/a", "/b").unwrap();
+        let now = fs.metadata("/b").unwrap();
+        assert_eq!(now.ino, moved, "the moved directory took the name");
+        assert_ne!(now.ino, replaced);
+        assert_eq!(
+            fs.metadata("/b/inner").unwrap().kind,
+            FsEntryKind::Directory
+        );
+        assert_eq!(fs.metadata("/a").unwrap_err().code, ErrorCode::NotFound);
+        assert_eq!(
+            fs.rename(FsClock::at(6), "/b", "/full").unwrap_err().code,
+            ErrorCode::DirectoryNotEmpty
+        );
+        create(&mut fs, "/file", 0o644);
+        assert_eq!(
+            fs.rename(FsClock::at(7), "/b", "/file").unwrap_err().code,
+            ErrorCode::NotDirectory
+        );
+        assert_eq!(
+            fs.rename(FsClock::at(8), "/file", "/full")
+                .unwrap_err()
+                .code,
+            ErrorCode::IsDirectory
+        );
+    }
+
+    /// RED before: a symlink was a path-keyed record, so `link` of one minted
+    /// a second, independent symlink (its own inode, `nlink` 1 on both).
+    #[test]
+    fn a_hard_link_to_a_symlink_is_a_second_name_for_the_link_node() {
+        let mut fs = MemFs::new();
+        fs.symlink(FsClock::EPOCH, "target", "/l").unwrap();
+        fs.link(FsClock::at(3), "/l", "/l2").unwrap();
+        let first = fs.metadata("/l").unwrap();
+        let second = fs.metadata("/l2").unwrap();
+        assert_eq!(second.kind, FsEntryKind::Symlink);
+        assert_eq!(first.ino, second.ino);
+        assert_eq!((first.nlink, second.nlink), (2, 2));
+        assert_eq!(fs.read_link(FsClock::EPOCH, "/l2").unwrap(), "target");
+        fs.remove_file(FsClock::at(4), "/l").unwrap();
+        assert_eq!(fs.metadata("/l2").unwrap().nlink, 1);
+    }
+
+    /// RED before: renaming a name onto another name for the same node dropped
+    /// the source and a link, where the kernel's `vfs_rename` changes nothing.
+    #[test]
+    fn a_rename_between_two_names_of_one_node_changes_nothing() {
+        let mut fs = MemFs::new();
+        create(&mut fs, "/f", 0o644);
+        fs.link(FsClock::EPOCH, "/f", "/g").unwrap();
+        fs.rename(FsClock::at(9), "/f", "/g").unwrap();
+        assert_eq!(fs.metadata("/f").unwrap().nlink, 2);
+        assert_eq!(fs.metadata("/g").unwrap().nlink, 2);
+    }
+
+    fn xattr_value(fs: &mut MemFs, path: &str, name: &str) -> DriverResult<Vec<u8>> {
+        fs.get_xattr(&XattrTarget::Path(path.into()), name)
+    }
+
+    fn set_xattr(
+        fs: &mut MemFs,
+        path: &str,
+        name: &str,
+        value: &[u8],
+        flags: u32,
+    ) -> Result<(), ErrorCode> {
+        fs.set_xattr(
+            FsClock::at(1),
+            &XattrTarget::Path(path.into()),
+            name,
+            value,
+            flags,
+        )
+        .map_err(|error| error.code)
+    }
+
+    #[test]
+    fn user_attributes_round_trip_and_follow_the_node() {
+        let mut fs = MemFs::new();
+        create(&mut fs, "/f", 0o644);
+        let path = XattrTarget::Path("/f".into());
+        fs.set_xattr(FsClock::at(5), &path, "user.a", b"v1", 0)
+            .unwrap();
+        assert_eq!(xattr_value(&mut fs, "/f", "user.a").unwrap(), b"v1");
+        assert_eq!(
+            fs.metadata("/f").unwrap().ctime_nanos,
+            5,
+            "a set moves ctime"
+        );
+        assert_eq!(
+            set_xattr(&mut fs, "/f", "user.a", b"v2", XATTR_CREATE),
+            Err(ErrorCode::AlreadyExists)
+        );
+        assert_eq!(
+            set_xattr(&mut fs, "/f", "user.b", b"v2", XATTR_REPLACE),
+            Err(ErrorCode::NoData)
+        );
+        assert_eq!(
+            set_xattr(&mut fs, "/f", "user.a", b"v2", XATTR_CREATE | XATTR_REPLACE),
+            Err(ErrorCode::AlreadyExists)
+        );
+        fs.set_xattr(FsClock::at(6), &path, "user.a", b"v2", XATTR_REPLACE)
+            .unwrap();
+        fs.link(FsClock::EPOCH, "/f", "/h").unwrap();
+        fs.rename(FsClock::EPOCH, "/f", "/moved").unwrap();
+        assert_eq!(xattr_value(&mut fs, "/h", "user.a").unwrap(), b"v2");
+        assert_eq!(xattr_value(&mut fs, "/moved", "user.a").unwrap(), b"v2");
+        assert_eq!(
+            fs.list_xattr(&XattrTarget::Path("/h".into())).unwrap(),
+            ["user.a"]
+        );
+        fs.remove_xattr(FsClock::EPOCH, &XattrTarget::Path("/h".into()), "user.a")
+            .unwrap();
+        assert_eq!(
+            xattr_value(&mut fs, "/moved", "user.a").unwrap_err().code,
+            ErrorCode::NoData
+        );
+        assert_eq!(
+            fs.remove_xattr(FsClock::EPOCH, &XattrTarget::Path("/h".into()), "user.a")
+                .unwrap_err()
+                .code,
+            ErrorCode::NoData
+        );
+    }
+
+    #[test]
+    fn namespaces_are_judged_as_the_kernel_judges_an_unprivileged_caller() {
+        let mut fs = MemFs::new();
+        create(&mut fs, "/f", 0o644);
+        create(&mut fs, "/ro", 0o444);
+        create(&mut fs, "/wo", 0o200);
+        fs.make_fifo(FsClock::EPOCH, "/p", 0o644).unwrap();
+        fs.symlink(FsClock::EPOCH, "f", "/l").unwrap();
+        // trusted.*: EPERM to write, ENODATA to read, never listed.
+        assert_eq!(
+            set_xattr(&mut fs, "/f", "trusted.x", b"v", 0),
+            Err(ErrorCode::NotPermitted)
+        );
+        assert_eq!(
+            xattr_value(&mut fs, "/f", "trusted.x").unwrap_err().code,
+            ErrorCode::NoData
+        );
+        // security.*: readable, not writable.
+        assert_eq!(
+            set_xattr(&mut fs, "/f", "security.x", b"v", 0),
+            Err(ErrorCode::NotPermitted)
+        );
+        assert_eq!(
+            xattr_value(&mut fs, "/f", "security.x").unwrap_err().code,
+            ErrorCode::NoData
+        );
+        // system.* and a name in no namespace have no handler.
+        assert_eq!(
+            set_xattr(&mut fs, "/f", "system.posix_acl_access", b"v", 0),
+            Err(ErrorCode::Unsupported)
+        );
+        assert_eq!(
+            set_xattr(&mut fs, "/f", "plain", b"v", 0),
+            Err(ErrorCode::Unsupported)
+        );
+        assert_eq!(
+            set_xattr(&mut fs, "/f", "user.", b"v", 0),
+            Err(ErrorCode::InvalidInput)
+        );
+        // user.* needs a regular file or a directory...
+        assert_eq!(
+            set_xattr(&mut fs, "/p", "user.a", b"v", 0),
+            Err(ErrorCode::NotPermitted)
+        );
+        assert_eq!(
+            xattr_value(&mut fs, "/p", "user.a").unwrap_err().code,
+            ErrorCode::NoData
+        );
+        assert_eq!(
+            set_xattr(&mut fs, "/l", "user.a", b"v", 0),
+            Err(ErrorCode::NotPermitted)
+        );
+        assert!(
+            fs.list_xattr(&XattrTarget::Path("/l".into()))
+                .unwrap()
+                .is_empty()
+        );
+        // ...and the mode's bits: the permission check comes before the
+        // handler lookup, so an unwritable file refuses even a bad name.
+        assert_eq!(
+            set_xattr(&mut fs, "/ro", "user.a", b"v", 0),
+            Err(ErrorCode::Denied)
+        );
+        assert_eq!(
+            set_xattr(&mut fs, "/ro", "plain", b"v", 0),
+            Err(ErrorCode::Denied)
+        );
+        assert_eq!(
+            xattr_value(&mut fs, "/wo", "user.a").unwrap_err().code,
+            ErrorCode::Denied
+        );
+        assert_eq!(set_xattr(&mut fs, "/wo", "user.a", b"w", 0), Ok(()));
+        fs.create_directory(FsClock::EPOCH, "/d", 0o755).unwrap();
+        assert_eq!(set_xattr(&mut fs, "/d", "user.d", b"dir", 0), Ok(()));
+        assert_eq!(
+            fs.list_xattr(&XattrTarget::Path("/d".into())).unwrap(),
+            ["user.d"]
+        );
+    }
+
+    #[test]
+    fn a_descriptor_names_its_node_and_a_location_names_none() {
+        let mut fs = MemFs::new();
+        create(&mut fs, "/f", 0o644);
+        let reader = fs
+            .open(FsClock::EPOCH, "/f", OpenFlags::read_only())
+            .unwrap();
+        fs.set_xattr(FsClock::EPOCH, &XattrTarget::Fd(reader), "user.fd", b"F", 0)
+            .unwrap();
+        assert_eq!(xattr_value(&mut fs, "/f", "user.fd").unwrap(), b"F");
+        let location = fs
+            .open(FsClock::EPOCH, "/f", OpenFlags::path_only())
+            .unwrap();
+        assert_eq!(
+            fs.get_xattr(&XattrTarget::Fd(location), "user.fd")
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidHandle
+        );
+        // An unlinked node keeps its attributes for as long as it is held, and
+        // they go with it.
+        fs.remove_file(FsClock::EPOCH, "/f").unwrap();
+        assert_eq!(
+            fs.get_xattr(&XattrTarget::Fd(reader), "user.fd").unwrap(),
+            b"F"
+        );
+        fs.close(reader).unwrap();
+        fs.close(location).unwrap();
+        assert!(fs.xattrs.is_empty());
+    }
+
+    #[test]
+    fn exchange_swaps_two_entries_of_any_kinds() {
+        let mut fs = MemFs::new();
+        create(&mut fs, "/a", 0o644);
+        fs.create_directory(FsClock::EPOCH, "/d", 0o755).unwrap();
+        create(&mut fs, "/d/inner", 0o600);
+        let (file, directory) = (
+            fs.metadata("/a").unwrap().ino,
+            fs.metadata("/d").unwrap().ino,
+        );
+        fs.exchange(FsClock::at(4), "/a", "/d").unwrap();
+        assert_eq!(fs.metadata("/a").unwrap().ino, directory);
+        assert_eq!(fs.metadata("/a/inner").unwrap().mode, 0o600);
+        assert_eq!(fs.metadata("/d").unwrap().ino, file);
+        assert_eq!(fs.metadata("/d").unwrap().kind, FsEntryKind::File);
+        assert_eq!(
+            fs.exchange(FsClock::EPOCH, "/a", "/missing")
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            fs.exchange(FsClock::EPOCH, "/a", "/a/inner")
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidInput
+        );
+        fs.exchange(FsClock::EPOCH, "/d", "/d").unwrap();
+    }
+
+    #[test]
+    fn mknod_makes_regular_files_sockets_and_whiteouts_that_open_nothing() {
+        let mut fs = MemFs::new();
+        fs.make_node(FsClock::EPOCH, "/r", FsNode::File, 0o640)
+            .unwrap();
+        fs.make_node(FsClock::EPOCH, "/s", FsNode::Socket, 0o600)
+            .unwrap();
+        fs.make_node(FsClock::EPOCH, "/w", FsNode::Whiteout, 0)
+            .unwrap();
+        assert_eq!(fs.metadata("/r").unwrap().kind, FsEntryKind::File);
+        assert_eq!(fs.metadata("/s").unwrap().kind, FsEntryKind::Socket);
+        assert_eq!(fs.metadata("/w").unwrap().mode, 0);
+        assert_eq!(
+            fs.make_node(FsClock::EPOCH, "/s", FsNode::Socket, 0o600)
+                .unwrap_err()
+                .code,
+            ErrorCode::AlreadyExists
+        );
+        assert_eq!(
+            fs.open(FsClock::EPOCH, "/s", OpenFlags::read_only())
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidInput,
+            "the caller answers ENXIO once the node is reached"
+        );
+        assert_eq!(
+            fs.open(FsClock::EPOCH, "/w", OpenFlags::read_only())
+                .unwrap_err()
+                .code,
+            ErrorCode::Denied,
+            "the whiteout's 0 mode is judged first"
+        );
+        let names: Vec<_> = fs
+            .read_directory(FsClock::EPOCH, "/")
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.name, entry.kind))
+            .collect();
+        assert!(names.contains(&("s".into(), FsEntryKind::Socket)));
+        assert!(names.contains(&("w".into(), FsEntryKind::CharDevice)));
+    }
+
+    /// A device other than the whiteout needs `CAP_MKNOD`, judged after the
+    /// name and the parent's `w`+`x` as `vfs_mknod` judges it.
+    #[test]
+    fn mknod_refuses_a_device_after_the_name_and_the_parent() {
+        let mut fs = MemFs::new();
+        fs.make_node(FsClock::EPOCH, "/s", FsNode::Socket, 0o600)
+            .unwrap();
+        fs.create_directory(FsClock::EPOCH, "/ro", 0o500).unwrap();
+        let refusal = |fs: &mut MemFs, path: &str, node: FsNode| {
+            fs.make_node(FsClock::EPOCH, path, node, 0o600)
+                .unwrap_err()
+                .code
+        };
+        let tty = FsNode::CharDevice { device: 0x0501 };
+        assert_eq!(refusal(&mut fs, "/s", tty), ErrorCode::AlreadyExists);
+        assert_eq!(refusal(&mut fs, "/ro/c", tty), ErrorCode::Denied);
+        assert_eq!(refusal(&mut fs, "/c", tty), ErrorCode::NotPermitted);
+        assert_eq!(
+            refusal(&mut fs, "/b", FsNode::BlockDevice { device: 0 }),
+            ErrorCode::NotPermitted
+        );
+        assert!(fs.metadata("/c").is_err() && fs.metadata("/b").is_err());
+    }
+
+    /// `RENAME_WHITEOUT` moves the entry and leaves a mode-0 whiteout where it
+    /// was; between two names of one node it changes nothing.
+    #[test]
+    fn a_whiteout_rename_leaves_a_whiteout_at_the_old_name() {
+        let mut fs = MemFs::new().with_file("/f", b"F".to_vec()).unwrap();
+        fs.rename_whiteout(FsClock::EPOCH, "/f", "/g").unwrap();
+        assert_eq!(fs.contents("/g").unwrap(), b"F");
+        let whiteout = fs.metadata("/f").unwrap();
+        assert_eq!((whiteout.kind, whiteout.mode), (FsEntryKind::CharDevice, 0));
+        fs.link(FsClock::EPOCH, "/g", "/h").unwrap();
+        fs.rename_whiteout(FsClock::EPOCH, "/g", "/h").unwrap();
+        assert_eq!(fs.metadata("/g").unwrap().kind, FsEntryKind::File);
+        assert_eq!(fs.metadata("/h").unwrap().nlink, 2);
+    }
+
+    #[test]
+    fn nodes_links_and_attributes_survive_a_restart_snapshot() {
+        let mut fs = MemFs::new();
+        fs.symlink(FsClock::EPOCH, "t", "/l").unwrap();
+        fs.link(FsClock::EPOCH, "/l", "/l2").unwrap();
+        fs.make_node(FsClock::EPOCH, "/s", FsNode::Socket, 0o600)
+            .unwrap();
+        fs.create_directory(FsClock::EPOCH, "/d", 0o755).unwrap();
+        fs.set_xattr(
+            FsClock::EPOCH,
+            &XattrTarget::Path("/d".into()),
+            "user.k",
+            b"v",
+            0,
+        )
+        .unwrap();
+        let encoded = fs.export_snapshot().encode().unwrap();
+        let mut restored = FsSnapshot::decode(&encoded).unwrap().into_memfs();
+        assert_eq!(restored.metadata("/l2").unwrap().nlink, 2);
+        assert_eq!(
+            restored.metadata("/l").unwrap().ino,
+            restored.metadata("/l2").unwrap().ino
+        );
+        assert_eq!(restored.metadata("/s").unwrap().kind, FsEntryKind::Socket);
+        assert_eq!(xattr_value(&mut restored, "/d", "user.k").unwrap(), b"v");
+        assert_eq!(restored.export_snapshot().encode().unwrap(), encoded);
     }
 }

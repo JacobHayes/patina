@@ -10,9 +10,7 @@
 //! regular file, directory, block device or symlink, and no access mode
 //! needed.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -172,15 +170,5 @@ pub const SCENARIO: Scenario = Scenario {
         "pipe2",
         "close",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::ALL,
-        what: "sync, syncfs and sync_file_range are unmodeled Trap rows: the first sync aborts (fsync/fdatasync before it conform)",
-        failure: Failure::Stops {
-            events: 32,
-            ending: Ending::Signal(6),
-            diagnostic: "unsupported syscall sync",
-        },
-    }],
     ..DEFAULTS
 };

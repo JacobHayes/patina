@@ -13,9 +13,7 @@
 //! device (its superblock's s_dev), is EINVAL for a device with no mounted
 //! filesystem — judged before the buffer — and EFAULT for a NULL buffer.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -207,66 +205,6 @@ pub const SCENARIO: Scenario = Scenario {
         "eventfd",
         "fstat",
         "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "statfs/fstatfs report f_flags without ST_VALID, which the kernel sets in every answer (fs/statfs.c calculate_f_flags); the C interposers' virtual volume",
-            failure: Failure::Differs(&[
-                Difference::field(3, "statfs", "fields.st_valid", Observed::Bool(false)),
-                Difference::check(5, "f_flags carries ST_VALID and not ST_RDONLY"),
-                Difference::field(11, "statfs", "fields.st_valid", Observed::Bool(false)),
-                Difference::field(13, "statfs", "fields.st_valid", Observed::Bool(false)),
-                Difference::field(23, "fstatfs", "fields.st_valid", Observed::Bool(false)),
-                Difference::field(26, "fstatfs", "fields.st_valid", Observed::Bool(false)),
-                Difference::field(29, "fstatfs", "fields.st_valid", Observed::Bool(false)),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "fstatfs of a pipe or an eventfd is EBADF, where the kernel answers the descriptor's pseudo-filesystem (PIPEFS_MAGIC, ANON_INODE_FS_MAGIC); the C fstatfs resolves only filesystem descriptors",
-            failure: Failure::Differs(&[
-                Difference::field(32, "fstatfs", "errno", Observed::Str("EBADF")),
-                Difference::field(32, "fstatfs", "fields.namelen", Observed::Null),
-                Difference::field(32, "fstatfs", "fields.rdonly", Observed::Null),
-                Difference::field(32, "fstatfs", "fields.st_valid", Observed::Null),
-                Difference::field(32, "fstatfs", "ret", Observed::Int(-1)),
-                Difference::check(33, "a pipe lives on pipefs"),
-                Difference::field(35, "fstatfs", "errno", Observed::Str("EBADF")),
-                Difference::field(35, "fstatfs", "fields.namelen", Observed::Null),
-                Difference::field(35, "fstatfs", "fields.rdonly", Observed::Null),
-                Difference::field(35, "fstatfs", "fields.st_valid", Observed::Null),
-                Difference::field(35, "fstatfs", "ret", Observed::Int(-1)),
-                Difference::check(36, "an eventfd lives on the anonymous-inode filesystem"),
-            ]),
-        },
-        #[cfg(target_arch = "x86_64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "ustat is unmodeled: the libc door (syscall(2), glibc has no wrapper) aborts on the Trap row",
-            failure: Failure::Stops {
-                events: 39,
-                ending: Ending::Signal(6),
-                diagnostic: "unsupported syscall ustat",
-            },
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[
-                Vehicle::Syscall,
-                #[cfg(target_arch = "x86_64")]
-                Vehicle::Raw,
-            ],
-            what: "the statfs/fstatfs rows are unmodeled on the raw doors (the C interposers answer them): the first raw statfs aborts on the Trap row",
-            failure: Failure::Stops {
-                events: 3,
-                ending: Ending::Signal(6),
-                diagnostic: "unsupported syscall statfs",
-            },
-        },
     ],
     ..DEFAULTS
 };

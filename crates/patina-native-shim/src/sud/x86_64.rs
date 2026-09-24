@@ -1,17 +1,24 @@
 //! SUD rows only the x86_64 table lists that need a decode of their own:
-//! `dup2`, `epoll_create`, `poll`, and the pre-`utimensat` time rows (`utime`,
-//! `utimes`, `futimesat`). The aarch64 table (asm-generic) never had these
-//! numbers — glibc there reaches `dup3`, `epoll_create1`, `ppoll` and
-//! `utimensat` instead — so this module is compiled exactly where the registry
-//! gives them an identity. Each lands on the same `patina_*` entry as its
-//! modern row. The x86_64 rows that are pure argument re-shuffles of a modern
-//! row (`open`, `stat`, `pipe`, `epoll_wait`, …) bind their modern handler
-//! directly in `BINDINGS`.
+//! `dup2`, `epoll_create`, `poll`, the pre-`utimensat` time rows (`utime`,
+//! `utimes`, `futimesat`), `ustat`, and the legacy `getdents`. The aarch64
+//! table (asm-generic) never had these numbers — glibc there reaches `dup3`,
+//! `epoll_create1`, `ppoll` and `utimensat` instead — so this module is
+//! compiled exactly where the registry gives them an identity. Each lands on
+//! the same `patina_*` entry as its modern row. The x86_64 rows that are pure
+//! argument re-shuffles of a modern row (`open`, `stat`, `pipe`, `epoll_wait`,
+//! …) bind their modern handler directly in `BINDINGS`.
 
 use super::*;
 
 unsafe extern "C" {
     fn patina_dup2(oldfd: c_int, newfd: c_int) -> c_int;
+    fn patina_ustat(dev: u32, out: *mut c_void) -> c_int;
+}
+
+/// `ustat(2)`: the kernel reads the device as an `unsigned int`.
+pub(super) fn sys_ustat(dev: u64, ubuf: u64) -> i64 {
+    // SAFETY: `ubuf` is the guest's `struct ustat` storage (or NULL, EFAULT).
+    ret_i32(unsafe { patina_ustat(dev as u32, ubuf as *mut c_void) })
 }
 
 /// `dup2(2)`. It differs from `dup3` in EXACTLY the equal-fd case:
@@ -142,6 +149,12 @@ pub(super) fn sys_utime(path: u64, times: u64) -> i64 {
             mtime.1,
         )
     })
+}
+
+/// The legacy `getdents(2)`: the same per-descriptor iteration `getdents64`
+/// reads, in the `struct linux_dirent` layout.
+pub(super) fn sys_getdents(fd: i64, dirp: u64, count: u64) -> i64 {
+    getdents(fd, dirp, count, DirentFormat::Dirent)
 }
 
 #[cfg(test)]

@@ -8,7 +8,10 @@
 //! expansion, as the kernel applies them — never lexically across a link),
 //! symlink walking with the kernel's 40-hop `ELOOP` limit, `ENAMETOOLONG` at
 //! `PATH_MAX`/`NAME_MAX`, `ENOTDIR` for a component resolved through a
-//! non-directory, and the trailing-slash rule. The deterministic filesystem
+//! non-directory, and the trailing-slash rule. `openat2`'s restrictions are
+//! rules of the same walk: a scope's root bounds `..` and absolute symlinks
+//! (`EXDEV` beneath it, a stop at it in-root), and `NO_SYMLINKS` refuses the
+//! first symlink met (`ELOOP`). The deterministic filesystem
 //! keeps its strict canonical-only contract underneath: it refuses `..` and
 //! an intermediate symlink, so what it is handed is always what this resolver
 //! produced.
@@ -31,7 +34,9 @@ use patina_dst_abi::{Fd, FsEntryKind, FsMetadata, OpenFlags};
 use patina_dst_runtime::{Context, RuntimeError};
 
 use crate::fdtable::FdKind;
-use crate::{EACCES, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR, SpinMutex, resolve_fd, with_context};
+use crate::{
+    EACCES, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR, EXDEV, SpinMutex, resolve_fd, with_context,
+};
 
 /// Linux `PATH_MAX`: a path (with its terminator) at or past this length is
 /// `ENAMETOOLONG`.
@@ -51,12 +56,40 @@ pub(crate) const RESOLVE_NOFOLLOW: u32 = 1 << 0;
 /// the descriptor's node otherwise (`AT_EMPTY_PATH`, `readlinkat(fd, "")`).
 /// Without it an empty path is `ENOENT`.
 pub(crate) const RESOLVE_EMPTY_PATH: u32 = 1 << 1;
-pub(crate) const RESOLVE_ALL: u32 = RESOLVE_NOFOLLOW | RESOLVE_EMPTY_PATH;
+/// The flags a `*at` entry's `AT_*` word decodes onto.
+pub(crate) const RESOLVE_AT_FLAGS: u32 = RESOLVE_NOFOLLOW | RESOLVE_EMPTY_PATH;
+/// Stay beneath the base (`RESOLVE_BENEATH`): a `..` out of it, an absolute
+/// path, or an absolute symlink is `EXDEV`.
+pub(crate) const RESOLVE_BENEATH: u32 = 1 << 2;
+/// Treat the base as the root (`RESOLVE_IN_ROOT`): an absolute path or symlink
+/// starts at it, and a `..` at it stays there, as `..` at `/` does.
+pub(crate) const RESOLVE_IN_ROOT: u32 = 1 << 3;
+/// Follow no symlink (`RESOLVE_NO_SYMLINKS`): meeting one is `ELOOP`.
+pub(crate) const RESOLVE_NO_SYMLINKS: u32 = 1 << 4;
+/// Cross no mount (`RESOLVE_NO_XDEV`): the volume is one mount, and the one
+/// entry outside it, `/dev/urandom`, is `EXDEV`.
+pub(crate) const RESOLVE_NO_XDEV: u32 = 1 << 5;
+/// Resolve from the cache alone (`RESOLVE_CACHED`). Every lookup here is in
+/// memory, so the walk is unchanged; the open refuses a creating or
+/// truncating one (`EAGAIN`), which could not complete without I/O.
+pub(crate) const RESOLVE_CACHED: u32 = 1 << 6;
+/// The restrictions `openat2`'s `RESOLVE_*` word decodes onto. It has no
+/// magic links to refuse: no entry here is one.
+#[cfg(target_os = "linux")]
+pub(crate) const RESOLVE_SCOPE_FLAGS: u32 =
+    RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV | RESOLVE_CACHED;
 
 /// The one path that names a device the shim owns rather than a filesystem
-/// entry. It is resolved without consulting the driver so the entropy device
-/// exists whether or not the image has a `/dev`.
+/// entry, on a mount of its own (devtmpfs). It is resolved without consulting
+/// the driver so the entropy device exists whether or not the image has a
+/// `/dev` — recognized lexically, before the walk, so a spelling that reaches
+/// it only through a symlink or a `..` goes to the volume instead.
 const URANDOM: &str = "/dev/urandom";
+
+/// Whether a resolved path is the entropy device.
+pub(crate) fn is_urandom(path: &str) -> bool {
+    path == URANDOM
+}
 
 /// A resolved path: the canonical absolute path the driver accepts, and the
 /// final entry's metadata when it exists (`None` when the final component is
@@ -239,6 +272,20 @@ fn fd_path(guest_fd: c_int, empty_path: bool) -> Result<String, c_int> {
     with_context(|context| context.fs_fd_path(handle))
 }
 
+/// How one resolution walks: the flags that change what a component does.
+#[derive(Clone, Copy)]
+struct Rules {
+    /// Leave a trailing symlink unresolved.
+    nofollow: bool,
+    /// Refuse every symlink met (`ELOOP`).
+    no_symlinks: bool,
+    /// Leaving the root is `EXDEV`, not a stop at it.
+    beneath: bool,
+    /// How many leading components of the resolved directory are the root:
+    /// the base's when the resolution is scoped to it, none otherwise.
+    root: usize,
+}
+
 enum Step {
     /// The resolution is complete.
     Done(String, Option<FsMetadata>),
@@ -259,7 +306,16 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolved, 
         return Err(ENAMETOOLONG);
     }
     let empty_path = flags & RESOLVE_EMPTY_PATH != 0;
-    let base = if path.starts_with('/') {
+    // An empty name is refused as it is copied in (`getname`: `ENOENT`),
+    // before the base it would be relative to is looked at.
+    if path.is_empty() && !empty_path {
+        return Err(ENOENT);
+    }
+    let scoped = flags & (RESOLVE_BENEATH | RESOLVE_IN_ROOT) != 0;
+    if path.starts_with('/') && flags & RESOLVE_BENEATH != 0 {
+        return Err(EXDEV);
+    }
+    let base = if path.starts_with('/') && !scoped {
         "/".to_owned()
     } else if dirfd == AT_FDCWD {
         cwd_path()?
@@ -267,9 +323,6 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolved, 
         fd_path(dirfd, path.is_empty() && empty_path)?
     };
     if path.is_empty() {
-        if !empty_path {
-            return Err(ENOENT);
-        }
         let metadata = metadata(&base)?;
         return Ok(Resolved {
             path: base,
@@ -282,8 +335,13 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolved, 
     // A trailing `/` (or `/.`) says the final entry must be a directory, and
     // makes a trailing symlink resolve even under NOFOLLOW, as the kernel does.
     let requires_directory = path.ends_with('/') || path.ends_with("/.") || path == ".";
-    let nofollow = flags & RESOLVE_NOFOLLOW != 0 && !requires_directory;
     let mut resolved: Vec<String> = components(&base).map(str::to_owned).collect();
+    let rules = Rules {
+        nofollow: flags & RESOLVE_NOFOLLOW != 0 && !requires_directory,
+        no_symlinks: flags & RESOLVE_NO_SYMLINKS != 0,
+        beneath: flags & RESOLVE_BENEATH != 0,
+        root: if scoped { resolved.len() } else { 0 },
+    };
     let mut remaining: VecDeque<String> = components(path).map(str::to_owned).collect();
     if !remaining.iter().any(|component| component == "..") {
         let lexical: Vec<String> = resolved
@@ -292,6 +350,9 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolved, 
             .cloned()
             .collect();
         if join(&lexical) == URANDOM {
+            if flags & RESOLVE_NO_XDEV != 0 {
+                return Err(EXDEV);
+            }
             return Ok(Resolved {
                 path: URANDOM.to_owned(),
                 metadata: None,
@@ -301,11 +362,11 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolved, 
     let mut hops = 0usize;
     loop {
         let step = if remaining.iter().any(|component| component == "..") {
-            walk(&mut resolved, &mut remaining, nofollow, &mut hops)?
+            walk(&mut resolved, &mut remaining, rules, &mut hops)?
         } else {
-            match fast(&mut resolved, &mut remaining, nofollow, &mut hops)? {
+            match fast(&mut resolved, &mut remaining, rules, &mut hops)? {
                 Some(step) => step,
-                None => walk(&mut resolved, &mut remaining, nofollow, &mut hops)?,
+                None => walk(&mut resolved, &mut remaining, rules, &mut hops)?,
             }
         };
         match step {
@@ -325,22 +386,82 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolved, 
     }
 }
 
+/// The kind of a path's final component, as the kernel's `filename_parentat`
+/// classifies it: an ordinary name, or one of the three spellings that name no
+/// entry an operation on a NAME can act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Last {
+    /// `LAST_NORM`.
+    Name,
+    /// `LAST_DOT`: the path ends in `.`.
+    Dot,
+    /// `LAST_DOTDOT`: the path ends in `..`.
+    DotDot,
+    /// `LAST_ROOT`: the path is `/` (however many slashes).
+    Root,
+}
+
+/// Classify `path`'s final component (trailing slashes do not count).
+pub(crate) fn last_component(path: &str) -> Last {
+    match components(path).last() {
+        None if path.starts_with('/') => Last::Root,
+        Some(".") => Last::Dot,
+        Some("..") => Last::DotDot,
+        _ => Last::Name,
+    }
+}
+
+/// The final component of a removal's or a rename's path, which must be a
+/// NAME. A special one is answered only after the path's parent has resolved
+/// to a directory, as the kernel looks the parent up before it judges the last
+/// component (a missing or non-directory prefix answers `ENOENT`/`ENOTDIR` as
+/// it would for any name).
+pub(crate) fn final_component(dirfd: c_int, path: &str) -> Result<Last, c_int> {
+    let last = last_component(path);
+    if last == Last::Name {
+        return Ok(last);
+    }
+    let parent = match path.trim_end_matches('/').rsplit_once('/') {
+        Some(("", _)) => "/",
+        Some((parent, _)) => parent,
+        None => "",
+    };
+    let resolved = resolve(
+        dirfd,
+        if last == Last::Root { "/" } else { parent },
+        RESOLVE_EMPTY_PATH,
+    )?;
+    match resolved.metadata {
+        None => Err(ENOENT),
+        Some(metadata) if metadata.kind != FsEntryKind::Directory => Err(ENOTDIR),
+        Some(_) => Ok(last),
+    }
+}
+
 /// Splice a symlink's target into the work list in place of the link. An
-/// absolute target restarts at the root; a relative one continues from the
-/// link's directory, which is what `resolved` already holds.
+/// absolute target restarts at the root (and leaves a `beneath` scope); a
+/// relative one continues from the link's directory, which is what `resolved`
+/// already holds.
 fn expand(
     resolved: &mut Vec<String>,
     remaining: &mut VecDeque<String>,
     link: &str,
+    rules: Rules,
     hops: &mut usize,
 ) -> Result<Step, c_int> {
+    if rules.no_symlinks {
+        return Err(ELOOP);
+    }
     *hops += 1;
     if *hops > SYMLINK_HOPS {
         return Err(ELOOP);
     }
     let target = with_context(|context| context.fs_read_link(link))?;
     if target.starts_with('/') {
-        resolved.clear();
+        if rules.beneath {
+            return Err(EXDEV);
+        }
+        resolved.truncate(rules.root);
     }
     for (index, component) in components(&target).enumerate() {
         remaining.insert(index, component.to_owned());
@@ -353,7 +474,7 @@ fn expand(
 fn fast(
     resolved: &mut Vec<String>,
     remaining: &mut VecDeque<String>,
-    nofollow: bool,
+    rules: Rules,
     hops: &mut usize,
 ) -> Result<Option<Step>, c_int> {
     let names: Vec<String> = remaining
@@ -366,11 +487,11 @@ fn fast(
     let candidate = join(&full);
     match metadata(&candidate) {
         Ok(Some(metadata)) => {
-            if metadata.kind == FsEntryKind::Symlink && !nofollow {
+            if metadata.kind == FsEntryKind::Symlink && !rules.nofollow {
                 // The link's directory is everything before its name.
                 *resolved = full[..full.len() - 1].to_vec();
                 remaining.clear();
-                return expand(resolved, remaining, &candidate, hops).map(Some);
+                return expand(resolved, remaining, &candidate, rules, hops).map(Some);
             }
             remaining.clear();
             Ok(Some(Step::Done(candidate, Some(metadata))))
@@ -405,11 +526,11 @@ fn fast(
 
 /// The component-wise walk: every prefix is looked up in turn, a symlink is
 /// expanded where it stands, `..` pops the resolved directory (never a link's
-/// name), and a non-directory prefix is `ENOTDIR`.
+/// name) down to the root, and a non-directory prefix is `ENOTDIR`.
 fn walk(
     resolved: &mut Vec<String>,
     remaining: &mut VecDeque<String>,
-    nofollow: bool,
+    rules: Rules,
     hops: &mut usize,
 ) -> Result<Step, c_int> {
     while let Some(component) = remaining.pop_front() {
@@ -417,7 +538,13 @@ fn walk(
             continue;
         }
         if component == ".." {
-            resolved.pop();
+            // `..` at the root stays there; out of a `beneath` scope it is
+            // refused.
+            if resolved.len() > rules.root {
+                resolved.pop();
+            } else if rules.beneath {
+                return Err(EXDEV);
+            }
             continue;
         }
         let candidate = child(resolved, &component);
@@ -430,11 +557,14 @@ fn walk(
         };
         match metadata.kind {
             FsEntryKind::Directory => resolved.push(component),
-            FsEntryKind::Symlink if is_final && nofollow => {
+            FsEntryKind::Symlink if is_final && rules.nofollow => {
                 return Ok(Step::Done(candidate, Some(metadata)));
             }
-            FsEntryKind::Symlink => return expand(resolved, remaining, &candidate, hops),
-            FsEntryKind::File | FsEntryKind::Fifo => {
+            FsEntryKind::Symlink => return expand(resolved, remaining, &candidate, rules, hops),
+            FsEntryKind::File
+            | FsEntryKind::Fifo
+            | FsEntryKind::Socket
+            | FsEntryKind::CharDevice => {
                 if is_final {
                     return Ok(Step::Done(candidate, Some(metadata)));
                 }
@@ -446,4 +576,24 @@ fn walk(
     let path = join(resolved);
     let metadata = metadata(&path)?;
     Ok(Step::Done(path, metadata))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_final_component_is_classified_as_filename_parentat_does() {
+        assert_eq!(last_component("d/sub"), Last::Name);
+        assert_eq!(last_component("d/sub/"), Last::Name);
+        assert_eq!(last_component("d/sub/."), Last::Dot);
+        assert_eq!(last_component("d/sub/./"), Last::Dot);
+        assert_eq!(last_component("."), Last::Dot);
+        assert_eq!(last_component("d/sub/.."), Last::DotDot);
+        assert_eq!(last_component(".."), Last::DotDot);
+        assert_eq!(last_component("/"), Last::Root);
+        assert_eq!(last_component("///"), Last::Root);
+        assert_eq!(last_component("/."), Last::Dot);
+        assert_eq!(last_component("..."), Last::Name);
+    }
 }

@@ -3356,6 +3356,10 @@ fn wasi_filetype(kind: FsEntryKind) -> u8 {
         // Preview 1 call makes a FIFO, so one can only arrive through a
         // pre-seeded image.)
         FsEntryKind::Fifo => WASI_FILETYPE_UNKNOWN,
+        // A socket node's inode says nothing about stream versus datagram, the
+        // distinction Preview 1's two socket kinds draw.
+        FsEntryKind::Socket => WASI_FILETYPE_UNKNOWN,
+        FsEntryKind::CharDevice => WASI_FILETYPE_CHARACTER_DEVICE,
     }
 }
 

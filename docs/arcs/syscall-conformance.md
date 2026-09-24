@@ -125,7 +125,7 @@ audit. And no gate compares patina's answers with the host kernel's, so a
    model, not a stop-gap. Host identity becomes knob-driven virtual state.
    cwd is modeled. A unified Linux-like fd table is a foundation.
 4. **Soft-deny ENOSYS only where ENOSYS is a real kernel outcome callers already
-   probe for** (openat2, rseq, membarrier until the memory+ipc arc models it,
+   probe for** (rseq, membarrier until the memory+ipc arc models it,
    cachestat, io_uring until its arc, removed numbers). Every stop-gap row
    names the arc that closes it.
 5. **Oracle = the host kernel.** Probes are self-checking Rust programs that

@@ -7,9 +7,7 @@
 //! request, are ENOTTY; an O_PATH descriptor is EBADF (fdget), as is a closed
 //! number.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -150,63 +148,6 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &[
         "ioctl", "fcntl", "openat", "read", "write", "lseek", "pipe2", "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "FIONREAD is modeled on sockets only: on a regular file (size minus position, negative past EOF) and a pipe (bytes queued) patina answers ENOTTY, also for a NULL argument (kernel: EFAULT); patina_ioctl's descriptor-class table",
-            failure: Failure::Differs(&[
-                Difference::field(4, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(4, "ioctl", "fields.value", Observed::Null),
-                Difference::field(4, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(5, "FIONREAD on a file is the size minus the position"),
-                Difference::field(7, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(7, "ioctl", "fields.value", Observed::Null),
-                Difference::field(7, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(8, "FIONREAD follows the cursor"),
-                Difference::field(10, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(10, "ioctl", "fields.value", Observed::Null),
-                Difference::field(10, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(11, "FIONREAD at EOF is 0"),
-                Difference::field(13, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(13, "ioctl", "fields.value", Observed::Null),
-                Difference::field(13, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(14, "FIONREAD past EOF is negative"),
-                Difference::field(15, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::check(16, "FIONREAD with a NULL argument is EFAULT"),
-                Difference::field(18, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(18, "ioctl", "fields.value", Observed::Null),
-                Difference::field(18, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(19, "FIONREAD on an empty pipe is 0"),
-                Difference::field(22, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(22, "ioctl", "fields.value", Observed::Null),
-                Difference::field(22, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(23, "FIONREAD on a pipe is the bytes queued"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "FIONBIO with a NULL argument succeeds: the shim does not read the int through the guest pointer (kernel: get_user \u{2192} EFAULT); patina_ioctl FIONBIO arm",
-            failure: Failure::Differs(&[
-                Difference::field(43, "ioctl", "errno", Observed::Null),
-                Difference::field(43, "ioctl", "ret", Observed::Int(0)),
-                Difference::check(44, "FIONBIO with a NULL argument is EFAULT"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "ioctl resolves an O_PATH descriptor: FIOCLEX succeeds and FIONREAD is ENOTTY, where the kernel's fdget refuses O_PATH with EBADF (fs/ioctl.c)",
-            failure: Failure::Differs(&[
-                Difference::field(52, "ioctl", "errno", Observed::Null),
-                Difference::field(52, "ioctl", "ret", Observed::Int(0)),
-                Difference::check(53, "FIOCLEX on an O_PATH descriptor is EBADF"),
-                Difference::field(54, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::check(55, "FIONREAD on an O_PATH descriptor is EBADF"),
-            ]),
-        },
     ],
     ..DEFAULTS
 };

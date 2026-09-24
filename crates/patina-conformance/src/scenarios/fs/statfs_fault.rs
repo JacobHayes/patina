@@ -4,9 +4,7 @@
 //! descriptor is still EBADF first. Its own scenario, because a door that
 //! writes through the guest's NULL instead ends the whole run.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -46,31 +44,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
     ],
     symbols: &["statfs", "fstatfs", "openat", "close"],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "statfs into a NULL buffer is a SIGSEGV: the C interposer writes the result through the guest's NULL instead of answering EFAULT, and the crash loses the captured event stream",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Signal(11),
-                diagnostic: "native_run signal=11",
-            },
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[
-                Vehicle::Syscall,
-                #[cfg(target_arch = "x86_64")]
-                Vehicle::Raw,
-            ],
-            what: "the statfs/fstatfs rows are unmodeled on the raw doors: the first raw statfs aborts on the Trap row",
-            failure: Failure::Stops {
-                events: 1,
-                ending: Ending::Signal(6),
-                diagnostic: "unsupported syscall statfs",
-            },
-        },
-    ],
     ..DEFAULTS
 };

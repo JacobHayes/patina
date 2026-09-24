@@ -78,43 +78,84 @@ pub(super) fn sys_pwrite(fd: i64, buf: u64, count: u64, offset: i64) -> i64 {
     ret_isize(unsafe { patina_pwrite(fd as c_int, buf as *const c_void, count as usize, offset) })
 }
 
-/// Kernel `struct iovec` on 64-bit Linux.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(super) struct Iovec {
-    iov_base: u64,
-    iov_len: usize,
-}
-
-/// Iterate the guest iovec array, applying `op` to each (base, len). Mirrors the
-/// C `writev`/`readv`: stop at the first short/failed transfer, returning the
-/// running total (or `-errno` if the very first transfer failed).
-pub(super) fn iovec_loop(iov: u64, count: i64, mut op: impl FnMut(u64, u64) -> i64) -> i64 {
-    if count < 0 || (count > 0 && iov == 0) {
-        return -EINVAL;
+/// `readv`/`writev` and the `*v2` rows at position -1: the vector, the
+/// descriptor and the transfer are all the one Rust entry the C interposers
+/// call (`crate::iov`). `flags` are the `RWF_*` word (0 for the plain rows).
+pub(super) fn sys_readv(fd: i64, iov: u64, count: u64, flags: u64) -> i64 {
+    if let Some(err) = fd_out_of_range(fd) {
+        return err;
     }
-    let mut total: i64 = 0;
-    for index in 0..count as usize {
-        // SAFETY: `iov` is the guest's iovec array of `count` entries.
-        let vector = unsafe { (iov as *const Iovec).add(index).read() };
-        let moved = op(vector.iov_base, vector.iov_len as u64);
-        if moved < 0 {
-            return if total > 0 { total } else { moved };
-        }
-        total += moved;
-        if (moved as u64) < vector.iov_len as u64 {
-            break;
-        }
+    // SAFETY: `iov`/`count` describe the guest's vector per the readv(2) contract.
+    ret_isize(unsafe {
+        patina_readv(
+            fd as c_int,
+            iov as *const c_void,
+            count as i64,
+            flags as i32,
+        )
+    })
+}
+
+pub(super) fn sys_writev(fd: i64, iov: u64, count: u64, flags: u64) -> i64 {
+    if let Some(err) = fd_out_of_range(fd) {
+        return err;
     }
-    total
+    // SAFETY: `iov`/`count` describe the guest's vector per the writev(2) contract.
+    ret_isize(unsafe {
+        patina_writev(
+            fd as c_int,
+            iov as *const c_void,
+            count as i64,
+            flags as i32,
+        )
+    })
 }
 
-pub(super) fn sys_readv(fd: i64, iov: u64, count: i64) -> i64 {
-    iovec_loop(iov, count, |base, len| sys_read(fd, base, len))
+/// `preadv`/`pwritev` at a position. The kernel splits the position across
+/// `pos_l`/`pos_h` and joins them as `pos_h << 64 | pos_l` on a 64-bit kernel,
+/// so the low register is the whole position.
+pub(super) fn sys_preadv(fd: i64, iov: u64, count: u64, offset: i64, flags: u64) -> i64 {
+    // SAFETY: as `sys_readv`.
+    ret_isize(unsafe {
+        patina_preadv(
+            fd as c_int,
+            iov as *const c_void,
+            count as i64,
+            offset,
+            flags as i32,
+        )
+    })
 }
 
-pub(super) fn sys_writev(fd: i64, iov: u64, count: i64) -> i64 {
-    iovec_loop(iov, count, |base, len| sys_write(fd, base, len))
+pub(super) fn sys_pwritev(fd: i64, iov: u64, count: u64, offset: i64, flags: u64) -> i64 {
+    // SAFETY: as `sys_writev`.
+    ret_isize(unsafe {
+        patina_pwritev(
+            fd as c_int,
+            iov as *const c_void,
+            count as i64,
+            offset,
+            flags as i32,
+        )
+    })
+}
+
+/// `preadv2`/`pwritev2`: position -1 is the cursor (`readv`/`writev` with the
+/// flags); any other position is the positional row.
+pub(super) fn sys_preadv2(fd: i64, iov: u64, count: u64, offset: i64, flags: u64) -> i64 {
+    if offset == -1 {
+        sys_readv(fd, iov, count, flags)
+    } else {
+        sys_preadv(fd, iov, count, offset, flags)
+    }
+}
+
+pub(super) fn sys_pwritev2(fd: i64, iov: u64, count: u64, offset: i64, flags: u64) -> i64 {
+    if offset == -1 {
+        sys_writev(fd, iov, count, flags)
+    } else {
+        sys_pwritev(fd, iov, count, offset, flags)
+    }
 }
 
 pub(super) fn sys_fsync(fd: i64) -> i64 {
@@ -327,38 +368,14 @@ pub(super) fn sys_fcntl(fd: i64, command: u64, arg: u64) -> i64 {
     }
 }
 
+/// `ioctl(2)`: the one entry the C `ioctl` calls too (`crate::ioctl`).
 pub(super) fn sys_ioctl(fd: i64, request: u64, arg: u64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    let cfd = fd as c_int;
-    // Mirror the C ioctl interposer EXACTLY: FIONBIO flips O_NONBLOCK on the
-    // description, FIOCLEX/FIONCLEX the number's FD_CLOEXEC bit; everything
-    // else is a SOFT -ENOTTY on an open descriptor (NOT fatal, NOT a fabricated
-    // FIONREAD=0, which C does not model) and -EBADF on a closed one.
-    match request {
-        FIONBIO => {
-            // SAFETY: `arg` points to an `int` on/off flag when non-null.
-            let on = if arg != 0 {
-                (unsafe { (arg as *const c_int).read() }) != 0
-            } else {
-                false
-            };
-            // SAFETY: no pointers.
-            ret_i32(unsafe { patina_fd_set_nonblocking(cfd, c_int::from(on)) })
-        }
-        // SAFETY: no pointers.
-        FIOCLEX => ret_i32(unsafe { patina_fd_setfd(cfd, 1) }),
-        // SAFETY: no pointers.
-        FIONCLEX => ret_i32(unsafe { patina_fd_setfd(cfd, 0) }),
-        _ => {
-            if fd_kind(fd).is_none() {
-                -EBADF
-            } else {
-                -ENOTTY
-            }
-        }
-    }
+    // The kernel reads the request as an `unsigned int`.
+    // SAFETY: `arg` is the guest's argument for the request.
+    ret_i32(unsafe { patina_ioctl(fd as c_int, u64::from(request as u32), arg as *mut c_void) })
 }
 
 /// `pipe2(2)`: `O_NONBLOCK` and `O_CLOEXEC` are honored at creation, `O_DIRECT`

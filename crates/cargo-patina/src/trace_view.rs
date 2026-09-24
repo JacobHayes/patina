@@ -711,6 +711,14 @@ pub const OP_KINDS: &[(&str, Category)] = &[
     ("fs_symlink", Category::Fs),
     ("fs_read_link", Category::Fs),
     ("fs_make_fifo", Category::Fs),
+    ("fs_make_node", Category::Fs),
+    ("fs_exchange", Category::Fs),
+    ("fs_rename_whiteout", Category::Fs),
+    ("fs_sync_all", Category::Fs),
+    ("fs_get_xattr", Category::Fs),
+    ("fs_list_xattr", Category::Fs),
+    ("fs_set_xattr", Category::Fs),
+    ("fs_remove_xattr", Category::Fs),
     ("fs_set_mode", Category::Fs),
     ("fs_set_fd_mode", Category::Fs),
     ("fs_fd_path", Category::Fs),
@@ -793,6 +801,14 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
         Operation::FsSymlink { .. } => "fs_symlink",
         Operation::FsReadLink { .. } => "fs_read_link",
         Operation::FsMakeFifo { .. } => "fs_make_fifo",
+        Operation::FsMakeNode { .. } => "fs_make_node",
+        Operation::FsExchange { .. } => "fs_exchange",
+        Operation::FsRenameWhiteout { .. } => "fs_rename_whiteout",
+        Operation::FsSyncAll => "fs_sync_all",
+        Operation::FsGetXattr { .. } => "fs_get_xattr",
+        Operation::FsListXattr { .. } => "fs_list_xattr",
+        Operation::FsSetXattr { .. } => "fs_set_xattr",
+        Operation::FsRemoveXattr { .. } => "fs_remove_xattr",
         Operation::FsSetMode { .. } => "fs_set_mode",
         Operation::FsSetFdMode { .. } => "fs_set_fd_mode",
         Operation::FsFdPath { .. } => "fs_fd_path",
@@ -826,8 +842,8 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
 pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcome)> {
     use patina_dst_abi::{
         ClockKind, Datagram, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata,
-        OpenFlags, SeekWhence, SendDisposition, SendReport, ShutdownHow, SignalTarget, SocketId,
-        TaskId, TcpAccepted, VerdictKind,
+        FsNode, OpenFlags, SeekWhence, SendDisposition, SendReport, ShutdownHow, SignalTarget,
+        SocketId, TaskId, TcpAccepted, VerdictKind, XattrTarget,
     };
 
     let metadata = FsMetadata {
@@ -1033,6 +1049,58 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
             Operation::FsMakeFifo {
                 path: "/pipe".into(),
                 mode: 0o644,
+            },
+            Outcome::Unit,
+        ),
+        (
+            Operation::FsMakeNode {
+                path: "/socket".into(),
+                node: FsNode::Socket,
+                mode: 0o600,
+            },
+            Outcome::Unit,
+        ),
+        (
+            Operation::FsExchange {
+                first: "/a".into(),
+                second: "/b".into(),
+            },
+            Outcome::Unit,
+        ),
+        (
+            Operation::FsRenameWhiteout {
+                from: "/a".into(),
+                to: "/b".into(),
+            },
+            Outcome::Unit,
+        ),
+        (Operation::FsSyncAll, Outcome::Unit),
+        (
+            Operation::FsGetXattr {
+                target: XattrTarget::Path("/file".into()),
+                name: "user.k".into(),
+            },
+            Outcome::Bytes(b"v".to_vec()),
+        ),
+        (
+            Operation::FsListXattr {
+                target: XattrTarget::Fd(Fd(3)),
+            },
+            Outcome::Bytes(b"user.k\0".to_vec()),
+        ),
+        (
+            Operation::FsSetXattr {
+                target: XattrTarget::Path("/file".into()),
+                name: "user.k".into(),
+                value: b"v".to_vec(),
+                flags: 1,
+            },
+            Outcome::Unit,
+        ),
+        (
+            Operation::FsRemoveXattr {
+                target: XattrTarget::Inode(7),
+                name: "user.k".into(),
             },
             Outcome::Unit,
         ),

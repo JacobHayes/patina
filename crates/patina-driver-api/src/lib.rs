@@ -4,8 +4,8 @@
 //! describe effects required by the runtime boundary.
 
 use patina_dst_abi::{
-    ClockKind, Datagram, EffectError, Fd, FsClock, FsDirectoryEntry, FsMetadata, OpenFlags,
-    SeekWhence, SendReport, ShutdownHow, SocketId, TaskId, TcpAccepted,
+    ClockKind, Datagram, EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsMetadata, FsNode,
+    OpenFlags, SeekWhence, SendReport, ShutdownHow, SocketId, TaskId, TcpAccepted, XattrTarget,
 };
 
 pub type DriverResult<T> = Result<T, EffectError>;
@@ -229,6 +229,72 @@ pub trait FsDriver: Send {
     fn make_fifo(&mut self, _clock: FsClock, _path: &str, _mode: u32) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("make fifo"))
     }
+    /// `mknod`: create `node` at `path`, judged as the kernel's `vfs_mknod`
+    /// judges it — the name and the parent's `w`+`x` first, then the
+    /// privilege a device other than the whiteout needs (`NotPermitted`: the
+    /// modeled identity has no `CAP_MKNOD`). A directory or symlink has its own
+    /// call. `mode` is the mode the kernel would store. Timestamps as for
+    /// [`FsDriver::create_directory`].
+    fn make_node(
+        &mut self,
+        _clock: FsClock,
+        _path: &str,
+        _node: FsNode,
+        _mode: u32,
+    ) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("make node"))
+    }
+    /// `renameat2(RENAME_WHITEOUT)`: [`FsDriver::rename`] that leaves a
+    /// whiteout (a 0:0 character device, mode 0) at `from`, as one change —
+    /// a crash keeps both halves or neither.
+    fn rename_whiteout(&mut self, _clock: FsClock, _from: &str, _to: &str) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("rename whiteout"))
+    }
+    /// `renameat2(RENAME_EXCHANGE)`: swap the entries at `first` and `second`
+    /// (both must exist; any two kinds) atomically. Neither side follows a
+    /// trailing symlink. Stamps both parents' `mtime`/`ctime` and both entries'
+    /// `ctime`.
+    fn exchange(&mut self, _clock: FsClock, _first: &str, _second: &str) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("exchange"))
+    }
+    /// `sync(2)`/`syncfs(2)`: every change on the volume made durable. A driver
+    /// with no durability model has nothing to do.
+    fn sync_all(&mut self) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("sync all"))
+    }
+    /// One extended attribute's value, with the kernel's namespace and
+    /// permission rules applied to the node `target` names (a read: `ENODATA`
+    /// where a write would be refused outright). The name arrives validated
+    /// (`1..=255` bytes).
+    fn get_xattr(&mut self, _target: &XattrTarget, _name: &str) -> DriverResult<Vec<u8>> {
+        Err(unsupported_filesystem_operation("get xattr"))
+    }
+    /// The extended attribute names the caller may see, in the order the
+    /// filesystem lists them.
+    fn list_xattr(&mut self, _target: &XattrTarget) -> DriverResult<Vec<String>> {
+        Err(unsupported_filesystem_operation("list xattr"))
+    }
+    /// Set one extended attribute (`flags`: `XATTR_CREATE` 1, `XATTR_REPLACE`
+    /// 2). Stamps `ctime`.
+    fn set_xattr(
+        &mut self,
+        _clock: FsClock,
+        _target: &XattrTarget,
+        _name: &str,
+        _value: &[u8],
+        _flags: u32,
+    ) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("set xattr"))
+    }
+    /// Remove one extended attribute. Stamps `ctime`.
+    fn remove_xattr(
+        &mut self,
+        _clock: FsClock,
+        _target: &XattrTarget,
+        _name: &str,
+    ) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("remove xattr"))
+    }
     /// Change the permission bits of the entry `path` names (`chmod` /
     /// `fchmodat`). Like every other path entry point here, this acts on the
     /// entry the caller named: a trailing symlink is resolved by the caller, not
@@ -298,6 +364,66 @@ pub trait FsDriver: Send {
     fn fault_report(&self) -> Option<FsFaultReport> {
         None
     }
+}
+
+/// The extended-attribute namespace a name resolves into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XattrNamespace {
+    User,
+    Trusted,
+    Security,
+    System,
+    /// A name outside every namespace: no handler resolves it.
+    Unknown,
+}
+
+impl XattrNamespace {
+    pub fn of(name: &str) -> Self {
+        [
+            ("user.", Self::User),
+            ("trusted.", Self::Trusted),
+            ("security.", Self::Security),
+            ("system.", Self::System),
+        ]
+        .into_iter()
+        .find_map(|(prefix, namespace)| name.starts_with(prefix).then_some(namespace))
+        .unwrap_or(Self::Unknown)
+    }
+}
+
+/// The kernel's judgment of an extended-attribute access before any
+/// filesystem's handler sees it (`fs/xattr.c`: `xattr_permission` and the
+/// capability hooks), for the one modeled identity — the owner of every node,
+/// with no capabilities. `trusted.*` needs `CAP_SYS_ADMIN`, and so does
+/// writing `security.*`; `user.*` exists only on regular files and
+/// directories — each refusal `NotPermitted` for a write and `NoData` for a
+/// read. `user.*` and a name in no namespace are then charged against the
+/// owner's permission bits (`Denied`). One judge for every node, whichever
+/// filesystem holds it; the namespace comes back for its handlers.
+pub fn xattr_permission(
+    file_or_directory: bool,
+    mode: u32,
+    name: &str,
+    write: bool,
+) -> Result<XattrNamespace, ErrorCode> {
+    let refused = if write {
+        ErrorCode::NotPermitted
+    } else {
+        ErrorCode::NoData
+    };
+    let namespace = XattrNamespace::of(name);
+    match namespace {
+        XattrNamespace::Trusted => return Err(refused),
+        XattrNamespace::Security if write => return Err(refused),
+        XattrNamespace::User if !file_or_directory => return Err(refused),
+        XattrNamespace::Security | XattrNamespace::System => return Ok(namespace),
+        XattrNamespace::User | XattrNamespace::Unknown => {}
+    }
+    let want = if write { 0o2 } else { 0o4 };
+    if (mode >> 6) & want == 0 {
+        return Err(ErrorCode::Denied);
+    }
+    Ok(namespace)
 }
 
 fn unsupported_filesystem_operation(operation: &str) -> EffectError {
@@ -484,6 +610,7 @@ pub enum FsFaultOpKind {
     Metadata,
     FdMetadata,
     CreateDirectory,
+    MakeNode,
     RemoveFile,
     Sync,
     SetLen,
@@ -502,7 +629,7 @@ impl FsFaultOpKind {
     /// counter array is sized from it and the breakdown is rendered by walking
     /// it, so a kind added to the enum reaches the report by adding one row
     /// here rather than by editing three parallel lists.
-    pub const ALL: [FsFaultOpKind; 19] = [
+    pub const ALL: [FsFaultOpKind; 20] = [
         FsFaultOpKind::Open,
         FsFaultOpKind::Read,
         FsFaultOpKind::Write,
@@ -511,6 +638,7 @@ impl FsFaultOpKind {
         FsFaultOpKind::Metadata,
         FsFaultOpKind::FdMetadata,
         FsFaultOpKind::CreateDirectory,
+        FsFaultOpKind::MakeNode,
         FsFaultOpKind::RemoveFile,
         FsFaultOpKind::Sync,
         FsFaultOpKind::SetLen,
@@ -537,6 +665,7 @@ impl FsFaultOpKind {
             FsFaultOpKind::Metadata => "metadata",
             FsFaultOpKind::FdMetadata => "fd_metadata",
             FsFaultOpKind::CreateDirectory => "create_directory",
+            FsFaultOpKind::MakeNode => "make_node",
             FsFaultOpKind::RemoveFile => "remove_file",
             FsFaultOpKind::Sync => "sync",
             FsFaultOpKind::SetLen => "set_len",
