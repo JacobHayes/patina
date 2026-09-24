@@ -104,6 +104,11 @@ mod advice;
 mod clocks;
 #[cfg(target_os = "linux")]
 mod identity;
+// The virtual Darwin kernel's self-description (`uname` on macOS). Built
+// under `cfg(test)` everywhere so its field model is covered on a Linux host
+// too. See `darwin_identity.rs`.
+#[cfg(any(target_os = "macos", test))]
+mod darwin_identity;
 #[cfg(target_os = "linux")]
 mod limits;
 #[cfg(target_os = "linux")]
@@ -5132,6 +5137,40 @@ pub extern "C" fn patina_uid() -> u32 {
 pub extern "C" fn patina_gid() -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     registry::IDENTITY_GID
+}
+
+/// The virtual machine's node name (`--hostname`), a recorded run fact that
+/// both platforms' `uname` report: read from the installed runtime, which a
+/// call before installation installs or, from a static constructor that ran
+/// before Patina's, refuses by name — never a default a constructor could
+/// cache for the whole run.
+fn node_name() -> Result<String, c_int> {
+    ensure_runtime()?;
+    with_context_raw(|context| Ok(context.hostname().to_owned()))
+}
+
+/// `uname(3)` on Darwin: the virtual Darwin kernel's self-description
+/// (`darwin_identity`) into the caller's `struct utsname`. 0, or -1 with
+/// [`patina_errno`] (`EFAULT` for NULL).
+///
+/// # Safety
+/// `out` must be NULL or writable for a Darwin `struct utsname`.
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_uname(out: *mut c_void) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if out.is_null() {
+        return fail(EFAULT);
+    }
+    let name = match node_name() {
+        Ok(name) => darwin_identity::describe(&name),
+        Err(errno) => return fail(errno),
+    };
+    // SAFETY: `out` was checked non-null and is writable per this function's
+    // contract.
+    unsafe { out.cast::<darwin_identity::Utsname>().write_unaligned(name) };
+    set_errno(0);
+    0
 }
 
 /// Read the metadata of the entry `(dirfd, path)` resolves to: the one entry

@@ -161,7 +161,7 @@ const ROWS: &[SymbolRow] = &[
         "uname",
         Platform::Both,
         Serves::Syscalls(&["uname"]),
-        SymbolStatus::Partial,
+        SymbolStatus::Modeled,
     ),
     s(
         "gethostname",

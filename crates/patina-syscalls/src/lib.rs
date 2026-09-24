@@ -64,6 +64,15 @@ pub struct DarwinEntry {
 /// its family's arc (the rule test names them).
 pub const VIRTUAL_ABI: &str = "6.8";
 
+/// The Darwin kernel release the virtual machine reports on macOS (`uname`'s
+/// release, and inside its version): Darwin 25.0.0, the macOS 26.0 kernel,
+/// built from [`DARWIN_XNU`], the xnu the vendored Darwin tables
+/// (`generated::SOURCES`) come from. A model constant like [`VIRTUAL_ABI`],
+/// never the host's release.
+pub const DARWIN_RELEASE: &str = "25.0.0";
+/// The xnu build of [`DARWIN_RELEASE`], named in the Darwin `uname` version.
+pub const DARWIN_XNU: &str = "xnu-12377.1.9";
+
 /// The one identity the virtual kernel runs the guest as: an ordinary
 /// non-root user that owns every entry of the deterministic filesystem. The
 /// single source `getuid`/`geteuid` (the `Constant` rows below and the C

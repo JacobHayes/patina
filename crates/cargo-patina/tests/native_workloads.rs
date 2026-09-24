@@ -73,32 +73,48 @@ fn realtime_epoch_defaults_overrides_and_replays_flag_free() {
     );
 }
 
+const HOSTNAME_KEYS: [&str; 5] = ["hostname", "nodename", "sysname", "release", "machine"];
+
+/// The rest of `uname` is the platform's modeled kernel, whatever the node
+/// name: Linux at the virtual ABI level, or the modeled Darwin release, on the
+/// build's machine — never the host's release.
+fn assert_virtual_kernel(fields: &std::collections::BTreeMap<&str, &str>) {
+    let arch = std::env::consts::ARCH;
+    if cfg!(target_os = "macos") {
+        assert_eq!(fields["sysname"], "Darwin");
+        assert_eq!(fields["release"], patina_dst_syscalls::DARWIN_RELEASE);
+        let machine = if arch == "aarch64" { "arm64" } else { arch };
+        assert_eq!(fields["machine"], machine);
+    } else {
+        assert_eq!(fields["sysname"], "Linux");
+        assert_eq!(
+            patina_dst_syscalls::parse_release(fields["release"]),
+            patina_dst_syscalls::parse_release(patina_dst_syscalls::VIRTUAL_ABI)
+        );
+        assert_eq!(fields["machine"], arch);
+    }
+}
+
 #[test]
 fn hostname_defaults_overrides_and_replays_flag_free() {
     const NAME: &str = "db-1.internal";
     let g = Guest::assert_build("hostname_probe.rs");
     g.assert_audit_clean();
     let default = g.assert_run_success(3, &[]).stdout;
-    let fields = assert_fields(
-        &default,
-        "NATIVE_HOSTNAME_RESULT ",
-        &["hostname", "nodename"],
-    );
+    let fields = assert_fields(&default, "NATIVE_HOSTNAME_RESULT ", &HOSTNAME_KEYS);
     assert_eq!(fields["hostname"], patina_dst_syscalls::IDENTITY_HOSTNAME);
     assert_eq!(fields["nodename"], patina_dst_syscalls::IDENTITY_HOSTNAME);
+    assert_virtual_kernel(&fields);
 
     // The flag renames the virtual machine for both readers, is recorded into
     // the trace, and a flag-free replay reproduces it (the identity helper
     // replays flag-free).
     let flags = ["--hostname", NAME];
     let baseline = g.assert_seed_repeatability(3, 2, &flags);
-    let fields = assert_fields(
-        &baseline,
-        "NATIVE_HOSTNAME_RESULT ",
-        &["hostname", "nodename"],
-    );
+    let fields = assert_fields(&baseline, "NATIVE_HOSTNAME_RESULT ", &HOSTNAME_KEYS);
     assert_eq!(fields["hostname"], NAME);
     assert_eq!(fields["nodename"], NAME);
+    assert_virtual_kernel(&fields);
     let trace = g.assert_record_replay_identity(3, &flags, &baseline);
     assert_eq!(
         patina_dst_trace::TraceBundle::load(&trace)

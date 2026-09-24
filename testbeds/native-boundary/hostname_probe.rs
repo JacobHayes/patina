@@ -1,6 +1,8 @@
 // The virtual machine's node name as an ordinary program reads it, through both
 // doors: `gethostname` and `uname`'s `nodename`. Both answer the run's
 // configured name (Patina's default, or `run --hostname`), and they agree.
+// Beside it, the rest of the virtual kernel's self-description: `uname`'s
+// system name, release and machine.
 use std::ffi::{CStr, c_char};
 
 fn main() {
@@ -16,13 +18,24 @@ fn main() {
         std::process::exit(22);
     }
     let name = unsafe { name.assume_init() };
-    let Ok(nodename) = unsafe { CStr::from_ptr(name.nodename.as_ptr()) }.to_str() else {
-        std::process::exit(23);
+    let field = |field: &[c_char; UTS_FIELD]| {
+        unsafe { CStr::from_ptr(field.as_ptr()) }
+            .to_str()
+            .unwrap_or_else(|_| std::process::exit(23))
     };
+    let nodename = field(&name.nodename);
     if hostname != nodename {
         std::process::exit(24);
     }
-    println!("NATIVE_HOSTNAME_RESULT hostname={hostname} nodename={nodename}");
+    let (sysname, release, machine) = (
+        field(&name.sysname),
+        field(&name.release),
+        field(&name.machine),
+    );
+    println!(
+        "NATIVE_HOSTNAME_RESULT hostname={hostname} nodename={nodename} \
+sysname={sysname} release={release} machine={machine}"
+    );
 }
 
 /// `struct utsname`: five (Linux: six, with `domainname`) fixed-size fields.

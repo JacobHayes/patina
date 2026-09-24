@@ -436,14 +436,7 @@ pub(crate) unsafe fn uname(out: *mut Utsname, persona: u32) -> i64 {
         (false, true) => "armv8l",
     };
     let release = release_for(persona);
-    // The run's node name (`--hostname`), a recorded run fact: read from the
-    // installed runtime, which a call before installation installs or, from
-    // a static constructor that ran before Patina's, refuses by name — never
-    // a default a constructor could cache for the whole run.
-    if let Err(code) = crate::ensure_runtime() {
-        return errno(code);
-    }
-    let hostname = match crate::with_context_raw(|context| Ok(context.hostname().to_owned())) {
+    let hostname = match crate::node_name() {
         Ok(hostname) => hostname,
         Err(code) => return errno(code),
     };

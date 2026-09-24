@@ -537,6 +537,15 @@ int32_t patina_pid(void);
 int32_t patina_ppid(void);
 uint32_t patina_uid(void);
 uint32_t patina_gid(void);
+#ifdef __APPLE__
+/*
+ * uname(3) on Darwin: the virtual Darwin kernel (`Darwin`, the run's node
+ * name, the modeled release and version, the machine) into `name`, a Darwin
+ * struct utsname. 0, or -1 with patina_errno(); before the runtime is
+ * installed it installs it or refuses by name, as every boundary does.
+ */
+int32_t patina_uname(void *name);
+#endif
 /*
  * utimensat(2) on a (dirfd, path) (`flags` are PATINA_RESOLVE_*; NOFOLLOW
  * sets a symlink's own times; EMPTY_PATH reaches the descriptor's inode,

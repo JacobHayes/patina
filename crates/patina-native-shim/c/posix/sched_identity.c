@@ -44,19 +44,25 @@ int pthread_threadid_np(pthread_t thread, uint64_t *thread_id) {
 
 #endif
 
+/* The virtual kernel's self-description, from the one Rust model: the SUD
+ * `uname` row on Linux, the Darwin model (src/darwin_identity.rs) on macOS.
+ * uname and gethostname below both read it here, never through the public
+ * uname. */
 #ifdef __linux__
-/* The virtual kernel's self-description, from the one Rust model (the SUD
- * `uname` row); gethostname below reads its node name. */
-int uname(struct utsname *name) {
+static int virtual_uname(struct utsname *name) {
     return signal_result(patina_sud_dispatch(SYS_uname, (uintptr_t)name, 0, 0, 0, 0, 0, 0));
 }
 #else
-int uname(struct utsname *name) {
-    (void)name;
-    errno = ENOSYS;
-    return -1;
+_Static_assert(sizeof(struct utsname) == 5 * 256,
+               "Darwin struct utsname: five 256-byte fields (src/darwin_identity.rs)");
+static int virtual_uname(struct utsname *name) {
+    return fail_int(patina_uname(name));
 }
 #endif
+
+int uname(struct utsname *name) {
+    return virtual_uname(name);
+}
 
 /*
  * sched_yield / std::thread::yield_now. std's mpsc/mpmc backoff spins through
@@ -257,7 +263,7 @@ int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask) {
  * fits copied) when it does not fit with its NUL. */
 int gethostname(char *name, size_t len) {
     struct utsname buf;
-    if (uname(&buf) != 0) return -1;
+    if (virtual_uname(&buf) != 0) return -1;
     size_t node_len = strlen(buf.nodename) + 1;
     memcpy(name, buf.nodename, len < node_len ? len : node_len);
     if (node_len > len) {
@@ -267,19 +273,17 @@ int gethostname(char *name, size_t len) {
     return 0;
 }
 #else
+/* Darwin's gethostname: uname's node name (the kernel's `kern.hostname`
+ * holds the same name), truncated to fit with its NUL as xnu's string
+ * sysctl truncates; a zero-length buffer receives nothing and succeeds, as
+ * the host's does. `name` is declared nonnull (passing NULL is caller UB). */
 int gethostname(char *name, size_t len) {
-    static const char host[] = "patina";
-    /* `name` is declared nonnull by glibc (comparing it to NULL is a
-     * -Werror=nonnull-compare error under gcc, and passing NULL is caller UB),
-     * so only the buffer length is validated here — the readdir/dirent
-     * nonnull-parameter precedent above. */
-    if (len == 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    size_t copied = sizeof host - 1; /* length without the NUL */
+    struct utsname buf;
+    if (virtual_uname(&buf) != 0) return -1;
+    if (len == 0) return 0;
+    size_t copied = strlen(buf.nodename); /* length without the NUL */
     if (copied >= len) copied = len - 1;
-    memcpy(name, host, copied);
+    memcpy(name, buf.nodename, copied);
     name[copied] = '\0';
     return 0;
 }
