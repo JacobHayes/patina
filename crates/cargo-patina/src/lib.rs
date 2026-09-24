@@ -19,7 +19,6 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use patina_dst_fs_mem::{FsImage, FsImageEntry};
 #[cfg(unix)]
@@ -43,7 +42,8 @@ use patina_dst_target::{
 };
 use patina_dst_trace::{
     CrashRestartSegments, HandoffSealKey, IncarnationHandoff, Sha256Digest, TraceBundle,
-    TraceError, abandoned_trace_marker, parse_abandoned_trace_marker, resource_limit_infra_line,
+    TraceError, abandoned_trace_marker, create_scratch, lock_exclusive,
+    parse_abandoned_trace_marker, remove_dead_scratch, resource_limit_infra_line,
 };
 use patina_dst_wasi_host::{
     DEFAULT_WASM_FUEL, MountPolicy, Preview1Host, ResourceLimits, execute_preview1_with_fuel,
@@ -231,7 +231,6 @@ const NATIVE_SHIM_OBJECTS_DIR: &str = "patina-shim-objects";
 const TARGET_DIR_LOCK: &str = ".patina-build.lock";
 const DEFAULT_NATIVE_EDITION: &str = "2024";
 const DEFAULT_NATIVE_FINGERPRINT: &str = "patina-native";
-static NATIVE_TRACE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// The fixed, machine-independent `argv[0]` every native guest sees. `native-run`
 /// resolves the guest binary to an absolute host path (tempdir-specific,
 /// machine-specific) to exec it, so passing that path through as `argv[0]` would
@@ -4967,37 +4966,6 @@ fn lock_target_dir(target_dir: &Path) -> Result<fs::File, CliError> {
     Ok(file)
 }
 
-/// Take an exclusive `flock(2)` on `file`, held until it is closed. With `wait`
-/// false a lock held elsewhere is [`io::ErrorKind::WouldBlock`].
-#[cfg(unix)]
-pub(crate) fn lock_exclusive(file: &fs::File, wait: bool) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-    const LOCK_EX: i32 = 2;
-    const LOCK_NB: i32 = 4;
-    unsafe extern "C" {
-        fn flock(fd: i32, operation: i32) -> i32;
-    }
-    let operation = if wait { LOCK_EX } else { LOCK_EX | LOCK_NB };
-    loop {
-        // SAFETY: `flock` only reads the descriptor, which `file` keeps open.
-        if unsafe { flock(file.as_raw_fd(), operation) } == 0 {
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
-}
-
-#[cfg(not(unix))]
-pub(crate) fn lock_exclusive(_file: &fs::File, _wait: bool) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "file locking is unsupported on this platform",
-    ))
-}
-
 /// Select the shim's Cargo target directory.
 ///
 /// The caller's explicit `CARGO_TARGET_DIR`, when present, is the base directory;
@@ -6833,17 +6801,13 @@ impl NativeTraceSink {
                 ))
             })?;
         }
-        let temp_path = native_trace_temp_path(final_path);
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-            .map_err(|error| {
-                CliError(format!(
-                    "failed to create temporary trace {}: {error}",
-                    temp_path.display()
-                ))
-            })?;
+        remove_dead_scratch(final_path);
+        let (temp_path, file) = create_scratch(final_path).map_err(|error| {
+            CliError(format!(
+                "failed to create temporary trace beside {}: {error}",
+                final_path.display()
+            ))
+        })?;
         Ok(Self {
             final_path: final_path.to_path_buf(),
             temp_path,
@@ -6874,7 +6838,8 @@ impl NativeTraceSink {
     }
 
     fn commit(mut self) -> Result<PathBuf, TraceCommitFailure> {
-        drop(self.file.take());
+        // Held, and with it the scratch file's lock, until the rename is done.
+        let _file = self.file.take();
         if let Err(error) = TraceBundle::load(&self.temp_path) {
             // Tell "the recorder gave up, and said so" apart from "the trace
             // is simply not there". Both leave no bundle at the temp path, but
@@ -6914,79 +6879,6 @@ impl Drop for NativeTraceSink {
         if self.file.is_some() {
             let _ = fs::remove_file(&self.temp_path);
         }
-    }
-}
-
-fn native_trace_temp_path(path: &Path) -> PathBuf {
-    let counter = NATIVE_TRACE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut name = OsString::from(".");
-    name.push(path.file_name().unwrap_or_else(|| OsStr::new("trace")));
-    name.push(format!(".tmp.{}.{}", std::process::id(), counter));
-    path.with_file_name(name)
-}
-
-/// Remove the scratch files a previous, dead recorder left beside `trace_path`.
-///
-/// Scratch names carry the recorder's pid (`native_trace_temp_path`), and a file
-/// whose pid is STILL ALIVE belongs to a recorder that is using it right now:
-/// sweeping it deletes another run's trace out from under it, which surfaces
-/// much later as an unexplained missing artifact at commit. That is exactly what
-/// two campaign processes sharing one out-dir do to each other, and the sweep is
-/// the mechanism — so the sweep declines to touch a live writer's file and
-/// leaves the concurrency to be caught (and reported) by the campaign lock.
-/// A stale file whose pid has been recycled is simply left for the next sweep.
-fn remove_native_trace_scratch(trace_path: &Path) {
-    let Some(parent) = trace_path.parent() else {
-        return;
-    };
-    let Some(file_name) = trace_path.file_name() else {
-        return;
-    };
-    let mut prefix = OsString::from(".");
-    prefix.push(file_name);
-    prefix.push(".tmp.");
-    let Ok(entries) = fs::read_dir(parent) else {
-        return;
-    };
-    let prefix = prefix.to_string_lossy().into_owned();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with(&prefix) {
-            continue;
-        }
-        if scratch_owner_is_alive(&name[prefix.len()..]) {
-            continue;
-        }
-        let _ = fs::remove_file(entry.path());
-    }
-}
-
-/// Whether the process that owns a scratch file is still running, read off the
-/// `<pid>.<counter>` tail of its name. Unparseable tails are treated as dead, so
-/// a name shape from an older patina still gets cleaned up.
-fn scratch_owner_is_alive(tail: &str) -> bool {
-    let Some(pid) = tail
-        .split('.')
-        .next()
-        .and_then(|value| value.parse::<i32>().ok())
-    else {
-        return false;
-    };
-    if pid <= 0 {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        if pid == std::process::id() as i32 {
-            return true;
-        }
-        // SAFETY: signal 0 performs the permission and existence checks without
-        // delivering anything, which is precisely the liveness question here.
-        unsafe { kill(pid, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        false
     }
 }
 
@@ -7158,11 +7050,6 @@ fn spawn_native_child(
         ))
     })?;
     Ok((child, guard))
-}
-
-#[cfg(unix)]
-unsafe extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
 }
 
 #[cfg(unix)]
@@ -8880,29 +8767,30 @@ mod tests {
     }
 
     /// The scratch sweep clears what a DEAD recorder left behind and nothing
-    /// else. A file whose owner is still running belongs to a live recorder —
-    /// two campaigns sharing an out-dir is how that happens — and deleting it
+    /// else. A file a recorder still holds belongs to a live run — two
+    /// campaigns sharing an out-dir is how that happens — and deleting it
     /// destroys that run's trace, surfacing much later as an unexplained
-    /// missing artifact.
+    /// missing artifact. Liveness is the recorder's lock on its file, never its
+    /// pid: a pid is reused, and one in another pid namespace or owned by
+    /// another user reads as dead to `kill(pid, 0)`.
     #[cfg(unix)]
     #[test]
     fn the_scratch_sweep_spares_a_live_recorders_file() {
-        use std::io::Write;
-
         let directory = tempfile::tempdir().unwrap();
         let trace_path = directory.path().join("generation-7.patina");
 
-        let live = directory
-            .path()
-            .join(format!(".generation-7.patina.tmp.{}.0", std::process::id()));
+        let live = NativeTraceSink::create(&trace_path).unwrap();
         let stale = directory.path().join(".generation-7.patina.tmp.1.0");
         let other_generation = directory.path().join(".generation-70.patina.tmp.1.0");
-        for path in [&live, &stale, &other_generation] {
-            fs::File::create(path).unwrap().write_all(b"x").unwrap();
+        for path in [&stale, &other_generation] {
+            fs::write(path, b"x").unwrap();
         }
 
-        remove_native_trace_scratch(&trace_path);
-        assert!(live.exists(), "a live recorder's scratch must be spared");
+        remove_dead_scratch(&trace_path);
+        assert!(
+            live.temp_path.exists(),
+            "a live recorder's scratch must be spared"
+        );
         assert!(!stale.exists(), "a dead recorder's scratch must be swept");
         assert!(
             other_generation.exists(),

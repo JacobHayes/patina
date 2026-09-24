@@ -593,7 +593,8 @@ fn fatal_batch_never_releases_a_handler_after_finalization() {
         deliver();
         panic!("fatal batch returned");
     }
-    let path = trace_path();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fatal-batch.patina");
     let output = reexec(
         &test_name(),
         &[("PATINA_FATAL_TRACE", path.to_str().unwrap())],
@@ -609,7 +610,6 @@ fn fatal_batch_never_releases_a_handler_after_finalization() {
             .count(),
         2
     );
-    std::fs::remove_file(path).unwrap();
 }
 
 static DEFERRED_FD: AtomicUsize = AtomicUsize::new(0);

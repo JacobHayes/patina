@@ -101,7 +101,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 pub use patina_dst_abi::VerdictKind;
@@ -121,7 +121,7 @@ use patina_dst_time_virtual::VirtualClock;
 pub use patina_dst_trace::MAX_TRACE_BYTES;
 use patina_dst_trace::{
     BranchSession, HandoffConsumedState, Recorder, Replayer, RunMetadata, TraceBundle, TraceError,
-    abandoned_trace_marker, resource_limit_infra_line,
+    abandoned_trace_marker, lock_exclusive, path_names, resource_limit_infra_line,
 };
 use patina_dst_wrapper_fault::FaultFs;
 
@@ -3359,8 +3359,14 @@ enum RecordSink {
     Transport(Box<dyn TraceTransport>),
 }
 
+/// One recorder's claim on a trace path: an exclusive advisory lock on
+/// `.<trace>.lock` beside it, held for the recorder's life. The kernel releases
+/// the lock when the recorder dies without unwinding, so a crashed recording
+/// never locks its path; a lock file left behind by one is unlocked and taken
+/// over by the next recorder.
 struct RecordReservation {
     lock_path: PathBuf,
+    _lock: File,
 }
 
 impl RecordReservation {
@@ -3396,23 +3402,48 @@ impl RecordReservation {
             })?;
         }
         let lock_path = record_lock_path(trace_path)?;
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-            .map_err(|source| RuntimeError::Io {
-                action: format!(
-                    "reserve trace {} using {}; another Patina recorder may be active",
-                    trace_path.display(),
-                    lock_path.display()
-                ),
-                source,
-            })?;
-        Ok(Self { lock_path })
+        let io_error = |source| RuntimeError::Io {
+            action: format!(
+                "reserve trace {} using {}",
+                trace_path.display(),
+                lock_path.display()
+            ),
+            source,
+        };
+        loop {
+            let lock = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+                .map_err(io_error)?;
+            match lock_exclusive(&lock, false) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Err(RuntimeError::Config(format!(
+                        "refusing to record trace {}: another Patina recorder holds {}",
+                        trace_path.display(),
+                        lock_path.display()
+                    )));
+                }
+                Err(error) => return Err(io_error(error)),
+            }
+            // A releasing recorder unlinks the lock file before closing it, so a
+            // lock won on a descriptor opened before that unlink guards a name
+            // no other recorder opens; take the file the name holds now instead.
+            if path_names(&lock_path, &lock).map_err(io_error)? {
+                return Ok(Self {
+                    lock_path,
+                    _lock: lock,
+                });
+            }
+        }
     }
 }
 
 impl Drop for RecordReservation {
+    /// Unlink the lock file while still holding its lock, which is released
+    /// when `_lock` closes after this.
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.lock_path);
     }
@@ -9368,6 +9399,53 @@ mod tests {
         assert_eq!(verdict.detail, "src/main.rs:9");
     }
 
+    /// A process that dies without unwinding — an abort, a kill, `exit`, a
+    /// panic=abort guest, a runtime held in a global — runs no destructor, so
+    /// the claim on a trace path has to be one the kernel releases. Red while
+    /// the claim was a sentinel file that only `Drop` removed: the path stayed
+    /// refused as "another Patina recorder may be active" forever. The child is
+    /// this test re-executed; it reserves the path and aborts.
+    #[cfg(unix)]
+    #[test]
+    fn a_recorder_that_dies_without_unwinding_leaves_its_path_recordable() {
+        use std::os::unix::process::ExitStatusExt;
+        const CHILD_TRACE: &str = "PATINA_TEST_ABORTING_RECORDER_TRACE";
+        const SIGABRT: i32 = 6;
+        if let Some(trace) = env::var_os(CHILD_TRACE) {
+            let _recorder = Context::from_config(RuntimeConfig::record(1, trace, "fp")).unwrap();
+            std::process::abort();
+        }
+        let directory = tempdir().unwrap();
+        let trace = directory.path().join("aborted.patina");
+        let status = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::a_recorder_that_dies_without_unwinding_leaves_its_path_recordable",
+                "--nocapture",
+            ])
+            .env(CHILD_TRACE, &trace)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(
+            status.signal(),
+            Some(SIGABRT),
+            "the child must abort while holding the reservation: {status}"
+        );
+        assert!(!trace.exists(), "the aborted recorder wrote no trace");
+        let lock_file = directory.path().join(".aborted.patina.lock");
+        assert!(
+            lock_file.exists(),
+            "the aborted recorder left its lock file"
+        );
+
+        let recorder = Context::from_config(RuntimeConfig::record(2, &trace, "fp")).unwrap();
+        recorder.finish().unwrap();
+        TraceBundle::load(&trace).unwrap();
+        assert!(!lock_file.exists());
+    }
+
     #[test]
     fn verdict_stream_records_replays_and_refuses_a_divergent_replay() {
         let directory = tempdir().unwrap();
@@ -10896,7 +10974,7 @@ class=crash|0 class=buggify|0"
         let first = Context::from_config(RuntimeConfig::record(1, &path, "fixture-v1")).unwrap();
         assert!(matches!(
             Context::from_config(RuntimeConfig::record(1, &path, "fixture-v1")),
-            Err(RuntimeError::Io { .. })
+            Err(RuntimeError::Config(message)) if message.contains("another Patina recorder")
         ));
         drop(first);
 
@@ -10908,6 +10986,21 @@ class=crash|0 class=buggify|0"
             Context::from_config(RuntimeConfig::record(1, &path, "fixture-v1")),
             Err(RuntimeError::Config(message)) if message.contains("refusing to overwrite")
         ));
+
+        let branch = |id: &str| RuntimeConfig::branch(&path, "main", 0, id, 2, "fixture-v1");
+        let first = Context::from_config(branch("first")).unwrap();
+        assert!(matches!(
+            Context::from_config(branch("second")),
+            Err(RuntimeError::Config(message)) if message.contains("another Patina recorder")
+        ));
+        first.finish().unwrap();
+
+        // A released reservation leaves nothing beside the trace.
+        let entries: Vec<_> = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, [OsString::from("run.patina")]);
     }
 
     #[test]

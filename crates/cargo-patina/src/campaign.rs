@@ -2932,7 +2932,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         let flags = derive_flags(&state.spec, &hash, state.artifact.family);
         let trace_path = traces_dir.join(format!("generation-{generation}.patina"));
         let _ = fs::remove_file(&trace_path);
-        crate::remove_native_trace_scratch(&trace_path);
+        crate::remove_dead_scratch(&trace_path);
         let coverage_map_path = edge_coverage
             .active()
             .map(|store| store.generation_covmap_path(generation));
@@ -3038,7 +3038,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         // Remove the scratch file (including an empty abort-reservation file) so the
         // output directory holds only real artifacts.
         let _ = fs::remove_file(&trace_path);
-        crate::remove_native_trace_scratch(&trace_path);
+        crate::remove_dead_scratch(&trace_path);
 
         if novel {
             novel_so_far += 1;
@@ -6442,7 +6442,7 @@ into the deterministic runtime via syscall-user-dispatch.",
     }
     // The same bargain for a failed trace channel: every generation that loses
     // its trace channel must collapse onto ONE signature. Each such run's own
-    // message names its own scratch path and pid, so without a shared shape a
+    // message names its own randomly named scratch path, so without a shared shape a
     // single environmental problem reads as one novel finding per generation —
     // which is exactly what it did on this campaign's B02 (26) and B08 (16).
     let channel_lost = |tail: &str| {

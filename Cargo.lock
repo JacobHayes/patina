@@ -439,6 +439,7 @@ dependencies = [
  "patina-dst-syscalls",
  "patina-dst-trace",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

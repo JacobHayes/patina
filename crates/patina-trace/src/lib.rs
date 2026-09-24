@@ -12,17 +12,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use patina_dst_abi::{Operation, Outcome, TaskId};
 use serde::{Deserialize, Serialize};
 
 mod crash_restart;
+mod file_lock;
 mod handoff;
 pub use crash_restart::CrashRestartSegments;
+pub use file_lock::{create_scratch, lock_exclusive, path_names, remove_dead_scratch};
 pub use handoff::{
     HandoffConsumedState, HandoffError, HandoffSealKey, IncarnationHandoff,
     MAX_HANDOFF_PAYLOAD_BYTES, VerifiedIncarnationHandoff,
@@ -160,7 +161,6 @@ pub fn parse_abandoned_trace_marker(bytes: &[u8]) -> Option<AbandonedTrace> {
 }
 
 const MAIN_TIMELINE: &str = "main";
-static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The boundary-operation kind a filesystem crash is pinned to. Serialized by
 /// name (snake_case) so it round-trips independent of declaration order, mirror
@@ -936,18 +936,14 @@ impl TraceBundle {
                 source,
             })?;
         }
-        let temp_path = temporary_path(path);
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-            .map_err(|source| TraceError::Io {
-                action: format!("create temporary trace {}", temp_path.display()),
-                source,
-            })?;
+        remove_dead_scratch(path);
+        let (temp_path, file) = create_scratch(path).map_err(|source| TraceError::Io {
+            action: format!("create temporary trace beside {}", path.display()),
+            source,
+        })?;
 
         let write_result = (|| {
-            let mut writer = BufWriter::new(file);
+            let mut writer = BufWriter::new(&file);
             writer.write_all(&bytes).map_err(|source| TraceError::Io {
                 action: format!("write temporary trace {}", temp_path.display()),
                 source,
@@ -2745,15 +2741,6 @@ fn enforce_trace_byte_limit(
     })
 }
 
-fn temporary_path(path: &Path) -> PathBuf {
-    let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("trace.patina");
-    path.with_file_name(format!(".{name}.tmp-{}-{counter}", std::process::id()))
-}
-
 #[cfg(test)]
 mod tests {
     use patina_dst_abi::{ClockKind, Fd, SignalTarget, TaskId};
@@ -2862,6 +2849,44 @@ mod tests {
             1,
             "atomic write must not leave a temporary file"
         );
+    }
+
+    /// A writer that dies mid-write leaves its scratch file behind, and a
+    /// scratch name derived from the pid is the name the next process given
+    /// that pid picks. Red while scratch names were `.<trace>.tmp-<pid>-<n>`
+    /// opened with `create_new`: these leftovers refused the write.
+    #[test]
+    fn a_dead_writers_scratch_file_does_not_block_a_write() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("run.patina");
+        for counter in 0..1024 {
+            let name = format!(".run.patina.tmp-{}-{counter}", std::process::id());
+            File::create(directory.path().join(name)).unwrap();
+        }
+        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint"));
+        recorder.observe(operation(), Outcome::U64(10));
+        recorder.finish(&path).unwrap();
+        TraceBundle::load(&path).unwrap();
+    }
+
+    /// A write sweeps the scratch files beside its trace that no writer holds
+    /// and spares one a live writer holds.
+    #[test]
+    fn a_write_sweeps_dead_scratch_and_spares_live_scratch() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("run.patina");
+        let (live, _held) = create_scratch(&path).unwrap();
+        let dead = directory.path().join(".run.patina.tmp.dead");
+        File::create(&dead).unwrap();
+        let other_trace = directory.path().join(".run.patina2.tmp.dead");
+        File::create(&other_trace).unwrap();
+
+        TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new())
+            .write_atomic(&path)
+            .unwrap();
+        assert!(!dead.exists(), "a dead writer's scratch is swept");
+        assert!(live.exists(), "a live writer's scratch is spared");
+        assert!(other_trace.exists(), "another trace's scratch is not swept");
     }
 
     #[test]

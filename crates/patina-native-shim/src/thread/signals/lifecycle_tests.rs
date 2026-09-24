@@ -393,8 +393,8 @@ fn raw_exit_from_main_keeps_the_process_alive() {
         }
         panic!("raw exit returned");
     }
-    let trace =
-        std::env::temp_dir().join(format!("patina-main-exit-{}.patina", std::process::id()));
+    let directory = tempfile::tempdir().unwrap();
+    let trace = directory.path().join("main-exit.patina");
     for (mode, expected) in [
         ("control", ATEXIT_STATUS),
         ("main", WORKER_STATUS),
@@ -425,7 +425,6 @@ fn raw_exit_from_main_keeps_the_process_alive() {
             .iter()
             .any(|event| matches!(event.operation, Operation::TaskComplete { task: TaskId(1) }))
     );
-    std::fs::remove_file(trace).unwrap();
 }
 
 #[test]

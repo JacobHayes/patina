@@ -25,3 +25,4 @@ serde_json.workspace = true
 [dev-dependencies]
 libc.workspace = true
 patina-dst-sched-det.workspace = true
+tempfile.workspace = true

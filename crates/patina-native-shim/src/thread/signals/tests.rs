@@ -23,16 +23,23 @@ extern "C" fn handler(_: i32) {
     HANDLERS.fetch_add(1, Ordering::SeqCst);
 }
 
+/// The trace an `isolated` child records, in a temporary directory its parent
+/// owns and removes once the child is gone — whatever the child left there,
+/// expected-fatal children included.
+const CHILD_TRACE: &str = "PATINA_SIGNAL_UNIT_TRACE";
+
 /// Every child (including expected-fatal children) must announce exactly one
 /// selected libtest test. `isolated` also requires one passed test; lifecycle
 /// tests instead check their deliberate process exit status (including zero).
 fn reexec(name: &str, env: &[(&str, &str)]) -> std::process::Output {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+    let directory = tempfile::tempdir().unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", name, "--nocapture"])
         .env("PATINA_SIGNAL_UNIT_CHILD", name)
+        .env(CHILD_TRACE, directory.path().join("signal-unit.patina"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (key, value) in env {
@@ -90,22 +97,18 @@ pub(in crate::thread) fn isolated(body: impl FnOnce()) {
     if crate::slot().lock().is_some() {
         assert_eq!(crate::patina_shutdown(), 0);
     }
-    let path = trace_path();
-    if path.exists() {
-        std::fs::remove_file(path).unwrap();
-    }
 }
 pub(in crate::thread) fn syscall_number(name: &str) -> i64 {
     crate::registry::syscall(name).unwrap().id.number() as i64
 }
-pub(in crate::thread) fn trace_path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("patina-signal-unit-{}.patina", std::process::id()))
+fn trace_path() -> std::path::PathBuf {
+    std::env::var_os(CHILD_TRACE)
+        .expect("only a re-executed child records")
+        .into()
 }
 pub(in crate::thread) fn operations() -> Vec<Operation> {
     assert_eq!(crate::patina_shutdown(), 0);
-    let path = trace_path();
-    let bundle = TraceBundle::load(&path).unwrap();
-    std::fs::remove_file(path).unwrap();
+    let bundle = TraceBundle::load(trace_path()).unwrap();
     bundle.timelines[0]
         .decisions
         .iter()

@@ -91,7 +91,7 @@ This is the currently implemented acceptance level. The application explicitly e
 | In-memory filesystem | Open/read/write/close behavior, cursor movement, truncation, and explicit errors have unit tests. |
 | Driver boundary | Runtime effects are expressed as typed ABI operations and use narrow driver traits. |
 | Missing capability | A runtime built without a requested driver returns `missing_driver`; it never falls through to the host. |
-| Record | `--record` reserves a new path, refuses active/existing writers, and writes one parseable trace bundle atomically after a successful or application-error run that reaches finalization. |
+| Record | `--record` reserves a new path with an advisory lock the kernel releases when the recorder exits or dies (a crashed recording never locks its path), refuses active/existing writers, and writes one parseable trace bundle atomically after a successful or application-error run that reaches finalization. |
 | Replay | The `replay` verb reproduces recorded results and consumes every event. |
 | Strict matching | Changed operation kind, arguments, event sequence, trailing events, malformed format, and changed fingerprint are errors. |
 | CLI transport | `cargo-patina` forwards Cargo arguments and passes mode, seed, trace path, and fingerprint through the documented environment protocol. |
