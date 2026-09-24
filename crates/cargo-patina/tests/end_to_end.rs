@@ -3074,17 +3074,19 @@ fn main() {
     let other_errno = Error::last_os_error().raw_os_error().unwrap_or(0);
     let idx = unsafe { if_nametoindex(b"patina-nope0\0".as_ptr() as *const c_char) };
     let idx_errno = Error::last_os_error().raw_os_error().unwrap_or(0);
-    // ESRCH = 3, ENXIO = 6 on both Linux and macOS.
+    // ESRCH = 3 on both; an unknown interface is ENODEV (19) on Linux
+    // (glibc's SIOCGIFINDEX) and ENXIO (6) on macOS.
+    let no_such_interface = if cfg!(target_os = "linux") { 19 } else { 6 };
     println!(
-        "self_alive={self_alive} other={other} other_esrch={} idx={idx} idx_enxio={}",
+        "self_alive={self_alive} other={other} other_esrch={} idx={idx} idx_unknown={}",
         other_errno == 3,
-        idx_errno == 6
+        idx_errno == no_such_interface
     );
 }
 "#,
     );
     assert!(
-        out.contains("self_alive=0 other=-1 other_esrch=true idx=0 idx_enxio=true"),
+        out.contains("self_alive=0 other=-1 other_esrch=true idx=0 idx_unknown=true"),
         "kill/if_nametoindex did not resolve to the deterministic error shape:\n{out}"
     );
 }
@@ -7843,7 +7845,7 @@ fn native_replay_refuses_incomplete_traces_before_guest_exec() {
         ("truncated", b"{\"format_version\":4,", "truncated JSON"),
         (
             "incomplete-metadata",
-            br#"{"format_version":11,"metadata":{"root_seed":1,"decision_policy":"splitmix64-v1"},"timelines":[]}"#,
+            br#"{"format_version":12,"metadata":{"root_seed":1,"decision_policy":"splitmix64-v1"},"timelines":[]}"#,
             "trace metadata is missing required field `fingerprint`",
         ),
     ];
@@ -9593,9 +9595,11 @@ fn a_wildcard_bound_guest_is_reachable_at_any_address_on_its_port() {
         line.contains("udp=udp-ping")
             && line.contains("udp_from=10.0.0.9:7200")
             && line.contains("tcp=tcp-ping")
-            // The TCP client never bound, so the shim synthesized its ephemeral
-            // local address; what matters is that the acceptor learned it.
-            && line.contains("tcp_peer=127.0.0.1:")
+            // The TCP client never bound, so the connect chose its source as
+            // the kernel does: the address of the interface routing to
+            // 10.0.0.5 (`eth0`, 10.0.0.1) and an ephemeral port; what matters
+            // is that the acceptor learned it.
+            && line.contains("tcp_peer=10.0.0.1:")
             && line.contains("reply=tcp-pong"),
         "wildcard-bound guest did not see the traffic dialed at a specific IP: {line}"
     );

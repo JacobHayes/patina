@@ -3,7 +3,8 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
 
 fn main() {
-    let ipv6 = TcpListener::bind("[::1]:9300").is_err();
+    // IPv6 loopback is on the virtual host's interface table.
+    let ipv6 = TcpListener::bind("[::1]:9300").is_ok();
     // DNS is modeled now, so this probe asserts the resolver's contract rather
     // than its former blanket refusal: a name outside the run's host table is
     // NXDOMAIN, and `localhost` resolves without any table at all.
@@ -26,6 +27,6 @@ fn main() {
     client.read_to_string(&mut reply).unwrap();
     let peer = server.join().unwrap();
     println!(
-        "NATIVE_TCP_RESULT reply={reply} peer={peer} ipv6_closed={ipv6} dns_nxdomain={nxdomain}"
+        "NATIVE_TCP_RESULT reply={reply} peer={peer} ipv6_loopback={ipv6} dns_nxdomain={nxdomain}"
     );
 }

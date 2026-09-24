@@ -44,6 +44,28 @@ impl<D: NetDriver> NetDriver for LatencyNet<D> {
         self.inner.bind(address)
     }
 
+    fn bind_shared(&mut self, address: &str) -> DriverResult<SocketId> {
+        self.inner.bind_shared(address)
+    }
+
+    fn mark_datagrams(
+        &mut self,
+        socket: SocketId,
+        tos: u8,
+        source: Option<&str>,
+    ) -> DriverResult<()> {
+        self.inner.mark_datagrams(socket, tos, source)
+    }
+
+    fn connect_datagram(
+        &mut self,
+        socket: SocketId,
+        local: &str,
+        peer: Option<&str>,
+    ) -> DriverResult<()> {
+        self.inner.connect_datagram(socket, local, peer)
+    }
+
     fn validate_send(&self, socket: SocketId, to: &str) -> DriverResult<()> {
         self.inner.validate_send(socket, to)
     }
@@ -74,6 +96,10 @@ impl<D: NetDriver> NetDriver for LatencyNet<D> {
 
     fn recv(&mut self, socket: SocketId, now_nanos: u64) -> DriverResult<Option<Datagram>> {
         self.inner.recv(socket, now_nanos)
+    }
+
+    fn peek(&self, socket: SocketId, now_nanos: u64) -> DriverResult<Option<Datagram>> {
+        self.inner.peek(socket, now_nanos)
     }
 
     fn next_delivery(&self, socket: SocketId, now_nanos: u64) -> DriverResult<Option<u64>> {
@@ -133,6 +159,15 @@ impl<D: NetDriver> NetDriver for LatencyNet<D> {
         now_nanos: u64,
     ) -> DriverResult<Option<Vec<u8>>> {
         self.inner.tcp_recv(socket, max_len, now_nanos)
+    }
+
+    fn tcp_peek(
+        &self,
+        socket: SocketId,
+        max_len: usize,
+        now_nanos: u64,
+    ) -> DriverResult<Option<Vec<u8>>> {
+        self.inner.tcp_peek(socket, max_len, now_nanos)
     }
 
     fn tcp_shutdown(&mut self, socket: SocketId, how: ShutdownHow) -> DriverResult<()> {

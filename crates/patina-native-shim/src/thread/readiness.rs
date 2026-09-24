@@ -3,7 +3,6 @@
 use super::signals::{Resumed, resume, with_temporary_mask};
 use super::*;
 use crate::EINTR;
-const EFAULT: i32 = 14;
 
 pub(super) const POLLIN: i16 = 0x001;
 const POLLPRI: i16 = 0x002;
@@ -11,8 +10,6 @@ const POLLOUT: i16 = 0x004;
 const POLLERR: i16 = 0x008;
 const POLLHUP: i16 = 0x010;
 const POLLNVAL: i16 = 0x020;
-const POLLRDNORM: i16 = 0x040;
-const POLLWRNORM: i16 = 0x100;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -46,43 +43,16 @@ fn poll(fds: &mut [PollFd], timeout: Option<u64>, mut remaining: Option<&mut u64
             if fd.fd < 0 {
                 continue;
             }
-            if crate::fd_table().lock().resolve(fd.fd).is_none() {
-                fd.revents = POLLNVAL;
-            } else {
-                let mut ready = fd_readiness(&state, fd.fd, None);
-                // A simplex pipe's EOF is POLLHUP, not POLLIN. select turns
-                // HUP back into read readiness below; the byte-channel backend
-                // also serves socketpair, whose EOF remains readable.
-                let entry = crate::fd_table().lock().resolve(fd.fd).unwrap();
-                if entry.kind == FdKind::Pipe {
-                    if let Some(end) = state.net.pipe_ends.get(&(entry.handle as i32)) {
-                        if let Some(channel) = end
-                            .read_channel
-                            .and_then(|id| state.net.pipe_channels.get(&id))
-                        {
-                            if end.write_channel.is_none() {
-                                ready.readable = !channel.buffer.is_empty();
-                                ready.read_eof = channel.write_closed();
-                            }
-                        }
-                    }
-                }
-                if ready.readable {
-                    fd.revents |= fd.events & (POLLIN | POLLRDNORM);
-                }
-                if ready.writable {
-                    fd.revents |= fd.events & (POLLOUT | POLLWRNORM);
-                }
-                if ready.read_eof {
-                    fd.revents |= POLLHUP;
-                }
-                if ready.write_eof {
-                    fd.revents |= POLLERR;
-                }
-                if fd.events & (POLLIN | POLLRDNORM) != 0 {
+            match fd_poll(&state, fd.fd, None) {
+                None => fd.revents = POLLNVAL,
+                Some((mask, _)) => {
+                    // `do_pollfd`: the requested events and the ones always
+                    // reported.
+                    let filter = fd.events as u16 as u32 | (POLLERR | POLLHUP) as u32;
+                    fd.revents = (mask & filter) as u16 as i16;
+                    // The object's wait queue wakes on any change: watch both
+                    // directions.
                     watched.push((ReadyDir::Read, fd.fd));
-                }
-                if fd.events & (POLLOUT | POLLWRNORM) != 0 {
                     watched.push((ReadyDir::Write, fd.fd));
                 }
             }
@@ -156,25 +126,28 @@ pub unsafe extern "C" fn patina_poll(
     remaining: *mut u64,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // `do_sys_poll`: the count is judged against the limit before the array
+    // is read, the array is copied in whole, and every `revents` is copied
+    // back out once the wait ends, whatever it answered.
     if count > crate::fd_limit() {
         return -i64::from(EINVAL);
     }
-    if count != 0 && fds.is_null() {
-        return -i64::from(EFAULT);
-    }
-    let fds = if count == 0 {
-        &mut []
-    } else {
-        unsafe { std::slice::from_raw_parts_mut(fds, count) }
+    let mut local = match crate::uaccess::read_vec::<PollFd>(fds as usize, count) {
+        Ok(local) => local,
+        Err(errno) => return -i64::from(errno),
     };
-    unsafe {
+    let rc = unsafe {
         with_temporary_mask(mask, || {
             poll(
-                fds,
+                &mut local,
                 (timeout >= 0).then_some(timeout as u64),
                 remaining.as_mut(),
             )
         })
+    };
+    match crate::uaccess::write_slice(fds as usize, &local) {
+        Ok(()) => rc,
+        Err(errno) => -i64::from(errno),
     }
 }
 
@@ -203,8 +176,10 @@ pub unsafe extern "C" fn patina_epoll_wait_masked(
 
 /// select/pselect use native-word fd sets. Timeout is relative nanoseconds;
 /// `remaining` lets each door write its timeval/timespec by its ABI rules.
+/// The sets are copied in and out whole (`EFAULT` for one that cannot be),
+/// as `core_sys_select` copies them.
 /// # Safety
-/// Each non-null set has ceil(nfds/64) words; optional remaining names a u64.
+/// An optional mask names eight bytes; optional remaining names a u64.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_select(
     nfds: i32,
@@ -216,16 +191,36 @@ pub unsafe extern "C" fn patina_select(
     remaining: *mut u64,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if nfds < 0 || nfds as usize > crate::fdtable::RLIMIT_NOFILE {
+    if nfds < 0 {
         return -i64::from(EINVAL);
     }
+    // `core_sys_select`: a count past the table is the table's size.
+    let nfds = nfds.min(crate::fd_limit() as i32);
+    let words = (nfds as usize).div_ceil(64);
+    let load = |set: *mut u64| -> Result<Vec<u64>, i32> {
+        if set.is_null() {
+            Ok(vec![0; words])
+        } else {
+            crate::uaccess::read_vec(set as usize, words)
+        }
+    };
+    let (sets_in, write_in, except_in) = match (load(read), load(write), load(except)) {
+        (Ok(read), Ok(write), Ok(except)) => (read, write, except),
+        (Err(errno), _, _) | (_, Err(errno), _) | (_, _, Err(errno)) => {
+            return -i64::from(errno);
+        }
+    };
     let mut fds = Vec::new();
     for fd in 0..nfds {
         let bit = 1u64 << (fd % 64);
         let index = fd as usize / 64;
         let mut events = 0;
-        for (set, event) in [(read, POLLIN), (write, POLLOUT), (except, POLLPRI)] {
-            if !set.is_null() && unsafe { *set.add(index) } & bit != 0 {
+        for (set, event) in [
+            (&sets_in, POLLIN),
+            (&write_in, POLLOUT),
+            (&except_in, POLLPRI),
+        ] {
+            if set[index] & bit != 0 {
                 events |= event;
             }
         }
@@ -252,29 +247,83 @@ pub unsafe extern "C" fn patina_select(
     if rc < 0 {
         return rc;
     }
-    for set in [read, write, except] {
-        if !set.is_null() {
-            unsafe {
-                std::ptr::write_bytes(set, 0, (nfds as usize).div_ceil(64));
-            }
-        }
-    }
+    let mut out = [vec![0u64; words], vec![0u64; words], vec![0u64; words]];
     let mut count = 0;
     for fd in fds {
-        for (set, requested, ready) in [
-            (read, POLLIN, POLLIN | POLLHUP | POLLERR),
-            (write, POLLOUT, POLLOUT | POLLERR),
-            (except, POLLPRI, POLLPRI),
+        // `POLLIN_SET`, `POLLOUT_SET`, `POLLEX_SET`.
+        for (slot, requested, ready) in [
+            (0, POLLIN, POLLIN | POLLHUP | POLLERR),
+            (1, POLLOUT, POLLOUT | POLLERR),
+            (2, POLLPRI, POLLPRI),
         ] {
-            if !set.is_null() && fd.events & requested != 0 && fd.revents & ready != 0 {
-                unsafe {
-                    *set.add(fd.fd as usize / 64) |= 1u64 << (fd.fd % 64);
-                }
+            if fd.events & requested != 0 && fd.revents & ready != 0 {
+                out[slot][fd.fd as usize / 64] |= 1u64 << (fd.fd % 64);
                 count += 1;
             }
         }
     }
+    for (set, bits) in [read, write, except].into_iter().zip(&out) {
+        if !set.is_null() {
+            if let Err(errno) = crate::uaccess::write_slice(set as usize, bits) {
+                return -i64::from(errno);
+            }
+        }
+    }
     count
+}
+
+/// The `select` row (`kern_select`): its `struct timeval` copied in and
+/// normalized — microseconds reaching a second carry into the seconds; only
+/// a time that is still negative is `EINVAL` — and the unslept time written
+/// back where it can be.
+/// # Safety
+/// As [`patina_select`]; a non-null `timeval` names the guest's timeval.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_select_timeval(
+    nfds: i32,
+    read: *mut u64,
+    write: *mut u64,
+    except: *mut u64,
+    timeval: usize,
+) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    const USEC: i64 = 1_000_000;
+    let nanos = if timeval == 0 {
+        -1
+    } else {
+        let [sec, usec]: [i64; 2] = match crate::uaccess::read(timeval) {
+            Ok(tv) => tv,
+            Err(errno) => return -i64::from(errno),
+        };
+        let sec = sec.saturating_add(usec / USEC);
+        let nsec = (usec % USEC) * 1000;
+        if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+            return -i64::from(EINVAL);
+        }
+        sec.saturating_mul(1_000_000_000).saturating_add(nsec)
+    };
+    let mut remaining = nanos.max(0) as u64;
+    let rc = unsafe {
+        patina_select(
+            nfds,
+            read,
+            write,
+            except,
+            nanos,
+            std::ptr::null(),
+            &mut remaining,
+        )
+    };
+    if timeval != 0 && (rc >= 0 || rc == -i64::from(EINTR)) {
+        let left = [
+            (remaining / 1_000_000_000) as i64,
+            ((remaining % 1_000_000_000) / 1000) as i64,
+        ];
+        // `poll_select_finish`: a timeval that cannot be written back
+        // leaves the result as it is.
+        let _ = crate::uaccess::write(timeval, &left);
+    }
+    rc
 }
 
 #[cfg(test)]

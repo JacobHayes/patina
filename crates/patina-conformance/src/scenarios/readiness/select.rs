@@ -29,15 +29,6 @@ use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
-/// The vehicles whose door hands a select timeval to patina unnormalized:
-/// every one on x86_64 (the `select` row); on arm64 only glibc's `select`
-/// (the syscall vehicle spells it `pselect6` and normalizes first).
-const NORMALIZED_BY_THE_DOOR: &[Vehicle] = if cfg!(target_arch = "x86_64") {
-    Vehicle::ALL
-} else {
-    &[Vehicle::Libc]
-};
-
 /// How long a wait for an event already caused may take: `(sec, usec)`.
 const WAIT: (i64, i64) = (5, 0);
 
@@ -215,35 +206,18 @@ pub const SCENARIO: Scenario = Scenario {
         "clock_gettime",
         "close",
     ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: NORMALIZED_BY_THE_DOOR,
-            what: "select refuses a timeval whose microseconds reach a second with EINVAL (c/posix/readiness.c select; on x86_64 sud/readiness.rs sys_select too — on arm64 the syscall vehicle's pselect6 spelling normalizes first, as glibc does) where the kernel normalizes it into seconds (kern_select → poll_select_set_timeout)",
-            failure: Failure::Differs(&[
-                Difference::field(12, "select", "errno", Observed::Str("EINVAL")),
-                Difference::field(12, "select", "fields.r0_ready", Observed::Null),
-                Difference::field(12, "select", "fields.w0_ready", Observed::Null),
-                Difference::field(12, "select", "ret", Observed::Int(-1)),
-                Difference::check(
-                    13,
-                    "a timeout whose microseconds reach a second is normalized, not refused",
-                ),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "MSG_OOB on a connected stream answers EOPNOTSUPP (c/posix/net.c sendto: `patina_stream_flags_supported`), so no urgent byte sets the exception bit",
-            failure: Failure::Differs(&[
-                Difference::field(42, "sendto", "errno", Observed::Str("EOPNOTSUPP")),
-                Difference::field(42, "sendto", "ret", Observed::Int(-1)),
-                Difference::check(43, "send an urgent byte"),
-                Difference::field(44, "select", "fields.e0_ready", Observed::Bool(false)),
-                Difference::field(44, "select", "ret", Observed::Int(0)),
-                Difference::check(45, "urgent data sets the exception bit"),
-            ]),
-        },
-    ],
+    gaps: &[Gap {
+        status: Status::Pending(Arc::NetworkReadiness),
+        vehicles: Vehicle::ALL,
+        what: "MSG_OOB on a connected stream answers EOPNOTSUPP (c/posix/net.c sendto: `patina_stream_flags_supported`), so no urgent byte sets the exception bit",
+        failure: Failure::Differs(&[
+            Difference::field(42, "sendto", "errno", Observed::Str("EOPNOTSUPP")),
+            Difference::field(42, "sendto", "ret", Observed::Int(-1)),
+            Difference::check(43, "send an urgent byte"),
+            Difference::field(44, "select", "fields.e0_ready", Observed::Bool(false)),
+            Difference::field(44, "select", "ret", Observed::Int(0)),
+            Difference::check(45, "urgent data sets the exception bit"),
+        ]),
+    }],
     ..DEFAULTS
 };

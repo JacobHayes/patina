@@ -110,7 +110,9 @@ use patina_dst_abi::{
     FsMetadata, FsNode, OpenFlags, Operation, Outcome, SeekWhence, SendReport, ShutdownHow,
     SocketId, TaskId, TcpAccepted, XattrTarget, verdict_line,
 };
-use patina_dst_driver_api::{ClockDriver, EntropyDriver, FsDriver, NetDriver, SchedulerDriver};
+use patina_dst_driver_api::{
+    ClockDriver, EntropyDriver, FsDriver, NetDriver, NetReadiness, SchedulerDriver,
+};
 use patina_dst_fs_crash::CrashFs;
 pub use patina_dst_fs_crash::TornGranularity;
 use patina_dst_fs_mem::{FsSnapshot, MemFs};
@@ -6917,6 +6919,28 @@ recording was produced by a guest whose result type no longer matches this one"
         decode_socket(&operation, outcome)
     }
 
+    /// Bind one more member of a shared (`SO_REUSEPORT`) binding at `address`.
+    pub fn net_bind_shared(&mut self, address: &str) -> Result<SocketId, RuntimeError> {
+        if self.network.is_none() {
+            return Err(EffectError::missing_driver("network").into());
+        }
+        let operation = Operation::NetBindShared {
+            address: address.into(),
+        };
+        let expected = self.replay_expected(&operation)?;
+        let result = self
+            .network
+            .as_mut()
+            .expect("driver was checked")
+            .bind_shared(address);
+        let actual = match result {
+            Ok(socket) => Outcome::Socket(socket),
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_socket(&operation, outcome)
+    }
+
     pub fn net_send(
         &mut self,
         socket: SocketId,
@@ -6987,40 +7011,43 @@ recording was produced by a guest whose result type no longer matches this one"
         decode_optional_u64(&operation, outcome)
     }
 
-    /// Level-triggered readiness of `socket` as a bitmask, for a `kqueue`/
-    /// `kevent` readiness reactor in an embedder (the native shim): bit 0
-    /// readable, bit 1 writable, bit 2 read-EOF (`EV_EOF` on read), bit 3
-    /// write-EOF (`EV_EOF` on write). Deliberately UNRECORDED: readiness is a
-    /// pure function of the recorded send/recv/shutdown history and the virtual
+    /// Level-triggered readiness of `socket`, for a readiness reactor in an
+    /// embedder (the native shim). Deliberately UNRECORDED: readiness is a pure
+    /// function of the recorded send/recv/shutdown history and the virtual
     /// clock — both reconstructed identically on replay — so a reactor may poll
     /// it every scheduling scan without emitting a boundary op, exactly as pipe
     /// readiness and mutex words carry no trace of their own. Virtual time is
     /// read through [`Self::current_monotonic`], the same unrecorded clock read
     /// the deadlock rescue uses.
-    pub fn net_readiness(&mut self, socket: SocketId) -> Result<u32, RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
+    pub fn net_readiness(&mut self, socket: SocketId) -> Result<NetReadiness, RuntimeError> {
         let now_nanos = self.current_monotonic()?;
-        let readiness = self
-            .network
-            .as_ref()
-            .expect("driver was checked")
-            .readiness(socket, now_nanos)?;
-        let mut bits = 0u32;
-        if readiness.readable {
-            bits |= 1 << 0;
+        Ok(self.network()?.readiness(socket, now_nanos)?)
+    }
+
+    /// The datagram a receive on `socket` would take now, left queued
+    /// (`MSG_PEEK`). UNRECORDED for the reason [`Self::net_readiness`] is: what
+    /// it answers is a function of the recorded history and the clock.
+    pub fn net_peek(&mut self, socket: SocketId) -> Result<Option<Datagram>, RuntimeError> {
+        let now_nanos = self.current_monotonic()?;
+        Ok(self.network()?.peek(socket, now_nanos)?)
+    }
+
+    /// What a stream receive on `socket` would take now, left queued
+    /// (`MSG_PEEK`). UNRECORDED, as [`Self::net_peek`].
+    pub fn net_tcp_peek(
+        &mut self,
+        socket: SocketId,
+        max_len: usize,
+    ) -> Result<Option<Vec<u8>>, RuntimeError> {
+        let now_nanos = self.current_monotonic()?;
+        Ok(self.network()?.tcp_peek(socket, max_len, now_nanos)?)
+    }
+
+    fn network(&self) -> Result<&dyn NetDriver, RuntimeError> {
+        match self.network.as_deref() {
+            Some(network) => Ok(network),
+            None => Err(EffectError::missing_driver("network").into()),
         }
-        if readiness.writable {
-            bits |= 1 << 1;
-        }
-        if readiness.read_eof {
-            bits |= 1 << 2;
-        }
-        if readiness.write_eof {
-            bits |= 1 << 3;
-        }
-        Ok(bits)
     }
 
     /// The current monotonic virtual time in nanoseconds, UNRECORDED. A
@@ -7178,6 +7205,66 @@ recording was produced by a guest whose result type no longer matches this one"
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
         decode_optional_bytes(&operation, outcome)
+    }
+
+    /// Mark what datagram socket `socket` sends from now on: see
+    /// [`NetDriver::mark_datagrams`].
+    pub fn net_mark(
+        &mut self,
+        socket: SocketId,
+        tos: u8,
+        source: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        if self.network.is_none() {
+            return Err(EffectError::missing_driver("network").into());
+        }
+        let operation = Operation::NetMark {
+            socket,
+            tos,
+            source: source.map(Into::into),
+        };
+        let expected = self.replay_expected(&operation)?;
+        let result = self
+            .network
+            .as_mut()
+            .expect("driver was checked")
+            .mark_datagrams(socket, tos, source);
+        let actual = match result {
+            Ok(()) => Outcome::Unit,
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_unit(&operation, outcome)
+    }
+
+    /// Pin datagram socket `socket` to `peer` as seen from `local`, or release
+    /// it (`None`): see [`NetDriver::connect_datagram`].
+    pub fn net_connect(
+        &mut self,
+        socket: SocketId,
+        local: &str,
+        peer: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        if self.network.is_none() {
+            return Err(EffectError::missing_driver("network").into());
+        }
+        let operation = Operation::NetConnect {
+            socket,
+            local: local.into(),
+            peer: peer.map(Into::into),
+        };
+        let expected = self.replay_expected(&operation)?;
+        let result = self
+            .network
+            .as_mut()
+            .expect("driver was checked")
+            .connect_datagram(socket, local, peer);
+        let actual = match result {
+            Ok(()) => Outcome::Unit,
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_unit(&operation, outcome)
     }
 
     pub fn net_tcp_shutdown(

@@ -7,8 +7,8 @@ use patina_dst_abi::{
     TcpAccepted,
 };
 use patina_dst_driver_api::{
-    DriverResult, NetDriver, NetFaultReport, NetReadiness, range_vacuity_is_diagnosable,
-    vacuity_is_diagnosable, wildcard_bind_key,
+    DriverResult, NetDriver, NetFaultReport, NetReadiness, datagram_source,
+    range_vacuity_is_diagnosable, vacuity_is_diagnosable, wildcard_bind_keys,
 };
 use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
 
@@ -142,6 +142,9 @@ impl SimNetBuilder {
             partitions: self.partitions,
             bindings: BTreeMap::new(),
             addresses: BTreeMap::new(),
+            datagram_peers: BTreeMap::new(),
+            datagram_marks: BTreeMap::new(),
+            received: BTreeMap::new(),
             packets: Vec::new(),
             next_socket: 1,
             next_packet: 1,
@@ -177,9 +180,23 @@ impl SimNetBuilder {
 struct Packet {
     id: u64,
     from: String,
+    /// The address the receiver is bound under.
     to: String,
+    /// The receiving socket, chosen when the packet is sent (one member of a
+    /// shared binding).
+    socket: SocketId,
     bytes: Vec<u8>,
     delivery_nanos: u64,
+    /// The address the sender dialed.
+    dialed: String,
+    tos: u8,
+}
+
+/// The sockets bound at one datagram address: one, or the members of a shared
+/// (`SO_REUSEPORT`) binding.
+struct Binding {
+    members: Vec<SocketId>,
+    shared: bool,
 }
 
 struct TcpListenerState {
@@ -203,6 +220,9 @@ struct TcpEndpoint {
     peer: Option<SocketId>,
     inbox: VecDeque<TcpSegment>,
     inbox_bytes: usize,
+    /// Segments that left the inbox (read or discarded): with the due ones
+    /// still queued, the arrivals so far.
+    retired: u64,
     remote_write_closed: bool,
     read_closed: bool,
     write_closed: bool,
@@ -214,7 +234,16 @@ pub struct SimNet {
     base_latency_nanos: u64,
     partitions: BTreeSet<(String, String)>,
     bindings: BTreeMap<SocketId, String>,
-    addresses: BTreeMap<String, SocketId>,
+    addresses: BTreeMap<String, Binding>,
+    /// Connected datagram sockets: the `(local, peer)` pair a datagram must
+    /// carry to reach each.
+    datagram_peers: BTreeMap<SocketId, (String, String)>,
+    /// Datagram sockets' marks: the type of service their sends carry and
+    /// the source address they leave from, when set.
+    datagram_marks: BTreeMap<SocketId, (u8, Option<String>)>,
+    /// Per datagram socket, the packets it has received: with the due ones
+    /// still queued, the arrivals so far.
+    received: BTreeMap<SocketId, u64>,
     packets: Vec<Packet>,
     next_socket: u64,
     next_packet: u64,
@@ -286,30 +315,55 @@ impl SimNet {
             .ok_or_else(|| invalid_socket(socket))
     }
 
-    /// The datagram socket that receives traffic dialed at `to`: the exact
-    /// binding if one exists, else a wildcard (`0.0.0.0:PORT`) binding under the
-    /// shared routing rule. Returns the resolved socket AND the address it is
-    /// actually bound under, because a queued packet is keyed by the RECEIVER's
-    /// bound address — that keeps `recv`, `next_delivery`, `readiness` and
-    /// `close` matching on one string apiece instead of each re-deriving the
-    /// rule.
-    fn resolve_datagram(&self, to: &str) -> Option<(SocketId, String)> {
-        if let Some(socket) = self.addresses.get(to) {
-            return Some((*socket, to.to_owned()));
-        }
-        let wildcard = wildcard_bind_key(to)?;
-        let socket = self.addresses.get(&wildcard)?;
-        Some((*socket, wildcard))
+    /// The datagram socket that receives traffic `from` dialed at `to`: the
+    /// exact binding if one exists, else a wildcard binding under the shared
+    /// routing rule ([`wildcard_bind_keys`]), and within a shared binding the
+    /// member the sender's address hashes to (a fixed member per sender, as a
+    /// kernel's reuseport group picks by flow). Returns the socket AND the
+    /// address it is bound under, because a queued packet names the address
+    /// the receiver is bound at.
+    fn resolve_datagram(&self, from: &str, to: &str) -> Option<(SocketId, String)> {
+        std::iter::once(to.to_owned())
+            .chain(wildcard_bind_keys(to))
+            .find_map(|address| {
+                let binding = self.addresses.get(&address)?;
+                // A connected member whose 4-tuple matches outranks every
+                // unconnected one; a connected member that does not match
+                // takes nothing (`compute_score`).
+                let connected = binding.members.iter().copied().find(|member| {
+                    self.datagram_peers
+                        .get(member)
+                        .is_some_and(|(local, peer)| local == to && peer == from)
+                });
+                if let Some(member) = connected {
+                    return Some((member, address));
+                }
+                let open: Vec<SocketId> = binding
+                    .members
+                    .iter()
+                    .copied()
+                    .filter(|member| !self.datagram_peers.contains_key(member))
+                    .collect();
+                let member = match open.len() {
+                    0 => return None,
+                    1 => open[0],
+                    count => {
+                        let hash = from.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                        });
+                        open[(hash % count as u64) as usize]
+                    }
+                };
+                Some((member, address))
+            })
     }
 
     /// The TCP listener that accepts a connection dialed at `to`, exact match
     /// first and then the wildcard rule, mirroring [`SimNet::resolve_datagram`].
     fn resolve_listener(&self, to: &str) -> Option<SocketId> {
-        if let Some(listener) = self.tcp_listener_addresses.get(to) {
-            return Some(*listener);
-        }
-        let wildcard = wildcard_bind_key(to)?;
-        self.tcp_listener_addresses.get(&wildcard).copied()
+        std::iter::once(to.to_owned())
+            .chain(wildcard_bind_keys(to))
+            .find_map(|address| self.tcp_listener_addresses.get(&address).copied())
     }
 
     /// Draw the seeded drop decision for one datagram. Extreme probabilities are
@@ -413,6 +467,17 @@ impl SimNet {
         true
     }
 
+    /// The index of the packet `recv` takes for `socket` at `now_nanos`: the
+    /// earliest deliverable one, ties by send order.
+    fn due_packet(&self, socket: SocketId, now_nanos: u64) -> Option<usize> {
+        self.packets
+            .iter()
+            .enumerate()
+            .filter(|(_, packet)| packet.socket == socket && packet.delivery_nanos <= now_nanos)
+            .min_by_key(|(_, packet)| (packet.delivery_nanos, packet.id))
+            .map(|(index, _)| index)
+    }
+
     fn allocate_socket(&mut self) -> DriverResult<SocketId> {
         let socket = SocketId(self.next_socket);
         self.next_socket = self.next_socket.checked_add(1).ok_or_else(|| {
@@ -435,25 +500,79 @@ impl NetDriver for SimNet {
     fn bind(&mut self, address: &str) -> DriverResult<SocketId> {
         validate_address(address)?;
         if self.addresses.contains_key(address) {
-            return Err(EffectError::new(
-                ErrorCode::AlreadyBound,
-                format!("virtual network address is already bound: {address}"),
-            ));
+            return Err(already_bound(address));
         }
         let socket = self.allocate_socket()?;
         self.bindings.insert(socket, address.into());
-        self.addresses.insert(address.into(), socket);
+        self.addresses.insert(
+            address.into(),
+            Binding {
+                members: vec![socket],
+                shared: false,
+            },
+        );
+        Ok(socket)
+    }
+
+    fn bind_shared(&mut self, address: &str) -> DriverResult<SocketId> {
+        validate_address(address)?;
+        if self
+            .addresses
+            .get(address)
+            .is_some_and(|binding| !binding.shared)
+        {
+            return Err(already_bound(address));
+        }
+        let socket = self.allocate_socket()?;
+        self.bindings.insert(socket, address.into());
+        self.addresses
+            .entry(address.into())
+            .or_insert(Binding {
+                members: Vec::new(),
+                shared: true,
+            })
+            .members
+            .push(socket);
         Ok(socket)
     }
 
     fn validate_send(&self, socket: SocketId, to: &str) -> DriverResult<()> {
         validate_address(to)?;
         self.address(socket)?;
-        if self.resolve_datagram(to).is_none() {
-            return Err(EffectError::new(
-                ErrorCode::NoRoute,
-                format!("no virtual socket is bound at {to}"),
-            ));
+        Ok(())
+    }
+
+    fn mark_datagrams(
+        &mut self,
+        socket: SocketId,
+        tos: u8,
+        source: Option<&str>,
+    ) -> DriverResult<()> {
+        self.address(socket)?;
+        if tos == 0 && source.is_none() {
+            self.datagram_marks.remove(&socket);
+        } else {
+            self.datagram_marks
+                .insert(socket, (tos, source.map(str::to_owned)));
+        }
+        Ok(())
+    }
+
+    fn connect_datagram(
+        &mut self,
+        socket: SocketId,
+        local: &str,
+        peer: Option<&str>,
+    ) -> DriverResult<()> {
+        self.address(socket)?;
+        match peer {
+            Some(peer) => {
+                self.datagram_peers
+                    .insert(socket, (local.to_owned(), peer.to_owned()));
+            }
+            None => {
+                self.datagram_peers.remove(&socket);
+            }
         }
         Ok(())
     }
@@ -466,16 +585,20 @@ impl NetDriver for SimNet {
         delivery_nanos: u64,
     ) -> DriverResult<SendReport> {
         self.validate_send(socket, to)?;
-        let from = self.address(socket)?.to_owned();
-        // Route once, here, and queue the packet under the address the receiver
-        // is actually BOUND to. A wildcard listener's queue is keyed `0.0.0.0:P`
-        // whichever IP the sender dialed, so every downstream filter (recv,
-        // next_delivery, readiness, close) keeps comparing one string and cannot
-        // drift from the routing rule. The guest never observes this: a datagram
-        // surfaces its `from`, not the address it was dialed at.
-        let (_, destination) = self
-            .resolve_datagram(to)
-            .expect("validate_send resolved a destination");
+        let (tos, source) = self
+            .datagram_marks
+            .get(&socket)
+            .cloned()
+            .unwrap_or_default();
+        let bound = self.address(socket)?;
+        let from = source.unwrap_or_else(|| datagram_source(bound, to));
+        // Route once, here, and queue the packet for the socket that receives
+        // it, under the address that socket is bound at: a wildcard binding's
+        // queue is keyed `0.0.0.0:P` whichever IP the sender dialed, so every
+        // downstream filter keeps comparing one socket. The guest never
+        // observes this: a datagram surfaces its `from`, not the address it
+        // was dialed at.
+        let route = self.resolve_datagram(&from, to);
         if self.partitions.contains(&(from.clone(), to.into())) {
             self.counts.partition_blocks += 1;
             return Ok(SendReport {
@@ -485,6 +608,16 @@ impl NetDriver for SimNet {
                 disposition: SendDisposition::DroppedByPartition,
             });
         }
+        // Nothing bound at the destination: the datagram goes nowhere, and the
+        // network's answer (a host's ICMP port-unreachable) is the report.
+        let Some((receiver, destination)) = route else {
+            return Ok(SendReport {
+                written: bytes.len(),
+                copies: 0,
+                delivery_nanos: Vec::new(),
+                disposition: SendDisposition::Unreachable,
+            });
+        };
         // Seeded fault decisions, drawn in a fixed order (drop, then jitter) so
         // the stream is a stable function of the send sequence. A dropped
         // datagram still reports the bytes as written — a lossy UDP send
@@ -533,8 +666,11 @@ impl NetDriver for SimNet {
                 id: self.next_packet,
                 from: from.clone(),
                 to: destination.clone(),
+                socket: receiver,
                 bytes: bytes.to_vec(),
                 delivery_nanos,
+                dialed: to.to_owned(),
+                tos,
             };
             self.next_packet = self.next_packet.checked_add(1).ok_or_else(|| {
                 EffectError::new(
@@ -554,33 +690,45 @@ impl NetDriver for SimNet {
     }
 
     fn recv(&mut self, socket: SocketId, now_nanos: u64) -> DriverResult<Option<Datagram>> {
-        let destination = self.address(socket)?.to_owned();
-        let candidate = self
-            .packets
-            .iter()
-            .enumerate()
-            .filter(|(_, packet)| packet.to == destination && packet.delivery_nanos <= now_nanos)
-            .min_by_key(|(_, packet)| (packet.delivery_nanos, packet.id))
-            .map(|(index, _)| index);
-        let Some(index) = candidate else {
+        self.address(socket)?;
+        let Some(index) = self.due_packet(socket, now_nanos) else {
             return Ok(None);
         };
         let packet = self.packets.remove(index);
+        *self.received.entry(socket).or_default() += 1;
         Ok(Some(Datagram {
             packet_id: packet.id,
             from: packet.from,
             to: packet.to,
             bytes: packet.bytes,
             delivery_nanos: packet.delivery_nanos,
+            dialed: packet.dialed,
+            tos: packet.tos,
+        }))
+    }
+
+    fn peek(&self, socket: SocketId, now_nanos: u64) -> DriverResult<Option<Datagram>> {
+        self.address(socket)?;
+        Ok(self.due_packet(socket, now_nanos).map(|index| {
+            let packet = &self.packets[index];
+            Datagram {
+                packet_id: packet.id,
+                from: packet.from.clone(),
+                to: packet.to.clone(),
+                bytes: packet.bytes.clone(),
+                delivery_nanos: packet.delivery_nanos,
+                dialed: packet.dialed.clone(),
+                tos: packet.tos,
+            }
         }))
     }
 
     fn next_delivery(&self, socket: SocketId, now_nanos: u64) -> DriverResult<Option<u64>> {
-        if let Some(destination) = self.bindings.get(&socket) {
+        if self.bindings.contains_key(&socket) {
             return Ok(self
                 .packets
                 .iter()
-                .filter(|packet| packet.to == *destination && packet.delivery_nanos > now_nanos)
+                .filter(|packet| packet.socket == socket && packet.delivery_nanos > now_nanos)
                 .map(|packet| packet.delivery_nanos)
                 .min());
         }
@@ -641,7 +789,7 @@ impl NetDriver for SimNet {
         })?;
         debug_assert!(
             endpoint.local == state.address
-                || wildcard_bind_key(&endpoint.local).as_deref() == Some(state.address.as_str()),
+                || wildcard_bind_keys(&endpoint.local).contains(&state.address),
             "accepted stream local {} matches neither the listener address {} nor its wildcard",
             endpoint.local,
             state.address
@@ -705,6 +853,7 @@ impl NetDriver for SimNet {
                 peer: Some(acceptor),
                 inbox: VecDeque::new(),
                 inbox_bytes: 0,
+                retired: 0,
                 remote_write_closed: false,
                 read_closed: false,
                 write_closed: false,
@@ -719,6 +868,7 @@ impl NetDriver for SimNet {
                 peer: Some(client),
                 inbox: VecDeque::new(),
                 inbox_bytes: 0,
+                retired: 0,
                 remote_write_closed: false,
                 read_closed: false,
                 write_closed: false,
@@ -840,6 +990,7 @@ impl NetDriver for SimNet {
             if front.bytes.len() <= remaining {
                 let segment = endpoint.inbox.pop_front().expect("front exists");
                 endpoint.inbox_bytes -= segment.bytes.len();
+                endpoint.retired += 1;
                 taken.extend_from_slice(&segment.bytes);
             } else {
                 taken.extend_from_slice(&front.bytes[..remaining]);
@@ -867,6 +1018,41 @@ impl NetDriver for SimNet {
         Ok(None)
     }
 
+    fn tcp_peek(
+        &self,
+        socket: SocketId,
+        max_len: usize,
+        now_nanos: u64,
+    ) -> DriverResult<Option<Vec<u8>>> {
+        let endpoint = self.tcp_endpoints.get(&socket).ok_or_else(|| {
+            EffectError::new(
+                ErrorCode::InvalidHandle,
+                format!("virtual TCP stream {} is not connected", socket.0),
+            )
+        })?;
+        if endpoint.reset {
+            return Err(tcp_reset(socket));
+        }
+        if endpoint.read_closed {
+            return Ok(Some(Vec::new()));
+        }
+        let mut peeked = Vec::new();
+        for segment in &endpoint.inbox {
+            if peeked.len() == max_len || segment.delivery_nanos > now_nanos {
+                break;
+            }
+            let take = segment.bytes.len().min(max_len - peeked.len());
+            peeked.extend_from_slice(&segment.bytes[..take]);
+        }
+        if !peeked.is_empty() {
+            return Ok(Some(peeked));
+        }
+        if endpoint.remote_write_closed && endpoint.inbox.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        Ok(None)
+    }
+
     fn tcp_shutdown(&mut self, socket: SocketId, how: ShutdownHow) -> DriverResult<()> {
         let peer = {
             let endpoint = self.tcp_endpoints.get_mut(&socket).ok_or_else(|| {
@@ -880,6 +1066,7 @@ impl NetDriver for SimNet {
             }
             if matches!(how, ShutdownHow::Read | ShutdownHow::Both) {
                 endpoint.read_closed = true;
+                endpoint.retired += endpoint.inbox.len() as u64;
                 endpoint.inbox.clear();
                 endpoint.inbox_bytes = 0;
             }
@@ -897,16 +1084,22 @@ impl NetDriver for SimNet {
         // Datagram: readable once a packet addressed here is deliverable at
         // `now_nanos` (the exact condition `recv` returns `Some` on); a virtual
         // datagram send never blocks, so it is always writable and has no EOF.
-        if let Some(address) = self.bindings.get(&socket) {
-            let readable = self
+        if self.bindings.contains_key(&socket) {
+            let due = self
                 .packets
                 .iter()
-                .any(|packet| packet.to == *address && packet.delivery_nanos <= now_nanos);
+                .filter(|packet| packet.socket == socket && packet.delivery_nanos <= now_nanos);
+            let arrivals =
+                due.clone().count() as u64 + self.received.get(&socket).copied().unwrap_or(0);
+            let pending = self
+                .due_packet(socket, now_nanos)
+                .map_or(0, |index| self.packets[index].bytes.len());
             return Ok(NetReadiness {
-                readable,
+                readable: due.clone().next().is_some(),
                 writable: true,
-                read_eof: false,
-                write_eof: false,
+                arrivals,
+                pending,
+                ..NetReadiness::default()
             });
         }
         if let Some(endpoint) = self.tcp_endpoints.get(&socket) {
@@ -918,17 +1111,22 @@ impl NetDriver for SimNet {
                     writable: true,
                     read_eof: true,
                     write_eof: true,
+                    peer_write_closed: true,
+                    reset: true,
+                    arrivals: endpoint.retired + endpoint.inbox.len() as u64 + 1,
+                    pending: 0,
                 });
             }
             // Mirror `tcp_recv`: `Some(nonempty)` = data, `Some(empty)` = EOF,
             // `None` = would-block. Readable iff a receive would not would-block.
-            let has_due_data = endpoint
+            let due: Vec<&TcpSegment> = endpoint
                 .inbox
                 .iter()
-                .any(|segment| segment.delivery_nanos <= now_nanos);
+                .take_while(|segment| segment.delivery_nanos <= now_nanos)
+                .collect();
             let read_eof =
                 endpoint.read_closed || (endpoint.remote_write_closed && endpoint.inbox.is_empty());
-            let readable = has_due_data || read_eof;
+            let readable = !due.is_empty() || read_eof;
             // Mirror `tcp_send`: `Ok(0)` (would-block) only when the peer's
             // receive buffer is full and the peer is still reading; a shut-for-
             // write, gone, or non-reading peer fails closed rather than blocks,
@@ -943,11 +1141,20 @@ impl NetDriver for SimNet {
                 .and_then(|peer| self.tcp_endpoints.get(&peer))
                 .is_none_or(|peer| peer.read_closed || peer.inbox_bytes < self.tcp_buffer_bytes);
             let writable = write_eof || peer_has_space;
+            // The FIN arrives after every byte sent before it, and is an
+            // arrival of its own: a peer's shutdown re-arms an edge-triggered
+            // reader even when it had nothing left to send.
+            let fin_arrived = endpoint.remote_write_closed && due.len() == endpoint.inbox.len();
+            let arrivals = endpoint.retired + due.len() as u64 + u64::from(fin_arrived);
             return Ok(NetReadiness {
                 readable,
                 writable,
                 read_eof,
                 write_eof,
+                peer_write_closed: fin_arrived,
+                reset: false,
+                arrivals,
+                pending: due.iter().map(|segment| segment.bytes.len()).sum(),
             });
         }
         if let Some(listener) = self.tcp_listeners.get(&socket) {
@@ -955,9 +1162,8 @@ impl NetDriver for SimNet {
             // would return `Some`. A listener is never writable.
             return Ok(NetReadiness {
                 readable: !listener.pending.is_empty(),
-                writable: false,
-                read_eof: false,
-                write_eof: false,
+                pending: listener.pending.len(),
+                ..NetReadiness::default()
             });
         }
         Err(invalid_socket(socket))
@@ -1024,10 +1230,18 @@ impl NetDriver for SimNet {
 
     fn close(&mut self, socket: SocketId) -> DriverResult<()> {
         if let Some(address) = self.bindings.remove(&socket) {
-            self.addresses.remove(&address);
+            if let Some(binding) = self.addresses.get_mut(&address) {
+                binding.members.retain(|member| *member != socket);
+                if binding.members.is_empty() {
+                    self.addresses.remove(&address);
+                }
+            }
+            self.received.remove(&socket);
+            self.datagram_peers.remove(&socket);
+            self.datagram_marks.remove(&socket);
             // A datagram already sent is independent of its sender's socket
             // lifetime, so in-flight packets FROM this address stay deliverable.
-            self.packets.retain(|packet| packet.to != address);
+            self.packets.retain(|packet| packet.socket != socket);
             return Ok(());
         }
         if let Some(listener) = self.tcp_listeners.remove(&socket) {
@@ -1072,6 +1286,13 @@ fn validate_address(address: &str) -> DriverResult<()> {
         ));
     }
     Ok(())
+}
+
+fn already_bound(address: &str) -> EffectError {
+    EffectError::new(
+        ErrorCode::AlreadyBound,
+        format!("virtual network address is already bound: {address}"),
+    )
 }
 
 fn invalid_socket(socket: SocketId) -> EffectError {
@@ -1160,7 +1381,12 @@ mod tests {
         net.send(sender, "receiver", b"reply", 0).unwrap();
         net.close(sender).unwrap();
         assert_eq!(net.recv(receiver, 0).unwrap().unwrap().bytes, b"reply");
-        net.send(receiver, "sender", b"gone", 0).unwrap_err();
+        assert_eq!(
+            net.send(receiver, "sender", b"gone", 0)
+                .unwrap()
+                .disposition,
+            SendDisposition::Unreachable
+        );
     }
 
     #[test]
@@ -1212,11 +1438,18 @@ mod tests {
         let mut net = SimNet::new();
         net.bind("0.0.0.0:80").unwrap();
         let client = net.bind("10.0.0.9:5000").unwrap();
-        net.send(client, "10.0.0.5:81", b"nope", 0)
-            .expect_err("no wildcard listener on port 81");
+        let unreachable = |report: SendReport| {
+            report.disposition == SendDisposition::Unreachable && report.copies == 0
+        };
+        assert!(
+            unreachable(net.send(client, "10.0.0.5:81", b"nope", 0).unwrap()),
+            "no wildcard listener on port 81"
+        );
         net.bind("server").unwrap();
-        net.send(client, "other-label", b"nope", 0)
-            .expect_err("a bare label has no wildcard form");
+        assert!(
+            unreachable(net.send(client, "other-label", b"nope", 0).unwrap()),
+            "a bare label has no wildcard form"
+        );
         assert_eq!(
             net.tcp_connect("10.0.0.9:5001", "10.0.0.5:80", 0)
                 .unwrap_err()
@@ -1224,6 +1457,165 @@ mod tests {
             ErrorCode::ConnectionRefused,
             "a datagram wildcard bind is not a TCP listener"
         );
+    }
+
+    #[test]
+    fn a_dual_stack_wildcard_takes_both_families_after_their_own_wildcards() {
+        let mut net = SimNet::new();
+        let any = net.bind("*:80").unwrap();
+        let v4 = net.bind("127.0.0.1:5000").unwrap();
+        let v6 = net.bind("[::1]:5000").unwrap();
+        net.send(v4, "127.0.0.1:80", b"four", 0).unwrap();
+        net.send(v6, "[::1]:80", b"six", 0).unwrap();
+        assert_eq!(net.recv(any, 0).unwrap().unwrap().bytes, b"four");
+        assert_eq!(net.recv(any, 0).unwrap().unwrap().bytes, b"six");
+        let only_v6 = net.bind("[::]:80").unwrap();
+        net.send(v6, "[::1]:80", b"own", 0).unwrap();
+        assert_eq!(net.recv(only_v6, 0).unwrap().unwrap().bytes, b"own");
+        assert!(net.recv(any, 0).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_shared_binding_hands_each_sender_to_one_fixed_member() {
+        let mut net = SimNet::new();
+        let first = net.bind_shared("127.0.0.1:80").unwrap();
+        let second = net.bind_shared("127.0.0.1:80").unwrap();
+        assert_eq!(
+            net.bind("127.0.0.1:80").unwrap_err().code,
+            ErrorCode::AlreadyBound,
+            "an unshared bind cannot join a shared binding"
+        );
+        let senders: Vec<SocketId> = (0..8)
+            .map(|port| net.bind(&format!("127.0.0.1:{}", 6000 + port)).unwrap())
+            .collect();
+        for sender in &senders {
+            for _ in 0..2 {
+                net.send(*sender, "127.0.0.1:80", b"x", 0).unwrap();
+            }
+        }
+        let mut drained = |member| {
+            let mut from = Vec::new();
+            while let Some(datagram) = net.recv(member, 0).unwrap() {
+                from.push(datagram.from);
+            }
+            from
+        };
+        let (a, b) = (drained(first), drained(second));
+        assert_eq!(a.len() + b.len(), 16);
+        assert!(!a.is_empty() && !b.is_empty(), "both members take traffic");
+        assert!(
+            a.iter().all(|from| !b.contains(from)),
+            "a sender's datagrams all go to one member"
+        );
+        net.close(first).unwrap();
+        net.send(senders[0], "127.0.0.1:80", b"y", 0).unwrap();
+        assert!(
+            net.recv(second, 0).unwrap().is_some(),
+            "the survivor takes it all"
+        );
+    }
+
+    #[test]
+    fn peeks_leave_the_data_queued() {
+        let mut net = SimNet::new();
+        let sender = net.bind("a").unwrap();
+        let receiver = net.bind("b").unwrap();
+        net.send(sender, "b", b"datagram", 0).unwrap();
+        assert_eq!(net.peek(receiver, 0).unwrap().unwrap().bytes, b"datagram");
+        assert_eq!(net.recv(receiver, 0).unwrap().unwrap().bytes, b"datagram");
+        assert!(net.peek(receiver, 0).unwrap().is_none());
+
+        let listener = net.tcp_listen("127.0.0.1:80", 1).unwrap();
+        let client = net
+            .tcp_connect("127.0.0.1:5000", "127.0.0.1:80", 0)
+            .unwrap();
+        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+        net.tcp_send(client, b"hello", 0).unwrap();
+        net.tcp_send(client, b" world", 0).unwrap();
+        assert_eq!(net.tcp_peek(server, 8, 0).unwrap().unwrap(), b"hello wo");
+        assert_eq!(
+            net.tcp_recv(server, 16, 0).unwrap().unwrap(),
+            b"hello world"
+        );
+        assert_eq!(net.tcp_peek(server, 8, 0).unwrap(), None);
+        net.tcp_shutdown(client, ShutdownHow::Write).unwrap();
+        assert_eq!(net.tcp_peek(server, 8, 0).unwrap(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn readiness_counts_arrivals_and_reports_the_peer_fin_while_data_is_queued() {
+        let mut net = SimNet::new();
+        let sender = net.bind("a").unwrap();
+        let receiver = net.bind("b").unwrap();
+        for _ in 0..2 {
+            net.send(sender, "b", b"xyz", 0).unwrap();
+        }
+        let before = net.readiness(receiver, 0).unwrap();
+        assert_eq!((before.arrivals, before.pending), (2, 3));
+        net.recv(receiver, 0).unwrap();
+        assert_eq!(
+            net.readiness(receiver, 0).unwrap().arrivals,
+            2,
+            "a read is no arrival"
+        );
+
+        let listener = net.tcp_listen("127.0.0.1:80", 1).unwrap();
+        let client = net
+            .tcp_connect("127.0.0.1:5000", "127.0.0.1:80", 0)
+            .unwrap();
+        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+        net.tcp_send(client, b"ab", 0).unwrap();
+        net.tcp_shutdown(client, ShutdownHow::Write).unwrap();
+        let queued = net.readiness(server, 0).unwrap();
+        assert!(queued.peer_write_closed && !queued.read_eof);
+        assert_eq!((queued.arrivals, queued.pending), (2, 2));
+        net.tcp_recv(server, 1, 0).unwrap();
+        assert_eq!(net.readiness(server, 0).unwrap().arrivals, 2);
+    }
+
+    /// The FIN follows the bytes sent before it: while any of them is still
+    /// in flight the peer's shutdown has not arrived, so a reactor that
+    /// trusted it would report a readable stream whose receive would block.
+    #[test]
+    fn a_peer_shutdown_arrives_after_the_bytes_it_follows() {
+        let mut net = SimNet::builder().base_latency_nanos(10).build().unwrap();
+        let listener = net.tcp_listen("127.0.0.1:80", 1).unwrap();
+        let client = net
+            .tcp_connect("127.0.0.1:5000", "127.0.0.1:80", 0)
+            .unwrap();
+        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+        net.tcp_send(client, b"ab", 0).unwrap();
+        net.tcp_shutdown(client, ShutdownHow::Write).unwrap();
+        let in_flight = net.readiness(server, 5).unwrap();
+        assert!(!in_flight.readable && !in_flight.peer_write_closed);
+        assert_eq!((in_flight.arrivals, in_flight.pending), (0, 0));
+        let arrived = net.readiness(server, 10).unwrap();
+        assert!(arrived.readable && arrived.peer_write_closed);
+        assert_eq!((arrived.arrivals, arrived.pending), (2, 2));
+    }
+
+    /// A connected datagram socket takes only its peer's datagrams to its
+    /// local address; another sender's goes to an unconnected socket on the
+    /// port or is unreachable, and a release takes everything again.
+    #[test]
+    fn a_connected_datagram_socket_admits_only_its_peer() {
+        let mut net = SimNet::new();
+        let receiver = net.bind("0.0.0.0:7").unwrap();
+        let peer = net.bind("127.0.0.1:8").unwrap();
+        let stranger = net.bind("127.0.0.1:9").unwrap();
+        net.connect_datagram(receiver, "127.0.0.1:7", Some("127.0.0.1:8"))
+            .unwrap();
+        let from_peer = net.send(peer, "127.0.0.1:7", b"p", 0).unwrap();
+        assert_eq!(from_peer.disposition, SendDisposition::Queued);
+        let refused = net.send(stranger, "127.0.0.1:7", b"s", 0).unwrap();
+        assert_eq!(refused.disposition, SendDisposition::Unreachable);
+        let other_address = net.send(peer, "10.0.0.1:7", b"a", 0).unwrap();
+        assert_eq!(other_address.disposition, SendDisposition::Unreachable);
+        assert_eq!(net.recv(receiver, 0).unwrap().unwrap().bytes, b"p");
+        assert!(net.recv(receiver, 0).unwrap().is_none());
+        net.connect_datagram(receiver, "", None).unwrap();
+        net.send(stranger, "127.0.0.1:7", b"s", 0).unwrap();
+        assert_eq!(net.recv(receiver, 0).unwrap().unwrap().bytes, b"s");
     }
 
     #[test]
@@ -1370,13 +1762,11 @@ mod tests {
     /// Send `count` numbered datagrams at send-time zero and drain them in
     /// delivery order, returning the sequence numbers actually received.
     fn delivered_order(net: &mut SimNet, count: u32) -> Vec<u32> {
-        net.bind("tx").unwrap();
-        net.bind("rx").unwrap();
-        let tx = net.addresses["tx"];
+        let tx = net.bind("tx").unwrap();
+        let rx = net.bind("rx").unwrap();
         for seq in 0..count {
             net.send(tx, "rx", &seq.to_le_bytes(), 0).unwrap();
         }
-        let rx = net.addresses["rx"];
         let mut received = Vec::new();
         while let Some(datagram) = net.recv(rx, u64::MAX).unwrap() {
             received.push(u32::from_le_bytes(datagram.bytes.try_into().unwrap()));

@@ -70,19 +70,20 @@ fn msg_nosignal_suppresses_sigpipe() {
     isolated(|| {
         install_task_handler(SIGPIPE, 0);
         let me = current_task();
-        let mut fds = [-1; 2];
+        use crate::thread::net::abi::{AF_UNIX, SOCK_STREAM};
+        use crate::thread::net::{patina_sock_sendto, patina_sock_socketpair};
+        let mut fds = [-1i32; 2];
         assert_eq!(
-            unsafe { patina_socketpair(fds.as_mut_ptr(), fds.as_mut_ptr().add(1), 0, 0) },
+            patina_sock_socketpair(AF_UNIX, SOCK_STREAM, 0, fds.as_mut_ptr() as usize),
             0
         );
         assert_eq!(crate::patina_close(fds[1]), 0);
         for (flags, count) in [(MSG_NOSIGNAL, 0), (0, 1)] {
-            // sendto's raw adapter and C send both route socketpairs here.
+            // The SUD sendto row and C send both reach this entry.
             assert_eq!(
-                unsafe { patina_pipe_write(fds[0], b"x".as_ptr().cast(), 1, flags) },
-                -1
+                patina_sock_sendto(fds[0], b"x".as_ptr() as usize, 1, flags, 0, 0),
+                -i64::from(EPIPE)
             );
-            assert_eq!(crate::patina_errno(), EPIPE);
             assert_eq!(HANDLERS.load(Ordering::SeqCst), count);
         }
         assert_eq!(

@@ -56,10 +56,10 @@ pub(crate) enum FdKind {
     /// The `/dev/urandom` device: reads draw from the deterministic entropy
     /// stream; no handle.
     Urandom,
-    /// A virtual AF_INET socket over SimNet; `handle` keys the net module's
-    /// socket table.
+    /// A socket of any modeled family (a socketpair end too); `handle` keys
+    /// the net module's socket table.
     Socket,
-    /// A pipe, socketpair, or FIFO endpoint; `handle` keys the pipe-end table.
+    /// A pipe or FIFO endpoint; `handle` keys the pipe-end table.
     Pipe,
     /// A deterministic eventfd counter; `handle` keys the eventfd table.
     #[cfg(target_os = "linux")]
@@ -313,6 +313,35 @@ impl GuestFdTable {
         Ok((a as c_int, b as c_int))
     }
 
+    /// `EMFILE` unless `count` numbers are free: what `accept`/`socketpair`
+    /// reserve before they create anything.
+    pub(crate) fn ensure_free(&self, count: usize) -> Result<(), c_int> {
+        let mut index = 0;
+        for _ in 0..count {
+            index = self.lowest_free(index)? + 1;
+        }
+        Ok(())
+    }
+
+    /// The two numbers [`GuestFdTable::install_pair`] would bind next.
+    pub(crate) fn next_free_pair(&self) -> Result<(c_int, c_int), c_int> {
+        let a = self.lowest_free(0)?;
+        let b = self.lowest_free(a + 1)?;
+        Ok((a as c_int, b as c_int))
+    }
+
+    /// Bind the lowest free number to the live description `desc`: a
+    /// descriptor received in flight (`SCM_RIGHTS`) names the sender's open
+    /// file description. `EBADF` for an id that names no live description.
+    pub(crate) fn install_existing(&mut self, desc: DescId, cloexec: bool) -> Result<c_int, c_int> {
+        if !self.descriptions.contains_key(&desc) {
+            return Err(EBADF);
+        }
+        let index = self.lowest_free(0)?;
+        self.bind(index, desc, cloexec);
+        Ok(index as c_int)
+    }
+
     /// What `fd` names, or `None` for an empty slot / out-of-range number.
     pub(crate) fn resolve(&self, fd: c_int) -> Option<Resolved> {
         let slot = (*self.slots.get(Self::slot_index(fd)?)?)?;
@@ -332,7 +361,6 @@ impl GuestFdTable {
 
     /// The description itself (for callers holding a [`DescId`], such as a
     /// mapping's retained reference).
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn description(&self, desc: DescId) -> Option<&Description> {
         self.descriptions.get(&desc)
     }
@@ -482,7 +510,6 @@ impl GuestFdTable {
     /// mapping holds so its write-back survives the guest closing the number.
     /// `EBADF` for an id that names no live description. Freed with
     /// [`GuestFdTable::release`].
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn retain(&mut self, desc: DescId) -> Result<(), c_int> {
         self.descriptions.get_mut(&desc).ok_or(EBADF)?.refs += 1;
         Ok(())
@@ -490,7 +517,6 @@ impl GuestFdTable {
 
     /// Drop a hidden reference taken by [`GuestFdTable::retain`]. `EBADF` for
     /// an id that names no live description (a double release).
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn release(&mut self, desc: DescId) -> Result<Option<Release>, c_int> {
         if !self.descriptions.contains_key(&desc) {
             return Err(EBADF);

@@ -49,8 +49,8 @@ fn main() {
         )
     };
     assert_eq!(b, 0, "bind {b}");
-    // A TWO-iovec datagram: a fragmenting implementation would send two
-    // datagrams; the correct (interposer-mirroring) row refuses with ENOSYS.
+    // A TWO-iovec datagram: the segments gather into ONE datagram, which a
+    // fragmenting implementation would send as two.
     let a = *b"frag-";
     let c = *b"ment";
     let (mut abuf, mut cbuf) = (a, c);
@@ -76,10 +76,7 @@ fn main() {
         _pad1: 0,
     };
     let sent = unsafe { sc(46, sock, &msg as *const Msghdr as i64, 0) }; // sendmsg
-    assert_eq!(
-        sent, -38,
-        "sendmsg must mirror the interposer ENOSYS, got {sent}"
-    );
+    assert_eq!(sent, 9, "sendmsg gathers both segments, got {sent}");
     let mut recv_buf = [0u8; 32];
     let mut riov = Iovec {
         base: recv_buf.as_mut_ptr(),
@@ -97,9 +94,7 @@ fn main() {
         _pad1: 0,
     };
     let got = unsafe { sc(47, sock, &mut rmsg as *mut Msghdr as i64, 0) }; // recvmsg
-    assert_eq!(
-        got, -38,
-        "recvmsg must mirror the interposer ENOSYS, got {got}"
-    );
-    println!("RAW_MSG sendmsg={sent} recvmsg={got}");
+    assert_eq!(got, 9, "recvmsg takes the one datagram whole, got {got}");
+    let data = String::from_utf8_lossy(&recv_buf[..got as usize]).into_owned();
+    println!("RAW_MSG sendmsg={sent} recvmsg={got} data={data}");
 }

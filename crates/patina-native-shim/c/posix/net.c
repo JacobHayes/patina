@@ -1,5 +1,5 @@
 /*
- * Network (SimNet): sockets, transfer, options, DNS, socketpair.
+ * Network (SimNet): sockets, transfer, options, name resolution, interfaces.
  *
  * This file is one family slice of the native shim's single C translation unit:
  * `c/patina_posix.c` #includes every slice under `c/posix/` in a fixed order, so the
@@ -10,463 +10,257 @@
  */
 
 /*
- * Virtual AF_INET/SOCK_DGRAM datagram sockets over SimNet. Only IPv4 datagrams
- * are supported; TCP (SOCK_STREAM), IPv6, and name resolution are denied
- * fail-closed. Sockets are fully virtual: no host network symbol is called.
+ * Every socket call is the shared `patina_sock_*` entry the SUD rows call,
+ * argument for argument: the entry copies guest memory in and out itself and
+ * answers the kernel's result (`-errno` on failure), so the two doors cannot
+ * differ. An `int` length travels as the kernel reads it, sign and all.
  */
-static int patina_parse_sockaddr(const struct sockaddr *addr, socklen_t len,
-                                 uint32_t *ip, uint16_t *port) {
-    if (addr == NULL || addr->sa_family != AF_INET ||
-        len < (socklen_t)sizeof(struct sockaddr_in)) {
+static ssize_t sock_result(int64_t rc) {
+#ifdef __linux__
+    patina_signal_deliver();
+#endif
+    if (rc < 0) {
+        errno = (int)-rc;
         return -1;
     }
-    const struct sockaddr_in *in = (const struct sockaddr_in *)(const void *)addr;
-    *ip = ntohl(in->sin_addr.s_addr);
-    *port = ntohs(in->sin_port);
-    return 0;
-}
-
-static void patina_fill_sockaddr(struct sockaddr *addr, socklen_t *len,
-                                 uint32_t ip, uint16_t port) {
-    if (addr == NULL || len == NULL) return;
-    struct sockaddr_in in;
-    memset(&in, 0, sizeof in);
-    in.sin_family = AF_INET;
-    in.sin_addr.s_addr = htonl(ip);
-    in.sin_port = htons(port);
-    socklen_t copy = *len < (socklen_t)sizeof in ? *len : (socklen_t)sizeof in;
-    memcpy(addr, &in, copy);
-    *len = (socklen_t)sizeof in;
+    return (ssize_t)rc;
 }
 
 int socket(int domain, int type, int protocol) {
-    if (domain != AF_INET) {
-        errno = EAFNOSUPPORT;
-        return -1;
-    }
-    int nonblocking = 0;
-    int cloexec = 0;
-    int base = type;
-#ifdef SOCK_NONBLOCK
-    if (base & SOCK_NONBLOCK) {
-        nonblocking = 1;
-        base &= ~SOCK_NONBLOCK;
-    }
-#endif
-#ifdef SOCK_CLOEXEC
-    if (base & SOCK_CLOEXEC) {
-        cloexec = 1;
-        base &= ~SOCK_CLOEXEC;
-    }
-#endif
-    int stream = 0;
-    if (base == SOCK_DGRAM) {
-        if (protocol != 0 && protocol != IPPROTO_UDP) {
-            errno = EPROTONOSUPPORT;
-            return -1;
-        }
-        stream = 0;
-    } else if (base == SOCK_STREAM) {
-        if (protocol != 0 && protocol != IPPROTO_TCP) {
-            errno = EPROTONOSUPPORT;
-            return -1;
-        }
-        stream = 1;
-    } else {
-        errno = EPROTOTYPE;
-        return -1;
-    }
-    int fd = patina_net_socket(stream, nonblocking, cloexec);
-    if (fd < 0) errno = patina_errno();
-    return fd;
+    return (int)sock_result(patina_sock_socket(domain, type, protocol));
 }
 
-/* The kind checks the socket family needs before the class entries: a number
- * that names nothing is EBADF, one that names anything but a socket or a
- * socketpair endpoint is ENOTSOCK. Returns 1 for a pipe/socketpair endpoint
- * (whose send/recv are the pipe transfer), 0 for a socket, -1 with errno. */
-static int patina_socket_or_pair(int fd) {
-    int kind = patina_fd_kind(fd);
-    if (kind < 0) {
-        errno = EBADF;
-        return -1;
-    }
-    if (kind == PATINA_FD_PIPE) return 1;
-    if (kind != PATINA_FD_SOCKET) {
-        errno = ENOTSOCK;
-        return -1;
-    }
-    return 0;
+int socketpair(int domain, int type, int protocol, int sv[2]) {
+    return (int)sock_result(patina_sock_socketpair(domain, type, protocol, (uintptr_t)sv));
 }
 
 int bind(int fd, const struct sockaddr *addr, socklen_t len) {
-    uint32_t ip;
-    uint16_t port;
-    if (patina_parse_sockaddr(addr, len, &ip, &port) != 0) {
-        errno = EAFNOSUPPORT;
-        return -1;
-    }
-    return fail_int(patina_net_bind(fd, ip, port));
+    return (int)sock_result(patina_sock_bind(fd, (uintptr_t)addr, (int32_t)len));
 }
 
 int connect(int fd, const struct sockaddr *addr, socklen_t len) {
-    uint32_t ip;
-    uint16_t port;
-    if (patina_parse_sockaddr(addr, len, &ip, &port) != 0) {
-        errno = EAFNOSUPPORT;
-        return -1;
-    }
-    int kind = patina_net_kind(fd);
-    if (kind == 3) {
-        errno = EISCONN;
-        return -1;
-    }
-    if (kind == 1) return fail_int(patina_net_tcp_connect(fd, ip, port));
-    if (kind == 2) {
-        errno = EOPNOTSUPP;
-        return -1;
-    }
-    /* A datagram socket, or not a socket at all: the entry answers
-     * EBADF/ENOTSOCK from the descriptor table. */
-    return fail_int(patina_net_connect(fd, ip, port));
-}
-
-static int patina_stream_flags_supported(int flags) {
-#ifdef MSG_NOSIGNAL
-    flags &= ~MSG_NOSIGNAL;
-#endif
-    return flags == 0;
-}
-
-/* A socketpair endpoint is a connected AF_UNIX stream, so the message-based
- * socket I/O (send/recv/sendto/recvfrom) is the same in-process byte channel as
- * write/read — tokio's UnixStream reaches the fd through send/recv, not
- * write/read. An addressed sendto/recvfrom on a connected pair is EISCONN. */
-ssize_t sendto(int fd, const void *buf, size_t len, int flags,
-               const struct sockaddr *addr, socklen_t alen) {
-    int pair = patina_socket_or_pair(fd);
-    if (pair < 0) return -1;
-    if (pair) {
-        if (addr != NULL) {
-            errno = EISCONN;
-            return -1;
-        }
-        if (!patina_stream_flags_supported(flags)) {
-            errno = EOPNOTSUPP;
-            return -1;
-        }
-        return fail_size(patina_pipe_write(fd, buf, len, flags));
-    }
-    int kind = patina_net_kind(fd);
-    if (kind == 3) {
-        if (addr != NULL) {
-            errno = EISCONN;
-            return -1;
-        }
-        if (!patina_stream_flags_supported(flags)) {
-            errno = EOPNOTSUPP;
-            return -1;
-        }
-        return fail_size(patina_net_stream_send(fd, buf, len, flags));
-    }
-    if (addr != NULL) {
-        uint32_t ip;
-        uint16_t port;
-        if (patina_parse_sockaddr(addr, alen, &ip, &port) != 0) {
-            errno = EAFNOSUPPORT;
-            return -1;
-        }
-        return fail_size(patina_net_sendto(fd, buf, len, ip, port));
-    }
-    return fail_size(patina_net_send(fd, buf, len));
-}
-
-ssize_t send(int fd, const void *buf, size_t len, int flags) {
-    int pair = patina_socket_or_pair(fd);
-    if (pair < 0) return -1;
-    if (pair) {
-        if (!patina_stream_flags_supported(flags)) {
-            errno = EOPNOTSUPP;
-            return -1;
-        }
-        return fail_size(patina_pipe_write(fd, buf, len, flags));
-    }
-    int kind = patina_net_kind(fd);
-    if (kind == 3) {
-        if (!patina_stream_flags_supported(flags)) {
-            errno = EOPNOTSUPP;
-            return -1;
-        }
-        return fail_size(patina_net_stream_send(fd, buf, len, flags));
-    }
-    return fail_size(patina_net_send(fd, buf, len));
-}
-
-ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
-                 struct sockaddr *addr, socklen_t *alen) {
-    int pair = patina_socket_or_pair(fd);
-    if (pair < 0) return -1;
-    if (pair) {
-        if (!patina_stream_flags_supported(flags)) {
-            errno = EOPNOTSUPP;
-            return -1;
-        }
-        (void)addr;
-        (void)alen;
-        return fail_size(patina_pipe_read(fd, buf, len));
-    }
-    int kind = patina_net_kind(fd);
-    if (kind == 3) {
-        if (addr != NULL) {
-            errno = EISCONN;
-            return -1;
-        }
-        if (!patina_stream_flags_supported(flags)) {
-            errno = EOPNOTSUPP;
-            return -1;
-        }
-        return fail_size(patina_net_stream_recv(fd, buf, len));
-    }
-    uint32_t ip = 0;
-    uint16_t port = 0;
-    ssize_t result = fail_size(patina_net_recvfrom(fd, buf, len, &ip, &port));
-    if (result >= 0) patina_fill_sockaddr(addr, alen, ip, port);
-    return result;
-}
-
-ssize_t recv(int fd, void *buf, size_t len, int flags) {
-    int pair = patina_socket_or_pair(fd);
-    if (pair < 0) return -1;
-    if (pair) {
-        if (!patina_stream_flags_supported(flags)) {
-            errno = EOPNOTSUPP;
-            return -1;
-        }
-        return fail_size(patina_pipe_read(fd, buf, len));
-    }
-    int kind = patina_net_kind(fd);
-    if (kind == 3) {
-        if (!patina_stream_flags_supported(flags)) {
-            errno = EOPNOTSUPP;
-            return -1;
-        }
-        return fail_size(patina_net_stream_recv(fd, buf, len));
-    }
-    return fail_size(patina_net_recv(fd, buf, len));
-}
-
-int getsockname(int fd, struct sockaddr *addr, socklen_t *len) {
-    uint32_t ip;
-    uint16_t port;
-    if (patina_net_getsockname(fd, &ip, &port) != 0) {
-        errno = patina_errno();
-        return -1;
-    }
-    patina_fill_sockaddr(addr, len, ip, port);
-    return 0;
-}
-
-static int patina_zero_timeval(const void *value, socklen_t len) {
-    if (value == NULL || len < (socklen_t)sizeof(struct timeval)) return 0;
-    const struct timeval *time = (const struct timeval *)value;
-    return time->tv_sec == 0 && time->tv_usec == 0;
-}
-
-static int patina_linger_off(const void *value, socklen_t len) {
-    if (value == NULL || len < (socklen_t)sizeof(struct linger)) return 0;
-    const struct linger *linger = (const struct linger *)value;
-    return linger->l_onoff == 0;
-}
-
-/* Virtual sockets allow only deterministic no-op option writes. */
-int setsockopt(int fd, int level, int optname, const void *value, socklen_t len) {
-    /* A socketpair endpoint is a socket for the option calls: the same
-     * deterministic no-op answers. */
-    if (patina_socket_or_pair(fd) < 0) return -1;
-    if (level == SOL_SOCKET) {
-        switch (optname) {
-            case SO_REUSEADDR:
-#ifdef SO_REUSEPORT
-            case SO_REUSEPORT:
-#endif
-#ifdef SO_NOSIGPIPE
-            case SO_NOSIGPIPE:
-#endif
-            case SO_KEEPALIVE:
-            case SO_BROADCAST:
-                return 0;
-            case SO_LINGER:
-                if (patina_linger_off(value, len)) return 0;
-                break;
-            case SO_RCVTIMEO:
-                /* Deterministic receive timeout: store the timeval (in virtual
-                 * nanoseconds) on the socket so a blocking recv is bounded by the
-                 * virtual clock. A zero timeval is POSIX "no timeout" and clears
-                 * it. */
-                if (value != NULL && len >= (socklen_t)sizeof(struct timeval)) {
-                    const struct timeval *rcv = (const struct timeval *)value;
-                    uint64_t nanos = (uint64_t)rcv->tv_sec * 1000000000ull +
-                                     (uint64_t)rcv->tv_usec * 1000ull;
-                    if (patina_net_set_read_timeout(fd, nanos) != 0) {
-                        errno = patina_errno();
-                        return -1;
-                    }
-                    return 0;
-                }
-                break;
-            case SO_SNDTIMEO:
-                /* Send timeouts are moot: virtual datagram/stream sends never
-                 * block, so only the no-op zero timeval is accepted. */
-                if (patina_zero_timeval(value, len)) return 0;
-                break;
-            default:
-                break;
-        }
-    }
-    if (level == IPPROTO_TCP && optname == TCP_NODELAY) return 0;
-    errno = ENOPROTOOPT;
-    return -1;
-}
-
-int getsockopt(int fd, int level, int optname, void *value, socklen_t *len) {
-    (void)level;
-    (void)optname;
-    if (patina_socket_or_pair(fd) < 0) return -1;
-    if (value != NULL && len != NULL) memset(value, 0, *len);
-    return 0;
+    return (int)sock_result(patina_sock_connect(fd, (uintptr_t)addr, (int32_t)len));
 }
 
 int listen(int fd, int backlog) {
-    return fail_int(patina_net_listen(fd, backlog));
-}
-
-static int patina_accept_impl(int fd, struct sockaddr *addr, socklen_t *len, int nonblocking,
-                              int cloexec) {
-    uint32_t ip = 0;
-    uint16_t port = 0;
-    int accepted = patina_net_accept(fd, &ip, &port, nonblocking, cloexec);
-    if (accepted < 0) {
-        errno = patina_errno();
-        return -1;
-    }
-    patina_fill_sockaddr(addr, len, ip, port);
-    return accepted;
+    return (int)sock_result(patina_sock_listen(fd, backlog));
 }
 
 int accept(int fd, struct sockaddr *addr, socklen_t *len) {
-    return patina_accept_impl(fd, addr, len, 0, 0);
+    return (int)sock_result(patina_sock_accept(fd, (uintptr_t)addr, (uintptr_t)len, 0));
 }
 
 #ifdef __linux__
 int accept4(int fd, struct sockaddr *addr, socklen_t *len, int flags) {
-    int allowed = SOCK_CLOEXEC;
-#ifdef SOCK_NONBLOCK
-    allowed |= SOCK_NONBLOCK;
-#endif
-    if ((flags & ~allowed) != 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    int nonblocking = 0;
-#ifdef SOCK_NONBLOCK
-    nonblocking = (flags & SOCK_NONBLOCK) != 0;
-#endif
-    return patina_accept_impl(fd, addr, len, nonblocking, (flags & SOCK_CLOEXEC) != 0);
+    return (int)sock_result(patina_sock_accept(fd, (uintptr_t)addr, (uintptr_t)len, flags));
 }
-
 #endif
 
-int shutdown(int fd, int how) {
-    int patina_how;
-    if (how == SHUT_RD) patina_how = 0;
-    else if (how == SHUT_WR) patina_how = 1;
-    else if (how == SHUT_RDWR) patina_how = 2;
-    else {
-        errno = EINVAL;
-        return -1;
-    }
-    return fail_int(patina_net_shutdown(fd, patina_how));
+int getsockname(int fd, struct sockaddr *addr, socklen_t *len) {
+    return (int)sock_result(patina_sock_name(fd, (uintptr_t)addr, (uintptr_t)len, 0));
 }
 
 int getpeername(int fd, struct sockaddr *addr, socklen_t *len) {
-    uint32_t ip;
-    uint16_t port;
-    if (patina_net_getpeername(fd, &ip, &port) != 0) {
-        errno = patina_errno();
-        return -1;
-    }
-    patina_fill_sockaddr(addr, len, ip, port);
-    return 0;
+    return (int)sock_result(patina_sock_name(fd, (uintptr_t)addr, (uintptr_t)len, 1));
+}
+
+int shutdown(int fd, int how) {
+    return (int)sock_result(patina_sock_shutdown(fd, how));
+}
+
+int setsockopt(int fd, int level, int optname, const void *value, socklen_t len) {
+    return (int)sock_result(
+        patina_sock_setsockopt(fd, level, optname, (uintptr_t)value, (int32_t)len));
+}
+
+int getsockopt(int fd, int level, int optname, void *value, socklen_t *len) {
+    return (int)sock_result(
+        patina_sock_getsockopt(fd, level, optname, (uintptr_t)value, (uintptr_t)len));
+}
+
+ssize_t sendto(int fd, const void *buf, size_t len, int flags,
+               const struct sockaddr *addr, socklen_t alen) {
+    return sock_result(patina_sock_sendto(fd, (uintptr_t)buf, len, flags, (uintptr_t)addr,
+                                          (int32_t)alen));
+}
+
+ssize_t send(int fd, const void *buf, size_t len, int flags) {
+    return sock_result(patina_sock_sendto(fd, (uintptr_t)buf, len, flags, 0, 0));
+}
+
+ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
+                 struct sockaddr *addr, socklen_t *alen) {
+    return sock_result(patina_sock_recvfrom(fd, (uintptr_t)buf, len, flags, (uintptr_t)addr,
+                                            (uintptr_t)alen));
+}
+
+ssize_t recv(int fd, void *buf, size_t len, int flags) {
+    return sock_result(patina_sock_recvfrom(fd, (uintptr_t)buf, len, flags, 0, 0));
+}
+
+ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
+    return sock_result(patina_sock_sendmsg(fd, (uintptr_t)msg, flags));
+}
+
+ssize_t recvmsg(int fd, struct msghdr *msg, int flags) {
+    return sock_result(patina_sock_recvmsg(fd, (uintptr_t)msg, flags));
+}
+
+#ifdef __linux__
+int sendmmsg(int fd, struct mmsghdr *vec, unsigned int vlen, int flags) {
+    return (int)sock_result(patina_sock_sendmmsg(fd, (uintptr_t)vec, vlen, flags));
+}
+
+int recvmmsg(int fd, struct mmsghdr *vec, unsigned int vlen, int flags,
+             struct timespec *timeout) {
+    return (int)sock_result(
+        patina_sock_recvmmsg(fd, (uintptr_t)vec, vlen, flags, (uintptr_t)timeout));
 }
 
 /*
- * DNS: forward lookup is modeled against the run's deterministic host table.
- * IPv6 stays out of scope, and so do gethostbyname/getnameinfo — nothing modern
- * uses them for forward resolution, so they are left undefined and the pre-run
- * audit keeps denying them rather than growing vocabulary no guest consumes.
- *
- * Only a single A record is ever returned: SimNet's address space is IPv4
- * `ip:port`, so a multi-address answer would offer the guest choices that cannot
- * differ. The result is heap-allocated and freeaddrinfo really frees it.
+ * glibc's `_FORTIFY_SOURCE` spellings of recv/recvfrom (debug/recv_chk.c,
+ * recvfrom_chk.c): the plain call, once the size the compiler knew for the
+ * buffer holds the length asked for (`__chk_fail` otherwise).
  */
+static ssize_t patina_recv_chk(int fd, void *buf, size_t len, size_t buflen, int flags) {
+    if (len > buflen) patina_chk_fail();
+    return sock_result(patina_sock_recvfrom(fd, (uintptr_t)buf, len, flags, 0, 0));
+}
 
-int getaddrinfo(const char *node, const char *service,
-                const struct addrinfo *hints, struct addrinfo **res) {
-    if (res == NULL) return EAI_FAIL;
-    if (hints != NULL && hints->ai_family == AF_INET6) return EAI_FAMILY;
-    /* A null node is a service-only lookup: it names the loopback address. */
-    const char *name = (node == NULL) ? "localhost" : node;
+static ssize_t patina_recvfrom_chk(int fd, void *buf, size_t len, size_t buflen, int flags,
+                                   struct sockaddr *addr, socklen_t *alen) {
+    if (len > buflen) patina_chk_fail();
+    return sock_result(patina_sock_recvfrom(fd, (uintptr_t)buf, len, flags, (uintptr_t)addr,
+                                            (uintptr_t)alen));
+}
 
-    uint16_t port = 0;
-    if (service != NULL) {
-        /* Only numeric services resolve: a /etc/services lookup would be a host
-         * dependency, and the virtual network has no service registry.
-         *
-         * Parsed by hand rather than with strtol. The original reason was the
-         * audit: glibc resolves strtol to __isoc23_strtol, an import the
-         * default-deny gate refused, and every native guest would have inherited
-         * it because this translation unit is always linked. That reason is GONE —
-         * the audit now normalizes the __isocNN_ generation alias onto the base
-         * symbol and strtol is known-safe — but the parser stays, because the
-         * remaining reason stands on its own: a digits-only parse is
-         * locale-independent, where strtol's is not. */
-        if (*service == '\0') return EAI_SERVICE;
-        unsigned long parsed = 0;
-        for (const char *digit = service; *digit != '\0'; ++digit) {
-            if (*digit < '0' || *digit > '9') return EAI_SERVICE;
-            parsed = parsed * 10u + (unsigned long)(*digit - '0');
-            if (parsed > 65535u) return EAI_SERVICE;
-        }
-        port = (uint16_t)parsed;
+ssize_t __recv_chk(int fd, void *buf, size_t len, size_t buflen, int flags) {
+    return patina_recv_chk(fd, buf, len, buflen, flags);
+}
+
+ssize_t __recvfrom_chk(int fd, void *buf, size_t len, size_t buflen, int flags,
+                       struct sockaddr *addr, socklen_t *alen) {
+    return patina_recvfrom_chk(fd, buf, len, buflen, flags, addr, alen);
+}
+#endif
+
+/*
+ * Name resolution over numeric hosts and the run's deterministic host table
+ * (patina_dns_resolve, IPv4): nothing reads /etc/hosts, /etc/services,
+ * /etc/gai.conf or the network. The answers follow glibc's
+ * (sysdeps/posix/getaddrinfo.c):
+ *
+ *  - a hints family other than AF_UNSPEC/AF_INET/AF_INET6 is EAI_FAMILY;
+ *  - the socket types come from glibc's `gaih_inet_typeproto` table: with
+ *    neither a type nor a protocol hinted, one result each for SOCK_STREAM
+ *    (IPPROTO_TCP), SOCK_DGRAM (IPPROTO_UDP) and SOCK_RAW (protocol 0);
+ *    otherwise the first entry both fit (none: EAI_SOCKTYPE with a type
+ *    hinted, else EAI_SERVICE), and SOCK_RAW with a service is EAI_SERVICE;
+ *  - only numeric services resolve (there is no service registry): a name
+ *    is EAI_NONAME under AI_NUMERICSERV, EAI_SERVICE otherwise;
+ *  - a NULL host is the wildcard address under AI_PASSIVE, loopback without
+ *    it; for AF_UNSPEC both families, in the order glibc's RFC 3484 sort
+ *    leaves them on a host with IPv4 and IPv6 loopback (passive: IPv4 first;
+ *    otherwise ::1 first);
+ *  - a numeric host (patina_net_numeric_host: inet_aton or inet_pton) of
+ *    another family than the one hinted is EAI_ADDRFAMILY (IPv4 under
+ *    AF_INET6 with AI_V4MAPPED answers the mapped address); a name under
+ *    AI_NUMERICHOST is EAI_NONAME;
+ *  - a name resolves to the host table's single IPv4 address (an injected
+ *    resolver timeout is EAI_AGAIN, an unknown name EAI_NONAME); AF_INET6
+ *    finds no address for it unless AI_V4MAPPED maps it;
+ *  - AI_CANONNAME names the host as given (the table has no aliases);
+ *    AI_ADDRCONFIG keeps a family only when a non-loopback interface of the
+ *    virtual table carries an address of it.
+ *
+ * The list is allocated node by node and freeaddrinfo frees it.
+ */
+struct patina_gai_type {
+    int socktype;
+    int protocol;
+    int any_protocol; /* the hinted protocol stands (SOCK_RAW) */
+    int no_service;   /* a service is EAI_SERVICE (SOCK_RAW) */
+};
+
+static const struct patina_gai_type patina_gai_types[] = {
+    {SOCK_STREAM, IPPROTO_TCP, 0, 0},
+    {SOCK_DGRAM, IPPROTO_UDP, 0, 0},
+#ifdef __linux__
+    {SOCK_DCCP, IPPROTO_DCCP, 0, 1},
+    {SOCK_DGRAM, IPPROTO_UDPLITE, 0, 0},
+    {SOCK_STREAM, IPPROTO_SCTP, 0, 0},
+    {SOCK_SEQPACKET, IPPROTO_SCTP, 0, 0},
+#endif
+    {SOCK_RAW, 0, 1, 1},
+};
+
+#define PATINA_GAI_TYPES (sizeof patina_gai_types / sizeof patina_gai_types[0])
+
+struct patina_gai_address {
+    int family;
+    unsigned char bytes[16];
+    uint32_t scope;
+};
+
+static int patina_gai_family_configured(int family) {
+    struct patina_interface interface;
+    for (uint32_t at = 0; patina_net_interface(at, &interface) == 0; ++at) {
+        if (interface.flags & IFF_LOOPBACK) continue;
+        if (family == AF_INET) return 1;
+        if (interface.has_ipv6) return 1;
     }
-
-    uint32_t ip = 0;
-    if (patina_dns_resolve(name, &ip) != 0) {
-        /* An injected resolver timeout is transient (EAI_AGAIN, the retry the
-         * guest is supposed to have); anything else is a name that does not
-         * resolve. */
-        return (patina_errno() == EINTR) ? EAI_AGAIN : EAI_NONAME;
-    }
-
-    struct addrinfo *out = calloc(1, sizeof(struct addrinfo));
-    struct sockaddr_in *addr = calloc(1, sizeof(struct sockaddr_in));
-    if (out == NULL || addr == NULL) {
-        free(out);
-        free(addr);
-        return EAI_MEMORY;
-    }
-    addr->sin_family = AF_INET;
-    addr->sin_port = htons(port);
-    addr->sin_addr.s_addr = htonl(ip);
-    out->ai_family = AF_INET;
-    out->ai_socktype = (hints != NULL && hints->ai_socktype != 0) ? hints->ai_socktype : SOCK_STREAM;
-    out->ai_protocol = (hints != NULL) ? hints->ai_protocol : 0;
-    out->ai_addrlen = sizeof(struct sockaddr_in);
-    out->ai_addr = (struct sockaddr *)addr;
-    out->ai_canonname = NULL;
-    out->ai_next = NULL;
-    *res = out;
     return 0;
+}
+
+static struct addrinfo *patina_gai_node(const struct patina_gai_address *address,
+                                        uint16_t port, int socktype, int protocol,
+                                        const char *canonical) {
+    struct addrinfo *node = calloc(1, sizeof *node);
+    if (node == NULL) return NULL;
+    node->ai_family = address->family;
+    node->ai_socktype = socktype;
+    node->ai_protocol = protocol;
+    if (address->family == AF_INET) {
+        struct sockaddr_in *in = calloc(1, sizeof *in);
+        if (in == NULL) {
+            free(node);
+            return NULL;
+        }
+#ifdef __APPLE__
+        in->sin_len = sizeof *in;
+#endif
+        in->sin_family = AF_INET;
+        in->sin_port = htons(port);
+        memcpy(&in->sin_addr, address->bytes, 4);
+        node->ai_addr = (struct sockaddr *)in;
+        node->ai_addrlen = sizeof *in;
+    } else {
+        struct sockaddr_in6 *in6 = calloc(1, sizeof *in6);
+        if (in6 == NULL) {
+            free(node);
+            return NULL;
+        }
+#ifdef __APPLE__
+        in6->sin6_len = sizeof *in6;
+#endif
+        in6->sin6_family = AF_INET6;
+        in6->sin6_port = htons(port);
+        memcpy(&in6->sin6_addr, address->bytes, 16);
+        in6->sin6_scope_id = address->scope;
+        node->ai_addr = (struct sockaddr *)in6;
+        node->ai_addrlen = sizeof *in6;
+    }
+    if (canonical != NULL) {
+        size_t size = strlen(canonical) + 1;
+        node->ai_canonname = malloc(size);
+        if (node->ai_canonname != NULL) memcpy(node->ai_canonname, canonical, size);
+        if (node->ai_canonname == NULL) {
+            free(node->ai_addr);
+            free(node);
+            return NULL;
+        }
+    }
+    return node;
 }
 
 void freeaddrinfo(struct addrinfo *res) {
@@ -479,79 +273,279 @@ void freeaddrinfo(struct addrinfo *res) {
     }
 }
 
-int socketpair(int domain, int type, int protocol, int sv[2]) {
-    if (sv == NULL) {
-        errno = EFAULT;
-        return -1;
+/* The numeric service, or -1 for a name. Digits only: a locale-independent
+ * parse (and no strtol import in the one translation unit every guest
+ * links). */
+static int patina_gai_port(const char *service) {
+    if (*service == '\0') return -1;
+    unsigned long parsed = 0;
+    for (const char *digit = service; *digit != '\0'; ++digit) {
+        if (*digit < '0' || *digit > '9') return -1;
+        parsed = parsed * 10u + (unsigned long)(*digit - '0');
+        if (parsed > 65535u) return -1;
     }
-    /* AF_LOCAL is the same constant as AF_UNIX; only a Unix-domain STREAM pair is
-     * a deterministic in-process duplex. Anything else fails closed. */
-    if (domain != AF_UNIX) {
-        errno = EAFNOSUPPORT;
-        return -1;
-    }
-    int nonblocking = 0;
-    int cloexec = 0;
-    int base = type;
-#ifdef SOCK_NONBLOCK
-    if (base & SOCK_NONBLOCK) {
-        nonblocking = 1;
-        base &= ~SOCK_NONBLOCK;
-    }
+    return (int)parsed;
+}
+
+static void patina_gai_v4mapped(struct patina_gai_address *address) {
+    unsigned char v4[4];
+    memcpy(v4, address->bytes, 4);
+    memset(address->bytes, 0, 10);
+    address->bytes[10] = 0xff;
+    address->bytes[11] = 0xff;
+    memcpy(address->bytes + 12, v4, 4);
+    address->family = AF_INET6;
+}
+
+int getaddrinfo(const char *node, const char *service,
+                const struct addrinfo *hints, struct addrinfo **res) {
+    static const struct addrinfo no_hints = {0};
+    if (hints == NULL) hints = &no_hints;
+    int family = hints->ai_family;
+    int flags = hints->ai_flags;
+#ifdef __linux__
+    const int known_flags = AI_PASSIVE | AI_CANONNAME | AI_NUMERICHOST | AI_ADDRCONFIG |
+                            AI_V4MAPPED | AI_NUMERICSERV | AI_ALL | AI_IDN | AI_CANONIDN |
+                            0x100 | 0x200;
+    if (flags & ~known_flags) return EAI_BADFLAGS;
 #endif
-#ifdef SOCK_CLOEXEC
-    if (base & SOCK_CLOEXEC) {
-        cloexec = 1;
-        base &= ~SOCK_CLOEXEC;
+    if ((flags & AI_CANONNAME) && node == NULL) return EAI_BADFLAGS;
+    if (family != AF_UNSPEC && family != AF_INET && family != AF_INET6) return EAI_FAMILY;
+    if (node == NULL && service == NULL) return EAI_NONAME;
+
+    /* The socket types. */
+    const struct patina_gai_type *only = NULL;
+    if (hints->ai_socktype != 0 || hints->ai_protocol != 0) {
+        for (size_t at = 0; at < PATINA_GAI_TYPES && only == NULL; ++at) {
+            const struct patina_gai_type *type = &patina_gai_types[at];
+            if (hints->ai_socktype != 0 && hints->ai_socktype != type->socktype) continue;
+            if (hints->ai_protocol != 0 && !type->any_protocol &&
+                hints->ai_protocol != type->protocol) {
+                continue;
+            }
+            only = type;
+        }
+        if (only == NULL) return hints->ai_socktype != 0 ? EAI_SOCKTYPE : EAI_SERVICE;
+        if (service != NULL && only->no_service) return EAI_SERVICE;
     }
+
+    uint16_t port = 0;
+    if (service != NULL) {
+        int parsed = patina_gai_port(service);
+        if (parsed < 0) return (flags & AI_NUMERICSERV) ? EAI_NONAME : EAI_SERVICE;
+        port = (uint16_t)parsed;
+    }
+
+    /* The addresses, in answer order. */
+    struct patina_gai_address addresses[2];
+    size_t count = 0;
+    if (node == NULL) {
+        static const unsigned char loopback4[4] = {127, 0, 0, 1};
+        struct patina_gai_address four = {.family = AF_INET};
+        struct patina_gai_address six = {.family = AF_INET6};
+        if (!(flags & AI_PASSIVE)) {
+            memcpy(four.bytes, loopback4, 4);
+            six.bytes[15] = 1;
+        }
+        int passive = (flags & AI_PASSIVE) != 0;
+        if (family != AF_INET && !passive) addresses[count++] = six;
+        if (family != AF_INET6) addresses[count++] = four;
+        if (family != AF_INET && passive) addresses[count++] = six;
+    } else {
+        struct patina_gai_address address = {0};
+        address.family = patina_net_numeric_host(node, address.bytes, &address.scope);
+        if (address.family == 0) {
+            if (flags & AI_NUMERICHOST) return EAI_NONAME;
+            uint32_t ip = 0;
+            if (patina_dns_resolve(node, &ip) != 0) {
+                return (patina_errno() == EINTR) ? EAI_AGAIN : EAI_NONAME;
+            }
+            uint32_t wire = htonl(ip);
+            address.family = AF_INET;
+            memcpy(address.bytes, &wire, 4);
+            if (family == AF_INET6) {
+                if (!(flags & AI_V4MAPPED)) return EAI_NONAME;
+                patina_gai_v4mapped(&address);
+            }
+        } else if (family != AF_UNSPEC && family != address.family) {
+            if (family == AF_INET6 && (flags & AI_V4MAPPED)) {
+                patina_gai_v4mapped(&address);
+            } else {
+#ifdef EAI_ADDRFAMILY
+                return EAI_ADDRFAMILY;
+#else
+                return EAI_NONAME;
 #endif
-    if (base != SOCK_STREAM) {
-        errno = EOPNOTSUPP;
-        return -1;
+            }
+        }
+        addresses[count++] = address;
     }
-    if (protocol != 0) {
-        errno = EPROTONOSUPPORT;
-        return -1;
+    if (flags & AI_ADDRCONFIG) {
+        size_t kept = 0;
+        for (size_t at = 0; at < count; ++at) {
+            if (patina_gai_family_configured(addresses[at].family)) {
+                addresses[kept++] = addresses[at];
+            }
+        }
+        count = kept;
+        if (count == 0) return EAI_NONAME;
     }
-    {
-        int rc = patina_socketpair(&sv[0], &sv[1], nonblocking, cloexec);
-        return fail_int(rc);
+
+    struct addrinfo *head = NULL;
+    struct addrinfo **tail = &head;
+    const char *canonical = (flags & AI_CANONNAME) ? node : NULL;
+    for (size_t at = 0; at < count; ++at) {
+        for (size_t type = 0; type < PATINA_GAI_TYPES; ++type) {
+            const struct patina_gai_type *entry = &patina_gai_types[type];
+            int socktype;
+            int protocol;
+            if (only != NULL) {
+                if (entry != only) continue;
+                socktype = only->socktype;
+                protocol = only->any_protocol ? hints->ai_protocol : only->protocol;
+            } else {
+                /* The default types: TCP, UDP and raw. */
+                if (entry->protocol != IPPROTO_TCP && entry->protocol != IPPROTO_UDP &&
+                    entry->socktype != SOCK_RAW) {
+                    continue;
+                }
+                socktype = entry->socktype;
+                protocol = entry->protocol;
+            }
+            struct addrinfo *made =
+                patina_gai_node(&addresses[at], port, socktype, protocol, canonical);
+            if (made == NULL) {
+                freeaddrinfo(head);
+                return EAI_MEMORY;
+            }
+            canonical = NULL;
+            *tail = made;
+            tail = &made->ai_next;
+        }
     }
+    *res = head;
+    return 0;
+}
+
+/*
+ * The virtual interface table (patina_net_interface: `lo`, `eth0`), the one
+ * the socket ioctls and rtnetlink answer from. An unknown name is glibc's
+ * SIOCGIFINDEX answer, ENODEV, or Darwin's ENXIO.
+ */
+unsigned int if_nametoindex(const char *ifname) {
+    struct patina_interface interface;
+    for (uint32_t at = 0; patina_net_interface(at, &interface) == 0; ++at) {
+        if (strncmp(interface.name, ifname, sizeof interface.name) == 0) return interface.index;
+    }
+#ifdef __linux__
+    errno = ENODEV;
+#else
+    errno = ENXIO;
+#endif
+    return 0;
 }
 
 #ifdef __linux__
 /*
- * recvmsg/sendmsg are the ancillary/scatter-gather message variants; std links
- * them but Patina's deterministic net layer models only sendto/recvfrom (routed
- * through patina_net_*). No supported guest uses the msg variants, so fail closed
- * softly with ENOSYS rather than aborting: the symbols leave the import table and
- * a caller cannot send or receive undeterministically.
+ * getifaddrs/freeifaddrs, as glibc builds the list from its RTM_GETLINK and
+ * RTM_GETADDR dumps (sysdeps/unix/sysv/linux/ifaddrs.c): one AF_PACKET entry
+ * per interface (a sockaddr_ll with its link address, the broadcast link
+ * address, and the link statistics in `ifa_data`), then each interface's
+ * IPv4 address (with its netmask and, on a broadcast link, broadcast
+ * address), then each IPv6 address (with its prefix as the netmask). The
+ * whole list is one allocation, as glibc's is: freeifaddrs frees it.
  */
-ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags) {
-    (void)sockfd;
-    (void)msg;
-    (void)flags;
-    errno = ENOSYS;
-    return -1;
-}
-ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
-    (void)sockfd;
-    (void)msg;
-    (void)flags;
-    errno = ENOSYS;
-    return -1;
+struct patina_ifaddrs_entry {
+    struct ifaddrs ifa;
+    union {
+        struct sockaddr_ll ll;
+        struct sockaddr_in in;
+        struct sockaddr_in6 in6;
+    } addr, netmask, broadcast;
+    char name[IF_NAMESIZE];
+    struct rtnl_link_stats stats;
+};
+
+static void patina_ifaddrs_prefix(unsigned char *mask, size_t len, unsigned prefix) {
+    for (size_t at = 0; at < len; ++at) {
+        unsigned bits = prefix > 8 ? 8 : prefix;
+        mask[at] = (unsigned char)(0xff00u >> bits);
+        prefix -= bits;
+    }
 }
 
-#endif
-
-/*
- * `if_nametoindex`: the interface-index lookup a host networking utility stack
- * (hyper-util) links dormant. No network interfaces are modeled, so every name
- * is "no such interface": return 0 (never a valid index) with errno ENXIO.
- * hyper-util reads the 0 as an absent scope id and proceeds.
- */
-unsigned int if_nametoindex(const char *ifname) {
-    (void)ifname;
-    errno = ENXIO;
+static int patina_getifaddrs(struct ifaddrs **out) {
+    struct patina_interface interfaces[8];
+    size_t count = 0;
+    size_t entries = 0;
+    while (count < sizeof interfaces / sizeof interfaces[0] &&
+           patina_net_interface((uint32_t)count, &interfaces[count]) == 0) {
+        entries += 2 + (interfaces[count].has_ipv6 ? 1 : 0);
+        ++count;
+    }
+    struct patina_ifaddrs_entry *list = calloc(entries, sizeof *list);
+    if (list == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    size_t at = 0;
+    for (int pass = 0; pass < 3; ++pass) {
+        for (size_t index = 0; index < count; ++index) {
+            const struct patina_interface *interface = &interfaces[index];
+            if (pass == 2 && !interface->has_ipv6) continue;
+            struct patina_ifaddrs_entry *entry = &list[at];
+            memcpy(entry->name, interface->name, IF_NAMESIZE);
+            entry->name[IF_NAMESIZE - 1] = '\0';
+            entry->ifa.ifa_name = entry->name;
+            entry->ifa.ifa_flags = interface->flags;
+            entry->ifa.ifa_addr = (struct sockaddr *)&entry->addr;
+            if (pass == 0) {
+                struct sockaddr_ll *ll = &entry->addr.ll;
+                ll->sll_family = AF_PACKET;
+                ll->sll_ifindex = (int)interface->index;
+                ll->sll_hatype = interface->hardware_type;
+                ll->sll_halen = 6;
+                memcpy(ll->sll_addr, interface->hardware_address, 6);
+                entry->broadcast.ll = *ll;
+                memcpy(entry->broadcast.ll.sll_addr, interface->broadcast_hardware_address, 6);
+                entry->ifa.ifa_broadaddr = (struct sockaddr *)&entry->broadcast;
+                entry->ifa.ifa_data = &entry->stats;
+            } else if (pass == 1) {
+                entry->addr.in.sin_family = AF_INET;
+                memcpy(&entry->addr.in.sin_addr, interface->ipv4, 4);
+                entry->netmask.in.sin_family = AF_INET;
+                memcpy(&entry->netmask.in.sin_addr, interface->ipv4_netmask, 4);
+                entry->ifa.ifa_netmask = (struct sockaddr *)&entry->netmask;
+                if (interface->flags & IFF_BROADCAST) {
+                    entry->broadcast.in.sin_family = AF_INET;
+                    memcpy(&entry->broadcast.in.sin_addr, interface->ipv4_broadcast, 4);
+                    entry->ifa.ifa_broadaddr = (struct sockaddr *)&entry->broadcast;
+                }
+            } else {
+                entry->addr.in6.sin6_family = AF_INET6;
+                memcpy(&entry->addr.in6.sin6_addr, interface->ipv6, 16);
+                entry->netmask.in6.sin6_family = AF_INET6;
+                patina_ifaddrs_prefix(entry->netmask.in6.sin6_addr.s6_addr, 16,
+                                      interface->ipv6_prefix);
+                entry->ifa.ifa_netmask = (struct sockaddr *)&entry->netmask;
+            }
+            if (at > 0) list[at - 1].ifa.ifa_next = &entry->ifa;
+            ++at;
+        }
+    }
+    *out = &list[0].ifa;
     return 0;
 }
+
+static void patina_freeifaddrs(struct ifaddrs *list) {
+    free(list);
+}
+
+int getifaddrs(struct ifaddrs **out) {
+    return patina_getifaddrs(out);
+}
+
+void freeifaddrs(struct ifaddrs *list) {
+    patina_freeifaddrs(list);
+}
+#endif

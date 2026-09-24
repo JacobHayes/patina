@@ -19,10 +19,8 @@
 //!
 //! Every wait is a poll bounded by `WAIT_MS`.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{OptionShown, Probe, SockAddr, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -207,91 +205,5 @@ pub const SCENARIO: Scenario = Scenario {
         "close",
     ],
     needs: &[Need::LocalBindOnly],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "a non-blocking TCP connect completes synchronously (lib.rs patina_net_tcp_connect: 0, or ECONNREFUSED at once) where the kernel answers EINPROGRESS and completes in the background (__inet_stream_connect), so a second connect is already EISCONN instead of reporting the completion",
-            failure: Failure::Differs(&[
-                Difference::field(7, "connect", "errno", Observed::Null),
-                Difference::field(7, "connect", "ret", Observed::Int(0)),
-                Difference::check(8, "a non-blocking connect is EINPROGRESS"),
-                Difference::field(15, "connect", "errno", Observed::Str("EISCONN")),
-                Difference::field(15, "connect", "ret", Observed::Int(-1)),
-                Difference::check(16, "a second connect reports the completed connection: 0"),
-                Difference::field(26, "connect", "errno", Observed::Str("ECONNREFUSED")),
-                Difference::check(27, "a non-blocking connect to nobody is EINPROGRESS too"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "a refused connect leaves no pending error: the socket polls nothing instead of POLLERR|POLLHUP, and SO_ERROR reads zeros (c/posix/net.c getsockopt has no option store) instead of ECONNREFUSED",
-            failure: Failure::Differs(&[
-                Difference::field(28, "poll", "fields.revents0", Observed::Int(0)),
-                Difference::field(28, "poll", "ret", Observed::Int(0)),
-                Difference::check(29, "the refused connect polls POLLERR|POLLHUP"),
-                Difference::field(30, "getsockopt", "fields.value", Observed::Str("00000000")),
-                Difference::check(31, "SO_ERROR is ECONNREFUSED"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "a connected datagram to a port nobody holds answers EIO at once (patina's connected datagram send, c/posix/net.c send → lib.rs patina_net_send) where the kernel sends it and the ICMP port-unreachable answer surfaces asynchronously: POLLERR, then ECONNREFUSED on the next receive (__udp4_lib_err)",
-            failure: Failure::Differs(&[
-                Difference::field(41, "sendto", "errno", Observed::Str("EIO")),
-                Difference::field(41, "sendto", "ret", Observed::Int(-1)),
-                Difference::check(42, "the datagram is sent"),
-                Difference::field(43, "poll", "fields.revents0", Observed::Int(0)),
-                Difference::field(43, "poll", "ret", Observed::Int(0)),
-                Difference::check(44, "the port-unreachable answer makes it poll POLLERR"),
-                Difference::field(45, "recvfrom", "errno", Observed::Str("EAGAIN")),
-                Difference::check(46, "the next receive is ECONNREFUSED"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "connect with AF_UNSPEC answers EAFNOSUPPORT (c/posix/net.c connect, sud/net.rs sys_connect parse AF_INET alone) where it dissolves a datagram association (udp_disconnect), so the socket keeps its peer",
-            failure: Failure::Differs(&[
-                Difference::field(49, "connect", "errno", Observed::Str("EAFNOSUPPORT")),
-                Difference::field(49, "connect", "ret", Observed::Int(-1)),
-                Difference::check(50, "connect with AF_UNSPEC dissolves the association"),
-                Difference::field(51, "getpeername", "errno", Observed::Null),
-                Difference::field(
-                    51,
-                    "getpeername",
-                    "fields.addr_family",
-                    Observed::Str("AF_INET"),
-                ),
-                Difference::field(
-                    51,
-                    "getpeername",
-                    "fields.addr_ip",
-                    Observed::Str("127.0.0.1"),
-                ),
-                Difference::field(
-                    51,
-                    "getpeername",
-                    "fields.addr_port",
-                    Observed::Str("port@24"),
-                ),
-                Difference::field(51, "getpeername", "fields.addrlen", Observed::Int(16)),
-                Difference::field(51, "getpeername", "ret", Observed::Int(0)),
-                Difference::check(52, "and the socket has no peer"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "bind to an address no interface has succeeds (lib.rs patina_net_bind checks no interface table) where inet_bind answers EADDRNOTAVAIL: the arc's table (`lo` + `eth0`/24) is to decide which local addresses exist",
-            failure: Failure::Differs(&[
-                Difference::field(54, "bind", "errno", Observed::Null),
-                Difference::field(54, "bind", "ret", Observed::Int(0)),
-                Difference::check(55, "bind to an address no interface has is EADDRNOTAVAIL"),
-            ]),
-        },
-    ],
     ..DEFAULTS
 };

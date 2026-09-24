@@ -737,6 +737,9 @@ pub const OP_KINDS: &[(&str, Category)] = &[
     ("task_complete", Category::Schedule),
     ("scheduler_next", Category::Schedule),
     ("net_bind", Category::Net),
+    ("net_bind_shared", Category::Net),
+    ("net_connect", Category::Net),
+    ("net_mark", Category::Net),
     ("net_send", Category::Net),
     ("net_recv", Category::Net),
     ("net_close", Category::Net),
@@ -831,6 +834,9 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
         Operation::TaskComplete { .. } => "task_complete",
         Operation::SchedulerNext => "scheduler_next",
         Operation::NetBind { .. } => "net_bind",
+        Operation::NetBindShared { .. } => "net_bind_shared",
+        Operation::NetConnect { .. } => "net_connect",
+        Operation::NetMark { .. } => "net_mark",
         Operation::NetSend { .. } => "net_send",
         Operation::NetRecv { .. } => "net_recv",
         Operation::NetClose { .. } => "net_close",
@@ -871,6 +877,8 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
         to: "127.0.0.1:2".into(),
         bytes: vec![9, 8, 7],
         delivery_nanos: 5,
+        dialed: "127.0.0.1:2".into(),
+        tos: 0,
     };
     vec![
         (
@@ -1206,6 +1214,28 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
                 address: "127.0.0.1:1".into(),
             },
             Outcome::Socket(SocketId(1)),
+        ),
+        (
+            Operation::NetBindShared {
+                address: "127.0.0.1:3".into(),
+            },
+            Outcome::Socket(SocketId(2)),
+        ),
+        (
+            Operation::NetMark {
+                socket: SocketId(1),
+                tos: 0x2e,
+                source: Some("127.0.0.9:1".into()),
+            },
+            Outcome::Unit,
+        ),
+        (
+            Operation::NetConnect {
+                socket: SocketId(1),
+                local: "127.0.0.1:1".into(),
+                peer: Some("127.0.0.1:2".into()),
+            },
+            Outcome::Unit,
         ),
         (
             Operation::NetSend {

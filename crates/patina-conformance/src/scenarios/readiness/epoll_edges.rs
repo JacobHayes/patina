@@ -10,6 +10,9 @@
 //!   long as data is queued;
 //! * a pending connection makes a listener readable; `EPOLLRDHUP` reports
 //!   the peer's `SHUT_WR`;
+//! * edge-triggered `EPOLLOUT`: a receive that frees room in a full stream
+//!   (AF_UNIX and TCP) is a new edge for its writer, though the reactor
+//!   never saw the writer unwritable (`sk_write_space`);
 //! * `EPOLLEXCLUSIVE` is accepted on `EPOLL_CTL_ADD` only: with
 //!   `EPOLLONESHOT` it is `EINVAL`, on `EPOLL_CTL_MOD` `EINVAL`, and an
 //!   exclusive item cannot be modified at all (`EINVAL`);
@@ -24,21 +27,11 @@
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, SIGSET_BYTES, SockAddr, neg};
 use crate::signals::one_set;
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
-
-/// The events recorded before the `EPOLLEXCLUSIVE` section: the x86_64-only
-/// legacy rows add 18.
-const EXCLUSIVE_AT: usize = if cfg!(target_arch = "x86_64") {
-    105
-} else {
-    87
-};
 
 /// How long a wait for an event already caused may take.
 const WAIT_MS: i32 = 5_000;
@@ -235,6 +228,34 @@ pub fn run(p: &Probe) {
         p.close(old);
     }
 
+    // ---- write space, edge-triggered: every receive that frees room is an
+    // edge (`sk_write_space` → `ep_poll_callback`), though the reactor never
+    // saw the socket unwritable ----
+    let wp = p.epoll_create1(EPOLL_CLOEXEC);
+    p.require("a second epoll instance", wp >= 0);
+    let (r, [w, drain]) = p.socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    p.require("a stream socketpair", r == 0);
+    write_space_edge(p, wp, w, drain, 6, "AF_UNIX");
+    let l2 = p.socket(AF_INET, SOCK_STREAM, 0);
+    p.require("a second listener", l2 >= 0);
+    p.check("bind it", p.bind_to(l2, &SockAddr::v4(0)) == 0);
+    p.check("listen on it", p.listen(l2, 1) == 0);
+    let (_, addr_l2, _) = p.name_of(l2, false, 128);
+    let addr_l2 = addr_l2.expect("getsockname l2");
+    let c2 = p.socket(AF_INET, SOCK_STREAM, 0);
+    p.require("a second client", c2 >= 0);
+    p.check("connect it", p.connect_to(c2, &addr_l2) == 0);
+    p.check(
+        "make the client non-blocking",
+        p.fcntl(c2, F_SETFL, i64::from(O_NONBLOCK)) == 0,
+    );
+    let (s2, _) = p.accept_from(l2, SOCK_NONBLOCK, false, false);
+    p.require("accept the second connection", s2 >= 0);
+    write_space_edge(p, wp, c2, s2, 7, "TCP");
+    for fd in [w, drain, c2, s2, l2, wp] {
+        p.close(fd);
+    }
+
     // ---- EPOLLEXCLUSIVE (last on purpose: a runtime that refuses the flag
     // fails closed here, after everything above) ----
     let ex = p.eventfd2(0, EFD_NONBLOCK);
@@ -274,6 +295,67 @@ pub fn run(p: &Probe) {
     crate::scenarios::net::check_allocated_port(p, &addr_u);
 }
 
+/// Watch `writer` edge-triggered for `EPOLLOUT` on `wp` under `tag`, see it
+/// writable, fill it until `EAGAIN` (unrecorded: how many writes that takes
+/// is the host's buffer size), let `reader` drain it, and wait: the freed
+/// room is a new edge.
+fn write_space_edge(p: &Probe, wp: i32, writer: i32, reader: i32, tag: u64, what: &str) {
+    p.check(
+        &format!("watch the {what} writer edge-triggered for EPOLLOUT"),
+        p.epoll_ctl(wp, EPOLL_CTL_ADD, writer, (EPOLLOUT | EPOLLET) as u32, tag) == 0,
+    );
+    let (n, events) = p.epoll_pwait(wp, 8, 0, None, SIGSET_BYTES as usize);
+    p.check(
+        &format!("the empty {what} stream is writable"),
+        n == 1 && events == vec![(tag, EPOLLOUT as u32)],
+    );
+    let chunk = [0u8; 4096];
+    let mut filled = false;
+    for _ in 0..65536 {
+        let n = p.call_unrecorded(
+            Syscall::N_write,
+            [
+                writer as i64,
+                chunk.as_ptr() as i64,
+                chunk.len() as i64,
+                0,
+                0,
+                0,
+            ],
+        );
+        if n < 0 {
+            filled = n == neg(EAGAIN);
+            break;
+        }
+    }
+    p.check(&format!("the {what} writer fills to EAGAIN"), filled);
+    let mut buf = vec![0u8; 65536];
+    let mut drained = false;
+    for _ in 0..65536 {
+        let n = p.call_unrecorded(
+            Syscall::N_read,
+            [
+                reader as i64,
+                buf.as_mut_ptr() as i64,
+                buf.len() as i64,
+                0,
+                0,
+                0,
+            ],
+        );
+        if n < 0 {
+            drained = n == neg(EAGAIN);
+            break;
+        }
+    }
+    p.check(&format!("the {what} reader drains it"), drained);
+    let (n, events) = p.epoll_pwait(wp, 8, WAIT_MS, None, SIGSET_BYTES as usize);
+    p.check(
+        &format!("the room the {what} reader freed is a new EPOLLOUT edge"),
+        n == 1 && events == vec![(tag, EPOLLOUT as u32)],
+    );
+}
+
 pub const SCENARIO: Scenario = Scenario {
     name: "readiness/epoll_edges",
     run,
@@ -292,6 +374,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_listen,
         Syscall::N_connect,
         Syscall::N_accept4,
+        Syscall::N_socketpair,
         Syscall::N_getsockname,
         Syscall::N_sendto,
         Syscall::N_recvfrom,
@@ -312,6 +395,7 @@ pub const SCENARIO: Scenario = Scenario {
         "listen",
         "connect",
         "accept4",
+        "socketpair",
         "getsockname",
         "sendto",
         "recvfrom",
@@ -321,44 +405,6 @@ pub const SCENARIO: Scenario = Scenario {
         "fcntl",
         "clock_gettime",
         "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "edge-triggered delivery re-arms on a readiness TRANSITION only (lib.rs epoll scan), where the kernel re-queues the item on every arrival (ep_poll_callback): a second datagram or stream write that arrives before the first is read is no new edge",
-            failure: Failure::Differs(&[
-                Difference::field(18, "epoll_pwait", "fields.events", Observed::Json(r#"[]"#)),
-                Difference::field(18, "epoll_pwait", "ret", Observed::Int(0)),
-                Difference::check(
-                    19,
-                    "a second arrival is a new edge though the first was never read",
-                ),
-                Difference::field(58, "epoll_pwait", "fields.events", Observed::Json(r#"[]"#)),
-                Difference::field(58, "epoll_pwait", "ret", Observed::Int(0)),
-                Difference::check(59, "more bytes, unread, are a new edge"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "EPOLLRDHUP is never reported for a peer's SHUT_WR (lib.rs epoll scan), where tcp_poll reports EPOLLIN|EPOLLRDHUP",
-            failure: Failure::Differs(&[
-                Difference::field(64, "epoll_pwait", "fields.events", Observed::Json(r#"[]"#)),
-                Difference::field(64, "epoll_pwait", "ret", Observed::Int(0)),
-                Difference::check(65, "EPOLLRDHUP reports it (with EPOLLIN: EOF is readable)"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "EPOLLEXCLUSIVE is an unmodeled flag: epoll_ctl fails closed (lib.rs patina_epoll_ctl) where the kernel accepts it on ADD and refuses it with EINVAL on MOD or with EPOLLONESHOT",
-            failure: Failure::Stops {
-                events: EXCLUSIVE_AT,
-                ending: Ending::Signal(libc::SIGABRT),
-                diagnostic: "epoll_ctl events 0x50000001 carry unmodeled flags",
-            },
-        },
     ],
     ..DEFAULTS
 };

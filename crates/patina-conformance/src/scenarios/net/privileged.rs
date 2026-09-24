@@ -17,10 +17,8 @@
 //! they are asserted here rather than excluded. Needs an unprivileged caller
 //! and Linux 5.7 (the unprivileged first `SO_BINDTODEVICE`).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Need, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::probe::{Control, Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -77,6 +75,9 @@ pub fn run(p: &Probe) {
 
     let (r, [a, b]) = p.socketpair(AF_UNIX, SOCK_STREAM, 0);
     p.require("a stream socketpair", r == 0);
+    // Another process: the caller's own pid is what `scm_check_creds` accepts,
+    // and no fixed pid is safely someone else's under every vehicle.
+    let other = p.getpid() + 1;
     let uid = p.getuid();
     let gid = p.getgid();
     p.check(
@@ -86,7 +87,7 @@ pub fn run(p: &Probe) {
             &[b"x"],
             None,
             &Control::Creds {
-                pid: 1,
+                pid: other as i32,
                 uid: uid as u32,
                 gid: gid as u32,
             },
@@ -105,6 +106,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_setsockopt,
         Syscall::N_socketpair,
         Syscall::N_sendmsg,
+        Syscall::N_getpid,
         Syscall::N_getuid,
         Syscall::N_getgid,
         Syscall::N_close,
@@ -114,6 +116,7 @@ pub const SCENARIO: Scenario = Scenario {
         "setsockopt",
         "socketpair",
         "sendmsg",
+        "getpid",
         "getuid",
         "getgid",
         "close",
@@ -123,50 +126,5 @@ pub const SCENARIO: Scenario = Scenario {
         release: "5.7",
         why: "an unprivileged SO_BINDTODEVICE on an unbound socket (net/core/sock.c sock_bindtoindex_locked)",
     }),
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "socket(AF_INET, SOCK_RAW) answers EPROTOTYPE and socket(AF_PACKET) EAFNOSUPPORT (c/posix/net.c socket, sud/net.rs sys_socket), where the unprivileged caller the virtual kernel models is refused with EPERM (inet_create, packet_create: CAP_NET_RAW)",
-            failure: Failure::Differs(&[
-                Difference::field(0, "socket", "errno", Observed::Str("EPROTOTYPE")),
-                Difference::check(1, "a raw ICMP socket is EPERM"),
-                Difference::field(2, "socket", "errno", Observed::Str("EAFNOSUPPORT")),
-                Difference::check(3, "a raw packet socket is EPERM"),
-                Difference::field(4, "socket", "errno", Observed::Str("EAFNOSUPPORT")),
-                Difference::check(5, "a cooked packet socket is EPERM"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "setsockopt answers ENOPROTOOPT for SO_PRIORITY, SO_MARK, SO_RCVBUFFORCE and SO_BINDTODEVICE (c/posix/net.c setsockopt, sud/net.rs sys_setsockopt accept a fixed no-op list): an in-range SO_PRIORITY and a first SO_BINDTODEVICE succeed unprivileged, the rest are EPERM (sk_setsockopt, sock_bindtoindex_locked)",
-            failure: Failure::Differs(&[
-                Difference::field(7, "setsockopt", "errno", Observed::Str("ENOPROTOOPT")),
-                Difference::field(7, "setsockopt", "ret", Observed::Int(-1)),
-                Difference::check(8, "SO_PRIORITY 6 needs no privilege"),
-                Difference::field(9, "setsockopt", "errno", Observed::Str("ENOPROTOOPT")),
-                Difference::check(10, "SO_PRIORITY 7 is EPERM"),
-                Difference::field(11, "setsockopt", "errno", Observed::Str("ENOPROTOOPT")),
-                Difference::check(12, "SO_MARK is EPERM"),
-                Difference::field(13, "setsockopt", "errno", Observed::Str("ENOPROTOOPT")),
-                Difference::check(14, "SO_RCVBUFFORCE is EPERM"),
-                Difference::field(15, "setsockopt", "errno", Observed::Str("ENOPROTOOPT")),
-                Difference::field(15, "setsockopt", "ret", Observed::Int(-1)),
-                Difference::check(16, "the first SO_BINDTODEVICE needs no privilege"),
-                Difference::field(17, "setsockopt", "errno", Observed::Str("ENOPROTOOPT")),
-                Difference::check(18, "unbinding it again is EPERM"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "sendmsg is a soft-deny ENOSYS (c/posix/net.c sendmsg, sud/net.rs sys_sendmsg), so SCM_CREDENTIALS naming another process is not refused with EPERM (scm_check_creds)",
-            failure: Failure::Differs(&[
-                Difference::field(23, "sendmsg", "errno", Observed::Str("ENOSYS")),
-                Difference::check(24, "SCM_CREDENTIALS naming another process is EPERM"),
-            ]),
-        },
-    ],
     ..DEFAULTS
 };

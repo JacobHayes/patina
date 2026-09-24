@@ -13,7 +13,7 @@ mod linux {
     const TRACE_SET: &str = concat!(
         "trace=%file,%network,%desc,%memory,%clock,nanosleep,gettimeofday,futex,",
         "rt_sigaction,rt_sigprocmask,rt_sigreturn,sigaltstack,sched_yield,",
-        "exit_group,exit,getrandom"
+        "exit_group,exit,getrandom,process_vm_readv,process_vm_writev"
     );
 
     #[test]

@@ -7,7 +7,9 @@
 //! (`EFAULT` for NULL) and sets or clears the description's `O_NONBLOCK`, and
 //! `FIONREAD` on a regular file is its size minus the position, as an `int`
 //! (negative past the end). Everything else goes to the object: a pipe's
-//! `FIONREAD` is the bytes queued in it; any other request, and `FIONREAD` on
+//! `FIONREAD` is the bytes queued in it, a socket's (`SIOCINQ`) what a
+//! receive would take now, and a socket answers the interface requests
+//! (`SIOCGIF*`, `thread::net::iface`); any other request, and `FIONREAD` on
 //! a directory or a descriptor with no such answer, is `ENOTTY`.
 //!
 //! `request` is the platform's own request number: the C door passes its
@@ -19,7 +21,7 @@ use patina_dst_abi::{Fd, SeekWhence};
 
 use crate::fdtable::FdKind;
 use crate::{
-    EFAULT, fail, fdget, patina_fd_set_nonblocking, patina_fd_setfd, set_errno, thread,
+    fail, fdget, patina_fd_set_nonblocking, patina_fd_setfd, set_errno, thread, uaccess,
     with_context,
 };
 
@@ -46,16 +48,16 @@ use request::{FIOCLEX, FIONBIO, FIONCLEX, FIONREAD};
 
 const ENOTTY: c_int = 25;
 
-/// Write an `int` answer through the guest's argument.
+/// Write an `int` answer through the guest's argument (`EFAULT` for memory
+/// that cannot take it).
 fn put_int(arg: *mut c_void, value: i32) -> c_int {
-    if arg.is_null() {
-        return fail(EFAULT);
+    match uaccess::write(arg as usize, &value) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
     }
-    // SAFETY: a non-null argument of an int-valued request is the guest's
-    // writable `int`.
-    unsafe { arg.cast::<i32>().write_unaligned(value) };
-    set_errno(0);
-    0
 }
 
 /// `FIONREAD` on a regular file: its size minus the description's position,
@@ -87,14 +89,10 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
     match request {
         FIOCLEX => patina_fd_setfd(raw_fd, 1),
         FIONCLEX => patina_fd_setfd(raw_fd, 0),
-        FIONBIO => {
-            if arg.is_null() {
-                return fail(EFAULT);
-            }
-            // SAFETY: a non-null FIONBIO argument is the guest's `int`.
-            let on = unsafe { arg.cast::<i32>().read_unaligned() } != 0;
-            patina_fd_set_nonblocking(raw_fd, c_int::from(on))
-        }
+        FIONBIO => match uaccess::read::<i32>(arg as usize) {
+            Ok(on) => patina_fd_set_nonblocking(raw_fd, c_int::from(on != 0)),
+            Err(errno) => fail(errno),
+        },
         FIONREAD => match resolved.kind {
             FdKind::File => file_fionread(Fd(resolved.handle), arg),
             FdKind::Pipe => match thread::pipe_queued(resolved.handle) {
@@ -106,8 +104,12 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
             | FdKind::Stdin
             | FdKind::Stdout
             | FdKind::Stderr
-            | FdKind::Urandom
-            | FdKind::Socket => fail(ENOTTY),
+            | FdKind::Urandom => fail(ENOTTY),
+            // `SIOCINQ`: what a receive would take now.
+            FdKind::Socket => match thread::net::socket_pending(resolved.handle) {
+                Ok(pending) => put_int(arg, pending),
+                Err(errno) => fail(errno),
+            },
             #[cfg(target_os = "linux")]
             FdKind::EventFd | FdKind::TimerFd | FdKind::Epoll | FdKind::SignalFd => fail(ENOTTY),
             // An mqueue inode is a regular file: its size less the position.
@@ -119,6 +121,20 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => fail(ENOTTY),
         },
+        // The interface requests a socket answers over the virtual
+        // interface table.
+        #[cfg(target_os = "linux")]
+        _ if resolved.kind == FdKind::Socket => {
+            let family = thread::net::socket_family(resolved.handle).unwrap_or(0);
+            match thread::net::iface::ioctl(family, request, arg as usize) {
+                Some(Ok(())) => {
+                    set_errno(0);
+                    0
+                }
+                Some(Err(errno)) => fail(errno),
+                None => fail(ENOTTY),
+            }
+        }
         _ => fail(ENOTTY),
     }
 }

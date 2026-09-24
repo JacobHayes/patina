@@ -1,5 +1,5 @@
 //! Live raw/libc parity and Patina-specific soft refusals. These are not host
-//! equivalence claims (identity, auxv and sendmsg deliberately differ).
+//! equivalence claims (identity and auxv deliberately differ).
 mod common;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -28,8 +28,8 @@ mod linux {
     }
 
     #[test]
-    fn raw_messages_return_enosys_without_transmission() {
-        assert_raw_output("raw_msg", "RAW_MSG sendmsg=-38 recvmsg=-38");
+    fn raw_messages_gather_into_one_datagram() {
+        assert_raw_output("raw_msg", "RAW_MSG sendmsg=9 recvmsg=9 data=frag-ment");
     }
 
     #[test]

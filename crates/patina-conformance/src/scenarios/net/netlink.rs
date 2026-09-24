@@ -22,11 +22,9 @@
 //! `lo`, are the host's business: the answers are read unrecorded and only
 //! the loopback facts are recorded (`mark` events).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{ARPHRD_LOOPBACK, NlMsg, Probe, SockAddr, attributes, neg, nl};
 use crate::scenarios::net::ifconfig::MIN_MTU as MIN_MTU_I32;
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
@@ -356,31 +354,6 @@ pub const SCENARIO: Scenario = Scenario {
         "recvfrom",
         "getpid",
         "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "socket(AF_NETLINK) answers EAFNOSUPPORT whatever the type or protocol (c/posix/net.c socket, sud/net.rs sys_socket admit AF_INET alone): nothing serves the rtnetlink dumps the arc's virtual interface table (`lo` + `eth0`/24) is to answer",
-            failure: Failure::Differs(&[
-                Difference::field(0, "socket", "errno", Observed::Str("EAFNOSUPPORT")),
-                Difference::check(1, "a netlink protocol past the families is EPROTONOSUPPORT"),
-                Difference::field(2, "socket", "errno", Observed::Str("EAFNOSUPPORT")),
-                Difference::check(3, "a netlink stream socket is ESOCKTNOSUPPORT"),
-                Difference::field(4, "socket", "errno", Observed::Str("EAFNOSUPPORT")),
-                Difference::field(4, "socket", "ret", Observed::Int(-1)),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "with no NETLINK_ROUTE socket the scenario cannot continue",
-            failure: Failure::Stops {
-                events: 5,
-                ending: Ending::Exit(101),
-                diagnostic: "net/netlink: cannot continue: a NETLINK_ROUTE socket",
-            },
-        },
     ],
     ..DEFAULTS
 };

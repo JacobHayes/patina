@@ -22,10 +22,8 @@
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{OptionShown, Probe, SockAddr, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6};
@@ -233,26 +231,5 @@ pub const SCENARIO: Scenario = Scenario {
         "close",
     ],
     needs: &[Need::Ipv6Loopback, Need::LocalBindOnly],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "socket(AF_INET6) answers EAFNOSUPPORT (c/posix/net.c socket, sud/net.rs sys_socket admit AF_INET alone): SimNet has no IPv6",
-            failure: Failure::Differs(&[
-                Difference::field(0, "socket", "errno", Observed::Str("EAFNOSUPPORT")),
-                Difference::field(0, "socket", "ret", Observed::Int(-1)),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "with no AF_INET6 socket the scenario cannot continue",
-            failure: Failure::Stops {
-                events: 1,
-                ending: Ending::Exit(101),
-                diagnostic: "net/inet6: cannot continue: an AF_INET6 datagram socket",
-            },
-        },
-    ],
     ..DEFAULTS
 };

@@ -314,7 +314,7 @@ pub(in crate::thread) fn on_any_waiter_list(task: TaskId) -> bool {
             .threads
             .values()
             .any(|entry| entry.joiner == Some(task))
-        || state.net.sockets.values().any(|socket| {
+        || state.net.sockets.table.values().any(|socket| {
             socket.recv_waiters.contains(&task) || socket.send_waiters.contains(&task)
         })
         || state.futexes.values().any(|queue| queue.contains(&task))
@@ -938,7 +938,10 @@ fn signalfd_readable_iff_matching_pending() {
         set_mask(SIG_SETMASK, bit(SIGUSR1) | bit(SIGUSR2));
         let sfd = unsafe { fd::patina_signalfd(-1, &bit(SIGUSR1), SIGSET_BYTES, 0) } as i32;
         assert!(sfd >= 0);
-        let ready = || fd_readiness(&lock_state(), sfd, None).readable;
+        let ready = || {
+            super::super::fd_poll(&lock_state(), sfd, None)
+                .is_some_and(|(mask, _)| mask & crate::thread::net::abi::POLLIN != 0)
+        };
         assert!(!ready());
         generate(SIGUSR2);
         assert!(!ready());

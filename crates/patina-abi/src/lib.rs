@@ -640,6 +640,19 @@ pub struct Datagram {
     #[serde(with = "bytes_base64")]
     pub bytes: Vec<u8>,
     pub delivery_nanos: u64,
+    /// The address the sender dialed: the header's destination, where `to`
+    /// is the binding the datagram was queued under (a wildcard binding
+    /// takes datagrams dialed at any local address).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dialed: String,
+    /// The type of service (IPv4) or traffic class (IPv6) the sender marked
+    /// the datagram with.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub tos: u8,
+}
+
+fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
 }
 
 /// Why a virtual send did or did not queue packets.
@@ -649,6 +662,9 @@ pub enum SendDisposition {
     Queued,
     DroppedByFault,
     DroppedByPartition,
+    /// Nothing is bound at the destination: the datagram is dropped, and the
+    /// network answers the sender as a host's ICMP port-unreachable does.
+    Unreachable,
 }
 
 /// Observable packet-lifecycle decisions made for one send.
@@ -1174,6 +1190,10 @@ pub enum Operation {
     NetBind {
         address: String,
     },
+    /// Bind one more member of a shared (`SO_REUSEPORT`) binding at `address`.
+    NetBindShared {
+        address: String,
+    },
     NetSend {
         socket: SocketId,
         to: String,
@@ -1187,6 +1207,21 @@ pub enum Operation {
     },
     NetClose {
         socket: SocketId,
+    },
+    /// Mark the datagrams a socket sends from now on: the type of service or
+    /// traffic class they carry, and the source address they leave from in
+    /// place of the one the route gives (`IP_PKTINFO`).
+    NetMark {
+        socket: SocketId,
+        tos: u8,
+        source: Option<String>,
+    },
+    /// Pin a datagram socket to one peer (`connect`): it then receives only
+    /// what `peer` sends to `local`; `None` releases it (`AF_UNSPEC`).
+    NetConnect {
+        socket: SocketId,
+        local: String,
+        peer: Option<String>,
     },
     /// Query the earliest future delivery time (`delivery_nanos > now_nanos`)
     /// among packets addressed to `socket`, so a blocking receive under

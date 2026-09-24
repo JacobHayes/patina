@@ -33,10 +33,9 @@ fn answered(result: Result<(), c_int>) -> c_int {
 }
 
 /// Whether the node behind a descriptor is a FIFO (`S_ISFIFO`): an anonymous
-/// pipe or a FIFO's endpoint, not a socketpair end, whose node is a socket.
-fn is_fifo(raw_fd: c_int, resolved: &Resolved) -> bool {
+/// pipe or a FIFO's endpoint.
+fn is_fifo(resolved: &Resolved) -> bool {
     resolved.kind == FdKind::Pipe
-        && thread::pipe_filesystem(raw_fd) != Some(crate::PATINA_FS_SOCKFS)
 }
 
 /// Whether the node is a regular file, a directory or a symlink — the kinds
@@ -67,7 +66,7 @@ fn has_mapping(resolved: &Resolved) -> bool {
 pub extern "C" fn patina_fadvise(raw_fd: c_int, _offset: i64, length: i64, advice: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     answered(fdget(raw_fd).and_then(|resolved| {
-        if is_fifo(raw_fd, &resolved) {
+        if is_fifo(&resolved) {
             return Err(ESPIPE);
         }
         if length < 0 || !(0..=POSIX_FADV_NOREUSE).contains(&advice) {

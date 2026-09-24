@@ -29,6 +29,7 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <limits.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -64,9 +65,12 @@
 #include <dlfcn.h>
 #include <elf.h>
 #include <link.h>
+#include <ifaddrs.h>
 #include <linux/audit.h>
 #include <linux/futex.h>
+#include <linux/if_link.h>
 #include <linux/prctl.h>
+#include <netpacket/packet.h>
 #include <sched.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -159,5 +163,14 @@ static int signal_result(int64_t rc) {
     patina_signal_deliver();
     if (rc < 0) { errno = (int)-rc; return -1; }
     return (int)rc;
+}
+
+/* glibc's `__chk_fail` (debug/chk_fail.c), the `_FORTIFY_SOURCE` entries'
+ * answer to a buffer smaller than the call may write: the diagnostic on
+ * stderr, then SIGABRT. */
+_Noreturn static void patina_chk_fail(void) {
+    static const char message[] = "*** buffer overflow detected ***: terminated\n";
+    (void)patina_stdio_write(2, message, sizeof message - 1);
+    patina_abort();
 }
 #endif

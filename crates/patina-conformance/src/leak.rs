@@ -11,7 +11,9 @@
 //! `tkill(tid, …)` with that tid. Target == self, any signal number; never a
 //! signal-name list, never a process-directed `kill`/`rt_sigqueueinfo`. A
 //! modeled row reaching the host (a `kill`, a `rt_sigpending`, a `signalfd4`)
-//! is an escape. strace's `???` for a thread killed at its syscall-entry stop
+//! is an escape. The shim's guest-memory copies are the other self-directed
+//! allowance: `process_vm_readv`/`process_vm_writev` whose pid is the traced
+//! process, never another. strace's `???` for a thread killed at its syscall-entry stop
 //! is not a call: the kernel aborted it (see `Filter::judge`).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const STRACE_EVENTS: &str = concat!(
     "trace=%file,%network,%desc,%memory,%clock,%process,%signal,%ipc,",
     "nanosleep,gettimeofday,futex,rt_sigaction,rt_sigprocmask,rt_sigreturn,",
-    "sigaltstack,sched_yield,exit_group,exit,getrandom"
+    "sigaltstack,sched_yield,exit_group,exit,getrandom,process_vm_readv,process_vm_writev"
 );
 
 /// Process-local rows with no filesystem, network, clock or entropy reach: the
@@ -320,6 +322,13 @@ impl Filter {
         if name == "getrandom" && args.contains("GRND_NONBLOCK") {
             return;
         }
+        // The shim's guest-memory copies (`uaccess`) name the traced process
+        // itself; a copy aimed at any other process reaches its memory.
+        if matches!(name, "process_vm_readv" | "process_vm_writev")
+            && arguments(args).first() == Some(&self.pid.as_str())
+        {
+            return;
+        }
         if matches!(
             name,
             "openat" | "openat2" | "open" | "newfstatat" | "readlink" | "readlinkat"
@@ -378,6 +387,23 @@ mod tests {
         assert_eq!(
             calls(escapes(trace)),
             ["openat(AT_FDCWD, \"/etc/hostname\", O_RDONLY)"]
+        );
+    }
+
+    /// The shim copies guest memory through `process_vm_readv`/`writev` on
+    /// its own process; the same call naming another process escapes.
+    #[test]
+    fn only_a_copy_aimed_at_the_traced_process_stays_inside() {
+        let trace = "4242 execve(\"/x/probe\", [\"/x/probe\"], 0x7ffd /* 3 vars */) = 0\n\
+                     4243 process_vm_readv(4242, [{iov_base=\"x\", iov_len=1}], 1, [{iov_base=0x7f0000000000, iov_len=1}], 1, 0) = 1\n\
+                     4242 process_vm_writev(4242, [{iov_base=\"x\", iov_len=1}], 1, [{iov_base=0x7f0000000000, iov_len=1}], 1, 0) = 1\n\
+                     4242 process_vm_readv(1, [{iov_base=\"x\", iov_len=1}], 1, [{iov_base=0x7f0000000000, iov_len=1}], 1, 0) = 1\n\
+                     4242 exit_group(0)                        = ?\n";
+        assert_eq!(
+            calls(escapes(trace)),
+            [
+                "process_vm_readv(1, [{iov_base=\"x\", iov_len=1}], 1, [{iov_base=0x7f0000000000, iov_len=1}], 1, 0)"
+            ]
         );
     }
 

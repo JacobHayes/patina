@@ -363,6 +363,8 @@ pub enum Control {
     /// One `SCM_RIGHTS` header whose `cmsg_len` is shorter than a header
     /// (`__scm_send`: `EINVAL`).
     ShortHeader,
+    /// Protocol-level messages, each its level, type and data.
+    Protocol(Vec<(i32, i32, Vec<u8>)>),
 }
 
 /// What a `recvmsg` asks for: the segment sizes, the name buffer's capacity
@@ -401,6 +403,8 @@ pub struct Received {
     pub rights: Vec<i32>,
     /// An `SCM_CREDENTIALS` message's pid, uid and gid.
     pub creds: Option<(i32, u32, u32)>,
+    /// Every other message: its level, type and data.
+    pub protocol: Vec<(i32, i32, Vec<u8>)>,
 }
 
 impl Received {
@@ -408,6 +412,12 @@ impl Received {
     pub fn data(&self) -> Vec<u8> {
         self.segments.concat()
     }
+}
+
+/// A control message as the record shows it: `level/type:hex bytes`.
+fn cmsg_text(level: i32, kind: i32, data: &[u8]) -> String {
+    let hex: String = data.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("{level}/{kind}:{hex}")
 }
 
 /// The space `CMSG_SPACE(len)` takes.
@@ -420,6 +430,31 @@ fn cmsg_space(len: usize) -> usize {
 fn control_bytes(control: &Control) -> Vec<u64> {
     let (level_type, payload): ((i32, i32), Vec<u8>) = match control {
         Control::None => return Vec::new(),
+        Control::Protocol(messages) => {
+            let space: usize = messages
+                .iter()
+                .map(|(_, _, data)| cmsg_space(data.len()))
+                .sum();
+            let mut buf = vec![0u64; space.div_ceil(8)];
+            let mut at = 0;
+            for (level, kind, data) in messages {
+                // SAFETY: each message's CMSG_SPACE lies within the buffer, its
+                // header at `at` (8-byte aligned) and its data at CMSG_DATA.
+                unsafe {
+                    let header = (buf.as_mut_ptr() as *mut u8).add(at) as *mut libc::cmsghdr;
+                    (*header).cmsg_level = *level;
+                    (*header).cmsg_type = *kind;
+                    (*header).cmsg_len = libc::CMSG_LEN(data.len() as u32) as _;
+                    std::ptr::copy_nonoverlapping(
+                        data.as_ptr(),
+                        libc::CMSG_DATA(header),
+                        data.len(),
+                    );
+                }
+                at += cmsg_space(data.len());
+            }
+            return buf;
+        }
         Control::Rights(fds) => (
             (libc::SOL_SOCKET, libc::SCM_RIGHTS),
             fds.iter().flat_map(|fd| fd.to_ne_bytes()).collect(),
@@ -916,6 +951,10 @@ impl Probe {
                 Control::ShortHeader => cmsg_space(4),
                 Control::Rights(fds) => cmsg_space(fds.len() * 4),
                 Control::Creds { .. } => cmsg_space(12),
+                Control::Protocol(messages) => messages
+                    .iter()
+                    .map(|(_, _, data)| cmsg_space(data.len()))
+                    .sum(),
                 Control::None => 0,
             } as _;
         }
@@ -941,6 +980,13 @@ impl Probe {
                     builder = self.fd_arg(builder, &format!("right{index}"), *fd);
                 }
                 builder
+            }
+            Control::Protocol(messages) => {
+                let described: Vec<Value> = messages
+                    .iter()
+                    .map(|(level, kind, data)| Value::from(cmsg_text(*level, *kind, data)))
+                    .collect();
+                builder.arg("control", Value::Array(described))
             }
             Control::Creds { pid, uid, gid } => builder
                 .arg("control", "credentials")
@@ -1073,7 +1119,11 @@ impl Probe {
                                 u32::from_ne_bytes(creds[8..12].try_into().unwrap()),
                             ));
                         }
-                        _ => {}
+                        (level, kind) => {
+                            let mut bytes = vec![0u8; len];
+                            std::ptr::copy_nonoverlapping(data, bytes.as_mut_ptr(), len);
+                            received.protocol.push((level, kind, bytes));
+                        }
                     }
                     header = libc::CMSG_NXTHDR(&msg, header);
                 }
@@ -1111,6 +1161,14 @@ impl Probe {
                     .field(&format!("right{index}"), *right)
                     .norm(&format!("fields.right{index}"), Norm::Relative("fd"));
             }
+        }
+        if !received.protocol.is_empty() {
+            let described: Vec<Value> = received
+                .protocol
+                .iter()
+                .map(|(level, kind, data)| Value::from(cmsg_text(*level, *kind, data)))
+                .collect();
+            builder = builder.field("cmsgs", Value::Array(described));
         }
         if let Some((pid, uid, gid)) = received.creds {
             builder = builder
@@ -2250,7 +2308,7 @@ impl Probe {
     /// probe binary cannot import it (the pre-run audit would refuse the
     /// whole binary), so the libc vehicle reaches glibc's definition
     /// dynamically, and under patina `dlsym` answers only what the shim
-    /// defines (c/posix/entropy.c `__wrap_dlsym`).
+    /// defines (c/posix/dlsym.c `__wrap_dlsym`).
     pub fn resolve(&self, symbol: &str) -> Option<*mut libc::c_void> {
         let c = cstr(symbol);
         // SAFETY: a NUL-terminated name looked up in the global scope.

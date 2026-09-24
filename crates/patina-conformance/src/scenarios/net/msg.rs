@@ -26,11 +26,9 @@
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{AT_FDCWD, Control, Probe, RecvSpec, SIGSET_BYTES, SockAddr, neg};
 use crate::signals::one_set;
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -390,38 +388,6 @@ pub const SCENARIO: Scenario = Scenario {
         "shutdown",
         "openat",
         "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "MSG_PEEK on a connected stream answers EOPNOTSUPP (c/posix/net.c recv, sud/net.rs sys_recvfrom: `patina_stream_flags_supported` admits MSG_NOSIGNAL alone), where tcp_recvmsg copies the queued bytes and leaves them queued",
-            failure: Failure::Differs(&[
-                Difference::field(16, "recv", "errno", Observed::Str("EOPNOTSUPP")),
-                Difference::field(16, "recv", "ret", Observed::Int(-1)),
-                Difference::field(16, "recv", "fields.data", Observed::Null),
-                Difference::check(17, "recv(3) MSG_PEEK reads the rest"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "sendmsg is a soft-deny ENOSYS (c/posix/net.c sendmsg, sud/net.rs sys_sendmsg; recvmsg likewise): no scatter-gather or ancillary message reaches SimNet",
-            failure: Failure::Differs(&[
-                Difference::field(66, "sendmsg", "errno", Observed::Str("ENOSYS")),
-                Difference::field(66, "sendmsg", "ret", Observed::Int(-1)),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "with sendmsg refused, the first message never leaves and the scenario stops before every message row it pins",
-            failure: Failure::Stops {
-                events: 67,
-                ending: Ending::Exit(101),
-                diagnostic: "net/msg: cannot continue: sendmsg gathers three iovecs (one empty) into one datagram",
-            },
-        },
     ],
     ..DEFAULTS
 };

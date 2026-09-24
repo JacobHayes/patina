@@ -3,9 +3,7 @@
 //! counter and semaphore eventfds, pipe readiness and HUP, and a timed wait on
 //! the clock.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{AT_FDCWD, Probe, neg};
@@ -310,43 +308,6 @@ pub const SCENARIO: Scenario = Scenario {
         "close",
         "openat",
         "clock_gettime",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "with maxevents below the ready count the reactor delivers events in descriptor order (lib.rs epoll `scan` walks the interest BTreeMap), where the kernel delivers them in ready-list order: FIFO by readiness arrival, a level-triggered item re-queued at the tail after each delivery (fs/eventpoll.c ep_send_events), so the writer registered first comes before the reader that became ready later",
-            failure: Failure::Differs(&[Difference::field(
-                91,
-                "epoll_wait",
-                "fields.events",
-                Observed::Json(r#"["1:0x1"]"#),
-            )]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "a pipe read end whose last writer closed reports EPOLLIN alone (lib.rs epoll `scan`: EPOLLHUP needs read_eof AND write_eof, and `pipe_readiness` keeps `readable` true at EOF), where the kernel reports EPOLLIN|EPOLLHUP while data remains and EPOLLHUP alone once drained (fs/pipe.c pipe_poll)",
-            failure: Failure::Differs(&[
-                Difference::field(
-                    95,
-                    "epoll_wait",
-                    "fields.events",
-                    Observed::Json(r#"["1:0x1"]"#),
-                ),
-                Difference::field(
-                    98,
-                    "epoll_wait",
-                    "fields.events",
-                    Observed::Json(r#"["1:0x1"]"#),
-                ),
-                Difference::check(
-                    96,
-                    "closing the writer removes its interest and hangs up the reader",
-                ),
-                Difference::check(99, "a drained hung-up pipe still reports EPOLLHUP"),
-            ]),
-        },
     ],
     ..DEFAULTS
 };

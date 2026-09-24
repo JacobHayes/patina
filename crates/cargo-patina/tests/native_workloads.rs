@@ -293,7 +293,7 @@ fn tcp_shutdown_dns_and_peer_are_deterministic() {
     let g = Guest::assert_build("tcp_probe.rs");
     g.assert_audit_clean();
     let expected =
-        "NATIVE_TCP_RESULT reply=PING peer=127.0.0.1:49152 ipv6_closed=true dns_nxdomain=true\n";
+        "NATIVE_TCP_RESULT reply=PING peer=127.0.0.1:32768 ipv6_loopback=true dns_nxdomain=true\n";
     for seed in [5, 6] {
         let baseline = g.assert_seed_repeatability(seed, 2, &[]);
         assert_eq!(text(&baseline), expected);

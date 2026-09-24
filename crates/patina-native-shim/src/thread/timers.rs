@@ -130,6 +130,9 @@ pub(super) struct TimerFd {
     interval: u64,
     /// Expirations not yet read.
     ticks: u64,
+    /// Every firing so far: the arrivals an edge-triggered epoll interest
+    /// re-fires on.
+    fires: u64,
     /// The timer fired and has not been forwarded since.
     expired: bool,
     waiters: VecDeque<TaskId>,
@@ -315,6 +318,7 @@ impl ThreadRuntime {
                 fd.queued = false;
                 fd.expired = true;
                 fd.ticks += 1;
+                fd.fires += 1;
                 readers.extend(fd.waiters.drain(..));
             }
         }
@@ -952,6 +956,7 @@ pub(crate) fn timerfd_create(clock: i32, flags: c_int) -> i64 {
                 queued: false,
                 interval: 0,
                 ticks: 0,
+                fires: 0,
                 expired: false,
                 waiters: VecDeque::new(),
                 open: true,
@@ -1174,13 +1179,14 @@ pub(crate) unsafe fn timerfd_read(
     }
 }
 
-/// Whether a timer descriptor has expirations to read.
-pub(super) fn timerfd_readable(state: &ThreadRuntime, handle: u64) -> bool {
+/// A timer descriptor's readiness and its firings so far (the readiness
+/// reactors' arrival sequence).
+pub(super) fn timerfd_poll(state: &ThreadRuntime, handle: u64) -> (bool, u64) {
     state
         .timers
         .fds
         .get(&handle)
-        .is_some_and(|timer| timer.ticks > 0)
+        .map_or((false, 0), |timer| (timer.ticks > 0, timer.fires))
 }
 
 /// Park `me` on a timer descriptor's readers, for a readiness wait.

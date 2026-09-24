@@ -69,8 +69,8 @@ enum {
     PATINA_FD_DIR = 4,     /* a directory descriptor (O_DIRECTORY, with or without O_PATH) */
     PATINA_FD_OPATH = 5,   /* an O_PATH descriptor on a non-directory */
     PATINA_FD_URANDOM = 6, /* the /dev/urandom device */
-    PATINA_FD_SOCKET = 7,  /* a virtual AF_INET socket */
-    PATINA_FD_PIPE = 8,    /* a pipe / socketpair / FIFO endpoint */
+    PATINA_FD_SOCKET = 7,  /* a virtual socket (any family; a socketpair end) */
+    PATINA_FD_PIPE = 8,    /* a pipe / FIFO endpoint */
     PATINA_FD_EVENTFD = 9, /* an eventfd counter (Linux) */
     PATINA_FD_EPOLL = 10,  /* an epoll instance (Linux) */
     PATINA_FD_KQUEUE = 11, /* a kqueue (Darwin) */
@@ -813,32 +813,63 @@ int32_t patina_rwlock_unlock(void *lock);
 int32_t patina_rwlock_destroy(void *lock);
 
 /*
- * Virtual AF_INET sockets over the runtime's SimNet. Every entry takes a guest
- * descriptor number and answers ENOTSOCK for one that is not PATINA_FD_SOCKET;
- * addresses are passed as host-order IPv4 + port. Blocking calls park the
- * calling managed task through the scheduler baton. patina_net_accept's
- * `nonblocking`/`cloexec` are accept4's SOCK_NONBLOCK/SOCK_CLOEXEC for the NEW
- * descriptor.
+ * Sockets (AF_INET, AF_INET6, AF_UNIX, AF_NETLINK) over the runtime's SimNet
+ * and the shim's socket model. Each entry is one kernel row, shared with the
+ * SUD door: it takes the row's arguments (guest pointers as addresses, an
+ * `int` length sign and all), copies guest memory in and out itself (EFAULT
+ * for memory it cannot), and answers the row's result or -errno. Blocking
+ * calls park the calling managed task through the scheduler baton.
  */
-int32_t patina_net_socket(int32_t stream, int32_t nonblocking, int32_t cloexec);
-int32_t patina_net_bind(int32_t fd, uint32_t ip, uint16_t port);
-int32_t patina_net_connect(int32_t fd, uint32_t ip, uint16_t port);
-int32_t patina_net_listen(int32_t fd, int32_t backlog);
-int32_t patina_net_accept(int32_t fd, uint32_t *ip, uint16_t *port, int32_t nonblocking,
-                          int32_t cloexec);
-int32_t patina_net_tcp_connect(int32_t fd, uint32_t ip, uint16_t port);
-intptr_t patina_net_sendto(int32_t fd, const void *buf, size_t len, uint32_t ip, uint16_t port);
-intptr_t patina_net_send(int32_t fd, const void *buf, size_t len);
-intptr_t patina_net_stream_send(int32_t fd, const void *buf, size_t len, int flags);
-intptr_t patina_net_recvfrom(int32_t fd, void *buf, size_t len, uint32_t *ip, uint16_t *port);
-intptr_t patina_net_recv(int32_t fd, void *buf, size_t len);
-intptr_t patina_net_stream_recv(int32_t fd, void *buf, size_t len);
-int32_t patina_net_shutdown(int32_t fd, int32_t how);
-int32_t patina_net_getsockname(int32_t fd, uint32_t *ip, uint16_t *port);
-int32_t patina_net_getpeername(int32_t fd, uint32_t *ip, uint16_t *port);
-int32_t patina_net_kind(int32_t fd); /* -1 not a socket, 0 datagram, 1 unbound stream, 2 listener, 3 stream */
-/* Set SO_RCVTIMEO in virtual nanoseconds; 0 clears (no timeout). */
-int32_t patina_net_set_read_timeout(int32_t fd, uint64_t nanos);
+int64_t patina_sock_socket(int family, int type, int protocol);
+int64_t patina_sock_socketpair(int family, int type, int protocol, uintptr_t sv);
+int64_t patina_sock_bind(int fd, uintptr_t addr, int64_t len);
+int64_t patina_sock_connect(int fd, uintptr_t addr, int64_t len);
+int64_t patina_sock_listen(int fd, int backlog);
+int64_t patina_sock_accept(int fd, uintptr_t addr, uintptr_t len_ptr, int flags);
+/* getsockname (peer 0) / getpeername (peer 1). */
+int64_t patina_sock_name(int fd, uintptr_t addr, uintptr_t len_ptr, int peer);
+int64_t patina_sock_shutdown(int fd, int how);
+int64_t patina_sock_setsockopt(int fd, int level, int name, uintptr_t value, int64_t len);
+int64_t patina_sock_getsockopt(int fd, int level, int name, uintptr_t value, uintptr_t len_ptr);
+int64_t patina_sock_sendto(int fd, uintptr_t buf, size_t len, int flags, uintptr_t addr,
+                           int64_t alen);
+int64_t patina_sock_recvfrom(int fd, uintptr_t buf, size_t len, int flags, uintptr_t addr,
+                             uintptr_t alen_ptr);
+int64_t patina_sock_sendmsg(int fd, uintptr_t msg, int flags);
+int64_t patina_sock_recvmsg(int fd, uintptr_t msg, int flags);
+#ifdef __linux__
+int64_t patina_sock_sendmmsg(int fd, uintptr_t vec, unsigned int vlen, int flags);
+int64_t patina_sock_recvmmsg(int fd, uintptr_t vec, unsigned int vlen, int flags,
+                             uintptr_t timeout);
+#endif
+
+/*
+ * The virtual interface table (`lo`, `eth0`) one record at a time, in index
+ * order: 0 with `*out` written, -EINVAL past the last. Addresses are in
+ * network order; `ipv4_broadcast` is zero for a link without broadcast.
+ */
+struct patina_interface {
+    uint32_t index;
+    uint32_t flags;
+    uint32_t mtu;
+    uint16_t hardware_type;
+    char name[16];
+    uint8_t hardware_address[6];
+    uint8_t broadcast_hardware_address[6];
+    uint8_t ipv4[4];
+    uint8_t ipv4_netmask[4];
+    uint8_t ipv4_broadcast[4];
+    uint8_t has_ipv6;
+    uint8_t ipv6_prefix;
+    uint8_t ipv6[16];
+};
+int64_t patina_net_interface(uint32_t position, struct patina_interface *out);
+/*
+ * getaddrinfo's numeric-host parse (inet_aton, or inet_pton with an optional
+ * `%scope`): AF_INET/AF_INET6 with the address in `out` (4 or 16 bytes,
+ * network order) and the scope in `*scope`, or 0 for no numeric host.
+ */
+int patina_net_numeric_host(const char *node, uint8_t out[16], uint32_t *scope);
 /*
  * Resolve a host name to a virtual IPv4 address (host byte order) through the
  * run's deterministic DNS host table. Returns 0 and writes *ip on success; on
@@ -849,24 +880,19 @@ int32_t patina_net_set_read_timeout(int32_t fd, uint64_t nanos);
 int32_t patina_dns_resolve(const char *name, uint32_t *ip);
 
 /*
- * In-process pipe / socketpair. Both endpoints live inside this one guest
- * process (an async runtime's IO-driver / signal self-pipe), so they are modeled
- * as deterministic in-memory byte channels, PATINA_FD_PIPE descriptions on the
- * same baton/waiter machinery the sockets use. The two numbers are allocated
- * atomically (one free slot is EMFILE and creates nothing). A dup of an endpoint
- * shares its description: a channel side reports EOF/EPIPE only once its LAST
- * number has closed. patina_pipe_read/write are the recv/send face of a
- * socketpair end (read/write reach the same transfer through patina_read/
- * patina_write); patina_pipe_size / patina_pipe_set_size are F_GETPIPE_SZ /
- * F_SETPIPE_SZ (page-rounded to a power of two, 64 KiB by default, EBUSY below
- * the bytes buffered, EPERM above the unprivileged maximum).
+ * In-process pipe. Both endpoints live inside this one guest process (an async
+ * runtime's IO-driver / signal self-pipe), so they are modeled as deterministic
+ * in-memory byte channels, PATINA_FD_PIPE descriptions on the same
+ * baton/waiter machinery the sockets use. The two numbers are allocated
+ * atomically (one free slot is EMFILE and creates nothing). A dup of an
+ * endpoint shares its description: a channel side reports EOF/EPIPE only once
+ * its LAST number has closed. patina_pipe_size / patina_pipe_set_size are
+ * F_GETPIPE_SZ / F_SETPIPE_SZ (page-rounded to a power of two, 64 KiB by
+ * default, EBUSY below the bytes buffered, EPERM above the unprivileged
+ * maximum).
  */
 int32_t patina_pipe(int32_t *read_fd_out, int32_t *write_fd_out, int32_t nonblocking,
                     int32_t cloexec);
-int32_t patina_socketpair(int32_t *fd0_out, int32_t *fd1_out, int32_t nonblocking,
-                          int32_t cloexec);
-intptr_t patina_pipe_read(int32_t fd, void *buf, size_t len);
-intptr_t patina_pipe_write(int32_t fd, const void *buf, size_t len, int flags);
 int32_t patina_pipe_size(int32_t fd);
 int32_t patina_pipe_set_size(int32_t fd, int32_t size);
 
@@ -1000,6 +1026,9 @@ int64_t patina_signalfd(int fd, const uint64_t *mask, size_t size, int flags);
 int64_t patina_poll(void *fds, size_t count, int64_t timeout, const uint64_t *mask, uint64_t *remaining);
 int64_t patina_epoll_wait_masked(int ep, void *events, int capacity, int timeout, const uint64_t *mask);
 int64_t patina_select(int nfds, uint64_t *read, uint64_t *write, uint64_t *except, int64_t timeout, const uint64_t *mask, uint64_t *remaining);
+/* The select row: the guest's timeval (0 for none) normalized as the kernel
+ * does, and the unslept time written back. */
+int64_t patina_select_timeval(int nfds, uint64_t *read, uint64_t *write, uint64_t *except, uintptr_t timeval);
 #endif
 
 #ifdef __cplusplus

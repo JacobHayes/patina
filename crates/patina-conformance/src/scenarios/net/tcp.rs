@@ -3,9 +3,7 @@
 //! lifecycle, byte-stream semantics, half-close, refusal, and the errno
 //! vocabulary.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{Probe, neg};
@@ -223,83 +221,6 @@ pub const SCENARIO: Scenario = Scenario {
         "setsockopt",
         "getsockopt",
         "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "getsockopt answers 0 for SO_ACCEPTCONN, TCP_NODELAY and SO_TYPE (patina_posix.c getsockopt has no option store)",
-            failure: Failure::Differs(&[
-                Difference::field(7, "getsockopt", "fields.value", Observed::Int(0)),
-                Difference::field(41, "getsockopt", "fields.value", Observed::Int(0)),
-                Difference::field(43, "getsockopt", "fields.value", Observed::Int(0)),
-                Difference::check(8, "SO_ACCEPTCONN is set on a listener"),
-                Difference::check(42, "TCP_NODELAY reads back"),
-                Difference::check(44, "SO_TYPE is SOCK_STREAM"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "listen on an already-listening socket answers EINVAL; the kernel accepts a second listen (patina_posix.c listen)",
-            failure: Failure::Differs(&[
-                Difference::field(9, "listen", "errno", Observed::Str("EINVAL")),
-                Difference::field(9, "listen", "ret", Observed::Int(-1)),
-                Difference::check(10, "listen twice is allowed"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "MSG_DONTWAIT on a blocking stream socket answers EOPNOTSUPP instead of EAGAIN (patina_posix.c recvfrom refuses non-zero flags on TCP)",
-            failure: Failure::Differs(&[
-                Difference::field(37, "recvfrom", "errno", Observed::Str("EOPNOTSUPP")),
-                Difference::check(38, "MSG_DONTWAIT on an empty stream is EAGAIN"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "send on a never-connected stream socket answers EOPNOTSUPP instead of EPIPE (patina_posix.c sendto on an unconnected TCP socket)",
-            failure: Failure::Differs(&[
-                Difference::field(66, "sendto", "errno", Observed::Str("EOPNOTSUPP")),
-                Difference::field(73, "sendto", "errno", Observed::Str("EOPNOTSUPP")),
-                Difference::check(67, "send on a never-connected stream socket is EPIPE"),
-                Difference::check(74, "send after the refused shutdown is EPIPE"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "listen on an unbound socket answers EINVAL instead of autobinding an ephemeral port (patina_posix.c listen), so getsockname then reports port 0",
-            failure: Failure::Differs(&[
-                Difference::field(68, "listen", "errno", Observed::Str("EINVAL")),
-                Difference::field(68, "listen", "ret", Observed::Int(-1)),
-                Difference::check(69, "listen without bind autobinds"),
-                Difference::field(75, "getsockname", "fields.addr_port", Observed::Int(0)),
-                Difference::check(76, "the autobound listener has a port"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "bind to a port a listener holds succeeds instead of EADDRINUSE (patina_posix.c bind does not check the SimNet listener table)",
-            failure: Failure::Differs(&[
-                Difference::field(78, "bind", "errno", Observed::Null),
-                Difference::field(78, "bind", "ret", Observed::Int(0)),
-                Difference::check(79, "bind to the listener's port is EADDRINUSE"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "a non-blocking connect completes synchronously (0) instead of EINPROGRESS (patina_posix.c connect is synchronous on SimNet)",
-            failure: Failure::Differs(&[
-                Difference::field(88, "connect", "errno", Observed::Null),
-                Difference::field(88, "connect", "ret", Observed::Int(0)),
-                Difference::check(89, "a non-blocking connect is EINPROGRESS"),
-            ]),
-        },
     ],
     ..DEFAULTS
 };

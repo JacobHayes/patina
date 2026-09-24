@@ -133,23 +133,29 @@ pub(super) fn sys_select(
     timeout: u64,
     sigarg: Option<u64>,
 ) -> i64 {
+    let Some(sigarg) = sigarg else {
+        // The `select` row: the shared entry normalizes its timeval.
+        // SAFETY: the sets and the timeval are the guest's, copied through
+        // `uaccess`.
+        return unsafe {
+            crate::thread::readiness::patina_select_timeval(
+                nfds as i32,
+                read as *mut u64,
+                write as *mut u64,
+                except as *mut u64,
+                timeout as usize,
+            )
+        };
+    };
     let nanos = if timeout == 0 {
         -1
-    } else if sigarg.is_some() {
+    } else {
         match read_timespec_nanos(timeout as *const Timespec) {
             Ok(n) => n.min(i64::MAX as u64) as i64,
             Err(e) => return e,
         }
-    } else {
-        let tv = unsafe { &*(timeout as *const Timeval) };
-        if tv.tv_sec < 0 || !(0..1_000_000).contains(&tv.tv_usec) {
-            return -EINVAL;
-        }
-        tv.tv_sec
-            .saturating_mul(1_000_000_000)
-            .saturating_add(tv.tv_usec * 1000)
     };
-    let mask = if let Some(arg) = sigarg.filter(|arg| *arg != 0) {
+    let mask = if let Some(arg) = Some(sigarg).filter(|arg| *arg != 0) {
         let pair = unsafe { &*(arg as *const [u64; 2]) };
         if pair[0] != 0 && pair[1] != 8 {
             return -EINVAL;
@@ -172,17 +178,10 @@ pub(super) fn sys_select(
     };
     if timeout != 0 && (rc >= 0 || rc == -4) {
         unsafe {
-            if sigarg.is_some() {
-                (timeout as *mut Timespec).write(Timespec {
-                    tv_sec: (remaining / 1_000_000_000) as i64,
-                    tv_nsec: (remaining % 1_000_000_000) as i64,
-                });
-            } else {
-                (timeout as *mut Timeval).write(Timeval {
-                    tv_sec: (remaining / 1_000_000_000) as i64,
-                    tv_usec: ((remaining % 1_000_000_000) / 1000) as i64,
-                });
-            }
+            (timeout as *mut Timespec).write(Timespec {
+                tv_sec: (remaining / 1_000_000_000) as i64,
+                tv_nsec: (remaining % 1_000_000_000) as i64,
+            });
         }
     }
     rc

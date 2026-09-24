@@ -30,12 +30,10 @@
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{AT_FDCWD, Probe, SIGSET_BYTES, SOCKADDR_UN, SockAddr, neg};
 use crate::scenarios::net::abstract_name;
 use crate::signals::{empty_set, has, one_set};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -312,7 +310,30 @@ pub fn run(p: &Probe) {
         "the autobind name is five hex digits in the abstract namespace",
         auto.as_ref().is_some_and(SockAddr::autobound) && len == 8,
     );
-    for fd in [lb, cn, au] {
+    // A connection its listener never accepted is reset when the listener
+    // closes (`unix_release_sock` of the embryo): its client reads
+    // ECONNRESET once, then end-of-file.
+    let lr = p.socket(AF_UNIX, SOCK_STREAM, 0);
+    p.require("a listener that will not accept", lr >= 0);
+    let reset = abstract_name(&root, "reset");
+    p.check(
+        "bind it",
+        p.bind_to(lr, &SockAddr::UnixAbstract(reset.clone())) == 0,
+    );
+    p.check("listen", p.listen(lr, 4) == 0);
+    let cr = p.socket(AF_UNIX, SOCK_STREAM, 0);
+    p.require("a client in its backlog", cr >= 0);
+    p.check(
+        "connect",
+        p.connect_to(cr, &SockAddr::UnixAbstract(reset)) == 0,
+    );
+    p.check("close the listener unaccepted", p.close(lr) == 0);
+    p.check(
+        "the client reads ECONNRESET",
+        p.recv(cr, 8, 0).0 == neg(ECONNRESET),
+    );
+    p.check("then end-of-file", p.recv(cr, 8, 0).0 == 0);
+    for fd in [lb, cn, au, cr] {
         p.close(fd);
     }
 }
@@ -364,71 +385,6 @@ pub const SCENARIO: Scenario = Scenario {
         "getuid",
         "getgid",
         "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "a socketpair end is no socket to getsockname or shutdown: both answer ENOTSOCK (a socketpair end is the pipe kind in the descriptor table, and c/posix/net.c getsockname/shutdown go straight to the SimNet entries, which take sockets alone), so a SHUT_WR or SHUT_RD never takes effect and the sends after it succeed",
-            failure: Failure::Differs(&[
-                Difference::field(5, "getsockname", "errno", Observed::Str("ENOTSOCK")),
-                Difference::field(5, "getsockname", "fields.addr_family", Observed::Null),
-                Difference::field(5, "getsockname", "fields.addr_unnamed", Observed::Null),
-                Difference::field(5, "getsockname", "fields.addrlen", Observed::Null),
-                Difference::field(5, "getsockname", "ret", Observed::Int(-1)),
-                Difference::check(6, "a pair's ends are unnamed"),
-                Difference::field(7, "shutdown", "errno", Observed::Str("ENOTSOCK")),
-                Difference::field(7, "shutdown", "ret", Observed::Int(-1)),
-                Difference::check(8, "shut down a's writing side"),
-                Difference::field(15, "sendto", "errno", Observed::Null),
-                Difference::field(15, "sendto", "ret", Observed::Int(1)),
-                Difference::check(16, "a send after SHUT_WR is EPIPE"),
-                Difference::field(19, "shutdown", "errno", Observed::Str("ENOTSOCK")),
-                Difference::field(19, "shutdown", "ret", Observed::Int(-1)),
-                Difference::check(20, "shut down a's reading side"),
-                Difference::field(25, "sendto", "errno", Observed::Null),
-                Difference::field(25, "sendto", "ret", Observed::Int(4)),
-                Difference::check(26, "and the peer's next send is EPIPE"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "MSG_DONTWAIT on a socketpair end answers EOPNOTSUPP (c/posix/net.c recvfrom, sud/net.rs sys_recvfrom: `patina_stream_flags_supported` admits MSG_NOSIGNAL alone) where the kernel reads the queued bytes, or EOF",
-            failure: Failure::Differs(&[
-                Difference::field(9, "recvfrom", "errno", Observed::Str("EOPNOTSUPP")),
-                Difference::field(9, "recvfrom", "fields.data", Observed::Null),
-                Difference::field(9, "recvfrom", "ret", Observed::Int(-1)),
-                Difference::check(10, "b reads EOF"),
-                Difference::field(23, "recvfrom", "errno", Observed::Str("EOPNOTSUPP")),
-                Difference::field(23, "recvfrom", "fields.data", Observed::Null),
-                Difference::field(23, "recvfrom", "ret", Observed::Int(-1)),
-                Difference::check(24, "then reads EOF without blocking"),
-                Difference::field(32, "recvfrom", "errno", Observed::Str("EOPNOTSUPP")),
-                Difference::field(32, "recvfrom", "fields.data", Observed::Null),
-                Difference::field(32, "recvfrom", "ret", Observed::Int(-1)),
-                Difference::check(33, "the survivor reads EOF"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "socket(AF_UNIX) answers EAFNOSUPPORT (c/posix/net.c socket, sud/net.rs sys_socket admit AF_INET alone): no path or abstract AF_UNIX socket exists",
-            failure: Failure::Differs(&[
-                Difference::field(47, "socket", "errno", Observed::Str("EAFNOSUPPORT")),
-                Difference::field(47, "socket", "ret", Observed::Int(-1)),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "with no AF_UNIX socket the scenario cannot continue",
-            failure: Failure::Stops {
-                events: 48,
-                ending: Ending::Exit(101),
-                diagnostic: "net/unix_stream: cannot continue: an AF_UNIX stream socket",
-            },
-        },
     ],
     ..DEFAULTS
 };

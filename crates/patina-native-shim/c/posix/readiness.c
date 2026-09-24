@@ -277,23 +277,8 @@ int ppoll(struct pollfd *fds, nfds_t count, const struct timespec *timeout, cons
 }
 int select(int nfds, fd_set *restrict read, fd_set *restrict write,
            fd_set *restrict except, struct timeval *restrict timeout) {
-    int64_t nanos = -1;
-    if (timeout != NULL) {
-        if (timeout->tv_sec < 0 || timeout->tv_usec < 0 || timeout->tv_usec >= 1000000) {
-            errno = EINVAL;
-            return -1;
-        }
-        struct timespec ts = {timeout->tv_sec, timeout->tv_usec * 1000};
-        nanos = readiness_timeout(&ts);
-    }
-    uint64_t remaining = nanos < 0 ? 0 : (uint64_t)nanos;
-    int64_t rc = patina_select(nfds, (uint64_t *)read, (uint64_t *)write,
-        (uint64_t *)except, nanos, NULL, &remaining);
-    if (timeout != NULL && (rc >= 0 || rc == -EINTR)) {
-        timeout->tv_sec = remaining / 1000000000;
-        timeout->tv_usec = (remaining % 1000000000) / 1000;
-    }
-    return signal_result(rc);
+    return signal_result(patina_select_timeval(nfds, (uint64_t *)read, (uint64_t *)write,
+        (uint64_t *)except, (uintptr_t)timeout));
 }
 int pselect(int nfds, fd_set *restrict read, fd_set *restrict write,
             fd_set *restrict except, const struct timespec *restrict timeout,
@@ -302,5 +287,33 @@ int pselect(int nfds, fd_set *restrict read, fd_set *restrict write,
     if (nanos == -2) { errno = EINVAL; return -1; }
     return signal_result(patina_select(nfds, (uint64_t *)read, (uint64_t *)write,
         (uint64_t *)except, nanos, (const uint64_t *)mask, NULL));
+}
+
+/*
+ * glibc's `_FORTIFY_SOURCE` spellings of poll/ppoll (debug/poll_chk.c,
+ * ppoll_chk.c): the plain call, once the size the compiler knew for the
+ * array holds `nfds` records (`__chk_fail` otherwise).
+ */
+static int patina_poll_chk(struct pollfd *fds, nfds_t nfds, int timeout, size_t fdslen) {
+    if (fdslen / sizeof *fds < nfds) patina_chk_fail();
+    return signal_result(patina_poll(fds, nfds,
+        timeout < 0 ? -1 : (int64_t)timeout * 1000000, NULL, NULL));
+}
+
+static int patina_ppoll_chk(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
+                            const sigset_t *mask, size_t fdslen) {
+    if (fdslen / sizeof *fds < nfds) patina_chk_fail();
+    int64_t nanos = readiness_timeout(timeout);
+    if (nanos == -2) { errno = EINVAL; return -1; }
+    return signal_result(patina_poll(fds, nfds, nanos, (const uint64_t *)mask, NULL));
+}
+
+int __poll_chk(struct pollfd *fds, nfds_t nfds, int timeout, size_t fdslen) {
+    return patina_poll_chk(fds, nfds, timeout, fdslen);
+}
+
+int __ppoll_chk(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
+                const sigset_t *mask, size_t fdslen) {
+    return patina_ppoll_chk(fds, nfds, timeout, mask, fdslen);
 }
 #endif

@@ -14,7 +14,8 @@
  *
  * Ordering rules: `core.c` first (feature macros and headers), then the
  * families a later slice's static helpers depend on (`env.c` before `init.c`,
- * `init.c` before `signal_process.c`, `time.c` before `sched_identity.c`).
+ * `init.c` before `signal_process.c`, `time.c` before `sched_identity.c`),
+ * and `dlsym.c` last (its table names statics from every family).
  * The registry in `src/registry/symbols.rs` lists every public symbol these
  * slices define; the object scan gate fails on an unlisted definition.
  */
@@ -33,3 +34,4 @@
 #include "posix/readiness.c"
 #include "posix/stdio.c"
 #include "posix/darwin.c"
+#include "posix/dlsym.c"

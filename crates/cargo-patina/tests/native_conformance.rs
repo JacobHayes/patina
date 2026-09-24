@@ -1310,6 +1310,11 @@ fn net_inet6() {
 }
 
 #[test]
+fn net_ipctl() {
+    conform("net/ipctl");
+}
+
+#[test]
 fn net_mmsg() {
     conform("net/mmsg");
 }

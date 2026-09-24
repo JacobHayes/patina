@@ -3,7 +3,7 @@ use std::os::raw::c_char;
 use std::ptr::NonNull;
 
 unsafe extern "C" {
-    fn patina_dlsym_entropy(symbol: *const c_char) -> *mut c_void;
+    fn patina_dlsym_route(symbol: *const c_char) -> *mut c_void;
 }
 
 #[cfg(target_os = "linux")]
@@ -16,7 +16,7 @@ type GetEntropyFn = unsafe extern "C" fn(*mut c_void, usize) -> i32;
 
 fn table(symbol: &str) -> *mut c_void {
     let name = CString::new(symbol).expect("symbol name carries no NUL");
-    unsafe { patina_dlsym_entropy(name.as_ptr()) }
+    unsafe { patina_dlsym_route(name.as_ptr()) }
 }
 
 fn hex(bytes: &[u8]) -> String {

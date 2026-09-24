@@ -1,11 +1,10 @@
 //! net/udp — socket / bind / sendto / recvfrom / getsockname / getpeername /
 //! connect / shutdown / setsockopt / getsockopt over loopback UDP: datagram
-//! boundaries, truncation, MSG_PEEK, non-blocking EAGAIN, and the errno
+//! boundaries, truncation, MSG_PEEK, non-blocking EAGAIN, the 4-tuple a
+//! connected socket receives by, and the errno
 //! vocabulary.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{AT_FDCWD, Probe, neg};
@@ -168,6 +167,37 @@ pub fn run(p: &Probe) {
         i64::from(p.accept4(a, 0).0) == neg(EOPNOTSUPP),
     );
 
+    // A connected datagram socket is found by its whole 4-tuple
+    // (`compute_score`): its peer's datagrams reach it, a third socket's do
+    // not.
+    let e = p.socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    p.require("socket e", e >= 0);
+    p.check("bind e", p.bind(e, ANY) == 0);
+    let (_, addr_e) = p.getsockname(e);
+    let addr_e = addr_e.expect("getsockname e");
+    let f = p.socket(AF_INET, SOCK_DGRAM, 0);
+    p.require("socket f", f >= 0);
+    p.check("bind f", p.bind(f, ANY) == 0);
+    let (_, addr_f) = p.getsockname(f);
+    let addr_f = addr_f.expect("getsockname f");
+    let g = p.socket(AF_INET, SOCK_DGRAM, 0);
+    p.require("socket g", g >= 0);
+    p.check("connect e to f", p.connect(e, addr_f) == 0);
+    p.check(
+        "g sends to e",
+        p.sendto(g, b"stranger", 0, Some(addr_e)) == 8,
+    );
+    p.check(
+        "a datagram from another socket does not reach the connected e",
+        p.recvfrom(e, 64, 0, true).0 == neg(EAGAIN),
+    );
+    p.check("f sends to e", p.sendto(f, b"peer", 0, Some(addr_e)) == 4);
+    let (n, data, _) = p.recvfrom(e, 64, 0, true);
+    p.check("the peer's datagram does", n == 4 && data == b"peer");
+    for fd in [e, f, g] {
+        p.close(fd);
+    }
+
     let file = p.openat(AT_FDCWD, &format!("{root}/file"), O_RDWR | O_CREAT, 0o640);
     p.require("open a file", file >= 0);
     p.check(
@@ -228,15 +258,5 @@ pub const SCENARIO: Scenario = Scenario {
         "openat",
         "close",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::NetworkReadiness),
-        vehicles: Vehicle::ALL,
-        what: "recvfrom(MSG_DONTWAIT) on a blocking datagram socket ignores the flag and parks the only task (c/posix/net.c recvfrom, sud/net.rs sys_recvfrom → patina-sched-det deadlock fatal)",
-        failure: Failure::Stops {
-            events: 19,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina native shim fatal: deadlock: no runnable tasks; parked tasks: 1 (net-recv)",
-        },
-    }],
     ..DEFAULTS
 };

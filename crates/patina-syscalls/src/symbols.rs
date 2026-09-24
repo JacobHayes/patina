@@ -1261,15 +1261,27 @@ const ROWS: &[SymbolRow] = &[
     ),
     s(
         "sendmsg",
-        Platform::Linux,
+        Platform::Both,
         Serves::Syscalls(&["sendmsg"]),
-        SymbolStatus::Partial,
+        SymbolStatus::Modeled,
     ),
     s(
         "recvmsg",
-        Platform::Linux,
+        Platform::Both,
         Serves::Syscalls(&["recvmsg"]),
-        SymbolStatus::Partial,
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "sendmmsg",
+        Platform::Linux,
+        Serves::Syscalls(&["sendmmsg"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "recvmmsg",
+        Platform::Linux,
+        Serves::Syscalls(&["recvmmsg"]),
+        SymbolStatus::Modeled,
     ),
     s(
         "shutdown",
@@ -1323,7 +1335,7 @@ const ROWS: &[SymbolRow] = &[
         "if_nametoindex",
         Platform::Both,
         Serves::LibcOnly,
-        SymbolStatus::Partial,
+        SymbolStatus::Modeled,
     ),
     s(
         "poll",
@@ -1947,13 +1959,13 @@ const ROWS: &[SymbolRow] = &[
         "__recv_chk",
         Platform::Linux,
         Serves::Syscalls(&["recvfrom"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "__recvfrom_chk",
         Platform::Linux,
         Serves::Syscalls(&["recvfrom"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "__readlink_chk",
@@ -1971,13 +1983,13 @@ const ROWS: &[SymbolRow] = &[
         "__poll_chk",
         Platform::Linux,
         Serves::Syscalls(&["poll", "ppoll"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "__ppoll_chk",
         Platform::Linux,
         Serves::Syscalls(&["ppoll"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "__read",
@@ -2307,13 +2319,13 @@ const ROWS: &[SymbolRow] = &[
         "getifaddrs",
         Platform::Linux,
         Serves::LibcOnly,
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "freeifaddrs",
         Platform::Linux,
         Serves::LibcOnly,
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "dlerror",

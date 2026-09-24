@@ -14,10 +14,8 @@
 //! issues `ppoll` (glibc's own spelling) and the libc vehicle calls glibc's
 //! `poll`.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, SockAddr};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -105,6 +103,39 @@ pub fn run(p: &Probe) {
         after - before >= 2_000_000,
     );
 
+    // A stream socket that never connected is writable and hung up
+    // (`unix_poll`, `tcp_poll` on TCP_CLOSE); a listener reports nothing
+    // until a connection is pending; a datagram socket is writable.
+    let us = p.socket(AF_UNIX, SOCK_STREAM, 0);
+    let uq = p.socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    let ud = p.socket(AF_UNIX, SOCK_DGRAM, 0);
+    let ts = p.socket(AF_INET, SOCK_STREAM, 0);
+    p.require(
+        "four unconnected sockets",
+        us >= 0 && uq >= 0 && ud >= 0 && ts >= 0,
+    );
+    let all = POLLIN | POLLOUT | POLLRDHUP | POLLPRI;
+    let (n, revents) = p.poll(&[(us, all), (uq, all), (ud, all), (ts, all)], 0, SHOWN);
+    p.check(
+        "unconnected streams are POLLOUT|POLLHUP, a datagram socket POLLOUT",
+        n == 4
+            && revents
+                == vec![
+                    POLLOUT | POLLHUP,
+                    POLLOUT | POLLHUP,
+                    POLLOUT,
+                    POLLOUT | POLLHUP,
+                ],
+    );
+    let (n, revents) = p.poll(&[(l, all)], 0, SHOWN);
+    p.check(
+        "a listener with nothing pending reports nothing",
+        n == 0 && revents == vec![0],
+    );
+    for fd in [us, uq, ud, ts] {
+        p.close(fd);
+    }
+
     for fd in [u, v, l, c, s] {
         p.close(fd);
     }
@@ -145,16 +176,5 @@ pub const SCENARIO: Scenario = Scenario {
         "clock_gettime",
         "close",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::NetworkReadiness),
-        vehicles: Vehicle::ALL,
-        what: "poll reports the peer's SHUT_WR as POLLHUP without POLLRDHUP (the readiness core's socket readiness: POLLHUP on read EOF alone), where tcp_poll reports POLLIN|POLLRDHUP for a half-closed peer and POLLHUP only once both directions are shut",
-        failure: Failure::Differs(&[
-            Difference::field(34, "poll", "fields.revents0", Observed::Int(17)),
-            Difference::check(35, "POLLIN|POLLRDHUP once the peer shut down writing"),
-            Difference::field(38, "poll", "fields.revents0", Observed::Int(25)),
-            Difference::check(39, "POLLHUP once both directions are shut"),
-        ]),
-    }],
     ..DEFAULTS
 };

@@ -14,11 +14,9 @@
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Control, Probe, RecvSpec, SockAddr, neg};
 use crate::scenarios::net::abstract_name;
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -151,29 +149,6 @@ pub const SCENARIO: Scenario = Scenario {
         "sendmsg",
         "recvmsg",
         "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "socketpair(AF_UNIX, SOCK_SEQPACKET) answers EOPNOTSUPP (c/posix/net.c socketpair, sud/net.rs sys_socketpair model a stream pair alone), and socket(AF_UNIX) is EAFNOSUPPORT: no AF_UNIX sequenced-packet socket exists",
-            failure: Failure::Differs(&[
-                Difference::field(0, "socketpair", "errno", Observed::Str("EOPNOTSUPP")),
-                Difference::field(0, "socketpair", "fields.first", Observed::Null),
-                Difference::field(0, "socketpair", "fields.second", Observed::Null),
-                Difference::field(0, "socketpair", "ret", Observed::Int(-1)),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "with no socket the scenario cannot continue",
-            failure: Failure::Stops {
-                events: 1,
-                ending: Ending::Exit(101),
-                diagnostic: "net/unix_seqpacket: cannot continue: a seqpacket socketpair",
-            },
-        },
     ],
     ..DEFAULTS
 };

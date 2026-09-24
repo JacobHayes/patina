@@ -16,8 +16,7 @@
 //! and the scenario reaches glibc's definitions through `dlsym`, which
 //! under patina answers only what the shim defines.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{ARPHRD_LOOPBACK, IfField, Probe, SIOCGIFFLAGS, SIOCGIFINDEX, family_name};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -147,39 +146,5 @@ pub const SCENARIO: Scenario = Scenario {
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_socket, Syscall::N_ioctl, Syscall::N_close],
     symbols: &["getifaddrs", "freeifaddrs", "socket", "ioctl", "close"],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: &[Vehicle::Libc],
-            what: "SIOCGIFINDEX and SIOCGIFFLAGS on a socket answer ENOTTY (c/posix/fd_io.c ioctl, sud/fd_io.rs sys_ioctl model FIONBIO/FIOCLEX/FIONCLEX alone): no interface table serves the SIOCGIF* requests",
-            failure: Failure::Differs(&[
-                Difference::field(1, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(1, "ioctl", "ret", Observed::Int(-1)),
-                Difference::field(1, "ioctl", "fields.ifindex", Observed::Null),
-                Difference::field(2, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(2, "ioctl", "ret", Observed::Int(-1)),
-                Difference::field(2, "ioctl", "fields.flags", Observed::Null),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim defines no getifaddrs/freeifaddrs (registry `Absent`), so `dlsym` finds neither (c/posix/entropy.c `__wrap_dlsym` answers the shim's own definitions alone) and the scenario stops: nothing serves the list the arc's virtual interface table (`lo` + `eth0`/24) is to answer",
-            failure: Failure::Differs(&[
-                Difference::field(4, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(5, "dlsym", "fields.resolved", Observed::Bool(false)),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: &[Vehicle::Libc],
-            what: "with neither symbol resolved the scenario cannot continue",
-            failure: Failure::Stops {
-                events: 6,
-                ending: Ending::Exit(101),
-                diagnostic: "net/getifaddrs: cannot continue: getifaddrs and freeifaddrs resolve",
-            },
-        },
-    ],
     ..DEFAULTS
 };

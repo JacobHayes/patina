@@ -3548,18 +3548,22 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "send",
         "sendto",
         "sendmsg",
+        "sendmmsg",
         "recv",
         "recvfrom",
         "recvmsg",
+        "recvmmsg",
         "shutdown",
         "getaddrinfo",
         "getnameinfo",
         "gethostbyname",
-        // Interface-index lookup (a host networking utility stack — hyper-util —
-        // links it dormant). The shim deny-traps it (dropped from a shim-linked
-        // import table); classified so a raw non-shim import reads as `network`
-        // rather than a bare unknown import.
+        // Interface lookups (a host networking utility stack — hyper-util —
+        // links `if_nametoindex` dormant). The shim answers them from the
+        // virtual interface table; classified so a raw non-shim import reads as
+        // `network` rather than a bare unknown import.
         "if_nametoindex",
+        "getifaddrs",
+        "freeifaddrs",
     ];
     // (a) Blocking/scheduling — readiness multiplexing. A host `poll`/`select`/
     // `kqueue`/`epoll` wait blocks the calling thread outside the scheduler.

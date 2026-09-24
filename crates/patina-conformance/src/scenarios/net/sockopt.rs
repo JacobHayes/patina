@@ -26,10 +26,8 @@
 //!   `EOPNOTSUPP` to get (`do_ip_setsockopt`/`do_ip_getsockopt`);
 //! * `ENOTSOCK` on a file, `EBADF` on a closed descriptor.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 use crate::probe::{AT_FDCWD, OptionShown, Probe, SockAddr, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -271,122 +269,5 @@ pub const SCENARIO: Scenario = Scenario {
         release: "5.7",
         why: "an unprivileged SO_BINDTODEVICE on an unbound socket (net/core/sock.c sock_bindtoindex_locked)",
     }),
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "getsockopt has no option store: it zeroes the caller's buffer and reports success with optlen unchanged (c/posix/net.c getsockopt, sud/net.rs sys_getsockopt), so every identity, boolean, linger, timeout, buffer and device option reads 0 and an unknown option or level is not refused",
-            failure: Failure::Differs(&[
-                Difference::field(1, "getsockopt", "fields.value", Observed::Str("00000000")),
-                Difference::check(2, "SO_TYPE is SOCK_STREAM"),
-                Difference::field(3, "getsockopt", "fields.value", Observed::Str("00000000")),
-                Difference::check(4, "SO_DOMAIN is AF_INET"),
-                Difference::field(5, "getsockopt", "fields.value", Observed::Str("00000000")),
-                Difference::check(6, "SO_PROTOCOL is IPPROTO_TCP"),
-                Difference::field(15, "getsockopt", "fields.value", Observed::Str("00000000")),
-                Difference::check(16, "SO_REUSEADDR reads back 1"),
-                Difference::field(21, "getsockopt", "fields.value", Observed::Str("00000000")),
-                Difference::check(22, "SO_REUSEPORT reads back 1"),
-                Difference::field(27, "getsockopt", "fields.value", Observed::Str("00000000")),
-                Difference::check(28, "SO_KEEPALIVE reads back 1"),
-                Difference::field(33, "getsockopt", "fields.value", Observed::Str("00000000")),
-                Difference::check(34, "TCP_NODELAY reads back 1"),
-                Difference::field(
-                    39,
-                    "getsockopt",
-                    "fields.value",
-                    Observed::Str("0000000000000000"),
-                ),
-                Difference::check(40, "SO_LINGER reads back {1, 5}"),
-                Difference::field(
-                    45,
-                    "getsockopt",
-                    "fields.value",
-                    Observed::Str("00000000000000000000000000000000"),
-                ),
-                Difference::check(46, "SO_RCVTIMEO reads back 2 s"),
-                Difference::field(
-                    53,
-                    "getsockopt",
-                    "fields.value",
-                    Observed::Str("00000000000000000000000000000000"),
-                ),
-                Difference::check(54, "SO_SNDTIMEO reads back 2 s"),
-                Difference::check(58, "SO_RCVBUF's default is at least twice the value set"),
-                Difference::check(62, "SO_RCVBUF reads back doubled"),
-                Difference::check(64, "SO_SNDBUF's default is at least twice the value set"),
-                Difference::check(68, "SO_SNDBUF reads back doubled"),
-                Difference::field(71, "getsockopt", "fields.optlen", Observed::Int(16)),
-                Difference::field(
-                    71,
-                    "getsockopt",
-                    "fields.value",
-                    Observed::Str("00000000000000000000000000000000"),
-                ),
-                Difference::check(72, "SO_BINDTODEVICE reads back lo"),
-                Difference::field(75, "getsockopt", "fields.value", Observed::Str("0000")),
-                Difference::check(
-                    76,
-                    "a two-byte getsockopt buffer gets two bytes of the value",
-                ),
-                Difference::field(79, "getsockopt", "errno", Observed::Null),
-                Difference::field(79, "getsockopt", "fields.optlen", Observed::Int(4)),
-                Difference::field(79, "getsockopt", "fields.value", Observed::Str("00000000")),
-                Difference::field(79, "getsockopt", "ret", Observed::Int(0)),
-                Difference::check(80, "and to get"),
-                Difference::field(83, "getsockopt", "errno", Observed::Null),
-                Difference::field(83, "getsockopt", "fields.optlen", Observed::Int(4)),
-                Difference::field(83, "getsockopt", "fields.value", Observed::Str("00000000")),
-                Difference::field(83, "getsockopt", "ret", Observed::Int(0)),
-                Difference::check(84, "and EOPNOTSUPP to get"),
-                Difference::field(86, "getsockopt", "fields.value", Observed::Str("00000000")),
-                Difference::check(87, "SO_PROTOCOL is IPPROTO_UDP"),
-                Difference::field(92, "getsockopt", "fields.value", Observed::Str("00000000")),
-                Difference::check(93, "SO_BROADCAST reads back 1"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "setsockopt accepts a fixed no-op list (c/posix/net.c setsockopt, sud/net.rs sys_setsockopt): SO_LINGER on, a non-zero SO_SNDTIMEO, SO_RCVBUF, SO_SNDBUF and SO_BINDTODEVICE answer ENOPROTOOPT, and nothing is validated — no EDOM for a timeval's microseconds, no EINVAL for a short optlen",
-            failure: Failure::Differs(&[
-                Difference::field(37, "setsockopt", "errno", Observed::Str("ENOPROTOOPT")),
-                Difference::field(37, "setsockopt", "ret", Observed::Int(-1)),
-                Difference::check(38, "set SO_LINGER on, 5 s"),
-                Difference::field(47, "setsockopt", "errno", Observed::Null),
-                Difference::field(47, "setsockopt", "ret", Observed::Int(0)),
-                Difference::check(48, "SO_RCVTIMEO with a million microseconds is EDOM"),
-                Difference::field(51, "setsockopt", "errno", Observed::Str("ENOPROTOOPT")),
-                Difference::field(51, "setsockopt", "ret", Observed::Int(-1)),
-                Difference::check(52, "set SO_SNDTIMEO to 2 s"),
-                Difference::field(55, "setsockopt", "errno", Observed::Str("ENOPROTOOPT")),
-                Difference::check(56, "SO_SNDTIMEO with a million microseconds is EDOM"),
-                Difference::field(59, "setsockopt", "errno", Observed::Str("ENOPROTOOPT")),
-                Difference::field(59, "setsockopt", "ret", Observed::Int(-1)),
-                Difference::check(60, "set SO_RCVBUF"),
-                Difference::field(65, "setsockopt", "errno", Observed::Str("ENOPROTOOPT")),
-                Difference::field(65, "setsockopt", "ret", Observed::Int(-1)),
-                Difference::check(66, "set SO_SNDBUF"),
-                Difference::field(69, "setsockopt", "errno", Observed::Str("ENOPROTOOPT")),
-                Difference::field(69, "setsockopt", "ret", Observed::Int(-1)),
-                Difference::check(70, "SO_BINDTODEVICE to lo"),
-                Difference::field(73, "setsockopt", "errno", Observed::Null),
-                Difference::field(73, "setsockopt", "ret", Observed::Int(0)),
-                Difference::check(74, "an int option with a short optlen is EINVAL"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "bind to a port another socket holds answers EEXIST instead of EADDRINUSE, and SO_REUSEPORT does not let two sockets share a port (SimNet's bound-address table)",
-            failure: Failure::Differs(&[
-                Difference::field(100, "bind", "errno", Observed::Str("EEXIST")),
-                Difference::check(101, "without SO_REUSEPORT the port is EADDRINUSE"),
-                Difference::field(104, "bind", "errno", Observed::Str("EEXIST")),
-                Difference::field(104, "bind", "ret", Observed::Int(-1)),
-                Difference::check(105, "both bind one port"),
-            ]),
-        },
-    ],
     ..DEFAULTS
 };

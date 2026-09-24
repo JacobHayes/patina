@@ -40,7 +40,7 @@ fn answered(result: Result<usize, c_int>) -> isize {
 }
 
 /// The pipe a descriptor is, for a splice: an anonymous pipe's or a FIFO's
-/// end (a socketpair end is a socket).
+/// end.
 fn pipe_of(resolved: &Resolved) -> Option<u64> {
     (resolved.kind == FdKind::Pipe)
         .then(|| thread::splice_pipe(resolved.handle))

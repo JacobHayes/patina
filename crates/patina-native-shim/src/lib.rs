@@ -54,6 +54,7 @@ pub const POSIX_C_FAMILY_SOURCES: &[(&str, &str)] = &[
     ("posix/readiness.c", include_str!("../c/posix/readiness.c")),
     ("posix/stdio.c", include_str!("../c/posix/stdio.c")),
     ("posix/darwin.c", include_str!("../c/posix/darwin.c")),
+    ("posix/dlsym.c", include_str!("../c/posix/dlsym.c")),
 ];
 /// The companion C header for [`POSIX_C_SOURCE`] (`include/patina_native.h`).
 pub const NATIVE_HEADER: &str = include_str!("../include/patina_native.h");
@@ -117,6 +118,9 @@ mod mem;
 mod numa;
 mod panic_boundary;
 mod paths;
+// Guest memory copied the way the kernel's `copy_from_user`/`copy_to_user` do:
+// whole or `EFAULT`, never a fault in shim code. See `uaccess.rs`.
+mod uaccess;
 // What `statfs`/`fstatfs`/`ustat` report: the one deterministic volume and the
 // kernel's pseudo-filesystems. See `volume.rs`.
 // In-kernel copies (`copy_file_range`, `sendfile`, `splice`, `tee`,
@@ -138,7 +142,7 @@ use std::io;
 use std::ops::{Deref, DerefMut};
 use std::slice;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 use fdtable::{DescId, FdKind, GuestFdTable, Release, Resolved};
 
@@ -161,11 +165,7 @@ pub use thread::{
     patina_cond_broadcast, patina_cond_destroy, patina_cond_init, patina_cond_signal,
     patina_cond_timedwait, patina_cond_wait, patina_futex_wait, patina_futex_wait_timed,
     patina_futex_wake, patina_mutex_destroy, patina_mutex_init, patina_mutex_lock,
-    patina_mutex_trylock, patina_mutex_unlock, patina_net_accept, patina_net_bind,
-    patina_net_connect, patina_net_getpeername, patina_net_getsockname, patina_net_kind,
-    patina_net_listen, patina_net_recv, patina_net_recvfrom, patina_net_send, patina_net_sendto,
-    patina_net_set_read_timeout, patina_net_shutdown, patina_net_socket, patina_net_stream_recv,
-    patina_net_stream_send, patina_net_tcp_connect, patina_rwlock_destroy, patina_rwlock_init,
+    patina_mutex_trylock, patina_mutex_unlock, patina_rwlock_destroy, patina_rwlock_init,
     patina_rwlock_rdlock, patina_rwlock_tryrdlock, patina_rwlock_trywrlock, patina_rwlock_unlock,
     patina_rwlock_wrlock, patina_thread_create, patina_thread_detach, patina_thread_exit,
     patina_thread_join,
@@ -344,8 +344,33 @@ const O_SETFL_MASK: u32 = O_APPEND | O_NONBLOCK;
 /// almost always uncontended: only the managed thread that currently holds the
 /// execution baton runs shim code, so contention is limited to brief handoffs.
 struct SpinMutex<T> {
-    locked: AtomicBool,
+    /// The lock word: the holding thread's [`thread_token`], 0 while free.
+    /// Taking the lock and naming its holder are one compare-exchange, so
+    /// there is no instant at which the lock is held by nobody in particular.
+    /// A contended acquire whose holder is the acquiring thread itself can
+    /// never succeed:
+    /// the only way one thread reaches a shim lock it already holds is a
+    /// signal handler running over shim code (a fault in the shim, the guest's
+    /// handler calling back into an interposer), and spinning there hangs the
+    /// process where the kernel would have answered. [`SpinMutex::lock`] turns
+    /// it into a named fatal instead.
+    owner: AtomicUsize,
     value: UnsafeCell<T>,
+}
+
+/// A shim lock re-acquired by the thread that holds it (see [`SpinMutex`]).
+#[derive(Debug, PartialEq, Eq)]
+struct SelfDeadlock;
+
+/// This thread's identity for [`SpinMutex::owner`]: the address of one of its
+/// thread-locals, never 0 and unique among LIVE threads (a thread that exits
+/// can hand its address to a later one; a holder cannot exit while holding a
+/// shim lock without the process aborting first).
+fn thread_token() -> usize {
+    thread_local! {
+        static TOKEN: u8 = const { 0 };
+    }
+    TOKEN.with(|token| token as *const u8 as usize)
 }
 
 // SAFETY: the spinlock serializes all access to the interior value, so it is
@@ -357,18 +382,38 @@ unsafe impl<T: Send> Send for SpinMutex<T> {}
 impl<T> SpinMutex<T> {
     const fn new(value: T) -> Self {
         Self {
-            locked: AtomicBool::new(false),
+            owner: AtomicUsize::new(0),
             value: UnsafeCell::new(value),
         }
     }
 
     fn lock(&self) -> SpinGuard<'_, T> {
-        while self
-            .locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
+        self.acquire().unwrap_or_else(|SelfDeadlock| {
+            // Nothing that takes a shim lock may run here — the lock this
+            // thread re-entered may be any of them, the captured-stdio one
+            // included — so the diagnostic goes straight to the host.
+            let _ = host_write_all(
+                2,
+                b"patina native shim fatal: a shim lock was re-entered by the thread that \
+                  holds it (a signal handler ran over shim code); failing closed\n",
+            );
+            host_abort()
+        })
+    }
+
+    /// Take the lock, or report that this thread already holds it.
+    fn acquire(&self) -> Result<SpinGuard<'_, T>, SelfDeadlock> {
+        let me = thread_token();
+        while let Err(holder) =
+            self.owner
+                .compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed)
         {
-            while self.locked.load(Ordering::Relaxed) {
+            // The lock word names its holder from the instant it is taken, so
+            // this thread reads its own token exactly while it holds the lock.
+            if holder == me {
+                return Err(SelfDeadlock);
+            }
+            while self.owner.load(Ordering::Relaxed) != 0 {
                 std::hint::spin_loop();
             }
         }
@@ -377,7 +422,7 @@ impl<T> SpinMutex<T> {
         // scheduler path) forwards to the real host primitive instead of
         // deadlocking on this very lock. See `SPIN_DEPTH`.
         spin_depth_inc();
-        SpinGuard { mutex: self }
+        Ok(SpinGuard { mutex: self })
     }
 }
 
@@ -402,8 +447,34 @@ impl<T> DerefMut for SpinGuard<'_, T> {
 
 impl<T> Drop for SpinGuard<'_, T> {
     fn drop(&mut self) {
-        self.mutex.locked.store(false, Ordering::Release);
+        self.mutex.owner.store(0, Ordering::Release);
         spin_depth_dec();
+    }
+}
+
+#[cfg(test)]
+mod spin_mutex_tests {
+    use super::{SelfDeadlock, SpinMutex};
+
+    #[test]
+    fn a_lock_its_own_holder_takes_again_is_a_self_deadlock_not_a_spin() {
+        let mutex = SpinMutex::new(0u8);
+        let held = mutex.acquire().expect("a free lock is taken");
+        assert_eq!(mutex.acquire().err(), Some(SelfDeadlock));
+        drop(held);
+        assert!(mutex.acquire().is_ok(), "released, it is free again");
+    }
+
+    #[test]
+    fn a_lock_another_thread_released_is_no_self_deadlock() {
+        let mutex = std::sync::Arc::new(SpinMutex::new(0u8));
+        let other = std::sync::Arc::clone(&mutex);
+        std::thread::spawn(move || drop(other.acquire().expect("taken elsewhere")))
+            .join()
+            .unwrap();
+        let held = mutex.acquire().expect("free after the other thread");
+        assert_eq!(mutex.acquire().err(), Some(SelfDeadlock));
+        drop(held);
     }
 }
 
@@ -465,7 +536,7 @@ fn install_fd(kind: FdKind, handle: u64, status: u32, cloexec: bool) -> Result<c
 /// gone. Runs OUTSIDE the table lock: a driver close is a recorded boundary
 /// operation, a pipe close wakes parked peers, and a readiness registry drop
 /// wakes parked waiters.
-fn release_description(release: Release) -> Result<(), c_int> {
+pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
     flock_release(release.desc);
     // An epoll interest is on the FILE (the kernel's `(fd, struct file)` key
     // drops with the file's last reference), whatever kind it was.
@@ -478,7 +549,7 @@ fn release_description(release: Release) -> Result<(), c_int> {
             mem::released(release.handle);
             with_context(|context| context.fs_close(Fd(release.handle)))
         }
-        FdKind::Socket => thread::socket_close(release.handle),
+        FdKind::Socket => thread::net::socket_close(release.handle),
         FdKind::Pipe => thread::pipe_close(release.handle),
         #[cfg(target_os = "linux")]
         FdKind::SignalFd => {
@@ -805,6 +876,13 @@ mod hostapi {
     // init call, so forwarding needs no paired init. `trylock` returns a C `bool`.
     pub type OsUnfairLockOp = unsafe extern "C" fn(*mut c_void);
     pub type OsUnfairLockTry = unsafe extern "C" fn(*mut c_void) -> bool;
+    // `<mach/mach_vm.h>`: copy between this task's own address ranges through
+    // the kernel, which answers `KERN_INVALID_ADDRESS`/`KERN_PROTECTION_FAILURE`
+    // for a range a user access could not touch instead of faulting — the
+    // guest-memory copy vehicle (`uaccess`). `mach_vm_write`'s count is a
+    // `mach_msg_type_number_t`.
+    pub type MachVmReadOverwrite = unsafe extern "C" fn(u32, u64, u64, u64, *mut u64) -> c_int;
+    pub type MachVmWrite = unsafe extern "C" fn(u32, u64, usize, u32) -> c_int;
 
     /// Real host vehicles resolved once through `dlsym(RTLD_NEXT, ...)`. None of
     /// these names appears as an undefined external in the shim objects.
@@ -844,6 +922,11 @@ mod hostapi {
         pub host_os_unfair_lock_lock: OsUnfairLockOp,
         pub host_os_unfair_lock_trylock: OsUnfairLockTry,
         pub host_os_unfair_lock_unlock: OsUnfairLockOp,
+        /// This task's own port (`mach_task_self()`, the `mach_task_self_`
+        /// variable) and the kernel copies `uaccess` makes against it.
+        pub task_self: MachPort,
+        pub mach_vm_read_overwrite: MachVmReadOverwrite,
+        pub mach_vm_write: MachVmWrite,
     }
 
     // SAFETY: the fields are all function pointers into libSystem/libdispatch;
@@ -932,6 +1015,13 @@ mod hostapi {
                 host_os_unfair_lock_unlock: std::mem::transmute::<*mut c_void, OsUnfairLockOp>(
                     resolve(c"os_unfair_lock_unlock"),
                 ),
+                task_self: *resolve(c"mach_task_self_").cast::<MachPort>(),
+                mach_vm_read_overwrite: std::mem::transmute::<*mut c_void, MachVmReadOverwrite>(
+                    resolve(c"mach_vm_read_overwrite"),
+                ),
+                mach_vm_write: std::mem::transmute::<*mut c_void, MachVmWrite>(resolve(
+                    c"mach_vm_write",
+                )),
             }
         }
     }
@@ -969,8 +1059,8 @@ mod hostapi {
 
     // The real glibc resolver, reached through the `-Wl,--wrap=dlsym` alias
     // `__real_dlsym`. Guest and std `dlsym` references bind to the shim's
-    // `__wrap_dlsym` (patina_posix.c), which answers only from its deterministic
-    // entropy routing table; only this shim-internal path
+    // `__wrap_dlsym` (c/posix/dlsym.c), which answers only from its routing
+    // table of shim definitions; only this shim-internal path
     // reaches the real resolver. Any consumer of the shim staticlib that drives a
     // host vehicle (managed threads / trace-fd I/O / baton) must link
     // `-Wl,--wrap=dlsym`, the single wrap the shim needs (thread creation is a
@@ -985,6 +1075,31 @@ mod hostapi {
     // directive in the same object as that definition is an assembler error.
     #[cfg(not(test))]
     core::arch::global_asm!(".weak __real_dlsym");
+
+    // `__real_dlsym`'s address as data: 0 when the weak reference went
+    // unresolved (a link without `-Wl,--wrap=dlsym`, the prefixed C ABI
+    // alone). A data word, because the compiler takes a function's address
+    // as never null.
+    core::arch::global_asm!(
+        ".pushsection .data.rel.ro.patina_real_dlsym,\"aw\"",
+        ".balign 8",
+        ".globl patina_real_dlsym_address",
+        ".hidden patina_real_dlsym_address",
+        "patina_real_dlsym_address:",
+        ".quad __real_dlsym",
+        ".popsection",
+    );
+    unsafe extern "C" {
+        static patina_real_dlsym_address: usize;
+    }
+
+    /// Whether the host-alias table can be had: the link supplied
+    /// `__real_dlsym` (`-Wl,--wrap=dlsym`). An embedding that links the
+    /// prefixed C ABI alone has no host vehicle to reach.
+    pub fn available() -> bool {
+        // SAFETY: a plain data word the link filled in.
+        unsafe { std::ptr::read_volatile(&raw const patina_real_dlsym_address) != 0 }
+    }
 
     // `<dlfcn.h>`: `RTLD_NEXT == (void *)-1`. Resolve against the images that
     // follow the main executable, i.e. the real glibc definition even for a name
@@ -2073,7 +2188,6 @@ fn fail(errno: c_int) -> c_int {
 /// is reachable from the crate-level `sud` and `tsc` modules. Used for the
 /// unmapped-syscall abort, the timestamp-counter trap's refusals, and the
 /// containment-invariant violations of both (§4.4, §7.4).
-#[cfg(any(target_os = "linux", test))]
 pub(crate) fn trap_fatal(message: &str) -> ! {
     // `host_abort()` skips the atexit-driven shutdown flush, so the guest's captured
     // output would be lost with the diagnostic: flush it first, exactly as the
@@ -2981,6 +3095,13 @@ fn install(context: Result<Context, RuntimeError>) -> c_int {
     if let Err(error) = paths::install_cwd(&mut context) {
         record_init_error(error.to_string());
         return fail(runtime_errno(&error));
+    }
+    // Guest memory is copied through `process_vm_readv`/`writev` on this
+    // process (`uaccess`); a host that refuses them refuses the run by name.
+    #[cfg(target_os = "linux")]
+    if let Err(message) = uaccess::probe() {
+        record_init_error(message);
+        return fail(ENOSYS);
     }
     let mut guard = slot().lock();
     if guard.is_some() {
@@ -4523,7 +4644,7 @@ unsafe fn read_resolved(
         }
         // SAFETY: forwarded from this function's own contract.
         FdKind::Socket => unsafe {
-            thread::socket_read(resolved.handle, nonblocking, destination, length)
+            thread::net::socket_read(resolved.handle, nonblocking, destination, length)
         },
         // SAFETY: as above.
         FdKind::Pipe => unsafe {
@@ -4618,7 +4739,7 @@ unsafe fn write_resolved(
         FdKind::File | FdKind::Dir | FdKind::OPath => fs_write(Fd(resolved.handle), source, length),
         // SAFETY: forwarded from this function's own contract.
         FdKind::Socket => unsafe {
-            thread::socket_write(resolved.handle, nonblocking, source, length)
+            thread::net::socket_write(resolved.handle, nonblocking, source, length)
         },
         // SAFETY: as above.
         FdKind::Pipe => unsafe {
@@ -5042,7 +5163,7 @@ fn metadata_kind(kind: FsEntryKind) -> u32 {
 
 /// The `PATINA_FS_*` wire values: which filesystem a node is on. The
 /// deterministic volume holds every entry a path can name; an anonymous pipe's
-/// node is on pipefs and a socketpair end's on sockfs, as on Linux.
+/// node is on pipefs and a socket's on sockfs, as on Linux.
 const PATINA_FS_VOLUME: u32 = 0;
 const PATINA_FS_PIPEFS: u32 = 1;
 const PATINA_FS_SOCKFS: u32 = 2;
@@ -5234,7 +5355,7 @@ pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut Patina
             Err(errno) => fail(errno),
         };
     }
-    // An anonymous pipe or socketpair end is on pipefs/sockfs: its node is the
+    // An anonymous pipe end or a socket is on pipefs/sockfs: its node is the
     // shim's own, and answers without a trip to the filesystem.
     if let Some(metadata) = thread::pipe_inode_metadata(raw_fd) {
         if out.is_null() {
@@ -7173,6 +7294,7 @@ pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usi
 mod thread {
     #[cfg(target_os = "linux")]
     pub(crate) mod ipc;
+    pub(crate) mod net;
     #[cfg(target_os = "linux")]
     pub(crate) mod readiness;
     #[cfg(target_os = "linux")]
@@ -7187,7 +7309,7 @@ mod thread {
     use std::ffi::{c_int, c_void};
     use std::sync::{Arc, OnceLock};
 
-    use patina_dst_abi::{ClockKind, Datagram, ShutdownHow, SocketId};
+    use patina_dst_abi::ClockKind;
 
     use super::fdtable::{DescId, FdKind};
     use super::hostcoll::{HostDeque, HostMap};
@@ -7196,11 +7318,6 @@ mod thread {
         EWOULDBLOCK, O_NONBLOCK, O_READ, O_WRITE, SpinGuard, SpinMutex, TaskId, host_write_all,
         with_context_msg, with_context_raw,
     };
-
-    #[cfg(target_os = "linux")]
-    const MSG_NOSIGNAL: c_int = 0x4000;
-    #[cfg(target_os = "macos")]
-    const MSG_NOSIGNAL: c_int = 0x80000;
 
     /// Where a guest number lands in this module's class tables. Every extern
     /// entry below resolves its guest number ONCE through the descriptor table
@@ -7235,12 +7352,8 @@ mod thread {
         }
     }
 
-    fn socket_handle(guest_fd: c_int) -> Result<c_int, c_int> {
-        socket_entry(guest_fd).map(|(handle, _)| handle)
-    }
-
     /// A guest number's pipe-endpoint handle and its `O_NONBLOCK`: `EBADF` for
-    /// anything that is not a pipe/socketpair/FIFO endpoint.
+    /// anything that is not a pipe/FIFO endpoint.
     fn pipe_entry(guest_fd: c_int) -> Result<(c_int, bool), c_int> {
         let resolved = class_entry(guest_fd)?;
         match resolved.kind {
@@ -8542,8 +8655,8 @@ mod thread {
 
         /// Unlink `task` from whichever wait queue holds it. A cond or futex
         /// waiter also enters `timed_out` so its wait returns `ETIMEDOUT`; a
-        /// net-recv waiter simply retries the receive (the packet is now due),
-        /// and a bare timed sleep is on no queue at all.
+        /// socket waiter simply retries (the packet is now due, or its timeout
+        /// has passed), and a bare timed sleep is on no queue at all.
         fn mark_timed_out(&mut self, task: TaskId) {
             #[cfg(target_os = "linux")]
             {
@@ -8586,14 +8699,12 @@ mod thread {
                         return;
                     }
                 }
-                for socket in self.net.sockets.values_mut() {
-                    if let Some(index) = socket
-                        .recv_waiters
-                        .iter()
-                        .position(|waiter| *waiter == task)
-                    {
-                        socket.recv_waiters.remove(index);
-                        return;
+                for socket in self.net.sockets.table.values_mut() {
+                    for waiters in [&mut socket.recv_waiters, &mut socket.send_waiters] {
+                        if let Some(index) = waiters.iter().position(|waiter| *waiter == task) {
+                            waiters.remove(index);
+                            return;
+                        }
                     }
                 }
             }
@@ -9747,105 +9858,18 @@ mod thread {
     }
 
     // ------------------------------------------------------------------
-    // Virtual AF_INET sockets over the runtime's SimNet.
-    //
-    // Guest socket descriptors live in a high, non-colliding range so `close`
-    // can route them here. Datagram sockets preserve the original UDP
-    // semantics. Stream sockets model zero-latency TCP listen/accept/connect,
-    // byte-stream reads/writes, and half-close through recorded runtime network
-    // operations plus the scheduler's existing park/wake machinery. IPv6, DNS,
-    // readiness multiplexing, peek, and socket timeouts stay fail-closed:
-    // `TcpStream::set_read_timeout(Some(_))` fails, `TcpStream::peek` fails,
-    // `TcpStream::set_nodelay` and `TcpListener::bind`'s `SO_REUSEADDR`
-    // succeed as no-ops, and `connect("localhost:...")` fails via getaddrinfo.
-    // TCP latency > 0 is deferred, but stream inbox delivery deadlines and
-    // timed read parking mirror the UDP path so wrappers can expose segment
-    // latency deterministically later. All sockets are fully virtual — no host
-    // network symbols are imported.
-
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum SocketKind {
-        Datagram,
-        /// SOCK_STREAM before listen/connect/accept resolves its role.
-        StreamUnbound,
-        StreamListener,
-        Stream,
-    }
-
-    struct NetSocket {
-        kind: SocketKind,
-        socket_id: Option<SocketId>,
-        address: Option<String>,
-        bound: Option<(u32, u16)>,
-        peer: Option<(u32, u16)>,
-        /// Deterministic `SO_RCVTIMEO`: `Some(nanos)` bounds a blocking receive by
-        /// this many virtual nanoseconds from entry; `None` (or a zero timeval,
-        /// which POSIX treats as no timeout) blocks until data or a genuine wake.
-        read_timeout_nanos: Option<u64>,
-        /// The `tcp_streams` key of the connection this stream endpoint belongs
-        /// to (the client's local address), for stream sockets only.
-        stream_key: Option<String>,
-        recv_waiters: VecDeque<TaskId>,
-        send_waiters: VecDeque<TaskId>,
-    }
-
-    impl NetSocket {
-        fn new(kind: SocketKind) -> Self {
-            Self {
-                kind,
-                socket_id: None,
-                address: None,
-                bound: None,
-                peer: None,
-                read_timeout_nanos: None,
-                stream_key: None,
-                recv_waiters: VecDeque::new(),
-                send_waiters: VecDeque::new(),
-            }
-        }
-    }
-
-    /// The two guest descriptors of one virtual TCP connection.
-    #[derive(Clone, Copy, Default)]
-    struct TcpPair {
-        client: Option<c_int>,
-        server: Option<c_int>,
-    }
-
-    impl TcpPair {
-        /// The descriptor on the other end from `fd`, if it is still open.
-        fn other(&self, fd: c_int) -> Option<c_int> {
-            match (self.client, self.server) {
-                (Some(client), server) if client == fd => server,
-                (client, Some(server)) if server == fd => client,
-                _ => None,
-            }
-        }
-
-        fn is_empty(&self) -> bool {
-            self.client.is_none() && self.server.is_none()
-        }
-    }
+    // The descriptor classes the thread runtime owns beside the sockets
+    // (`net`): pipes and FIFOs, eventfds, and the readiness reactors.
 
     struct NetState {
-        sockets: BTreeMap<c_int, NetSocket>,
-        bound: BTreeMap<String, c_int>,
-        tcp_listeners: BTreeMap<String, c_int>,
-        /// Connected stream endpoints, keyed by the CLIENT's local address. That
-        /// address is unique per connection (it carries the ephemeral port) and
-        /// BOTH sides hold it — the client as its own local, the acceptor as the
-        /// peer address the runtime hands back — so the two endpoints agree on
-        /// one key. Keying by `(local, peer)` instead would break under a
-        /// wildcard bind, where the acceptor's local is the listener's
-        /// `0.0.0.0:PORT` while the client's peer is the specific IP it dialed,
-        /// and neither side can derive the other's spelling.
-        tcp_streams: BTreeMap<String, TcpPair>,
-        // In-process pipe/socketpair channels. Endpoints are keyed by class
-        // handle (`next_handle`, shared with the sockets, so a handle is a socket
+        /// Every socket and the socket families' namespaces (`net`).
+        sockets: net::Sockets,
+        // In-process pipe channels. Endpoints are keyed by class handle
+        // (`next_handle`, shared with the sockets, so a handle is a socket
         // XOR a pipe end); the descriptor table maps guest numbers onto them and
         // says which kind a number names. `pipe_channels` are the directed byte
-        // buffers each endpoint reads from / writes to; see the "in-process pipe
-        // / socketpair" section.
+        // buffers each endpoint reads from / writes to; see the "in-process
+        // pipe" section.
         pipe_ends: BTreeMap<c_int, PipeEnd>,
         pipe_channels: BTreeMap<u64, PipeChannel>,
         /// The channel currently backing each open FIFO, keyed by the
@@ -9856,8 +9880,8 @@ mod thread {
         /// exists only while some descriptor is open on the FIFO.
         fifo_channels: BTreeMap<u64, u64>,
         next_channel: u64,
-        /// The pipefs and sockfs nodes behind anonymous pipes and socketpair
-        /// ends ([`PipeInode`]), keyed by their inode number.
+        /// The pipefs and sockfs nodes behind anonymous pipes and sockets
+        /// ([`PipeInode`]), keyed by their inode number.
         pipe_inodes: BTreeMap<u64, PipeInode>,
         next_pipe_ino: u64,
         // Virtual kqueue readiness reactors, keyed by registry id. The
@@ -9886,16 +9910,12 @@ mod thread {
         /// `eventfds`: an internal identity the descriptor table maps guest
         /// numbers onto, never a number the guest sees (see `next_handle`).
         next_handle: c_int,
-        next_ephemeral: u16,
     }
 
     impl NetState {
         fn new() -> Self {
             Self {
-                sockets: BTreeMap::new(),
-                bound: BTreeMap::new(),
-                tcp_listeners: BTreeMap::new(),
-                tcp_streams: BTreeMap::new(),
+                sockets: net::Sockets::default(),
                 pipe_ends: BTreeMap::new(),
                 pipe_channels: BTreeMap::new(),
                 fifo_channels: BTreeMap::new(),
@@ -9913,44 +9933,16 @@ mod thread {
                 #[cfg(target_os = "linux")]
                 eventfds: BTreeMap::new(),
                 next_handle: 0,
-                next_ephemeral: 49152,
             }
         }
-
-        fn ephemeral(&mut self) -> u16 {
-            let assigned = self.next_ephemeral;
-            self.next_ephemeral = assigned.checked_add(1).unwrap_or(49152);
-            assigned
-        }
     }
 
-    fn format_addr(ip: u32, port: u16) -> String {
-        format!(
-            "{}.{}.{}.{}:{}",
-            (ip >> 24) & 0xff,
-            (ip >> 16) & 0xff,
-            (ip >> 8) & 0xff,
-            ip & 0xff,
-            port
-        )
-    }
-
+    /// A dotted-quad `IP:PORT` as a host-order address and port.
     fn parse_addr(addr: &str) -> Option<(u32, u16)> {
         let (host, port) = addr.rsplit_once(':')?;
         let port: u16 = port.parse().ok()?;
-        let mut octets = host.split('.');
-        let mut ip: u32 = 0;
-        for _ in 0..4 {
-            let octet: u32 = octets.next()?.parse().ok()?;
-            if octet > 255 {
-                return None;
-            }
-            ip = (ip << 8) | octet;
-        }
-        if octets.next().is_some() {
-            return None;
-        }
-        Some((ip, port))
+        let ip: std::net::Ipv4Addr = host.parse().ok()?;
+        Some((u32::from(ip), port))
     }
 
     fn wake_all(waiters: Vec<TaskId>) {
@@ -9961,1164 +9953,6 @@ mod thread {
             if let Err(message) = scheduler.wake(task) {
                 fatal(&message);
             }
-        }
-    }
-
-    /// The address a listening socket is registered under for traffic dialed at
-    /// `destination`: the exact address when something is bound there, else the
-    /// wildcard key when a `0.0.0.0:PORT` listener covers it. The shim keeps its
-    /// own address-keyed tables to know which task to WAKE, so it must resolve
-    /// exactly as the runtime routed — a datagram the runtime delivers to a
-    /// wildcard socket whose waiter the shim never wakes is a silent hang.
-    fn resolve_listener_address(state: &ThreadRuntime, destination: &str) -> String {
-        if state.net.tcp_listeners.contains_key(destination) {
-            return destination.to_owned();
-        }
-        match patina_dst_driver_api::wildcard_bind_key(destination) {
-            Some(wildcard) if state.net.tcp_listeners.contains_key(&wildcard) => wildcard,
-            _ => destination.to_owned(),
-        }
-    }
-
-    /// [`resolve_listener_address`] for the datagram table.
-    fn resolve_bound_address(state: &ThreadRuntime, destination: &str) -> String {
-        if state.net.bound.contains_key(destination) {
-            return destination.to_owned();
-        }
-        match patina_dst_driver_api::wildcard_bind_key(destination) {
-            Some(wildcard) if state.net.bound.contains_key(&wildcard) => wildcard,
-            _ => destination.to_owned(),
-        }
-    }
-
-    fn peer_fd(state: &ThreadRuntime, fd: c_int) -> Option<c_int> {
-        let key = state.net.sockets.get(&fd)?.stream_key.as_ref()?;
-        state.net.tcp_streams.get(key)?.other(fd)
-    }
-
-    fn drain_recv_waiters(state: &mut ThreadRuntime, fd: c_int) -> Vec<TaskId> {
-        state
-            .net
-            .sockets
-            .get_mut(&fd)
-            .map(|socket| socket.recv_waiters.drain(..).collect())
-            .unwrap_or_default()
-    }
-
-    fn drain_send_waiters(state: &mut ThreadRuntime, fd: c_int) -> Vec<TaskId> {
-        state
-            .net
-            .sockets
-            .get_mut(&fd)
-            .map(|socket| socket.send_waiters.drain(..).collect())
-            .unwrap_or_default()
-    }
-
-    /// Allocate a virtual socket. Activates the thread subsystem so a later
-    /// blocking receive/accept/send can park through the baton.
-    ///
-    /// # Safety
-    /// C ABI entry point.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_socket(
-        stream: c_int,
-        nonblocking: c_int,
-        cloexec: c_int,
-    ) -> c_int {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        let mut state = lock_state();
-        if let Err(error) = state.ensure_active() {
-            return super::fail(error.into_posix());
-        }
-        let handle = next_handle(&mut state);
-        let kind = if stream != 0 {
-            SocketKind::StreamUnbound
-        } else {
-            SocketKind::Datagram
-        };
-        state.net.sockets.insert(handle, NetSocket::new(kind));
-        bind_socket_handle(&mut state, handle, nonblocking != 0, cloexec != 0)
-    }
-
-    /// Bind a freshly minted socket handle to a guest number (`socket`,
-    /// `accept`). A full table (`EMFILE`) drops the socket again, so the
-    /// failure creates nothing — the kernel's `sock_map_fd` failure shape.
-    fn bind_socket_handle(
-        state: &mut ThreadRuntime,
-        handle: c_int,
-        nonblocking: bool,
-        cloexec: bool,
-    ) -> c_int {
-        let status = O_READ | O_WRITE | if nonblocking { O_NONBLOCK } else { 0 };
-        match super::install_fd(FdKind::Socket, handle as u64, status, cloexec) {
-            Ok(fd) => {
-                super::set_errno(0);
-                fd
-            }
-            Err(errno) => {
-                state.net.sockets.remove(&handle);
-                super::fail(errno)
-            }
-        }
-    }
-
-    /// Return the managed socket kind: -1 unknown, 0 datagram, 1 unbound stream,
-    /// 2 listener, 3 stream. This is C dispatch state only: no runtime op.
-    ///
-    /// # Safety
-    /// C ABI entry point.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_kind(guest_fd: c_int) -> c_int {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        let Ok(fd) = socket_handle(guest_fd) else {
-            return -1;
-        };
-        let state = lock_state();
-        match state.net.sockets.get(&fd).map(|socket| socket.kind) {
-            Some(SocketKind::Datagram) => 0,
-            Some(SocketKind::StreamUnbound) => 1,
-            Some(SocketKind::StreamListener) => 2,
-            Some(SocketKind::Stream) => 3,
-            None => -1,
-        }
-    }
-
-    /// # Safety
-    /// C ABI entry point; `guest_fd` names a socket from [`patina_net_socket`].
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_bind(guest_fd: c_int, ip: u32, port: u16) -> c_int {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match socket_handle(guest_fd) {
-            Ok(fd) => net_bind(fd, ip, port),
-            Err(errno) => super::fail(errno),
-        }
-    }
-
-    fn net_bind(fd: c_int, ip: u32, port: u16) -> c_int {
-        if let Err(errno) = sched_point() {
-            return super::fail(errno);
-        }
-        let mut state = lock_state();
-        let kind = match state.net.sockets.get(&fd) {
-            Some(socket) => socket.kind,
-            None => return super::fail(super::EBADF),
-        };
-        match kind {
-            SocketKind::Datagram => {
-                if state
-                    .net
-                    .sockets
-                    .get(&fd)
-                    .is_some_and(|s| s.socket_id.is_some())
-                {
-                    return super::fail(EINVAL);
-                }
-                let port = if port == 0 {
-                    state.net.ephemeral()
-                } else {
-                    port
-                };
-                let address = format_addr(ip, port);
-                let socket_id = match with_context_raw(|context| context.net_bind(&address)) {
-                    Ok(socket_id) => socket_id,
-                    Err(errno) => return super::fail(errno),
-                };
-                let socket = state.net.sockets.get_mut(&fd).expect("socket was checked");
-                socket.socket_id = Some(socket_id);
-                socket.address = Some(address.clone());
-                socket.bound = Some((ip, port));
-                state.net.bound.insert(address, fd);
-                0
-            }
-            SocketKind::StreamUnbound => {
-                if state
-                    .net
-                    .sockets
-                    .get(&fd)
-                    .is_some_and(|s| s.bound.is_some())
-                {
-                    return super::fail(EINVAL);
-                }
-                let port = if port == 0 {
-                    state.net.ephemeral()
-                } else {
-                    port
-                };
-                let address = format_addr(ip, port);
-                let socket = state.net.sockets.get_mut(&fd).expect("socket was checked");
-                socket.address = Some(address);
-                socket.bound = Some((ip, port));
-                0
-            }
-            SocketKind::StreamListener | SocketKind::Stream => super::fail(EINVAL),
-        }
-    }
-
-    /// Datagram `connect`: pin the peer address.
-    ///
-    /// # Safety
-    /// C ABI entry point.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_connect(guest_fd: c_int, ip: u32, port: u16) -> c_int {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match socket_handle(guest_fd) {
-            Ok(fd) => net_connect(fd, ip, port),
-            Err(errno) => super::fail(errno),
-        }
-    }
-
-    fn net_connect(fd: c_int, ip: u32, port: u16) -> c_int {
-        if let Err(errno) = sched_point() {
-            return super::fail(errno);
-        }
-        let mut state = lock_state();
-        match state.net.sockets.get_mut(&fd) {
-            Some(socket) if socket.kind == SocketKind::Datagram => {
-                socket.peer = Some((ip, port));
-                0
-            }
-            Some(_) => super::fail(EOPNOTSUPP),
-            None => super::fail(super::EBADF),
-        }
-    }
-
-    /// `listen`: turn an unbound/bound stream socket into a listener.
-    ///
-    /// # Safety
-    /// C ABI entry point.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_listen(guest_fd: c_int, backlog: c_int) -> c_int {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match socket_handle(guest_fd) {
-            Ok(fd) => net_listen(fd, backlog),
-            Err(errno) => super::fail(errno),
-        }
-    }
-
-    fn net_listen(fd: c_int, backlog: c_int) -> c_int {
-        if let Err(errno) = sched_point() {
-            return super::fail(errno);
-        }
-        let mut state = lock_state();
-        let (address, backlog) = match state.net.sockets.get(&fd) {
-            Some(socket) if socket.kind == SocketKind::Datagram => return super::fail(EOPNOTSUPP),
-            Some(socket)
-                if matches!(socket.kind, SocketKind::StreamListener | SocketKind::Stream) =>
-            {
-                return super::fail(EINVAL);
-            }
-            Some(socket) => {
-                let Some(address) = socket.address.clone() else {
-                    return super::fail(EINVAL);
-                };
-                (address, backlog.max(1) as usize)
-            }
-            None => return super::fail(super::EBADF),
-        };
-        let socket_id = match with_context_raw(|context| context.net_tcp_listen(&address, backlog))
-        {
-            Ok(socket_id) => socket_id,
-            Err(errno) => return super::fail(errno),
-        };
-        let socket = state.net.sockets.get_mut(&fd).expect("socket was checked");
-        socket.socket_id = Some(socket_id);
-        socket.kind = SocketKind::StreamListener;
-        state.net.tcp_listeners.insert(address, fd);
-        0
-    }
-
-    /// `accept`/`accept4`: the accepted stream's guest number. `nonblocking`
-    /// and `cloexec` are the `SOCK_NONBLOCK`/`SOCK_CLOEXEC` bits for the NEW
-    /// descriptor; whether the listener itself blocks is its own `O_NONBLOCK`.
-    ///
-    /// # Safety
-    /// `ip_out`/`port_out` are writable when non-null.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_net_accept(
-        guest_fd: c_int,
-        ip_out: *mut u32,
-        port_out: *mut u16,
-        nonblocking: c_int,
-        cloexec: c_int,
-    ) -> c_int {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        let (fd, listener_nonblocking) = match socket_entry(guest_fd) {
-            Ok(entry) => entry,
-            Err(errno) => return super::fail(errno),
-        };
-        // SAFETY: forwarded from this function's own contract.
-        unsafe {
-            net_accept(
-                fd,
-                listener_nonblocking,
-                ip_out,
-                port_out,
-                nonblocking != 0,
-                cloexec != 0,
-            )
-        }
-    }
-
-    /// # Safety
-    /// `ip_out`/`port_out` are writable when non-null.
-    unsafe fn net_accept(
-        fd: c_int,
-        nonblocking: bool,
-        ip_out: *mut u32,
-        port_out: *mut u16,
-        accepted_nonblocking: bool,
-        accepted_cloexec: bool,
-    ) -> c_int {
-        if let Err(errno) = sched_point() {
-            return super::fail(errno);
-        }
-        let me = current_task();
-        loop {
-            let mut state = lock_state();
-            let (listener_id, local, bound) = match state.net.sockets.get(&fd) {
-                Some(socket) if socket.kind == SocketKind::StreamListener => (
-                    socket.socket_id.expect("listener has runtime socket id"),
-                    socket.address.clone().expect("listener has address"),
-                    socket.bound.expect("listener is bound"),
-                ),
-                Some(socket) if socket.kind == SocketKind::Datagram => {
-                    return super::fail(EOPNOTSUPP);
-                }
-                Some(_) => return super::fail(EINVAL),
-                None => return super::fail(super::EBADF),
-            };
-            match with_context_raw(|context| context.net_tcp_accept(listener_id)) {
-                Ok(Some(accepted)) => {
-                    let Some(peer) = parse_addr(&accepted.peer) else {
-                        fatal("network driver returned malformed TCP peer address");
-                    };
-                    let new_fd = next_handle(&mut state);
-                    state.net.sockets.insert(
-                        new_fd,
-                        NetSocket {
-                            kind: SocketKind::Stream,
-                            socket_id: Some(accepted.socket),
-                            address: Some(local.clone()),
-                            bound: Some(bound),
-                            peer: Some(peer),
-                            read_timeout_nanos: None,
-                            stream_key: Some(accepted.peer.clone()),
-                            recv_waiters: VecDeque::new(),
-                            send_waiters: VecDeque::new(),
-                        },
-                    );
-                    state
-                        .net
-                        .tcp_streams
-                        .entry(accepted.peer)
-                        .or_default()
-                        .server = Some(new_fd);
-                    if !ip_out.is_null() {
-                        unsafe { ip_out.write(peer.0) };
-                    }
-                    if !port_out.is_null() {
-                        unsafe { port_out.write(peer.1) };
-                    }
-                    return bind_socket_handle(
-                        &mut state,
-                        new_fd,
-                        accepted_nonblocking,
-                        accepted_cloexec,
-                    );
-                }
-                Ok(None) => {
-                    if nonblocking {
-                        return super::fail(EWOULDBLOCK);
-                    }
-                    state
-                        .net
-                        .sockets
-                        .get_mut(&fd)
-                        .expect("socket was checked")
-                        .recv_waiters
-                        .push_back(me);
-                    let step = state.block(
-                        me,
-                        "tcp-accept",
-                        Wait::new(BlockClass::Io, vec![WaiterLoc::SockRecv(fd)]),
-                    );
-                    match step {
-                        Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
-                        Ok(Step::Continue) => drop(state),
-                        Err(error) => return error.into_posix(),
-                    }
-                    lock_state().timed_out.remove(&me);
-                    #[cfg(target_os = "linux")]
-                    if signals::resume() == signals::Resumed::Eintr {
-                        return super::fail(super::EINTR);
-                    }
-                }
-                Err(errno) => return super::fail(errno),
-            }
-        }
-    }
-
-    /// Stream `connect`: dial a listener over SimNet.
-    ///
-    /// # Safety
-    /// C ABI entry point.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_tcp_connect(guest_fd: c_int, ip: u32, port: u16) -> c_int {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match socket_handle(guest_fd) {
-            Ok(fd) => net_tcp_connect(fd, ip, port),
-            Err(errno) => super::fail(errno),
-        }
-    }
-
-    fn net_tcp_connect(fd: c_int, ip: u32, port: u16) -> c_int {
-        if let Err(errno) = sched_point() {
-            return super::fail(errno);
-        }
-        let mut state = lock_state();
-        let (local, bound, destination) = match state.net.sockets.get(&fd) {
-            Some(socket) if socket.kind == SocketKind::Stream => return super::fail(EISCONN),
-            Some(socket) if socket.kind == SocketKind::StreamListener => {
-                return super::fail(EOPNOTSUPP);
-            }
-            Some(socket) if socket.kind == SocketKind::Datagram => return super::fail(EOPNOTSUPP),
-            Some(socket) => {
-                let (local, bound) = match (socket.address.clone(), socket.bound) {
-                    (Some(address), Some(bound)) => (address, bound),
-                    _ => {
-                        let local_ip = 0x7f00_0001;
-                        let local_port = state.net.ephemeral();
-                        (format_addr(local_ip, local_port), (local_ip, local_port))
-                    }
-                };
-                (local, bound, format_addr(ip, port))
-            }
-            None => return super::fail(super::EBADF),
-        };
-        let socket_id =
-            match with_context_raw(|context| context.net_tcp_connect(&local, &destination)) {
-                Ok(socket_id) => socket_id,
-                Err(errno) => return super::fail(errno),
-            };
-        let socket = state.net.sockets.get_mut(&fd).expect("socket was checked");
-        socket.kind = SocketKind::Stream;
-        socket.socket_id = Some(socket_id);
-        socket.address = Some(local.clone());
-        socket.bound = Some(bound);
-        socket.peer = Some((ip, port));
-        socket.stream_key = Some(local.clone());
-        state.net.tcp_streams.entry(local).or_default().client = Some(fd);
-        // Wake whoever is blocked in `accept`, resolving the listener the same
-        // exact-then-wildcard way the runtime routed the connection.
-        let listener_address = resolve_listener_address(&state, &destination);
-        let waiters = state
-            .net
-            .tcp_listeners
-            .get(&listener_address)
-            .copied()
-            .map(|listener_fd| drain_recv_waiters(&mut state, listener_fd))
-            .unwrap_or_default();
-        drop(state);
-        wake_all(waiters);
-        0
-    }
-
-    fn net_send_to(fd: c_int, bytes: &[u8], destination: &str) -> isize {
-        let mut state = lock_state();
-        let socket_id = match state.net.sockets.get(&fd) {
-            Some(socket) if socket.kind == SocketKind::Datagram => match socket.socket_id {
-                Some(socket_id) => socket_id,
-                None => return super::fail(super::EBADF) as isize,
-            },
-            Some(_) => return super::fail(EOPNOTSUPP) as isize,
-            None => return super::fail(super::EBADF) as isize,
-        };
-        let report =
-            match with_context_raw(|context| context.net_send(socket_id, destination, bytes)) {
-                Ok(report) => report,
-                Err(errno) => return super::fail(errno) as isize,
-            };
-        let bound_address = resolve_bound_address(&state, destination);
-        let waiters = state
-            .net
-            .bound
-            .get(&bound_address)
-            .copied()
-            .map(|destination_fd| drain_recv_waiters(&mut state, destination_fd))
-            .unwrap_or_default();
-        drop(state);
-        wake_all(waiters);
-        isize::try_from(report.written).unwrap_or(isize::MAX)
-    }
-
-    /// Addressed datagram send.
-    ///
-    /// # Safety
-    /// `buf` must be readable for `len` bytes when nonzero.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_net_sendto(
-        guest_fd: c_int,
-        buf: *const c_void,
-        len: usize,
-        ip: u32,
-        port: u16,
-    ) -> isize {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match socket_handle(guest_fd) {
-            // SAFETY: forwarded from this function's own contract.
-            Ok(fd) => unsafe { net_sendto(fd, buf, len, ip, port) },
-            Err(errno) => super::fail(errno) as isize,
-        }
-    }
-
-    /// # Safety
-    /// `buf` must be readable for `len` bytes when nonzero.
-    unsafe fn net_sendto(fd: c_int, buf: *const c_void, len: usize, ip: u32, port: u16) -> isize {
-        if let Err(errno) = sched_point() {
-            return super::fail(errno) as isize;
-        }
-        if len != 0 && buf.is_null() {
-            return super::fail(EINVAL) as isize;
-        }
-        let bytes = if len == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) }
-        };
-        net_send_to(fd, bytes, &format_addr(ip, port))
-    }
-
-    /// Connected datagram send.
-    ///
-    /// # Safety
-    /// `buf` must be readable for `len` bytes when nonzero.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_net_send(
-        guest_fd: c_int,
-        buf: *const c_void,
-        len: usize,
-    ) -> isize {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match socket_handle(guest_fd) {
-            // SAFETY: forwarded from this function's own contract.
-            Ok(fd) => unsafe { net_send(fd, buf, len) },
-            Err(errno) => super::fail(errno) as isize,
-        }
-    }
-
-    /// # Safety
-    /// `buf` must be readable for `len` bytes when nonzero.
-    unsafe fn net_send(fd: c_int, buf: *const c_void, len: usize) -> isize {
-        if let Err(errno) = sched_point() {
-            return super::fail(errno) as isize;
-        }
-        if len != 0 && buf.is_null() {
-            return super::fail(EINVAL) as isize;
-        }
-        let peer = {
-            let state = lock_state();
-            match state.net.sockets.get(&fd) {
-                Some(socket) if socket.kind == SocketKind::Datagram => socket.peer,
-                Some(_) => return super::fail(EOPNOTSUPP) as isize,
-                None => return super::fail(super::EBADF) as isize,
-            }
-        };
-        let Some((ip, port)) = peer else {
-            return super::fail(ENOTCONN) as isize;
-        };
-        let bytes = if len == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) }
-        };
-        net_send_to(fd, bytes, &format_addr(ip, port))
-    }
-
-    /// Stream send.
-    ///
-    /// # Safety
-    /// `buf` must be readable for `len` bytes when nonzero.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_net_stream_send(
-        guest_fd: c_int,
-        buf: *const c_void,
-        len: usize,
-        flags: c_int,
-    ) -> isize {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match socket_entry(guest_fd) {
-            // SAFETY: forwarded from this function's own contract.
-            Ok((fd, nonblocking)) => unsafe {
-                net_stream_send(fd, nonblocking, buf, len, flags & MSG_NOSIGNAL != 0)
-            },
-            Err(errno) => super::fail(errno) as isize,
-        }
-    }
-
-    /// # Safety
-    /// `buf` must be readable for `len` bytes when nonzero.
-    unsafe fn net_stream_send(
-        fd: c_int,
-        nonblocking: bool,
-        buf: *const c_void,
-        len: usize,
-        nosignal: bool,
-    ) -> isize {
-        if let Err(errno) = sched_point() {
-            return super::fail(errno) as isize;
-        }
-        if len != 0 && buf.is_null() {
-            return super::fail(EINVAL) as isize;
-        }
-        if len == 0 {
-            return 0;
-        }
-        let bytes = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) };
-        let me = current_task();
-        loop {
-            let mut state = lock_state();
-            let socket_id = match state.net.sockets.get(&fd) {
-                Some(socket) if socket.kind == SocketKind::Stream => {
-                    socket.socket_id.expect("stream has runtime socket id")
-                }
-                Some(_) => return super::fail(ENOTCONN) as isize,
-                None => return super::fail(super::EBADF) as isize,
-            };
-            match with_context_raw(|context| context.net_tcp_send(socket_id, bytes)) {
-                Ok(written) if written > 0 => {
-                    let waiters = peer_fd(&state, fd)
-                        .map(|peer_fd| drain_recv_waiters(&mut state, peer_fd))
-                        .unwrap_or_default();
-                    drop(state);
-                    wake_all(waiters);
-                    return isize::try_from(written).unwrap_or(isize::MAX);
-                }
-                Ok(0) => {
-                    if nonblocking {
-                        return super::fail(EWOULDBLOCK) as isize;
-                    }
-                    state
-                        .net
-                        .sockets
-                        .get_mut(&fd)
-                        .expect("socket was checked")
-                        .send_waiters
-                        .push_back(me);
-                    let step = state.block(
-                        me,
-                        "tcp-send",
-                        Wait::new(BlockClass::Io, vec![WaiterLoc::SockSend(fd)]),
-                    );
-                    match step {
-                        Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
-                        Ok(Step::Continue) => drop(state),
-                        Err(error) => return super::fail(error.into_posix()) as isize,
-                    }
-                    lock_state().timed_out.remove(&me);
-                    #[cfg(target_os = "linux")]
-                    if signals::resume() == signals::Resumed::Eintr {
-                        return super::fail(super::EINTR) as isize;
-                    }
-                }
-                Ok(_) => {
-                    fatal("TCP send returned more bytes than requested after zero-length check")
-                }
-                Err(errno) => {
-                    drop(state);
-                    if errno == super::EPIPE && !nosignal {
-                        broken_pipe_signal();
-                    }
-                    return super::fail(errno) as isize;
-                }
-            }
-        }
-    }
-
-    // SAFETY: `buf`/`ip_out`/`port_out` are writable per the C ABI contract.
-    unsafe fn deliver_datagram(
-        datagram: &Datagram,
-        buf: *mut c_void,
-        len: usize,
-        ip_out: *mut u32,
-        port_out: *mut u16,
-    ) -> isize {
-        let count = datagram.bytes.len().min(len);
-        if count > 0 && !buf.is_null() {
-            unsafe {
-                std::slice::from_raw_parts_mut(buf.cast::<u8>(), count)
-                    .copy_from_slice(&datagram.bytes[..count]);
-            }
-        }
-        if let Some((ip, port)) = parse_addr(&datagram.from) {
-            if !ip_out.is_null() {
-                unsafe { ip_out.write(ip) };
-            }
-            if !port_out.is_null() {
-                unsafe { port_out.write(port) };
-            }
-        }
-        isize::try_from(count).unwrap_or(isize::MAX)
-    }
-
-    /// Datagram receive, reporting the sender when asked.
-    ///
-    /// # Safety
-    /// `buf` must be writable for `len` bytes; `ip_out`/`port_out` writable or null.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_net_recvfrom(
-        guest_fd: c_int,
-        buf: *mut c_void,
-        len: usize,
-        ip_out: *mut u32,
-        port_out: *mut u16,
-    ) -> isize {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match socket_entry(guest_fd) {
-            // SAFETY: forwarded from this function's own contract.
-            Ok((fd, nonblocking)) => unsafe {
-                net_recvfrom(fd, nonblocking, buf, len, ip_out, port_out)
-            },
-            Err(errno) => super::fail(errno) as isize,
-        }
-    }
-
-    /// # Safety
-    /// `buf` must be writable for `len` bytes; `ip_out`/`port_out` writable or null.
-    unsafe fn net_recvfrom(
-        fd: c_int,
-        nonblocking: bool,
-        buf: *mut c_void,
-        len: usize,
-        ip_out: *mut u32,
-        port_out: *mut u16,
-    ) -> isize {
-        if let Err(errno) = sched_point() {
-            return super::fail(errno) as isize;
-        }
-        let me = current_task();
-        // Absolute virtual deadline for a `SO_RCVTIMEO` receive, fixed on the
-        // first block from entry time so it does not drift across re-checks.
-        let mut timeout_deadline: Option<u64> = None;
-        loop {
-            let mut state = lock_state();
-            let (socket_id, read_timeout) = match state.net.sockets.get(&fd) {
-                Some(socket) if socket.kind == SocketKind::Datagram => match socket.socket_id {
-                    Some(socket_id) => (socket_id, socket.read_timeout_nanos),
-                    None => return super::fail(super::EBADF) as isize,
-                },
-                Some(_) => return super::fail(EOPNOTSUPP) as isize,
-                None => return super::fail(super::EBADF) as isize,
-            };
-            match with_context_raw(|context| context.net_recv(socket_id)) {
-                Ok(Some(datagram)) => {
-                    drop(state);
-                    return unsafe { deliver_datagram(&datagram, buf, len, ip_out, port_out) };
-                }
-                Ok(None) => {
-                    if nonblocking {
-                        return super::fail(EWOULDBLOCK) as isize;
-                    }
-                    // Deterministic SO_RCVTIMEO. `net_recv` above is checked
-                    // first every iteration, so a datagram deliverable at exactly
-                    // the timeout instant is returned rather than timing out:
-                    // delivery wins ties. The deadline is captured once (relative
-                    // to entry) and the park below is bounded by it.
-                    if let Some(rt) = read_timeout {
-                        let now = match with_context_raw(|c| c.now(ClockKind::Monotonic)) {
-                            Ok(now) => now,
-                            Err(errno) => return super::fail(errno) as isize,
-                        };
-                        let deadline = *timeout_deadline.get_or_insert(now.saturating_add(rt));
-                        if now >= deadline {
-                            return super::fail(EWOULDBLOCK) as isize;
-                        }
-                    }
-                    state
-                        .net
-                        .sockets
-                        .get_mut(&fd)
-                        .expect("socket was checked")
-                        .recv_waiters
-                        .push_back(me);
-                    let delivery = match with_context_raw(|c| c.net_next_delivery(socket_id)) {
-                        Ok(delivery) => delivery,
-                        Err(errno) => return super::fail(errno) as isize,
-                    };
-                    // Park until the earlier of the next delivery and the receive
-                    // timeout; block indefinitely only when neither bounds it.
-                    let park_deadline = match (delivery, timeout_deadline) {
-                        (Some(delivery), Some(timeout)) => Some(delivery.min(timeout)),
-                        (Some(delivery), None) => Some(delivery),
-                        (None, Some(timeout)) => Some(timeout),
-                        (None, None) => None,
-                    };
-                    let step = match park_deadline {
-                        Some(deadline) => state.block_timed(
-                            me,
-                            "net-recv",
-                            Wait::new(BlockClass::Io, vec![WaiterLoc::SockRecv(fd)]),
-                            ClockKind::Monotonic,
-                            deadline,
-                        ),
-                        None => state.block(
-                            me,
-                            "net-recv",
-                            Wait::new(BlockClass::Io, vec![WaiterLoc::SockRecv(fd)]),
-                        ),
-                    };
-                    match step {
-                        Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
-                        Ok(Step::Continue) => drop(state),
-                        Err(error) => return super::fail(error.into_posix()) as isize,
-                    }
-                    lock_state().timed_out.remove(&me);
-                    #[cfg(target_os = "linux")]
-                    if signals::resume() == signals::Resumed::Eintr {
-                        return super::fail(super::EINTR) as isize;
-                    }
-                }
-                Err(errno) => return super::fail(errno) as isize,
-            }
-        }
-    }
-
-    /// Datagram receive without the sender.
-    ///
-    /// # Safety
-    /// `buf` must be writable for `len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_net_recv(
-        guest_fd: c_int,
-        buf: *mut c_void,
-        len: usize,
-    ) -> isize {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match socket_entry(guest_fd) {
-            // SAFETY: forwarded from this function's own contract.
-            Ok((fd, nonblocking)) => unsafe { net_recv(fd, nonblocking, buf, len) },
-            Err(errno) => super::fail(errno) as isize,
-        }
-    }
-
-    /// # Safety
-    /// `buf` must be writable for `len` bytes.
-    unsafe fn net_recv(fd: c_int, nonblocking: bool, buf: *mut c_void, len: usize) -> isize {
-        // SAFETY: forwarded from this function's own contract.
-        unsafe {
-            net_recvfrom(
-                fd,
-                nonblocking,
-                buf,
-                len,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        }
-    }
-
-    /// Stream receive.
-    ///
-    /// # Safety
-    /// `buf` must be writable for `len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_net_stream_recv(
-        guest_fd: c_int,
-        buf: *mut c_void,
-        len: usize,
-    ) -> isize {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match socket_entry(guest_fd) {
-            // SAFETY: forwarded from this function's own contract.
-            Ok((fd, nonblocking)) => unsafe { net_stream_recv(fd, nonblocking, buf, len) },
-            Err(errno) => super::fail(errno) as isize,
-        }
-    }
-
-    /// The `read(2)`/`write(2)` face of a socket description: a stream is its
-    /// stream transfer, a datagram its connected transfer, anything else is
-    /// `ENOTCONN`.
-    ///
-    /// # Safety
-    /// `buf` must be writable for `len` bytes when nonzero.
-    pub(crate) unsafe fn socket_read(
-        handle: u64,
-        nonblocking: bool,
-        buf: *mut c_void,
-        len: usize,
-    ) -> isize {
-        let fd = handle as c_int;
-        let kind = lock_state().net.sockets.get(&fd).map(|socket| socket.kind);
-        match kind {
-            // SAFETY: forwarded from this function's own contract.
-            Some(SocketKind::Stream) => unsafe { net_stream_recv(fd, nonblocking, buf, len) },
-            // SAFETY: as above.
-            Some(SocketKind::Datagram) => unsafe { net_recv(fd, nonblocking, buf, len) },
-            Some(SocketKind::StreamUnbound | SocketKind::StreamListener) => {
-                super::fail(ENOTCONN) as isize
-            }
-            None => super::fail(super::EBADF) as isize,
-        }
-    }
-
-    /// # Safety
-    /// `buf` must be readable for `len` bytes when nonzero.
-    pub(crate) unsafe fn socket_write(
-        handle: u64,
-        nonblocking: bool,
-        buf: *const c_void,
-        len: usize,
-    ) -> isize {
-        let fd = handle as c_int;
-        let kind = lock_state().net.sockets.get(&fd).map(|socket| socket.kind);
-        match kind {
-            // SAFETY: forwarded from this function's own contract.
-            Some(SocketKind::Stream) => unsafe {
-                net_stream_send(fd, nonblocking, buf, len, false)
-            },
-            // SAFETY: as above.
-            Some(SocketKind::Datagram) => unsafe { net_send(fd, buf, len) },
-            Some(SocketKind::StreamUnbound | SocketKind::StreamListener) => {
-                super::fail(ENOTCONN) as isize
-            }
-            None => super::fail(super::EBADF) as isize,
-        }
-    }
-
-    /// # Safety
-    /// `buf` must be writable for `len` bytes.
-    unsafe fn net_stream_recv(fd: c_int, nonblocking: bool, buf: *mut c_void, len: usize) -> isize {
-        if let Err(errno) = sched_point() {
-            return super::fail(errno) as isize;
-        }
-        if len != 0 && buf.is_null() {
-            return super::fail(EINVAL) as isize;
-        }
-        if len == 0 {
-            return 0;
-        }
-        let me = current_task();
-        loop {
-            let mut state = lock_state();
-            let socket_id = match state.net.sockets.get(&fd) {
-                Some(socket) if socket.kind == SocketKind::Stream => {
-                    socket.socket_id.expect("stream has runtime socket id")
-                }
-                Some(_) => return super::fail(ENOTCONN) as isize,
-                None => return super::fail(super::EBADF) as isize,
-            };
-            match with_context_raw(|context| context.net_tcp_recv(socket_id, len)) {
-                Ok(Some(bytes)) => {
-                    if bytes.len() > len {
-                        fatal("network driver returned more TCP bytes than requested");
-                    }
-                    if !bytes.is_empty() {
-                        unsafe {
-                            std::slice::from_raw_parts_mut(buf.cast::<u8>(), bytes.len())
-                                .copy_from_slice(&bytes);
-                        }
-                    }
-                    let waiters = if bytes.is_empty() {
-                        Vec::new()
-                    } else {
-                        peer_fd(&state, fd)
-                            .map(|peer_fd| drain_send_waiters(&mut state, peer_fd))
-                            .unwrap_or_default()
-                    };
-                    drop(state);
-                    wake_all(waiters);
-                    return isize::try_from(bytes.len()).unwrap_or(isize::MAX);
-                }
-                Ok(None) => {
-                    if nonblocking {
-                        return super::fail(EWOULDBLOCK) as isize;
-                    }
-                    state
-                        .net
-                        .sockets
-                        .get_mut(&fd)
-                        .expect("socket was checked")
-                        .recv_waiters
-                        .push_back(me);
-                    let delivery = match with_context_raw(|c| c.net_next_delivery(socket_id)) {
-                        Ok(delivery) => delivery,
-                        Err(errno) => return super::fail(errno) as isize,
-                    };
-                    let step = match delivery {
-                        Some(deadline) => state.block_timed(
-                            me,
-                            "tcp-recv",
-                            Wait::new(BlockClass::Io, vec![WaiterLoc::SockRecv(fd)]),
-                            ClockKind::Monotonic,
-                            deadline,
-                        ),
-                        None => state.block(
-                            me,
-                            "tcp-recv",
-                            Wait::new(BlockClass::Io, vec![WaiterLoc::SockRecv(fd)]),
-                        ),
-                    };
-                    match step {
-                        Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
-                        Ok(Step::Continue) => drop(state),
-                        Err(error) => return super::fail(error.into_posix()) as isize,
-                    }
-                    lock_state().timed_out.remove(&me);
-                    #[cfg(target_os = "linux")]
-                    if signals::resume() == signals::Resumed::Eintr {
-                        return super::fail(super::EINTR) as isize;
-                    }
-                }
-                Err(errno) => return super::fail(errno) as isize,
-            }
-        }
-    }
-
-    /// `shutdown(2)` on a stream.
-    ///
-    /// # Safety
-    /// C ABI entry point.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_shutdown(guest_fd: c_int, how: c_int) -> c_int {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match socket_handle(guest_fd) {
-            Ok(fd) => net_shutdown(fd, how),
-            Err(errno) => super::fail(errno),
-        }
-    }
-
-    fn net_shutdown(fd: c_int, how: c_int) -> c_int {
-        if let Err(errno) = sched_point() {
-            return super::fail(errno);
-        }
-        let how = match how {
-            0 => ShutdownHow::Read,
-            1 => ShutdownHow::Write,
-            2 => ShutdownHow::Both,
-            _ => return super::fail(EINVAL),
-        };
-        let mut state = lock_state();
-        let socket_id = match state.net.sockets.get(&fd) {
-            Some(socket) if socket.kind == SocketKind::Stream => {
-                socket.socket_id.expect("stream has runtime socket id")
-            }
-            Some(socket) if socket.kind == SocketKind::StreamUnbound => {
-                return super::fail(ENOTCONN);
-            }
-            Some(_) => return super::fail(EOPNOTSUPP),
-            None => return super::fail(super::EBADF),
-        };
-        if let Err(errno) = with_context_raw(|context| context.net_tcp_shutdown(socket_id, how)) {
-            return super::fail(errno);
-        }
-        let peer_fd = peer_fd(&state, fd);
-        let mut waiters = Vec::new();
-        if matches!(how, ShutdownHow::Write | ShutdownHow::Both) {
-            if let Some(peer_fd) = peer_fd {
-                waiters.extend(drain_recv_waiters(&mut state, peer_fd));
-            }
-        }
-        if matches!(how, ShutdownHow::Read | ShutdownHow::Both) {
-            if let Some(peer_fd) = peer_fd {
-                waiters.extend(drain_send_waiters(&mut state, peer_fd));
-            }
-            waiters.extend(drain_recv_waiters(&mut state, fd));
-        }
-        drop(state);
-        wake_all(waiters);
-        0
-    }
-
-    /// The socket's own address.
-    ///
-    /// # Safety
-    /// `ip_out`/`port_out` must be writable.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_net_getsockname(
-        guest_fd: c_int,
-        ip_out: *mut u32,
-        port_out: *mut u16,
-    ) -> c_int {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match socket_handle(guest_fd) {
-            // SAFETY: forwarded from this function's own contract.
-            Ok(fd) => unsafe { net_getsockname(fd, ip_out, port_out) },
-            Err(errno) => super::fail(errno),
-        }
-    }
-
-    /// # Safety
-    /// `ip_out`/`port_out` must be writable.
-    unsafe fn net_getsockname(fd: c_int, ip_out: *mut u32, port_out: *mut u16) -> c_int {
-        if ip_out.is_null() || port_out.is_null() {
-            return super::fail(EINVAL);
-        }
-        let state = lock_state();
-        let Some(socket) = state.net.sockets.get(&fd) else {
-            return super::fail(super::EBADF);
-        };
-        let (ip, port) = socket.bound.unwrap_or((0, 0));
-        unsafe {
-            ip_out.write(ip);
-            port_out.write(port);
-        }
-        0
-    }
-
-    /// The connected peer's address.
-    ///
-    /// # Safety
-    /// `ip_out`/`port_out` must be writable.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_net_getpeername(
-        guest_fd: c_int,
-        ip_out: *mut u32,
-        port_out: *mut u16,
-    ) -> c_int {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match socket_handle(guest_fd) {
-            // SAFETY: forwarded from this function's own contract.
-            Ok(fd) => unsafe { net_getpeername(fd, ip_out, port_out) },
-            Err(errno) => super::fail(errno),
-        }
-    }
-
-    /// # Safety
-    /// `ip_out`/`port_out` must be writable.
-    unsafe fn net_getpeername(fd: c_int, ip_out: *mut u32, port_out: *mut u16) -> c_int {
-        if ip_out.is_null() || port_out.is_null() {
-            return super::fail(EINVAL);
-        }
-        let state = lock_state();
-        let Some(socket) = state.net.sockets.get(&fd) else {
-            return super::fail(super::EBADF);
-        };
-        let Some((ip, port)) = socket.peer else {
-            return super::fail(ENOTCONN);
-        };
-        unsafe {
-            ip_out.write(ip);
-            port_out.write(port);
-        }
-        0
-    }
-
-    /// Set a socket's `SO_RCVTIMEO` in virtual nanoseconds. A zero clears the
-    /// timeout (POSIX: block indefinitely); any nonzero value bounds a later
-    /// blocking receive by that many nanoseconds of virtual time from entry.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_set_read_timeout(guest_fd: c_int, nanos: u64) -> c_int {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        let fd = match socket_handle(guest_fd) {
-            Ok(fd) => fd,
-            Err(errno) => return super::fail(errno),
-        };
-        let mut state = lock_state();
-        match state.net.sockets.get_mut(&fd) {
-            Some(socket) => {
-                socket.read_timeout_nanos = (nanos != 0).then_some(nanos);
-                0
-            }
-            None => super::fail(super::EBADF),
         }
     }
 
@@ -11159,74 +9993,9 @@ mod thread {
         0
     }
 
-    /// Free a socket whose description's last reference went (the universal
-    /// `patina_close` path): drop it from the address tables, tell the peer,
-    /// wake whoever was parked on it, and close the runtime socket.
-    pub(crate) fn socket_close(handle: u64) -> Result<(), c_int> {
-        let fd = handle as c_int;
-        let mut state = lock_state();
-        let Some(socket) = state.net.sockets.remove(&fd) else {
-            return Err(super::EBADF);
-        };
-        let mut waiters = Vec::new();
-        match socket.kind {
-            SocketKind::Datagram => {
-                if let Some(address) = &socket.address {
-                    state.net.bound.remove(address);
-                }
-            }
-            SocketKind::StreamListener => {
-                if let Some(address) = &socket.address {
-                    state.net.tcp_listeners.remove(address);
-                }
-                waiters.extend(socket.recv_waiters);
-                waiters.extend(socket.send_waiters);
-            }
-            SocketKind::Stream => {
-                // The socket is already out of the table, so take the peer from
-                // the connection entry directly, then drop this side from it —
-                // and the whole entry once both sides are gone.
-                if let Some(key) = &socket.stream_key {
-                    let peer = state
-                        .net
-                        .tcp_streams
-                        .get(key)
-                        .and_then(|pair| pair.other(fd));
-                    if let Some(pair) = state.net.tcp_streams.get_mut(key) {
-                        if pair.client == Some(fd) {
-                            pair.client = None;
-                        }
-                        if pair.server == Some(fd) {
-                            pair.server = None;
-                        }
-                        if pair.is_empty() {
-                            state.net.tcp_streams.remove(key);
-                        }
-                    }
-                    if let Some(peer_fd) = peer {
-                        waiters.extend(drain_recv_waiters(&mut state, peer_fd));
-                        waiters.extend(drain_send_waiters(&mut state, peer_fd));
-                    }
-                }
-                waiters.extend(socket.recv_waiters);
-                waiters.extend(socket.send_waiters);
-            }
-            SocketKind::StreamUnbound => {
-                waiters.extend(socket.recv_waiters);
-                waiters.extend(socket.send_waiters);
-            }
-        }
-        if let Some(socket_id) = socket.socket_id {
-            with_context_raw(|context| context.net_close(socket_id))?;
-        }
-        drop(state);
-        wake_all(waiters);
-        Ok(())
-    }
-
     // ------------------------------------------------------------------
-    // In-process pipe / socketpair. Both endpoints of a `pipe`/`pipe2`/
-    // `socketpair` live inside this one guest process (the common case: an async
+    // In-process pipe. Both endpoints of a `pipe`/`pipe2` (or of a FIFO) live
+    // inside this one guest process (the common case: an async
     // runtime's IO-driver / signal self-pipe wakeup), so there is no cross-
     // address-space escape — they are modeled as deterministic in-memory byte
     // channels whose reads/writes are scheduler-visible, reusing the SAME baton /
@@ -11237,9 +10006,8 @@ mod thread {
     // recorded scheduler steps already pin every interleaving, so record and
     // flag-free replay converge on that. No host call is ever made.
 
-    /// A bounded, directed byte channel: one writer endpoint feeds it, one reader
-    /// endpoint drains it. A simplex `pipe` is a single channel; a duplex
-    /// `socketpair` is two of them (one per direction).
+    /// A bounded, directed byte channel: writer endpoints feed it, reader
+    /// endpoints drain it. A `pipe` (or a FIFO) is a single channel.
     struct PipeChannel {
         buffer: VecDeque<u8>,
         capacity: usize,
@@ -11270,7 +10038,7 @@ mod thread {
         /// backs a FIFO, so the last close can drop the inode → channel binding
         /// (a later `open` of the same FIFO then starts from an empty pipe,
         /// exactly as it does on a kernel that frees the pipe with its last fd).
-        /// `None` for an anonymous `pipe`/`socketpair` channel.
+        /// `None` for an anonymous `pipe` channel.
         fifo_ino: Option<u64>,
         /// Read-direction arrival sequence: bumped on every event that could
         /// newly satisfy a reader (bytes written, writer close). The epoll
@@ -11289,6 +10057,11 @@ mod thread {
     /// match it so a writer that outruns its reader parks on a full buffer exactly
     /// as it would on the host, rather than buffering without bound.
     const PIPE_CAPACITY: usize = 64 * 1024;
+    /// `PIPE_BUF`: the largest write a pipe takes whole or not at all.
+    #[cfg(target_os = "linux")]
+    const PIPE_BUF: usize = 4096;
+    #[cfg(target_os = "macos")]
+    const PIPE_BUF: usize = 512;
 
     #[derive(Debug, PartialEq, Eq)]
     enum PipeRead {
@@ -11373,15 +10146,17 @@ mod thread {
             }
         }
 
-        /// Push as many of `src`'s bytes as fit. `WouldBlock` when the buffer is
-        /// full and the reader is open (the caller parks); a closed reader is
-        /// `BrokenPipe` (the caller generates SIGPIPE before returning EPIPE).
+        /// Push as many of `src`'s bytes as fit — all of them or none when
+        /// there are at most `PIPE_BUF` (`pipe_write`'s atomic write).
+        /// `WouldBlock` when they do not fit and the reader is open (the caller
+        /// parks); a closed reader is `BrokenPipe` (the caller generates SIGPIPE
+        /// before returning EPIPE).
         fn try_write(&mut self, src: &[u8]) -> PipeWrite {
             if self.read_closed() {
                 return PipeWrite::BrokenPipe;
             }
             let space = self.capacity - self.buffer.len();
-            if space == 0 {
+            if space == 0 || (src.len() <= PIPE_BUF && space < src.len()) {
                 return PipeWrite::WouldBlock;
             }
             let count = src.len().min(space);
@@ -11394,27 +10169,27 @@ mod thread {
         }
     }
 
-    /// One end of a pipe/socketpair. `read_channel`/`write_channel` name the
-    /// directed [`PipeChannel`]s this endpoint may drain / feed; a simplex pipe
-    /// end holds exactly one of them, a duplex socketpair end holds both.
+    /// One end of a pipe or FIFO. `read_channel`/`write_channel` name the
+    /// directed [`PipeChannel`]s this endpoint may drain / feed: a pipe end
+    /// holds one of them, a FIFO opened read-write both sides of its one.
     struct PipeEnd {
         read_channel: Option<u64>,
         write_channel: Option<u64>,
         /// Set when this endpoint came from opening a FIFO rather than from
-        /// `pipe`/`socketpair`: the NODE it is open on. It is all the descriptor
+        /// `pipe`: the NODE it is open on. It is all the descriptor
         /// needs, because `fstat` asks the filesystem about that node — the
         /// node's own reference (taken at the first open, dropped with the last
         /// endpoint) is what keeps it answerable even after the last name for it
         /// is unlinked.
         fifo_ino: Option<u64>,
-        /// The pipefs/sockfs node an anonymous pipe or socketpair end is on
+        /// The pipefs node an anonymous pipe end is on
         /// (`net.pipe_inodes`); `None` for a FIFO end, whose node is
         /// `fifo_ino`'s.
         inode: Option<u64>,
     }
 
     /// The node behind an anonymous pipe (both ends share one, on pipefs) or a
-    /// socketpair end (each its own, on sockfs): what `fstat` reports, what
+    /// socket (each its own, on sockfs): what `fstat` reports, what
     /// `fchmod` changes, and what the filesystem-level answers (`fstatfs`,
     /// `syncfs`) are about. It holds no bytes — those are the channel's.
     struct PipeInode {
@@ -11454,12 +10229,28 @@ mod thread {
         super::fs_time_unrecorded()
     }
 
-    /// The pipefs/sockfs node behind `fd`, if it is an anonymous pipe or
-    /// socketpair end: its metadata as `fstat` reports it.
+    /// The pipefs/sockfs node behind `fd` when it is an anonymous pipe end
+    /// or a socket.
+    fn anon_inode(state: &ThreadRuntime, fd: c_int) -> Option<u64> {
+        let resolved = class_entry(fd).ok()?;
+        let handle = resolved.handle as c_int;
+        match resolved.kind {
+            FdKind::Pipe => state.net.pipe_ends.get(&handle)?.inode,
+            FdKind::Socket => state
+                .net
+                .sockets
+                .table
+                .get(&handle)
+                .map(|socket| socket.inode),
+            _ => None,
+        }
+    }
+
+    /// The pipefs/sockfs node behind `fd`, if it is an anonymous pipe end or
+    /// a socket: its metadata as `fstat` reports it.
     pub(crate) fn pipe_inode_metadata(fd: c_int) -> Option<super::PatinaMetadata> {
-        let (end, _) = pipe_entry(fd).ok()?;
         let state = lock_state();
-        let ino = state.net.pipe_ends.get(&end)?.inode?;
+        let ino = anon_inode(&state, fd)?;
         let inode = state.net.pipe_inodes.get(&ino)?;
         Some(super::PatinaMetadata {
             kind: if inode.socket {
@@ -11483,13 +10274,12 @@ mod thread {
         })
     }
 
-    /// `fchmod` on an anonymous pipe or socketpair end: the node's permission
+    /// `fchmod` on an anonymous pipe end or a socket: the node's permission
     /// bits change and its `ctime` moves. `None` for any other descriptor.
     pub(crate) fn pipe_inode_set_mode(fd: c_int, mode: u32) -> Option<()> {
         let now = pipe_inode_time();
-        let (end, _) = pipe_entry(fd).ok()?;
         let mut state = lock_state();
-        let ino = state.net.pipe_ends.get(&end)?.inode?;
+        let ino = anon_inode(&state, fd)?;
         let inode = state.net.pipe_inodes.get_mut(&ino)?;
         inode.mode = mode & 0o7777;
         inode.ctime_nanos = now;
@@ -11497,21 +10287,17 @@ mod thread {
     }
 
     /// Which filesystem a pipe-kind descriptor is on: a FIFO end is on the
-    /// deterministic volume, an anonymous pipe on pipefs, a socketpair end on
-    /// sockfs. `None` for a number that is not a pipe end.
+    /// deterministic volume, an anonymous pipe on pipefs. `None` for a number
+    /// that is not a pipe end.
     #[cfg(target_os = "linux")]
     pub(crate) fn pipe_filesystem(fd: c_int) -> Option<u32> {
         let (end, _) = pipe_entry(fd).ok()?;
         let state = lock_state();
         let end = state.net.pipe_ends.get(&end)?;
-        match end.inode {
-            None => Some(super::PATINA_FS_VOLUME),
-            Some(ino) => Some(if state.net.pipe_inodes.get(&ino)?.socket {
-                super::PATINA_FS_SOCKFS
-            } else {
-                super::PATINA_FS_PIPEFS
-            }),
-        }
+        Some(match end.inode {
+            None => super::PATINA_FS_VOLUME,
+            Some(_) => super::PATINA_FS_PIPEFS,
+        })
     }
 
     fn drain_channel_recv_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<TaskId> {
@@ -11636,75 +10422,6 @@ mod thread {
                 let _ = pipe_close_locked(second.0 as u64);
                 super::fail(errno)
             }
-        }
-    }
-
-    /// Create a duplex AF_UNIX/SOCK_STREAM pair: `fd0_out` and `fd1_out` are
-    /// interchangeable bidirectional endpoints. Two directed channels back them
-    /// (fd0 → fd1 and fd1 → fd0), so each end reads what the other writes.
-    ///
-    /// # Safety
-    /// `fd0_out`/`fd1_out` must be writable.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_socketpair(
-        fd0_out: *mut c_int,
-        fd1_out: *mut c_int,
-        nonblocking: c_int,
-        cloexec: c_int,
-    ) -> c_int {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        if fd0_out.is_null() || fd1_out.is_null() {
-            return super::fail(EINVAL);
-        }
-        let now = pipe_inode_time();
-        let mut state = lock_state();
-        if let Err(error) = state.ensure_active() {
-            return super::fail(error.into_posix());
-        }
-        let inode0 = mint_pipe_inode(&mut state, true, now, 1);
-        let inode1 = mint_pipe_inode(&mut state, true, now, 1);
-        let channel_0to1 = state.net.next_channel;
-        let channel_1to0 = channel_0to1.wrapping_add(1);
-        state.net.next_channel = channel_1to0.wrapping_add(1);
-        state
-            .net
-            .pipe_channels
-            .insert(channel_0to1, PipeChannel::new(PIPE_CAPACITY));
-        state
-            .net
-            .pipe_channels
-            .insert(channel_1to0, PipeChannel::new(PIPE_CAPACITY));
-        let end0 = next_handle(&mut state);
-        let end1 = next_handle(&mut state);
-        state.net.pipe_ends.insert(
-            end0,
-            PipeEnd {
-                read_channel: Some(channel_1to0),
-                write_channel: Some(channel_0to1),
-                fifo_ino: None,
-                inode: Some(inode0),
-            },
-        );
-        state.net.pipe_ends.insert(
-            end1,
-            PipeEnd {
-                read_channel: Some(channel_0to1),
-                write_channel: Some(channel_1to0),
-                fifo_ino: None,
-                inode: Some(inode1),
-            },
-        );
-        let status = O_READ | O_WRITE | if nonblocking != 0 { O_NONBLOCK } else { 0 };
-        // SAFETY: the out-pointers were checked non-null above.
-        unsafe {
-            bind_pipe_pair(
-                &mut state,
-                (end0, status),
-                (end1, status),
-                cloexec != 0,
-                fd0_out,
-                fd1_out,
-            )
         }
     }
 
@@ -11897,7 +10614,7 @@ mod thread {
         fd
     }
 
-    /// The bytes a pipe or socketpair end's `FIONREAD` reports: what is queued
+    /// The bytes a pipe end's `FIONREAD` reports: what is queued
     /// in the channel it reads (a pipe's write end, the pipe's one channel).
     pub(crate) fn pipe_queued(handle: u64) -> Option<usize> {
         let state = lock_state();
@@ -11918,26 +10635,6 @@ mod thread {
             .pipe_ends
             .get(&end)
             .and_then(|end| end.fifo_ino)
-    }
-
-    /// Blocking (or `O_NONBLOCK`) read from a pipe/socketpair endpoint (the
-    /// `recv`/`recvfrom` face of a socketpair end; `read` reaches the same
-    /// transfer through the universal `patina_read`).
-    ///
-    /// # Safety
-    /// `buf` must be writable for `len` bytes when nonzero.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_pipe_read(
-        guest_fd: c_int,
-        buf: *mut c_void,
-        len: usize,
-    ) -> isize {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match pipe_entry(guest_fd) {
-            // SAFETY: forwarded from this function's own contract.
-            Ok((end, nonblocking)) => unsafe { pipe_read(end as u64, nonblocking, buf, len) },
-            Err(errno) => super::fail(errno) as isize,
-        }
     }
 
     /// # Safety
@@ -12015,28 +10712,6 @@ mod thread {
         }
     }
 
-    /// Blocking (or `O_NONBLOCK`) write to a pipe/socketpair endpoint (the
-    /// `send`/`sendto` face of a socketpair end).
-    ///
-    /// # Safety
-    /// `buf` must be readable for `len` bytes when nonzero.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_pipe_write(
-        guest_fd: c_int,
-        buf: *const c_void,
-        len: usize,
-        flags: c_int,
-    ) -> isize {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        match pipe_entry(guest_fd) {
-            // SAFETY: forwarded from this function's own contract.
-            Ok((end, nonblocking)) => unsafe {
-                pipe_write(end as u64, nonblocking, buf, len, flags & MSG_NOSIGNAL != 0)
-            },
-            Err(errno) => super::fail(errno) as isize,
-        }
-    }
-
     /// # Safety
     /// `buf` must be readable for `len` bytes when nonzero.
     pub(crate) unsafe fn pipe_write(
@@ -12058,6 +10733,10 @@ mod thread {
         }
         let src = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) };
         let me = current_task();
+        // A blocking write returns once every byte is in (a signal or a
+        // vanished reader ends it early with what went in); a nonblocking one
+        // returns what fit.
+        let mut written = 0;
         loop {
             let mut state = lock_state();
             let channel = match state.net.pipe_ends.get(&fd) {
@@ -12072,19 +10751,25 @@ mod thread {
                 .net
                 .pipe_channels
                 .get_mut(&channel)
-                .map(|channel| channel.try_write(src))
+                .map(|channel| channel.try_write(&src[written..]))
                 .unwrap_or(PipeWrite::BrokenPipe);
             match outcome {
                 PipeWrite::Wrote(count) => {
+                    written += count;
                     let waiters = drain_channel_recv_waiters(&mut state, channel);
                     drop(state);
                     wake_all(waiters);
-                    return isize::try_from(count).unwrap_or(isize::MAX);
+                    if written == len || nonblocking {
+                        return isize::try_from(written).unwrap_or(isize::MAX);
+                    }
                 }
                 PipeWrite::BrokenPipe => {
                     drop(state);
                     if !nosignal {
                         broken_pipe_signal();
+                    }
+                    if written > 0 {
+                        return isize::try_from(written).unwrap_or(isize::MAX);
                     }
                     return super::fail(super::EPIPE) as isize;
                 }
@@ -12108,6 +10793,9 @@ mod thread {
                     lock_state().timed_out.remove(&me);
                     #[cfg(target_os = "linux")]
                     if signals::resume() == signals::Resumed::Eintr {
+                        if written > 0 {
+                            return isize::try_from(written).unwrap_or(isize::MAX);
+                        }
                         return super::fail(super::EINTR) as isize;
                     }
                 }
@@ -12144,19 +10832,11 @@ mod thread {
     // observable exactly as the equivalent read and write would be.
 
     /// The pipe an endpoint belongs to — the one channel of an anonymous pipe
-    /// or a FIFO — or `None` for a socketpair end, which `splice` treats as a
-    /// socket (`get_pipe_info` answers NULL for it).
+    /// or a FIFO.
     #[cfg(target_os = "linux")]
     pub(crate) fn splice_pipe(handle: u64) -> Option<u64> {
         let state = lock_state();
         let end = state.net.pipe_ends.get(&(handle as c_int))?;
-        let socket = end
-            .inode
-            .and_then(|ino| state.net.pipe_inodes.get(&ino))
-            .is_some_and(|inode| inode.socket);
-        if socket {
-            return None;
-        }
         end.read_channel.or(end.write_channel)
     }
 
@@ -12394,7 +11074,7 @@ mod thread {
         Ok(count)
     }
 
-    /// Free a pipe/socketpair endpoint whose description's last reference went
+    /// Free a pipe endpoint whose description's last reference went
     /// (the universal `patina_close` path). A channel SIDE closes — waking the
     /// peer with EPIPE (readers gone) or EOF (writers gone) — only on the LAST
     /// endpoint of that side; a dup'd number never reaches here until it is the
@@ -12486,10 +11166,8 @@ mod thread {
     const PIPE_MAX_SIZE: usize = 1 << 20;
     const PIPE_PAGE: usize = 4096;
 
-    /// The channel a pipe endpoint's `F_GETPIPE_SZ`/`F_SETPIPE_SZ` act on: a
-    /// simplex end's one channel, a socketpair end's write side (the kernel
-    /// answers `EINVAL` for a socket; a socketpair end here is a pipe pair, and
-    /// its size is the buffer it writes into).
+    /// The channel a pipe endpoint's `F_GETPIPE_SZ`/`F_SETPIPE_SZ` act on: the
+    /// pipe's one channel.
     fn pipe_size_channel(state: &ThreadRuntime, fd: c_int) -> Option<u64> {
         let end = state.net.pipe_ends.get(&fd)?;
         end.write_channel.or(end.read_channel)
@@ -12766,7 +11444,7 @@ mod thread {
     // model of the BSD readiness multiplexer that mio (and therefore tokio)
     // builds its IO driver on. A `kqueue` is a description in the descriptor
     // table; `kevent`/`kevent64` register EVFILT_READ/WRITE interest over the
-    // virtual pipe/socketpair and SimNet socket fds, an EVFILT_USER self-wakeup
+    // virtual pipe and socket fds, an EVFILT_USER self-wakeup
     // (mio's `Waker`), and EVFILT_TIMER against the virtual clock, then gather
     // ready events — parking on the scheduler baton with multi-fd fan-in when
     // nothing is ready. Readiness for a pipe fd is pure in-shim channel state;
@@ -12797,183 +11475,146 @@ mod thread {
         udata: usize,
     }
 
-    /// Level-triggered readiness of a virtual descriptor, for the kqueue/epoll
-    /// reactors. A pipe/socketpair endpoint is read from in-shim channel state;
-    /// an eventfd (Linux) from its in-shim counter; a SimNet socket from the
-    /// runtime's unrecorded `net_readiness`.
+    /// A descriptor's kernel poll mask (`EPOLL*` bits, [`net::abi`]'s
+    /// `POLL*`) and its per-direction arrival sequences, for the readiness
+    /// reactors: what the object's poll function answers now, computed
+    /// without consuming anything or recording a boundary op. `desc`, when
+    /// given, is the description an interest was registered against, which is
+    /// what is polled even if the number now names another one (the kernel's
+    /// `(fd, struct file)` interest key). `None` for a number that names
+    /// nothing.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[derive(Clone, Copy)]
-    struct FdReadiness {
-        readable: bool,
-        writable: bool,
-        read_eof: bool,
-        write_eof: bool,
+    fn fd_poll(
+        state: &ThreadRuntime,
+        fd: c_int,
+        desc: Option<DescId>,
+    ) -> Option<(u32, (u64, u64))> {
+        let (kind, handle) = match desc {
+            Some(desc) => {
+                let table = super::fd_table().lock();
+                let description = table.description(desc)?;
+                (description.kind, description.handle)
+            }
+            None => {
+                let resolved = super::fd_table().lock().resolve(fd)?;
+                (resolved.kind, resolved.handle)
+            }
+        };
+        Some(poll_description(state, kind, handle))
     }
 
-    /// A descriptor that no longer exists (closed after registration, or its
-    /// number reused by another description): ready-with-EOF so the reactor
-    /// wakes, the subsequent operation surfaces the error, and the knote drops
-    /// out.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    const GONE: FdReadiness = FdReadiness {
-        readable: true,
-        writable: true,
-        read_eof: true,
-        write_eof: true,
-    };
-
-    /// Compute the readiness of guest descriptor `fd` without consuming any
-    /// bytes or recording a boundary op. `desc`, when given, is the description
-    /// the interest was registered against: a number that now names another
-    /// description is [`GONE`], never the newcomer's readiness.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn fd_readiness(state: &ThreadRuntime, fd: c_int, desc: Option<DescId>) -> FdReadiness {
-        let Some(resolved) = super::fd_table().lock().resolve(fd) else {
-            return GONE;
-        };
-        if desc.is_some_and(|desc| desc != resolved.desc) {
-            return GONE;
-        }
-        let handle = resolved.handle as c_int;
-        match resolved.kind {
-            FdKind::Pipe => pipe_readiness(state, handle),
-            FdKind::Socket => socket_readiness(state, handle),
-            #[cfg(target_os = "linux")]
-            FdKind::SignalFd => FdReadiness {
-                readable: signals::fd::readable(state, resolved.handle, current_task()),
-                writable: false,
-                read_eof: false,
-                write_eof: false,
-            },
-            #[cfg(target_os = "linux")]
-            FdKind::TimerFd => FdReadiness {
-                readable: timers::timerfd_readable(state, resolved.handle),
-                writable: false,
-                read_eof: false,
-                write_eof: false,
-            },
-            #[cfg(target_os = "linux")]
-            FdKind::EventFd => {
-                // Deterministic eventfd counter: readable iff nonzero; always
-                // writable (a write that would overflow fails closed loudly
-                // instead of parking, so writability never drops).
-                let readable = state
-                    .net
-                    .eventfds
-                    .get(&handle)
-                    .is_some_and(|efd| efd.value > 0);
-                FdReadiness {
-                    readable,
-                    writable: true,
-                    read_eof: false,
-                    write_eof: false,
-                }
+    fn poll_description(state: &ThreadRuntime, kind: FdKind, handle: u64) -> (u32, (u64, u64)) {
+        use net::abi::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
+        match kind {
+            FdKind::Pipe => pipe_poll(state, handle as c_int),
+            FdKind::Socket => {
+                net::socket_poll(state, handle).unwrap_or((POLLERR | POLLHUP, (0, 0)))
             }
-            // Standard input is at EOF: readable, hung up on the read side.
-            FdKind::Stdin => FdReadiness {
-                readable: true,
-                writable: false,
-                read_eof: true,
-                write_eof: false,
-            },
-            // The captured streams always accept bytes.
-            FdKind::Stdout | FdKind::Stderr => FdReadiness {
-                readable: false,
-                writable: true,
-                read_eof: false,
-                write_eof: false,
-            },
-            // Regular files and devices are always ready (and cannot be
-            // registered with epoll at all: `EPERM` at `epoll_ctl`).
-            FdKind::File | FdKind::Dir | FdKind::OPath | FdKind::Urandom => FdReadiness {
-                readable: true,
-                writable: true,
-                read_eof: false,
-                write_eof: false,
-            },
             #[cfg(target_os = "linux")]
-            FdKind::Epoll => FdReadiness {
-                readable: false,
-                writable: false,
-                read_eof: false,
-                write_eof: false,
-            },
+            FdKind::SignalFd => {
+                let readable = signals::fd::readable(state, handle, current_task());
+                let arrivals = state
+                    .signals
+                    .signalfds
+                    .get(&handle)
+                    .map_or(0, |fd| fd.arrivals);
+                (
+                    if readable { POLLIN | POLLRDNORM } else { 0 },
+                    (arrivals, 0),
+                )
+            }
+            // `eventfd_poll`: readable while the count is nonzero; a write
+            // that would overflow fails closed instead of parking, so it is
+            // always writable.
+            #[cfg(target_os = "linux")]
+            FdKind::EventFd => state.net.eventfds.get(&(handle as c_int)).map_or(
+                (POLLERR | POLLHUP, (0, 0)),
+                |efd| {
+                    let readable = if efd.value > 0 {
+                        POLLIN | POLLRDNORM
+                    } else {
+                        0
+                    };
+                    (readable | POLLOUT | POLLWRNORM, (efd.write_events, 0))
+                },
+            ),
+            // Standard input is at end of file.
+            FdKind::Stdin => (POLLIN | POLLRDNORM | POLLHUP, (0, 0)),
+            // The captured streams always accept bytes.
+            FdKind::Stdout | FdKind::Stderr => (POLLOUT | POLLWRNORM, (0, 0)),
+            // `DEFAULT_POLLMASK`: files and devices are always ready (and
+            // cannot be registered with epoll at all: `EPERM` at
+            // `epoll_ctl`).
+            FdKind::File | FdKind::Dir | FdKind::OPath | FdKind::Urandom => {
+                (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM, (0, 0))
+            }
+            // `timerfd_poll`: readable while an expiration is unread; every
+            // firing is an arrival.
+            #[cfg(target_os = "linux")]
+            FdKind::TimerFd => {
+                let (readable, fires) = timers::timerfd_poll(state, handle);
+                (if readable { POLLIN | POLLRDNORM } else { 0 }, (fires, 0))
+            }
+            #[cfg(target_os = "linux")]
+            FdKind::Epoll => (0, (0, 0)),
             #[cfg(target_os = "linux")]
             FdKind::MessageQueue => {
-                let (readable, writable) = ipc::mq_readiness(state, resolved.handle);
-                FdReadiness {
-                    readable,
-                    writable,
-                    read_eof: false,
-                    write_eof: false,
+                let (readable, writable) = ipc::mq_readiness(state, handle);
+                let mut mask = 0;
+                if readable {
+                    mask |= POLLIN | POLLRDNORM;
                 }
+                if writable {
+                    mask |= POLLOUT | POLLWRNORM;
+                }
+                (mask, ipc::mq_event_seqs(state, handle))
             }
             #[cfg(target_os = "macos")]
-            FdKind::Kqueue => FdReadiness {
-                readable: false,
-                writable: false,
-                read_eof: false,
-                write_eof: false,
-            },
+            FdKind::Kqueue => (0, (0, 0)),
         }
     }
 
-    /// Pipe/socketpair endpoint readiness: pure in-shim channel state, so it
-    /// needs no runtime op and emits no trace event.
+    /// `pipe_poll`: the read side is readable while bytes are queued and hung
+    /// up once no writer is left; the write side is writable while there is
+    /// room and in error once no reader is left.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn pipe_readiness(state: &ThreadRuntime, fd: c_int) -> FdReadiness {
-        if let Some(end) = state.net.pipe_ends.get(&fd) {
-            let mut readiness = FdReadiness {
-                readable: false,
-                writable: false,
-                read_eof: false,
-                write_eof: false,
-            };
-            if let Some(channel) = end
-                .read_channel
-                .and_then(|id| state.net.pipe_channels.get(&id))
-            {
-                readiness.read_eof = channel.write_closed() && channel.buffer.is_empty();
-                readiness.readable = !channel.buffer.is_empty() || readiness.read_eof;
+    fn pipe_poll(state: &ThreadRuntime, fd: c_int) -> (u32, (u64, u64)) {
+        use net::abi::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
+        let Some(end) = state.net.pipe_ends.get(&fd) else {
+            return (POLLERR | POLLHUP, (0, 0));
+        };
+        let read = end
+            .read_channel
+            .and_then(|id| state.net.pipe_channels.get(&id));
+        let write = end
+            .write_channel
+            .and_then(|id| state.net.pipe_channels.get(&id));
+        let mut mask = 0;
+        if let Some(channel) = read {
+            if !channel.buffer.is_empty() {
+                mask |= POLLIN | POLLRDNORM;
             }
-            if let Some(channel) = end
-                .write_channel
-                .and_then(|id| state.net.pipe_channels.get(&id))
-            {
-                readiness.write_eof = channel.read_closed();
-                readiness.writable = readiness.write_eof || channel.buffer.len() < channel.capacity;
+            if channel.write_closed() {
+                mask |= POLLHUP;
             }
-            return readiness;
         }
-        GONE
-    }
-
-    /// Virtual SimNet socket readiness: it lives in the runtime network driver.
-    /// `net_readiness` reads it plus the virtual clock WITHOUT recording, so it
-    /// is deterministic given the recorded schedule and emits no trace event.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn socket_readiness(state: &ThreadRuntime, fd: c_int) -> FdReadiness {
-        if let Some(socket) = state.net.sockets.get(&fd) {
-            let Some(socket_id) = socket.socket_id else {
-                // An unbound/unconnected stream has no buffers yet: nothing ready.
-                return FdReadiness {
-                    readable: false,
-                    writable: false,
-                    read_eof: false,
-                    write_eof: false,
-                };
-            };
-            return match with_context_raw(|context| context.net_readiness(socket_id)) {
-                Ok(bits) => FdReadiness {
-                    readable: bits & (1 << 0) != 0,
-                    writable: bits & (1 << 1) != 0,
-                    read_eof: bits & (1 << 2) != 0,
-                    write_eof: bits & (1 << 3) != 0,
-                },
-                Err(_) => GONE,
-            };
+        if let Some(channel) = write {
+            if channel.buffer.len() < channel.capacity {
+                mask |= POLLOUT | POLLWRNORM;
+            }
+            if channel.read_closed() {
+                mask |= POLLERR;
+            }
         }
-        GONE
+        #[cfg(target_os = "linux")]
+        let seqs = (
+            read.map_or(0, |channel| channel.read_events),
+            write.map_or(0, |channel| channel.write_events),
+        );
+        #[cfg(target_os = "macos")]
+        let seqs = (0, 0);
+        (mask, seqs)
     }
 
     /// A readiness direction to watch on a virtual descriptor. Deliberately
@@ -13099,7 +11740,7 @@ mod thread {
                     }
                 }
             } else if resolved.kind == FdKind::Socket {
-                let Some(socket) = state.net.sockets.get_mut(&fd) else {
+                let Some(socket) = state.net.sockets.table.get_mut(&fd) else {
                     continue;
                 };
                 match dir {
@@ -13184,12 +11825,12 @@ mod thread {
                     }
                 }
                 WaiterLoc::SockRecv(fd) => {
-                    if let Some(socket) = state.net.sockets.get_mut(&fd) {
+                    if let Some(socket) = state.net.sockets.table.get_mut(&fd) {
                         remove(&mut socket.recv_waiters);
                     }
                 }
                 WaiterLoc::SockSend(fd) => {
-                    if let Some(socket) = state.net.sockets.get_mut(&fd) {
+                    if let Some(socket) = state.net.sockets.table.get_mut(&fd) {
                         remove(&mut socket.send_waiters);
                     }
                 }
@@ -13227,10 +11868,11 @@ mod thread {
 
         use super::{
             BlockClass, FdKind, O_READ, O_WRITE, PatinaKevent, ReadyDir, Step, TaskId,
-            ThreadRuntime, Wait, current_task, fatal, fd_readiness, lock_state,
+            ThreadRuntime, Wait, current_task, fatal, fd_poll, lock_state,
             register_readiness_waiters, sched_point, switch_and_park, unregister_waiters, wake_all,
             with_context_raw,
         };
+        use crate::thread::net::abi::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDHUP};
 
         // macOS <sys/event.h> filter identifiers (the reactor is macOS-only).
         pub(super) const EVFILT_READ: i16 = -1;
@@ -13433,8 +12075,8 @@ mod thread {
 
                 if flags & EV_ADD != 0 {
                     // Registration-time fd validation: EVFILT_READ/WRITE readiness
-                    // is defined only over virtual pipe/socketpair and SimNet
-                    // socket descriptors. A real file, stdio, or otherwise unknown
+                    // is defined only over virtual pipe and socket
+                    // descriptors. A real file, stdio, or otherwise unknown
                     // descriptor fails closed loudly here.
                     if matches!(filter, EVFILT_READ | EVFILT_WRITE) {
                         let fd = c_int::try_from(ident).unwrap_or(-1);
@@ -13582,11 +12224,21 @@ mod thread {
                 match key.filter {
                     EVFILT_READ | EVFILT_WRITE => {
                         let fd = c_int::try_from(key.ident).unwrap_or(-1);
-                        let r = fd_readiness(state, fd, None);
+                        // The filters read the poll mask: a number that names
+                        // nothing any more is ready with EOF, so the reactor
+                        // wakes and the next operation surfaces the error.
+                        let mask =
+                            fd_poll(state, fd, None).map_or(POLLERR | POLLHUP, |(mask, _)| mask);
                         let (ready_now, eof) = if key.filter == EVFILT_READ {
-                            (r.readable, r.read_eof)
+                            (
+                                mask & (POLLIN | POLLRDHUP | POLLHUP | POLLERR) != 0,
+                                mask & (POLLRDHUP | POLLHUP) != 0,
+                            )
                         } else {
-                            (r.writable, r.write_eof)
+                            (
+                                mask & (POLLOUT | POLLHUP | POLLERR) != 0,
+                                mask & (POLLHUP | POLLERR) != 0,
+                            )
                         };
                         if ready_now && !st.delivered {
                             let mut flags = 0u16;
@@ -13876,41 +12528,39 @@ mod thread {
 
     // ------------------------------------------------------------------
     // epoll readiness reactor (Linux) — the mirror of `mod kqueue` above over
-    // the same OS-agnostic readiness core (`fd_readiness`,
+    // the same OS-agnostic readiness core (`fd_poll`,
     // `register_readiness_waiters`). An epoll instance is a description in the
     // descriptor table; `epoll_ctl` keeps one interest per watched fd (epoll
-    // semantics) over the virtual pipe/socketpair, eventfd, and SimNet socket
-    // fds; `epoll_wait` gathers ready events — parking on the scheduler baton
-    // with multi-fd fan-in when nothing is ready, bounded by the millisecond
-    // timeout on the virtual clock. mio's `Waker` analogue needs no
-    // epoll-specific wake path: it is an ordinary watched eventfd whose write
-    // drains the shared read-waiter queue.
+    // semantics) over every pollable descriptor kind; `epoll_wait` gathers
+    // ready events — parking on the scheduler baton with multi-fd fan-in when
+    // nothing is ready, bounded by the millisecond timeout on the virtual
+    // clock. mio's `Waker` analogue needs no epoll-specific wake path: it is an
+    // ordinary watched eventfd whose write drains the shared read-waiter
+    // queue.
     //
-    // Event delivery under EPOLLET compares per-direction ARRIVAL SEQUENCES
-    // (`PipeChannel::read_events`/`write_events`, `EventFd::write_events`): an
-    // edge re-fires whenever the source's sequence has advanced since the last
-    // delivery, not merely after readiness dropped — the kernel fires
-    // edge-triggered events per arrival, and mio's eventfd Waker depends on it
-    // (it writes without draining the counter). SimNet sockets expose no
-    // sequence (constant 0), so they degrade to the drop-only latch the kqueue
-    // frontend uses — sound for mio, which drains to EWOULDBLOCK. Returned
-    // events are ordered by the interest table's fd key order (a `BTreeMap`),
-    // so the gathered slice is a pure function of the registry and the
-    // schedule. Like the kqueue registry, everything here is deterministic
-    // GIVEN the recorded schedule and carries NO trace events; only the
-    // scheduler parks/wakes are recorded.
+    // Delivery follows fs/eventpoll.c: a ready list (`ep->rdllist`) that an
+    // interest joins at the tail when its source wakes it, from which
+    // `epoll_wait` delivers each item's poll mask read through its events,
+    // re-queuing a level-triggered item at the tail and dropping an
+    // edge-triggered one until its next wakeup. The model observes wakeups
+    // through each source's per-direction ARRIVAL SEQUENCES (a datagram, a
+    // write, an eventfd add — every arrival is a wakeup, as `ep_poll_callback`
+    // sees it) and through watched conditions rising (a hang-up, an error,
+    // room to write). Everything here is deterministic GIVEN the recorded
+    // schedule and carries NO trace events; only the scheduler parks/wakes are
+    // recorded.
     #[cfg(target_os = "linux")]
     mod epoll {
         use super::{BlockClass, Wait};
-        use std::collections::BTreeMap;
+        use std::collections::{BTreeMap, VecDeque};
         use std::ffi::{c_int, c_void};
 
         use patina_dst_abi::ClockKind;
 
         use super::{
             DescId, EPERM, FdKind, O_READ, O_WRITE, ReadyDir, Step, ThreadRuntime, current_task,
-            fatal, fd_readiness, lock_state, register_readiness_waiters, sched_point,
-            switch_and_park, unregister_waiters, with_context_raw,
+            fatal, lock_state, register_readiness_waiters, sched_point, switch_and_park,
+            unregister_waiters, with_context_raw,
         };
 
         // <sys/epoll.h> control ops and event bits (the reactor is Linux-only).
@@ -13925,9 +12575,16 @@ mod thread {
         const EPOLLRDHUP: u32 = 0x2000;
         const EPOLLET: u32 = 1 << 31;
         /// One delivery, then the interest is disarmed until `EPOLL_CTL_MOD`
-        /// re-arms it (the kernel clears the requested directions and keeps
-        /// this bit; a MOD replaces the whole mask).
+        /// re-arms it (the kernel keeps only the mode bits; a MOD replaces
+        /// the whole mask).
         const EPOLLONESHOT: u32 = 1 << 30;
+        /// Keep the system awake while the event is pending: it needs
+        /// CAP_BLOCK_SUSPEND, so the kernel drops it for the guest.
+        const EPOLLWAKEUP: u32 = 1 << 29;
+        /// Wake one of the epoll instances waiting on the source rather than
+        /// all: every instance sees the event here, which the flag's
+        /// contract ("one or more") allows.
+        const EPOLLEXCLUSIVE: u32 = 1 << 28;
         /// EPOLL_CLOEXEC == O_CLOEXEC: FD_CLOEXEC on the new number.
         const EPOLL_CLOEXEC: c_int = 0o2000000;
 
@@ -13943,29 +12600,140 @@ mod thread {
             data: u64,
         }
 
+        /// The poll bits a read-direction wakeup carries (`EPOLLIN`, `EPOLLPRI`,
+        /// `EPOLLRDNORM`, `EPOLLRDBAND`, `EPOLLMSG`, `EPOLLRDHUP`), and a
+        /// write-direction one (`EPOLLOUT`, `EPOLLWRNORM`, `EPOLLWRBAND`).
+        const READ_BITS: u32 = EPOLLIN | 0x002 | 0x040 | 0x080 | 0x400 | EPOLLRDHUP;
+        const WRITE_BITS: u32 = EPOLLOUT | 0x100 | 0x200;
+        /// `EP_PRIVATE_BITS`: the mode bits, never reported.
+        const PRIVATE_BITS: u32 = EPOLLWAKEUP | EPOLLONESHOT | EPOLLET | EPOLLEXCLUSIVE;
+        /// `EPOLLEXCLUSIVE_OK_BITS`: what an exclusive interest may carry.
+        const EXCLUSIVE_OK_BITS: u32 =
+            EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLWAKEUP | EPOLLET | EPOLLEXCLUSIVE;
+
         /// One watched fd's interest (epoll semantics: at most one per fd).
         struct Interest {
-            /// Requested EPOLLIN/EPOLLOUT/EPOLLRDHUP plus the EPOLLET/EPOLLONESHOT
-            /// mode bits.
+            /// The requested events with `EPOLLERR|EPOLLHUP` (always
+            /// monitored) and the mode bits; a fired `EPOLLONESHOT` interest
+            /// keeps the mode bits alone.
             events: u32,
             /// The caller's `epoll_data`, returned verbatim in delivered events.
             data: u64,
             /// The open file description the number named at registration — the
-            /// kernel's `(fd, struct file)` key. A number reused for another
-            /// description reads as closed, and the interest drops with the
+            /// kernel's `(fd, struct file)` key. The interest drops with the
             /// description's last reference.
             desc: DescId,
-            /// EPOLLET per-direction latch: `Some(seq)` after a delivery at
-            /// arrival sequence `seq` — silent until readiness drops (re-arm to
-            /// `None`) or the sequence advances (a new arrival re-fires).
-            delivered_read: Option<u64>,
-            delivered_write: Option<u64>,
+            /// The source's per-direction arrival sequences when last observed.
+            seen: (u64, u64),
+            /// What the interest's events read at the last observation.
+            observed: u32,
         }
 
-        /// A virtual epoll instance: its per-fd interest table, ordered by fd.
+        /// A virtual epoll instance: its per-fd interest table and its ready
+        /// list (`ep->rdllist`).
         #[derive(Default)]
         struct Epoll {
             interests: BTreeMap<c_int, Interest>,
+            ready: VecDeque<c_int>,
+        }
+
+        impl Epoll {
+            /// `ep_poll_callback`, observed after the fact: an interest whose
+            /// source woke it since the last observation — an arrival in a
+            /// watched direction, or a watched condition rising — joins the
+            /// tail of the ready list unless it is on it (or disarmed, or
+            /// not ready at all, when `ep_send_events` would drop it).
+            fn observe(&mut self, fd: c_int, mask: u32, seqs: (u64, u64)) {
+                let Some(interest) = self.interests.get_mut(&fd) else {
+                    return;
+                };
+                let events = interest.events;
+                let revents = mask & events;
+                let woken = events & !PRIVATE_BITS != 0
+                    && ((events & READ_BITS != 0 && seqs.0 != interest.seen.0)
+                        || (events & WRITE_BITS != 0 && seqs.1 != interest.seen.1)
+                        || revents & !interest.observed != 0);
+                interest.seen = seqs;
+                interest.observed = revents;
+                if woken && revents != 0 && !self.ready.contains(&fd) {
+                    self.ready.push_back(fd);
+                }
+            }
+
+            /// `ep_send_events`: up to `max` events off the head of the ready
+            /// list, each what its source's poll mask (`masks`) reads through
+            /// the interest's events. An item that reads nothing leaves the
+            /// list; a delivered `EPOLLONESHOT` item is disarmed, a delivered
+            /// level-triggered one re-queued at the tail, an edge-triggered
+            /// one dropped until its next wakeup. Items not reached stay at
+            /// the head.
+            #[cfg(test)]
+            fn send(&mut self, masks: &BTreeMap<c_int, u32>, max: usize) -> Vec<EpollEvent> {
+                let delivery = self.plan(masks, max);
+                let events = delivery.events.clone();
+                self.commit(delivery);
+                events
+            }
+
+            /// [`Epoll::send`]'s outcome, decided without changing the
+            /// instance: what a gather delivers, the ready list after it, and
+            /// the one-shot interests it disarms. Only the ready list is
+            /// copied, so deciding costs what the list holds, not what the
+            /// instance watches.
+            fn plan(&self, masks: &BTreeMap<c_int, u32>, max: usize) -> Delivery {
+                let mut pending = self.ready.clone();
+                let mut requeued = VecDeque::new();
+                let mut events = Vec::new();
+                let mut disarmed = Vec::new();
+                while events.len() < max {
+                    let Some(fd) = pending.pop_front() else {
+                        break;
+                    };
+                    let Some(interest) = self.interests.get(&fd) else {
+                        continue;
+                    };
+                    let revents = masks.get(&fd).copied().unwrap_or(0) & interest.events;
+                    if revents == 0 {
+                        continue;
+                    }
+                    events.push(EpollEvent {
+                        events: revents,
+                        data: interest.data,
+                    });
+                    if interest.events & EPOLLONESHOT != 0 {
+                        disarmed.push(fd);
+                    } else if interest.events & EPOLLET == 0 {
+                        requeued.push_back(fd);
+                    }
+                }
+                pending.extend(requeued);
+                Delivery {
+                    events,
+                    ready: pending,
+                    disarmed,
+                }
+            }
+
+            fn commit(&mut self, delivery: Delivery) {
+                self.ready = delivery.ready;
+                for fd in delivery.disarmed {
+                    if let Some(interest) = self.interests.get_mut(&fd) {
+                        interest.events &= PRIVATE_BITS;
+                    }
+                }
+            }
+
+            fn forget(&mut self, fd: c_int) -> bool {
+                self.ready.retain(|queued| *queued != fd);
+                self.interests.remove(&fd).is_some()
+            }
+        }
+
+        /// What one gather delivers and leaves behind (see [`Epoll::plan`]).
+        struct Delivery {
+            events: Vec<EpollEvent>,
+            ready: VecDeque<c_int>,
+            disarmed: Vec<c_int>,
         }
 
         /// An epoll registry. The descriptor table refcounts the description
@@ -13978,7 +12746,7 @@ mod thread {
 
         /// Resolve a guest number to its epoll registry id: `EBADF` for a number
         /// that names nothing, `EINVAL` for one that is not an epoll instance.
-        fn ep_id(_state: &ThreadRuntime, fd: c_int) -> Result<u64, c_int> {
+        fn ep_id(fd: c_int) -> Result<u64, c_int> {
             match super::super::fd_table().lock().resolve(fd) {
                 Some(resolved) if resolved.kind == FdKind::Epoll => Ok(resolved.handle),
                 Some(_) => Err(super::EINVAL),
@@ -14000,9 +12768,16 @@ mod thread {
         pub(crate) fn forget_description(desc: DescId) {
             let mut state = lock_state();
             for slot in state.net.epolls.values_mut() {
-                slot.ep
+                let gone: Vec<c_int> = slot
+                    .ep
                     .interests
-                    .retain(|_, interest| interest.desc != desc);
+                    .iter()
+                    .filter(|(_, interest)| interest.desc == desc)
+                    .map(|(&fd, _)| fd)
+                    .collect();
+                for fd in gone {
+                    slot.ep.forget(fd);
+                }
             }
         }
 
@@ -14052,15 +12827,22 @@ mod thread {
 
         /// Apply one `epoll_ctl` op. Syscall-shaped (`epoll_ctl(epfd, op, fd,
         /// event)`) for the SUD dispatcher. Registry mutation only — no
-        /// scheduling point, no trace event. Kernel-faithful errno: EBADF for a
-        /// number that names nothing (either argument), EINVAL for an `epfd`
-        /// that is not an epoll instance or a target that is `epfd` itself,
-        /// EPERM for a target that cannot be polled (a file, a directory, a
-        /// device), EEXIST on a double ADD, ENOENT on MOD/DEL of an unregistered
-        /// fd. Unmodeled event flags fail closed loudly.
+        /// scheduling point, no trace event. The kernel's `do_epoll_ctl`
+        /// order: the event is copied in for every op but DEL (`EFAULT`);
+        /// both numbers must name something (`EBADF`, `epfd` first); the
+        /// target must be pollable (`EPERM`: a file, a directory, a device);
+        /// `EPOLLWAKEUP` is dropped (it needs CAP_BLOCK_SUSPEND); `epfd` must
+        /// be an epoll instance other than the target (`EINVAL`);
+        /// `EPOLLEXCLUSIVE` is `EINVAL` on MOD, with bits outside
+        /// `EPOLLEXCLUSIVE_OK_BITS` or on an epoll target; then ADD is
+        /// `EEXIST` for a registered fd, DEL and MOD `ENOENT` for an
+        /// unregistered one, MOD `EINVAL` for an exclusive interest, and an
+        /// unknown op `EINVAL`. A registered interest that is ready joins the
+        /// ready list.
         ///
         /// # Safety
-        /// `event` must point to a live `struct epoll_event` for ADD/MOD.
+        /// `event` is the guest's `struct epoll_event` for every op but DEL;
+        /// it is copied in through `uaccess`.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn patina_epoll_ctl(
             epfd: c_int,
@@ -14069,307 +12851,150 @@ mod thread {
             event: *const EpollEvent,
         ) -> c_int {
             let _panic_scope = crate::panic_boundary::PanicScope::enter();
-            let mut state = lock_state();
-            // The kernel's `do_epoll_ctl` order: both numbers must name
-            // something (EBADF, `epfd` first), the target must be pollable
-            // (EPERM: a file, a directory, a device), and only then must `epfd`
-            // be an epoll instance other than the target (EINVAL). Every op,
-            // DEL included, goes through the same checks.
-            let id = match ep_id(&state, epfd) {
-                Ok(id) => Ok(id),
-                Err(errno) if errno == super::super::EBADF => {
-                    return super::super::fail(errno);
+            let fail = super::super::fail;
+            let (events, data) = if op == EPOLL_CTL_DEL {
+                (0, 0)
+            } else {
+                match crate::uaccess::read::<EpollEvent>(event as usize) {
+                    Ok(event) => (event.events & !EPOLLWAKEUP, event.data),
+                    Err(errno) => return fail(errno),
                 }
-                Err(errno) => Err(errno),
+            };
+            let mut state = lock_state();
+            let id = match ep_id(epfd) {
+                Err(errno) if errno == super::super::EBADF => return fail(errno),
+                id => id,
             };
             let Some(target) = super::super::fd_table().lock().resolve(fd) else {
-                return super::super::fail(super::super::EBADF);
+                return fail(super::super::EBADF);
             };
-            // Readiness is defined over pipe/socketpair, eventfd, SimNet socket
-            // and captured-stdio descriptions; another epoll instance (nested
-            // epoll) is not modeled and fails closed loudly.
-            match target.kind {
-                FdKind::Pipe
-                | FdKind::Socket
-                | FdKind::EventFd
-                | FdKind::SignalFd
-                | FdKind::MessageQueue
-                | FdKind::TimerFd
-                | FdKind::Stdin
-                | FdKind::Stdout
-                | FdKind::Stderr => {}
-                FdKind::File | FdKind::Dir | FdKind::OPath | FdKind::Urandom => {
-                    return super::super::fail(EPERM);
-                }
-                // An epoll file is pollable, so the instance-on-itself case and
-                // a non-epoll `epfd` reach the kernel's EINVAL below; an epoll
-                // instance registered on ANOTHER instance is the unmodeled
-                // nesting.
-                FdKind::Epoll if fd != epfd && id.is_ok() => fatal(&format!(
-                    "epoll_ctl registered epoll descriptor {fd} on another epoll instance: \
-                     nested epoll is not modeled; failing closed"
-                )),
-                FdKind::Epoll => {}
+            if matches!(
+                target.kind,
+                FdKind::File | FdKind::Dir | FdKind::OPath | FdKind::Urandom
+            ) {
+                return fail(EPERM);
             }
             let id = match id {
                 Ok(id) if fd != epfd => id,
-                _ => return super::super::fail(super::EINVAL),
+                _ => return fail(super::EINVAL),
             };
-            if op == EPOLL_CTL_DEL {
-                return match state
-                    .net
-                    .epolls
-                    .get_mut(&id)
-                    .expect("epoll was checked")
-                    .ep
-                    .interests
-                    .remove(&fd)
-                {
-                    Some(_) => 0,
-                    None => super::super::fail(super::super::ENOENT),
-                };
+            if op != EPOLL_CTL_DEL
+                && events & EPOLLEXCLUSIVE != 0
+                && (op == EPOLL_CTL_MOD
+                    || (op == EPOLL_CTL_ADD
+                        && (target.kind == FdKind::Epoll || events & !EXCLUSIVE_OK_BITS != 0)))
+            {
+                return fail(super::EINVAL);
             }
-            if !matches!(op, EPOLL_CTL_ADD | EPOLL_CTL_MOD) {
-                return super::super::fail(super::EINVAL);
-            }
-            if event.is_null() {
-                return super::super::fail(super::EINVAL);
-            }
-            // SAFETY: non-null `event` points to a live epoll_event per this
-            // function's contract; fields are copied out by value.
-            let (events, data) = unsafe { ((*event).events, (*event).data) };
-            // Fail closed LOUDLY on interest flags the reactor does not model
-            // (EPOLLEXCLUSIVE, EPOLLWAKEUP, EPOLLPRI, ...): a silent EINVAL a
-            // caller swallowed would be an invisible escape. EPOLLHUP/EPOLLERR
-            // are always-monitored no-ops in a request mask, accepted exactly as
-            // the kernel accepts them.
-            const MODELED: u32 =
-                EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLERR | EPOLLHUP | EPOLLET | EPOLLONESHOT;
-            if events & !MODELED != 0 {
+            // Readiness is defined over every pollable kind but another epoll
+            // instance: nested epoll is not modeled and fails closed loudly.
+            if target.kind == FdKind::Epoll {
                 fatal(&format!(
-                    "epoll_ctl events {events:#x} carry unmodeled flags (only EPOLLIN/EPOLLOUT/\
-                     EPOLLRDHUP/EPOLLERR/EPOLLHUP/EPOLLET/EPOLLONESHOT are modeled); failing \
-                     closed"
+                    "epoll_ctl registered epoll descriptor {fd} on another epoll instance: \
+                     nested epoll is not modeled; failing closed"
                 ));
             }
-            let interests = &mut state
-                .net
-                .epolls
-                .get_mut(&id)
-                .expect("epoll was checked")
-                .ep
-                .interests;
-            let armed = Interest {
-                events,
+            let (mask, seqs) = super::fd_poll(&state, fd, Some(target.desc)).unwrap_or((0, (0, 0)));
+            let ep = &mut state.net.epolls.get_mut(&id).expect("epoll was checked").ep;
+            let registered = Interest {
+                events: events | EPOLLERR | EPOLLHUP,
                 data,
                 desc: target.desc,
-                delivered_read: None,
-                delivered_write: None,
+                seen: seqs,
+                observed: 0,
             };
             match op {
                 EPOLL_CTL_ADD => {
-                    if interests.contains_key(&fd) {
-                        return super::super::fail(super::super::EEXIST);
+                    if ep.interests.contains_key(&fd) {
+                        return fail(super::super::EEXIST);
                     }
-                    interests.insert(fd, armed);
+                    ep.interests.insert(fd, registered);
                 }
-                _ => {
-                    // EPOLL_CTL_MOD replaces the interest and re-arms the
-                    // EPOLLET latches, matching the kernel.
-                    let Some(interest) = interests.get_mut(&fd) else {
-                        return super::super::fail(super::super::ENOENT);
+                EPOLL_CTL_DEL => {
+                    return if ep.forget(fd) {
+                        0
+                    } else {
+                        fail(super::super::ENOENT)
                     };
-                    *interest = armed;
                 }
+                EPOLL_CTL_MOD => {
+                    let Some(interest) = ep.interests.get_mut(&fd) else {
+                        return fail(super::super::ENOENT);
+                    };
+                    if interest.events & EPOLLEXCLUSIVE != 0 {
+                        return fail(super::EINVAL);
+                    }
+                    *interest = registered;
+                }
+                _ => return fail(super::EINVAL),
             }
+            // `ep_insert`/`ep_modify` poll the item once and queue it if ready.
+            ep.observe(fd, mask, seqs);
             0
         }
 
-        /// Monotonic per-direction arrival sequences for guest number `fd` (see
-        /// the section comment). SimNet sockets and closed descriptors report
-        /// constant 0.
-        fn fd_event_seqs(state: &ThreadRuntime, fd: c_int) -> (u64, u64) {
-            let Some(resolved) = super::super::fd_table().lock().resolve(fd) else {
-                return (0, 0);
-            };
-            let fd = resolved.handle as c_int;
-            if resolved.kind == FdKind::SignalFd {
-                return (
-                    state
-                        .signals
-                        .signalfds
-                        .get(&resolved.handle)
-                        .map_or(0, |fd| fd.arrivals),
-                    0,
-                );
+        /// Observe every interest of instance `id` (see [`Epoll::observe`]),
+        /// in descriptor order — wakeups between two observations are queued
+        /// in that order, the model keeping no clock across sources — and
+        /// return what each source's poll mask reads now.
+        fn scan(state: &mut ThreadRuntime, id: u64) -> BTreeMap<c_int, u32> {
+            let polled: Vec<(c_int, u32, (u64, u64))> = state
+                .net
+                .epolls
+                .get(&id)
+                .expect("epoll exists")
+                .ep
+                .interests
+                .iter()
+                .map(|(&fd, interest)| {
+                    let (mask, seqs) =
+                        super::fd_poll(state, fd, Some(interest.desc)).unwrap_or((0, (0, 0)));
+                    (fd, mask, seqs)
+                })
+                .collect();
+            let ep = &mut state.net.epolls.get_mut(&id).expect("epoll exists").ep;
+            let mut masks = BTreeMap::new();
+            for (fd, mask, seqs) in polled {
+                ep.observe(fd, mask, seqs);
+                masks.insert(fd, mask);
             }
-            if resolved.kind == FdKind::MessageQueue {
-                return super::ipc::mq_event_seqs(state, resolved.handle);
-            }
-            if resolved.kind != FdKind::Pipe && resolved.kind != FdKind::EventFd {
-                return (0, 0);
-            }
-            if let Some(end) = state.net.pipe_ends.get(&fd) {
-                let read_seq = end
-                    .read_channel
-                    .and_then(|id| state.net.pipe_channels.get(&id))
-                    .map_or(0, |channel| channel.read_events);
-                let write_seq = end
-                    .write_channel
-                    .and_then(|id| state.net.pipe_channels.get(&id))
-                    .map_or(0, |channel| channel.write_events);
-                return (read_seq, write_seq);
-            }
-            if let Some(efd) = state.net.eventfds.get(&fd) {
-                return (efd.write_events, 0);
-            }
-            (0, 0)
-        }
-
-        /// An event ready to deliver, plus the latch edits its delivery entails.
-        struct ReadyEvent {
-            event: EpollEvent,
-            fd: c_int,
-            /// Latch the EPOLLET read direction at this arrival sequence.
-            latch_read: Option<u64>,
-            latch_write: Option<u64>,
-        }
-
-        /// Does a watched direction fire? Level-triggered interest fires
-        /// whenever ready; EPOLLET fires when ready AND the latch is armed or
-        /// the arrival sequence has advanced since the last delivery.
-        fn dir_fires(edge: bool, ready: bool, delivered: Option<u64>, seq: u64) -> bool {
-            ready && (!edge || delivered != Some(seq))
-        }
-
-        /// Scan the instance's interests, collecting the events ready to
-        /// deliver (in fd order) and the re-arm edits for directions observed
-        /// not-ready.
-        fn scan(state: &ThreadRuntime, id: u64) -> (Vec<ReadyEvent>, Vec<(c_int, bool, bool)>) {
-            let ep = &state.net.epolls.get(&id).expect("epoll exists").ep;
-            let mut ready = Vec::new();
-            let mut rearms = Vec::new();
-            for (&fd, interest) in &ep.interests {
-                let r = fd_readiness(state, fd, Some(interest.desc));
-                let (read_seq, write_seq) = fd_event_seqs(state, fd);
-                let watch_read = interest.events & (EPOLLIN | EPOLLRDHUP) != 0;
-                let watch_write = interest.events & EPOLLOUT != 0;
-                let edge = interest.events & EPOLLET != 0;
-
-                let rearm_read = watch_read && !r.readable && interest.delivered_read.is_some();
-                let rearm_write = watch_write && !r.writable && interest.delivered_write.is_some();
-                if rearm_read || rearm_write {
-                    rearms.push((fd, rearm_read, rearm_write));
-                }
-
-                let read_fires =
-                    watch_read && dir_fires(edge, r.readable, interest.delivered_read, read_seq);
-                let write_fires =
-                    watch_write && dir_fires(edge, r.writable, interest.delivered_write, write_seq);
-                if !(read_fires || write_fires) {
-                    continue;
-                }
-                // The delivered mask is the full current state of the watched
-                // directions (an ET edge reports everything ready, like the
-                // kernel). EPOLLERR/EPOLLHUP are reported unmasked: a broken
-                // write side is EPOLLERR (the pipe-write-end shape), a fully
-                // hung-up descriptor EPOLLHUP.
-                let mut mask = 0u32;
-                if r.readable && interest.events & EPOLLIN != 0 {
-                    mask |= EPOLLIN;
-                }
-                if r.read_eof && interest.events & EPOLLRDHUP != 0 {
-                    mask |= EPOLLRDHUP;
-                }
-                if r.writable && interest.events & EPOLLOUT != 0 {
-                    mask |= EPOLLOUT;
-                }
-                if r.write_eof {
-                    mask |= EPOLLERR;
-                }
-                if r.read_eof && r.write_eof {
-                    mask |= EPOLLHUP;
-                }
-                if mask == 0 {
-                    // A watched direction rose but nothing in the request mask
-                    // is reportable (e.g. an EPOLLRDHUP-only interest with data
-                    // but no EOF): nothing to deliver, nothing to latch.
-                    continue;
-                }
-                ready.push(ReadyEvent {
-                    event: EpollEvent {
-                        events: mask,
-                        data: interest.data,
-                    },
-                    fd,
-                    latch_read: (edge && watch_read && r.readable).then_some(read_seq),
-                    latch_write: (edge && watch_write && r.writable).then_some(write_seq),
-                });
-            }
-            (ready, rearms)
+            masks
         }
 
         /// The watched fds as reactor-neutral `(direction, fd)` pairs for the
-        /// shared fan-in park. Latched directions still register: a wake simply
-        /// rescans, and an arrival that woke us has advanced its sequence.
+        /// shared fan-in park: every armed interest watches the read side
+        /// (where hang-ups and errors arrive too), and the write side when it
+        /// asks for it. A wake simply rescans.
         fn watched_sources(state: &ThreadRuntime, id: u64) -> Vec<(ReadyDir, c_int)> {
             let ep = &state.net.epolls.get(&id).expect("epoll exists").ep;
             let mut watched = Vec::new();
             for (&fd, interest) in &ep.interests {
-                if interest.events & (EPOLLIN | EPOLLRDHUP) != 0 {
-                    watched.push((ReadyDir::Read, fd));
+                if interest.events & !PRIVATE_BITS == 0 {
+                    continue;
                 }
-                if interest.events & EPOLLOUT != 0 {
+                watched.push((ReadyDir::Read, fd));
+                if interest.events & WRITE_BITS != 0 {
                     watched.push((ReadyDir::Write, fd));
                 }
             }
             watched
         }
 
-        /// Apply the latch edits for the events actually delivered this gather,
-        /// and disarm every EPOLLONESHOT interest that fired: the kernel clears
-        /// its requested directions (keeping the mode bits) until a MOD re-arms
-        /// it.
-        fn commit_delivered(state: &mut ThreadRuntime, id: u64, delivered: &[ReadyEvent]) {
-            let ep = &mut state.net.epolls.get_mut(&id).expect("epoll exists").ep;
-            for event in delivered {
-                if let Some(interest) = ep.interests.get_mut(&event.fd) {
-                    if event.latch_read.is_some() {
-                        interest.delivered_read = event.latch_read;
-                    }
-                    if event.latch_write.is_some() {
-                        interest.delivered_write = event.latch_write;
-                    }
-                    if interest.events & EPOLLONESHOT != 0 {
-                        interest.events &= !(EPOLLIN | EPOLLOUT | EPOLLRDHUP);
-                    }
-                }
-            }
-        }
-
-        /// Re-arm the EPOLLET latches for directions observed not-ready.
-        fn commit_rearm(state: &mut ThreadRuntime, id: u64, rearms: &[(c_int, bool, bool)]) {
-            let ep = &mut state.net.epolls.get_mut(&id).expect("epoll exists").ep;
-            for &(fd, rearm_read, rearm_write) in rearms {
-                if let Some(interest) = ep.interests.get_mut(&fd) {
-                    if rearm_read {
-                        interest.delivered_read = None;
-                    }
-                    if rearm_write {
-                        interest.delivered_write = None;
-                    }
-                }
-            }
-        }
+        /// `EP_MAX_EVENTS`: the most events one wait may ask for.
+        const MAX_EVENTS: c_int =
+            (c_int::MAX as usize / std::mem::size_of::<EpollEvent>()) as c_int;
 
         /// Gather up to `maxevents` ready events into `events`, blocking per the
         /// millisecond `timeout_ms` (-1 = block until ready, 0 = poll, > 0 =
         /// relative virtual-clock deadline). Syscall-shaped (`epoll_wait(epfd,
-        /// events, maxevents, timeout)`) for the future SIGSYS dispatcher; the
-        /// C epoll_wait/epoll_pwait interposers are thin marshaling over this.
+        /// events, maxevents, timeout)`) for the SUD dispatcher; the C
+        /// epoll_wait/epoll_pwait interposers are thin marshaling over this.
+        /// `maxevents` outside `1..=EP_MAX_EVENTS` is `EINVAL`; the events are
+        /// copied out through `uaccess`, and one that cannot be ends the
+        /// delivery there (`EFAULT` if it was the first).
         ///
         /// # Safety
-        /// `events` must be writable for `maxevents` `struct epoll_event`s.
+        /// C ABI entry point; `events` is the guest's buffer.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn patina_epoll_wait(
             epfd: c_int,
@@ -14378,11 +13003,12 @@ mod thread {
             timeout_ms: c_int,
         ) -> c_int {
             let _panic_scope = crate::panic_boundary::PanicScope::enter();
+            let fail = super::super::fail;
             if let Err(errno) = sched_point() {
-                return super::super::fail(errno);
+                return fail(errno);
             }
-            if maxevents <= 0 || events.is_null() {
-                return super::super::fail(super::EINVAL);
+            if !(1..=MAX_EVENTS).contains(&maxevents) {
+                return fail(super::EINVAL);
             }
             let capacity = maxevents as usize;
             let me = current_task();
@@ -14391,30 +13017,37 @@ mod thread {
             let mut timeout_deadline: Option<u64> = None;
             loop {
                 let mut state = lock_state();
-                let id = match ep_id(&state, epfd) {
+                let id = match ep_id(epfd) {
                     Ok(id) => id,
-                    Err(errno) => return super::super::fail(errno),
+                    Err(errno) => return fail(errno),
                 };
                 let now = match with_context_raw(|c| c.monotonic_now_unrecorded()) {
                     Ok(now) => now,
-                    Err(errno) => return super::super::fail(errno),
+                    Err(errno) => return fail(errno),
                 };
-                let (ready, rearms) = scan(&state, id);
-                commit_rearm(&mut state, id, &rearms);
-
-                if !ready.is_empty() {
-                    let count = ready.len().min(capacity);
-                    let delivered = &ready[..count];
-                    // SAFETY: `events` is writable for `maxevents >= count`
-                    // entries per this function's contract.
-                    let slots = unsafe {
-                        std::slice::from_raw_parts_mut(events.cast::<EpollEvent>(), count)
-                    };
-                    for (slot, event) in slots.iter_mut().zip(delivered) {
-                        *slot = event.event;
+                let masks = scan(&mut state, id);
+                let ep = &mut state.net.epolls.get_mut(&id).expect("epoll exists").ep;
+                let delivery = ep.plan(&masks, capacity);
+                if !delivery.events.is_empty() {
+                    let size = std::mem::size_of::<EpollEvent>();
+                    let written = delivery
+                        .events
+                        .iter()
+                        .enumerate()
+                        .take_while(|(at, event)| {
+                            crate::uaccess::write(events as usize + at * size, *event).is_ok()
+                        })
+                        .count();
+                    if written == 0 {
+                        return fail(super::super::EFAULT);
                     }
-                    commit_delivered(&mut state, id, delivered);
-                    return c_int::try_from(count).unwrap_or(c_int::MAX);
+                    let delivery = if written < delivery.events.len() {
+                        ep.plan(&masks, written)
+                    } else {
+                        delivery
+                    };
+                    ep.commit(delivery);
+                    return c_int::try_from(written).unwrap_or(c_int::MAX);
                 }
 
                 if timeout_ms == 0 {
@@ -14430,7 +13063,6 @@ mod thread {
                         return 0;
                     }
                 }
-
                 // Nothing ready: park with multi-fd fan-in on the shared core.
                 let watched = watched_sources(&state, id);
                 let locs = register_readiness_waiters(&mut state, me, &watched);
@@ -14471,7 +13103,10 @@ mod thread {
 
         #[cfg(test)]
         mod tests {
-            use super::{EpollEvent, dir_fires};
+            use super::{
+                BTreeMap, EPOLLERR, EPOLLET, EPOLLHUP, EPOLLIN, EPOLLONESHOT, EPOLLOUT, Epoll,
+                EpollEvent, Interest,
+            };
 
             /// The Rust struct is written straight into the guest's buffer, so
             /// its layout must be the kernel ABI (also pinned from the C side
@@ -14488,20 +13123,96 @@ mod thread {
                 }
             }
 
+            fn interest(events: u32) -> Interest {
+                Interest {
+                    events: events | EPOLLERR | EPOLLHUP,
+                    data: 0,
+                    desc: 0,
+                    seen: (0, 0),
+                    observed: 0,
+                }
+            }
+
+            fn delivered(ep: &mut Epoll, masks: &[(i32, u32)], max: usize) -> Vec<u32> {
+                let masks: BTreeMap<i32, u32> = masks.iter().copied().collect();
+                ep.send(&masks, max)
+                    .iter()
+                    .map(|event| event.events)
+                    .collect()
+            }
+
+            /// The pipe of readiness/epoll: the writer is ready first, the
+            /// reader after a write; level-triggered items re-queue at the
+            /// tail, so `maxevents` 1 takes the one queued first.
             #[test]
-            fn edge_latch_fires_per_arrival_and_stays_silent_while_latched() {
-                // Armed and ready: fires.
-                assert!(dir_fires(true, true, None, 5));
-                // Delivered at this arrival, still ready, nothing new: silent
-                // (the partial-drain case).
-                assert!(!dir_fires(true, true, Some(5), 5));
-                // A new arrival while still ready re-fires (the kernel's
-                // per-arrival edge; mio's undrained eventfd Waker needs this).
-                assert!(dir_fires(true, true, Some(5), 6));
-                // Not ready never fires.
-                assert!(!dir_fires(true, false, Some(5), 6));
-                // Level-triggered interest ignores the latch entirely.
-                assert!(dir_fires(false, true, Some(5), 5));
+            fn ready_list_is_fifo_by_wakeup_with_level_items_requeued_at_the_tail() {
+                let mut ep = Epoll::default();
+                ep.interests.insert(3, interest(EPOLLIN));
+                ep.interests.insert(4, interest(EPOLLOUT));
+                ep.observe(3, EPOLLOUT, (0, 0));
+                ep.observe(4, EPOLLOUT, (0, 0));
+                assert_eq!(ep.ready, [4]);
+                assert_eq!(
+                    delivered(&mut ep, &[(3, EPOLLOUT), (4, EPOLLOUT)], 8),
+                    [EPOLLOUT]
+                );
+                ep.observe(3, EPOLLIN, (1, 0));
+                ep.observe(4, EPOLLOUT, (0, 0));
+                assert_eq!(ep.ready, [4, 3]);
+                let both = [(3, EPOLLIN), (4, EPOLLOUT)];
+                assert_eq!(delivered(&mut ep, &both, 8), [EPOLLOUT, EPOLLIN]);
+                assert_eq!(delivered(&mut ep, &both, 1), [EPOLLOUT]);
+                assert_eq!(ep.ready, [3, 4]);
+            }
+
+            /// Edge-triggered: every arrival is a wakeup, readiness that
+            /// merely persists is none; a rising condition (a hang-up) is.
+            #[test]
+            fn edge_items_fire_per_arrival_and_per_rising_condition() {
+                let mut ep = Epoll::default();
+                ep.interests.insert(5, interest(EPOLLIN | EPOLLET));
+                ep.observe(5, EPOLLIN, (1, 0));
+                assert_eq!(delivered(&mut ep, &[(5, EPOLLIN)], 8), [EPOLLIN]);
+                ep.observe(5, EPOLLIN, (1, 0));
+                assert!(ep.ready.is_empty());
+                ep.observe(5, EPOLLIN, (2, 0));
+                assert_eq!(delivered(&mut ep, &[(5, EPOLLIN)], 8), [EPOLLIN]);
+                ep.observe(5, EPOLLIN | EPOLLHUP, (2, 0));
+                assert_eq!(
+                    delivered(&mut ep, &[(5, EPOLLIN | EPOLLHUP)], 8),
+                    [EPOLLIN | EPOLLHUP]
+                );
+            }
+
+            /// A socket's write-space arrivals: an edge-triggered EPOLLOUT item
+            /// the reactor saw writable, whose writer then filled and was
+            /// drained before the next wait, is queued again by the drain
+            /// alone — the mask never read unwritable at a scan.
+            #[test]
+            fn a_write_space_arrival_requeues_an_edge_triggered_writer() {
+                let mut ep = Epoll::default();
+                ep.interests.insert(8, interest(EPOLLOUT | EPOLLET));
+                ep.observe(8, EPOLLOUT, (0, 0));
+                assert_eq!(delivered(&mut ep, &[(8, EPOLLOUT)], 8), [EPOLLOUT]);
+                ep.observe(8, EPOLLOUT, (0, 0));
+                assert!(ep.ready.is_empty());
+                ep.observe(8, EPOLLOUT, (0, 1));
+                assert_eq!(delivered(&mut ep, &[(8, EPOLLOUT)], 8), [EPOLLOUT]);
+            }
+
+            /// A delivered one-shot item is disarmed: nothing wakes it until
+            /// a MOD re-arms it; an item that reads nothing leaves the list.
+            #[test]
+            fn oneshot_disarms_and_unready_items_leave_the_list() {
+                let mut ep = Epoll::default();
+                ep.interests.insert(6, interest(EPOLLIN | EPOLLONESHOT));
+                ep.interests.insert(7, interest(EPOLLIN));
+                ep.observe(6, EPOLLIN, (1, 0));
+                ep.observe(7, EPOLLIN, (1, 0));
+                assert_eq!(delivered(&mut ep, &[(6, EPOLLIN), (7, 0)], 8), [EPOLLIN]);
+                assert!(ep.ready.is_empty());
+                ep.observe(6, EPOLLIN, (2, 0));
+                assert!(ep.ready.is_empty());
             }
         }
     }
@@ -14807,16 +13518,17 @@ mod thread {
         }
 
         // Pure pipe-channel semantics (the scheduler-integrated parking is covered
-        // end-to-end by the pipe/socketpair tests in cargo-patina/tests/native_abi.rs):
-        // bounded capacity, partial reads/writes, and EOF only after drain.
+        // end-to-end by the pipe tests in cargo-patina/tests/native_abi.rs):
+        // bounded capacity, partial reads, and EOF only after drain.
         #[test]
         fn pipe_channel_transfers_bytes_with_bounded_capacity_and_eof() {
             let mut channel = PipeChannel::new(4);
             let mut dst = [0u8; 8];
             // Empty + writer open → WouldBlock (the reader parks).
             assert_eq!(channel.try_read(&mut dst), PipeRead::WouldBlock);
-            // Bounded capacity: only 4 of 6 bytes fit; the writer must loop.
-            assert_eq!(channel.try_write(b"abcdef"), PipeWrite::Wrote(4));
+            // Bounded capacity: a write fills it, and the next (atomic, below
+            // PIPE_BUF) waits for room for all of it.
+            assert_eq!(channel.try_write(b"abcd"), PipeWrite::Wrote(4));
             assert_eq!(channel.try_write(b"ef"), PipeWrite::WouldBlock);
             // A short read frees space for the writer's remaining bytes.
             assert_eq!(channel.try_read(&mut dst[..2]), PipeRead::Read(2));
@@ -14866,6 +13578,28 @@ mod thread {
             assert_eq!(channel.try_read(&mut dst), PipeRead::Eof);
             channel.write_refs += 1;
             assert_eq!(channel.try_read(&mut dst), PipeRead::WouldBlock);
+        }
+
+        // `pipe_write`: a write of at most PIPE_BUF bytes is atomic — it waits
+        // for room for all of it rather than landing in part — while a longer
+        // one takes what fits.
+        #[test]
+        fn pipe_channel_writes_up_to_pipe_buf_atomically() {
+            let mut channel = PipeChannel::new(PIPE_BUF + 8);
+            let small = [7u8; 16];
+            assert_eq!(
+                channel.try_write(&[0; PIPE_BUF]),
+                PipeWrite::Wrote(PIPE_BUF)
+            );
+            assert_eq!(channel.try_write(&small), PipeWrite::WouldBlock);
+            assert_eq!(channel.try_write(&small[..8]), PipeWrite::Wrote(8));
+            let mut dst = [0u8; PIPE_BUF + 8];
+            assert_eq!(channel.try_read(&mut dst), PipeRead::Read(PIPE_BUF + 8));
+            assert_eq!(channel.try_write(&small[..8]), PipeWrite::Wrote(8));
+            assert_eq!(
+                channel.try_write(&[1; PIPE_BUF + 1]),
+                PipeWrite::Wrote(PIPE_BUF)
+            );
         }
 
         // Writing to a channel whose reader closed is a broken pipe surfaced as an

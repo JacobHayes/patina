@@ -19,8 +19,7 @@
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, SockAddr};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -146,130 +145,6 @@ pub const SCENARIO: Scenario = Scenario {
         "sendto",
         "recvfrom",
         "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: &[Vehicle::Libc],
-            what: "getaddrinfo leaves ai_protocol at the hints' 0 (c/posix/net.c getaddrinfo copies hints->ai_protocol), where glibc fills in the socket type's protocol (IPPROTO_TCP for SOCK_STREAM, IPPROTO_UDP for SOCK_DGRAM)",
-            failure: Failure::Differs(&[
-                Difference::field(0, "getaddrinfo", "fields.protocol0", Observed::Int(0)),
-                Difference::check(
-                    1,
-                    "a numeric IPv4 stream address: one result, IPPROTO_TCP, no canonical name",
-                ),
-                Difference::field(2, "getaddrinfo", "fields.protocol0", Observed::Int(0)),
-                Difference::check(3, "a numeric IPv4 datagram address: IPPROTO_UDP"),
-                Difference::field(8, "getaddrinfo", "fields.protocol0", Observed::Int(0)),
-                Difference::field(20, "getaddrinfo", "fields.protocol0", Observed::Int(0)),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: &[Vehicle::Libc],
-            what: "getaddrinfo refuses AF_INET6 with EAI_FAMILY (c/posix/net.c getaddrinfo: IPv6 out of scope), where a numeric IPv6 host answers a sockaddr_in6",
-            failure: Failure::Differs(&[
-                Difference::field(4, "getaddrinfo", "fields.addr0_family", Observed::Null),
-                Difference::field(4, "getaddrinfo", "fields.addr0_flowinfo", Observed::Null),
-                Difference::field(4, "getaddrinfo", "fields.addr0_ip", Observed::Null),
-                Difference::field(4, "getaddrinfo", "fields.addr0_port", Observed::Null),
-                Difference::field(4, "getaddrinfo", "fields.addr0_scope_id", Observed::Null),
-                Difference::field(4, "getaddrinfo", "fields.addrlen0", Observed::Null),
-                Difference::field(4, "getaddrinfo", "fields.canonname0", Observed::Null),
-                Difference::field(4, "getaddrinfo", "fields.code", Observed::Str("EAI_FAMILY")),
-                Difference::field(4, "getaddrinfo", "fields.family0", Observed::Null),
-                Difference::field(4, "getaddrinfo", "fields.protocol0", Observed::Null),
-                Difference::field(4, "getaddrinfo", "fields.results", Observed::Int(0)),
-                Difference::field(4, "getaddrinfo", "fields.socktype0", Observed::Null),
-                Difference::check(5, "a numeric IPv6 address: a 28-byte sockaddr_in6"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: &[Vehicle::Libc],
-            what: "getaddrinfo ignores AI_PASSIVE (c/posix/net.c getaddrinfo: a null node always names localhost), where a passive lookup with no host answers the wildcard address",
-            failure: Failure::Differs(&[
-                Difference::field(
-                    6,
-                    "getaddrinfo",
-                    "fields.addr0_ip",
-                    Observed::Str("127.0.0.1"),
-                ),
-                Difference::field(6, "getaddrinfo", "fields.protocol0", Observed::Int(0)),
-                Difference::check(7, "no host with AI_PASSIVE is the wildcard address"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: &[Vehicle::Libc],
-            what: "getaddrinfo answers a non-numeric service with EAI_SERVICE even under AI_NUMERICSERV, where glibc answers EAI_NONAME",
-            failure: Failure::Differs(&[
-                Difference::field(
-                    12,
-                    "getaddrinfo",
-                    "fields.code",
-                    Observed::Str("EAI_SERVICE"),
-                ),
-                Difference::check(13, "AI_NUMERICSERV with a service name is EAI_NONAME"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: &[Vehicle::Libc],
-            what: "getaddrinfo accepts a hints family it does not know (c/posix/net.c getaddrinfo checks AF_INET6 alone), where glibc answers EAI_FAMILY",
-            failure: Failure::Differs(&[
-                Difference::field(
-                    14,
-                    "getaddrinfo",
-                    "fields.addr0_family",
-                    Observed::Str("AF_INET"),
-                ),
-                Difference::field(
-                    14,
-                    "getaddrinfo",
-                    "fields.addr0_ip",
-                    Observed::Str("127.0.0.1"),
-                ),
-                Difference::field(
-                    14,
-                    "getaddrinfo",
-                    "fields.addr0_port",
-                    Observed::Str("port@14"),
-                ),
-                Difference::field(14, "getaddrinfo", "fields.addrlen0", Observed::Int(16)),
-                Difference::field(
-                    14,
-                    "getaddrinfo",
-                    "fields.canonname0",
-                    Observed::Bool(false),
-                ),
-                Difference::field(14, "getaddrinfo", "fields.code", Observed::Str("0")),
-                Difference::field(
-                    14,
-                    "getaddrinfo",
-                    "fields.family0",
-                    Observed::Str("AF_INET"),
-                ),
-                Difference::field(14, "getaddrinfo", "fields.protocol0", Observed::Int(0)),
-                Difference::field(14, "getaddrinfo", "fields.results", Observed::Int(1)),
-                Difference::field(14, "getaddrinfo", "fields.socktype0", Observed::Int(1)),
-                Difference::check(15, "an unknown family is EAI_FAMILY"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: &[Vehicle::Libc],
-            what: "sendto from a datagram socket that was never bound answers EBADF instead of autobinding an ephemeral port (lib.rs net_send_to: a datagram socket without a SimNet socket_id), so the datagram never arrives",
-            failure: Failure::Differs(&[
-                Difference::field(22, "sendto", "errno", Observed::Str("EBADF")),
-                Difference::field(22, "sendto", "ret", Observed::Int(-1)),
-                Difference::check(23, "send to the resolved address with the receiver's port"),
-                Difference::field(24, "recvfrom", "errno", Observed::Str("EAGAIN")),
-                Difference::field(24, "recvfrom", "fields.data", Observed::Null),
-                Difference::field(24, "recvfrom", "ret", Observed::Int(-1)),
-                Difference::check(25, "it arrives"),
-            ]),
-        },
     ],
     ..DEFAULTS
 };

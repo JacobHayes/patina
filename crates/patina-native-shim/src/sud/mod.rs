@@ -325,46 +325,44 @@ unsafe extern "C" {
         cloexec: c_int,
     ) -> c_int;
 
-    // Network (SimNet) — the exact entries the C socket interposers call.
-    fn patina_net_socket(stream: c_int, nonblocking: c_int, cloexec: c_int) -> c_int;
-    fn patina_net_kind(fd: c_int) -> c_int;
-    fn patina_net_bind(fd: c_int, ip: u32, port: u16) -> c_int;
-    fn patina_net_connect(fd: c_int, ip: u32, port: u16) -> c_int;
-    fn patina_net_tcp_connect(fd: c_int, ip: u32, port: u16) -> c_int;
-    fn patina_net_listen(fd: c_int, backlog: c_int) -> c_int;
-    fn patina_net_accept(
+    // Sockets — the exact entries the C socket interposers call.
+    fn patina_sock_socket(family: c_int, ty: c_int, protocol: c_int) -> i64;
+    fn patina_sock_socketpair(family: c_int, ty: c_int, protocol: c_int, sv: usize) -> i64;
+    fn patina_sock_bind(fd: c_int, addr: usize, len: i64) -> i64;
+    fn patina_sock_connect(fd: c_int, addr: usize, len: i64) -> i64;
+    fn patina_sock_listen(fd: c_int, backlog: c_int) -> i64;
+    fn patina_sock_accept(fd: c_int, addr: usize, len_ptr: usize, flags: c_int) -> i64;
+    fn patina_sock_name(fd: c_int, addr: usize, len_ptr: usize, peer: c_int) -> i64;
+    fn patina_sock_shutdown(fd: c_int, how: c_int) -> i64;
+    fn patina_sock_setsockopt(fd: c_int, level: c_int, name: c_int, value: usize, len: i64) -> i64;
+    fn patina_sock_getsockopt(
         fd: c_int,
-        ip_out: *mut u32,
-        port_out: *mut u16,
-        nonblocking: c_int,
-        cloexec: c_int,
-    ) -> c_int;
-    fn patina_net_sendto(fd: c_int, buf: *const c_void, len: usize, ip: u32, port: u16) -> isize;
-    fn patina_net_send(fd: c_int, buf: *const c_void, len: usize) -> isize;
-    fn patina_net_stream_send(fd: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize;
-    fn patina_net_recvfrom(
+        level: c_int,
+        name: c_int,
+        value: usize,
+        len_ptr: usize,
+    ) -> i64;
+    fn patina_sock_sendto(
         fd: c_int,
-        buf: *mut c_void,
+        buf: usize,
         len: usize,
-        ip_out: *mut u32,
-        port_out: *mut u16,
-    ) -> isize;
-    fn patina_net_stream_recv(fd: c_int, buf: *mut c_void, len: usize) -> isize;
-    fn patina_net_shutdown(fd: c_int, how: c_int) -> c_int;
-    fn patina_net_getsockname(fd: c_int, ip_out: *mut u32, port_out: *mut u16) -> c_int;
-    fn patina_net_getpeername(fd: c_int, ip_out: *mut u32, port_out: *mut u16) -> c_int;
-    fn patina_net_set_read_timeout(fd: c_int, nanos: u64) -> c_int;
-    fn patina_socketpair(
-        fd0_out: *mut c_int,
-        fd1_out: *mut c_int,
-        nonblocking: c_int,
-        cloexec: c_int,
-    ) -> c_int;
+        flags: c_int,
+        addr: usize,
+        alen: i64,
+    ) -> i64;
+    fn patina_sock_recvfrom(
+        fd: c_int,
+        buf: usize,
+        len: usize,
+        flags: c_int,
+        addr: usize,
+        alen_ptr: usize,
+    ) -> i64;
+    fn patina_sock_sendmsg(fd: c_int, msg: usize, flags: c_int) -> i64;
+    fn patina_sock_recvmsg(fd: c_int, msg: usize, flags: c_int) -> i64;
+    fn patina_sock_sendmmsg(fd: c_int, vec: usize, vlen: u32, flags: c_int) -> i64;
+    fn patina_sock_recvmmsg(fd: c_int, vec: usize, vlen: u32, flags: c_int, timeout: usize) -> i64;
 
-    // In-process pipe / socketpair endpoints (the send/recv face of a
-    // socketpair end) and eventfds.
-    fn patina_pipe_read(fd: c_int, buf: *mut c_void, len: usize) -> isize;
-    fn patina_pipe_write(fd: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize;
     fn patina_eventfd(initval: u32, flags: c_int) -> c_int;
 
     // Readiness reactor (Linux epoll frontend over the OS-agnostic core). The SUD
@@ -392,19 +390,7 @@ const EINVAL: i64 = errno::EINVAL as i64;
 
 const ENOSYS: i64 = errno::ENOSYS as i64;
 
-const ENOTSOCK: i64 = errno::ENOTSOCK as i64;
-
 const EOPNOTSUPP: i64 = errno::EOPNOTSUPP as i64;
-
-const EAFNOSUPPORT: i64 = errno::EAFNOSUPPORT as i64;
-
-const ENOPROTOOPT: i64 = errno::ENOPROTOOPT as i64;
-
-const EISCONN: i64 = errno::EISCONN as i64;
-
-const EPROTONOSUPPORT: i64 = errno::EPROTONOSUPPORT as i64;
-
-const EPROTOTYPE: i64 = errno::EPROTOTYPE as i64;
 
 const EOVERFLOW: i64 = errno::EOVERFLOW as i64;
 
@@ -415,10 +401,6 @@ const E2BIG: i64 = errno::E2BIG as i64;
 // on what a number names. Everything else about a descriptor is answered by
 // the universal `patina_*` entries, which resolve the number themselves.
 const PATINA_FD_DIR: c_int = 4;
-
-const PATINA_FD_SOCKET: c_int = 7;
-
-const PATINA_FD_PIPE: c_int = 8;
 
 // Patina clock ids (see `patina_native.h`).
 const PATINA_CLOCK_REALTIME: u32 = 0;
@@ -652,68 +634,6 @@ struct KernelFlock {
 }
 
 const FD_CLOEXEC: i64 = uapi::FD_CLOEXEC as i64;
-
-// `socket(2)` domain / type / protocol constants (Linux, arch-independent).
-const AF_INET: u16 = 2;
-
-// AF_UNIX / AF_LOCAL (the only domain a deterministic socketpair models).
-const AF_UNIX: i64 = 1;
-
-const SOCK_STREAM: u64 = 1;
-
-const SOCK_DGRAM: u64 = 2;
-
-const SOCK_NONBLOCK: u64 = 0o4000;
-
-const SOCK_CLOEXEC: u64 = 0o2000000;
-
-const IPPROTO_TCP: u64 = 6;
-
-const IPPROTO_UDP: u64 = 17;
-
-// `shutdown(2)` how values.
-const SHUT_RD: u64 = 0;
-
-const SHUT_WR: u64 = 1;
-
-const SHUT_RDWR: u64 = 2;
-
-// setsockopt levels / options accepted as deterministic no-ops (mirrors the C
-// setsockopt interposer's accepted subset).
-const SOL_SOCKET: u64 = 1;
-
-const SO_REUSEADDR: u64 = 2;
-
-const SO_KEEPALIVE: u64 = 9;
-
-const SO_BROADCAST: u64 = 6;
-
-const SO_LINGER: u64 = 13;
-
-const SO_REUSEPORT: u64 = 15;
-
-const SO_RCVTIMEO: u64 = 20;
-
-const SO_SNDTIMEO: u64 = 21;
-
-const TCP_NODELAY: u64 = 1;
-
-// `MSG_*` send/recv flags the virtual sockets tolerate (only MSG_NOSIGNAL is a
-// no-op; anything else is unmodeled and fails closed, mirroring the C
-// send/recv `patina_stream_flags_supported`).
-const MSG_NOSIGNAL: u64 = 0x4000;
-
-/// Kernel `struct sockaddr_in` on Linux (`sin_family`, `sin_port` (network
-/// order), `sin_addr` (network order), padding). Read from / written to guest
-/// memory during the socket-address rows.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct SockaddrIn {
-    sin_family: u16,
-    sin_port: u16,
-    sin_addr: u32,
-    sin_zero: [u8; 8],
-}
 
 /// Kernel `struct timespec` on 64-bit Linux (`time_t` and `long` are both 8
 /// bytes). Read from and written to guest memory during dispatch.
@@ -1634,16 +1554,15 @@ const BINDINGS: &[(Syscall, Handler)] = &[
         sys_fchown(arg_fd(a[0]), a[1], a[2])
     }),
     (Syscall::N_truncate, |_, a| sys_truncate(a[0], a[1] as i64)),
-    // ---- network ----
+    // ---- network: the shared socket entries, argument for argument ----
     (Syscall::N_socket, |_, a| sys_socket(a[0], a[1], a[2])),
-    (Syscall::N_bind, |_, a| {
-        sys_bind(arg_fd(a[0]), a[1], a[2] as u32)
+    (Syscall::N_socketpair, |_, a| {
+        sys_socketpair(a[0], a[1], a[2], a[3])
     }),
-    (Syscall::N_listen, |_, a| {
-        sys_listen(arg_fd(a[0]), a[1] as i64)
-    }),
+    (Syscall::N_bind, |_, a| sys_bind(arg_fd(a[0]), a[1], a[2])),
+    (Syscall::N_listen, |_, a| sys_listen(arg_fd(a[0]), a[1])),
     (Syscall::N_connect, |_, a| {
-        sys_connect(arg_fd(a[0]), a[1], a[2] as u32)
+        sys_connect(arg_fd(a[0]), a[1], a[2])
     }),
     (Syscall::N_accept, |_, a| {
         sys_accept(arg_fd(a[0]), a[1], a[2], 0)
@@ -1652,7 +1571,7 @@ const BINDINGS: &[(Syscall, Handler)] = &[
         sys_accept(arg_fd(a[0]), a[1], a[2], a[3])
     }),
     (Syscall::N_sendto, |_, a| {
-        sys_sendto(arg_fd(a[0]), a[1], a[2], a[3], a[4], a[5] as u32)
+        sys_sendto(arg_fd(a[0]), a[1], a[2], a[3], a[4], a[5])
     }),
     (Syscall::N_recvfrom, |_, a| {
         sys_recvfrom(arg_fd(a[0]), a[1], a[2], a[3], a[4], a[5])
@@ -1663,21 +1582,24 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_recvmsg, |_, a| {
         sys_recvmsg(arg_fd(a[0]), a[1], a[2])
     }),
+    (Syscall::N_sendmmsg, |_, a| {
+        sys_sendmmsg(arg_fd(a[0]), a[1], a[2], a[3])
+    }),
+    (Syscall::N_recvmmsg, |_, a| {
+        sys_recvmmsg(arg_fd(a[0]), a[1], a[2], a[3], a[4])
+    }),
     (Syscall::N_shutdown, |_, a| sys_shutdown(arg_fd(a[0]), a[1])),
     (Syscall::N_getsockname, |_, a| {
-        sys_getsockname(arg_fd(a[0]), a[1], a[2])
+        sys_name(arg_fd(a[0]), a[1], a[2], false)
     }),
     (Syscall::N_getpeername, |_, a| {
-        sys_getpeername(arg_fd(a[0]), a[1], a[2])
+        sys_name(arg_fd(a[0]), a[1], a[2], true)
     }),
     (Syscall::N_setsockopt, |_, a| {
-        sys_setsockopt(arg_fd(a[0]), a[1], a[2], a[3], a[4] as u32)
+        sys_setsockopt(arg_fd(a[0]), a[1], a[2], a[3], a[4])
     }),
     (Syscall::N_getsockopt, |_, a| {
-        sys_getsockopt(arg_fd(a[0]), a[3], a[4])
-    }),
-    (Syscall::N_socketpair, |_, a| {
-        sys_socketpair(a[0], a[1], a[2], a[3])
+        sys_getsockopt(arg_fd(a[0]), a[1], a[2], a[3], a[4])
     }),
     // ---- readiness ----
     (Syscall::N_epoll_create1, |_, a| sys_epoll_create1(a[0])),
@@ -2017,21 +1939,6 @@ mod tests {
     }
 
     #[test]
-    fn sendmsg_recvmsg_mirror_the_interposer_enosys_never_fragment() {
-        // The C sendmsg/recvmsg interposers fail closed with ENOSYS; the SUD
-        // rows must return the identical refusal, NOT a per-iovec sendto/recvfrom
-        // loop. RED: a fragmenting implementation would route the (fd, msg, flags)
-        // through the net rows and return a byte count (or -EFAULT / other),
-        // never exactly -ENOSYS — so this assertion catches the silently-wrong
-        // datagram-fragmentation regression. Pure (no runtime entry is called),
-        // so the argument values are irrelevant to the refusal.
-        assert_eq!(sys_sendmsg(0, 0, 0), -ENOSYS);
-        assert_eq!(sys_sendmsg(0x4000_0000, 0xdead_beef, 0x4000), -ENOSYS);
-        assert_eq!(sys_recvmsg(0, 0, 0), -ENOSYS);
-        assert_eq!(sys_recvmsg(0x4000_0000, 0xdead_beef, 0x4000), -ENOSYS);
-    }
-
-    #[test]
     fn prctl_option_narrows_to_unsigned_int_like_the_kernel() {
         // The kernel reads `option = (unsigned int) arg`, so only the low 32 bits
         // decide the route. rustix passes a clean 32-bit PR_GET_AUXV; hand asm may
@@ -2115,37 +2022,30 @@ mod tests {
     }
 
     #[test]
-    fn socketpair_validates_args_in_c_order() {
-        // A non-null dummy sv pointer that is never dereferenced on the failure
-        // paths (each check below returns before touching it).
-        let sv: u64 = 0x1000;
-        // Null sv is EFAULT, checked FIRST — even with otherwise-valid args.
-        assert_eq!(sys_socketpair(AF_UNIX as u64, SOCK_STREAM, 0, 0), -EFAULT);
-        // Wrong domain → EAFNOSUPPORT (only AF_UNIX is a deterministic duplex).
+    fn socketpair_answers_in_kernel_order() {
+        use crate::thread::net::abi::{
+            AF_INET, AF_UNIX, EPROTONOSUPPORT, SOCK_CLOEXEC, SOCK_NONBLOCK, SOCK_STREAM,
+        };
+        let mut sv = [-1i32; 2];
+        let at = sv.as_mut_ptr() as u64;
+        // `__sys_socketpair`: the creation flags first, then both numbers
+        // are written to `sv` before any socket exists, then the family.
         assert_eq!(
-            sys_socketpair(AF_INET as u64, SOCK_STREAM, 0, sv),
-            -EAFNOSUPPORT
-        );
-        // Non-STREAM base type → EOPNOTSUPP, and SOCK_NONBLOCK is stripped BEFORE
-        // that compare (a DGRAM|NONBLOCK stays DGRAM, not mistaken for STREAM).
-        assert_eq!(
-            sys_socketpair(AF_UNIX as u64, SOCK_DGRAM, 0, sv),
-            -EOPNOTSUPP
+            sys_socketpair(AF_UNIX as u64, (SOCK_STREAM | 0x1_0000) as u64, 0, at),
+            -EINVAL
         );
         assert_eq!(
-            sys_socketpair(AF_UNIX as u64, SOCK_DGRAM | SOCK_NONBLOCK, 0, sv),
-            -EOPNOTSUPP
+            sys_socketpair(AF_INET as u64, SOCK_STREAM as u64, 0, 0),
+            -EFAULT
         );
-        // A STREAM pair with a non-zero protocol → EPROTONOSUPPORT (the NONBLOCK
-        // and CLOEXEC bits are stripped, so the base is a clean STREAM here).
         assert_eq!(
             sys_socketpair(
                 AF_UNIX as u64,
-                SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                (SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC) as u64,
                 6,
-                sv
+                at
             ),
-            -EPROTONOSUPPORT
+            -i64::from(EPROTONOSUPPORT)
         );
     }
 

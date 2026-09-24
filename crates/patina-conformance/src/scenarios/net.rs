@@ -26,6 +26,7 @@ pub mod getaddrinfo;
 pub mod getifaddrs;
 pub mod ifconfig;
 pub mod inet6;
+pub mod ipctl;
 pub mod mmsg;
 pub mod msg;
 pub mod netlink;
@@ -41,7 +42,6 @@ pub mod unix_seqpacket;
 pub mod unix_stream;
 
 use crate::probe::{Probe, SockAddr};
-use crate::vehicle::Vehicle;
 
 /// The lowest port a `bind` to port 0 can be given: autoallocation draws from
 /// `ip_local_port_range`, whose low end the kernel refuses below
@@ -58,15 +58,6 @@ pub fn check_allocated_port(p: &Probe, addr: &SockAddr) {
         addr.port().is_some_and(|port| port >= UNPRIVILEGED_PORT),
     );
 }
-
-/// The vehicles that issue the kernel rows themselves (`syscall(2)` and, on
-/// x86_64, the instruction): where a libc wrapper answers differently from
-/// the row glibc spells it with, the two get separate gaps.
-pub const ROWS: &[Vehicle] = &[
-    Vehicle::Syscall,
-    #[cfg(target_arch = "x86_64")]
-    Vehicle::Raw,
-];
 
 /// An abstract AF_UNIX name a run owns: derived from its run directory —
 /// a 64-bit FNV-1a of the path, so the name's length is bounded whatever

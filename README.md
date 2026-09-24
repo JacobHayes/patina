@@ -366,8 +366,11 @@ silently:
   `patina_dst::` in code.
 - **No process spawning**: `fork`/`posix_spawn` and friends are denied
   (a guest that reaches them aborts deterministically). One process per run.
-- **IPv6 and DNS fail closed**. TCP and UDP over the simulated network both
-  honor `--net-latency-nanos` and the seeded jitter/drop knobs.
+- **The network is virtual**: IPv4, IPv6, Unix-domain and netlink sockets see
+  one virtual host (`lo`, `eth0` at 10.0.0.1/24, no default route) and names
+  resolve only through the run's `--dns-entry` table. TCP and UDP over the
+  simulated network both honor `--net-latency-nanos` and the seeded
+  jitter/drop knobs.
 - **Not a hypervisor**: unsupported FFI, dynamic loading, inline assembly
   reading clocks/entropy, and direct host APIs are refused, not virtualized.
   Patina makes *mostly-Rust* programs deterministic; it does not promise to run

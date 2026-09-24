@@ -17,14 +17,11 @@
 //! against the IPv4 minimum of 576, never recorded) — is its own business, as the `eth0` of
 //! the interface table the arc models is patina's.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{
     ARPHRD_LOOPBACK, AT_FDCWD, IfField, Probe, SIOCGIFADDR, SIOCGIFFLAGS, SIOCGIFHWADDR,
     SIOCGIFINDEX, SIOCGIFMTU, SIOCGIFNAME, SIOCGIFNETMASK, neg,
 };
-use crate::scenarios::net::ROWS;
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::net::Ipv4Addr;
@@ -151,80 +148,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
     ],
     symbols: &["socket", "ioctl", "if_nametoindex", "openat", "close"],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "the SIOCGIF* interface requests answer ENOTTY on a socket (c/posix/fd_io.c ioctl, sud/fd_io.rs sys_ioctl model FIONBIO/FIOCLEX/FIONCLEX alone): nothing serves the requests the arc's virtual interface table (`lo` + `eth0`/24) is to answer — no index, name, flags, address, netmask, hardware address, MTU or SIOCGIFCONF listing, and no ENODEV for a name or index it lacks",
-            failure: Failure::Differs(&[
-                Difference::field(1, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(1, "ioctl", "fields.ifindex", Observed::Null),
-                Difference::field(1, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(2, "lo is interface 1"),
-                Difference::field(3, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(3, "ioctl", "fields.ifname", Observed::Null),
-                Difference::field(3, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(4, "interface 1 is lo"),
-                Difference::field(5, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(5, "ioctl", "fields.flags", Observed::Null),
-                Difference::field(5, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(6, "lo is up, loopback and running"),
-                Difference::field(7, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(7, "ioctl", "fields.addr", Observed::Null),
-                Difference::field(7, "ioctl", "fields.family", Observed::Null),
-                Difference::field(7, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(8, "lo's address is 127.0.0.1"),
-                Difference::field(9, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(9, "ioctl", "fields.addr", Observed::Null),
-                Difference::field(9, "ioctl", "fields.family", Observed::Null),
-                Difference::field(9, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(10, "lo's netmask is 255.0.0.0"),
-                Difference::field(11, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(11, "ioctl", "fields.hw_addr", Observed::Null),
-                Difference::field(11, "ioctl", "fields.hw_family", Observed::Null),
-                Difference::field(11, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(
-                    12,
-                    "lo's hardware type is ARPHRD_LOOPBACK with an all-zero address",
-                ),
-                Difference::field(13, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(13, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(14, "lo's MTU is at least the IPv4 minimum reassembly size"),
-                Difference::field(15, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::field(15, "ioctl", "fields.found", Observed::Null),
-                Difference::field(15, "ioctl", "fields.whole_entries", Observed::Null),
-                Difference::field(15, "ioctl", "ret", Observed::Int(-1)),
-                Difference::check(16, "SIOCGIFCONF lists lo with 127.0.0.1"),
-                Difference::field(17, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::check(18, "a name no interface has is ENODEV"),
-                Difference::field(19, "ioctl", "errno", Observed::Str("ENOTTY")),
-                Difference::check(20, "an index no interface has is ENODEV"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: &[Vehicle::Libc],
-            what: "if_nametoindex answers 0 with ENXIO for every name (c/posix/net.c if_nametoindex: no interface is modeled), where `lo` is 1 and a name no interface has is ENODEV",
-            failure: Failure::Differs(&[
-                Difference::field(21, "if_nametoindex", "errno", Observed::Str("ENXIO")),
-                Difference::field(21, "if_nametoindex", "ret", Observed::Int(-1)),
-                Difference::check(22, "if_nametoindex(lo) is 1"),
-                Difference::field(23, "if_nametoindex", "errno", Observed::Str("ENXIO")),
-                Difference::check(24, "if_nametoindex of a name no interface has is ENODEV"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: ROWS,
-            what: "glibc's if_nametoindex spelling (SIOCGIFINDEX on a datagram socket) answers ENOTTY, the ioctl gap above",
-            failure: Failure::Differs(&[
-                Difference::field(21, "if_nametoindex", "errno", Observed::Str("ENOTTY")),
-                Difference::field(21, "if_nametoindex", "ret", Observed::Int(-1)),
-                Difference::check(22, "if_nametoindex(lo) is 1"),
-                Difference::field(23, "if_nametoindex", "errno", Observed::Str("ENOTTY")),
-                Difference::check(24, "if_nametoindex of a name no interface has is ENODEV"),
-            ]),
-        },
-    ],
     ..DEFAULTS
 };

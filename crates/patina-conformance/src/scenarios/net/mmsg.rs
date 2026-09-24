@@ -21,10 +21,8 @@
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{AT_FDCWD, Outgoing, Probe, SockAddr, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -184,16 +182,14 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_openat,
         Syscall::N_close,
     ],
-    symbols: &["socket", "bind", "getsockname", "openat", "close"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::NetworkReadiness),
-        vehicles: Vehicle::ALL,
-        what: "sendmmsg is an unmodeled trap (registry Trap(unmodeled), sud dispatcher; glibc's wrapper is not a shim symbol, so every vehicle reaches the row): the first batch send aborts by name (recvmmsg is the same trap); the diagnostic is pinned up to the syscall number, which differs by architecture",
-        failure: Failure::Stops {
-            events: 8,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall sendmmsg (nr",
-        },
-    }],
+    symbols: &[
+        "sendmmsg",
+        "recvmmsg",
+        "socket",
+        "bind",
+        "getsockname",
+        "openat",
+        "close",
+    ],
     ..DEFAULTS
 };

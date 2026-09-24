@@ -3,6 +3,8 @@
     }
     {
       line = $0
+      # The traced process: the first call's pid (its execve).
+      if (pid == "") { pid = $1 }
       sub(/^[0-9]+ +/, "", line)
       if (line ~ /^--- / || line ~ /^\+\+\+ /) next
       syscall = line
@@ -17,6 +19,9 @@
       if (syscall == "close") { cfd = args; sub(/[^0-9].*/, "", cfd); if (cfd != "") delete trusted[cfd] }
       if (syscall ~ /^(execve|brk|arch_prctl|mmap|mmap2|munmap|mprotect|madvise|futex|sched_yield|sigaltstack|rt_sigaction|rt_sigprocmask|rt_sigreturn|exit|exit_group|close)$/) next
       if (syscall == "getrandom" && args ~ /GRND_NONBLOCK/) next
+      # The shim's guest-memory copies name the traced process itself; a copy
+      # aimed at another process escapes.
+      if (syscall ~ /^process_vm_(readv|writev)$/) { target = args; sub(/,.*/, "", target); if (target == pid) next }
       if (syscall ~ /^(openat|openat2|open|newfstatat|readlink|readlinkat)$/ && trusted_path(args)) next
       if (syscall ~ /^(faccessat|faccessat2|access)$/ && args ~ /"\/etc\/ld\.so\.preload"/) next
       if (syscall ~ /^(read|pread64|fstat|fcntl|lseek)$/) {

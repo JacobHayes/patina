@@ -17,8 +17,7 @@
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, SockAddr};
 use crate::vehicle::{Vehicle, fold_errno};
 use libc::*;
@@ -178,29 +177,6 @@ pub const SCENARIO: Scenario = Scenario {
         "getsockname",
         "sendto",
         "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim defines none of __recv_chk/__recvfrom_chk/__poll_chk/__ppoll_chk (registry `Absent`): a fortified guest importing one is refused by the pre-run audit, and `dlsym` finds none (c/posix/entropy.c `__wrap_dlsym` answers the shim's own definitions alone)",
-            failure: Failure::Differs(&[
-                Difference::field(8, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(9, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(10, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(11, "dlsym", "fields.resolved", Observed::Bool(false)),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: &[Vehicle::Libc],
-            what: "with none of them resolved the scenario cannot continue",
-            failure: Failure::Stops {
-                events: 12,
-                ending: Ending::Exit(101),
-                diagnostic: "net/fortify: cannot continue: the fortified symbols resolve",
-            },
-        },
     ],
     ..DEFAULTS
 };

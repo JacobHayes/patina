@@ -8,8 +8,8 @@
 //! `calculate_f_flags` builds them — `ST_VALID` always, plus the mount's
 //! `relatime`, the atime policy the filesystem stamps by. A descriptor with no
 //! entry on the volume is on one of the kernel's pseudo-filesystems, which
-//! answer through `simple_statfs`: an anonymous pipe on pipefs, a socket or a
-//! socketpair end on sockfs, an eventfd, signalfd or epoll instance on
+//! answer through `simple_statfs`: an anonymous pipe on pipefs, a socket on
+//! sockfs, an eventfd, signalfd or epoll instance on
 //! anon_inodefs. The entropy device `/dev/urandom` is on a mount of its own,
 //! devtmpfs (a tmpfs), described by constants like the volume. Every `f_fsid`
 //! is derived from the filesystem's device. Linux only: the C `statfs` family
@@ -166,7 +166,6 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
         FdKind::File | FdKind::Dir | FdKind::OPath => Ok(Filesystem::Volume),
         FdKind::Pipe => match thread::pipe_filesystem(raw_fd) {
             Some(PATINA_FS_PIPEFS) => Ok(Filesystem::Pipefs),
-            Some(PATINA_FS_SOCKFS) => Ok(Filesystem::Sockfs),
             Some(_) => Ok(Filesystem::Volume),
             None => Err(EBADF),
         },

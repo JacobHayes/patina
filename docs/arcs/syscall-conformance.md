@@ -395,12 +395,52 @@ forwards into the same dispatcher instead of its two-number allowlist.
   and packet sockets, `SO_PRIORITY` above 6, `SO_MARK`, `SO_RCVBUFFORCE`,
   rebinding `SO_BINDTODEVICE`, another process's `SCM_CREDENTIALS`) are
   asserted as the EPERM an unprivileged caller gets, not excluded. The
-  symbols the shim leaves `Absent` (`getifaddrs`/`freeifaddrs`, the
-  `__recv_chk`/`__recvfrom_chk`/`__poll_chk`/`__ppoll_chk` fortify
-  spellings) are reached through `dlsym`, which under patina answers the
-  shim's own definitions alone, so defining one means answering it there
-  too. `uname`, `gethostname` and `res_init` are host identity (the time +
+  scenarios reach `getifaddrs`/`freeifaddrs` and the
+  `__recv_chk`/`__recvfrom_chk`/`__poll_chk`/`__ppoll_chk` fortify spellings
+  through `dlsym`, which under patina answers the shim's own definitions
+  (c/posix/dlsym.c), so each is defined in the shim and routed there.
+  `uname`, `gethostname` and `res_init` are host identity (the time +
   identity family).
+  Status: one socket model (`thread/net.rs` and `thread/net/*`) behind both
+  doors — every socket row is a `patina_sock_*` entry that copies guest
+  memory through `uaccess` (`process_vm_readv`/`writev` on Linux, the Mach
+  VM calls on Darwin: EFAULT, never a fault in the shim; a host that refuses
+  the vehicle refuses the run by name at install) and answers the kernel's
+  errno order; the C interposers are one-line calls. A send is copied in as
+  the protocol takes it (a record once its size is judged, a stream a
+  piece at a time), never allocated whole up front. AF_INET and AF_INET6
+  (dual-stack wildcard binds, `IPV6_V6ONLY`) run over SimNet with shared
+  `SO_REUSEADDR`/`SO_REUSEPORT` bindings, datagram autobind, a connected
+  datagram socket found by its whole 4-tuple, the port-unreachable answer as
+  ECONNREFUSED on a connected socket, the EINPROGRESS connect, AF_UNSPEC
+  disconnect and a reset reported once, then end-of-file; UDP sockets take
+  `IP_TOS`/`IPV6_TCLASS`, `IP_PKTINFO`/`IPV6_PKTINFO` (sent and received),
+  the hop limits and `UDP_SEGMENT` (net/ipctl). AF_UNIX stream, datagram and
+  seqpacket sockets (filesystem nodes with their write permission, abstract
+  names, autobind, socketpairs as sockets, SCM_RIGHTS/SCM_CREDENTIALS,
+  SO_PEERCRED, a listener's unaccepted connections reset when it closes) and
+  AF_NETLINK route sockets (RTM_GETLINK/RTM_GETADDR over the interface
+  table) are the shim's own; raw and packet sockets are EPERM.
+  sendmsg/recvmsg/sendmmsg/recvmmsg, the option store (`SO_RCVLOWAT`
+  included), `SIOCINQ` and the `SIOCGIF*` requests, getaddrinfo over numeric
+  hosts and the host table, if_nametoindex and getifaddrs are modeled.
+  Readiness is each object's kernel poll mask: poll/ppoll/select/pselect6
+  read it (select normalizes its timeval as `kern_select` does), and epoll
+  keeps a ready list — FIFO by wakeup, level-triggered items re-queued at the
+  tail, edge-triggered ones re-queued on each wakeup their source makes (an
+  arrival, a receive that frees room for a writer, a condition rising),
+  EPOLLEXCLUSIVE validated (its wake-one is "one or more": every instance
+  sees the event). Pipe writes of at most `PIPE_BUF` bytes are atomic. Trace
+  format 12 adds `net_bind_shared`, `net_connect`, `net_mark` and the
+  unreachable send disposition. Left: urgent data (`MSG_OOB` on a stream is
+  EOPNOTSUPP, so select's exception set stays empty), `--net-default-route`
+  (no default route: off-table is ENETUNREACH), inotify (still a trap),
+  fanotify (a named trap by design), the `SIOCGIF*` requests and every
+  IP-level control message on macOS (the latter a named fatal), UDP-Lite
+  (a named fatal), `UDP_GRO` (receive coalescing: the option answers
+  ENOPROTOOPT), IP options, `IP_PROTOCOL`, IPv6 flow labels and extension
+  headers (named fatals), and wakeups between two epoll scans are queued in
+  descriptor order (the model keeps no clock across sources).
 - **process lifecycle + privileged** (data only): every row `Trap(class)` with
   its one-line reasoning in the registry; `execve`/`arch_prctl`/`set_tid_address`
   pre-arm rows documented as never-trapping.
