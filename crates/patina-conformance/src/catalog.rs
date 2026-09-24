@@ -165,6 +165,9 @@ pub enum Need {
     /// The clocks resolve to 1 ns (`CONFIG_HIGH_RES_TIMERS` with a
     /// oneshot-capable clock event device), not to a tick.
     HighResTimers,
+    /// Landlock is built and active (`CONFIG_SECURITY_LANDLOCK`, and in the
+    /// boot's LSM list): `landlock_create_ruleset`'s version query answers.
+    Landlock,
 }
 
 impl Need {
@@ -182,7 +185,8 @@ impl Need {
             | Need::SecretMemory
             | Need::OneNumaNode
             | Need::SysfsSyscall
-            | Need::HighResTimers => true,
+            | Need::HighResTimers
+            | Need::Landlock => true,
             Need::UserXattrs
             | Need::Inotify
             | Need::FileHandles
@@ -480,6 +484,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &proc::namespaces::SCENARIO,
     &proc::pgrp::SCENARIO,
     &proc::prctl::SCENARIO,
+    &proc::seccomp::SCENARIO,
     &proc::traps::SCENARIO,
     &proc::wait::SCENARIO,
     &readiness::epoll::SCENARIO,
@@ -519,6 +524,8 @@ pub const SCENARIOS: &[&Scenario] = &[
     #[cfg(target_arch = "x86_64")]
     &sys::ioport::SCENARIO,
     &sys::keys::SCENARIO,
+    &sys::landlock::SCENARIO,
+    &sys::lsm::SCENARIO,
     &sys::personality::SCENARIO,
     &sys::quota::SCENARIO,
     &sys::rlimit::SCENARIO,

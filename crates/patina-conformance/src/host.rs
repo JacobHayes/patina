@@ -200,6 +200,7 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         Need::DefaultPersona => timeid::default_persona(),
         Need::SysfsSyscall => timeid::sysfs_syscall(),
         Need::HighResTimers => timeid::high_res_timers(),
+        Need::Landlock => timeid::landlock(),
     }
 }
 
@@ -643,6 +644,18 @@ mod timeid {
             cause: Cause::Absent,
             detail: "this architecture's table has no sysfs row".into(),
         })
+    }
+
+    /// `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`:
+    /// the ABI version, `EOPNOTSUPP` when Landlock is built but not in the
+    /// boot's LSM list, `ENOSYS` when it is not built.
+    pub(super) fn landlock() -> Result<(), NotRun> {
+        // SAFETY: a NULL attribute pointer, size 0, a flag word.
+        let result = unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, 0, 0, 1) };
+        match result {
+            version if version > 0 => Ok(()),
+            _ => Err(refusal("landlock_create_ruleset(VERSION)", errno())),
+        }
     }
 
     pub(super) fn high_res_timers() -> Result<(), NotRun> {

@@ -1512,6 +1512,11 @@ fn proc_prctl() {
 }
 
 #[test]
+fn proc_seccomp() {
+    conform("proc/seccomp");
+}
+
+#[test]
 fn proc_traps() {
     conform("proc/traps");
 }
@@ -1700,6 +1705,16 @@ fn sys_ioport() {
 #[test]
 fn sys_keys() {
     conform("sys/keys");
+}
+
+#[test]
+fn sys_landlock() {
+    conform("sys/landlock");
+}
+
+#[test]
+fn sys_lsm() {
+    conform("sys/lsm");
 }
 
 #[test]
