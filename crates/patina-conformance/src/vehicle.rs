@@ -441,6 +441,84 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             Syscall::N_chown => chown(a[0] as *const c_char, a[1] as uid_t, a[2] as gid_t) as i64,
             #[cfg(target_arch = "x86_64")]
             Syscall::N_lchown => lchown(a[0] as *const c_char, a[1] as uid_t, a[2] as gid_t) as i64,
+            // The memory rows whose glibc symbol a shim-linked probe may
+            // import: the shim defines `mmap`/`munmap`/`msync`/`mremap`, and
+            // the import audit admits `mprotect`/`madvise` as process-local
+            // memory. `MAP_FAILED` is the pointer -1, which folds like `-1`.
+            Syscall::N_mmap => mmap(
+                a[0] as *mut c_void,
+                a[1] as size_t,
+                a[2] as c_int,
+                a[3] as c_int,
+                a[4] as c_int,
+                a[5] as off_t,
+            ) as i64,
+            Syscall::N_munmap => munmap(a[0] as *mut c_void, a[1] as size_t) as i64,
+            Syscall::N_mprotect => {
+                mprotect(a[0] as *mut c_void, a[1] as size_t, a[2] as c_int) as i64
+            }
+            Syscall::N_madvise => {
+                madvise(a[0] as *mut c_void, a[1] as size_t, a[2] as c_int) as i64
+            }
+            Syscall::N_msync => msync(a[0] as *mut c_void, a[1] as size_t, a[2] as c_int) as i64,
+            Syscall::N_mremap => mremap(
+                a[0] as *mut c_void,
+                a[1] as size_t,
+                a[2] as size_t,
+                a[3] as c_int,
+                a[4] as *mut c_void,
+            ) as i64,
+            // Memory and IPC rows whose glibc wrapper the shim does not define
+            // (`brk`, `mincore`, the `mlock` family, SysV shm/sem/msg, the
+            // kernel rows under glibc's `mq_*`, `memfd_create`, `pkey_*`,
+            // `remap_file_pages`, `pidfd_open`, `process_madvise`) or that
+            // glibc does not wrap at all (`membarrier`, `memfd_secret`,
+            // `map_shadow_stack`, the NUMA rows libnuma wraps, `mseal`):
+            // importing such a wrapper would make the pre-run import audit
+            // refuse the whole probe binary, so the libc spelling is glibc's
+            // own `syscall(2)` until the shim defines it.
+            Syscall::N_brk
+            | Syscall::N_mincore
+            | Syscall::N_mlock
+            | Syscall::N_munlock
+            | Syscall::N_mlockall
+            | Syscall::N_munlockall
+            | Syscall::N_mlock2
+            | Syscall::N_shmget
+            | Syscall::N_shmat
+            | Syscall::N_shmdt
+            | Syscall::N_shmctl
+            | Syscall::N_semget
+            | Syscall::N_semop
+            | Syscall::N_semtimedop
+            | Syscall::N_semctl
+            | Syscall::N_msgget
+            | Syscall::N_msgsnd
+            | Syscall::N_msgrcv
+            | Syscall::N_msgctl
+            | Syscall::N_mq_open
+            | Syscall::N_mq_unlink
+            | Syscall::N_mq_timedsend
+            | Syscall::N_mq_timedreceive
+            | Syscall::N_mq_notify
+            | Syscall::N_mq_getsetattr
+            | Syscall::N_memfd_create
+            | Syscall::N_memfd_secret
+            | Syscall::N_membarrier
+            | Syscall::N_remap_file_pages
+            | Syscall::N_pkey_mprotect
+            | Syscall::N_pkey_alloc
+            | Syscall::N_pkey_free
+            | Syscall::N_map_shadow_stack
+            | Syscall::N_pidfd_open
+            | Syscall::N_process_madvise
+            | Syscall::N_mbind
+            | Syscall::N_set_mempolicy
+            | Syscall::N_get_mempolicy
+            | Syscall::N_migrate_pages
+            | Syscall::N_move_pages
+            | Syscall::N_set_mempolicy_home_node
+            | Syscall::N_mseal => syscall_door(row, a),
             // No glibc wrapper: the futex word, the signal rows (glibc's
             // wrappers take its own struct layouts), tkill/tgkill, the thread
             // and process-lifecycle rows (`_exit(2)` is not interposed, so its
@@ -624,6 +702,8 @@ pub fn errno_name(code: i32) -> String {
         libc::EINPROGRESS => "EINPROGRESS",
         libc::EOVERFLOW => "EOVERFLOW",
         libc::ENODATA => "ENODATA",
+        libc::EIDRM => "EIDRM",
+        libc::ENOMSG => "ENOMSG",
         _ => return format!("E#{code}"),
     };
     name.to_string()

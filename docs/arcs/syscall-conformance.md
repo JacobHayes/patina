@@ -125,8 +125,9 @@ audit. And no gate compares patina's answers with the host kernel's, so a
    model, not a stop-gap. Host identity becomes knob-driven virtual state.
    cwd is modeled. A unified Linux-like fd table is a foundation.
 4. **Soft-deny ENOSYS only where ENOSYS is a real kernel outcome callers already
-   probe for** (openat2, rseq, membarrier, cachestat, io_uring until its arc,
-   removed numbers). Every stop-gap row names the arc that closes it.
+   probe for** (openat2, rseq, membarrier until the memory+ipc arc models it,
+   cachestat, io_uring until its arc, removed numbers). Every stop-gap row
+   names the arc that closes it.
 5. **Oracle = the host kernel.** Probes are self-checking Rust programs that
    also emit typed observation events; the same binary runs natively, under
    patina, and under patina replay, and the event streams must match except for
@@ -220,9 +221,11 @@ forwards into the same dispatcher instead of its two-number allowlist.
 - A scenario declares the rows it covers and the rows it asserts absent (past
   the virtual ABI level); a host kernel predating a covered row or the
   scenario's kernel floor makes the scenario not run, printed with the reason —
-  as does a host capability the scenario declares it needs and the run
-  directory's filesystem, the caller's limits or privileges lack (user xattrs,
-  inotify, file handles, whiteouts, an unprivileged caller), a host without SUD
+  as does a host capability the scenario declares it needs and the host lacks
+  (on the run directory's filesystem: user xattrs, file handles, whiteouts; in
+  the caller's limits or privileges: inotify, lockable pages, an unprivileged
+  caller; in the hardware or kernel configuration: protection keys, shadow
+  stacks, secret memory, SysV and POSIX IPC, one NUMA node), a host without SUD
   for the raw vehicle under patina, or one without strace for the leak run. A
   host kernel implementing an asserted-absent row stays an oracle: the native
   run answers that row with its declared ENOSYS and only that row's native
@@ -263,7 +266,16 @@ forwards into the same dispatcher instead of its two-number allowlist.
   (fd-backed, blocking on the scheduler) and named/unnamed `sem_*`
   interposers (the baton keeps its host-alias `sem_*`; guest symbols route to
   the scheduler); mincore/mlock constants; Linux AIO soft-deny (closes in the
-  io_uring arc).
+  io_uring arc); membarrier modeled (single process: QUERY reports the modeled
+  commands, the rest are ordered no-ops with the kernel's exact validation), its
+  SoftDeny(ENOSYS) a stop-gap until then. Its scenarios are `mem/*` and `ipc/*`, one per row group,
+  within one process and its threads; the hardware- and limit-dependent ones
+  (protection keys, shadow stacks, secret memory, lockable pages, one NUMA
+  node, SysV and POSIX IPC) declare host needs, and a behaviour newer than its
+  row (self `process_madvise`, `MREMAP_DONTUNMAP`, …) a kernel floor. The
+  POSIX `shm_*`/`sem_*`/`mq_*` symbols have no registry rows yet: the probe
+  cannot import a wrapper the shim leaves undefined (the pre-run audit would
+  refuse it), so the scenarios drive the kernel rows under them.
 - **time + timers + sched + identity**: timerfd (fd kind on the virtual clock);
   setitimer/getitimer/alarm; timer_create family (SIGEV_SIGNAL through the
   signal model, SIGEV_THREAD as a managed task); times; clock_getres; virtual

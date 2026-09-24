@@ -32,6 +32,8 @@ pub mod coverage;
 #[cfg(target_os = "linux")]
 pub mod host;
 #[cfg(target_os = "linux")]
+pub mod owned;
+#[cfg(target_os = "linux")]
 pub mod probe;
 #[cfg(target_os = "linux")]
 pub mod record;

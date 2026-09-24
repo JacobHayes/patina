@@ -24,8 +24,9 @@ pub const STRACE_EVENTS: &str = concat!(
 );
 
 /// Process-local rows with no filesystem, network, clock or entropy reach: the
-/// loader and allocator, signal-frame bookkeeping, and the rows a managed
-/// thread's host `pthread_create` issues.
+/// loader and allocator (the registry's `Passthrough` memory rows, `mremap`
+/// among them: glibc's `realloc` moves large blocks with it), signal-frame
+/// bookkeeping, and the rows a managed thread's host `pthread_create` issues.
 const PROCESS_LOCAL: &[&str] = &[
     "execve",
     "brk",
@@ -33,6 +34,7 @@ const PROCESS_LOCAL: &[&str] = &[
     "mmap",
     "mmap2",
     "munmap",
+    "mremap",
     "mprotect",
     "madvise",
     "futex",

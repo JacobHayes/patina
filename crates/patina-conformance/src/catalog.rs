@@ -12,7 +12,9 @@
 
 use crate::compare::{Expected, Failure};
 use crate::probe::Probe;
-use crate::scenarios::{abi, entropy, fd, fs, net, proc, readiness, signal, thread, time};
+use crate::scenarios::{
+    abi, entropy, fd, fs, ipc, mem, net, proc, readiness, signal, thread, time,
+};
 use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
@@ -95,6 +97,62 @@ pub enum Need {
     /// An unprivileged caller (euid ≠ 0, no effective capability): the EPERM
     /// and EACCES a scenario asserts are what capabilities bypass.
     Unprivileged,
+    /// A System V shared memory segment can be created and removed
+    /// (`CONFIG_SYSVIPC`; the IPC namespace's `shmmni`/`shmall`).
+    SysvShm,
+    /// A System V semaphore set can be created and removed (`semmni`,
+    /// `semmns`).
+    SysvSem,
+    /// A System V message queue can be created and removed (`msgmni`).
+    SysvMsg,
+    /// A POSIX message queue can be created and unlinked
+    /// (`CONFIG_POSIX_MQUEUE`; `RLIMIT_MSGQUEUE`, `queues_max`).
+    PosixMqueue,
+    /// This many pages can be locked (`RLIMIT_MEMLOCK`, or `CAP_IPC_LOCK`).
+    LockedPages(usize),
+    /// `MEMBARRIER_CMD_QUERY` answers (`CONFIG_MEMBARRIER`) and offers the
+    /// private and global expedited commands.
+    Membarrier,
+    /// A memory protection key allocates (`pkey_alloc`: the CPU's keys and
+    /// the kernel's support for them).
+    ProtectionKeys,
+    /// A shadow stack maps (`map_shadow_stack`: the CPU's user shadow
+    /// stacks and the kernel's support for them).
+    ShadowStack,
+    /// A secret-memory page can be created and mapped (`memfd_secret`
+    /// enabled, and one lockable page).
+    SecretMemory,
+    /// The NUMA policy rows answer (`CONFIG_NUMA`) and this task may
+    /// allocate from exactly one memory node.
+    OneNumaNode,
+}
+
+impl Need {
+    /// A fact of the machine — its CPU, its memory topology, its kernel's
+    /// build configuration — rather than a prerequisite a test host is set up
+    /// to meet. Found absent, it leaves the scenario not run even where a
+    /// host oracle is required (`PATINA_REQUIRE_HOST_ORACLE=1`): a runner
+    /// without protection keys is no misconfigured runner. Every other need,
+    /// and a hardware need that fails any other way (a limit, a permission,
+    /// a broken detection), still fails there.
+    pub fn hardware(self) -> bool {
+        match self {
+            Need::ProtectionKeys | Need::ShadowStack | Need::SecretMemory | Need::OneNumaNode => {
+                true
+            }
+            Need::UserXattrs
+            | Need::Inotify
+            | Need::FileHandles
+            | Need::Whiteouts
+            | Need::Unprivileged
+            | Need::SysvShm
+            | Need::SysvSem
+            | Need::SysvMsg
+            | Need::PosixMqueue
+            | Need::LockedPages(_)
+            | Need::Membarrier => false,
+        }
+    }
 }
 
 /// The family arc (docs/arcs/syscall-conformance.md §6) that models a
@@ -300,6 +358,28 @@ pub const SCENARIOS: &[&Scenario] = &[
     &fs::times::SCENARIO,
     &fs::vectored_io::SCENARIO,
     &fs::xattr::SCENARIO,
+    &ipc::mqueue::SCENARIO,
+    &ipc::sysv_msg::SCENARIO,
+    &ipc::sysv_sem::SCENARIO,
+    &ipc::sysv_shm::SCENARIO,
+    &mem::brk::SCENARIO,
+    &mem::membarrier::SCENARIO,
+    &mem::memfd::SCENARIO,
+    &mem::mincore::SCENARIO,
+    &mem::mlock::SCENARIO,
+    &mem::mmap::SCENARIO,
+    &mem::mmap_file::SCENARIO,
+    &mem::mremap::SCENARIO,
+    &mem::mseal::SCENARIO,
+    &mem::msync::SCENARIO,
+    &mem::numa::SCENARIO,
+    &mem::pkeys::SCENARIO,
+    &mem::process_madvise::SCENARIO,
+    &mem::process_madvise_self::SCENARIO,
+    &mem::protect::SCENARIO,
+    &mem::remap_file_pages::SCENARIO,
+    &mem::secret::SCENARIO,
+    &mem::shadow_stack::SCENARIO,
     &net::tcp::SCENARIO,
     &net::udp::SCENARIO,
     &proc::absent::SCENARIO,

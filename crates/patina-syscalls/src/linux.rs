@@ -2371,8 +2371,8 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Sync,
         Disposition::SoftDeny(ENOSYS),
-        "ENOSYS: a kernel without membarrier is a configuration every runtime handles by falling back to a full fence, and passing it through would make the schedule depend on host-kernel behavior.",
-        None,
+        "Stop-gap: ENOSYS, the kernel-without-membarrier answer every runtime falls back from (a full fence), until the memory+ipc arc models it. In one process under a cooperative scheduler every barrier is trivially satisfied: QUERY reports the modeled commands and the rest are ordered no-ops with the kernel's exact validation (registration before use, flags, unknown commands). It is never passed through: the host kernel would then shape the schedule.",
+        Some("memory+ipc"),
     ),
     Syscall::N_mlock2 => r(
         id,

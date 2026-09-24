@@ -140,12 +140,14 @@ fn declared_absent_on(scenario: &Scenario, release: &str) -> Option<NotRun> {
 }
 
 /// The first host capability `scenario` needs that the run directory `dir`
-/// (an existing directory on the filesystem the native run uses) lacks.
-pub fn needs_unmet(scenario: &Scenario, dir: &Path) -> Option<NotRun> {
+/// (an existing directory on the filesystem the native run uses) lacks, with
+/// the need (whether it is [`Need::hardware`] decides how strict a required
+/// oracle is about it).
+pub fn needs_unmet(scenario: &Scenario, dir: &Path) -> Option<(Need, NotRun)> {
     scenario
         .needs
         .iter()
-        .find_map(|need| need_unmet(*need, dir).err())
+        .find_map(|need| need_unmet(*need, dir).err().map(|reason| (*need, reason)))
 }
 
 /// Detect `need` live in `dir`. Every call goes through `syscall(2)`: the
@@ -158,6 +160,16 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         Need::FileHandles => file_handles(dir),
         Need::Whiteouts => whiteouts(dir),
         Need::Unprivileged => unprivileged(),
+        Need::SysvShm => memipc::sysv_shm(),
+        Need::SysvSem => memipc::sysv_sem(),
+        Need::SysvMsg => memipc::sysv_msg(),
+        Need::PosixMqueue => memipc::posix_mqueue(dir),
+        Need::LockedPages(pages) => memipc::locked_pages(pages),
+        Need::Membarrier => memipc::membarrier(),
+        Need::ProtectionKeys => memipc::protection_keys(),
+        Need::ShadowStack => memipc::shadow_stack(),
+        Need::SecretMemory => memipc::secret_memory(),
+        Need::OneNumaNode => memipc::one_numa_node(),
     }
 }
 
@@ -356,6 +368,302 @@ fn unprivileged() -> Result<(), NotRun> {
             cause: Cause::Unexpected,
             detail: "no Uid/CapEff in /proc/self/status".into(),
         }),
+    }
+}
+
+/// The memory and IPC needs: each creates the smallest object of its kind
+/// the scenario would, then releases it. Refusals classify through
+/// [`refusal`]; a row whose errno names the missing capability says so where
+/// it is used.
+mod memipc {
+    use super::{Cause, NotRun, refusal};
+    use crate::vehicle::errno;
+    use patina_dst_syscalls::Syscall;
+    use std::path::Path;
+
+    /// `syscall(2)` with the row's number; the kernel convention (`-errno`).
+    fn sys(row: Syscall, args: [i64; 6]) -> i64 {
+        // SAFETY: every pointer passed below is owned by the caller for the
+        // duration of the call.
+        let result = unsafe {
+            libc::syscall(
+                row.number() as libc::c_long,
+                args[0],
+                args[1],
+                args[2],
+                args[3],
+                args[4],
+                args[5],
+            )
+        };
+        if result < 0 {
+            -i64::from(errno())
+        } else {
+            result
+        }
+    }
+
+    fn page() -> i64 {
+        crate::probe::page_size() as i64
+    }
+
+    fn check(what: &str, result: i64) -> Result<i64, NotRun> {
+        if result < 0 {
+            Err(refusal(what, (-result) as i32))
+        } else {
+            Ok(result)
+        }
+    }
+
+    /// A System V creation: ENOSPC is `shmmni`/`semmni`/`msgmni` and ENOMEM
+    /// `shmall` or the namespace's memory (ipc/shm.c, ipc/util.c) — limits,
+    /// not a broken probe.
+    fn sysv(what: &str, result: i64) -> Result<i64, NotRun> {
+        if result == -i64::from(libc::ENOMEM) {
+            return Err(unmet(Cause::Exhausted, format!("{what} answered ENOMEM")));
+        }
+        check(what, result)
+    }
+
+    fn unmet(cause: Cause, detail: String) -> NotRun {
+        NotRun { cause, detail }
+    }
+
+    pub(super) fn sysv_shm() -> Result<(), NotRun> {
+        let id = sysv(
+            "shmget(IPC_PRIVATE, one page)",
+            sys(
+                Syscall::N_shmget,
+                [0, page(), (libc::IPC_CREAT | 0o600) as i64, 0, 0, 0],
+            ),
+        )?;
+        check(
+            "shmctl(IPC_RMID)",
+            sys(Syscall::N_shmctl, [id, libc::IPC_RMID as i64, 0, 0, 0, 0]),
+        )
+        .map(drop)
+    }
+
+    pub(super) fn sysv_sem() -> Result<(), NotRun> {
+        let id = sysv(
+            "semget(IPC_PRIVATE, 1)",
+            sys(
+                Syscall::N_semget,
+                [0, 1, (libc::IPC_CREAT | 0o600) as i64, 0, 0, 0],
+            ),
+        )?;
+        check(
+            "semctl(IPC_RMID)",
+            sys(Syscall::N_semctl, [id, 0, libc::IPC_RMID as i64, 0, 0, 0]),
+        )
+        .map(drop)
+    }
+
+    pub(super) fn sysv_msg() -> Result<(), NotRun> {
+        let id = sysv(
+            "msgget(IPC_PRIVATE)",
+            sys(
+                Syscall::N_msgget,
+                [0, (libc::IPC_CREAT | 0o600) as i64, 0, 0, 0, 0],
+            ),
+        )?;
+        check(
+            "msgctl(IPC_RMID)",
+            sys(Syscall::N_msgctl, [id, libc::IPC_RMID as i64, 0, 0, 0, 0]),
+        )
+        .map(drop)
+    }
+
+    /// The attributes the mqueue scenario creates its queue with.
+    const MQ_MAXMSG: i64 = 4;
+    const MQ_MSGSIZE: i64 = 16;
+
+    pub(super) fn posix_mqueue(dir: &Path) -> Result<(), NotRun> {
+        let base = dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = std::ffi::CString::new(format!("{base}-need-mq")).expect("no NUL");
+        // SAFETY: mq_attr is plain data.
+        let mut attr: libc::mq_attr = unsafe { std::mem::zeroed() };
+        attr.mq_maxmsg = MQ_MAXMSG;
+        attr.mq_msgsize = MQ_MSGSIZE;
+        let fd = check(
+            "mq_open(O_CREAT|O_EXCL, 4 x 16 bytes)",
+            sys(
+                Syscall::N_mq_open,
+                [
+                    name.as_ptr() as i64,
+                    (libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC) as i64,
+                    0o600,
+                    &attr as *const libc::mq_attr as i64,
+                    0,
+                    0,
+                ],
+            ),
+        )?;
+        sys(Syscall::N_close, [fd, 0, 0, 0, 0, 0]);
+        check(
+            "mq_unlink",
+            sys(Syscall::N_mq_unlink, [name.as_ptr() as i64, 0, 0, 0, 0, 0]),
+        )
+        .map(drop)
+    }
+
+    fn anonymous(pages: i64) -> Result<i64, NotRun> {
+        check(
+            "mmap(anonymous)",
+            sys(
+                Syscall::N_mmap,
+                [
+                    0,
+                    pages * page(),
+                    (libc::PROT_READ | libc::PROT_WRITE) as i64,
+                    (libc::MAP_PRIVATE | libc::MAP_ANONYMOUS) as i64,
+                    -1,
+                    0,
+                ],
+            ),
+        )
+    }
+
+    /// `mlock` answers ENOMEM when the pages exceed a nonzero
+    /// `RLIMIT_MEMLOCK` and EPERM when the limit is 0 (man 2 mlock).
+    pub(super) fn locked_pages(pages: usize) -> Result<(), NotRun> {
+        let pages = pages as i64;
+        let base = anonymous(pages)?;
+        let locked = sys(Syscall::N_mlock, [base, pages * page(), 0, 0, 0, 0]);
+        sys(Syscall::N_munlock, [base, pages * page(), 0, 0, 0, 0]);
+        sys(Syscall::N_munmap, [base, pages * page(), 0, 0, 0, 0]);
+        match locked {
+            0 => Ok(()),
+            error if error == -i64::from(libc::ENOMEM) => Err(unmet(
+                Cause::Exhausted,
+                format!("mlock of {pages} pages answered ENOMEM (RLIMIT_MEMLOCK)"),
+            )),
+            error => Err(refusal(&format!("mlock of {pages} pages"), (-error) as i32)),
+        }
+    }
+
+    /// `MEMBARRIER_CMD_{GLOBAL,PRIVATE}_EXPEDITED` and their registrations.
+    const MEMBARRIER_PORTABLE: i64 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4);
+
+    pub(super) fn membarrier() -> Result<(), NotRun> {
+        let mask = check(
+            "membarrier(MEMBARRIER_CMD_QUERY)",
+            sys(Syscall::N_membarrier, [0; 6]),
+        )?;
+        if mask & MEMBARRIER_PORTABLE != MEMBARRIER_PORTABLE {
+            return Err(unmet(
+                Cause::Absent,
+                format!("membarrier offers no expedited commands (mask {mask:#x})"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// `pkey_alloc` answers ENOSPC when no key is free — on a CPU without
+    /// protection keys, always (only key 0 exists and it is taken).
+    pub(super) fn protection_keys() -> Result<(), NotRun> {
+        let key = sys(Syscall::N_pkey_alloc, [0; 6]);
+        if key == -i64::from(libc::ENOSPC) {
+            return Err(unmet(
+                Cause::Absent,
+                "pkey_alloc answered ENOSPC (no allocatable protection key)".into(),
+            ));
+        }
+        let key = check("pkey_alloc", key)?;
+        check("pkey_free", sys(Syscall::N_pkey_free, [key, 0, 0, 0, 0, 0])).map(drop)
+    }
+
+    pub(super) fn shadow_stack() -> Result<(), NotRun> {
+        let base = check(
+            "map_shadow_stack(one page)",
+            sys(Syscall::N_map_shadow_stack, [0, page(), 0, 0, 0, 0]),
+        )?;
+        sys(Syscall::N_munmap, [base, page(), 0, 0, 0, 0]);
+        Ok(())
+    }
+
+    /// A secret page is locked memory: its mapping answers EAGAIN past
+    /// `RLIMIT_MEMLOCK` (mm/secretmem.c).
+    pub(super) fn secret_memory() -> Result<(), NotRun> {
+        let fd = check(
+            "memfd_secret",
+            sys(
+                Syscall::N_memfd_secret,
+                [libc::O_CLOEXEC as i64, 0, 0, 0, 0, 0],
+            ),
+        )?;
+        let sized = sys(Syscall::N_ftruncate, [fd, page(), 0, 0, 0, 0]);
+        let mapped = if sized == 0 {
+            sys(
+                Syscall::N_mmap,
+                [
+                    0,
+                    page(),
+                    (libc::PROT_READ | libc::PROT_WRITE) as i64,
+                    libc::MAP_SHARED as i64,
+                    fd,
+                    0,
+                ],
+            )
+        } else {
+            sized
+        };
+        if mapped >= 0 {
+            sys(Syscall::N_munmap, [mapped, page(), 0, 0, 0, 0]);
+        }
+        sys(Syscall::N_close, [fd, 0, 0, 0, 0, 0]);
+        match mapped {
+            mapped if mapped >= 0 => Ok(()),
+            error if error == -i64::from(libc::EAGAIN) => Err(unmet(
+                Cause::Exhausted,
+                "mapping a secret-memory page answered EAGAIN (RLIMIT_MEMLOCK)".into(),
+            )),
+            error => Err(refusal(
+                "sizing and mapping a secret-memory page",
+                (-error) as i32,
+            )),
+        }
+    }
+
+    pub(super) fn one_numa_node() -> Result<(), NotRun> {
+        const MPOL_F_MEMS_ALLOWED: i64 = 1 << 2;
+        let mut mode: i32 = 0;
+        let mut mask = [0u64; 16];
+        check(
+            "get_mempolicy(MPOL_F_MEMS_ALLOWED)",
+            sys(
+                Syscall::N_get_mempolicy,
+                [
+                    &mut mode as *mut i32 as i64,
+                    mask.as_mut_ptr() as i64,
+                    (mask.len() * 64) as i64,
+                    0,
+                    MPOL_F_MEMS_ALLOWED,
+                    0,
+                ],
+            ),
+        )?;
+        let nodes: u32 = mask.iter().map(|word| word.count_ones()).sum();
+        if nodes != 1 {
+            return Err(unmet(
+                Cause::Absent,
+                format!("this task may allocate from {nodes} memory nodes, not one"),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn an_impossible_lock_is_unmet_not_passed() {
+            assert!(locked_pages(1 << 40).is_err());
+        }
     }
 }
 

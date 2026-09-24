@@ -26,6 +26,7 @@ use patina_dst_conformance::compare::{self, Failure, Observation, Termination};
 use patina_dst_conformance::host::{self, Cause, NotRun};
 use patina_dst_conformance::leak;
 use patina_dst_conformance::observe::parse_stream;
+use patina_dst_conformance::owned;
 use patina_dst_conformance::vehicle::Vehicle;
 use serde_json::Value;
 use std::io::Write;
@@ -294,7 +295,11 @@ impl Leg<'_> {
         }
         // SAFETY: the hook only calls async-signal-safe libc functions.
         unsafe { command.pre_exec(pin_process_state) };
-        let output = run(&mut command)?;
+        let output = run(&mut command);
+        // IPC objects outlive a run killed outright (the deadline); the next
+        // leg recreates this directory, likely on the same inode and keys.
+        owned::sweep(self.dir);
+        let output = output?;
         self.keep("native", &output);
         direct_observation(&output)
     }
@@ -568,13 +573,16 @@ fn conform(name: &str) {
         .prefix("patina-conformance-")
         .tempdir()
         .expect("create the scenario's directory");
-    if let Some(reason) = host::needs_unmet(scenario, owned.path()) {
+    if let Some((need, reason)) = host::needs_unmet(scenario, owned.path()) {
         assert!(
             reason.cause != Cause::Unexpected,
             "detecting what {name} needs failed: {reason}"
         );
+        // A machine fact found absent (no protection keys on this CPU) is no
+        // misconfigured host: not run even where an oracle is required.
         assert!(
-            !required("PATINA_REQUIRE_HOST_ORACLE"),
+            (need.hardware() && reason.cause == Cause::Absent)
+                || !required("PATINA_REQUIRE_HOST_ORACLE"),
             "PATINA_REQUIRE_HOST_ORACLE=1 but this host is no oracle for {name}: {reason}"
         );
         not_run(name, &reason);
@@ -622,6 +630,95 @@ fn every_scenario_has_one_test() {
             1,
             "{} needs exactly one test calling {call}",
             scenario.name
+        );
+    }
+}
+
+/// A native IPC run killed outright unwinds none of its guards. Each IPC
+/// scenario is SIGKILLed on entering its second creating call — strace injects
+/// the signal, so the point is exact: its first keyed object (or its queue)
+/// exists and nothing private does yet. The object is really left behind, the
+/// sweep every native run gets removes it and nothing else is left under the
+/// run's names, and the next run on the recreated directory is an oracle
+/// again.
+#[test]
+fn a_killed_native_ipc_run_is_swept() {
+    if let Err(reason) = strace() {
+        assert!(
+            !required("PATINA_REQUIRE_STRACE"),
+            "PATINA_REQUIRE_STRACE=1: {reason}"
+        );
+        not_run("the killed IPC runs", reason);
+        return;
+    }
+    let cases = [
+        ("ipc/sysv_shm", "shmget"),
+        ("ipc/sysv_sem", "semget"),
+        ("ipc/sysv_msg", "msgget"),
+        ("ipc/mqueue", "mq_open"),
+    ];
+    for (name, creator) in cases {
+        let scenario = catalog::scenario(name).expect("an IPC scenario");
+        let owned = tempfile::Builder::new()
+            .prefix("patina-conformance-")
+            .tempdir()
+            .unwrap();
+        if let Some((_, reason)) = host::needs_unmet(scenario, owned.path()) {
+            assert!(
+                !required("PATINA_REQUIRE_HOST_ORACLE"),
+                "PATINA_REQUIRE_HOST_ORACLE=1 but this host is no oracle for {name}: {reason}"
+            );
+            not_run(&format!("{name} killed"), &reason);
+            continue;
+        }
+        let dir = owned.path().join("run");
+        let mut command = Command::new("strace");
+        command
+            .args(["-f", "-o", "/dev/null", "-e"])
+            .arg(format!("inject={creator}:signal=KILL:when=2"))
+            .arg(&probes().native)
+            .args([name, "--vehicle", "syscall", "--dir"])
+            .arg(&dir)
+            .arg("--strict");
+        // SAFETY: the hook only calls async-signal-safe libc functions.
+        unsafe { command.pre_exec(pin_process_state) };
+        let output = run(&mut command).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(
+            output.status.signal() == Some(libc::SIGKILL)
+                || output.status.code() == Some(128 + libc::SIGKILL),
+            "{name}: not killed at its second {creator} ({}): {}",
+            output.status,
+            text(&output.stderr)
+        );
+        let swept = owned::sweep(&dir);
+        assert_eq!(
+            swept.len(),
+            1,
+            "{name}: the killed run left exactly its one named object: {swept:?}"
+        );
+        assert_eq!(
+            owned::sweep(&dir),
+            Vec::<String>::new(),
+            "{name}: swept twice"
+        );
+        let logs = logs_root().join(format!("{}-killed", name.replace('/', "-")));
+        std::fs::create_dir_all(&logs).unwrap();
+        let leg = Leg {
+            scenario,
+            vehicle: Vehicle::Syscall,
+            dir: &dir,
+            logs,
+            declared_absent: false,
+        };
+        let rerun = leg
+            .native()
+            .unwrap_or_else(|error| panic!("{name}: rerun: {error}"));
+        compare::native_verdict(&rerun)
+            .unwrap_or_else(|error| panic!("{name}: the run after the kill is no oracle: {error}"));
+        assert_eq!(
+            owned::sweep(&dir),
+            Vec::<String>::new(),
+            "{name}: a completed run leaves nothing to sweep"
         );
     }
 }
@@ -809,6 +906,116 @@ fn fs_vectored_io() {
 #[test]
 fn fs_xattr() {
     conform("fs/xattr");
+}
+
+#[test]
+fn ipc_mqueue() {
+    conform("ipc/mqueue");
+}
+
+#[test]
+fn ipc_sysv_msg() {
+    conform("ipc/sysv_msg");
+}
+
+#[test]
+fn ipc_sysv_sem() {
+    conform("ipc/sysv_sem");
+}
+
+#[test]
+fn ipc_sysv_shm() {
+    conform("ipc/sysv_shm");
+}
+
+#[test]
+fn mem_brk() {
+    conform("mem/brk");
+}
+
+#[test]
+fn mem_membarrier() {
+    conform("mem/membarrier");
+}
+
+#[test]
+fn mem_memfd() {
+    conform("mem/memfd");
+}
+
+#[test]
+fn mem_mincore() {
+    conform("mem/mincore");
+}
+
+#[test]
+fn mem_mlock() {
+    conform("mem/mlock");
+}
+
+#[test]
+fn mem_mmap() {
+    conform("mem/mmap");
+}
+
+#[test]
+fn mem_mmap_file() {
+    conform("mem/mmap_file");
+}
+
+#[test]
+fn mem_mremap() {
+    conform("mem/mremap");
+}
+
+#[test]
+fn mem_mseal() {
+    conform("mem/mseal");
+}
+
+#[test]
+fn mem_msync() {
+    conform("mem/msync");
+}
+
+#[test]
+fn mem_numa() {
+    conform("mem/numa");
+}
+
+#[test]
+fn mem_pkeys() {
+    conform("mem/pkeys");
+}
+
+#[test]
+fn mem_process_madvise() {
+    conform("mem/process_madvise");
+}
+
+#[test]
+fn mem_process_madvise_self() {
+    conform("mem/process_madvise_self");
+}
+
+#[test]
+fn mem_protect() {
+    conform("mem/protect");
+}
+
+#[test]
+fn mem_remap_file_pages() {
+    conform("mem/remap_file_pages");
+}
+
+#[test]
+fn mem_secret() {
+    conform("mem/secret");
+}
+
+#[test]
+fn mem_shadow_stack() {
+    conform("mem/shadow_stack");
 }
 
 #[test]
