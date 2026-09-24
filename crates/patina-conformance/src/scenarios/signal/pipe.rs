@@ -13,19 +13,18 @@ use libc::*;
 fn default_sigpipe_status(p: &Probe) -> c_int {
     let mut fds = [0; 2];
     assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+    // The read end closes before the fork, so no process holds it when the
+    // child writes and the write always raises SIGPIPE.
+    unsafe { close(fds[0]) };
     let child = p.fork_child(
         || fold_errno(unsafe { fork() } as i64),
         || unsafe {
-            close(fds[0]);
             signal(SIGPIPE, SIG_DFL);
             let _ = write(fds[1], b"x".as_ptr() as *const _, 1);
             99
         },
     );
-    unsafe {
-        close(fds[0]);
-        close(fds[1]);
-    }
+    unsafe { close(fds[1]) };
     child.wait()
 }
 

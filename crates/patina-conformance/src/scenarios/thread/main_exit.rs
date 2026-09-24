@@ -8,13 +8,17 @@ use crate::catalog::{DEFAULTS, Scenario, TraceFacts};
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::Probe;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 pub fn run(p: &Probe) {
     static MAIN_LEAVING: AtomicBool = AtomicBool::new(false);
+    static WORKER_PROBE: AtomicPtr<Probe> = AtomicPtr::new(std::ptr::null_mut());
+    // Published before the spawn, so the worker never reads it unset. The main
+    // thread leaves by a raw exit that never returns, so the probe its frame
+    // owns stays mapped for the worker.
+    WORKER_PROBE.store(p as *const Probe as *mut Probe, Ordering::SeqCst);
     let worker = std::thread::Builder::new()
         .spawn(move || {
-            // The probe object outlives main's exit: it is leaked below.
             let p: &'static Probe =
                 unsafe { &*(WORKER_PROBE.load(Ordering::SeqCst) as *const Probe) };
             while !MAIN_LEAVING.load(Ordering::SeqCst) {
@@ -27,9 +31,6 @@ pub fn run(p: &Probe) {
         })
         .expect("spawn");
     drop(worker);
-    static WORKER_PROBE: std::sync::atomic::AtomicPtr<Probe> =
-        std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-    WORKER_PROBE.store(p as *const Probe as *mut Probe, Ordering::SeqCst);
     p.check(
         "the main thread is the thread group leader",
         p.gettid() == p.getpid(),
