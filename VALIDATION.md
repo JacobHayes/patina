@@ -51,11 +51,11 @@ Required locally before landing (`mise run check`):
 - `scripts/validate-wasi.sh` when validating V3
 - `mise run check:native-abi` for focused native ABI feedback; the full native acceptance tests and ecosystem testbeds are included in `mise run check`
 - `scripts/smoke-cross-target.sh` when validating cross-target determinism
-- the workq/pubsub/macro-adopter and FIFO/rustix-default/cap-std testbeds, plus
-  full syscall conformance and its planted-failure selftest
+- the workq/pubsub/macro-adopter and FIFO/rustix-default/cap-std testbeds; the
+  syscall conformance scenarios run with the native acceptance tests
 
 `mise run check:fast` is the inner loop: fmt, the three clippy passes, every workspace
-test except cargo-patina's e2e/native execution targets, syscall conformance `--fast`,
+test except cargo-patina's e2e/native execution targets (conformance among them),
 the cheap selftests, CLI flag drift, MSRV `cargo check`, WASI validation, and
 cross-target smoke. It is intentionally not landing evidence.
 
@@ -179,6 +179,9 @@ integration testing, with reviewable guests in `testbeds/native-boundary/`:
   signal driver and uses parking_lot and the product-selected rustix backend;
   the test supplies no backend override. Replay checks compare complete output,
   two complete traces, flag-free replay and a changed-fingerprint refusal.
+- `native_conformance`: every syscall conformance scenario natively and under
+  patina (record/replay, strace, direct termination), one test per scenario, and
+  the planted strace escape; see the conformance rows below.
 - `native_containment`: planted raw/unknown-import/IPC escapes, the original
   `envp` array and ambient canaries, dlsym routing, live SUD arming or pre-exec
   refusal, SIGSYS protection, AT_RANDOM, vsyscall, and TSC containment.
@@ -196,14 +199,14 @@ integration testing, with reviewable guests in `testbeds/native-boundary/`:
   both Linux architectures; explicit unsupported ktrace policy on macOS.
 - `shim_host_alias`: compiled-object doctrine scan and planted leak.
 
-The six native targets run in the full `check` workspace-test rung, in
+The seven native targets run in the full `check` workspace-test rung, in
 both Linux CI architectures on stable and MSRV, and in the stable macOS job.
 `check:fast` retains the cheap `shim_host_alias` object scan, not native execution.
 `mise run check:native-abi` selects just `native_abi`; a libtest filter selects an
 individual proof. The guest/build/gate map is in
-`testbeds/native-boundary/README.md`. The independent host-oracle probes remain
-in syscall-conformance; an unblessed platform or a `pending`/whole-`probe`
-divergence does not substitute for native acceptance on that platform.
+`testbeds/native-boundary/README.md`. The independent host-oracle scenarios
+live in `crates/patina-conformance`; a scenario that is not run on a host, or a
+declared gap, does not substitute for native acceptance on that platform.
 
 `native_build_package_audits_records_and_fails_closed` in `end_to_end` owns the
 package/path-dependency/build-script/ambiguous-bin proof, including full stdout
@@ -284,11 +287,9 @@ a false-negative child, duplicate receipts and a failed child.
 `native_raw` pins process constants, two-iovec sendmsg/recvmsg ENOSYS, live
 scrubbed PR_GET_AUXV and denied prctl, legacy filesystem spellings, FIFO rows,
 creation-mode enforcement and raw/libc fcntl parity. Raw eventfd/epoll semantics
-now live in syscall-conformance `readiness/epoll`, including
-exact zero-creation-flags / 0xC0FFEE userdata case through the raw vehicle
-(not one of its declared divergent HUP rows).
-That probe also runs explicitly through the raw vehicle in x86_64 MSRV CI,
-as well as the stable full conformance gate.
+live in the conformance scenario `readiness/epoll`, including the exact
+zero-creation-flags / 0xC0FFEE userdata case through the raw vehicle (not one of
+its declared HUP gaps), which every x86_64 CI row runs, stable and MSRV.
 
 Directory-descriptor-relative (`*at`) resolution is proved by a second committed MRE, `testbeds/cap-std-dirfd/` — a std + `cap-std` guest. `cap-std` is the capability-based filesystem API: it opens ONE directory through std (libc → the C interposer) and then resolves every path component itself against that descriptor with raw `openat(dirfd, name, O_PATH|O_DIRECTORY|O_NOFOLLOW)`, `statx(dirfd, name)`, `readlinkat(dirfd, name)`, `faccessat2(dirfd, ".")`, `mkdirat`/`unlinkat`/`renameat`/`symlinkat`, and `getdents64` over a descriptor derived by `fcntl(dirfd, F_GETFL)` + `openat(dirfd, ".")`. One guest therefore exercises BOTH entry paths on the SAME descriptor, which is exactly the property under test: the two only agree because they share one directory-descriptor table in the runtime (`patina_diropen`/`patina_dirpath`). Its `run-patina.sh` skips **loudly and counted** (`cap-std-dirfd: SKIPPED 1 …`) on non-SUD/non-Linux hosts and, under SUD, asserts audit→`SUD-managed`, byte-identical same-seed repeats on **stdout AND the captured stderr** (a refusal diagnostic lands on the latter, so comparing stdout alone would not notice a nondeterministic deny), and byte-identical record→replay, printing `CAPSTD_LEGS_RAN branch=sud …`; the full landing gate runs it in `native ecosystem testbeds`, and every Linux CI row runs it through the receipt-checking wrapper. RED before the resolution landed: with every `*at` row modeling `AT_FDCWD` only and the libc `open` refusing `O_PATH`, the guest dies on its FIRST call — `Dir::open_ambient_dir: Function not implemented (os error 38)`. It also carries the `O_PATH` leg (`opath=nocost,list=r,walk=x`): a `0o400` directory is listable but not traversable, a `0o100` one is traversable but not listable, and a `0o000` one still accepts a path-only open whose descriptor then refuses to be read — RED when both directory opens were the same open, which charged `x` and handed back a readable handle. The deny-string parity rule the SUD layer depends on (a raw guest and a libc guest must record the same captured stderr for the same refusal) is itself gated: a unit test extracts the C `O_PATH` deny macro from `patina_posix.c` and compares it byte-for-byte with the SUD constant, and is RED-proven by perturbing either spelling.
 
@@ -515,11 +516,10 @@ unit suite — it is in the handful of **structurally unpaired classes** below
 | Instruction scan (`scan_instruction_classes`: aarch64 `svc`/`mrs CNTVCT`/`RNDR`, x86 `syscall`/`rdtsc`/`rdtscp`/`rdrand`/`rdseed`) | `patina-target/src/lib.rs`; `walks_past_forbidden_bytes_embedded_in_operands`, `fails_closed_on_undecodable_bytes`, `refuses_binaries_of_undecodable_architectures` | Old byte-slide false-positive on operand-embedded bytes; silent pass on undecodable architectures | **Class** | Boundary-aware; discriminates operand bytes from real opcodes; undecodable *architectures* refuse loudly (`UnsupportedNativeArchitecture`, no escape hatch). Limit: known encodings only — commpage `ldr` time reads are residual; `cpuid` is decoded but deliberately visible-not-refused (host-identity class). |
 | Bootstrap-window init-error reachability | e2e `native_replay_init_error_reaches_every_bootstrap_window_entry_point` (one leg per answering entry point, deadline-bounded) + `bootstrap_window_lints` in `crates/patina-native-shim/src/lib.rs` (single `SHIM_BOOTSTRAP` reader; enumerated call-site table) | Replay init errors swallowed for clock-only guests — a 100% CPU spin instead of the named abort (`docs/bugs/replay-init-error-swallowed-for-clock-only-guests.md`); second swallow: `println!`-only guest exited 0 with output dropped | **Class** | The class is "any interposed entry point that can answer without reaching `ensure_runtime`"; the window itself is covered by construction (one guarded predicate, lint-pinned). Residual: the ~100 non-window C-ABI entry points that reach the runtime through helpers await a call-graph audit. |
 | Linux whole-run `strace` containment | `native_trace::std_whole_run_and_planted_openat_use_identical_filter` (both Linux architectures) | Inlined raw syscall (no import) | **Class** | Whole-run default-deny; planted escape proves non-vacuity. Linux-only; `PATINA_REQUIRE_STRACE=1` (set on all Linux CI jobs, which install strace) turns the missing-tool soft-skip into a hard failure. |
-| Syscall conformance against the host kernel (`testbeds/syscall-conformance/run.sh`) | forty-nine probes × three vehicles (libc / `syscall(2)` / inline `syscall`) × four legs (native oracle, patina, record→replay, strace leak), every leg supervised (`conform supervise`: own process group, wall-clock timeout, the observed process outcome appended as the `__termination` event — `waitpid` natively, the `patina.result/v1` envelope's `guest_exit` under patina/replay, never copied from the expectation); `expected/<probe>.<os>-<arch>.jsonl` blessed with the oracle kernel (a signal death only when the probe announced it); `divergences.toml` (`field`/`abort` with a pinned diagnostic/`probe`/`pending`); `run.sh --selftest` (`conform selftest` + planted leak + self-signal allowance bounds + planted never-returning process group) | A guest "bug" that is really a patina≠kernel divergence (docs/arcs/syscall-conformance.md §1); a virtual kernel that exits where the real one dies by a signal; a harness that fills in the outcome it expected | **Class** | Differential against the real kernel per field: an undeclared difference fails, a declared one that stopped diverging fails (STALE), an aborted probe fails unless declared at that exact event with its diagnostic, the process outcome is compared like any event, and the stream must survive replay byte-identically. Every gate is RED-proven on synthetic streams by the selftest (planted divergence native+patina, stale declaration, count drift both ways, failed check, stale abort/probe/pending declaration, wrong/missing termination, unannounced death, host too old / host-unavailable, unknown vehicle), the leak gate by a planted `openat("/etc/hostname")` under the identical strace invocation (and the self-signal allowance by synthetic cross-thread/process-directed lines that must stay denied), and the timeout by a planted process group. Limit: Linux only (the rows are the Linux ABI); `linux-aarch64` expectations are blessed separately and skip loudly until recorded; the core flag of a Core-class death records what the blessing host's core sink did (an apport pipe pattern here); the registry↔manifest cross-gate (next row) reports unprobed `Modeled` rows and refuses them only under `PATINA_CONFORMANCE_STRICT=1`. |
-| The frozen oracle of a family built after its probes (`testbeds/syscall-conformance/frozen.toml` + `gate.sh --family <f>`; today the signals family, spec `docs/arcs/syscall-conformance-signals.md`) | the oracle's frozen `paths` (the family's probes and expectations, the harness sources, `run.sh`, `probes.toml`, `gate.sh`, `frozen.toml`) carry no uncommitted change (`jj diff --name-only -- <paths>` is empty: version control is the tamper evidence); the exact declaration set (`pending` entries a builder may only delete, all of them for a PASS, + `by design:` aborts) checked by `conform gate`; rustfmt, clippy `-D warnings`, the registry cross-gate and the full `run.sh`; then the DESIGN OBLIGATIONS — required unit tests run by exact path (`cargo test -p <crate> -- --exact`), facts read from each probe's RECORDED trace (format version, the `signal_generated` ops equal to the probe's generations in order, at most one `task_wake` per generation); the remaining work as plain lines (probes still pending or differing, unit tests missing/ignored/failing, trace facts unmet), then one `FAMILY_GATE <f>: PASS\|FAIL` line; `gate.sh --selftest` (the `conformance gate selftest` rung of `scripts/check.sh`, fast and full) | A builder that weakens a probe, re-blesses an expectation, adds or relabels a divergence, deletes a by-design abort, or teaches the harness to synthesize the termination line — the eight rejected rounds of the signals family; and a BEHAVIOUR-ONLY pass: a shallow model (process-global C signal state, a host signal fired at generation, no trace op) that turns every single-threaded probe green on every leg while none of the required unit tests, the trace op or the format bump exists | **Class** | The gate refuses each by construction (an uncommitted-change check, an exact-set comparison, an obligation); `--selftest` proves each mechanism beside a control that passes — a frozen-path edit in a scratch checkout, a relabeled declaration, against a real scratch crate a missing required test and an `#[ignore]`d one, a recorded trace with no `signal_generated` op, a termination that was not observed. Limit: the gate checks that a required test exists and passes, not what it asserts (the frozen `asserts` sentence is the vet's yardstick); where a host signal is sent FROM is not greppable (the same syscall is the legitimate frame vehicle); the frozen-path check trusts the checkout's parent commit to be the oracle commit, which is the coordinator's to verify. |
-| Filesystem timestamps, ownership and sizes (`FsClock` on every reading/mutating driver op; runtime atime fixed to `relatime` (other policies are driver-only clock inputs), mtime+ctime on a data change, ctime on a metadata change, btime at creation; directory `st_nlink = 2 + subdirectories`; `chown` as a comparison against the one identity with the setuid/setgid kill; `truncate`/`fallocate` as single recorded operations) | `patina-dst-fs-mem` `creation_stamps_all_four_times_and_the_parent_directory`, `data_changes_move_mtime_and_ctime_and_leave_atime_and_btime`, `relatime_refreshes_atime_after_a_data_change_or_a_day_and_not_otherwise`, `metadata_changes_move_ctime_only`, `a_directory_link_count_is_two_plus_its_subdirectories`, `truncation_by_descriptor_and_by_name_answer_the_kernels_errnos`, `allocate_grows_keeps_or_zeroes_and_answers_the_kernels_errnos`, `zero_io_preserves_times_size_and_cursor`, `read_after_truncate_past_cursor_returns_eof_without_rewinding`, `impossible_capacity_is_a_storage_error_not_a_process_abort`; CrashFs `crash_restores_newly_synced_times_and_symlink_times`; runtime `filesystem_attribute_latency_repeats_and_replays` and `filesystem_mutations_sample_after_latency`; conformance probes `fs/times`, `fs/owner`, `fs/size` (host-checked through all three vehicles; every check is a relation between two readings, never an absolute time, and none depends on the oracle mount's atime policy) | Stat reporting `ctime` as a copy of `mtime`, no birth time, `st_uid` 0 beside `getuid()` 1000, a directory link count of 1, `X_OK` refused on an executable file, `truncate` a planted host escape | **Class** | Every rule is a unit-level detector RED against the two-timestamp filesystem; the probes diff the model against the kernel per field. Limit: the oracle host mounts `/tmp` `noatime`, so the relatime rule itself is proven by the unit tests, not by the kernel diff. |
-| Syscall registry ↔ conformance manifest (every `probe` id a syscall or symbol row names exists in `testbeds/syscall-conformance/probes.toml` and covers that row; every syscall/symbol the manifest names is a registry row; a manifest `absent` row is `Absent` and an exercised row is not; every probe exercises something; every `Modeled` syscall row without a probe is counted and named) | `syscall-conformance` `src/registry_gate.rs` (`registry_probes_and_the_conformance_manifest_agree`, planted `planted_cross_gaps_are_reported`); the same manifest check runs in the harness prelude (`conform check-manifest`, FATAL) and the testbed's `--selftest` plants it; `cargo patina syscalls` prints `modeled rows without a probe: N (names)` (`summary.modeled_without_probe` in `patina.syscalls/v2`) | A row claiming a probe that was renamed or never written; a probe naming a row that does not exist; a `Modeled` row nobody host-checks | **Class** | Both directions fail by name; the planted test doctors the rows and the manifest to fire every field. **`PATINA_CONFORMANCE_STRICT=1`** turns the reported `Modeled`-without-probe set into a failure (unset it is a count and names only); the arc flips it on in CI once every modeled row has its probe, and until then the count in the verb's output is the measure of the gap. |
-| Virtual ABI level (`registry::VIRTUAL_ABI`; a row whose `since` is newer is `Absent` → `ENOSYS`, and only such rows are `Absent`) | `patina-dst-syscalls` `tests::{since_newer_than_virtual_abi_is_exactly_the_absent_rows, rows_are_well_formed}` (the predicate is planted with dated/undated/undatable rows); conformance probe `abi/newer-than-virtual` (`fchroot`, 472, since 7.3) asserts `ENOSYS` through all three vehicles natively, under patina, on replay, and under the leak leg — the native leg is host-unavailable on a kernel that implements the number (`conform selftest` plants both gate directions) | A number newer than the declared kernel trapping as `unmodeled` (an abort a real 6.8 kernel would not produce), or a host newer than the virtual level oracling semantics patina never claimed | **Class** | Raising `VIRTUAL_ABI` fails the rule test by naming every row it passes, so each is re-dispositioned deliberately; the harness reads the level from the pure shared registry, so a header can never disagree with the registry. |
+| Syscall conformance against the live host kernel (`crates/patina-conformance`, `cargo-patina/tests/native_conformance.rs`) | forty-nine scenarios, each one `#[test]`, through every vehicle the architecture has (libc / `syscall(2)` / inline `syscall` on x86_64): the native run (the oracle: every check holds, a signal death only when announced) agrees with the first vehicle's, and the patina run is compared field by field under the call sites' typed normalizations; a completed patina run is also recorded and replayed (identical streams and endings; the scenario's recorded-trace facts — its exact `signal_generated` sequence, at most one `task_wake` per generation where declared) and run directly under strace (default-deny leak filter; the one allowance is a signal to the calling thread); a native signal death is re-checked on the shim-linked binary's own wait status. Unit tests in `patina-dst-conformance` (`compare`, `leak`, `catalog`, `host`) plant every refusal; `strace_leak_filter_flags_a_planted_escape` plants a host `openat("/etc/hostname")` under the real strace invocation | A guest "bug" that is really a patina≠kernel divergence (docs/arcs/syscall-conformance.md §1); a virtual kernel that exits where the real one dies by a signal; a BEHAVIOUR-ONLY pass (process-global signal state, a host signal fired at generation, no trace op) that turns every single-threaded scenario green | **Class** | Exact by default: an undeclared difference fails, and a gap (`Failure::Differs` with the exact patina values, `Failure::Stops` with the exact event count, ending and diagnostic) that stops matching fails until it is removed, so the gaps are always exactly the current gap. RED-proven: planted differences, stale gaps, a wrong pinned value, count drift both ways, a termination or core-flag change, a missing or wrong stop diagnostic, an unannounced native death, documented alternatives that must not absorb ENOTDIR, masks that keep in-mask bits, the self-signal allowance's bounds, trace facts missing a generation or waking twice, a host kernel too old for a covered row or implementing an asserted-absent one. Limit: Linux only (the rows are the Linux ABI); an unmet host need prints `NOT RUN` with its reason (`PATINA_REQUIRE_HOST_ORACLE=1`/`PATINA_REQUIRE_SUD=1`/`PATINA_REQUIRE_STRACE=1`, all set on the Linux CI jobs, make an unsuitable kernel, SUD or strace absence a failure); the core flag of a Core-class death is what this host's core sink does. |
+| Filesystem timestamps, ownership and sizes (`FsClock` on every reading/mutating driver op; runtime atime fixed to `relatime` (other policies are driver-only clock inputs), mtime+ctime on a data change, ctime on a metadata change, btime at creation; directory `st_nlink = 2 + subdirectories`; `chown` as a comparison against the one identity with the setuid/setgid kill; `truncate`/`fallocate` as single recorded operations) | `patina-dst-fs-mem` `creation_stamps_all_four_times_and_the_parent_directory`, `data_changes_move_mtime_and_ctime_and_leave_atime_and_btime`, `relatime_refreshes_atime_after_a_data_change_or_a_day_and_not_otherwise`, `metadata_changes_move_ctime_only`, `a_directory_link_count_is_two_plus_its_subdirectories`, `truncation_by_descriptor_and_by_name_answer_the_kernels_errnos`, `allocate_grows_keeps_or_zeroes_and_answers_the_kernels_errnos`, `zero_io_preserves_times_size_and_cursor`, `read_after_truncate_past_cursor_returns_eof_without_rewinding`, `impossible_capacity_is_a_storage_error_not_a_process_abort`; CrashFs `crash_restores_newly_synced_times_and_symlink_times`; runtime `filesystem_attribute_latency_repeats_and_replays` and `filesystem_mutations_sample_after_latency`; conformance scenarios `fs/times`, `fs/owner`, `fs/size` (host-checked through every vehicle; every check is a relation between two readings, never an absolute time, and none depends on the oracle mount's atime policy) | Stat reporting `ctime` as a copy of `mtime`, no birth time, `st_uid` 0 beside `getuid()` 1000, a directory link count of 1, `X_OK` refused on an executable file, `truncate` a planted host escape | **Class** | Every rule is a unit-level detector RED against the two-timestamp filesystem; the scenarios diff the model against the kernel per field. Limit: the oracle host mounts `/tmp` `noatime`, so the relatime rule itself is proven by the unit tests, not by the kernel diff. |
+| Conformance coverage and catalog consistency (every scenario covers a row; its covered rows are in the virtual ABI and its asserted-absent rows are `Absent`; its symbols are registry rows; its gaps name vehicles it has and a stop gap is alone; exclusions are unique and uncovered; every scenario has exactly one test) | `patina-dst-conformance` `catalog::tests`, `coverage::tests`; `native_conformance::every_scenario_has_one_test`; `mise run conformance:coverage` lists every syscall and symbol row of the target no scenario covers and no exclusion accounts for | A scenario claiming a row it cannot exercise; a scenario nobody runs; a registry entry nobody host-checks | **Class** | The metadata tests fail by name. The coverage report is a local command, not a gate: it exits 1 while any entry is uncovered, and its count is the measure of the gap until every entry has a scenario or a reasoned exclusion. |
+| Virtual ABI level (`registry::VIRTUAL_ABI`; a row whose `since` is newer is `Absent` → `ENOSYS`, and only such rows are `Absent`) | `patina-dst-syscalls` `tests::{since_newer_than_virtual_abi_is_exactly_the_absent_rows, rows_are_well_formed}` (the predicate is planted with dated/undated/undatable rows); conformance scenario `abi/newer-than-virtual` (`fchroot`, 472, since 7.3) asserts `ENOSYS` through every vehicle natively, under patina, on replay, and under strace — it is not run on a kernel that implements the number (`host::tests` plant both directions) | A number newer than the declared kernel trapping as `unmodeled` (an abort a real 6.8 kernel would not produce), or a host newer than the virtual level oracling semantics patina never claimed | **Class** | Raising `VIRTUAL_ABI` fails the rule test by naming every row it passes, so each is re-dispositioned deliberately; the scenarios' asserted-absent rows are checked against the registry's `Absent` disposition, so a scenario can never disagree with the level. |
 | macOS whole-run containment | — | — | **NONE** | Honestly absent: `ktrace` cannot ground a sound gate. `PATINA_REQUIRE_KTRACE=1` hard-fails rather than reporting a vacuous check. Only static scan + import audit on macOS. |
 | Shim host-alias object scan | `cargo-patina` `tests/shim_host_alias.rs` (`shim_objects_name_no_undeclared_host_escape` + `planted_leak_is_caught`) | Dispatch-semaphore Parker sharing the baton's `--allow` | **Class** | Scans shim's own objects for undeclared host escapes; planted leak keeps it honest. |
 | Syscall registry completeness (every vendored-table number has exactly one row; every row's numbers are in the table under its name; the `Removed` family is exactly the table's entry-less numbers; routed rows bind exactly one handler, trap rows none) | `patina-dst-syscalls` `tests::{every_native_entry_has_exactly_one_support_row, removed_rows_are_exactly_the_tables_unimplemented_numbers, rows_are_well_formed, symbol_rows_reference_real_rows}` over active generated metadata in `crates/patina-syscalls/`; `compile_contract.rs` rejects foreign IDs and missing classifications; native Darwin `darwin::validate_associations` checks every symbol association against generated variants at compile time, paired with `darwin::tests` and a planted unknown binding in `compile_contract.rs`; `scripts/test-refresh-syscalls.py` detects source-to-Rust number/guard mutations and mocked latest-release ordering errors (Linux RC/final/trailing-zero/downgrade/malformed versions; independent XNU tags); `sud::build_dispatch` (compile-time) + `sud::tests::bindings_match_the_registry_rows` (by name) | Every un-routed raw syscall number answered by one generic `unmapped` abort; C-only interposers (statfs, getcwd, umask, sched_getaffinity) with no link to the rows they serve | **Class** | A kernel number added upstream, a mistyped number, a deleted row, or a routed row without a handler fails by name (or fails to compile). Limit: the dispositions encode today's behavior; a WRONG disposition is caught only by the conformance probes (docs/arcs/syscall-conformance.md §4), which land with the testbed. |
@@ -580,25 +580,23 @@ smoke (now pinned).
 
 The [revised syscall contract](docs/arcs/syscall-conformance.md#revised-contract-supersedes-conflicting-decisions-below)
 supersedes the historical foreign-inventory and blessed-host acceptance model.
-During migration, a passing registry build is not exhaustive conformance evidence.
-Inherited coverage debt must remain visible and cannot become accepted pending
-entries or blanket exclusions. Final coverage requires an explicit typed mapping
-for every generated entry to an exercised reviewed probe or reasoned exclusion.
-New entries must fail compilation or coverage until reviewed.
+The registry and the live-oracle scenarios are in place (arc checkpoint); a
+passing registry build is still not exhaustive conformance evidence. Inherited
+coverage debt stays visible: `mise run conformance:coverage` lists every entry
+without a scenario or a reasoned exclusion and exits 1 while any remain, and
+nothing turns an entry into an accepted pending state or a blanket exclusion.
 
-The replacement needs proven-red controls for missing typed identities,
-classification/probe omissions, differential false positives and false negatives,
-precise expected-failure mismatches and unexpected passes. Keep the existing
-rename errno and statx validity-mask negative controls and strict record/replay
-identity. Native applicability evidence records kernel/features, permission and
-other capability failures distinctly; an unavailable host comparison does not
-silently disable Patina simulation. Raw observations are retained run artifacts.
-
-Frozen path changes require parent review and re-pinning before family acceptance;
-relocation cannot weaken their anti-weakening checks or required trace evidence.
-Cross-compilation checks active-target type boundaries; runtime claims require
-execution on that OS/architecture. No green migration or foreign runtime evidence
-is claimed by this design update.
+Proven-red controls: the comparison's unit tests (differential false positives
+and negatives, precise expected-failure mismatches, unexpected passes, the
+rename errno and statx validity-mask relations with their negative controls),
+the catalog and coverage tests (missing identities, disposition mismatches,
+unknown symbols, malformed gaps, a scenario without a test), the host
+applicability tests (a kernel too old, a kernel implementing an asserted-absent
+row), and strict record/replay identity. An unmet host need is reported as not
+run with its cause (absent, permission denied, sandboxed, present) and never
+disables the patina run's comparison where the native oracle ran. Raw
+observations are retained run artifacts. Cross-compilation checks active-target
+type boundaries; runtime claims require execution on that OS/architecture.
 
 ### Maintenance rule
 
@@ -614,21 +612,20 @@ detector that "would fire" is only evidence if it actually executes.
 
 ### Filesystem fixup confidence boundary
 
-The conformance differ compares Linux-permitted host alternatives semantically:
-`renameat` EEXIST/ENOTEMPTY for a nonempty destination (never ENOTDIR or other
-operations), and successful `statx` validity masks on requested plus observed
-fields. Raw observations and record/replay byte identity are unchanged. The
-class-level differ selftest pairs the x86 host-oracle regression with both-way
-controls and planted wrong errnos, lost requested/observed validity bits,
-field/argument/return/error drift and malformed/unknown mask contracts. See the
-testbed README for the exact field mapping; filesystem allocation and
-directory-onto-file gaps remain declared, not waived.
+The conformance comparison accepts Linux-permitted host alternatives only where
+the scenario API declares them: `Probe::renameat` records EEXIST/ENOTEMPTY as
+alternatives for a nonempty destination (never ENOTDIR, never another
+operation), and `Probe::statx` compares the returned mask through the requested
+bits plus the validity bits of every field it records. Raw observations and
+record/replay identity are unchanged. The comparison's unit tests pair both with
+negative controls (a value outside the alternatives, a lost in-mask bit);
+filesystem allocation and directory-onto-file gaps remain declared, not waived.
 
-The fs probes cover missing-path/closed-fd OMIT, AT_EMPTY_PATH, symlink chown,
+The fs scenarios cover missing-path/closed-fd OMIT, AT_EMPTY_PATH, symlink chown,
 retained FIFO timestamps/ownership, zero I/O, EOF after truncation, fallocate
 overflow and truthful allocation masks across all three vehicles. Planted dropped
 inode effects, early-return/flag regressions, wrapping conversions, BLOCKS claims
-and ZERO_RANGE refusal fail those probes. Allocation-capacity, crash durability
+and ZERO_RANGE refusal fail those scenarios. Allocation-capacity, crash durability
 and positive-latency sampling also have independent red-before-green unit tests.
 Runtime repeat/strict-replay tests include NOW and inode-addressed setters with
 positive filesystem latency. The runtime has no configurable atime policy.
@@ -643,7 +640,7 @@ new timestamp rules; ordinary fingerprint/outcome mismatch checks still apply.
 
 ### Signal-wait confidence boundary
 
-The frozen signals-family wait tests pair the host-oracle interruption probes with
+The signals-family wait tests pair the host-oracle interruption scenarios with
 real managed-thread unit tests in `thread/signals/tests.rs`: recipient choice,
 queue unlinking before wake, no extra interruption, restart versus EINTR, mask
 restoration, remaining-time writes and signalfd consumption/readiness. Runtime
@@ -654,14 +651,14 @@ and nonmatching-mask controls. The typed `cargo-patina/tests/native_signals.rs`
 integration test compiles `testbeds/native-boundary/signals/blocking_readiness.c`
 to check actual libc poll/ppoll/select/pselect/epoll_pwait adapters under SA_RESTART
 and verify libc timeout preservation. These detectors
-pair with the existing full-family trace obligations; none substitutes for the
-family gate or for cross-platform execution evidence.
+pair with the scenarios' recorded-trace facts; none substitutes for the
+conformance tests or for cross-platform execution evidence.
 
 ### Signals evidence and residual scope
 
-The frozen family gate covers its 39 production-backed obligations and 22 trace
-facts; the landing battery runs it alongside the parallel testbeds, with isolated
-builds and conformance outputs in `target/check/parallel/signals-family-gate/`.
+The family's 22 recorded-trace facts are scenario declarations checked on every
+recorded patina run; its 39 unit-test obligations are ordinary tests of their
+crates, run by the workspace suite.
 `native_signals` and `native_containment` compile the real C layer through
 `cargo-patina/tests/common` with guests in `testbeds/native-boundary/signals/`.
 They exercise libc and inline SUD, including prctl sharing, reserved masks/actions,
@@ -708,7 +705,7 @@ Poll/select/pselect6 remain network+readiness-owned despite being implemented to
 support signal interruption; their dedicated host-conformance oracle has not
 landed. The raw frame/restart protocols are final `signal-abi` traps; pidfd signal
 sending remains a process trap (no virtual pidfds), a stated deviation from the
-frozen spec's self-pidfd mention. Ambient host signals and siglongjmp escape from
+signals spec's self-pidfd mention. Ambient host signals and siglongjmp escape from
 a handler remain outside verified deterministic behavior.
 
 The portable `native_signals` process/sleep detector checks waitpid's ECHILD
@@ -734,38 +731,13 @@ both caller-buffer and allocated-result paths must resolve virtual filesystem
 entries. Darwin's legacy plain `realpath` remains uninterposed and audit-refused;
 the registry does not normalize it into the supported extended ABI.
 
-The signals-family gate's required-test selftest includes raw child stderr during
-a passing serial test, plus missing, ignored, failed and filtered-to-empty tests.
-Only stdout carries per-test verdicts; a nonzero cargo status still fails, and
-both diagnostic streams are retained on failure. Frozen-path integrity remains
-a separate mandatory check, including the gate script itself.
-
-The full check runner schedules the frozen signals-family gate only on Linux,
-including Linux arm64 regardless of SUD availability. Non-Linux hosts emit a
-counted `SKIP` for that Linux-ABI oracle, not a passing signal-model receipt.
-The runner's platform-selection selftest, the gate's own selftest, and shared
-native signal/panic tests still run on macOS. Direct family-gate invocations
-retain their frozen-path integrity and all Linux obligations.
-
-The conformance vehicle's
-`legacy_rows_match_architecture_table_and_refuse_before_dispatch` detector
-checks legacy-row applicability against the vendored architecture tables and
-refuses dispatch of numberless rows through every vehicle. It pairs with the
-arm64 compile regression and the architecture-local legacy sections in
-`signal/wait`, `proc/traps`, and `proc/absent`; missing numbers never become
-synthetic ENOSYS observations. Partial-probe omissions are named on stderr,
-not counted as passing row coverage or as whole-leg skips (see the testbed
-README). A planted wrong-number mapping makes the detector fail.
-
-The manifest's architecture-applicability detector (`conform selftest`, run by
-`run.sh --selftest`) pairs with shared-manifest validation on ARM. Separate
-complete Linux x86_64/aarch64 reports from the same rebuilt binary preserve the
-public syscall JSON and target-local numbered rows. Planted missing/wrong-target
-inventories, ABI mismatches, typos and wrong row kinds must fail; known foreign
-rows must be explicitly reported as nonhost. Contrasting future host/foreign
-kernel dates and foreign absent rows enforce that only host metadata can gate
-execution or absence observations. Check, host-check and bless share coverage
-validation; this does not bless ARM outputs or waive frozen trace obligations.
+Scenario rows are the registry's typed `Syscall` identities: a row the
+architecture lacks does not exist to be issued. `signal/wait`'s legacy
+`signalfd`, `proc/traps`' `fork` and `proc/absent`'s thirteen x86_64-only
+removed numbers are x86_64-only sections; `chown`/`lchown`/`access`/`utime`/
+`utimes`/`futimesat`/`pause`/`dup2`/`epoll_wait` keep their libc door on arm64
+and issue the generic table's kernel shape through `syscall(2)`. Missing numbers
+never become synthetic ENOSYS observations.
 
 ### Darwin kernel-entry inventory (source-only)
 

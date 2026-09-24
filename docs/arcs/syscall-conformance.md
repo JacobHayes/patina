@@ -4,9 +4,10 @@ Status: revised architecture approved; migration requires bounded parent review.
 
 ## Revised contract (supersedes conflicting decisions below)
 
-The historical design below describes the existing harness, not an authorization
-to retain foreign-target inspection, vendored-source parsing, or blessed host
-answers. The approved replacement has these boundaries:
+The design sections below record how the arc was planned (§4 describes the
+current scenarios); they are not an authorization to retain foreign-target
+inspection, vendored-source parsing, or blessed host answers. The approved
+replacement has these boundaries:
 
 - A small dependency-light shared registry crate owns generated syscall identities
   and immutable upstream provenance. Only the active OS/architecture module is
@@ -52,10 +53,11 @@ answers. The approved replacement has these boundaries:
   the existing direct process-group API. No global destructive effect, unowned
   file/process access, privilege change, VM, or sandbox framework is introduced.
   Temporary directories and timeouts are not a security sandbox for arbitrary code.
-- Frozen review/anti-weakening safeguards and trace obligations survive migration;
-  the parent reviews and pins moved paths before family acceptance. Host libtest
-  retains normal concurrency; deterministic guest serialization is independent.
-  Default reports are quiet summaries with retained logs.
+- Trace obligations survive as each scenario's declared trace facts. There is no
+  tamper-proofing manifest: the coordinator reviews scenario and gap diffs at
+  landing. Host libtest retains normal concurrency; deterministic guest
+  serialization is independent. Default reports are quiet summaries with
+  retained logs.
 
 ### Bounded migration and acceptance
 
@@ -82,24 +84,16 @@ invoke Cargo in a way that requires an installed user's missing repository.
 No self-sufficient public command is claimed by the workspace migration.
 ### Implementation checkpoint
 
-The shared pure crate, cfg-native generated identities, total numbers, typed
-Linux dispositions/SUD bindings, and active-only CLI are implemented. The
-conformance vehicle detector uses the pure crate; the harness and runner no
-longer exchange host/reference JSON. Typed scenario associations distinguish
-architecture-inapplicable calls from unknown names. The explicit maintainer
-generator and offline mutation detectors replace raw vendoring/parsers.
+Steps 1 and 2 are implemented. The pure registry crate (`crates/patina-syscalls`)
+owns identities and dispositions only; the scenarios declare what they cover. They
+live in `crates/patina-conformance` and run as ordinary tests
+(`crates/cargo-patina/tests/native_conformance.rs`, §4) against the live host
+kernel, with no committed expectations, blessing, manifest or frozen-path gate.
+Step 3 is open: `mise run conformance:coverage` lists every registry entry of
+the target that no scenario covers and no exclusion accounts for, and exits 1
+while any remain; it is a local report, not part of `mise run check` or CI.
 
-Stage1 acceptance requires independent review, including parent review of
-the moved/frozen test paths. Host fast checks pass; cross compilation is not
-cross-platform execution evidence. Root-workspace conformance relocation,
-live differential oracles and exhaustive reviewed probe/exclusion coverage are
-still outstanding. Inventory counts are not coverage, and inherited gaps remain
-unaccepted. The historical implementation details below are not the current API.
-
-Scouting evidence (file:line inventories per family, native strace demand
-ranking, prior art) lives outside the repo at
-`/cache/jacobhayes/patina-syscall-arc/reports/` — it is a snapshot that rots;
-the durable artifacts are the registry in code and the conformance testbed.
+The durable artifacts are the registry in code and the conformance scenarios.
 
 ## 1. Problem
 
@@ -160,8 +154,7 @@ crates/patina-native-shim/
 ```
 
 `SyscallRow { name, nr: Nr { x86_64: Option<u32>, aarch64: Option<u32> }, family,
-disposition, reasoning, closes_in: Option<&str>, probe: Option<&str>, since:
-Option<&str> }` (the handler binding lives in `sud`, by row name). `VIRTUAL_ABI`
+disposition, reasoning, closes_in: Option<&str>, since: Option<&str> }` (the handler binding lives in `sud`, by row name). `VIRTUAL_ABI`
 is the kernel release the virtual kernel declares; a row whose `since` is newer
 is `Absent`. Dispositions:
 
@@ -178,62 +171,64 @@ The dispatch function is generated from the rows (a match built by macro or a
 sorted array + binary search — the builder chooses; the requirement is that a
 row without a handler cannot compile as `Modeled`). Tests: (a) every number in
 the vendored table for the arch has exactly one row; (b) every row's number
-exists in the table; (c) every probe id a row names exists in the conformance testbed and covers
-that row, every row the testbed's manifest names exists with the matching
-disposition, and a `Modeled` row without a probe is reported (a failure under
-`PATINA_CONFORMANCE_STRICT=1`); (d) every `SymbolRow` names a symbol the compiled shim
+exists in the table; (c) the rows a conformance scenario covers are not
+`Absent` and the rows it asserts absent are (`patina-dst-conformance` catalog
+tests), and `mise run conformance:coverage` reports rows no scenario covers;
+(d) every `SymbolRow` names a symbol the compiled shim
 objects define (scanned with the `object` crate as `shim_host_alias.rs` does)
 and every defined public symbol has a row; (e) the audit classification lists
 in `patina-target` agree with the registry (an interposed symbol is never in a
 deny list; a `Trap` symbol is in the deny-trap list).
 
 `cargo patina syscalls [--format json]` prints the
-table with dispositions and reasoning (`patina.syscalls/v2`), so humans and
+table with dispositions and reasoning (`patina.syscalls/v3`), so humans and
 agents inspect the live registry, never a doc. `syscall(2)` (the glibc wrapper)
 forwards into the same dispatcher instead of its two-number allowlist.
 
-## 4. The conformance testbed (`testbeds/syscall-conformance/`)
+## 4. The conformance scenarios (`crates/patina-conformance/`)
 
-- `probes/<family>/<probe>.rs`: one binary per probe, ordinary `std` + `libc`
-  + `rustix` (both backends) + inline asm. A probe is a scripted scenario with
-  `assert!`s on semantic properties (must pass natively) and an `observe!`
-  macro that appends typed events to a JSONL stream on a dedicated fd:
-  `{"op":"openat","args":{...},"ret":3,"errno":null,"fields":{"st_mode":...}}`.
-- `--vehicle libc|syscall|raw` selects how the probe issues its calls; the
-  probe body is written once against a small `Vehicle` trait. `raw` is
-  `cfg(all(target_os="linux", target_arch="x86_64"))` until the arm64 `svc`
-  variant lands; macOS never has it.
-- Normalization is typed, per field, declared in the probe (`normalize:
-  monotonic | relative | pid | inode | mask(bits)`), never regex over text.
-- `run.sh --mode native|patina|replay --vehicle … [--bless] [--selftest]`;
-  expectations at `expected/<probe>.<os>-<arch>.jsonl` with a header recording
-  the oracle kernel (`uname -r`) and glibc that blessed them, plus a
-  `divergences.toml` listing every declared host≠patina field with a reason.
-  An undeclared divergence fails. The native leg asserts the host kernel is at
-  least the blessed version and marks a probe host-unavailable (not failed)
-  when the host lacks a syscall the virtual ABI level has.
-- Selftests: a planted divergence proves the differ fails; a planted missing
-  row proves the registry gate fails; a planted raw `openat("/etc/hostname")`
-  proves the strace leak gate fails (reusing `validate-native-shim.sh`'s
-  filter).
-- Every leg is supervised (`conform supervise`): its own process group, a
-  wall-clock timeout, and the process outcome the supervisor observed appended
-  as the stream's `__termination` event (`waitpid` natively; the
-  `patina.result/v1` envelope's `guest_exit` under patina/replay), compared
-  like any event — so a probe whose last act is a `SIG_DFL` signal to itself
-  is blessed as "signaled N" and the virtual kernel must die the same way.
-- A family whose runtime is built after its probes is a FROZEN oracle:
-  `frozen.toml` (per family: the oracle's paths, which must carry no
-  uncommitted change; the exact declaration set, `pending: <family> — …`
-  entries a builder may only delete plus `by design:` aborts; and the design
-  obligations — required unit tests and recorded-trace facts) and ONE gate,
-  `gate.sh --family <f>`: the remaining work as plain lines, then
-  `FAMILY_GATE <f>: PASS|FAIL`; `gate.sh --selftest` proves each mechanism can
-  refuse. The signals family's spec, suggested order of work and frozen set:
-  [syscall-conformance-signals.md](syscall-conformance-signals.md).
-- Ladder: `run.sh --fast` (native + patina, libc vehicle) in `check:fast`;
-  the three-vehicle + replay leg in `mise run check` and CI (Linux x86_64 and
-  the arm64 job with `raw` skipped by cfg).
+- A scenario is a plain Rust function over the `Probe` call API
+  (`src/scenarios/<family>/<name>.rs`): it issues its calls through one of
+  three vehicles — the glibc symbol, glibc's `syscall(2)`, or the inline
+  `syscall` instruction (x86_64 only) — asserts the semantic properties it pins
+  with `check`, and writes one typed JSON event per observed call. Every
+  scenario is built into one probe binary (`conformance-probe <scenario>
+  --vehicle V --dir D`). Rows are the registry's typed `Syscall` identities, so
+  a row the architecture lacks cannot be issued: on arm64 a legacy row's libc
+  door stays and `syscall(2)` issues the generic table's kernel shape (glibc's
+  own), and a row with no shape there (`fork`, legacy `signalfd`, most removed
+  numbers) is an x86_64-only section.
+- Each scenario is one `#[test]` in
+  `crates/cargo-patina/tests/native_conformance.rs`: per vehicle, the native
+  run (the host kernel is the oracle) must pass and agree with the scenario's
+  first vehicle; the `cargo patina run` observation of the same run is compared
+  with it field by field. Normalization is typed and declared at the call site
+  (`relative` descriptors and ports, `inode`, `identity`, `monotonic`, `mask`,
+  documented `alternatives` such as rename(2)'s EEXIST/ENOTEMPTY); the statx
+  mask compares requested and recorded fields' validity bits only.
+- A gap (`catalog::Gap`, pending with its arc, or by design) is a strict
+  expected failure: `Failure::Differs` names every differing field with the
+  exact patina value, `Failure::Stops` the exact event count, ending and
+  diagnostic. Another failure fails the test, and so does a gap patina no
+  longer shows. Gaps are per vehicle and per target (cfg).
+- A patina run that completes is also recorded and replayed (identical streams
+  and endings; the scenario's recorded-trace facts, e.g. its exact
+  `signal_generated` sequence), and run directly under strace with the
+  default-deny leak filter (`leak.rs`; the one allowance is a signal to the
+  calling thread itself); a native signal death is re-checked on the
+  shim-linked binary's own wait status.
+- A scenario declares the rows it covers and the rows it asserts absent (past
+  the virtual ABI level); a host kernel predating a covered row, or
+  implementing an asserted-absent one, makes the scenario not run, printed with
+  the reason — as does a host without SUD for the raw vehicle under patina or
+  without strace for the leak run (`PATINA_REQUIRE_HOST_ORACLE=1`,
+  `PATINA_REQUIRE_SUD=1` and `PATINA_REQUIRE_STRACE=1`, set in CI, turn those
+  into failures). Every run owns a
+  temporary directory and runs under a deadline; a scenario's forked children
+  are reaped within one.
+- The tests run in the full workspace suite (`mise run check`, CI on Linux
+  x86_64 and arm64, the MSRV suite) and not in `check:fast`; streams and logs
+  are kept under the target dir's `conformance/<scenario>/<vehicle>/`.
 
 ## 5. Foundations (serial where they touch the same code)
 
@@ -274,7 +269,7 @@ forwards into the same dispatcher instead of its two-number allowlist.
   cgroup,mountinfo,auxv}, sys/devices/system/cpu/online, fs/cgroup cpu.max),
   `/etc/localtime`, hostname — all from one `--host-*` knob group recorded in
   the fingerprint; getcpu; personality; syslog → EPERM.
-- **signals + threads + process** (spec, suggested order M1–M5 and the frozen oracle:
+- **signals + threads + process** (spec and suggested order M1–M5:
   [syscall-conformance-signals.md](syscall-conformance-signals.md)): D1 state in `ThreadRuntime` (dispositions,
   per-task mask, pending sets, altstack); D2 generation records a trace op and
   delivery happens only on the baton-holding task at syscall return / sched
@@ -325,16 +320,14 @@ residual 5, VALIDATION gate taxonomy, testbeds/README row, `llms.txt` verb map.
 
 ## Cross-platform entry inventory
 
-`patina.syscalls/v2` is one target-local report contract for Linux x86_64,
+`patina.syscalls/v3` is one target-local report contract for Linux x86_64,
 Linux aarch64, and Darwin aarch64. Darwin x86_64 is explicitly unavailable.
 Common fields are `os`, `arch`, `scope`, `sources`, `metadata`, `rows`,
 `symbols`, and `summary`. Row identity is `(namespace, nr, subcode)`; `variants`
 retain source entry names, conditions, and table status. Linux runtime fields
-(`disposition`, `family`, `reasoning`, `closes_in`, `probe`, `since`) live under
-the row's `linux` object, and its virtual ABI lives at
-`metadata.linux.virtual_abi`. Reports contain only the selected target's rows;
-the conformance harness still loads host and reference Linux inventories
-separately. Frozen expectations and host/reference acceptance policy do not change.
+(`disposition`, `family`, `reasoning`, `closes_in`, `since`) live under the
+row's `linux` object, and its virtual ABI lives at
+`metadata.linux.virtual_abi`. Reports contain only the selected target's rows.
 
 Darwin references one pinned XNU revision (`registry/darwin.rs::REVISION`). Its
 BSD slots, Mach table slots (negative selectors), ARM special time traps, and

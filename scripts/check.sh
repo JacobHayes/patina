@@ -23,7 +23,7 @@ Usage: scripts/check.sh <full|fast|msrv>
   full  Full local pre-landing gate. Cheap checks run first, the e2e-heavy
         workspace test rung runs alone, then independent runtime/testbed gates
         run concurrently.
-  fast  Inner-loop gate; excludes cargo-patina end_to_end and the six native execution targets
+  fast  Inner-loop gate; excludes cargo-patina end_to_end and the seven native execution targets
         and the landing-only docs/packaging/testbed/full-e2e rungs.
         Targeted native ABI feedback: mise run check:native-abi.
   msrv  Execute the complete Rust 1.86 suite. This is CI/final-gate evidence,
@@ -173,7 +173,7 @@ run_fast_workspace_tests() {
   while IFS= read -r test_path; do
     test_name=$(basename "${test_path%.rs}")
     case "$test_name" in
-      native_abi|native_containment|native_raw|native_signals|native_trace|native_workloads) continue ;;
+      native_abi|native_conformance|native_containment|native_raw|native_signals|native_trace|native_workloads) continue ;;
     esac
     cargo_patina_targets+=(--test "$test_name")
   done < <(find crates/cargo-patina/tests -maxdepth 1 -type f -name '*.rs' ! -name end_to_end.rs | LC_ALL=C sort)
@@ -205,38 +205,6 @@ run_msrv_full() {
   cargo +1.86.0 test --quiet --target-dir "$msrv_target" --workspace --locked &&
     cargo +1.86.0 test --quiet --target-dir "$msrv_target" -p patina-dst --features macros --locked
 }
-
-run_conformance() {
-  testbeds/syscall-conformance/run.sh --selftest &&
-    testbeds/syscall-conformance/run.sh "$@"
-}
-
-# The frozen signals oracle is the Linux syscall ABI, on either architecture.
-# Keep the selector independent of SUD availability and of checkout/VCS state.
-start_signals_family_rung() {
-  if [[ $1 == Linux ]]; then
-    start_rung 'signals family gate' testbeds/syscall-conformance/gate.sh --family signals
-  else
-    skipped=$((skipped + 1))
-  fi
-}
-
-platform_rungs_selftest() (
-  # Exercise the same scheduling seam without launching any heavy child jobs.
-  start_rung() { printf 'RUN %s\n' "$*"; }
-  local linux darwin
-  linux="$(start_signals_family_rung Linux)"
-  darwin="$(start_signals_family_rung Darwin; printf 'skipped=%s\n' "$skipped")"
-  if [[ "$linux" != 'RUN signals family gate testbeds/syscall-conformance/gate.sh --family signals' ]]; then
-    echo "FAIL: Linux must schedule the signals family gate: $linux" >&2
-    return 1
-  fi
-  if [[ "$darwin" != 'skipped=1' ]]; then
-    echo "FAIL: Darwin must report a counted skip, not run the Linux oracle: $darwin" >&2
-    return 1
-  fi
-  echo 'CHECK_PLATFORM_SELFTEST_RAN cases=linux-family,darwin-counted-skip'
-)
 
 # Class detector: successful child chatter stays in retained logs, while failed
 # children preserve their status, command, and original stdout/stderr.
@@ -271,9 +239,7 @@ output_selftest() (
 
 run_full() {
   # Cheap, high-signal failures stay serial and stop before expensive work.
-  run_rung 'platform rung selection selftest' platform_rungs_selftest || return $?
   run_rung 'output contract selftest' output_selftest || return $?
-  run_rung 'conformance metadata tests' cargo test -q --manifest-path testbeds/syscall-conformance/Cargo.toml --lib || return $?
   run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
@@ -287,16 +253,15 @@ run_full() {
   run_rung 'crate packaging' cargo package --workspace --no-verify --locked --allow-dirty || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
-  run_rung 'conformance runner selftest' testbeds/syscall-conformance/run.sh --selftest || return $?
-  run_rung 'conformance gate selftest' testbeds/syscall-conformance/gate.sh --selftest || return $?
   run_rung 'MSRV cargo check' run_msrv_check || return $?
   run_rung 'MSRV rodata detector' run_msrv_detector || return $?
   run_rung 'MSRV macro feature test' run_msrv_macro_feature_test || return $?
 
   # The cargo-patina end_to_end binary dominates the stable workspace suite and
   # contends badly with other CPU-heavy cargo/check rungs, so the full workspace
-  # test rung runs alone. The post-test group below gets one Cargo target dir per
-  # rung through start_rung, plus each script's own runtime scratch paths.
+  # test rung (the native_conformance scenarios included) runs alone. The
+  # post-test group below gets one Cargo target dir per rung through
+  # start_rung, plus each script's own runtime scratch paths.
   run_rung 'stable workspace tests (includes e2e)' cargo test --quiet --workspace --locked || return $?
 
   start_rung 'native ecosystem testbeds' scripts/check-native-testbeds.sh
@@ -305,16 +270,11 @@ run_full() {
   start_rung 'workq testbed' testbeds/workq/run-patina.sh
   start_rung 'WASI validation' scripts/validate-wasi.sh
   start_rung 'cross-target smoke' scripts/smoke-cross-target.sh
-  # Includes the full conformance run and obligations, replacing the standalone
-  # conformance rung. gate.sh and run.sh both inherit this rung's target dir.
-  start_signals_family_rung "$(uname -s)"
   wait_rungs || return $?
 }
 
 run_fast() {
-  run_rung 'platform rung selection selftest' platform_rungs_selftest || return $?
   run_rung 'output contract selftest' output_selftest || return $?
-  run_rung 'conformance metadata tests' cargo test -q --manifest-path testbeds/syscall-conformance/Cargo.toml --lib || return $?
   run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
@@ -329,19 +289,16 @@ run_fast() {
   run_rung 'MSRV cargo check' run_msrv_check || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
-  run_rung 'conformance gate selftest' testbeds/syscall-conformance/gate.sh --selftest || return $?
 
   run_rung 'native ecosystem receipt selftest' scripts/check-native-testbeds.sh --selftest || return $?
 
-  start_rung 'syscall conformance (fast tier)' run_conformance --fast
   start_rung 'WASI validation' scripts/validate-wasi.sh
   start_rung 'cross-target smoke' scripts/smoke-cross-target.sh
   wait_rungs || return $?
 }
 
 case $profile in
-  selftest) run_rung 'platform rung selection selftest' platform_rungs_selftest &&
-    run_rung 'output contract selftest' output_selftest ;;
+  selftest) run_rung 'output contract selftest' output_selftest ;;
   full) run_full ;;
   fast) run_fast ;;
   msrv) run_rung 'MSRV full compatibility suite' run_msrv_full ;;

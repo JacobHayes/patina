@@ -1,7 +1,0 @@
-{"header":{"schema":"patina.conformance/v1","probe":"signal/default","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
-{"seq":0,"op":"getpid","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
-{"seq":1,"op":"wait_status","args":{"case":"SIGTERM"},"ret":0,"errno":null,"fields":{"core":false,"signaled":true,"termsig":15},"norm":{}}
-{"seq":2,"op":"check","args":{"label":"SIGTERM terminates with no core flag"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":3,"op":"wait_status","args":{"case":"SIGABRT"},"ret":0,"errno":null,"fields":{"core":true,"signaled":true,"termsig":6},"norm":{}}
-{"seq":4,"op":"check","args":{"label":"SIGABRT terminates and sets the core flag"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":5,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

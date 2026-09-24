@@ -5,6 +5,7 @@ members = [
     "crates/patina-abi",
     "crates/patina-async",
     "crates/patina-bench",
+    "crates/patina-conformance",
     "crates/patina-driver-api",
     "crates/patina-fs-crash",
     "crates/patina-fs-host",
@@ -69,6 +70,7 @@ patina-dst-wrapper-latency = { path = "crates/patina-wrapper-latency", version =
 # that re-runs `mise run msrv`. Default features are off: the CLI renders its own
 # help and usage from the flag registry, and `color` would make error output
 # terminal-dependent, which a machine-parsed CLI must not be.
+libc = "0.2.189"
 clap = { version = "~4.6", default-features = false, features = ["std", "error-context", "suggestions"] }
 object = { version = "0.39.1", default-features = false, features = ["read", "std"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }

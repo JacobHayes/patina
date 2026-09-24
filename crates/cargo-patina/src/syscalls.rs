@@ -3,7 +3,7 @@
 //! The registry (`patina_dst_native_shim::registry`) is code — the SUD
 //! dispatcher is generated from it and the vendored-table gates hold it
 //! complete — so humans and agents inspect the rows here rather than a doc
-//! that could drift. The JSON form is schema `patina.syscalls/v2`.
+//! that could drift. The JSON form is schema `patina.syscalls/v3`.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -18,7 +18,7 @@ use crate::cli;
 use crate::help;
 use crate::output;
 
-pub(crate) const SYSCALLS_SCHEMA: &str = "patina.syscalls/v2";
+pub(crate) const SYSCALLS_SCHEMA: &str = "patina.syscalls/v3";
 
 pub(crate) struct SyscallsInvocation;
 
@@ -138,7 +138,6 @@ impl Report {
                     "disposition": disposition_json(row.disposition),
                     "reasoning": row.reasoning,
                     "closes_in": row.closes_in,
-                    "probe": row.probe,
                     "since": row.since,
                     },
                     "symbols": self
@@ -160,7 +159,6 @@ impl Report {
                     "name": symbol.name,
                     "platform": symbol.platform.name(),
                     "status": symbol.status.render(),
-                    "probe": symbol.probe,
                     "serves": match symbol.serves {
                         Serves::Syscalls(ids) => json!(ids),
                         Serves::Darwin(names) => {
@@ -172,7 +170,6 @@ impl Report {
                 })
             })
             .collect();
-        let unprobed = registry::modeled_rows_without_probe();
         json!({
             "schema": SYSCALLS_SCHEMA,
             "os": self.os.name(),
@@ -184,10 +181,6 @@ impl Report {
                 "rows": self.rows.len(),
                 "dispositions": self.disposition_counts(),
                 "symbols": symbol_status_counts(&self.symbols),
-                "modeled_without_probe": {
-                    "count": unprobed.len(),
-                    "names": unprobed,
-                },
             },
             "vehicles": self
                 .symbols
@@ -214,19 +207,9 @@ impl Report {
             out.push_str(&format!(" {disposition} {count}"));
         }
         out.push('\n');
-        let unprobed = registry::modeled_rows_without_probe();
         out.push_str(&format!(
-            "modeled rows without a probe: {}{}\n",
-            unprobed.len(),
-            if unprobed.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", unprobed.join(" "))
-            }
-        ));
-        out.push_str(&format!(
-            "{:>4}  {:<24} {:<11} {:<19} {:<30} {:<24} symbols\n",
-            "nr", "name", "family", "disposition", "closes-in", "probe"
+            "{:>4}  {:<24} {:<11} {:<19} {:<30} symbols\n",
+            "nr", "name", "family", "disposition", "closes-in"
         ));
         for (nr, row) in &self.rows {
             let symbols: Vec<&str> = self
@@ -235,12 +218,11 @@ impl Report {
                 .map(|symbol| symbol.name)
                 .collect();
             out.push_str(&format!(
-                "{nr:>4}  {:<24} {:<11} {:<19} {:<30} {:<24} {}\n",
+                "{nr:>4}  {:<24} {:<11} {:<19} {:<30} {}\n",
                 row.name,
                 row.family.name(),
                 row.disposition.render(),
                 row.closes_in.unwrap_or("-"),
-                row.probe.unwrap_or("-"),
                 if symbols.is_empty() {
                     "-".to_string()
                 } else {
@@ -580,7 +562,6 @@ mod tests {
         assert!(absent.iter().any(|symbol| symbol["name"] == "__read_chk"));
         assert_eq!(report["vehicles"], json!(["syscall"]));
         assert_eq!(report["metadata"]["linux"]["virtual_abi"], VIRTUAL_ABI);
-        assert_eq!(read["linux"]["probe"], "fs/open_rw");
         assert_eq!(read["linux"]["since"], Value::Null);
         let fchroot = report["rows"]
             .as_array()
@@ -590,27 +571,6 @@ mod tests {
             .unwrap();
         assert_eq!(fchroot["linux"]["disposition"], json!({ "kind": "absent" }));
         assert_eq!(fchroot["linux"]["since"], "7.3");
-        assert_eq!(fchroot["linux"]["probe"], "abi/newer-than-virtual");
-        let unprobed = &report["summary"]["modeled_without_probe"];
-        assert_eq!(
-            unprobed["count"].as_u64().unwrap() as usize,
-            unprobed["names"].as_array().unwrap().len()
-        );
-        assert!(
-            unprobed["names"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|name| name == "readv"),
-            "readv is modeled with no probe yet: {unprobed}"
-        );
-        assert!(
-            !unprobed["names"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|name| name == "read")
-        );
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -619,13 +579,7 @@ mod tests {
         let text = Report::linux().render();
         assert!(text.contains("386 numbers"));
         assert!(text.contains(&format!("virtual ABI {VIRTUAL_ABI}")));
-        assert!(text.contains("modeled rows without a probe: "));
-        assert!(
-            text.contains(" readv "),
-            "the unprobed names are listed: {text}"
-        );
         assert!(text.contains("   0  read"));
-        assert!(text.contains("fs/open_rw"));
         assert!(text.contains(" 472  fchroot                  privileged  absent"));
         assert!(text.contains("trap(process)"));
         assert!(text.contains("absent — known ABI spellings"));

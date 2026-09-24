@@ -42,15 +42,15 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   gate.
 - `mise run check:fast` is an inner-loop tier, not landing evidence. It includes
   fmt, the three clippy passes, all workspace tests except the `cargo-patina`
-  `end_to_end` binary and the six native execution targets, fast conformance, cheap selftests, flag drift, MSRV cargo
+  `end_to_end` binary and the seven native execution targets, cheap selftests, flag drift, MSRV cargo
   check, WASI, and cross-target smoke. `mise run check` is the default local
   landing gate; CI/final gates add the full `mise run msrv` suite and audit
   corpus breadth. For runtime/shim/trace/target changes, the native acceptance
-  targets (`native_abi`, `native_containment`, `native_raw`, `native_signals`, `native_trace`,
-  `native_workloads`) and WASI/cross-target checks are part of the evidence, not optional
-  cleanup. The frozen signals-family oracle is Linux-only (both architectures);
-  macOS receives an explicit counted skip for that rung, while shared native
-  signal/panic coverage and gate selftests still execute.
+  targets (`native_abi`, `native_conformance`, `native_containment`, `native_raw`,
+  `native_signals`, `native_trace`, `native_workloads`) and WASI/cross-target checks are
+  part of the evidence, not optional cleanup. The syscall conformance scenarios
+  are Linux-only (both architectures); on macOS their test target compiles to
+  nothing, while shared native signal/panic coverage still executes.
 - A green gate is only evidence if it can fail. Selftests and planted fixtures
   should prove classifiers, drift detectors, default-deny audits, and vacuity
   checks actually bite.

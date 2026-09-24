@@ -1,0 +1,24 @@
+[package]
+name = "patina-dst-conformance"
+description = "Linux syscall conformance scenarios with the host kernel as the live oracle"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+libc.workspace = true
+patina-dst-syscalls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# One probe binary for every scenario; the report of uncovered registry entries.
+[[bin]]
+name = "conformance-probe"
+path = "src/bin/conformance-probe.rs"
+
+[[bin]]
+name = "conformance-coverage"
+path = "src/bin/conformance-coverage.rs"

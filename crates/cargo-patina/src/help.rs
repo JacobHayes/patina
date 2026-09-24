@@ -2266,7 +2266,7 @@ and ARM-specific entries, including guarded alternatives and invalid slots; \
 source status and C symbol interposition are not raw-entry models. Darwin \
 x86_64 is not inventoried. MIG messages and commpage APIs are outside the \
 kernel-entry scope. The JSON form \
-emits the shared schema patina.syscalls/v2.",
+emits the shared schema patina.syscalls/v3.",
     families: &[fam(Family::Sole, "`syscalls`", None)],
     groups: &[],
     refusals: NO_REFUSALS,

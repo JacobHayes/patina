@@ -55,8 +55,10 @@ name = "cargo-patina"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "object",
  "patina-dst-abi",
+ "patina-dst-conformance",
  "patina-dst-driver-api",
  "patina-dst-fs-crash",
  "patina-dst-fs-mem",
@@ -354,6 +356,16 @@ version = "0.1.0"
 dependencies = [
  "patina-dst-abi",
  "patina-dst-runtime",
+]
+
+[[package]]
+name = "patina-dst-conformance"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "patina-dst-syscalls",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

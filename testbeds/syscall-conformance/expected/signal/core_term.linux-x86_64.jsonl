@@ -1,5 +1,0 @@
-{"header":{"schema":"patina.conformance/v1","probe":"signal/core_term","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
-{"seq":0,"op":"getpid","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
-{"seq":1,"op":"check","args":{"label":"SIGABRT is at its default disposition"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":2,"op":"expect_death","args":{"signal":6},"ret":0,"errno":null,"fields":{},"norm":{}}
-{"seq":3,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"core":true,"kind":"signaled","signal":6},"norm":{}}

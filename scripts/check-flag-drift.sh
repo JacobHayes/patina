@@ -82,7 +82,7 @@ DOCS=(README.md TUTORIAL.md USAGE-MODES.md ARCHITECTURE.md IMPLEMENTATION.md
       testbeds/audit-corpus/README.md testbeds/rustix-default/README.md
       testbeds/cap-std-dirfd/README.md testbeds/fifo-ipc/README.md
       testbeds/native-boundary/README.md
-      testbeds/syscall-conformance/README.md
+      crates/patina-conformance/README.md
       testbeds/buggify-wasi/README.md testbeds/checkout-retry-idempotency/README.md
       testbeds/patina-macro-adopter/README.md)
 
@@ -145,14 +145,9 @@ ALLOWED_FLAGS='
 --points-at
 --no-graph
 --execute
---mode
 --vehicle
---probe
---bless
---fast
+--dir
 --strict
---family
---name-only
 --apply
 '
 # -- cargo / rustc / rustup / linker tool flags --
@@ -186,13 +181,9 @@ ALLOWED_FLAGS='
 # --porcelain/--points-at: git status/tag flags; --no-graph: jj log's flag
 #   (publish.sh's clean-tree and release-tag preconditions).
 # --execute: publish.sh's own real-upload switch.
-# -- syscall-conformance testbed (testbeds/syscall-conformance/run.sh + probes) --
-# --mode/--vehicle/--probe/--bless/--fast: run.sh's own options (legs, vehicle,
-#   probe selection, re-recording expectations, the check:fast tier).
-# --strict: the probe binaries' own switch (a failed semantic check panics on
-#   the native oracle leg; under patina it is recorded as a divergence).
-# --family: gate.sh's own option (the frozen family to gate).
-# --name-only: `jj diff --name-only`, gate.sh's frozen-path check.
+# -- syscall conformance (crates/patina-conformance) --
+# --vehicle/--dir/--strict: the conformance-probe binary's own options (the
+#   vehicle, the run's owned directory, a failed check panics natively).
 # -- syscall-table refresh (scripts/refresh-syscalls.py) --
 # --apply: its own atomic generated-artifact replacement switch.
 # (--selftest and --seed are REAL registry flags — not allowlisted here.)

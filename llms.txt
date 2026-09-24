@@ -174,11 +174,12 @@ unknown option.
   this host). Linux x86_64/aarch64 rows carry runtime dispositions; Darwin
   aarch64 inventories pinned BSD, Mach, ARM-special and platform entries,
   preserving guards and invalid slots without claiming raw-entry models.
-  Darwin x86_64 is not inventoried. Shared JSON schema: `patina.syscalls/v2`.
+  Darwin x86_64 is not inventoried. Shared JSON schema: `patina.syscalls/v3`.
   Row identity is `(namespace, nr, subcode)`; `variants` carry source status.
   Linux runtime fields are under each row's `linux` object (`disposition`,
-  `probe`, `since`, etc.); ABI is `metadata.linux.virtual_abi`, and unprobed
-  models remain in `summary.modeled_without_probe`. Darwin has no virtual ABI;
+  `closes_in`, `since`, etc.); ABI is `metadata.linux.virtual_abi`. Which
+  conformance scenario covers a row is `mise run conformance:coverage`'s
+  business, not the report's. Darwin has no virtual ABI;
   `darwin.raw_entry` is `not-interposed`, independent of C symbol status.
   MIG messages and commpage APIs are outside the kernel-entry scope.
 
@@ -362,11 +363,11 @@ dev-dependency use under plain `cargo test`.
 ## Docs
 
 - Validation ladder: `mise run check:fast` is the inner loop (fmt, the three
-  clippy passes, workspace tests except cargo-patina's e2e/native execution targets, fast
-  conformance, cheap selftests, flag drift, MSRV cargo check, WASI, cross smoke).
+  clippy passes, workspace tests except cargo-patina's e2e/native execution targets,
+  cheap selftests, flag drift, MSRV cargo check, WASI, cross smoke).
   `mise run check` is the local landing gate (adds docs, packaging, full stable
-  tests including e2e, native acceptance tests, ecosystem testbeds, full conformance gate,
-  and local MSRV detector/macros rungs). `mise run msrv` is the full Rust 1.86
+  tests including e2e, native acceptance tests and syscall conformance, ecosystem
+  testbeds, and local MSRV detector/macros rungs). `mise run msrv` is the full Rust 1.86
   suite for CI/final-gate evidence.
 - `docs/skills/patina-dst.md`: tool-agnostic agent skill — what Patina is, the
   capability map, and the method for discovering the current surface (the help
@@ -377,11 +378,12 @@ dev-dependency use under plain `cargo test`.
   planted bug, replay it, and render the timeline.
 - `ARCHITECTURE.md`, `IMPLEMENTATION.md`, `VALIDATION.md`: design, slice status,
   and the verification gates.
-- `testbeds/syscall-conformance/run.sh`: host-oracle syscall conformance — probes
-  run natively (kernel answers), under patina, under replay, and under strace;
-  `divergences.toml` is the exact current host≠patina gap (`--selftest`, `--bless`).
-  `gate.sh --family signals` is the frozen-oracle family gate
-  (`frozen.toml`; spec `docs/arcs/syscall-conformance-signals.md`).
+- `crates/patina-conformance`: syscall conformance scenarios with the live host
+  kernel as the oracle; `cargo test -p cargo-patina --test native_conformance`
+  (`mise run conformance`) runs each natively and under patina (plus record/replay
+  and strace), and each scenario's declared gaps are the exact current
+  host≠patina difference. `mise run conformance:coverage` lists registry entries
+  no scenario or exclusion accounts for.
 - `testbeds/`: real end-to-end guests — `workq` (the flagship durable-work-queue
   demo), `pubsub` (a tokio broker on the interposed reactors), and more; see
   `testbeds/README.md` and each testbed's `run-patina.sh`.
@@ -389,10 +391,11 @@ dev-dependency use under plain `cargo test`.
 ## Native development feedback
 
 `mise run check:native-abi` selects cargo-patina's `native_abi` tests. The other
-native targets are `native_containment`, `native_raw`, `native_trace`, and
-`native_workloads`, and `native_signals`; use Cargo's test-name filter for a single proof. All run in
-`check` and the Linux/macOS workspace-test CI jobs, not `check:fast`. The full gate
-also runs receipt-checked FIFO/rustix-default/cap-std testbeds and conformance's full four-leg
-run and planted-failure selftest. See `testbeds/native-boundary/README.md` for
+native targets are `native_conformance`, `native_containment`, `native_raw`,
+`native_signals`, `native_trace` and `native_workloads`; use Cargo's test-name
+filter for a single proof (one conformance scenario is one test, e.g.
+`fs_open_rw`). All run in `check` and the Linux/macOS workspace-test CI jobs, not
+`check:fast`. The full gate also runs receipt-checked FIFO/rustix-default/cap-std
+testbeds. See `testbeds/native-boundary/README.md` for
 exact owners and platform limits; Linux-only oracle expectations do not replace
 portable native ABI tests.

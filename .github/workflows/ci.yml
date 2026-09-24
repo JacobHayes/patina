@@ -34,6 +34,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       PATINA_REQUIRE_SUD: ${{ matrix.runner == 'ubuntu-latest' && '1' || '0' }}
+      # Every syscall conformance scenario must find the runner's kernel an
+      # oracle (covered rows present, asserted-absent rows absent).
+      PATINA_REQUIRE_HOST_ORACLE: '1'
     steps:
       - uses: actions/checkout@v7
       - if: matrix.toolchain == 'stable'
@@ -63,10 +66,12 @@ jobs:
         run: cargo fmt --all -- --check
       - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # Stable executes the complete suite on each Linux platform. MSRV is the
-      # full Rust 1.86 final-gate tier (the same battery exposed locally as
-      # `mise run msrv`), with its own outer Cargo cache; nested Patina shim
-      # caches are compiler-identity keyed.
+      # Stable executes the complete suite on each Linux platform, the syscall
+      # conformance scenarios (native_conformance) included; x86_64 also runs
+      # their raw vehicle under SUD. MSRV is the full Rust 1.86 final-gate tier
+      # (the same battery exposed locally as `mise run msrv`, conformance
+      # included), with its own outer Cargo cache; nested Patina shim caches are
+      # compiler-identity keyed.
       - if: matrix.toolchain == 'stable'
         run: cargo test --workspace --locked
         env:
@@ -108,24 +113,6 @@ jobs:
       # fail-closed planted-bug legs).
       - if: matrix.toolchain == 'stable'
         run: testbeds/pubsub/run-patina.sh
-      # The syscall-conformance testbed: every probe natively (the host kernel
-      # is the oracle; the blessing kernel must not be newer than the runner's)
-      # and under patina through all three vehicles, plus record/replay identity
-      # and the strace leak leg. x86_64 runs the raw vehicle under SUD; arm64
-      # skips it by cfg (counted) and its expectations are recorded separately
-      # (`run.sh --bless` on an aarch64 host; unblessed platforms skip loudly).
-      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
-        run: |
-          testbeds/syscall-conformance/run.sh --selftest
-          testbeds/syscall-conformance/run.sh
-        env:
-          PATINA_REQUIRE_STRACE: '1'
-      # Raw eventfd/epoll semantics run on MSRV as well as stable.
-      # Expectations currently exist only for Linux x86_64.
-      - if: matrix.toolchain == 'msrv' && matrix.runner == 'ubuntu-latest'
-        run: testbeds/syscall-conformance/run.sh --probe readiness/epoll --vehicle raw
-        env:
-          PATINA_REQUIRE_STRACE: '1'
       # The ecosystem symbol-audit corpus: 20 per-crate MREs built + audited,
       # each compared strictly (both directions) to a committed platform
       # expectation file. Stable Linux x86_64 runs it here; the daily/manual
@@ -179,7 +166,7 @@ jobs:
         run: |
           # Testbeds are standalone workspaces (publish=false) with their own
           # lockfiles. Every one is strict — no advisory is ignored anywhere.
-          for tb in buggify-wasi liveness-campaign pubsub syscall-conformance workq native-boundary/rand-rng native-boundary/tokio native-boundary/raw; do
+          for tb in buggify-wasi liveness-campaign pubsub workq native-boundary/rand-rng native-boundary/tokio native-boundary/raw; do
             echo "== audit testbeds/$tb =="
             cargo audit --file "testbeds/$tb/Cargo.lock"
           done

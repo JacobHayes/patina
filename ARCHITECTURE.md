@@ -147,7 +147,7 @@ retains its requested status.
 Guest raw `rt_sigreturn` and `restart_syscall` are final `signal-abi` traps: handler
 returns use the allowed host restorer, and no guest restart-block protocol exists.
 `pidfd_send_signal` remains a process trap because there are no virtual pidfds;
-this does not implement the frozen signals spec's self-pidfd aspiration. Ambient
+this does not implement the signals spec's self-pidfd aspiration. Ambient
 host signals are outside the deterministic model and can execute a handler
 off-baton. Nonlocal `siglongjmp` escape from a handler is unverified, including
 mask/frame restoration; neither case carries a reproducibility claim.
@@ -566,10 +566,9 @@ with compile-time binding checks. No runtime behavior is derived from an upstrea
 source declaration. The explicit Python maintainer generator validates immutable
 source hashes, discards temporary downloads and atomically replaces the single
 Rust artifact. Normal builds neither parse nor fetch upstream source files.
-`cargo patina syscalls` reports only the compiled target. The conformance harness
-reads the pure metadata directly; the symbol/object and probe-association gates
-remain distinct from execution coverage. Its existing expectation-based oracle
-is not yet the approved live differential design.
+`cargo patina syscalls` reports only the compiled target. The registry names no
+conformance scenario: which scenario covers an entry is declared by the
+scenario (`crates/patina-conformance`), the one source of that association.
 
 **The descriptor table.** The shim owns one guest descriptor table (`crates/patina-native-shim/src/fdtable.rs`), shaped like the kernel's: guest numbers are allocated lowest-free with holes and refcount an open file *description* — the kind of object (captured stdin/stdout/stderr, a deterministic-filesystem file, directory or `O_PATH` handle, the `/dev/urandom` device, a virtual socket, a pipe/socketpair/FIFO endpoint, an eventfd, an epoll instance or kqueue), its class handle, and its status flags (access mode, `O_APPEND`, `O_NONBLOCK`) — while `FD_CLOEXEC` is a bit on the number. `dup`/`dup2`/`dup3`/`F_DUPFD[_CLOEXEC]` bind a second number to one description (`F_DUPFD` honors its minimum; `dup2`/`dup3` bind a chosen number, closing what it named), `close` frees the number and the description with its last number, `close_range` covers a range (or marks it close-on-exec), and `EMFILE` falls at `RLIMIT_NOFILE` — the one number `getrlimit`, `sysconf(_SC_OPEN_MAX)` and the table agree on. The class handle a description names (the driver `Fd`, the net module's socket or pipe-end key, a reactor's registry id) is internal: traces record driver handles exactly as before, and a guest number is a pure function of the deterministic call sequence, never recorded. Every descriptor operation — `read`, `write`, `pread`/`pwrite`, `lseek`, `fsync`, `ftruncate`, `flock`, `fcntl`, `close`, the `dup` family — is one universal `patina_*` entry that resolves the number once and dispatches on what it names (a pipe's `lseek` is `ESPIPE`, its `fsync` `EINVAL`, an empty slot `EBADF`, exactly as the kernel answers); the C interposers and the SUD rows call that entry and decide nothing by kind themselves, and `patina_fd_kind` is the single oracle for the few calls whose meaning depends on the kind (a socket op on a file is `ENOTSOCK`, a `*at` dirfd must be a directory, `mmap` of a pipe is `ENODEV`). Redirecting a standard stream works the Linux way: `dup2(fd, 2)` makes number 2 name the file, and a `close(2)` followed by an `open` makes 2 an ordinary file; the runtime's own diagnostics write to the capture *sinks* directly, so a guest cannot redirect them away from the supervisor. A file-backed mapping holds a hidden reference on its description, so its writeback survives the guest closing the number. Standard input is a stream at EOF; the conformance probe `fd/table` host-checks all of it.
 
@@ -655,14 +654,18 @@ pure generated active-target identity, human runtime support metadata, and the
 live differential observation oracle. The shared registry compiles only the
 native OS/architecture, with total syscall numbers for valid target entries;
 Darwin namespaces and subcodes remain distinct. Runtime support and handler
-bindings use generated types. Conformance belongs to the root workspace without
-linking the shim runtime into the host oracle. See the
+bindings use generated types. Conformance is a root-workspace crate,
+`crates/patina-conformance`, that depends on the pure registry and never links
+the shim runtime into the host oracle: its scenarios are plain functions built
+into one probe binary, and `crates/cargo-patina/tests/native_conformance.rs`
+runs each natively and under patina and compares the observations live, exact
+but for each scenario's declared normalizations and gaps. See the
 [revised contract](docs/arcs/syscall-conformance.md#revised-contract-supersedes-conflicting-decisions-below)
-for the migration and acceptance boundary. The expectation-based conformance implementation does not yet satisfy the full
-replacement contract.
+for the acceptance boundary; exhaustive coverage of the registry is still open
+(`mise run conformance:coverage`).
 
 **Native syscall inventory.** `cargo patina syscalls` emits one
-`patina.syscalls/v2` contract for the compiled target. On every target,
+`patina.syscalls/v3` contract for the compiled target. On every target,
 `summary.symbols` is a status-to-count object (deny classes grouped as `deny`);
 row identity is `(namespace, nr, subcode)`. Variant entry names may be null for
 Linux table slots without an entry point. Linux runtime dispositions

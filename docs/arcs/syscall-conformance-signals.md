@@ -1,19 +1,17 @@
-# Signals + threads + process: the family spec and its frozen oracle
+# Signals + threads + process: the family spec
 
-Status: oracle frozen (the probes and expectations under
-`testbeds/syscall-conformance/{probes,expected}/{signal,thread,proc}/`, the
-harness, `frozen.toml` and `gate.sh`) before any runtime work; the runtime is
-built against one gate, `gate.sh --family signals` (§5), in the order §4
-suggests. Parent arc: [syscall-conformance.md](syscall-conformance.md) §6 "signals
-+ threads + process", §7. Every claim below about Linux is host-checked by a
-probe on this family's blessing host (Linux 6.8, glibc 2.39, x86_64); the
-kernel is the oracle, this text is the index.
+Status: landed. The family's scenarios are `signal/*`, `thread/*` and `proc/*`
+in `crates/patina-conformance`; no pending gap remains, and the fork-based
+child oracles carry by-design gaps. The runtime was built against the order §4
+suggests. Parent arc: [syscall-conformance.md](syscall-conformance.md) §6
+"signals + threads + process", §7. Every claim below about Linux is
+host-checked by a scenario against the live host kernel; the kernel is the
+oracle, this text is the index.
 
 ## As landed: implementation deltas
 
 The numbered design below records the original plan. These deltas describe the
-implementation; they do not change the frozen probes, expectations, declarations
-or required test names in `frozen.toml`.
+implementation; they do not change the scenarios or the required unit tests.
 
 - `pidfd_send_signal(self)` is not a generation door: virtual pidfds do not exist,
   and `pidfd_send_signal` is a final `process` trap. This is a deliberate limit,
@@ -39,17 +37,17 @@ or required test names in `frozen.toml`.
   panic policy; guest callbacks suspend ownership, preserving caught guest
   panics. Guard-unwind and panic-time abort checks protect against hook replacement.
 
-The family gate and full landing battery are required acceptance checks.
+The conformance tests and the full landing battery are the acceptance checks.
 Ambient host signals, nonlocal handler escape and macOS runtime behavior are not
 proved by the Linux signal detectors; see `VALIDATION.md` for the evidence scope.
 
-## 1. Rows: the Linux semantics the probes pin
+## 1. Rows: the Linux semantics the scenarios pin
 
 Citations: `man 7 signal` (default actions, restart rule), `man 2 <row>`, and
 `kernel/signal.c` / `kernel/sys.c` / `kernel/fork.c` / `fs/signalfd.c` /
 `fs/pipe.c` / `arch/x86/kernel/signal.c` / `kernel/entry/common.c` function
-names where the behaviour is subtle. "Probe" names the probe(s) that pin the
-row; every probe runs through all three vehicles unless noted.
+names where the behaviour is subtle. "Probe" names the scenario(s) that pin
+the row; every scenario runs through every vehicle unless noted.
 
 ### 1.1 Generation
 
@@ -123,10 +121,8 @@ return code decides:
 
 ## 2. The design, at file:line of this tree
 
-Verified against the tree at `mzntnszl 30f0c9d3` (the lineage head the oracle
-was frozen on). The scout inventory this refines lives outside the repo
-(`/cache/jacobhayes/patina-syscall-arc/briefs/signals-delivery-design.md`);
-every claim here was re-checked.
+Verified against the tree at `mzntnszl 30f0c9d3` (the lineage head the design
+was made on).
 
 ### 2.1 Where the runtime stands
 
@@ -181,7 +177,7 @@ Delivery = "the baton-holding task runs `deliver_pending_for_current_task`": re-
 
 `BlockedTask { class: BlockClass, locs: Vec<WaiterLoc>, deadline }` is registered by every parking path listed in §2.1 before `scheduler.park` and removed on resume, so generation can unlink a waiter without draining whole queues (`patina_signal_interrupt_all` — the rejected round's wake-everything primitive — must not exist). A timed sleep interrupted early has its timer deregistered (`task_wake` already does, `runtime/src/lib.rs:6027`) and computes `rem = deadline - virtual now`.
 
-**Frames are the kernel's.** A handler is invoked by signalling the calling host thread itself from a delivery point: install the virtual mask minus the reserved signals on the host, then `rt_tgsigqueueinfo(host_pid, host_tid, sig, &siginfo)` with the VIRTUAL siginfo (`si_code` `SI_USER`/`SI_TKILL`/`SI_QUEUE`, `si_pid = 1`, `si_uid = 1000`, `si_value`) — a nonnegative `si_code` to one's own thread group is accepted (§1.1) — so the kernel builds the frame (honouring `SA_SIGINFO`, `SA_ONSTACK` on the host-forwarded altstack, `sa_mask`, `SA_NODEFER`, `SA_RESETHAND` — the shim mirrors the reset into `actions` — and glibc's restorer), the handler runs on the same host thread under the baton, and `rt_sigreturn` runs from glibc's text. `SA_SIGINFO si_pid == getpid()` holds because the siginfo carries the virtual identity; a plain `tgkill` would leak the host pid into it. Several deliverable signals at one point are queued on the host while blocked and released with ONE host `sigprocmask`, so the kernel stacks the frames in its own order (`signal/unmask`'s reverse-order and frame-mask checks). The leak filter allows exactly this vehicle: `tgkill`/`tkill`/`rt_tgsigqueueinfo` whose target is the calling thread, any signal, and nothing else (`run.sh`, `strace_filter`, `self_directed`).
+**Frames are the kernel's.** A handler is invoked by signalling the calling host thread itself from a delivery point: install the virtual mask minus the reserved signals on the host, then `rt_tgsigqueueinfo(host_pid, host_tid, sig, &siginfo)` with the VIRTUAL siginfo (`si_code` `SI_USER`/`SI_TKILL`/`SI_QUEUE`, `si_pid = 1`, `si_uid = 1000`, `si_value`) — a nonnegative `si_code` to one's own thread group is accepted (§1.1) — so the kernel builds the frame (honouring `SA_SIGINFO`, `SA_ONSTACK` on the host-forwarded altstack, `sa_mask`, `SA_NODEFER`, `SA_RESETHAND` — the shim mirrors the reset into `actions` — and glibc's restorer), the handler runs on the same host thread under the baton, and `rt_sigreturn` runs from glibc's text. `SA_SIGINFO si_pid == getpid()` holds because the siginfo carries the virtual identity; a plain `tgkill` would leak the host pid into it. Several deliverable signals at one point are queued on the host while blocked and released with ONE host `sigprocmask`, so the kernel stacks the frames in its own order (`signal/unmask`'s reverse-order and frame-mask checks). The leak filter allows exactly this vehicle: `tgkill`/`tkill`/`rt_tgsigqueueinfo` whose target is the calling thread, any signal, and nothing else (`crates/patina-conformance/src/leak.rs`, `self_directed`).
 
 **The SUD vehicle.** Delivery runs inside the SIGSYS handler. For a raw syscall issued from inside a nested guest handler to trap normally, the SIGSYS handler is installed with `SA_NODEFER` (a synchronous SIGSYS while SIGSYS is blocked is force-delivered as SIG_DFL and kills the process), the dispatch re-entry guard (`with_dispatch_guard`) admits re-entry only while a guest handler is running, and the guest handler's frame is built by the kernel on top of the SIGSYS frame (or on the altstack under `SA_ONSTACK`). The alternative — the scout's RIP-redirect stub that delivers after `rt_sigreturn` on the guest's own stack — is acceptable only if the stub preserves the complete register file the guest's inline `syscall` did not declare clobbered (everything but `rax`/`rcx`/`r11`, including the vector registers and the 128-byte red zone), which is exactly a signal frame; the probes decide, the design does not.
 
@@ -201,19 +197,19 @@ At a delivery point, `SIG_DFL` for a Term/Core signal: `patina_shutdown` (`lib.r
 
 `set_tid_address` stores the word per task and returns the managed tid; `thread_finish` (`lib.rs:7528`) writes 0 and `patina_futex_wake`s it (the host kernel clears glibc's own `pd->tid`, never the guest's word — the raw row never reached it). A raw `exit` from a managed non-main task runs `thread_finish` and ends the host thread; from the main task it marks the root task completed and leaves the process to the remaining tasks, whose `exit_group` ends it with their status (`patina_exit`, `lib.rs:5698`, must not run atexit for a raw `exit_group` — kernel semantics; the natural-return path keeps today's chain). `pthread_kill` is a strong-def wrapper over the `tgkill` model with the `pthread_t → TaskId` map (`ThreadRuntime.handles`); `raise`, `sigwait`, `sigwaitinfo`, `sigtimedwait`, `sigsuspend`, `sigqueue`, `sigprocmask`, `sigpending`, `siginterrupt`, `killpg`, `psignal`/`strsignal` are the remaining wrappers, each a symbol row flipped from `Absent` honestly (a wrapper the shim does not define stays `Absent`, and the probe that needs it stays libc-only).
 
-## 3. The harness contract the oracle relies on
+## 3. The harness contract the scenarios rely on
 
-- Every leg runs under `conform supervise` (`testbeds/syscall-conformance/src/bin/conform.rs`): its own process group, a wall-clock timeout (`PATINA_CONFORMANCE_LEG_TIMEOUT`, default 60 s) that kills the group, and the process outcome the supervisor OBSERVED appended as the stream's `__termination` event — `waitpid` for the native leg, `guest_exit` from the `cargo patina … --format json` envelope for patina/replay. It is compared like any event (`fields.kind/code/signal/core`), declarable as `op = "__termination"`, and never copied from an expectation (`run.sh --selftest`, `gate.sh --selftest`).
-- A probe that means to die announces it (`Probe::dies_by(signal)`, the `expect_death` event) as its last act; the blessing refuses any other signal death.
-- Declarations: `kind = "pending"` covers every difference a probe still shows and lists them; `kind = "abort"` pins the event AND the diagnostic (`stderr = "…"`) of a by-design death; the frozen set of both is in `frozen.toml`.
-- The replay leg dumps the trace it recorded AS THE SUPERVISOR REPORTS IT (`cargo patina trace info|events --format json` into `target/conformance/<bin>/replay.<vehicle>.trace-{info.json,events.jsonl}`, removed before anything can skip the leg so a stale dump never stands in); the family gate's trace obligations read those.
-- A probe blessed to die by a signal is, in its leak leg, also run DIRECTLY — the shim-linked binary, no `cargo patina`, no strace — and its `waitpid` outcome (signal and core flag) must be the blessed one: an exit code a supervisor translates into "signaled", or a core flag the envelope invents, does not survive it (`run.sh --selftest`, direct-termination).
+- Every run (`crates/cargo-patina/tests/native_conformance.rs`) is its own process group under a deadline, and each supervisor's observed outcome is compared — `waitpid` natively, `guest_exit` (signal and core flag) from the `cargo patina … --format json` envelope under patina, record and replay.
+- A scenario that means to die announces it (`Probe::dies_by(signal)`, the `expect_death` event) as its last act; any other native signal death is no oracle.
+- Gaps: `Failure::Differs` names every difference a scenario still shows with its exact patina value; `Failure::Stops` pins the event count, the ending and the diagnostic of a by-design death.
+- The recorded run's trace is read back through `cargo patina trace events --format json`; a scenario's `trace` facts (§4) are checked against it.
+- A scenario whose native run dies by a signal is also run DIRECTLY — the shim-linked binary, no `cargo patina`, no strace — and its wait status (signal and core flag) must be the native one: an exit code a supervisor translates into "signaled", or a core flag the envelope invents, does not survive it.
 - One stream, many threads: `Recorder::quiet` suspends recording for the CALLING thread only, so a helper's unrecorded wake never swallows an event of the thread under test; a worker that records does so in its own turn (a phase handoff while the main thread waits unrecorded), so the stream's order never depends on which thread the scheduler runs first.
-- Ordering evidence: every helper thread waits until the main thread is asleep in its blocking call (`/proc/self/task/<tid>/stat` state `S` natively; the virtual kernel has no `/proc`, so under patina it is a virtual-time pause and the scheduler's order is deterministic) and records a `helper_kill` mark immediately before it signals, so a wait that returned early is an ordering divergence, and the handler count at return is checked.
+- Ordering evidence: every helper thread waits until the main thread is asleep in its blocking call (`/proc/self/task/<tid>/stat` state `S` natively; the virtual kernel has no `/proc`, so under patina it is a virtual-time pause and the scheduler's order is deterministic) and records a `helper_kill` mark immediately before it signals, so a wait that returned early is an ordering difference, and the handler count at return is checked.
 
 ## 4. The work, in its suggested order: scope, probes, DESIGN OBLIGATIONS, traps
 
-There is one gate and one outcome: `testbeds/syscall-conformance/gate.sh --family signals` prints `FAMILY_GATE signals: PASS` when (a) every `pending: signals — …` declaration has been DELETED from `divergences.toml` (the only edit it accepts for a frozen probe) and the full run is green without them, AND (b) every design obligation below holds. Until then it prints what is left as plain lines — the probes still pending or differing, the required unit tests missing, ignored or failing, the trace facts unmet — so it is also the progress report; run it early and often.
+The family was built against one done-condition: (a) every `pending: signals — …` gap gone with the scenarios green, AND (b) every design obligation below held.
 
 M1..M5 are the SUGGESTED ORDER of work, not separate gates; the `M<k>` in each pending reason names the step that closes it. The order is the dependency order, and the reasons are these:
 
@@ -224,10 +220,10 @@ M1..M5 are the SUGGESTED ORDER of work, not separate gates; the `M<k>` in each p
 
 A different order that reaches the same PASS is the builder's call; what is not negotiable is the end state.
 
-Why (b) exists: green probes are necessary, not sufficient. A process-global C model that fires a host signal at generation time — the host kernel as the pending queue, no per-task state, no trace op — passes every single-threaded M2 probe on every leg, replay included. The obligations are what such a pass skips, checked mechanically from `frozen.toml`:
+Why (b) exists: green scenarios are necessary, not sufficient. A process-global C model that fires a host signal at generation time — the host kernel as the pending queue, no per-task state, no trace op — passes every single-threaded M2 scenario on every vehicle, replay included. The obligations are what such a pass skips:
 
-- **unit tests** — the crate has exactly one test with the given path (or whose path ends in `::` + the given name: the module layout is the builder's, the name is not), it is not `#[ignore]`d, and it passes when run alone with `cargo test -p <crate> -- --exact <path>`. The gate checks existence and passing; the third column below is what the final vet checks each test's SUBSTANCE against. A test that asserts less than its row says is a defect the vet raises, not a pass.
-- **trace facts** — read from the trace the probe's replay leg RECORDED, as the supervisor reports it (§2.7): `format_version ≥ 9`, the `signal_generated` ops are exactly the probe's generations in order (`<sig>:p` process-directed, `<sig>:t` thread-directed), and, where stated, at most one `task_wake` directly follows a generation. A probe still declared (or whose replay leg fails) has no trace, which is unmet.
+- **unit tests** — named tests in their crates' suites; the third column below is what each test's SUBSTANCE is reviewed against. A test that asserts less than its row says is a defect, not a pass.
+- **trace facts** — each scenario's `trace` declaration, checked against the trace its patina run RECORDED (§2.7): the `signal_generated` ops are exactly the scenario's generations in order (`<sig>:p` process-directed, `<sig>:t` thread-directed), and, where stated, at most one `task_wake` directly follows a generation.
 
 ### M1 — process rows (no delivery machinery)
 
@@ -307,7 +303,7 @@ Traps: returning `EINTR`/`EAGAIN` immediately from a wait (the rejected round's 
 
 Scope: §2.6 on both doors; `guest_exit.core` in the `cargo-patina` envelope (`GuestExit` gains `core` from the wait status; the harness reads it); SIGPIPE from `pipe_write` and the socketpair send path with `MSG_NOSIGNAL` honoured and `SIG_IGN` → bare `EPIPE`; Stop-class named trap; `abort()` finalizes then aborts through the host alias.
 
-Probes: `signal/default_term`, `signal/core_term`, `signal/pipe_term`, `signal/resethand_term` — on every leg, including the leak leg's DIRECT run whose `waitpid` must read the blessed signal and core flag; `signal/default` and `signal/pipe` stay by-design aborts with the pinned C diagnostic.
+Probes: `signal/default_term`, `signal/core_term`, `signal/pipe_term`, `signal/resethand_term` — through every vehicle, including the DIRECT run whose `waitpid` must read the native signal and core flag; `signal/default` and `signal/pipe` stay by-design aborts with the pinned C diagnostic.
 
 Obligations:
 
@@ -342,25 +338,20 @@ Obligations:
 
 Traps: validating the tid and then delivering on the caller (defect 4 of the review); `pthread_exit`/raw `exit` folded onto process exit; handing the guest's `set_tid_address` word to the host kernel.
 
-Done: `gate.sh --family signals` prints `FAMILY_GATE signals: PASS` — every pending declaration gone, every obligation held, the by-design aborts intact — and `mise run check` is green. The change that gets there also puts `gate.sh --family signals` on the `scripts/check.sh` full ladder in place of the bare `run.sh` rung (serially, after the parallel group: the gate drives workspace-level cargo builds that share `target/debug` with the macro-adopter testbed), so the obligations stay held after the family lands.
+Done: every pending gap gone, every obligation held, the by-design gaps intact, and `mise run check` green.
 
 ### What is NOT mechanically checkable (the vet's list)
 
 - **Where the host signal is sent from.** The frame vehicle (`rt_tgsigqueueinfo`/`tgkill` to self) is legitimate at a delivery point and the shortcut at generation; the syscall is the same, so no grep separates them. It is held indirectly: the trace obligation (generation must record an op, so it goes through the runtime), `same_task_kill_delivers_at_syscall_return` and `stacked_delivery_releases_frames_with_one_host_unblock` (substance for the vet), and `signal/per_thread`/`signal/one_wake`.
-- **Whether a unit test asserts what its row says.** The gate sees a name and a pass.
+- **Whether a unit test asserts what its row says.** A suite sees a name and a pass.
 - **Process-global signal state, in C or in Rust, under any name.** No grep names it reliably; it is held by `signal_state_is_per_task`, `signal/per_thread`, `signal/one_wake` and the vet.
-- **Host passthrough of a modeled row** (`wait4`, `rt_sigpending`, `rt_sigtimedwait`, `set_tid_address` handed to the host). The leak leg's strace filter sees the syscalls it lists; the registry's dispositions and reasoning strings are the vet's.
+- **Host passthrough of a modeled row** (`wait4`, `rt_sigpending`, `rt_sigtimedwait`, `set_tid_address` handed to the host). The strace leak run's filter sees the syscalls it lists; the registry's dispositions and reasoning strings are the vet's.
 - **`exit(128 + sig)` as source text.** `128 +` is legitimate in `cargo-patina`'s exit-code mapping; the direct-run `waitpid` check is the mechanical form.
 - **No duplicated logic across the C and SUD doors, no compat shims, honest reasoning strings.** Phase D.
 
-## 5. The frozen oracle and the gate
+## 5. Where the oracle lives
 
-`testbeds/syscall-conformance/frozen.toml` lists, for `family.signals`: the 31 probe ids the family owns; the oracle's `paths` (the family's probes and expectations, the harness sources, `run.sh`, `probes.toml`, `Cargo.toml`/`Cargo.lock`, `gate.sh`, `frozen.toml` itself); the exact declaration set the family's probes may carry (33 entries: 28 `pending`, 5 `by design:` aborts); and the 61 design obligations of §4 (39 unit tests, 22 recorded-trace facts).
-
-The oracle is frozen by version control: a builder works in a workspace whose parent is the oracle commit and never commits, so `jj diff --name-only -- <paths>` (or `git status --porcelain` where there is no jj repo) being empty is the whole tamper check, and the coordinator's diff of the builder's change shows the same thing.
-
-`gate.sh --family signals` runs every step, in order: the frozen-path check; the declaration rule (`conform gate`: no new, relabeled or re-scoped declaration; no removed by-design one; no pending one left); rustfmt; clippy `-D warnings`; the registry↔manifest cross-gate; the full `run.sh`; then the design obligations — unit tests through `cargo test -p <crate> -- --exact <path>`, trace facts through `conform obligations`. It prints the remaining work as plain lines (`still pending: signal/basic`, `probe differs: signal/per_thread[patina/libc]: …`, `unit test missing: patina-dst-native-shim signal_state_is_per_task`, `unit test ignored: …`, `unit test failing: …`, `trace fact unmet: signal/basic[libc]: …`), each step's full log under `target/conformance/gate/`, and then the one verdict line. The gate knows what is left; nothing else (a count of entries in `divergences.toml`, a grep) is a done-condition.
-
-`gate.sh --selftest` proves each mechanism can refuse, with a control beside each that must pass: a frozen-path edit in a scratch checkout; a relabeled declaration; against a real scratch crate, a required test that is missing and one that is `#[ignore]`d; a recorded trace with no `signal_generated` op for a generating probe; and a stream whose termination was not observed, or is `exited 143` where the blessing died by SIGTERM, refused by the differ. It is the `conformance gate selftest` rung of `scripts/check.sh` (fast and full).
-
-Changing the oracle is the oracle author's commit: probes, expectations, declarations and obligations change together with `frozen.toml`, and land before a builder's workspace is created on top.
+The family's scenarios, their by-design gaps and their trace facts are in
+`crates/patina-conformance/src/scenarios/{signal,thread,proc}/`; the unit-test
+obligations are ordinary tests of their crates. Changing a scenario, a gap or a
+trace fact is a reviewed diff like any other; there is no frozen manifest.

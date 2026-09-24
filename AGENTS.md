@@ -75,15 +75,16 @@ toolchains/targets, including the 1.86 MSRV toolchain with `wasm32-wasip1`):
 - `mise run check:fast` — the inner-loop tier: fmt, clippy (host +
   cross-target `x86_64-unknown-linux-gnu` for Linux-cfg code and
   `aarch64-apple-darwin` for Darwin-cfg code), every workspace
-  test except `cargo-patina`'s `end_to_end` and six native execution targets, syscall
-  conformance `--fast`, the cheap classifier/gate selftests, CLI flag drift,
+  test except `cargo-patina`'s `end_to_end` and seven native execution targets
+  (syscall conformance among them), the cheap classifier selftests, CLI flag drift,
   MSRV `cargo check`, WASI validation, and cross-target smoke. It is designed to
   give ordinary edits an honest signal quickly, but it is not landing evidence.
 - `mise run check` — the local pre-landing battery: the cheap checks above,
   docs, packaging, the local MSRV rungs (cargo check, the cargo-patina rodata
   detector, and the `patina-dst` macros feature test), the full stable workspace
-  test suite including `end_to_end`, native acceptance tests, WASI/cross smoke,
-  the workq/pubsub/macro-adopter and FIFO/rustix-default/cap-std testbeds, and the full syscall-conformance run plus its planted-failure selftest. Cheap failure checks run first; the e2e-heavy workspace test rung runs
+  test suite including `end_to_end`, native acceptance tests and the syscall
+  conformance scenarios, WASI/cross smoke, and the workq/pubsub/macro-adopter
+  and FIFO/rustix-default/cap-std testbeds. Cheap failure checks run first; the e2e-heavy workspace test rung runs
   alone; independent runtime/testbed rungs then overlap. The runner prints
   one overall result and a retained log directory (commands and per-rung timings),
   suppresses successful command chatter, and replays a failed rung's complete log. **This is the local landing gate.** CI/final gates add
@@ -120,8 +121,13 @@ Gates worth knowing individually:
   mention or invoke a patina flag anywhere, it must exist; if you rename a flag,
   the gate finds every stale mention — in prose or in a script's flag arrays.
 - `mise run check:native-abi` — focused native ABI integration tests; other native
-  targets (`native_containment`, `native_raw`, `native_signals`, `native_trace`, `native_workloads`)
-  run in the full workspace-test tier and CI, not `check:fast`. `scripts/validate-wasi.sh` and
+  targets (`native_conformance`, `native_containment`, `native_raw`, `native_signals`,
+  `native_trace`, `native_workloads`) run in the full workspace-test tier and CI,
+  not `check:fast`.
+- `mise run conformance` — the syscall conformance scenarios
+  (`crates/patina-conformance`) natively and under patina, the live host kernel
+  as the oracle; `mise run conformance:coverage` lists registry entries no
+  scenario or exclusion accounts for (a local report, not a gate). `scripts/validate-wasi.sh` and
   `scripts/smoke-cross-target.sh` are the WASI/cross-target acceptance batteries
   (VALIDATION.md defines what each proves).
 - `testbeds/workq/fuzz-sweep.sh --selftest` and

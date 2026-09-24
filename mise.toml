@@ -33,8 +33,9 @@ description = "Full local pre-landing validation (audit-corpus and full MSRV sui
 run = "scripts/check.sh full"
 
 # Inner-loop tier: fmt, the three clippy passes, all workspace tests except the
-# cargo-patina end_to_end and native execution targets, fast conformance, cheap selftests,
-# flag drift, MSRV cargo check, WASI validation, and cross-target smoke.
+# cargo-patina end_to_end and native execution targets (conformance included),
+# cheap selftests, flag drift, MSRV cargo check, WASI validation, and
+# cross-target smoke.
 [tasks."check:fast"]
 description = "Fast iteration tier of `check`; not sufficient for landing"
 run = "scripts/check.sh fast"
@@ -61,8 +62,12 @@ description = "Ecosystem symbol-audit corpus: build+audit 20 MREs, strict-xfail 
 run = "testbeds/audit-corpus/run.sh"
 
 [tasks.conformance]
-description = "Syscall conformance: every probe natively (host oracle) + under patina through all three vehicles, replay identity, strace leak leg"
-run = "testbeds/syscall-conformance/run.sh"
+description = "Syscall conformance: every scenario natively (the live host oracle) and under patina through every vehicle, record/replay, strace leak run"
+run = "cargo test -p cargo-patina --test native_conformance --locked"
+
+[tasks."conformance:coverage"]
+description = "List registry entries no conformance scenario covers and no exclusion accounts for; exits 1 while any remain"
+run = "cargo run -q -p patina-dst-conformance --bin conformance-coverage --locked"
 
 [tasks.demo]
 description = "Run the explicit-context vertical-slice demo"

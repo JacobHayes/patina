@@ -110,7 +110,7 @@ binary under a default-deny allowlist. Any un-interposed effect symbol is a
 finding. This is the gate that keeps "deterministic" honest — and it runs before
 every native run, so a guest reaching an unmodeled effect is refused rather than
 quietly escaping. `cargo patina syscalls` prints the target-local inventory
-(`--format json` gives schema `patina.syscalls/v2`). Linux rows describe runtime
+(`--format json` gives schema `patina.syscalls/v3`). Linux rows describe runtime
 dispositions; Darwin ARM64 rows describe source entries and raw-interposition
 gaps, separately from C symbol models. Ask this surface rather than guessing
 support from a syscall name or treating inventory coverage as runtime support.

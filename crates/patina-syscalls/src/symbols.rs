@@ -27,7 +27,6 @@ const fn s(
         platform,
         serves,
         status,
-        probe: None,
     }
 }
 
@@ -43,8 +42,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["clock_gettime"]),
         SymbolStatus::Partial,
-    )
-    .probe("time/clocks"),
+    ),
     s(
         "time",
         Platform::Both,
@@ -56,22 +54,19 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["gettimeofday"]),
         SymbolStatus::Modeled,
-    )
-    .probe("time/clocks"),
+    ),
     s(
         "nanosleep",
         Platform::Both,
         Serves::Syscalls(&["nanosleep"]),
         SymbolStatus::Modeled,
-    )
-    .probe("time/clocks"),
+    ),
     s(
         "clock_nanosleep",
         Platform::Linux,
         Serves::Syscalls(&["clock_nanosleep"]),
         SymbolStatus::Partial,
-    )
-    .probe("time/clocks"),
+    ),
     s(
         "sleep",
         Platform::Both,
@@ -125,8 +120,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["getpid"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/metadata"),
+    ),
     s(
         "getppid",
         Platform::Both,
@@ -144,8 +138,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["getuid"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/metadata"),
+    ),
     s(
         "geteuid",
         Platform::Both,
@@ -157,8 +150,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["getgid"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/metadata"),
+    ),
     s(
         "getegid",
         Platform::Both,
@@ -266,8 +258,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Linux,
         Serves::Syscalls(&["getrandom"]),
         SymbolStatus::Modeled,
-    )
-    .probe("entropy/getrandom"),
+    ),
     s(
         "__wrap_dlsym",
         Platform::Linux,
@@ -279,8 +270,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Linux,
         Serves::Dispatcher,
         SymbolStatus::Modeled,
-    )
-    .probe("thread/futex"),
+    ),
     s(
         "opendir",
         Platform::Both,
@@ -346,8 +336,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["openat"]),
         SymbolStatus::Partial,
-    )
-    .probe("fs/open_rw"),
+    ),
     s(
         "openat64",
         Platform::Linux,
@@ -381,22 +370,19 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["getcwd"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/paths"),
+    ),
     s(
         "fchdir",
         Platform::Both,
         Serves::Syscalls(&["fchdir"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/paths"),
+    ),
     s(
         "umask",
         Platform::Both,
         Serves::Syscalls(&["umask"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/paths"),
+    ),
     s(
         "stat",
         Platform::Both,
@@ -414,15 +400,13 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["fstat"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/metadata"),
+    ),
     s(
         "fstatat",
         Platform::Both,
         Serves::Syscalls(&["newfstatat"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/metadata"),
+    ),
     s(
         "stat64",
         Platform::Linux,
@@ -452,8 +436,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Linux,
         Serves::Syscalls(&["statx"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/metadata"),
+    ),
     s(
         "statfs",
         Platform::Linux,
@@ -501,15 +484,13 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["access", "faccessat"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/owner"),
+    ),
     s(
         "faccessat",
         Platform::Both,
         Serves::Syscalls(&["faccessat", "faccessat2"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/owner"),
+    ),
     s(
         "mkdir",
         Platform::Both,
@@ -521,8 +502,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["mkdirat"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/dirs"),
+    ),
     s(
         "mkfifo",
         Platform::Both,
@@ -558,8 +538,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["unlinkat"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/dirs"),
+    ),
     s(
         "rmdir",
         Platform::Both,
@@ -577,8 +556,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["renameat"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/dirs"),
+    ),
     s(
         "renameat2",
         Platform::Linux,
@@ -596,8 +574,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["linkat"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/links"),
+    ),
     s(
         "symlink",
         Platform::Both,
@@ -609,8 +586,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["symlinkat"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/links"),
+    ),
     s(
         "readlink",
         Platform::Both,
@@ -622,22 +598,19 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["readlinkat"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/links"),
+    ),
     s(
         "read",
         Platform::Both,
         Serves::Syscalls(&["read"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/open_rw"),
+    ),
     s(
         "write",
         Platform::Both,
         Serves::Syscalls(&["write"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/open_rw"),
+    ),
     s(
         "pread",
         Platform::Both,
@@ -703,43 +676,37 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["close"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/open_rw"),
+    ),
     s(
         "dup",
         Platform::Both,
         Serves::Syscalls(&["dup"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fd/pipes"),
+    ),
     s(
         "dup2",
         Platform::Both,
         Serves::Syscalls(&["dup2", "dup3"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fd/table"),
+    ),
     s(
         "dup3",
         Platform::Linux,
         Serves::Syscalls(&["dup3"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fd/table"),
+    ),
     s(
         "close_range",
         Platform::Linux,
         Serves::Syscalls(&["close_range"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fd/table"),
+    ),
     s(
         "lseek",
         Platform::Both,
         Serves::Syscalls(&["lseek"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/open_rw"),
+    ),
     s(
         "lseek64",
         Platform::Linux,
@@ -775,15 +742,13 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["flock"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fd/pipes"),
+    ),
     s(
         "fcntl",
         Platform::Both,
         Serves::Syscalls(&["fcntl"]),
         SymbolStatus::Partial,
-    )
-    .probe("fd/pipes"),
+    ),
     s(
         "fcntl64",
         Platform::Linux,
@@ -813,8 +778,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Linux,
         Serves::Syscalls(&["pipe2"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fd/pipes"),
+    ),
     s(
         "mmap",
         Platform::Linux,
@@ -1108,8 +1072,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["chdir"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/paths"),
+    ),
     s(
         "chroot",
         Platform::Both,
@@ -1199,29 +1162,25 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["socket"]),
         SymbolStatus::Partial,
-    )
-    .probe("net/udp"),
+    ),
     s(
         "bind",
         Platform::Both,
         Serves::Syscalls(&["bind"]),
         SymbolStatus::Modeled,
-    )
-    .probe("net/udp"),
+    ),
     s(
         "connect",
         Platform::Both,
         Serves::Syscalls(&["connect"]),
         SymbolStatus::Modeled,
-    )
-    .probe("net/udp"),
+    ),
     s(
         "listen",
         Platform::Both,
         Serves::Syscalls(&["listen"]),
         SymbolStatus::Modeled,
-    )
-    .probe("net/tcp"),
+    ),
     s(
         "accept",
         Platform::Both,
@@ -1233,15 +1192,13 @@ const ROWS: &[SymbolRow] = &[
         Platform::Linux,
         Serves::Syscalls(&["accept4"]),
         SymbolStatus::Modeled,
-    )
-    .probe("net/tcp"),
+    ),
     s(
         "sendto",
         Platform::Both,
         Serves::Syscalls(&["sendto"]),
         SymbolStatus::Modeled,
-    )
-    .probe("net/udp"),
+    ),
     s(
         "send",
         Platform::Both,
@@ -1253,8 +1210,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["recvfrom"]),
         SymbolStatus::Modeled,
-    )
-    .probe("net/udp"),
+    ),
     s(
         "recv",
         Platform::Both,
@@ -1278,36 +1234,31 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["shutdown"]),
         SymbolStatus::Modeled,
-    )
-    .probe("net/udp"),
+    ),
     s(
         "getsockname",
         Platform::Both,
         Serves::Syscalls(&["getsockname"]),
         SymbolStatus::Modeled,
-    )
-    .probe("net/udp"),
+    ),
     s(
         "getpeername",
         Platform::Both,
         Serves::Syscalls(&["getpeername"]),
         SymbolStatus::Modeled,
-    )
-    .probe("net/udp"),
+    ),
     s(
         "setsockopt",
         Platform::Both,
         Serves::Syscalls(&["setsockopt"]),
         SymbolStatus::Partial,
-    )
-    .probe("net/udp"),
+    ),
     s(
         "getsockopt",
         Platform::Both,
         Serves::Syscalls(&["getsockopt"]),
         SymbolStatus::Partial,
-    )
-    .probe("net/udp"),
+    ),
     s(
         "socketpair",
         Platform::Both,
@@ -1343,22 +1294,19 @@ const ROWS: &[SymbolRow] = &[
         Platform::Linux,
         Serves::Syscalls(&["epoll_create1"]),
         SymbolStatus::Modeled,
-    )
-    .probe("readiness/epoll"),
+    ),
     s(
         "epoll_ctl",
         Platform::Linux,
         Serves::Syscalls(&["epoll_ctl"]),
         SymbolStatus::Modeled,
-    )
-    .probe("readiness/epoll"),
+    ),
     s(
         "epoll_wait",
         Platform::Linux,
         Serves::Syscalls(&["epoll_wait"]),
         SymbolStatus::Modeled,
-    )
-    .probe("readiness/epoll"),
+    ),
     s(
         "epoll_pwait",
         Platform::Linux,
@@ -1388,8 +1336,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Linux,
         Serves::Syscalls(&["eventfd2"]),
         SymbolStatus::Modeled,
-    )
-    .probe("readiness/epoll"),
+    ),
     s(
         "fputs",
         Platform::Both,
@@ -2085,8 +2032,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Linux,
         Serves::Syscalls(&["fallocate"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/size"),
+    ),
     s(
         "posix_fadvise",
         Platform::Linux,
@@ -2099,24 +2045,20 @@ const ROWS: &[SymbolRow] = &[
         Serves::Syscalls(&["copy_file_range"]),
         SymbolStatus::Absent,
     ),
-    // The two rows the conformance probes reach only through `syscall(2)` and
-    // the raw instruction: glibc's wrappers are not defined, so a guest
-    // importing them is audit-refused (declared in the testbed's
-    // divergences.toml).
+    // glibc's getdents64 wrapper is not defined, so a guest importing it is
+    // audit-refused (the conformance scenario fs/getdents carries the gap).
     s(
         "getdents64",
         Platform::Linux,
         Serves::Syscalls(&["getdents64"]),
         SymbolStatus::Absent,
-    )
-    .probe("fs/getdents"),
+    ),
     s(
         "ppoll",
         Platform::Linux,
         Serves::Syscalls(&["ppoll"]),
         SymbolStatus::Modeled,
-    )
-    .probe("readiness/ppoll"),
+    ),
     s(
         "sendfile",
         Platform::Linux,
@@ -2128,50 +2070,43 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["fchown"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/owner"),
+    ),
     s(
         "chown",
         Platform::Both,
         Serves::Syscalls(&["chown"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/owner"),
+    ),
     s(
         "lchown",
         Platform::Both,
         Serves::Syscalls(&["lchown"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/owner"),
+    ),
     s(
         "utimes",
         Platform::Both,
         Serves::Syscalls(&["utimes"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/times"),
+    ),
     s(
         "utimensat",
         Platform::Both,
         Serves::Syscalls(&["utimensat"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/times"),
+    ),
     s(
         "futimens",
         Platform::Both,
         Serves::Syscalls(&["utimensat"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/times"),
+    ),
     s(
         "truncate",
         Platform::Both,
         Serves::Syscalls(&["truncate"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/size"),
+    ),
     s(
         "truncate64",
         Platform::Linux,
@@ -2195,15 +2130,13 @@ const ROWS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["fchownat"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/owner"),
+    ),
     s(
         "utime",
         Platform::Both,
         Serves::Syscalls(&["utime"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/times"),
+    ),
     s(
         "lutimes",
         Platform::Both,
@@ -2221,8 +2154,7 @@ const ROWS: &[SymbolRow] = &[
         Platform::Linux,
         Serves::Syscalls(&["futimesat"]),
         SymbolStatus::Modeled,
-    )
-    .probe("fs/times"),
+    ),
     s(
         "sigpending",
         Platform::Linux,

@@ -60,9 +60,8 @@ pub struct DarwinEntry {
 /// The Linux kernel release whose ABI the virtual kernel declares. A number the
 /// vendored table lists but that first appeared in a newer release is
 /// [`Disposition::Absent`] — `ENOSYS`, byte-identical to what a kernel of this
-/// release answers — and a probe's blessing header records it. Raising it moves
-/// every row whose `since` it passes back to its family's arc (the rule test
-/// names them).
+/// release answers. Raising it moves every row whose `since` it passes back to
+/// its family's arc (the rule test names them).
 pub const VIRTUAL_ABI: &str = "6.8";
 
 /// The one identity the virtual kernel runs the guest as: an ordinary
@@ -219,7 +218,8 @@ impl Family {
 /// keeps it honest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Disposition {
-    /// Routed to a runtime entry; semantics host-checked by a probe.
+    /// Routed to a runtime entry; semantics host-checked by a conformance
+    /// scenario.
     Modeled,
     /// Process-local memory only, passed to the host kernel through the glibc
     /// `syscall(2)` host alias.
@@ -329,11 +329,6 @@ pub struct SyscallRow {
     /// The arc (docs/arcs/syscall-conformance.md §6) that changes this row's
     /// disposition, or `None` when the disposition is final.
     pub closes_in: Option<&'static str>,
-    /// The primary conformance probe (`testbeds/syscall-conformance/probes.toml`
-    /// id) that host-checks this row. Gated both ways against the manifest; a
-    /// `Modeled` row with `None` is reported by `cargo patina syscalls` and by
-    /// the cross-gate (a failure under `PATINA_CONFORMANCE_STRICT=1`).
-    pub probe: Option<&'static str>,
     /// The first mainline kernel release carrying this number, when it is
     /// newer than the table's baseline (docs/arcs/syscall-conformance.md; the
     /// prior-art drift table). `None` means the number predates every host the
@@ -344,12 +339,6 @@ pub struct SyscallRow {
 
 #[cfg(target_os = "linux")]
 impl SyscallRow {
-    /// Name the primary conformance probe for this row.
-    pub const fn probe(mut self, id: &'static str) -> Self {
-        self.probe = Some(id);
-        self
-    }
-
     /// Record the first kernel release carrying this number.
     pub const fn since(mut self, release: &'static str) -> Self {
         self.since = Some(release);
@@ -376,18 +365,6 @@ pub fn rows_for() -> Vec<(u32, &'static SyscallRow)> {
         SYSCALLS.iter().map(|row| (row.id.number(), row)).collect();
     rows.sort_by_key(|(nr, _)| *nr);
     rows
-}
-
-/// The `Modeled` syscall rows no conformance probe covers yet, by name in
-/// x86_64 number order — the set `cargo patina syscalls` reports and the
-/// cross-gate counts (and refuses under `PATINA_CONFORMANCE_STRICT=1`).
-#[cfg(target_os = "linux")]
-pub fn modeled_rows_without_probe() -> Vec<&'static str> {
-    SYSCALLS
-        .iter()
-        .filter(|row| row.disposition == Disposition::Modeled && row.probe.is_none())
-        .map(|row| row.name)
-        .collect()
 }
 
 pub mod symbols;
@@ -486,18 +463,6 @@ pub struct SymbolRow {
     pub platform: Platform,
     pub serves: Serves,
     pub status: SymbolStatus,
-    /// The primary conformance probe that exercises this symbol through the
-    /// `libc` vehicle (`probes.toml` `symbols`), gated both ways against the
-    /// manifest like [`SyscallRow::probe`].
-    pub probe: Option<&'static str>,
-}
-
-impl SymbolRow {
-    /// Name the primary conformance probe for this symbol.
-    pub const fn probe(mut self, id: &'static str) -> Self {
-        self.probe = Some(id);
-        self
-    }
 }
 
 /// The symbol rows that serve a syscall name.

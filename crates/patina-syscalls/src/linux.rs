@@ -20,7 +20,6 @@ const fn r(
         disposition,
         reasoning,
         closes_in,
-        probe: None,
         since: None,
     }
 }
@@ -36,16 +35,14 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_read`, by descriptor class: file, pipe/socketpair, eventfd, socket).",
         None,
-    )
-    .probe("fs/open_rw"),
+    ),
     Syscall::N_write => r(
         id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_write`; fds 1/2 go to captured stdio).",
         None,
-    )
-    .probe("fs/open_rw"),
+    ),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_open => r(
         id,
@@ -60,8 +57,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_close`, by descriptor class); drops any `getdents64` snapshot.",
         None,
-    )
-    .probe("fs/open_rw"),
+    ),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_stat => r(
         id,
@@ -76,8 +72,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fd_metadata_full`); the kernel `struct stat` layout is filled per arch.",
         None,
-    )
-    .probe("fs/metadata"),
+    ),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_lstat => r(
         id,
@@ -100,8 +95,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_seek`); `SEEK_SET 0` on a directory fd rewinds its `getdents64` snapshot.",
         None,
-    )
-    .probe("fs/open_rw"),
+    ),
     Syscall::N_mmap => r(
         id,
         Family::Mem,
@@ -272,8 +266,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same universal entry the C interposer calls (`patina_dup`): the lowest free number in the shim's descriptor table, sharing the open file description, for every kind of descriptor.",
         None,
-    )
-    .probe("fd/pipes"),
+    ),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_dup2 => r(
         id,
@@ -281,8 +274,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "x86_64 legacy alias of `dup3(old, new, 0)`, except `old == new` validates and returns the number without closing (kernel semantics). Binds a CHOSEN number in the shim's descriptor table (`patina_dup2`), closing what it named; `dup2(fd, 1)` redirects captured stdout.",
         None,
-    )
-    .probe("fd/table"),
+    ),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_pause => r(
         id,
@@ -297,8 +289,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "A relative sleep on the virtual clock (`patina_sleep_until`).",
         None,
-    )
-    .probe("time/clocks"),
+    ),
     Syscall::N_getitimer => r(
         id,
         Family::Time,
@@ -327,8 +318,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Constant(1),
         "The one modeled process is pid 1, the same value the C `getpid` interposer returns.",
         Some("time+identity"),
-    )
-    .probe("fs/metadata"),
+    ),
     Syscall::N_sendfile => r(
         id,
         Family::Fs,
@@ -342,16 +332,14 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_socket`): AF_INET stream/datagram over SimNet; AF_UNIX and IPv6 answer EAFNOSUPPORT.",
         None,
-    )
-    .probe("net/udp"),
+    ),
     Syscall::N_connect => r(
         id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_connect` / `patina_net_tcp_connect`).",
         None,
-    )
-    .probe("net/udp"),
+    ),
     Syscall::N_accept => r(
         id,
         Family::Net,
@@ -365,16 +353,14 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_sendto` / `patina_net_stream_send`); MSG_NOSIGNAL is the one accepted flag.",
         None,
-    )
-    .probe("net/udp"),
+    ),
     Syscall::N_recvfrom => r(
         id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_recvfrom` / `patina_net_stream_recv`).",
         None,
-    )
-    .probe("net/udp"),
+    ),
     Syscall::N_sendmsg => r(
         id,
         Family::Net,
@@ -395,40 +381,35 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_shutdown`).",
         None,
-    )
-    .probe("net/udp"),
+    ),
     Syscall::N_bind => r(
         id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_bind`).",
         None,
-    )
-    .probe("net/udp"),
+    ),
     Syscall::N_listen => r(
         id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_listen`).",
         None,
-    )
-    .probe("net/tcp"),
+    ),
     Syscall::N_getsockname => r(
         id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_getsockname`).",
         None,
-    )
-    .probe("net/udp"),
+    ),
     Syscall::N_getpeername => r(
         id,
         Family::Net,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_getpeername`).",
         None,
-    )
-    .probe("net/udp"),
+    ),
     Syscall::N_socketpair => r(
         id,
         Family::Net,
@@ -442,16 +423,14 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "The bookkeeping subset the C interposer accepts (SO_REUSEADDR/KEEPALIVE/BROADCAST/REUSEPORT, zero timeouts, linger off, TCP_NODELAY); everything else is ENOPROTOOPT.",
         None,
-    )
-    .probe("net/udp"),
+    ),
     Syscall::N_getsockopt => r(
         id,
         Family::Net,
         Disposition::Modeled,
         "Mirrors the C interposer: zero-fills the caller's buffer and succeeds (SO_ERROR reads 0).",
         None,
-    )
-    .probe("net/udp"),
+    ),
     Syscall::N_clone => r(
         id,
         Family::Process,
@@ -572,16 +551,14 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "F_GETFD/F_SETFD (per number), F_GETFL/F_SETFL (per open file description: access mode, O_APPEND, O_NONBLOCK), F_DUPFD/F_DUPFD_CLOEXEC (lowest free number at or above the minimum; EINVAL past RLIMIT_NOFILE), F_GETPIPE_SZ/F_SETPIPE_SZ, and the record-lock family are modeled through the shim's descriptor table; an unknown command answers EINVAL on an open number and EBADF on a closed one, like the C interposer.",
         None,
-    )
-    .probe("fd/pipes"),
+    ),
     Syscall::N_flock => r(
         id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_flock`).",
         None,
-    )
-    .probe("fd/pipes"),
+    ),
     Syscall::N_fsync => r(
         id,
         Family::FdIo,
@@ -602,16 +579,14 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_truncate`): a regular file's length by name over the deterministic filesystem, `EISDIR`/`EINVAL`/`EACCES` as the kernel answers, `mtime`/`ctime` stamped.",
         None,
-    )
-    .probe("fs/size"),
+    ),
     Syscall::N_ftruncate => r(
         id,
         Family::FdIo,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_set_len`): EISDIR for a directory, EINVAL for a descriptor not open for writing, `mtime`/`ctime` stamped even when the length is unchanged.",
         None,
-    )
-    .probe("fs/size"),
+    ),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_getdents => r(
         id,
@@ -626,24 +601,21 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "The working directory is a NODE the shim holds (a path-only driver handle) and names through the filesystem at every read, so a renamed ancestor moves it and an unlinked one answers ENOENT; ERANGE for a short buffer. Routed into the same `patina_getcwd` the C interposer calls.",
         None,
-    )
-    .probe("fs/paths"),
+    ),
     Syscall::N_chdir => r(
         id,
         Family::Fs,
         Disposition::Modeled,
         "Resolved through the one path resolver (symlinks followed; ENOENT/ENOTDIR/EACCES as the kernel answers) and held as a path-only driver handle; guest-driven and unrecorded like `setenv`. Routed into the same `patina_chdir` the C interposer calls.",
         None,
-    )
-    .probe("fs/paths"),
+    ),
     Syscall::N_fchdir => r(
         id,
         Family::Fs,
         Disposition::Modeled,
         "A directory descriptor (plain or O_PATH) becomes the working directory through a shim-held dup of its driver handle; EBADF/ENOTDIR as the kernel answers. Routed into the same `patina_fchdir` the C interposer calls.",
         None,
-    )
-    .probe("fs/paths"),
+    ),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_rename => r(
         id,
@@ -730,16 +702,14 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "x86_64 legacy alias: `fchownat(AT_FDCWD, path, uid, gid, 0)` (`patina_chown`).",
         None,
-    )
-    .probe("fs/owner"),
+    ),
     Syscall::N_fchown => r(
         id,
         Family::Fs,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fchown`): a comparison against the one modeled identity — its own ids or -1 succeed (killing the setuid/setgid bits on a non-directory and moving `ctime`), any other id is `EPERM`. FIFO endpoints mutate retained inode metadata even after unlink; anonymous descriptors without modeled filesystem inodes refuse loudly (ENOSYS), a named remaining gap.",
         None,
-    )
-    .probe("fs/owner"),
+    ),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_lchown => r(
         id,
@@ -747,24 +717,21 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "x86_64 legacy alias: `fchownat(AT_FDCWD, path, uid, gid, AT_SYMLINK_NOFOLLOW)` (`patina_chown`).",
         None,
-    )
-    .probe("fs/owner"),
+    ),
     Syscall::N_umask => r(
         id,
         Family::Fs,
         Disposition::Modeled,
         "Process state the shim keeps and applies to every creating call (open, mkdir, mknod) before the driver, so the driver stores what the kernel would; answers the previous mask. Routed into the same `patina_umask` the C interposer calls.",
         None,
-    )
-    .probe("fs/paths"),
+    ),
     Syscall::N_gettimeofday => r(
         id,
         Family::Time,
         Disposition::Modeled,
         "The virtual CLOCK_REALTIME split into seconds/microseconds (`patina_clock_now`); the timezone argument is ignored as glibc does.",
         None,
-    )
-    .probe("time/clocks"),
+    ),
     Syscall::N_getrlimit => r(
         id,
         Family::Identity,
@@ -806,8 +773,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Constant(IDENTITY_UID as i64),
         "The one modeled non-root identity (uid 1000), the same value the C interposer returns; the identity arc makes it a `--host-*` knob.",
         Some("time+identity"),
-    )
-    .probe("fs/metadata"),
+    ),
     Syscall::N_syslog => r(
         id,
         Family::Privileged,
@@ -821,8 +787,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Constant(IDENTITY_GID as i64),
         "The one modeled non-root identity (gid 1000), the same value the C interposer returns.",
         Some("time+identity"),
-    )
-    .probe("fs/metadata"),
+    ),
     Syscall::N_setuid => r(
         id,
         Family::Identity,
@@ -1020,8 +985,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "x86_64 legacy alias: whole-second times onto the same `patina_utimensat` entry as `utimensat`. Gap: unsigned-nanosecond timestamps refuse pre-epoch and overflowing seconds with EINVAL (Linux may clamp wide positive times); NOW samples after modeled latency, OMIT/OMIT skips resolution, and AT_EMPTY_PATH reaches retained inodes.",
         None,
-    )
-    .probe("fs/times"),
+    ),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_mknod => r(
         id,
@@ -1529,8 +1493,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "FUTEX_WAIT/WAKE and their BITSET forms park and wake on the deterministic scheduler (the same decode as the libc `syscall(2)` interposer, timeouts on the virtual clock); other ops answer ENOSYS.",
         None,
-    )
-    .probe("thread/futex"),
+    ),
     Syscall::N_sched_setaffinity => r(
         id,
         Family::Sched,
@@ -1640,8 +1603,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Serves a per-directory-fd snapshot taken through `patina_read_dir`, the entry the C `readdir` uses; `.`/`..` and real `d_ino` are the fs arc.",
         Some("fs"),
-    )
-    .probe("fs/getdents"),
+    ),
     Syscall::N_set_tid_address => r(
         id,
         Family::Thread,
@@ -1718,8 +1680,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "CLOCK_REALTIME/CLOCK_MONOTONIC from the virtual clock (`patina_clock_now`); other clocks answer EINVAL.",
         None,
-    )
-    .probe("time/clocks"),
+    ),
     Syscall::N_clock_getres => r(
         id,
         Family::Time,
@@ -1733,8 +1694,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Relative and TIMER_ABSTIME sleeps on the virtual clock (`patina_sleep_until`); other flags answer EINVAL.",
         None,
-    )
-    .probe("time/clocks"),
+    ),
     Syscall::N_exit_group => r(
         id,
         Family::Process,
@@ -1749,16 +1709,14 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_epoll_wait`), a second caller of the readiness reactor, never a second reactor.",
         None,
-    )
-    .probe("readiness/epoll"),
+    ),
     Syscall::N_epoll_ctl => r(
         id,
         Family::Readiness,
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_epoll_ctl`).",
         None,
-    )
-    .probe("readiness/epoll"),
+    ),
     Syscall::N_tgkill => r(
         id,
         Family::Signal,
@@ -1773,8 +1731,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "x86_64 legacy alias: microsecond times onto the same `patina_utimensat` entry as `utimensat`. Gap: unsigned-nanosecond timestamps refuse pre-epoch and overflowing seconds with EINVAL (Linux may clamp wide positive times); NOW samples after modeled latency, OMIT/OMIT skips resolution, and AT_EMPTY_PATH reaches retained inodes.",
         None,
-    )
-    .probe("fs/times"),
+    ),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_vserver => r(
         id,
@@ -1931,7 +1888,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_openat`): `(dirfd, path)` resolves through the one path resolver (working directory, `..`, symlinks to the 40-hop ELOOP limit) and the entry's kind decides the descriptor; O_PATH and O_DIRECTORY are distinct opens; O_PATH|O_NOFOLLOW on a symlink prints the shared deny and answers ENOSYS.",
         None,
     )
-    .probe("fs/open_rw")
     .since("2.6.16"),
     Syscall::N_mkdirat => r(
         id,
@@ -1940,7 +1896,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_mkdir`), the creation mode carried and the umask applied by the driver.",
         None,
     )
-    .probe("fs/dirs")
     .since("2.6.16"),
     Syscall::N_mknodat => r(
         id,
@@ -1955,8 +1910,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_chown`, through the one path resolver; AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH honored, other flags EINVAL): the one-identity ownership rule of `fchown`.",
         None,
-    )
-    .probe("fs/owner"),
+    ),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_futimesat => r(
         id,
@@ -1964,8 +1918,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "x86_64 legacy alias: microsecond times with a dirfd onto the same `patina_utimensat` entry as `utimensat` (a null path names the descriptor). Gap: unsigned-nanosecond timestamps refuse pre-epoch and overflowing seconds with EINVAL (Linux may clamp wide positive times); NOW samples after modeled latency, OMIT/OMIT skips resolution, and AT_EMPTY_PATH reaches retained inodes.",
         None,
-    )
-    .probe("fs/times"),
+    ),
     Syscall::N_newfstatat => r(
         id,
         Family::Fs,
@@ -1973,7 +1926,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver); AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH/AT_NO_AUTOMOUNT honored, other flags EINVAL.",
         None,
     )
-    .probe("fs/metadata")
     .since("2.6.16"),
     Syscall::N_unlinkat => r(
         id,
@@ -1982,7 +1934,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_unlink` / `patina_rmdir` by AT_REMOVEDIR).",
         None,
     )
-    .probe("fs/dirs")
     .since("2.6.16"),
     Syscall::N_renameat => r(
         id,
@@ -1991,7 +1942,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_rename`).",
         None,
     )
-    .probe("fs/dirs")
     .since("2.6.16"),
     Syscall::N_linkat => r(
         id,
@@ -2000,7 +1950,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_link`); AT_SYMLINK_FOLLOW/AT_EMPTY_PATH honored.",
         None,
     )
-    .probe("fs/links")
     .since("2.6.16"),
     Syscall::N_symlinkat => r(
         id,
@@ -2009,7 +1958,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_symlink`).",
         None,
     )
-    .probe("fs/links")
     .since("2.6.16"),
     Syscall::N_readlinkat => r(
         id,
@@ -2018,7 +1966,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_read_link`).",
         None,
     )
-    .probe("fs/links")
     .since("2.6.16"),
     Syscall::N_fchmodat => r(
         id,
@@ -2033,8 +1980,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Modeled against the entry's permission bits, the owner triad of the one identity: R_OK/W_OK/X_OK are each a mode fact (`X_OK` on a file honors its `x` bit; exec itself stays a process-family trap); the kernel form carries no flags.",
         None,
-    )
-    .probe("fs/owner"),
+    ),
     Syscall::N_pselect6 => r(
         id,
         Family::Readiness,
@@ -2049,7 +1995,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Shared readiness queues with a virtual timeout and temporary task signal mask; EINTR is never restarted.",
         None,
     )
-    .probe("readiness/ppoll")
     .since("2.6.16"),
     Syscall::N_unshare => r(
         id,
@@ -2113,8 +2058,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_utimensat`/`patina_futimens`, through the one path resolver): UTIME_NOW resolves to the virtual clock, UTIME_OMIT leaves a time alone, both OMIT is the kernel's early success, `ctime` moves with either time; AT_SYMLINK_NOFOLLOW honored, other flags EINVAL, a null path names the descriptor. Gap: unsigned-nanosecond timestamps refuse pre-epoch and overflowing seconds with EINVAL (Linux may clamp wide positive times); NOW samples after modeled latency, OMIT/OMIT skips resolution, and AT_EMPTY_PATH reaches retained inodes. FIFO endpoints mutate retained inode metadata even after unlink; anonymous descriptors without modeled filesystem inodes refuse loudly (ENOSYS), a named remaining gap.",
         None,
-    )
-    .probe("fs/times"),
+    ),
     Syscall::N_epoll_pwait => r(
         id,
         Family::Readiness,
@@ -2151,8 +2095,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fallocate`): mode 0 and KEEP_SIZE reserve, PUNCH_HOLE|KEEP_SIZE and ZERO_RANGE zero the range, the range-shifting modes are EOPNOTSUPP; EINVAL/EBADF/ESPIPE/EISDIR/ENODEV in the kernel's order; one recorded operation whatever the range. Modeled modes are 0, KEEP_SIZE, PUNCH_HOLE|KEEP_SIZE, ZERO_RANGE and ZERO_RANGE|KEEP_SIZE; Linux itself refuses unknown/self-contradictory combinations, while valid COLLAPSE_RANGE/INSERT_RANGE remain unmodeled EOPNOTSUPP. No allocation extent accounting is claimed via statx BLOCKS.",
         None,
-    )
-    .probe("fs/size"),
+    ),
     Syscall::N_timerfd_settime => r(
         id,
         Family::Time,
@@ -2174,7 +2117,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_accept`); SOCK_NONBLOCK/SOCK_CLOEXEC honored.",
         None,
     )
-    .probe("net/tcp")
     .since("2.6.28"),
     Syscall::N_signalfd4 => r(
         id,
@@ -2190,7 +2132,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_eventfd`).",
         None,
     )
-    .probe("readiness/epoll")
     .since("2.6.27"),
     Syscall::N_epoll_create1 => r(
         id,
@@ -2199,7 +2140,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_epoll_create1`).",
         None,
     )
-    .probe("readiness/epoll")
     .since("2.6.27"),
     Syscall::N_dup3 => r(
         id,
@@ -2207,8 +2147,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "Binds a chosen number to `oldfd`'s open file description in the shim's descriptor table (`patina_dup3`), closing what it named; equal numbers are EINVAL, a target past RLIMIT_NOFILE is EBADF, O_CLOEXEC lands on the new number only.",
         None,
-    )
-    .probe("fd/table"),
+    ),
     Syscall::N_pipe2 => r(
         id,
         Family::FdIo,
@@ -2216,7 +2155,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_pipe`): an in-process pipe channel; O_NONBLOCK honored.",
         None,
     )
-    .probe("fd/pipes")
     .since("2.6.27"),
     Syscall::N_inotify_init1 => r(
         id,
@@ -2393,7 +2331,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_entropy`): seeded bytes; GRND_* flags are irrelevant to a source that never blocks.",
         None,
     )
-    .probe("entropy/getrandom")
     .since("3.17"),
     Syscall::N_memfd_create => r(
         id,
@@ -2493,7 +2430,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver): an honest mask — STATX_BASIC_STATS and STATX_MNT_ID always, STATX_BTIME when requested — with the owner from the one identity and all four timestamps from the model; the device numbers (`stx_dev_*`) stay zero until the volume model of the fs arc.",
         Some("fs"),
     )
-    .probe("fs/metadata")
     .since("4.11"),
     Syscall::N_io_pgetevents => r(
         id,
@@ -2618,7 +2554,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "A range close over the shim's descriptor table (`patina_close_range`): every open number in [first, last] (clamped to the table) is closed, or marked close-on-exec under CLOSE_RANGE_CLOEXEC; CLOSE_RANGE_UNSHARE is a no-op with one process; first > last or an unknown flag is EINVAL.",
         None,
     )
-    .probe("fd/table")
     .since("5.9"),
     Syscall::N_openat2 => r(
         id,
@@ -2640,8 +2575,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         Disposition::Modeled,
         "The flagged form of `faccessat` (AT_EACCESS/AT_SYMLINK_NOFOLLOW); both are routed because callers probe this one first and fall back on ENOSYS.",
         None,
-    )
-    .probe("fs/owner"),
+    ),
     Syscall::N_process_madvise => r(
         id,
         Family::Mem,
@@ -2883,7 +2817,6 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         "Absent: the number first appears in Linux 7.3, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 7.3 or later returns it to the privileged trap (§7): an fd-based root change.",
         None,
     )
-    .probe("abi/newer-than-virtual")
     .since("7.3"),
 
     }

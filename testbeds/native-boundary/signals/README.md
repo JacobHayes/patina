@@ -7,7 +7,7 @@ libc timeout-output conventions.
 
 The typed `cargo-patina` integration test `native_signals` compiles it with the
 current shim and requires every named wait case to succeed. Rust state/restart
-detectors and the frozen syscall-conformance family supply the complementary
+detectors and the signals-family conformance scenarios supply the complementary
 raw-door, trace/replay and host-oracle evidence.
 
 `signal_boundary.c` supplies independent named cases for libc/raw prctl state,
