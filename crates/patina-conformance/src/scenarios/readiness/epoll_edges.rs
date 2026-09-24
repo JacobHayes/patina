@@ -12,7 +12,10 @@
 //!   the peer's `SHUT_WR`;
 //! * edge-triggered `EPOLLOUT`: a receive that frees room in a full stream
 //!   (AF_UNIX and TCP) is a new edge for its writer, though the reactor
-//!   never saw the writer unwritable (`sk_write_space`);
+//!   never saw the writer unwritable (`sk_write_space`); so is one that
+//!   frees room in an AF_UNIX datagram queue for a sender connected to it
+//!   that it is not connected back to (`unix_dgram_recvmsg` wakes its
+//!   `peer_wait`, where `unix_dgram_peer_wake_me` left the sender);
 //! * `EPOLLEXCLUSIVE` is accepted on `EPOLL_CTL_ADD` only: with
 //!   `EPOLLONESHOT` it is `EINVAL`, on `EPOLL_CTL_MOD` `EINVAL`, and an
 //!   exclusive item cannot be modified at all (`EINVAL`);
@@ -27,9 +30,11 @@
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{DEFAULTS, Scenario};
+use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
+use crate::compare::{Difference, Failure, Observed};
 use crate::probe::{Probe, SIGSET_BYTES, SockAddr, neg};
 use crate::signals::one_set;
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -252,7 +257,18 @@ pub fn run(p: &Probe) {
     let (s2, _) = p.accept_from(l2, SOCK_NONBLOCK, false, false);
     p.require("accept the second connection", s2 >= 0);
     write_space_edge(p, wp, c2, s2, 7, "TCP");
-    for fd in [w, drain, c2, s2, l2, wp] {
+    let sink = p.socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    p.require("a datagram sink", sink >= 0);
+    let sink_path = SockAddr::UnixPath(p.unix_path("edge-sink.sock"));
+    p.check("bind the sink to a path", p.bind_to(sink, &sink_path) == 0);
+    let one_way = p.socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    p.require("a datagram sender", one_way >= 0);
+    p.check(
+        "connect the sender to the sink, which stays unconnected",
+        p.connect_to(one_way, &sink_path) == 0,
+    );
+    write_space_edge(p, wp, one_way, sink, 8, "one-way AF_UNIX datagram");
+    for fd in [w, drain, c2, s2, l2, one_way, sink, wp] {
         p.close(fd);
     }
 
@@ -306,7 +322,7 @@ fn write_space_edge(p: &Probe, wp: i32, writer: i32, reader: i32, tag: u64, what
     );
     let (n, events) = p.epoll_pwait(wp, 8, 0, None, SIGSET_BYTES as usize);
     p.check(
-        &format!("the empty {what} stream is writable"),
+        &format!("the empty {what} socket is writable"),
         n == 1 && events == vec![(tag, EPOLLOUT as u32)],
     );
     let chunk = [0u8; 4096];
@@ -406,5 +422,30 @@ pub const SCENARIO: Scenario = Scenario {
         "clock_gettime",
         "close",
     ],
+    gaps: &[Gap {
+        status: Status::Pending(Arc::NetworkReadiness),
+        vehicles: Vehicle::ALL,
+        what: "a datagram receive signals write space only to the socket the receiver is connected to (thread/net/unix.rs recv_record), not to every sender connected to it (the kernel's peer_wait)",
+        failure: Failure::Differs(&[
+            Difference::field(
+                ONE_WAY_EDGE,
+                "epoll_pwait",
+                "fields.events",
+                Observed::Json("[]"),
+            ),
+            Difference::field(ONE_WAY_EDGE, "epoll_pwait", "ret", Observed::Int(0)),
+            Difference::check(
+                ONE_WAY_EDGE + 1,
+                "the room the one-way AF_UNIX datagram reader freed is a new EPOLLOUT edge",
+            ),
+        ]),
+    }],
     ..DEFAULTS
+};
+
+/// The one-way datagram leg's closing wait (after the x86_64-only rows).
+const ONE_WAY_EDGE: u64 = if cfg!(target_arch = "x86_64") {
+    146
+} else {
+    128
 };
