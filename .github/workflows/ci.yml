@@ -47,14 +47,8 @@ jobs:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
         with:
-          # The testbed gates below build their own standalone workspaces;
-          # without caching them, pubsub's tokio tree compiles cold on every
-          # push (workq's tree is tiny, but cache it uniformly).
-          workspaces: |
-            .
-            testbeds/workq
-            testbeds/pubsub
-            testbeds/syscall-conformance
+          # The testbed gates below stage their builds under the root target dir.
+          workspaces: .
           # cargo-patina unpacks and builds the native shim under the per-user
           # cache (not the workspace target dir); keep that build warm too.
           cache-directories: |
@@ -111,8 +105,7 @@ jobs:
         run: testbeds/workq/run-patina.sh
       # The async-native testbed's full self-checking gate (multi-seed
       # determinism + cross-seed outcome invariance, record/strict-replay,
-      # fail-closed planted-bug legs). Its dependency tree adds tokio, cached
-      # via the rust-cache workspaces above.
+      # fail-closed planted-bug legs).
       - if: matrix.toolchain == 'stable'
         run: testbeds/pubsub/run-patina.sh
       # The syscall-conformance testbed: every probe natively (the host kernel
@@ -153,10 +146,7 @@ jobs:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            .
-            testbeds/workq
-            testbeds/pubsub
+          workspaces: .
           # The native shim's per-user build cache (macOS location).
           cache-directories: |
             ~/Library/Caches/patina
@@ -210,11 +200,8 @@ jobs:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
         with:
-          # Cache the root workspace (cargo-patina) and the workq testbed
-          # so the campaign's per-generation builds reuse warm artifacts.
-          workspaces: |
-            .
-            testbeds/workq
+          # The sweep builds cargo-patina and workq under the root target dir.
+          workspaces: .
           # The native shim's per-user build cache.
           cache-directories: |
             ~/.cache/patina

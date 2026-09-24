@@ -30,13 +30,15 @@ repo_root="$(cd "$here/../.." && pwd)"
 # shellcheck source=../buggify-campaign.sh
 source "$here/../buggify-campaign.sh"
 
-PATINA="$repo_root/target/release/cargo-patina"
-WASM="$here/target/wasm32-wasip1/debug/buggify-wasi-fixture.wasm"
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/buggify-wasi}"
+export CARGO_TARGET_DIR="$target_dir"
+PATINA="$target_dir/release/cargo-patina"
+WASM="$target_dir/wasm32-wasip1/debug/buggify-wasi-fixture.wasm"
 OUTDIR="${WASI_BUGGIFY_OUT:-$here/out-wasi-buggify}"
 CAMPAIGN_STATE="$OUTDIR/campaign-state.json"
 SWEEP_LOG="$OUTDIR/sweep.log"
 SITES_JOIN_CHECKED=0
-LOCK="$here/target/.wasi-buggify-sweep.lock"
+LOCK="$target_dir/.wasi-buggify-sweep.lock"
 
 # Fill BYTE[0..31] from SHA-256("wasi-buggify-$G").
 declare -a BYTE
@@ -221,6 +223,8 @@ Usage:
 
 Environment:
   WASI_BUGGIFY_OUT=DIR   output/scratch directory (default <here>/out-wasi-buggify).
+  CARGO_TARGET_DIR=DIR   target directory for cargo-patina and the fixture
+                         (default <repo>/target/testbeds/buggify-wasi).
 
 Exit status: 0 = campaign clean (or --help/--selftest ok); 1 = one or more
 findings; 2 = usage error; 3 = build/environment failure; 4 = another sweep

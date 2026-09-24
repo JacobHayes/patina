@@ -32,8 +32,10 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
-built="$here/target/patina/pubsub"
-PATINA="$repo_root/target/release/cargo-patina"
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/pubsub-sweep}"
+export CARGO_TARGET_DIR="$target_dir"
+built="$target_dir/patina/pubsub"
+PATINA="$target_dir/release/cargo-patina"
 
 # Fixed workload (matches run-patina.sh): guest --seed fixes payloads/topics
 # (echoed as PUBSUB_RESULT workload_seed=, intentionally constant across every
@@ -257,10 +259,12 @@ Usage:
   fuzz-sweep.sh -h | --help              show this help.
 
 Environment:
-  SKIP_BUILD=1   reuse the already-built harness at target/patina/pubsub instead
-                 of rebuilding cargo-patina + the harness (fails loudly if the
-                 binary is missing). Any other PATINA_* net-fault report vars are
-                 emitted by the runtime and parsed from each run's stderr.
+  CARGO_TARGET_DIR  target directory for cargo-patina and the harness
+                 (default <repo>/target/testbeds/pubsub-sweep).
+  SKIP_BUILD=1   reuse the already-built harness at $CARGO_TARGET_DIR/patina/pubsub
+                 instead of rebuilding cargo-patina + the harness (fails loudly if
+                 the binary is missing). Any other PATINA_* net-fault report vars
+                 are emitted by the runtime and parsed from each run's stderr.
 
 Exit status: 0 = all generations clean (or --help/--selftest ok); 1 = one or more
 findings; 2 = usage error; 3 = build/environment failure.
@@ -317,7 +321,7 @@ cd "$repo_root"
 if [[ "${SKIP_BUILD:-0}" != 1 ]]; then
   echo "==> building cargo-patina + the pubsub harness"
   if ! cargo build --release --quiet -p cargo-patina; then echo "FATAL: build cargo-patina failed" >&2; exit 3; fi
-  if ! mkdir -p "$here/target/patina"; then echo "FATAL: mkdir failed" >&2; exit 3; fi
+  if ! mkdir -p "$target_dir/patina"; then echo "FATAL: mkdir failed" >&2; exit 3; fi
   if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then echo "FATAL: build pubsub harness failed" >&2; exit 3; fi
 else
   echo "==> SKIP_BUILD=1: reusing $built"

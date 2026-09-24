@@ -24,6 +24,7 @@ case "${1:-}" in
 esac
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$here/../../target/testbeds/checkout-retry-idempotency}"
 run_guest() {
   PATINA_SEED=7 PATINA_SCHEDULE_REPORT=0 cargo run --quiet --manifest-path "$here/Cargo.toml" -- "$@"
 }

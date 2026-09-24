@@ -24,6 +24,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$here/../../target/testbeds/workq-native}"
 cd "$here"
 
 # The one seam between native and Patina. Word-split intentionally so it can

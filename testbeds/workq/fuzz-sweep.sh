@@ -84,16 +84,18 @@ source "$here/../buggify-campaign.sh"
 # Distinct files so the sweep never rewrites a binary a process might be
 # executing (macOS SIGKILLs a rewritten running binary), and so their traces
 # never cross-replay (the yield-points fingerprint differs by design).
-built="$here/target/patina/workq"
-built_yp="$here/target/patina/workq-yp"
-PATINA="$repo_root/target/release/cargo-patina"
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/workq-sweep}"
+export CARGO_TARGET_DIR="$target_dir"
+built="$target_dir/patina/workq"
+built_yp="$target_dir/patina/workq-yp"
+PATINA="$target_dir/release/cargo-patina"
 
 OUTDIR="${PATINA_FUZZ_OUT:-$here/out-fuzz}"
 SWEEP_LOG="$OUTDIR/sweep.log"
 CAMPAIGN_STATE="$OUTDIR/campaign-state.json"
 SITES_JOIN_CHECKED=0
 # GLOBAL so the EXIT trap (fires after sweep() returns) still sees it under set -u.
-FUZZ_LOCK="$here/target/patina/.fuzz-sweep.lock"
+FUZZ_LOCK="$target_dir/patina/.fuzz-sweep.lock"
 
 # Virtual-clock budget base (Instant is virtual under Patina, so this is generous
 # without costing wall time) and base port (SimNet, so never really bound).
@@ -684,7 +686,7 @@ build_all() {
   if ! cargo build --release --quiet -p cargo-patina; then
     echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
   fi
-  mkdir -p "$here/target/patina"
+  mkdir -p "$target_dir/patina"
   if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
     echo "FATAL: build (plain) failed" >&2; exit 3
   fi
@@ -912,7 +914,7 @@ sweep() {
 
   # Concurrency guard: two instances would clobber the shared target/ + binaries.
   local lock="$FUZZ_LOCK"
-  mkdir -p "$here/target/patina"
+  mkdir -p "$target_dir/patina"
   if ! mkdir "$lock" 2>/dev/null; then
     local holder=""; [[ -f "$lock/pid" ]] && holder="$(cat "$lock/pid" 2>/dev/null)"
     if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
@@ -1024,6 +1026,8 @@ Usage:
 
 Environment:
   PATINA_FUZZ_OUT=DIR         output/scratch directory (default <here>/out-fuzz).
+  CARGO_TARGET_DIR=DIR        target directory for cargo-patina and both binaries
+                              (default <repo>/target/testbeds/workq-sweep).
   PATINA_FUZZ_SKIP_BUILD=1    continue a campaign against the EXISTING binaries
                               (no rebuild); still hard-fails if a binary or the
                               yield-points marker is missing.

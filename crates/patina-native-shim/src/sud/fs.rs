@@ -55,7 +55,7 @@ pub(super) fn is_dir_fd(fd: i64) -> bool {
 
 /// A guest path pointer, or `EFAULT` for null. Every path row reads its path
 /// through here so a null pointer is an errno, never a dereference.
-fn guest_path(path: u64) -> Result<*const c_char, i64> {
+pub(super) fn guest_path(path: u64) -> Result<*const c_char, i64> {
     if path == 0 {
         return Err(-EFAULT);
     }
@@ -883,26 +883,10 @@ struct KernelTimespec {
     tv_nsec: i64,
 }
 
-/// A kernel `struct timeval` (x86_64: two i64).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct KernelTimeval {
-    tv_sec: i64,
-    tv_usec: i64,
-}
-
-/// A `utimbuf` (`utime(2)`): two whole-second times.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct KernelUtimbuf {
-    actime: i64,
-    modtime: i64,
-}
-
 /// One `utimensat` time argument decoded onto the runtime's `PATINA_TIME_*`
 /// vocabulary, exactly as the kernel decodes it: `UTIME_NOW`/`UTIME_OMIT` in
 /// `tv_nsec`, else a nanosecond count that must be in range (`EINVAL`).
-fn checked_time(seconds: i64, fraction: u64) -> Result<u64, i64> {
+pub(super) fn checked_time(seconds: i64, fraction: u64) -> Result<u64, i64> {
     u64::try_from(seconds)
         .ok()
         .and_then(|s| s.checked_mul(NANOS_PER_SEC))
@@ -919,20 +903,9 @@ fn time_argument(time: &KernelTimespec) -> Result<(u32, u64), i64> {
     }
 }
 
-/// A `timeval` time argument (`utimes`/`futimesat`): microseconds in range.
-fn timeval_argument(time: &KernelTimeval) -> Result<(u32, u64), i64> {
-    if !(0..1_000_000).contains(&time.tv_usec) || time.tv_sec < 0 {
-        return Err(-EINVAL);
-    }
-    Ok((
-        crate::TIME_SET,
-        checked_time(time.tv_sec, time.tv_usec as u64 * 1_000)?,
-    ))
-}
-
 /// The two time arguments of a `utimensat`/`utimes`-shaped row: a null
 /// pointer is now/now.
-fn times_arguments<T: Copy>(
+pub(super) fn times_arguments<T: Copy>(
     times: u64,
     decode: impl Fn(&T) -> Result<(u32, u64), i64>,
 ) -> Result<[(u32, u64); 2], i64> {
@@ -984,70 +957,6 @@ pub(super) fn sys_utimensat(dirfd: i64, path: u64, times: u64, flags: u64) -> i6
             dirfd as c_int,
             path,
             resolve_flags(flags),
-            atime.0,
-            atime.1,
-            mtime.0,
-            mtime.1,
-        )
-    })
-}
-
-/// `utimes(2)` and `futimesat(2)`: microsecond times, always following a
-/// trailing symlink; a null path on `futimesat` names the directory
-/// descriptor itself.
-pub(super) fn sys_futimesat(dirfd: i64, path: u64, times: u64) -> i64 {
-    let [atime, mtime] = match times_arguments(times, timeval_argument) {
-        Ok(times) => times,
-        Err(errno) => return errno,
-    };
-    if path == 0 {
-        if dirfd == AT_FDCWD {
-            return -EFAULT;
-        }
-        if let Some(err) = fd_out_of_range(dirfd) {
-            return err;
-        }
-        // SAFETY: no pointers.
-        return ret_i32(unsafe {
-            patina_futimens(dirfd as c_int, atime.0, atime.1, mtime.0, mtime.1)
-        });
-    }
-    let path = match guest_path(path) {
-        Ok(path) => path,
-        Err(errno) => return errno,
-    };
-    // SAFETY: `path` is a valid NUL-terminated guest string pointer.
-    ret_i32(unsafe {
-        patina_utimensat(dirfd as c_int, path, 0, atime.0, atime.1, mtime.0, mtime.1)
-    })
-}
-
-/// `utime(2)`: whole-second times; a null buffer is now/now.
-pub(super) fn sys_utime(path: u64, times: u64) -> i64 {
-    let (atime, mtime) = if times == 0 {
-        ((crate::TIME_NOW, 0), (crate::TIME_NOW, 0))
-    } else {
-        // SAFETY: `times` is the guest's `struct utimbuf`.
-        let buf = unsafe { (times as *const KernelUtimbuf).read_unaligned() };
-        if buf.actime < 0 || buf.modtime < 0 {
-            return -EINVAL;
-        }
-        let (Ok(atime), Ok(mtime)) = (checked_time(buf.actime, 0), checked_time(buf.modtime, 0))
-        else {
-            return -EINVAL;
-        };
-        ((crate::TIME_SET, atime), (crate::TIME_SET, mtime))
-    };
-    let path = match guest_path(path) {
-        Ok(path) => path,
-        Err(errno) => return errno,
-    };
-    // SAFETY: `path` is a valid NUL-terminated guest string pointer.
-    ret_i32(unsafe {
-        patina_utimensat(
-            AT_FDCWD as c_int,
-            path,
-            0,
             atime.0,
             atime.1,
             mtime.0,

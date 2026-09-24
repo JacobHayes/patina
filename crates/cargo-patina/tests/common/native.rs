@@ -138,11 +138,7 @@ impl Guest {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("guest");
         let source = guest_source(name);
-        let target = super::profile_dir()
-            .parent()
-            .expect("profile has a target base")
-            .join("native-guests")
-            .join(name);
+        let target = super::guest_target_dir(name);
         let mut args = vec![
             "build",
             source.to_str().unwrap(),

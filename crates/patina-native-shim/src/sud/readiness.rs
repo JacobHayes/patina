@@ -1,5 +1,6 @@
-//! SUD rows — readiness: the epoll frontend (`epoll_create*`/`epoll_ctl`/
-//! `epoll_*wait*`), `eventfd*`, and `poll`/`ppoll` over the same reactor core.
+//! SUD rows — readiness: the epoll frontend (`epoll_create1`/`epoll_ctl`/
+//! `epoll_pwait*`), `eventfd2`, `ppoll` and `pselect6` over the same reactor
+//! core. The x86_64-only forms live in `x86_64.rs` or alias these rows.
 
 use super::*;
 
@@ -8,17 +9,6 @@ use super::*;
 pub(super) fn sys_epoll_create1(flags: u64) -> i64 {
     // SAFETY: no pointers.
     ret_i32(unsafe { patina_epoll_create1(flags as c_int) })
-}
-
-/// Legacy `epoll_create(size)` (x86_64-only syscall). The `size` hint has been
-/// ignored since Linux 2.6.8, but the kernel still rejects `size <= 0` with
-/// `-EINVAL` before creating the instance with no flags. Everything else is
-/// `epoll_create1(0)`.
-pub(super) fn sys_epoll_create(size: u64) -> i64 {
-    if size as i32 <= 0 {
-        return -EINVAL;
-    }
-    sys_epoll_create1(0)
 }
 
 pub(super) fn sys_epoll_ctl(epfd: i64, op: i64, fd: i64, event: u64) -> i64 {
@@ -30,18 +20,6 @@ pub(super) fn sys_epoll_ctl(epfd: i64, op: i64, fd: i64, event: u64) -> i64 {
             op as c_int,
             fd as c_int,
             event as *const c_void,
-        )
-    })
-}
-
-pub(super) fn sys_epoll_wait(epfd: i64, events: u64, maxevents: i64, timeout_ms: i64) -> i64 {
-    // SAFETY: `events` is the guest event buffer for `maxevents` entries.
-    ret_i32(unsafe {
-        patina_epoll_wait(
-            epfd as c_int,
-            events as *mut c_void,
-            maxevents as c_int,
-            timeout_ms as c_int,
         )
     })
 }
@@ -101,31 +79,6 @@ pub(super) fn sys_epoll_pwait2(
 pub(super) fn sys_eventfd2(initval: u64, flags: i64) -> i64 {
     // SAFETY: no pointers.
     ret_i32(unsafe { patina_eventfd(initval as u32, flags as c_int) })
-}
-
-/// Shared nanosecond wait core used by both POSIX and raw adapters.
-pub(super) fn poll_core(fds: u64, nfds: u64, timeout: Option<u64>) -> i64 {
-    unsafe {
-        crate::thread::readiness::patina_poll(
-            fds as *mut _,
-            nfds as usize,
-            timeout.map_or(-1, |n| n.min(i64::MAX as u64) as i64),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-        )
-    }
-}
-
-/// Legacy `poll(2)` (x86_64-only syscall). `timeout` is an `int` of milliseconds:
-/// negative is the infinite timeout, otherwise it scales to nanoseconds for
-/// [`poll_core`].
-pub(super) fn sys_poll(fds: u64, nfds: u64, timeout_ms: i64) -> i64 {
-    let timeout = if timeout_ms < 0 {
-        None
-    } else {
-        Some((timeout_ms as u64).saturating_mul(1_000_000))
-    };
-    poll_core(fds, nfds, timeout)
 }
 
 /// `ppoll(2)` uses a temporary task mask and a relative timespec. Unlike

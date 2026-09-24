@@ -49,7 +49,11 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 crates_dir="$here/crates"
 expected_dir="$here/expected"
-PATINA="$repo_root/target/release/cargo-patina"
+# cargo-patina and every MRE's guest build stage under one target directory,
+# never a target/ inside a corpus crate.
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/audit-corpus}"
+export CARGO_TARGET_DIR="$target_dir"
+PATINA="$target_dir/release/cargo-patina"
 
 # The complete corpus, in a stable order. Keep in sync with crates/ and with the
 # per-crate expectation files under expected/.
@@ -175,7 +179,9 @@ Usage:
   run.sh -h | --help  show this help.
 
 Environment:
-  TMPDIR   base directory for the scratch work/log dirs (default /tmp).
+  TMPDIR            base directory for the scratch work/log dirs (default /tmp).
+  CARGO_TARGET_DIR  target directory for cargo-patina and every MRE build
+                    (default <repo>/target/testbeds/audit-corpus).
 
 The platform is auto-detected (macos / linux); arch is not distinguished. Bump
 procedure and the full contract live in README.md. Exit status: 0 = PASS or SKIP;

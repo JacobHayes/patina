@@ -45,20 +45,22 @@ Output accumulates under `out-wasi-buggify/` (override with
 `WASI_BUGGIFY_OUT=DIR`); failing generations keep their `gen-N/` dir with the
 config, output, and trace.
 
-One run by hand, from the repository root (`build` prints the artifact path):
+One run by hand, from the repository root (`build` prints the artifact path;
+the sweep stages under the same target directory):
 
 ```sh
+export CARGO_TARGET_DIR=target/testbeds/buggify-wasi
 cargo patina build testbeds/buggify-wasi --target wasi
-cargo patina run testbeds/buggify-wasi/target/wasm32-wasip1/debug/buggify-wasi-fixture.wasm \
+cargo patina run target/testbeds/buggify-wasi/wasm32-wasip1/debug/buggify-wasi-fixture.wasm \
   --seed 7 --buggify --record /tmp/bw.patina
-cargo patina replay testbeds/buggify-wasi/target/wasm32-wasip1/debug/buggify-wasi-fixture.wasm /tmp/bw.patina
+cargo patina replay target/testbeds/buggify-wasi/wasm32-wasip1/debug/buggify-wasi-fixture.wasm /tmp/bw.patina
 ```
 
 Plant the `always!` violation (the WASI mirror of the native abort — the run
 reports a `PATINA_VERDICT ... kind=violation` line and traps):
 
 ```sh
-cargo patina run testbeds/buggify-wasi/target/wasm32-wasip1/debug/buggify-wasi-fixture.wasm \
+cargo patina run target/testbeds/buggify-wasi/wasm32-wasip1/debug/buggify-wasi-fixture.wasm \
   --seed 7 --buggify --arg violate
 ```
 

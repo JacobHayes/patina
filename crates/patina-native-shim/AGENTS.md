@@ -252,7 +252,11 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   `patina_*` externs, the handler BINDINGS, and the dispatch index generated
   from the registry; the `sys_*` handlers live in per-family modules
   (`time`, `sched_identity`, `fd_io`, `fs`, `mem`, `signal_process`, `net`,
-  `readiness`).
+  `readiness`). A handler for a row only one arch's table lists lives in that
+  arch's module (`x86_64`: `dup2`, `poll`, `utime`, …), compiled only where
+  the registry gives the row an identity. A family module holds only handlers
+  every Linux table binds, so an arch-only handler there is dead code, a
+  `-D warnings` error, on the other arch.
 - `src/registry/` re-exports the dependency-free `patina-dst-syscalls` crate.
   Its `generated.rs` owns cfg-native identities, numbers and immutable provenance;
   `linux.rs` owns exhaustive typed runtime dispositions; `symbols.rs` describes

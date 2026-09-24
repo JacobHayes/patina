@@ -47,6 +47,8 @@ mod readiness;
 mod sched_identity;
 mod signal_process;
 mod time;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 use fd_io::*;
 use fs::*;
 use mem::*;
@@ -55,6 +57,8 @@ use readiness::*;
 use sched_identity::*;
 use signal_process::*;
 use time::*;
+#[cfg(target_arch = "x86_64")]
+use x86_64::*;
 
 // The one row-side entry the descriptor close path in `lib.rs` calls directly.
 pub(crate) use fs::release_dir_iteration;
@@ -151,7 +155,6 @@ unsafe extern "C" {
     fn patina_fd_setfl(fd: c_int, flags: u32) -> c_int;
     fn patina_fd_set_nonblocking(fd: c_int, nonblocking: c_int) -> c_int;
     fn patina_dupfd(fd: c_int, minimum: c_int, cloexec: c_int) -> c_int;
-    fn patina_dup2(oldfd: c_int, newfd: c_int) -> c_int;
     fn patina_dup3(oldfd: c_int, newfd: c_int, cloexec: c_int) -> c_int;
     fn patina_close_range(first: u32, last: u32, flags: u32) -> c_int;
     fn patina_pipe_size(fd: c_int) -> c_int;
@@ -243,12 +246,6 @@ unsafe extern "C" {
     // rows are a SECOND caller of these exact entries, never a second reactor.
     fn patina_epoll_create1(flags: c_int) -> c_int;
     fn patina_epoll_ctl(epfd: c_int, op: c_int, fd: c_int, event: *const c_void) -> c_int;
-    fn patina_epoll_wait(
-        epfd: c_int,
-        events: *mut c_void,
-        maxevents: c_int,
-        timeout_ms: c_int,
-    ) -> c_int;
 }
 
 // Linux errno values used to shape raw-syscall returns (`-errno`). Fixed across
@@ -1107,10 +1104,6 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_epoll_ctl, |_, a| {
         sys_epoll_ctl(arg_fd(a[0]), a[1] as i64, arg_fd(a[2]), a[3])
     }),
-    #[cfg(target_arch = "x86_64")]
-    (Syscall::N_epoll_wait, |_, a| {
-        sys_epoll_wait(arg_fd(a[0]), a[1], a[2] as i64, a[3] as i64)
-    }),
     (Syscall::N_epoll_pwait, |_, a| {
         sys_epoll_pwait(arg_fd(a[0]), a[1], a[2] as i64, a[3] as i64, a[4], a[5])
     }),
@@ -1128,8 +1121,10 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     // ---- x86_64 legacy aliases (route to the SAME modern handler) ----
     // rustix's linux_raw backend and hand-written asm reach for the legacy
     // non-`*at` forms on x86_64; each is exactly its modern form with dirfd =
-    // AT_FDCWD (and, for `creat`, synthesized flags). The registry gives these
-    // rows no arm64 number, so the bindings are inert there.
+    // AT_FDCWD (and, for `creat`, synthesized flags). Only the x86_64 table
+    // lists these rows, so their identities, and these bindings, exist only
+    // there; the ones with a decode of their own bind a handler from
+    // `x86_64.rs`.
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_open, |_, a| {
         sys_openat(AT_FDCWD, a[0], a[1], a[2])
@@ -1212,6 +1207,11 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_eventfd, |_, a| sys_eventfd2(a[0], 0)),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_epoll_create, |_, a| sys_epoll_create(a[0])),
+    // `epoll_wait` is `epoll_pwait` with no signal mask, in the kernel too.
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_epoll_wait, |_, a| {
+        sys_epoll_pwait(arg_fd(a[0]), a[1], a[2] as i64, a[3] as i64, 0, 0)
+    }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_poll, |_, a| {
         sys_poll(a[0], a[1], a[2] as i32 as i64)
@@ -1573,31 +1573,6 @@ mod tests {
         assert_eq!(openat_patina_flags(0), PATINA_O_READ);
     }
 
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn dup2_diverges_from_dup3_only_on_equal_fds() {
-        // The kernel-exact divergence: dup2(fd, fd) is a validating no-op that
-        // returns fd, whereas dup3(fd, fd, 0) is -EINVAL. RED: routing legacy
-        // `dup2` straight through the dup3 handler (or vice versa) would turn a
-        // valid stdio dup2(1,1) into -EINVAL, breaking any raw dup2-based fd
-        // shuffle. The descriptor table alone answers these (no runtime is
-        // installed here): the three standard numbers exist from birth.
-        assert_eq!(sys_dup2(0, 0), 0);
-        assert_eq!(sys_dup2(1, 1), 1);
-        assert_eq!(sys_dup2(2, 2), 2);
-        assert_eq!(sys_dup3(0, 0, 0), -EINVAL);
-        assert_eq!(sys_dup3(1, 1, 0), -EINVAL);
-        // An out-of-range equal fd is EBADF (a bad descriptor), NOT EINVAL.
-        assert_eq!(sys_dup2(-1, -1), -EBADF);
-        // A source that names nothing is EBADF before the target is looked at.
-        assert_eq!(sys_dup2(900, 901), -EBADF);
-        assert_eq!(sys_dup3(900, 901, 0), -EBADF);
-        // dup3 refuses a flag other than O_CLOEXEC before touching the table.
-        assert_eq!(sys_dup3(0, 901, 0o4000), -EINVAL);
-        // A chosen number well above the table is EBADF.
-        assert_eq!(sys_dup3(0, 1 << 20, 0), -EBADF);
-    }
-
     #[test]
     fn socketpair_validates_args_in_c_order() {
         // A non-null dummy sv pointer that is never dereferenced on the failure
@@ -1634,9 +1609,9 @@ mod tests {
     }
 
     #[test]
-    fn poll_validates_buffers_and_descriptor_limit_before_waiting() {
-        assert_eq!(poll_core(0, 1, None), -EFAULT);
-        assert_eq!(poll_core(0, 1025, Some(0)), -EINVAL);
+    fn ppoll_validates_buffers_and_descriptor_limit_before_waiting() {
+        assert_eq!(sys_ppoll(0, 1, 0, 0, 0), -EFAULT);
+        assert_eq!(sys_ppoll(0, 1025, 0, 0, 0), -EINVAL);
         assert_eq!(sys_ppoll(0, 0, 0, 1, 4), -EINVAL);
     }
 
@@ -1724,17 +1699,5 @@ mod tests {
                 openat_patina_flags(base | noise)
             );
         }
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn epoll_create_rejects_nonpositive_size_like_the_kernel() {
-        // Legacy `epoll_create(size)` ignores `size` since 2.6.8 but still rejects
-        // `size <= 0` with -EINVAL before creating. RED: dropping the guard would
-        // let epoll_create(0) fall through to epoll_create1 and succeed, diverging
-        // from the kernel. (size > 0 delegates to the runtime and is covered
-        // end-to-end by the epoll validate leg.)
-        assert_eq!(sys_epoll_create(0), -EINVAL);
-        assert_eq!(sys_epoll_create(0xFFFF_FFFF), -EINVAL); // reads as int -1
     }
 }

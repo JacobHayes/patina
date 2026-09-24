@@ -3874,6 +3874,26 @@ fn campaign_sometimes_gate_fails_unmet_accepts_met_and_waives_threshold() {
     );
 }
 
+/// Build the planted-liveness-bug guest (`testbeds/liveness-campaign`) into
+/// `output`, staging its Cargo build under this test build's target directory.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn build_liveness_guest(output: &Path) {
+    let workspace = native_workspace();
+    let fixture = workspace.join("testbeds/liveness-campaign");
+    let target = common::guest_target_dir("liveness-campaign");
+    invoke_in_with_env(
+        workspace,
+        &[
+            "build",
+            fixture.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--release",
+        ],
+        &[("CARGO_TARGET_DIR", target.to_str().unwrap())],
+    );
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 // End-to-end coverage for `cargo patina campaign` + the liveness watchdog: build
 // the buggify-driven planted-bug guest (`testbeds/liveness-campaign`), sweep it,
@@ -3885,27 +3905,11 @@ fn campaign_sometimes_gate_fails_unmet_accepts_met_and_waives_threshold() {
 #[test]
 fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
     let workspace = native_workspace();
-    let fixture = workspace.join("testbeds/liveness-campaign");
     let directory = tempdir().unwrap();
     let guest = directory.path().join("liveness-guest");
 
     // Build the planted-bug guest once; the campaign sweeps this same binary.
-    let built = invoke(
-        workspace,
-        &[
-            "build",
-            fixture.to_str().unwrap(),
-            "--output",
-            guest.to_str().unwrap(),
-            "--release",
-        ],
-    );
-    assert!(
-        built.status.success(),
-        "building the liveness-campaign guest failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&built.stdout),
-        String::from_utf8_lossy(&built.stderr)
-    );
+    build_liveness_guest(&guest);
 
     let out = directory.path().join("camp");
     let campaign_args = |out: &Path| {
@@ -4045,25 +4049,9 @@ fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
 #[test]
 fn swarm_deselection_stays_coherent_with_fingerprint_and_metadata() {
     let workspace = native_workspace();
-    let fixture = workspace.join("testbeds/liveness-campaign");
     let directory = tempdir().unwrap();
     let guest = directory.path().join("swarm-guest");
-    let built = invoke(
-        workspace,
-        &[
-            "build",
-            fixture.to_str().unwrap(),
-            "--output",
-            guest.to_str().unwrap(),
-            "--release",
-        ],
-    );
-    assert!(
-        built.status.success(),
-        "building the swarm guest failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&built.stdout),
-        String::from_utf8_lossy(&built.stderr)
-    );
+    build_liveness_guest(&guest);
 
     // Find one generation that drops buggify and one that keeps it by reading
     // each run's own PATINA_SWARM_REPORT rather than re-deriving the mask here. A
@@ -4239,20 +4227,9 @@ fn swarm_deselection_stays_coherent_with_fingerprint_and_metadata() {
 #[test]
 fn campaign_with_swarm_and_buggify_has_no_coherence_aborts() {
     let workspace = native_workspace();
-    let fixture = workspace.join("testbeds/liveness-campaign");
     let directory = tempdir().unwrap();
     let guest = directory.path().join("swarm-campaign-guest");
-    let built = invoke(
-        workspace,
-        &[
-            "build",
-            fixture.to_str().unwrap(),
-            "--output",
-            guest.to_str().unwrap(),
-            "--release",
-        ],
-    );
-    assert!(built.status.success());
+    build_liveness_guest(&guest);
 
     let out = directory.path().join("camp");
     let ran = invoke_unchecked(
@@ -4531,26 +4508,10 @@ fn campaign_timeout_does_not_save_incomplete_trace() {
 #[test]
 fn campaign_extend_equals_fresh_campaign() {
     let workspace = native_workspace();
-    let fixture = workspace.join("testbeds/liveness-campaign");
     let directory = tempdir().unwrap();
     let guest = directory.path().join("liveness-guest");
 
-    let built = invoke(
-        workspace,
-        &[
-            "build",
-            fixture.to_str().unwrap(),
-            "--output",
-            guest.to_str().unwrap(),
-            "--release",
-        ],
-    );
-    assert!(
-        built.status.success(),
-        "building the liveness-campaign guest failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&built.stdout),
-        String::from_utf8_lossy(&built.stderr)
-    );
+    build_liveness_guest(&guest);
 
     let campaign_args = |out: &Path, gens: u64, json: bool| {
         let mut args = vec![

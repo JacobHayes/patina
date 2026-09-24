@@ -184,19 +184,6 @@ pub(super) fn sys_dup3(oldfd: i64, newfd: i64, flags: u64) -> i64 {
     ret_i32(unsafe { patina_dup3(oldfd as c_int, newfd, c_int::from(flags & O_CLOEXEC != 0)) })
 }
 
-/// Legacy `dup2(2)` (x86_64-only syscall). It differs from `dup3` in EXACTLY the
-/// equal-fd case: `dup2(fd, fd)` validates `fd` and returns it unchanged (no
-/// close, no CLOEXEC), whereas `dup3(fd, fd, …)` is `-EINVAL`. The entry owns
-/// that distinction, so the raw and wrapped paths route identically.
-pub(super) fn sys_dup2(oldfd: i64, newfd: i64) -> i64 {
-    if let Some(err) = fd_out_of_range(oldfd) {
-        return err;
-    }
-    let newfd = c_int::try_from(newfd).unwrap_or(-1);
-    // SAFETY: no pointers.
-    ret_i32(unsafe { patina_dup2(oldfd as c_int, newfd) })
-}
-
 /// `close_range(2)`: the kernel reads `first`/`last` as unsigned ints.
 pub(super) fn sys_close_range(first: u64, last: u64, flags: u64) -> i64 {
     // SAFETY: no pointers.

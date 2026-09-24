@@ -28,6 +28,16 @@ pub fn profile_dir() -> PathBuf {
         .to_path_buf()
 }
 
+/// The Cargo target directory for an in-tree guest package a test builds: under
+/// this test build's own target base, never a `target/` beside the package.
+pub fn guest_target_dir(name: &str) -> PathBuf {
+    profile_dir()
+        .parent()
+        .expect("profile has a target base")
+        .join("native-guests")
+        .join(name)
+}
+
 /// Return the repository root containing the acceptance guests.
 pub fn native_workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
