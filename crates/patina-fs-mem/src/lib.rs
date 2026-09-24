@@ -192,6 +192,67 @@ struct Inode {
     times: Times,
     /// POSIX permission bits (`0o7777`), without the file-type bits.
     mode: u32,
+    /// The `F_SEAL_*` set of an anonymous file (`memfd_create`), the one kind
+    /// of node that can be sealed; `None` for every named node.
+    seals: Option<u32>,
+    /// The huge page size of a hugetlbfs file (`MFD_HUGETLB`), 0 for every
+    /// other node. The machine reserves no huge pages: such a file has no
+    /// write method, sizes in whole huge pages, allocates nothing, and reads
+    /// as a hole.
+    huge_page: u64,
+}
+
+use patina_dst_abi::seals::{
+    F_ALL_SEALS, F_SEAL_EXEC, F_SEAL_FUTURE_WRITE, F_SEAL_GROW, F_SEAL_SEAL, F_SEAL_SHRINK,
+    F_SEAL_WRITE,
+};
+
+impl Inode {
+    /// A write reaching `end`: a hugetlbfs file has no write method
+    /// (`vfs_write`'s `FMODE_CAN_WRITE`), then the node's seals
+    /// (`shmem_write_begin`): a write seal refuses every write, a grow seal one
+    /// past the end.
+    fn check_write_seals(&self, end: usize) -> DriverResult<()> {
+        if self.huge_page != 0 {
+            return Err(EffectError::new(
+                ErrorCode::InvalidInput,
+                "a hugetlbfs file has no write method",
+            ));
+        }
+        let seals = self.seals.unwrap_or(0);
+        if seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0
+            || (seals & F_SEAL_GROW != 0 && end > self.contents.len())
+        {
+            return Err(sealed());
+        }
+        Ok(())
+    }
+
+    /// A length change to `len`: a hugetlbfs file sizes in whole huge pages
+    /// (`hugetlbfs_setattr`), then the node's seals (`shmem_setattr`).
+    fn check_resize_seals(&self, len: usize) -> DriverResult<()> {
+        if self.huge_page != 0 && len as u64 % self.huge_page != 0 {
+            return Err(EffectError::new(
+                ErrorCode::InvalidInput,
+                "a hugetlbfs file sizes in whole huge pages",
+            ));
+        }
+        let seals = self.seals.unwrap_or(0);
+        let current = self.contents.len();
+        if (len < current && seals & F_SEAL_SHRINK != 0)
+            || (len > current && seals & F_SEAL_GROW != 0)
+        {
+            return Err(sealed());
+        }
+        Ok(())
+    }
+}
+
+fn sealed() -> EffectError {
+    EffectError::new(
+        ErrorCode::NotPermitted,
+        "the virtual file is sealed against this change",
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -643,6 +704,8 @@ impl MemFs {
                 openers: 0,
                 times: Times::created(clock),
                 mode: mode & MODE_MASK,
+                seals: None,
+                huge_page: 0,
             },
         );
         inode
@@ -1323,11 +1386,12 @@ impl FsDriver for MemFs {
             .inodes
             .get_mut(&inode)
             .expect("open handle references a file");
-        let file = &mut inode.contents;
-        let start = if append { file.len() } else { cursor };
+        let start = if append { inode.contents.len() } else { cursor };
         let end = start.checked_add(bytes.len()).ok_or_else(|| {
             EffectError::new(ErrorCode::InvalidInput, "virtual file size overflowed")
         })?;
+        inode.check_write_seals(end)?;
+        let file = &mut inode.contents;
         if file.len() < end {
             Self::resize_contents(file, end)?;
         }
@@ -1344,43 +1408,20 @@ impl FsDriver for MemFs {
         offset: u64,
         bytes: &[u8],
     ) -> DriverResult<usize> {
-        let description = self.description(fd)?;
-        if !description.writable {
-            return Err(EffectError::new(
-                ErrorCode::NotWritable,
-                format!("virtual file handle {} is not writable", fd.0),
-            ));
-        }
-        if description.kind == FsEntryKind::Directory {
-            return Err(EffectError::new(
-                ErrorCode::IsDirectory,
-                format!("virtual file handle {} references a directory", fd.0),
-            ));
-        }
-        if bytes.is_empty() {
-            return Ok(0);
-        }
-        let start = usize::try_from(offset).map_err(|_| {
-            EffectError::new(
-                ErrorCode::InvalidInput,
-                "virtual write offset exceeds the addressable range",
-            )
-        })?;
-        let end = start.checked_add(bytes.len()).ok_or_else(|| {
-            EffectError::new(ErrorCode::InvalidInput, "virtual file size overflowed")
-        })?;
-        let inode = self.handle_inode(fd)?;
-        let inode = self
-            .inodes
-            .get_mut(&inode)
-            .expect("open handle references a file");
-        let file = &mut inode.contents;
-        if file.len() < end {
-            Self::resize_contents(file, end)?;
-        }
-        file[start..end].copy_from_slice(bytes);
-        inode.times.data_changed(clock);
-        Ok(bytes.len())
+        self.write_node_at(clock, fd, offset, bytes, true)
+    }
+
+    /// The page cache's write-back: what a shared mapping stored. A write
+    /// seal does not refuse it — a mapping writable before the seal keeps
+    /// writing the file.
+    fn write_back_at(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        bytes: &[u8],
+    ) -> DriverResult<usize> {
+        self.write_node_at(clock, fd, offset, bytes, false)
     }
 
     fn close(&mut self, fd: Fd) -> DriverResult<()> {
@@ -1668,6 +1709,11 @@ impl FsDriver for MemFs {
             ));
         }
         let inode = self.handle_inode(fd)?;
+        let target = usize::try_from(len).unwrap_or(usize::MAX);
+        self.inodes
+            .get(&inode)
+            .expect("open handle references a file")
+            .check_resize_seals(target)?;
         Self::truncate_inode(self.inodes.get_mut(&inode), clock, len)
     }
 
@@ -1747,6 +1793,24 @@ impl FsDriver for MemFs {
             .inodes
             .get_mut(&inode)
             .expect("open handle references a file");
+        // `hugetlbfs_fallocate` with no huge page to allocate: a hole punch has
+        // nothing to free, an allocation fails.
+        if inode.huge_page != 0 {
+            if zero {
+                return Ok(());
+            }
+            return Err(EffectError::new(
+                ErrorCode::NoSpace,
+                "no huge page is reserved to allocate",
+            ));
+        }
+        // `shmem_fallocate`: punching needs no write seal, growing no grow seal.
+        let seals = inode.seals.unwrap_or(0);
+        if (zero && seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0)
+            || (!keep_size && end > inode.contents.len() && seals & F_SEAL_GROW != 0)
+        {
+            return Err(sealed());
+        }
         let file = &mut inode.contents;
         if !keep_size && end > file.len() {
             Self::resize_contents(file, end)?;
@@ -2261,9 +2325,155 @@ impl FsDriver for MemFs {
         self.stamp_node(clock, ino, kind);
         Ok(())
     }
+
+    /// [`FsDriver::create_anonymous`]: a node with no name, alive while a
+    /// descriptor holds it, exactly an unlinked file's lifetime.
+    fn create_anonymous(
+        &mut self,
+        clock: FsClock,
+        _name: &str,
+        mode: u32,
+        seals: u32,
+        huge_page: u64,
+    ) -> DriverResult<Fd> {
+        let node = self.next_inode;
+        self.next_inode = self.next_inode.checked_add(1).ok_or_else(|| {
+            EffectError::new(ErrorCode::NoSpace, "virtual inode numbers exhausted")
+        })?;
+        self.inodes.insert(
+            node,
+            Inode {
+                kind: FsEntryKind::File,
+                contents: Vec::new(),
+                links: 0,
+                openers: 0,
+                times: Times::created(clock),
+                mode: mode & MODE_MASK,
+                seals: Some(seals & F_ALL_SEALS),
+                huge_page,
+            },
+        );
+        let access = Access {
+            readable: true,
+            writable: true,
+            append: false,
+            path_only: false,
+        };
+        match self.allocate_handle(node, 0, access, FsEntryKind::File) {
+            Ok(fd) => Ok(fd),
+            Err(error) => {
+                self.inodes.remove(&node);
+                Err(error)
+            }
+        }
+    }
+
+    fn seals(&mut self, fd: Fd) -> DriverResult<u32> {
+        let node = self.description(fd)?.node;
+        self.inodes
+            .get(&node)
+            .and_then(|inode| inode.seals)
+            .ok_or_else(not_sealable)
+    }
+
+    fn add_seals(&mut self, fd: Fd, seals: u32, writably_mapped: bool) -> DriverResult<()> {
+        let description = self.description(fd)?;
+        if !description.writable {
+            return Err(EffectError::new(
+                ErrorCode::NotPermitted,
+                format!("virtual file handle {} is not open for writing", fd.0),
+            ));
+        }
+        if seals & !F_ALL_SEALS != 0 {
+            return Err(EffectError::new(ErrorCode::InvalidInput, "unknown seal"));
+        }
+        let node = description.node;
+        let inode = self
+            .inodes
+            .get_mut(&node)
+            .filter(|inode| inode.seals.is_some())
+            .ok_or_else(not_sealable)?;
+        let current = inode.seals.expect("filtered to a sealable node");
+        if current & F_SEAL_SEAL != 0 {
+            return Err(sealed());
+        }
+        if seals & F_SEAL_WRITE != 0 && current & F_SEAL_WRITE == 0 && writably_mapped {
+            return Err(EffectError::new(
+                ErrorCode::Busy,
+                "a shared writable mapping of the virtual file is live",
+            ));
+        }
+        // `F_SEAL_EXEC` on an executable file implies every write seal.
+        let implied = if seals & F_SEAL_EXEC != 0 && inode.mode & 0o111 != 0 {
+            F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_FUTURE_WRITE
+        } else {
+            0
+        };
+        inode.seals = Some(current | seals | implied);
+        Ok(())
+    }
+}
+
+fn not_sealable() -> EffectError {
+    EffectError::new(
+        ErrorCode::InvalidInput,
+        "only an anonymous virtual file can be sealed",
+    )
 }
 
 impl MemFs {
+    /// A positional write through `fd`, judged against the node's write seals
+    /// when `sealed`.
+    fn write_node_at(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        bytes: &[u8],
+        sealed: bool,
+    ) -> DriverResult<usize> {
+        let description = self.description(fd)?;
+        if !description.writable {
+            return Err(EffectError::new(
+                ErrorCode::NotWritable,
+                format!("virtual file handle {} is not writable", fd.0),
+            ));
+        }
+        if description.kind == FsEntryKind::Directory {
+            return Err(EffectError::new(
+                ErrorCode::IsDirectory,
+                format!("virtual file handle {} references a directory", fd.0),
+            ));
+        }
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let start = usize::try_from(offset).map_err(|_| {
+            EffectError::new(
+                ErrorCode::InvalidInput,
+                "virtual write offset exceeds the addressable range",
+            )
+        })?;
+        let end = start.checked_add(bytes.len()).ok_or_else(|| {
+            EffectError::new(ErrorCode::InvalidInput, "virtual file size overflowed")
+        })?;
+        let inode = self.handle_inode(fd)?;
+        let inode = self
+            .inodes
+            .get_mut(&inode)
+            .expect("open handle references a file");
+        if sealed {
+            inode.check_write_seals(end)?;
+        }
+        let file = &mut inode.contents;
+        if file.len() < end {
+            Self::resize_contents(file, end)?;
+        }
+        file[start..end].copy_from_slice(bytes);
+        inode.times.data_changed(clock);
+        Ok(bytes.len())
+    }
+
     /// Enumerate one directory's immediate children, in path order and without
     /// enforcement. Both listing entry points share it: the access decision is
     /// theirs, the enumeration is one implementation.
@@ -3813,6 +4023,105 @@ mod tests {
             snapshot.read(FsClock::EPOCH, second, 1).unwrap_err().code,
             ErrorCode::InvalidHandle
         );
+    }
+
+    #[test]
+    fn an_anonymous_file_lives_behind_its_handle_and_obeys_its_seals() {
+        let mut fs = MemFs::new().with_file("/named", b"x").unwrap();
+        let fd = fs
+            .create_anonymous(FsClock::EPOCH, "buffer", 0o777, 0, 0)
+            .unwrap();
+        let metadata = fs.fd_metadata(fd).unwrap();
+        assert_eq!(
+            (metadata.kind, metadata.len, metadata.mode),
+            (FsEntryKind::File, 0, 0o777)
+        );
+        assert_eq!(fs.write(FsClock::EPOCH, fd, b"hello").unwrap(), 5);
+        assert_eq!(fs.seals(fd).unwrap(), 0);
+        // Only an anonymous file can be sealed.
+        let named = fs
+            .open(FsClock::EPOCH, "/named", OpenFlags::read_only())
+            .unwrap();
+        assert_eq!(fs.seals(named).unwrap_err().code, ErrorCode::InvalidInput);
+        // A live shared writable mapping refuses a new write seal; an unknown
+        // seal bit is judged before anything else about the node.
+        assert_eq!(
+            fs.add_seals(fd, F_SEAL_WRITE, true).unwrap_err().code,
+            ErrorCode::Busy
+        );
+        assert_eq!(
+            fs.add_seals(fd, 0x100, false).unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+        fs.add_seals(fd, F_SEAL_WRITE | F_SEAL_SHRINK, false)
+            .unwrap();
+        assert_eq!(
+            fs.write(FsClock::EPOCH, fd, b"x").unwrap_err().code,
+            ErrorCode::NotPermitted
+        );
+        assert_eq!(
+            fs.write_at(FsClock::EPOCH, fd, 0, b"x").unwrap_err().code,
+            ErrorCode::NotPermitted
+        );
+        assert_eq!(
+            fs.set_len(FsClock::EPOCH, fd, 1).unwrap_err().code,
+            ErrorCode::NotPermitted
+        );
+        fs.set_len(FsClock::EPOCH, fd, 8).unwrap();
+        // The page cache's write-back is not a write the seal refuses.
+        assert_eq!(fs.write_back_at(FsClock::EPOCH, fd, 0, b"J").unwrap(), 1);
+        assert_eq!(fs.read_at(FsClock::EPOCH, fd, 0, 5).unwrap(), b"Jello");
+        fs.add_seals(fd, F_SEAL_SEAL, false).unwrap();
+        assert_eq!(
+            fs.add_seals(fd, F_SEAL_GROW, false).unwrap_err().code,
+            ErrorCode::NotPermitted
+        );
+        assert_eq!(
+            fs.seals(fd).unwrap(),
+            F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_SEAL
+        );
+        // No name reaches it, and the last handle frees it.
+        let ino = metadata.ino;
+        fs.close(fd).unwrap();
+        assert_eq!(
+            fs.inode_metadata(ino).unwrap_err().code,
+            ErrorCode::NotFound
+        );
+    }
+
+    /// A hugetlbfs file on a machine with no huge pages reserved: no write
+    /// method, sized in whole huge pages, a punch frees nothing and an
+    /// allocation finds no page.
+    #[test]
+    fn a_hugetlb_file_sizes_in_huge_pages_and_cannot_be_written() {
+        const HUGE: u64 = 2 << 20;
+        let mut fs = MemFs::new();
+        let fd = fs
+            .create_anonymous(FsClock::EPOCH, "huge", 0o777, 0, HUGE)
+            .unwrap();
+        assert_eq!(
+            fs.write(FsClock::EPOCH, fd, b"x").unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+        assert_eq!(
+            fs.write_at(FsClock::EPOCH, fd, 0, b"x").unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+        assert_eq!(
+            fs.set_len(FsClock::EPOCH, fd, 4096).unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+        fs.set_len(FsClock::EPOCH, fd, HUGE).unwrap();
+        assert_eq!(fs.fd_metadata(fd).unwrap().len, HUGE);
+        fs.allocate(FsClock::EPOCH, fd, 0, HUGE, true, true)
+            .unwrap();
+        assert_eq!(
+            fs.allocate(FsClock::EPOCH, fd, 0, HUGE, false, false)
+                .unwrap_err()
+                .code,
+            ErrorCode::NoSpace
+        );
+        assert_eq!(fs.read_at(FsClock::EPOCH, fd, 0, 4).unwrap(), [0; 4]);
     }
 
     #[test]

@@ -245,6 +245,38 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         Ok(written)
     }
 
+    /// The page cache's write-back is not a guest operation: no fault is
+    /// injected into it.
+    fn write_back_at(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        bytes: &[u8],
+    ) -> DriverResult<usize> {
+        self.inner.write_back_at(clock, fd, offset, bytes)
+    }
+
+    fn create_anonymous(
+        &mut self,
+        clock: FsClock,
+        name: &str,
+        mode: u32,
+        seals: u32,
+        huge_page: u64,
+    ) -> DriverResult<Fd> {
+        self.inner
+            .create_anonymous(clock, name, mode, seals, huge_page)
+    }
+
+    fn seals(&mut self, fd: Fd) -> DriverResult<u32> {
+        self.inner.seals(fd)
+    }
+
+    fn add_seals(&mut self, fd: Fd, seals: u32, writably_mapped: bool) -> DriverResult<()> {
+        self.inner.add_seals(fd, seals, writably_mapped)
+    }
+
     fn close(&mut self, fd: Fd) -> DriverResult<()> {
         self.inner.close(fd)
     }

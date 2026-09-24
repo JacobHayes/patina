@@ -11,10 +11,8 @@
 //! without THP answers EINVAL and has no such hazard) makes the vectors the
 //! same on every host, whatever its THP settings.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{At, Probe, neg, page_size};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -105,15 +103,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[Syscall::N_mincore],
     symbols: &["syscall", "mmap", "munmap"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::MemoryIpc),
-        vehicles: Vehicle::ALL,
-        what: "mincore is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no mincore wrapper)",
-        failure: Failure::Stops {
-            events: 2,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall mincore (nr",
-        },
-    }],
     ..DEFAULTS
 };

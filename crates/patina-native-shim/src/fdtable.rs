@@ -70,6 +70,10 @@ pub(crate) enum FdKind {
     /// A virtual epoll instance; `handle` is the registry id.
     #[cfg(target_os = "linux")]
     Epoll,
+    /// A POSIX message queue descriptor (`mq_open`); `handle` keys the open
+    /// queue table of the IPC model.
+    #[cfg(target_os = "linux")]
+    MessageQueue,
     /// A virtual kqueue; `handle` is the registry id.
     #[cfg(target_os = "macos")]
     Kqueue,
@@ -95,6 +99,8 @@ impl FdKind {
             FdKind::SignalFd => 12,
             #[cfg(target_os = "linux")]
             FdKind::Epoll => 10,
+            #[cfg(target_os = "linux")]
+            FdKind::MessageQueue => 13,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => 11,
         }
@@ -112,7 +118,7 @@ impl FdKind {
             | FdKind::Socket
             | FdKind::Pipe => false,
             #[cfg(target_os = "linux")]
-            FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd => false,
+            FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::MessageQueue => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }
@@ -205,6 +211,17 @@ impl GuestFdTable {
                 .expect("the three standard descriptors fit any limit");
         }
         table
+    }
+
+    /// The bound no new number reaches (`EMFILE`, `F_DUPFD`'s `EINVAL`).
+    pub(crate) fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// A new bound, as `setrlimit(RLIMIT_NOFILE)` sets it.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_limit(&mut self, limit: usize) {
+        self.limit = limit;
     }
 
     fn slot_index(fd: c_int) -> Option<usize> {
@@ -306,6 +323,7 @@ impl GuestFdTable {
 
     /// The description itself (for callers holding a [`DescId`], such as a
     /// mapping's retained reference).
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn description(&self, desc: DescId) -> Option<&Description> {
         self.descriptions.get(&desc)
     }
@@ -451,20 +469,19 @@ impl GuestFdTable {
         Ok(())
     }
 
-    /// A hidden reference on `fd`'s description — what a file-backed mapping
-    /// holds so its writeback survives the guest closing the number. Freed with
+    /// A hidden reference on the live description `desc` — what a file-backed
+    /// mapping holds so its write-back survives the guest closing the number.
+    /// `EBADF` for an id that names no live description. Freed with
     /// [`GuestFdTable::release`].
-    pub(crate) fn retain(&mut self, fd: c_int) -> Result<DescId, c_int> {
-        let resolved = self.resolve(fd).ok_or(EBADF)?;
-        self.descriptions
-            .get_mut(&resolved.desc)
-            .expect("a resolved description exists")
-            .refs += 1;
-        Ok(resolved.desc)
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn retain(&mut self, desc: DescId) -> Result<(), c_int> {
+        self.descriptions.get_mut(&desc).ok_or(EBADF)?.refs += 1;
+        Ok(())
     }
 
     /// Drop a hidden reference taken by [`GuestFdTable::retain`]. `EBADF` for
     /// an id that names no live description (a double release).
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn release(&mut self, desc: DescId) -> Result<Option<Release>, c_int> {
         if !self.descriptions.contains_key(&desc) {
             return Err(EBADF);
@@ -682,7 +699,8 @@ mod tests {
     fn a_retained_description_outlives_its_numbers() {
         let mut table = table();
         let fd = table.install(FdKind::File, 10, O_READ, false).unwrap();
-        let desc = table.retain(fd).unwrap();
+        let desc = table.resolve(fd).unwrap().desc;
+        table.retain(desc).unwrap();
         assert_eq!(table.close(fd), Ok(None));
         assert_eq!(table.description(desc).map(|d| d.handle), Some(10));
         // The number is free for reuse while the hidden reference lives on.
@@ -696,7 +714,7 @@ mod tests {
             }))
         );
         assert_eq!(table.release(desc), Err(EBADF));
-        assert_eq!(table.retain(4000), Err(EBADF));
+        assert_eq!(table.retain(desc), Err(EBADF));
     }
 
     #[test]

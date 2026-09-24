@@ -142,6 +142,32 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   seam is the one branch in `patina_openat`: the driver judges existence,
   resolution and permissions and then declines to hand back a descriptor, and the
   caller reads the refused entry's kind on the failure path only.
+- A file mapping is a VIEW of the file's page cache, never a copy: the page
+  cache of a mapped file is a host memfd the shim holds (`src/mem/cache.rs`),
+  which `MAP_SHARED` views map directly and `MAP_PRIVATE` views map
+  copy-on-write, so every view and the shim itself (through `pread`/`pwrite`
+  on the memfd) see one set of bytes and the kernel's shmem rules answer for
+  them. The filesystem stays the store the crash model judges: the descriptor
+  funnels write back the pages views changed before a read (through the
+  write-back driver op write seals do not refuse), mirror a write, truncation
+  or allocation into the page cache after the filesystem accepts it, and
+  `msync(MS_SYNC)`/`fsync`/`syncfs` make the stores durable. The hooks
+  (`mem::reading`, `written`, `written_at_cursor`, `resized`, `allocated`,
+  `syncing`, `syncing_all`, `released`, `crashed`) are called from `lib.rs`,
+  `transfer.rs`, `iov.rs` and `advice.rs`; a new funnel that reads or changes a
+  regular file's bytes has to call them too, or a mapping of that file goes
+  stale. The address-space rows (`mmap`, `munmap`, `mremap`, `mprotect`, fixed
+  placements) keep the view table — and the System V attachments, page locks
+  and range memory policies it also holds (`src/mem/ranges.rs`) — in step with
+  the host's.
+- Nothing the host decides about memory may reach the guest as an answer: page
+  locks are bookkeeping against the shim's own `RLIMIT_MEMLOCK` (never a host
+  `mlock`, whose answer depends on the host's limit), the hugetlb pool is
+  virtually empty, THP is disabled at startup so residency is per page, and a
+  host memfd the shim cannot get (its descriptor limit) is a named fatal, not
+  the guest's `EMFILE`.
+  What stays host-decided (reclaim and swap evicting a page `mincore` reports)
+  is listed in `crates/patina-target/ESCAPE-CLASSES.md`.
 - Model a rendezvous the way the kernel models it, counters and all. A blocking
   FIFO open waits for the PARTNER'S OPEN COUNTER to move, not for a partner to
   still be there (`fs/pipe.c:fifo_open`); waiting on presence loses the writer
@@ -249,6 +275,14 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   is added to the umbrella AND to `POSIX_C_FAMILY_SOURCES` in `src/lib.rs`
   (the installed `cargo-patina` stages only the exported slices — a lint pins
   the three lists together).
+- The memory and IPC models are Rust modules both doors call: `src/mem/`
+  (mappings and page caches in `mod.rs`, `cache.rs`, `ranges.rs`;
+  `memfd_create` and seals in `memfd.rs`; `membarrier` in `barrier.rs`),
+  `src/numa.rs` (memory policy on one node), `src/limits.rs` (the 16
+  resource limits `getrlimit`/`setrlimit`/`prlimit64` answer, read by the
+  descriptor table, lock accounting and message queues) and `src/thread/ipc.rs` (System V
+  IPC and POSIX message queues, which block on the scheduler and so live with
+  the thread runtime; every wait settles through `wait_on`).
 - `src/sud/` is the SUD dispatcher: `mod.rs` holds the shared constants, the
   `patina_*` externs, the handler BINDINGS, and the dispatch index generated
   from the registry; the `sys_*` handlers live in per-family modules

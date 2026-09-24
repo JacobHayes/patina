@@ -5150,9 +5150,9 @@ recording was produced by a guest whose result type no longer matches this one"
     }
 
     /// The instant [`Self::fs_clock`] would hand a filesystem operation now,
-    /// for a node that lives outside the filesystem driver (a pipe's pipefs
-    /// inode, stamped by the native shim). Unrecorded for the same reason the
-    /// filesystem's own reads are.
+    /// for a kernel object that lives outside the filesystem driver (a pipe's
+    /// pipefs inode, a System V IPC object, stamped by the native shim).
+    /// Unrecorded for the same reason the filesystem's own reads are.
     pub fn fs_time_unrecorded(&mut self) -> Result<u64, RuntimeError> {
         Ok(self.fs_clock()?.now_nanos)
     }
@@ -5318,6 +5318,158 @@ recording was produced by a guest whose result type no longer matches this one"
             self.maybe_inject_crash(CrashOp::Write)?;
         }
         decoded
+    }
+
+    /// The cursor of filesystem handle `fd`, read UNRECORDED: it is a pure
+    /// function of the recorded operations the driver executed, and the driver
+    /// executes every one of them again on replay, so it reproduces without a
+    /// trace op of its own (the native shim's page cache asks where a cursor
+    /// write landed). A host-capture replay executes no driver, so there it is
+    /// the recorded seek.
+    pub fn fs_cursor_unrecorded(&mut self, fd: Fd) -> Result<u64, RuntimeError> {
+        if self.filesystem_is_capture {
+            return self.fs_seek(fd, 0, SeekWhence::Current);
+        }
+        Ok(self
+            .filesystem
+            .as_mut()
+            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
+            .seek(fd, 0, SeekWhence::Current)?)
+    }
+
+    /// The inode filesystem handle `fd` is open on, read UNRECORDED as
+    /// [`Self::fs_cursor_unrecorded`] is: a handle's inode is fixed at its
+    /// open, which the driver executes again on replay (the native shim's
+    /// page cache asks which file a handle's bytes belong to).
+    pub fn fs_ino_unrecorded(&mut self, fd: Fd) -> Result<u64, RuntimeError> {
+        if self.filesystem_is_capture {
+            return Ok(self.fs_fd_metadata(fd)?.ino);
+        }
+        Ok(self
+            .filesystem
+            .as_mut()
+            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
+            .fd_metadata(fd)?
+            .ino)
+    }
+
+    /// The page cache's write-back: what a shared mapping of `fd`'s file
+    /// stored, written into the file ([`Operation::FsWriteBackAt`]). Not a
+    /// guest operation, so no modeled latency; it is storage traffic, so it
+    /// counts toward the `write` crash ordinal like any other write.
+    pub fn fs_write_back_at(
+        &mut self,
+        fd: Fd,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<usize, RuntimeError> {
+        if self.filesystem.is_none() {
+            return Err(EffectError::missing_driver("filesystem").into());
+        }
+        let operation = Operation::FsWriteBackAt {
+            fd,
+            offset,
+            bytes: bytes.to_vec(),
+        };
+        let expected = match self.filesystem_expected(&operation)? {
+            FilesystemExpected::Execute(expected) => expected,
+            FilesystemExpected::Captured(outcome) => return decode_usize(&operation, outcome),
+        };
+        let clock = self.fs_clock()?;
+        let result = self
+            .filesystem
+            .as_mut()
+            .expect("driver was checked")
+            .write_back_at(clock, fd, offset, bytes);
+        let actual = match result {
+            Ok(written) => Outcome::Usize(written),
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        let decoded = decode_usize(&operation, outcome);
+        if decoded.is_ok() {
+            self.maybe_inject_crash(CrashOp::Write)?;
+        }
+        decoded
+    }
+
+    /// `memfd_create`: a nameless regular file on a new read-write handle
+    /// ([`Operation::FsCreateAnonymous`]). No storage is touched, so no
+    /// modeled latency.
+    pub fn fs_create_anonymous(
+        &mut self,
+        name: &str,
+        mode: u32,
+        seals: u32,
+        huge_page: u64,
+    ) -> Result<Fd, RuntimeError> {
+        if self.filesystem.is_none() {
+            return Err(EffectError::missing_driver("filesystem").into());
+        }
+        let operation = Operation::FsCreateAnonymous {
+            name: name.into(),
+            mode,
+            seals,
+            huge_page,
+        };
+        let expected = match self.filesystem_expected(&operation)? {
+            FilesystemExpected::Execute(expected) => expected,
+            FilesystemExpected::Captured(outcome) => return decode_handle(&operation, outcome),
+        };
+        let clock = self.fs_clock()?;
+        let result = self
+            .filesystem
+            .as_mut()
+            .expect("driver was checked")
+            .create_anonymous(clock, name, mode, seals, huge_page);
+        let actual = match result {
+            Ok(fd) => Outcome::Handle(fd),
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_handle(&operation, outcome)
+    }
+
+    /// `F_GET_SEALS` ([`Operation::FsSeals`]).
+    pub fn fs_seals(&mut self, fd: Fd) -> Result<u32, RuntimeError> {
+        if self.filesystem.is_none() {
+            return Err(EffectError::missing_driver("filesystem").into());
+        }
+        let operation = Operation::FsSeals { fd };
+        let expected = match self.filesystem_expected(&operation)? {
+            FilesystemExpected::Execute(expected) => expected,
+            FilesystemExpected::Captured(outcome) => {
+                return decode_u64(&operation, outcome).map(|seals| seals as u32);
+            }
+        };
+        let result = self
+            .filesystem
+            .as_mut()
+            .expect("driver was checked")
+            .seals(fd);
+        let actual = match result {
+            Ok(seals) => Outcome::U64(u64::from(seals)),
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_u64(&operation, outcome).map(|seals| seals as u32)
+    }
+
+    /// `F_ADD_SEALS` ([`Operation::FsAddSeals`]).
+    pub fn fs_add_seals(
+        &mut self,
+        fd: Fd,
+        seals: u32,
+        writably_mapped: bool,
+    ) -> Result<(), RuntimeError> {
+        self.filesystem_unit_undelayed(
+            Operation::FsAddSeals {
+                fd,
+                seals,
+                writably_mapped,
+            },
+            |filesystem| filesystem.add_seals(fd, seals, writably_mapped),
+        )
     }
 
     pub fn fs_close(&mut self, fd: Fd) -> Result<(), RuntimeError> {
@@ -11564,6 +11716,40 @@ class=crash|0 class=buggify|0"
         assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
         let mut ctx = Context::from_config(RuntimeConfig::replay(&a, "attrs")).unwrap();
         exercise(&mut ctx);
+        ctx.finish().unwrap();
+    }
+
+    /// The page cache's cursor and inode queries leave no trace op: a run
+    /// that asks them records the same trace as one that does not, and that
+    /// trace replays a run that asks them.
+    #[test]
+    fn unrecorded_filesystem_queries_leave_no_trace_op() {
+        fn exercise(ctx: &mut Context, ask: bool) {
+            let fd = ctx
+                .fs_open("/f", OpenFlags::create_truncate_write())
+                .unwrap();
+            ctx.fs_write(fd, b"hello").unwrap();
+            if ask {
+                assert_eq!(ctx.fs_cursor_unrecorded(fd).unwrap(), 5);
+                let ino = ctx.fs_ino_unrecorded(fd).unwrap();
+                assert_ne!(ino, 0);
+            }
+            ctx.fs_close(fd).unwrap();
+        }
+        let directory = tempdir().unwrap();
+        let asked = directory.path().join("asked.patina");
+        let quiet = directory.path().join("quiet.patina");
+        for (path, ask) in [(&asked, true), (&quiet, false)] {
+            let mut ctx = Context::from_config(RuntimeConfig::record(7, path, "queries")).unwrap();
+            exercise(&mut ctx, ask);
+            ctx.finish().unwrap();
+        }
+        assert_eq!(
+            std::fs::read(&asked).unwrap(),
+            std::fs::read(&quiet).unwrap()
+        );
+        let mut ctx = Context::from_config(RuntimeConfig::replay(&quiet, "queries")).unwrap();
+        exercise(&mut ctx, true);
         ctx.finish().unwrap();
     }
 

@@ -98,6 +98,8 @@ typedef int (*patina_host_sigaction_fn)(int, const struct sigaction *,
                                         struct sigaction *);
 
 static patina_prctl_fn patina_host_prctl;
+/* glibc's getrlimit/setrlimit (the shim defines the guest's). */
+typedef int (*patina_setrlimit_fn)(int, struct rlimit *);
 static patina_host_open_fn patina_host_open;
 static patina_host_read_fn patina_host_read_real;
 static patina_host_close_fn patina_host_close_real;
@@ -768,6 +770,34 @@ int __libc_start_main(patina_main_fn main_fn, int argc, char **argv, void *init,
      * guest's inline rdtsc/rdtscp is answered from the virtual clock instead of
      * reading the host counter. A no-op on every other platform or run. */
     patina_tsc_init(argc, argv);
+#ifndef PR_SET_THP_DISABLE
+#define PR_SET_THP_DISABLE 41
+#endif
+    /* The virtual kernel runs the process with transparent huge pages off (what
+     * PR_GET_THP_DISABLE answers), so page residency is page-exact on every
+     * host. Fail closed: a guest told THP is off must not run with it on. */
+    if (patina_host_prctl == NULL) {
+        patina_host_prctl = (patina_prctl_fn)__real_dlsym(RTLD_NEXT, "prctl");
+    }
+    if (patina_host_prctl == NULL || patina_host_prctl(PR_SET_THP_DISABLE, 1, 0, 0, NULL) != 0) {
+        patina_sud_report_fatal("could not disable transparent huge pages (PR_SET_THP_DISABLE)");
+    }
+    /* Every mapped file and System V segment of the guest is one host memfd,
+     * beside the shim's own descriptors, so the host's soft RLIMIT_NOFILE is
+     * the budget of guest mappings. Raise it to the hard limit (process-local:
+     * the guest's RLIMIT_NOFILE is the virtual table's). A memfd the host still
+     * refuses is a named fatal, never a guest errno. */
+    patina_setrlimit_fn host_getrlimit = (patina_setrlimit_fn)__real_dlsym(RTLD_NEXT, "getrlimit");
+    patina_setrlimit_fn host_setrlimit = (patina_setrlimit_fn)__real_dlsym(RTLD_NEXT, "setrlimit");
+    struct rlimit descriptors;
+    if (host_getrlimit == NULL || host_setrlimit == NULL ||
+        host_getrlimit(RLIMIT_NOFILE, &descriptors) != 0) {
+        patina_sud_report_fatal("could not read the host's RLIMIT_NOFILE");
+    }
+    descriptors.rlim_cur = descriptors.rlim_max;
+    if (host_setrlimit(RLIMIT_NOFILE, &descriptors) != 0) {
+        patina_sud_report_fatal("could not raise the host's soft RLIMIT_NOFILE to its hard limit");
+    }
     patina_libc_start_main_fn real =
         (patina_libc_start_main_fn)__real_dlsym(RTLD_NEXT, "__libc_start_main");
     if (real == NULL) {

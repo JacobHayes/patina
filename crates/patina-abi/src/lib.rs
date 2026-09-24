@@ -324,6 +324,25 @@ pub const DEFAULT_DIRECTORY_CREATE_MODE: u32 = 0o777;
 /// `umask(2)` of its own (the WASI host) applies to every creating call.
 pub const DEFAULT_UMASK: u32 = 0o022;
 
+/// The `F_SEAL_*` bits (uapi/linux/fcntl.h) an anonymous file's seal set is
+/// made of: [`Operation::FsCreateAnonymous`] and [`Operation::FsAddSeals`]
+/// carry them, and the filesystem enforces them.
+pub mod seals {
+    pub const F_SEAL_SEAL: u32 = 0x1;
+    pub const F_SEAL_SHRINK: u32 = 0x2;
+    pub const F_SEAL_GROW: u32 = 0x4;
+    pub const F_SEAL_WRITE: u32 = 0x8;
+    pub const F_SEAL_FUTURE_WRITE: u32 = 0x10;
+    pub const F_SEAL_EXEC: u32 = 0x20;
+    /// Every seal a 6.8 kernel defines.
+    pub const F_ALL_SEALS: u32 = F_SEAL_SEAL
+        | F_SEAL_SHRINK
+        | F_SEAL_GROW
+        | F_SEAL_WRITE
+        | F_SEAL_FUTURE_WRITE
+        | F_SEAL_EXEC;
+}
+
 impl OpenFlags {
     pub const fn read_only() -> Self {
         Self {
@@ -866,6 +885,40 @@ pub enum Operation {
         offset: u64,
         #[serde(with = "bytes_base64")]
         bytes: Vec<u8>,
+    },
+    /// What a shared mapping of the descriptor's file stored, written into the
+    /// file: the page cache's write-back, not a guest `write`. Write seals do
+    /// not refuse it (a mapping that was writable before `F_SEAL_FUTURE_WRITE`
+    /// keeps writing); it counts toward the `write` crash ordinal like
+    /// [`Operation::FsWriteAt`].
+    FsWriteBackAt {
+        fd: Fd,
+        offset: u64,
+        #[serde(with = "bytes_base64")]
+        bytes: Vec<u8>,
+    },
+    /// `memfd_create`: a regular file no name reaches, opened read-write.
+    /// `mode` is its permission bits and `seals` its initial `F_SEAL_*` set
+    /// ([`seals`]); `name` is the caller's, which names nothing.
+    FsCreateAnonymous {
+        name: String,
+        mode: u32,
+        seals: u32,
+        /// The huge page size of a hugetlbfs file (`MFD_HUGETLB`), 0 for a
+        /// shmem one.
+        huge_page: u64,
+    },
+    /// `fcntl(F_GET_SEALS)`: the seals of a descriptor's node, as
+    /// [`Outcome::U64`]. A node that cannot be sealed is `InvalidInput`.
+    FsSeals {
+        fd: Fd,
+    },
+    /// `fcntl(F_ADD_SEALS)`. `writably_mapped` says a shared mapping that may
+    /// write the node is live, which refuses a new `F_SEAL_WRITE` (`Busy`).
+    FsAddSeals {
+        fd: Fd,
+        seals: u32,
+        writably_mapped: bool,
     },
     FsClose {
         fd: Fd,

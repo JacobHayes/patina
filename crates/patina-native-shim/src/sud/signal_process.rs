@@ -53,6 +53,10 @@ struct PrctlState {
     dumpable: u32,
     no_new_privs: bool,
     timerslack_ns: u64,
+    /// `MMF_DISABLE_THP` as the guest last set it. The host process runs with
+    /// THP off whatever the guest asks (`__libc_start_main`), so residency
+    /// stays per base page.
+    thp_disabled: bool,
 }
 
 impl PrctlState {
@@ -63,6 +67,7 @@ impl PrctlState {
             dumpable: 1,
             no_new_privs: false,
             timerslack_ns: DEFAULT_TIMERSLACK_NS,
+            thp_disabled: true,
         }
     }
 }
@@ -192,8 +197,14 @@ pub(super) fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: 
 
     let mut state = PRCTL_STATE.lock().unwrap();
     match option {
-        PR_SET_VMA | PR_SET_THP_DISABLE => 0,
-        PR_GET_THP_DISABLE => 1,
+        PR_SET_VMA => 0,
+        PR_SET_THP_DISABLE if arg3 != 0 || arg4 != 0 || arg5 != 0 => -EINVAL,
+        PR_SET_THP_DISABLE => {
+            state.thp_disabled = arg2 != 0;
+            0
+        }
+        PR_GET_THP_DISABLE if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 => -EINVAL,
+        PR_GET_THP_DISABLE => i64::from(state.thp_disabled),
         PR_SET_NAME => prctl_set_name(&mut state, arg2),
         PR_GET_NAME => prctl_get_name(&state, arg2),
         PR_SET_PDEATHSIG => {

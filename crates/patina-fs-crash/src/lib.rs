@@ -1072,6 +1072,46 @@ impl FsDriver for CrashFs {
         Ok(written)
     }
 
+    /// A mapping's write-back is unsynced data like a positional write.
+    fn write_back_at(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        bytes: &[u8],
+    ) -> DriverResult<usize> {
+        let written = self.live.write_back_at(clock, fd, offset, bytes)?;
+        if let (Ok(offset), Some(path)) =
+            (usize::try_from(offset), self.open_paths.get(&fd).cloned())
+        {
+            self.last_write = Some((path, offset, written));
+        }
+        Ok(written)
+    }
+
+    /// An anonymous file has no name for the durable baseline to carry: it is
+    /// process state, like the bytes in a pipe, and a restart has nothing
+    /// that could reach it.
+    fn create_anonymous(
+        &mut self,
+        clock: FsClock,
+        name: &str,
+        mode: u32,
+        seals: u32,
+        huge_page: u64,
+    ) -> DriverResult<Fd> {
+        self.live
+            .create_anonymous(clock, name, mode, seals, huge_page)
+    }
+
+    fn seals(&mut self, fd: Fd) -> DriverResult<u32> {
+        self.live.seals(fd)
+    }
+
+    fn add_seals(&mut self, fd: Fd, seals: u32, writably_mapped: bool) -> DriverResult<()> {
+        self.live.add_seals(fd, seals, writably_mapped)
+    }
+
     fn close(&mut self, fd: Fd) -> DriverResult<()> {
         self.live.close(fd)?;
         self.open_paths.remove(&fd);

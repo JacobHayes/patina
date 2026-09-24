@@ -23,10 +23,8 @@
 //! The allowed node is the host's (`MPOL_F_MEMS_ALLOWED`); the scenario
 //! needs exactly one, so node numbers are compared as it answers them.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::probe::{At, Probe, neg, page_size};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -228,15 +226,5 @@ pub const SCENARIO: Scenario = Scenario {
         release: "5.17",
         why: "set_mempolicy_home_node first appears in Linux 5.17 (the registry row carries no date)",
     }),
-    gaps: &[Gap {
-        status: Status::Pending(Arc::MemoryIpc),
-        vehicles: Vehicle::ALL,
-        what: "get_mempolicy is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no get_mempolicy wrapper)",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall get_mempolicy (nr",
-        },
-    }],
     ..DEFAULTS
 };

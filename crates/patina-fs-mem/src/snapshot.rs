@@ -236,6 +236,8 @@ impl FsSnapshot {
                     openers: 0,
                     times,
                     mode,
+                    seals: None,
+                    huge_page: 0,
                 },
             );
         }

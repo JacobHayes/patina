@@ -21,10 +21,8 @@
 //! The execute bits of a memfd's mode follow the `vm.memfd_noexec` sysctl (a
 //! host setting), so its mode is compared within `0o666`.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 use crate::probe::{At, Probe, neg, page_size};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -231,16 +229,6 @@ pub const SCENARIO: Scenario = Scenario {
         "munmap",
         "pipe2",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::MemoryIpc),
-        vehicles: Vehicle::ALL,
-        what: "memfd_create is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no memfd_create wrapper)",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall memfd_create (nr",
-        },
-    }],
     kernel_floor: Some(KernelFloor {
         release: "5.1",
         why: "F_SEAL_FUTURE_WRITE first appears in Linux 5.1",

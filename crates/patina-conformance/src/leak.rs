@@ -24,19 +24,23 @@ pub const STRACE_EVENTS: &str = concat!(
 );
 
 /// Process-local rows with no filesystem, network, clock or entropy reach: the
-/// loader and allocator (the registry's `Passthrough` memory rows, `mremap`
-/// among them: glibc's `realloc` moves large blocks with it), signal-frame
+/// loader and allocator, the memory rows over process-local address space
+/// (`mremap` also moves glibc's large `realloc` blocks), signal-frame
 /// bookkeeping, and the rows a managed thread's host `pthread_create` issues.
+/// `mmap` and `msync` are judged by what they map ([`Filter::judge`]): the
+/// memory model's host calls map only anonymous memory and memfds. The `mlock`
+/// family is not here: page locks are the memory model's bookkeeping, and a
+/// host lock would answer from the host's `RLIMIT_MEMLOCK`.
 const PROCESS_LOCAL: &[&str] = &[
     "execve",
     "brk",
     "arch_prctl",
-    "mmap",
-    "mmap2",
     "munmap",
     "mremap",
     "mprotect",
     "madvise",
+    "mincore",
+    "remap_file_pages",
     "futex",
     "sched_yield",
     "sigaltstack",
@@ -152,10 +156,52 @@ struct Filter {
     pid: String,
     /// Descriptors open on a trusted loader path.
     trusted: BTreeSet<String>,
+    /// The memory model's memfds (`memfd_create("patina-page-cache",
+    /// MFD_CLOEXEC)`): the anonymous memory its page caches and segments are
+    /// made of, which it reads, writes, sizes, punches and maps.
+    memfds: BTreeSet<String>,
+    /// The address ranges mapped from a file (a trusted loader descriptor):
+    /// an `msync` reaching one would write a host file.
+    file_maps: Vec<(u64, u64)>,
     escaped: Vec<String>,
 }
 
+/// A call's top-level arguments.
+fn arguments(args: &str) -> Vec<&str> {
+    let args = args.rsplit_once(')').map_or(args, |(inner, _)| inner);
+    args.split(", ").map(str::trim).collect()
+}
+
+/// A number strace printed: decimal, or `0x` hexadecimal.
+fn number(text: &str) -> Option<u64> {
+    match text.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
+}
+
 impl Filter {
+    /// Remove `[start, end)` from the file-mapped ranges; whether it held any.
+    fn cut_file_maps(&mut self, start: u64, end: u64) -> bool {
+        let mut held = false;
+        let mut kept = Vec::new();
+        for (from, to) in self.file_maps.drain(..) {
+            if start < to && from < end {
+                held = true;
+                if from < start {
+                    kept.push((from, start));
+                }
+                if end < to {
+                    kept.push((end, to));
+                }
+            } else {
+                kept.push((from, to));
+            }
+        }
+        self.file_maps = kept;
+        held
+    }
+
     /// Judge one whole call issued by thread `caller`; `torn_down` when the
     /// thread was gone before the call returned.
     fn judge(&mut self, caller: &str, line: String, torn_down: bool) {
@@ -194,7 +240,74 @@ impl Filter {
         if name == "close" {
             if let Some(fd) = leading_fd(args) {
                 self.trusted.remove(fd);
+                self.memfds.remove(fd);
             }
+        }
+        // What an unmapped range held is gone; a moved file range moves.
+        if matches!(name, "munmap" | "mremap") {
+            let parts = arguments(args);
+            let start = parts.first().and_then(|start| number(start));
+            let len = parts.get(1).and_then(|len| number(len));
+            if let (Some(start), Some(len)) = (start, len) {
+                let moved = self.cut_file_maps(start, start + len);
+                let target = line
+                    .rsplit_once('=')
+                    .and_then(|(_, value)| number(value.trim()));
+                let new_len = parts.get(2).and_then(|len| number(len));
+                if let (true, "mremap", Some(target), Some(new_len)) =
+                    (moved, name, target, new_len)
+                {
+                    self.file_maps.push((target, target + new_len));
+                }
+            }
+        }
+        // The memory model's own memfds, by the one name and flag set it
+        // creates them with; any other memfd reaching the host escapes.
+        if name == "memfd_create" {
+            if !args.starts_with("\"patina-page-cache\", MFD_CLOEXEC)") {
+                self.escaped.push(line);
+                return;
+            }
+            if let Some(fd) = returned {
+                self.memfds.insert(fd.to_string());
+            }
+            return;
+        }
+        if matches!(name, "mmap" | "mmap2") {
+            let parts = arguments(args);
+            let fd = parts.get(4).copied().unwrap_or("");
+            if fd == "-1" || self.memfds.contains(fd) {
+                return;
+            }
+            if self.trusted.contains(fd) {
+                let start = line
+                    .rsplit_once('=')
+                    .and_then(|(_, value)| number(value.trim()));
+                let len = parts.get(1).and_then(|len| number(len));
+                if let (Some(start), Some(len)) = (start, len) {
+                    self.file_maps.push((start, start + len));
+                }
+                return;
+            }
+            self.escaped.push(line);
+            return;
+        }
+        if name == "msync" {
+            let parts = arguments(args);
+            let start = parts.first().and_then(|start| number(start));
+            let len = parts.get(1).and_then(|len| number(len));
+            if let (Some(start), Some(len)) = (start, len) {
+                let end = start + len;
+                if !self
+                    .file_maps
+                    .iter()
+                    .any(|(from, to)| start < *to && *from < end)
+                {
+                    return;
+                }
+            }
+            self.escaped.push(line);
+            return;
         }
         if PROCESS_LOCAL.contains(&name) {
             return;
@@ -225,6 +338,12 @@ impl Filter {
                     return;
                 }
             }
+        }
+        // The calls the page cache makes on its memfds (`src/mem/cache.rs`).
+        if matches!(name, "pread64" | "pwrite64" | "ftruncate" | "fallocate")
+            && leading_fd(args).is_some_and(|fd| self.memfds.contains(fd))
+        {
+            return;
         }
         if name == "write"
             && args.len() >= 2
@@ -274,6 +393,50 @@ mod tests {
                      4242 write(1, \"{}\\n\", 3)                 = 3\n\
                      4242 exit_group(0)                        = ?\n";
         assert!(escapes(trace).is_empty(), "{:?}", escapes(trace));
+    }
+
+    /// `mmap` is judged by its descriptor: anonymous memory, the memory
+    /// model's memfd and a loader file stay inside, any other file escapes —
+    /// and so does an `msync` of a range mapped from a file, a memfd by any
+    /// other name, a call on the model's memfd it never makes, and a host
+    /// page lock.
+    #[test]
+    fn mappings_are_judged_by_what_they_map() {
+        let trace = r#"4242 execve("/x/probe", ["/x/probe"], 0x7ffd /* 3 vars */) = 0
+4242 openat(AT_FDCWD, "/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC) = 3
+4242 mmap(NULL, 8192, PROT_READ, MAP_PRIVATE|MAP_DENYWRITE, 3, 0) = 0x7f0000000000
+4242 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f0000010000
+4242 memfd_create("patina-page-cache", MFD_CLOEXEC) = 6
+4242 ftruncate(6, 4096)                   = 0
+4242 pwrite64(6, "x", 1, 0)              = 1
+4242 pread64(6, "x", 1, 0)               = 1
+4242 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_SHARED, 6, 0) = 0x7f0000020000
+4242 msync(0x7f0000020000, 4096, MS_SYNC) = 0
+4242 msync(0x7f0000000000, 4096, MS_SYNC) = 0
+4242 munmap(0x7f0000000000, 4096)         = 0
+4242 msync(0x7f0000000000, 4096, MS_SYNC) = -1 ENOMEM (Cannot allocate memory)
+4242 msync(0x7f0000001000, 4096, MS_SYNC) = 0
+4242 mmap(NULL, 4096, PROT_READ, MAP_SHARED, 5, 0) = 0x7f0000030000
+4242 fstat(6, {st_mode=S_IFREG|0777, st_size=4096, ...}) = 0
+4242 memfd_create("guest", MFD_CLOEXEC) = 7
+4242 read(7, "x", 1)                     = 1
+4242 mlock(0x7f0000010000, 4096)          = 0
+4242 close(6)                             = 0
+4242 pwrite64(6, "x", 1, 0)              = 1
+"#;
+        assert_eq!(
+            calls(escapes(trace)),
+            [
+                "msync(0x7f0000000000, 4096, MS_SYNC)",
+                "msync(0x7f0000001000, 4096, MS_SYNC)",
+                "mmap(NULL, 4096, PROT_READ, MAP_SHARED, 5, 0)",
+                "fstat(6, {st_mode=S_IFREG|0777, st_size=4096, ...})",
+                "memfd_create(\"guest\", MFD_CLOEXEC)",
+                "read(7, \"x\", 1)",
+                "mlock(0x7f0000010000, 4096)",
+                "pwrite64(6, \"x\", 1, 0)",
+            ]
+        );
     }
 
     #[test]

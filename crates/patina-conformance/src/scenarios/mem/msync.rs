@@ -5,10 +5,8 @@
 //! `EINVAL`; a range that is not entirely mapped is `ENOMEM`; length 0
 //! succeeds. (A file mapping's write-back is `mem/mmap_file`.)
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{At, Probe, neg, page_size};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -73,56 +71,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[Syscall::N_msync],
     symbols: &["msync", "mmap", "munmap"],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::MemoryIpc),
-            vehicles: &[Vehicle::Libc],
-            what: "the msync interposer (c/posix/mem.c) fails closed with ENOSYS for any range that is not a modeled file-backed mapping, anonymous memory included, before it judges flags, alignment or the range",
-            failure: Failure::Differs(&[
-                Difference::field(1, "msync", "errno", Observed::Str("ENOSYS")),
-                Difference::field(1, "msync", "ret", Observed::Int(-1)),
-                Difference::check(2, "MS_SYNC of anonymous memory succeeds"),
-                Difference::field(3, "msync", "errno", Observed::Str("ENOSYS")),
-                Difference::field(3, "msync", "ret", Observed::Int(-1)),
-                Difference::check(4, "MS_ASYNC succeeds"),
-                Difference::field(5, "msync", "errno", Observed::Str("ENOSYS")),
-                Difference::field(5, "msync", "ret", Observed::Int(-1)),
-                Difference::check(6, "MS_INVALIDATE succeeds"),
-                Difference::field(7, "msync", "errno", Observed::Str("ENOSYS")),
-                Difference::field(7, "msync", "ret", Observed::Int(-1)),
-                Difference::check(8, "MS_SYNC with MS_INVALIDATE succeeds"),
-                Difference::field(9, "msync", "errno", Observed::Str("ENOSYS")),
-                Difference::field(9, "msync", "ret", Observed::Int(-1)),
-                Difference::check(10, "no flag at all succeeds"),
-                Difference::field(12, "msync", "errno", Observed::Str("ENOSYS")),
-                Difference::check(13, "MS_SYNC with MS_ASYNC is EINVAL"),
-                Difference::field(14, "msync", "errno", Observed::Str("ENOSYS")),
-                Difference::check(15, "an unknown flag is EINVAL"),
-                Difference::field(16, "msync", "errno", Observed::Str("ENOSYS")),
-                Difference::check(17, "a misaligned address is EINVAL"),
-                Difference::field(18, "msync", "errno", Observed::Str("ENOSYS")),
-                Difference::field(18, "msync", "ret", Observed::Int(-1)),
-                Difference::check(19, "length 0 succeeds"),
-                Difference::field(22, "msync", "errno", Observed::Str("ENOSYS")),
-                Difference::check(23, "a range reaching past the mapping is ENOMEM"),
-                Difference::field(24, "msync", "errno", Observed::Str("ENOSYS")),
-                Difference::check(25, "an unmapped range is ENOMEM"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::MemoryIpc),
-            vehicles: &[
-                Vehicle::Syscall,
-                #[cfg(target_arch = "x86_64")]
-                Vehicle::Raw,
-            ],
-            what: "msync is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name",
-            failure: Failure::Stops {
-                events: 1,
-                ending: Ending::Signal(libc::SIGABRT),
-                diagnostic: "patina: SUD trapped unsupported syscall msync (nr",
-            },
-        },
-    ],
     ..DEFAULTS
 };

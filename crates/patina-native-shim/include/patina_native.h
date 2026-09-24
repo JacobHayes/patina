@@ -75,6 +75,7 @@ enum {
     PATINA_FD_EPOLL = 10,  /* an epoll instance (Linux) */
     PATINA_FD_KQUEUE = 11, /* a kqueue (Darwin) */
     PATINA_FD_SIGNALFD = 12, /* a virtual signal queue reader (Linux) */
+    PATINA_FD_MQUEUE = 13,   /* a POSIX message queue (Linux) */
 };
 
 enum {
@@ -357,16 +358,46 @@ int32_t patina_dup2(int32_t oldfd, int32_t newfd);
 int32_t patina_dup3(int32_t oldfd, int32_t newfd, int32_t cloexec);
 int32_t patina_close_range(uint32_t first, uint32_t last, uint32_t flags);
 /*
- * A hidden reference on a descriptor's description -- what a file-backed
- * mapping holds so its writeback survives the guest closing the number, as the
- * kernel's mapping holds the struct file. patina_fd_retain returns the
- * description id (or -1/EBADF); patina_desc_pwrite is pwrite through it;
- * patina_desc_release drops it, freeing the description with its last
- * reference exactly as the last close would.
+ * Memory mappings (src/mem.rs), the one model the C mmap/mmap64/munmap/mremap/
+ * msync interposers and the SUD rows share. Each answers in the raw syscall
+ * ABI: the address (or 0) on success, -errno on failure. An anonymous mapping
+ * is host address space; a mapping of a deterministic-filesystem file is a
+ * view of that file's page cache, coherent with read/write through every
+ * descriptor on the file.
  */
-int64_t patina_fd_retain(int32_t fd);
-intptr_t patina_desc_pwrite(int64_t desc, const void *source, size_t length, int64_t offset);
-int32_t patina_desc_release(int64_t desc);
+int64_t patina_mmap(uintptr_t addr, size_t length, int32_t prot, int32_t flags, int32_t fd,
+                    int64_t offset);
+int64_t patina_munmap(uintptr_t addr, size_t length);
+int64_t patina_mremap(uintptr_t old_addr, size_t old_length, size_t new_length, uintptr_t flags,
+                      uintptr_t new_addr);
+int64_t patina_msync(uintptr_t addr, size_t length, int32_t flags);
+int64_t patina_mprotect(uintptr_t addr, size_t length, int32_t prot);
+/*
+ * Memory locks against the virtual RLIMIT_MEMLOCK (never the host's): mlock
+ * and mlock2 (flags: MLOCK_ONFAULT), munlock, mlockall, munlockall.
+ */
+int64_t patina_mlock(uintptr_t addr, size_t length, uint32_t flags);
+int64_t patina_munlock(uintptr_t addr, size_t length);
+int64_t patina_mlockall(int32_t flags);
+int64_t patina_munlockall(void);
+/*
+ * prlimit64 of the virtual process (pid 0 or 1): the old limits into `old`
+ * when non-NULL, then `new` when non-NULL. 0 or -errno.
+ */
+struct patina_rlimit {
+    uint64_t cur;
+    uint64_t max;
+};
+int64_t patina_prlimit(int32_t pid, uint32_t resource, const struct patina_rlimit *new_limit,
+                       struct patina_rlimit *old_limit);
+/*
+ * Anonymous files (src/mem.rs): memfd_create over the deterministic
+ * filesystem, and the fcntl seal commands (F_GET_SEALS answers the seals,
+ * F_ADD_SEALS adds them). Each returns -1 with patina_errno() on failure.
+ */
+int32_t patina_memfd_create(const char *name, uint32_t flags);
+int32_t patina_get_seals(int32_t fd);
+int32_t patina_add_seals(int32_t fd, uint32_t seals);
 enum {
     PATINA_ENTRY_FILE = 1,
     PATINA_ENTRY_DIRECTORY = 2,

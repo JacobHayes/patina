@@ -265,7 +265,9 @@ fn fd_path(guest_fd: c_int, empty_path: bool) -> Result<String, c_int> {
         | FdKind::Socket
         | FdKind::Pipe => return Err(ENOTDIR),
         #[cfg(target_os = "linux")]
-        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd => return Err(ENOTDIR),
+        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::MessageQueue => {
+            return Err(ENOTDIR);
+        }
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => return Err(ENOTDIR),
     };

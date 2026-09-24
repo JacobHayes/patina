@@ -92,12 +92,15 @@ impl Position {
 
 fn read_file_at(handle: Fd, offset: i64, len: usize) -> Result<Vec<u8>, c_int> {
     let offset = u64::try_from(offset).map_err(|_| EINVAL)?;
+    crate::mem::reading(handle.0);
     with_context(|context| context.fs_read_at(handle, offset, len))
 }
 
 fn write_file_at(handle: Fd, offset: i64, bytes: &[u8]) -> Result<usize, c_int> {
     let offset = u64::try_from(offset).map_err(|_| EINVAL)?;
-    with_context(|context| context.fs_write_at(handle, offset, bytes))
+    let written = with_context(|context| context.fs_write_at(handle, offset, bytes))?;
+    crate::mem::written(handle.0, offset, &bytes[..written.min(bytes.len())]);
+    Ok(written)
 }
 
 /// `copy_file_range(2)`: both descriptors first (`EBADF`), the offsets read,

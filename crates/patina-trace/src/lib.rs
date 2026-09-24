@@ -84,7 +84,22 @@ pub use handoff::{
 /// siginfo code and payload. Format-8 bundles contain no such variant, so
 /// migration preserves their observations and advances only the version tag.
 /// This does not promise replay compatibility with changed signal semantics.
-pub const TRACE_FORMAT_VERSION: u32 = 9;
+///
+/// Format 10 names the operations the filesystem and memory families added
+/// since format 9. The filesystem rows' `fs_sync_all`, `fs_make_node`,
+/// `fs_rename_whiteout`, `fs_exchange`, the four xattr operations and the
+/// `socket` and `char_device` entry kinds shipped under format 9 without a
+/// bump, so a format-9 bundle recorded after them may carry them (and a
+/// reader from before them fails on such a bundle by operation, not by
+/// version); format 10 bumps for them together with the page cache's and
+/// anonymous files' `fs_write_back_at`, `fs_create_anonymous`, `fs_seals` and
+/// `fs_add_seals`. Every one of these variants is unchanged by the bump, so a
+/// format-9 bundle, with or without them, migrates by its version tag alone,
+/// and a format-9 reader refuses a format-10 bundle as an unsupported
+/// version. This does not promise replay compatibility for a run whose
+/// recorded operations changed: a guest that maps a file records its page
+/// cache's operations now.
+pub const TRACE_FORMAT_VERSION: u32 = 10;
 /// The oldest trace format version this runtime can read. A bundle at this
 /// version, or any later supported version, is migrated in memory through the
 /// `MIGRATIONS` chain up to [`TRACE_FORMAT_VERSION`] and then validated by
@@ -2241,6 +2256,7 @@ const MIGRATIONS: &[Migration] = &[
     migrate_v6_to_v7,
     migrate_v7_to_v8,
     migrate_v8_to_v9,
+    migrate_v9_to_v10,
 ];
 
 // One migration step must exist for each supported prior version; this keeps
@@ -2666,6 +2682,19 @@ fn migrate_v8_to_v9(mut value: serde_json::Value) -> Result<serde_json::Value, T
     Ok(value)
 }
 
+/// Upgrade format 9 to format 10.
+///
+/// Format 10 names the filesystem and memory families' operation variants,
+/// some of which format-9 bundles already carry unchanged, so the migration
+/// is an identity transform apart from the version tag.
+fn migrate_v9_to_v10(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| TraceError::Invalid("format 9 trace is not a JSON object".into()))?;
+    object.insert("format_version".into(), serde_json::Value::from(10u32));
+    Ok(value)
+}
+
 fn value_contains_legacy_fs_crash(value: &serde_json::Value) -> bool {
     fn event_is_fs_crash(event: &serde_json::Value) -> bool {
         event
@@ -2755,13 +2784,73 @@ mod tests {
     }
 
     #[test]
+    fn format_9_migrates_to_10() {
+        let bytes = include_bytes!("../tests/fixtures/format-9.patina");
+        let format9: TraceBundle = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(format9.format_version, 9);
+        let migrated = TraceBundle::from_slice(bytes).unwrap();
+        assert_eq!(TRACE_FORMAT_VERSION, 10);
+        assert_eq!(migrated.format_version, 10);
+        assert_eq!(
+            migrated.resolved_timeline("main").unwrap(),
+            format9.timelines[0].decisions
+        );
+
+        // Checked-in feature fixture pins the page cache's and anonymous
+        // files' operations and one of the filesystem family's.
+        let bytes = include_bytes!("../tests/fixtures/format-10-memory.patina");
+        let bundle = TraceBundle::from_slice(bytes).unwrap();
+        bundle.validate().unwrap();
+        assert_eq!(bundle.to_bytes().unwrap(), bytes);
+        let expected = [
+            (
+                Operation::FsCreateAnonymous {
+                    name: "buffer".into(),
+                    mode: 0o777,
+                    seals: 1,
+                    huge_page: 0,
+                },
+                Outcome::Handle(Fd(4)),
+            ),
+            (
+                Operation::FsAddSeals {
+                    fd: Fd(4),
+                    seals: 8,
+                    writably_mapped: false,
+                },
+                Outcome::Unit,
+            ),
+            (Operation::FsSeals { fd: Fd(4) }, Outcome::U64(9)),
+            (
+                Operation::FsWriteBackAt {
+                    fd: Fd(3),
+                    offset: 4096,
+                    bytes: b"mapped".to_vec(),
+                },
+                Outcome::Usize(6),
+            ),
+            (
+                Operation::FsRenameWhiteout {
+                    from: "/a".into(),
+                    to: "/b".into(),
+                },
+                Outcome::Unit,
+            ),
+        ];
+        let mut replay = Replayer::from_bundle(bundle, "fixture-fingerprint", "main").unwrap();
+        for (operation, outcome) in expected {
+            assert_eq!(replay.expect(&operation).unwrap(), outcome);
+        }
+        replay.finish().unwrap();
+    }
+
+    #[test]
     fn format_8_migrates_to_9() {
         let bytes = include_bytes!("../tests/fixtures/format-8.patina");
         let format8: TraceBundle = serde_json::from_slice(bytes).unwrap();
         assert_eq!(format8.format_version, 8);
         let migrated = TraceBundle::from_slice(bytes).unwrap();
-        assert_eq!(TRACE_FORMAT_VERSION, 9);
-        assert_eq!(migrated.format_version, 9);
+        assert_eq!(migrated.format_version, TRACE_FORMAT_VERSION);
         assert_eq!(
             migrated.resolved_timeline("main").unwrap(),
             format8.timelines[0].decisions
@@ -2775,8 +2864,12 @@ mod tests {
         let bytes = include_bytes!("../tests/fixtures/format-9-signals.patina");
         let bundle = TraceBundle::from_slice(bytes).unwrap();
         bundle.validate().unwrap();
-        assert_eq!(bundle.format_version, 9);
-        assert_eq!(bundle.to_bytes().unwrap(), bytes);
+        assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
+        // The migrated bundle re-encodes to the fixture under the current tag.
+        let current = String::from_utf8(bytes.to_vec())
+            .unwrap()
+            .replace("\"format_version\":9,", "\"format_version\":10,");
+        assert_eq!(bundle.to_bytes().unwrap(), current.into_bytes());
         let expected = [
             Operation::SignalGenerated {
                 seq: 1,

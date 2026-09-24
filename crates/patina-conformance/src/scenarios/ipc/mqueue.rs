@@ -29,12 +29,10 @@
 //! every path.
 
 use super::owned::Owned;
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::owned;
 use crate::probe::{Deadline, Notify, Probe, neg};
 use crate::signals as support;
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -279,15 +277,5 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &["syscall", "close"],
     needs: &[Need::PosixMqueue],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::MemoryIpc),
-        vehicles: Vehicle::ALL,
-        what: "mq_open is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no mq_open wrapper)",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall mq_open (nr",
-        },
-    }],
     ..DEFAULTS
 };

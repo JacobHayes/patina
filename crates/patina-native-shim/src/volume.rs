@@ -47,6 +47,7 @@ const PIPEFS_MAGIC: i64 = 0x5049_5045;
 const SOCKFS_MAGIC: i64 = 0x534F_434B;
 const ANON_INODE_FS_MAGIC: i64 = 0x0904_1934;
 const TMPFS_MAGIC: i64 = 0x0102_1994;
+const MQUEUE_MAGIC: i64 = 0x1980_0202;
 
 /// `statfs(2)` `f_flags`: the answer is valid (`ST_VALID`, set by
 /// `calculate_f_flags` on every answer) and the mount's atime policy.
@@ -60,6 +61,8 @@ const NAME_MAX: i64 = 255;
 /// The anonymous devices anon_inodefs and devtmpfs are on.
 const ANON_INODEFS_DEVICE: (u32, u32) = (0, 15);
 const DEVTMPFS_DEVICE: (u32, u32) = (0, 5);
+/// The IPC namespace's internal mqueue mount, where `mq_open` descriptors live.
+const MQUEUE_DEVICE: (u32, u32) = (0, 26);
 
 /// A filesystem a node can be on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,15 +72,17 @@ enum Filesystem {
     Sockfs,
     AnonInodefs,
     Devtmpfs,
+    Mqueue,
 }
 
 impl Filesystem {
-    const ALL: [Filesystem; 5] = [
+    const ALL: [Filesystem; 6] = [
         Filesystem::Volume,
         Filesystem::Pipefs,
         Filesystem::Sockfs,
         Filesystem::AnonInodefs,
         Filesystem::Devtmpfs,
+        Filesystem::Mqueue,
     ];
 
     fn device(self) -> (u32, u32) {
@@ -87,6 +92,7 @@ impl Filesystem {
             Filesystem::Sockfs => fs_device(PATINA_FS_SOCKFS),
             Filesystem::AnonInodefs => ANON_INODEFS_DEVICE,
             Filesystem::Devtmpfs => DEVTMPFS_DEVICE,
+            Filesystem::Mqueue => MQUEUE_DEVICE,
         }
     }
 
@@ -131,10 +137,14 @@ impl Filesystem {
                 f_flags: ST_VALID | ST_NOSUID | ST_RELATIME,
                 f_spare: [0; 4],
             },
-            Filesystem::Pipefs | Filesystem::Sockfs | Filesystem::AnonInodefs => KernelStatfs {
+            Filesystem::Pipefs
+            | Filesystem::Sockfs
+            | Filesystem::AnonInodefs
+            | Filesystem::Mqueue => KernelStatfs {
                 f_type: match self {
                     Filesystem::Pipefs => PIPEFS_MAGIC,
                     Filesystem::Sockfs => SOCKFS_MAGIC,
+                    Filesystem::Mqueue => MQUEUE_MAGIC,
                     _ => ANON_INODE_FS_MAGIC,
                 },
                 f_bsize: crate::PAGE_SIZE as i64,
@@ -162,6 +172,7 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
         },
         FdKind::Socket => Ok(Filesystem::Sockfs),
         FdKind::EventFd | FdKind::SignalFd | FdKind::Epoll => Ok(Filesystem::AnonInodefs),
+        FdKind::MessageQueue => Ok(Filesystem::Mqueue),
         FdKind::Urandom => Ok(Filesystem::Devtmpfs),
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Err(EBADF),
     }

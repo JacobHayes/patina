@@ -13,7 +13,7 @@
 use std::ffi::c_int;
 
 use crate::fdtable::{FdKind, Resolved};
-use crate::{EBADF, EINVAL, ESPIPE, O_READ, fail, fdget, set_errno, thread, with_context};
+use crate::{EBADF, EINVAL, ESPIPE, O_READ, fail, fdget, set_errno, thread};
 
 /// `POSIX_FADV_NORMAL` .. `POSIX_FADV_NOREUSE` (0..=5 on x86_64 and arm64).
 const POSIX_FADV_NOREUSE: c_int = 5;
@@ -43,7 +43,8 @@ fn is_fifo(raw_fd: c_int, resolved: &Resolved) -> bool {
 /// with a mapping `sync_file_range` writes back (the rest are `ESPIPE`).
 fn has_mapping(resolved: &Resolved) -> bool {
     match resolved.kind {
-        FdKind::File | FdKind::Dir => true,
+        // An mqueue inode is a regular file.
+        FdKind::File | FdKind::Dir | FdKind::MessageQueue => true,
         FdKind::OPath
         | FdKind::Stdin
         | FdKind::Stdout
@@ -120,7 +121,7 @@ pub extern "C" fn patina_sync_file_range(
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_sync() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    answered(with_context(|context| context.fs_sync_all()))
+    answered(crate::fs_sync_volume())
 }
 
 /// `syncfs(2)`: the filesystem a descriptor is on made durable. An empty slot
@@ -142,10 +143,11 @@ pub extern "C" fn patina_syncfs(raw_fd: c_int) -> c_int {
             | FdKind::Socket
             | FdKind::EventFd
             | FdKind::SignalFd
-            | FdKind::Epoll => false,
+            | FdKind::Epoll
+            | FdKind::MessageQueue => false,
         };
         if on_volume {
-            with_context(|context| context.fs_sync_all())
+            crate::fs_sync_volume()
         } else {
             Ok(())
         }

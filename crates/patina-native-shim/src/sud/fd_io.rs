@@ -294,6 +294,10 @@ pub(super) fn sys_fcntl(fd: i64, command: u64, arg: u64) -> i64 {
         // SAFETY: no pointers.
         F_DUPFD_CLOEXEC => ret_i32(unsafe { patina_dupfd(cfd, arg as c_int, 1) }),
         // SAFETY: no pointers.
+        F_ADD_SEALS => ret_i32(unsafe { patina_add_seals(cfd, arg as u32) }),
+        // SAFETY: no pointers.
+        F_GET_SEALS => ret_i32(unsafe { patina_get_seals(cfd) }),
+        // SAFETY: no pointers.
         F_GETPIPE_SZ => ret_i32(unsafe { patina_pipe_size(cfd) }),
         // SAFETY: no pointers.
         F_SETPIPE_SZ => ret_i32(unsafe { patina_pipe_set_size(cfd, arg as c_int) }),

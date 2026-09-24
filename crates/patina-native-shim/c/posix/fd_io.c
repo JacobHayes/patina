@@ -121,6 +121,12 @@ int fcntl(int fd, int command, ...) {
         case F_SETPIPE_SZ:
             return fail_int(patina_pipe_set_size(fd, argument));
 #endif
+#ifdef F_ADD_SEALS
+        case F_ADD_SEALS:
+            return fail_int(patina_add_seals(fd, (uint32_t)argument));
+        case F_GET_SEALS:
+            return fail_int(patina_get_seals(fd));
+#endif
 #ifdef __APPLE__
         /* Rust std maps File::sync_all to F_FULLFSYNC on Darwin. */
         case F_FULLFSYNC:

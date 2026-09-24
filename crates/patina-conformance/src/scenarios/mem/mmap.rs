@@ -17,10 +17,8 @@
 //! * the descriptor of a `MAP_ANONYMOUS` mapping is ignored (Linux only
 //!   requires -1 of portable callers).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 use crate::probe::{At, Probe, neg, page_size};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -212,20 +210,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[Syscall::N_mmap, Syscall::N_munmap, Syscall::N_madvise],
     symbols: &["mmap", "munmap"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::MemoryIpc),
-        vehicles: &[
-            Vehicle::Syscall,
-            #[cfg(target_arch = "x86_64")]
-            Vehicle::Raw,
-        ],
-        what: "the SUD mmap row (sud/mem.rs sys_mmap) traps any descriptor but -1 as a file-backed mapping, even under MAP_ANONYMOUS, whose descriptor Linux ignores",
-        failure: Failure::Stops {
-            events: 77,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped a file-backed mmap",
-        },
-    }],
     kernel_floor: Some(KernelFloor {
         release: "5.4",
         why: "MAP_FIXED_NOREPLACE (4.17; older kernels ignore it and map over the page) and MADV_COLD (5.4)",

@@ -6,10 +6,8 @@
 //! expedited barrier is `EPERM` until the process registers for it, then
 //! succeeds, and it too takes no flag.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Need, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::probe::{Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -70,39 +68,6 @@ pub const SCENARIO: Scenario = Scenario {
     covers: &[Syscall::N_membarrier],
     symbols: &["syscall"],
     needs: &[Need::Membarrier],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::MemoryIpc),
-        vehicles: Vehicle::ALL,
-        what: "membarrier is SoftDeny(ENOSYS) in the registry (patina-syscalls linux.rs), a stop-gap: in one process under a cooperative scheduler every barrier is trivially satisfied, so the arc can answer the query mask and the registration state exactly",
-        failure: Failure::Differs(&[
-            Difference::field(0, "membarrier", "errno", Observed::Str("ENOSYS")),
-            Difference::field(0, "membarrier", "ret", Observed::Int(-1)),
-            Difference::check(
-                1,
-                "the query offers the private and global expedited commands",
-            ),
-            Difference::field(2, "membarrier", "errno", Observed::Str("ENOSYS")),
-            Difference::check(3, "the query with a flag is EINVAL"),
-            Difference::field(4, "membarrier", "errno", Observed::Str("ENOSYS")),
-            Difference::check(5, "an unknown command is EINVAL"),
-            Difference::field(6, "membarrier", "errno", Observed::Str("ENOSYS")),
-            Difference::check(
-                7,
-                "the private expedited barrier before registering is EPERM",
-            ),
-            Difference::field(8, "membarrier", "errno", Observed::Str("ENOSYS")),
-            Difference::field(8, "membarrier", "ret", Observed::Int(-1)),
-            Difference::check(9, "registering for it succeeds"),
-            Difference::field(10, "membarrier", "errno", Observed::Str("ENOSYS")),
-            Difference::field(10, "membarrier", "ret", Observed::Int(-1)),
-            Difference::check(11, "then the barrier succeeds"),
-            Difference::field(12, "membarrier", "errno", Observed::Str("ENOSYS")),
-            Difference::field(12, "membarrier", "ret", Observed::Int(-1)),
-            Difference::check(13, "registering again succeeds"),
-            Difference::field(14, "membarrier", "errno", Observed::Str("ENOSYS")),
-            Difference::check(15, "the barrier with a flag is EINVAL"),
-        ]),
-    }],
     kernel_floor: Some(KernelFloor {
         release: "4.16",
         why: "MEMBARRIER_CMD_GLOBAL_EXPEDITED and its registration first appear in Linux 4.16",

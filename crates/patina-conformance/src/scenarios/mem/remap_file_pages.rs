@@ -7,10 +7,8 @@
 //! dropped, not refused. A shared anonymous mapping is a
 //! shmem object, so no file is needed.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 use crate::probe::{At, Probe, neg, page_size};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -74,16 +72,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[Syscall::N_remap_file_pages],
     symbols: &["syscall", "mmap", "munmap"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::MemoryIpc),
-        vehicles: Vehicle::ALL,
-        what: "remap_file_pages is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no remap_file_pages wrapper)",
-        failure: Failure::Stops {
-            events: 1,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall remap_file_pages (nr",
-        },
-    }],
     kernel_floor: Some(KernelFloor {
         release: "4.0",
         why: "remap_file_pages is an emulation over a fresh mmap since Linux 4.0",

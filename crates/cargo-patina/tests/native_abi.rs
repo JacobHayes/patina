@@ -188,6 +188,119 @@ mod linux {
         );
     }
 
+    /// A shared file mapping is a view of the page cache the crash model
+    /// judges: a store through it is what a read returns, an in-process crash
+    /// rolls the file AND the mapping back to the durable image, and
+    /// `msync(MS_SYNC)` makes a store survive the next crash.
+    #[test]
+    fn shared_file_mappings_follow_the_crash_model() {
+        let g = assert_build_c_guest("mmap_crash_probe.c", CLink::PosixShim);
+        let first = assert_standalone_success(&g.binary, &[], &[]).stdout;
+        assert_eq!(first, assert_standalone_success(&g.binary, &[], &[]).stdout);
+        assert_eq!(text(&first), "NATIVE_MMAP_CRASH_RESULT contents=synced!\n");
+    }
+
+    /// Run one `mem_probe.c` mode, with the host's `RLIMIT_MEMLOCK` at zero:
+    /// every lock answer the guest sees must be the virtual kernel's.
+    fn mem_probe(mode: &str) -> std::process::Output {
+        mem_probe_with(mode, None)
+    }
+
+    /// `mem_probe`, with the host's `RLIMIT_NOFILE` (soft and hard) at
+    /// `descriptors` when given.
+    fn mem_probe_with(mode: &str, descriptors: Option<libc::rlim_t>) -> std::process::Output {
+        use std::os::unix::process::CommandExt;
+        let g = assert_build_c_guest("mem_probe.c", CLink::PosixShim);
+        let mut command = std::process::Command::new(&g.binary);
+        command.env_clear().arg(mode);
+        // SAFETY: async-signal-safe calls on the forked child's own limits.
+        unsafe {
+            command.pre_exec(move || {
+                let none = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::setrlimit(libc::RLIMIT_MEMLOCK, &none) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if let Some(count) = descriptors {
+                    let limit = libc::rlimit {
+                        rlim_cur: count,
+                        rlim_max: count,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            })
+        };
+        common::output_with_deadline(&mut command, std::time::Duration::from_secs(20))
+            .expect("mem probe exceeded 20s")
+    }
+
+    fn assert_mem_probe(mode: &str) {
+        let output = mem_probe(mode);
+        assert!(output.status.success(), "{mode}: {output:?}");
+        assert_eq!(
+            text(&output.stdout),
+            format!("NATIVE_MEM_RESULT {mode}=ok\n")
+        );
+    }
+
+    /// `RLIMIT_MEMLOCK` is the virtual 8 MiB whatever the host's is, lowers
+    /// but never rises again, and judges `mlock`.
+    #[test]
+    fn memlock_limit_is_virtual() {
+        assert_mem_probe("limits");
+    }
+
+    /// A shared view that may not write (a read-only file, `SHM_RDONLY`)
+    /// refuses `PROT_WRITE`; a private copy of the same file takes it.
+    #[test]
+    fn mprotect_refuses_write_on_read_only_shared_views() {
+        assert_mem_probe("mprotect");
+    }
+
+    /// Zero hugetlb pages, one answer across `mmap`, `shmget` and `memfd`.
+    #[test]
+    fn hugetlb_has_no_configured_pages() {
+        assert_mem_probe("huge");
+    }
+
+    /// Transparent huge pages are off: one touch makes one page resident.
+    #[test]
+    fn transparent_huge_pages_are_disabled() {
+        assert_mem_probe("thp");
+    }
+
+    /// A touch past the end of a mapped file is `SIGBUS`.
+    #[test]
+    fn touching_past_end_of_file_raises_sigbus() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = mem_probe("sigbus");
+        assert_eq!(output.status.signal(), Some(libc::SIGBUS), "{output:?}");
+    }
+
+    /// `mlock` populates what it locks, and a page no fault reaches (no
+    /// access, past a file's end) is `ENOMEM`.
+    #[test]
+    fn mlock_answers_what_populating_found() {
+        assert_mem_probe("populate");
+    }
+
+    /// Each mapped file holds a host memfd; past the host's descriptor limit
+    /// the shim stops by name instead of answering the guest `EMFILE`.
+    #[test]
+    fn host_descriptor_exhaustion_is_a_named_fatal() {
+        let output = mem_probe_with("descriptors", Some(64));
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            text(&output.stderr).contains("the host refused a memfd for guest memory"),
+            "{output:?}"
+        );
+    }
+
     #[test]
     fn epoll_timeout_advances_exact_virtual_time() {
         let g = Guest::assert_build("epoll_timeout_probe.rs");

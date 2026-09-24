@@ -342,6 +342,51 @@ pub trait FsDriver: Send {
     fn release_inode(&mut self, _ino: u64) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("release inode"))
     }
+    /// Store `bytes` a shared mapping of `fd`'s file wrote at `offset`: the
+    /// page cache's write-back. Like [`FsDriver::write_at`] except that a
+    /// write seal does not refuse it — a mapping writable before
+    /// `F_SEAL_FUTURE_WRITE` keeps writing the file. A filesystem without
+    /// seals has nothing to tell apart.
+    fn write_back_at(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        bytes: &[u8],
+    ) -> DriverResult<usize> {
+        self.write_at(clock, fd, offset, bytes)
+    }
+    /// `memfd_create`: a regular file that no name reaches, on a new
+    /// read-write handle, with permission bits `mode` (no umask: the kernel
+    /// applies none) and the initial seal set `seals`. It lives while a
+    /// descriptor holds it. A nonzero `huge_page` makes it a hugetlbfs file of
+    /// that page size on a machine with no huge pages reserved: `write` is
+    /// `InvalidInput`, a length that is not a multiple of the page size is
+    /// `InvalidInput`, an allocation is `NoSpace`, and every read is a hole.
+    fn create_anonymous(
+        &mut self,
+        _clock: FsClock,
+        _name: &str,
+        _mode: u32,
+        _seals: u32,
+        _huge_page: u64,
+    ) -> DriverResult<Fd> {
+        Err(unsupported_filesystem_operation("anonymous files"))
+    }
+    /// `F_GET_SEALS`: the seal set of `fd`'s node. A node that cannot be
+    /// sealed — every node of a filesystem without anonymous files — is
+    /// [`patina_dst_abi::ErrorCode::InvalidInput`], the kernel's `EINVAL`.
+    fn seals(&mut self, _fd: Fd) -> DriverResult<u32> {
+        Err(not_sealable())
+    }
+    /// `F_ADD_SEALS`, in `memfd_add_seals`' order: a description not open for
+    /// writing is `NotPermitted`, an unknown seal bit `InvalidInput`, a node
+    /// that cannot be sealed `InvalidInput`, a node sealed with `F_SEAL_SEAL`
+    /// `NotPermitted`, and a new `F_SEAL_WRITE` while `writably_mapped` (a
+    /// shared mapping that may write is live) `Busy`.
+    fn add_seals(&mut self, _fd: Fd, _seals: u32, _writably_mapped: bool) -> DriverResult<()> {
+        Err(not_sealable())
+    }
     fn crash(&mut self) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("crash"))
     }
@@ -424,6 +469,13 @@ pub fn xattr_permission(
         return Err(ErrorCode::Denied);
     }
     Ok(namespace)
+}
+
+fn not_sealable() -> EffectError {
+    EffectError::new(
+        patina_dst_abi::ErrorCode::InvalidInput,
+        "no node of this filesystem can be sealed",
+    )
 }
 
 fn unsupported_filesystem_operation(operation: &str) -> EffectError {

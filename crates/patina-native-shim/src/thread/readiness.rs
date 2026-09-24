@@ -156,7 +156,7 @@ pub unsafe extern "C" fn patina_poll(
     remaining: *mut u64,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if count > crate::fdtable::RLIMIT_NOFILE {
+    if count > crate::fd_limit() {
         return -i64::from(EINVAL);
     }
     if count != 0 && fds.is_null() {

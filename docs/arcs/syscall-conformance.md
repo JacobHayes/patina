@@ -276,6 +276,40 @@ forwards into the same dispatcher instead of its two-number allowlist.
   POSIX `shm_*`/`sem_*`/`mq_*` symbols have no registry rows yet: the probe
   cannot import a wrapper the shim leaves undefined (the pre-run audit would
   refuse it), so the scenarios drive the kernel rows under them.
+  Status: file mappings map a per-file page cache (a host memfd; page-granular
+  write-back before a read, mirroring after a write) in one model behind both
+  doors; `memfd_create` and seals live in fs-mem (trace format 10); System V
+  shm/sem/msg and POSIX mq are modeled for one process and its threads,
+  blocking on the scheduler, and every `mem/*` and `ipc/*` scenario passes; NUMA
+  answers for one node; resource limits are a 16-resource virtual table and
+  locking is bookkeeping against its `RLIMIT_MEMLOCK`; no hugetlb pages are
+  configured and THP is off;
+  `mincore`/`remap_file_pages` pass through; `membarrier` is modeled. Left as
+  named traps: protection keys and shadow stacks (CPU state), `memfd_secret`
+  (needs a page-cache fill the filesystem does not refuse), `process_madvise`
+  (needs the signals arc's self pidfd), the Linux AIO rows (no scenario yet),
+  and the libc `shm_*`/`sem_*`/`mq_*` and SysV wrappers (still refused by the
+  audit). Scenarios for the resource limits other than `RLIMIT_MEMLOCK` come
+  with the time + identity family. Locking and populating need
+  `MADV_POPULATE_*` (Linux 5.14, SUD needs 5.11): on an older host the first
+  populate stops the run by name, since no fallback is exact (touching pages
+  cannot write-fault a private page without changing it, and a host `mlock`
+  answers from the host's limit). Known divergences, each narrower than a
+  scenario reaches: `brk` is host-direct in glibc, so under
+  `mlockall(MCL_FUTURE)` heap growth is neither locked nor refused (the kernel
+  refuses it past the limit, `EAGAIN` from `do_brk_flags`); a mapping the
+  shim's allocator makes for itself is never locked by `MCL_FUTURE`;
+  `mlockall(MCL_CURRENT)` is a named deny (the kernel answers from `total_vm`,
+  unreadable without `/proc`); a `MAP_HUGETLB|MAP_NORESERVE` mapping is judged
+  at base-page granularity by `munmap`/`mremap`/`mprotect`, and `mlock`
+  charges its pages where `mlock_fixup` skips hugetlb; `mlock` of an
+  execute-only page answers `ENOMEM` (the kernel populates it with
+  `FOLL_FORCE`); `fstat` on a POSIX queue
+  descriptor answers `EBADF` (the kernel's is an 80-byte `S_IFREG` inode);
+  `move_pages` answers node 0 for a page only ever read, where the kernel's
+  zero page answers `-EFAULT`; residency under host reclaim and the host
+  descriptor behind each mapped file are residuals 7 and 8 of
+  `crates/patina-target/ESCAPE-CLASSES.md`.
 - **time + timers + sched + identity**: timerfd (fd kind on the virtual clock);
   setitimer/getitimer/alarm; timer_create family (SIGEV_SIGNAL through the
   signal model, SIGEV_THREAD as a managed task); times; clock_getres; virtual

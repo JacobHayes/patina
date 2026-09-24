@@ -229,32 +229,32 @@ int prctl(int option, ...) {
 }
 
 /*
- * getrlimit/setrlimit (the sysinfo crate reads limits). getrlimit reports a
- * fixed generous limit — RLIM_INFINITY, except RLIMIT_NOFILE which reports the
- * descriptor table's own bound (patina_fd_limit: the number EMFILE enforces
- * and sysconf(_SC_OPEN_MAX) reports) — as a deterministic constant independent
- * of the host's real ulimits. setrlimit
- * refuses with EPERM: a truthful "cannot mutate host resource limits" rather
- * than a lying success (a guest cannot change limits the runtime does not model).
+ * getrlimit/setrlimit (the sysinfo crate reads limits): the virtual kernel's
+ * limits (patina_prlimit, which the SUD getrlimit/setrlimit/prlimit64 rows
+ * call too; src/limits.rs), never the host's ulimits: 16 resources from the
+ * kernel's INIT_RLIMITS, changed by the unprivileged rule.
  */
-int getrlimit(__rlimit_resource_t resource, struct rlimit *rlim) {
-    /* `rlim` is declared nonnull by glibc (a NULL compare is -Werror under gcc). */
-    rlim_t value = RLIM_INFINITY;
-#ifdef RLIMIT_NOFILE
-    if (resource == RLIMIT_NOFILE) {
-        value = (rlim_t)patina_fd_limit();
+static int patina_limit_result(int64_t result) {
+    if (result < 0) {
+        errno = (int)-result;
+        return -1;
     }
-#endif
-    rlim->rlim_cur = value;
-    rlim->rlim_max = value;
     return 0;
 }
 
+int getrlimit(__rlimit_resource_t resource, struct rlimit *rlim) {
+    struct patina_rlimit limit;
+    int64_t result = patina_prlimit(0, (uint32_t)resource, NULL, &limit);
+    if (result == 0) {
+        rlim->rlim_cur = (rlim_t)limit.cur;
+        rlim->rlim_max = (rlim_t)limit.max;
+    }
+    return patina_limit_result(result);
+}
+
 int setrlimit(__rlimit_resource_t resource, const struct rlimit *rlim) {
-    (void)resource;
-    (void)rlim;
-    errno = EPERM;
-    return -1;
+    struct patina_rlimit limit = {(uint64_t)rlim->rlim_cur, (uint64_t)rlim->rlim_max};
+    return patina_limit_result(patina_prlimit(0, (uint32_t)resource, &limit, NULL));
 }
 
 /*

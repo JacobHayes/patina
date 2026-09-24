@@ -110,6 +110,12 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
             | FdKind::Socket => fail(ENOTTY),
             #[cfg(target_os = "linux")]
             FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd => fail(ENOTTY),
+            // An mqueue inode is a regular file: its size less the position.
+            #[cfg(target_os = "linux")]
+            FdKind::MessageQueue => match thread::ipc::mq_unread(resolved.handle) {
+                Some(unread) => put_int(arg, unread),
+                None => fail(ENOTTY),
+            },
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => fail(ENOTTY),
         },

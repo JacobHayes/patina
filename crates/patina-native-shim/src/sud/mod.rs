@@ -130,6 +130,41 @@ unsafe extern "C" {
         timeout_nanos: u64,
     ) -> c_int;
     fn patina_futex_wake(addr: usize, count: c_int) -> c_int;
+    // Memory mappings (`crate::mem`): the one model the C mmap/munmap/mremap/
+    // msync interposers call, in the raw ABI.
+    fn patina_mmap(
+        addr: usize,
+        length: usize,
+        prot: c_int,
+        flags: c_int,
+        fd: c_int,
+        offset: i64,
+    ) -> i64;
+    fn patina_munmap(addr: usize, length: usize) -> i64;
+    fn patina_mremap(
+        old_addr: usize,
+        old_length: usize,
+        new_length: usize,
+        flags: usize,
+        new_addr: usize,
+    ) -> i64;
+    fn patina_msync(addr: usize, length: usize, flags: c_int) -> i64;
+    fn patina_mprotect(addr: usize, length: usize, prot: c_int) -> i64;
+    fn patina_mlock(addr: usize, length: usize, flags: u32) -> i64;
+    fn patina_munlock(addr: usize, length: usize) -> i64;
+    fn patina_mlockall(flags: c_int) -> i64;
+    fn patina_munlockall() -> i64;
+    fn patina_prlimit(
+        pid: c_int,
+        resource: u32,
+        new: *const crate::limits::Rlimit,
+        old: *mut crate::limits::Rlimit,
+    ) -> i64;
+    // Anonymous files and their seals (`crate::mem`), the C memfd_create and
+    // fcntl seal commands' entries.
+    fn patina_memfd_create(name: *const c_char, flags: u32) -> c_int;
+    fn patina_get_seals(fd: c_int) -> c_int;
+    fn patina_add_seals(fd: c_int, seals: u32) -> c_int;
 
     // Filesystem metadata / directory iteration (the same records the C
     // stat/statx/getdents interposers normalize).
@@ -373,8 +408,6 @@ const EPROTONOSUPPORT: i64 = errno::EPROTONOSUPPORT as i64;
 
 const EPROTOTYPE: i64 = errno::EPROTOTYPE as i64;
 
-const EIO: i64 = errno::EIO as i64;
-
 const EOVERFLOW: i64 = errno::EOVERFLOW as i64;
 
 const E2BIG: i64 = errno::E2BIG as i64;
@@ -476,9 +509,6 @@ const O_DIRECT: u64 = uapi::O_DIRECT as u64;
 const O_PATH: u64 = uapi::O_PATH as u64;
 
 const AT_FDCWD: i64 = uapi::AT_FDCWD as i64;
-
-// `mmap(2)` / memory-management constants.
-const MAP_ANONYMOUS: u64 = uapi::MAP_ANONYMOUS as u64;
 
 // `clock_nanosleep(2)` absolute-deadline flag.
 const TIMER_ABSTIME: u64 = uapi::TIMER_ABSTIME as u64;
@@ -585,6 +615,8 @@ const F_DUPFD_CLOEXEC: u64 = uapi::F_DUPFD_CLOEXEC as u64;
 const F_SETPIPE_SZ: u64 = uapi::F_SETPIPE_SZ as u64;
 
 const F_GETPIPE_SZ: u64 = uapi::F_GETPIPE_SZ as u64;
+const F_ADD_SEALS: u64 = uapi::F_ADD_SEALS as u64;
+const F_GET_SEALS: u64 = uapi::F_GET_SEALS as u64;
 
 const F_GETLK: u64 = uapi::F_GETLK as u64;
 
@@ -922,15 +954,172 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_exit_group, |_, a| unsafe {
         patina_raw_exit_group(a[0] as c_int)
     }),
-    // ---- memory: process-local, passed through to the host kernel via the
-    // glibc `syscall(2)` HOST ALIAS (never the interposed `syscall`). Anonymous
-    // only — an fd-backed mapping would bypass the deterministic FS.
-    (Syscall::N_mmap, sys_mmap),
-    (Syscall::N_munmap, mem_passthrough),
-    (Syscall::N_mprotect, mem_passthrough),
+    // ---- memory: the mapping rows go through the one mapping model (a file
+    // mapping is a view of the file's page cache); the rest is process-local
+    // and passed through to the host kernel via the glibc `syscall(2)` HOST
+    // ALIAS (never the interposed `syscall`).
+    (Syscall::N_mmap, |_, a| sys_mmap(a)),
+    (Syscall::N_munmap, |_, a| sys_munmap(a)),
+    (Syscall::N_mremap, |_, a| sys_mremap(a)),
+    (Syscall::N_msync, |_, a| sys_msync(a)),
+    (Syscall::N_mprotect, |_, a| sys_mprotect(a)),
     (Syscall::N_madvise, mem_passthrough),
-    (Syscall::N_mremap, mem_passthrough),
     (Syscall::N_brk, mem_passthrough),
+    (Syscall::N_mincore, mem_passthrough),
+    (Syscall::N_mlock, |_, a| unsafe {
+        patina_mlock(a[0] as usize, a[1] as usize, 0)
+    }),
+    (Syscall::N_mlock2, |_, a| unsafe {
+        patina_mlock(a[0] as usize, a[1] as usize, a[2] as u32)
+    }),
+    (Syscall::N_munlock, |_, a| unsafe {
+        patina_munlock(a[0] as usize, a[1] as usize)
+    }),
+    (Syscall::N_mlockall, |_, a| unsafe {
+        patina_mlockall(a[0] as c_int)
+    }),
+    (Syscall::N_munlockall, |_, _| unsafe { patina_munlockall() }),
+    // ---- resource limits: the virtual kernel's (`crate::mem`) ----
+    (Syscall::N_getrlimit, |_, a| sys_getrlimit(a[0], a[1])),
+    (Syscall::N_setrlimit, |_, a| sys_setrlimit(a[0], a[1])),
+    (Syscall::N_prlimit64, |_, a| unsafe {
+        patina_prlimit(a[0] as c_int, a[1] as u32, a[2] as *const _, a[3] as *mut _)
+    }),
+    (Syscall::N_remap_file_pages, mem_passthrough),
+    (Syscall::N_memfd_create, |_, a| unsafe {
+        ret_i32(patina_memfd_create(a[0] as *const c_char, a[1] as u32))
+    }),
+    // ---- System V IPC: the one-process model (`thread::ipc`) ----
+    (Syscall::N_shmget, |_, a| {
+        crate::thread::ipc::shmget(a[0] as i32, a[1] as usize, a[2] as i32)
+    }),
+    (Syscall::N_shmat, |_, a| {
+        crate::thread::ipc::shmat(a[0] as i32, a[1] as usize, a[2] as i32)
+    }),
+    (Syscall::N_shmdt, |_, a| {
+        crate::thread::ipc::shmdt(a[0] as usize)
+    }),
+    (Syscall::N_shmctl, |_, a| unsafe {
+        crate::thread::ipc::shmctl(a[0] as i32, a[1] as i32, a[2] as *mut _)
+    }),
+    (Syscall::N_semget, |_, a| {
+        crate::thread::ipc::semget(a[0] as i32, a[1] as i32, a[2] as i32)
+    }),
+    (Syscall::N_semop, |_, a| unsafe {
+        crate::thread::ipc::semtimedop(
+            a[0] as i32,
+            a[1] as *const _,
+            a[2] as usize,
+            std::ptr::null(),
+        )
+    }),
+    (Syscall::N_semtimedop, |_, a| unsafe {
+        crate::thread::ipc::semtimedop(
+            a[0] as i32,
+            a[1] as *const _,
+            a[2] as usize,
+            a[3] as *const _,
+        )
+    }),
+    (Syscall::N_semctl, |_, a| unsafe {
+        crate::thread::ipc::semctl(a[0] as i32, a[1] as i32, a[2] as i32, a[3] as usize)
+    }),
+    (Syscall::N_msgget, |_, a| {
+        crate::thread::ipc::msgget(a[0] as i32, a[1] as i32)
+    }),
+    (Syscall::N_msgsnd, |_, a| unsafe {
+        crate::thread::ipc::msgsnd(a[0] as i32, a[1] as *const u8, a[2] as usize, a[3] as i32)
+    }),
+    (Syscall::N_msgrcv, |_, a| unsafe {
+        crate::thread::ipc::msgrcv(
+            a[0] as i32,
+            a[1] as *mut u8,
+            a[2] as usize,
+            a[3] as i64,
+            a[4] as i32,
+        )
+    }),
+    (Syscall::N_msgctl, |_, a| unsafe {
+        crate::thread::ipc::msgctl(a[0] as i32, a[1] as i32, a[2] as *mut _)
+    }),
+    // ---- POSIX message queues: the one-process model (`thread::ipc`) ----
+    (Syscall::N_mq_open, |_, a| unsafe {
+        crate::thread::ipc::mq_open(
+            a[0] as *const c_char,
+            a[1] as i32,
+            a[2] as u32,
+            a[3] as *const _,
+        )
+    }),
+    (Syscall::N_mq_unlink, |_, a| unsafe {
+        crate::thread::ipc::mq_unlink(a[0] as *const c_char)
+    }),
+    (Syscall::N_mq_timedsend, |_, a| unsafe {
+        crate::thread::ipc::mq_timedsend(
+            arg_fd(a[0]) as c_int,
+            a[1] as *const u8,
+            a[2] as usize,
+            a[3] as u32,
+            a[4] as *const _,
+        )
+    }),
+    (Syscall::N_mq_timedreceive, |_, a| unsafe {
+        crate::thread::ipc::mq_timedreceive(
+            arg_fd(a[0]) as c_int,
+            a[1] as *mut u8,
+            a[2] as usize,
+            a[3] as *mut u32,
+            a[4] as *const _,
+        )
+    }),
+    (Syscall::N_mq_notify, |_, a| unsafe {
+        crate::thread::ipc::mq_notify(arg_fd(a[0]) as c_int, a[1] as *const _)
+    }),
+    (Syscall::N_mq_getsetattr, |_, a| unsafe {
+        crate::thread::ipc::mq_getsetattr(arg_fd(a[0]) as c_int, a[1] as *const _, a[2] as *mut _)
+    }),
+    // ---- memory policy on the one memory node (`crate::numa`) ----
+    (Syscall::N_set_mempolicy, |_, a| unsafe {
+        crate::numa::set_mempolicy(a[0] as i32, a[1] as *const u64, a[2])
+    }),
+    (Syscall::N_get_mempolicy, |_, a| unsafe {
+        crate::numa::get_mempolicy(
+            a[0] as *mut i32,
+            a[1] as *mut u64,
+            a[2],
+            a[3] as usize,
+            a[4],
+        )
+    }),
+    (Syscall::N_mbind, |_, a| unsafe {
+        crate::numa::mbind(
+            a[0] as usize,
+            a[1] as usize,
+            a[2] as i32,
+            a[3] as *const u64,
+            a[4],
+            a[5] as u32,
+        )
+    }),
+    (Syscall::N_move_pages, |_, a| unsafe {
+        crate::numa::move_pages(
+            a[0] as i32,
+            a[1] as usize,
+            a[2] as *const usize,
+            a[3] as *const i32,
+            a[4] as *mut i32,
+            a[5] as i32,
+        )
+    }),
+    (Syscall::N_migrate_pages, |_, a| unsafe {
+        crate::numa::migrate_pages(a[0] as i32, a[1], a[2] as *const u64, a[3] as *const u64)
+    }),
+    (Syscall::N_set_mempolicy_home_node, |_, a| {
+        crate::numa::set_mempolicy_home_node(a[0] as usize, a[1] as usize, a[2], a[3])
+    }),
+    (Syscall::N_membarrier, |_, a| {
+        crate::mem::membarrier(a[0] as c_int, a[1] as u32, a[2] as c_int)
+    }),
     // ---- signals / process rows owned by the signals conformance family ----
     // `rt_sigaction` for SIGSYS would replace the dispatch handler: fatal.
     (Syscall::N_rt_sigaction, |_, a| unsafe {

@@ -100,6 +100,12 @@ mod iov;
 // `sync_file_range`, `sync`, `syncfs`). See `advice.rs`.
 #[cfg(target_os = "linux")]
 mod advice;
+#[cfg(target_os = "linux")]
+mod limits;
+#[cfg(target_os = "linux")]
+mod mem;
+#[cfg(target_os = "linux")]
+mod numa;
 mod panic_boundary;
 mod paths;
 // What `statfs`/`fstatfs`/`ustat` report: the one deterministic volume and the
@@ -184,6 +190,8 @@ const EINTR: c_int = 4;
 const EINVAL: c_int = 22;
 const EFAULT: c_int = 14;
 const EIO: c_int = 5;
+#[cfg(target_os = "linux")]
+const ENOMEM: c_int = 12;
 const EISDIR: c_int = 21;
 const ENOENT: c_int = 2;
 const ENOSPC: c_int = 28;
@@ -457,6 +465,8 @@ fn release_description(release: Release) -> Result<(), c_int> {
     match release.kind {
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr | FdKind::Urandom => Ok(()),
         FdKind::File | FdKind::Dir | FdKind::OPath => {
+            #[cfg(target_os = "linux")]
+            mem::released(release.handle);
             with_context(|context| context.fs_close(Fd(release.handle)))
         }
         FdKind::Socket => thread::socket_close(release.handle),
@@ -474,6 +484,11 @@ fn release_description(release: Release) -> Result<(), c_int> {
         #[cfg(target_os = "linux")]
         FdKind::Epoll => {
             thread::epoll_close(release.handle);
+            Ok(())
+        }
+        #[cfg(target_os = "linux")]
+        FdKind::MessageQueue => {
+            thread::ipc::mq_close(release.handle);
             Ok(())
         }
         #[cfg(target_os = "macos")]
@@ -4153,7 +4168,14 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
         }
         Some(FsEntryKind::File) | None => {
             match with_context(|context| context.fs_open(&resolved.path, open_flags)) {
-                Ok(fd) => bind_fs_handle(fd, kind, status, cloexec),
+                Ok(fd) => {
+                    // An `O_TRUNC` open of a mapped file empties its page cache.
+                    #[cfg(target_os = "linux")]
+                    if let (true, Some(metadata)) = (open_flags.truncate, resolved.metadata) {
+                        mem::resized_ino(metadata.ino, 0);
+                    }
+                    bind_fs_handle(fd, kind, status, cloexec)
+                }
                 Err(errno) => fail(errno),
             }
         }
@@ -4187,7 +4209,21 @@ pub extern "C" fn patina_fd_kind(raw_fd: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fd_limit() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    c_int::try_from(fdtable::RLIMIT_NOFILE).expect("the descriptor limit fits an int")
+    c_int::try_from(fd_limit()).expect("the descriptor limit fits an int")
+}
+
+/// The descriptor table's bound now: the soft `RLIMIT_NOFILE`.
+pub(crate) fn fd_limit() -> usize {
+    fd_table().lock().limit()
+}
+
+/// A new soft `RLIMIT_NOFILE` (`src/limits.rs`), which the table enforces
+/// from the next allocation on; descriptors above it stay open.
+#[cfg(target_os = "linux")]
+pub(crate) fn set_fd_limit(limit: u64) {
+    fd_table()
+        .lock()
+        .set_limit(usize::try_from(limit).unwrap_or(usize::MAX));
 }
 
 /// `F_GETFD`: 1 when the number carries `FD_CLOEXEC`, 0 when not, -1/`EBADF`.
@@ -4376,75 +4412,6 @@ pub extern "C" fn patina_close_range(first: u32, last: u32, flags: u32) -> c_int
     0
 }
 
-/// A hidden reference on `fd`'s description — a file-backed mapping takes one
-/// so its writeback survives the guest closing the number (the kernel's mapping
-/// holds the `struct file` the same way). Returns the description id, or -1
-/// with `EBADF`. Released with [`patina_desc_release`].
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_fd_retain(raw_fd: c_int) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    match fd_table().lock().retain(raw_fd) {
-        Ok(desc) => {
-            set_errno(0);
-            i64::try_from(desc).unwrap_or_else(|_| i64::from(fail(EOVERFLOW)))
-        }
-        Err(errno) => i64::from(fail(errno)),
-    }
-}
-
-/// Positional write through a retained description (a mapping's writeback):
-/// the file is still writable after every guest number for it has closed.
-///
-/// # Safety
-/// `source` must be readable for `length` bytes when nonzero.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_desc_pwrite(
-    desc: i64,
-    source: *const c_void,
-    length: usize,
-    offset: i64,
-) -> isize {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let Ok(desc) = DescId::try_from(desc) else {
-        return fail(EBADF) as isize;
-    };
-    let handle = {
-        let table = fd_table().lock();
-        match table.description(desc) {
-            Some(description) if description.kind.is_fs() => Fd(description.handle),
-            Some(_) => return fail(EINVAL) as isize,
-            None => return fail(EBADF) as isize,
-        }
-    };
-    // SAFETY: forwarded from this function's own contract.
-    unsafe { fs_pwrite(handle, source, length, offset) }
-}
-
-/// Drop a hidden reference taken by [`patina_fd_retain`]; the last reference
-/// frees the description exactly as the last `close` would.
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_desc_release(desc: i64) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let Ok(desc) = DescId::try_from(desc) else {
-        return fail(EBADF);
-    };
-    let released = match fd_table().lock().release(desc) {
-        Ok(released) => released,
-        Err(errno) => return fail(errno),
-    };
-    let result = match released {
-        Some(release) => release_description(release),
-        None => Ok(()),
-    };
-    match result {
-        Ok(()) => {
-            set_errno(0);
-            0
-        }
-        Err(errno) => fail(errno),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The universal descriptor operations. Each resolves the guest number ONCE and
 // dispatches on what it names; a kind that has no such operation answers what
@@ -4452,6 +4419,8 @@ pub extern "C" fn patina_desc_release(desc: i64) -> c_int {
 // the SUD rows call, so the two doors share one decode.
 
 fn fs_read(fd: Fd, destination: *mut c_void, length: usize) -> isize {
+    #[cfg(target_os = "linux")]
+    mem::reading(fd.0);
     match with_context(|context| context.fs_read(fd, length)) {
         Ok(bytes) => {
             if !bytes.is_empty() {
@@ -4550,6 +4519,13 @@ unsafe fn read_resolved(
         },
         #[cfg(target_os = "linux")]
         FdKind::Epoll => fail(EINVAL) as isize,
+        // SAFETY: forwarded from this function's own contract.
+        #[cfg(target_os = "linux")]
+        FdKind::MessageQueue if resolved.status & O_READ != 0 => unsafe {
+            thread::ipc::mq_read(resolved.handle, destination, length, None)
+        },
+        #[cfg(target_os = "linux")]
+        FdKind::MessageQueue => fail(EBADF) as isize,
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => fail(EINVAL) as isize,
     }
@@ -4564,7 +4540,11 @@ fn fs_write(fd: Fd, source: *const c_void, length: usize) -> isize {
         unsafe { slice::from_raw_parts(source.cast::<u8>(), length) }
     };
     match with_context(|context| context.fs_write(fd, bytes)) {
-        Ok(written) => isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize),
+        Ok(written) => {
+            #[cfg(target_os = "linux")]
+            mem::written_at_cursor(fd.0, &bytes[..written.min(bytes.len())]);
+            isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
+        }
         Err(errno) => fail(errno) as isize,
     }
 }
@@ -4623,6 +4603,12 @@ unsafe fn write_resolved(
         FdKind::EventFd => unsafe { thread::eventfd_write(resolved.handle, source, length) },
         #[cfg(target_os = "linux")]
         FdKind::Epoll | FdKind::SignalFd => fail(EINVAL) as isize,
+        // A queue file has no write method: EBADF without write access, EINVAL
+        // with it.
+        #[cfg(target_os = "linux")]
+        FdKind::MessageQueue if resolved.status & O_WRITE == 0 => fail(EBADF) as isize,
+        #[cfg(target_os = "linux")]
+        FdKind::MessageQueue => fail(EINVAL) as isize,
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => fail(EINVAL) as isize,
     }
@@ -4641,7 +4627,10 @@ fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved, u64), c_in
     };
     let resolved = fdget(raw_fd)?;
     match resolved.kind {
+        // An mqueue file is positioned (it reads its status line).
         FdKind::File | FdKind::Dir => Ok((resolved, offset)),
+        #[cfg(target_os = "linux")]
+        FdKind::MessageQueue => Ok((resolved, offset)),
         FdKind::OPath
         | FdKind::Stdin
         | FdKind::Stdout
@@ -4670,6 +4659,13 @@ unsafe fn fs_pread(
     if resolved.kind == FdKind::Dir {
         return fail(EISDIR) as isize;
     }
+    #[cfg(target_os = "linux")]
+    if resolved.kind == FdKind::MessageQueue {
+        // SAFETY: forwarded from this function's own contract.
+        return unsafe { thread::ipc::mq_read(resolved.handle, destination, length, Some(offset)) };
+    }
+    #[cfg(target_os = "linux")]
+    mem::reading(resolved.handle);
     match with_context(|context| context.fs_read_at(Fd(resolved.handle), offset, length)) {
         Ok(bytes) => {
             if !bytes.is_empty() {
@@ -4723,7 +4719,11 @@ unsafe fn fs_pwrite(handle: Fd, source: *const c_void, length: usize, offset: i6
         unsafe { slice::from_raw_parts(source.cast::<u8>(), length) }
     };
     match with_context(|context| context.fs_write_at(handle, offset, bytes)) {
-        Ok(written) => isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize),
+        Ok(written) => {
+            #[cfg(target_os = "linux")]
+            mem::written(handle.0, offset, &bytes[..written.min(bytes.len())]);
+            isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
+        }
         Err(errno) => fail(errno) as isize,
     }
 }
@@ -4896,6 +4896,16 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
                 None => i64::from(fail(EINVAL)),
             };
         }
+        #[cfg(target_os = "linux")]
+        Ok(resolved) if resolved.kind == FdKind::MessageQueue => {
+            return match thread::ipc::mq_seek(resolved.handle, offset, whence) {
+                Ok(position) => {
+                    set_errno(0);
+                    position
+                }
+                Err(errno) => i64::from(fail(errno)),
+            };
+        }
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
         Ok(_) => return i64::from(fail(ESPIPE)),
         Err(errno) => return i64::from(fail(errno)),
@@ -4923,10 +4933,26 @@ pub extern "C" fn patina_fsync(raw_fd: c_int) -> c_int {
         Ok(_) => return fail(EINVAL),
         Err(errno) => return fail(errno),
     };
-    match with_context(|context| context.fs_sync(handle)) {
+    match fs_sync_handle(handle) {
         Ok(()) => 0,
         Err(errno) => fail(errno),
     }
+}
+
+/// `fsync` of a filesystem handle: what shared mappings of its file stored is
+/// written back first, so it becomes durable with the rest of the file.
+fn fs_sync_handle(handle: Fd) -> Result<(), c_int> {
+    #[cfg(target_os = "linux")]
+    mem::syncing(handle.0)?;
+    with_context(|context| context.fs_sync(handle))
+}
+
+/// `sync`/`syncfs` of the volume: every mapped file's stores are written back
+/// first.
+#[cfg(target_os = "linux")]
+fn fs_sync_volume() -> Result<(), c_int> {
+    mem::syncing_all()?;
+    with_context(|context| context.fs_sync_all())
 }
 
 /// `ftruncate(2)`: a file's length; every other kind is `EINVAL`.
@@ -4939,7 +4965,11 @@ pub extern "C" fn patina_set_len(raw_fd: c_int, length: u64) -> c_int {
         Err(errno) => return fail(errno),
     };
     match with_context(|context| context.fs_set_len(handle, length)) {
-        Ok(()) => 0,
+        Ok(()) => {
+            #[cfg(target_os = "linux")]
+            mem::resized(handle.0, length);
+            0
+        }
         Err(errno) => fail(errno),
     }
 }
@@ -5548,19 +5578,23 @@ pub unsafe extern "C" fn patina_truncate(dirfd: c_int, path: *const c_char, leng
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
     };
-    match resolved.metadata.map(|metadata| metadata.kind) {
+    let ino = match resolved.metadata {
         None => return fail(ENOENT),
-        Some(FsEntryKind::Directory) => return fail(EISDIR),
-        Some(
+        Some(metadata) => match metadata.kind {
+            FsEntryKind::Directory => return fail(EISDIR),
             FsEntryKind::Fifo
             | FsEntryKind::Symlink
             | FsEntryKind::Socket
-            | FsEntryKind::CharDevice,
-        ) => return fail(EINVAL),
-        Some(FsEntryKind::File) => {}
-    }
+            | FsEntryKind::CharDevice => return fail(EINVAL),
+            FsEntryKind::File => metadata.ino,
+        },
+    };
     match with_context(|context| context.fs_set_len_by_path(&resolved.path, length)) {
         Ok(()) => {
+            #[cfg(target_os = "linux")]
+            mem::resized_ino(ino, length);
+            #[cfg(not(target_os = "linux"))]
+            let _ = ino;
             set_errno(0);
             0
         }
@@ -5636,6 +5670,9 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         | FdKind::Socket => return fail(ENODEV),
         #[cfg(target_os = "linux")]
         FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd => return fail(ENODEV),
+        // A queue is a regular file (judged after the range, below).
+        #[cfg(target_os = "linux")]
+        FdKind::MessageQueue => {}
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => return fail(ENODEV),
     }
@@ -5649,11 +5686,23 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
     {
         return fail(EFBIG);
     }
+    // The file's own `fallocate`: an mqueue file has none, and a memfd
+    // (`shmem_fallocate`, `hugetlbfs_fallocate`) takes only `KEEP_SIZE` and
+    // `PUNCH_HOLE`.
+    #[cfg(target_os = "linux")]
+    if resolved.kind == FdKind::MessageQueue
+        || (mem::anonymous(resolved.handle).is_some()
+            && mode & !(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE) != 0)
+    {
+        return fail(EOPNOTSUPP);
+    }
     let zero = mode & (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_ZERO_RANGE) != 0;
     let keep_size = mode & FALLOC_FL_KEEP_SIZE != 0;
     let fd = Fd(resolved.handle);
     match with_context(|context| context.fs_allocate(fd, offset, length, zero, keep_size)) {
         Ok(()) => {
+            #[cfg(target_os = "linux")]
+            mem::allocated(fd.0, offset, length, zero, keep_size);
             set_errno(0);
             0
         }
@@ -6519,7 +6568,11 @@ guaranteed\n",
 pub extern "C" fn patina_crash() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match with_context(Context::fs_crash) {
-        Ok(()) => 0,
+        Ok(()) => {
+            #[cfg(target_os = "linux")]
+            mem::crashed();
+            0
+        }
         Err(errno) => fail(errno),
     }
 }
@@ -7042,6 +7095,8 @@ pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usi
 /// primitives only provide the vehicle and the blocking.
 mod thread {
     #[cfg(target_os = "linux")]
+    pub(crate) mod ipc;
+    #[cfg(target_os = "linux")]
     pub(crate) mod readiness;
     #[cfg(target_os = "linux")]
     pub(crate) mod signals;
@@ -7089,7 +7144,9 @@ mod thread {
             | FdKind::Urandom
             | FdKind::Pipe => Err(super::ENOTSOCK),
             #[cfg(target_os = "linux")]
-            FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd => Err(super::ENOTSOCK),
+            FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::MessageQueue => {
+                Err(super::ENOTSOCK)
+            }
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::ENOTSOCK),
         }
@@ -7114,7 +7171,9 @@ mod thread {
             | FdKind::Urandom
             | FdKind::Socket => Err(super::EBADF),
             #[cfg(target_os = "linux")]
-            FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd => Err(super::EBADF),
+            FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::MessageQueue => {
+                Err(super::EBADF)
+            }
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::EBADF),
         }
@@ -7861,6 +7920,9 @@ mod thread {
         SigWait,
         #[cfg(target_os = "linux")]
         SignalfdRead,
+        /// A System V IPC wait: never restarted after a handler (`EINTR`).
+        #[cfg(target_os = "linux")]
+        Ipc,
     }
 
     #[derive(Clone)]
@@ -8100,6 +8162,9 @@ mod thread {
         table: ThreadTable,
         #[cfg(target_os = "linux")]
         signals: signals::SignalRuntime,
+        /// System V IPC objects and their waiters.
+        #[cfg(target_os = "linux")]
+        ipc: ipc::Ipc,
         /// Real host `pthread_t` bits mapped to the managed task they run.
         handles: BTreeMap<usize, TaskId>,
         /// Per-task baton semaphores.
@@ -8328,7 +8393,7 @@ mod thread {
                         || blocked
                             .locs
                             .iter()
-                            .any(|loc| matches!(loc, WaiterLoc::Cond(..)))
+                            .any(|loc| matches!(loc, WaiterLoc::Cond(..) | WaiterLoc::Ipc(..)))
                 }) {
                     self.timed_out.insert(task);
                 }
@@ -8383,6 +8448,8 @@ mod thread {
                 table: ThreadTable::default(),
                 #[cfg(target_os = "linux")]
                 signals: signals::SignalRuntime::default(),
+                #[cfg(target_os = "linux")]
+                ipc: ipc::Ipc::default(),
                 handles: BTreeMap::new(),
                 sems: BTreeMap::new(),
                 net: NetState::new(),
@@ -8679,6 +8746,12 @@ mod thread {
         state.table.register(task);
         #[cfg(target_os = "linux")]
         state.signals.spawn(task, Some(current_task()));
+        // A new thread inherits its creator's memory policy.
+        #[cfg(target_os = "linux")]
+        crate::numa::spawned(
+            deterministic_thread_id(),
+            c_int::try_from(task.0).unwrap_or(c_int::MAX),
+        );
         // The semaphore must exist before the host thread parks on it.
         state.sems.insert(task, Arc::new(baton::Semaphore::new()));
         let payload = Box::into_raw(Box::new(ThreadStart {
@@ -12660,6 +12733,16 @@ mod thread {
                 read_eof: false,
                 write_eof: false,
             },
+            #[cfg(target_os = "linux")]
+            FdKind::MessageQueue => {
+                let (readable, writable) = ipc::mq_readiness(state, resolved.handle);
+                FdReadiness {
+                    readable,
+                    writable,
+                    read_eof: false,
+                    write_eof: false,
+                }
+            }
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => FdReadiness {
                 readable: false,
@@ -12761,6 +12844,9 @@ mod thread {
         EventFdRecv(c_int),
         #[cfg(target_os = "linux")]
         SignalFdRecv(u64),
+        /// Linux: parked on a System V IPC object's wait queue.
+        #[cfg(target_os = "linux")]
+        Ipc(ipc::IpcWait),
     }
 
     /// Register `me` on the waiter queue of every watched `(direction, fd)`
@@ -12794,6 +12880,14 @@ mod thread {
                         fd.waiters.push_back(me);
                         locs.push(WaiterLoc::SignalFdRecv(resolved.handle));
                     }
+                }
+                continue;
+            }
+            #[cfg(target_os = "linux")]
+            if resolved.kind == FdKind::MessageQueue {
+                if let Some(loc) = ipc::mq_watch(state, resolved.handle, me, dir == ReadyDir::Read)
+                {
+                    locs.push(loc);
                 }
                 continue;
             }
@@ -12936,6 +13030,8 @@ mod thread {
                         remove(&mut efd.read_waiters);
                     }
                 }
+                #[cfg(target_os = "linux")]
+                WaiterLoc::Ipc(wait) => state.ipc.unwait(wait, me),
             }
         }
     }
@@ -13820,6 +13916,7 @@ mod thread {
                 | FdKind::Socket
                 | FdKind::EventFd
                 | FdKind::SignalFd
+                | FdKind::MessageQueue
                 | FdKind::Stdin
                 | FdKind::Stdout
                 | FdKind::Stderr => {}
@@ -13927,6 +14024,9 @@ mod thread {
                         .map_or(0, |fd| fd.arrivals),
                     0,
                 );
+            }
+            if resolved.kind == FdKind::MessageQueue {
+                return super::ipc::mq_event_seqs(state, resolved.handle);
             }
             if resolved.kind != FdKind::Pipe && resolved.kind != FdKind::EventFd {
                 return (0, 0);

@@ -28,11 +28,9 @@
 //! there leaves only what the harness sweeps by key (`crate::owned`).
 
 use super::owned::Owned;
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::owned;
 use crate::probe::{Key, Probe, SemArg, Window, neg, perm_mode};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -299,15 +297,5 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &["syscall", "getpid"],
     needs: &[Need::SysvSem],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::MemoryIpc),
-        vehicles: Vehicle::ALL,
-        what: "semget is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no semget wrapper)",
-        failure: Failure::Stops {
-            events: 1,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall semget (nr",
-        },
-    }],
     ..DEFAULTS
 };

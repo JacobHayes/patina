@@ -17,10 +17,8 @@
 //!
 //! The first mapping goes through `mmap64`, glibc's LFS spelling of the row.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 use crate::probe::{AT_FDCWD, At, Probe, Region, neg, page_size};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -235,114 +233,6 @@ pub const SCENARIO: Scenario = Scenario {
         "ftruncate",
         "pipe2",
         "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::MemoryIpc),
-            vehicles: &[Vehicle::Libc],
-            what: "a MAP_SHARED file mapping is a private copy of the file (c/posix/mem.c), written back only at msync/munmap: a store through it is not what read returns, a write is not what it shows, and truncation does not zero its tail",
-            failure: Failure::Differs(&[
-                Difference::field(7, "read", "fields.data", Observed::Str("A")),
-                Difference::check(8, "a store through a shared mapping is what read returns"),
-                Difference::check(13, "a write is what the shared mapping shows"),
-                Difference::field(25, "read", "fields.data", Observed::Str("A")),
-                Difference::check(
-                    26,
-                    "a private store reaches neither the file nor the shared mapping",
-                ),
-                Difference::check(39, "the mapped bytes past the new end read zero"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::MemoryIpc),
-            vehicles: &[Vehicle::Libc],
-            what: "a second shared mapping of an already-mapped file range in another shape fails closed with ENOSYS (c/posix/mem.c patina_mmap_impl: no page cache to keep two views coherent)",
-            failure: Failure::Differs(&[
-                Difference::field(15, "mmap", "errno", Observed::Str("ENOSYS")),
-                Difference::field(15, "mmap", "fields.aligned", Observed::Null),
-                Difference::field(15, "mmap", "ret", Observed::Int(-1)),
-                Difference::check(16, "a second shared mapping of the second page"),
-                Difference::check(17, "its stores show through the first mapping"),
-                Difference::check(18, "and the first mapping's through it"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::MemoryIpc),
-            vehicles: &[Vehicle::Libc],
-            what: "every MAP_PRIVATE file mapping is EINVAL: patina_mmap_impl (c/posix/mem.c) tests `flags & (MAP_SHARED | MAP_SHARED_VALIDATE)`, and MAP_SHARED_VALIDATE (3) contains MAP_PRIVATE's bit, so a private mapping reads as both shared and private",
-            failure: Failure::Differs(&[
-                Difference::field(22, "mmap", "errno", Observed::Str("EINVAL")),
-                Difference::field(22, "mmap", "fields.aligned", Observed::Null),
-                Difference::field(22, "mmap", "ret", Observed::Int(-1)),
-                Difference::check(23, "a private mapping shows the file"),
-                Difference::field(47, "mmap", "errno", Observed::Str("EINVAL")),
-                Difference::field(47, "mmap", "fields.aligned", Observed::Null),
-                Difference::field(47, "mmap", "ret", Observed::Int(-1)),
-                Difference::check(
-                    48,
-                    "MAP_PRIVATE with PROT_WRITE of a read-only descriptor is allowed",
-                ),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::MemoryIpc),
-            vehicles: &[Vehicle::Libc],
-            what: "the msync interposer (c/posix/mem.c) refuses MS_INVALIDATE with ENOSYS and never validates its flags (MS_SYNC|MS_ASYNC succeeds)",
-            failure: Failure::Differs(&[
-                Difference::field(33, "msync", "errno", Observed::Str("ENOSYS")),
-                Difference::field(33, "msync", "ret", Observed::Int(-1)),
-                Difference::check(34, "MS_INVALIDATE succeeds"),
-                Difference::field(35, "msync", "errno", Observed::Null),
-                Difference::field(35, "msync", "ret", Observed::Int(0)),
-                Difference::check(36, "MS_SYNC with MS_ASYNC is EINVAL"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::MemoryIpc),
-            vehicles: &[Vehicle::Libc],
-            what: "the mmap interposer (c/posix/mem.c) never checks the descriptor's access mode: MAP_SHARED with PROT_WRITE of a read-only descriptor succeeds, and a write-only one fails EBADF from the populating read instead of EACCES",
-            failure: Failure::Differs(&[
-                Difference::field(44, "mmap", "errno", Observed::Null),
-                Difference::field(44, "mmap", "fields.aligned", Observed::Bool(true)),
-                Difference::field(44, "mmap", "ret", Observed::Int(0)),
-                Difference::check(
-                    45,
-                    "MAP_SHARED with PROT_WRITE of a read-only descriptor is EACCES",
-                ),
-                Difference::field(51, "mmap", "errno", Observed::Str("EBADF")),
-                Difference::check(52, "any mapping of a write-only descriptor is EACCES"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::MemoryIpc),
-            vehicles: &[Vehicle::Libc],
-            what: "the mmap interposer (c/posix/mem.c) fails closed with ENOSYS on any flag outside its modeled set: an unknown flag is not EOPNOTSUPP under MAP_SHARED_VALIDATE, nor ignored under plain MAP_SHARED",
-            failure: Failure::Differs(&[
-                Difference::field(55, "mmap", "errno", Observed::Str("ENOSYS")),
-                Difference::check(
-                    56,
-                    "an unknown flag under MAP_SHARED_VALIDATE is EOPNOTSUPP",
-                ),
-                Difference::field(58, "mmap", "errno", Observed::Str("ENOSYS")),
-                Difference::field(58, "mmap", "fields.aligned", Observed::Null),
-                Difference::field(58, "mmap", "ret", Observed::Int(-1)),
-                Difference::check(59, "plain MAP_SHARED ignores it"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::MemoryIpc),
-            vehicles: &[
-                Vehicle::Syscall,
-                #[cfg(target_arch = "x86_64")]
-                Vehicle::Raw,
-            ],
-            what: "the SUD mmap row (sud/mem.rs sys_mmap) traps every file-backed mapping; only the C mmap interposer models one",
-            failure: Failure::Stops {
-                events: 3,
-                ending: Ending::Signal(libc::SIGABRT),
-                diagnostic: "patina: SUD trapped a file-backed mmap",
-            },
-        },
     ],
     kernel_floor: Some(KernelFloor {
         release: "4.15",

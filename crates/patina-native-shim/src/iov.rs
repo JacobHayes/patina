@@ -188,7 +188,7 @@ unsafe fn cursor_writev(
 /// flags promise, through the same `fsync` the descriptor would take.
 fn sync_written(resolved: Resolved, moved: usize, flags: i32, stopped: Option<c_int>) -> isize {
     if moved != 0 && resolved.kind == FdKind::File && flags & (RWF_DSYNC | RWF_SYNC) != 0 {
-        if let Err(errno) = with_context(|context| context.fs_sync(Fd(resolved.handle))) {
+        if let Err(errno) = crate::fs_sync_handle(Fd(resolved.handle)) {
             return fail(errno) as isize;
         }
     }

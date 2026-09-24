@@ -20,10 +20,8 @@
 //! residency vectors are exact per page because the regions refuse
 //! transparent huge pages (`MADV_NOHUGEPAGE`, as `mem/mincore`).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::probe::{At, Probe, neg, page_size};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -156,15 +154,5 @@ pub const SCENARIO: Scenario = Scenario {
         release: "4.4",
         why: "mlock2, MLOCK_ONFAULT and MCL_ONFAULT first appear in Linux 4.4",
     }),
-    gaps: &[Gap {
-        status: Status::Pending(Arc::MemoryIpc),
-        vehicles: Vehicle::ALL,
-        what: "mlock is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no mlock wrapper)",
-        failure: Failure::Stops {
-            events: 2,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall mlock (nr",
-        },
-    }],
     ..DEFAULTS
 };
