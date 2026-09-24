@@ -319,7 +319,24 @@ forwards into the same dispatcher instead of its two-number allowlist.
   `/proc` and `/sys` subtree (cpuinfo, meminfo, stat, self/{exe,maps,status,
   cgroup,mountinfo,auxv}, sys/devices/system/cpu/online, fs/cgroup cpu.max),
   `/etc/localtime`, hostname — all from one `--host-*` knob group recorded in
-  the fingerprint; getcpu; personality; syslog → EPERM.
+  the fingerprint; getcpu; personality; syslog → EPERM. Its scenarios are
+  `time/*` (clocks, resolution, interval and POSIX timers, timerfd, CPU
+  time, the refused clock-setting rows), `sched/*`, `cred/*`, `sys/*`
+  (uname, sysinfo, personality, rlimits, hostname) and `proc/pgrp`;
+  `sys/sysfs` exercises the fs family's `sysfs` row, and its gap names that
+  arc.
+  What is the host's — its wall clock, CPU set, hard limits, supplementary
+  groups, kernel release, node name, memory, uptime, CPU-time figures — is
+  compared by relation, never by value; a timer is waited on with a bounded
+  `rt_sigtimedwait`/`ppoll`, never a timing assertion; a model answering
+  constants fails: CPU time advances across a bounded spin and the CPU-time
+  timers fire, remaining times drop across a sleep, and expiration counts
+  reach the whole periods measured since arming. Nice 0, the default
+  persona, `CONFIG_SYSFS_SYSCALL` and high-resolution timers are detected
+  needs. The rows whose
+  unprivileged answer is what capabilities bypass (set*id, groups, caps,
+  priority raises, realtime policies, hard-limit raises, clock setting, the
+  kernel log) need an unprivileged caller and are reported not run as root.
 - **signals + threads + process** (spec and suggested order M1–M5:
   [syscall-conformance-signals.md](syscall-conformance-signals.md)): D1 state in `ThreadRuntime` (dispositions,
   per-task mask, pending sets, altstack); D2 generation records a trace op and

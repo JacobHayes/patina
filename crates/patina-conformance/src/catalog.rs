@@ -13,7 +13,7 @@
 use crate::compare::{Expected, Failure};
 use crate::probe::Probe;
 use crate::scenarios::{
-    abi, entropy, fd, fs, ipc, mem, net, proc, readiness, signal, thread, time,
+    abi, cred, entropy, fd, fs, ipc, mem, net, proc, readiness, sched, signal, sys, thread, time,
 };
 use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
@@ -94,8 +94,10 @@ pub enum Need {
     /// Whiteouts (`renameat2(RENAME_WHITEOUT)`) on the run directory's
     /// filesystem; overlayfs refuses them.
     Whiteouts,
-    /// An unprivileged caller (euid ≠ 0, no effective capability): the EPERM
-    /// and EACCES a scenario asserts are what capabilities bypass.
+    /// An unprivileged caller (euid ≠ 0; empty effective, permitted,
+    /// inheritable and ambient capability sets): the EPERM and EACCES a
+    /// scenario asserts are what capabilities bypass, and its own capability
+    /// sets read back empty.
     Unprivileged,
     /// A System V shared memory segment can be created and removed
     /// (`CONFIG_SYSVIPC`; the IPC namespace's `shmmni`/`shmall`).
@@ -125,6 +127,17 @@ pub enum Need {
     /// The NUMA policy rows answer (`CONFIG_NUMA`) and this task may
     /// allocate from exactly one memory node.
     OneNumaNode,
+    /// The native run starts at nice 0, as the virtual kernel's process
+    /// does (the harness cannot raise a priority it inherited lowered).
+    NiceZero,
+    /// The native run starts in the default execution domain (`PER_LINUX`,
+    /// no persona flag: no `setarch` launcher).
+    DefaultPersona,
+    /// The legacy `sysfs(2)` row answers (`CONFIG_SYSFS_SYSCALL`).
+    SysfsSyscall,
+    /// The clocks resolve to 1 ns (`CONFIG_HIGH_RES_TIMERS` with a
+    /// oneshot-capable clock event device), not to a tick.
+    HighResTimers,
 }
 
 impl Need {
@@ -137,9 +150,12 @@ impl Need {
     /// a broken detection), still fails there.
     pub fn hardware(self) -> bool {
         match self {
-            Need::ProtectionKeys | Need::ShadowStack | Need::SecretMemory | Need::OneNumaNode => {
-                true
-            }
+            Need::ProtectionKeys
+            | Need::ShadowStack
+            | Need::SecretMemory
+            | Need::OneNumaNode
+            | Need::SysfsSyscall
+            | Need::HighResTimers => true,
             Need::UserXattrs
             | Need::Inotify
             | Need::FileHandles
@@ -150,7 +166,9 @@ impl Need {
             | Need::SysvMsg
             | Need::PosixMqueue
             | Need::LockedPages(_)
-            | Need::Membarrier => false,
+            | Need::Membarrier
+            | Need::NiceZero
+            | Need::DefaultPersona => false,
         }
     }
 }
@@ -327,6 +345,9 @@ pub const EXCLUSIONS: &[Exclusion] = &[Exclusion {
 
 pub const SCENARIOS: &[&Scenario] = &[
     &abi::newer_than_virtual::SCENARIO,
+    &cred::caps::SCENARIO,
+    &cred::groups::SCENARIO,
+    &cred::ids::SCENARIO,
     &entropy::getrandom::SCENARIO,
     &fd::pipes::SCENARIO,
     &fd::table::SCENARIO,
@@ -384,11 +405,17 @@ pub const SCENARIOS: &[&Scenario] = &[
     &net::udp::SCENARIO,
     &proc::absent::SCENARIO,
     &proc::ids::SCENARIO,
+    &proc::pgrp::SCENARIO,
     &proc::prctl::SCENARIO,
     &proc::traps::SCENARIO,
     &proc::wait::SCENARIO,
     &readiness::epoll::SCENARIO,
     &readiness::ppoll::SCENARIO,
+    &sched::affinity::SCENARIO,
+    &sched::attr::SCENARIO,
+    &sched::ioprio::SCENARIO,
+    &sched::policy::SCENARIO,
+    &sched::priority::SCENARIO,
     &signal::altstack::SCENARIO,
     &signal::basic::SCENARIO,
     &signal::block::SCENARIO,
@@ -408,6 +435,13 @@ pub const SCENARIOS: &[&Scenario] = &[
     &signal::rt_order::SCENARIO,
     &signal::unmask::SCENARIO,
     &signal::wait::SCENARIO,
+    &sys::hostname::SCENARIO,
+    &sys::personality::SCENARIO,
+    &sys::rlimit::SCENARIO,
+    #[cfg(target_arch = "x86_64")]
+    &sys::sysfs::SCENARIO,
+    &sys::sysinfo::SCENARIO,
+    &sys::uname::SCENARIO,
     &thread::futex::SCENARIO,
     &thread::kill::SCENARIO,
     &thread::lifecycle::SCENARIO,
@@ -415,7 +449,13 @@ pub const SCENARIOS: &[&Scenario] = &[
     &thread::masks::SCENARIO,
     &thread::pthread_kill::SCENARIO,
     &thread::tid_clear::SCENARIO,
+    &time::clock_res::SCENARIO,
+    &time::clock_set::SCENARIO,
     &time::clocks::SCENARIO,
+    &time::cputime::SCENARIO,
+    &time::itimer::SCENARIO,
+    &time::posix_timer::SCENARIO,
+    &time::timerfd::SCENARIO,
 ];
 
 /// The scenario named `name`.

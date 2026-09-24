@@ -758,6 +758,21 @@ fn abi_newer_than_virtual() {
 }
 
 #[test]
+fn cred_caps() {
+    conform("cred/caps");
+}
+
+#[test]
+fn cred_groups() {
+    conform("cred/groups");
+}
+
+#[test]
+fn cred_ids() {
+    conform("cred/ids");
+}
+
+#[test]
 fn entropy_getrandom() {
     conform("entropy/getrandom");
 }
@@ -1039,6 +1054,11 @@ fn proc_ids() {
 }
 
 #[test]
+fn proc_pgrp() {
+    conform("proc/pgrp");
+}
+
+#[test]
 fn proc_prctl() {
     conform("proc/prctl");
 }
@@ -1061,6 +1081,31 @@ fn readiness_epoll() {
 #[test]
 fn readiness_ppoll() {
     conform("readiness/ppoll");
+}
+
+#[test]
+fn sched_affinity() {
+    conform("sched/affinity");
+}
+
+#[test]
+fn sched_attr() {
+    conform("sched/attr");
+}
+
+#[test]
+fn sched_ioprio() {
+    conform("sched/ioprio");
+}
+
+#[test]
+fn sched_policy() {
+    conform("sched/policy");
+}
+
+#[test]
+fn sched_priority() {
+    conform("sched/priority");
 }
 
 #[test]
@@ -1159,6 +1204,37 @@ fn signal_wait() {
 }
 
 #[test]
+fn sys_hostname() {
+    conform("sys/hostname");
+}
+
+#[test]
+fn sys_personality() {
+    conform("sys/personality");
+}
+
+#[test]
+fn sys_rlimit() {
+    conform("sys/rlimit");
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn sys_sysfs() {
+    conform("sys/sysfs");
+}
+
+#[test]
+fn sys_sysinfo() {
+    conform("sys/sysinfo");
+}
+
+#[test]
+fn sys_uname() {
+    conform("sys/uname");
+}
+
+#[test]
 fn thread_futex() {
     conform("thread/futex");
 }
@@ -1194,6 +1270,36 @@ fn thread_tid_clear() {
 }
 
 #[test]
+fn time_clock_res() {
+    conform("time/clock_res");
+}
+
+#[test]
+fn time_clock_set() {
+    conform("time/clock_set");
+}
+
+#[test]
 fn time_clocks() {
     conform("time/clocks");
+}
+
+#[test]
+fn time_cputime() {
+    conform("time/cputime");
+}
+
+#[test]
+fn time_itimer() {
+    conform("time/itimer");
+}
+
+#[test]
+fn time_posix_timer() {
+    conform("time/posix_timer");
+}
+
+#[test]
+fn time_timerfd() {
+    conform("time/timerfd");
 }

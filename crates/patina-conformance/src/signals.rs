@@ -203,6 +203,38 @@ pub fn wait_until(interval: Duration, mut done: impl FnMut() -> bool) -> bool {
     done()
 }
 
+/// The most CPU-bound chunks [`spin_until`] runs: tens of seconds of CPU,
+/// the bound that ends a spin where no clock moves while the process
+/// computes (a model whose virtual clocks stand still between calls).
+const SPIN_CHUNKS: u32 = 200_000;
+
+/// Compute (no system call) in short chunks until `done` holds, for at most
+/// [`PROGRESS_DEADLINE`] of monotonic time or [`SPIN_CHUNKS`] chunks; whether
+/// it held. CPU time accrues only while the process runs, so a loaded host
+/// makes the spin take longer in wall time and never makes it end early;
+/// `done` reads whatever clock or pending set the scenario waits on, through
+/// its own door.
+pub fn spin_until(mut done: impl FnMut() -> bool) -> bool {
+    let started = std::time::Instant::now();
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..SPIN_CHUNKS {
+        if done() {
+            return true;
+        }
+        if started.elapsed() > PROGRESS_DEADLINE {
+            break;
+        }
+        for _ in 0..20_000 {
+            state = std::hint::black_box(
+                state
+                    .wrapping_mul(0x5851_f42d_4c95_7f2d)
+                    .wrapping_add(0x1405_7b7e_f767_814f),
+            );
+        }
+    }
+    done()
+}
+
 /// The helper's pause before it signals the main thread: long enough for the
 /// main thread to be parked in its blocking call natively; virtual time under
 /// patina, where the wait must be a real park.

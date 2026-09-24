@@ -26,6 +26,9 @@ pub enum Cause {
     Exhausted,
     /// The process holds a privilege whose checks the scenario asserts.
     Privileged,
+    /// The process inherited a state the scenario starts from otherwise (a
+    /// lowered priority, a persona) and cannot restore.
+    Inherited,
     /// Detection itself failed in a way no missing capability explains (a
     /// vanished run directory, EIO, a wrong argument): a broken probe, which
     /// the harness fails rather than reports not run.
@@ -48,6 +51,7 @@ impl fmt::Display for NotRun {
             Cause::Present => "present",
             Cause::Exhausted => "exhausted",
             Cause::Privileged => "privileged",
+            Cause::Inherited => "inherited",
             Cause::Unexpected => "unexpected",
         };
         write!(f, "{cause}: {}", self.detail)
@@ -170,6 +174,10 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         Need::ShadowStack => memipc::shadow_stack(),
         Need::SecretMemory => memipc::secret_memory(),
         Need::OneNumaNode => memipc::one_numa_node(),
+        Need::NiceZero => timeid::nice_zero(),
+        Need::DefaultPersona => timeid::default_persona(),
+        Need::SysfsSyscall => timeid::sysfs_syscall(),
+        Need::HighResTimers => timeid::high_res_timers(),
     }
 }
 
@@ -335,8 +343,9 @@ fn whiteouts(dir: &Path) -> Result<(), NotRun> {
 }
 
 /// The effective user and capabilities from `/proc/self/status`: the checks a
-/// scenario asserts for an unprivileged caller (EPERM, EACCES) hold only with
-/// euid ≠ 0 and an empty effective capability set.
+/// scenario asserts for an unprivileged caller (EPERM, EACCES, empty
+/// capability sets) hold only with euid ≠ 0 and empty effective, permitted,
+/// inheritable and ambient capability sets.
 fn unprivileged() -> Result<(), NotRun> {
     let status = std::fs::read_to_string("/proc/self/status").map_err(|error| NotRun {
         cause: Cause::Unexpected,
@@ -350,24 +359,121 @@ fn unprivileged() -> Result<(), NotRun> {
             .map(str::to_string)
     };
     let euid = field("Uid:").and_then(|uids| uids.split_whitespace().nth(1).map(str::to_string));
-    let caps = field("CapEff:");
-    match (
-        euid.as_deref(),
-        caps.as_deref().map(|hex| u64::from_str_radix(hex, 16)),
-    ) {
-        (Some("0"), _) => Err(NotRun {
-            cause: Cause::Privileged,
-            detail: "the effective uid is 0".into(),
-        }),
-        (Some(_), Some(Ok(0))) => Ok(()),
-        (Some(_), Some(Ok(caps))) => Err(NotRun {
-            cause: Cause::Privileged,
-            detail: format!("the effective capability set is {caps:#x}"),
-        }),
-        _ => Err(NotRun {
-            cause: Cause::Unexpected,
-            detail: "no Uid/CapEff in /proc/self/status".into(),
-        }),
+    match euid.as_deref() {
+        Some("0") => {
+            return Err(NotRun {
+                cause: Cause::Privileged,
+                detail: "the effective uid is 0".into(),
+            });
+        }
+        Some(_) => {}
+        None => {
+            return Err(NotRun {
+                cause: Cause::Unexpected,
+                detail: "no Uid in /proc/self/status".into(),
+            });
+        }
+    }
+    for set in ["CapEff:", "CapPrm:", "CapInh:", "CapAmb:"] {
+        match field(set).map(|hex| u64::from_str_radix(&hex, 16)) {
+            Some(Ok(0)) => {}
+            Some(Ok(caps)) => {
+                return Err(NotRun {
+                    cause: Cause::Privileged,
+                    detail: format!("{} is {caps:#x}", set.trim_end_matches(':')),
+                });
+            }
+            _ => {
+                return Err(NotRun {
+                    cause: Cause::Unexpected,
+                    detail: format!("no {set} in /proc/self/status"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The time, scheduling and identity needs: a process attribute the native
+/// run inherits from the harness, or a kernel-configuration fact.
+mod timeid {
+    use super::{Cause, NotRun, refusal};
+    use crate::vehicle::errno;
+
+    /// `syscall(2)` with a raw number; the kernel convention (`-errno`).
+    fn sys(number: libc::c_long, args: [libc::c_long; 2]) -> i64 {
+        // SAFETY: the rows below take no pointer this frame does not own.
+        let result = unsafe { libc::syscall(number, args[0], args[1]) };
+        if result == -1 {
+            -i64::from(errno())
+        } else {
+            result
+        }
+    }
+
+    pub(super) fn nice_zero() -> Result<(), NotRun> {
+        // The raw row answers 20 - nice.
+        match sys(
+            libc::SYS_getpriority,
+            [libc::PRIO_PROCESS as libc::c_long, 0],
+        ) {
+            20 => Ok(()),
+            result if result > 0 => Err(NotRun {
+                cause: Cause::Inherited,
+                detail: format!("the harness runs at nice {}", 20 - result),
+            }),
+            result => Err(refusal("getpriority(PRIO_PROCESS, 0)", -result as i32)),
+        }
+    }
+
+    pub(super) fn default_persona() -> Result<(), NotRun> {
+        match sys(libc::SYS_personality, [0xffff_ffff, 0]) {
+            0 => Ok(()),
+            result if result > 0 => Err(NotRun {
+                cause: Cause::Inherited,
+                detail: format!("the harness runs in persona {result:#x}"),
+            }),
+            result => Err(refusal("personality(0xffffffff)", -result as i32)),
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn sysfs_syscall() -> Result<(), NotRun> {
+        match sys(libc::SYS_sysfs, [3, 0]) {
+            count if count >= 0 => Ok(()),
+            result => Err(refusal("sysfs(3)", -result as i32)),
+        }
+    }
+
+    /// The generic (arm64) table has no `sysfs` row.
+    #[cfg(not(target_arch = "x86_64"))]
+    pub(super) fn sysfs_syscall() -> Result<(), NotRun> {
+        Err(NotRun {
+            cause: Cause::Absent,
+            detail: "this architecture's table has no sysfs row".into(),
+        })
+    }
+
+    pub(super) fn high_res_timers() -> Result<(), NotRun> {
+        let mut res = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let result = sys(
+            libc::SYS_clock_getres,
+            [
+                libc::CLOCK_MONOTONIC as libc::c_long,
+                &mut res as *mut libc::timespec as libc::c_long,
+            ],
+        );
+        match (result, res.tv_sec, res.tv_nsec) {
+            (0, 0, 1) => Ok(()),
+            (0, sec, nsec) => Err(NotRun {
+                cause: Cause::Absent,
+                detail: format!("CLOCK_MONOTONIC resolves to {sec}.{nsec:09} s, a tick"),
+            }),
+            (result, _, _) => Err(refusal("clock_getres(CLOCK_MONOTONIC)", -result as i32)),
+        }
     }
 }
 

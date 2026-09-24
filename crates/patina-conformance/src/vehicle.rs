@@ -612,6 +612,90 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_inotify_add_watch
             | Syscall::N_inotify_rm_watch
             | Syscall::N_name_to_handle_at => syscall_door(row, a),
+            // The time, identity, scheduling and limit rows whose glibc
+            // symbol the shim defines: the libc spelling is that wrapper
+            // (`setuid`/`setgid`/`setgroups`/`setsid`/`setpgid` are the
+            // shim's deny-traps; `sched_getaffinity` answers 0 where the row
+            // answers the bytes it wrote, which its probe method folds).
+            Syscall::N_uname => uname(a[0] as *mut utsname) as i64,
+            Syscall::N_sysinfo => sysinfo(a[0] as *mut sysinfo) as i64,
+            Syscall::N_getrusage => getrusage(a[0] as c_int, a[1] as *mut rusage) as i64,
+            Syscall::N_getrlimit => {
+                getrlimit(a[0] as __rlimit_resource_t, a[1] as *mut rlimit) as i64
+            }
+            Syscall::N_setrlimit => {
+                setrlimit(a[0] as __rlimit_resource_t, a[1] as *const rlimit) as i64
+            }
+            Syscall::N_sched_getaffinity => {
+                sched_getaffinity(a[0] as pid_t, a[1] as size_t, a[2] as *mut cpu_set_t) as i64
+            }
+            Syscall::N_sched_setaffinity => {
+                sched_setaffinity(a[0] as pid_t, a[1] as size_t, a[2] as *const cpu_set_t) as i64
+            }
+            Syscall::N_sched_yield => sched_yield() as i64,
+            Syscall::N_geteuid => geteuid() as i64,
+            Syscall::N_getegid => getegid() as i64,
+            Syscall::N_setuid => setuid(a[0] as uid_t) as i64,
+            Syscall::N_setgid => setgid(a[0] as gid_t) as i64,
+            Syscall::N_setgroups => setgroups(a[0] as size_t, a[1] as *const gid_t) as i64,
+            Syscall::N_setsid => setsid() as i64,
+            Syscall::N_setpgid => setpgid(a[0] as pid_t, a[1] as pid_t) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_time => time(a[0] as *mut time_t) as i64,
+            // The time, identity, scheduling and limit rows whose glibc
+            // wrapper the shim does not define (importing it would make the
+            // pre-run import audit refuse the whole probe binary) or that
+            // glibc does not wrap (`timer_*` ids and `getpriority`'s raw
+            // answer differ from glibc's wrappers; `clock_getres`'s symbol row
+            // is `Absent`): the libc spelling is glibc's own `syscall(2)`.
+            Syscall::N_clock_getres
+            | Syscall::N_getitimer
+            | Syscall::N_setitimer
+            | Syscall::N_timer_create
+            | Syscall::N_timer_settime
+            | Syscall::N_timer_gettime
+            | Syscall::N_timer_getoverrun
+            | Syscall::N_timer_delete
+            | Syscall::N_timerfd_create
+            | Syscall::N_timerfd_settime
+            | Syscall::N_timerfd_gettime
+            | Syscall::N_times
+            | Syscall::N_settimeofday
+            | Syscall::N_clock_settime
+            | Syscall::N_adjtimex
+            | Syscall::N_clock_adjtime
+            | Syscall::N_syslog
+            | Syscall::N_personality
+            | Syscall::N_prlimit64
+            | Syscall::N_getpriority
+            | Syscall::N_setpriority
+            | Syscall::N_ioprio_get
+            | Syscall::N_ioprio_set
+            | Syscall::N_sched_getscheduler
+            | Syscall::N_sched_setscheduler
+            | Syscall::N_sched_getparam
+            | Syscall::N_sched_setparam
+            | Syscall::N_sched_get_priority_max
+            | Syscall::N_sched_get_priority_min
+            | Syscall::N_sched_rr_get_interval
+            | Syscall::N_sched_getattr
+            | Syscall::N_sched_setattr
+            | Syscall::N_getcpu
+            | Syscall::N_getresuid
+            | Syscall::N_getresgid
+            | Syscall::N_setreuid
+            | Syscall::N_setregid
+            | Syscall::N_setresuid
+            | Syscall::N_setresgid
+            | Syscall::N_setfsuid
+            | Syscall::N_setfsgid
+            | Syscall::N_getgroups
+            | Syscall::N_capget
+            | Syscall::N_capset
+            | Syscall::N_sethostname
+            | Syscall::N_setdomainname => syscall_door(row, a),
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_alarm | Syscall::N_getpgrp | Syscall::N_sysfs => syscall_door(row, a),
             // Legacy rows glibc has no wrapper for (`getdents`; `ustat`, whose
             // wrapper glibc 2.28 dropped) or whose wrapper the shim does not
             // define (`inotify_init`).
@@ -704,6 +788,7 @@ pub fn errno_name(code: i32) -> String {
         libc::ENODATA => "ENODATA",
         libc::EIDRM => "EIDRM",
         libc::ENOMSG => "ENOMSG",
+        libc::ECANCELED => "ECANCELED",
         _ => return format!("E#{code}"),
     };
     name.to_string()
