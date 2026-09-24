@@ -1,0 +1,11 @@
+# CI runs the workspace suite with `cargo nextest run --profile ci`, split into
+# partitions across parallel jobs (.github/workflows/ci.yml). Local gates keep
+# using `cargo test` through scripts/check.sh.
+[profile.ci]
+# Run every test: one failure must not hide the rest of the partition's results.
+fail-fast = false
+# Report (never kill) tests past a minute, and list every slow test's duration
+# at the end, so CI keeps a per-test timing record.
+slow-timeout = { period = "60s" }
+final-status-level = "slow"
+failure-output = "immediate-final"

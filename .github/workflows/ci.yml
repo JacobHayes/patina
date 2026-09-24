@@ -21,11 +21,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  platform:
-    # Scheduled runs have dedicated jobs below. Pushes, pull requests, and
-    # manual dispatches cover both Linux architectures on stable + MSRV.
+  # Each push/PR/dispatch row (stable and MSRV on both Linux architectures) is
+  # split into parallel jobs so wall time is the longest slice, not the sum:
+  # `tests` runs the complete workspace suite in two nextest partitions, and
+  # `gates` runs every other check of the row. Together they run exactly the
+  # battery the single per-row job ran before.
+  tests:
     if: github.event_name != 'schedule'
-    name: ${{ matrix.toolchain }} / ${{ matrix.runner }}
+    name: ${{ matrix.toolchain }} / ${{ matrix.runner }} / tests ${{ matrix.shard }}/2
     strategy:
       fail-fast: false
       matrix:
@@ -33,6 +36,7 @@ jobs:
         # x86_64 and aarch64 Linux surface different platform gaps (libgcc
         # split-stack wrap symbols exist only on x86; the dev VM is aarch64).
         runner: [ubuntu-latest, ubuntu-24.04-arm]
+        shard: [1, 2]
     runs-on: ${{ matrix.runner }}
     env:
       PATINA_REQUIRE_SUD: ${{ matrix.runner == 'ubuntu-latest' && '1' || '0' }}
@@ -41,6 +45,65 @@ jobs:
       # virtual ABI that a newer runner kernel implements answer their declared
       # ENOSYS natively instead.
       PATINA_REQUIRE_HOST_ORACLE: '1'
+      # strace is the Linux whole-run syscall-containment class detector
+      # (native_trace, and the conformance scenarios' leak run). It is installed
+      # below and required, so a runner image without strace hard-fails instead
+      # of silently dropping the containment gate.
+      PATINA_REQUIRE_STRACE: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - if: matrix.toolchain == 'stable'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - if: matrix.toolchain == 'msrv'
+        uses: dtolnay/rust-toolchain@1.86.0
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The partitions build identical artifacts; one saves for both,
+          # and only main saves, so branch and PR runs cannot evict main's cache.
+          save-if: ${{ matrix.shard == 1 && github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: sudo apt-get update && sudo apt-get install -y strace && uname -r
+      # The oracle host's network-scenario prerequisites, on record for when a
+      # need goes unmet (IPv6 on lo, fanotify groups, non-local binds).
+      - run: |
+          sysctl net.ipv6.conf.lo.disable_ipv6 net.ipv4.ip_nonlocal_bind net.ipv6.ip_nonlocal_bind || true
+          cat /proc/sys/fs/fanotify/max_user_groups || true
+      # The complete workspace suite, split across the two partitions by test
+      # name (nextest runs every test binary; doctests run separately below).
+      # Stable executes it on each Linux platform, the syscall conformance
+      # scenarios (native_conformance) included; x86_64 also runs their raw
+      # vehicle under SUD. MSRV is the full Rust 1.86 final-gate tier (the same
+      # battery `mise run msrv` runs locally, conformance included). Nested
+      # Patina shim caches are compiler-identity keyed.
+      - run: cargo nextest run --profile ci --workspace --locked --partition hash:${{ matrix.shard }}/2
+      - if: matrix.shard == 1
+        run: cargo test --workspace --doc --locked
+      - if: matrix.shard == 1 && matrix.toolchain == 'msrv'
+        run: cargo test -p patina-dst --features macros --locked
+
+  gates:
+    if: github.event_name != 'schedule'
+    name: ${{ matrix.toolchain }} / ${{ matrix.runner }} / gates
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, msrv]
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    env:
+      # check-native-testbeds.sh requires each SUD receipt on x86_64. (strace
+      # and the host-oracle requirement belong to the test suite, in `tests`.)
+      PATINA_REQUIRE_SUD: ${{ matrix.runner == 'ubuntu-latest' && '1' || '0' }}
+      # The gate scripts each default to a private target dir so the local
+      # check runner can overlap them; here they run one after another, so they
+      # share one and build the release cargo-patina and native shim once.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v7
       - if: matrix.toolchain == 'stable'
@@ -54,48 +117,17 @@ jobs:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
         with:
-          # The testbed gates below stage their builds under the root target dir.
-          workspaces: .
-          # cargo-patina unpacks and builds the native shim under the per-user
-          # cache (not the workspace target dir); keep that build warm too.
-          cache-directories: |
-            ~/.cache/patina
-      # strace is the Linux whole-run syscall-containment class detector invoked
-      # by cargo-patina's native_trace test. Install it and require it (PATINA_REQUIRE_STRACE=1
-      # below) so a runner image without strace hard-fails instead of silently
-      # dropping the containment gate.
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y strace && uname -r
-      # The oracle host's network-scenario prerequisites, on record for when a
-      # need goes unmet (IPv6 on lo, fanotify groups, non-local binds).
-      - if: runner.os == 'Linux'
-        run: |
-          sysctl net.ipv6.conf.lo.disable_ipv6 net.ipv4.ip_nonlocal_bind net.ipv6.ip_nonlocal_bind || true
-          cat /proc/sys/fs/fanotify/max_user_groups || true
-      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
-        run: cargo fmt --all -- --check
-      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # Stable executes the complete suite on each Linux platform, the syscall
-      # conformance scenarios (native_conformance) included; x86_64 also runs
-      # their raw vehicle under SUD. MSRV is the full Rust 1.86 final-gate tier
-      # (the same battery exposed locally as `mise run msrv`, conformance
-      # included), with its own outer Cargo cache; nested Patina shim caches are
-      # compiler-identity keyed.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - if: matrix.toolchain == 'stable'
-        run: cargo test --workspace --locked
-        env:
-          PATINA_REQUIRE_STRACE: '1'
-      - if: matrix.toolchain == 'msrv'
-        run: scripts/check.sh msrv
-        env:
-          PATINA_REQUIRE_STRACE: '1'
-      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+      - if: matrix.toolchain == 'stable'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - if: matrix.toolchain == 'stable'
         run: cargo doc --workspace --no-deps --locked
       # Flag drift gate: every --flag mentioned in the docs OR in any shell script
       # must exist in the CLI's own machine-readable registry (or the script's
       # small allowlist of non-patina flags).
-      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
+      - if: matrix.toolchain == 'stable'
         run: scripts/check-flag-drift.sh
       - run: scripts/validate-wasi.sh
       - run: scripts/check-native-testbeds.sh
@@ -105,17 +137,15 @@ jobs:
       # covered by a Rust test; the campaign selftest is ALSO exercised by the
       # `campaign_selftest_passes` integration test but kept here as a direct
       # CLI-level gate against the shipped subcommand.
-      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
+      - if: matrix.toolchain == 'stable'
         run: testbeds/workq/fuzz-sweep.sh --selftest
-      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
+      - if: matrix.toolchain == 'stable'
         run: cargo run -p cargo-patina --quiet -- campaign --selftest
       # The flagship durable-work-queue testbed's full self-checking gate
       # (determinism, record/replay, net/fs faults, crash-recovery, buggify
-      # sweep). Its dependency tree is tiny (patina-dst + sha2 only) and its own
-      # target dir is small, so it fits the per-push budget: measured ~5.5s warm
-      # / ~35s cold (dominated by the release cargo-patina + shim compile it
-      # shares), well under two minutes. The heavier randomized fault-combination
-      # sweep over this same testbed runs nightly (see the `nightly` job).
+      # sweep). Its dependency tree is tiny (patina-dst + sha2 only). The
+      # heavier randomized fault-combination sweep over this same testbed runs
+      # nightly (see the `nightly` job).
       - if: matrix.toolchain == 'stable'
         run: testbeds/workq/run-patina.sh
       # The async-native testbed's full self-checking gate (multi-seed

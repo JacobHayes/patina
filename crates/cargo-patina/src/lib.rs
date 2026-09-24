@@ -6118,16 +6118,14 @@ fn policy_downgrades(policy: &UnsupportedPolicy, escape: &NativeEscape) -> bool 
 /// allocating the whole (large, instrumented) binary, so the detection itself
 /// never adds the memory pressure it must survive.
 fn binary_instrumentation(binary: &Path) -> Result<GuestInstrumentation, CliError> {
-    // The yield-point marker is checked first and wins: the two hook objects are
+    // The yield-point marker wins wherever it sits: the two hook objects are
     // mutually exclusive at link, so at most one can be present, and a binary
     // carrying both bytes could only be a doctored artifact — classify it under
     // the DENSER policy rather than the cheaper one.
-    if scan_marker(binary, PATINA_YIELD_MARKER, 0)?.is_some() {
-        return Ok(GuestInstrumentation::YieldPoints);
-    }
-    // Up to 10 decimal digits (u32) plus the ';' terminator follow the prefix.
-    let Some(tail) = scan_marker(binary, PATINA_COV_MARKER_PREFIX, 11)? else {
-        return Ok(GuestInstrumentation::None);
+    let tail = match scan_instrumentation_markers(binary)? {
+        MarkerScan::YieldPoints => return Ok(GuestInstrumentation::YieldPoints),
+        MarkerScan::CoveragePoints(tail) => tail,
+        MarkerScan::None => return Ok(GuestInstrumentation::None),
     };
     let digits: Vec<u8> = tail
         .iter()
@@ -6147,15 +6145,30 @@ fn binary_instrumentation(binary: &Path) -> Result<GuestInstrumentation, CliErro
     Ok(GuestInstrumentation::CoveragePoints { stride })
 }
 
-/// Stream `binary` looking for `marker`, returning the `trailing` bytes that
-/// follow it (empty when `trailing == 0`), or `None` when it is absent.
+/// The decimal digits (a `u32`: at most 10) plus the `;` terminator that follow
+/// the coverage-points marker prefix.
+const PATINA_COV_MARKER_TRAILING: usize = 11;
+
+/// What [`scan_instrumentation_markers`] found in a binary's bytes.
+enum MarkerScan {
+    /// The yield-point marker, anywhere in the image.
+    YieldPoints,
+    /// No yield-point marker; the bytes following the FIRST coverage-points
+    /// prefix (up to [`PATINA_COV_MARKER_TRAILING`]; fewer when the image ends).
+    CoveragePoints(Vec<u8>),
+    /// Neither marker.
+    None,
+}
+
+/// Stream `binary` once for both instrumentation markers.
 ///
-/// The scan streams the image in a bounded window rather than allocating the
-/// whole (large, instrumented) binary, so the detection itself never adds the
-/// memory pressure it must survive; a marker straddling a chunk boundary is
-/// caught by carrying the trailing overlap, which is sized to hold the marker AND
-/// the bytes the caller wants after it.
-fn scan_marker(binary: &Path, marker: &[u8], trailing: usize) -> Result<Option<Vec<u8>>, CliError> {
+/// The image streams through a bounded window rather than being allocated whole,
+/// so the detection itself never adds the memory pressure it must survive. A
+/// marker straddling a chunk boundary is caught by carrying the trailing overlap,
+/// sized to hold the longer marker AND the bytes wanted after it. Both markers
+/// are found with `memmem` in the same pass: a plain binary, which carries
+/// neither, is read and searched once, not once per marker byte by byte.
+fn scan_instrumentation_markers(binary: &Path) -> Result<MarkerScan, CliError> {
     use std::io::Read;
 
     let mut file = fs::File::open(binary).map_err(|error| {
@@ -6164,10 +6177,15 @@ fn scan_marker(binary: &Path, marker: &[u8], trailing: usize) -> Result<Option<V
             binary.display()
         ))
     })?;
-    let span = marker.len() + trailing;
-    let overlap = span - 1;
+    let yield_marker = memchr::memmem::Finder::new(PATINA_YIELD_MARKER);
+    let cov_marker = memchr::memmem::Finder::new(PATINA_COV_MARKER_PREFIX);
+    let overlap = PATINA_YIELD_MARKER
+        .len()
+        .max(PATINA_COV_MARKER_PREFIX.len() + PATINA_COV_MARKER_TRAILING)
+        - 1;
     let mut window: Vec<u8> = Vec::with_capacity(overlap + 64 * 1024);
     let mut chunk = vec![0u8; 64 * 1024];
+    let mut cov_tail = None;
     loop {
         let read = file.read(&mut chunk).map_err(|error| {
             CliError(format!(
@@ -6176,28 +6194,28 @@ fn scan_marker(binary: &Path, marker: &[u8], trailing: usize) -> Result<Option<V
             ))
         })?;
         if read == 0 {
-            // End of file: the last window may still hold a match whose trailing
-            // bytes are simply short (a marker at the very end of the image).
-            if let Some(at) = window
-                .windows(marker.len())
-                .position(|candidate| candidate == marker)
-            {
-                let from = at + marker.len();
-                return Ok(Some(window[from..].to_vec()));
+            // End of file: the retained window may still hold a coverage prefix
+            // whose trailing bytes are simply short (a marker at the very end).
+            if cov_tail.is_none() {
+                cov_tail = cov_marker
+                    .find(&window)
+                    .map(|at| window[at + PATINA_COV_MARKER_PREFIX.len()..].to_vec());
             }
-            return Ok(None);
+            return Ok(cov_tail.map_or(MarkerScan::None, MarkerScan::CoveragePoints));
         }
         window.extend_from_slice(&chunk[..read]);
-        if let Some(at) = window
-            .windows(marker.len())
-            .position(|candidate| candidate == marker)
-        {
-            let from = at + marker.len();
-            if window.len() - from >= trailing {
-                return Ok(Some(window[from..from + trailing].to_vec()));
+        if yield_marker.find(&window).is_some() {
+            return Ok(MarkerScan::YieldPoints);
+        }
+        if cov_tail.is_none() {
+            if let Some(at) = cov_marker.find(&window) {
+                let from = at + PATINA_COV_MARKER_PREFIX.len();
+                // Without all its trailing bytes yet, the match lies within the
+                // retained overlap and is found again once they are read.
+                if window.len() - from >= PATINA_COV_MARKER_TRAILING {
+                    cov_tail = Some(window[from..from + PATINA_COV_MARKER_TRAILING].to_vec());
+                }
             }
-            // The trailing bytes have not been read yet; keep the match in the
-            // window (it is within the retained overlap) and read more.
         }
         // Retain only the trailing `overlap` bytes so a marker split across the
         // next chunk boundary is still found without unbounded growth.
@@ -10296,6 +10314,36 @@ mod tests {
                 );
             }
         }
+
+        // Both markers are found in one pass, so neither may shadow the other's
+        // rule: a yield-point marker wins even when a coverage prefix precedes it
+        // (and even across a chunk boundary), and among coverage prefixes the
+        // FIRST names the stride.
+        let cov = |stride: u32| {
+            format!(
+                "{}{stride};",
+                std::str::from_utf8(PATINA_COV_MARKER_PREFIX).unwrap()
+            )
+        };
+        let mut image = vec![0u8; 200_000];
+        image[100..100 + cov(9).len()].copy_from_slice(cov(9).as_bytes());
+        let late = 150_000;
+        image[late..late + PATINA_YIELD_MARKER.len()].copy_from_slice(PATINA_YIELD_MARKER);
+        let yield_after_cov = dir.path().join("yield-after-cov.bin");
+        fs::write(&yield_after_cov, &image).unwrap();
+        assert_eq!(
+            binary_instrumentation(&yield_after_cov).ok(),
+            Some(GuestInstrumentation::YieldPoints)
+        );
+        let mut image = vec![0u8; 200_000];
+        image[100..100 + cov(9).len()].copy_from_slice(cov(9).as_bytes());
+        image[late..late + cov(4).len()].copy_from_slice(cov(4).as_bytes());
+        let two_strides = dir.path().join("two-strides.bin");
+        fs::write(&two_strides, &image).unwrap();
+        assert_eq!(
+            binary_instrumentation(&two_strides).ok(),
+            Some(GuestInstrumentation::CoveragePoints { stride: 9 })
+        );
 
         // An unreadable image is a hard error, never a silent "not instrumented".
         let missing = dir.path().join("does-not-exist.bin");

@@ -79,10 +79,15 @@ fn probes() -> &'static Probes {
             status.success(),
             "building the native conformance probe failed"
         );
+        // Run the shim-linked probe from the path Cargo produced, never from an
+        // `--output` copy: every test process (nextest runs one per test)
+        // rebuilds the probe, and a copy rewrites the file in place while
+        // another process may be executing it (ETXTBSY). Cargo replaces its
+        // output by link, which a running executable survives; the conformance
+        // scenarios are Linux-only, where the target dir hard-links.
         let patina_target = common::guest_target_dir("conformance");
-        let patina = patina_target.join("conformance-probe");
         let package = common::native_workspace().join("crates/patina-conformance");
-        common::invoke_in_with_env(
+        let built = common::invoke_in_with_env(
             common::native_workspace(),
             &[
                 "build",
@@ -90,11 +95,13 @@ fn probes() -> &'static Probes {
                 "--bin",
                 "conformance-probe",
                 "--release",
-                "--output",
-                patina.to_str().unwrap(),
             ],
             &[("CARGO_TARGET_DIR", patina_target.to_str().unwrap())],
         );
+        let patina = PathBuf::from(common::native::assert_unique_line_payload(
+            &built.stdout,
+            "PATINA_NATIVE_BUILD output=",
+        ));
         Probes {
             native: native_target.join("release/conformance-probe"),
             patina,

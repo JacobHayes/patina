@@ -29,6 +29,20 @@ members = [
 ]
 resolver = "2"
 
+# `cargo test` builds the cargo-patina binary that the integration suites drive
+# with the test profile, and the suites invoke it about a thousand times. Each
+# call pushes the whole guest binary (tens of MB for a debug guest) through
+# third-party code: `object` parses it, `memchr` searches it for markers, and a
+# `build` hashes the shim archive (over 100 MB in debug) with `sha2`.
+# Unoptimized, those dependencies cost about 2 s of CPU per `build` and 0.5 s
+# per `run`. Only third-party dependencies are optimized: they change only with
+# Cargo.lock, so the dependency cache absorbs their compile time. Workspace
+# crates, including the test harnesses, stay at opt-level 0; debug assertions
+# and overflow checks stay on; `cargo build` and `cargo run` (the dev profile)
+# are unaffected.
+[profile.test.package."*"]
+opt-level = 3
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
@@ -75,6 +89,8 @@ clap = { version = "~4.6", default-features = false, features = ["std", "error-c
 # The Linux kernel's uapi constants for the target architecture: the native
 # shim decodes the kernel ABI's flag words and errno values with them.
 linux-raw-sys = { version = "0.12.1", default-features = false, features = ["errno", "general", "no_std"] }
+# Substring search for the instrumentation markers in guest binaries.
+memchr = "2.8.3"
 object = { version = "0.39.1", default-features = false, features = ["read", "std"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }

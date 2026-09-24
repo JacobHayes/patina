@@ -1037,7 +1037,13 @@ struct AddressProvenance {
 }
 
 struct NativeProvenanceIndex {
+    /// Sorted by `(address, size)`.
     entries: Vec<AddressProvenance>,
+    /// `reach[i]` is the largest end address among `entries[..=i]` (a zero-size
+    /// label ends one past its address), so it never decreases. Every entry
+    /// before the first `reach` past an address ends at or before it and cannot
+    /// contain it, which bounds a lookup's scan from below.
+    reach: Vec<u64>,
 }
 
 impl NativeProvenanceIndex {
@@ -1107,15 +1113,31 @@ impl NativeProvenanceIndex {
         }
 
         entries.sort_by_key(|entry| (entry.address, entry.size));
-        Self { entries }
+        Self::from_sorted(entries)
+    }
+
+    fn from_sorted(entries: Vec<AddressProvenance>) -> Self {
+        let reach = entries
+            .iter()
+            .scan(0u64, |reach, entry| {
+                *reach = (*reach).max(entry_end(entry));
+                Some(*reach)
+            })
+            .collect();
+        Self { entries, reach }
     }
 
     fn for_address(&self, address: u64, section: Option<&str>) -> NativeProvenance {
+        // The candidates are exactly the entries starting at or before `address`
+        // whose running reach extends past it; visiting them in index order keeps
+        // the first-best tie-breaking of a full scan. A binary's call sites hit
+        // this once per import reference, so a scan from index 0 was quadratic.
+        let first = self.reach.partition_point(|reach| *reach <= address);
+        let last = self
+            .entries
+            .partition_point(|entry| entry.address <= address);
         let mut best = None;
-        for entry in &self.entries {
-            if entry.address > address {
-                break;
-            }
+        for entry in self.entries.get(first..last).unwrap_or_default() {
             if address_in_entry(address, entry) {
                 best = match best {
                     None => Some(entry),
@@ -1155,6 +1177,11 @@ impl NativeProvenanceIndex {
             section: section.map(str::to_owned),
         }
     }
+}
+
+/// One past the last address `entry` contains (see [`address_in_entry`]).
+fn entry_end(entry: &AddressProvenance) -> u64 {
+    entry.address.saturating_add(entry.size.max(1))
 }
 
 fn address_in_entry(address: u64, entry: &AddressProvenance) -> bool {
@@ -2568,9 +2595,7 @@ mod x86_scan {
         }
 
         fn scan_test(data: &[u8], escapes: &mut Vec<super::super::NativeEscape>) {
-            let provenance = super::super::NativeProvenanceIndex {
-                entries: Vec::new(),
-            };
+            let provenance = super::super::NativeProvenanceIndex::from_sorted(Vec::new());
             scan(data, ".text", 0, &provenance, escapes);
         }
 
@@ -4216,9 +4241,7 @@ mod tests {
         // vsyscall gettimeofday entry — is caught by the immediate signal.
         let mut text = vec![0x48u8, 0xb8];
         text.extend_from_slice(&0xffffffffff600000u64.to_le_bytes());
-        let provenance = NativeProvenanceIndex {
-            entries: Vec::new(),
-        };
+        let provenance = NativeProvenanceIndex::from_sorted(Vec::new());
         let mut escapes = Vec::new();
         scan_vsyscall_references(&text, ".text", 0, &provenance, &mut escapes);
         assert_eq!(
@@ -5328,6 +5351,68 @@ mod tests {
                 .as_deref(),
             Some("outer_region")
         );
+    }
+
+    // The bounded lookup must answer exactly what a scan of every entry answers:
+    // it only skips entries whose running reach proves they end before the
+    // address. The planted tables have a huge early container (whose reach keeps
+    // every later lookup's lower bound at 0), nested sized symbols, zero-size
+    // labels on and off sized entries, and equal-precision twins that differ only
+    // in object provenance, so the first-best tie-break and the sized-beats-label
+    // rule are both exercised at every address.
+    #[test]
+    fn bounded_provenance_lookup_matches_a_full_scan() {
+        let entry =
+            |address: u64, size: u64, object: Option<&str>, symbol: &str| AddressProvenance {
+                address,
+                size,
+                object_path: object.map(str::to_owned),
+                archive_member: None,
+                symbol: Some(symbol.to_owned()),
+            };
+        let tables = [
+            vec![
+                entry(0x10, 0x20, Some("a.o"), "small_first"),
+                entry(0x40, 0, None, "label_alone"),
+                entry(0x40, 0x10, None, "sized_at_label"),
+                entry(0x48, 0x04, None, "nested"),
+                entry(0x48, 0x04, Some("b.o"), "nested_twin_with_object"),
+                entry(0x60, 0, Some("c.o"), "label_with_object"),
+                entry(0x60, 0, None, "label_twin"),
+                entry(0x70, 0x08, None, "after_gap"),
+            ],
+            vec![
+                entry(0x08, 0x1000, Some("big.o"), "huge_early_container"),
+                entry(0x20, 0x10, None, "inside_huge"),
+                entry(0x20, 0x10, Some("d.o"), "inside_huge_twin"),
+                entry(0x90, 0, None, "label_in_huge"),
+                entry(0x2000, 0x10, None, "past_huge"),
+            ],
+        ];
+        for mut entries in tables {
+            entries.sort_by_key(|entry| (entry.address, entry.size));
+            let reference = |address: u64| {
+                let mut best: Option<&AddressProvenance> = None;
+                for entry in entries
+                    .iter()
+                    .filter(|entry| address_in_entry(address, entry))
+                {
+                    if best.is_none_or(|current| entry_better(entry, current)) {
+                        best = Some(entry);
+                    }
+                }
+                best.and_then(|entry| entry.symbol.clone())
+            };
+            let expected: Vec<_> = (0..0x2020).map(reference).collect();
+            let index = NativeProvenanceIndex::from_sorted(entries);
+            for (address, expected) in (0..0x2020u64).zip(expected) {
+                assert_eq!(
+                    index.for_address(address, Some(".text")).containing_symbol,
+                    expected,
+                    "address {address:#x}"
+                );
+            }
+        }
     }
 
     // Each stub is mapped by the slot it jumps through, not by its position in
