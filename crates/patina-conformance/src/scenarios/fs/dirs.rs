@@ -1,12 +1,7 @@
 //! fs/dirs — mkdirat / renameat / unlinkat: the namespace mutations and their
 //! errno vocabulary (existence checked through newfstatat).
 
-#[cfg(target_arch = "aarch64")]
-use crate::catalog::{ARM64_OPEN_FLAGS, DISPATCHER, RUST_PANIC};
-use crate::catalog::{Arc, DEFAULTS, Gap, LIBC, OPEN_FLAGS_AGREE, Scenario, Status};
-#[cfg(target_arch = "aarch64")]
-use crate::compare::Ending;
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -190,47 +185,6 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &[
         "mkdirat", "renameat", "unlinkat", "fstatat", "openat", "write", "fstat", "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: OPEN_FLAGS_AGREE,
-            what: "renaming a directory onto a regular file answers EEXIST, not ENOTDIR (patina_posix.c renameat → fs-mem rename)",
-            failure: Failure::Differs(&[
-                Difference::field(27, "renameat", "errno", Observed::Str("EEXIST")),
-                Difference::check(28, "renameat directory onto a file is ENOTDIR"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: LIBC,
-            what: "the C unlinkat refuses an unknown flag with ENOSYS (patina_posix.c unlinkat) while the dispatcher row and the kernel answer EINVAL",
-            failure: Failure::Differs(&[
-                Difference::field(53, "unlinkat", "errno", Observed::Str("ENOSYS")),
-                Difference::check(54, "unlinkat with an unknown flag is EINVAL"),
-            ]),
-        },
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Differs(&[
-                Difference::field(12, "openat", "errno", Observed::Str("ENOSYS")),
-                Difference::field(12, "openat", "ret", Observed::Int(-1)),
-            ]),
-        },
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Stops {
-                events: 13,
-                ending: Ending::Exit(RUST_PANIC),
-                diagnostic: "fs/dirs: cannot continue: open root",
-            },
-        },
     ],
     ..DEFAULTS
 };

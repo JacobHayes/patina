@@ -428,6 +428,8 @@ dependencies = [
 name = "patina-dst-native-shim"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "linux-raw-sys",
  "patina-dst-abi",
  "patina-dst-driver-api",
  "patina-dst-fs-crash",

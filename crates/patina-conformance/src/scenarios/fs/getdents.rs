@@ -1,13 +1,8 @@
 //! fs/getdents — getdents64 over a directory descriptor: the entry set, `.`
 //! and `..`, d_type per kind, the cursor (EOF and rewind through lseek), and
-//! the errno vocabulary. The libc door is glibc's `getdents64`, which the shim
-//! does not define (see `crate::vehicle`).
+//! the errno vocabulary. The libc door is glibc's `getdents64`.
 
-#[cfg(target_arch = "aarch64")]
-use crate::catalog::ARM64_OPEN_FLAGS;
-use crate::catalog::{Arc, DEFAULTS, DISPATCHER, Gap, LIBC, RUST_PANIC, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
-use crate::vehicle::GETDENTS64_UNRESOLVED;
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -113,71 +108,6 @@ pub const SCENARIO: Scenario = Scenario {
         "mkdirat",
         "symlinkat",
         "unlinkat",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: LIBC,
-            what: "the libc symbol getdents64 is not interposed (registry symbol row getdents64: Absent; C readdir is the only door), so the libc door does not resolve",
-            failure: Failure::Stops {
-                events: 9,
-                ending: Ending::Exit(RUST_PANIC),
-                diagnostic: GETDENTS64_UNRESOLVED,
-            },
-        },
-        #[cfg(target_arch = "x86_64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: "the getdents64 row lists no `.` or `..` entry (sud/fs.rs sys_getdents64 iterates the patina_read_dir snapshot, which has neither)",
-            failure: Failure::Differs(&[
-                Difference::field(
-                    9,
-                    "getdents64",
-                    "fields.entries",
-                    Observed::Json(r#"["a:8","b:8","l:10","sub:4"]"#),
-                ),
-                Difference::field(9, "getdents64", "ret", Observed::Int(96)),
-                Difference::field(
-                    20,
-                    "getdents64",
-                    "fields.entries",
-                    Observed::Json(r#"["a:8","b:8","l:10","sub:4"]"#),
-                ),
-                Difference::field(20, "getdents64", "ret", Observed::Int(96)),
-                Difference::field(
-                    33,
-                    "getdents64",
-                    "fields.entries",
-                    Observed::Json(r#"["b:8","l:10","sub:4"]"#),
-                ),
-                Difference::field(33, "getdents64", "ret", Observed::Int(72)),
-                Difference::check(14, "'.' and '..' are listed as DT_DIR"),
-                Difference::check(15, "every entry exactly once"),
-                Difference::check(34, "an unlinked entry is no longer listed"),
-            ]),
-        },
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Differs(&[
-                Difference::field(8, "openat", "errno", Observed::Str("ENOSYS")),
-                Difference::field(8, "openat", "ret", Observed::Int(-1)),
-            ]),
-        },
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Stops {
-                events: 9,
-                ending: Ending::Exit(RUST_PANIC),
-                diagnostic: "fs/getdents: cannot continue: open the directory",
-            },
-        },
     ],
     ..DEFAULTS
 };

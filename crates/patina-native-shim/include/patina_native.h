@@ -170,6 +170,10 @@ void patina_assert_teardown_engaged(void);
 int32_t patina_flush_captured_stdio(void);
 int32_t patina_errno(void);
 int32_t patina_entropy(void *destination, size_t length);
+/* getrandom(2) over the seeded stream: the byte count, or -1/EINVAL for a flag
+ * word the Linux kernel refuses (GRND_* outside NONBLOCK|RANDOM|INSECURE, or
+ * INSECURE with RANDOM). */
+intptr_t patina_getrandom(void *destination, size_t length, uint32_t flags);
 int32_t patina_clock_now(uint32_t clock, uint64_t *nanos);
 int32_t patina_sleep_until(uint32_t clock, uint64_t deadline_nanos);
 int patina_sleep_until_remaining(uint32_t clock_id, uint64_t deadline_nanos, int64_t *remaining);
@@ -287,6 +291,12 @@ int32_t patina_fd_setfd(int32_t fd, int32_t cloexec);
 int32_t patina_fd_getfl(int32_t fd);
 int32_t patina_fd_setfl(int32_t fd, uint32_t flags);
 int32_t patina_fd_set_nonblocking(int32_t fd, int32_t nonblocking);
+#ifdef __linux__
+/* The kernel's O_LARGEFILE bit for the target architecture (the uapi value the
+ * SUD dispatcher reports), which F_GETFL carries for a PATINA_O_OPENED
+ * description. glibc defines its O_LARGEFILE macro as 0 on 64-bit targets. */
+extern const int32_t PATINA_KERNEL_O_LARGEFILE;
+#endif
 /*
  * Duplication and closing, kernel semantics: dup binds the lowest free number;
  * F_DUPFD[_CLOEXEC] the lowest free at or above `minimum` (EINVAL outside the

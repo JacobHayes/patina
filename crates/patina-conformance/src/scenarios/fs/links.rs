@@ -1,12 +1,9 @@
 //! fs/links — symlinkat / readlinkat / linkat: link targets and truncation,
 //! dangling links, hard-link counts, and AT_SYMLINK_FOLLOW.
 
-#[cfg(target_arch = "aarch64")]
-use crate::catalog::{ARM64_OPEN_FLAGS, DISPATCHER, RUST_PANIC};
-use crate::catalog::{Arc, DEFAULTS, Gap, OPEN_FLAGS_AGREE, Scenario, Status};
-#[cfg(target_arch = "aarch64")]
-use crate::compare::Ending;
+use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
 use crate::compare::{Difference, Failure, Observed};
+use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
 
@@ -183,48 +180,16 @@ pub const SCENARIO: Scenario = Scenario {
         "mkdirat",
         "unlinkat",
     ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: OPEN_FLAGS_AGREE,
-            what: "linkat of a directory answers EACCES instead of EPERM (patina_posix.c linkat → fs-mem link)",
-            failure: Failure::Differs(&[
-                Difference::field(43, "linkat", "errno", Observed::Str("EACCES")),
-                Difference::check(44, "linkat of a directory is EPERM"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: OPEN_FLAGS_AGREE,
-            what: "linkat of a symlink without AT_SYMLINK_FOLLOW copies the link instead of hard-linking it: the new name's nlink is 1, not 2 (patina_posix.c linkat)",
-            failure: Failure::Differs(&[Difference::field(
-                47,
-                "newfstatat",
-                "fields.nlink",
-                Observed::Int(1),
-            )]),
-        },
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Differs(&[
-                Difference::field(18, "openat", "errno", Observed::Str("ENOSYS")),
-                Difference::field(18, "openat", "ret", Observed::Int(-1)),
-            ]),
-        },
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Stops {
-                events: 19,
-                ending: Ending::Exit(RUST_PANIC),
-                diagnostic: "fs/links: cannot continue: open root",
-            },
-        },
-    ],
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Fs),
+        vehicles: Vehicle::ALL,
+        what: "linkat of a symlink without AT_SYMLINK_FOLLOW copies the link instead of hard-linking it: the new name's nlink is 1, not 2 (patina-fs-mem link: a symlink is a path-keyed entry, not an inode)",
+        failure: Failure::Differs(&[Difference::field(
+            47,
+            "newfstatat",
+            "fields.nlink",
+            Observed::Int(1),
+        )]),
+    }],
     ..DEFAULTS
 };

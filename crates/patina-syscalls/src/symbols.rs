@@ -2045,13 +2045,11 @@ const ROWS: &[SymbolRow] = &[
         Serves::Syscalls(&["copy_file_range"]),
         SymbolStatus::Absent,
     ),
-    // glibc's getdents64 wrapper is not defined, so a guest importing it is
-    // audit-refused (the conformance scenario fs/getdents carries the gap).
     s(
         "getdents64",
         Platform::Linux,
         Serves::Syscalls(&["getdents64"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "ppoll",

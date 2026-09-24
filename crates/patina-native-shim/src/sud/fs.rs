@@ -11,10 +11,13 @@
 //! the decode from kernel flag words onto the runtime's vocabulary.
 //!
 //! Linux directory ITERATION (`getdents64`) is the one thing a plain filesystem
-//! fd cannot answer, so this layer keeps a per-dir-fd entry snapshot on the side,
-//! taken through the SAME `patina_read_dir` entry the interposed `opendir` uses.
-//! The snapshot is created by the first `getdents64` on the fd, dropped by
-//! `lseek(…, 0, SEEK_SET)` (rustix `Dir::rewind`) and by `close`.
+//! fd cannot answer, so this layer keeps a per-dir-fd position and entry
+//! snapshot on the side, taken through the SAME `patina_read_dir` entry the
+//! interposed `opendir` uses. The snapshot is taken by the first `getdents64`
+//! after an open or a seek, and dropped by a seek and by `close`. A `DIR*` from
+//! the C `opendir`/`fdopendir` holds a snapshot and position of its own, so a
+//! guest mixing `readdir(d)` with a raw `getdents64(dirfd(d))` reads two
+//! cursors where a kernel has one.
 
 use super::*;
 
@@ -23,7 +26,12 @@ use super::*;
 /// under [`DIR_ITERATIONS`]'s lock, so passing it across threads is sound (the
 /// raw pointer is stored as `usize` to keep the map `Send`).
 pub(super) struct DirIteration {
+    /// The live snapshot, or 0 before the first read after an open or a seek.
     snapshot: usize,
+    /// How many snapshot entries the guest has been handed: the directory's
+    /// position, which `lseek` reports and sets and each entry's `d_off`
+    /// carries.
+    position: u64,
     /// An entry read from the snapshot that did not fit the previous
     /// `getdents64` buffer, held so the next call emits it first (the kernel
     /// never drops an entry it could not return). `patina_read_dir_next` only
@@ -44,13 +52,6 @@ pub(super) fn fd_kind(fd: i64) -> Option<c_int> {
     // SAFETY: a plain table lookup; no pointers.
     let kind = unsafe { patina_fd_kind(fd as c_int) };
     (kind >= 0).then_some(kind)
-}
-
-/// Is `fd` a directory descriptor the deterministic filesystem issued? The
-/// descriptor table is the single source of truth, shared with the C
-/// interposers.
-pub(super) fn is_dir_fd(fd: i64) -> bool {
-    fd_kind(fd) == Some(PATINA_FD_DIR)
 }
 
 /// A guest path pointer, or `EFAULT` for null. Every path row reads its path
@@ -194,9 +195,9 @@ pub(super) fn sys_openat(dirfd: i64, path: u64, flags: u64, mode: u64) -> i64 {
     })
 }
 
-/// Drop any live `getdents64` snapshot for `fd` (rustix `Dir::rewind`, and every
-/// close of the descriptor). The next `getdents64` takes a fresh one from the
-/// start.
+/// Drop any live `getdents64` snapshot for `fd` (a rewind through
+/// `patina_seek`, and every close of the descriptor). The next `getdents64`
+/// takes a fresh one from the start.
 ///
 /// The universal `patina_close` calls this for every vacated number, so a
 /// descriptor opened with a raw `openat` and iterated with a raw `getdents64`
@@ -204,9 +205,40 @@ pub(super) fn sys_openat(dirfd: i64, path: u64, flags: u64, mode: u64) -> i64 {
 /// share the descriptor, so they must share its teardown.
 pub(crate) fn release_dir_iteration(fd: c_int) {
     if let Some(iteration) = DIR_ITERATIONS.lock().unwrap().remove(&fd) {
-        // SAFETY: `snapshot` is the live `patina_read_dir` box for this fd.
+        // SAFETY: `snapshot` is null or the live `patina_read_dir` box for this fd.
         unsafe { patina_read_dir_free(iteration.snapshot as *mut c_void) };
     }
+}
+
+/// `lseek(2)` on directory descriptor `fd`, as tmpfs's `dcache_dir_lseek`
+/// answers it: `SEEK_SET` and `SEEK_CUR` move the position (a negative result
+/// is `EINVAL`), `SEEK_CUR 0` only reports it, and every other `whence` is
+/// `EINVAL` (`None`). A move drops the snapshot, so the next `getdents64`
+/// takes a fresh one and resumes that many entries in — which is what a
+/// `d_off` cookie resumes from, and what `lseek(fd, 0, SEEK_SET)` (rustix
+/// `Dir::rewind`) rewinds to.
+pub(crate) fn seek_dir_iteration(fd: c_int, offset: i64, whence: u32) -> Option<u64> {
+    let mut map = DIR_ITERATIONS.lock().unwrap();
+    let position = map.get(&fd).map_or(0, |dir| dir.position);
+    let target = match whence {
+        uapi::SEEK_SET => offset,
+        uapi::SEEK_CUR if offset == 0 => return Some(position),
+        uapi::SEEK_CUR => i64::try_from(position).ok()?.checked_add(offset)?,
+        _ => return None,
+    };
+    let target = u64::try_from(target).ok()?;
+    if let Some(dir) = map.insert(
+        fd,
+        DirIteration {
+            snapshot: 0,
+            position: target,
+            pending: None,
+        },
+    ) {
+        // SAFETY: `snapshot` is null or the live `patina_read_dir` box for this fd.
+        unsafe { patina_read_dir_free(dir.snapshot as *mut c_void) };
+    }
+    Some(target)
 }
 
 // ---- Metadata (fstat / newfstatat / statx) ----
@@ -379,9 +411,11 @@ pub(super) fn sys_fstat(fd: i64, statbuf: u64) -> i64 {
     }
 }
 
-/// The `*at` metadata flag set both `newfstatat` and `statx` accept, mirroring
-/// the C `PATINA_STAT_AT_FLAGS`.
-pub(super) const STAT_AT_FLAGS: u64 = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT;
+/// The `*at` metadata flags the kernel's `vfs_statx` accepts for both
+/// `newfstatat` and `statx` (the C `PATINA_STAT_AT_FLAGS`); any other bit is
+/// `EINVAL`.
+pub(super) const STAT_AT_FLAGS: u64 =
+    AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE;
 
 /// Resolve the addressing forms the `*at` metadata rows accept onto the same
 /// virtual metadata `stat` answers from, mirroring the C
@@ -392,26 +426,22 @@ pub(super) const STAT_AT_FLAGS: u64 = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_N
 /// - `AT_EMPTY_PATH` with an empty path on `AT_FDCWD` — the working directory;
 /// - everything else — the resolved path, `AT_SYMLINK_NOFOLLOW` naming a
 ///   trailing symlink itself.
-pub(super) fn stat_at_values(
-    dirfd: i64,
-    path: u64,
-    flags: u64,
-    allowed: u64,
-) -> Result<StatValues, i64> {
-    if flags & !allowed != 0 {
-        return Err(-ENOSYS);
+///
+/// As in `vfs_statx`, the flags are judged before the descriptor, which the
+/// kernel reads as an `int` and consults only to resolve a relative path.
+pub(super) fn stat_at_values(dirfd: i64, path: u64, flags: u64) -> Result<StatValues, i64> {
+    if flags & !STAT_AT_FLAGS != 0 {
+        return Err(-EINVAL);
     }
-    if dirfd != AT_FDCWD && is_empty_path(path, flags) {
-        return fd_stat_values(dirfd as c_int);
+    let dirfd = dirfd as c_int;
+    if dirfd != AT_FDCWD as c_int && is_empty_path(path, flags) {
+        return fd_stat_values(dirfd);
     }
-    path_stat_values(dirfd, path, resolve_flags(flags))
+    path_stat_values(dirfd.into(), path, resolve_flags(flags))
 }
 
 pub(super) fn sys_newfstatat(dirfd: i64, path: u64, statbuf: u64, flags: u64) -> i64 {
-    if let Some(err) = fd_out_of_range(dirfd).filter(|_| dirfd != AT_FDCWD) {
-        return err;
-    }
-    match stat_at_values(dirfd, path, flags, STAT_AT_FLAGS) {
+    match stat_at_values(dirfd, path, flags) {
         Ok(values) => write_kernel_stat(&values, statbuf),
         Err(errno) => errno,
     }
@@ -457,17 +487,18 @@ pub(super) struct Statx {
 }
 
 pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, statxbuf: u64) -> i64 {
-    if statxbuf == 0 {
-        return -EFAULT;
+    // `do_statx` refuses both sync modes at once and the reserved mask bit
+    // before anything else, and copies the answer out last.
+    if flags & AT_STATX_SYNC_TYPE == AT_STATX_SYNC_TYPE || flags_mask & STATX__RESERVED != 0 {
+        return -EINVAL;
     }
-    if let Some(err) = fd_out_of_range(dirfd).filter(|_| dirfd != AT_FDCWD) {
-        return err;
-    }
-    let allowed = STAT_AT_FLAGS | AT_STATX_SYNC_AS_STAT | AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC;
-    let values = match stat_at_values(dirfd, path, flags, allowed) {
+    let values = match stat_at_values(dirfd, path, flags) {
         Ok(values) => values,
         Err(errno) => return errno,
     };
+    if statxbuf == 0 {
+        return -EFAULT;
+    }
     // An honest mask, the exact one the C statx interposer reports:
     // BASIC_STATS except unmodeled BLOCKS, plus MNT_ID (the kernel's
     // vfs_statx fills them whatever was asked), STATX_BTIME only when requested.
@@ -531,15 +562,21 @@ pub(super) fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
     if dirp == 0 {
         return -EFAULT;
     }
-    let cap = count as usize;
+    // The kernel reads the length as an unsigned int.
+    let cap = count as u32 as usize;
     // The snapshot is taken by the FIRST getdents64 on the descriptor (and after
-    // a rewind), through the same `patina_read_dir` entry the interposed
+    // a seek), through the same `patina_read_dir` entry the interposed
     // `opendir` uses — a second caller, never a second directory model.
+    let Ok(fd) = c_int::try_from(fd) else {
+        return -EBADF;
+    };
     let mut map = DIR_ITERATIONS.lock().unwrap();
-    if let std::collections::btree_map::Entry::Vacant(slot) = map.entry(fd as c_int) {
-        let Ok(fd) = c_int::try_from(fd) else {
-            return -EBADF;
-        };
+    let dir = map.entry(fd).or_insert(DirIteration {
+        snapshot: 0,
+        position: 0,
+        pending: None,
+    });
+    if dir.snapshot == 0 {
         let mut snapshot: *mut c_void = std::ptr::null_mut();
         // The snapshot is read through the DESCRIPTOR: its `r` was charged at
         // open, so a later `chmod` cannot break a walk under way and an `O_PATH`
@@ -550,12 +587,25 @@ pub(super) fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
             // SAFETY: plain thread-local read.
             return -(unsafe { patina_errno() } as i64);
         }
-        slot.insert(DirIteration {
-            snapshot: snapshot as usize,
-            pending: None,
-        });
+        dir.snapshot = snapshot as usize;
+        // Resume at the position: skip the entries before it.
+        let mut name = [0u8; 256];
+        let mut kind: u32 = 0;
+        for _ in 0..dir.position {
+            // SAFETY: `snapshot` is the live box; `name` is writable for its length.
+            let rc = unsafe {
+                patina_read_dir_next(
+                    snapshot,
+                    name.as_mut_ptr() as *mut c_char,
+                    name.len(),
+                    &mut kind,
+                )
+            };
+            if rc != 1 {
+                break;
+            }
+        }
     }
-    let dir = map.get_mut(&(fd as c_int)).expect("snapshot just inserted");
     let snapshot = dir.snapshot as *mut c_void;
     let mut written = 0usize;
     // linux_dirent64 header: d_ino(8) d_off(8) d_reclen(2) d_type(1) then name.
@@ -606,10 +656,11 @@ pub(super) fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
         // SAFETY: `dirp+written` has `reclen` bytes of room (checked above).
         unsafe {
             let rec = (dirp as *mut u8).add(written);
-            // d_ino: the snapshot exposes no inode; a stable nonzero value keeps
-            // callers that reject d_ino==0 happy.
-            (rec as *mut u64).write((written as u64) + 1);
-            (rec.add(8) as *mut i64).write((written + reclen) as i64); // d_off cookie
+            // d_ino: the snapshot exposes no inode; the one-based snapshot index
+            // is nonzero and the one the C `readdir` reports.
+            (rec as *mut u64).write(dir.position + 1);
+            // d_off: the position after this entry, which `lseek` resumes from.
+            (rec.add(8) as *mut i64).write((dir.position + 1) as i64);
             (rec.add(16) as *mut u16).write(reclen as u16); // d_reclen
             rec.add(18).write(dt_for_kind(kind)); // d_type
             let dst = rec.add(HEADER);
@@ -617,6 +668,7 @@ pub(super) fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
             dst.add(name.len()).write(0); // NUL
         }
         written += reclen;
+        dir.position += 1;
     }
     written as i64
 }

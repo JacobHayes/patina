@@ -158,6 +158,7 @@ const EDEADLK: c_int = 35;
 const EEXIST: c_int = 17;
 const EINTR: c_int = 4;
 const EINVAL: c_int = 22;
+const EFAULT: c_int = 14;
 const EIO: c_int = 5;
 const EISDIR: c_int = 21;
 const ENOENT: c_int = 2;
@@ -3678,6 +3679,48 @@ pub unsafe extern "C" fn patina_entropy(destination: *mut c_void, length: usize)
     }
 }
 
+/// Does the kernel's `getrandom(2)` accept `flags`? Every bit outside
+/// `GRND_NONBLOCK|GRND_RANDOM|GRND_INSECURE`, and `GRND_INSECURE` with
+/// `GRND_RANDOM`, is `EINVAL` (`drivers/char/random.c`).
+pub(crate) fn getrandom_flags_accepted(flags: u32) -> bool {
+    use linux_raw_sys::general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM};
+    let insecure_random = GRND_INSECURE | GRND_RANDOM;
+    flags & !(GRND_NONBLOCK | insecure_random) == 0 && flags & insecure_random != insecure_random
+}
+
+/// The most one read-like call transfers: `MAX_RW_COUNT`, `INT_MAX` rounded
+/// down to the modeled 4096-byte page.
+const MAX_RW_COUNT: usize = i32::MAX as usize & !4095;
+
+/// `getrandom(2)` over the seeded stream: the byte count, -1/`EINVAL` for a
+/// flag word the kernel refuses, or -1/`EFAULT` for a null buffer. The stream
+/// never blocks and has one pool, so the accepted flags change nothing. One
+/// draw is at most `MAX_RW_COUNT` bytes, as on the kernel. The C `getrandom`
+/// and the SUD row both answer here.
+///
+/// # Safety
+/// `destination` must be writable for `length` bytes when `length` is nonzero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_getrandom(
+    destination: *mut c_void,
+    length: usize,
+    flags: u32,
+) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if !getrandom_flags_accepted(flags) {
+        return fail(EINVAL) as isize;
+    }
+    if length != 0 && destination.is_null() {
+        return fail(EFAULT) as isize;
+    }
+    let length = length.min(MAX_RW_COUNT);
+    // SAFETY: Guaranteed by this function's C ABI contract.
+    match unsafe { patina_entropy(destination, length) } {
+        0 => length as isize,
+        _ => -1,
+    }
+}
+
 /// Write a deterministic clock value to caller-owned memory.
 ///
 /// # Safety
@@ -4558,6 +4601,9 @@ const LOCK_UN: c_int = 8;
 /// than parking a real thread — the single-baton scheduler does not model
 /// advisory-lock waiting, and no supported guest blocks on a contended `flock`
 /// (std's `File::try_lock*` is always `LOCK_NB`).
+///
+/// On Linux a request carrying `LOCK_MAND` on an open descriptor answers 0 and
+/// is ignored (`fs/locks.c`).
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
@@ -4565,6 +4611,11 @@ pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
     };
+    #[cfg(target_os = "linux")]
+    if operation & linux_raw_sys::general::LOCK_MAND as c_int != 0 {
+        set_errno(0);
+        return 0;
+    }
     let non_blocking = operation & LOCK_NB != 0;
     let request = operation & !LOCK_NB;
     if request == LOCK_UN {
@@ -4608,10 +4659,23 @@ pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
 
 /// `lseek(2)`: a file's cursor; a description without offset addressing is
 /// `ESPIPE`.
+///
+/// On Linux a directory's position is its `getdents64` iteration, which both
+/// doors read and move (`crate::sud::seek_dir_iteration`).
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let handle = match resolve_fd(raw_fd) {
+        #[cfg(target_os = "linux")]
+        Ok(resolved) if resolved.kind == FdKind::Dir => {
+            return match crate::sud::seek_dir_iteration(raw_fd, offset, whence) {
+                Some(position) => {
+                    set_errno(0);
+                    position as i64
+                }
+                None => i64::from(fail(EINVAL)),
+            };
+        }
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
         Ok(_) => return i64::from(fail(ESPIPE)),
         Err(errno) => return i64::from(fail(errno)),
@@ -4663,6 +4727,21 @@ pub extern "C" fn patina_set_len(raw_fd: c_int, length: u64) -> c_int {
 struct ReadDirState {
     entries: Vec<FsDirectoryEntry>,
     position: usize,
+}
+
+impl ReadDirState {
+    /// A directory's listing as the kernel's `getdents64` reports it: `.` and
+    /// `..` first, then the driver's entries.
+    fn listing(listed: Vec<FsDirectoryEntry>) -> Self {
+        let dots = [".", ".."].map(|name| FsDirectoryEntry {
+            name: name.into(),
+            kind: FsEntryKind::Directory,
+        });
+        ReadDirState {
+            entries: dots.into_iter().chain(listed).collect(),
+            position: 0,
+        }
+    }
 }
 
 /// The `PATINA_ENTRY_*` wire values (`include/patina_native.h`). The C side ORs
@@ -5315,6 +5394,10 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
 /// descriptor first (which is also what makes `dirfd()` on one meaningful), and
 /// `fdopendir` and the raw `getdents64` row already hold one.
 ///
+/// The snapshot lists `.` and `..` first ([`ReadDirState::listing`]): every
+/// directory has both, and the kernel's `getdents64` (so every `readdir`)
+/// reports them.
+///
 /// # Safety
 /// `state_out` must be writable.
 #[unsafe(no_mangle)]
@@ -5328,11 +5411,8 @@ pub unsafe extern "C" fn patina_read_dir(raw_fd: c_int, state_out: *mut *mut c_v
         Err(errno) => return fail(errno),
     };
     match with_context(|context| context.fs_read_directory_fd(fd)) {
-        Ok(entries) => {
-            let state = Box::new(ReadDirState {
-                entries,
-                position: 0,
-            });
+        Ok(listed) => {
+            let state = Box::new(ReadDirState::listing(listed));
             // SAFETY: `state_out` was checked and is required to be writable.
             unsafe { state_out.write(Box::into_raw(state).cast()) };
             set_errno(0);
@@ -14201,5 +14281,53 @@ mod posix_source_lints {
                 "{relative}: system headers belong in posix/core.c, which every slice shares"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod directory_iteration_tests {
+    use super::*;
+
+    #[test]
+    fn a_listing_starts_with_dot_and_dot_dot() {
+        let file = FsDirectoryEntry {
+            name: "a".into(),
+            kind: FsEntryKind::File,
+        };
+        let names = |listed: Vec<FsDirectoryEntry>| {
+            ReadDirState::listing(listed)
+                .entries
+                .into_iter()
+                .map(|entry| (entry.name, entry.kind))
+                .collect::<Vec<_>>()
+        };
+        let dir = |name: &str| (name.to_string(), FsEntryKind::Directory);
+        // An empty directory (the root included) still lists both.
+        assert_eq!(names(Vec::new()), [dir("."), dir("..")]);
+        assert_eq!(
+            names(vec![file]),
+            [dir("."), dir(".."), ("a".into(), FsEntryKind::File)]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_seeks_like_tmpfs_and_never_answers_espipe() {
+        use crate::sud::{release_dir_iteration, seek_dir_iteration};
+        use linux_raw_sys::general::{SEEK_CUR, SEEK_DATA, SEEK_END, SEEK_SET};
+        // A number no other test touches; the position table is keyed by it.
+        let fd = 900;
+        assert_eq!(seek_dir_iteration(fd, 0, SEEK_CUR), Some(0));
+        assert_eq!(seek_dir_iteration(fd, 3, SEEK_SET), Some(3));
+        assert_eq!(seek_dir_iteration(fd, 0, SEEK_CUR), Some(3));
+        assert_eq!(seek_dir_iteration(fd, -1, SEEK_CUR), Some(2));
+        assert_eq!(seek_dir_iteration(fd, -5, SEEK_CUR), None);
+        assert_eq!(seek_dir_iteration(fd, -1, SEEK_SET), None);
+        assert_eq!(seek_dir_iteration(fd, 0, SEEK_END), None);
+        assert_eq!(seek_dir_iteration(fd, 0, SEEK_DATA), None);
+        assert_eq!(seek_dir_iteration(fd, 0, SEEK_CUR), Some(2));
+        assert_eq!(seek_dir_iteration(fd, 0, SEEK_SET), Some(0));
+        release_dir_iteration(fd);
+        assert_eq!(seek_dir_iteration(fd, 0, SEEK_CUR), Some(0));
     }
 }

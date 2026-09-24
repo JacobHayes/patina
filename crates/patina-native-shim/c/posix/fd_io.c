@@ -58,9 +58,9 @@ static int patina_getfl_to_posix(uint32_t status) {
 #ifdef __linux__
     /* A 64-bit kernel forces O_LARGEFILE into every open(2)-minted description
      * (fs/open.c build_open_how) and F_GETFL reports it; the shim's table
-     * remembers which those are. The KERNEL value (0100000) is spelled out
-     * because glibc defines the O_LARGEFILE macro as 0 on 64-bit targets. */
-    if (status & PATINA_O_OPENED) flags |= 0100000;
+     * remembers which those are. glibc defines the O_LARGEFILE macro as 0 on
+     * 64-bit targets, so the bit is the kernel's, for this architecture. */
+    if (status & PATINA_O_OPENED) flags |= PATINA_KERNEL_O_LARGEFILE;
 #endif
     return flags;
 }

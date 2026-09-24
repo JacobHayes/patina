@@ -839,6 +839,16 @@ impl MemFs {
         })
     }
 
+    /// Does directory `path` hold any entry?
+    fn has_children(&self, path: &str) -> bool {
+        let prefix = format!("{path}/");
+        let under = |candidate: &String| candidate.starts_with(&prefix);
+        self.directories.keys().any(under)
+            || self.files.keys().any(under)
+            || self.symlinks.keys().any(under)
+            || self.fifos.keys().any(under)
+    }
+
     fn path_exists(&self, path: &str) -> bool {
         self.directories.contains_key(path)
             || self.files.contains_key(path)
@@ -1699,24 +1709,7 @@ impl FsDriver for MemFs {
         if !self.directories.contains_key(&path) {
             return Err(not_found(&path));
         }
-        let prefix = format!("{path}/");
-        if self
-            .directories
-            .keys()
-            .any(|candidate| candidate.starts_with(&prefix))
-            || self
-                .files
-                .keys()
-                .any(|candidate| candidate.starts_with(&prefix))
-            || self
-                .symlinks
-                .keys()
-                .any(|candidate| candidate.starts_with(&prefix))
-            || self
-                .fifos
-                .keys()
-                .any(|candidate| candidate.starts_with(&prefix))
-        {
+        if self.has_children(&path) {
             return Err(EffectError::new(
                 ErrorCode::DirectoryNotEmpty,
                 format!("virtual directory is not empty: {path}"),
@@ -1798,10 +1791,25 @@ impl FsDriver for MemFs {
             return Err(not_found(&from));
         }
         if self.path_exists(&to) {
-            return Err(EffectError::new(
-                ErrorCode::AlreadyExists,
-                format!("virtual rename destination already exists: {to}"),
-            ));
+            // Over a non-directory the kernel answers ENOTDIR, and over a
+            // non-empty directory ENOTEMPTY. It replaces an empty directory,
+            // which is not modeled here (EEXIST).
+            return Err(if !self.directories.contains_key(&to) {
+                EffectError::new(
+                    ErrorCode::NotDirectory,
+                    format!("virtual rename of a directory onto a non-directory: {to}"),
+                )
+            } else if self.has_children(&to) {
+                EffectError::new(
+                    ErrorCode::DirectoryNotEmpty,
+                    format!("virtual rename destination is not empty: {to}"),
+                )
+            } else {
+                EffectError::new(
+                    ErrorCode::AlreadyExists,
+                    format!("virtual rename destination already exists: {to}"),
+                )
+            });
         }
         let prefix = format!("{from}/");
         let moved_directories = self
@@ -1877,8 +1885,8 @@ impl FsDriver for MemFs {
         }
         if self.directories.contains_key(&from) {
             return Err(EffectError::new(
-                ErrorCode::Denied,
-                format!("virtual directory hard links are not supported: {from}"),
+                ErrorCode::NotPermitted,
+                format!("virtual hard link to a directory: {from}"),
             ));
         }
         if let Some(target) = self.symlinks.get(&from).cloned() {
@@ -3624,6 +3632,31 @@ mod tests {
         assert_eq!(survivor.nlink, 1);
         fs.remove_file(FsClock::EPOCH, "/b").unwrap();
         assert_eq!(fs.metadata("/b").unwrap_err().code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn a_directory_moves_only_onto_a_directory_and_is_never_hard_linked() {
+        let mut fs = MemFs::new().with_file("/file", b"").unwrap();
+        fs.create_directory(FsClock::EPOCH, "/dir", 0o777).unwrap();
+        // rename(2): a directory over a non-directory is ENOTDIR.
+        assert_eq!(
+            fs.rename(FsClock::EPOCH, "/dir", "/file").unwrap_err().code,
+            ErrorCode::NotDirectory
+        );
+        // Over a non-empty directory it is ENOTEMPTY.
+        fs.create_directory(FsClock::EPOCH, "/full", 0o777).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/full/inner", 0o777)
+            .unwrap();
+        assert_eq!(
+            fs.rename(FsClock::EPOCH, "/dir", "/full").unwrap_err().code,
+            ErrorCode::DirectoryNotEmpty
+        );
+        // link(2): a hard link to a directory is EPERM.
+        assert_eq!(
+            fs.link(FsClock::EPOCH, "/dir", "/alias").unwrap_err().code,
+            ErrorCode::NotPermitted
+        );
+        assert!(fs.metadata("/dir").is_ok() && fs.metadata("/file").is_ok());
     }
 
     #[test]

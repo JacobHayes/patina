@@ -1,9 +1,7 @@
 //! fd/pipes — pipe2 / dup / fcntl / flock: descriptor flags versus description
 //! flags, sharing through dup, EOF/EPIPE/EAGAIN on pipes, and advisory locks.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{AT_FDCWD, Probe, neg};
@@ -244,14 +242,5 @@ pub const SCENARIO: Scenario = Scenario {
         "openat",
         "socketpair",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::ALL,
-        what: "flock with an operation outside LOCK_SH|LOCK_EX|LOCK_UN answers EINVAL where the host kernel answers 0 (lib.rs patina_flock)",
-        failure: Failure::Differs(&[
-            Difference::field(88, "flock", "errno", Observed::Str("EINVAL")),
-            Difference::field(88, "flock", "ret", Observed::Int(-1)),
-        ]),
-    }],
     ..DEFAULTS
 };

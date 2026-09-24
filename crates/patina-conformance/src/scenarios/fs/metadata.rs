@@ -2,11 +2,7 @@
 //! report): kinds, permission bits, link counts, sizes, inode identity, the
 //! AT_* flag vocabulary, and timestamp ordering.
 
-#[cfg(target_arch = "aarch64")]
-use crate::catalog::{ARM64_OPEN_FLAGS, DISPATCHER, RUST_PANIC};
-use crate::catalog::{Arc, DEFAULTS, Gap, OPEN_FLAGS_AGREE, Scenario, Status};
-#[cfg(target_arch = "aarch64")]
-use crate::compare::Ending;
+use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
 use crate::compare::{Difference, Failure, Observed};
 use crate::vehicle::Vehicle;
 
@@ -199,59 +195,16 @@ pub const SCENARIO: Scenario = Scenario {
         "symlinkat",
         "linkat",
     ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "an unknown fstatat flag is refused ENOSYS instead of EINVAL (patina_posix.c patina_stat_at_values / PATINA_STAT_AT_FLAGS)",
-            failure: Failure::Differs(&[
-                Difference::field(22, "newfstatat", "errno", Observed::Str("ENOSYS")),
-                Difference::check(23, "an unknown flag is EINVAL"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: OPEN_FLAGS_AGREE,
-            what: "an unknown statx flag is refused ENOSYS instead of EINVAL (patina_posix.c statx → patina_stat_at_values)",
-            failure: Failure::Differs(&[
-                Difference::field(61, "statx", "errno", Observed::Str("ENOSYS")),
-                Difference::check(62, "statx with an unknown flag is EINVAL"),
-            ]),
-        },
-        // Seqs 50-57 follow the first directory open (seq 30), past which
-        // only `OPEN_FLAGS_AGREE` vehicles run on every architecture.
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: OPEN_FLAGS_AGREE,
-            what: "allocation accounting: STATX_BLOCKS is absent because allocation extents are not modeled; length-derived blocks would lie after KEEP_SIZE or PUNCH_HOLE",
-            failure: Failure::Differs(&[
-                Difference::field(50, "statx", "fields.mask", Observed::Int(1023)),
-                Difference::field(55, "statx", "fields.mask", Observed::Int(3071)),
-                Difference::field(57, "statx", "fields.mask", Observed::Int(1023)),
-                Difference::check(52, "statx fills every basic field"),
-            ]),
-        },
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Differs(&[
-                Difference::field(30, "openat", "errno", Observed::Str("ENOSYS")),
-                Difference::field(30, "openat", "ret", Observed::Int(-1)),
-            ]),
-        },
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Stops {
-                events: 31,
-                ending: Ending::Exit(RUST_PANIC),
-                diagnostic: "fs/metadata: cannot continue: open d",
-            },
-        },
-    ],
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Fs),
+        vehicles: Vehicle::ALL,
+        what: "allocation accounting: STATX_BLOCKS is absent because allocation extents are not modeled; length-derived blocks would lie after KEEP_SIZE or PUNCH_HOLE",
+        failure: Failure::Differs(&[
+            Difference::field(50, "statx", "fields.mask", Observed::Int(1023)),
+            Difference::field(55, "statx", "fields.mask", Observed::Int(3071)),
+            Difference::field(57, "statx", "fields.mask", Observed::Int(1023)),
+            Difference::check(52, "statx fills every basic field"),
+        ]),
+    }],
     ..DEFAULTS
 };

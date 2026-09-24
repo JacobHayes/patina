@@ -60,9 +60,11 @@ use time::*;
 #[cfg(target_arch = "x86_64")]
 use x86_64::*;
 
-// The one row-side entry the descriptor close path in `lib.rs` calls directly.
-pub(crate) use fs::release_dir_iteration;
+// The row-side entries the descriptor close and seek paths in `lib.rs` call.
+pub(crate) use fs::{release_dir_iteration, seek_dir_iteration};
 
+use linux_raw_sys::errno;
+use linux_raw_sys::general as uapi;
 use std::ffi::{c_char, c_int, c_long, c_void};
 
 // The `patina_*` runtime entry points the C interposers call. Declaring them as
@@ -90,7 +92,7 @@ unsafe extern "C" {
     fn patina_set_len(fd: c_int, length: u64) -> c_int;
     fn patina_flock(fd: c_int, operation: c_int) -> c_int;
     fn patina_dup(fd: c_int) -> c_int;
-    fn patina_entropy(destination: *mut c_void, length: usize) -> c_int;
+    fn patina_getrandom(destination: *mut c_void, length: usize, flags: u32) -> isize;
     fn patina_sched_yield() -> c_int;
     fn patina_thread_id() -> c_int;
     fn patina_raw_exit(status: c_int) -> !;
@@ -248,47 +250,46 @@ unsafe extern "C" {
     fn patina_epoll_ctl(epfd: c_int, op: c_int, fd: c_int, event: *const c_void) -> c_int;
 }
 
-// Linux errno values used to shape raw-syscall returns (`-errno`). Fixed across
-// the Linux ABIs Patina targets.
-const EPERM: i64 = 1;
+// The kernel ABI's own values, from its uapi headers for the target
+// architecture (`linux-raw-sys`): errno values shape raw-syscall returns
+// (`-errno`), and every flag word below is decoded with them.
+const EPERM: i64 = errno::EPERM as i64;
 
-const ERANGE: i64 = 34;
+const ERANGE: i64 = errno::ERANGE as i64;
 
-const EBADF: i64 = 9;
+const EBADF: i64 = errno::EBADF as i64;
 
-const EACCES: i64 = 13;
+const EACCES: i64 = errno::EACCES as i64;
 
-const EFAULT: i64 = 14;
+const EFAULT: i64 = errno::EFAULT as i64;
 
-const ECHILD: i64 = 10;
+const ECHILD: i64 = errno::ECHILD as i64;
 
-const ESRCH: i64 = 3;
+const ESRCH: i64 = errno::ESRCH as i64;
 
-const ENOTDIR: i64 = 20;
+const ENOTDIR: i64 = errno::ENOTDIR as i64;
 
-const EINVAL: i64 = 22;
+const EINVAL: i64 = errno::EINVAL as i64;
 
-const ENOTTY: i64 = 25;
+const ENOTTY: i64 = errno::ENOTTY as i64;
 
-const ESPIPE: i64 = 29;
+const ENOSYS: i64 = errno::ENOSYS as i64;
 
-const ENOSYS: i64 = 38;
+const ENOTSOCK: i64 = errno::ENOTSOCK as i64;
 
-const ENOTSOCK: i64 = 88;
+const EOPNOTSUPP: i64 = errno::EOPNOTSUPP as i64;
 
-const EOPNOTSUPP: i64 = 95;
+const EAFNOSUPPORT: i64 = errno::EAFNOSUPPORT as i64;
 
-const EAFNOSUPPORT: i64 = 97;
+const ENOPROTOOPT: i64 = errno::ENOPROTOOPT as i64;
 
-const ENOPROTOOPT: i64 = 92;
+const EISCONN: i64 = errno::EISCONN as i64;
 
-const EISCONN: i64 = 106;
+const EPROTONOSUPPORT: i64 = errno::EPROTONOSUPPORT as i64;
 
-const EPROTONOSUPPORT: i64 = 93;
+const EPROTOTYPE: i64 = errno::EPROTOTYPE as i64;
 
-const EPROTOTYPE: i64 = 91;
-
-const EIO: i64 = 5;
+const EIO: i64 = errno::EIO as i64;
 
 // The descriptor kinds `patina_fd_kind` answers (`PATINA_FD_*` in
 // `patina_native.h`): the one oracle a row consults when its meaning depends
@@ -335,56 +336,68 @@ const PATINA_RESOLVE_NOFOLLOW: u32 = 1 << 0;
 
 const PATINA_RESOLVE_EMPTY_PATH: u32 = 1 << 1;
 
-// Kernel `open(2)` flag bits (octal), identical on x86_64 and aarch64 Linux.
-const O_ACCMODE: u64 = 0o3;
+// Kernel `open(2)` flag bits: x86_64 and arm64 disagree on `O_DIRECTORY`,
+// `O_NOFOLLOW`, `O_DIRECT` and `O_LARGEFILE`.
+const O_ACCMODE: u64 = uapi::O_ACCMODE as u64;
 
-const O_WRONLY: u64 = 0o1;
+const O_WRONLY: u64 = uapi::O_WRONLY as u64;
 
-const O_RDWR: u64 = 0o2;
+const O_RDWR: u64 = uapi::O_RDWR as u64;
 
-const O_CREAT: u64 = 0o100;
+const O_CREAT: u64 = uapi::O_CREAT as u64;
 
-const O_EXCL: u64 = 0o200;
+const O_EXCL: u64 = uapi::O_EXCL as u64;
 
-const O_TRUNC: u64 = 0o1000;
+const O_TRUNC: u64 = uapi::O_TRUNC as u64;
 
-const O_APPEND: u64 = 0o2000;
+const O_APPEND: u64 = uapi::O_APPEND as u64;
 
-const O_DIRECTORY: u64 = 0o200000;
+const O_NONBLOCK: u64 = uapi::O_NONBLOCK as u64;
 
-const O_NOFOLLOW: u64 = 0o400000;
+const O_DIRECTORY: u64 = uapi::O_DIRECTORY as u64;
 
-const O_CLOEXEC: u64 = 0o2000000;
+const O_NOFOLLOW: u64 = uapi::O_NOFOLLOW as u64;
 
-const O_LARGEFILE: u64 = 0o100000;
+const O_CLOEXEC: u64 = uapi::O_CLOEXEC as u64;
+
+/// A 64-bit kernel forces `O_LARGEFILE` into every `open(2)`-minted
+/// description and reports it through `F_GETFL`.
+const O_LARGEFILE: u64 = uapi::O_LARGEFILE as u64;
+
+/// `O_LARGEFILE` for the C `fcntl(F_GETFL)`, whose libc spells the macro 0.
+#[unsafe(no_mangle)]
+pub static PATINA_KERNEL_O_LARGEFILE: c_int = O_LARGEFILE as c_int;
+
+/// `O_DIRECT` on a pipe asks for packet mode, which is not modeled.
+const O_DIRECT: u64 = uapi::O_DIRECT as u64;
 
 /// `O_PATH`: a descriptor that resolves paths and answers metadata but cannot
 /// read or write. `cap-primitives` walks a path one component at a time with
 /// `openat(dirfd, name, O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)`, so this bit is
 /// on the hot path of every capability-based filesystem guest.
-const O_PATH: u64 = 0o10000000;
+const O_PATH: u64 = uapi::O_PATH as u64;
 
-const AT_FDCWD: i64 = -100;
+const AT_FDCWD: i64 = uapi::AT_FDCWD as i64;
 
 // `mmap(2)` / memory-management constants.
-const MAP_ANONYMOUS: u64 = 0x20;
+const MAP_ANONYMOUS: u64 = uapi::MAP_ANONYMOUS as u64;
 
 // `clock_nanosleep(2)` absolute-deadline flag.
-const TIMER_ABSTIME: u64 = 1;
+const TIMER_ABSTIME: u64 = uapi::TIMER_ABSTIME as u64;
 
 // `futex(2)` op decode (mirrors the libc `syscall()` interposer in
 // patina_posix.c so the raw and wrapped paths route identically).
-const FUTEX_WAIT: u64 = 0;
+const FUTEX_WAIT: u64 = uapi::FUTEX_WAIT as u64;
 
-const FUTEX_WAKE: u64 = 1;
+const FUTEX_WAKE: u64 = uapi::FUTEX_WAKE as u64;
 
-const FUTEX_WAIT_BITSET: u64 = 9;
+const FUTEX_WAIT_BITSET: u64 = uapi::FUTEX_WAIT_BITSET as u64;
 
-const FUTEX_WAKE_BITSET: u64 = 10;
+const FUTEX_WAKE_BITSET: u64 = uapi::FUTEX_WAKE_BITSET as u64;
 
-const FUTEX_PRIVATE_FLAG: u64 = 128;
+const FUTEX_PRIVATE_FLAG: u64 = uapi::FUTEX_PRIVATE_FLAG as u64;
 
-const FUTEX_CLOCK_REALTIME: u64 = 256;
+const FUTEX_CLOCK_REALTIME: u64 = uapi::FUTEX_CLOCK_REALTIME as u64;
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 
@@ -396,106 +409,105 @@ const PATINA_ENTRY_SYMLINK: u32 = 3;
 const PATINA_ENTRY_FIFO: u32 = 4;
 
 // getdents64 `d_type` values (linux_dirent64).
-const DT_FIFO: u8 = 1;
+const DT_FIFO: u8 = uapi::DT_FIFO as u8;
 
-const DT_DIR: u8 = 4;
+const DT_DIR: u8 = uapi::DT_DIR as u8;
 
-const DT_REG: u8 = 8;
+const DT_REG: u8 = uapi::DT_REG as u8;
 
-const DT_LNK: u8 = 10;
+const DT_LNK: u8 = uapi::DT_LNK as u8;
 
 // File-mode bits for the kernel `struct stat`/`struct statx` (mirrors the C
 // `patina_mode_for_kind`).
-const S_IFIFO: u32 = 0o010000;
+const S_IFIFO: u32 = uapi::S_IFIFO;
 
-const S_IFDIR: u32 = 0o040000;
+const S_IFDIR: u32 = uapi::S_IFDIR;
 
-const S_IFREG: u32 = 0o100000;
+const S_IFREG: u32 = uapi::S_IFREG;
 
-const S_IFLNK: u32 = 0o120000;
+const S_IFLNK: u32 = uapi::S_IFLNK;
 
 /// `S_IFMT`: the file-type field of a `mode_t`, which `mknodat` carries.
-const S_IFMT: u64 = 0o170000;
+const S_IFMT: u64 = uapi::S_IFMT as u64;
 
-const S_IFCHR: u64 = 0o020000;
+const S_IFCHR: u64 = uapi::S_IFCHR as u64;
 
-const S_IFBLK: u64 = 0o060000;
+const S_IFBLK: u64 = uapi::S_IFBLK as u64;
 
 // `*at` flag bits.
-const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+const AT_SYMLINK_NOFOLLOW: u64 = uapi::AT_SYMLINK_NOFOLLOW as u64;
 
-const AT_REMOVEDIR: u64 = 0x200;
+const AT_REMOVEDIR: u64 = uapi::AT_REMOVEDIR as u64;
 
-const AT_SYMLINK_FOLLOW: u64 = 0x400;
+const AT_SYMLINK_FOLLOW: u64 = uapi::AT_SYMLINK_FOLLOW as u64;
 
-const AT_EMPTY_PATH: u64 = 0x1000;
+const AT_EMPTY_PATH: u64 = uapi::AT_EMPTY_PATH as u64;
 
-const AT_EACCESS: u64 = 0x200;
+const AT_EACCESS: u64 = uapi::AT_EACCESS as u64;
 
-const AT_NO_AUTOMOUNT: u64 = 0x800;
+const AT_NO_AUTOMOUNT: u64 = uapi::AT_NO_AUTOMOUNT as u64;
 
-// `statx(2)` sync-mode bits. They only choose how fresh a network filesystem's
-// answer must be; a virtual filesystem is always exact, so they are accepted and
-// ignored rather than failing closed (mirrors the C `statx` interposer).
-const AT_STATX_SYNC_AS_STAT: u64 = 0x0000;
+/// `statx(2)`'s two sync-mode bits (`AT_STATX_FORCE_SYNC|AT_STATX_DONT_SYNC`).
+/// They only choose how fresh a network filesystem's answer must be; a virtual
+/// filesystem is always exact, so they change nothing.
+const AT_STATX_SYNC_TYPE: u64 = uapi::AT_STATX_SYNC_TYPE as u64;
 
-const AT_STATX_FORCE_SYNC: u64 = 0x2000;
-
-const AT_STATX_DONT_SYNC: u64 = 0x4000;
+/// The `statx(2)` mask bit reserved for a future `struct statx` expansion.
+const STATX__RESERVED: u64 = uapi::STATX__RESERVED as u64;
 
 // `access(2)` mode bits.
-const X_OK: u64 = 1;
+const X_OK: u64 = uapi::X_OK as u64;
 
-const W_OK: u64 = 2;
+const W_OK: u64 = uapi::W_OK as u64;
 
-const R_OK: u64 = 4;
+const R_OK: u64 = uapi::R_OK as u64;
 
 /// `utimensat(2)` `tv_nsec` sentinels.
-const UTIME_NOW: i64 = (1 << 30) - 1;
-const UTIME_OMIT: i64 = (1 << 30) - 2;
+const UTIME_NOW: i64 = uapi::UTIME_NOW as i64;
+const UTIME_OMIT: i64 = uapi::UTIME_OMIT as i64;
 
-// `fcntl(2)` commands (identical on x86_64 and aarch64 Linux).
-const F_DUPFD: u64 = 0;
+// `fcntl(2)` commands.
+const F_DUPFD: u64 = uapi::F_DUPFD as u64;
 
-const F_GETFD: u64 = 1;
+const F_GETFD: u64 = uapi::F_GETFD as u64;
 
-const F_SETFD: u64 = 2;
+const F_SETFD: u64 = uapi::F_SETFD as u64;
 
-const F_GETFL: u64 = 3;
+const F_GETFL: u64 = uapi::F_GETFL as u64;
 
-const F_SETFL: u64 = 4;
+const F_SETFL: u64 = uapi::F_SETFL as u64;
 
-const F_DUPFD_CLOEXEC: u64 = 1030;
+const F_DUPFD_CLOEXEC: u64 = uapi::F_DUPFD_CLOEXEC as u64;
 
-const F_SETPIPE_SZ: u64 = 1031;
+const F_SETPIPE_SZ: u64 = uapi::F_SETPIPE_SZ as u64;
 
-const F_GETPIPE_SZ: u64 = 1032;
+const F_GETPIPE_SZ: u64 = uapi::F_GETPIPE_SZ as u64;
 
-const F_GETLK: u64 = 5;
+const F_GETLK: u64 = uapi::F_GETLK as u64;
 
-const F_SETLK: u64 = 6;
+const F_SETLK: u64 = uapi::F_SETLK as u64;
 
-const F_SETLKW: u64 = 7;
+const F_SETLKW: u64 = uapi::F_SETLKW as u64;
 
-const F_OFD_GETLK: u64 = 36;
+const F_OFD_GETLK: u64 = uapi::F_OFD_GETLK as u64;
 
-const F_OFD_SETLK: u64 = 37;
+const F_OFD_SETLK: u64 = uapi::F_OFD_SETLK as u64;
 
-const F_OFD_SETLKW: u64 = 38;
+const F_OFD_SETLKW: u64 = uapi::F_OFD_SETLKW as u64;
 
-const F_RDLCK: i16 = 0;
+const F_RDLCK: i16 = uapi::F_RDLCK as i16;
 
-const F_WRLCK: i16 = 1;
+const F_WRLCK: i16 = uapi::F_WRLCK as i16;
 
-const F_UNLCK: i16 = 2;
+const F_UNLCK: i16 = uapi::F_UNLCK as i16;
 
-const LOCK_SH: c_int = 1;
+const LOCK_SH: c_int = uapi::LOCK_SH as c_int;
 
-const LOCK_EX: c_int = 2;
+const LOCK_EX: c_int = uapi::LOCK_EX as c_int;
 
-const LOCK_NB: c_int = 4;
+const LOCK_NB: c_int = uapi::LOCK_NB as c_int;
 
-const LOCK_UN: c_int = 8;
+const LOCK_UN: c_int = uapi::LOCK_UN as c_int;
 
 /// Kernel `struct flock` as the x86_64 / aarch64 Linux ABI lays it out (the
 /// only two SUD platforms): what rustix's `fcntl_lock` hands `fcntl(2)`.
@@ -509,12 +521,7 @@ struct KernelFlock {
     l_pid: i32,
 }
 
-const FD_CLOEXEC: i64 = 1;
-
-const O_NONBLOCK: u64 = 0o4000;
-
-/// `O_DIRECT` on a pipe asks for packet mode, which is not modeled.
-const O_DIRECT: u64 = 0o40000;
+const FD_CLOEXEC: i64 = uapi::FD_CLOEXEC as i64;
 
 // `ioctl(2)` request numbers used by nonblocking-flag toggling on virtual fds.
 // (No FIONREAD row: the C ioctl models none, so a raw FIONREAD must fall to the
@@ -1654,8 +1661,81 @@ mod tests {
     }
 
     #[test]
+    fn flag_words_the_kernel_refuses_or_ignores() {
+        use uapi::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM, LOCK_MAND};
+        let mut buf = [0u8; 256];
+        let buf = buf.as_mut_ptr() as u64;
+        let (insecure, nonblock, random) = (
+            u64::from(GRND_INSECURE),
+            u64::from(GRND_NONBLOCK),
+            u64::from(GRND_RANDOM),
+        );
+        // getrandom: every bit outside NONBLOCK|RANDOM|INSECURE, and INSECURE
+        // with RANDOM, are EINVAL before any byte is drawn; every other
+        // combination is accepted (no runtime is installed here, so the
+        // accepted side is asked of the rule itself), and a null buffer is
+        // EFAULT.
+        let unknown = 1 << (insecure | nonblock | random).count_ones();
+        assert_eq!(sys_getrandom(buf, 16, unknown), -EINVAL);
+        assert_eq!(sys_getrandom(buf, 16, insecure | random), -EINVAL);
+        for accepted in [
+            0,
+            nonblock,
+            random,
+            insecure,
+            nonblock | random,
+            nonblock | insecure,
+        ] {
+            assert!(
+                crate::getrandom_flags_accepted(accepted as u32),
+                "{accepted:#x}"
+            );
+        }
+        assert_eq!(sys_getrandom(0, 16, 0), -EFAULT);
+        // newfstatat/statx: a bit vfs_statx does not accept is EINVAL, before
+        // the descriptor is looked at; statx also refuses both sync modes at
+        // once and the reserved mask bit.
+        let path = c"/x".as_ptr() as u64;
+        let bad_fd = -1;
+        let unknown_at = !STAT_AT_FLAGS & STAT_AT_FLAGS.wrapping_add(1);
+        assert_eq!(sys_newfstatat(bad_fd, path, buf, unknown_at), -EINVAL);
+        assert_eq!(sys_statx(bad_fd, path, unknown_at, 0, 0), -EINVAL);
+        assert_eq!(sys_statx(bad_fd, path, AT_STATX_SYNC_TYPE, 0, 0), -EINVAL);
+        assert_eq!(sys_statx(bad_fd, path, 0, STATX__RESERVED, 0), -EINVAL);
+        // flock: LOCK_MAND on an open descriptor is answered 0 and ignored; on
+        // a closed one the descriptor is judged first.
+        let mand = LOCK_MAND as i64 | LOCK_SH as i64;
+        assert_eq!(sys_flock(2, mand), 0);
+        assert_eq!(sys_flock(5, mand), -EBADF);
+    }
+
+    #[test]
+    fn open_flags_decode_with_this_architectures_values() {
+        // The flag words a guest's libc hands the kernel, in the libc crate's
+        // per-target spelling: x86_64 and arm64 disagree on O_DIRECTORY,
+        // O_NOFOLLOW and O_DIRECT, so this oracle is independent of the
+        // dispatcher's own constants. RED with x86_64's values on arm64: the
+        // directory open is refused as unsupported, and pipe2 reads O_DIRECT as
+        // O_DIRECTORY.
+        let bits = |flags: libc::c_int| flags as u64;
+        let directory =
+            bits(libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        assert_eq!(directory & !OPENAT_SUPPORTED_FLAGS, 0);
+        assert_eq!(
+            openat_patina_flags(directory),
+            PATINA_O_READ | PATINA_O_DIRECTORY | PATINA_O_NOFOLLOW | PATINA_O_CLOEXEC
+        );
+        assert_ne!(bits(libc::O_DIRECT) & !OPENAT_SUPPORTED_FLAGS, 0);
+        // pipe2 refuses packet mode as unmodeled and any other bit as invalid,
+        // both before it creates anything.
+        let fds: u64 = 0x1000;
+        assert_eq!(sys_pipe2(fds, bits(libc::O_DIRECT)), -ENOSYS);
+        assert_eq!(sys_pipe2(fds, bits(libc::O_DIRECTORY)), -EINVAL);
+    }
+
+    #[test]
     fn openat_flag_decode_ignores_largefile_directory_cloexec_bits() {
-        // rustix ORs O_LARGEFILE (0x8000) into every open, and a directory open
+        // rustix ORs O_LARGEFILE into every open, and a directory open
         // adds O_DIRECTORY|O_CLOEXEC. The legacy `open`/`creat` aliases and the
         // direct `openat` share ONE decode (`openat_patina_flags`), so they are
         // bit-for-bit identical — the round-6 EBADF was NOT a flag defect (it was
@@ -1668,9 +1748,9 @@ mod tests {
             openat_patina_flags(O_RDWR | O_CLOEXEC),
             PATINA_O_READ | PATINA_O_WRITE | PATINA_O_CLOEXEC
         );
-        // The EXACT round-5 flag word (O_WRONLY|O_CREAT|O_TRUNC|O_LARGEFILE).
+        // The round-5 flag word.
         assert_eq!(
-            openat_patina_flags(0x8241),
+            openat_patina_flags(O_WRONLY | O_CREAT | O_TRUNC | O_LARGEFILE),
             PATINA_O_WRITE | PATINA_O_CREATE | PATINA_O_TRUNCATE
         );
         // A directory open decodes read-only plus the directory requirement;

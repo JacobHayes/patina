@@ -94,43 +94,16 @@ fn syscall_door(row: Syscall, a: Args) -> i64 {
     }
 }
 
-// glibc exports `futimesat` (deprecated, still a strong symbol); the libc
-// crate does not declare it.
+// glibc exports `futimesat` (deprecated, still a strong symbol) and
+// `getdents64`; the libc crate declares neither.
 unsafe extern "C" {
     pub(crate) fn futimesat(
         dirfd: libc::c_int,
         path: *const libc::c_char,
         times: *const libc::timeval,
     ) -> libc::c_int;
+    fn getdents64(fd: libc::c_int, buffer: *mut libc::c_void, length: libc::size_t) -> isize;
 }
-
-/// glibc's `getdents64` wrapper, resolved at call time. The shim does not
-/// define it (registry symbol row `getdents64`: `Absent`), so a static import
-/// would make the pre-run audit refuse the whole shared probe binary; resolving
-/// it here keeps that refusal scoped to the one door. Under patina the
-/// resolver answers nothing for a symbol the shim lacks, and the door stops.
-fn libc_getdents64(a: Args) -> i64 {
-    type Getdents64 = unsafe extern "C" fn(libc::c_int, *mut libc::c_void, libc::size_t) -> isize;
-    // SAFETY: a NUL-terminated name and the default namespace handle.
-    let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"getdents64".as_ptr()) };
-    if symbol.is_null() {
-        panic!("{GETDENTS64_UNRESOLVED}");
-    }
-    // SAFETY: glibc's getdents64 has exactly this signature.
-    let getdents64: Getdents64 = unsafe { std::mem::transmute(symbol) };
-    // SAFETY: the scenario owns the buffer.
-    fold_errno(unsafe {
-        getdents64(
-            a[0] as libc::c_int,
-            a[1] as *mut libc::c_void,
-            a[2] as libc::size_t,
-        )
-    } as i64)
-}
-
-/// The diagnostic the `libc` door for `getdents64` stops with when the
-/// symbol does not resolve.
-pub const GETDENTS64_UNRESOLVED: &str = "libc door: getdents64 does not resolve";
 
 /// The glibc symbol of the same name, folded to the kernel result convention.
 /// A row glibc has no wrapper for is spelled `syscall(2)`, the same door glibc
@@ -164,7 +137,9 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
                 a[3] as c_uint,
                 a[4] as *mut statx,
             ) as i64,
-            Syscall::N_getdents64 => return libc_getdents64(a),
+            Syscall::N_getdents64 => {
+                getdents64(a[0] as c_int, a[1] as *mut c_void, a[2] as size_t) as i64
+            }
             Syscall::N_mkdirat => {
                 mkdirat(a[0] as c_int, a[1] as *const c_char, a[2] as mode_t) as i64
             }
@@ -526,21 +501,4 @@ pub fn errno_name(code: i32) -> String {
         _ => return format!("E#{code}"),
     };
     name.to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use patina_dst_syscalls::{Os, SYMBOLS, SymbolStatus};
-
-    /// The `getdents64` libc door resolves at call time only because the shim
-    /// does not define the symbol. Once it does, the door links it like every
-    /// other symbol, and fs/getdents' libc gap goes.
-    #[test]
-    fn getdents64_door_resolves_late_only_while_the_shim_lacks_it() {
-        let row = SYMBOLS
-            .iter()
-            .find(|row| row.name == "getdents64" && row.platform.defines_on(Os::Linux))
-            .expect("a getdents64 symbol row");
-        assert_eq!(row.status, SymbolStatus::Absent);
-    }
 }

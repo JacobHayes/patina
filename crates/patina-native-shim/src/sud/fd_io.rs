@@ -49,19 +49,6 @@ pub(super) fn sys_lseek(fd: i64, offset: i64, whence: u64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    // A directory fd: `lseek(fd, 0, SEEK_SET)` is rustix `Dir::rewind` — drop the
-    // current snapshot so the next `getdents64` takes a fresh one from the start.
-    // It does NOT route to `patina_seek`: the driver refuses to seek a directory
-    // handle (a directory has no byte offset), and the libc path never lseeks one
-    // either — `rewinddir` re-snapshots exactly like this. Any other seek on a
-    // directory fd is meaningless (ESPIPE, matching a directory stream).
-    if is_dir_fd(fd) {
-        if whence == SEEK_SET && offset == 0 {
-            release_dir_iteration(fd as c_int);
-            return 0;
-        }
-        return -ESPIPE;
-    }
     // patina_seek returns the new offset or -1; shape it to the raw convention.
     // SAFETY: no pointers.
     let result = unsafe { patina_seek(fd as c_int, offset, whence as u32) };

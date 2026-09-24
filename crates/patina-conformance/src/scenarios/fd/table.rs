@@ -10,13 +10,7 @@
 //! written to fd 1 as each call returns, so redirecting fd 1 would divert the
 //! events themselves into the file under test.
 
-#[cfg(target_arch = "aarch64")]
-use crate::catalog::{Arc, Gap, Status};
 use crate::catalog::{DEFAULTS, Scenario};
-#[cfg(target_arch = "aarch64")]
-use crate::compare::{Difference, Failure, Observed};
-#[cfg(target_arch = "aarch64")]
-use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
 
@@ -268,19 +262,6 @@ pub const SCENARIO: Scenario = Scenario {
         "lseek",
         "pipe2",
         "eventfd",
-    ],
-    gaps: &[
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "F_GETFL reports x86_64's O_LARGEFILE bit (0o100000) where the arm64 kernel reports 0o400000 (c/posix/fd_io.c patina_getfl_to_posix and sud/fd_io.rs spell the x86_64 value)",
-            failure: Failure::Differs(&[
-                Difference::field(19, "fcntl", "ret", Observed::Int(32770)),
-                Difference::field(22, "fcntl", "ret", Observed::Int(33794)),
-                Difference::field(25, "fcntl", "ret", Observed::Int(32770)),
-            ]),
-        },
     ],
     ..DEFAULTS
 };

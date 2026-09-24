@@ -1601,7 +1601,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Fs,
         Disposition::Modeled,
-        "Serves a per-directory-fd snapshot taken through `patina_read_dir`, the entry the C `readdir` uses; `.`/`..` and real `d_ino` are the fs arc.",
+        "Serves a per-directory-fd snapshot taken through `patina_read_dir`, the entry the C `readdir` uses, `.` and `..` first; the C `getdents64` forwards here. Real `d_ino` is the fs arc.",
         Some("fs"),
     ),
     Syscall::N_set_tid_address => r(

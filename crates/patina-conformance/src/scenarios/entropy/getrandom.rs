@@ -1,8 +1,7 @@
 //! entropy/getrandom — getrandom: lengths, the flag vocabulary, and that two
 //! draws differ (the bytes themselves are never recorded).
 
-use crate::catalog::{Arc, DEFAULTS, DISPATCHER, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{Probe, neg};
@@ -35,16 +34,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[Syscall::N_getrandom],
     symbols: &["getrandom"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: DISPATCHER,
-        what: "the dispatcher's getrandom row ignores flags (sud.rs sys_getrandom), so an unknown flag fills the buffer instead of EINVAL; the C getrandom validates against PATINA_GRND_KNOWN (patina_posix.c getrandom)",
-        failure: Failure::Differs(&[
-            Difference::field(12, "getrandom", "errno", Observed::Null),
-            Difference::field(12, "getrandom", "fields.nonzero", Observed::Bool(true)),
-            Difference::field(12, "getrandom", "ret", Observed::Int(16)),
-            Difference::check(13, "an unknown flag is EINVAL"),
-        ]),
-    }],
     ..DEFAULTS
 };

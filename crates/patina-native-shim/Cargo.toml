@@ -12,6 +12,7 @@ links = "patina-dst-native-shim"
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
+linux-raw-sys.workspace = true
 patina-dst-syscalls.workspace = true
 patina-dst-abi.workspace = true
 patina-dst-driver-api.workspace = true
@@ -22,4 +23,5 @@ patina-dst-trace.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+libc.workspace = true
 patina-dst-sched-det.workspace = true

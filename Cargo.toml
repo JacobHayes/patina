@@ -72,6 +72,9 @@ patina-dst-wrapper-latency = { path = "crates/patina-wrapper-latency", version =
 # terminal-dependent, which a machine-parsed CLI must not be.
 libc = "0.2.189"
 clap = { version = "~4.6", default-features = false, features = ["std", "error-context", "suggestions"] }
+# The Linux kernel's uapi constants for the target architecture: the native
+# shim decodes the kernel ABI's flag words and errno values with them.
+linux-raw-sys = { version = "0.12.1", default-features = false, features = ["errno", "general", "no_std"] }
 object = { version = "0.39.1", default-features = false, features = ["read", "std"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }

@@ -40,15 +40,13 @@ pub(super) fn sys_futex(args: [u64; 6]) -> i64 {
     -ENOSYS
 }
 
-pub(super) fn sys_getrandom(buf: u64, len: u64, _flags: u64) -> i64 {
-    // Deterministic entropy never blocks and has one source, so GRND_* flags are
-    // irrelevant (mirrors the C getrandom/SYS_getrandom routes).
+pub(super) fn sys_getrandom(buf: u64, len: u64, flags: u64) -> i64 {
     // SAFETY: `buf`/`len` describe a guest buffer.
-    let rc = unsafe { patina_entropy(buf as *mut c_void, len as usize) };
-    if rc != 0 {
+    let count = unsafe { patina_getrandom(buf as *mut c_void, len as usize, flags as u32) };
+    if count < 0 {
         // SAFETY: plain thread-local read.
         -(unsafe { patina_errno() } as i64)
     } else {
-        len as i64
+        count as i64
     }
 }

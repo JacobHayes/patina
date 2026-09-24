@@ -7,11 +7,7 @@
 //! checks — and no check depends on the mount's atime policy (the oracle may
 //! be `noatime`, the virtual kernel is `relatime`).
 
-#[cfg(target_arch = "aarch64")]
-use crate::catalog::{ARM64_OPEN_FLAGS, DISPATCHER, RUST_PANIC};
-use crate::catalog::{Arc, DEFAULTS, Gap, OPEN_FLAGS_AGREE, Scenario, Status};
-#[cfg(target_arch = "aarch64")]
-use crate::compare::Ending;
+use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
 use crate::compare::{Difference, Failure, Observed};
 use crate::vehicle::Vehicle;
 
@@ -580,7 +576,7 @@ pub const SCENARIO: Scenario = Scenario {
         },
         Gap {
             status: Status::Pending(Arc::Fs),
-            vehicles: OPEN_FLAGS_AGREE,
+            vehicles: Vehicle::ALL,
             what: "signed/wide filesystem timestamps: the unsigned-nanosecond ABI refuses out-of-range seconds with EINVAL; Linux accepts them and clamps to its filesystem range (checked conversion, never wrap)",
             failure: Failure::Differs(&[
                 Difference::field(190, "utimensat", "errno", Observed::Str("EINVAL")),
@@ -590,27 +586,6 @@ pub const SCENARIO: Scenario = Scenario {
                 Difference::field(196, "utime", "errno", Observed::Str("EINVAL")),
                 Difference::field(196, "utime", "ret", Observed::Int(-1)),
             ]),
-        },
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Differs(&[
-                Difference::field(110, "openat", "errno", Observed::Str("ENOSYS")),
-                Difference::field(110, "openat", "ret", Observed::Int(-1)),
-            ]),
-        },
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Stops {
-                events: 111,
-                ending: Ending::Exit(RUST_PANIC),
-                diagnostic: "fs/times: cannot continue: open d",
-            },
         },
     ],
     ..DEFAULTS

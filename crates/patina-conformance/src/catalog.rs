@@ -58,38 +58,6 @@ pub const DEFAULTS: Scenario = Scenario {
     trace: None,
 };
 
-/// The vehicles that reach patina's dispatcher: `syscall(2)` and the raw
-/// instruction.
-pub const DISPATCHER: &[Vehicle] = &[
-    Vehicle::Syscall,
-    #[cfg(target_arch = "x86_64")]
-    Vehicle::Raw,
-];
-
-/// The libc interposer door alone.
-pub const LIBC: &[Vehicle] = &[Vehicle::Libc];
-
-/// The vehicles whose open flags patina decodes with the host kernel's
-/// values: all of them on x86_64. On arm64 the dispatcher decodes x86_64's
-/// values (`ARM64_OPEN_FLAGS`), so a scenario's `syscall` run stops at its
-/// first open carrying such a flag, and a gap past that point applies to the
-/// libc vehicle alone there.
-pub const OPEN_FLAGS_AGREE: &[Vehicle] = &[
-    Vehicle::Libc,
-    #[cfg(target_arch = "x86_64")]
-    Vehicle::Syscall,
-    #[cfg(target_arch = "x86_64")]
-    Vehicle::Raw,
-];
-
-/// The arm64 dispatcher's open-flag gap, shared by the scenarios it stops.
-#[cfg(target_arch = "aarch64")]
-pub const ARM64_OPEN_FLAGS: &str = "the dispatcher decodes open flags with x86_64's values (sud/mod.rs O_DIRECTORY 0o200000, O_NOFOLLOW 0o400000, O_LARGEFILE 0o100000), so an arm64 open with O_DIRECTORY (0o40000) or O_NOFOLLOW (0o100000) answers ENOSYS and the scenario cannot continue";
-
-/// The exit code of a Rust program whose main thread panicked (a scenario
-/// that cannot continue).
-pub const RUST_PANIC: i32 = 101;
-
 /// The family arc (docs/arcs/syscall-conformance.md §6) that models a
 /// pending gap away.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

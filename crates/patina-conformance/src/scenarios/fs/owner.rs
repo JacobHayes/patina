@@ -5,11 +5,7 @@
 //! lchown names a link itself; fchownat's flag vocabulary; fchown on O_PATH is
 //! EBADF; access/faccessat/faccessat2 answer from the mode bits, X_OK included.
 
-#[cfg(target_arch = "aarch64")]
-use crate::catalog::{ARM64_OPEN_FLAGS, Arc, DISPATCHER, Gap, RUST_PANIC, Status};
 use crate::catalog::{DEFAULTS, Scenario};
-#[cfg(target_arch = "aarch64")]
-use crate::compare::{Difference, Ending, Failure, Observed};
 
 use patina_dst_syscalls::Syscall;
 
@@ -339,29 +335,6 @@ pub const SCENARIO: Scenario = Scenario {
         "nanosleep",
         "getuid",
         "getgid",
-    ],
-    gaps: &[
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Differs(&[
-                Difference::field(49, "openat", "errno", Observed::Str("ENOSYS")),
-                Difference::field(49, "openat", "ret", Observed::Int(-1)),
-            ]),
-        },
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Stops {
-                events: 50,
-                ending: Ending::Exit(RUST_PANIC),
-                diagnostic: "fs/owner: cannot continue: open d",
-            },
-        },
     ],
     ..DEFAULTS
 };

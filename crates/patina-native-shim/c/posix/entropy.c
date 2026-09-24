@@ -23,18 +23,6 @@
  * `patina_entropy` stream.
  */
 
-#ifdef __linux__
-#define PATINA_GRND_KNOWN ((unsigned int)(GRND_NONBLOCK | GRND_RANDOM))
-
-#endif
-
-#ifndef __linux__
-/* <linux/random.h> GRND_NONBLOCK | GRND_RANDOM, spelled out so the routing
- * table compiles — and can be probed — on macOS too. */
-#define PATINA_GRND_KNOWN 0x3u
-
-#endif
-
 static int patina_deterministic_getentropy(void *destination, size_t length) {
     if (patina_entropy(destination, length) != 0) {
         errno = patina_errno();
@@ -45,15 +33,7 @@ static int patina_deterministic_getentropy(void *destination, size_t length) {
 
 static ssize_t patina_deterministic_getrandom(void *destination, size_t length,
                                               unsigned int flags) {
-    if ((flags & ~PATINA_GRND_KNOWN) != 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (patina_entropy(destination, length) != 0) {
-        errno = patina_errno();
-        return -1;
-    }
-    return (ssize_t)length;
+    return fail_size(patina_getrandom(destination, length, flags));
 }
 
 /*

@@ -247,7 +247,7 @@ forwards into the same dispatcher instead of its two-number allowlist.
   `access(X_OK)` honors the bit; O_TMPFILE → EOPNOTSUPP until the /proc tree,
   then anonymous inode; copy_file_range/sendfile/splice/tee/vmsplice over
   `patina_read`/`patina_write`; timestamps (`FsClock` on driver ops, relatime);
-  st_uid/st_gid from the identity knob; real `d_ino` and `.`/`..` entries;
+  st_uid/st_gid from the identity knob; real `d_ino`;
   libc-only holes strong-defined: fopen family, mkstemp/mkdtemp/tmpfile,
   realpath, scandir, statvfs, remove; ustat/sysfs/name_to_handle_at constants;
   cachestat ENOSYS.

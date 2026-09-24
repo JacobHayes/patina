@@ -1,11 +1,7 @@
 //! fs/open_rw — openat / read / write / lseek / close: the descriptor cursor,
 //! access modes, creation flags, and the errno vocabulary around them.
 
-#[cfg(target_arch = "aarch64")]
-use crate::catalog::{ARM64_OPEN_FLAGS, Arc, DISPATCHER, Gap, RUST_PANIC, Status};
 use crate::catalog::{DEFAULTS, Scenario};
-#[cfg(target_arch = "aarch64")]
-use crate::compare::{Difference, Ending, Failure, Observed};
 
 use patina_dst_syscalls::Syscall;
 
@@ -189,30 +185,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
     ],
     symbols: &["openat", "read", "write", "lseek", "close"],
-    gaps: &[
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Differs(&[
-                Difference::field(53, "openat", "errno", Observed::Str("ENOSYS")),
-                Difference::check(54, "O_DIRECTORY on a file is ENOTDIR"),
-                Difference::field(59, "openat", "errno", Observed::Str("ENOSYS")),
-                Difference::field(59, "openat", "ret", Observed::Int(-1)),
-            ]),
-        },
-        #[cfg(target_arch = "aarch64")]
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: DISPATCHER,
-            what: ARM64_OPEN_FLAGS,
-            failure: Failure::Stops {
-                events: 60,
-                ending: Ending::Exit(RUST_PANIC),
-                diagnostic: "fs/open_rw: cannot continue: directory open",
-            },
-        },
-    ],
     ..DEFAULTS
 };

@@ -243,6 +243,18 @@ struct dirent64 *readdir64(DIR *dirp) {
     return &directory->entry64;
 }
 
+/*
+ * glibc's getdents64 is the syscall with the length clamped to INT_MAX (the
+ * kernel's length checks use an int). This one forwards into the dispatcher's
+ * getdents64 row, so the libc wrapper and a raw getdents64 read one
+ * per-descriptor iteration.
+ */
+ssize_t getdents64(int fd, void *buffer, size_t length) {
+    if (length > INT_MAX) length = INT_MAX;
+    return dispatch_result(patina_sud_dispatch(SYS_getdents64, (unsigned long)fd,
+                                               (uintptr_t)buffer, length, 0, 0, 0, 0));
+}
+
 #endif
 
 int closedir(DIR *dirp) {
@@ -564,6 +576,19 @@ static int fill_stat(int result, const struct patina_metadata *values, struct st
 #ifndef AT_NO_AUTOMOUNT
 #define AT_NO_AUTOMOUNT 0
 #endif
+#ifndef AT_STATX_SYNC_TYPE
+#define AT_STATX_SYNC_TYPE 0
+#endif
+
+/* The errno for an *at flag outside the modeled set. On Linux each modeled set
+ * is every bit the kernel accepts, so the rest are the kernel's EINVAL. Darwin
+ * defines bits that are not modeled (AT_SYMLINK_NOFOLLOW_ANY, AT_REALDEV,
+ * AT_FDONLY, AT_REMOVEDIR_DATALESS), and those fail closed. */
+#ifdef __linux__
+#define PATINA_AT_FLAG_REFUSAL EINVAL
+#else
+#define PATINA_AT_FLAG_REFUSAL ENOSYS
+#endif
 
 /*
  * Resolve the addressing forms the *at* metadata entries accept onto the same
@@ -578,12 +603,18 @@ static int fill_stat(int result, const struct patina_metadata *values, struct st
  *   everything else -> the resolved path, with AT_SYMLINK_NOFOLLOW naming a
  *   trailing symlink itself.
  *
- * Flags outside `allowed` still fail closed.
+ * The flags are the ones the Linux kernel's vfs_statx accepts for both calls
+ * (fs/stat.c). The AT_STATX_SYNC_* bits only choose how fresh a network
+ * filesystem's answer must be; a virtual filesystem is always exact, so they
+ * change nothing.
  */
-static int patina_stat_at_values(int directory, const char *path, int flags, int allowed,
+#define PATINA_STAT_AT_FLAGS \
+    (AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE)
+
+static int patina_stat_at_values(int directory, const char *path, int flags,
                                  struct patina_metadata *values) {
-    if ((flags & ~allowed) != 0) {
-        errno = ENOSYS;
+    if ((flags & ~PATINA_STAT_AT_FLAGS) != 0) {
+        errno = PATINA_AT_FLAG_REFUSAL;
         return -1;
     }
     uint32_t resolve_flags = 0;
@@ -596,8 +627,6 @@ static int patina_stat_at_values(int directory, const char *path, int flags, int
     }
     return patina_metadata_values(patina_at(directory), path, resolve_flags, values);
 }
-
-#define PATINA_STAT_AT_FLAGS (AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT)
 
 /*
  * Existence and permission probe. The guest is one non-root identity (what
@@ -732,7 +761,7 @@ int fstat(int fd, struct stat *status) {
 
 int fstatat(int directory, const char *restrict path, struct stat *restrict status, int flags) {
     struct patina_metadata values;
-    int result = patina_stat_at_values(directory, path, flags, PATINA_STAT_AT_FLAGS, &values);
+    int result = patina_stat_at_values(directory, path, flags, &values);
     return fill_stat(result, &values, status);
 }
 
@@ -835,7 +864,7 @@ int fstat64(int fd, struct stat64 *status) {
 
 int fstatat64(int directory, const char *restrict path, struct stat64 *restrict status, int flags) {
     struct patina_metadata values;
-    int result = patina_stat_at_values(directory, path, flags, PATINA_STAT_AT_FLAGS, &values);
+    int result = patina_stat_at_values(directory, path, flags, &values);
     return fill_stat64(result, &values, status);
 }
 
@@ -855,14 +884,13 @@ static void patina_statx_time(struct statx_timestamp *out, uint64_t nanos) {
  */
 int statx(int directory, const char *restrict path, int flags, unsigned int mask,
           struct statx *restrict status) {
-    /* The three STATX_SYNC bits only choose how fresh a network filesystem's
-     * answer must be; a virtual filesystem is always exact, so they are accepted
-     * and ignored rather than failing closed. */
+    /* do_statx refuses both sync modes at once and the reserved mask bit. */
+    if ((flags & AT_STATX_SYNC_TYPE) == AT_STATX_SYNC_TYPE || (mask & STATX__RESERVED) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
     struct patina_metadata values;
-    int result = patina_stat_at_values(
-        directory, path, flags,
-        PATINA_STAT_AT_FLAGS | AT_STATX_SYNC_AS_STAT | AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC,
-        &values);
+    int result = patina_stat_at_values(directory, path, flags, &values);
     if (result < 0) return -1;
     memset(status, 0, sizeof *status);
     status->stx_mask = (STATX_BASIC_STATS & ~STATX_BLOCKS) | STATX_MNT_ID;
@@ -1138,13 +1166,13 @@ int rename(const char *from, const char *to) {
 
 /*
  * *at removal/rename. unlinkat routes to rmdir when AT_REMOVEDIR is set,
- * otherwise unlink; unknown flags fail closed. renameat resolves both dirfds
+ * otherwise unlink (AT_REMOVEDIR is the only flag Linux defines). renameat resolves both dirfds
  * (cap-std's `Dir::rename` is dir-fd-relative on both sides); renameat2 models
  * only flags==0 and otherwise fails closed, then routes through renameat.
  */
 int unlinkat(int dirfd, const char *path, int flags) {
     if ((flags & ~AT_REMOVEDIR) != 0) {
-        errno = ENOSYS;
+        errno = PATINA_AT_FLAG_REFUSAL;
         return -1;
     }
     if (flags & AT_REMOVEDIR) return fail_int(patina_rmdir(patina_at(dirfd), path));

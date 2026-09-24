@@ -28,19 +28,22 @@
  * `-errno` is reshaped into this wrapper's `-1`/`errno` contract. The faulting
  * address argument is 0: this is a call, not a trap.
  */
+static long dispatch_result(long result) {
+    if (result < 0 && result > -4096) {
+        errno = (int)-result;
+        return -1;
+    }
+    return result;
+}
+
 long syscall(long number, ...) {
     va_list ap;
     va_start(ap, number);
     uint64_t args[6];
     for (int i = 0; i < 6; i++) args[i] = va_arg(ap, uint64_t);
     va_end(ap);
-    long result = patina_sud_dispatch((long)number, args[0], args[1], args[2], args[3],
-                                      args[4], args[5], 0);
-    if (result < 0 && result > -4096) {
-        errno = (int)-result;
-        return -1;
-    }
-    return result;
+    return dispatch_result(patina_sud_dispatch((long)number, args[0], args[1], args[2],
+                                               args[3], args[4], args[5], 0));
 }
 
 /* ==========================================================================
