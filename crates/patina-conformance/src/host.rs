@@ -201,6 +201,9 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         Need::SysfsSyscall => timeid::sysfs_syscall(),
         Need::HighResTimers => timeid::high_res_timers(),
         Need::Landlock => timeid::landlock(),
+        Need::RestrictedBpf => restricted::bpf(),
+        Need::RestrictedPerf => restricted::perf(),
+        Need::RestrictedUserfaultfd => restricted::userfaultfd(),
     }
 }
 
@@ -678,6 +681,89 @@ mod timeid {
             }),
             (result, _, _) => Err(refusal("clock_getres(CLOCK_MONOTONIC)", -result as i32)),
         }
+    }
+}
+
+/// The host-configuration needs of the privileged rows: each asks for the
+/// smallest harmless object an unrestricted host would hand an unprivileged
+/// caller, and closes it if the host does.
+mod restricted {
+    use super::{Cause, NotRun, refusal};
+    use crate::vehicle::errno;
+
+    /// `syscall(2)`; the kernel convention (`-errno`).
+    fn sys(number: libc::c_long, args: [libc::c_long; 5]) -> i64 {
+        // SAFETY: every pointer passed below is owned by the caller for the
+        // duration of the call.
+        let result = unsafe { libc::syscall(number, args[0], args[1], args[2], args[3], args[4]) };
+        if result < 0 {
+            -i64::from(errno())
+        } else {
+            result
+        }
+    }
+
+    /// `refused` is the answer of a restricted host; a descriptor is closed
+    /// and reported as the host's permissive configuration.
+    fn expect(what: &str, result: i64, refused: i32, permissive: &str) -> Result<(), NotRun> {
+        if result == -i64::from(refused) {
+            Ok(())
+        } else if result >= 0 {
+            // SAFETY: the descriptor the call just opened.
+            unsafe { libc::close(result as libc::c_int) };
+            Err(NotRun {
+                cause: Cause::Absent,
+                detail: format!("{what} succeeded: {permissive}"),
+            })
+        } else {
+            Err(refusal(what, (-result) as i32))
+        }
+    }
+
+    pub(super) fn bpf() -> Result<(), NotRun> {
+        // `union bpf_attr`'s map-creation prefix: an array of one 4-byte
+        // entry under a 4-byte key.
+        let attr: [u32; 5] = [2, 4, 4, 1, 0];
+        let result = sys(libc::SYS_bpf, [0, attr.as_ptr() as libc::c_long, 20, 0, 0]);
+        expect(
+            "bpf(BPF_MAP_CREATE, array)",
+            result,
+            libc::EPERM,
+            "kernel.unprivileged_bpf_disabled is 0",
+        )
+    }
+
+    pub(super) fn perf() -> Result<(), NotRun> {
+        // `struct perf_event_attr` (PERF_ATTR_SIZE_VER0 bytes): the software
+        // task clock, disabled, excluding the kernel and hypervisor.
+        let mut attr = [0u8; 64];
+        attr[0..4].copy_from_slice(&1u32.to_ne_bytes());
+        attr[4..8].copy_from_slice(&64u32.to_ne_bytes());
+        attr[8..16].copy_from_slice(&1u64.to_ne_bytes());
+        attr[40..48].copy_from_slice(&0b110_0001u64.to_ne_bytes());
+        let result = sys(
+            libc::SYS_perf_event_open,
+            [attr.as_ptr() as libc::c_long, 0, -1, -1, 0],
+        );
+        expect(
+            "perf_event_open(user-only task clock)",
+            result,
+            libc::EACCES,
+            "kernel.perf_event_paranoid lets an unprivileged caller count its own time",
+        )
+    }
+
+    pub(super) fn userfaultfd() -> Result<(), NotRun> {
+        let result = sys(
+            libc::SYS_userfaultfd,
+            [libc::O_CLOEXEC as libc::c_long, 0, 0, 0, 0],
+        );
+        expect(
+            "userfaultfd(O_CLOEXEC)",
+            result,
+            libc::EPERM,
+            "vm.unprivileged_userfaultfd is 1",
+        )
     }
 }
 

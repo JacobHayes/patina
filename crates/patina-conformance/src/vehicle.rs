@@ -893,6 +893,7 @@ const WRAPPERS: &[(Syscall, &str)] = &[
     (Syscall::N_quotactl, "quotactl"),
     (Syscall::N_unshare, "unshare"),
     (Syscall::N_setns, "setns"),
+    (Syscall::N_ptrace, "ptrace"),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_iopl, "iopl"),
     #[cfg(target_arch = "x86_64")]
@@ -970,6 +971,25 @@ pub unsafe fn wrapper_door(row: Syscall, address: *mut std::ffi::c_void, a: Args
         ),
         Syscall::N_unshare => call!((c_int) -> c_int, a[0]),
         Syscall::N_setns => call!((c_int, c_int) -> c_int, a[0], a[1]),
+        // `long ptrace(enum __ptrace_request, ...)`: pid, address and data
+        // are its variadic arguments.
+        Syscall::N_ptrace => {
+            // SAFETY: the caller's contract: `address` is glibc's ptrace.
+            let ptrace = unsafe {
+                std::mem::transmute::<*mut c_void, unsafe extern "C" fn(c_uint, ...) -> c_long>(
+                    address,
+                )
+            };
+            // SAFETY: the caller's contract: it owns every pointer passed.
+            unsafe {
+                ptrace(
+                    a[0] as c_uint,
+                    a[1] as pid_t,
+                    a[2] as *mut c_void,
+                    a[3] as *mut c_void,
+                )
+            }
+        }
         #[cfg(target_arch = "x86_64")]
         Syscall::N_iopl => call!((c_int) -> c_int, a[0]),
         #[cfg(target_arch = "x86_64")]

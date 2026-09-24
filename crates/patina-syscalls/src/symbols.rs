@@ -2526,4 +2526,10 @@ const ROWS: &[SymbolRow] = &[
         Serves::Syscalls(&["setns"]),
         SymbolStatus::Absent,
     ),
+    s(
+        "ptrace",
+        Platform::Linux,
+        Serves::Syscalls(&["ptrace"]),
+        SymbolStatus::Absent,
+    ),
 ];

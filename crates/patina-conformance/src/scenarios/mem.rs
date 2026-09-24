@@ -17,3 +17,4 @@ pub mod protect;
 pub mod remap_file_pages;
 pub mod secret;
 pub mod shadow_stack;
+pub mod userfaultfd;

@@ -1,10 +1,12 @@
 pub mod admin;
+pub mod bpf;
 pub mod hostname;
 #[cfg(target_arch = "x86_64")]
 pub mod ioport;
 pub mod keys;
 pub mod landlock;
 pub mod lsm;
+pub mod perf;
 pub mod personality;
 pub mod quota;
 pub mod rlimit;

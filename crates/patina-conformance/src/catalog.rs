@@ -168,6 +168,19 @@ pub enum Need {
     /// Landlock is built and active (`CONFIG_SECURITY_LANDLOCK`, and in the
     /// boot's LSM list): `landlock_create_ruleset`'s version query answers.
     Landlock,
+    /// The host refuses an unprivileged caller BPF maps and programs
+    /// (`kernel.unprivileged_bpf_disabled` set, the default of
+    /// `CONFIG_BPF_UNPRIV_DEFAULT_OFF`): a one-entry array map is `EPERM`.
+    RestrictedBpf,
+    /// The host refuses an unprivileged caller every perf event, even
+    /// counting its own user time (`kernel.perf_event_paranoid` above 2 on
+    /// Debian and Ubuntu kernels, whose patch adds that level): a user-only
+    /// task-clock event on the caller is `EACCES`.
+    RestrictedPerf,
+    /// The host refuses an unprivileged caller a userfaultfd that handles
+    /// kernel faults (`vm.unprivileged_userfaultfd` 0, its default):
+    /// `userfaultfd` without `UFFD_USER_MODE_ONLY` is `EPERM`.
+    RestrictedUserfaultfd,
 }
 
 impl Need {
@@ -203,7 +216,10 @@ impl Need {
             | Need::DefaultPersona
             | Need::Ipv6Loopback
             | Need::Fanotify
-            | Need::LocalBindOnly => false,
+            | Need::LocalBindOnly
+            | Need::RestrictedBpf
+            | Need::RestrictedPerf
+            | Need::RestrictedUserfaultfd => false,
         }
     }
 }
@@ -458,6 +474,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &mem::remap_file_pages::SCENARIO,
     &mem::secret::SCENARIO,
     &mem::shadow_stack::SCENARIO,
+    &mem::userfaultfd::SCENARIO,
     &net::fortify::SCENARIO,
     &net::getaddrinfo::SCENARIO,
     &net::getifaddrs::SCENARIO,
@@ -484,6 +501,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &proc::namespaces::SCENARIO,
     &proc::pgrp::SCENARIO,
     &proc::prctl::SCENARIO,
+    &proc::ptrace::SCENARIO,
     &proc::seccomp::SCENARIO,
     &proc::traps::SCENARIO,
     &proc::wait::SCENARIO,
@@ -520,12 +538,14 @@ pub const SCENARIOS: &[&Scenario] = &[
     &signal::unmask::SCENARIO,
     &signal::wait::SCENARIO,
     &sys::admin::SCENARIO,
+    &sys::bpf::SCENARIO,
     &sys::hostname::SCENARIO,
     #[cfg(target_arch = "x86_64")]
     &sys::ioport::SCENARIO,
     &sys::keys::SCENARIO,
     &sys::landlock::SCENARIO,
     &sys::lsm::SCENARIO,
+    &sys::perf::SCENARIO,
     &sys::personality::SCENARIO,
     &sys::quota::SCENARIO,
     &sys::rlimit::SCENARIO,

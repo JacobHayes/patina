@@ -1382,6 +1382,11 @@ fn mem_shadow_stack() {
 }
 
 #[test]
+fn mem_userfaultfd() {
+    conform("mem/userfaultfd");
+}
+
+#[test]
 fn net_fortify() {
     conform("net/fortify");
 }
@@ -1509,6 +1514,11 @@ fn proc_pgrp() {
 #[test]
 fn proc_prctl() {
     conform("proc/prctl");
+}
+
+#[test]
+fn proc_ptrace() {
+    conform("proc/ptrace");
 }
 
 #[test]
@@ -1692,6 +1702,11 @@ fn sys_admin() {
 }
 
 #[test]
+fn sys_bpf() {
+    conform("sys/bpf");
+}
+
+#[test]
 fn sys_hostname() {
     conform("sys/hostname");
 }
@@ -1715,6 +1730,11 @@ fn sys_landlock() {
 #[test]
 fn sys_lsm() {
     conform("sys/lsm");
+}
+
+#[test]
+fn sys_perf() {
+    conform("sys/perf");
 }
 
 #[test]

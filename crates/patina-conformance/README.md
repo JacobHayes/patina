@@ -22,9 +22,12 @@ A scenario declares the registry rows it covers (`covers`, `asserts_absent`),
 the libc symbols its `libc` vehicle goes through, the host capabilities its
 native oracle needs beyond those rows (`needs`: user xattrs, file handles or
 whiteouts on the run directory's filesystem, inotify or lockable pages within
-the caller's limits, an unprivileged caller, no controlling terminal, a hardware or kernel-configuration
-feature such as protection keys or SysV IPC — detected live, an unmet one is
-reported not run and a detection that fails unexpectedly is a failure), the
+the caller's limits, an unprivileged caller, no controlling terminal, a
+hardware or kernel-configuration feature such as protection keys or SysV IPC,
+a host that restricts what the virtual kernel's declared configuration
+restricts (unprivileged BPF, perf events, kernel-fault userfaultfd) — detected
+live, an unmet one is reported not run and a detection that fails
+unexpectedly is a failure), the
 oldest kernel whose behaviour its checks assert (`kernel_floor`), its gaps, and
 the facts its recorded trace must show. Where a host oracle is required
 (`PATINA_REQUIRE_HOST_ORACLE=1`, CI), an unmet need or a kernel below a
