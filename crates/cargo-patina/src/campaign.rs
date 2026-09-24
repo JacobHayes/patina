@@ -3495,6 +3495,16 @@ fn run_generation(
     let status = child
         .wait()
         .map_err(|e| CliError(format!("failed to collect generation run output: {e}")))?;
+    if timed_out {
+        // Reaping the child reaped only the process-group LEADER. The guest it
+        // supervises was signalled in the same `kill` but dies on its own
+        // schedule, and until it has, it still holds the trace scratch file's
+        // lock through the descriptor it inherited: the sweep that follows would
+        // spare that file as a live recorder's. The generation is over when its
+        // last process is.
+        #[cfg(unix)]
+        await_process_group_exit(child.id(), KILLED_GROUP_EXIT_BOUND);
+    }
     let stdout_bytes = stdout_reader.join().unwrap_or_default();
     let stderr_bytes = stderr_reader.join().unwrap_or_default();
     let exit = status.code().unwrap_or(-1);
@@ -3578,6 +3588,64 @@ fn kill_generation_process_tree(child: &mut std::process::Child) {
         }
     }
     let _ = child.kill();
+}
+
+/// How long a SIGKILLed generation's process group may take to vanish before
+/// the campaign stops waiting for it. A killed process normally exits within
+/// milliseconds even on a loaded host; one that outlasts this is stuck in the
+/// kernel (uninterruptible I/O) or is an orphaned zombie nobody reaps.
+#[cfg(unix)]
+const KILLED_GROUP_EXIT_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wait until no process of the SIGKILLed generation process group `pgid`
+/// remains, and return whether it vanished within `bound`. The caller has
+/// already reaped the group's leader; the other members (the guest the leader
+/// supervised) died of the same signal but are reparented, and reaped,
+/// elsewhere. Their exit is what releases the trace scratch lock they
+/// inherited, so only after this returns does the scratch sweep see the file as
+/// a dead writer's.
+///
+/// A member this process is itself the reaper of (the campaign runs as pid 1,
+/// or as a child subreaper) is reaped here, since nobody else will. A group
+/// that outlasts `bound` is reported and left: the campaign cannot do more than
+/// SIGKILL, and a scratch file that then survives the sweep is the loud trace
+/// of it.
+#[cfg(unix)]
+fn await_process_group_exit(pgid: u32, bound: std::time::Duration) -> bool {
+    use std::time::{Duration, Instant};
+
+    const ESRCH: i32 = 3;
+    const WNOHANG: i32 = 1;
+    unsafe extern "C" {
+        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    }
+
+    let Ok(pgid) = i32::try_from(pgid) else {
+        return true;
+    };
+    let deadline = Instant::now() + bound;
+    loop {
+        let mut status = 0;
+        // SAFETY: `waitpid` writes only through the valid `status` pointer; with
+        // a negative pid it reaps only members of this generation's group.
+        while unsafe { waitpid(-pgid, &mut status, WNOHANG) } > 0 {}
+        // SAFETY: signal 0 delivers nothing; it only probes for group members.
+        if unsafe { kill(-pgid, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(ESRCH)
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            eprintln!(
+                "patina: warning: process group {pgid} of a timed-out campaign generation \
+                 still has members {}s after SIGKILL; its trace scratch file may be left \
+                 in the out-dir",
+                bound.as_secs()
+            );
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// A typed value for a child `run` flag, rendered to the exact canonical syntax
@@ -7226,6 +7294,85 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    /// A timed-out generation's trace scratch file is swept only once the last
+    /// process holding it is gone. The backstop SIGKILLs the generation's whole
+    /// process group but reaps only its leader (the child `cargo patina run`);
+    /// the guest that leader supervised holds the scratch lock through an
+    /// inherited descriptor and dies on its own schedule. Sweeping as soon as
+    /// the leader was reaped spared the file as a live recorder's, and on a
+    /// loaded host a timed-out campaign left it in `<out-dir>/traces/`.
+    ///
+    /// Here the straggler is forced rather than hoped for: the leader exits by
+    /// itself and a member holding the lock lives on, so the sweep deterministically
+    /// sees the state the old code swept in. Class-level pairing: the
+    /// `campaign_timeout_does_not_save_incomplete_trace` end-to-end test asserts
+    /// the out-dir invariant itself (no scratch of any name survives a timed-out
+    /// generation), and `await_process_group_exit` is the one choke point every
+    /// timeout kill passes through before `run_generation` returns.
+    #[cfg(unix)]
+    #[test]
+    fn a_killed_generation_is_swept_only_after_its_last_process_is_gone() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        use std::time::Duration;
+
+        unsafe extern "C" {
+            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        }
+        const F_SETFD: i32 = 2;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let trace = dir.path().join("generation-0.patina");
+        let (scratch, file) = crate::create_scratch(&trace).expect("scratch");
+        let fd = file.as_raw_fd();
+        // The leader exits at once; the member it backgrounds inherits the
+        // locked scratch descriptor, as the guest inherits `PATINA_TRACE_FD`.
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("sleep 60 & exit 0").process_group(0);
+        // SAFETY: `fcntl` is async-signal-safe, and clearing `FD_CLOEXEC` here
+        // touches only the forked child's descriptor table, never this test
+        // process's (which other tests spawn from concurrently).
+        unsafe {
+            command.pre_exec(move || {
+                if fcntl(fd, F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut leader = command.spawn().expect("spawn the generation group");
+        drop(file);
+        assert!(leader.wait().expect("reap the leader").success());
+        let pgid = leader.id();
+
+        // The state the old code swept in: the leader is reaped, a member is
+        // not, and the sweep rightly spares a held lock.
+        crate::remove_dead_scratch(&trace);
+        assert!(
+            scratch.exists(),
+            "the straggler must still hold the scratch lock, or this test proves nothing"
+        );
+
+        // What the timeout backstop does: SIGKILL the group, then await it.
+        // SAFETY: signalling the process group this test created.
+        assert_eq!(unsafe { kill(-(pgid as i32), SIGKILL) }, 0);
+        assert!(
+            await_process_group_exit(pgid, Duration::from_secs(30)),
+            "a SIGKILLed group must vanish"
+        );
+        // SAFETY: signal 0 only probes for members.
+        assert_ne!(
+            unsafe { kill(-(pgid as i32), 0) },
+            0,
+            "no member of the group may remain once the wait returns"
+        );
+        crate::remove_dead_scratch(&trace);
+        assert!(
+            !scratch.exists(),
+            "once the last holder is gone the sweep must remove the scratch file"
+        );
+    }
 
     /// A `--spec` file and individual flags layer with the flag on top, in
     /// EITHER argument order, and an absent switch never undoes the spec.

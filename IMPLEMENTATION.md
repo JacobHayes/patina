@@ -622,7 +622,11 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    re-run — a liveness/always abort writes no trace). A per-generation wall-clock
    `--timeout-secs` backstop kills a generation that hangs in a way the virtual-time
    watchdog cannot see (an uninterposed atomics-only busy loop), classifying it
-   INFRA so one hung generation cannot wedge the whole campaign. Output is
+   INFRA so one hung generation cannot wedge the whole campaign. The kill takes
+   the generation's whole process group, and the campaign waits for its last
+   process to exit (the guest holds the trace scratch lock through an inherited
+   descriptor) before sweeping, so a timed-out generation leaves no scratch file
+   in the out-dir. Output is
    summary-first: a human report (novel/failing generations plus a periodic
    `--progress-every` heartbeat) or a `patina.campaign/v2` JSON envelope (class
    counts, deduped signatures, per-run detail for novel/failing generations, a
