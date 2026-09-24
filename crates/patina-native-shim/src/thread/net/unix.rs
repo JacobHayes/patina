@@ -961,11 +961,17 @@ fn recv_record(
                 unix.queued -= whole;
                 incoming.rights = std::mem::take(&mut message.rights);
                 // A sender waiting for room in this queue may proceed, and
-                // the associated socket, whose sends land here, has room.
+                // every socket whose sends land here has room: the
+                // associated socket and every sender connected to this one
+                // (`unix_dgram_recvmsg` wakes `peer_wait`, where
+                // `unix_dgram_peer_wake_me` left each sender that found the
+                // queue full, associated back or not).
                 let peer = unix.peer;
                 let mut wakes = waiters(&mut state, handle, Dir::Send);
-                if let Some(peer) = peer.filter(|peer| *peer != handle) {
-                    wakes.extend(room_freed(&mut state, peer));
+                let mut writers = connected_to(&state.net.sockets.table, handle);
+                writers.extend(peer.filter(|peer| *peer != handle && !writers.contains(peer)));
+                for writer in writers {
+                    wakes.extend(room_freed(&mut state, writer));
                 }
                 drop(state);
                 wake_all(wakes);
@@ -988,6 +994,20 @@ fn recv_record(
         }
         park(state, handle, Dir::Recv, deadline, "unix-recv")?;
     }
+}
+
+/// The datagram and sequenced-packet sockets connected to `handle`, itself
+/// aside: the senders its `peer_wait` holds.
+fn connected_to(table: &BTreeMap<c_int, Socket>, handle: c_int) -> Vec<c_int> {
+    table
+        .iter()
+        .filter(|(other, socket)| {
+            **other != handle
+                && socket.ty != SOCK_STREAM
+                && matches!(&socket.proto, Proto::Unix(unix) if unix.peer == Some(handle))
+        })
+        .map(|(other, _)| *other)
+        .collect()
 }
 
 /// The kernel poll mask (`unix_poll` for a stream, `unix_dgram_poll` for
@@ -1065,5 +1085,25 @@ mod tests {
         assert!(matches!(create(SOCK_STREAM, 2), Err(EPROTONOSUPPORT)));
         // SOCK_RDM
         assert!(matches!(create(4, 0), Err(ESOCKTNOSUPPORT)));
+    }
+
+    #[test]
+    fn a_receivers_peer_wait_holds_every_sender_connected_to_it() {
+        let socket = |ty: i32, peer: Option<c_int>| {
+            let mut unix = Unix::new();
+            unix.peer = peer;
+            Socket::new(AF_UNIX, ty, 0, Proto::Unix(unix), 0)
+        };
+        let table = BTreeMap::from([
+            (3, socket(SOCK_DGRAM, None)),
+            (4, socket(SOCK_DGRAM, Some(3))),
+            (5, socket(SOCK_SEQPACKET, Some(3))),
+            (6, socket(SOCK_STREAM, Some(3))),
+            (7, socket(SOCK_DGRAM, Some(8))),
+            (8, socket(SOCK_DGRAM, Some(7))),
+        ]);
+        assert_eq!(connected_to(&table, 3), [4, 5]);
+        assert_eq!(connected_to(&table, 8), [7]);
+        assert!(connected_to(&table, 4).is_empty());
     }
 }

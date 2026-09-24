@@ -30,11 +30,9 @@
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, SIGSET_BYTES, SockAddr, neg};
 use crate::signals::one_set;
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -422,30 +420,5 @@ pub const SCENARIO: Scenario = Scenario {
         "clock_gettime",
         "close",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::NetworkReadiness),
-        vehicles: Vehicle::ALL,
-        what: "a datagram receive signals write space only to the socket the receiver is connected to (thread/net/unix.rs recv_record), not to every sender connected to it (the kernel's peer_wait)",
-        failure: Failure::Differs(&[
-            Difference::field(
-                ONE_WAY_EDGE,
-                "epoll_pwait",
-                "fields.events",
-                Observed::Json("[]"),
-            ),
-            Difference::field(ONE_WAY_EDGE, "epoll_pwait", "ret", Observed::Int(0)),
-            Difference::check(
-                ONE_WAY_EDGE + 1,
-                "the room the one-way AF_UNIX datagram reader freed is a new EPOLLOUT edge",
-            ),
-        ]),
-    }],
     ..DEFAULTS
-};
-
-/// The one-way datagram leg's closing wait (after the x86_64-only rows).
-const ONE_WAY_EDGE: u64 = if cfg!(target_arch = "x86_64") {
-    146
-} else {
-    128
 };
