@@ -766,7 +766,7 @@ per-call restart rules and per-door sleep remainder handling. Signalfd uses the
 unified descriptor table. Poll/ppoll and select/pselect share the readiness wait
 core and temporary-mask mechanism; no host readiness object is introduced.
 The six blocking-wait probes (`signal/mask`, `signal/eintr`, `signal/wait`, `signal/block`,
-`signal/one_wake`, `thread/futex`) and the collateral `readiness/ppoll` probe have
+`signal/one_wake`, `thread/futex`) and the collateral `readiness/poll` probe have
 no pending declarations. Required unit tests drive real managed threads,
 queues, kernel handlers, recorded wakes and virtual timer rescue; the C readiness
 adapter guest lives in `testbeds/native-boundary/signals/` and runs through the

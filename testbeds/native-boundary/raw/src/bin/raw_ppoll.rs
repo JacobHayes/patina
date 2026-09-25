@@ -32,7 +32,7 @@ fn mono_ns() -> i64 {
     }
     ts.sec * 1_000_000_000 + ts.nsec
 }
-// Class pairing: readiness/ppoll host oracle and signals readiness wait tests.
+// Class pairing: readiness/poll host oracle and signals readiness wait tests.
 fn main() {
     const PPOLL: i64 = 271;
     const PIPE2: i64 = 293;

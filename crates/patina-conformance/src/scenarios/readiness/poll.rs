@@ -1,14 +1,23 @@
-//! readiness/poll — poll(2) over sockets (poll(2); fs/select.c
-//! `do_sys_poll`, net/ipv4/tcp.c `tcp_poll`, net/core/datagram.c
-//! `datagram_poll`):
+//! readiness/poll — poll(2) and ppoll(2) readiness bits by descriptor kind
+//! (poll(2); fs/select.c `do_sys_poll`, the one core under both,
+//! net/ipv4/tcp.c `tcp_poll`, net/core/datagram.c `datagram_poll`,
+//! fs/pipe.c `pipe_poll`, fs/eventfd.c `eventfd_poll`):
 //!
+//! * every zero-timeout readiness below is asked through both calls, which
+//!   answer alike;
 //! * a bound UDP socket is writable, and readable once a datagram arrives;
 //! * a listener is readable once a connection is pending;
 //! * a connected TCP socket reports `POLLRDHUP` (with `POLLIN`) once its peer
 //!   shut down writing, and `POLLHUP` once both directions are shut;
-//! * a closed descriptor reports `POLLNVAL`, a negative one is ignored; no
-//!   descriptors is a timed sleep of the clock (the faulting arrays are
-//!   readiness/poll_fault).
+//! * unconnected stream sockets are `POLLOUT|POLLHUP`, a datagram socket
+//!   `POLLOUT`, an idle listener nothing;
+//! * a pipe's read end is readable once written and `POLLHUP` once its
+//!   writer closed, its write end writable; an eventfd is writable, and
+//!   readable once written;
+//! * a closed descriptor reports `POLLNVAL`, a negative one is ignored;
+//! * a wait with nothing ready, and one with no descriptors, is a timed
+//!   sleep of the clock, in `poll`'s milliseconds and `ppoll`'s timespec
+//!   alike (the faulting arrays are readiness/poll_fault).
 //!
 //! The generic (arm64) table has no `poll` row: there the syscall vehicle
 //! issues `ppoll` (glibc's own spelling) and the libc vehicle calls glibc's
@@ -26,41 +35,54 @@ const WAIT_MS: i32 = 5_000;
 /// The bits a revents field is recorded with.
 const SHOWN: i16 = POLLIN | POLLOUT | POLLERR | POLLHUP | POLLNVAL | POLLRDHUP | POLLPRI;
 
+/// Readiness right now: `poll` and `ppoll` with a zero timeout both answer
+/// `expected` per slot, and count the slots with any bit.
+fn ready(p: &Probe, label: &str, fds: &[(i32, i16)], expected: &[i16]) {
+    let count = expected.iter().filter(|revents| **revents != 0).count() as i64;
+    let (n, by_poll) = p.poll(fds, 0, SHOWN);
+    let (m, by_ppoll) = p.ppoll(fds, Some(0));
+    p.check(
+        label,
+        n == count && by_poll == expected && m == count && by_ppoll == expected,
+    );
+}
+
 pub fn run(p: &Probe) {
+    // ---- sockets ----
     let u = p.socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     p.require("a UDP socket", u >= 0);
-    p.check("bind it", p.bind_to(u, &SockAddr::v4(0)) == 0);
+    p.require("bind it", p.bind_to(u, &SockAddr::v4(0)) == 0);
     let (_, addr_u, _) = p.name_of(u, false, 128);
     let addr_u = addr_u.expect("getsockname u");
-    let (n, revents) = p.poll(&[(u, POLLIN | POLLOUT)], 0, SHOWN);
-    p.check(
+    ready(
+        p,
         "a bound UDP socket is writable, not readable",
-        n == 1 && revents == vec![POLLOUT],
+        &[(u, POLLIN | POLLOUT)],
+        &[POLLOUT],
     );
     let v = p.socket(AF_INET, SOCK_DGRAM, 0);
     p.require("a sender", v >= 0);
-    p.check("bind the sender", p.bind_to(v, &SockAddr::v4(0)) == 0);
+    p.require("bind the sender", p.bind_to(v, &SockAddr::v4(0)) == 0);
     p.check("send a datagram", p.send_to(v, b"d", 0, Some(&addr_u)) == 1);
     let (n, revents) = p.poll(&[(u, POLLIN)], WAIT_MS, SHOWN);
     p.check("the datagram arrives", n == 1 && revents == vec![POLLIN]);
-    let (n, revents) = p.poll(&[(u, POLLIN | POLLOUT)], 0, SHOWN);
-    p.check(
+    ready(
+        p,
         "with a datagram queued it is readable too",
-        n == 1 && revents == vec![POLLIN | POLLOUT],
+        &[(u, POLLIN | POLLOUT)],
+        &[POLLIN | POLLOUT],
     );
     p.recv_from(u, 8, 0, false);
 
     let l = p.socket(AF_INET, SOCK_STREAM, 0);
     p.require("a listener", l >= 0);
-    p.check("bind the listener", p.bind_to(l, &SockAddr::v4(0)) == 0);
-    p.check("listen", p.listen(l, 4) == 0);
+    p.require("bind the listener", p.bind_to(l, &SockAddr::v4(0)) == 0);
+    p.require("listen", p.listen(l, 4) == 0);
     let (_, addr_l, _) = p.name_of(l, false, 128);
     let addr_l = addr_l.expect("getsockname l");
-    let (n, _) = p.poll(&[(l, POLLIN)], 0, SHOWN);
-    p.check("a listener with nothing pending is not readable", n == 0);
     let c = p.socket(AF_INET, SOCK_STREAM, 0);
     p.require("a client", c >= 0);
-    p.check("connect", p.connect_to(c, &addr_l) == 0);
+    p.require("connect", p.connect_to(c, &addr_l) == 0);
     let (n, revents) = p.poll(&[(l, POLLIN)], WAIT_MS, SHOWN);
     p.check(
         "a pending connection makes the listener readable",
@@ -68,10 +90,11 @@ pub fn run(p: &Probe) {
     );
     let (s, _) = p.accept_from(l, 0, false, false);
     p.require("accept4", s >= 0);
-    let (n, revents) = p.poll(&[(s, POLLIN | POLLRDHUP)], 0, SHOWN);
-    p.check(
+    ready(
+        p,
         "an idle connection reports nothing asked",
-        n == 0 && revents == vec![0],
+        &[(s, POLLIN | POLLRDHUP)],
+        &[0],
     );
     p.check("the peer shuts down writing", p.shutdown(c, SHUT_WR) == 0);
     let (n, revents) = p.poll(&[(s, POLLIN | POLLRDHUP)], WAIT_MS, SHOWN);
@@ -86,57 +109,104 @@ pub fn run(p: &Probe) {
         n == 1 && revents == vec![POLLIN | POLLRDHUP | POLLHUP],
     );
 
-    let x = p.socket(AF_INET, SOCK_DGRAM, 0);
-    p.require("a socket to close", x >= 0);
-    p.close(x);
-    let (n, revents) = p.poll(&[(x, POLLIN), (-1, POLLIN), (u, POLLOUT)], 0, SHOWN);
-    p.check(
-        "a closed descriptor reports POLLNVAL, a negative one is ignored",
-        n == 2 && revents == vec![POLLNVAL, 0, POLLOUT],
-    );
-    let (_, before) = p.clock_gettime(CLOCK_MONOTONIC);
-    let (n, _) = p.poll(&[], 2, SHOWN);
-    p.check("no descriptors is a timed sleep", n == 0);
-    let (_, after) = p.clock_gettime(CLOCK_MONOTONIC);
-    p.check(
-        "that advanced the clock by at least the timeout",
-        after - before >= 2_000_000,
-    );
-
     // A stream socket that never connected is writable and hung up
     // (`unix_poll`, `tcp_poll` on TCP_CLOSE); a listener reports nothing
-    // until a connection is pending; a datagram socket is writable.
+    // once its connection was accepted; a datagram socket is writable.
     let us = p.socket(AF_UNIX, SOCK_STREAM, 0);
     let uq = p.socket(AF_UNIX, SOCK_SEQPACKET, 0);
     let ud = p.socket(AF_UNIX, SOCK_DGRAM, 0);
     let ts = p.socket(AF_INET, SOCK_STREAM, 0);
+    let all = POLLIN | POLLOUT | POLLRDHUP | POLLPRI;
     p.require(
         "four unconnected sockets",
         us >= 0 && uq >= 0 && ud >= 0 && ts >= 0,
     );
-    let all = POLLIN | POLLOUT | POLLRDHUP | POLLPRI;
-    let (n, revents) = p.poll(&[(us, all), (uq, all), (ud, all), (ts, all)], 0, SHOWN);
-    p.check(
+    ready(
+        p,
         "unconnected streams are POLLOUT|POLLHUP, a datagram socket POLLOUT",
-        n == 4
-            && revents
-                == vec![
-                    POLLOUT | POLLHUP,
-                    POLLOUT | POLLHUP,
-                    POLLOUT,
-                    POLLOUT | POLLHUP,
-                ],
+        &[(us, all), (uq, all), (ud, all), (ts, all)],
+        &[
+            POLLOUT | POLLHUP,
+            POLLOUT | POLLHUP,
+            POLLOUT,
+            POLLOUT | POLLHUP,
+        ],
     );
-    let (n, revents) = p.poll(&[(l, all)], 0, SHOWN);
-    p.check(
+    ready(
+        p,
         "a listener with nothing pending reports nothing",
-        n == 0 && revents == vec![0],
+        &[(l, all)],
+        &[0],
     );
     for fd in [us, uq, ud, ts] {
         p.close(fd);
     }
 
-    for fd in [u, v, l, c, s] {
+    // ---- a pipe and an eventfd ----
+    let (r, [rd, wr]) = p.pipe2(O_CLOEXEC);
+    p.require("pipe2", r == 0);
+    ready(p, "an empty pipe is not readable", &[(rd, POLLIN)], &[0]);
+    p.write(wr, b"x");
+    ready(
+        p,
+        "a written pipe is readable, its write end writable",
+        &[(rd, POLLIN), (wr, POLLOUT)],
+        &[POLLIN, POLLOUT],
+    );
+    p.read(rd, 8);
+    let ef = p.eventfd2(0, EFD_NONBLOCK);
+    p.require("eventfd2", ef >= 0);
+    ready(
+        p,
+        "a fresh eventfd is writable only",
+        &[(ef, POLLIN | POLLOUT)],
+        &[POLLOUT],
+    );
+    p.write(ef, &1u64.to_ne_bytes());
+    ready(
+        p,
+        "a written eventfd is readable and writable",
+        &[(ef, POLLIN | POLLOUT)],
+        &[POLLIN | POLLOUT],
+    );
+
+    // ---- descriptors that are not there, and timed waits ----
+    let x = p.socket(AF_INET, SOCK_DGRAM, 0);
+    p.require("a socket to close", x >= 0);
+    p.close(x);
+    ready(
+        p,
+        "a closed descriptor reports POLLNVAL, a negative one is ignored",
+        &[(x, POLLIN), (-1, POLLIN), (u, POLLOUT)],
+        &[POLLNVAL, 0, POLLOUT],
+    );
+    let (_, before) = p.clock_gettime(CLOCK_MONOTONIC);
+    let (n, _) = p.poll(&[], 2, SHOWN);
+    p.check("poll with no descriptors is a timed sleep", n == 0);
+    let (_, after) = p.clock_gettime(CLOCK_MONOTONIC);
+    p.check(
+        "that advanced the clock by at least the timeout",
+        after - before >= 2_000_000,
+    );
+    let (n, _) = p.ppoll(&[], Some(1_000_000));
+    p.check("ppoll with no descriptors is a sleep", n == 0);
+    let (_, before) = p.clock_gettime(CLOCK_MONOTONIC);
+    let (n, _) = p.ppoll(&[(rd, POLLIN)], Some(2_000_000));
+    p.check("a timed ppoll with nothing ready returns 0", n == 0);
+    let (_, after) = p.clock_gettime(CLOCK_MONOTONIC);
+    p.check(
+        "the timed wait advanced the clock by at least the timeout",
+        after - before >= 2_000_000,
+    );
+    p.check("close the pipe's writer", p.close(wr) == 0);
+    ready(
+        p,
+        "a pipe with no writer reports POLLHUP",
+        &[(rd, POLLIN)],
+        &[POLLHUP],
+    );
+
+    for fd in [u, v, l, c, s, rd, ef] {
         p.close(fd);
     }
     crate::scenarios::net::check_allocated_port(p, &addr_u);
@@ -148,7 +218,6 @@ pub const SCENARIO: Scenario = Scenario {
     covers: &[
         #[cfg(target_arch = "x86_64")]
         Syscall::N_poll,
-        #[cfg(not(target_arch = "x86_64"))]
         Syscall::N_ppoll,
         Syscall::N_socket,
         Syscall::N_bind,
@@ -160,10 +229,15 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_recvfrom,
         Syscall::N_shutdown,
         Syscall::N_clock_gettime,
+        Syscall::N_pipe2,
+        Syscall::N_eventfd2,
+        Syscall::N_read,
+        Syscall::N_write,
         Syscall::N_close,
     ],
     symbols: &[
         "poll",
+        "ppoll",
         "socket",
         "bind",
         "listen",
@@ -174,6 +248,10 @@ pub const SCENARIO: Scenario = Scenario {
         "recvfrom",
         "shutdown",
         "clock_gettime",
+        "pipe2",
+        "eventfd",
+        "read",
+        "write",
         "close",
     ],
     ..DEFAULTS

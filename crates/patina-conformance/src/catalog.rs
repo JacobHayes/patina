@@ -503,7 +503,6 @@ pub const SCENARIOS: &[&Scenario] = &[
     &readiness::inotify::SCENARIO,
     &readiness::poll::SCENARIO,
     &readiness::poll_fault::SCENARIO,
-    &readiness::ppoll::SCENARIO,
     &readiness::select::SCENARIO,
     &sched::affinity::SCENARIO,
     &sched::attr::SCENARIO,

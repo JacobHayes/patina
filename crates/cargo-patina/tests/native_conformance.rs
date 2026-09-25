@@ -1783,11 +1783,6 @@ fn readiness_poll_fault() {
 }
 
 #[test]
-fn readiness_ppoll() {
-    conform("readiness/ppoll");
-}
-
-#[test]
 fn readiness_select() {
     conform("readiness/select");
 }
