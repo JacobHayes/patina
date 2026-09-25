@@ -48,8 +48,24 @@ fn host_pid() -> std::ffi::c_long {
     static PAGE: AtomicUsize = AtomicUsize::new(0);
     let mut page = PAGE.load(Ordering::Acquire);
     if page == 0 {
-        page = wipe_on_fork_page().unwrap_or(usize::MAX);
+        let mine = wipe_on_fork_page();
+        page = mine.unwrap_or(usize::MAX);
         if let Err(existing) = PAGE.compare_exchange(0, page, Ordering::AcqRel, Ordering::Acquire) {
+            // Another thread's page won the race: give this one back.
+            if let Some(mine) = mine {
+                // SAFETY: the page this call mapped, never published.
+                unsafe {
+                    crate::sud_host_syscall(
+                        patina_dst_syscalls::Syscall::N_munmap.number() as std::ffi::c_long,
+                        mine as std::ffi::c_long,
+                        4096,
+                        0,
+                        0,
+                        0,
+                        0,
+                    );
+                }
+            }
             page = existing;
         }
     }
@@ -203,14 +219,22 @@ fn copy_with(
     classify(raw_result(copied), len)
 }
 
-/// The refusal a copy vehicle the host will not run is reported as.
+/// The refusal a copy vehicle the host will not run is reported as, named
+/// by what its errno means.
 #[cfg(target_os = "linux")]
 fn unavailable(errno: c_int) -> String {
+    let why = match errno {
+        crate::EPERM | crate::ENOSYS => {
+            "a seccomp profile or sandbox refusing them, or a kernel without them; allow \
+             them (for Docker, a seccomp profile permitting \
+             process_vm_readv/process_vm_writev)"
+        }
+        crate::ENOMEM => "the host is out of memory for the copy's page array",
+        _ => "an answer patina does not expect from them; please report it",
+    };
     format!(
         "process_vm_readv/process_vm_writev on this process failed with errno {errno} \
-         (a seccomp profile or sandbox refusing them, or a kernel without them): patina \
-         copies guest memory through them and cannot run here; allow them (for Docker, \
-         a seccomp profile permitting process_vm_readv/process_vm_writev)"
+         ({why}): patina copies guest memory through them and cannot run here"
     )
 }
 
@@ -566,6 +590,8 @@ mod tests {
             Err(CopyFailure::Fault)
         );
         assert_eq!(classify(2, 4), Err(CopyFailure::Fault));
+        assert_ne!(unavailable(libc::EPERM), unavailable(libc::ENOMEM));
+        assert_ne!(unavailable(libc::ENOMEM), unavailable(libc::EINVAL));
         assert_eq!(classify(4, 4), Ok(()));
         assert_eq!(probe(), Ok(()));
     }

@@ -535,8 +535,10 @@ pub fn scenario(name: &str) -> Option<&'static Scenario> {
 }
 
 /// Scenarios that exist to prove a harness check can fail, never compared
-/// with patina: `planted/escape` opens a host file through `syscall(2)` for the
-/// leak filter to flag.
+/// with patina: `planted/escape` opens a host file through `syscall(2)` and
+/// copies from another process (pid 1) through `process_vm_readv`, the
+/// vehicle the shim may aim only at its own process, for the leak filters
+/// to flag.
 pub fn planted(name: &str) -> Option<(&'static str, Run)> {
     match name {
         "planted/escape" => Some(("planted/escape", planted_escape)),
@@ -548,6 +550,29 @@ fn planted_escape(p: &Probe) {
     let fd = p.openat(crate::probe::AT_FDCWD, "/etc/hostname", libc::O_RDONLY, 0);
     if fd >= 0 {
         p.close(fd);
+    }
+    // strace records the call whether the kernel answers EPERM or ESRCH.
+    let mut byte = 0u8;
+    let local = libc::iovec {
+        iov_base: (&raw mut byte).cast(),
+        iov_len: 1,
+    };
+    let remote = libc::iovec {
+        iov_base: std::ptr::without_provenance_mut(0x1000),
+        iov_len: 1,
+    };
+    // SAFETY: the local iovec is one byte of this frame; the kernel judges
+    // the remote one against pid 1 and writes at most that byte.
+    unsafe {
+        libc::syscall(
+            libc::SYS_process_vm_readv,
+            1 as libc::pid_t,
+            &local as *const libc::iovec,
+            1u64,
+            &remote as *const libc::iovec,
+            1u64,
+            0u64,
+        );
     }
 }
 

@@ -1001,6 +1001,28 @@ fn strace_leak_filter_flags_a_planted_escape() {
             .any(|line| line.starts_with("openat(") && line.contains("\"/etc/hostname\"")),
         "the planted escape was not flagged: {escaped:?}"
     );
+    // A copy aimed at another process: the self-copy allowance must not
+    // cover it, in either filter.
+    let foreign = |line: &str| line.starts_with("process_vm_readv(1,");
+    assert!(
+        escaped.iter().any(|line| foreign(line)),
+        "the planted foreign-pid copy was not flagged: {escaped:?}"
+    );
+    let awk = Command::new("awk")
+        .arg("-f")
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../testbeds/native-boundary/containment.awk"),
+        )
+        .arg(&log)
+        .output()
+        .unwrap();
+    assert!(awk.status.success(), "{}", text(&awk.stderr));
+    let flagged = text(&awk.stdout);
+    assert!(
+        flagged.lines().any(foreign),
+        "containment.awk did not flag the planted foreign-pid copy: {flagged}"
+    );
 }
 
 #[test]
