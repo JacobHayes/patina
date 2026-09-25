@@ -297,7 +297,7 @@ forwards into the same dispatcher instead of its two-number allowlist.
   `mincore`/`remap_file_pages` pass through; `membarrier` is modeled. Left as
   named traps: protection keys and shadow stacks (CPU state), `memfd_secret`
   (needs a page-cache fill the filesystem does not refuse), `process_madvise`
-  (needs the signals arc's self pidfd), the Linux AIO rows (no scenario yet),
+  (needs the signals arc's self pidfd), the Linux AIO rows (`asyncio/aio`),
   and the libc `shm_*`/`sem_*`/`mq_*` and SysV wrappers (still refused by the
   audit). Scenarios for the resource limits other than `RLIMIT_MEMLOCK` come
   with the time + identity family. Locking and populating need
@@ -496,7 +496,13 @@ forwards into the same dispatcher instead of its two-number allowlist.
   ENETUNREACH; that is a model answer, not a hole.
 - **io_uring.** A submission/completion ring model over the readiness reactor
   is its own arc (`docs/arcs/io-uring.md`, queued after this one); until then
-  `io_uring_setup` → ENOSYS, which tokio/mio/monoio probe for.
+  `io_uring_setup` → ENOSYS, which tokio/mio/monoio probe for, and the
+  Linux AIO rows → ENOSYS (a kernel built without AIO). Today both are
+  still named traps, a bug against that plan: a guest that probes at
+  startup dies instead of falling back. `asyncio/io_uring` and
+  `asyncio/aio` pin the traps as pending on this arc, and assert the
+  kernel's answers (a ring's parameters and opcode probe, a no-op round
+  trip; AIO on a file and a cancellable poll) that a ring model must meet.
 
 ## 8. Sequencing and landing
 

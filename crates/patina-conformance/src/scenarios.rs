@@ -1,5 +1,6 @@
 //! Every scenario, one module per family.
 pub mod abi;
+pub mod asyncio;
 pub mod cred;
 pub mod entropy;
 pub mod fd;

@@ -203,6 +203,8 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         Need::RestrictedBpf => restricted::bpf(),
         Need::RestrictedPerf => restricted::perf(),
         Need::RestrictedUserfaultfd => restricted::userfaultfd(),
+        Need::Aio => asyncio::aio(),
+        Need::IoUring => asyncio::io_uring(),
     }
 }
 
@@ -770,6 +772,60 @@ mod restricted {
 /// the scenario would, then releases it. Refusals classify through
 /// [`refusal`]; a row whose errno names the missing capability says so where
 /// it is used.
+/// The asynchronous I/O interfaces: whether the host offers them at all
+/// (built in, and neither disabled nor filtered for this caller).
+mod asyncio {
+    use super::{Cause, NotRun, refusal};
+    use crate::vehicle::errno;
+    use patina_dst_syscalls::Syscall;
+
+    fn sys(row: Syscall, args: [i64; 2]) -> i64 {
+        // SAFETY: every pointer passed below is owned by the caller for the
+        // duration of the call.
+        let result = unsafe { libc::syscall(row.number() as libc::c_long, args[0], args[1]) };
+        if result < 0 {
+            -i64::from(errno())
+        } else {
+            result
+        }
+    }
+
+    /// `io_setup(1)` and `io_destroy`. ENOSYS is a kernel without AIO,
+    /// EAGAIN a used-up `fs.aio-max-nr`, EPERM a seccomp filter.
+    pub(super) fn aio() -> Result<(), NotRun> {
+        let mut ctx = 0u64;
+        let result = sys(Syscall::N_io_setup, [1, &mut ctx as *mut u64 as i64]);
+        if result == -i64::from(libc::EAGAIN) {
+            return Err(NotRun {
+                cause: Cause::Exhausted,
+                detail: "io_setup(1) answered EAGAIN: fs.aio-max-nr is used up".into(),
+            });
+        }
+        if result < 0 {
+            return Err(refusal("io_setup(1)", (-result) as i32));
+        }
+        let destroyed = sys(Syscall::N_io_destroy, [ctx as i64, 0]);
+        if destroyed < 0 {
+            return Err(refusal("io_destroy", (-destroyed) as i32));
+        }
+        Ok(())
+    }
+
+    /// `io_uring_setup(1)` and a close. ENOSYS is a kernel without io_uring,
+    /// EPERM `kernel.io_uring_disabled` (or a seccomp filter).
+    pub(super) fn io_uring() -> Result<(), NotRun> {
+        // `struct io_uring_params`: 120 zeroed bytes.
+        let mut params = [0u64; 15];
+        let fd = sys(Syscall::N_io_uring_setup, [1, params.as_mut_ptr() as i64]);
+        if fd < 0 {
+            return Err(refusal("io_uring_setup(1)", (-fd) as i32));
+        }
+        // SAFETY: the ring descriptor just opened.
+        unsafe { libc::close(fd as libc::c_int) };
+        Ok(())
+    }
+}
+
 mod memipc {
     use super::{Cause, NotRun, refusal};
     use crate::vehicle::errno;

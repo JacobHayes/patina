@@ -1325,6 +1325,16 @@ fn abi_newer_than_virtual() {
 }
 
 #[test]
+fn asyncio_aio() {
+    conform("asyncio/aio");
+}
+
+#[test]
+fn asyncio_io_uring() {
+    conform("asyncio/io_uring");
+}
+
+#[test]
 fn cred_caps() {
     conform("cred/caps");
 }

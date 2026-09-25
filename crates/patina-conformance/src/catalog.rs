@@ -13,7 +13,8 @@
 use crate::compare::{Expected, Failure};
 use crate::probe::Probe;
 use crate::scenarios::{
-    abi, cred, entropy, fd, fs, ipc, mem, net, proc, readiness, sched, signal, sys, thread, time,
+    abi, asyncio, cred, entropy, fd, fs, ipc, mem, net, proc, readiness, sched, signal, sys,
+    thread, time,
 };
 use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
@@ -181,6 +182,14 @@ pub enum Need {
     /// kernel faults (`vm.unprivileged_userfaultfd` 0, its default):
     /// `userfaultfd` without `UFFD_USER_MODE_ONLY` is `EPERM`.
     RestrictedUserfaultfd,
+    /// Linux AIO answers: a one-event context can be set up and destroyed
+    /// (`CONFIG_AIO`, room under `fs.aio-max-nr`, no seccomp filter
+    /// refusing the rows, as container runtimes' default profiles do).
+    Aio,
+    /// io_uring answers: a one-entry ring can be set up and closed
+    /// (`CONFIG_IO_URING`, `kernel.io_uring_disabled` 0 or the caller in
+    /// `kernel.io_uring_group`, no seccomp filter refusing the rows).
+    IoUring,
 }
 
 impl Need {
@@ -199,7 +208,9 @@ impl Need {
             | Need::OneNumaNode
             | Need::SysfsSyscall
             | Need::HighResTimers
-            | Need::Landlock => true,
+            | Need::Landlock
+            | Need::Aio
+            | Need::IoUring => true,
             Need::UserXattrs
             | Need::Inotify
             | Need::FileHandles
@@ -229,8 +240,8 @@ impl Need {
 /// run deadline, so a hang gap's cost stays visible where it is declared.
 pub const MAX_HANG_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// The family arc (docs/arcs/syscall-conformance.md §6) that models a
-/// pending gap away.
+/// The family arc (docs/arcs/syscall-conformance.md §6, and the io_uring
+/// arc §7 queues after it) that models a pending gap away.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arc {
     Fs,
@@ -239,10 +250,11 @@ pub enum Arc {
     SignalsThreadsProcess,
     NetworkReadiness,
     Privileged,
+    IoUring,
 }
 
 impl Arc {
-    /// The arc's name as §6 spells it.
+    /// The arc's name as §6 (or, for io_uring, §7 and the registry) spells it.
     pub fn name(self) -> &'static str {
         match self {
             Arc::Fs => "fs",
@@ -251,6 +263,7 @@ impl Arc {
             Arc::SignalsThreadsProcess => "signals+threads+process",
             Arc::NetworkReadiness => "network+readiness",
             Arc::Privileged => "privileged",
+            Arc::IoUring => "io_uring",
         }
     }
 }
@@ -440,6 +453,8 @@ pub const EXCLUSIONS: &[Exclusion] = &[
 
 pub const SCENARIOS: &[&Scenario] = &[
     &abi::newer_than_virtual::SCENARIO,
+    &asyncio::aio::SCENARIO,
+    &asyncio::io_uring::SCENARIO,
     &cred::caps::SCENARIO,
     &cred::groups::SCENARIO,
     &cred::ids::SCENARIO,
