@@ -93,32 +93,15 @@ pub const SCENARIO: Scenario = Scenario {
     symbols: &["mount", "umount2"],
     resolves: &["mount", "umount2"],
     needs: &[Need::Unprivileged],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: Vehicle::KERNEL,
-            what: "mount is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)) where the unprivileged caller is answered EFAULT, ENOENT, EINVAL or EPERM",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Signal(SIGABRT),
-                diagnostic: TRAP,
-            },
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Privileged),
+        vehicles: &[Vehicle::Libc],
+        what: "the shim defines neither mount nor umount2 (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds neither (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
+        failure: Failure::Stops {
+            events: 0,
+            ending: Ending::Exit(101),
+            diagnostic: "fs/mount: cannot continue: glibc's mount resolves",
         },
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim defines neither mount nor umount2 (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds neither (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Exit(101),
-                diagnostic: "fs/mount: cannot continue: glibc's mount resolves",
-            },
-        },
-    ],
+    }],
     ..DEFAULTS
 };
-
-#[cfg(target_arch = "x86_64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall mount (nr 165, class privileged";
-#[cfg(target_arch = "aarch64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall mount (nr 40, class privileged";

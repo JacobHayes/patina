@@ -22,6 +22,10 @@ use crate::registry::Capability;
 #[cfg(test)]
 use crate::registry::Syscall;
 use linux_raw_sys::errno;
+use std::ffi::c_int;
+
+mod mount;
+pub(super) use mount::*;
 
 /// What a privileged row answers: the raw return value (`-errno` for a
 /// refusal), or the point past which the model does not go.
@@ -33,11 +37,38 @@ pub(super) enum Unmodeled {
     /// The credential holds the capability the kernel checks: what the
     /// kernel then does is not modeled.
     Granted(Capability),
+    /// A path the kernel takes for any caller that the model does not
+    /// have: what it is.
+    Path(String),
 }
 
 /// A refusal: `-errno`.
-const fn refuse(code: u32) -> Answer {
-    Ok(-(code as i64))
+fn refuse(code: impl Into<i64>) -> Answer {
+    Ok(-code.into())
+}
+
+/// The guest's path at `address`: `EFAULT` for NULL (`getname`,
+/// [`super::guest_path`]), then the shim's one decode of a C path.
+fn guest_path(address: u64) -> Result<String, c_int> {
+    let pointer = super::guest_path(address).map_err(|code| -code as c_int)?;
+    crate::path_from_c(pointer)
+}
+
+/// `user_path_at(AT_FDCWD, path, …)`: the entry a guest path names, with
+/// or without following a final symlink — the resolver's refusals, and
+/// `ENOENT` for a missing entry.
+fn lookup(address: u64, follow: bool) -> Result<crate::paths::Resolved, c_int> {
+    let path = guest_path(address)?;
+    let flags = if follow {
+        0
+    } else {
+        crate::paths::RESOLVE_NOFOLLOW
+    };
+    let resolved = crate::paths::resolve(crate::paths::AT_FDCWD, &path, flags)?;
+    if resolved.metadata.is_none() {
+        return Err(errno::ENOENT as c_int);
+    }
+    Ok(resolved)
 }
 
 /// The capability check (`capable`, `ns_capable`, `may_mount`): `refusal`
@@ -66,6 +97,9 @@ pub(super) fn answer(nr: i64, check: Check, args: [u64; 6]) -> i64 {
             capability.name(),
             row()
         )),
+        Err(Unmodeled::Path(what)) => {
+            crate::trap_fatal(&format!("{}: {what} is not modeled; failing closed", row()))
+        }
     }
 }
 
@@ -103,7 +137,7 @@ mod tests {
 
     /// Every case, one list per group of rows.
     fn cases() -> Vec<Case> {
-        [uts_cases()].into_iter().flatten().collect()
+        [uts_cases(), mount_cases()].into_iter().flatten().collect()
     }
 
     /// The rows that declare a capability no caller of the model reaches:
@@ -202,6 +236,49 @@ mod tests {
                 row: Syscall::N_setdomainname,
                 check: set_uts_name,
                 args: [0; 6],
+                refusal: errno::EPERM,
+            },
+        ]
+    }
+
+    /// The mount rows: past their own argument checks (and, for `mount` and
+    /// `umount2`, a target the lookup finds), each is `may_mount`.
+    fn mount_cases() -> Vec<Case> {
+        const CLONE: u64 = 1;
+        let first = |row, check| Case {
+            row,
+            check,
+            args: [u64::MAX; 6],
+            refusal: errno::EPERM,
+        };
+        vec![
+            first(Syscall::N_fsopen, may_mount),
+            first(Syscall::N_fspick, may_mount),
+            first(Syscall::N_fsmount, may_mount),
+            first(Syscall::N_move_mount, may_mount),
+            first(Syscall::N_pivot_root, may_mount),
+            Case {
+                row: Syscall::N_mount,
+                check: |credential, a| mount_finding(credential, a, |_| Ok(())),
+                args: [0, 1, 0, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_umount2,
+                check: |credential, a| umount2_finding(credential, a, |_, _| Ok(())),
+                args: [1, 0, 0, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_mount_setattr,
+                check: mount_setattr,
+                args: [0, 0, 0, 0, 32, 0],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_open_tree,
+                check: open_tree,
+                args: [0, 0, CLONE, 0, 0, 0],
                 refusal: errno::EPERM,
             },
         ]

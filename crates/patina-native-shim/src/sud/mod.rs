@@ -982,6 +982,36 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_setdomainname, |nr, a| {
         privileged::answer(nr, privileged::set_uts_name, a)
     }),
+    (Syscall::N_mount, |nr, a| {
+        privileged::answer(nr, privileged::mount, a)
+    }),
+    (Syscall::N_umount2, |nr, a| {
+        privileged::answer(nr, privileged::umount2, a)
+    }),
+    (Syscall::N_pivot_root, |nr, a| {
+        privileged::answer(nr, privileged::may_mount, a)
+    }),
+    (Syscall::N_open_tree, |nr, a| {
+        privileged::answer(nr, privileged::open_tree, a)
+    }),
+    (Syscall::N_move_mount, |nr, a| {
+        privileged::answer(nr, privileged::may_mount, a)
+    }),
+    (Syscall::N_fsopen, |nr, a| {
+        privileged::answer(nr, privileged::may_mount, a)
+    }),
+    (Syscall::N_fsconfig, |nr, a| {
+        privileged::answer(nr, privileged::fsconfig, a)
+    }),
+    (Syscall::N_fsmount, |nr, a| {
+        privileged::answer(nr, privileged::may_mount, a)
+    }),
+    (Syscall::N_fspick, |nr, a| {
+        privileged::answer(nr, privileged::may_mount, a)
+    }),
+    (Syscall::N_mount_setattr, |nr, a| {
+        privileged::answer(nr, privileged::mount_setattr, a)
+    }),
     (Syscall::N_uname, |_, a| unsafe {
         crate::identity::uname(a[0] as *mut _, crate::thread::sched::persona())
     }),

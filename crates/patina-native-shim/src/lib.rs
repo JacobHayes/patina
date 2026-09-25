@@ -500,14 +500,14 @@ fn fd_table() -> &'static SpinMutex<GuestFdTable> {
 /// What a guest number names right now, or `EBADF` — the kernel's
 /// `fdget_raw`, which an `O_PATH` descriptor passes (`fstat`, `fstatfs`,
 /// `fcntl`, the base of a `*at` path).
-fn resolve_fd(raw_fd: c_int) -> Result<Resolved, c_int> {
+pub(crate) fn resolve_fd(raw_fd: c_int) -> Result<Resolved, c_int> {
     fd_table().lock().resolve(raw_fd).ok_or(EBADF)
 }
 
 /// What a guest number names for an operation on an OPENED file — the kernel's
 /// `fdget`, which refuses an `O_PATH` descriptor with `EBADF` exactly as it
 /// refuses an empty slot (`read`, `ioctl`, `fsync`, the `f*xattr` rows, ...).
-fn fdget(raw_fd: c_int) -> Result<Resolved, c_int> {
+pub(crate) fn fdget(raw_fd: c_int) -> Result<Resolved, c_int> {
     match resolve_fd(raw_fd)? {
         resolved if resolved.kind == FdKind::OPath => Err(EBADF),
         resolved => Ok(resolved),

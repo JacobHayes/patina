@@ -112,27 +112,15 @@ pub const SCENARIO: Scenario = Scenario {
     symbols: &["open_tree", "fcntl", "read", "fstat", "openat", "close"],
     resolves: &["open_tree"],
     needs: &[Need::Unprivileged],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: Vehicle::KERNEL,
-            what: "open_tree is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)) where the kernel opens an O_PATH descriptor without a clone and answers a clone EPERM",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Signal(SIGABRT),
-                diagnostic: "patina: SUD trapped unsupported syscall open_tree (nr 428, class privileged",
-            },
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Privileged),
+        vehicles: &[Vehicle::Libc],
+        what: "the shim does not define glibc's open_tree (registry `Absent`): a guest importing it is refused by the pre-run audit, and `dlsym` does not find it (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
+        failure: Failure::Stops {
+            events: 0,
+            ending: Ending::Exit(101),
+            diagnostic: "fs/open_tree: cannot continue: glibc's open_tree resolves",
         },
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim does not define glibc's open_tree (registry `Absent`): a guest importing it is refused by the pre-run audit, and `dlsym` does not find it (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Exit(101),
-                diagnostic: "fs/open_tree: cannot continue: glibc's open_tree resolves",
-            },
-        },
-    ],
+    }],
     ..DEFAULTS
 };

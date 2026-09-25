@@ -1150,10 +1150,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_pivot_root => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_ADMIN` (`may_mount`) before either path is read (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     #[cfg(target_arch = "x86_64")]
     Syscall::N__sysctl => r(
         id,
@@ -1222,17 +1223,19 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_mount => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: the type, source and options are copied (`EFAULT`), the target looked up (`ENOENT`, …), `MS_NOUSER` refused (`EINVAL`), then `CAP_SYS_ADMIN` (`may_mount`: `EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_umount2 => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: an unknown flag (`EINVAL`), the lookup (`ENOENT`, …), then `CAP_SYS_ADMIN` (`may_mount`: `EPERM` without it, before whether the path is a mount; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_swapon => r(
         id,
         Family::Privileged,
@@ -2498,45 +2501,50 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_open_tree => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: an unknown flag or `AT_RECURSIVE` without a clone (`EINVAL`), then a clone needs `CAP_SYS_ADMIN` before the lookup (`EPERM`; granted, a named fatal); without a clone, the `O_PATH` open of the path `openat` makes (a descriptor that names no filesystem entry, under `AT_EMPTY_PATH`, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_move_mount => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_ADMIN` (`may_mount`) before the flags and paths (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_fsopen => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_ADMIN` in the mount namespace's owner before the flags and name (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_fsconfig => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "No capability check: a negative descriptor, the command's argument shape (`EINVAL`, unknown `EOPNOTSUPP`), a descriptor not open (`EBADF`), then no filesystem context (`EINVAL`) — every descriptor the model holds, since only `fsopen`/`fspick` make one.",
         None,
     ),
     Syscall::N_fsmount => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_ADMIN` (`may_mount`) before the flags and descriptor (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_fspick => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_ADMIN` in the mount namespace's owner before the flags and path (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_pidfd_open => r(
         id,
         Family::Process,
@@ -2597,10 +2605,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_mount_setattr => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: an unknown flag (`EINVAL`), a size past a page (`E2BIG`) or short of `MOUNT_ATTR_SIZE_VER0` (`EINVAL`), then `CAP_SYS_ADMIN` (`may_mount`) before the attributes are read (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_quotactl_fd => r(
         id,
         Family::Privileged,

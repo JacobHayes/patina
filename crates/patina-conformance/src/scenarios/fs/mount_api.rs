@@ -173,27 +173,15 @@ pub const SCENARIO: Scenario = Scenario {
         "fsconfig",
     ],
     needs: &[Need::Unprivileged],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: Vehicle::KERNEL,
-            what: "fsopen is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)), as are fspick, fsmount, move_mount, mount_setattr and fsconfig, where the unprivileged caller is answered EPERM (after mount_setattr's argument checks) and fsconfig from its argument and descriptor checks",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Signal(SIGABRT),
-                diagnostic: "patina: SUD trapped unsupported syscall fsopen (nr 430, class privileged",
-            },
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Privileged),
+        vehicles: &[Vehicle::Libc],
+        what: "the shim defines none of glibc's mount-API wrappers (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds none (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
+        failure: Failure::Stops {
+            events: 0,
+            ending: Ending::Exit(101),
+            diagnostic: "fs/mount_api: cannot continue: glibc's fsopen resolves",
         },
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim defines none of glibc's mount-API wrappers (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds none (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Exit(101),
-                diagnostic: "fs/mount_api: cannot continue: glibc's fsopen resolves",
-            },
-        },
-    ],
+    }],
     ..DEFAULTS
 };
