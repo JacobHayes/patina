@@ -886,6 +886,7 @@ pub fn errno_name(code: i32) -> String {
         libc::EPIPE => "EPIPE",
         libc::EDOM => "EDOM",
         libc::ERANGE => "ERANGE",
+        libc::EDEADLK => "EDEADLK",
         libc::ENAMETOOLONG => "ENAMETOOLONG",
         libc::ENOSYS => "ENOSYS",
         libc::ENOTEMPTY => "ENOTEMPTY",

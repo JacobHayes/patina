@@ -1970,8 +1970,18 @@ fn thread_main_exit() {
 }
 
 #[test]
+fn thread_mutex() {
+    conform("thread/mutex");
+}
+
+#[test]
 fn thread_pthread_kill() {
     conform("thread/pthread_kill");
+}
+
+#[test]
+fn thread_rwlock() {
+    conform("thread/rwlock");
 }
 
 #[test]
