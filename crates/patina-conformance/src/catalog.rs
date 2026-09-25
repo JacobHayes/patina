@@ -414,6 +414,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &cred::ids::SCENARIO,
     &entropy::getrandom::SCENARIO,
     &fd::pipes::SCENARIO,
+    &fd::stdio::SCENARIO,
     &fd::table::SCENARIO,
     &fs::cache::SCENARIO,
     &fs::chmod::SCENARIO,

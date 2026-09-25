@@ -1331,6 +1331,11 @@ fn fd_pipes() {
 }
 
 #[test]
+fn fd_stdio() {
+    conform("fd/stdio");
+}
+
+#[test]
 fn fd_table() {
     conform("fd/table");
 }
