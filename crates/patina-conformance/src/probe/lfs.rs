@@ -5,11 +5,10 @@
 //! it answers exactly what the plain row does. libc only; each event is named
 //! for the symbol it went through.
 
-use super::{Probe, StatView, Statfs, cstr, printable};
+use super::{Probe, StatView, Statfs, cstr, filled, lens_of, read_vector, write_vector};
 use crate::observe::{Id, Norm};
 use crate::vehicle::fold_errno;
 use libc::c_int;
-use serde_json::Value;
 
 // The 64-bit layouts are the plain ones on every 64-bit Linux target.
 const _: () = assert!(size_of::<libc::stat>() == size_of::<libc::stat64>());
@@ -145,35 +144,20 @@ impl Probe {
 
     /// `preadv64(fd, one buffer per length, offset)`; the segments read.
     pub fn preadv64(&self, fd: i32, lens: &[usize], offset: i64) -> (i64, Vec<Vec<u8>>) {
-        let mut buffers: Vec<Vec<u8>> = lens.iter().map(|&len| vec![0u8; len]).collect();
-        let iov: Vec<libc::iovec> = buffers
-            .iter_mut()
-            .map(|buf| libc::iovec {
-                iov_base: buf.as_mut_ptr().cast(),
-                iov_len: buf.len(),
-            })
-            .collect();
+        let (mut buffers, iov) = read_vector(lens);
         // SAFETY: every iovec names a live buffer of its length.
         let result =
             fold_errno(
                 unsafe { libc::preadv64(fd, iov.as_ptr(), iov.len() as c_int, offset) } as i64,
             );
-        let mut remaining = result.max(0) as usize;
-        for buf in &mut buffers {
-            let filled = remaining.min(buf.len());
-            buf.truncate(filled);
-            remaining -= filled;
-        }
+        let segments = filled(&mut buffers, result);
         let builder = self.rec.event("preadv64", result);
         let builder = self
             .fd_arg(builder, "fd", fd)
             .arg("lens", lens.to_vec())
             .arg("offset", offset);
         let builder = if result >= 0 {
-            builder.field(
-                "segments",
-                Value::Array(buffers.iter().map(|b| Value::from(printable(b))).collect()),
-            )
+            builder.field("segments", segments)
         } else {
             builder
         };
@@ -183,13 +167,7 @@ impl Probe {
 
     /// `pwritev64(fd, segments, offset)`.
     pub fn pwritev64(&self, fd: i32, segments: &[&[u8]], offset: i64) -> i64 {
-        let iov: Vec<libc::iovec> = segments
-            .iter()
-            .map(|segment| libc::iovec {
-                iov_base: segment.as_ptr() as *mut libc::c_void,
-                iov_len: segment.len(),
-            })
-            .collect();
+        let iov = write_vector(segments);
         // SAFETY: every iovec names a live buffer of its length, only read.
         let result =
             fold_errno(
@@ -197,13 +175,7 @@ impl Probe {
             );
         let builder = self.rec.event("pwritev64", result);
         self.fd_arg(builder, "fd", fd)
-            .arg(
-                "lens",
-                segments
-                    .iter()
-                    .map(|segment| segment.len())
-                    .collect::<Vec<_>>(),
-            )
+            .arg("lens", lens_of(segments))
             .arg("offset", offset)
             .emit();
         result

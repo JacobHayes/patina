@@ -378,6 +378,47 @@ fn printable(bytes: &[u8]) -> String {
     }
 }
 
+/// A vectored read's buffers: one of each length, and one iovec naming each.
+fn read_vector(lens: &[usize]) -> (Vec<Vec<u8>>, Vec<libc::iovec>) {
+    let mut buffers: Vec<Vec<u8>> = lens.iter().map(|&len| vec![0u8; len]).collect();
+    let iov = buffers
+        .iter_mut()
+        .map(|buf| libc::iovec {
+            iov_base: buf.as_mut_ptr().cast(),
+            iov_len: buf.len(),
+        })
+        .collect();
+    (buffers, iov)
+}
+
+/// A vectored write's iovecs, one naming each segment (only read through).
+fn write_vector(segments: &[&[u8]]) -> Vec<libc::iovec> {
+    segments
+        .iter()
+        .map(|segment| libc::iovec {
+            iov_base: segment.as_ptr() as *mut libc::c_void,
+            iov_len: segment.len(),
+        })
+        .collect()
+}
+
+/// Cut `buffers` to what a vectored read answering `result` filled, in
+/// order, and render them as the event's `segments` field.
+fn filled(buffers: &mut [Vec<u8>], result: i64) -> Value {
+    let mut remaining = result.max(0) as usize;
+    for buf in buffers.iter_mut() {
+        let filled = remaining.min(buf.len());
+        buf.truncate(filled);
+        remaining -= filled;
+    }
+    Value::Array(buffers.iter().map(|b| Value::from(printable(b))).collect())
+}
+
+/// The lengths of a vectored write's segments.
+fn lens_of(segments: &[&[u8]]) -> Vec<usize> {
+    segments.iter().map(|segment| segment.len()).collect()
+}
+
 fn sockaddr_in(addr: SocketAddrV4) -> libc::sockaddr_in {
     let mut raw: libc::sockaddr_in = unsafe { std::mem::zeroed() };
     raw.sin_family = libc::AF_INET as libc::sa_family_t;
@@ -3491,32 +3532,17 @@ impl Probe {
         offset: Option<i64>,
         flags: Option<i32>,
     ) -> SegmentsRead {
-        let mut buffers: Vec<Vec<u8>> = lens.iter().map(|&len| vec![0u8; len]).collect();
-        let iov: Vec<libc::iovec> = buffers
-            .iter_mut()
-            .map(|buf| libc::iovec {
-                iov_base: buf.as_mut_ptr().cast(),
-                iov_len: buf.len(),
-            })
-            .collect();
+        let (mut buffers, iov) = read_vector(lens);
         let result = self.call(
             row,
             Self::vectored_args(fd, iov.as_ptr() as i64, iov.len() as i64, offset, flags),
         );
-        let mut remaining = result.max(0) as usize;
-        for buf in &mut buffers {
-            let filled = remaining.min(buf.len());
-            buf.truncate(filled);
-            remaining -= filled;
-        }
+        let segments = filled(&mut buffers, result);
         let builder = self
             .vectored_event(row, result, fd, offset, flags)
             .arg("lens", lens.to_vec());
         let builder = if result >= 0 {
-            builder.field(
-                "segments",
-                Value::Array(buffers.iter().map(|b| Value::from(printable(b))).collect()),
-            )
+            builder.field("segments", segments)
         } else {
             builder
         };
@@ -3533,18 +3559,12 @@ impl Probe {
         offset: Option<i64>,
         flags: Option<i32>,
     ) -> i64 {
-        let iov: Vec<libc::iovec> = segments
-            .iter()
-            .map(|segment| libc::iovec {
-                iov_base: segment.as_ptr() as *mut libc::c_void,
-                iov_len: segment.len(),
-            })
-            .collect();
+        let iov = write_vector(segments);
         let result = self.call(
             row,
             Self::vectored_args(fd, iov.as_ptr() as i64, iov.len() as i64, offset, flags),
         );
-        let lens: Vec<usize> = segments.iter().map(|segment| segment.len()).collect();
+        let lens = lens_of(segments);
         self.vectored_event(row, result, fd, offset, flags)
             .arg("lens", lens)
             .emit();
@@ -4191,13 +4211,7 @@ impl Probe {
 
     /// `vmsplice` of `segments` into a pipe's write end.
     pub fn vmsplice(&self, fd: i32, segments: &[&[u8]], flags: u32) -> i64 {
-        let iov: Vec<libc::iovec> = segments
-            .iter()
-            .map(|segment| libc::iovec {
-                iov_base: segment.as_ptr() as *mut libc::c_void,
-                iov_len: segment.len(),
-            })
-            .collect();
+        let iov = write_vector(segments);
         let result = self.call(
             Syscall::N_vmsplice,
             [
@@ -4209,7 +4223,7 @@ impl Probe {
                 0,
             ],
         );
-        let lens: Vec<usize> = segments.iter().map(|segment| segment.len()).collect();
+        let lens = lens_of(segments);
         self.fd_arg(self.event(Syscall::N_vmsplice, result), "fd", fd)
             .arg("lens", lens)
             .arg("flags", flags)
@@ -4220,14 +4234,7 @@ impl Probe {
     /// `vmsplice` from a pipe's read end into segments of `lens` bytes (the
     /// copy-out direction).
     pub fn vmsplice_read(&self, fd: i32, lens: &[usize], flags: u32) -> SegmentsRead {
-        let mut buffers: Vec<Vec<u8>> = lens.iter().map(|&len| vec![0u8; len]).collect();
-        let iov: Vec<libc::iovec> = buffers
-            .iter_mut()
-            .map(|buf| libc::iovec {
-                iov_base: buf.as_mut_ptr().cast(),
-                iov_len: buf.len(),
-            })
-            .collect();
+        let (mut buffers, iov) = read_vector(lens);
         let result = self.call(
             Syscall::N_vmsplice,
             [
@@ -4239,21 +4246,13 @@ impl Probe {
                 0,
             ],
         );
-        let mut remaining = result.max(0) as usize;
-        for buf in &mut buffers {
-            let filled = remaining.min(buf.len());
-            buf.truncate(filled);
-            remaining -= filled;
-        }
+        let segments = filled(&mut buffers, result);
         let builder = self
             .fd_arg(self.event(Syscall::N_vmsplice, result), "fd", fd)
             .arg("lens", lens.to_vec())
             .arg("flags", flags);
         let builder = if result >= 0 {
-            builder.field(
-                "segments",
-                Value::Array(buffers.iter().map(|b| Value::from(printable(b))).collect()),
-            )
+            builder.field("segments", segments)
         } else {
             builder
         };
