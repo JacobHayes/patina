@@ -69,11 +69,19 @@ jobs:
         with:
           tool: cargo-nextest
       - run: sudo apt-get update && sudo apt-get install -y strace && uname -r
-      # The oracle host's network-scenario prerequisites, on record for when a
-      # need goes unmet (IPv6 on lo, fanotify groups, non-local binds).
+      # The oracle host's scenario prerequisites, on record for when a need
+      # goes unmet: network (IPv6 on lo, fanotify groups, non-local binds) and
+      # privileged (perf, BPF, userfaultfd, Yama, user namespaces, Landlock).
+      # Each key is read on its own, so a kernel without one still logs the rest.
       - run: |
-          sysctl net.ipv6.conf.lo.disable_ipv6 net.ipv4.ip_nonlocal_bind net.ipv6.ip_nonlocal_bind || true
+          for key in net.ipv6.conf.lo.disable_ipv6 net.ipv4.ip_nonlocal_bind net.ipv6.ip_nonlocal_bind \
+              kernel.perf_event_paranoid kernel.unprivileged_bpf_disabled vm.unprivileged_userfaultfd \
+              kernel.yama.ptrace_scope kernel.apparmor_restrict_unprivileged_userns; do
+            sysctl "$key" || echo "$key: absent"
+          done
           cat /proc/sys/fs/fanotify/max_user_groups || true
+          echo "lsm: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unreadable)"
+          python3 -c 'import ctypes; r = ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1); print("landlock ABI:", r if r > 0 else "unavailable (errno %d)" % ctypes.get_errno())' || true
       # The complete workspace suite, split across the two partitions by test
       # name (nextest runs every test binary; doctests run separately below).
       # Stable executes it on each Linux platform, the syscall conformance
