@@ -1739,3 +1739,8 @@ fn time_posix_timer() {
 fn time_timerfd() {
     conform("time/timerfd");
 }
+
+#[test]
+fn time_timerfd_fault() {
+    conform("time/timerfd_fault");
+}

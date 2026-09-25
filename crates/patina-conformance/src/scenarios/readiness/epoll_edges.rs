@@ -16,6 +16,8 @@
 //!   frees room in an AF_UNIX datagram queue for a sender connected to it
 //!   that it is not connected back to (`unix_dgram_recvmsg` wakes its
 //!   `peer_wait`, where `unix_dgram_peer_wake_me` left the sender);
+//! * a periodic timer descriptor left unread is one edge, however many
+//!   periods pass, until a read forwards it (and counts them all);
 //! * `EPOLLEXCLUSIVE` is accepted on `EPOLL_CTL_ADD` only: with
 //!   `EPOLLONESHOT` it is `EINVAL`, on `EPOLL_CTL_MOD` `EINVAL`, and an
 //!   exclusive item cannot be modified at all (`EINVAL`);
@@ -31,13 +33,15 @@
 //! returns (scenarios/net.rs, "Loopback delivery").
 
 use crate::catalog::{DEFAULTS, Scenario};
-use crate::probe::{Probe, SIGSET_BYTES, SockAddr, neg};
+use crate::probe::{Arm, Count, Probe, SIGSET_BYTES, SockAddr, neg};
 use crate::signals::one_set;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
 /// How long a wait for an event already caused may take.
 const WAIT_MS: i32 = 5_000;
+/// The periodic timer descriptor's period.
+const PERIOD_NS: i64 = 10_000_000;
 
 pub fn run(p: &Probe) {
     let usr1 = one_set(SIGUSR1);
@@ -270,6 +274,49 @@ pub fn run(p: &Probe) {
         p.close(fd);
     }
 
+    // ---- a periodic timer descriptor left unread: its first expiry is the
+    // one edge until a read (`timerfd_tmrproc` does not restart the timer;
+    // the read forwards it and counts every period since) ----
+    let tp = p.epoll_create1(EPOLL_CLOEXEC);
+    p.require("a third epoll instance", tp >= 0);
+    let tfd = p.timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+    p.require("a timerfd", tfd >= 0);
+    p.check(
+        "watch it edge-triggered",
+        p.epoll_ctl(tp, EPOLL_CTL_ADD, tfd, (EPOLLIN | EPOLLET) as u32, 9) == 0,
+    );
+    let period = (0, PERIOD_NS);
+    let (_, armed_at) = p.rec.quiet(|| p.clock_gettime(CLOCK_MONOTONIC));
+    p.check(
+        "arm it every 10 ms",
+        p.timerfd_settime(tfd, 0, Arm::Spec(period), period).0 == 0,
+    );
+    let (n, events) = p.epoll_pwait(tp, 8, WAIT_MS, None, SIGSET_BYTES as usize);
+    p.check(
+        "its first expiry is an edge",
+        n == 1 && events == vec![(9, EPOLLIN as u32)],
+    );
+    p.check(
+        "the periods that pass unread are no further edge",
+        p.epoll_pwait(tp, 8, 50, None, SIGSET_BYTES as usize).0 == 0,
+    );
+    let (_, before_read) = p.rec.quiet(|| p.clock_gettime(CLOCK_MONOTONIC));
+    let bound = u64::try_from((before_read - armed_at) / i128::from(PERIOD_NS))
+        .unwrap_or(0)
+        .saturating_sub(1);
+    let (r, count) = p.timerfd_read(tfd, 8, Count::AtLeast(bound));
+    p.check(
+        "a read counts every period since the first",
+        r == 8 && bound >= 4 && count >= bound,
+    );
+    let (n, events) = p.epoll_pwait(tp, 8, WAIT_MS, None, SIGSET_BYTES as usize);
+    p.check(
+        "the read rearms it: the next expiry is an edge",
+        n == 1 && events == vec![(9, EPOLLIN as u32)],
+    );
+    p.close(tfd);
+    p.close(tp);
+
     // ---- EPOLLEXCLUSIVE (last on purpose: a runtime that refuses the flag
     // fails closed here, after everything above) ----
     let ex = p.eventfd2(0, EFD_NONBLOCK);
@@ -398,6 +445,8 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_epoll_create1,
         Syscall::N_epoll_ctl,
         Syscall::N_eventfd2,
+        Syscall::N_timerfd_create,
+        Syscall::N_timerfd_settime,
         Syscall::N_socket,
         Syscall::N_bind,
         Syscall::N_listen,
@@ -419,6 +468,7 @@ pub const SCENARIO: Scenario = Scenario {
         "epoll_create1",
         "epoll_ctl",
         "eventfd",
+        "syscall",
         "socket",
         "bind",
         "listen",

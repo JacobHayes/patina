@@ -5,3 +5,4 @@ pub mod cputime;
 pub mod itimer;
 pub mod posix_timer;
 pub mod timerfd;
+pub mod timerfd_fault;

@@ -523,6 +523,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &time::itimer::SCENARIO,
     &time::posix_timer::SCENARIO,
     &time::timerfd::SCENARIO,
+    &time::timerfd_fault::SCENARIO,
 ];
 
 /// The scenario named `name`.
