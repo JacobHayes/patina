@@ -213,7 +213,15 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_kill,
         Syscall::N_tgkill,
     ],
-    symbols: &["getpid", "kill", "sigaction", "syscall"],
+    symbols: &[
+        "getpid",
+        "gettid",
+        "tgkill",
+        "kill",
+        "sigaction",
+        "sigaltstack",
+        "syscall",
+    ],
     trace: Some(TraceFacts {
         generations: &[Generation::process(SIGUSR1), Generation::thread(SIGUSR1)],
         max_wakes_per_generation: None,

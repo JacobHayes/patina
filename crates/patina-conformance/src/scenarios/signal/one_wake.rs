@@ -121,6 +121,7 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &[
         "getpid",
+        "gettid",
         "pipe2",
         "read",
         "write",

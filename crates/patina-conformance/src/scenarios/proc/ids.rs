@@ -83,7 +83,9 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_setpgid,
         Syscall::N_setsid,
     ],
-    symbols: &["getpid", "syscall", "getppid", "kill", "setpgid", "setsid"],
+    symbols: &[
+        "getpid", "syscall", "getppid", "gettid", "tgkill", "kill", "setpgid", "setsid",
+    ],
     gaps: &[Gap {
         status: Status::ByDesign,
         vehicles: Vehicle::ALL,

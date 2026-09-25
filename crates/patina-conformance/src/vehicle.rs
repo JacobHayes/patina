@@ -665,11 +665,20 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_migrate_pages
             | Syscall::N_move_pages
             | Syscall::N_set_mempolicy_home_node => syscall_door(row, a),
+            // glibc 2.30's thin wrappers of the thread-identity rows, and its
+            // `signalfd`, which issues signalfd4 with the kernel's 8-byte
+            // sigset (the size every probe call passes).
+            Syscall::N_gettid => gettid() as i64,
+            Syscall::N_tgkill => tgkill(a[0] as pid_t, a[1] as pid_t, a[2] as c_int) as i64,
+            Syscall::N_signalfd4 if a[2] == 8 => {
+                signalfd(a[0] as c_int, a[1] as *const sigset_t, a[3] as c_int) as i64
+            }
             // No glibc wrapper: the futex word, the signal rows (glibc's
-            // wrappers take its own struct layouts), tkill/tgkill, the thread
-            // and process-lifecycle rows (`_exit(2)` is not interposed, so its
-            // import would be refused), faccessat2 (glibc's faccessat emulates
-            // the flags over it) and removed numbers.
+            // wrappers take its own struct layouts), tkill (glibc exports
+            // none), the thread and process-lifecycle rows (`_exit(2)` is not
+            // interposed, so its import would be refused), faccessat2
+            // (glibc's faccessat emulates the flags over it) and removed
+            // numbers.
             Syscall::N_futex
             | Syscall::N_rt_sigaction
             | Syscall::N_rt_sigprocmask
@@ -680,8 +689,6 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_rt_tgsigqueueinfo
             | Syscall::N_signalfd4
             | Syscall::N_tkill
-            | Syscall::N_tgkill
-            | Syscall::N_gettid
             | Syscall::N_getpgid
             | Syscall::N_getsid
             | Syscall::N_set_tid_address

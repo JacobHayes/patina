@@ -165,6 +165,7 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &[
         "getpid",
+        "signalfd",
         "pause",
         "read",
         "close",

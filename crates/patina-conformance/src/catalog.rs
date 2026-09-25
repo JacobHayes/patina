@@ -396,10 +396,16 @@ pub enum Entry {
 }
 
 /// Registry entries excluded from conformance coverage, with their reasons.
-pub const EXCLUSIONS: &[Exclusion] = &[Exclusion {
-    entry: Entry::Syscall(Syscall::N_open_by_handle_at),
-    reason: "privileged: opening by handle bypasses path permission checks, so it needs CAP_DAC_READ_SEARCH in the mount's user namespace (fs/fhandle.c may_decode_fh); an unprivileged native oracle observes only the EPERM refusal. Its unprivileged half, name_to_handle_at, is covered by fs/handles",
-}];
+pub const EXCLUSIONS: &[Exclusion] = &[
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_open_by_handle_at),
+        reason: "privileged: opening by handle bypasses path permission checks, so it needs CAP_DAC_READ_SEARCH in the mount's user namespace (fs/fhandle.c may_decode_fh); an unprivileged native oracle observes only the EPERM refusal. Its unprivileged half, name_to_handle_at, is covered by fs/handles",
+    },
+    Exclusion {
+        entry: Entry::Symbol("tkill"),
+        reason: "glibc exports no tkill (only tgkill, since 2.30), so a native oracle can neither import nor dlsym it; the shim's definition serves guests that declare it themselves. The tkill row is covered through syscall(2) and the raw instruction by signal/basic",
+    },
+];
 
 pub const SCENARIOS: &[&Scenario] = &[
     &abi::newer_than_virtual::SCENARIO,
