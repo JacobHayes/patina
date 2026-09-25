@@ -882,11 +882,11 @@ pub fn errno_name(code: i32) -> String {
     name.to_string()
 }
 
-/// glibc's wrappers for privileged rows. The shim defines none of them
-/// (registry `Absent`), so the probe binary cannot import them (the pre-run
-/// audit would refuse the whole binary): the libc vehicle reaches each
-/// through `dlsym` at its row's first call (`Probe::call`), and under patina
-/// that lookup answers NULL.
+/// glibc's wrappers for privileged, copy and extended-attribute rows. The
+/// shim defines none of them (registry `Absent`), so the probe binary cannot
+/// import them (the pre-run audit would refuse the whole binary): the libc
+/// vehicle reaches each through `dlsym` at its row's first call
+/// (`Probe::call`), and under patina that lookup answers NULL.
 const WRAPPERS: &[(Syscall, &str)] = &[
     (Syscall::N_mount, "mount"),
     (Syscall::N_umount2, "umount2"),
@@ -913,6 +913,13 @@ const WRAPPERS: &[(Syscall, &str)] = &[
     (Syscall::N_iopl, "iopl"),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_ioperm, "ioperm"),
+    (Syscall::N_copy_file_range, "copy_file_range"),
+    (Syscall::N_sendfile, "sendfile"),
+    (Syscall::N_setxattr, "setxattr"),
+    (Syscall::N_getxattr, "getxattr"),
+    (Syscall::N_fgetxattr, "fgetxattr"),
+    (Syscall::N_listxattr, "listxattr"),
+    (Syscall::N_removexattr, "removexattr"),
 ];
 
 /// The glibc wrapper the libc vehicle reaches `row` through, if it has one.
@@ -942,7 +949,8 @@ pub unsafe fn wrapper_door(row: Syscall, address: *mut std::ffi::c_void, a: Args
                 )
             };
             // SAFETY: the caller's contract: it owns every pointer passed.
-            i64::from(unsafe { wrapper($($arg as $param),*) })
+            let result = unsafe { wrapper($($arg as $param),*) };
+            result as i64
         }};
     }
     let result = match row {
@@ -1009,6 +1017,31 @@ pub unsafe fn wrapper_door(row: Syscall, address: *mut std::ffi::c_void, a: Args
         Syscall::N_iopl => call!((c_int) -> c_int, a[0]),
         #[cfg(target_arch = "x86_64")]
         Syscall::N_ioperm => call!((c_ulong, c_ulong, c_int) -> c_int, a[0], a[1], a[2]),
+        Syscall::N_copy_file_range => call!(
+            (c_int, *mut off64_t, c_int, *mut off64_t, size_t, c_uint) -> ssize_t,
+            a[0], a[1], a[2], a[3], a[4], a[5]
+        ),
+        Syscall::N_sendfile => call!(
+            (c_int, c_int, *mut off_t, size_t) -> ssize_t,
+            a[0], a[1], a[2], a[3]
+        ),
+        Syscall::N_setxattr => call!(
+            (*const c_char, *const c_char, *const c_void, size_t, c_int) -> c_int,
+            a[0], a[1], a[2], a[3], a[4]
+        ),
+        Syscall::N_getxattr => call!(
+            (*const c_char, *const c_char, *mut c_void, size_t) -> ssize_t,
+            a[0], a[1], a[2], a[3]
+        ),
+        Syscall::N_fgetxattr => call!(
+            (c_int, *const c_char, *mut c_void, size_t) -> ssize_t,
+            a[0], a[1], a[2], a[3]
+        ),
+        Syscall::N_listxattr => call!(
+            (*const c_char, *mut c_char, size_t) -> ssize_t,
+            a[0], a[1], a[2]
+        ),
+        Syscall::N_removexattr => call!((*const c_char, *const c_char) -> c_int, a[0], a[1]),
         other => panic!("{}: no glibc wrapper", other.name()),
     };
     fold_errno(result)

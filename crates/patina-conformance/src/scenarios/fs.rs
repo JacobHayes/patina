@@ -1,7 +1,6 @@
 pub mod cache;
 pub mod chmod;
 pub mod copy;
-pub mod copy_libc;
 pub mod dirent;
 pub mod fifo;
 pub mod fortify;
@@ -34,4 +33,3 @@ pub mod sync;
 pub mod times;
 pub mod vectored_io;
 pub mod xattr;
-pub mod xattr_libc;

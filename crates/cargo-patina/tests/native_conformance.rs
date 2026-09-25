@@ -1328,11 +1328,6 @@ fn fs_copy() {
 }
 
 #[test]
-fn fs_copy_libc() {
-    conform("fs/copy_libc");
-}
-
-#[test]
 fn fs_dirent() {
     conform("fs/dirent");
 }
@@ -1490,11 +1485,6 @@ fn fs_vectored_io() {
 #[test]
 fn fs_xattr() {
     conform("fs/xattr");
-}
-
-#[test]
-fn fs_xattr_libc() {
-    conform("fs/xattr_libc");
 }
 
 #[test]

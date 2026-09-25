@@ -12,8 +12,16 @@
 //! r/w bits (EACCES), and `trusted.*` needs CAP_SYS_ADMIN (EPERM to set,
 //! ENODATA to read). The `f*` rows need no access mode but refuse O_PATH
 //! (EBADF). Needs `user.*` attributes on the run directory's filesystem.
+//!
+//! The libc vehicle goes through glibc's `setxattr`, `getxattr`,
+//! `fgetxattr`, `listxattr` and `removexattr`, which the shim does not define
+//! (registry `Absent`): it reaches them through `dlsym`
+//! (`vehicle::WRAPPERS`). glibc's other xattr wrappers have no registry row
+//! yet, so no scenario can name them: the libc vehicle spells their rows
+//! `syscall(2)`.
 
-use crate::catalog::{DEFAULTS, Need, Scenario};
+use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
+use crate::compare::{Ending, Failure};
 use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
@@ -299,9 +307,6 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "fs/xattr",
     run,
-    // The shim defines none of the xattr wrappers, so their libc spelling
-    // would be `syscall(2)` again; fs/xattr_libc goes through glibc's wrappers.
-    vehicles: Vehicle::KERNEL,
     covers: &[
         Syscall::N_setxattr,
         Syscall::N_lsetxattr,
@@ -323,6 +328,38 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_linkat,
         Syscall::N_renameat,
     ],
+    symbols: &[
+        "setxattr",
+        "getxattr",
+        "fgetxattr",
+        "listxattr",
+        "removexattr",
+        "syscall",
+        "openat",
+        "close",
+        "mkdirat",
+        "symlinkat",
+        "mknodat",
+        "linkat",
+        "renameat",
+    ],
+    resolves: &[
+        "setxattr",
+        "getxattr",
+        "fgetxattr",
+        "listxattr",
+        "removexattr",
+    ],
     needs: &[Need::UserXattrs, Need::Unprivileged],
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Fs),
+        vehicles: &[Vehicle::Libc],
+        what: "the shim defines none of setxattr/getxattr/fgetxattr/listxattr/removexattr (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds none (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
+        failure: Failure::Stops {
+            events: 12,
+            ending: Ending::Exit(101),
+            diagnostic: "fs/xattr: cannot continue: glibc's listxattr resolves",
+        },
+    }],
     ..DEFAULTS
 };

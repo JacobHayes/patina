@@ -9,9 +9,14 @@
 //! file read at its cursor or at `*offset` (then written back, the cursor
 //! untouched); the output may be a file or a pipe, but not O_APPEND (EINVAL);
 //! a pipe as input is EINVAL; EBADF for the wrong access mode or a closed
-//! descriptor; a negative offset is EINVAL.
+//! descriptor at either end; a negative offset is EINVAL.
+//!
+//! The libc vehicle goes through glibc's `copy_file_range` and `sendfile`,
+//! which the shim does not define (registry `Absent`): it reaches them
+//! through `dlsym` (`vehicle::WRAPPERS`).
 
-use crate::catalog::{DEFAULTS, Scenario};
+use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
+use crate::compare::{Ending, Failure};
 use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
@@ -174,6 +179,10 @@ pub fn run(p: &Probe) {
         "sendfile from a closed descriptor is EBADF",
         p.sendfile(out, 4000, None, 4).0 == neg(EBADF),
     );
+    p.check(
+        "sendfile to a closed descriptor is EBADF",
+        p.sendfile(4000, src, Some(0), 4).0 == neg(EBADF),
+    );
 
     for f in [
         src, dst, append, reader, writer, dirfd, pipe[0], pipe[1], out, pipe2[0], pipe2[1],
@@ -185,10 +194,6 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "fs/copy",
     run,
-    // The shim defines neither copy_file_range nor sendfile, so their libc
-    // spelling would be `syscall(2)` again; fs/copy_libc goes through glibc's
-    // wrappers.
-    vehicles: Vehicle::KERNEL,
     covers: &[
         Syscall::N_copy_file_range,
         Syscall::N_sendfile,
@@ -200,5 +205,27 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_pipe2,
         Syscall::N_close,
     ],
+    symbols: &[
+        "copy_file_range",
+        "sendfile",
+        "openat",
+        "read",
+        "write",
+        "pread64",
+        "lseek",
+        "pipe2",
+        "close",
+    ],
+    resolves: &["copy_file_range", "sendfile"],
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Fs),
+        vehicles: &[Vehicle::Libc],
+        what: "the shim defines neither copy_file_range nor sendfile (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds neither (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
+        failure: Failure::Stops {
+            events: 5,
+            ending: Ending::Exit(101),
+            diagnostic: "fs/copy: cannot continue: glibc's copy_file_range resolves",
+        },
+    }],
     ..DEFAULTS
 };
