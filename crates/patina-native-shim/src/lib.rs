@@ -877,8 +877,9 @@ mod hostapi {
     pub type OsUnfairLockOp = unsafe extern "C" fn(*mut c_void);
     pub type OsUnfairLockTry = unsafe extern "C" fn(*mut c_void) -> bool;
     // `<mach/mach_vm.h>`: copy between this task's own address ranges through
-    // the kernel, which answers `KERN_INVALID_ADDRESS`/`KERN_PROTECTION_FAILURE`
-    // for a range a user access could not touch instead of faulting — the
+    // the kernel, which answers `KERN_INVALID_ADDRESS` (`uaccess` takes
+    // `KERN_PROTECTION_FAILURE` too) for a range a user access could not touch
+    // instead of faulting — the
     // guest-memory copy vehicle (`uaccess`). `mach_vm_write`'s count is a
     // `mach_msg_type_number_t`.
     pub type MachVmReadOverwrite = unsafe extern "C" fn(u32, u64, u64, u64, *mut u64) -> c_int;

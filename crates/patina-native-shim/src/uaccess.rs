@@ -12,7 +12,10 @@
 //! unmapped page, a `PROT_NONE` page, or a write to a read-only page is
 //! `EFAULT`), and nothing faults in user space. On Darwin the vehicle is
 //! `mach_vm_read_overwrite`/`mach_vm_write` against this task's own port,
-//! which answer `KERN_INVALID_ADDRESS`/`KERN_PROTECTION_FAILURE` the same way.
+//! which answer `KERN_INVALID_ADDRESS` for the same ranges — a write to a
+//! read-only page included, a private file mapping too (no copy-on-write
+//! break), and a range that wraps the address space — so they are `EFAULT`
+//! alike (`KERN_PROTECTION_FAILURE` is taken as one too).
 //! A refused vehicle is never an `EFAULT` the guest runs on: it is a named
 //! fatal (and, on Linux, a run refused at install by [`probe`]). An
 //! embedding that links the prefixed C ABI alone, without the host-alias
@@ -236,7 +239,8 @@ fn kernel_copy(local: usize, remote: usize, len: usize, reading: bool) -> Result
 }
 
 /// `KERN_INVALID_ADDRESS`, `KERN_PROTECTION_FAILURE`: a range a user access
-/// could not touch.
+/// could not touch. (macOS answers the first for every such range the tests
+/// try, read-only pages included.)
 #[cfg(target_os = "macos")]
 const KERN_FAULTS: [c_int; 2] = [1, 2];
 
@@ -580,6 +584,81 @@ mod tests {
         let none = Page::new(libc::PROT_NONE);
         let bad = [(first.as_ptr() as usize, 4), (none.0, 4)];
         assert_eq!(read_gather(&bad, &mut into), Err(EFAULT));
+    }
+
+    /// A write to a read-only private file mapping is `EFAULT` and leaves
+    /// the page as it was: the vehicle breaks no copy-on-write the way a
+    /// debugger's forced write would (`FOLL_FORCE` on Linux, a
+    /// `VM_PROT_WRITE` maximum protection on Darwin).
+    #[test]
+    fn a_write_to_a_read_only_file_mapping_is_efault() {
+        use std::os::fd::AsRawFd;
+        let path =
+            std::env::temp_dir().join(format!("patina-uaccess-{}-read-only", std::process::id()));
+        std::fs::write(&path, vec![7u8; page_size()]).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        // SAFETY: a private read-only mapping of the file's one page.
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                page_size(),
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(addr, libc::MAP_FAILED);
+        let mapped = Page(addr as usize);
+        assert_eq!(write_bytes(mapped.0, b"x"), Err(EFAULT));
+        assert_eq!(read_bytes(mapped.0, 1), Ok(vec![7]));
+    }
+
+    /// A range whose end wraps past the top of the address space is no
+    /// user range: `EFAULT` both ways, as `access_ok` (and on Linux the copy
+    /// vehicle) answers.
+    #[test]
+    fn a_range_that_wraps_the_address_space_is_efault() {
+        assert_eq!(read_bytes(usize::MAX - 3, 8), Err(EFAULT));
+        assert_eq!(write_bytes(usize::MAX - 3, &[0; 8]), Err(EFAULT));
+    }
+
+    /// The Darwin vehicle itself, called as `kernel_copy` calls it: an
+    /// inaccessible range answers one of the two fault codes (never a
+    /// signal, and never another code that would be the named fatal).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_mach_vehicle_answers_a_fault_code_for_an_inaccessible_range() {
+        let api = crate::hostapi::get();
+        let none = Page::new(libc::PROT_NONE);
+        let read_only = Page::new(libc::PROT_READ);
+        let mut into = [0u8; 4];
+        let mut copied = 0u64;
+        // SAFETY: `into` is 4 bytes of test memory the call may fill.
+        let read = unsafe {
+            (api.mach_vm_read_overwrite)(
+                api.task_self,
+                none.0 as u64,
+                4,
+                into.as_mut_ptr() as u64,
+                &mut copied,
+            )
+        };
+        assert!(
+            KERN_FAULTS.contains(&read),
+            "mach_vm_read_overwrite: {read}"
+        );
+        let bytes = [1u8; 4];
+        for page in [&none, &read_only] {
+            // SAFETY: `bytes` is 4 bytes of test memory the call reads.
+            let wrote = unsafe {
+                (api.mach_vm_write)(api.task_self, page.0 as u64, bytes.as_ptr() as usize, 4)
+            };
+            assert!(KERN_FAULTS.contains(&wrote), "mach_vm_write: {wrote}");
+        }
+        // SAFETY: a readable page of the test's own.
+        assert_eq!(unsafe { *(read_only.0 as *const u8) }, 0);
     }
 
     #[test]
