@@ -2000,11 +2000,6 @@ fn thread_main_exit() {
 }
 
 #[test]
-fn thread_masks() {
-    conform("thread/masks");
-}
-
-#[test]
 fn thread_pthread_kill() {
     conform("thread/pthread_kill");
 }

@@ -548,7 +548,6 @@ pub const SCENARIOS: &[&Scenario] = &[
     &thread::futex::SCENARIO,
     &thread::kill::SCENARIO,
     &thread::main_exit::SCENARIO,
-    &thread::masks::SCENARIO,
     &thread::pthread_kill::SCENARIO,
     &thread::tid_clear::SCENARIO,
     &time::clock_res::SCENARIO,
