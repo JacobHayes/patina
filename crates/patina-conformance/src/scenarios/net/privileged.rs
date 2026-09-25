@@ -1,6 +1,7 @@
-//! net/privileged — the network operations that need a capability, observed
-//! from the unprivileged caller the virtual kernel models: each is refused
-//! with `EPERM` (raw(7), packet(7), socket(7), unix(7); the checks named at
+//! net/privileged — the network operations refused to the unprivileged
+//! caller the virtual kernel models: those that need a capability are
+//! refused with `EPERM`, and one that needs a permission the caller lacks
+//! with `EACCES` (raw(7), packet(7), socket(7), unix(7); the checks named at
 //! each call):
 //!
 //! * raw IPv4 sockets and packet sockets need `CAP_NET_RAW`
@@ -11,14 +12,17 @@
 //! * a second `SO_BINDTODEVICE` (rebinding, or unbinding with an empty
 //!   name) needs `CAP_NET_RAW` (`sock_bindtoindex_locked`);
 //! * `SCM_CREDENTIALS` naming another process needs `CAP_SYS_ADMIN`
-//!   (net/core/scm.c `scm_check_creds`).
+//!   (net/core/scm.c `scm_check_creds`);
+//! * connecting to an AF_UNIX socket node needs write permission on it
+//!   (`unix_find_bsd`: `EACCES`, which `CAP_DAC_OVERRIDE` would bypass), and
+//!   the connect succeeds once the permission is back.
 //!
 //! These are the privileged network rows' only unprivileged outcome, so
 //! they are asserted here rather than excluded. Needs an unprivileged caller
 //! and Linux 5.7 (the unprivileged first `SO_BINDTODEVICE`).
 
 use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
-use crate::probe::{Control, Probe, neg};
+use crate::probe::{AT_FDCWD, Control, Probe, SockAddr, neg};
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -96,6 +100,29 @@ pub fn run(p: &Probe) {
     );
     p.close(a);
     p.close(b);
+
+    let path = p.unix_path("node.sock");
+    let node = SockAddr::UnixPath(path.clone());
+    let l = p.socket(AF_UNIX, SOCK_STREAM, 0);
+    p.require("an AF_UNIX listener", l >= 0);
+    p.check("bind it to a path", p.bind_to(l, &node) == 0);
+    p.check("listen", p.listen(l, 4) == 0);
+    p.check(
+        "take write permission off the node",
+        p.chmod(&path, 0o500) == 0,
+    );
+    let c = p.socket(AF_UNIX, SOCK_STREAM, 0);
+    p.require("a client", c >= 0);
+    p.check(
+        "connecting to it is EACCES",
+        p.connect_to(c, &node) == neg(EACCES),
+    );
+    p.check("give it back", p.chmod(&path, 0o700) == 0);
+    p.check("and the connect succeeds", p.connect_to(c, &node) == 0);
+    for fd in [c, l] {
+        p.close(fd);
+    }
+    p.unlinkat(AT_FDCWD, &path, 0);
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -109,6 +136,11 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_getpid,
         Syscall::N_getuid,
         Syscall::N_getgid,
+        Syscall::N_bind,
+        Syscall::N_listen,
+        Syscall::N_connect,
+        Syscall::N_fchmodat,
+        Syscall::N_unlinkat,
         Syscall::N_close,
     ],
     symbols: &[
@@ -119,6 +151,11 @@ pub const SCENARIO: Scenario = Scenario {
         "getpid",
         "getuid",
         "getgid",
+        "bind",
+        "listen",
+        "connect",
+        "chmod",
+        "unlinkat",
         "close",
     ],
     needs: &[Need::Unprivileged],

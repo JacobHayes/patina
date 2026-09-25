@@ -15,6 +15,10 @@
 //!   bookkeeping); the defaults are the host's sysctls and are compared by
 //!   relation (at least twice the value set: `tcp_rmem`/`tcp_wmem` defaults
 //!   sit far above it on any host), never by value;
+//! * `SO_RCVLOWAT` -1 is capped: on a TCP socket at half its receive buffer
+//!   once `SO_RCVBUF` locked it, and below `INT_MAX` (half `tcp_rmem`'s
+//!   maximum) otherwise (`tcp_set_rcvlowat`); on a datagram socket it is
+//!   `INT_MAX` (the mark's readiness is readiness/poll's);
 //! * `SO_BINDTODEVICE` to `lo` reads the name back (unprivileged since
 //!   Linux 5.7 while unbound);
 //! * lengths: an int option with `optlen` below `sizeof(int)` is `EINVAL`;
@@ -28,6 +32,7 @@
 
 use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 use crate::probe::{AT_FDCWD, OptionShown, Probe, SockAddr, neg};
+use crate::scenarios::net::{int, timeval};
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -38,17 +43,6 @@ const NO_OPTION: i32 = 9999;
 /// The buffer size set: small enough for any `rmem_max`/`wmem_max`, doubled
 /// above the kernel's minimum.
 const BUFFER: i32 = 4096;
-
-fn int(value: i32) -> [u8; 4] {
-    value.to_ne_bytes()
-}
-
-fn timeval(sec: i64, usec: i64) -> [u8; 16] {
-    let mut bytes = [0u8; 16];
-    bytes[..8].copy_from_slice(&sec.to_ne_bytes());
-    bytes[8..].copy_from_slice(&usec.to_ne_bytes());
-    bytes
-}
 
 fn linger(onoff: i32, secs: i32) -> [u8; 8] {
     let mut bytes = [0u8; 8];
@@ -130,6 +124,15 @@ pub fn run(p: &Probe) {
             ) == neg(EDOM),
         );
     }
+    p.check(
+        "SO_RCVLOWAT -1 on the TCP socket",
+        p.setsockopt_bytes(t, SOL_SOCKET, SO_RCVLOWAT, &int(-1), 4, "-1") == 0,
+    );
+    let (r, mark) = p.getsockopt_hidden(t, SOL_SOCKET, SO_RCVLOWAT);
+    p.check(
+        "is capped below INT_MAX (half the host's tcp_rmem maximum)",
+        r == 0 && mark > 0 && mark < i32::MAX,
+    );
     for (label, name) in [("SO_RCVBUF", SO_RCVBUF), ("SO_SNDBUF", SO_SNDBUF)] {
         let (r, default) = p.getsockopt_hidden(t, SOL_SOCKET, name);
         p.check(
@@ -146,6 +149,15 @@ pub fn run(p: &Probe) {
             r == 0 && value == 2 * BUFFER,
         );
     }
+    p.check(
+        "SO_RCVLOWAT -1 once SO_RCVBUF locked the buffer (8192)",
+        p.setsockopt_bytes(t, SOL_SOCKET, SO_RCVLOWAT, &int(-1), 4, "-1") == 0,
+    );
+    let (r, value) = p.getsockopt_bytes(t, SOL_SOCKET, SO_RCVLOWAT, 4, OptionShown::Exact);
+    p.check(
+        "is capped at half the locked buffer",
+        r == 0 && value == int(BUFFER),
+    );
     let lo = b"lo\0";
     p.check(
         "SO_BINDTODEVICE to lo",
@@ -197,6 +209,12 @@ pub fn run(p: &Probe) {
     );
     let (r, value) = p.getsockopt_bytes(u, SOL_SOCKET, SO_BROADCAST, 4, OptionShown::Exact);
     p.check("SO_BROADCAST reads back 1", r == 0 && value == int(1));
+    p.check(
+        "SO_RCVLOWAT -1 on the UDP socket",
+        p.setsockopt_bytes(u, SOL_SOCKET, SO_RCVLOWAT, &int(-1), 4, "-1") == 0,
+    );
+    let (r, value) = p.getsockopt_bytes(u, SOL_SOCKET, SO_RCVLOWAT, 4, OptionShown::Exact);
+    p.check("is INT_MAX", r == 0 && value == int(i32::MAX));
     p.check(
         "SO_REUSEPORT on the first UDP socket",
         p.setsockopt_bytes(u, SOL_SOCKET, SO_REUSEPORT, &int(1), 4, "1") == 0,

@@ -12,7 +12,8 @@
 //! * `bind` to a path creates a socket inode with mode `0777 & ~umask`, a
 //!   second bind to the path is `EADDRINUSE`, a path in a missing directory
 //!   `ENOENT`, a length past `sizeof(struct sockaddr_un)` or another family
-//!   `EINVAL`; `listen` before `bind` is `EINVAL` (no autobind for listen);
+//!   `EINVAL`; `listen` before `bind` is `EINVAL` (no autobind for listen),
+//!   and `SIOCINQ` on a listener `EINVAL` (`unix_inq_len`);
 //! * names: the listener's is its path (`addrlen` = the path + its NUL +
 //!   the family), a connected client's is unnamed (`addrlen` 2), the
 //!   accepted socket's is the listener's path, and the client's peer is the
@@ -31,7 +32,7 @@
 //! returns (scenarios/net.rs, "Loopback delivery").
 
 use crate::catalog::{DEFAULTS, Scenario};
-use crate::probe::{AT_FDCWD, Probe, SIGSET_BYTES, SOCKADDR_UN, SockAddr, neg};
+use crate::probe::{AT_FDCWD, IoctlArg, Probe, SIGSET_BYTES, SOCKADDR_UN, SockAddr, neg};
 use crate::scenarios::net::abstract_name;
 use crate::signals::{empty_set, has, one_set};
 use libc::*;
@@ -176,6 +177,10 @@ pub fn run(p: &Probe) {
         p.connect_to(l2, &SockAddr::UnixPath(path.clone())) == neg(ECONNREFUSED),
     );
     p.check("listen", p.listen(l, 4) == 0);
+    p.check(
+        "SIOCINQ on a listener is EINVAL",
+        p.ioctl(l, FIONREAD, "FIONREAD", IoctlArg::Out).0 == neg(EINVAL),
+    );
     let (r, name, len) = p.name_of(l, false, 128);
     p.check(
         "the listener's name is its path, with the NUL in addrlen",
@@ -354,6 +359,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_sendto,
         Syscall::N_recvfrom,
         Syscall::N_shutdown,
+        Syscall::N_ioctl,
         Syscall::N_newfstatat,
         Syscall::N_unlinkat,
         Syscall::N_openat,
@@ -378,6 +384,7 @@ pub const SCENARIO: Scenario = Scenario {
         "sendto",
         "recvfrom",
         "shutdown",
+        "ioctl",
         "fstatat",
         "unlinkat",
         "openat",

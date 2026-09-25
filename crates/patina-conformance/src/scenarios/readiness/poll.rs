@@ -9,6 +9,11 @@
 //! * a listener is readable once a connection is pending;
 //! * a connected TCP socket reports `POLLRDHUP` (with `POLLIN`) once its peer
 //!   shut down writing, and `POLLHUP` once both directions are shut;
+//! * a TCP stream is readable only once `SO_RCVLOWAT` bytes are queued
+//!   (`tcp_poll`), yet a non-blocking receive takes fewer (`tcp_recvmsg`
+//!   stops at any data once it may not wait); a blocking peek below the mark
+//!   waits for it, here until its `SO_RCVTIMEO` (`sock_rcvlowat` is the
+//!   peek's target too; the mark's caps are net/sockopt's);
 //! * unconnected stream sockets are `POLLOUT|POLLHUP`, a datagram socket
 //!   `POLLOUT`, an idle listener nothing;
 //! * a pipe's read end is readable once written and `POLLHUP` once its
@@ -19,12 +24,16 @@
 //!   sleep of the clock, in `poll`'s milliseconds and `ppoll`'s timespec
 //!   alike (the faulting arrays are readiness/poll_fault).
 //!
+//! Reads right after a send rely on loopback delivery before the send
+//! returns (scenarios/net.rs, "Loopback delivery").
+//!
 //! The generic (arm64) table has no `poll` row: there the syscall vehicle
 //! issues `ppoll` (glibc's own spelling) and the libc vehicle calls glibc's
 //! `poll`.
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, SockAddr};
+use crate::scenarios::net::{int, timeval};
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -108,6 +117,51 @@ pub fn run(p: &Probe) {
         "POLLHUP once both directions are shut",
         n == 1 && revents == vec![POLLIN | POLLRDHUP | POLLHUP],
     );
+
+    // ---- a stream's receive low-water mark ----
+    let lc = p.socket(AF_INET, SOCK_STREAM, 0);
+    p.require("a second client", lc >= 0);
+    p.require("connect it", p.connect_to(lc, &addr_l) == 0);
+    let (ls, _) = p.accept_from(l, 0, false, false);
+    p.require("accept it", ls >= 0);
+    p.check(
+        "SO_RCVLOWAT 4 on the server",
+        p.setsockopt_bytes(ls, SOL_SOCKET, SO_RCVLOWAT, &int(4), 4, "4") == 0,
+    );
+    p.send_to(lc, b"ab", 0, None);
+    ready(
+        p,
+        "two bytes queued are not readable",
+        &[(ls, POLLIN)],
+        &[0],
+    );
+    let (n, data) = p.recv(ls, 16, MSG_DONTWAIT);
+    p.check(
+        "a non-blocking receive takes them all the same",
+        n == 2 && data == b"ab",
+    );
+    p.send_to(lc, b"cdef", 0, None);
+    let (n, revents) = p.poll(&[(ls, POLLIN)], WAIT_MS, SHOWN);
+    p.check("four are", n == 1 && revents == vec![POLLIN]);
+    let (n, data) = p.recv(ls, 16, 0);
+    p.check("a receive takes them", n == 4 && data == b"cdef");
+    p.check(
+        "SO_RCVTIMEO 50 ms on the server",
+        p.setsockopt_bytes(ls, SOL_SOCKET, SO_RCVTIMEO, &timeval(0, 50_000), 16, "50ms") == 0,
+    );
+    p.send_to(lc, b"gh", 0, None);
+    let (_, before) = p.rec.quiet(|| p.clock_gettime(CLOCK_MONOTONIC));
+    let (n, data) = p.recv(ls, 16, MSG_PEEK);
+    let (_, after) = p.rec.quiet(|| p.clock_gettime(CLOCK_MONOTONIC));
+    p.check(
+        "a blocking peek below the mark waits out its timeout, then answers what is queued",
+        n == 2 && data == b"gh" && after - before >= 50_000_000,
+    );
+    let (n, _) = p.recv(ls, 16, MSG_DONTWAIT);
+    p.check("the peeked bytes are still queued", n == 2);
+    for fd in [lc, ls] {
+        p.close(fd);
+    }
 
     // A stream socket that never connected is writable and hung up
     // (`unix_poll`, `tcp_poll` on TCP_CLOSE); a listener reports nothing
@@ -228,6 +282,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_sendto,
         Syscall::N_recvfrom,
         Syscall::N_shutdown,
+        Syscall::N_setsockopt,
         Syscall::N_clock_gettime,
         Syscall::N_pipe2,
         Syscall::N_eventfd2,
@@ -246,7 +301,9 @@ pub const SCENARIO: Scenario = Scenario {
         "getsockname",
         "sendto",
         "recvfrom",
+        "recv",
         "shutdown",
+        "setsockopt",
         "clock_gettime",
         "pipe2",
         "eventfd",

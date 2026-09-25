@@ -7,8 +7,8 @@
 //! * every send is one record: a receive never merges two, a short buffer
 //!   truncates one (`MSG_TRUNC` in `msg_flags`, the tail discarded, the
 //!   `MSG_TRUNC` flag answering the record's full length);
-//! * a destination on a connected socket is ignored; a send on an
-//!   unconnected one is `ENOTCONN`;
+//! * a destination on a connected socket is ignored; a send or a receive on
+//!   an unconnected one is `ENOTCONN`;
 //! * once the peer closes the survivor reads EOF and its send is `EPIPE`.
 //!
 //! Reads right after a send rely on loopback delivery before the send
@@ -47,6 +47,10 @@ pub fn run(p: &Probe) {
     p.check(
         "a send on an unconnected socket is ENOTCONN",
         p.send_to(u, b"x", 0, None) == neg(ENOTCONN),
+    );
+    p.check(
+        "and so is a receive",
+        p.recv_from(u, 8, MSG_DONTWAIT, false).0 == neg(ENOTCONN),
     );
     let c = p.socket(AF_UNIX, SOCK_SEQPACKET, 0);
     p.require("a client", c >= 0);

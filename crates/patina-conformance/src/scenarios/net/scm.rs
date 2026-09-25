@@ -5,20 +5,24 @@
 //! * `SCM_RIGHTS` installs a NEW descriptor for the same open file
 //!   description: the same inode, the shared file offset, no close-on-exec
 //!   unless the receive asks `MSG_CMSG_CLOEXEC`; several descriptors travel
-//!   in one message, in order;
+//!   in one message, in order; a peek installs its own copies, and the
+//!   receive after it installs them again (`unix_peek_fds`);
 //! * a control buffer too small for the descriptors (or none at all) sets
 //!   `MSG_CTRUNC` and installs nothing; a descriptor that is not open is
 //!   `EBADF`, more than `SCM_MAX_FD` (253) `EINVAL`, a header shorter than
 //!   a `cmsghdr` `EINVAL`;
 //! * with `SO_PASSCRED` every received message carries `SCM_CREDENTIALS`
 //!   of the sender — this process's pid, uid and gid — and a sender may
-//!   state its own credentials explicitly.
+//!   state its own credentials explicitly; credentials ride a datagram only
+//!   when an end asked for them when it was sent (`maybe_add_creds`): a
+//!   receiver that asks afterwards reads none — pid 0 and the overflow ids.
 //!
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{AT_FDCWD, Control, OptionShown, Probe, RecvSpec, neg};
+use crate::scenarios::net::int;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -90,6 +94,27 @@ pub fn run(p: &Probe) {
     );
     p.close(g);
 
+    p.sendmsg(a, &[b"P"], None, &Control::Rights(vec![file]), 0);
+    let one_right = |flags| RecvSpec {
+        segments: &[8],
+        name: None,
+        control: rights_space(1),
+        flags,
+    };
+    let peeked = p.recvmsg(b, one_right(MSG_PEEK));
+    p.check(
+        "a peek installs a copy of the descriptor",
+        peeked.result == 1 && peeked.rights.len() == 1,
+    );
+    let taken = p.recvmsg(b, one_right(0));
+    p.check(
+        "and the receive installs it again",
+        taken.result == 1 && taken.rights.len() == 1 && taken.rights != peeked.rights,
+    );
+    for fd in peeked.rights.iter().chain(&taken.rights) {
+        p.close(*fd);
+    }
+
     let (r, [pr, pw]) = p.pipe2(O_CLOEXEC);
     p.require("a pipe", r == 0);
     p.sendmsg(a, &[b"2"], None, &Control::Rights(vec![pw, file]), 0);
@@ -155,16 +180,49 @@ pub fn run(p: &Probe) {
     );
 
     // ---- credentials ----
-    let one = 1i32.to_ne_bytes();
+    let pid = p.getpid();
+    let uid = p.getuid();
+    let gid = p.getgid();
+    let (r, [da, db]) = p.socketpair(AF_UNIX, SOCK_DGRAM, 0);
+    p.require("a datagram socketpair", r == 0);
+    p.check(
+        "a datagram sent with no end asking for credentials",
+        p.sendmsg(da, &[b"c"], None, &Control::None, 0) == 1,
+    );
+    p.check(
+        "the receiver asks afterwards",
+        p.setsockopt_bytes(db, SOL_SOCKET, SO_PASSCRED, &int(1), 4, "1") == 0,
+    );
+    let with_creds = RecvSpec {
+        segments: &[8],
+        name: None,
+        control: 64,
+        flags: 0,
+    };
+    let got = p.recvmsg(db, with_creds);
+    p.check(
+        "and reads pid 0 and the overflow ids",
+        got.result == 1 && got.creds == Some((0, 65534, 65534)),
+    );
+    p.check(
+        "a datagram sent now",
+        p.sendmsg(da, &[b"d"], None, &Control::None, 0) == 1,
+    );
+    let got = p.recvmsg(db, with_creds);
+    p.check(
+        "carries the sender's credentials",
+        got.result == 1 && got.creds == Some((pid as i32, uid as u32, gid as u32)),
+    );
+    p.close(da);
+    p.close(db);
+
+    let one = int(1);
     p.check(
         "set SO_PASSCRED on the receiver",
         p.setsockopt_bytes(b, SOL_SOCKET, SO_PASSCRED, &one, 4, "1") == 0,
     );
     let (r, value) = p.getsockopt_bytes(b, SOL_SOCKET, SO_PASSCRED, 4, OptionShown::Exact);
     p.check("SO_PASSCRED reads back 1", r == 0 && value == one);
-    let pid = p.getpid();
-    let uid = p.getuid();
-    let gid = p.getgid();
     p.sendmsg(a, &[b"c"], None, &Control::None, 0);
     let got = p.recvmsg(
         b,

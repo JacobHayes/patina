@@ -54,7 +54,6 @@ pub mod sockopt_fault;
 pub mod tcp;
 pub mod udp;
 pub mod unix_dgram;
-pub mod unix_edges;
 pub mod unix_seqpacket;
 pub mod unix_stream;
 
@@ -74,6 +73,20 @@ pub fn check_allocated_port(p: &Probe, addr: &SockAddr) {
         "the kernel-allocated port is unprivileged (>= 1024)",
         addr.port().is_some_and(|port| port >= UNPRIVILEGED_PORT),
     );
+}
+
+/// An int socket option's bytes, as `setsockopt` takes and `getsockopt`
+/// answers them.
+pub fn int(value: i32) -> [u8; 4] {
+    value.to_ne_bytes()
+}
+
+/// A `struct timeval` as `SO_RCVTIMEO`/`SO_SNDTIMEO` take it.
+pub fn timeval(sec: i64, usec: i64) -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&sec.to_ne_bytes());
+    bytes[8..].copy_from_slice(&usec.to_ne_bytes());
+    bytes
 }
 
 /// An abstract AF_UNIX name a run owns: derived from its run directory —
