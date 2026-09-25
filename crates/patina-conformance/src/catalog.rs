@@ -462,7 +462,6 @@ pub const SCENARIOS: &[&Scenario] = &[
     &mem::numa::SCENARIO,
     &mem::pkeys::SCENARIO,
     &mem::process_madvise::SCENARIO,
-    &mem::process_madvise_self::SCENARIO,
     &mem::protect::SCENARIO,
     &mem::remap_file_pages::SCENARIO,
     &mem::secret::SCENARIO,

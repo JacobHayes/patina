@@ -11,7 +11,6 @@ pub mod msync;
 pub mod numa;
 pub mod pkeys;
 pub mod process_madvise;
-pub mod process_madvise_self;
 pub mod protect;
 pub mod remap_file_pages;
 pub mod secret;

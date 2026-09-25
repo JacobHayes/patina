@@ -1578,11 +1578,6 @@ fn mem_process_madvise() {
 }
 
 #[test]
-fn mem_process_madvise_self() {
-    conform("mem/process_madvise_self");
-}
-
-#[test]
 fn mem_protect() {
     conform("mem/protect");
 }

@@ -1,16 +1,17 @@
-//! mem/process_madvise — advice through a pidfd, the refusals every kernel
-//! judges before it asks whether the caller may advise the target (man 2
-//! process_madvise; mm/madvise.c): a flag is `EINVAL` (judged first), a
-//! descriptor that is not a pidfd `EBADF`, an unknown advice `EINVAL`, all
-//! through the process's own pidfd. Which known advice is accepted grows by
-//! kernel version (`MADV_DONTNEED` joined the set after 6.8), so none is
-//! asserted refused. What an accepted call does is
-//! `mem/process_madvise_self`.
+//! mem/process_madvise — advice through a pidfd, judged as 6.8 judges it
+//! (man 2 process_madvise; mm/madvise.c): a flag is `EINVAL` (judged
+//! first), a descriptor that is not a pidfd `EBADF`, an advice outside the
+//! non-destructive set a pidfd takes `EINVAL` (an unknown one, and
+//! `MADV_DONTNEED`); then, even through the process's own pidfd, a caller
+//! without `CAP_SYS_NICE` is `EPERM` for every advice of the set — before
+//! any range is looked at, so an unmapped range and an empty vector too —
+//! and nothing is advised. (Linux 6.13 made advising oneself unprivileged
+//! and admitted every advice for it; the pinned 6.8 does neither.)
 //!
 //! Only the process's own pidfd: advising another process is a
 //! cross-process effect the single-process model has no counterpart for.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Scenario, Status};
+use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Need, Scenario, Status};
 use crate::compare::{Ending, Failure};
 use crate::probe::{At, Probe, neg, page_size};
 use crate::vehicle::Vehicle;
@@ -22,14 +23,15 @@ pub fn run(p: &Probe) {
     let (r, a) = p.mmap(
         "a",
         &At::null(),
-        page,
+        2 * page,
         PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS,
         -1,
         0,
     );
-    p.require("map a page", r >= 0);
+    p.require("map two pages", r >= 0);
     let a = a.unwrap();
+    a.fill(0, b"advised");
     let pid = p.getpid() as i32;
     let pidfd = p.pidfd_open(pid, 0);
     p.require("open this process's pidfd", pidfd >= 0);
@@ -48,10 +50,38 @@ pub fn run(p: &Probe) {
         "a closed descriptor is EBADF",
         p.process_madvise(4000, &range, MADV_COLD, 0) == neg(EBADF),
     );
+    for (advice, label) in [
+        (12345, "an unknown advice is EINVAL"),
+        (
+            MADV_DONTNEED,
+            "MADV_DONTNEED is EINVAL, judged before privilege",
+        ),
+    ] {
+        p.check(
+            label,
+            p.process_madvise(pidfd, &range, advice, 0) == neg(EINVAL),
+        );
+    }
+    for (advice, label) in [
+        (MADV_COLD, "MADV_COLD without CAP_SYS_NICE is EPERM"),
+        (MADV_PAGEOUT, "MADV_PAGEOUT without CAP_SYS_NICE is EPERM"),
+        (MADV_WILLNEED, "MADV_WILLNEED without CAP_SYS_NICE is EPERM"),
+    ] {
+        p.check(
+            label,
+            p.process_madvise(pidfd, &range, advice, 0) == neg(EPERM),
+        );
+    }
+    p.require("unmap the second page", p.munmap(&a.at(page), page) == 0);
     p.check(
-        "an unknown advice is EINVAL",
-        p.process_madvise(pidfd, &range, 12345, 0) == neg(EINVAL),
+        "an unmapped range is EPERM: privilege is judged before any range",
+        p.process_madvise(pidfd, &[(a.at(page), page)], MADV_COLD, 0) == neg(EPERM),
     );
+    p.check(
+        "an empty vector is EPERM",
+        p.process_madvise(pidfd, &[], MADV_COLD, 0) == neg(EPERM),
+    );
+    p.check("nothing was advised", a.bytes(0, 7) == b"advised");
     for fd in [rd, wr, pidfd] {
         p.close(fd);
     }
@@ -61,8 +91,9 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "mem/process_madvise",
     run,
-    covers: &[Syscall::N_process_madvise],
     vehicles: Vehicle::KERNEL,
+    covers: &[Syscall::N_process_madvise],
+    needs: &[Need::Unprivileged],
     gaps: &[Gap {
         status: Status::Pending(Arc::SignalsThreadsProcess),
         vehicles: Vehicle::KERNEL,
