@@ -9934,16 +9934,21 @@ mod thread {
         tv_nsec: i64,
     }
 
-    /// Convert an absolute `struct timespec` deadline to nanoseconds,
-    /// fail-closed on a malformed field or overflow.
+    /// Convert an absolute `struct timespec` deadline to nanoseconds: `EINVAL`
+    /// for a `tv_nsec` outside a second, `EOVERFLOW` past `u64`. A deadline
+    /// before the epoch is already past, as glibc's futex wait judges it, so
+    /// it is the epoch.
     ///
     /// # Safety
     /// `ptr` must point to a valid `struct timespec`.
     unsafe fn timespec_nanos(ptr: *const c_void) -> Result<u64, c_int> {
         // SAFETY: guaranteed by this function's contract.
         let time = unsafe { &*ptr.cast::<CTimespec>() };
-        if time.tv_sec < 0 || time.tv_nsec < 0 || time.tv_nsec >= 1_000_000_000 {
+        if time.tv_nsec < 0 || time.tv_nsec >= 1_000_000_000 {
             return Err(EINVAL);
+        }
+        if time.tv_sec < 0 {
+            return Ok(0);
         }
         u64::try_from(time.tv_sec)
             .ok()

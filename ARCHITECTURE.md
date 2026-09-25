@@ -168,6 +168,8 @@ releasing writer's lock to the next waiting writer first;
 `PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP` hands over writer to writer too and
 makes a new reader wait behind a waiting writer (the only policy on macOS). The
 writer's own `rdlock`/`wrlock` are `EDEADLK` and its try-locks `EBUSY`.
+`pthread_cond_timedwait` treats a deadline before the epoch as already past
+(`ETIMEDOUT`).
 
 Guest raw `rt_sigreturn` and `restart_syscall` are final `signal-abi` traps: handler
 returns use the allowed host restorer, and no guest restart-block protocol exists.

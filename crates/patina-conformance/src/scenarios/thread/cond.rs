@@ -21,8 +21,7 @@
 //! each is recorded as `-error`. A libc-only subject, so the libc vehicle
 //! alone.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -331,19 +330,5 @@ pub const SCENARIO: Scenario = Scenario {
         "pthread_mutex_destroy",
         "clock_gettime",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::SignalsThreadsProcess),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim's timed wait refuses a negative tv_sec as EINVAL (patina-native-shim src/lib.rs timespec_nanos), where glibc's futex wait treats a deadline before the epoch as already past: ETIMEDOUT",
-        failure: Failure::Differs(&[
-            Difference::field(
-                33,
-                "pthread_cond_timedwait",
-                "errno",
-                Observed::Str("EINVAL"),
-            ),
-            Difference::check(34, "a negative deadline is ETIMEDOUT"),
-        ]),
-    }],
     ..DEFAULTS
 };
