@@ -331,7 +331,8 @@ forwards into the same dispatcher instead of its two-number allowlist.
   the fingerprint; getcpu; personality; syslog → EPERM. Its scenarios are
   `time/*` (clocks, resolution, interval and POSIX timers, timerfd, CPU
   time, the refused clock-setting rows), `sched/*`, `cred/*`, `sys/*`
-  (uname, sysinfo, personality, rlimits, hostname) and `proc/pgrp`;
+  (uname, sysinfo, personality, rlimits, hostname) and `proc/ids`'s
+  group and session rows;
   `sys/sysfs` exercises the fs family's `sysfs` row, and its gap names that
   arc.
   What is the host's — its wall clock, CPU set, hard limits, supplementary

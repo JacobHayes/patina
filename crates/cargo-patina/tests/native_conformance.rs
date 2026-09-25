@@ -1728,11 +1728,6 @@ fn proc_namespaces() {
 }
 
 #[test]
-fn proc_pgrp() {
-    conform("proc/pgrp");
-}
-
-#[test]
 fn proc_prctl() {
     conform("proc/prctl");
 }

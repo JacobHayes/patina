@@ -492,7 +492,6 @@ pub const SCENARIOS: &[&Scenario] = &[
     &proc::absent::SCENARIO,
     &proc::ids::SCENARIO,
     &proc::namespaces::SCENARIO,
-    &proc::pgrp::SCENARIO,
     &proc::prctl::SCENARIO,
     &proc::ptrace::SCENARIO,
     &proc::seccomp::SCENARIO,

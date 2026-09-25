@@ -1,7 +1,6 @@
 pub mod absent;
 pub mod ids;
 pub mod namespaces;
-pub mod pgrp;
 pub mod prctl;
 pub mod ptrace;
 pub mod seccomp;
