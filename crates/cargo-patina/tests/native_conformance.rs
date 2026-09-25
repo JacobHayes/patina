@@ -1950,8 +1950,18 @@ fn sys_uname() {
 }
 
 #[test]
+fn thread_exit() {
+    conform("thread/exit");
+}
+
+#[test]
 fn thread_futex() {
     conform("thread/futex");
+}
+
+#[test]
+fn thread_lifecycle() {
+    conform("thread/lifecycle");
 }
 
 #[test]
