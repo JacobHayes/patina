@@ -127,8 +127,8 @@ Gates worth knowing individually:
   not `check:fast`.
 - `mise run conformance` — the syscall conformance scenarios
   (`crates/patina-conformance`) natively and under patina, the live host kernel
-  as the oracle — authoritative only on the pinned 6.8 kernel, report-only
-  (`DIVERGES`) elsewhere; `mise run conformance:coverage` lists registry entries no
+  as the oracle — authoritative only on the pinned system (Ubuntu 24.04: the
+  6.8 kernel and glibc 2.39), report-only (`DIVERGES`) elsewhere; `mise run conformance:coverage` lists registry entries no
   scenario or exclusion accounts for (a local report, not a gate). `scripts/validate-wasi.sh` and
   `scripts/smoke-cross-target.sh` are the WASI/cross-target acceptance batteries
   (VALIDATION.md defines what each proves).

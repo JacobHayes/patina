@@ -582,7 +582,8 @@ Rust artifact. Normal builds neither parse nor fetch upstream source files.
 `cargo patina syscalls` reports only the compiled target. The virtual Linux
 kernel is pinned to one kernel, Ubuntu 24.04's GA kernel (Ubuntu's 6.8 build),
 as `VIRTUAL_ABI`: a number first appearing later is `Absent` (`ENOSYS`), the
-conformance scenarios assert that kernel's answers, and a bump is one explicit,
+conformance scenarios assert that kernel's answers and, for the libc-only
+symbols, those of the same release's glibc (2.39), and a bump is one explicit,
 wholesale migration. The registry names no
 conformance scenario: which scenario covers an entry is declared by the
 scenario (`crates/patina-conformance`), the one source of that association.

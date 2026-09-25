@@ -348,8 +348,8 @@ then `run` the resulting artifact.
 On Linux the virtual kernel is pinned to Ubuntu 24.04's GA kernel (Ubuntu's
 Linux 6.8 build; `cargo patina --version` names it): `uname` reports 6.8, a
 syscall first added later answers `ENOSYS` as 6.8 does, and the syscall
-conformance scenarios assert 6.8's answers, authoritatively only on a 6.8
-host. Moving to a newer kernel is an explicit, wholesale migration.
+conformance scenarios assert the answers of Ubuntu 24.04 — its 6.8 kernel and
+its glibc 2.39 — authoritatively only on a host with both. Moving to a newer kernel is an explicit, wholesale migration.
 
 If you use [mise](https://mise.jdx.dev/): `mise run setup` installs toolchains
 and targets, `mise run check:fast` is the inner-loop signal, `mise run check` is

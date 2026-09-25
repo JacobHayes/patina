@@ -10,14 +10,14 @@
 //! under strace (no host syscall escapes; the process ends as the recorded
 //! run did).
 //!
-//! The scenarios assert the pinned kernel, Ubuntu 24.04's GA kernel (Linux
-//! 6.8, `VIRTUAL_ABI`), so only a host of that series (`host::pinned`) is
-//! authoritative: elsewhere (GitHub's runners run 6.17) whatever sets the
-//! host apart from patina — a failed native check, a native-versus-patina
-//! difference, a gap that no longer matches — is reported, `DIVERGES (host
-//! H, pinned 6.8)` on stderr and a section of `$GITHUB_STEP_SUMMARY` when
-//! set, and fails nothing; `PATINA_REQUIRE_PINNED_KERNEL=1` judges any host
-//! as the pinned one. Native vehicles that disagree, patina's record/replay,
+//! The scenarios assert the pinned system, Ubuntu 24.04: its GA kernel
+//! (Linux 6.8, `VIRTUAL_ABI`) and its glibc (2.39, `host::PINNED_GLIBC`), so
+//! only a host with both (`host::pinned`) is authoritative: elsewhere
+//! (GitHub's runners run 6.17) whatever sets the host apart from patina — a
+//! failed native check, a native-versus-patina difference, a gap that no
+//! longer matches — is reported, `DIVERGES (host H, pinned P)` on stderr and
+//! a section of `$GITHUB_STEP_SUMMARY` when set, and fails nothing;
+//! `PATINA_REQUIRE_PINNED_KERNEL=1` judges any host as the pinned one. Native vehicles that disagree, patina's record/replay,
 //! trace and strace checks, and runs that crash or overrun fail on every
 //! host.
 //!
@@ -240,12 +240,22 @@ fn required(variable: &str) -> bool {
     std::env::var(variable).as_deref() == Ok("1")
 }
 
-/// This host kernel as the oracle of the pinned one: whether a
+/// This host as the oracle of the pinned system: whether a
 /// native-versus-patina judgement fails the test, or only reports.
 struct Oracle {
     release: String,
-    /// The pinned series (`host::pinned`), or `PATINA_REQUIRE_PINNED_KERNEL=1`.
+    glibc: String,
+    /// The pinned kernel series and glibc (`host::pinned`), or
+    /// `PATINA_REQUIRE_PINNED_KERNEL=1`.
     authoritative: bool,
+}
+
+/// The host's glibc release (`gnu_get_libc_version`).
+fn glibc_version() -> String {
+    // SAFETY: glibc answers a static NUL-terminated string.
+    unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 impl Oracle {
@@ -254,15 +264,17 @@ impl Oracle {
         ORACLE.get_or_init(|| {
             Oracle::on(
                 &host::kernel_release(),
+                &glibc_version(),
                 required("PATINA_REQUIRE_PINNED_KERNEL"),
             )
         })
     }
 
-    fn on(release: &str, strict: bool) -> Oracle {
+    fn on(release: &str, glibc: &str, strict: bool) -> Oracle {
         Oracle {
             release: release.to_string(),
-            authoritative: strict || host::pinned(release),
+            glibc: glibc.to_string(),
+            authoritative: strict || host::pinned(release, glibc),
         }
     }
 
@@ -288,7 +300,11 @@ impl Oracle {
             || self.release.clone(),
             |(major, minor, _)| format!("{major}.{minor}"),
         );
-        format!("DIVERGES (host {host}, pinned {VIRTUAL_ABI})")
+        format!(
+            "DIVERGES (host {host}/glibc {}, pinned {VIRTUAL_ABI}/glibc {})",
+            self.glibc,
+            host::PINNED_GLIBC
+        )
     }
 
     /// Print `scenario`'s divergences on `stderr` and, when `summary` names
@@ -1061,16 +1077,19 @@ fn planted(events: &[(&str, i64)], termination: Termination) -> Observation {
     }
 }
 
-/// On a faked host off the pinned kernel a difference from patina and a
-/// failed native check are reported — printed with the prefix and
-/// summarized — and fail nothing; on the pinned kernel, or forced strict,
-/// they fail. Native vehicles that disagree fail off the pin too.
+/// On a faked host off the pinned kernel, or on the pinned kernel with
+/// another glibc, a difference from patina and a failed native check are
+/// reported — printed with the prefix and summarized — and fail nothing; on
+/// the pinned system, or forced strict, they fail. Native vehicles that
+/// disagree fail off the pin too.
 #[test]
 fn off_the_pinned_kernel_differences_only_report() {
     let (major, minor, _) = parse_release(VIRTUAL_ABI).unwrap();
-    let off = Oracle::on(&format!("{major}.{}.0-1017-azure", minor + 9), false);
-    let pinned = Oracle::on(&format!("{major}.{minor}.0-139-generic"), false);
-    let forced = Oracle::on(&off.release, true);
+    let glibc = host::PINNED_GLIBC;
+    let off = Oracle::on(&format!("{major}.{}.0-1017-azure", minor + 9), glibc, false);
+    let pinned = Oracle::on(&format!("{major}.{minor}.0-139-generic"), glibc, false);
+    let other_glibc = Oracle::on(&pinned.release, "2.40", false);
+    let forced = Oracle::on(&off.release, glibc, true);
     let native = planted(&[("close", 0), ("check", 1)], Termination::Exited(0));
     let patina = planted(&[("close", -1), ("check", 1)], Termination::Exited(0));
     let failed = planted(&[("close", 0), ("check", 0)], Termination::Exited(101));
@@ -1081,6 +1100,10 @@ fn off_the_pinned_kernel_differences_only_report() {
     assert!(!diverged.is_empty());
     assert!(pinned.judged(judge(), &mut Vec::new()).is_err());
     assert!(forced.judged(judge(), &mut Vec::new()).is_err());
+    let mut reported = Vec::new();
+    assert_eq!(other_glibc.judged(judge(), &mut reported), Ok(()));
+    assert!(!reported.is_empty());
+    assert!(other_glibc.prefix().contains("glibc 2.40"));
 
     let before = diverged.len();
     let mut reference = None;

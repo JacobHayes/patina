@@ -21,16 +21,19 @@ recorded one (recording changes nothing it observes, which one test checks on
 a few scenarios); one that completes is also replayed and run directly under
 strace.
 
-The kernel is pinned: the scenarios assert Ubuntu 24.04's GA kernel, Ubuntu's
-build of Linux 6.8 (`patina_dst_syscalls::VIRTUAL_ABI`, the kernel the virtual
-kernel mirrors), and moving to a newer one is an explicit, wholesale
-migration. So only a host of that series (release `6.8.*`, any flavour:
-`host::pinned`) is the authoritative oracle. On any other host (GitHub's
-runners run 6.17) what sets the host apart from patina — a native check that
-fails, a difference between the native and patina streams, a gap that no
-longer matches — is reported and fails nothing: each line on stderr as
-`DIVERGES (host 6.17, pinned 6.8) …`, and each scenario's lines as a Markdown
-section appended to `$GITHUB_STEP_SUMMARY` when it is set.
+The system is pinned: the scenarios assert Ubuntu 24.04 — its GA kernel,
+Ubuntu's build of Linux 6.8 (`patina_dst_syscalls::VIRTUAL_ABI`, the kernel
+the virtual kernel mirrors), and its glibc, 2.39 (`host::PINNED_GLIBC`, whose
+answers the libc-only scenarios assert) — and moving to a newer one is an
+explicit, wholesale migration. So only a host with both (kernel release
+`6.8.*`, any flavour, and glibc `2.39`: `host::pinned`) is the authoritative
+oracle. On any other host (GitHub's runners run 6.17) what sets the host
+apart from patina — a native check that fails, a difference between the
+native and patina streams, a gap that no longer matches — is reported and
+fails nothing: each line on stderr as
+`DIVERGES (host 6.17/glibc 2.39, pinned 6.8/glibc 2.39) …`, and each
+scenario's lines as a Markdown section appended to `$GITHUB_STEP_SUMMARY`
+when it is set.
 `PATINA_REQUIRE_PINNED_KERNEL=1` judges any host as the pinned one. Native
 vehicles that disagree with each other, patina's record/replay, trace and
 strace checks, and a run that crashes or overruns its deadline fail on every

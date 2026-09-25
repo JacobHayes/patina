@@ -71,13 +71,21 @@ pub fn kernel_release() -> String {
         .into_owned()
 }
 
-/// Whether host kernel `release` is of the pinned series, the virtual ABI
-/// level's major.minor ([`VIRTUAL_ABI`]: Ubuntu 24.04's GA kernel, 6.8), of
+/// The glibc release of the pinned system, Ubuntu 24.04's (`2.39`, any
+/// Ubuntu patch): the libc-only scenarios assert its answers (the layout of
+/// `environ`, the stdio writers' return values, the termios speed encoding),
+/// which change between glibc releases as a kernel's do between kernels.
+pub const PINNED_GLIBC: &str = "2.39";
+
+/// Whether a host with kernel `release` and glibc `glibc`
+/// (`gnu_get_libc_version`) is the pinned system, Ubuntu 24.04: a kernel of
+/// the virtual ABI level's series ([`VIRTUAL_ABI`]: its GA kernel, 6.8), of
 /// any patch level and flavour (`-generic`, `-azure`, `-aws` are one Ubuntu
-/// source tree). Only there is the host an authoritative oracle.
-pub fn pinned(release: &str) -> bool {
+/// source tree), and glibc [`PINNED_GLIBC`]. Only there is the host an
+/// authoritative oracle.
+pub fn pinned(release: &str, glibc: &str) -> bool {
     let series = |release| parse_release(release).map(|(major, minor, _)| (major, minor));
-    series(release).is_some() && series(release) == series(VIRTUAL_ABI)
+    series(release).is_some() && series(release) == series(VIRTUAL_ABI) && glibc == PINNED_GLIBC
 }
 
 fn since(row: Syscall) -> Option<(u64, u64, u64)> {
@@ -1166,6 +1174,7 @@ mod tests {
     #[test]
     fn only_the_virtual_abi_series_is_pinned() {
         let (major, minor, _) = parse_release(VIRTUAL_ABI).unwrap();
+        let pinned = |release: &str| pinned(release, PINNED_GLIBC);
         assert!(pinned(&format!("{major}.{minor}.0-139-generic")));
         assert!(pinned(&format!("{major}.{minor}.0-1017-azure")));
         assert!(pinned(&format!("{major}.{minor}.12")));
@@ -1173,6 +1182,15 @@ mod tests {
         assert!(!pinned(&format!("{major}.{minor}0.0")));
         assert!(!pinned(&format!("{}.{minor}.0", major + 1)));
         assert!(!pinned(""));
+    }
+
+    #[test]
+    fn only_the_pinned_glibc_is_pinned() {
+        let release = format!("{VIRTUAL_ABI}.0-139-generic");
+        assert!(pinned(&release, PINNED_GLIBC));
+        assert!(!pinned(&release, "2.40"));
+        assert!(!pinned(&release, "2.3"));
+        assert!(!pinned(&release, ""));
     }
 
     /// Detection fails closed: a run directory that does not exist meets no
