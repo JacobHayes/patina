@@ -1,5 +1,5 @@
 //! thread/futex — the futex row behind std's locks and parking: value
-//! mismatch, wake with no waiters, a timed wait on the clock, an unknown op,
+//! mismatch (private and shared), wake with no waiters, a timed wait on the clock, an unknown op,
 //! and a real handshake with a second thread (the racy loop is unobserved; the
 //! outcome is).
 
@@ -19,6 +19,10 @@ pub fn run(p: &Probe) {
     p.check(
         "FUTEX_WAIT with a stale expected value is EAGAIN",
         p.futex(&word, WAIT, 1, None) == neg(EAGAIN),
+    );
+    p.check(
+        "a shared (not private) FUTEX_WAIT with a stale value is EAGAIN too",
+        p.futex(&word, FUTEX_WAIT, 1, None) == neg(EAGAIN),
     );
     p.check(
         "FUTEX_WAKE with no waiters wakes 0",

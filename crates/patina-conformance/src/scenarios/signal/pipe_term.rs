@@ -2,8 +2,11 @@
 //! the handler runs before the write returns `EPIPE` (fs/pipe.c pipe_write:
 //! send_sig(SIGPIPE) then -EPIPE, delivered on the return to user mode); on
 //! a socketpair `MSG_NOSIGNAL` suppresses it (net/unix/af_unix.c) and a
-//! plain send does not; `SIG_IGN` turns it into a bare `EPIPE`; and
-//! `SIG_DFL` ends the process by SIGPIPE (the `__termination` line).
+//! plain send does not, and a TCP send on an unconnected socket is `EPIPE`
+//! with no signal under `MSG_NOSIGNAL` (net/ipv4/tcp.c tcp_sendmsg_locked,
+//! net/core/stream.c sk_stream_error); `SIG_IGN` turns it into a bare
+//! `EPIPE`; and `SIG_DFL` ends the process by SIGPIPE (the `__termination`
+//! line).
 
 use crate::catalog::{DEFAULTS, Generation, Scenario, TraceFacts};
 use patina_dst_syscalls::Syscall;
@@ -44,6 +47,18 @@ pub fn run(p: &Probe) {
     p.check("the plain send raised SIGPIPE", support::count() == 2);
     p.close(pair[0]);
 
+    let s = p.socket(AF_INET, SOCK_STREAM, 0);
+    p.require("tcp socket", s >= 0);
+    p.check(
+        "MSG_NOSIGNAL send on an unconnected TCP socket is EPIPE",
+        p.sendto(s, b"x", MSG_NOSIGNAL, None) == neg(EPIPE),
+    );
+    p.check(
+        "MSG_NOSIGNAL suppressed SIGPIPE on TCP",
+        support::count() == 2,
+    );
+    p.close(s);
+
     support::install_disposition(SIGPIPE, SIG_IGN);
     let (r, fds) = p.pipe2(0);
     p.require("pipe", r == 0);
@@ -72,6 +87,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_write,
         Syscall::N_close,
         Syscall::N_socketpair,
+        Syscall::N_socket,
         Syscall::N_sendto,
     ],
     symbols: &[
@@ -79,6 +95,7 @@ pub const SCENARIO: Scenario = Scenario {
         "write",
         "close",
         "socketpair",
+        "socket",
         "sendto",
         "sigaction",
     ],

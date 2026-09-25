@@ -63,12 +63,12 @@ the row; every scenario runs through every vehicle unless noted.
 
 | row | semantics | kernel | probe |
 |---|---|---|---|
-| `rt_sigaction(sig, act, oldact, 8)` | installs `act` (kernel layout: handler, `sa_flags`, `sa_restorer`, 8-byte mask) and writes the previous action to `oldact` — including `SA_RESTORER` and the restorer glibc registered; `sig` outside 1..64, `sigsetsize != 8`, or `act != NULL` for SIGKILL/SIGSTOP → `EINVAL`; registration without `SA_RESTORER` is accepted (the restorer matters at frame setup); installing `SIG_IGN` (or the default for an ignore-class signal) flushes that signal from the pending queues. Both doors (libc `sigaction`/`signal` and the raw row) read and write ONE disposition table. | `do_sigaction` (`copy k_sigaction` both ways, `flush_sigqueue_mask`) | `signal/raw_action`, `signal/basic`, `signal/nested` |
+| `rt_sigaction(sig, act, oldact, 8)` | installs `act` (kernel layout: handler, `sa_flags`, `sa_restorer`, 8-byte mask) and writes the previous action to `oldact` — including `SA_RESTORER` and the restorer glibc registered; `sig` outside 1..64, `sigsetsize != 8`, or `act != NULL` for SIGKILL/SIGSTOP → `EINVAL`; registration without `SA_RESTORER` is accepted (the restorer matters at frame setup); installing `SIG_IGN` (or the default for an ignore-class signal) flushes that signal from the pending queues. Both doors (libc `sigaction`/`signal` and the raw row) read and write ONE disposition table. | `do_sigaction` (`copy k_sigaction` both ways, `flush_sigqueue_mask`) | `signal/raw_action`, `signal/basic` |
 | `rt_sigprocmask(how, set, oldset, 8)` | per THREAD; `how` not in `SIG_BLOCK`/`SIG_UNBLOCK`/`SIG_SETMASK` → `EINVAL`; `sigsetsize != 8` → `EINVAL`; SIGKILL/SIGSTOP cannot be blocked; a `set == NULL` call only reads; a signal that became deliverable by the change is handled BEFORE the call returns (recalc_sigpending → handled on the return to user mode); several standard signals unblocked at once are dequeued lowest-numbered first and one frame is set up per signal before the return to user mode, so the handlers RUN in reverse order, each inner one under the outer frame's mask. | `sigprocmask`, `set_current_blocked`, `exit_to_user_mode_loop` → `arch_do_signal_or_restart` (one frame per iteration), `next_signal` | `signal/unmask`, `signal/mask`, `thread/masks` |
 | `rt_sigpending(set, size)` | `(private ∪ shared pending) ∩ blocked` of the CALLING thread; `size > sizeof(sigset_t)` → `EINVAL` (a smaller size copies that many bytes). A thread-directed signal pending for another thread is not in it. | `do_sigpending` | `signal/mask`, `signal/unmask`, `thread/masks` |
 | dequeue order | the thread's private pending set is searched before the shared one; within a set the lowest-numbered signal first (synchronous fault signals first); within one realtime number FIFO. | `dequeue_signal`, `next_signal` | `signal/queue`, `signal/rt_order` |
 | `sigaltstack(ss, old_ss)` | per thread; `ss_flags` not in {0, `SS_DISABLE`, `SS_AUTODISARM`} → `EINVAL`; `ss_size < MINSIGSTKSZ` → `ENOMEM`; any change while executing on the stack → `EPERM`; `old_ss` reports the current stack with `SS_ONSTACK` set while on it and `SS_DISABLE` when none; a `SA_ONSTACK` handler runs with its stack pointer inside the range. | `do_sigaltstack`, `on_sig_stack`, `get_sigframe` | `signal/altstack` |
-| handler frame | while a handler runs the thread's mask is `blocked ∪ sa_mask ∪ {sig}` (the signal itself unless `SA_NODEFER`), so a same-signal raise inside the handler is delivered after `rt_sigreturn`; `SA_NODEFER` nests; `SA_RESETHAND` restores `SIG_DFL` before the handler runs; `SA_SIGINFO` passes the queued `siginfo`. | `handle_signal`, `signal_setup_done`, `get_signal` (`SA_ONESHOT`) | `signal/nested`, `signal/resethand_term`, `signal/basic` |
+| handler frame | while a handler runs the thread's mask is `blocked ∪ sa_mask ∪ {sig}` (the signal itself unless `SA_NODEFER`), so a same-signal raise inside the handler is delivered after `rt_sigreturn`; `SA_NODEFER` nests; `SA_RESETHAND` restores `SIG_DFL` before the handler runs; `SA_SIGINFO` passes the queued `siginfo`. | `handle_signal`, `signal_setup_done`, `get_signal` (`SA_ONESHOT`) | `signal/handler_flags`, `signal/basic` |
 
 ### 1.3 Waiting for signals
 
@@ -99,7 +99,7 @@ return code decides:
 
 | class | signals | virtual kernel | probe |
 |---|---|---|---|
-| Term | SIGHUP SIGINT SIGKILL SIGPIPE SIGALRM SIGTERM SIGUSR1 SIGUSR2 SIGPROF SIGVTALRM SIGSTKFLT SIGIO SIGPWR, realtime | the process ends BY THAT SIGNAL (`waitpid` reports `WTERMSIG`), after the run is finalized (§2.6); no core flag | `signal/default_term`, `signal/resethand_term`, `signal/pipe_term` |
+| Term | SIGHUP SIGINT SIGKILL SIGPIPE SIGALRM SIGTERM SIGUSR1 SIGUSR2 SIGPROF SIGVTALRM SIGSTKFLT SIGIO SIGPWR, realtime | the process ends BY THAT SIGNAL (`waitpid` reports `WTERMSIG`), after the run is finalized (§2.6); no core flag | `signal/default_term`, `signal/handler_flags`, `signal/pipe_term` |
 | Core | SIGQUIT SIGILL SIGABRT SIGFPE SIGSEGV SIGBUS SIGSYS SIGTRAP SIGXCPU SIGXFSZ | ends by that signal; the wait status's core flag is set when the kernel dumped (`do_coredump` → `group_exit_code |= 0x80`) — what the host's core sink does (this host: an apport pipe pattern, which dumps regardless of `RLIMIT_CORE`); the virtual kernel dies through the real signal so the same host answers the same | `signal/core_term` |
 | Ign | SIGCHLD SIGURG SIGWINCH | dropped at generation unless blocked (§1.1) | — (state only) |
 | Cont | SIGCONT | nothing is stopped: dropped | — |
@@ -109,14 +109,14 @@ return code decides:
 
 | row | semantics | kernel | probe |
 |---|---|---|---|
-| `set_tid_address(ptr)` | records `ptr` for the calling thread and returns its tid; when that thread exits the kernel writes 0 to `*ptr` and `futex_wake`s it (`FUTEX_BITSET_MATCH_ANY`) | `sys_set_tid_address`, `mm_release` (kernel/fork.c) | `thread/tid_clear`, `thread/lifecycle` |
+| `set_tid_address(ptr)` | records `ptr` for the calling thread and returns its tid; when that thread exits the kernel writes 0 to `*ptr` and `futex_wake`s it (`FUTEX_BITSET_MATCH_ANY`) | `sys_set_tid_address`, `mm_release` (kernel/fork.c) | `thread/tid_clear` |
 | `exit(code)` (60) | ends the CALLING thread only; the process lives while another thread runs and its `exit_group` sets the status; no atexit handlers run | `do_exit` vs `do_group_exit` | `thread/main_exit` |
 | `exit_group(code)` (231) | ends every thread; the process exit status is `code` | `do_group_exit` | `thread/main_exit` |
 | `wait4`/`waitid` | a process without children: `ECHILD` (also with `WNOHANG`); `waitid` options outside `WNOHANG|WNOWAIT|WEXITED|WSTOPPED|WCONTINUED|__WNOTHREAD|__WCLONE|__WALL`, or none of `WEXITED|WSTOPPED|WCONTINUED` → `EINVAL` | `do_wait`, `kernel_waitid` | `proc/wait` |
 | `prctl` | `PR_SET_NAME` stores 15 bytes + NUL (`PR_GET_NAME` reads them back); `PR_SET_PDEATHSIG` takes a signal number (0 clears; `> 64` → `EINVAL`), `PR_GET_PDEATHSIG` writes it (`EFAULT` for a bad pointer); `PR_SET_DUMPABLE` accepts 0 or 1 only (2 → `EINVAL`), `PR_GET_DUMPABLE` starts at 1; `PR_SET_NO_NEW_PRIVS` accepts exactly `(1, 0, 0, 0)` (`0` → `EINVAL`, a nonzero trailing argument → `EINVAL`) and is sticky; `PR_SET_TIMERSLACK` with 0 restores the 50 000 ns default, `PR_GET_TIMERSLACK` returns the current value; an unknown option → `EINVAL` (not `ENOSYS`) | `sys_prctl` (kernel/sys.c) | `proc/prctl` |
 | removed numbers | `_sysctl`, `nfsservctl`, `vserver`, `security`, `tuxcall`, `afs_syscall`, `getpmsg`, `putpmsg`, `epoll_ctl_old`, `epoll_wait_old`, `lookup_dcookie`, `create_module`, `query_module`, `get_kernel_syms`, `uselib`: `ENOSYS` (the table lists them without an implementation). Registry disposition: `SoftDeny(ENOSYS)` — the parent arc's §2.4 class for removed numbers; `Absent` is reserved by the registry's own rule test for numbers newer than the virtual ABI | `sys_ni_syscall` | `proc/absent` |
 | `getpgid`/`getsid`/`kill(0|-1, 0)`/`tgkill(pid, pid, 0)` | the one virtual process is its own group leader and session leader (pgid = sid = 1); the probes succeed | — | `proc/ids` |
-| `fork`/`clone`/`clone3`/`execve`/`execveat` | process-lifecycle traps BY DESIGN ([syscall-conformance.md](syscall-conformance.md) §7): a named abort with the pinned diagnostic; the fork-based child oracles (`signal/default`, `signal/pipe`, `signal/nested`, `thread/lifecycle`, `proc/traps`) keep running natively, are declared `by design:` aborts at the fork's event, and the same facts are pinned in-process by `signal/default_term`, `signal/core_term`, `signal/pipe_term`, `signal/resethand_term`, `thread/main_exit`, `thread/tid_clear` | — | those five (prefix + pinned abort) |
+| `fork`/`clone`/`clone3`/`execve`/`execveat` | process-lifecycle traps BY DESIGN ([syscall-conformance.md](syscall-conformance.md) §7): a named abort with the pinned diagnostic; the fork-based child oracles (`signal/default` through glibc's `fork()`, libc vehicle only; `proc/traps` through the row) keep running natively, are declared `by design:` aborts at the fork's event, and the same facts are pinned in-process by `signal/default_term`, `signal/core_term`, `signal/pipe_term`, `signal/handler_flags`, `thread/main_exit`, `thread/tid_clear` | — | those two (prefix + pinned abort) |
 | `pthread_kill(t, sig)` (libc only) | glibc: `tgkill` on the target's tid; returns the error number (`EINVAL` past SIGRTMAX); signal 0 probes | — | `thread/pthread_kill` (libc vehicle) |
 
 ## 2. The design, at file:line of this tree
@@ -248,7 +248,7 @@ Traps: answering `ENOSYS` where the kernel answers `EINVAL`; flipping a row to `
 
 Scope: §2.2 state, PER TASK from the first line (masks, private pending, altstack; inherited mask at spawn); `rt_sigaction` on both doors over one table with `oldact` and the host forward; `rt_sigprocmask`/`rt_sigpending`/`sigaltstack` per task with out-parameters and the SIGSYS-frame `ucontext` writes; generation §2.3 for `kill`/`tkill`/`tgkill`/`rt_sigqueueinfo`/`rt_tgsigqueueinfo` with the kernel's errno vocabulary, recording `SignalGenerated` (§2.7, trace format 8 → 9 with the migration and a fixture); delivery points 1–3 of §2.4 with kernel-built frames via self-directed `rt_tgsigqueueinfo` carrying the virtual siginfo, from a DELIVERY POINT, never from generation; `SA_NODEFER`/`sa_mask`/`SA_RESETHAND`/`SA_ONSTACK`; delivery on unmask including the stacked-frame order; the zero-timeout dequeue (private before shared, lowest first, FIFO).
 
-Probes: `signal/basic`, `signal/raw_action`, `signal/queue`, `signal/rt_order`, `signal/unmask`, `signal/altstack`, `signal/per_thread` (two threads, no signal crossing them: a worker's block must not stop the main thread's own `kill(self)`; private pending and altstack per thread; inherited mask), `signal/nested` (prefix; its fork abort stays).
+Probes: `signal/basic`, `signal/raw_action`, `signal/queue`, `signal/rt_order`, `signal/unmask`, `signal/altstack`, `signal/per_thread` (two threads, no signal crossing them: a worker's block must not stop the main thread's own `kill(self)`; private pending and altstack per thread; inherited mask), `signal/handler_flags` (default deferral, `SA_NODEFER`, `SA_RESETHAND`).
 
 Obligations:
 
@@ -303,7 +303,7 @@ Traps: returning `EINTR`/`EAGAIN` immediately from a wait (the rejected round's 
 
 Scope: §2.6 on both doors; `guest_exit.core` in the `cargo-patina` envelope (`GuestExit` gains `core` from the wait status; the harness reads it); SIGPIPE from `pipe_write` and the socketpair send path with `MSG_NOSIGNAL` honoured and `SIG_IGN` → bare `EPIPE`; Stop-class named trap; `abort()` finalizes then aborts through the host alias.
 
-Probes: `signal/default_term`, `signal/core_term`, `signal/pipe_term`, `signal/resethand_term` — through every vehicle, including the DIRECT run whose `waitpid` must read the native signal and core flag; `signal/default` and `signal/pipe` stay by-design aborts with the pinned C diagnostic.
+Probes: `signal/default_term`, `signal/core_term`, `signal/pipe_term`, `signal/handler_flags` — through every vehicle, including the DIRECT run whose `waitpid` must read the native signal and core flag; `signal/default` (libc vehicle only) stays a by-design abort with the pinned C diagnostic.
 
 Obligations:
 
@@ -315,7 +315,7 @@ Obligations:
 | `patina-dst-native-shim` | `msg_nosignal_suppresses_sigpipe` | A socketpair send to a closed peer with MSG_NOSIGNAL answers EPIPE and records no generation; without the flag it records one. |
 | `patina-dst-native-shim` | `sigstop_to_self_is_a_named_trap` | A default-action Stop-class signal reaching delivery is the named fatal trap; SIGTSTP/SIGTTIN/SIGTTOU with a handler run the handler. |
 
-- Recorded traces (format ≥ 9; `signal_generated` ops, in order): `signal/default_term` [15:p]; `signal/core_term` [6:p]; `signal/resethand_term` [12:p 12:p]; `signal/pipe_term` [13:t 13:t 13:t 13:t].
+- Recorded traces (format ≥ 9; `signal_generated` ops, in order): `signal/default_term` [15:p]; `signal/core_term` [6:p]; `signal/handler_flags` [10:p 10:p 10:p 10:p 12:p 12:p]; `signal/pipe_term` [13:t 13:t 13:t 13:t].
 
 Traps: `exit(128 + sig)` instead of dying by the signal, with or without a supervisor that translates it back (the direct run reads `exited 143`); a `core` the envelope hardcodes per signal; copying the expected termination into the observed stream (the frozen harness refuses; the gate's selftest plants it); terminating before the trace is finalized (no complete trace → no replay leg → the trace obligation is unmet).
 
@@ -323,7 +323,7 @@ Traps: `exit(128 + sig)` instead of dying by the signal, with or without a super
 
 Scope: thread-directed delivery to the named task with the handler on that task's host thread; delivery on the target's unmask; `pthread_kill` (and the other wrappers of §2.8) as strong defs with honest symbol rows; `set_tid_address` per task with the exit-time clear + futex wake; per-thread raw `exit` and main-thread exit while a worker runs; `exit_group` without atexit.
 
-Probes: `thread/kill`, `thread/masks`, `thread/pthread_kill`, `thread/tid_clear`, `thread/main_exit`, `thread/lifecycle` (prefix; its fork abort stays).
+Probes: `thread/kill`, `thread/masks`, `thread/pthread_kill`, `thread/tid_clear`, `thread/main_exit`.
 
 Obligations:
 

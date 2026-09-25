@@ -1858,13 +1858,13 @@ fn signal_eintr() {
 }
 
 #[test]
-fn signal_mask() {
-    conform("signal/mask");
+fn signal_handler_flags() {
+    conform("signal/handler_flags");
 }
 
 #[test]
-fn signal_nested() {
-    conform("signal/nested");
+fn signal_mask() {
+    conform("signal/mask");
 }
 
 #[test]
@@ -1875,11 +1875,6 @@ fn signal_one_wake() {
 #[test]
 fn signal_per_thread() {
     conform("signal/per_thread");
-}
-
-#[test]
-fn signal_pipe() {
-    conform("signal/pipe");
 }
 
 #[test]
@@ -1895,11 +1890,6 @@ fn signal_queue() {
 #[test]
 fn signal_raw_action() {
     conform("signal/raw_action");
-}
-
-#[test]
-fn signal_resethand_term() {
-    conform("signal/resethand_term");
 }
 
 #[test]
@@ -2007,11 +1997,6 @@ fn thread_futex() {
 #[test]
 fn thread_kill() {
     conform("thread/kill");
-}
-
-#[test]
-fn thread_lifecycle() {
-    conform("thread/lifecycle");
 }
 
 #[test]

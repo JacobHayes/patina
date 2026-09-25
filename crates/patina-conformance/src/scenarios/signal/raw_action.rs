@@ -6,7 +6,10 @@
 //! raw `kill`, is reported back through `oldact` with its flags, a raw
 //! `SIG_IGN` is honoured, and libc's `sigaction` query sees the raw door's
 //! disposition (man 2 rt_sigaction: SA_RESTORER; kernel/signal.c
-//! do_sigaction copies the whole k_sigaction both ways).
+//! do_sigaction copies the whole k_sigaction both ways). A raw install
+//! without `SA_RESTORER` is accepted at registration: the restorer matters
+//! only at frame setup (arch/x86/kernel/signal.c), so that handler is never
+//! raised.
 
 use crate::catalog::{DEFAULTS, Generation, Scenario, TraceFacts};
 use patina_dst_syscalls::Syscall;
@@ -118,6 +121,17 @@ pub fn run(p: &Probe) {
     p.check(
         "libc sigaction sees SIG_DFL again",
         support::disposition(SIGUSR1) == "SIG_DFL",
+    );
+
+    let bare = KernelSigaction {
+        handler: support::handler as *const () as usize,
+        flags: 0,
+        restorer: 0,
+        mask: 0,
+    };
+    p.check(
+        "raw rt_sigaction without SA_RESTORER is accepted at registration",
+        p.rt_sigaction_install(SIGUSR1, Some(&bare), None) == 0,
     );
 }
 

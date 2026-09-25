@@ -125,15 +125,26 @@ pub fn has(set: &sigset_t, sig: c_int) -> bool {
 /// Install `handler`/`info_handler` for `sig` through libc `sigaction`
 /// (unrecorded setup; the scenario's checks say what it observed).
 pub fn install(sig: c_int, flags: c_int, info: bool) {
+    install_with(
+        sig,
+        flags,
+        if info {
+            info_handler as unsafe extern "C" fn(c_int, *mut siginfo_t, *mut c_void) as usize
+        } else {
+            handler as extern "C" fn(c_int) as usize
+        },
+    );
+}
+
+/// Install a scenario's own `handler` (an `extern "C"` function's address)
+/// for `sig` with `flags` and an empty `sa_mask`, through libc `sigaction`
+/// (unrecorded setup).
+pub fn install_with(sig: c_int, flags: c_int, handler: usize) {
     unsafe {
         let mut sa: sigaction = std::mem::zeroed();
         sigemptyset(&mut sa.sa_mask);
         sa.sa_flags = flags;
-        sa.sa_sigaction = if info {
-            info_handler as unsafe extern "C" fn(c_int, *mut siginfo_t, *mut c_void) as usize
-        } else {
-            handler as extern "C" fn(c_int) as usize
-        };
+        sa.sa_sigaction = handler;
         assert_eq!(sigaction(sig, &sa, std::ptr::null_mut()), 0);
     }
 }
