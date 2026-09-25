@@ -1370,6 +1370,11 @@ fn net_ipctl() {
 }
 
 #[test]
+fn net_ipopts() {
+    conform("net/ipopts");
+}
+
+#[test]
 fn net_mmsg() {
     conform("net/mmsg");
 }

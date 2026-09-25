@@ -27,6 +27,7 @@ pub mod getifaddrs;
 pub mod ifconfig;
 pub mod inet6;
 pub mod ipctl;
+pub mod ipopts;
 pub mod mmsg;
 pub mod msg;
 pub mod netlink;

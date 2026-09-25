@@ -448,6 +448,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &net::ifconfig::SCENARIO,
     &net::inet6::SCENARIO,
     &net::ipctl::SCENARIO,
+    &net::ipopts::SCENARIO,
     &net::mmsg::SCENARIO,
     &net::msg::SCENARIO,
     &net::netlink::SCENARIO,
