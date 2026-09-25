@@ -422,6 +422,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &fd::pipes::SCENARIO,
     &fd::stdio::SCENARIO,
     &fd::table::SCENARIO,
+    &fd::termios::SCENARIO,
     &fs::cache::SCENARIO,
     &fs::chmod::SCENARIO,
     &fs::copy::SCENARIO,

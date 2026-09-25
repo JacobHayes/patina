@@ -1351,6 +1351,11 @@ fn fd_table() {
 }
 
 #[test]
+fn fd_termios() {
+    conform("fd/termios");
+}
+
+#[test]
 fn fs_cache() {
     conform("fs/cache");
 }
