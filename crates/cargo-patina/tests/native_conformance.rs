@@ -1333,11 +1333,6 @@ fn fs_copy_libc() {
 }
 
 #[test]
-fn fs_dirs() {
-    conform("fs/dirs");
-}
-
-#[test]
 fn fs_dirent() {
     conform("fs/dirent");
 }
@@ -1393,11 +1388,6 @@ fn fs_libc_times() {
 }
 
 #[test]
-fn fs_links() {
-    conform("fs/links");
-}
-
-#[test]
 fn fs_metadata() {
     conform("fs/metadata");
 }
@@ -1415,6 +1405,11 @@ fn fs_mount_api() {
 #[test]
 fn fs_mount_query() {
     conform("fs/mount_query");
+}
+
+#[test]
+fn fs_names() {
+    conform("fs/names");
 }
 
 #[test]
