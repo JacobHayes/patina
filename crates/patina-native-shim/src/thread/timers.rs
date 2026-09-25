@@ -29,7 +29,7 @@ use super::signals::{Info, SIGALRM, SIGPROF, SIGVTALRM};
 use super::*;
 use crate::clocks::{Clock, CpuOf, NANOS, TICK_NSEC, Timespec, Timeval};
 use crate::neg_errno as errno;
-use crate::{EBADF, EFAULT};
+use crate::{EBADF, EFAULT, uaccess};
 use patina_dst_abi::SignalTarget;
 
 /// `hrtimer_forward`: move `expires` by whole `interval`s until it lies
@@ -1013,22 +1013,14 @@ impl TimerFd {
 /// time is `EINVAL` before the descriptor is looked at; the old setting is
 /// answered; arming drops the expirations not yet read.
 /// `TFD_TIMER_CANCEL_ON_SET` is accepted: only a clock set cancels, and
-/// nothing sets the virtual clock.
-///
-/// # Safety
-/// `new` must be NULL or readable, `old` NULL or writable, each for a
-/// `struct itimerspec`.
-pub(crate) unsafe fn timerfd_settime(
-    fd: c_int,
-    flags: i32,
-    new: *const Itimerspec,
-    old: *mut Itimerspec,
-) -> i64 {
-    if new.is_null() {
-        return errno(EFAULT);
-    }
-    // SAFETY: per this function's contract.
-    let [interval, value] = unsafe { new.read_unaligned() };
+/// nothing sets the virtual clock. The guest's settings are copied through
+/// `uaccess`: an unreadable new one is `EFAULT` before anything, an
+/// unwritable old one `EFAULT` after the new one took.
+pub(crate) fn timerfd_settime(fd: c_int, flags: i32, new: usize, old: usize) -> i64 {
+    let [interval, value] = match uaccess::read::<Itimerspec>(new) {
+        Ok(new) => new,
+        Err(code) => return errno(code),
+    };
     let (Some(interval), Some(value)) = (interval.valid_nanos(), value.valid_nanos()) else {
         return errno(EINVAL);
     };
@@ -1069,19 +1061,24 @@ pub(crate) unsafe fn timerfd_settime(
     timer.queued = value != 0;
     state.publish_alarm();
     drop(state);
-    if !old.is_null() {
-        // SAFETY: per this function's contract.
-        unsafe { write_spec(old, previous) };
+    if old != 0 {
+        if let Err(code) = uaccess::write(old, &spec(previous)) {
+            return errno(code);
+        }
     }
     0
 }
 
+/// A remaining time and a reload as a `struct itimerspec`.
+fn spec((value, interval): (u64, u64)) -> Itimerspec {
+    [Timespec::from_nanos(interval), Timespec::from_nanos(value)]
+}
+
 /// `timerfd_gettime(fd, value)`: the remaining time (0 the moment a period
-/// ends, until the timer is forwarded — here, by this read) and the reload.
-///
-/// # Safety
-/// `out` must be NULL or writable for a `struct itimerspec`.
-pub(crate) unsafe fn timerfd_gettime(fd: c_int, out: *mut Itimerspec) -> i64 {
+/// ends, until the timer is forwarded — here, by this read) and the reload,
+/// copied out through `uaccess` (`EFAULT` for a range the guest cannot
+/// write, after the forward).
+pub(crate) fn timerfd_gettime(fd: c_int, out: usize) -> i64 {
     let handle = match timerfd_handle(fd) {
         Ok(handle) => handle,
         Err(code) => return errno(code),
@@ -1101,33 +1098,22 @@ pub(crate) unsafe fn timerfd_gettime(fd: c_int, out: *mut Itimerspec) -> i64 {
         state.publish_alarm();
         current
     };
-    if out.is_null() {
-        return errno(EFAULT);
+    match uaccess::write(out, &spec(current)) {
+        Ok(()) => 0,
+        Err(code) => errno(code),
     }
-    // SAFETY: per this function's contract.
-    unsafe { write_spec(out, current) };
-    0
 }
 
 /// Read a timer descriptor: the expirations since the last read, one `u64`,
 /// and the count resets (a fired periodic timer moves to its next period
 /// after now, the periods it skipped counted). A buffer shorter than a `u64`
 /// is `EINVAL`; with none expired, `EAGAIN` nonblocking, else the reader
-/// waits for the expiry.
-///
-/// # Safety
-/// `buf` must be writable for `len` bytes.
-pub(crate) unsafe fn timerfd_read(
-    handle: u64,
-    nonblocking: bool,
-    buf: *mut c_void,
-    len: usize,
-) -> isize {
+/// waits for the expiry. The count is copied out through `uaccess` after it
+/// resets (`put_user` last): a buffer the guest cannot write is `EFAULT`
+/// with the expirations consumed.
+pub(crate) fn timerfd_read(handle: u64, nonblocking: bool, buf: usize, len: usize) -> isize {
     if len < 8 {
         return crate::fail(EINVAL) as isize;
-    }
-    if buf.is_null() {
-        return crate::fail(EFAULT) as isize;
     }
     let me = current_task();
     loop {
@@ -1150,12 +1136,11 @@ pub(crate) unsafe fn timerfd_read(
             timer.ticks = 0;
             state.release_closed_timerfd(handle);
             state.publish_alarm();
-            // SAFETY: `buf` is writable for >= 8 bytes (checked above).
-            unsafe {
-                buf.cast::<u8>()
-                    .copy_from_nonoverlapping(ticks.to_ne_bytes().as_ptr(), 8)
+            drop(state);
+            return match uaccess::write(buf, &ticks) {
+                Ok(()) => 8,
+                Err(code) => crate::fail(code) as isize,
             };
-            return 8;
         }
         if nonblocking {
             return crate::fail(EWOULDBLOCK) as isize;

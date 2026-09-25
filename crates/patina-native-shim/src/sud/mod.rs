@@ -882,16 +882,16 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_timerfd_create, |_, a| {
         crate::thread::timers::timerfd_create(a[0] as i32, a[1] as c_int)
     }),
-    (Syscall::N_timerfd_settime, |_, a| unsafe {
+    (Syscall::N_timerfd_settime, |_, a| {
         crate::thread::timers::timerfd_settime(
             arg_fd(a[0]) as c_int,
             a[1] as i32,
-            a[2] as *const _,
-            a[3] as *mut _,
+            a[2] as usize,
+            a[3] as usize,
         )
     }),
-    (Syscall::N_timerfd_gettime, |_, a| unsafe {
-        crate::thread::timers::timerfd_gettime(arg_fd(a[0]) as c_int, a[1] as *mut _)
+    (Syscall::N_timerfd_gettime, |_, a| {
+        crate::thread::timers::timerfd_gettime(arg_fd(a[0]) as c_int, a[1] as usize)
     }),
     (Syscall::N_times, |_, a| unsafe {
         crate::clocks::times(a[0] as *mut [i64; 4])

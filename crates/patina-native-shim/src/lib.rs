@@ -4660,11 +4660,10 @@ unsafe fn read_resolved(
         FdKind::EventFd => unsafe {
             thread::eventfd_read(resolved.handle, nonblocking, destination, length)
         },
-        // SAFETY: as above.
         #[cfg(target_os = "linux")]
-        FdKind::TimerFd => unsafe {
-            thread::timers::timerfd_read(resolved.handle, nonblocking, destination, length)
-        },
+        FdKind::TimerFd => {
+            thread::timers::timerfd_read(resolved.handle, nonblocking, destination as usize, length)
+        }
         #[cfg(target_os = "linux")]
         FdKind::Epoll => fail(EINVAL) as isize,
         // SAFETY: forwarded from this function's own contract.

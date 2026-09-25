@@ -12,11 +12,9 @@
 //! Its own scenario, because a door that dereferences the pointer itself
 //! ends the whole run (and a crash loses the captured event stream).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Arm, Count, Probe, neg, spec_ns};
 use crate::signals::PROGRESS_DEADLINE;
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -92,15 +90,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_timerfd_gettime,
     ],
     symbols: &["syscall", "read", "ppoll", "close"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: Vehicle::ALL,
-        what: "the timer descriptor rows dereference guest pointers themselves (thread/timers.rs timerfd_settime, timerfd_gettime, timerfd_read): a bad one faults in the shim instead of answering EFAULT",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGSEGV),
-            diagnostic: "native_run signal=11",
-        },
-    }],
     ..DEFAULTS
 };
