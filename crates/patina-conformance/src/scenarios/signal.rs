@@ -1,8 +1,10 @@
+pub mod abort;
 pub mod altstack;
 pub mod basic;
 pub mod block;
 pub mod core_term;
 pub mod default;
+pub mod describe;
 pub mod eintr;
 pub mod handler_flags;
 pub mod mask;

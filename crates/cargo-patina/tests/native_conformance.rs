@@ -1798,6 +1798,11 @@ fn sched_priority() {
 }
 
 #[test]
+fn signal_abort() {
+    conform("signal/abort");
+}
+
+#[test]
 fn signal_altstack() {
     conform("signal/altstack");
 }
@@ -1820,6 +1825,11 @@ fn signal_core_term() {
 #[test]
 fn signal_default() {
     conform("signal/default");
+}
+
+#[test]
+fn signal_describe() {
+    conform("signal/describe");
 }
 
 #[test]
