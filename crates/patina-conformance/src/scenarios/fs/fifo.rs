@@ -3,7 +3,7 @@
 //! 0)`): a FIFO whose permissions are the mode under the umask, relative to
 //! the working directory or a directory descriptor (`0666` under a `027`
 //! umask is `0640`); opened non-blocking it
-//! reads with no writer and refuses a writer with no reader (ENXIO). An
+//! reads with no writer (fs/paths refuses a writer with no reader). An
 //! existing name is EEXIST, a missing parent ENOENT, a path through a file
 //! ENOTDIR, a closed directory descriptor EBADF, a file descriptor as the
 //! directory ENOTDIR.
@@ -97,10 +97,6 @@ pub fn run(p: &Probe) {
     p.check("a non-blocking reader opens with no writer", reader >= 0);
     p.check("and reads nothing", reader >= 0 && p.read(reader, 8).0 == 0);
     p.close(reader);
-    p.check(
-        "a non-blocking writer with no reader is ENXIO",
-        i64::from(p.openat(AT_FDCWD, &fifo, O_WRONLY | O_NONBLOCK, 0)) == neg(ENXIO),
-    );
     p.close(fd);
     p.close(dir);
 }

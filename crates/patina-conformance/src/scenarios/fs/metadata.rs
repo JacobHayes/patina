@@ -1,6 +1,6 @@
 //! fs/metadata — fstat / newfstatat / statx (plus the identity constants they
-//! report): kinds, permission bits, link counts, sizes, inode identity, the
-//! AT_* flag vocabulary, and timestamp ordering.
+//! report): kinds, permission bits, link counts, sizes, inode identity, and
+//! the AT_* flag vocabulary (timestamps are fs/times).
 
 use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
 use crate::compare::{Difference, Failure, Observed};
@@ -19,8 +19,6 @@ pub fn run(p: &Probe) {
 
     let uid = p.getuid();
     let gid = p.getgid();
-    let pid = p.getpid();
-    p.check("pid is positive", pid > 0);
 
     let fd = p.openat(AT_FDCWD, &file, O_RDWR | O_CREAT | O_EXCL, 0o640);
     p.require("create f", fd >= 0);
@@ -43,10 +41,6 @@ pub fn run(p: &Probe) {
     let (_, after) = p.fstat(fd);
     let after = after.expect("fstat after write");
     p.check("size follows the write", after.size == 5);
-    p.check(
-        "mtime does not go backwards on write",
-        after.mtime_ns >= st.mtime_ns,
-    );
     p.check("inode identity is stable", after.ino == st.ino);
 
     let (r, by_path) = p.newfstatat(AT_FDCWD, &file, 0);
@@ -121,10 +115,6 @@ pub fn run(p: &Probe) {
     let (_, linked) = p.fstat(fd);
     let linked = linked.expect("fstat after link");
     p.check("a hard link bumps nlink to 2", linked.nlink == 2);
-    p.check(
-        "ctime does not go backwards on link",
-        linked.ctime_ns >= after.ctime_ns,
-    );
 
     let (r, sx, mask) = p.statx(AT_FDCWD, &file, 0, STATX_BASIC_STATS);
     p.check(
@@ -137,11 +127,6 @@ pub fn run(p: &Probe) {
     p.check(
         "statx fills every basic field",
         mask & STATX_BASIC_STATS == STATX_BASIC_STATS,
-    );
-    let (r, _, mask) = p.statx(AT_FDCWD, &file, 0, STATX_BTIME);
-    p.check(
-        "statx can report a birth time",
-        r == 0 && mask & STATX_BTIME != 0,
     );
     let (r, sx, _) = p.statx(fd, "", AT_EMPTY_PATH, STATX_ALL);
     p.check(
@@ -180,7 +165,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_fstat,
         Syscall::N_newfstatat,
         Syscall::N_statx,
-        Syscall::N_getpid,
         Syscall::N_getuid,
         Syscall::N_getgid,
         Syscall::N_openat,
@@ -194,7 +178,6 @@ pub const SCENARIO: Scenario = Scenario {
         "fstat",
         "fstatat",
         "statx",
-        "getpid",
         "getuid",
         "getgid",
         "openat",
@@ -209,10 +192,10 @@ pub const SCENARIO: Scenario = Scenario {
         vehicles: Vehicle::ALL,
         what: "allocation accounting: STATX_BLOCKS is absent because allocation extents are not modeled; length-derived blocks would lie after KEEP_SIZE or PUNCH_HOLE",
         failure: Failure::Differs(&[
-            Difference::field(50, "statx", "fields.mask", Observed::Int(1023)),
-            Difference::field(55, "statx", "fields.mask", Observed::Int(3071)),
-            Difference::field(57, "statx", "fields.mask", Observed::Int(1023)),
-            Difference::check(52, "statx fills every basic field"),
+            Difference::field(46, "statx", "fields.mask", Observed::Int(1023)),
+            Difference::field(49, "statx", "fields.mask", Observed::Int(3071)),
+            Difference::field(51, "statx", "fields.mask", Observed::Int(1023)),
+            Difference::check(48, "statx fills every basic field"),
         ]),
     }],
     ..DEFAULTS

@@ -107,27 +107,6 @@ fn at_the_cursor(p: &Probe, root: &str) {
         p.lseek(fd, 0, SEEK_END) == 0,
     );
 
-    let on_file = p.openat(AT_FDCWD, &file, O_RDONLY | O_DIRECTORY, 0);
-    p.check(
-        "O_DIRECTORY on a file is ENOTDIR",
-        i64::from(on_file) == neg(ENOTDIR),
-    );
-    let through = p.openat(AT_FDCWD, &format!("{file}/x"), O_RDONLY, 0);
-    p.check(
-        "a component through a file is ENOTDIR",
-        i64::from(through) == neg(ENOTDIR),
-    );
-    let trailing = p.openat(AT_FDCWD, &format!("{file}/"), O_RDONLY, 0);
-    p.check(
-        "a trailing slash on a file is ENOTDIR",
-        i64::from(trailing) == neg(ENOTDIR),
-    );
-    // An unexpected success is closed unobserved so the descriptor ordinals
-    // downstream stay aligned with the native run.
-    if trailing >= 0 {
-        p.rec.quiet(|| p.close(trailing));
-    }
-
     let dir = p.openat(AT_FDCWD, root, O_RDONLY | O_DIRECTORY, 0);
     p.require("directory open", dir >= 0);
     p.check(
@@ -158,11 +137,6 @@ fn at_the_cursor(p: &Probe, root: &str) {
         "a dirfd that is not open is EBADF",
         i64::from(closed_dirfd) == neg(EBADF),
     );
-    let empty = p.openat(AT_FDCWD, "", O_RDONLY, 0);
-    p.check("an empty path is ENOENT", i64::from(empty) == neg(ENOENT));
-    if empty >= 0 {
-        p.rec.quiet(|| p.close(empty));
-    }
 
     p.check("close succeeds", p.close(fd) == 0);
     p.check("a second close is EBADF", p.close(fd) == neg(EBADF));
@@ -173,10 +147,6 @@ fn at_the_cursor(p: &Probe, root: &str) {
     p.check(
         "lseek on a closed descriptor is EBADF",
         p.lseek(fd, 0, SEEK_SET) == neg(EBADF),
-    );
-    p.check(
-        "close of a never-open descriptor is EBADF",
-        p.close(4000) == neg(EBADF),
     );
     let reused = p.openat(AT_FDCWD, &file, O_RDONLY, 0);
     p.check("the lowest free descriptor number is reused", reused == fd);

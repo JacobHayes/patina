@@ -50,7 +50,8 @@ pub fn run(p: &Probe) {
         "creation stamps atime, mtime and ctime at one instant",
         created.atime_ns == created.mtime_ns && created.mtime_ns == created.ctime_ns,
     );
-    let (r, sx, _) = p.statx(fd, "", AT_EMPTY_PATH, STATX_BASIC_STATS | STATX_BTIME);
+    // Only the type and the birth time: fs/metadata owns the basic-stats mask.
+    let (r, sx, _) = p.statx(fd, "", AT_EMPTY_PATH, STATX_TYPE | STATX_BTIME);
     p.check(
         "statx reports a birth time equal to the creation ctime",
         r == 0
@@ -560,33 +561,18 @@ pub const SCENARIO: Scenario = Scenario {
         "unlinkat",
         "symlinkat",
     ],
-    gaps: &[
-        // Seq 3 precedes every vehicle's first directory open, so the gap
-        // shows through every vehicle on every architecture.
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "allocation accounting: STATX_BLOCKS is absent because allocation extents are not modeled; length-derived blocks would lie after KEEP_SIZE or PUNCH_HOLE",
-            failure: Failure::Differs(&[Difference::field(
-                3,
-                "statx",
-                "fields.mask",
-                Observed::Int(3071),
-            )]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: Vehicle::ALL,
-            what: "signed/wide filesystem timestamps: the unsigned-nanosecond ABI refuses out-of-range seconds with EINVAL; Linux accepts them and clamps to its filesystem range (checked conversion, never wrap)",
-            failure: Failure::Differs(&[
-                Difference::field(190, "utimensat", "errno", Observed::Str("EINVAL")),
-                Difference::field(190, "utimensat", "ret", Observed::Int(-1)),
-                Difference::field(193, "utimes", "errno", Observed::Str("EINVAL")),
-                Difference::field(193, "utimes", "ret", Observed::Int(-1)),
-                Difference::field(196, "utime", "errno", Observed::Str("EINVAL")),
-                Difference::field(196, "utime", "ret", Observed::Int(-1)),
-            ]),
-        },
-    ],
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Fs),
+        vehicles: Vehicle::ALL,
+        what: "signed/wide filesystem timestamps: the unsigned-nanosecond ABI refuses out-of-range seconds with EINVAL; Linux accepts them and clamps to its filesystem range (checked conversion, never wrap)",
+        failure: Failure::Differs(&[
+            Difference::field(190, "utimensat", "errno", Observed::Str("EINVAL")),
+            Difference::field(190, "utimensat", "ret", Observed::Int(-1)),
+            Difference::field(193, "utimes", "errno", Observed::Str("EINVAL")),
+            Difference::field(193, "utimes", "ret", Observed::Int(-1)),
+            Difference::field(196, "utime", "errno", Observed::Str("EINVAL")),
+            Difference::field(196, "utime", "ret", Observed::Int(-1)),
+        ]),
+    }],
     ..DEFAULTS
 };

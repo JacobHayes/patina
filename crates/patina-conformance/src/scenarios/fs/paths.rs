@@ -222,10 +222,6 @@ pub fn run(p: &Probe) {
         "newfstatat through a file is ENOTDIR",
         p.newfstatat(AT_FDCWD, "rel.txt/x", 0).0 == neg(ENOTDIR),
     );
-    p.check(
-        "mkdirat under a file is ENOTDIR",
-        p.mkdirat(AT_FDCWD, "rel.txt/x", 0o755) == neg(ENOTDIR),
-    );
     let fd = p.openat(AT_FDCWD, "rel.txt/", O_RDONLY, 0);
     p.check(
         "a trailing slash on a file is ENOTDIR",

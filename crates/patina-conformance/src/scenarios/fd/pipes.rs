@@ -61,11 +61,6 @@ pub fn run(p: &Probe) {
         "F_SETFD FD_CLOEXEC on the original",
         p.fcntl(rd, F_SETFD, i64::from(FD_CLOEXEC)) == 0,
     );
-    let d2 = p.dup(rd) as i32;
-    p.check(
-        "dup does not copy FD_CLOEXEC (descriptor flag)",
-        d2 >= 0 && p.fcntl(d2, F_GETFD, 0) == 0,
-    );
     let high = p.fcntl(rd, F_DUPFD, 20);
     p.check("F_DUPFD honors the minimum", high >= 20);
     let high_cloexec = p.fcntl(rd, F_DUPFD_CLOEXEC, 30);
@@ -89,10 +84,6 @@ pub fn run(p: &Probe) {
         p.dup(4000) == neg(EBADF),
     );
     p.check(
-        "fcntl on a closed descriptor is EBADF",
-        p.fcntl(4000, F_GETFL, 0) == neg(EBADF),
-    );
-    p.check(
         "an unknown fcntl command is EINVAL",
         p.fcntl(rd, 9999, 0) == neg(EINVAL),
     );
@@ -102,7 +93,7 @@ pub fn run(p: &Probe) {
         "read after the last writer closed is EOF",
         p.read(rd, 8).0 == 0,
     );
-    for f in [rd, d, d2, high as i32, high_cloexec as i32] {
+    for f in [rd, d, high as i32, high_cloexec as i32] {
         p.close(f);
     }
 
@@ -171,23 +162,10 @@ pub fn run(p: &Probe) {
         p.close(f);
     }
 
-    // A duplicated endpoint keeps its side alive until the LAST alias
-    // closes, not until the original descriptor closes (native ABI pin:
-    // native_abi::pipe_aliases_keep_channels_alive, also run on arm64 and macOS).
-    let (rc, ends) = p.pipe2(O_NONBLOCK);
-    p.require("alias lifetime pipe", rc == 0);
-    let [rd, wr] = ends;
-    let writer_alias = p.dup(wr) as i32;
-    p.require("duplicate writer", writer_alias >= 0);
-    p.check("close original writer", p.close(wr) == 0);
-    p.check("writer alias prevents EOF", p.read(rd, 1).0 == neg(EAGAIN));
-    p.check("write through alias", p.write(writer_alias, b"a") == 1);
-    let (n, bytes) = p.read(rd, 1);
-    p.check("read alias payload", n == 1 && bytes == b"a");
-    p.check("close last writer", p.close(writer_alias) == 0);
-    p.check("last writer produces EOF", p.read(rd, 1).0 == 0);
-    p.close(rd);
-
+    // A duplicated read end keeps the pipe's reading side alive until the
+    // LAST alias closes, not until the original descriptor closes (native ABI
+    // pin: native_abi::pipe_aliases_keep_channels_alive, also run on arm64 and
+    // macOS; fd/table holds the writing side).
     let (rc, ends) = p.pipe2(O_NONBLOCK);
     p.require("reader alias lifetime pipe", rc == 0);
     let [rd, wr] = ends;
@@ -217,14 +195,10 @@ pub fn run(p: &Probe) {
 
     // Linux 5.19 dropped LOCK_MAND and answers 0 to it before the
     // descriptor is resolved (fs/locks.c flock), so even a closed number
-    // succeeds; without it a closed number is EBADF.
+    // succeeds; without it a closed number is EBADF (checked above).
     p.check(
         "flock LOCK_MAND is 0 even on a closed descriptor",
         p.flock(4000, LOCK_MAND) == 0,
-    );
-    p.check(
-        "without LOCK_MAND a closed descriptor is EBADF",
-        p.flock(4000, LOCK_EX | LOCK_NB) == neg(EBADF),
     );
 
     // ---- pipe(2) -----------------------------------------------------------
