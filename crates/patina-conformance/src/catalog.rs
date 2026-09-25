@@ -544,6 +544,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &sys::sysfs::SCENARIO,
     &sys::sysinfo::SCENARIO,
     &sys::uname::SCENARIO,
+    &thread::cond::SCENARIO,
     &thread::exit::SCENARIO,
     &thread::futex::SCENARIO,
     &thread::lifecycle::SCENARIO,

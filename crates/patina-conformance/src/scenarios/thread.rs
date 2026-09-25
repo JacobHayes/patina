@@ -1,3 +1,4 @@
+pub mod cond;
 pub mod exit;
 pub mod futex;
 pub mod lifecycle;

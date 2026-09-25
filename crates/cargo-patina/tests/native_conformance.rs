@@ -1950,6 +1950,11 @@ fn sys_uname() {
 }
 
 #[test]
+fn thread_cond() {
+    conform("thread/cond");
+}
+
+#[test]
 fn thread_exit() {
     conform("thread/exit");
 }
