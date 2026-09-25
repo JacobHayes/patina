@@ -556,7 +556,7 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             // glibc's `mq_*`, `pkey_*`, `remap_file_pages`, `pidfd_open`,
             // `process_madvise`) or that glibc does not wrap at all
             // (`membarrier`, `memfd_secret`, `map_shadow_stack`, the NUMA
-            // rows libnuma wraps, `mseal`): importing such a wrapper would
+            // rows libnuma wraps): importing such a wrapper would
             // make the pre-run import audit refuse the whole probe binary, so
             // the libc spelling is glibc's own `syscall(2)` until the shim
             // defines it. A scenario made only of such rows runs through
@@ -595,14 +595,12 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_get_mempolicy
             | Syscall::N_migrate_pages
             | Syscall::N_move_pages
-            | Syscall::N_set_mempolicy_home_node
-            | Syscall::N_mseal => syscall_door(row, a),
+            | Syscall::N_set_mempolicy_home_node => syscall_door(row, a),
             // No glibc wrapper: the futex word, the signal rows (glibc's
             // wrappers take its own struct layouts), tkill/tgkill, the thread
             // and process-lifecycle rows (`_exit(2)` is not interposed, so its
             // import would be refused), faccessat2 (glibc's faccessat emulates
-            // the flags over it), removed numbers, and numbers past the
-            // virtual ABI level.
+            // the flags over it) and removed numbers.
             Syscall::N_futex
             | Syscall::N_rt_sigaction
             | Syscall::N_rt_sigprocmask
@@ -627,8 +625,7 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_exit_group
             | Syscall::N_faccessat2
             | Syscall::N_nfsservctl
-            | Syscall::N_lookup_dcookie
-            | Syscall::N_fchroot => syscall_door(row, a),
+            | Syscall::N_lookup_dcookie => syscall_door(row, a),
             #[cfg(target_arch = "x86_64")]
             Syscall::N_signalfd
             | Syscall::N_fork
@@ -645,51 +642,28 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_query_module
             | Syscall::N_get_kernel_syms
             | Syscall::N_uselib => syscall_door(row, a),
-            // Rows with no glibc wrapper at all (openat2, cachestat, the rows
-            // past the virtual ABI level; fchmodat2, whose flags glibc's
-            // fchmodat emulates over it), and rows whose glibc wrapper the
-            // shim does not define (a symbol row that is `Absent`, or none):
-            // the probe binary importing such a wrapper would be refused whole
-            // by the pre-run import audit, so until the shim defines it the
-            // libc spelling is glibc's own `syscall(2)`, and the symbol stays
-            // in the coverage report.
+            // fchmodat2, whose flags glibc's fchmodat emulates over it, and
+            // rows whose glibc wrapper the shim does not define and no
+            // scenario reaches through `WRAPPERS` (a symbol row that is
+            // `Absent`, or none): the probe binary importing such a wrapper
+            // would be refused whole by the pre-run import audit, so until the
+            // shim defines it the libc spelling is glibc's own `syscall(2)`,
+            // and the symbol stays in the coverage report.
             Syscall::N_fchmodat2
-            | Syscall::N_openat2
-            | Syscall::N_cachestat
-            | Syscall::N_setxattrat
-            | Syscall::N_getxattrat
-            | Syscall::N_listxattrat
-            | Syscall::N_removexattrat
-            | Syscall::N_file_getattr
-            | Syscall::N_file_setattr
             | Syscall::N_sync
             | Syscall::N_syncfs
             | Syscall::N_sync_file_range
-            | Syscall::N_readahead
-            | Syscall::N_fadvise64
             | Syscall::N_preadv2
             | Syscall::N_pwritev2
-            | Syscall::N_copy_file_range
-            | Syscall::N_sendfile
-            | Syscall::N_splice
-            | Syscall::N_tee
-            | Syscall::N_vmsplice
-            | Syscall::N_setxattr
             | Syscall::N_lsetxattr
             | Syscall::N_fsetxattr
-            | Syscall::N_getxattr
             | Syscall::N_lgetxattr
-            | Syscall::N_fgetxattr
-            | Syscall::N_listxattr
             | Syscall::N_llistxattr
             | Syscall::N_flistxattr
-            | Syscall::N_removexattr
             | Syscall::N_lremovexattr
             | Syscall::N_fremovexattr
             | Syscall::N_inotify_init1
-            | Syscall::N_inotify_add_watch
-            | Syscall::N_inotify_rm_watch
-            | Syscall::N_name_to_handle_at => syscall_door(row, a),
+            | Syscall::N_inotify_add_watch => syscall_door(row, a),
             // The time, identity, scheduling and limit rows whose glibc
             // symbol the shim defines: the libc spelling is that wrapper
             // (`setuid`/`setgid`/`setgroups`/`setsid`/`setpgid` are the
@@ -775,12 +749,9 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             #[cfg(target_arch = "x86_64")]
             Syscall::N_alarm | Syscall::N_getpgrp | Syscall::N_sysfs => syscall_door(row, a),
             // Legacy rows glibc has no wrapper for (`getdents`; `ustat`, whose
-            // wrapper glibc 2.28 dropped) or whose wrapper the shim does not
-            // define (`inotify_init`).
+            // wrapper glibc 2.28 dropped).
             #[cfg(target_arch = "x86_64")]
-            Syscall::N_getdents | Syscall::N_ustat | Syscall::N_inotify_init => {
-                syscall_door(row, a)
-            }
+            Syscall::N_getdents | Syscall::N_ustat => syscall_door(row, a),
             // `chroot` is the shim's own definition (a deny-trap).
             Syscall::N_chroot => chroot(a[0] as *const c_char) as i64,
             // Privileged rows glibc has no wrapper for, in scenarios whose
