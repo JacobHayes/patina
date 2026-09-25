@@ -405,6 +405,10 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         entry: Entry::Symbol("tkill"),
         reason: "glibc exports no tkill (only tgkill, since 2.30), so a native oracle can neither import nor dlsym it; the shim's definition serves guests that declare it themselves. The tkill row is covered through syscall(2) and the raw instruction by signal/basic",
     },
+    Exclusion {
+        entry: Entry::Symbol("res_init"),
+        reason: "glibc exports no res_init (resolv.h defines it as __res_init, the name glibc 2.39 exports), so a native oracle can neither import nor dlsym it; the shim's definition serves guests that declare the name themselves. __res_init is covered by sys/nss",
+    },
 ];
 
 pub const SCENARIOS: &[&Scenario] = &[
@@ -541,6 +545,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &sys::keys::SCENARIO,
     &sys::landlock::SCENARIO,
     &sys::lsm::SCENARIO,
+    &sys::nss::SCENARIO,
     &sys::perf::SCENARIO,
     &sys::personality::SCENARIO,
     &sys::quota::SCENARIO,

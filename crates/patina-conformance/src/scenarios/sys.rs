@@ -6,6 +6,7 @@ pub mod ioport;
 pub mod keys;
 pub mod landlock;
 pub mod lsm;
+pub mod nss;
 pub mod perf;
 pub mod personality;
 pub mod quota;

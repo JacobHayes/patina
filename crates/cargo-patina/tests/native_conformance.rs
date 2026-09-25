@@ -1962,6 +1962,11 @@ fn sys_lsm() {
 }
 
 #[test]
+fn sys_nss() {
+    conform("sys/nss");
+}
+
+#[test]
 fn sys_perf() {
     conform("sys/perf");
 }
