@@ -395,6 +395,9 @@ pub enum Entry {
     Symbol(&'static str),
 }
 
+/// Why zstd's tracing hooks have no scenario.
+const ZSTD_TRACE_HOOK: &str = "no native definition (a third-party weak hook): one of zstd's weak tracing hooks, which the shim defines as no-ops (begin answers 0, which disables tracing per zstd_trace.h; end is inert; c/posix/core.c) so a guest linking zstd's static library imports nothing for them. zstd calls them, never the guest, and neither glibc nor the host defines them, so there is no native oracle and no row they serve";
+
 /// Registry entries excluded from conformance coverage, with their reasons.
 pub const EXCLUSIONS: &[Exclusion] = &[
     Exclusion {
@@ -412,6 +415,22 @@ pub const EXCLUSIONS: &[Exclusion] = &[
     Exclusion {
         entry: Entry::Symbol("posix_spawn_file_actions_addchdir"),
         reason: "glibc 2.39 exports no posix_spawn_file_actions_addchdir (the POSIX.1-2024 name; it has only the _np spelling), so a native oracle can neither import nor dlsym it; the shim's deny-trap serves guests that declare the name themselves. posix_spawn_file_actions_addchdir_np is covered by proc/spawn",
+    },
+    Exclusion {
+        entry: Entry::Symbol("ZSTD_trace_compress_begin"),
+        reason: ZSTD_TRACE_HOOK,
+    },
+    Exclusion {
+        entry: Entry::Symbol("ZSTD_trace_compress_end"),
+        reason: ZSTD_TRACE_HOOK,
+    },
+    Exclusion {
+        entry: Entry::Symbol("ZSTD_trace_decompress_begin"),
+        reason: ZSTD_TRACE_HOOK,
+    },
+    Exclusion {
+        entry: Entry::Symbol("ZSTD_trace_decompress_end"),
+        reason: ZSTD_TRACE_HOOK,
     },
     Exclusion {
         entry: Entry::Symbol("__libc_start_main"),
