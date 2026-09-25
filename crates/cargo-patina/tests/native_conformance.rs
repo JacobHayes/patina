@@ -2077,6 +2077,11 @@ fn thread_futex() {
 }
 
 #[test]
+fn thread_futex2() {
+    conform("thread/futex2");
+}
+
+#[test]
 fn thread_lifecycle() {
     conform("thread/lifecycle");
 }

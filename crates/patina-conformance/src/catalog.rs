@@ -592,6 +592,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &thread::cond::SCENARIO,
     &thread::exit::SCENARIO,
     &thread::futex::SCENARIO,
+    &thread::futex2::SCENARIO,
     &thread::lifecycle::SCENARIO,
     &thread::main_exit::SCENARIO,
     &thread::mutex::SCENARIO,

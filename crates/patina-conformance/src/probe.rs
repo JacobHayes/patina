@@ -2560,6 +2560,20 @@ impl Probe {
         result
     }
 
+    /// `row` issued with `args` the scenario built (pointers to its own
+    /// structures among them) and recorded under `named`: descriptive values
+    /// the scenario chooses, never an address, so the event compares across
+    /// runs.
+    pub fn observed(&self, row: Syscall, args: Args, named: &[(&str, Value)]) -> i64 {
+        let result = self.call(row, args);
+        let mut builder = self.event(row, result);
+        for (name, value) in named {
+            builder = builder.arg(name, value.clone());
+        }
+        builder.emit();
+        result
+    }
+
     /// A row past the virtual ABI level, issued with plain integer arguments
     /// recorded verbatim (NULL pointers as 0): what is under test is the
     /// number's absence, so nothing is interpreted.

@@ -1,6 +1,7 @@
 pub mod cond;
 pub mod exit;
 pub mod futex;
+pub mod futex2;
 pub mod lifecycle;
 pub mod main_exit;
 pub mod mutex;
