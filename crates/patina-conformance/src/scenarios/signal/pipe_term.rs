@@ -37,12 +37,12 @@ pub fn run(p: &Probe) {
     p.close(pair[1]);
     p.check(
         "MSG_NOSIGNAL send to a closed peer is EPIPE",
-        p.sendto(pair[0], b"x", MSG_NOSIGNAL, None) == neg(EPIPE),
+        p.send_to(pair[0], b"x", MSG_NOSIGNAL, None) == neg(EPIPE),
     );
     p.check("MSG_NOSIGNAL suppressed SIGPIPE", support::count() == 1);
     p.check(
         "a plain send to a closed peer is EPIPE",
-        p.sendto(pair[0], b"x", 0, None) == neg(EPIPE),
+        p.send_to(pair[0], b"x", 0, None) == neg(EPIPE),
     );
     p.check("the plain send raised SIGPIPE", support::count() == 2);
     p.close(pair[0]);
@@ -51,7 +51,7 @@ pub fn run(p: &Probe) {
     p.require("tcp socket", s >= 0);
     p.check(
         "MSG_NOSIGNAL send on an unconnected TCP socket is EPIPE",
-        p.sendto(s, b"x", MSG_NOSIGNAL, None) == neg(EPIPE),
+        p.send_to(s, b"x", MSG_NOSIGNAL, None) == neg(EPIPE),
     );
     p.check(
         "MSG_NOSIGNAL suppressed SIGPIPE on TCP",

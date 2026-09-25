@@ -31,7 +31,7 @@
 //! returns (scenarios/net.rs, "Loopback delivery").
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
-use crate::probe::{Control, Probe, RecvSpec, SockAddr, neg};
+use crate::probe::{Control, OptionShown, Probe, RecvSpec, SockAddr, neg};
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
@@ -42,6 +42,7 @@ const IPV6_2292PKTINFO: i32 = 2;
 const IPV6_2292PKTOPTIONS: i32 = 6;
 const IPV6_2292HOPLIMIT: i32 = 8;
 
+/// An int's bytes, as an option or a control message carries them.
 fn int(value: i32) -> Vec<u8> {
     value.to_ne_bytes().to_vec()
 }
@@ -110,11 +111,11 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "IP_RECVTOS",
-        p.setsockopt_int(r, IPPROTO_IP, IP_RECVTOS, 1) == 0,
+        p.setsockopt_bytes(r, IPPROTO_IP, IP_RECVTOS, &int(1), 4, "1") == 0,
     );
     p.check(
         "IP_PKTINFO",
-        p.setsockopt_int(r, IPPROTO_IP, IP_PKTINFO, 1) == 0,
+        p.setsockopt_bytes(r, IPPROTO_IP, IP_PKTINFO, &int(1), 4, "1") == 0,
     );
     let tos = |value: Vec<u8>| Control::Protocol(vec![(IPPROTO_IP, IP_TOS, value)]);
     p.check(
@@ -154,11 +155,11 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "the IP_TOS socket option",
-        p.setsockopt_int(s, IPPROTO_IP, IP_TOS, 0x10) == 0,
+        p.setsockopt_bytes(s, IPPROTO_IP, IP_TOS, &int(0x10), 4, "16") == 0,
     );
     p.check(
         "reads back",
-        p.getsockopt_int(s, IPPROTO_IP, IP_TOS) == (0, 0x10),
+        p.getsockopt_bytes(s, IPPROTO_IP, IP_TOS, 4, OptionShown::Exact) == (0, int(0x10)),
     );
     p.check(
         "a plain send",
@@ -294,7 +295,7 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "the UDP_SEGMENT socket option",
-        p.setsockopt_int(s, IPPROTO_UDP, UDP_SEGMENT, 5) == 0,
+        p.setsockopt_bytes(s, IPPROTO_UDP, UDP_SEGMENT, &int(5), 4, "5") == 0,
     );
     p.check(
         "cuts a plain send",
@@ -303,7 +304,7 @@ pub fn run(p: &Probe) {
     p.check("into 5, 5 and 2", drain(p, r) == [5, 5, 2]);
     p.check(
         "a UDP_SEGMENT option past 65535 is EINVAL",
-        p.setsockopt_int(s, IPPROTO_UDP, UDP_SEGMENT, 65536) == neg(EINVAL),
+        p.setsockopt_bytes(s, IPPROTO_UDP, UDP_SEGMENT, &int(65536), 4, "65536") == neg(EINVAL),
     );
 
     // ---- IPv6 ----
@@ -325,11 +326,11 @@ pub fn run(p: &Probe) {
     p.require("an IPv6 sender", s6 >= 0);
     p.check(
         "IPV6_RECVTCLASS",
-        p.setsockopt_int(r6, IPPROTO_IPV6, IPV6_RECVTCLASS, 1) == 0,
+        p.setsockopt_bytes(r6, IPPROTO_IPV6, IPV6_RECVTCLASS, &int(1), 4, "1") == 0,
     );
     p.check(
         "IPV6_RECVPKTINFO",
-        p.setsockopt_int(r6, IPPROTO_IPV6, IPV6_RECVPKTINFO, 1) == 0,
+        p.setsockopt_bytes(r6, IPPROTO_IPV6, IPV6_RECVPKTINFO, &int(1), 4, "1") == 0,
     );
     let tclass = |value: i32| Control::Protocol(vec![(IPPROTO_IPV6, IPV6_TCLASS, int(value))]);
     p.check(
@@ -392,7 +393,7 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "and IPv4's packet information on the dual-stack receiver",
-        p.setsockopt_int(r6, IPPROTO_IP, IP_PKTINFO, 1) == 0,
+        p.setsockopt_bytes(r6, IPPROTO_IP, IP_PKTINFO, &int(1), 4, "1") == 0,
     );
     let s4 = p.socket(AF_INET, SOCK_DGRAM, 0);
     p.require("an IPv4 sender", s4 >= 0);

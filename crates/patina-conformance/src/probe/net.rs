@@ -1,10 +1,10 @@
-//! The network rows past the IPv4 core of `probe.rs`: socket addresses of
-//! every family a scenario uses ([`SockAddr`]: IPv4, IPv6, AF_UNIX path,
-//! abstract and unnamed, AF_NETLINK), the message rows (`sendmsg`/`recvmsg`
-//! with ancillary data, `sendmmsg`/`recvmmsg`), socket options beyond one
-//! int, the interface ioctls and lookups, netlink requests, and the readiness
-//! rows over sockets (`poll`, `select`, `pselect6`, `epoll_create`,
-//! `epoll_pwait`, `epoll_pwait2`, `eventfd`).
+//! The network rows: sockets and their socket addresses of every family a
+//! scenario uses ([`SockAddr`]: IPv4, IPv6, AF_UNIX path, abstract and
+//! unnamed, AF_NETLINK), the message rows (`sendmsg`/`recvmsg` with
+//! ancillary data, `sendmmsg`/`recvmmsg`), socket options, the interface
+//! ioctls and lookups, netlink requests, and the readiness rows over sockets
+//! (`poll`, `select`, `pselect6`, `epoll_create`, `epoll_pwait`,
+//! `epoll_pwait2`, `eventfd`).
 //!
 //! Host-dependent values are recorded by relation, never by value: ports,
 //! netlink port ids and AF_UNIX autobind names as [`Norm::Relative`] labels;
@@ -654,6 +654,38 @@ impl Probe {
             return neg(libc::ENOSYS);
         }
         vehicle.call(row, args)
+    }
+
+    // ---- sockets -----------------------------------------------------------
+
+    pub fn socket(&self, domain: i32, kind: i32, protocol: i32) -> i32 {
+        let result = self.call(
+            Syscall::N_socket,
+            [domain as i64, kind as i64, protocol as i64, 0, 0, 0],
+        );
+        self.event(Syscall::N_socket, result)
+            .arg("domain", domain)
+            .arg("type", kind)
+            .arg("protocol", protocol)
+            .norm("ret", Norm::Relative("fd"))
+            .emit();
+        result as i32
+    }
+
+    pub fn listen(&self, fd: i32, backlog: i32) -> i64 {
+        let result = self.call(Syscall::N_listen, [fd as i64, backlog as i64, 0, 0, 0, 0]);
+        let builder = self.event(Syscall::N_listen, result);
+        self.fd_arg(builder, "fd", fd)
+            .arg("backlog", backlog)
+            .emit();
+        result
+    }
+
+    pub fn shutdown(&self, fd: i32, how: i32) -> i64 {
+        let result = self.call(Syscall::N_shutdown, [fd as i64, how as i64, 0, 0, 0, 0]);
+        let builder = self.event(Syscall::N_shutdown, result);
+        self.fd_arg(builder, "fd", fd).arg("how", how).emit();
+        result
     }
 
     // ---- addresses ---------------------------------------------------------

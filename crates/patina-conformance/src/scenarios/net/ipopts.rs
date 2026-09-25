@@ -30,6 +30,7 @@
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{OptionShown, Probe, neg};
+use crate::scenarios::net::int;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -38,13 +39,25 @@ const IPV6_DONTFRAG: i32 = 62;
 const PMTUDISC_WANT: i32 = 1;
 const PMTUDISC_OMIT: i32 = 5;
 
+/// Set an `int` option.
+fn set(p: &Probe, fd: i32, level: i32, name: i32, value: i32) -> i64 {
+    p.setsockopt_bytes(fd, level, name, &int(value), 4, &value.to_string())
+}
+
+/// Read an `int` option: the call's answer and the value.
+fn get(p: &Probe, fd: i32, level: i32, name: i32) -> (i64, i32) {
+    let (r, bytes) = p.getsockopt_bytes(fd, level, name, 4, OptionShown::Exact);
+    let value = bytes.try_into().map_or(0, i32::from_ne_bytes);
+    (r, value)
+}
+
 /// Set an `int` option and read it back.
 fn set_get(p: &Probe, fd: i32, level: i32, name: i32, value: i32, what: &str) -> i32 {
     p.check(
         &format!("set {what} {value}"),
-        p.setsockopt_int(fd, level, name, value) == 0,
+        set(p, fd, level, name, value) == 0,
     );
-    let (r, got) = p.getsockopt_int(fd, level, name);
+    let (r, got) = get(p, fd, level, name);
     p.require(&format!("read {what} back"), r == 0);
     got
 }
@@ -55,7 +68,7 @@ pub fn run(p: &Probe) {
     p.require("a UDP socket", u >= 0);
     p.check(
         "IP_TTL reads the default 64 until set",
-        p.getsockopt_int(u, IPPROTO_IP, IP_TTL) == (0, 64),
+        get(p, u, IPPROTO_IP, IP_TTL) == (0, 64),
     );
     p.check(
         "IP_TTL reads back what was set",
@@ -65,10 +78,7 @@ pub fn run(p: &Probe) {
         "IP_TTL as a single byte",
         p.setsockopt_bytes(u, IPPROTO_IP, IP_TTL, &[9], 1, "9") == 0,
     );
-    p.check(
-        "reads back",
-        p.getsockopt_int(u, IPPROTO_IP, IP_TTL) == (0, 9),
-    );
+    p.check("reads back", get(p, u, IPPROTO_IP, IP_TTL) == (0, 9));
     p.check(
         "IP_TTL -1 restores the default",
         set_get(p, u, IPPROTO_IP, IP_TTL, -1, "IP_TTL") == 64,
@@ -76,7 +86,7 @@ pub fn run(p: &Probe) {
     for value in [0, 256, -2] {
         p.check(
             &format!("IP_TTL {value} is EINVAL"),
-            p.setsockopt_int(u, IPPROTO_IP, IP_TTL, value) == neg(EINVAL),
+            set(p, u, IPPROTO_IP, IP_TTL, value) == neg(EINVAL),
         );
     }
     p.check(
@@ -98,7 +108,7 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "IP_MTU_DISCOVER reads IP_PMTUDISC_WANT until set",
-        p.getsockopt_int(u, IPPROTO_IP, IP_MTU_DISCOVER) == (0, PMTUDISC_WANT),
+        get(p, u, IPPROTO_IP, IP_MTU_DISCOVER) == (0, PMTUDISC_WANT),
     );
     p.check(
         "reads back IP_PMTUDISC_OMIT",
@@ -114,13 +124,13 @@ pub fn run(p: &Probe) {
     for value in [PMTUDISC_OMIT + 1, -1] {
         p.check(
             &format!("IP_MTU_DISCOVER {value} is EINVAL"),
-            p.setsockopt_int(u, IPPROTO_IP, IP_MTU_DISCOVER, value) == neg(EINVAL),
+            set(p, u, IPPROTO_IP, IP_MTU_DISCOVER, value) == neg(EINVAL),
         );
     }
     for (name, what) in [(IP_RECVTOS, "IP_RECVTOS"), (IP_PKTINFO, "IP_PKTINFO")] {
         p.check(
             &format!("{what} reads 0 until set"),
-            p.getsockopt_int(u, IPPROTO_IP, name) == (0, 0),
+            get(p, u, IPPROTO_IP, name) == (0, 0),
         );
         p.check(
             &format!("{what} reads back 1"),
@@ -129,7 +139,7 @@ pub fn run(p: &Probe) {
     }
     p.check(
         "UDP_SEGMENT reads 0 until set",
-        p.getsockopt_int(u, IPPROTO_UDP, UDP_SEGMENT) == (0, 0),
+        get(p, u, IPPROTO_UDP, UDP_SEGMENT) == (0, 0),
     );
     p.check(
         "UDP_SEGMENT reads back what was set",
@@ -151,7 +161,7 @@ pub fn run(p: &Probe) {
     p.require("an IPv6 UDP socket", v >= 0);
     p.check(
         "IPV6_TCLASS reads 0 until set",
-        p.getsockopt_int(v, IPPROTO_IPV6, IPV6_TCLASS) == (0, 0),
+        get(p, v, IPPROTO_IPV6, IPV6_TCLASS) == (0, 0),
     );
     p.check(
         "IPV6_TCLASS reads back what was set",
@@ -164,7 +174,7 @@ pub fn run(p: &Probe) {
     for value in [256, -2] {
         p.check(
             &format!("IPV6_TCLASS {value} is EINVAL"),
-            p.setsockopt_int(v, IPPROTO_IPV6, IPV6_TCLASS, value) == neg(EINVAL),
+            set(p, v, IPPROTO_IPV6, IPV6_TCLASS, value) == neg(EINVAL),
         );
     }
     p.check(
@@ -173,7 +183,7 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "IPV6_MTU_DISCOVER reads IPV6_PMTUDISC_WANT until set",
-        p.getsockopt_int(v, IPPROTO_IPV6, IPV6_MTU_DISCOVER) == (0, PMTUDISC_WANT),
+        get(p, v, IPPROTO_IPV6, IPV6_MTU_DISCOVER) == (0, PMTUDISC_WANT),
     );
     p.check(
         "reads back IPV6_PMTUDISC_OMIT",
@@ -188,7 +198,7 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "IPV6_MTU_DISCOVER past IPV6_PMTUDISC_OMIT is EINVAL",
-        p.setsockopt_int(v, IPPROTO_IPV6, IPV6_MTU_DISCOVER, PMTUDISC_OMIT + 1) == neg(EINVAL),
+        set(p, v, IPPROTO_IPV6, IPV6_MTU_DISCOVER, PMTUDISC_OMIT + 1) == neg(EINVAL),
     );
     for (name, what) in [
         (IPV6_RECVTCLASS, "IPV6_RECVTCLASS"),
@@ -196,7 +206,7 @@ pub fn run(p: &Probe) {
     ] {
         p.check(
             &format!("{what} reads 0 until set"),
-            p.getsockopt_int(v, IPPROTO_IPV6, name) == (0, 0),
+            get(p, v, IPPROTO_IPV6, name) == (0, 0),
         );
         p.check(
             &format!("{what} reads back 1"),
@@ -205,7 +215,7 @@ pub fn run(p: &Probe) {
     }
     p.check(
         "IPV6_DONTFRAG reads 0 until set",
-        p.getsockopt_int(v, IPPROTO_IPV6, IPV6_DONTFRAG) == (0, 0),
+        get(p, v, IPPROTO_IPV6, IPV6_DONTFRAG) == (0, 0),
     );
     p.check(
         "IPV6_DONTFRAG 2 reads back 1",
@@ -217,11 +227,11 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "reads back 0",
-        p.getsockopt_int(v, IPPROTO_IPV6, IPV6_DONTFRAG) == (0, 0),
+        get(p, v, IPPROTO_IPV6, IPV6_DONTFRAG) == (0, 0),
     );
     p.check(
         "IPV6_UNICAST_HOPS reads the default 64 until set",
-        p.getsockopt_int(v, IPPROTO_IPV6, IPV6_UNICAST_HOPS) == (0, 64),
+        get(p, v, IPPROTO_IPV6, IPV6_UNICAST_HOPS) == (0, 64),
     );
     p.check(
         "IPV6_UNICAST_HOPS reads back what was set",
@@ -253,7 +263,7 @@ pub fn run(p: &Probe) {
     for value in [256, -2] {
         p.check(
             &format!("IPV6_UNICAST_HOPS {value} is EINVAL"),
-            p.setsockopt_int(v, IPPROTO_IPV6, IPV6_UNICAST_HOPS, value) == neg(EINVAL),
+            set(p, v, IPPROTO_IPV6, IPV6_UNICAST_HOPS, value) == neg(EINVAL),
         );
     }
     p.check(
