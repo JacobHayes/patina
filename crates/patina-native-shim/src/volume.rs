@@ -150,6 +150,8 @@ impl Filesystem {
                 f_bsize: crate::PAGE_SIZE as i64,
                 f_fsid: self.fsid(),
                 f_namelen: NAME_MAX,
+                // `simple_statfs` leaves it unset; `vfs_statfs` fills it in.
+                f_frsize: crate::PAGE_SIZE as i64,
                 f_flags: ST_VALID,
                 ..KernelStatfs::default()
             },

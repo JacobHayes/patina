@@ -8,7 +8,8 @@
 //! on). The kernel's own answers compare exactly: f_namelen is NAME_MAX,
 //! f_flags carries ST_VALID (fs/statfs.c calculate_f_flags) and not
 //! ST_RDONLY; a pipe's descriptor reports PIPEFS_MAGIC and an eventfd's
-//! ANON_INODE_FS_MAGIC; ENOENT, ENOTDIR, ENAMETOOLONG, EBADF for a closed
+//! ANON_INODE_FS_MAGIC, each with f_frsize its f_bsize (vfs_statfs fills the
+//! f_frsize simple_statfs leaves unset); ENOENT, ENOTDIR, ENAMETOOLONG, EBADF for a closed
 //! descriptor. ustat(2) finds the run directory's device (its superblock's
 //! s_dev), is EINVAL for a device with no mounted filesystem — judged before
 //! the buffer — and EFAULT for a NULL buffer. A NULL buffer is EFAULT for
@@ -143,12 +144,20 @@ pub fn run(p: &Probe) {
         "a pipe lives on pipefs",
         r == 0 && pipefs.is_some_and(|st| st.f_type == PIPEFS_MAGIC),
     );
+    p.check(
+        "with a fragment size, its block size (vfs_statfs fills an unset f_frsize)",
+        pipefs.is_some_and(|st| st.f_frsize == st.f_bsize && st.f_frsize > 0),
+    );
     let event = p.eventfd2(0, EFD_CLOEXEC);
     p.require("eventfd2", event >= 0);
     let (r, anon) = p.fstatfs(event, false);
     p.check(
         "an eventfd lives on the anonymous-inode filesystem",
         r == 0 && anon.is_some_and(|st| st.f_type == ANON_INODE_FS_MAGIC),
+    );
+    p.check(
+        "with a fragment size too",
+        anon.is_some_and(|st| st.f_frsize == st.f_bsize && st.f_frsize > 0),
     );
     p.check(
         "fstatfs of a closed descriptor is EBADF",
