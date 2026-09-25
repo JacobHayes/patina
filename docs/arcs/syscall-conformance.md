@@ -466,7 +466,22 @@ forwards into the same dispatcher instead of its two-number allowlist.
   reboot magic, an empty module image, a filesystem type that does not
   exist) and never restrict or kill the probe (no successful
   `landlock_restrict_self` or seccomp install; no namespace is created or
-  joined).
+  joined). **Landed** (capability-gated and host-configuration rows): the
+  credential (`identity::Credential`), the registry's `capabilities` field,
+  the checks in `src/sud/privileged/`, the declared configuration
+  (`patina_dst_syscalls::KERNEL_CONFIG`) and the shim's glibc wrappers
+  (`c/posix/privileged.c`, `chroot` included); `fs/mount`, `fs/mount_api`,
+  `fs/open_tree`, `sys/admin`, `sys/quota`, `sys/ioport`, `sys/root`,
+  `sys/perf`, `sys/bpf` and `proc/ptrace` run without a gap. **Open**:
+  `proc/namespaces` stops where it opens `/proc/self/ns/uts`, which the
+  virtual filesystem lacks, before `setns`'s namespace checks; named fatals
+  where the model ends: unsharing filesystem state, descriptors or the
+  semaphore undo list from other threads, the user-mode `userfaultfd`
+  descriptor (`mem/userfaultfd`), non-array BPF map types, detaching a BPF
+  program from its attach point; and the rows still `Trap(privileged)`:
+  keyrings (`sys/keys`), Landlock (`sys/landlock`), the LSM attribute calls
+  (`sys/lsm`), `seccomp` (`proc/seccomp`), `statmount`/`listmount`
+  (`fs/mount_query`) and fanotify.
 
 ## 7. Why the exclusions stay excluded
 
