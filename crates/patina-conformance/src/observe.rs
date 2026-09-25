@@ -6,11 +6,8 @@
 //! named on failure), `fields` are the struct members the scenario pulled out,
 //! and `norm` maps a field path (`ret`, `errno`, `args.fd`, `fields.ino`) to
 //! the typed normalization the comparison applies before it compares the
-//! native and patina streams (see [`Norm`]). `not_compared`, present only on
-//! a data event (never a check) recorded under a kernel floor this kernel does not share with the
-//! virtual ABI level (`Probe::since`), says why the comparison skips it.
-//! Asserts and panics go to stderr, so a stream stays machine-readable even
-//! when the scenario dies.
+//! native and patina streams (see [`Norm`]). Asserts and panics go to stderr,
+//! so a stream stays machine-readable even when the scenario dies.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,11 +22,6 @@ pub struct Event {
     pub errno: Option<String>,
     pub fields: BTreeMap<String, Value>,
     pub norm: BTreeMap<String, String>,
-    /// Why the comparison skips the event: it observes a behaviour that began
-    /// in a kernel release this kernel and the virtual ABI level are on
-    /// different sides of, so this answer is no oracle for the other's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub not_compared: Option<String>,
 }
 
 /// The op of a semantic property the scenario asserts (`ret` 1 or 0, the

@@ -3,8 +3,8 @@
 //! `no_new_privs` or `CAP_SYS_ADMIN`:
 //!
 //! * `landlock_create_ruleset` with `LANDLOCK_CREATE_RULESET_VERSION`, a
-//!   NULL attribute and size 0 answers the ABI version (4 from Linux 6.7,
-//!   network rules; 5 and more from 6.10); any other flag, or the version
+//!   NULL attribute and size 0 answers the ABI version, 4 (Linux 6.7's
+//!   network rules; 6.10 moves it to 5); any other flag, or the version
 //!   flag with an attribute size, is `EINVAL`;
 //! * a ruleset's attribute (`copy_min_struct_from_user`): unreadable
 //!   `EFAULT` before its size is looked at, then a size short of
@@ -76,16 +76,9 @@ pub fn run(p: &Probe) {
             [attr as i64, size, flags, 0, 0, 0],
         )
     };
-    p.since(
-        "6.10",
-        "Landlock ABI 5 (LANDLOCK_ACCESS_FS_IOCTL_DEV)",
-        |newer| {
-            let version = create(std::ptr::null(), 0, LANDLOCK_CREATE_RULESET_VERSION);
-            p.check(
-                "the version query answers the kernel's ABI version (4 for 6.8)",
-                if newer { version >= 5 } else { version == 4 },
-            );
-        },
+    p.check(
+        "the version query answers the ABI version 4",
+        create(std::ptr::null(), 0, LANDLOCK_CREATE_RULESET_VERSION) == 4,
     );
     let handled = |fs: u64| RulesetAttr {
         handled_access_fs: fs,

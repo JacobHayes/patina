@@ -6,10 +6,10 @@
 //! * an unknown `flags` bit is `EINVAL` first; the request is then read
 //!   (`copy_mnt_id_req`): unreadable `EFAULT`, a `size` past a page `E2BIG`,
 //!   short of `MNT_ID_REQ_SIZE_VER0` `EINVAL`, a nonzero `spare` `EINVAL`
-//!   (from 6.17 that word is `mnt_ns_fd`: a descriptor not open is `EBADF`);
-//! * a mount id no mount has is `ENOENT` (unique ids start past 2^32, from
-//!   6.11 past 2^31, which also refuses an id at or below that offset as
-//!   `EINVAL`: the id asked for is far past both);
+//!   (6.17 makes that word `mnt_ns_fd`, a descriptor not open `EBADF`);
+//! * a mount id no mount has is `ENOENT` (unique ids start past 2^32; 6.11
+//!   moves that to 2^31 and refuses an id at or below it as `EINVAL`: the id
+//!   asked for is far past both);
 //! * `statmount` of the root's mount (its id from `statx`'s
 //!   `STATX_MNT_ID_UNIQUE`) answers the requested mask, that id and the
 //!   mount point `/`; a buffer with no room for a requested string is
@@ -123,16 +123,9 @@ pub fn run(p: &Probe) {
         spare: CLOSED,
         ..request(NO_MOUNT, 0)
     };
-    p.since(
-        "6.17",
-        "the request's spare word names a mount namespace descriptor (mnt_ns_fd)",
-        |named| {
-            let r = statmount(Some(&spare), buf, whole, 0);
-            p.check(
-                "a nonzero spare is EINVAL (from 6.17 a mount namespace descriptor not open: EBADF)",
-                r == neg(if named { EBADF } else { EINVAL }),
-            );
-        },
+    p.check(
+        "a nonzero spare is EINVAL",
+        statmount(Some(&spare), buf, whole, 0) == neg(EINVAL),
     );
     p.check(
         "a mount id no mount has is ENOENT",
@@ -158,16 +151,7 @@ pub fn run(p: &Probe) {
         "statx names the root's unique mount id",
         r == 0 && stx.stx_mask & STATX_MNT_ID_UNIQUE != 0,
     );
-    p.since(
-        "6.11",
-        "unique mount ids start past 2^31 (MNT_UNIQUE_ID_OFFSET)",
-        |lowered| {
-            p.check(
-                "a unique mount id is past the first one (2^32, from 6.11 2^31)",
-                root > if lowered { 1 << 31 } else { 1 << 32 },
-            );
-        },
-    );
+    p.check("a unique mount id is past 2^32", root > 1 << 32);
 
     let wanted = STATMOUNT_MNT_BASIC | STATMOUNT_MNT_POINT;
     let r = statmount(Some(&request(root, wanted)), buf, whole, 0);

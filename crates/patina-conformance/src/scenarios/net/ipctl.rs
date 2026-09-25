@@ -14,10 +14,9 @@
 //! * `IP_TTL` is taken; an unknown IP-level type is `EINVAL`, another
 //!   family's level is skipped;
 //! * `UDP_SEGMENT` cuts a send into datagrams of that size, the last shorter;
-//!   more than 128 segments is `EINVAL`, another size `EINVAL` (128 is 6.8's
-//!   `UDP_MAX_SEGMENTS`: a kernel-version-sensitive leg);
-//! * over IPv6, `IPV6_TCLASS` (-1 is the byte 255 on 6.8: a
-//!   kernel-version-sensitive leg) and `IPV6_PKTINFO` with
+//!   128 segments arrive as 128 datagrams and more is `EINVAL` (6.8's
+//!   `UDP_MAX_SEGMENTS`), another size `EINVAL`;
+//! * over IPv6, `IPV6_TCLASS` (-1 is the byte 255) and `IPV6_PKTINFO` with
 //!   `IPV6_RECVTCLASS`/`IPV6_RECVPKTINFO`; a source that is no local
 //!   address is `EINVAL`, an unknown interface `ENODEV`; an IPv4 datagram on
 //!   a dual-stack socket reports both families' packet information;
@@ -38,16 +37,6 @@ use patina_dst_syscalls::Syscall;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
 const UDP_SEGMENT: i32 = 103;
-/// Kernel-version-sensitive answers, pinned from the oldest kernel they were
-/// verified on (a ratchet a later ABI bump moves).
-const MAX_SEGMENTS: (&str, &str) = (
-    "6.8",
-    "UDP_MAX_SEGMENTS is 128 (include/linux/udp.h, 1 << 7)",
-);
-const TCLASS_MINUS_ONE: (&str, &str) = (
-    "6.8",
-    "an IPV6_TCLASS control message of -1 is sent as the byte 255 (ipcm6_cookie.tclass truncated to u8)",
-);
 // The RFC 2292 numbers (include/uapi/linux/in6.h).
 const IPV6_2292PKTINFO: i32 = 2;
 const IPV6_2292PKTOPTIONS: i32 = 6;
@@ -283,19 +272,12 @@ pub fn run(p: &Probe) {
         p.sendmsg(s, &[&payload[..8]], Some(&to), &segment(10), 0) == 8,
     );
     p.check("one", drain(p, r) == [8]);
-    let (release, why) = MAX_SEGMENTS;
-    p.since(release, why, |has| {
-        let sent = p.sendmsg(s, &[&payload[..128]], Some(&to), &segment(1), 0);
-        let queued = drain(p, r).len();
-        p.check(
-            "128 segments arrive as 128 datagrams (since 6.8; a kernel before its bump may refuse them)",
-            if has {
-                sent == 128 && queued == 128
-            } else {
-                (sent == 128 && queued == 128) || (sent == neg(EINVAL) && queued == 0)
-            },
-        );
-    });
+    let sent = p.sendmsg(s, &[&payload[..128]], Some(&to), &segment(1), 0);
+    let queued = drain(p, r).len();
+    p.check(
+        "128 segments (UDP_MAX_SEGMENTS) arrive as 128 datagrams",
+        sent == 128 && queued == 128,
+    );
     p.check(
         "129 segments is EINVAL",
         p.sendmsg(s, &[&payload[..129]], Some(&to), &segment(1), 0) == neg(EINVAL),
@@ -363,19 +345,15 @@ pub fn run(p: &Probe) {
                 (IPPROTO_IPV6, IPV6_TCLASS, int(0x2e)),
             ],
     );
-    let (release, why) = TCLASS_MINUS_ONE;
-    p.since(release, why, |has| {
-        p.check(
-            "IPV6_TCLASS -1",
-            p.sendmsg(s6, &[b"u"], Some(&to6), &tclass(-1), 0) == 1,
-        );
-        let got = p.recvmsg(r6, WITH_CONTROL);
-        p.check(
-            "is the byte 255 (since 6.8; an older kernel may send the socket's class)",
-            got.result == 1
-                && (!has || got.protocol.get(1) == Some(&(IPPROTO_IPV6, IPV6_TCLASS, int(255)))),
-        );
-    });
+    p.check(
+        "IPV6_TCLASS -1",
+        p.sendmsg(s6, &[b"u"], Some(&to6), &tclass(-1), 0) == 1,
+    );
+    let got = p.recvmsg(r6, WITH_CONTROL);
+    p.check(
+        "is the byte 255",
+        got.result == 1 && got.protocol.get(1) == Some(&(IPPROTO_IPV6, IPV6_TCLASS, int(255))),
+    );
     p.check(
         "a traffic class past 255 is EINVAL",
         p.sendmsg(s6, &[b"v"], Some(&to6), &tclass(256), 0) == neg(EINVAL),

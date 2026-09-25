@@ -40,15 +40,7 @@ the harness sweeps every name a run derives from its directory after each
 native run (`owned::sweep`). A host kernel that implements an
 asserted-absent row is still an oracle: the native run answers that row with
 the declared ENOSYS (the probe binary's declared-absent mode) and patina is
-judged against it. A behaviour known only from some kernel release on (the
-release it began in, or simply the kernel it was verified on) is a per-check
-floor (`Probe::since(release, why, |has| …)`): the check
-asserts this kernel's own answer, and its events compare strictly where the
-host kernel and the virtual ABI level are on the same side of that release;
-elsewhere its data events, and any gap difference declared on them, are
-reported `NOT COMPARED` with the reason, never passed, while its checks still
-compare (both sides assert their own kernel's answer, so a wrong patina
-answer fails on every host). `EXCLUSIONS` lists registry
+judged against it. `EXCLUSIONS` lists registry
 entries deliberately left without a scenario. `mise run conformance` runs the tests;
 `mise run conformance:coverage` lists every registry entry of this target that
 neither a scenario nor an exclusion accounts for, and exits 1 while any remain.

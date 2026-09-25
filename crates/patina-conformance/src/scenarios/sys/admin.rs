@@ -17,9 +17,8 @@
 //!   (kernel/module/main.c) need `CAP_SYS_MODULE` before their image, flags,
 //!   descriptor or name;
 //! * `pivot_root` (fs/namespace.c) needs `CAP_SYS_ADMIN` in the mount
-//!   namespace's user namespace (`may_mount`) before its paths are read;
-//!   from 7.0 (`path_pivot_root`) the paths are looked up first, so NULL is
-//!   `EFAULT`.
+//!   namespace's user namespace (`may_mount`) before its paths are read
+//!   (7.0's `path_pivot_root` looks them up first, so NULL is `EFAULT`).
 //!
 //! Every call is one root would be refused too, so nothing is switched,
 //! swapped, rebooted, loaded or unloaded: a missing accounting file
@@ -134,16 +133,9 @@ pub fn run(p: &Probe) {
     ] {
         p.check(label, p.call_observed(row, args) == neg(errno));
     }
-    p.since(
-        "7.0",
-        "pivot_root looks its paths up before may_mount (path_pivot_root)",
-        |looked_up| {
-            p.check(
-                "pivot_root of NULL paths is EPERM (no CAP_SYS_ADMIN) before they are read (from 7.0 EFAULT)",
-                p.call_observed(Syscall::N_pivot_root, [0; 6])
-                    == neg(if looked_up { EFAULT } else { EPERM }),
-            );
-        },
+    p.check(
+        "pivot_root of NULL paths is EPERM (no CAP_SYS_ADMIN) before they are read",
+        p.call_observed(Syscall::N_pivot_root, [0; 6]) == neg(EPERM),
     );
 }
 

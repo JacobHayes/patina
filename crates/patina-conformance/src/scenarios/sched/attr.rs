@@ -5,8 +5,8 @@
 //! * `sched_getattr` answers a normal task's policy, flags, nice and
 //!   priority; it writes `min(size, the kernel's size)` bytes and says so in
 //!   `size` (48 for the first version, 56 — the kernel's own — for anything
-//!   larger); the rest of a larger buffer is left alone up to Linux 6.12
-//!   and zeroed from 6.13 (a check floored at 6.13, `ZEROES_TAIL`); a size
+//!   larger); the rest of a larger buffer is left alone (6.13 zeroes it:
+//!   commit 112cca098a70, past the pinned 6.8); a size
 //!   under the first version, above a page, a flag, or a negative pid is
 //!   `EINVAL`, a pid no process has `ESRCH`;
 //! * `sched_setattr` takes a size of 0 as the first version; a size under it
@@ -28,16 +28,6 @@ use patina_dst_syscalls::Syscall;
 
 /// A `sched_flags` bit past `SCHED_FLAG_ALL`.
 const UNKNOWN_SCHED_FLAG: u64 = 1 << 20;
-
-/// `sched_getattr` zeroes a larger buffer past the kernel's struct from Linux
-/// 6.13, commit 112cca098a70 ("sched_getattr: port to copy_struct_to_user",
-/// merged through vfs-6.13.usercopy). Up to 6.12 those bytes were left alone
-/// (`sched_attr_copy_to_user` copied `min(usize, ksize)` bytes only); a
-/// smaller buffer is written up to its size on both.
-const ZEROES_TAIL: (&str, &str) = (
-    "6.13",
-    "sched_getattr zeroes a larger buffer past the kernel's struct (commit 112cca098a70)",
-);
 
 /// `sched_getattr(0, buf, 128, 0)` into a 128-byte buffer filled with
 /// `0xa5`: the attribute and what became of the 72 bytes past the kernel's
@@ -105,15 +95,11 @@ pub fn run(p: &Probe) {
         "the first version's size writes 48 bytes and says so",
         r == 0 && attr.size == SCHED_ATTR_SIZE_VER0,
     );
-    let (release, why) = ZEROES_TAIL;
-    let (r, attr) = p.since(release, why, |zeroes| {
-        let (r, attr, tail) = getattr_larger(p);
-        p.check(
-            "the bytes past the kernel's struct are zeroed (from 6.13; left alone before)",
-            r == 0 && tail == if zeroes { "zeroed" } else { "untouched" },
-        );
-        (r, attr)
-    });
+    let (r, attr, tail) = getattr_larger(p);
+    p.check(
+        "the bytes past the kernel's struct are left alone",
+        r == 0 && tail == "untouched",
+    );
     p.check(
         "a larger size writes the kernel's 56 and says so",
         r == 0 && attr.size == SCHED_ATTR_SIZE_VER1,

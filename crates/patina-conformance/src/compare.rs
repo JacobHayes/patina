@@ -344,13 +344,6 @@ pub enum Difference {
 }
 
 impl Difference {
-    /// The event the difference is declared on.
-    pub const fn seq(&self) -> u64 {
-        match self {
-            Difference::Field { seq, .. } | Difference::Check { seq, .. } => *seq,
-        }
-    }
-
     pub const fn check(seq: u64, label: &'static str) -> Self {
         Difference::Check { seq, label }
     }
@@ -483,22 +476,11 @@ fn alternative(native: &Event, path: &str, native_value: &Value, patina_value: &
     among(native_value) && among(patina_value)
 }
 
-/// Why the comparison skips an aligned pair of events: either side was
-/// recorded under a kernel floor its kernel does not share with the virtual
-/// ABI level (`Probe::since`).
-fn not_compared<'a>(native: &'a Event, patina: &'a Event) -> Option<&'a str> {
-    native
-        .not_compared
-        .as_deref()
-        .or(patina.not_compared.as_deref())
-}
-
-/// The field differences between two aligned, normalized event prefixes;
-/// with `floors`, pairs [`not_compared`] names are skipped.
-fn found(native: &[Event], patina: &[Event], floors: bool) -> Vec<Found> {
+/// The field differences between two aligned, normalized event prefixes.
+fn found(native: &[Event], patina: &[Event]) -> Vec<Found> {
     let mut out = Vec::new();
     for (native, patina) in native.iter().zip(patina) {
-        if native == patina || (floors && not_compared(native, patina).is_some()) {
+        if native == patina {
             continue;
         }
         if native.op == CHECK_OP
@@ -576,34 +558,19 @@ pub struct Expected<'a> {
     pub failure: &'a Failure,
 }
 
-/// What a comparison that held saw: one line per gap confirmed, and one per
-/// event (or declared difference) it did not compare, with why.
+/// What a comparison that held saw: one line per gap confirmed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Verdict {
     pub confirmed: Vec<String>,
-    pub not_compared: Vec<String>,
 }
 
 /// Compare a patina observation with its native oracle under the applicable
 /// gaps. At most one gap stops the run; the differing gaps then name every
-/// difference before the stop. An event recorded under a kernel floor the
-/// native kernel and the virtual ABI level are on different sides of is not
-/// compared, and neither is a declared difference on it: both are listed in
-/// the verdict, never counted as a pass or as a stale gap. `Err` carries every
-/// failure.
+/// difference before the stop. `Err` carries every failure.
 pub fn judge(
     native: &Observation,
     patina: &Observation,
     gaps: &[Expected<'_>],
-) -> Result<Verdict, Vec<String>> {
-    compare(native, patina, gaps, true)
-}
-
-fn compare(
-    native: &Observation,
-    patina: &Observation,
-    gaps: &[Expected<'_>],
-    floors: bool,
 ) -> Result<Verdict, Vec<String>> {
     let native_events = normalize(native.events.clone());
     let patina_events = normalize(patina.events.clone());
@@ -614,7 +581,7 @@ fn compare(
     let compared = match stops.as_slice() {
         [] => {
             if native_events.len() != patina_events.len() {
-                let first = found(&native_events, &patina_events, floors);
+                let first = found(&native_events, &patina_events);
                 failures.push(format!(
                     "event count: native {}, patina {}{}",
                     native_events.len(),
@@ -650,29 +617,14 @@ fn compare(
             )]);
         }
     };
-    let observed = found(compared, &patina_events, floors);
-    let mut skipped = Vec::new();
-    let mut uncompared = BTreeMap::new();
-    if floors {
-        for (native, patina) in compared.iter().zip(&patina_events) {
-            if let Some(reason) = not_compared(native, patina) {
-                skipped.push(format!("seq {} {}: {reason}", native.seq, native.op));
-                uncompared.insert(native.seq, reason);
-            }
-        }
-    }
+    let observed = found(compared, &patina_events);
     for gap in &differs {
         let Failure::Differs(declared) = gap.failure else {
             unreachable!("partitioned above")
         };
         let mut matched = 0;
         for difference in declared.iter() {
-            if let Some(reason) = uncompared.get(&difference.seq()) {
-                skipped.push(format!(
-                    "declared difference {difference:?} ({}): {reason}",
-                    gap.reason
-                ));
-            } else if observed
+            if observed
                 .iter()
                 .any(|found| declared_matches(difference, found))
             {
@@ -684,7 +636,7 @@ fn compare(
                 ));
             }
         }
-        if matched > 0 && matched == declared.len() - skipped_in(declared, &uncompared) {
+        if matched > 0 && matched == declared.len() {
             confirmed.push(format!(
                 "{matched} difference(s) as declared: {}",
                 gap.reason
@@ -701,21 +653,10 @@ fn compare(
         }
     }
     if failures.is_empty() {
-        Ok(Verdict {
-            confirmed,
-            not_compared: skipped,
-        })
+        Ok(Verdict { confirmed })
     } else {
         Err(failures)
     }
-}
-
-/// How many of `declared` fall on events the comparison skipped.
-fn skipped_in(declared: &[Difference], uncompared: &BTreeMap<u64, &str>) -> usize {
-    declared
-        .iter()
-        .filter(|difference| uncompared.contains_key(&difference.seq()))
-        .count()
 }
 
 /// The declared stop's own conditions: the event count, the ending and the
@@ -801,10 +742,9 @@ fn check_stop(
 }
 
 /// Compare two native observations of one scenario through different
-/// vehicles: the host kernel answers every vehicle the same way, its floored
-/// events included (one kernel on both sides).
+/// vehicles: the host kernel answers every vehicle the same way.
 pub fn vehicles_agree(reference: &Observation, other: &Observation) -> Result<(), Vec<String>> {
-    compare(reference, other, &[], false).map(|_| ())
+    judge(reference, other, &[]).map(|_| ())
 }
 
 #[cfg(test)]
@@ -821,7 +761,6 @@ mod tests {
             errno: None,
             fields: BTreeMap::new(),
             norm: BTreeMap::new(),
-            not_compared: None,
         }
     }
 
@@ -903,7 +842,6 @@ mod tests {
     fn a_declared_difference_is_confirmed() {
         let verdict = judge(&native(), &patina_enosys(), &[gap(&ENOSYS_GAP)]).unwrap();
         assert_eq!(verdict.confirmed.len(), 1);
-        assert!(verdict.not_compared.is_empty());
     }
 
     #[test]
@@ -1150,71 +1088,6 @@ mod tests {
         assert!(judge(&masked(0x7ff, 0x7ff), &masked(0x3ff, 0x7ff), &[]).is_err());
     }
 
-    /// A stream whose newfstatat observes a behaviour this host and the
-    /// virtual ABI level are on different sides of: the data event is
-    /// marked, the check beside it never is (`Recorder::not_compared`).
-    fn floored(stream: Observation) -> Observation {
-        let mut stream = stream;
-        stream.events[1].not_compared = Some("planted floor".to_string());
-        stream
-    }
-
-    /// The patina side of a straddled scope: its data event answers the
-    /// other kernel's way, its check (asserting its own kernel's answer)
-    /// holds.
-    fn patina_other_kernel() -> Observation {
-        let mut patina = native();
-        patina.events[1].errno = Some("ENOSYS".to_string());
-        patina
-    }
-
-    const FIELD_GAP: Failure = Failure::Differs(&[Difference::Field {
-        seq: 1,
-        op: "newfstatat",
-        path: "errno",
-        patina: Observed::Str("ENOSYS"),
-    }]);
-
-    #[test]
-    fn a_floored_event_is_not_compared_and_says_so() {
-        let verdict = judge(&floored(native()), &patina_other_kernel(), &[]).unwrap();
-        assert_eq!(verdict.not_compared.len(), 1, "{verdict:?}");
-        assert!(verdict.confirmed.is_empty());
-    }
-
-    /// Each side's check asserts its own kernel's answer, so a false patina
-    /// check beside a true native one is a wrong patina answer on any host.
-    #[test]
-    fn a_false_patina_check_in_a_straddled_scope_fails() {
-        let failures = judge(&floored(native()), &patina_enosys(), &[]).unwrap_err();
-        assert!(
-            failures
-                .iter()
-                .any(|line| line.contains("an unknown flag is EINVAL")),
-            "{failures:?}"
-        );
-    }
-
-    #[test]
-    fn a_declared_difference_on_a_floored_event_is_not_compared_not_stale() {
-        let verdict = judge(&floored(native()), &native(), &[gap(&FIELD_GAP)]).unwrap();
-        assert_eq!(verdict.not_compared.len(), 2, "{verdict:?}");
-        assert!(verdict.confirmed.is_empty());
-    }
-
-    #[test]
-    fn an_unfloored_event_still_compares_beside_a_floored_one() {
-        let mut patina = patina_other_kernel();
-        patina.events[0].ret = Value::from(4);
-        assert!(judge(&floored(native()), &patina, &[]).is_err());
-    }
-
-    /// Two native runs share their kernel: a floored event is compared.
-    #[test]
-    fn vehicles_compare_floored_events() {
-        assert!(vehicles_agree(&floored(native()), &floored(patina_other_kernel())).is_err());
-    }
-
     fn opened(fd: i64, seq: u64) -> Event {
         let mut event = event(seq, "openat", fd);
         event
@@ -1239,7 +1112,7 @@ mod tests {
 
     #[test]
     fn a_gap_pins_the_raw_alternative() {
-        let found = found(&renamed("ENOTDIR").events, &renamed("EEXIST").events, true);
+        let found = found(&renamed("ENOTDIR").events, &renamed("EEXIST").events);
         assert_eq!(
             found,
             [Found::Field {
