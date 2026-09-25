@@ -15,13 +15,9 @@
 //! * the core limit lowers to zero and its hard value is not raised again,
 //!   to a finite value or to infinity (`EPERM`); `prlimit64` reads it back.
 //!
-//! libc only, and through `dlsym`: the registry lists both `Absent` (the
-//! shim does not define them), so the probe binary cannot import them (the
-//! pre-run audit would refuse the whole binary). Under patina `dlsym` finds
-//! neither: the shim's `__wrap_dlsym` routes only its entropy names.
+//! libc only: glibc's two symbols, imported (the shim defines them).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{GetRlimit64, INFINITY, Probe, SetRlimit64, Shown, Who, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -30,19 +26,7 @@ use patina_dst_syscalls::Syscall;
 use super::rlimit::{FD_LIMIT, UNKNOWN_RESOURCE};
 
 pub fn run(p: &Probe) {
-    let get = p.resolve("getrlimit64");
-    let set = p.resolve("setrlimit64");
-    p.require(
-        "the large-file limit symbols resolve",
-        get.is_some() && set.is_some(),
-    );
-    // SAFETY: glibc's definitions, by their documented types.
-    let (get, set) = unsafe {
-        (
-            std::mem::transmute::<*mut c_void, GetRlimit64>(get.unwrap()),
-            std::mem::transmute::<*mut c_void, SetRlimit64>(set.unwrap()),
-        )
-    };
+    let (get, set): (GetRlimit64, SetRlimit64) = (getrlimit64, setrlimit64);
     let nofile = RLIMIT_NOFILE as i32;
     let core = RLIMIT_CORE as i32;
 
@@ -116,28 +100,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_prlimit64,
     ],
     symbols: &["getrlimit64", "setrlimit64", "syscall"],
-    resolves: &["getrlimit64", "setrlimit64"],
     needs: &[Need::Unprivileged],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim defines neither getrlimit64 nor setrlimit64 (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds neither (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the gap lifts only once the shim both defines them and routes them there, or the scenario imports them directly",
-            failure: Failure::Differs(&[
-                Difference::field(0, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(1, "dlsym", "fields.resolved", Observed::Bool(false)),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[Vehicle::Libc],
-            what: "with neither resolved the scenario cannot continue",
-            failure: Failure::Stops {
-                events: 2,
-                ending: Ending::Exit(101),
-                diagnostic: "sys/rlimit64: cannot continue: the large-file limit symbols resolve",
-            },
-        },
-    ],
     ..DEFAULTS
 };

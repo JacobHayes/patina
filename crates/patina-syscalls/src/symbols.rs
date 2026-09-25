@@ -233,13 +233,13 @@ const ROWS: &[SymbolRow] = &[
         "getrlimit",
         Platform::Linux,
         Serves::Syscalls(&["getrlimit", "prlimit64"]),
-        SymbolStatus::Partial,
+        SymbolStatus::Modeled,
     ),
     s(
         "setrlimit",
         Platform::Linux,
         Serves::Syscalls(&["setrlimit", "prlimit64"]),
-        SymbolStatus::Partial,
+        SymbolStatus::Modeled,
     ),
     s(
         "prctl",
@@ -2031,13 +2031,13 @@ const ROWS: &[SymbolRow] = &[
         "getrlimit64",
         Platform::Linux,
         Serves::Syscalls(&["getrlimit", "prlimit64"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "setrlimit64",
         Platform::Linux,
         Serves::Syscalls(&["setrlimit", "prlimit64"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "fallocate64",
@@ -2061,7 +2061,7 @@ const ROWS: &[SymbolRow] = &[
         "posix_fadvise64",
         Platform::Linux,
         Serves::Syscalls(&["fadvise64"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "clock_getres",
@@ -2091,7 +2091,7 @@ const ROWS: &[SymbolRow] = &[
         "posix_fadvise",
         Platform::Linux,
         Serves::Syscalls(&["fadvise64"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "copy_file_range",

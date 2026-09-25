@@ -554,13 +554,15 @@ rename, renameat, renameat2 (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT)
 readv, writev, preadv, pwritev (one iovec decode; preadv2/pwritev2 RWF_* flags on the raw rows)
 ioctl (FIOCLEX, FIONCLEX, FIONBIO, FIONREAD), statfs, fstatfs
 statvfs, fstatvfs, statvfs64, fstatvfs64 (glibc 2.39's conversion of the one statfs description: f_type, f_flag from the mount flags, f_fsid packed high:low)
+posix_fadvise, posix_fadvise64 (the error number returned, errno untouched)
+getrlimit, setrlimit, getrlimit64, setrlimit64 (one definition; a NULL limit asks for and sets nothing)
 socket, bind, connect, send, recv
 clock_gettime, gettimeofday, nanosleep
 getrandom, getentropy, /dev/urandom reads (and `dlsym`-resolved getrandom on Linux)
 pthread_create, pthread_mutex_*, pthread_cond_*
 ```
 
-Linux rows with no interposed wrapper are modeled on the raw-syscall door, which `syscall(2)` reaches too: `openat2` (its `RESOLVE_*` restrictions applied by the one path resolver), the extended-attribute family, `sync`/`syncfs`/`sync_file_range`/`fadvise64`/`readahead`, `copy_file_range`/`sendfile`/`splice`/`tee`/`vmsplice`, `ustat`, `name_to_handle_at` and the legacy `getdents`.
+Linux rows with no interposed wrapper are modeled on the raw-syscall door, which `syscall(2)` reaches too: `openat2` (its `RESOLVE_*` restrictions applied by the one path resolver), the extended-attribute family, `sync`/`syncfs`/`sync_file_range`/`readahead`, `copy_file_range`/`sendfile`/`splice`/`tee`/`vmsplice`, `ustat`, `name_to_handle_at` and the legacy `getdents`.
 
 These symbols delegate to Patina drivers and scheduler operations. Direct syscalls, dynamic loading, and platform-specific APIs are denied unless explicitly supported.
 

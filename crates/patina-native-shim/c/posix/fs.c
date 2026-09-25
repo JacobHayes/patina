@@ -1180,6 +1180,23 @@ int posix_fallocate64(int fd, off64_t offset, off64_t length) {
     if (patina_fallocate(fd, 0, (int64_t)offset, (int64_t)length) < 0) return patina_errno();
     return 0;
 }
+
+/* posix_fadvise/posix_fadvise64: glibc's fadvise64(2) wrappers
+ * (sysdeps/unix/sysv/linux/posix_fadvise64.c), which return the error number
+ * rather than setting errno — errno is left as it was. The advice is a hint,
+ * so the one model (patina_fadvise) only judges it. */
+static int patina_posix_fadvise(int fd, int64_t offset, int64_t length, int advice) {
+    if (patina_fadvise(fd, offset, length, advice) < 0) return patina_errno();
+    return 0;
+}
+
+int posix_fadvise(int fd, off_t offset, off_t length, int advice) {
+    return patina_posix_fadvise(fd, (int64_t)offset, (int64_t)length, advice);
+}
+
+int posix_fadvise64(int fd, off64_t offset, off64_t length, int advice) {
+    return patina_posix_fadvise(fd, (int64_t)offset, (int64_t)length, advice);
+}
 #endif
 
 /*

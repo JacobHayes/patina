@@ -332,7 +332,7 @@ is stated plainly:
    status — `Modeled`, `Partial` (a subset modeled, the rest refuses loudly),
    `Deny(class)` (the deny-traps), `ControlPlane` — and the known ABI spellings
    the shim does NOT define at all carry `Absent` (the fortified
-   `__open64_2`/`__read_chk` aliases, `getrlimit64`, `clock_getres`,
+   `__open64_2`/`__read_chk` aliases, `clock_getres`,
    `copy_file_range`, …), which a guest importing them reaches the host through
    or is audit-refused on. `cargo patina syscalls` prints it, and an object-scan
    gate fails when a symbol is defined without a row or an `Absent` row gains a

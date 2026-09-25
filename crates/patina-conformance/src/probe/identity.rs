@@ -116,10 +116,12 @@ pub enum Shown {
     Relation,
 }
 
-/// glibc's `getrlimit64`, by its documented type.
-pub type GetRlimit64 = unsafe extern "C" fn(libc::c_int, *mut libc::rlimit64) -> libc::c_int;
-/// glibc's `setrlimit64`, by its documented type.
-pub type SetRlimit64 = unsafe extern "C" fn(libc::c_int, *const libc::rlimit64) -> libc::c_int;
+/// glibc's `getrlimit64`, by its declared type.
+pub type GetRlimit64 =
+    unsafe extern "C" fn(libc::__rlimit_resource_t, *mut libc::rlimit64) -> libc::c_int;
+/// glibc's `setrlimit64`, by its declared type.
+pub type SetRlimit64 =
+    unsafe extern "C" fn(libc::__rlimit_resource_t, *const libc::rlimit64) -> libc::c_int;
 
 /// `RLIM_INFINITY` as the kernel ABI spells it.
 pub const INFINITY: u64 = u64::MAX;
@@ -394,8 +396,7 @@ impl Probe {
         result
     }
 
-    /// glibc's `getrlimit64(resource, &limit)` through its definition `f`
-    /// (reached by `dlsym`: the shim does not define it), recorded like
+    /// glibc's `getrlimit64(resource, &limit)` through `f`, recorded like
     /// `getrlimit`; returns `(soft, hard)`.
     pub fn getrlimit64(&self, f: GetRlimit64, resource: i32, shown: Shown) -> (i64, u64, u64) {
         let mut limit = libc::rlimit64 {
@@ -403,7 +404,9 @@ impl Probe {
             rlim_max: u64::MAX - 1,
         };
         // SAFETY: glibc's definition and a live rlimit64.
-        let result = crate::vehicle::fold_errno(unsafe { f(resource, &mut limit) }.into());
+        let result = crate::vehicle::fold_errno(
+            unsafe { f(resource as libc::__rlimit_resource_t, &mut limit) }.into(),
+        );
         let builder = self
             .rec
             .event("getrlimit64", result)
@@ -415,8 +418,9 @@ impl Probe {
     /// `getrlimit64(resource, NULL)` through `f`.
     pub fn getrlimit64_null(&self, f: GetRlimit64, resource: i32) -> i64 {
         // SAFETY: glibc's definition; a NULL limit.
-        let result =
-            crate::vehicle::fold_errno(unsafe { f(resource, std::ptr::null_mut()) }.into());
+        let result = crate::vehicle::fold_errno(
+            unsafe { f(resource as libc::__rlimit_resource_t, std::ptr::null_mut()) }.into(),
+        );
         self.rec
             .event("getrlimit64", result)
             .arg("resource", resource)
@@ -425,8 +429,8 @@ impl Probe {
         result
     }
 
-    /// glibc's `setrlimit64(resource, {soft, hard})` through its definition
-    /// `f` (`None`: a NULL limit), recorded like `setrlimit`.
+    /// glibc's `setrlimit64(resource, {soft, hard})` through `f` (`None`: a
+    /// NULL limit), recorded like `setrlimit`.
     pub fn setrlimit64(&self, f: SetRlimit64, resource: i32, limit: Option<(u64, u64)>) -> i64 {
         let result = Self::set64(f, resource, limit);
         let builder = self
@@ -465,7 +469,9 @@ impl Probe {
             .as_ref()
             .map_or(std::ptr::null(), |limit| limit as *const libc::rlimit64);
         // SAFETY: glibc's definition and a live rlimit64, or NULL.
-        crate::vehicle::fold_errno(unsafe { f(resource, pointer) }.into())
+        crate::vehicle::fold_errno(
+            unsafe { f(resource as libc::__rlimit_resource_t, pointer) }.into(),
+        )
     }
 
     /// `setrlimit(resource, {soft, hard})` where `hard` is the host's own

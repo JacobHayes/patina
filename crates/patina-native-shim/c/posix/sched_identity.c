@@ -220,19 +220,44 @@ static int patina_limit_result(int64_t result) {
     return 0;
 }
 
-int getrlimit(__rlimit_resource_t resource, struct rlimit *rlim) {
+/* glibc issues prlimit64(0, resource, NULL, rlim) for getrlimit and
+ * prlimit64(0, resource, rlim, NULL) for setrlimit, so a NULL limit asks for
+ * nothing and sets nothing: 0 once the resource is known. The plain and the
+ * LFS spellings are one function in glibc on a 64-bit target (rlim_t is
+ * rlim64_t), as here. */
+static int patina_getrlimit(__rlimit_resource_t resource, struct rlimit64 *rlim) {
     struct patina_rlimit limit;
-    int64_t result = patina_prlimit(0, (uint32_t)resource, NULL, &limit);
-    if (result == 0) {
-        rlim->rlim_cur = (rlim_t)limit.cur;
-        rlim->rlim_max = (rlim_t)limit.max;
+    int64_t result = patina_prlimit(0, (uint32_t)resource, NULL, rlim == NULL ? NULL : &limit);
+    if (result == 0 && rlim != NULL) {
+        rlim->rlim_cur = (rlim64_t)limit.cur;
+        rlim->rlim_max = (rlim64_t)limit.max;
     }
     return patina_limit_result(result);
 }
 
-int setrlimit(__rlimit_resource_t resource, const struct rlimit *rlim) {
+static int patina_setrlimit(__rlimit_resource_t resource, const struct rlimit64 *rlim) {
+    if (rlim == NULL) return patina_limit_result(patina_prlimit(0, (uint32_t)resource, NULL, NULL));
     struct patina_rlimit limit = {(uint64_t)rlim->rlim_cur, (uint64_t)rlim->rlim_max};
     return patina_limit_result(patina_prlimit(0, (uint32_t)resource, &limit, NULL));
+}
+
+_Static_assert(sizeof(struct rlimit) == sizeof(struct rlimit64),
+               "rlim_t is rlim64_t on a 64-bit target");
+
+int getrlimit(__rlimit_resource_t resource, struct rlimit *rlim) {
+    return patina_getrlimit(resource, (struct rlimit64 *)rlim);
+}
+
+int setrlimit(__rlimit_resource_t resource, const struct rlimit *rlim) {
+    return patina_setrlimit(resource, (const struct rlimit64 *)rlim);
+}
+
+int getrlimit64(__rlimit_resource_t resource, struct rlimit64 *rlim) {
+    return patina_getrlimit(resource, rlim);
+}
+
+int setrlimit64(__rlimit_resource_t resource, const struct rlimit64 *rlim) {
+    return patina_setrlimit(resource, rlim);
 }
 
 /*
