@@ -1,5 +1,5 @@
-//! thread/cond — glibc's condition variables (nptl pthread_cond_wait.c)
-//! with default attributes (`CLOCK_REALTIME` deadlines):
+//! thread/cond — glibc's condition variables (nptl pthread_cond_wait.c),
+//! by default with `CLOCK_REALTIME` deadlines:
 //!
 //! * `pthread_cond_signal` wakes a waiter and `pthread_cond_broadcast`
 //!   wakes every waiter, each returning 0 with the mutex held again;
@@ -9,7 +9,9 @@
 //!   decades later), with the mutex held again; a deadline already past
 //!   times out at once, and so does a negative one (glibc's futex wait answers `ETIMEDOUT` for a
 //!   negative `tv_sec`); a `tv_nsec` outside `[0, 1e9)` is `EINVAL`, the
-//!   mutex never released.
+//!   mutex never released;
+//! * a condition variable whose attribute names `CLOCK_MONOTONIC`
+//!   (`pthread_condattr_setclock`) judges its deadline on that clock.
 //!
 //! The mutex is error-checking, so its `unlock` succeeding shows the
 //! caller holds it. Workers wait under the usual predicate loop and the
@@ -156,6 +158,64 @@ fn monotonic_ns() -> i64 {
     now.tv_sec * 1_000_000_000 + now.tv_nsec
 }
 
+/// A timed wait on a `CLOCK_MONOTONIC` condition variable, with the
+/// shared mutex, that nobody signals: it ends at its monotonic deadline.
+fn monotonic_timedwait(p: &Probe, shared: &Shared) {
+    // SAFETY: all-zero storage, initialized below.
+    let cond: Box<UnsafeCell<pthread_cond_t>> = Box::new(unsafe { std::mem::zeroed() });
+    // SAFETY: attribute storage of this frame, the box's condition variable.
+    let (set, init) = unsafe {
+        let mut attr: pthread_condattr_t = std::mem::zeroed();
+        pthread_condattr_init(&mut attr);
+        let set = pthread_condattr_setclock(&mut attr, CLOCK_MONOTONIC);
+        let init = pthread_cond_init(cond.get(), &attr);
+        pthread_condattr_destroy(&mut attr);
+        (set, init)
+    };
+    p.check(
+        "pthread_condattr_setclock",
+        record(p, "pthread_condattr_setclock", "monotonic", set) == 0,
+    );
+    p.check(
+        "pthread_cond_init",
+        record(p, "pthread_cond_init", "monotonic", init) == 0,
+    );
+    shared.lock();
+    let deadline = monotonic_ns() + 50_000_000;
+    // SAFETY: initialized objects; the main thread holds the mutex.
+    let error = unsafe {
+        pthread_cond_timedwait(
+            cond.get(),
+            shared.mutex(),
+            &timespec {
+                tv_sec: deadline / 1_000_000_000,
+                tv_nsec: deadline % 1_000_000_000,
+            },
+        )
+    };
+    let after = monotonic_ns();
+    p.check(
+        "an unsignalled timed wait is ETIMEDOUT",
+        record(p, "pthread_cond_timedwait", "monotonic 50ms", error) == neg(ETIMEDOUT),
+    );
+    p.check(
+        "no earlier than its CLOCK_MONOTONIC deadline",
+        after >= deadline,
+    );
+    p.check(
+        "and not far past it",
+        after < deadline + support::PROGRESS_DEADLINE_NS,
+    );
+    shared.unlock_held(p, "monotonic 50ms");
+    p.check(
+        "pthread_cond_destroy",
+        // SAFETY: an initialized condition variable nobody waits on.
+        record(p, "pthread_cond_destroy", "monotonic", unsafe {
+            pthread_cond_destroy(cond.get())
+        }) == 0,
+    );
+}
+
 fn realtime_ns() -> i64 {
     let mut now = timespec {
         tv_sec: 0,
@@ -267,6 +327,8 @@ pub fn run(p: &Probe) {
         elapsed < 50_000_000 + support::PROGRESS_DEADLINE_NS,
     );
     shared.unlock_held(p, "50ms");
+
+    monotonic_timedwait(p, shared);
 
     shared.lock();
     let error = shared.timedwait(timespec {

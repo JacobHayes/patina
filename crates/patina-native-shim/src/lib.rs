@@ -7884,9 +7884,42 @@ mod thread {
         }
     }
 
-    #[derive(Default)]
     struct CondEntry {
         waiters: HostDeque<(TaskId, usize)>,
+        /// The clock its timed waits judge their deadline on: its attribute's
+        /// (`pthread_condattr_setclock`), `CLOCK_REALTIME` by default.
+        clock: ClockKind,
+    }
+
+    impl Default for CondEntry {
+        fn default() -> Self {
+            Self {
+                waiters: HostDeque::default(),
+                clock: ClockKind::Realtime,
+            }
+        }
+    }
+
+    impl CondEntry {
+        /// The clock a `pthread_cond_init` attribute names; no attribute is
+        /// `CLOCK_REALTIME`.
+        ///
+        /// # Safety
+        /// Non-null `attr` must point to an initialized `pthread_condattr_t`.
+        unsafe fn clock_of_attr(attr: *const c_void) -> ClockKind {
+            #[cfg(target_os = "linux")]
+            {
+                // SAFETY: glibc's `struct pthread_condattr` is one `int`,
+                // `value`: bit 0 process-shared, bit 1 the clock
+                // (`CLOCK_MONOTONIC` when set; `pthread_condattr_setclock`
+                // accepts only it and `CLOCK_REALTIME`).
+                if !attr.is_null() && (unsafe { attr.cast::<c_int>().read() } >> 1) & 1 == 1 {
+                    return ClockKind::Monotonic;
+                }
+            }
+            let _ = attr;
+            ClockKind::Realtime
+        }
     }
 
     /// Which side a reader/writer lock favours when both wait
@@ -8388,8 +8421,21 @@ mod thread {
             Ok(())
         }
 
-        fn init_cond(&mut self, key: usize) {
-            self.conds.insert(key, CondEntry::default());
+        fn init_cond(&mut self, key: usize, clock: ClockKind) {
+            self.conds.insert(
+                key,
+                CondEntry {
+                    clock,
+                    ..CondEntry::default()
+                },
+            );
+        }
+
+        /// The clock the condition variable at `key` judges deadlines on.
+        fn cond_clock(&self, key: usize) -> ClockKind {
+            self.conds
+                .get(&key)
+                .map_or(ClockKind::Realtime, |cond| cond.clock)
         }
 
         /// Release `mutex_key` (waking its next waiter) and enqueue `me` on the
@@ -9897,11 +9943,13 @@ mod thread {
     /// # Safety
     /// `cond` must reference a valid `pthread_cond_t`.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_cond_init(cond: *mut c_void, _attr: *const c_void) -> c_int {
+    pub unsafe extern "C" fn patina_cond_init(cond: *mut c_void, attr: *const c_void) -> c_int {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        // SAFETY: a null or initialized attribute, per the pthread contract.
+        let clock = unsafe { CondEntry::clock_of_attr(attr) };
         managed_op!({
             let mut state = lock_state();
-            state.table.init_cond(cond as usize);
+            state.table.init_cond(cond as usize, clock);
             0
         })
     }
@@ -9958,12 +10006,14 @@ mod thread {
     }
 
     /// Timed condition wait. Like [`patina_cond_wait`], but parks with the
-    /// wait's absolute `CLOCK_REALTIME` deadline registered on the virtual-clock
-    /// timer queue. A signal before the deadline returns 0 (the waiter owns the
-    /// mutex, exactly like the untimed path); reaching the deadline re-acquires
-    /// the mutex and returns `ETIMEDOUT`. Whether the wake was a signal or the
-    /// timer is decided by which path removed the waiter — never by comparing
-    /// clocks — so it is deterministic.
+    /// wait's absolute deadline, on the condition's clock, registered on the
+    /// virtual-clock timer queue. A signal before the deadline returns 0 (the
+    /// waiter owns the mutex, exactly like the untimed path); reaching the
+    /// deadline re-acquires the mutex and returns `ETIMEDOUT`. Whether the wake
+    /// was a signal or the timer is decided by which path removed the waiter —
+    /// never by comparing clocks — so it is deterministic. A deadline already
+    /// reached parks nothing: the mutex is released and re-acquired, and the
+    /// wait is `ETIMEDOUT` at once, however busy the other tasks are.
     ///
     /// # Safety
     /// `cond` and `mutex` must reference valid pthread objects the caller owns,
@@ -9991,6 +10041,28 @@ mod thread {
         let me = current_task();
         let mut state = lock_state();
         let mut scheduler = RealScheduler;
+        let clock = state.table.cond_clock(cond_key);
+        let past = with_context_raw(|context| {
+            let due = context.monotonic_deadline(clock, deadline)?;
+            Ok(due <= context.monotonic_now_unrecorded()?)
+        });
+        match past {
+            Ok(false) => {}
+            Ok(true) => {
+                if let Err(error) = state.table.unlock(&mut scheduler, me, mutex_key) {
+                    return error.into_posix();
+                }
+                // SAFETY: a valid `pthread_mutex_t`, per this function's contract.
+                let kind = unsafe { MutexKind::of_static(mutex) };
+                match state.begin_lock(me, mutex_key, kind) {
+                    Ok(Step::Continue) => drop(state),
+                    Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+                    Err(error) => return error.into_posix(),
+                }
+                return ETIMEDOUT;
+            }
+            Err(errno) => return errno,
+        }
         // Release the mutex and enqueue on the condition, exactly as cond_wait.
         if let Err(error) = state
             .table
@@ -10002,7 +10074,7 @@ mod thread {
             me,
             "cond-timedwait",
             Wait::new(BlockClass::Sync, vec![WaiterLoc::Cond(cond_key, mutex_key)]),
-            ClockKind::Realtime,
+            clock,
             deadline,
         ) {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
@@ -14168,7 +14240,7 @@ mod thread {
             table.register(waiter);
             table.register(signaler);
             table.init_mutex(MUTEX, MutexKind::Recursive);
-            table.init_cond(COND);
+            table.init_cond(COND, ClockKind::Realtime);
 
             table.lock(waiter, MUTEX, MutexKind::Recursive).unwrap();
             table.lock(waiter, MUTEX, MutexKind::Recursive).unwrap();
@@ -14424,7 +14496,7 @@ mod thread {
             table.register(waiter);
             table.register(signaler);
             table.init_mutex(MUTEX, MutexKind::Normal);
-            table.init_cond(COND);
+            table.init_cond(COND, ClockKind::Realtime);
 
             // The waiter owns the mutex, then waits on the condition.
             assert!(matches!(
