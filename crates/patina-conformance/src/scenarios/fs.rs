@@ -11,6 +11,14 @@
 //! its last creation. A scenario that removes one earlier holds a descriptor
 //! on it first (`O_PATH` suffices): a removed inode with a live reference
 //! stays allocated.
+//!
+//! Scoped lookups: a `RESOLVE_BENEATH` or `RESOLVE_IN_ROOT` lookup through
+//! `..` answers EAGAIN when any rename or mount on the host races it (v6.8
+//! fs/namei.c `handle_dots`), a transient the caller retries. `Probe::openat2`
+//! retries that answer unrecorded, as a caller does, and records the final
+//! one; a scenario asserts a scoped lookup's settled answer. That is the only
+//! lookup the host fails on a system-wide race: elsewhere the kernel retries
+//! internally (`d_path`, `d_walk`, the ref-walk fallback on -ECHILD).
 
 pub mod cache;
 pub mod chmod;

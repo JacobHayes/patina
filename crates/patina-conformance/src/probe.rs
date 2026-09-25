@@ -45,6 +45,11 @@ pub const SIGSET_BYTES: i64 = 8;
 /// the child and fails.
 pub const CHILD_DEADLINE: Duration = Duration::from_secs(30);
 
+/// How many times [`Probe::openat2`] issues a `RESOLVE_BENEATH` or
+/// `RESOLVE_IN_ROOT` lookup that a system-wide rename or mount raced (EAGAIN)
+/// before it records that answer.
+const SCOPED_LOOKUP_ATTEMPTS: u32 = 64;
+
 /// The kernel's `rt_sigaction` struct on x86_64 (NOT glibc's `struct
 /// sigaction`, whose field order differs): handler, flags, restorer, then the
 /// 8-byte mask. A raw registration needs `SA_RESTORER` with a restorer the
@@ -3609,6 +3614,17 @@ impl Probe {
     /// followed by `trailing` in the next u64 (read by the kernel only when
     /// `size` covers it), in a zeroed page-sized buffer, so any `size` up to a
     /// page is readable memory and a larger one is refused unread.
+    ///
+    /// A lookup scoped by `RESOLVE_BENEATH` or `RESOLVE_IN_ROOT` answers
+    /// EAGAIN when a rename or mount anywhere on the system races one of its
+    /// `..` steps, and openat2(2) tells the caller to retry: v6.8 fs/namei.c
+    /// `handle_dots` returns -EAGAIN under `LOOKUP_IS_SCOPED` when
+    /// `mount_lock` or `rename_lock` moved since `path_init` sampled
+    /// `nd->m_seq`/`nd->r_seq`. Such an answer is retried here, unrecorded,
+    /// up to [`SCOPED_LOOKUP_ATTEMPTS`] times, and only the final one is
+    /// recorded. The retry keys on the scoping bits alone: `RESOLVE_CACHED`'s
+    /// EAGAIN (fs/open.c `build_open_flags`, with O_CREAT/O_TRUNC/O_TMPFILE)
+    /// is an answer, not a race, and an unscoped call is never retried.
     pub fn openat2(
         &self,
         dirfd: i32,
@@ -3623,17 +3639,25 @@ impl Probe {
         buf[1] = how.1;
         buf[2] = how.2;
         buf[3] = trailing;
-        let result = self.call(
-            Syscall::N_openat2,
-            [
-                dirfd as i64,
-                c.as_ptr() as i64,
-                buf.as_ptr() as i64,
-                size as i64,
-                0,
-                0,
-            ],
-        );
+        let scoped = how.2 & (libc::RESOLVE_BENEATH | libc::RESOLVE_IN_ROOT) != 0;
+        let mut attempts = 0;
+        let result = loop {
+            attempts += 1;
+            let result = self.call(
+                Syscall::N_openat2,
+                [
+                    dirfd as i64,
+                    c.as_ptr() as i64,
+                    buf.as_ptr() as i64,
+                    size as i64,
+                    0,
+                    0,
+                ],
+            );
+            if !(scoped && result == neg(libc::EAGAIN) && attempts < SCOPED_LOOKUP_ATTEMPTS) {
+                break result;
+            }
+        };
         let builder = self.event(Syscall::N_openat2, result);
         self.fd_arg(builder, "dirfd", dirfd)
             .arg("path", path)
