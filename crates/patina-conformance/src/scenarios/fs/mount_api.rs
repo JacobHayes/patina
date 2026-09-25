@@ -17,13 +17,10 @@
 //! Every call is one root would be refused too (an unknown flag, a missing
 //! path, no descriptor, or no attributes), so nothing is ever mounted. The
 //! libc vehicle goes through glibc 2.36's wrappers of the same names, which
-//! the shim does not define (registry `Absent`): it reaches them through
-//! `dlsym`.
+//! the shim defines.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{AT_FDCWD, Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::ffi::CString;
@@ -164,24 +161,6 @@ pub const SCENARIO: Scenario = Scenario {
         "openat",
         "close",
     ],
-    resolves: &[
-        "fsopen",
-        "fspick",
-        "fsmount",
-        "move_mount",
-        "mount_setattr",
-        "fsconfig",
-    ],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim defines none of glibc's mount-API wrappers (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds none (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Exit(101),
-            diagnostic: "fs/mount_api: cannot continue: glibc's fsopen resolves",
-        },
-    }],
     ..DEFAULTS
 };

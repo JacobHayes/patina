@@ -30,6 +30,7 @@
 #include "posix/mem.c"
 #include "posix/thread_sync.c"
 #include "posix/signal_process.c"
+#include "posix/privileged.c"
 #include "posix/net.c"
 #include "posix/readiness.c"
 #include "posix/stdio.c"

@@ -273,8 +273,6 @@ pub struct Probe {
     /// such a row, whose own answer is not the oracle for a virtual kernel
     /// that lacks it (`--declared-absent`).
     declared_absent: bool,
-    /// The glibc wrappers the libc vehicle has resolved, by row (addresses).
-    wrappers: std::sync::Mutex<Vec<(Syscall, usize)>>,
 }
 
 /// A forked child a scenario reaps within [`CHILD_DEADLINE`]; dropped
@@ -443,7 +441,6 @@ impl Probe {
             strict,
             dir,
             declared_absent: false,
-            wrappers: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -544,14 +541,6 @@ impl Probe {
         if self.declared_absent && past_virtual_abi(row) {
             return neg(libc::ENOSYS);
         }
-        if self.vehicle == Vehicle::Libc {
-            if let Some(symbol) = crate::vehicle::wrapper(row) {
-                let address = self.wrapper_address(row, symbol);
-                // SAFETY: glibc's definition of the row's wrapper; the
-                // scenario owns every pointer in `args`.
-                return unsafe { crate::vehicle::wrapper_door(row, address, args) };
-            }
-        }
         self.vehicle.call(row, args)
     }
 
@@ -564,29 +553,6 @@ impl Probe {
             Vehicle::Libc => crate::vehicle::fold_errno(libc_door()),
             Vehicle::Syscall => self.call(row, args),
         }
-    }
-
-    /// glibc's wrapper `symbol` for `row`, resolved through `dlsym` at the
-    /// row's first call on the libc vehicle. The lookup is not recorded, so
-    /// the native streams of every vehicle still agree; the shim defines none
-    /// of these wrappers, so under patina it answers NULL and the scenario
-    /// stops here, by name.
-    fn wrapper_address(&self, row: Syscall, symbol: &str) -> *mut libc::c_void {
-        let known = self
-            .wrappers
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(bound, _)| *bound == row)
-            .map(|(_, address)| *address);
-        if let Some(address) = known {
-            return address as *mut libc::c_void;
-        }
-        let address = self.rec.quiet(|| self.resolve(symbol));
-        self.require(&format!("glibc's {symbol} resolves"), address.is_some());
-        let address = address.unwrap();
-        self.wrappers.lock().unwrap().push((row, address as usize));
-        address
     }
 
     fn event(&self, row: Syscall, result: i64) -> EventBuilder<'_> {

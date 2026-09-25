@@ -34,14 +34,11 @@
 //!
 //! The libc vehicle goes through glibc's wrappers (`acct`, `vhangup`,
 //! `swapon`, `swapoff`, `reboot`, `init_module`, `delete_module`,
-//! `pivot_root`), which the shim does not define (registry `Absent`): it
-//! reaches them through `dlsym`. `finit_module` and the `kexec` rows have
-//! no wrapper; glibc's spelling is `syscall(2)`.
+//! `pivot_root`), which the shim defines. `finit_module` and the `kexec`
+//! rows have no wrapper; glibc's spelling is `syscall(2)`.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::ffi::CString;
@@ -166,26 +163,6 @@ pub const SCENARIO: Scenario = Scenario {
         "pivot_root",
         "syscall",
     ],
-    resolves: &[
-        "acct",
-        "vhangup",
-        "swapon",
-        "swapoff",
-        "reboot",
-        "init_module",
-        "delete_module",
-        "pivot_root",
-    ],
     needs: &[Need::Unprivileged, Need::NoControllingTerminal],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim defines none of glibc's administration wrappers (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds none (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Exit(101),
-            diagnostic: "sys/admin: cannot continue: glibc's acct resolves",
-        },
-    }],
     ..DEFAULTS
 };

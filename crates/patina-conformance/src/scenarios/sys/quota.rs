@@ -15,13 +15,11 @@
 //! the filesystem's business (quota operations or `ENOSYS`), so it is not
 //! asserted. `Q_QUOTAOFF` is named only with a path that is no device, which
 //! root is refused too. The libc vehicle goes through glibc's `quotactl`,
-//! which the shim does not define (registry `Absent`): it reaches it through
-//! `dlsym`. `quotactl_fd` has no wrapper; glibc's spelling is `syscall(2)`.
+//! which the shim defines. `quotactl_fd` has no wrapper; glibc's spelling is
+//! `syscall(2)`.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{AT_FDCWD, Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::ffi::CString;
@@ -94,17 +92,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
     ],
     symbols: &["quotactl", "syscall", "openat", "close"],
-    resolves: &["quotactl"],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim does not define glibc's quotactl (registry `Absent`): a guest importing it is refused by the pre-run audit, and `dlsym` does not find it (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-        failure: Failure::Stops {
-            events: 2,
-            ending: Ending::Exit(101),
-            diagnostic: "sys/quota: cannot continue: glibc's quotactl resolves",
-        },
-    }],
     ..DEFAULTS
 };

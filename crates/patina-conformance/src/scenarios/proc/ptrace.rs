@@ -18,13 +18,10 @@
 //! ever named, and `PTRACE_TRACEME` is never asked: it would hand the probe
 //! to the harness as a tracee.
 //!
-//! The libc vehicle goes through glibc's `ptrace`, which the shim does not
-//! define (registry `Absent`): it reaches it through `dlsym`.
+//! The libc vehicle goes through glibc's `ptrace`, which the shim defines.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -81,17 +78,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[Syscall::N_ptrace, Syscall::N_getpid],
     symbols: &["ptrace", "getpid"],
-    resolves: &["ptrace"],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim does not define glibc's ptrace (registry `Absent`): a guest importing it is refused by the pre-run audit, and `dlsym` does not find it (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Exit(101),
-            diagnostic: "proc/ptrace: cannot continue: glibc's ptrace resolves",
-        },
-    }],
     ..DEFAULTS
 };

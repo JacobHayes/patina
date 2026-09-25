@@ -10,13 +10,10 @@
 //! What root would be granted is harmless: `iopl(1)` grants no port (only
 //! level 3 does), and `ioperm` port 0x80 (the POST diagnostic port) is never
 //! touched by the probe. The libc vehicle goes through glibc's `iopl` and
-//! `ioperm`, which the shim does not define (registry `Absent`): it reaches
-//! them through `dlsym`.
+//! `ioperm`, which the shim defines.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -60,17 +57,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[Syscall::N_iopl, Syscall::N_ioperm],
     symbols: &["iopl", "ioperm"],
-    resolves: &["iopl", "ioperm"],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim defines neither iopl nor ioperm (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds neither (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Exit(101),
-            diagnostic: "sys/ioport: cannot continue: glibc's iopl resolves",
-        },
-    }],
     ..DEFAULTS
 };

@@ -14,13 +14,10 @@
 //! Every call is one root would be refused too: the filesystem type exists
 //! nowhere (`ENODEV`), and the run directory is no mount root (`EINVAL`), so
 //! nothing is ever mounted or unmounted. The libc vehicle goes through
-//! glibc's `mount` and `umount2`, which the shim does not define (registry
-//! `Absent`): it reaches them through `dlsym`.
+//! glibc's `mount` and `umount2`, which the shim defines.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::ffi::CString;
@@ -91,17 +88,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[Syscall::N_mount, Syscall::N_umount2],
     symbols: &["mount", "umount2"],
-    resolves: &["mount", "umount2"],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim defines neither mount nor umount2 (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds neither (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Exit(101),
-            diagnostic: "fs/mount: cannot continue: glibc's mount resolves",
-        },
-    }],
     ..DEFAULTS
 };

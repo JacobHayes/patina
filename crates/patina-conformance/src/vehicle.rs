@@ -114,6 +114,43 @@ unsafe extern "C" {
     fn getdents64(fd: libc::c_int, buffer: *mut libc::c_void, length: libc::size_t) -> isize;
 }
 
+// glibc's wrappers of privileged rows the libc crate does not declare.
+unsafe extern "C" {
+    fn pivot_root(new_root: *const libc::c_char, put_old: *const libc::c_char) -> libc::c_int;
+    fn init_module(
+        image: *mut libc::c_void,
+        length: libc::c_ulong,
+        params: *const libc::c_char,
+    ) -> libc::c_int;
+    fn delete_module(name: *const libc::c_char, flags: libc::c_uint) -> libc::c_int;
+    fn open_tree(dirfd: libc::c_int, path: *const libc::c_char, flags: libc::c_uint)
+    -> libc::c_int;
+    fn move_mount(
+        from_dirfd: libc::c_int,
+        from_path: *const libc::c_char,
+        to_dirfd: libc::c_int,
+        to_path: *const libc::c_char,
+        flags: libc::c_uint,
+    ) -> libc::c_int;
+    fn fsopen(fs_name: *const libc::c_char, flags: libc::c_uint) -> libc::c_int;
+    fn fsconfig(
+        fd: libc::c_int,
+        cmd: libc::c_uint,
+        key: *const libc::c_char,
+        value: *const libc::c_void,
+        aux: libc::c_int,
+    ) -> libc::c_int;
+    fn fsmount(fd: libc::c_int, flags: libc::c_uint, attr_flags: libc::c_uint) -> libc::c_int;
+    fn fspick(dirfd: libc::c_int, path: *const libc::c_char, flags: libc::c_uint) -> libc::c_int;
+    fn mount_setattr(
+        dirfd: libc::c_int,
+        path: *const libc::c_char,
+        flags: libc::c_uint,
+        attr: *mut libc::c_void,
+        size: libc::size_t,
+    ) -> libc::c_int;
+}
+
 /// The glibc symbol of the same name, folded to the kernel result convention.
 /// A row glibc has no wrapper for is spelled `syscall(2)`, the same door glibc
 /// itself would use.
@@ -719,9 +756,8 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_get_kernel_syms
             | Syscall::N_uselib => syscall_door(row, a),
             // fchmodat2, whose flags glibc's fchmodat emulates over it, and
-            // rows whose glibc wrapper the shim does not define and no
-            // scenario reaches through `WRAPPERS` (a symbol row that is
-            // `Absent`, or none): the probe binary importing such a wrapper
+            // rows whose glibc wrapper the shim does not define (a symbol row
+            // that is `Absent`, or none): the probe binary importing such a wrapper
             // would be refused whole by the pre-run import audit, so until the
             // shim defines it the libc spelling is glibc's own `syscall(2)`,
             // and the symbol stays in the coverage report.
@@ -821,11 +857,82 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             // wrapper glibc 2.28 dropped).
             #[cfg(target_arch = "x86_64")]
             Syscall::N_getdents | Syscall::N_ustat => syscall_door(row, a),
-            // `chroot` is the shim's own definition (a deny-trap).
+            // The privileged rows' glibc wrappers, which the shim defines.
             Syscall::N_chroot => chroot(a[0] as *const c_char) as i64,
+            Syscall::N_mount => mount(
+                a[0] as *const c_char,
+                a[1] as *const c_char,
+                a[2] as *const c_char,
+                a[3] as c_ulong,
+                a[4] as *const c_void,
+            ) as i64,
+            Syscall::N_umount2 => umount2(a[0] as *const c_char, a[1] as c_int) as i64,
+            Syscall::N_pivot_root => {
+                pivot_root(a[0] as *const c_char, a[1] as *const c_char) as i64
+            }
+            Syscall::N_open_tree => {
+                open_tree(a[0] as c_int, a[1] as *const c_char, a[2] as c_uint) as i64
+            }
+            Syscall::N_move_mount => move_mount(
+                a[0] as c_int,
+                a[1] as *const c_char,
+                a[2] as c_int,
+                a[3] as *const c_char,
+                a[4] as c_uint,
+            ) as i64,
+            Syscall::N_fsopen => fsopen(a[0] as *const c_char, a[1] as c_uint) as i64,
+            Syscall::N_fsconfig => fsconfig(
+                a[0] as c_int,
+                a[1] as c_uint,
+                a[2] as *const c_char,
+                a[3] as *const c_void,
+                a[4] as c_int,
+            ) as i64,
+            Syscall::N_fsmount => fsmount(a[0] as c_int, a[1] as c_uint, a[2] as c_uint) as i64,
+            Syscall::N_fspick => {
+                fspick(a[0] as c_int, a[1] as *const c_char, a[2] as c_uint) as i64
+            }
+            Syscall::N_mount_setattr => mount_setattr(
+                a[0] as c_int,
+                a[1] as *const c_char,
+                a[2] as c_uint,
+                a[3] as *mut c_void,
+                a[4] as size_t,
+            ) as i64,
+            Syscall::N_acct => acct(a[0] as *const c_char) as i64,
+            Syscall::N_vhangup => vhangup() as i64,
+            Syscall::N_swapon => swapon(a[0] as *const c_char, a[1] as c_int) as i64,
+            Syscall::N_swapoff => swapoff(a[0] as *const c_char) as i64,
+            // glibc's `reboot(howto)` passes both magic numbers itself: the
+            // row's command is its one argument.
+            Syscall::N_reboot => reboot(a[2] as c_int) as i64,
+            Syscall::N_init_module => {
+                init_module(a[0] as *mut c_void, a[1] as c_ulong, a[2] as *const c_char) as i64
+            }
+            Syscall::N_delete_module => delete_module(a[0] as *const c_char, a[1] as c_uint) as i64,
+            Syscall::N_quotactl => quotactl(
+                a[0] as c_int,
+                a[1] as *const c_char,
+                a[2] as c_int,
+                a[3] as *mut c_char,
+            ) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_iopl => iopl(a[0] as c_int) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_ioperm => ioperm(a[0] as c_ulong, a[1] as c_ulong, a[2] as c_int) as i64,
+            Syscall::N_unshare => unshare(a[0] as c_int) as i64,
+            Syscall::N_setns => setns(a[0] as c_int, a[1] as c_int) as i64,
+            // `long ptrace(enum __ptrace_request, ...)`: pid, address and
+            // data are its variadic arguments.
+            Syscall::N_ptrace => ptrace(
+                a[0] as c_uint,
+                a[1] as pid_t,
+                a[2] as *mut c_void,
+                a[3] as *mut c_void,
+            ),
             // Privileged rows glibc has no wrapper for, in scenarios whose
-            // libc leg goes through the wrappers of their other rows
-            // (`WRAPPERS`): glibc's own spelling is `syscall(2)`.
+            // libc leg goes through the wrappers of their other rows: glibc's
+            // own spelling is `syscall(2)`.
             Syscall::N_finit_module
             | Syscall::N_kexec_load
             | Syscall::N_kexec_file_load
@@ -921,137 +1028,4 @@ pub fn errno_name(code: i32) -> String {
         _ => return format!("E#{code}"),
     };
     name.to_string()
-}
-
-/// glibc's wrappers for privileged rows. The
-/// shim defines none of them (registry `Absent`), so the probe binary cannot
-/// import them (the pre-run audit would refuse the whole binary): the libc
-/// vehicle reaches each through `dlsym` at its row's first call
-/// (`Probe::call`), and under patina that lookup answers NULL.
-const WRAPPERS: &[(Syscall, &str)] = &[
-    (Syscall::N_mount, "mount"),
-    (Syscall::N_umount2, "umount2"),
-    (Syscall::N_open_tree, "open_tree"),
-    (Syscall::N_fsopen, "fsopen"),
-    (Syscall::N_fspick, "fspick"),
-    (Syscall::N_fsmount, "fsmount"),
-    (Syscall::N_fsconfig, "fsconfig"),
-    (Syscall::N_move_mount, "move_mount"),
-    (Syscall::N_mount_setattr, "mount_setattr"),
-    (Syscall::N_acct, "acct"),
-    (Syscall::N_vhangup, "vhangup"),
-    (Syscall::N_swapon, "swapon"),
-    (Syscall::N_swapoff, "swapoff"),
-    (Syscall::N_reboot, "reboot"),
-    (Syscall::N_init_module, "init_module"),
-    (Syscall::N_delete_module, "delete_module"),
-    (Syscall::N_pivot_root, "pivot_root"),
-    (Syscall::N_quotactl, "quotactl"),
-    (Syscall::N_unshare, "unshare"),
-    (Syscall::N_setns, "setns"),
-    (Syscall::N_ptrace, "ptrace"),
-    #[cfg(target_arch = "x86_64")]
-    (Syscall::N_iopl, "iopl"),
-    #[cfg(target_arch = "x86_64")]
-    (Syscall::N_ioperm, "ioperm"),
-];
-
-/// The glibc wrapper the libc vehicle reaches `row` through, if it has one.
-pub fn wrapper(row: Syscall) -> Option<&'static str> {
-    WRAPPERS
-        .iter()
-        .find(|(wrapped, _)| *wrapped == row)
-        .map(|(_, symbol)| *symbol)
-}
-
-/// Call glibc's wrapper for `row`, found at `address`, with the row's
-/// arguments in the wrapper's own types; the kernel result convention.
-///
-/// # Safety
-///
-/// `address` is glibc's definition of `wrapper(row)`, and the caller owns
-/// every pointer in `a`.
-pub unsafe fn wrapper_door(row: Syscall, address: *mut std::ffi::c_void, a: Args) -> i64 {
-    use libc::*;
-    /// Call `address` as `unsafe extern "C" fn(params) -> ret`.
-    macro_rules! call {
-        (($($param:ty),*) -> $ret:ty, $($arg:expr),*) => {{
-            // SAFETY: the caller's contract: `address` is this wrapper.
-            let wrapper = unsafe {
-                std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($param),*) -> $ret>(
-                    address,
-                )
-            };
-            // SAFETY: the caller's contract: it owns every pointer passed.
-            let result = unsafe { wrapper($($arg as $param),*) };
-            result as i64
-        }};
-    }
-    let result = match row {
-        Syscall::N_mount => call!(
-            (*const c_char, *const c_char, *const c_char, c_ulong, *const c_void) -> c_int,
-            a[0], a[1], a[2], a[3], a[4]
-        ),
-        Syscall::N_umount2 => call!((*const c_char, c_int) -> c_int, a[0], a[1]),
-        Syscall::N_open_tree => call!((c_int, *const c_char, c_uint) -> c_int, a[0], a[1], a[2]),
-        Syscall::N_fsopen => call!((*const c_char, c_uint) -> c_int, a[0], a[1]),
-        Syscall::N_fspick => call!((c_int, *const c_char, c_uint) -> c_int, a[0], a[1], a[2]),
-        Syscall::N_fsmount => call!((c_int, c_uint, c_uint) -> c_int, a[0], a[1], a[2]),
-        Syscall::N_fsconfig => call!(
-            (c_int, c_uint, *const c_char, *const c_void, c_int) -> c_int,
-            a[0], a[1], a[2], a[3], a[4]
-        ),
-        Syscall::N_move_mount => call!(
-            (c_int, *const c_char, c_int, *const c_char, c_uint) -> c_int,
-            a[0], a[1], a[2], a[3], a[4]
-        ),
-        Syscall::N_mount_setattr => call!(
-            (c_int, *const c_char, c_uint, *mut c_void, size_t) -> c_int,
-            a[0], a[1], a[2], a[3], a[4]
-        ),
-        Syscall::N_acct => call!((*const c_char) -> c_int, a[0]),
-        Syscall::N_vhangup => call!(() -> c_int,),
-        Syscall::N_swapon => call!((*const c_char, c_int) -> c_int, a[0], a[1]),
-        Syscall::N_swapoff => call!((*const c_char) -> c_int, a[0]),
-        // glibc's `reboot(howto)` passes both magic numbers itself: the
-        // row's command is its one argument.
-        Syscall::N_reboot => call!((c_int) -> c_int, a[2]),
-        Syscall::N_init_module => call!(
-            (*mut c_void, c_ulong, *const c_char) -> c_int,
-            a[0], a[1], a[2]
-        ),
-        Syscall::N_delete_module => call!((*const c_char, c_uint) -> c_int, a[0], a[1]),
-        Syscall::N_pivot_root => call!((*const c_char, *const c_char) -> c_int, a[0], a[1]),
-        Syscall::N_quotactl => call!(
-            (c_int, *const c_char, c_int, *mut c_char) -> c_int,
-            a[0], a[1], a[2], a[3]
-        ),
-        Syscall::N_unshare => call!((c_int) -> c_int, a[0]),
-        Syscall::N_setns => call!((c_int, c_int) -> c_int, a[0], a[1]),
-        // `long ptrace(enum __ptrace_request, ...)`: pid, address and data
-        // are its variadic arguments.
-        Syscall::N_ptrace => {
-            // SAFETY: the caller's contract: `address` is glibc's ptrace.
-            let ptrace = unsafe {
-                std::mem::transmute::<*mut c_void, unsafe extern "C" fn(c_uint, ...) -> c_long>(
-                    address,
-                )
-            };
-            // SAFETY: the caller's contract: it owns every pointer passed.
-            unsafe {
-                ptrace(
-                    a[0] as c_uint,
-                    a[1] as pid_t,
-                    a[2] as *mut c_void,
-                    a[3] as *mut c_void,
-                )
-            }
-        }
-        #[cfg(target_arch = "x86_64")]
-        Syscall::N_iopl => call!((c_int) -> c_int, a[0]),
-        #[cfg(target_arch = "x86_64")]
-        Syscall::N_ioperm => call!((c_ulong, c_ulong, c_int) -> c_int, a[0], a[1], a[2]),
-        other => panic!("{}: no glibc wrapper", other.name()),
-    };
-    fold_errno(result)
 }

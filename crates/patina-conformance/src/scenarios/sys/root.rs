@@ -7,10 +7,8 @@
 //! A root caller's `chroot` of the run directory would change the probe's
 //! own root and nothing else.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{AT_FDCWD, Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::ffi::CString;
@@ -74,15 +72,5 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &["chroot", "openat", "close", "mkdirat", "unlinkat"],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim's chroot is a process-class deny-trap (c/posix/signal_process.c chroot) where the unprivileged caller is answered EFAULT, ENOENT, ENOTDIR, EACCES and EPERM",
-        failure: Failure::Stops {
-            events: 3,
-            ending: Ending::Signal(SIGABRT),
-            diagnostic: "patina: process spawn reached under patina: chroot",
-        },
-    }],
     ..DEFAULTS
 };

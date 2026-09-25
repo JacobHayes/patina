@@ -162,7 +162,7 @@ int raise(int sig) {
 #endif
 
 /*
- * Process-class deny-traps. The fork/exec/spawn/reap surface (and chroot) is a
+ * Process-class deny-traps. The fork/exec/spawn/reap surface is a
  * deterministic-runtime non-goal: a managed guest never legitimately enters
  * it and the runtime models none of it. Real guests still LINK this
  * surface (std::process and dormant subprocess helper paths that a plain
@@ -257,10 +257,6 @@ int setgroups(int count, const gid_t *groups) {
     return patina_refuse(EPERM);
 }
 #endif
-int chroot(const char *path) {
-    (void)path;
-    patina_process_trap("chroot");
-}
 int posix_spawnp(pid_t *restrict pid, const char *restrict file,
                  const posix_spawn_file_actions_t *file_actions,
                  const posix_spawnattr_t *restrict attrp, char *const argv[restrict],

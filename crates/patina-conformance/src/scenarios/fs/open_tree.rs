@@ -7,14 +7,11 @@
 //! namespace's user namespace (`may_mount`), checked before the path is
 //! looked up, so a clone of a missing path is `EPERM`, not `ENOENT` (root
 //! would be told `ENOENT`: nothing is cloned). The libc vehicle goes
-//! through glibc 2.36's `open_tree`, which the shim does not define (registry
-//! `Absent`): it reaches it through `dlsym`.
+//! through glibc 2.36's `open_tree`, which the shim defines.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::observe::Norm;
 use crate::probe::{AT_FDCWD, Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::ffi::CString;
@@ -110,17 +107,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
     ],
     symbols: &["open_tree", "fcntl", "read", "fstat", "openat", "close"],
-    resolves: &["open_tree"],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim does not define glibc's open_tree (registry `Absent`): a guest importing it is refused by the pre-run audit, and `dlsym` does not find it (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Exit(101),
-            diagnostic: "fs/open_tree: cannot continue: glibc's open_tree resolves",
-        },
-    }],
     ..DEFAULTS
 };

@@ -21,7 +21,7 @@
 //!   otherwise `EPERM` (`CAP_SYS_ADMIN` over the namespace: `validate_ns`).
 //!
 //! The libc vehicle goes through glibc's `unshare` and `setns`, which the
-//! shim does not define (registry `Absent`): it reaches them through `dlsym`.
+//! shim defines.
 //!
 //! Were the capability checks to pass, the namespaces asked for would be the
 //! probe's own (new UTS, IPC, mount, network, pid, cgroup and time
@@ -143,12 +143,11 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
     ],
     symbols: &["unshare", "setns", "openat", "close"],
-    resolves: &["unshare", "setns"],
     needs: &[Need::Unprivileged],
     gaps: &[
         Gap {
             status: Status::Pending(Arc::Privileged),
-            vehicles: Vehicle::KERNEL,
+            vehicles: Vehicle::ALL,
             what: "the virtual filesystem has no namespace files: /proc/self/ns/uts is ENOENT where the kernel opens the caller's UTS namespace",
             failure: Failure::Differs(&[
                 Difference::field(38, "openat", "errno", Observed::Str("ENOENT")),
@@ -157,22 +156,12 @@ pub const SCENARIO: Scenario = Scenario {
         },
         Gap {
             status: Status::Pending(Arc::Privileged),
-            vehicles: Vehicle::KERNEL,
+            vehicles: Vehicle::ALL,
             what: "without a namespace file the scenario cannot continue, so setns's namespace-type and CAP_SYS_ADMIN checks are never reached (patina-native-shim sud/privileged/process.rs setns refuses every descriptor the model holds)",
             failure: Failure::Stops {
                 events: 39,
                 ending: Ending::Exit(101),
                 diagnostic: "proc/namespaces: cannot continue: open the caller's UTS namespace",
-            },
-        },
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim defines neither unshare nor setns (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds neither (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Exit(101),
-                diagnostic: "proc/namespaces: cannot continue: glibc's unshare resolves",
             },
         },
     ],

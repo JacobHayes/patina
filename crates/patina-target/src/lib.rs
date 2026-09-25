@@ -639,8 +639,7 @@ pub type NativeDenyTrapSymbol = (&'static str, &'static str);
 /// from the shim's C — so a trap converted to a real model (or a new one) must
 /// move all three in lockstep or the gate fails closed.
 const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
-    // process (patina_process_trap): spawn/exec/wait and chroot.
-    ("chroot", "process"),
+    // process (patina_process_trap): spawn/exec/wait.
     ("execvp", "process"),
     ("fork", "process"),
     ("pidfd_getpid", "process"),
@@ -3528,13 +3527,12 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "fallocate64",
         "posix_fallocate",
         "posix_fallocate64",
-        // Not interposed, by decision: `acct(2)` turns on process accounting
-        // to a file — a privileged, kernel-global effect (CAP_SYS_PACCT) no
-        // DST guest legitimately needs — so a reference to it is a host
-        // filesystem escape and is LABELED here, never modeled. It is the
-        // planted filesystem representative of the gate-level e2e
-        // (`native_run_prerun_gate_refuses_every_escape_class`) now that every
-        // symbol above it is shim-defined.
+        // `acct(2)` turns on process accounting to a file — a privileged,
+        // kernel-global effect (CAP_SYS_PACCT). The Linux shim defines it
+        // (answered from the virtual credential: `EPERM`); on macOS it is not
+        // interposed, so a reference there is a host filesystem escape and is
+        // LABELED here. It is the planted filesystem representative of the
+        // macOS gate-level e2e (`native_run_prerun_gate_refuses_every_escape_class`).
         "acct",
     ];
     // (f) Network: BSD sockets. Modeled over SimNet when interposed.

@@ -268,8 +268,9 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 
 - `c/patina_posix.c` is ONE translation unit assembled from per-family slices
   under `c/posix/` (`core`, `env`, `init`, `time`, `sched_identity`,
-  `entropy`, `fs`, `fd_io`, `mem`, `thread_sync`, `signal_process`, `net`,
-  `readiness`, `stdio`, `darwin`), `#include`d in a fixed order so the slices
+  `entropy`, `fs`, `fd_io`, `mem`, `thread_sync`, `signal_process`,
+  `privileged`, `net`, `readiness`, `stdio`, `darwin`, `dlsym`), `#include`d
+  in a fixed order so the slices
   share one set of headers and static helpers and produce one object. A slice
   is not compiled on its own; system headers go in `posix/core.c`; a new slice
   is added to the umbrella AND to `POSIX_C_FAMILY_SOURCES` in `src/lib.rs`
@@ -298,7 +299,12 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   `patina_*` externs, the handler BINDINGS, and the dispatch index generated
   from the registry; the `sys_*` handlers live in per-family modules
   (`time`, `sched_identity`, `fd_io`, `fs`, `mem`, `signal_process`, `net`,
-  `readiness`). A handler for a row only one arch's table lists lives in that
+  `readiness`). The privileged rows are checks, not handlers: `privileged/`
+  holds each row's pre-capability checks over the virtual credential
+  (`identity::credential`) and the declared kernel configuration
+  (`registry::KERNEL_CONFIG`), in the kernel's order, and `privileged::answer`
+  turns a granted capability or an unmodeled path into a named fatal; the
+  x86-only port rows there are `cfg`-gated. A handler for a row only one arch's table lists lives in that
   arch's module (`x86_64`: `dup2`, `poll`, `utime`, …), compiled only where
   the registry gives the row an identity. A family module holds only handlers
   every Linux table binds, so an arch-only handler there is dead code, a

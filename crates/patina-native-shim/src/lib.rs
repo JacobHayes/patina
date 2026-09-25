@@ -50,6 +50,10 @@ pub const POSIX_C_FAMILY_SOURCES: &[(&str, &str)] = &[
         "posix/signal_process.c",
         include_str!("../c/posix/signal_process.c"),
     ),
+    (
+        "posix/privileged.c",
+        include_str!("../c/posix/privileged.c"),
+    ),
     ("posix/net.c", include_str!("../c/posix/net.c")),
     ("posix/readiness.c", include_str!("../c/posix/readiness.c")),
     ("posix/stdio.c", include_str!("../c/posix/stdio.c")),
