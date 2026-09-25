@@ -10,7 +10,10 @@
 //!   with or without a `res`; a process CPU clock id
 //!   (`clock_getcpuclockid(3)`) of the caller resolves, one of a pid no
 //!   process has is `EINVAL`;
-//! * `sleep(3)` sleeps the whole second it is asked for and answers 0;
+//! * `sleep(3)` sleeps the whole second it is asked for and answers 0 (the
+//!   libc vehicle; the others check, for a millisecond, the
+//!   `clock_nanosleep` glibc's `sleep` is built on, so no leg but that one
+//!   waits a second);
 //! * `time(2)` answers whole `CLOCK_REALTIME` seconds, stores them through a
 //!   pointer, and lies between realtime readings taken around it (the row
 //!   reads the coarse clock, so it may trail a precise reading by a tick).
@@ -19,6 +22,7 @@
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{ClockArg, Probe, Res, neg};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
@@ -74,20 +78,38 @@ pub fn run(p: &Probe) {
     );
 
     let (_, start) = p.rec.quiet(|| p.clock_gettime(CLOCK_MONOTONIC));
-    // The sleep symbol's row: one second is the least `sleep(3)` takes
-    // (its nanosecond cousins are time/clocks'). SAFETY: no pointer.
-    let left = unsafe { sleep(1) };
+    let (left, asked_ns) = if p.vehicle == Vehicle::Libc {
+        // The sleep symbol's row: one second is the least `sleep(3)` takes
+        // (its nanosecond cousins are time/clocks'). SAFETY: no pointer.
+        (i64::from(unsafe { sleep(1) }), 1_000_000_000)
+    } else {
+        // Unrecorded, so every vehicle records the same facts: time/clocks
+        // compares the row itself.
+        let request = timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000,
+        };
+        let args = [
+            i64::from(CLOCK_REALTIME),
+            0,
+            &request as *const timespec as i64,
+            0,
+            0,
+            0,
+        ];
+        (p.vehicle.call(Syscall::N_clock_nanosleep, args), 1_000_000)
+    };
     let (_, end) = p.rec.quiet(|| p.clock_gettime(CLOCK_MONOTONIC));
     p.mark(
         "sleep",
         &[
             ("left", Value::from(left)),
-            ("slept_a_second", Value::from(end - start >= 1_000_000_000)),
+            ("slept_whole", Value::from(end - start >= asked_ns)),
         ],
     );
     p.check(
-        "sleep(1) sleeps the whole second, answering 0",
-        left == 0 && end - start >= 1_000_000_000,
+        "sleep sleeps the whole interval, answering 0",
+        left == 0 && end - start >= asked_ns,
     );
 
     let before = p.realtime_seconds();

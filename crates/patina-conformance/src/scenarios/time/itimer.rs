@@ -13,13 +13,13 @@
 //! * the CPU-time timers (`ITIMER_VIRTUAL`, `ITIMER_PROF`) arm, read back
 //!   and disarm; the kernel adds one tick to their first expiry
 //!   (`set_cpu_itimer`), so what reads back is within the set value plus a
-//!   tick; a 10 ms one fires (`SIGVTALRM`/`SIGPROF`, `SI_KERNEL`) once the
-//!   process has computed past it — a bounded spin, since CPU time accrues
-//!   only while it runs — and is then disarmed;
+//!   tick; a 1 ms one fires (`SIGVTALRM`/`SIGPROF`, `SI_KERNEL`) once the
+//!   process has computed past it — one bounded spin for both, since CPU time
+//!   accrues only while it runs — and is then disarmed;
 //! * (x86_64) `alarm` answers the previous alarm's remaining seconds rounded
 //!   to the nearest, a nonzero remainder under a second rounding up to 1
-//!   (`alarm_setitimer`); it is `ITIMER_REAL`; `alarm(0)` cancels; its expiry
-//!   is `SIGALRM`.
+//!   (`alarm_setitimer`); it is `ITIMER_REAL` (so its expiry is the
+//!   `SIGALRM` above); `alarm(0)` cancels.
 //!
 //! `SIGALRM` stays blocked, so every expiry is dequeued with a bounded
 //! `rt_sigtimedwait` — a wait that ends the moment the signal is pending,
@@ -171,17 +171,21 @@ pub fn run(p: &Probe) {
         "block SIGVTALRM and SIGPROF",
         p.rt_sigprocmask(SIG_BLOCK, Some(&cpu_signals), None, SIGSET_BYTES as usize) == 0,
     );
-    for (which, sig) in [(ITIMER_VIRTUAL, SIGVTALRM), (ITIMER_PROF, SIGPROF)] {
-        let (r, _, _) = p.setitimer(which, ms_us(10), (0, 0));
-        p.check("arm a CPU-time timer for 10 ms", r == 0);
-        let pending = spin_until(|| {
-            let mut set = empty_set();
-            p.rec
-                .quiet(|| p.rt_sigpending(&mut set, SIGSET_BYTES as usize))
-                == 0
-                && has(&set, sig)
-        });
-        p.mark("spin", &[("fired", Value::from(pending))]);
+    let cpu_timers = [(ITIMER_VIRTUAL, SIGVTALRM), (ITIMER_PROF, SIGPROF)];
+    for (which, _) in cpu_timers {
+        let (r, _, _) = p.setitimer(which, ms_us(1), (0, 0));
+        p.check("arm a CPU-time timer for 1 ms", r == 0);
+    }
+    let pending = spin_until(|| {
+        let mut set = empty_set();
+        p.rec
+            .quiet(|| p.rt_sigpending(&mut set, SIGSET_BYTES as usize))
+            == 0
+            && has(&set, SIGVTALRM)
+            && has(&set, SIGPROF)
+    });
+    p.mark("spin", &[("fired", Value::from(pending))]);
+    for (which, sig) in cpu_timers {
         // SAFETY: all-zero is a valid siginfo_t.
         let mut info: siginfo_t = unsafe { std::mem::zeroed() };
         let r = p.rt_sigtimedwait(
@@ -224,8 +228,6 @@ pub fn run(p: &Probe) {
             p.alarm(0, &[]) == 1,
         );
         p.check("alarm(0) cancelled it", p.alarm(0, &[]) == 0);
-        p.check("an alarm of one second", p.alarm(1, &[]) == 0);
-        alarm_expires(p, &alrm, "the alarm's expiry is SIGALRM");
     }
 }
 

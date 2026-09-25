@@ -234,11 +234,11 @@ pub fn run(p: &Probe) {
         },
     );
     p.require("a process CPU-time clock takes a timer", r == 0);
-    let (r, _, _) = p.timer_settime(cpu, 0, Arm::Spec(ms(10)), (0, 0));
+    let (r, _, _) = p.timer_settime(cpu, 0, Arm::Spec(ms(1)), (0, 0));
     let (_, value, _) = p.timer_gettime(cpu);
     p.check(
         "it arms and reads back within what was set",
-        r == 0 && spec_ns(value) > 0 && spec_ns(value) <= 10_000_000,
+        r == 0 && spec_ns(value) > 0 && spec_ns(value) <= 1_000_000,
     );
     let pending = spin_until(|| {
         let mut pending = empty_set();

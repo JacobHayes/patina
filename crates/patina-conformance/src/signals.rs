@@ -231,10 +231,17 @@ pub fn wait_until(interval: Duration, mut done: impl FnMut() -> bool) -> bool {
     done()
 }
 
+/// The computation between two of [`spin_until`]'s `done` calls: a
+/// microsecond or two of CPU. Short, because under patina CPU time accrues
+/// only by the clock observations (`done`) themselves (the runtime's
+/// advance-on-spin rescue), so the computation between them is pure cost
+/// there, and a natively cheap `done` keeps the spin CPU-bound either way.
+const SPIN_CHUNK_STEPS: u32 = 1_000;
+
 /// The most CPU-bound chunks [`spin_until`] runs: tens of seconds of CPU,
 /// the bound that ends a spin where no clock moves while the process
 /// computes (a model whose virtual clocks stand still between calls).
-const SPIN_CHUNKS: u32 = 200_000;
+const SPIN_CHUNKS: u32 = 4_000_000;
 
 /// Compute (no system call) in short chunks until `done` holds, for at most
 /// [`PROGRESS_DEADLINE`] of monotonic time or [`SPIN_CHUNKS`] chunks; whether
@@ -252,7 +259,7 @@ pub fn spin_until(mut done: impl FnMut() -> bool) -> bool {
         if started.elapsed() > PROGRESS_DEADLINE {
             break;
         }
-        for _ in 0..20_000 {
+        for _ in 0..SPIN_CHUNK_STEPS {
             state = std::hint::black_box(
                 state
                     .wrapping_mul(0x5851_f42d_4c95_7f2d)
