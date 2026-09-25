@@ -1800,8 +1800,18 @@ fn proc_ids() {
 }
 
 #[test]
+fn proc_kcmp() {
+    conform("proc/kcmp");
+}
+
+#[test]
 fn proc_namespaces() {
     conform("proc/namespaces");
+}
+
+#[test]
+fn proc_pidfd() {
+    conform("proc/pidfd");
 }
 
 #[test]
@@ -1832,6 +1842,17 @@ fn proc_spawn() {
 #[test]
 fn proc_traps() {
     conform("proc/traps");
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn proc_vfork() {
+    conform("proc/vfork");
+}
+
+#[test]
+fn proc_vm_rw() {
+    conform("proc/vm_rw");
 }
 
 #[test]

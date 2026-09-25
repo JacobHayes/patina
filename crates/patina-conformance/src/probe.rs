@@ -118,6 +118,13 @@ pub const FUTEX_WAIT_PRIVATE: i32 = libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG;
 /// `FUTEX_WAKE` on a word private to the process.
 pub const FUTEX_WAKE_PRIVATE: i32 = libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG;
 
+/// A pid past `PID_MAX_LIMIT` (4194304 on 64-bit): no process has it.
+pub const NO_SUCH_PID: i32 = 0x3fff_ffff;
+
+/// A descriptor number a scenario never opens (below the 1024 limit the
+/// runs share, far above what any scenario holds).
+pub const CLOSED_FD: i32 = 4000;
+
 /// A negative errno in the kernel convention.
 pub const fn neg(errno: i32) -> i64 {
     -(errno as i64)
