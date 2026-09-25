@@ -28,6 +28,7 @@
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Arm, Count, Probe, ms, neg, spec_ns};
 use crate::signals::PROGRESS_DEADLINE;
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -209,20 +210,13 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "time/timerfd",
     run,
+    // Every row's libc spelling is glibc's syscall(2): a libc leg would
+    // repeat the syscall one.
+    vehicles: Vehicle::KERNEL,
     covers: &[
         Syscall::N_timerfd_create,
         Syscall::N_timerfd_settime,
         Syscall::N_timerfd_gettime,
-    ],
-    symbols: &[
-        "syscall",
-        "read",
-        "fcntl",
-        "ppoll",
-        "nanosleep",
-        "clock_gettime",
-        "pipe2",
-        "close",
     ],
     ..DEFAULTS
 };

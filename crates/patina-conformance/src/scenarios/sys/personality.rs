@@ -9,6 +9,7 @@
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::Probe;
+use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
 const QUERY: u32 = 0xffff_ffff;
@@ -45,8 +46,10 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "sys/personality",
     run,
+    // Every row's libc spelling is glibc's syscall(2): a libc leg would
+    // repeat the syscall one.
+    vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_personality],
-    symbols: &["syscall"],
     needs: &[Need::DefaultPersona],
     ..DEFAULTS
 };

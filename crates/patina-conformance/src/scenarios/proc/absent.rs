@@ -3,6 +3,7 @@
 //! escapes.
 
 use crate::catalog::{DEFAULTS, Scenario};
+use crate::vehicle::Vehicle;
 
 use crate::probe::{Probe, neg};
 use patina_dst_syscalls::Syscall;
@@ -49,6 +50,9 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "proc/absent",
     run,
+    // Every row's libc spelling is glibc's syscall(2): a libc leg would
+    // repeat the syscall one.
+    vehicles: Vehicle::KERNEL,
     covers: &[
         #[cfg(target_arch = "x86_64")]
         Syscall::N__sysctl,
@@ -79,6 +83,5 @@ pub const SCENARIO: Scenario = Scenario {
         #[cfg(target_arch = "x86_64")]
         Syscall::N_uselib,
     ],
-    symbols: &["syscall"],
     ..DEFAULTS
 };

@@ -34,6 +34,7 @@ use crate::probe::{
     Arm, Count, MISSING_PID, Probe, SIGSET_BYTES, Sigev, TimerId, ms, neg, spec_ns,
 };
 use crate::signals::{FIRST_RT, PROGRESS_DEADLINE, empty_set, gettid, has, set_of, spin_until};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
@@ -337,6 +338,9 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "time/posix_timer",
     run,
+    // Every row's libc spelling is glibc's syscall(2): a libc leg would
+    // repeat the syscall one.
+    vehicles: Vehicle::KERNEL,
     covers: &[
         Syscall::N_timer_create,
         Syscall::N_timer_settime,
@@ -344,6 +348,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_timer_getoverrun,
         Syscall::N_timer_delete,
     ],
-    symbols: &["syscall", "nanosleep", "clock_gettime"],
     ..DEFAULTS
 };

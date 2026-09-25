@@ -18,6 +18,7 @@
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{CAPABILITY_V3, CapData, Probe, Who, neg};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -101,8 +102,10 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "cred/caps",
     run,
+    // Every row's libc spelling is glibc's syscall(2): a libc leg would
+    // repeat the syscall one.
+    vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_capget, Syscall::N_capset],
-    symbols: &["syscall", "getpid"],
     needs: &[Need::Unprivileged],
     ..DEFAULTS
 };

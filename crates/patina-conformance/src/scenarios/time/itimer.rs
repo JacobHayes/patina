@@ -29,6 +29,7 @@
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, SIGSET_BYTES, micros, ms_us, neg};
 use crate::signals::{PROGRESS_DEADLINE, empty_set, has, one_set, set_of, spin_until};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
@@ -231,12 +232,14 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "time/itimer",
     run,
+    // Every row's libc spelling is glibc's syscall(2): a libc leg would
+    // repeat the syscall one.
+    vehicles: Vehicle::KERNEL,
     covers: &[
         Syscall::N_setitimer,
         Syscall::N_getitimer,
         #[cfg(target_arch = "x86_64")]
         Syscall::N_alarm,
     ],
-    symbols: &["syscall", "nanosleep", "clock_gettime"],
     ..DEFAULTS
 };

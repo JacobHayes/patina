@@ -5,6 +5,7 @@
 //! vs do_group_exit; man 2 exit).
 
 use crate::catalog::{DEFAULTS, Scenario, TraceFacts};
+use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::Probe;
@@ -42,13 +43,15 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "thread/main_exit",
     run,
+    // Every row's libc spelling is glibc's syscall(2): a libc leg would
+    // repeat the syscall one.
+    vehicles: Vehicle::KERNEL,
     covers: &[
         Syscall::N_getpid,
         Syscall::N_gettid,
         Syscall::N_exit,
         Syscall::N_exit_group,
     ],
-    symbols: &["getpid", "syscall"],
     trace: Some(TraceFacts {
         generations: &[],
         max_wakes_per_generation: None,

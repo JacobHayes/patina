@@ -40,12 +40,14 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "sys/sysfs",
     run,
+    // Every row's libc spelling is glibc's syscall(2): a libc leg would
+    // repeat the syscall one.
+    vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_sysfs],
-    symbols: &["syscall"],
     needs: &[Need::SysfsSyscall],
     gaps: &[Gap {
         status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::ALL,
+        vehicles: Vehicle::KERNEL,
         what: "sysfs is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no sysfs wrapper)",
         failure: Failure::Stops {
             events: 0,

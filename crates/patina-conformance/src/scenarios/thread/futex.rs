@@ -4,6 +4,7 @@
 //! outcome is).
 
 use crate::catalog::{DEFAULTS, Scenario, TraceFacts};
+use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{Probe, neg};
@@ -69,8 +70,10 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "thread/futex",
     run,
+    // Every row's libc spelling is glibc's syscall(2): a libc leg would
+    // repeat the syscall one.
+    vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_futex, Syscall::N_clock_gettime],
-    symbols: &["syscall", "clock_gettime"],
     trace: Some(TraceFacts {
         generations: &[],
         max_wakes_per_generation: None,

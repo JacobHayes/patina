@@ -16,6 +16,7 @@
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, Who, neg};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -87,8 +88,10 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "sched/priority",
     run,
+    // Every row's libc spelling is glibc's syscall(2): a libc leg would
+    // repeat the syscall one.
+    vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_getpriority, Syscall::N_setpriority],
-    symbols: &["syscall", "getpid", "setrlimit"],
     needs: &[Need::Unprivileged, Need::NiceZero],
     ..DEFAULTS
 };

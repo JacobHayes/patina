@@ -7,6 +7,7 @@
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, neg};
+use crate::vehicle::Vehicle;
 use libc::EPERM;
 use patina_dst_syscalls::Syscall;
 
@@ -28,8 +29,10 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "sys/hostname",
     run,
+    // Every row's libc spelling is glibc's syscall(2): a libc leg would
+    // repeat the syscall one.
+    vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_sethostname, Syscall::N_setdomainname],
-    symbols: &["syscall"],
     needs: &[Need::Unprivileged],
     ..DEFAULTS
 };

@@ -23,6 +23,7 @@
 
 use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::probe::{Probe, SCHED_ATTR_SIZE_VER0, SCHED_ATTR_SIZE_VER1, SchedAttr, Who, neg};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -215,8 +216,10 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "sched/attr",
     run,
+    // Every row's libc spelling is glibc's syscall(2): a libc leg would
+    // repeat the syscall one.
+    vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_sched_setattr, Syscall::N_sched_getattr],
-    symbols: &["syscall", "getpid", "setrlimit"],
     needs: &[Need::Unprivileged, Need::NiceZero],
     kernel_floor: Some(KernelFloor {
         release: "5.3",

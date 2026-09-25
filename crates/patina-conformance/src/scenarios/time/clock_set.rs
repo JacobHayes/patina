@@ -27,6 +27,7 @@
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{ClockArg, Probe, SetTo, neg};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -139,6 +140,9 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "time/clock_set",
     run,
+    // Every row's libc spelling is glibc's syscall(2): a libc leg would
+    // repeat the syscall one.
+    vehicles: Vehicle::KERNEL,
     covers: &[
         Syscall::N_settimeofday,
         Syscall::N_clock_settime,
@@ -146,7 +150,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_clock_adjtime,
         Syscall::N_syslog,
     ],
-    symbols: &["syscall", "getpid", "clock_gettime"],
     needs: &[Need::Unprivileged],
     ..DEFAULTS
 };
