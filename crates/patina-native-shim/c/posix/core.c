@@ -51,6 +51,7 @@
 #include <sys/stat.h>
 
 #ifdef __linux__
+#include <sys/sendfile.h>
 #include <sys/statfs.h>
 #include <sys/statvfs.h>
 #endif

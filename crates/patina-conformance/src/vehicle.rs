@@ -441,6 +441,20 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             ) as i64,
             Syscall::N_readv => readv(a[0] as c_int, a[1] as *const iovec, a[2] as c_int) as i64,
             Syscall::N_writev => writev(a[0] as c_int, a[1] as *const iovec, a[2] as c_int) as i64,
+            Syscall::N_copy_file_range => copy_file_range(
+                a[0] as c_int,
+                a[1] as *mut off64_t,
+                a[2] as c_int,
+                a[3] as *mut off64_t,
+                a[4] as size_t,
+                a[5] as c_uint,
+            ) as i64,
+            Syscall::N_sendfile => sendfile(
+                a[0] as c_int,
+                a[1] as c_int,
+                a[2] as *mut off_t,
+                a[3] as size_t,
+            ) as i64,
             // The kernel rows split the position into (pos_l, pos_h); on a
             // 64-bit kernel pos_l is the whole position and pos_h is ignored.
             Syscall::N_preadv => preadv(
@@ -853,7 +867,7 @@ pub fn errno_name(code: i32) -> String {
     name.to_string()
 }
 
-/// glibc's wrappers for privileged, copy and extended-attribute rows. The
+/// glibc's wrappers for privileged and extended-attribute rows. The
 /// shim defines none of them (registry `Absent`), so the probe binary cannot
 /// import them (the pre-run audit would refuse the whole binary): the libc
 /// vehicle reaches each through `dlsym` at its row's first call
@@ -884,8 +898,6 @@ const WRAPPERS: &[(Syscall, &str)] = &[
     (Syscall::N_iopl, "iopl"),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_ioperm, "ioperm"),
-    (Syscall::N_copy_file_range, "copy_file_range"),
-    (Syscall::N_sendfile, "sendfile"),
     (Syscall::N_setxattr, "setxattr"),
     (Syscall::N_getxattr, "getxattr"),
     (Syscall::N_fgetxattr, "fgetxattr"),
@@ -988,14 +1000,6 @@ pub unsafe fn wrapper_door(row: Syscall, address: *mut std::ffi::c_void, a: Args
         Syscall::N_iopl => call!((c_int) -> c_int, a[0]),
         #[cfg(target_arch = "x86_64")]
         Syscall::N_ioperm => call!((c_ulong, c_ulong, c_int) -> c_int, a[0], a[1], a[2]),
-        Syscall::N_copy_file_range => call!(
-            (c_int, *mut off64_t, c_int, *mut off64_t, size_t, c_uint) -> ssize_t,
-            a[0], a[1], a[2], a[3], a[4], a[5]
-        ),
-        Syscall::N_sendfile => call!(
-            (c_int, c_int, *mut off_t, size_t) -> ssize_t,
-            a[0], a[1], a[2], a[3]
-        ),
         Syscall::N_setxattr => call!(
             (*const c_char, *const c_char, *const c_void, size_t, c_int) -> c_int,
             a[0], a[1], a[2], a[3], a[4]

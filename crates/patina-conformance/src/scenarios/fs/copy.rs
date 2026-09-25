@@ -12,12 +12,10 @@
 //! descriptor at either end; a negative offset is EINVAL.
 //!
 //! The libc vehicle goes through glibc's `copy_file_range` and `sendfile`,
-//! which the shim does not define (registry `Absent`): it reaches them
-//! through `dlsym` (`vehicle::WRAPPERS`).
+//! imported (the shim defines them); every vehicle also calls glibc's LFS
+//! spelling `sendfile64`.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -184,6 +182,40 @@ pub fn run(p: &Probe) {
         p.sendfile(4000, src, Some(0), 4).0 == neg(EBADF),
     );
 
+    // glibc's LFS spelling, which `<sys/sendfile.h>` binds `sendfile` to
+    // under `_FILE_OFFSET_BITS=64`: the same call on every vehicle.
+    let sendfile64 = |out_fd: i32, in_fd: i32, offset: i64, count: usize| {
+        let mut pos = offset;
+        // SAFETY: two descriptor numbers and a live offset.
+        let r =
+            crate::vehicle::fold_errno(
+                unsafe { libc::sendfile64(out_fd, in_fd, &mut pos, count) } as i64
+            );
+        p.rec
+            .event("sendfile64", r)
+            .arg("out_fd", out_fd)
+            .norm("args.out_fd", crate::observe::Norm::Relative("fd"))
+            .arg("in_fd", in_fd)
+            .norm("args.in_fd", crate::observe::Norm::Relative("fd"))
+            .arg("offset", offset)
+            .arg("count", count)
+            .field("offset_after", pos)
+            .emit();
+        (r, pos)
+    };
+    p.check(
+        "sendfile64 at an offset writes the offset back",
+        sendfile64(pipe2[1], src, 4, 3) == (3, 7),
+    );
+    p.check(
+        "the pipe holds those bytes",
+        p.read(pipe2[0], 8).1 == b"456",
+    );
+    p.check(
+        "sendfile64 at a negative offset is EINVAL",
+        sendfile64(out, src, -1, 4).0 == neg(EINVAL),
+    );
+
     for f in [
         src, dst, append, reader, writer, dirfd, pipe[0], pipe[1], out, pipe2[0], pipe2[1],
     ] {
@@ -208,6 +240,7 @@ pub const SCENARIO: Scenario = Scenario {
     symbols: &[
         "copy_file_range",
         "sendfile",
+        "sendfile64",
         "openat",
         "read",
         "write",
@@ -216,16 +249,5 @@ pub const SCENARIO: Scenario = Scenario {
         "pipe2",
         "close",
     ],
-    resolves: &["copy_file_range", "sendfile"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim defines neither copy_file_range nor sendfile (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds neither (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-        failure: Failure::Stops {
-            events: 5,
-            ending: Ending::Exit(101),
-            diagnostic: "fs/copy: cannot continue: glibc's copy_file_range resolves",
-        },
-    }],
     ..DEFAULTS
 };

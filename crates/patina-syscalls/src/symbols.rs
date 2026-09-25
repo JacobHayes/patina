@@ -2097,7 +2097,7 @@ const ROWS: &[SymbolRow] = &[
         "copy_file_range",
         Platform::Linux,
         Serves::Syscalls(&["copy_file_range"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "getdents64",
@@ -2115,7 +2115,13 @@ const ROWS: &[SymbolRow] = &[
         "sendfile",
         Platform::Linux,
         Serves::Syscalls(&["sendfile"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "sendfile64",
+        Platform::Linux,
+        Serves::Syscalls(&["sendfile"]),
+        SymbolStatus::Modeled,
     ),
     s(
         "fchown",

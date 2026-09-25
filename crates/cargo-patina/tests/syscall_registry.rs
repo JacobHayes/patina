@@ -155,14 +155,23 @@ fn planted_gaps_are_reported() {
         Gaps::default(),
         "the control set is clean"
     );
-    defined.insert("copy_file_range".to_owned()); // an Absent row, now defined
+    // An Absent row, now defined: any one the registry still lists.
+    let absent = SYMBOLS
+        .iter()
+        .find(|symbol| {
+            symbol.status == SymbolStatus::Absent && symbol.platform.defines_on(Os::Linux)
+        })
+        .expect("the registry lists an Absent Linux symbol")
+        .name
+        .to_owned();
+    defined.insert(absent.clone());
     defined.insert("nonesuch".to_owned()); // defined, no row
     defined.remove("read"); // a row the objects lost
     defined.insert("patina_planted".to_owned()); // runtime ABI: excluded by rule
     let gaps = gaps(&defined, Os::Linux);
     assert_eq!(gaps.unlisted, vec!["nonesuch".to_owned()]);
     assert_eq!(gaps.undefined, vec!["read".to_owned()]);
-    assert_eq!(gaps.absent_but_defined, vec!["copy_file_range".to_owned()]);
+    assert_eq!(gaps.absent_but_defined, vec![absent]);
 }
 
 /// The identifier argument of a `MACRO(Ident)` invocation at the start of a

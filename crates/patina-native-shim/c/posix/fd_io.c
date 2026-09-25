@@ -201,6 +201,25 @@ ssize_t pwrite64(int fd, const void *source, size_t length, off64_t offset) {
     return fail_size(patina_pwrite(fd, source, length, (int64_t)offset));
 }
 
+/* In-kernel copies: glibc's copy_file_range and sendfile are the bare
+ * syscalls, so the wrappers are the rows' one model (src/transfer.rs) with
+ * errno set. Rust's std reaches copy_file_range for `fs::copy`/`io::copy`
+ * between files. off_t is off64_t on a 64-bit target. */
+ssize_t copy_file_range(int fd_in, off64_t *off_in, int fd_out, off64_t *off_out, size_t length,
+                        unsigned int flags) {
+    return fail_size(patina_copy_file_range(fd_in, (int64_t *)off_in, fd_out, (int64_t *)off_out,
+                                            length, (uint32_t)flags));
+}
+
+ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count) {
+    return fail_size(patina_sendfile(out_fd, in_fd, (int64_t *)offset, count));
+}
+
+/* The LFS spelling `<sys/sendfile.h>` binds under _FILE_OFFSET_BITS=64. */
+ssize_t sendfile64(int out_fd, int in_fd, off64_t *offset, size_t count) {
+    return fail_size(patina_sendfile(out_fd, in_fd, (int64_t *)offset, count));
+}
+
 #endif
 
 /* Whole-file advisory lock (a single-opener database takes one via File::try_lock on open).
