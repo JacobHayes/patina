@@ -2704,20 +2704,6 @@ impl Probe {
         result
     }
 
-    // ---- the virtual ABI level ----------------------------------------------
-
-    /// A number the vendored table lists but the virtual ABI level lacks
-    /// (`fchroot`, 472, since Linux 7.3). What is under test is the row's
-    /// absence, so the arguments are recorded verbatim and never interpreted.
-    pub fn fchroot(&self, fd: i32, flags: u32) -> i64 {
-        let result = self.call(Syscall::N_fchroot, [fd as i64, flags as i64, 0, 0, 0, 0]);
-        self.event(Syscall::N_fchroot, result)
-            .arg("fd", fd)
-            .arg("flags", flags)
-            .emit();
-        result
-    }
-
     // ---- signals, threads and process rows (the signals family) -------------
 
     /// Announce that the scenario's next act ends the process on `signal`

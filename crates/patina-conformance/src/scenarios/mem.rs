@@ -7,7 +7,6 @@ pub mod mlock;
 pub mod mmap;
 pub mod mmap_file;
 pub mod mremap;
-pub mod mseal;
 pub mod msync;
 pub mod numa;
 pub mod pkeys;

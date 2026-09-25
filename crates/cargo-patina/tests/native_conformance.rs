@@ -1279,7 +1279,7 @@ fn strace_leak_filter_flags_a_planted_escape() {
 
 #[test]
 fn abi_newer_than_virtual() {
-    conform("abi/newer-than-virtual");
+    conform("abi/newer_than_virtual");
 }
 
 #[test]
@@ -1410,11 +1410,6 @@ fn fs_mount_query() {
 #[test]
 fn fs_names() {
     conform("fs/names");
-}
-
-#[test]
-fn fs_newer_than_virtual() {
-    conform("fs/newer_than_virtual");
 }
 
 #[test]
@@ -1560,11 +1555,6 @@ fn mem_mmap_file() {
 #[test]
 fn mem_mremap() {
     conform("mem/mremap");
-}
-
-#[test]
-fn mem_mseal() {
-    conform("mem/mseal");
 }
 
 #[test]

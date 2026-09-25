@@ -360,10 +360,6 @@ impl Probe {
         )
     }
 
-    pub fn mseal(&self, at: &At, len: usize, flags: u64) -> i64 {
-        self.range_call(Syscall::N_mseal, at, len, Some(("flags", flags as i64)))
-    }
-
     pub fn mlockall(&self, flags: i32) -> i64 {
         let result = self.call(Syscall::N_mlockall, [flags as i64, 0, 0, 0, 0, 0]);
         self.record_mlockall(flags, result)

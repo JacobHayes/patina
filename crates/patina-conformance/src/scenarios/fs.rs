@@ -18,7 +18,6 @@ pub mod mount;
 pub mod mount_api;
 pub mod mount_query;
 pub mod names;
-pub mod newer_than_virtual;
 pub mod open_tree;
 pub mod openat2;
 pub mod owner;
