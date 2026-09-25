@@ -3174,6 +3174,8 @@ pub extern "C" fn patina_init_panic_policy() {
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_note_startup_constructor_finished() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // The loader runs the constructor on the main thread.
+    thread::claim_main_thread();
     STARTUP_CONSTRUCTOR_FINISHED.store(true, Ordering::Release);
 }
 
@@ -7580,16 +7582,33 @@ mod thread {
         MAIN_RETURNED.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// The unmanaged sentinel used before the thread subsystem activates; the
-    /// scheduler never issues task id 0.
+    /// The task of a host thread the runtime does not run (a foreign thread,
+    /// or the main thread of an embedding without the POSIX startup
+    /// constructor); the scheduler never issues task id 0.
     const UNMANAGED_TASK: TaskId = TaskId(0);
+
+    /// The main thread's task. The scheduler numbers tasks from 1 and
+    /// [`ThreadRuntime::ensure_active`] spawns the main thread's first, so the
+    /// startup constructor can claim this identity for the main thread before
+    /// the thread runtime activates. Everything that records a thread's
+    /// identity before activation — a mutex or write-lock owner, a waiter —
+    /// then names the same task after it: activation (the first
+    /// `pthread_create`, but also a pipe, an eventfd, a FIFO open, a futex
+    /// wait or any signal-state call) never changes who the main thread is.
+    const MAIN_TASK: TaskId = TaskId(1);
+
+    /// Claim [`MAIN_TASK`] for the calling thread. Called once, by the POSIX
+    /// startup constructor, which the loader runs on the main thread.
+    pub(crate) fn claim_main_thread() {
+        set_current_task(MAIN_TASK);
+    }
 
     fn current_task() -> TaskId {
         CURRENT_TASK.with(Cell::get).unwrap_or(UNMANAGED_TASK)
     }
 
-    /// How far thread ids sit above task ids: the scheduler numbers the main
-    /// task 1, and the main thread's id is the guest's pid.
+    /// How far thread ids sit above task ids: the main thread is
+    /// [`MAIN_TASK`], and its id is the guest's pid.
     const TID_OFFSET: u64 = crate::registry::IDENTITY_PID as u64 - 1;
 
     /// The thread id of `task`: the guest's pid for the main thread (and for
@@ -8541,14 +8560,19 @@ mod thread {
             )
         }
 
-        /// Register the main thread as the first managed task and give it the
-        /// baton the first time the thread subsystem is used.
+        /// Register the main thread as the first managed task, [`MAIN_TASK`],
+        /// and give it the baton the first time the thread subsystem is used.
         fn ensure_active(&mut self) -> Result<(), ThreadError> {
             if self.active {
                 return Ok(());
             }
             let mut scheduler = RealScheduler;
             let main = scheduler.spawn("main")?;
+            if main != MAIN_TASK {
+                return Err(ThreadError::Fatal(format!(
+                    "the scheduler numbered the main task {main:?}, not {MAIN_TASK:?}"
+                )));
+            }
             let selected = scheduler.next()?;
             if selected != Some(main) {
                 return Err(ThreadError::Fatal(format!(

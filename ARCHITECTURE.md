@@ -144,6 +144,12 @@ finalizes without running guest atexit handlers; normal libc exit retains its
 atexit chain. The last worker returning normally exits zero; an explicit raw exit
 retains its requested status.
 
+The main thread is task 1 from the startup constructor on; the scheduler
+registers it lazily, on first thread-subsystem use (the first `pthread_create`,
+but also a pipe, an eventfd, a FIFO open, a futex wait or a signal-state call).
+Whatever records a thread's identity before that — a mutex or write-lock owner —
+therefore names the same task after it.
+
 Guest raw `rt_sigreturn` and `restart_syscall` are final `signal-abi` traps: handler
 returns use the allowed host restorer, and no guest restart-block protocol exists.
 `pidfd_send_signal` remains a process trap because there are no virtual pidfds;

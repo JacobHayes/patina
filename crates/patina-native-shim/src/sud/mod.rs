@@ -738,11 +738,12 @@ pub unsafe extern "C" fn patina_sud_dispatch(
     //
     // Thread-provenance invariant (SUD-DESIGN.md §4.2 invariant 1, restated): the
     // trapping thread is a managed task OR the pre-activation main thread —
-    // identical thread-semantics to the interposer entries. The main thread gets
-    // its managed TaskId lazily (`ensure_active`, on first thread-subsystem use),
-    // so a raw syscall before any spawn runs with no CURRENT_TASK, exactly like an
-    // interposed call would — the `patina_*` entries handle that today (the
-    // UNMANAGED_TASK root fallback), and dispatch must not be stricter than the
+    // identical thread-semantics to the interposer entries. The main thread holds
+    // its task id from the startup constructor on (`MAIN_TASK`) but is only
+    // registered with the scheduler lazily (`ensure_active`, on first
+    // thread-subsystem use), so a raw syscall before any spawn runs on an
+    // inactive runtime, exactly like an interposed call would — the `patina_*`
+    // entries handle that today, and dispatch must not be stricter than the
     // boundary it mirrors (a hard managed-task assert here aborted every guest
     // whose first raw syscall preceded its first spawn). No dispatch-side check is
     // needed to hold the invariant: arming strictly follows `set_current_task` in

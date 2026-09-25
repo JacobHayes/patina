@@ -335,31 +335,6 @@ pub const SCENARIO: Scenario = Scenario {
         Gap {
             status: Status::Pending(Arc::SignalsThreadsProcess),
             vehicles: &[Vehicle::Libc],
-            what: "the main thread's lock-owner identity changes when the thread runtime activates (patina-native-shim src/lib.rs current_task: UNMANAGED_TASK until ensure_active makes it task 1), and activation is not only the first pthread_create but also pipe, eventfd, a FIFO open, a futex wait and every signal-state call (sigprocmask, pthread_sigmask, pthread_kill, …): a mutex the main thread locked before that is owned by a task it no longer is, so its unlock is EPERM and the mutex stays held (destroy EBUSY; a contender would park forever)",
-            failure: Failure::Differs(&[
-                Difference::field(8, "pthread_mutex_unlock", "ret", Observed::Int(-1)),
-                Difference::field(8, "pthread_mutex_unlock", "errno", Observed::Str("EPERM")),
-                Difference::check(
-                    9,
-                    "the owner unlocks, whatever the thread did since it locked",
-                ),
-                Difference::field(10, "pthread_mutex_destroy", "ret", Observed::Int(-1)),
-                Difference::field(10, "pthread_mutex_destroy", "errno", Observed::Str("EBUSY")),
-                Difference::check(11, "destroy"),
-                Difference::field(16, "pthread_mutex_unlock", "ret", Observed::Int(-1)),
-                Difference::field(16, "pthread_mutex_unlock", "errno", Observed::Str("EPERM")),
-                Difference::check(
-                    17,
-                    "the owner unlocks, whatever threads it created since it locked",
-                ),
-                Difference::field(18, "pthread_mutex_destroy", "ret", Observed::Int(-1)),
-                Difference::field(18, "pthread_mutex_destroy", "errno", Observed::Str("EBUSY")),
-                Difference::check(19, "destroy"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
             what: "the shim's mutexes have no type: patina_mutex_init drops the attributes and a static initializer's kind (glibc's PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP) is never read, so every mutex is error-checking and a recursive one's relock is EDEADLK, one unlock frees it (another thread's trylock succeeds) and the second is EPERM",
             failure: Failure::Differs(&[
                 Difference::field(49, "pthread_mutex_lock", "ret", Observed::Int(-1)),

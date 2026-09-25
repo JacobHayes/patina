@@ -236,22 +236,6 @@ pub const SCENARIO: Scenario = Scenario {
         Gap {
             status: Status::Pending(Arc::SignalsThreadsProcess),
             vehicles: &[Vehicle::Libc],
-            what: "the main thread's lock-owner identity changes when the thread runtime activates (patina-native-shim src/lib.rs current_task: UNMANAGED_TASK until ensure_active; a signal-state call such as sigprocmask activates it), so a write lock taken before that is owned by a task the main thread no longer is: its unlock is EPERM (rwlock_unlock) and the lock stays held (destroy EBUSY)",
-            failure: Failure::Differs(&[
-                Difference::field(4, "pthread_rwlock_unlock", "ret", Observed::Int(-1)),
-                Difference::field(4, "pthread_rwlock_unlock", "errno", Observed::Str("EPERM")),
-                Difference::check(
-                    5,
-                    "the writer unlocks, whatever the thread did since it locked",
-                ),
-                Difference::field(6, "pthread_rwlock_destroy", "ret", Observed::Int(-1)),
-                Difference::field(6, "pthread_rwlock_destroy", "errno", Observed::Str("EBUSY")),
-                Difference::check(7, "destroy"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
             what: "the shim's rwlock table answers the writer's own tryrdlock and trywrlock EDEADLK (patina-native-shim src/lib.rs rwlock_tryrdlock/rwlock_trywrlock), where glibc's non-blocking calls do not check the writer and are EBUSY",
             failure: Failure::Differs(&[
                 Difference::field(
