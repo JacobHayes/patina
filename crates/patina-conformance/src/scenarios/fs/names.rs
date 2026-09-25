@@ -3,7 +3,9 @@
 //! newfstatat). symlinkat / readlinkat / linkat: link targets and truncation,
 //! dangling links, hard-link counts, and AT_SYMLINK_FOLLOW. The directory
 //! part leaves the run directory empty, so the link part starts from a fresh
-//! one.
+//! one. It holds an `O_PATH` descriptor on everything it removes until the
+//! scenario ends, so no inode it labeled is reused by a link-part object
+//! (the inode identity rule, `scenarios/fs.rs`).
 
 use crate::catalog::{DEFAULTS, Scenario};
 
@@ -18,11 +20,25 @@ fn exists(p: &Probe, path: &str) -> bool {
 
 pub fn run(p: &Probe) {
     let root = p.dir();
-    directories(p, &root);
+    let held = directories(p, &root);
     links(p, &root);
+    for fd in held {
+        p.close(fd);
+    }
 }
 
-fn directories(p: &Probe, root: &str) {
+/// Open `path` `O_PATH` and keep the descriptor: a referenced inode stays
+/// allocated after its last name goes, so the host cannot give its number to
+/// a later object.
+fn hold(p: &Probe, held: &mut Vec<i32>, dirfd: i32, path: &str) {
+    let fd = p.openat(dirfd, path, O_PATH, 0);
+    p.require("hold an object before removing it", fd >= 0);
+    held.push(fd);
+}
+
+/// The directory part. Returns the descriptors holding what it removed.
+fn directories(p: &Probe, root: &str) -> Vec<i32> {
+    let mut held = Vec::new();
     let d = format!("{root}/d");
     let f = format!("{root}/f");
     let g = format!("{root}/g");
@@ -126,10 +142,12 @@ fn directories(p: &Probe, root: &str) {
         "unlinkat AT_REMOVEDIR on a non-empty directory is ENOTEMPTY",
         p.unlinkat(AT_FDCWD, &d2, AT_REMOVEDIR) == neg(ENOTEMPTY),
     );
+    hold(p, &mut held, AT_FDCWD, &format!("{d2}/inner"));
     p.check(
         "unlinkat removes a file",
         p.unlinkat(AT_FDCWD, &format!("{d2}/inner"), 0) == 0,
     );
+    hold(p, &mut held, AT_FDCWD, &d2);
     p.check(
         "unlinkat AT_REMOVEDIR on an empty directory",
         p.unlinkat(AT_FDCWD, &d2, AT_REMOVEDIR) == 0,
@@ -149,6 +167,7 @@ fn directories(p: &Probe, root: &str) {
 
     let open_then_unlink = p.openat(dirfd, "sub/g2", O_RDWR, 0);
     p.require("open sub/g2", open_then_unlink >= 0);
+    hold(p, &mut held, dirfd, "sub/g2");
     p.check(
         "unlinkat relative to a dirfd",
         p.unlinkat(dirfd, "sub/g2", 0) == 0,
@@ -167,16 +186,19 @@ fn directories(p: &Probe, root: &str) {
         !exists(p, &format!("{root}/sub/g2")),
     );
     p.close(open_then_unlink);
+    hold(p, &mut held, dirfd, "sub/dmoved");
     p.check(
         "unlinkat AT_REMOVEDIR relative to a dirfd",
         p.unlinkat(dirfd, "sub/dmoved", AT_REMOVEDIR) == 0,
     );
+    hold(p, &mut held, dirfd, "sub");
     p.check(
         "unlinkat AT_REMOVEDIR on the now-empty sub",
         p.unlinkat(dirfd, "sub", AT_REMOVEDIR) == 0,
     );
     p.close(fd);
     p.close(dirfd);
+    held
 }
 
 fn links(p: &Probe, root: &str) {

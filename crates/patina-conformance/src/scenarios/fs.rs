@@ -1,3 +1,17 @@
+//! The filesystem family: files, directories, links and mounts, their
+//! metadata, and the libc wrappers over them, in the run directory.
+//!
+//! Inode identity: an inode label is an identity by number (the comparison
+//! labels each `ino` by the event it first appears in), so two objects that
+//! share a number read as one. Patina's filesystem does not repeat a number
+//! within a run, but the host's does: once an inode's last name and last
+//! reference are gone, its number may be handed to the next object created.
+//! A stream therefore labels only inodes the kernel keeps distinct: an object
+//! whose inode it labeled stays referenced, by a name or a descriptor, until
+//! its last creation. A scenario that removes one earlier holds a descriptor
+//! on it first (`O_PATH` suffices): a removed inode with a live reference
+//! stays allocated.
+
 pub mod cache;
 pub mod chmod;
 pub mod copy;
