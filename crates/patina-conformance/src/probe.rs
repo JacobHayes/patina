@@ -162,6 +162,8 @@ pub enum XattrTarget<'a> {
     Path(&'a str),
     Link(&'a str),
     Fd(i32),
+    /// A NULL path, through the followed path rows.
+    NullPath,
 }
 
 /// One decoded `struct inotify_event`.
@@ -3381,7 +3383,7 @@ impl Probe {
 
     fn xattr_row(target: XattrTarget<'_>, path: Syscall, link: Syscall, fd: Syscall) -> Syscall {
         match target {
-            XattrTarget::Path(_) => path,
+            XattrTarget::Path(_) | XattrTarget::NullPath => path,
             XattrTarget::Link(_) => link,
             XattrTarget::Fd(_) => fd,
         }
@@ -3396,17 +3398,19 @@ impl Probe {
         match target {
             XattrTarget::Path(path) | XattrTarget::Link(path) => builder.arg("path", path),
             XattrTarget::Fd(fd) => self.fd_arg(builder, "fd", fd),
+            XattrTarget::NullPath => builder.arg("path", "NULL"),
         }
     }
 
     fn xattr_call(&self, row: Syscall, target: XattrTarget<'_>, rest: [i64; 4]) -> i64 {
         let path = match target {
             XattrTarget::Path(path) | XattrTarget::Link(path) => Some(cstr(path)),
-            XattrTarget::Fd(_) => None,
+            XattrTarget::Fd(_) | XattrTarget::NullPath => None,
         };
         let first = match (&path, target) {
             (Some(c), _) => c.as_ptr() as i64,
             (None, XattrTarget::Fd(fd)) => fd as i64,
+            (None, XattrTarget::NullPath) => 0,
             (None, _) => unreachable!("a path target has a path"),
         };
         self.call(row, [first, rest[0], rest[1], rest[2], rest[3], 0])

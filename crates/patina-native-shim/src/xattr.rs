@@ -7,9 +7,11 @@
 //! (`E2BIG`), answers the size protocol (a zero size asks for the length, a
 //! short buffer is `ERANGE`), and names the node — a path resolved with or
 //! without following a final symlink, or a descriptor (`fdget`: `O_PATH` is
-//! `EBADF`). The refusals come in the kernel's order: `setxattr` judges its
-//! flags, name and value before the path, `getxattr`/`removexattr` after it,
-//! and every descriptor row resolves the descriptor first. What an attribute
+//! `EBADF`). The refusals come in the kernel's order (6.8): `setxattr` and
+//! `removexattr` judge their flags, name and value before the path (a NULL
+//! path is `EFAULT` there), `getxattr`/`listxattr` look the path up first,
+//! and every descriptor row resolves the descriptor first. Which of the three
+//! a call names is explicit (`XATTR_BY_*`), never read off a NULL path. What an attribute
 //! IS — its namespace rules, the permission bits it is charged against, where
 //! it is kept — is the filesystem's business; a descriptor on no filesystem
 //! entry (an anonymous pipe, a socket, an eventfd) is on a pseudo-filesystem
@@ -32,6 +34,13 @@ const XATTR_NAME_MAX: usize = 255;
 const XATTR_SIZE_MAX: usize = 65536;
 /// `XATTR_CREATE | XATTR_REPLACE`: the flags the set rows define.
 const XATTR_FLAGS: c_int = 0x1 | 0x2;
+
+/// What an entry's `by` argument names (`PATINA_XATTR_BY_*` in
+/// `patina_native.h`): a path with a final symlink not followed (the `l*`
+/// rows), a path followed, or the descriptor `fd` (the `f*` rows).
+pub(crate) const XATTR_BY_LINK: c_int = 0;
+pub(crate) const XATTR_BY_PATH: c_int = 1;
+pub(crate) const XATTR_BY_FD: c_int = 2;
 
 /// Copy an attribute name in as `strncpy_from_user` into a
 /// `XATTR_NAME_MAX + 1` buffer does: an empty or over-long name is `ERANGE`,
@@ -63,6 +72,9 @@ enum Node {
 /// The node a path names: resolved with or without following a final
 /// symlink (the `l*` rows), and it must exist.
 fn path_node(path: *const c_char, follow: bool) -> Result<Node, c_int> {
+    if path.is_null() {
+        return Err(EFAULT);
+    }
     let path = path_from_c(path)?;
     let flags = if follow { 0 } else { paths::RESOLVE_NOFOLLOW };
     let resolved = paths::resolve(paths::AT_FDCWD, &path, flags)?;
@@ -136,18 +148,17 @@ fn copy_out(bytes: &[u8], buffer: *mut c_void, size: usize) -> isize {
     isize::try_from(bytes.len()).unwrap_or(isize::MAX)
 }
 
-/// The node `(fd, path, follow)` names: the path when `path` is non-null,
-/// else the descriptor.
-fn node(raw_fd: c_int, path: *const c_char, follow: c_int) -> Result<Node, c_int> {
-    if path.is_null() {
+/// The node `(fd, path, by)` names.
+fn node(raw_fd: c_int, path: *const c_char, by: c_int) -> Result<Node, c_int> {
+    if by == XATTR_BY_FD {
         descriptor_node(raw_fd)
     } else {
-        path_node(path, follow != 0)
+        path_node(path, by == XATTR_BY_PATH)
     }
 }
 
-/// `getxattr`/`lgetxattr` (a non-null `path`, `follow` choosing) and
-/// `fgetxattr` (a NULL `path`, `fd`).
+/// `getxattr`/`lgetxattr` (`path`, `by` choosing) and `fgetxattr` (`fd`,
+/// `by` [`XATTR_BY_FD`]).
 ///
 /// # Safety
 /// `path` and `name`, when non-null, must be NUL-terminated strings; `value`
@@ -156,13 +167,13 @@ fn node(raw_fd: c_int, path: *const c_char, follow: c_int) -> Result<Node, c_int
 pub unsafe extern "C" fn patina_getxattr(
     raw_fd: c_int,
     path: *const c_char,
-    follow: c_int,
+    by: c_int,
     name: *const c_char,
     value: *mut c_void,
     size: usize,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let node = match node(raw_fd, path, follow) {
+    let node = match node(raw_fd, path, by) {
         Ok(node) => node,
         Err(errno) => return fail(errno) as isize,
     };
@@ -190,12 +201,12 @@ pub unsafe extern "C" fn patina_getxattr(
 pub unsafe extern "C" fn patina_listxattr(
     raw_fd: c_int,
     path: *const c_char,
-    follow: c_int,
+    by: c_int,
     list: *mut c_void,
     size: usize,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let target = match node(raw_fd, path, follow) {
+    let target = match node(raw_fd, path, by) {
         Ok(Node::Volume(target)) => target,
         Ok(Node::Pseudo { .. }) => return copy_out(&[], list, size),
         Err(errno) => return fail(errno) as isize,
@@ -216,14 +227,14 @@ pub unsafe extern "C" fn patina_listxattr(
 pub unsafe extern "C" fn patina_setxattr(
     raw_fd: c_int,
     path: *const c_char,
-    follow: c_int,
+    by: c_int,
     name: *const c_char,
     value: *const c_void,
     size: usize,
     flags: c_int,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let descriptor = if path.is_null() {
+    let descriptor = if by == XATTR_BY_FD {
         match descriptor_node(raw_fd) {
             Ok(node) => Some(node),
             Err(errno) => return fail(errno),
@@ -252,7 +263,7 @@ pub unsafe extern "C" fn patina_setxattr(
     };
     let node = match descriptor {
         Some(node) => node,
-        None => match path_node(path, follow != 0) {
+        None => match path_node(path, by == XATTR_BY_PATH) {
             Ok(node) => node,
             Err(errno) => return fail(errno),
         },
@@ -278,17 +289,30 @@ pub unsafe extern "C" fn patina_setxattr(
 pub unsafe extern "C" fn patina_removexattr(
     raw_fd: c_int,
     path: *const c_char,
-    follow: c_int,
+    by: c_int,
     name: *const c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let node = match node(raw_fd, path, follow) {
-        Ok(node) => node,
-        Err(errno) => return fail(errno),
+    // The descriptor row resolves the descriptor, then the name; the path
+    // rows copy the name before they look the path up.
+    let descriptor = if by == XATTR_BY_FD {
+        match descriptor_node(raw_fd) {
+            Ok(node) => Some(node),
+            Err(errno) => return fail(errno),
+        }
+    } else {
+        None
     };
     let name = match copy_name(name) {
         Ok(name) => name,
         Err(errno) => return fail(errno),
+    };
+    let node = match descriptor {
+        Some(node) => node,
+        None => match path_node(path, by == XATTR_BY_PATH) {
+            Ok(node) => node,
+            Err(errno) => return fail(errno),
+        },
     };
     let target = match node {
         Node::Volume(target) => target,

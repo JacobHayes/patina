@@ -6,7 +6,9 @@
 //! one ENODATA (both together: each where it applies), an unknown flag EINVAL; a name without a
 //! namespace is EOPNOTSUPP, an empty or over-long name ERANGE, a value over
 //! XATTR_SIZE_MAX E2BIG before the value is read (a NULL value of that size is
-//! still E2BIG; of a small size, EFAULT). Permissions are the inode's
+//! still E2BIG; of a small size, EFAULT). The set and remove path rows judge
+//! the flags, the name and the size before the path (a NULL or missing path
+//! with an empty name is ERANGE); get and list look the path up first. Permissions are the inode's
 //! (xattr_permission): `user.*` needs a regular file or directory — on a
 //! symlink or a FIFO a write is EPERM and a read ENODATA — plus the mode's
 //! r/w bits (EACCES), and `trusted.*` needs CAP_SYS_ADMIN (EPERM to set,
@@ -299,6 +301,54 @@ pub fn run(p: &Probe) {
     p.check(
         "attributes survive a rename",
         p.getxattr(XattrTarget::Path(&renamed), "user.a", 64).1 == b"v2",
+    );
+
+    // ---- the path rows' order --------------------------------------------------
+    // set and remove judge the flags, the name and the size before they look
+    // the path up (fs/xattr.c path_setxattr, path_removexattr); get and list
+    // look it up first.
+    let missing = format!("{root}/missing/x");
+    p.check(
+        "setxattr of a NULL path with an empty name is ERANGE",
+        p.setxattr(XattrTarget::NullPath, "", Some(b"v"), 1, 0) == neg(ERANGE),
+    );
+    p.check(
+        "with an oversized value E2BIG",
+        p.setxattr(XattrTarget::NullPath, "user.a", None, XATTR_SIZE_MAX + 1, 0) == neg(E2BIG),
+    );
+    p.check(
+        "with an unknown flag EINVAL",
+        p.setxattr(
+            XattrTarget::NullPath,
+            "user.a",
+            Some(b"v"),
+            1,
+            UNKNOWN_XATTR_FLAG,
+        ) == neg(EINVAL),
+    );
+    p.check(
+        "and with a good name EFAULT",
+        p.setxattr(XattrTarget::NullPath, "user.a", Some(b"v"), 1, 0) == neg(EFAULT),
+    );
+    p.check(
+        "removexattr of a NULL path with an empty name is ERANGE",
+        p.removexattr(XattrTarget::NullPath, "") == neg(ERANGE),
+    );
+    p.check(
+        "of a missing path too",
+        p.removexattr(XattrTarget::Path(&missing), "") == neg(ERANGE),
+    );
+    p.check(
+        "and of a NULL path with a good name EFAULT",
+        p.removexattr(XattrTarget::NullPath, "user.a") == neg(EFAULT),
+    );
+    p.check(
+        "getxattr of a NULL path is EFAULT whatever the name",
+        p.getxattr(XattrTarget::NullPath, "", 64).0 == neg(EFAULT),
+    );
+    p.check(
+        "and listxattr of one",
+        p.listxattr(XattrTarget::NullPath, 64).0 == neg(EFAULT),
     );
     p.close(reader);
     p.close(location);

@@ -488,20 +488,25 @@ int32_t patina_statfs(const char *path, void *out);
 int32_t patina_fstatfs(int32_t fd, void *out);
 int32_t patina_ustat(uint32_t dev, void *out);
 /*
- * Linux extended attributes. A non-NULL `path` names the entry (`follow`
- * nonzero follows a final symlink, zero is the l* rows), a NULL one the
- * descriptor `fd` (O_PATH is EBADF). setxattr judges flags (XATTR_CREATE/
- * XATTR_REPLACE, EINVAL otherwise), the name (1..=255 bytes, ERANGE) and the
- * value (XATTR_SIZE_MAX, E2BIG) before the path; getxattr/removexattr after
- * it. get/list answer the size protocol: a zero size asks for the length, a
- * short buffer is ERANGE.
+ * Linux extended attributes. `by` names the node: PATINA_XATTR_BY_PATH the
+ * entry at `path` (a final symlink followed), PATINA_XATTR_BY_LINK the entry
+ * itself (the l* rows), PATINA_XATTR_BY_FD the descriptor `fd` (O_PATH is
+ * EBADF); a NULL `path` is EFAULT where the kernel looks it up. setxattr and
+ * removexattr judge flags (XATTR_CREATE/XATTR_REPLACE, EINVAL otherwise), the
+ * name (1..=255 bytes, ERANGE) and the value (XATTR_SIZE_MAX, E2BIG) before
+ * the path; getxattr/listxattr look the path up first; the f* rows resolve
+ * the descriptor first. get/list answer the size protocol: a zero size asks
+ * for the length, a short buffer is ERANGE.
  */
-intptr_t patina_getxattr(int32_t fd, const char *path, int32_t follow, const char *name,
-                         void *value, size_t size);
-intptr_t patina_listxattr(int32_t fd, const char *path, int32_t follow, void *list, size_t size);
-int32_t patina_setxattr(int32_t fd, const char *path, int32_t follow, const char *name,
+#define PATINA_XATTR_BY_LINK 0
+#define PATINA_XATTR_BY_PATH 1
+#define PATINA_XATTR_BY_FD 2
+intptr_t patina_getxattr(int32_t fd, const char *path, int32_t by, const char *name, void *value,
+                         size_t size);
+intptr_t patina_listxattr(int32_t fd, const char *path, int32_t by, void *list, size_t size);
+int32_t patina_setxattr(int32_t fd, const char *path, int32_t by, const char *name,
                         const void *value, size_t size, int32_t flags);
-int32_t patina_removexattr(int32_t fd, const char *path, int32_t follow, const char *name);
+int32_t patina_removexattr(int32_t fd, const char *path, int32_t by, const char *name);
 /*
  * Linux in-kernel copies, each with its syscall's contract and refusal order:
  * copy_file_range between two regular files (offsets read and advanced

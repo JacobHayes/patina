@@ -176,12 +176,12 @@ unsafe extern "C" {
     ) -> c_int;
     fn patina_fd_metadata_full(fd: c_int, out: *mut PatinaMetadata) -> c_int;
     fn patina_statfs(path: *const c_char, out: *mut c_void) -> c_int;
-    // Extended attributes: a non-null `path` names the entry (`follow`
-    // choosing the `l*` rows), a NULL one the descriptor `fd`.
+    // Extended attributes: `by` (`xattr::XATTR_BY_*`) names the path, its
+    // final symlink followed or not (the `l*` rows), or the descriptor `fd`.
     fn patina_getxattr(
         fd: c_int,
         path: *const c_char,
-        follow: c_int,
+        by: c_int,
         name: *const c_char,
         value: *mut c_void,
         size: usize,
@@ -189,25 +189,20 @@ unsafe extern "C" {
     fn patina_listxattr(
         fd: c_int,
         path: *const c_char,
-        follow: c_int,
+        by: c_int,
         list: *mut c_void,
         size: usize,
     ) -> isize;
     fn patina_setxattr(
         fd: c_int,
         path: *const c_char,
-        follow: c_int,
+        by: c_int,
         name: *const c_char,
         value: *const c_void,
         size: usize,
         flags: c_int,
     ) -> c_int;
-    fn patina_removexattr(
-        fd: c_int,
-        path: *const c_char,
-        follow: c_int,
-        name: *const c_char,
-    ) -> c_int;
+    fn patina_removexattr(fd: c_int, path: *const c_char, by: c_int, name: *const c_char) -> c_int;
     // In-kernel copies.
     fn patina_copy_file_range(
         fd_in: c_int,
