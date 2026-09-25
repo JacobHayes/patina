@@ -379,6 +379,9 @@ struct SemSet {
     sems: Vec<(i32, i32)>,
     /// The process's `SEM_UNDO` adjustments.
     adjust: Vec<i32>,
+    /// Whether the process holds an undo entry for the set: a `SEM_UNDO`
+    /// operation got past the set's lookup (`find_alloc_undo`).
+    undo: bool,
     otime: i64,
     ctime: i64,
     /// Blocked operations, oldest first.
@@ -898,6 +901,7 @@ pub(crate) fn semget(key: i32, nsems: i32, flags: i32) -> i64 {
             Ok(SemSet {
                 sems: vec![(0, 0); nsems as usize],
                 adjust: vec![0; nsems as usize],
+                undo: false,
                 otime: 0,
                 ctime: now(),
                 pending: VecDeque::new(),
@@ -1030,6 +1034,7 @@ pub(crate) unsafe fn semtimedop(
     };
     let max = ops.iter().map(|op| op.num).max().unwrap_or(0) as usize;
     let alter = ops.iter().any(|op| op.op != 0);
+    let undos = ops.iter().any(|op| op.flg & SEM_UNDO != 0);
     let me = current_task();
     let mut deadline = None;
     loop {
@@ -1042,6 +1047,9 @@ pub(crate) unsafe fn semtimedop(
             Ok(found) => found,
             Err(errno) => return fail(errno),
         };
+        if undos {
+            set.undo = true;
+        }
         if max >= set.sems.len() {
             return fail(EFBIG);
         }
@@ -1089,6 +1097,34 @@ pub(crate) unsafe fn semtimedop(
             Err(result) => return result,
         }
     }
+}
+
+/// `exit_sem` for a process whose only thread drops its undo list
+/// (`unshare(CLONE_SYSVSEM)`): each set it holds an undo entry for gets the
+/// adjustments applied — a semaphore kept within `0..=SEMVMX`, its last
+/// process the caller where one moved it — and the entry dropped; then the
+/// set's waiters are rescanned and its `sem_otime` moves (`do_smart_update`
+/// with `otime` forced).
+pub(crate) fn exit_sem() {
+    let mut state = lock_state();
+    let Ipc { sem, outcomes, .. } = &mut state.ipc;
+    let mut woken = Vec::new();
+    for (_, set) in sem.objects.values_mut() {
+        if !set.undo {
+            continue;
+        }
+        set.undo = false;
+        for (slot, adjust) in set.sems.iter_mut().zip(set.adjust.iter_mut()) {
+            if *adjust != 0 {
+                *slot = ((slot.0 + *adjust).clamp(0, SEMVMX), PID);
+                *adjust = 0;
+            }
+        }
+        woken.extend(update_queue(set, outcomes));
+        set.otime = now();
+    }
+    drop(state);
+    wake_all(woken);
 }
 
 /// `semctl(2)`; `arg` is the fourth argument's register (`union semun`).
@@ -2463,6 +2499,7 @@ mod tests {
         SemSet {
             sems: values.iter().map(|value| (*value, 0)).collect(),
             adjust: vec![0; values.len()],
+            undo: false,
             otime: 0,
             ctime: 0,
             pending: VecDeque::new(),

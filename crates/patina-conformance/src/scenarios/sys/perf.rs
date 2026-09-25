@@ -1,16 +1,15 @@
 //! sys/perf — performance events (kernel/events/core.c `perf_event_open`),
 //! on a host that refuses them to an unprivileged caller altogether
-//! (`Need::RestrictedPerf`: Debian's and Ubuntu's `perf_event_paranoid`
-//! above 2, the configuration the virtual kernel declares). An unknown flag
-//! is `EINVAL` first; then every event is `EACCES` without the capability,
-//! before the attribute is even read: counting the caller's own user time
-//! and an unreadable attribute alike.
+//! (`Need::RestrictedPerf`; the virtual kernel declares Ubuntu's
+//! `perf_event_paranoid` 4, at which its patch refuses every event). An
+//! unknown flag is `EINVAL` first; then every event is `EACCES` without
+//! `CAP_PERFMON` or `CAP_SYS_ADMIN`, before the attribute is even read:
+//! counting the caller's own user time and an unreadable attribute alike.
 //!
 //! What root would be granted is a disabled software counter of its own
 //! time, closed at exit.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -82,22 +81,5 @@ pub const SCENARIO: Scenario = Scenario {
     vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_perf_event_open],
     needs: &[Need::Unprivileged, Need::RestrictedPerf],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: Vehicle::KERNEL,
-        what: "perf_event_open is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)) where a kernel restricting perf events to privileged callers answers EINVAL for a bad flag and otherwise EACCES",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(SIGABRT),
-            diagnostic: TRAP,
-        },
-    }],
     ..DEFAULTS
 };
-
-#[cfg(target_arch = "x86_64")]
-const TRAP: &str =
-    "patina: SUD trapped unsupported syscall perf_event_open (nr 298, class privileged";
-#[cfg(target_arch = "aarch64")]
-const TRAP: &str =
-    "patina: SUD trapped unsupported syscall perf_event_open (nr 241, class privileged";

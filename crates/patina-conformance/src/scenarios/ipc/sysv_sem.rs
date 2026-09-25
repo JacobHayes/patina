@@ -19,6 +19,9 @@
 //! * a key names one set: `EEXIST` for `IPC_CREAT|IPC_EXCL` on a taken key,
 //!   `EINVAL` for more semaphores than the set has, `ENOENT` for a key
 //!   nobody took; creating a set of 0 semaphores is `EINVAL`.
+//! * a lone thread's `unshare(CLONE_SYSVSEM)` drops its undo list the way
+//!   exit does (`exit_sem`): a `SEM_UNDO` operation's adjustment is applied,
+//!   another operation's value stays.
 //!
 //! The helper thread's calls are unrecorded (their timing is the host's);
 //! what they cause is. Keys are `ftok(3)` of the run directory; every set is
@@ -42,6 +45,7 @@ const SEMVMX: i32 = 32767;
 /// Far past any host's `SEMOPM` (32 by default, 500 on most distributions).
 const TOO_MANY_OPS: usize = 1 << 20;
 const NOWAIT: i16 = IPC_NOWAIT as i16;
+const UNDO: i16 = SEM_UNDO as i16;
 /// How long the helper thread waits for the main thread to block.
 const BLOCK_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -89,6 +93,30 @@ pub fn run(p: &Probe) {
         "a key nobody took is ENOENT",
         i64::from(p.semget(key, 0, 0)) == neg(ENOENT),
     );
+    // ---- undo ----
+    // First among the private sets, while the probe has no other thread:
+    // an exited thread drops its hold on the shared undo list after its
+    // joiner may return (`exit_sem` follows `exit_mm`), and while another
+    // holds it `unshare` only detaches this thread from the list.
+    let id = p.semget(Key::PRIVATE, 2, IPC_CREAT | 0o600);
+    p.require("create a set of two", id >= 0);
+    let undo = Owned::sysv(Syscall::N_semctl, id);
+    p.check(
+        "an increment with SEM_UNDO and one without",
+        p.semop(id, &[(0, 2, UNDO), (1, 1, 0)], None) == 0,
+    );
+    p.check(
+        "a lone thread unsharing its undo list is 0",
+        p.call_observed(Syscall::N_unshare, [CLONE_SYSVSEM as i64, 0, 0, 0, 0, 0]) == 0,
+    );
+    let (r, values) = p.semctl(id, 0, GETALL, &SemArg::GetAll(2));
+    p.check(
+        "which applied the undoable increment's adjustment, and only that",
+        r == 0 && values == [0, 1],
+    );
+    let removed = p.semctl(id, 0, IPC_RMID, &SemArg::None).0;
+    undo.removed(removed);
+
     // ---- values ----
     let from = p.realtime_seconds();
     let id = p.semget(Key::PRIVATE, 3, IPC_CREAT | 0o600);
@@ -292,6 +320,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_semop,
         Syscall::N_semtimedop,
         Syscall::N_semctl,
+        Syscall::N_unshare,
     ],
     vehicles: Vehicle::KERNEL,
     needs: &[Need::SysvSem],

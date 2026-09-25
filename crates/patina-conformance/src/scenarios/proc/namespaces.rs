@@ -30,7 +30,7 @@
 //! caller, and the probe stops before any call unless it is one.
 
 use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::compare::{Difference, Ending, Failure, Observed};
 use crate::probe::{AT_FDCWD, Probe, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -149,11 +149,20 @@ pub const SCENARIO: Scenario = Scenario {
         Gap {
             status: Status::Pending(Arc::Privileged),
             vehicles: Vehicle::KERNEL,
-            what: "unshare is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)), as is setns, where the unprivileged caller may unshare what only it holds, and is answered EINVAL for flags that cannot apply and EPERM for new or joined namespaces (no CAP_SYS_ADMIN)",
+            what: "the virtual filesystem has no namespace files: /proc/self/ns/uts is ENOENT where the kernel opens the caller's UTS namespace",
+            failure: Failure::Differs(&[
+                Difference::field(38, "openat", "errno", Observed::Str("ENOENT")),
+                Difference::field(38, "openat", "ret", Observed::Int(-1)),
+            ]),
+        },
+        Gap {
+            status: Status::Pending(Arc::Privileged),
+            vehicles: Vehicle::KERNEL,
+            what: "without a namespace file the scenario cannot continue, so setns's namespace-type and CAP_SYS_ADMIN checks are never reached (patina-native-shim sud/privileged/process.rs setns refuses every descriptor the model holds)",
             failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Signal(SIGABRT),
-                diagnostic: TRAP,
+                events: 39,
+                ending: Ending::Exit(101),
+                diagnostic: "proc/namespaces: cannot continue: open the caller's UTS namespace",
             },
         },
         Gap {
@@ -169,8 +178,3 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     ..DEFAULTS
 };
-
-#[cfg(target_arch = "x86_64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall unshare (nr 272, class privileged";
-#[cfg(target_arch = "aarch64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall unshare (nr 97, class privileged";

@@ -83,32 +83,15 @@ pub const SCENARIO: Scenario = Scenario {
     symbols: &["ptrace", "getpid"],
     resolves: &["ptrace"],
     needs: &[Need::Unprivileged],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: Vehicle::KERNEL,
-            what: "ptrace is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)) where the kernel answers ESRCH, EIO and EPERM: its own thread group is never traceable, and PTRACE_O_SUSPEND_SECCOMP needs CAP_SYS_ADMIN",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Signal(SIGABRT),
-                diagnostic: TRAP,
-            },
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Privileged),
+        vehicles: &[Vehicle::Libc],
+        what: "the shim does not define glibc's ptrace (registry `Absent`): a guest importing it is refused by the pre-run audit, and `dlsym` does not find it (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
+        failure: Failure::Stops {
+            events: 0,
+            ending: Ending::Exit(101),
+            diagnostic: "proc/ptrace: cannot continue: glibc's ptrace resolves",
         },
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim does not define glibc's ptrace (registry `Absent`): a guest importing it is refused by the pre-run audit, and `dlsym` does not find it (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Exit(101),
-                diagnostic: "proc/ptrace: cannot continue: glibc's ptrace resolves",
-            },
-        },
-    ],
+    }],
     ..DEFAULTS
 };
-
-#[cfg(target_arch = "x86_64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall ptrace (nr 101, class privileged";
-#[cfg(target_arch = "aarch64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall ptrace (nr 117, class privileged";

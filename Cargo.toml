@@ -88,7 +88,7 @@ libc = "0.2.189"
 clap = { version = "~4.6", default-features = false, features = ["std", "error-context", "suggestions"] }
 # The Linux kernel's uapi constants for the target architecture: the native
 # shim decodes the kernel ABI's flag words and errno values with them.
-linux-raw-sys = { version = "0.12.1", default-features = false, features = ["errno", "general", "no_std"] }
+linux-raw-sys = { version = "0.12.1", default-features = false, features = ["errno", "general", "no_std", "ptrace"] }
 # Substring search for the instrumentation markers in guest binaries.
 memchr = "2.8.3"
 object = { version = "0.39.1", default-features = false, features = ["read", "std"] }

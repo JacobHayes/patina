@@ -10,21 +10,34 @@
 //! * `BPF_PROG_LOAD` checks its flags first (unknown: `EINVAL`), then is
 //!   `EPERM` even for a socket filter (`bpf_prog_load`);
 //! * walking the loaded programs' ids needs `CAP_SYS_ADMIN` whatever the
-//!   sysctl says (`bpf_obj_get_next_id`: `EPERM`).
+//!   sysctl says (`bpf_obj_get_next_id`: `EPERM`), as does opening one by id;
+//!   loading BTF needs `CAP_BPF`, querying attached programs
+//!   `CAP_NET_ADMIN` (`EPERM`), which is what feature probing meets;
+//! * an array map's value past `INT_MAX` is `E2BIG` (`array_map_alloc_check`),
+//!   before the privilege check;
+//! * a command on a map needs a map: a descriptor not open is `EBADF`, one
+//!   that is no map `EINVAL`; a pinned object is looked up by path first
+//!   (`EFAULT` for none).
 //!
 //! What root would be granted is a one-entry array map and a two-instruction
 //! socket filter (`return 0`), both closed at exit and attached nowhere.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
-use crate::probe::{Probe, neg};
+use crate::catalog::{DEFAULTS, Need, Scenario};
+use crate::probe::{AT_FDCWD, Probe, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
 const BPF_MAP_CREATE: i64 = 0;
 const BPF_PROG_LOAD: i64 = 5;
+const BPF_MAP_LOOKUP_ELEM: i64 = 1;
+const BPF_OBJ_GET: i64 = 7;
 const BPF_PROG_GET_NEXT_ID: i64 = 11;
+const BPF_PROG_GET_FD_BY_ID: i64 = 13;
+const BPF_PROG_QUERY: i64 = 16;
+const BPF_BTF_LOAD: i64 = 18;
+/// A descriptor number no run opens.
+const CLOSED: u32 = 9999;
 /// No `BPF_*` command.
 const UNKNOWN_COMMAND: i64 = 9999;
 const BPF_MAP_TYPE_ARRAY: u32 = 2;
@@ -34,6 +47,7 @@ const UNKNOWN_PROG_FLAG: u32 = 1 << 30;
 
 /// Room for every command's `union bpf_attr` prefix used here, zeroed past
 /// what each sets.
+#[derive(Clone)]
 #[repr(C, align(8))]
 struct Attr([u8; 128]);
 
@@ -109,6 +123,41 @@ pub fn run(p: &Probe) {
         "walking program ids is EPERM (no CAP_SYS_ADMIN)",
         bpf(BPF_PROG_GET_NEXT_ID, &Attr::new(), size) == neg(EPERM),
     );
+    p.check(
+        "an array value past INT_MAX is E2BIG before the privilege check",
+        bpf(BPF_MAP_CREATE, &array.clone().u32_at(8, 0x8000_0000), size) == neg(E2BIG),
+    );
+    p.check(
+        "loading BTF is EPERM (no CAP_BPF)",
+        bpf(BPF_BTF_LOAD, &Attr::new(), size) == neg(EPERM),
+    );
+    p.check(
+        "opening a program by id is EPERM (no CAP_SYS_ADMIN)",
+        bpf(BPF_PROG_GET_FD_BY_ID, &Attr::new(), size) == neg(EPERM),
+    );
+    p.check(
+        "querying attached programs is EPERM (no CAP_NET_ADMIN)",
+        bpf(BPF_PROG_QUERY, &Attr::new(), size) == neg(EPERM),
+    );
+    p.check(
+        "a map lookup on a descriptor not open is EBADF",
+        bpf(BPF_MAP_LOOKUP_ELEM, &Attr::new().u32_at(0, CLOSED), size) == neg(EBADF),
+    );
+    let dir = p.openat(AT_FDCWD, &p.dir(), O_RDONLY | O_DIRECTORY, 0);
+    p.require("open the run directory", dir >= 0);
+    p.check(
+        "a map lookup on a descriptor that is no map is EINVAL",
+        bpf(
+            BPF_MAP_LOOKUP_ELEM,
+            &Attr::new().u32_at(0, dir as u32),
+            size,
+        ) == neg(EINVAL),
+    );
+    p.close(dir);
+    p.check(
+        "a pinned object at no path is EFAULT",
+        bpf(BPF_OBJ_GET, &Attr::new(), size) == neg(EFAULT),
+    );
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -117,22 +166,7 @@ pub const SCENARIO: Scenario = Scenario {
     // glibc has no wrapper for the row: the libc spelling would be
     // `syscall(2)` again.
     vehicles: Vehicle::KERNEL,
-    covers: &[Syscall::N_bpf],
+    covers: &[Syscall::N_bpf, Syscall::N_openat, Syscall::N_close],
     needs: &[Need::Unprivileged, Need::RestrictedBpf],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: Vehicle::KERNEL,
-        what: "bpf is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)) where a kernel with unprivileged BPF disabled answers each command's argument checks and then EPERM",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(SIGABRT),
-            diagnostic: TRAP,
-        },
-    }],
     ..DEFAULTS
 };
-
-#[cfg(target_arch = "x86_64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall bpf (nr 321, class privileged";
-#[cfg(target_arch = "aarch64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall bpf (nr 280, class privileged";

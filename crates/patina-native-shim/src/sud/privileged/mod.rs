@@ -1,11 +1,13 @@
 //! SUD rows — the privileged rows, answered as the pinned kernel answers the
 //! virtual credential (`crate::identity::credential`).
 //!
-//! Each row is a pure function of the credential, the virtual kernel's
+//! Each row's answer is a function of the credential, the virtual kernel's
 //! declared configuration, its arguments and the modeled filesystem and
 //! descriptor table: the checks the kernel makes before its capability
 //! check, in the kernel's order, then the capability check itself
-//! ([`gate`]). A credential without the capability gets the kernel's
+//! ([`gate`]). What any caller may do goes through the model's own rows:
+//! `open_tree` without a clone opens as `openat` does, and
+//! `unshare(CLONE_SYSVSEM)` applies the semaphore adjustments as exit does. A credential without the capability gets the kernel's
 //! refusal (`EPERM`, `EACCES`, …). A credential that holds it reaches what
 //! the kernel would then do, which is not modeled: [`Unmodeled::Granted`], a
 //! named fatal. The capability a row checks is declared on its registry row
@@ -27,11 +29,15 @@ use std::ffi::c_int;
 mod admin;
 #[cfg(target_arch = "x86_64")]
 mod ioport;
+mod kernel;
 mod mount;
+mod process;
 pub(super) use admin::*;
 #[cfg(target_arch = "x86_64")]
 pub(super) use ioport::*;
+pub(super) use kernel::*;
 pub(super) use mount::*;
+pub(super) use process::*;
 
 /// What a privileged row answers: the raw return value (`-errno` for a
 /// refusal), or the point past which the model does not go.
@@ -60,17 +66,22 @@ fn guest_path(address: u64) -> Result<String, c_int> {
     crate::path_from_c(pointer)
 }
 
-/// `user_path_at(AT_FDCWD, path, …)`: the entry a guest path names, with
-/// or without following a final symlink — the resolver's refusals, and
-/// `ENOENT` for a missing entry.
+/// `user_path_at(AT_FDCWD, path, …)`; see [`lookup_at`].
 fn lookup(address: u64, follow: bool) -> Result<crate::paths::Resolved, c_int> {
+    lookup_at(crate::paths::AT_FDCWD, address, follow)
+}
+
+/// `user_path_at(dirfd, path, …)`: the entry a guest path names, with or
+/// without following a final symlink — the resolver's refusals, and
+/// `ENOENT` for a missing entry.
+fn lookup_at(dirfd: c_int, address: u64, follow: bool) -> Result<crate::paths::Resolved, c_int> {
     let path = guest_path(address)?;
     let flags = if follow {
         0
     } else {
         crate::paths::RESOLVE_NOFOLLOW
     };
-    let resolved = crate::paths::resolve(crate::paths::AT_FDCWD, &path, flags)?;
+    let resolved = crate::paths::resolve(dirfd, &path, flags)?;
     if resolved.metadata.is_none() {
         return Err(errno::ENOENT as c_int);
     }
@@ -149,6 +160,7 @@ mod tests {
             admin_cases(),
             ioport_cases(),
             chroot_cases(),
+            config_cases(),
         ]
         .into_iter()
         .flatten()
@@ -158,7 +170,11 @@ mod tests {
     /// The rows that declare a capability no caller of the model reaches:
     /// the kernel checks it only past a refusal every descriptor or device
     /// of the virtual machine gets.
-    const UNREACHABLE: &[Syscall] = &[Syscall::N_quotactl, Syscall::N_quotactl_fd];
+    const UNREACHABLE: &[Syscall] = &[
+        Syscall::N_quotactl,
+        Syscall::N_quotactl_fd,
+        Syscall::N_setns,
+    ];
 
     /// The row's answer to `case` for a credential holding `held`.
     fn outcome(case: &Case, held: u64) -> Answer {
@@ -383,5 +399,99 @@ mod tests {
             args: [1, 0, 0, 0, 0, 0],
             refusal: errno::EPERM,
         }]
+    }
+
+    /// A zeroed BPF attribute: no start id.
+    static NO_ID: [u8; 16] = [0; 16];
+    /// `BPF_MAP_CREATE`'s attribute for a one-entry array map of four-byte
+    /// keys and values.
+    static ARRAY_MAP: [u32; 4] = [2, 4, 4, 1];
+
+    /// The rows the declared configuration restricts: each refuses a
+    /// caller without the capability exactly where the configuration says,
+    /// after its argument checks.
+    fn config_cases() -> Vec<Case> {
+        const PTRACE_ATTACH: u64 = 16;
+        const PTRACE_SEIZE: u64 = 0x4206;
+        const SUSPEND_SECCOMP: u64 = 1 << 21;
+        const CLONE_NEWUTS: u64 = 0x0400_0000;
+        const BPF_MAP_CREATE: u64 = 0;
+        const BPF_PROG_GET_NEXT_ID: u64 = 11;
+        const BPF_PROG_QUERY: u64 = 16;
+        vec![
+            Case {
+                row: Syscall::N_syslog,
+                check: syslog,
+                args: [3, 0, 0, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_perf_event_open,
+                check: perf_event_open,
+                args: [0, 0, u64::MAX, u64::MAX, 0, 0],
+                refusal: errno::EACCES,
+            },
+            Case {
+                row: Syscall::N_bpf,
+                check: bpf,
+                args: [BPF_PROG_GET_NEXT_ID, NO_ID.as_ptr() as u64, 16, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_bpf,
+                check: bpf,
+                args: [BPF_MAP_CREATE, ARRAY_MAP.as_ptr() as u64, 16, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_bpf,
+                check: bpf,
+                args: [BPF_PROG_QUERY, NO_ID.as_ptr() as u64, 16, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_userfaultfd,
+                check: userfaultfd,
+                args: [0; 6],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_ptrace,
+                check: ptrace,
+                args: [PTRACE_ATTACH, 1, 0, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_ptrace,
+                check: ptrace,
+                args: [PTRACE_SEIZE, 1, 0, SUSPEND_SECCOMP, 0, 0],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_unshare,
+                check: unshare,
+                args: [CLONE_NEWUTS, 0, 0, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+        ]
+    }
+
+    /// `PTRACE_O_SUSPEND_SECCOMP` needs `CAP_SYS_ADMIN`; past it, seizing
+    /// the caller's own thread group is still refused, for every credential.
+    #[test]
+    fn a_granted_option_still_meets_the_thread_group_check() {
+        const PTRACE_SEIZE: u64 = 0x4206;
+        const SUSPEND_SECCOMP: u64 = 1 << 21;
+        let own = crate::registry::IDENTITY_PID as u64;
+        let seize = [PTRACE_SEIZE, own, 0, SUSPEND_SECCOMP, 0, 0];
+        assert_eq!(ptrace(&holding(0), &seize), refuse(errno::EPERM));
+        assert_eq!(
+            ptrace(&holding(Capability::ALL), &seize),
+            refuse(errno::EPERM)
+        );
+        assert!(matches!(
+            ptrace(credential(), &[0; 6]),
+            Err(Unmodeled::Path(_))
+        ));
     }
 }

@@ -1051,6 +1051,27 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_chroot, |nr, a| {
         privileged::answer(nr, privileged::chroot, a)
     }),
+    (Syscall::N_syslog, |nr, a| {
+        privileged::answer(nr, privileged::syslog, a)
+    }),
+    (Syscall::N_perf_event_open, |nr, a| {
+        privileged::answer(nr, privileged::perf_event_open, a)
+    }),
+    (Syscall::N_bpf, |nr, a| {
+        privileged::answer(nr, privileged::bpf, a)
+    }),
+    (Syscall::N_userfaultfd, |nr, a| {
+        privileged::answer(nr, privileged::userfaultfd, a)
+    }),
+    (Syscall::N_ptrace, |nr, a| {
+        privileged::answer(nr, privileged::ptrace, a)
+    }),
+    (Syscall::N_unshare, |nr, a| {
+        privileged::answer(nr, privileged::unshare, a)
+    }),
+    (Syscall::N_setns, |nr, a| {
+        privileged::answer(nr, privileged::setns, a)
+    }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_iopl, |nr, a| {
         privileged::answer(nr, privileged::iopl, a)

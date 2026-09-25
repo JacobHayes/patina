@@ -173,8 +173,8 @@ pub enum Need {
     /// `CONFIG_BPF_UNPRIV_DEFAULT_OFF`): a one-entry array map is `EPERM`.
     RestrictedBpf,
     /// The host refuses an unprivileged caller every perf event, even
-    /// counting its own user time (`kernel.perf_event_paranoid` above 2 on
-    /// Debian and Ubuntu kernels, whose patch adds that level): a user-only
+    /// counting its own user time (`kernel.perf_event_paranoid` at a level a
+    /// distribution patch adds: 4 on Ubuntu, above 2 on Debian): a user-only
     /// task-clock event on the caller is `EACCES`.
     RestrictedPerf,
     /// The host refuses an unprivileged caller a userfaultfd that handles

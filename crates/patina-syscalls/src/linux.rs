@@ -26,7 +26,6 @@ const fn r(
 }
 
 const ENOSYS: i32 = 38;
-const EPERM: i32 = 1;
 
 pub const fn disposition(id: Syscall) -> SyscallRow {
     match id {
@@ -765,10 +764,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_ptrace => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential and the declared Yama scope (1): the pid (`ESRCH`), a request needing a tracee (`ESRCH`: nothing is traced), `PTRACE_SEIZE`'s arguments (`EIO`), `PTRACE_O_SUSPEND_SECCOMP` without `CAP_SYS_ADMIN` and the caller's own thread group (`EPERM`), then init needs `CAP_SYS_PTRACE` (`EPERM`; granted, a named fatal); `PTRACE_TRACEME` is a named fatal.",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysPtrace, Capability::SysAdmin]),
     Syscall::N_getuid => r(
         id,
         Family::Identity,
@@ -779,10 +779,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_syslog => r(
         id,
         Family::Privileged,
-        Disposition::SoftDeny(EPERM),
-        "The virtual kernel restricts its log (`dmesg_restrict`), so every action is `EPERM` to a caller without `CAP_SYSLOG`, checked before the action is looked at.",
+        Disposition::Modeled,
+        "Answered from the virtual credential and the declared `kernel.dmesg_restrict` (on): every action needs `CAP_SYSLOG` (or `CAP_SYS_ADMIN`) before it is looked at (`EPERM` without; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::Syslog, Capability::SysAdmin]),
     Syscall::N_getgid => r(
         id,
         Family::Identity,
@@ -2018,10 +2019,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_unshare => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential and the declared `kernel.unprivileged_userns_clone` (on) and `user.max_user_namespaces` (0): an unknown flag or splitting a threaded group (`EINVAL`), a user namespace (`ENOSPC`), other new namespaces need `CAP_SYS_ADMIN` (`EPERM`; granted, a named fatal); what a lone thread unshares is 0 (`CLONE_SYSVSEM` applies its semaphore adjustments), and unsharing filesystem state, descriptors or the undo list from other threads is a named fatal.",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_set_robust_list => r(
         id,
         Family::Sync,
@@ -2206,10 +2208,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_perf_event_open => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential and the declared `kernel.perf_event_paranoid` (4): an unknown flag (`EINVAL`), then Ubuntu's `perfmon_capable` check (`CAP_PERFMON` or `CAP_SYS_ADMIN`) before the attribute is read (`EACCES` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::Perfmon, Capability::SysAdmin]),
     Syscall::N_recvmmsg => r(
         id,
         Family::Net,
@@ -2276,10 +2279,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_setns => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "A descriptor not open (`EBADF`), then no namespace file or pidfd (`EINVAL`): every descriptor the model holds, so `CAP_SYS_ADMIN` over a namespace is never reached.",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_getcpu => r(
         id,
         Family::Sched,
@@ -2370,10 +2374,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_bpf => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential and the declared `kernel.unprivileged_bpf_disabled` (2): the attribute's size and copy (`E2BIG`, `EFAULT`), an unknown command (`EINVAL`), then each command's attribute checks; map creation (array maps; other types a named fatal), program loading and BTF loading are `EPERM` without `CAP_BPF`/`CAP_SYS_ADMIN`, the id walks, the by-id opens, task queries and statistics without `CAP_SYS_ADMIN`, program queries without `CAP_NET_ADMIN`; a command on a BPF object answers `EBADF`/`EINVAL` (the model holds none), a pinned-object lookup `EACCES`; granted, or detaching from an attach point, a named fatal.",
         None,
-    ),
+    )
+    .capabilities(&[Capability::Bpf, Capability::SysAdmin, Capability::NetAdmin]),
     Syscall::N_execveat => r(
         id,
         Family::Process,
@@ -2384,10 +2389,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_userfaultfd => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential and the declared `vm.unprivileged_userfaultfd` (0): kernel-fault handling needs `CAP_SYS_PTRACE` before the flags (`EPERM`), then an unknown flag (`EINVAL`); the descriptor (user-mode-only, or granted) is a named fatal until it is modeled.",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysPtrace]),
     Syscall::N_membarrier => r(
         id,
         Family::Sync,

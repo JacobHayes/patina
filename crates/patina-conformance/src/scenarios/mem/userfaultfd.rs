@@ -153,17 +153,12 @@ pub const SCENARIO: Scenario = Scenario {
     gaps: &[Gap {
         status: Status::Pending(Arc::Privileged),
         vehicles: Vehicle::KERNEL,
-        what: "userfaultfd is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)) where the kernel answers EPERM for kernel-fault handling (no CAP_SYS_PTRACE) and hands any caller a user-mode-only descriptor",
+        what: "a userfaultfd descriptor is a named fatal (patina-native-shim sud/privileged/kernel.rs userfaultfd) where the kernel hands any caller a user-mode-only descriptor: read-only, EINVAL to a read before the UFFDIO_API handshake",
         failure: Failure::Stops {
-            events: 0,
+            events: 6,
             ending: Ending::Signal(SIGABRT),
-            diagnostic: TRAP,
+            diagnostic: "patina: userfaultfd: a userfaultfd descriptor is not modeled",
         },
     }],
     ..DEFAULTS
 };
-
-#[cfg(target_arch = "x86_64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall userfaultfd (nr 323, class privileged";
-#[cfg(target_arch = "aarch64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall userfaultfd (nr 282, class privileged";
