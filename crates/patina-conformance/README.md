@@ -16,8 +16,10 @@ identities, clock readings, documented alternative answers) and its declared
 gaps. A gap is a strict expected failure (`Failure::Differs` with the exact
 patina values, or `Failure::Stops` with the exact point, ending and
 diagnostic): the test fails when patina fails differently, and when patina
-starts passing, until the gap is removed. A patina run that completes is also
-recorded and replayed and run directly under strace.
+starts passing, until the gap is removed. The patina run judged is the
+recorded one (recording changes nothing it observes, which one test checks on
+a few scenarios); one that completes is also replayed and run directly under
+strace.
 
 The kernel is pinned: the scenarios assert Ubuntu 24.04's GA kernel, Ubuntu's
 build of Linux 6.8 (`patina_dst_syscalls::VIRTUAL_ABI`, the kernel the virtual

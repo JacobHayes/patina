@@ -212,7 +212,9 @@ forwards into the same dispatcher instead of its two-number allowlist.
   exact patina value, `Failure::Stops` the exact event count, ending and
   diagnostic. Another failure fails the test, and so does a gap patina no
   longer shows. Gaps are per vehicle and per target (cfg).
-- A patina run that completes is also recorded and replayed (identical streams
+- The patina run judged is the recorded one (a plain run of the same seed
+  observes the same, checked on a few scenarios); one that completes is
+  replayed (identical streams
   and endings; the scenario's recorded-trace facts, e.g. its exact
   `signal_generated` sequence), and run directly under strace with the
   default-deny leak filter (`leak.rs`; the one allowance is a signal to the

@@ -3,9 +3,10 @@
 //! under `cargo patina`, in the same test, through every vehicle it has.
 //!
 //! Per vehicle: the native run passes (every check holds) and agrees with the
-//! scenario's first vehicle; the patina run equals it or fails exactly as the
-//! scenario's gaps declare. A patina run that completes is also recorded and
-//! replayed (identical streams; the scenario's trace facts) and run directly
+//! scenario's first vehicle; the patina run, recorded, equals it or fails
+//! exactly as the scenario's gaps declare (a plain run observes the same:
+//! `recording_changes_no_observation`). One that completes is also replayed
+//! (identical streams; the scenario's trace facts) and run directly
 //! under strace (no host syscall escapes; the process ends as the recorded
 //! run did).
 //!
@@ -807,36 +808,25 @@ impl Leg<'_> {
             .zip(&reasons)
             .map(|(gap, reason)| gap.expected(reason))
             .collect();
-        let patina = self
-            .patina(None)
+        // The patina run is the recorded one: recording changes nothing it
+        // observes (`recording_changes_no_observation`).
+        let trace = self.logs.join("run.patina");
+        let recorded = self
+            .patina(Some(&trace))
             .map_err(|error| vec![format!("patina run: {error}")])?;
         if compared {
             oracle
                 .judged(
-                    compare::judge(&native, &patina, &expected)
+                    compare::judge(&native, &recorded, &expected)
                         .map_err(|failures| prefixed("patina: ", failures)),
                     diverged,
                 )
-                .map_err(|failures| with_stderr(failures, &patina))?;
+                .map_err(|failures| with_stderr(failures, &recorded))?;
         }
         if gaps.iter().any(|gap| gap.failure.ends_early()) {
             // A stopped run leaves no complete trace, and the direct run would
             // be the same refusal outside the supervisor.
             return Ok(());
-        }
-
-        let trace = self.logs.join("run.patina");
-        let recorded = self
-            .patina(Some(&trace))
-            .map_err(|error| vec![format!("record: {error}")])?;
-        if compared {
-            oracle
-                .judged(
-                    compare::judge(&native, &recorded, &expected)
-                        .map_err(|failures| prefixed("record: ", failures)),
-                    diverged,
-                )
-                .map_err(|failures| with_stderr(failures, &recorded))?;
         }
         let replayed = self
             .replay(&trace)
@@ -1010,6 +1000,40 @@ fn conform(name: &str) {
         failures.join("\n"),
         logs.display()
     );
+}
+
+/// Recording changes nothing a run observes: the legs judge only the
+/// recorded patina run, so a plain run of the same seed must match it event
+/// for event and in its ending. One filesystem, one network and one signal
+/// scenario, through their first vehicle.
+#[test]
+fn recording_changes_no_observation() {
+    for name in ["fs/open_rw", "net/tcp", "signal/basic"] {
+        let scenario = catalog::scenario(name).unwrap();
+        let owned = tempfile::Builder::new()
+            .prefix("patina-conformance-")
+            .tempdir()
+            .unwrap();
+        let logs = logs_root().join("recording").join(name.replace('/', "-"));
+        let _ = std::fs::remove_dir_all(&logs);
+        std::fs::create_dir_all(&logs).unwrap();
+        let leg = Leg {
+            scenario,
+            vehicle: scenario.vehicles[0],
+            dir: &owned.path().join("run"),
+            logs,
+            declared_absent: false,
+        };
+        let plain = leg.patina(None).unwrap();
+        let recorded = leg.patina(Some(&leg.logs.join("run.patina"))).unwrap();
+        assert!(
+            !plain.events.is_empty(),
+            "{name}: no events\n{}",
+            plain.stderr
+        );
+        assert_eq!(plain.events, recorded.events, "{name}");
+        assert_eq!(plain.termination, recorded.termination, "{name}");
+    }
 }
 
 /// A planted stream: `(op, ret)` events, a check where `op` is "check".
