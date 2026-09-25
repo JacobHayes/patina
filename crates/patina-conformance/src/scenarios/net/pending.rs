@@ -19,18 +19,12 @@
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{OptionShown, Probe, SockAddr, neg};
+use crate::scenarios::net::{WAIT_MS, int};
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
-/// How long a scenario waits for an asynchronous completion.
-const WAIT_MS: i32 = 5_000;
-
 /// The poll bits a completion is judged by.
 const COMPLETION: i16 = POLLIN | POLLOUT | POLLERR | POLLHUP;
-
-fn int(value: i32) -> [u8; 4] {
-    value.to_ne_bytes()
-}
 
 /// A loopback TCP port nobody listens on, held for the scenario's lifetime:
 /// a socket bound to it but not listening. A SYN to a bound, non-listening

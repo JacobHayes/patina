@@ -1344,29 +1344,11 @@ impl Probe {
             } as i64),
             Vehicle::Syscall => self.call(Syscall::N_epoll_pwait, args),
         };
-        let mut delivered: Vec<(u64, u32)> = if result > 0 {
-            events[..result as usize]
-                .iter()
-                .map(|event| (event.u64, event.events))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        delivered.sort();
-        let rendered: Vec<Value> = delivered
-            .iter()
-            .map(|(data, mask)| Value::from(format!("{data}:{mask:#x}")))
-            .collect();
-        let builder = self.rec.event("epoll_wait", result);
         let builder = self
-            .fd_arg(builder, "epfd", epfd)
+            .fd_arg(self.rec.event("epoll_wait", result), "epfd", epfd)
             .arg("maxevents", maxevents)
             .arg("timeout_ms", timeout_ms);
-        let builder = if result >= 0 {
-            builder.field("events", Value::Array(rendered))
-        } else {
-            builder
-        };
+        let (builder, delivered) = self.record_epoll(builder, result, &events);
         builder.emit();
         (result, delivered)
     }
@@ -1387,14 +1369,7 @@ impl Probe {
     /// `ppoll` over `(fd, events)` pairs with an optional relative timeout;
     /// revents recorded per slot.
     pub fn ppoll(&self, fds: &[(i32, i16)], timeout_ns: Option<i64>) -> (i64, Vec<i16>) {
-        let mut pollfds: Vec<libc::pollfd> = fds
-            .iter()
-            .map(|&(fd, events)| libc::pollfd {
-                fd,
-                events,
-                revents: 0,
-            })
-            .collect();
+        let mut pollfds = net::pollfd_array(fds);
         let timeout = timeout_ns.map(|ns| libc::timespec {
             tv_sec: ns / 1_000_000_000,
             tv_nsec: ns % 1_000_000_000,
@@ -1413,24 +1388,10 @@ impl Probe {
                 0,
             ],
         );
-        let revents: Vec<i16> = pollfds.iter().map(|p| p.revents).collect();
-        let mut builder = self.event(Syscall::N_ppoll, result).arg("nfds", fds.len());
-        for (index, &(fd, events)) in fds.iter().enumerate() {
-            builder = self
-                .fd_arg(builder, &format!("fd{index}"), fd)
-                .arg(&format!("events{index}"), events);
-        }
-        builder = match timeout_ns {
-            Some(ns) => builder.arg("timeout_ns", ns),
-            None => builder.arg("timeout_ns", Value::Null),
-        };
-        if result >= 0 {
-            for (index, revent) in revents.iter().enumerate() {
-                builder = builder.field(&format!("revents{index}"), *revent);
-            }
-        }
-        builder.emit();
-        (result, revents)
+        let builder = self
+            .event(Syscall::N_ppoll, result)
+            .arg("timeout_ns", timeout_ns.map_or(Value::Null, Value::from));
+        self.record_pollfds(builder, fds, &pollfds, result, !0)
     }
 
     // ---- threads ------------------------------------------------------------

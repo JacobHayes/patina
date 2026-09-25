@@ -20,13 +20,10 @@
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, SockAddr, neg};
+use crate::scenarios::net::int;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::net::{Ipv4Addr, SocketAddrV6};
-
-fn int(value: i32) -> [u8; 4] {
-    value.to_ne_bytes()
-}
 
 pub fn run(p: &Probe) {
     let l4 = p.socket(AF_INET, SOCK_STREAM, 0);

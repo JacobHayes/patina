@@ -34,8 +34,8 @@ pub const MIN_MTU: i32 = 576;
 const LOOPBACK_INDEX: i32 = 1;
 /// An interface name no host has (within `IFNAMSIZ`).
 const NO_SUCH: &str = "ptnone0";
-/// The flags every up loopback device carries.
-const LOOPBACK_FLAGS: u16 = (IFF_UP | IFF_LOOPBACK | IFF_RUNNING) as u16;
+/// The flags every up loopback device carries, as `ifr_flags` holds them.
+const LOOPBACK_FLAGS: u16 = super::LOOPBACK_FLAGS as u16;
 
 pub fn run(p: &Probe) {
     let root = p.dir();

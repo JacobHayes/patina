@@ -38,8 +38,8 @@ const NO_PROTOCOL: i32 = 99;
 const NO_TYPE: u16 = 0x7ff0;
 /// The most reads one answer may take.
 const MAX_READS: usize = 64;
-/// The flags every up loopback device carries.
-const LOOPBACK_FLAGS: u32 = (IFF_UP | IFF_LOOPBACK | IFF_RUNNING) as u32;
+/// The flags every up loopback device carries, as `ifi_flags` holds them.
+const LOOPBACK_FLAGS: u32 = super::LOOPBACK_FLAGS as u32;
 
 /// An `ifinfomsg` asking about `index` (0: every interface).
 fn ifinfomsg(index: i32) -> Vec<u8> {

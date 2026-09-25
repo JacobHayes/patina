@@ -27,20 +27,16 @@
 //! returns (scenarios/net.rs, "Loopback delivery").
 
 use crate::catalog::{DEFAULTS, Scenario};
-use crate::probe::{AT_FDCWD, Control, Probe, RecvSpec, SIGSET_BYTES, SockAddr, neg};
-use crate::signals::one_set;
+use crate::probe::{AT_FDCWD, Control, Probe, RecvSpec, SockAddr, neg};
+use crate::scenarios::net::{UIO_MAXIOV, epipe_raises_sigpipe};
 use libc::*;
 use patina_dst_syscalls::Syscall;
-
-/// `UIO_MAXIOV`: the most iovecs one message takes (include/uapi/linux/uio.h).
-const UIO_MAXIOV: usize = 1024;
 
 /// The largest UDP payload over IPv4: 65535 less the IP and UDP headers.
 const UDP_MAX: usize = 65507;
 
 pub fn run(p: &Probe) {
     let root = p.dir();
-    let sigpipe = one_set(SIGPIPE);
 
     // ---- legacy accept and send(3)/recv(3) over a byte stream ----
     let l = p.socket(AF_INET, SOCK_STREAM, 0);
@@ -68,35 +64,7 @@ pub fn run(p: &Probe) {
         "shut the client's writing side",
         p.shutdown(c, SHUT_WR) == 0,
     );
-    p.check(
-        "send(3) after SHUT_WR with MSG_NOSIGNAL is EPIPE",
-        p.send(c, b"x", MSG_NOSIGNAL) == neg(EPIPE),
-    );
-    let mut pending = crate::signals::empty_set();
-    p.rt_sigpending(&mut pending, SIGSET_BYTES as usize);
-    p.check(
-        "MSG_NOSIGNAL raised no SIGPIPE",
-        !crate::signals::has(&pending, SIGPIPE),
-    );
-    p.check(
-        "block SIGPIPE",
-        p.rt_sigprocmask(SIG_BLOCK, Some(&sigpipe), None, SIGSET_BYTES as usize) == 0,
-    );
-    p.check(
-        "send(3) after SHUT_WR without MSG_NOSIGNAL is EPIPE",
-        p.send(c, b"x", 0) == neg(EPIPE),
-    );
-    // SAFETY: an all-zero siginfo is a valid out-buffer.
-    let mut info: siginfo_t = unsafe { std::mem::zeroed() };
-    p.check(
-        "and raised SIGPIPE, queued while blocked",
-        p.rt_sigtimedwait(&sigpipe, Some(&mut info), Some(0), SIGSET_BYTES as usize)
-            == i64::from(SIGPIPE),
-    );
-    p.check(
-        "unblock SIGPIPE",
-        p.rt_sigprocmask(SIG_UNBLOCK, Some(&sigpipe), None, SIGSET_BYTES as usize) == 0,
-    );
+    epipe_raises_sigpipe(p, "send(3) after SHUT_WR", |flags| p.send(c, b"x", flags));
     p.check("the server reads EOF", p.recv(s, 16, 0).0 == 0);
 
     let c2 = p.socket(AF_INET, SOCK_STREAM, 0);

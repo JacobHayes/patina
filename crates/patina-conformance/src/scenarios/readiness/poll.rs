@@ -33,13 +33,9 @@
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, SockAddr};
-use crate::scenarios::net::{int, timeval};
+use crate::scenarios::net::{WAIT_MS, int, timeval};
 use libc::*;
 use patina_dst_syscalls::Syscall;
-
-/// How long a poll waits for an event already caused (loopback delivers
-/// within the causing call; the bound only keeps a slow host honest).
-const WAIT_MS: i32 = 5_000;
 
 /// The bits a revents field is recorded with.
 const SHOWN: i16 = POLLIN | POLLOUT | POLLERR | POLLHUP | POLLNVAL | POLLRDHUP | POLLPRI;

@@ -23,11 +23,9 @@
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{AT_FDCWD, Outgoing, Probe, SockAddr, neg};
+use crate::scenarios::net::UIO_MAXIOV;
 use libc::*;
 use patina_dst_syscalls::Syscall;
-
-/// `UIO_MAXIOV`: the most messages one `sendmmsg`/`recvmmsg` handles.
-const UIO_MAXIOV: usize = 1024;
 
 pub fn run(p: &Probe) {
     let root = p.dir();

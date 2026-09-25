@@ -57,7 +57,21 @@ pub mod unix_dgram;
 pub mod unix_seqpacket;
 pub mod unix_stream;
 
-use crate::probe::{Probe, SockAddr};
+use crate::probe::{Probe, SIGSET_BYTES, SockAddr, neg};
+use crate::signals::{empty_set, has, one_set};
+use libc::{EPIPE, MSG_NOSIGNAL, SIG_BLOCK, SIG_UNBLOCK, SIGPIPE, siginfo_t};
+
+/// How long a wait for an event already caused, or an asynchronous
+/// completion, may take (loopback delivers within the causing call; the
+/// bound only keeps a slow host honest).
+pub const WAIT_MS: i32 = 5_000;
+
+/// The flags every up loopback device carries.
+pub const LOOPBACK_FLAGS: i32 = libc::IFF_UP | libc::IFF_LOOPBACK | libc::IFF_RUNNING;
+
+/// `UIO_MAXIOV` (include/uapi/linux/uio.h): the most iovecs one message
+/// takes, and the most messages one `sendmmsg`/`recvmmsg` handles.
+pub const UIO_MAXIOV: usize = 1024;
 
 /// The lowest port a `bind` to port 0 can be given: autoallocation draws from
 /// `ip_local_port_range`, whose low end the kernel refuses below
@@ -87,6 +101,37 @@ pub fn timeval(sec: i64, usec: i64) -> [u8; 16] {
     bytes[..8].copy_from_slice(&sec.to_ne_bytes());
     bytes[8..].copy_from_slice(&usec.to_ne_bytes());
     bytes
+}
+
+/// A send that fails with `EPIPE` raises `SIGPIPE` unless `MSG_NOSIGNAL`:
+/// `send(flags)` issues it (`what` names it in the labels), once with
+/// `MSG_NOSIGNAL` — no signal pending after — and once without, with
+/// `SIGPIPE` blocked, which queues it for a zero-timeout `sigtimedwait`.
+pub fn epipe_raises_sigpipe(p: &Probe, what: &str, send: impl Fn(i32) -> i64) {
+    let sigpipe = one_set(SIGPIPE);
+    p.check(
+        &format!("{what} with MSG_NOSIGNAL is EPIPE"),
+        send(MSG_NOSIGNAL) == neg(EPIPE),
+    );
+    let mut pending = empty_set();
+    p.rt_sigpending(&mut pending, SIGSET_BYTES as usize);
+    p.check("MSG_NOSIGNAL raised no SIGPIPE", !has(&pending, SIGPIPE));
+    p.check(
+        "block SIGPIPE",
+        p.rt_sigprocmask(SIG_BLOCK, Some(&sigpipe), None, SIGSET_BYTES as usize) == 0,
+    );
+    p.check(&format!("{what} is EPIPE"), send(0) == neg(EPIPE));
+    // SAFETY: an all-zero siginfo is a valid out-buffer.
+    let mut info: siginfo_t = unsafe { std::mem::zeroed() };
+    p.check(
+        "and raised SIGPIPE, queued while blocked",
+        p.rt_sigtimedwait(&sigpipe, Some(&mut info), Some(0), SIGSET_BYTES as usize)
+            == i64::from(SIGPIPE),
+    );
+    p.check(
+        "unblock SIGPIPE",
+        p.rt_sigprocmask(SIG_UNBLOCK, Some(&sigpipe), None, SIGSET_BYTES as usize) == 0,
+    );
 }
 
 /// An abstract AF_UNIX name a run owns: derived from its run directory —

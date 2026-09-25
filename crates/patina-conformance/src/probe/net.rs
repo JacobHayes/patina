@@ -14,7 +14,7 @@
 //! host: every address is loopback (`127.0.0.1`, `::1`), a path under the
 //! run directory, an abstract name derived from it, or the kernel's netlink.
 
-use super::{Probe, SIGSET_BYTES, cstr, neg, printable};
+use super::{Probe, SIGSET_BYTES, cstr, neg, printable, read_vector, write_vector};
 use crate::observe::{Id, Norm};
 use crate::record::EventBuilder;
 use crate::vehicle::{Args, Vehicle, fold_errno};
@@ -573,6 +573,17 @@ pub fn attributes(payload: &[u8], fixed: usize) -> Vec<(u16, Vec<u8>)> {
 }
 
 /// An `fd_set` over the descriptors in `fds`.
+/// The `pollfd` array a poll-shaped call takes for `(fd, events)` pairs.
+pub(super) fn pollfd_array(fds: &[(i32, i16)]) -> Vec<libc::pollfd> {
+    fds.iter()
+        .map(|&(fd, events)| libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        })
+        .collect()
+}
+
 fn fd_set(fds: &[i32]) -> libc::fd_set {
     // SAFETY: FD_ZERO/FD_SET on a local set; the scenario's descriptors are
     // below FD_SETSIZE.
@@ -960,13 +971,7 @@ impl Probe {
         control: &Control,
         flags: i32,
     ) -> i64 {
-        let mut iov: Vec<libc::iovec> = segments
-            .iter()
-            .map(|segment| libc::iovec {
-                iov_base: segment.as_ptr() as *mut libc::c_void,
-                iov_len: segment.len(),
-            })
-            .collect();
+        let mut iov = write_vector(segments);
         let encoded = to.map(SockAddr::encode);
         let mut cbuf = control_bytes(control);
         // SAFETY: an all-zero msghdr is a valid value.
@@ -1071,14 +1076,7 @@ impl Probe {
     /// `recvmsg` into `spec`'s segments, name and control buffers. Received
     /// descriptors are recorded as `fd` labels, credentials as identities.
     pub fn recvmsg(&self, fd: i32, spec: RecvSpec<'_>) -> Received {
-        let mut buffers: Vec<Vec<u8>> = spec.segments.iter().map(|len| vec![0u8; *len]).collect();
-        let mut iov: Vec<libc::iovec> = buffers
-            .iter_mut()
-            .map(|buf| libc::iovec {
-                iov_base: buf.as_mut_ptr().cast(),
-                iov_len: buf.len(),
-            })
-            .collect();
+        let (buffers, mut iov) = read_vector(spec.segments);
         // SAFETY: an all-zero sockaddr_storage / msghdr is a valid value.
         let mut raw: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         let mut cbuf = vec![0u64; spec.control.div_ceil(8)];
@@ -1222,13 +1220,8 @@ impl Probe {
             .iter()
             .map(|message| message.to.as_ref().map(SockAddr::encode))
             .collect();
-        let mut iov: Vec<libc::iovec> = messages
-            .iter()
-            .map(|message| libc::iovec {
-                iov_base: message.data.as_ptr() as *mut libc::c_void,
-                iov_len: message.data.len(),
-            })
-            .collect();
+        let data: Vec<&[u8]> = messages.iter().map(|message| message.data).collect();
+        let mut iov = write_vector(&data);
         let mut headers: Vec<libc::mmsghdr> = (0..messages.len())
             .map(|index| {
                 // SAFETY: an all-zero mmsghdr is a valid value.
@@ -1295,14 +1288,7 @@ impl Probe {
         flags: i32,
         timeout: Option<(i64, i64)>,
     ) -> (i64, Vec<Incoming>) {
-        let mut buffers: Vec<Vec<u8>> = caps.iter().map(|cap| vec![0u8; *cap]).collect();
-        let mut iov: Vec<libc::iovec> = buffers
-            .iter_mut()
-            .map(|buf| libc::iovec {
-                iov_base: buf.as_mut_ptr().cast(),
-                iov_len: buf.len(),
-            })
-            .collect();
+        let (buffers, mut iov) = read_vector(caps);
         // SAFETY: all-zero sockaddr_storage values are valid.
         let mut names: Vec<libc::sockaddr_storage> = (0..caps.len())
             .map(|_| unsafe { std::mem::zeroed() })
@@ -1862,14 +1848,7 @@ impl Probe {
     /// has no `poll` row: there the syscall vehicle issues `ppoll` with the
     /// timeout as a timespec (glibc's own spelling).
     pub fn poll(&self, fds: &[(i32, i16)], timeout_ms: i32, mask: i16) -> (i64, Vec<i16>) {
-        let mut pollfds: Vec<libc::pollfd> = fds
-            .iter()
-            .map(|&(fd, events)| libc::pollfd {
-                fd,
-                events,
-                revents: 0,
-            })
-            .collect();
+        let mut pollfds = pollfd_array(fds);
         let pointer = if pollfds.is_empty() {
             0
         } else {
@@ -1900,12 +1879,23 @@ impl Probe {
                 [pointer, count as i64, ts_ptr, 0, SIGSET_BYTES, 0],
             )
         };
+        let builder = self.rec.event("poll", result).arg("timeout_ms", timeout_ms);
+        self.record_pollfds(builder, fds, &pollfds, result, mask)
+    }
+
+    /// Record a poll-shaped call's slots — each descriptor and the events
+    /// asked, and once it answered each slot's revents kept to `mask` — and
+    /// answer the result and the revents.
+    pub(super) fn record_pollfds(
+        &self,
+        builder: EventBuilder<'_>,
+        fds: &[(i32, i16)],
+        pollfds: &[libc::pollfd],
+        result: i64,
+        mask: i16,
+    ) -> (i64, Vec<i16>) {
         let revents: Vec<i16> = pollfds.iter().map(|p| p.revents).collect();
-        let mut builder = self
-            .rec
-            .event("poll", result)
-            .arg("nfds", fds.len())
-            .arg("timeout_ms", timeout_ms);
+        let mut builder = builder.arg("nfds", fds.len());
         for (index, &(fd, events)) in fds.iter().enumerate() {
             builder = self
                 .fd_arg(builder, &format!("fd{index}"), fd)
@@ -2150,7 +2140,7 @@ impl Probe {
     }
 
     /// Record an epoll wait's delivered events, sorted by data.
-    fn record_epoll<'a>(
+    pub(super) fn record_epoll<'a>(
         &self,
         builder: EventBuilder<'a>,
         result: i64,

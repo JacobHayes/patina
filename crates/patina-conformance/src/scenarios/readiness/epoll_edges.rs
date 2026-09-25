@@ -34,12 +34,11 @@
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Arm, Count, Probe, SIGSET_BYTES, SockAddr, neg};
+use crate::scenarios::net::WAIT_MS;
 use crate::signals::one_set;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
-/// How long a wait for an event already caused may take.
-const WAIT_MS: i32 = 5_000;
 /// The periodic timer descriptor's period.
 const PERIOD_NS: i64 = 10_000_000;
 

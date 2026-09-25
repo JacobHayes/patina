@@ -10,12 +10,10 @@
 //! * `freeifaddrs` releases the list.
 //!
 //! libc only: there is no kernel row under the list (glibc builds it from
-//! netlink dumps, net/netlink covers those). The registry lists both
-//! symbols `Absent` — the shim does not define them, so the probe binary
-//! cannot import them (the pre-run audit would refuse the whole binary) —
-//! and the scenario reaches glibc's definitions through `dlsym`, which
-//! under patina finds neither: the shim's `__wrap_dlsym` routes only its
-//! entropy names.
+//! netlink dumps, net/netlink covers those). The scenario reaches both
+//! symbols through `dlsym`, a program's other way to them: the shim defines
+//! both, and under patina `dlsym` answers its own definitions
+//! (c/posix/dlsym.c `patina_dlsym_route`).
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{ARPHRD_LOOPBACK, IfField, Probe, SIOCGIFFLAGS, SIOCGIFINDEX, family_name};
@@ -26,7 +24,7 @@ use serde_json::Value;
 use std::net::Ipv4Addr;
 
 /// The flags every up loopback device carries.
-const LOOPBACK_FLAGS: u32 = (IFF_UP | IFF_LOOPBACK | IFF_RUNNING) as u32;
+const LOOPBACK_FLAGS: u32 = super::LOOPBACK_FLAGS as u32;
 
 type GetIfAddrs = unsafe extern "C" fn(*mut *mut ifaddrs) -> c_int;
 type FreeIfAddrs = unsafe extern "C" fn(*mut ifaddrs);

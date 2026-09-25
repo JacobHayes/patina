@@ -32,15 +32,13 @@
 //! returns (scenarios/net.rs, "Loopback delivery").
 
 use crate::catalog::{DEFAULTS, Scenario};
-use crate::probe::{AT_FDCWD, IoctlArg, Probe, SIGSET_BYTES, SOCKADDR_UN, SockAddr, neg};
-use crate::scenarios::net::abstract_name;
-use crate::signals::{empty_set, has, one_set};
+use crate::probe::{AT_FDCWD, IoctlArg, Probe, SOCKADDR_UN, SockAddr, neg};
+use crate::scenarios::net::{abstract_name, epipe_raises_sigpipe};
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
 pub fn run(p: &Probe) {
     let root = p.dir();
-    let sigpipe = one_set(SIGPIPE);
 
     // ---- a connected pair ----
     let (r, [a, b]) = p.socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -94,32 +92,9 @@ pub fn run(p: &Probe) {
         "the survivor reads EOF",
         p.recv_from(c, 16, MSG_DONTWAIT, false).0 == 0,
     );
-    p.check(
-        "a send to a closed peer with MSG_NOSIGNAL is EPIPE",
-        p.send_to(c, b"x", MSG_NOSIGNAL, None) == neg(EPIPE),
-    );
-    let mut pending = empty_set();
-    p.rt_sigpending(&mut pending, SIGSET_BYTES as usize);
-    p.check("MSG_NOSIGNAL raised no SIGPIPE", !has(&pending, SIGPIPE));
-    p.check(
-        "block SIGPIPE",
-        p.rt_sigprocmask(SIG_BLOCK, Some(&sigpipe), None, SIGSET_BYTES as usize) == 0,
-    );
-    p.check(
-        "a send to a closed peer is EPIPE",
-        p.send_to(c, b"x", 0, None) == neg(EPIPE),
-    );
-    // SAFETY: an all-zero siginfo is a valid out-buffer.
-    let mut info: siginfo_t = unsafe { std::mem::zeroed() };
-    p.check(
-        "and raised SIGPIPE, queued while blocked",
-        p.rt_sigtimedwait(&sigpipe, Some(&mut info), Some(0), SIGSET_BYTES as usize)
-            == i64::from(SIGPIPE),
-    );
-    p.check(
-        "unblock SIGPIPE",
-        p.rt_sigprocmask(SIG_UNBLOCK, Some(&sigpipe), None, SIGSET_BYTES as usize) == 0,
-    );
+    epipe_raises_sigpipe(p, "a send to a closed peer", |flags| {
+        p.send_to(c, b"x", flags, None)
+    });
     p.close(c);
 
     // ---- a filesystem path ----

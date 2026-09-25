@@ -25,6 +25,7 @@
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{OptionShown, Probe, SockAddr, neg};
+use crate::scenarios::net::int;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
@@ -38,10 +39,6 @@ const DOCUMENTATION: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
 
 /// An address in TEST-NET-1 (RFC 5737), IPv4's documentation block.
 const DOCUMENTATION4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
-
-fn int(value: i32) -> [u8; 4] {
-    value.to_ne_bytes()
-}
 
 pub fn run(p: &Probe) {
     // ---- datagrams ----

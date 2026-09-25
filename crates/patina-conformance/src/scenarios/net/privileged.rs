@@ -23,16 +23,13 @@
 
 use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::probe::{AT_FDCWD, Control, Probe, SockAddr, neg};
+use crate::scenarios::net::int;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
 /// `ETH_P_ALL` in network byte order, the protocol of an all-frames packet
 /// socket.
 const ETH_P_ALL_BE: i32 = (ETH_P_ALL as u16).to_be() as i32;
-
-fn int(value: i32) -> [u8; 4] {
-    value.to_ne_bytes()
-}
 
 pub fn run(p: &Probe) {
     p.check(

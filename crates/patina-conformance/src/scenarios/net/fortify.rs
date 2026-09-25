@@ -8,12 +8,10 @@
 //! * `__recv_chk`/`__recvfrom_chk` read a queued datagram (with its source);
 //! * `__poll_chk`/`__ppoll_chk` report a readable socket.
 //!
-//! libc only, and through `dlsym`: the registry lists the four `Absent`
-//! (the shim does not define them), so the probe binary cannot import them
-//! (the pre-run audit would refuse the whole binary). Under patina `dlsym`
-//! finds none: the shim's `__wrap_dlsym` routes only its entropy names. The
-//! overflow path
-//! (`__chk_fail`, SIGABRT) is not exercised.
+//! libc only, and through `dlsym` (a program may reach them that way as
+//! well as by linking): the shim defines all four, and under patina `dlsym`
+//! answers its own definitions (c/posix/dlsym.c `patina_dlsym_route`). The
+//! overflow path (`__chk_fail`, SIGABRT) is not exercised.
 //!
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
