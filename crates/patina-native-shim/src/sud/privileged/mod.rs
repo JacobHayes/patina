@@ -25,8 +25,12 @@ use linux_raw_sys::errno;
 use std::ffi::c_int;
 
 mod admin;
+#[cfg(target_arch = "x86_64")]
+mod ioport;
 mod mount;
 pub(super) use admin::*;
+#[cfg(target_arch = "x86_64")]
+pub(super) use ioport::*;
 pub(super) use mount::*;
 
 /// What a privileged row answers: the raw return value (`-errno` for a
@@ -139,10 +143,16 @@ mod tests {
 
     /// Every case, one list per group of rows.
     fn cases() -> Vec<Case> {
-        [uts_cases(), mount_cases(), admin_cases()]
-            .into_iter()
-            .flatten()
-            .collect()
+        [
+            uts_cases(),
+            mount_cases(),
+            admin_cases(),
+            ioport_cases(),
+            chroot_cases(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     /// The rows that declare a capability no caller of the model reaches:
@@ -324,5 +334,54 @@ mod tests {
         for held in [0, Capability::ALL] {
             assert_eq!(swapon(&holding(held), &unknown_flag), refuse(errno::EINVAL));
         }
+    }
+
+    /// Raising the I/O privilege level or turning ports on needs
+    /// `CAP_SYS_RAWIO`.
+    #[cfg(target_arch = "x86_64")]
+    fn ioport_cases() -> Vec<Case> {
+        vec![
+            Case {
+                row: Syscall::N_iopl,
+                check: iopl,
+                args: [3, 0, 0, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_ioperm,
+                check: ioperm,
+                args: [0x80, 1, 1, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+        ]
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn ioport_cases() -> Vec<Case> {
+        Vec::new()
+    }
+
+    /// Keeping I/O privilege level 0 or turning ports off needs nothing.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn keeping_the_io_ports_closed_needs_no_privilege() {
+        let nothing = holding(0);
+        assert_eq!(iopl(&nothing, &[0; 6]), Ok(0));
+        assert_eq!(ioperm(&nothing, &[0x80, 1, 0, 0, 0, 0]), Ok(0));
+        assert_eq!(
+            ioperm(&nothing, &[u64::MAX, 2, 1, 0, 0, 0]),
+            refuse(errno::EINVAL)
+        );
+    }
+
+    /// `chroot` of a directory the caller may search needs
+    /// `CAP_SYS_CHROOT`.
+    fn chroot_cases() -> Vec<Case> {
+        vec![Case {
+            row: Syscall::N_chroot,
+            check: |credential, a| chroot_finding(credential, a, |_| Ok(())),
+            args: [1, 0, 0, 0, 0, 0],
+            refusal: errno::EPERM,
+        }]
     }
 }

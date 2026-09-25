@@ -1196,10 +1196,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_chroot => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: the lookup (`EFAULT`, `ENOENT`, `ENOTDIR`, …), search permission on the directory (`EACCES`), then `CAP_SYS_CHROOT` (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysChroot]),
     Syscall::N_sync => r(
         id,
         Family::Fs,
@@ -1282,18 +1283,20 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_iopl => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: a level past 3 (`EINVAL`); the current level 0 needs nothing (0); raising it needs `CAP_SYS_RAWIO` (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysRawio]),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_ioperm => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: a range that wraps, is empty or passes port 65535 (`EINVAL`); turning ports off needs nothing (0: no bitmap); turning them on needs `CAP_SYS_RAWIO` (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysRawio]),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_create_module => r(
         id,

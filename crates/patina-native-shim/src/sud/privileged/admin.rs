@@ -1,10 +1,11 @@
 //! The system administration rows: process accounting, the terminal hangup,
 //! swap, reboot and kexec, kernel modules (each checks its capability before
-//! any argument, `swapon`'s flags aside), and disk quotas, whose capability
+//! any argument, `swapon`'s flags aside), disk quotas, whose capability
 //! check comes only after the filesystem is found to support quotas — which
-//! no filesystem of the virtual machine does.
+//! no filesystem of the virtual machine does — and `chroot`, which looks its
+//! path up first.
 
-use super::{Answer, gate, lookup, refuse};
+use super::{Answer, gate, guest_path, lookup, refuse};
 use crate::identity::Credential;
 use crate::registry::Capability;
 use linux_raw_sys::errno;
@@ -99,4 +100,27 @@ pub(in crate::sud) fn quotactl_fd(_: &Credential, a: &[u64; 6]) -> Answer {
         return refuse(errno::EINVAL);
     }
     refuse(errno::ENOSYS)
+}
+
+/// `chroot(path)` (fs/open.c): the lookup (following links), a directory
+/// (`ENOTDIR`) the caller may search (`EACCES`), then `CAP_SYS_CHROOT`
+/// (`EPERM`).
+pub(in crate::sud) fn chroot(credential: &Credential, a: &[u64; 6]) -> Answer {
+    chroot_finding(credential, a, |address| {
+        guest_path(address).and_then(|path| {
+            crate::paths::searchable_directory(crate::paths::AT_FDCWD, &path).map(drop)
+        })
+    })
+}
+
+/// [`chroot`], its searchable directory found by `find`.
+pub(super) fn chroot_finding(
+    credential: &Credential,
+    a: &[u64; 6],
+    find: impl FnOnce(u64) -> Result<(), c_int>,
+) -> Answer {
+    if let Err(code) = find(a[0]) {
+        return refuse(code);
+    }
+    gate(credential, Capability::SysChroot, errno::EPERM)
 }

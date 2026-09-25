@@ -162,18 +162,25 @@ fn replace_cwd(new: Fd) -> Result<(), c_int> {
     Ok(())
 }
 
-/// `chdir(2)`: the resolved entry must exist, be a directory, and be
-/// searchable by the one modeled identity; the node is then held as the new
-/// working directory.
-pub(crate) fn chdir(dirfd: c_int, path: &str) -> Result<(), c_int> {
+/// The directory `chdir(2)` and `chroot(2)` look up: the resolved entry must
+/// exist, be a directory, and be searchable by the one modeled identity
+/// (`path_permission(MAY_EXEC | MAY_CHDIR)`).
+pub(crate) fn searchable_directory(dirfd: c_int, path: &str) -> Result<Resolved, c_int> {
     let resolved = resolve(dirfd, path, 0)?;
-    let metadata = resolved.metadata.ok_or(ENOENT)?;
+    let metadata = resolved.metadata.as_ref().ok_or(ENOENT)?;
     if metadata.kind != FsEntryKind::Directory {
         return Err(ENOTDIR);
     }
     if metadata.mode & 0o100 == 0 {
         return Err(EACCES);
     }
+    Ok(resolved)
+}
+
+/// `chdir(2)`: the [`searchable_directory`]'s node is held as the new
+/// working directory.
+pub(crate) fn chdir(dirfd: c_int, path: &str) -> Result<(), c_int> {
+    let resolved = searchable_directory(dirfd, path)?;
     let fd = with_context(|context| context.fs_open(&resolved.path, OpenFlags::path_only()))?;
     replace_cwd(fd)
 }

@@ -74,36 +74,15 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &["chroot", "openat", "close", "mkdirat", "unlinkat"],
     needs: &[Need::Unprivileged],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim's chroot is a process-class deny-trap (c/posix/signal_process.c chroot) where the unprivileged caller is answered EFAULT, ENOENT, ENOTDIR, EACCES and EPERM",
-            failure: Failure::Stops {
-                events: 3,
-                ending: Ending::Signal(SIGABRT),
-                diagnostic: "patina: process spawn reached under patina: chroot",
-            },
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Privileged),
+        vehicles: &[Vehicle::Libc],
+        what: "the shim's chroot is a process-class deny-trap (c/posix/signal_process.c chroot) where the unprivileged caller is answered EFAULT, ENOENT, ENOTDIR, EACCES and EPERM",
+        failure: Failure::Stops {
+            events: 3,
+            ending: Ending::Signal(SIGABRT),
+            diagnostic: "patina: process spawn reached under patina: chroot",
         },
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: &[
-                Vehicle::Syscall,
-                #[cfg(target_arch = "x86_64")]
-                Vehicle::Raw,
-            ],
-            what: "chroot is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)) where the unprivileged caller is answered by the path checks and then EPERM",
-            failure: Failure::Stops {
-                events: 3,
-                ending: Ending::Signal(SIGABRT),
-                diagnostic: TRAP,
-            },
-        },
-    ],
+    }],
     ..DEFAULTS
 };
-
-#[cfg(target_arch = "x86_64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall chroot (nr 161, class privileged";
-#[cfg(target_arch = "aarch64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall chroot (nr 51, class privileged";

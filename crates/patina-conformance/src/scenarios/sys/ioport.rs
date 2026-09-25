@@ -62,27 +62,15 @@ pub const SCENARIO: Scenario = Scenario {
     symbols: &["iopl", "ioperm"],
     resolves: &["iopl", "ioperm"],
     needs: &[Need::Unprivileged],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: Vehicle::KERNEL,
-            what: "iopl is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)), as is ioperm, where the unprivileged caller may keep or drop port access and is answered EPERM for more (no CAP_SYS_RAWIO)",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Signal(SIGABRT),
-                diagnostic: "patina: SUD trapped unsupported syscall iopl (nr 172, class privileged",
-            },
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Privileged),
+        vehicles: &[Vehicle::Libc],
+        what: "the shim defines neither iopl nor ioperm (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds neither (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
+        failure: Failure::Stops {
+            events: 0,
+            ending: Ending::Exit(101),
+            diagnostic: "sys/ioport: cannot continue: glibc's iopl resolves",
         },
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim defines neither iopl nor ioperm (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds neither (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Exit(101),
-                diagnostic: "sys/ioport: cannot continue: glibc's iopl resolves",
-            },
-        },
-    ],
+    }],
     ..DEFAULTS
 };

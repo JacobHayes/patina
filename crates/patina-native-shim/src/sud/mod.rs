@@ -1048,6 +1048,17 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_quotactl_fd, |nr, a| {
         privileged::answer(nr, privileged::quotactl_fd, a)
     }),
+    (Syscall::N_chroot, |nr, a| {
+        privileged::answer(nr, privileged::chroot, a)
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_iopl, |nr, a| {
+        privileged::answer(nr, privileged::iopl, a)
+    }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_ioperm, |nr, a| {
+        privileged::answer(nr, privileged::ioperm, a)
+    }),
     (Syscall::N_uname, |_, a| unsafe {
         crate::identity::uname(a[0] as *mut _, crate::thread::sched::persona())
     }),
