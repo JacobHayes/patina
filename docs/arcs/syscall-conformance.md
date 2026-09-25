@@ -438,8 +438,9 @@ forwards into the same dispatcher instead of its two-number allowlist.
   (no default route: off-table is ENETUNREACH), inotify (still a trap),
   fanotify (a named trap by design), the `SIOCGIF*` requests and every
   IP-level control message on macOS (the latter a named fatal), UDP-Lite
-  (a named fatal), `UDP_GRO` (receive coalescing: the option answers
-  ENOPROTOOPT), IP options, `IP_PROTOCOL`, IPv6 flow labels and extension
+  (a named fatal), `UDP_GRO` (receive coalescing), `UDP_CORK`, `UDP_ENCAP`
+  and `UDP_NO_CHECK6_TX`/`RX` (each answers ENOPROTOOPT, where 6.8 takes
+  it), IP options, `IP_PROTOCOL`, IPv6 flow labels and extension
   headers (named fatals), a packet-information interface index (checked to
   exist, not routed by: the virtual network delivers by address), and wakeups between two epoll scans are queued in
   descriptor order (the model keeps no clock across sources).

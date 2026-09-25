@@ -333,7 +333,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Net,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_sock_*` entry the C interposer calls (`patina_sock_socket`): AF_INET/AF_INET6 stream and datagram sockets over SimNet, AF_UNIX stream/datagram/seqpacket sockets, AF_NETLINK route sockets; raw and packet sockets are EPERM, ping sockets EACCES, as for an unprivileged process.",
+        "Routed by the SUD dispatcher into the same `patina_sock_*` entry the C interposer calls (`patina_sock_socket`): AF_INET/AF_INET6 stream and datagram sockets over SimNet, AF_UNIX stream/datagram/seqpacket sockets, AF_NETLINK route sockets; raw and packet sockets are EPERM, ping sockets EACCES, as for an unprivileged process; a UDP-Lite socket (SOCK_DGRAM with IPPROTO_UDPLITE) is a named fatal.",
         None,
     ),
     Syscall::N_connect => r(
@@ -424,7 +424,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Net,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_sock_*` entry the C interposer calls (`patina_sock_setsockopt`): the per-socket option store with the kernel's validation (EINVAL, EDOM, ENOPROTOOPT, EPERM for privileged options); buffer sizes doubled as `sock_setsockopt` does; at the IP level IP_TOS/IP_TTL/IP_RECVTOS/IP_PKTINFO/IP_MTU_DISCOVER, at the IPv6 level IPV6_V6ONLY/IPV6_TCLASS/IPV6_RECVTCLASS/IPV6_RECVPKTINFO/IPV6_MTU_DISCOVER/IPV6_DONTFRAG/IPV6_UNICAST_HOPS, and UDP_SEGMENT; other IP- and UDP-level options (UDP_GRO, IP_RECVERR, …) answer ENOPROTOOPT.",
+        "Routed by the SUD dispatcher into the same `patina_sock_*` entry the C interposer calls (`patina_sock_setsockopt`): the per-socket option store with the kernel's validation (EINVAL, EDOM, ENOPROTOOPT, EPERM for privileged options); buffer sizes doubled as `sock_setsockopt` does; at the IP level IP_TOS/IP_TTL/IP_RECVTOS/IP_PKTINFO/IP_MTU_DISCOVER, at the IPv6 level IPV6_V6ONLY/IPV6_TCLASS/IPV6_RECVTCLASS/IPV6_RECVPKTINFO/IPV6_MTU_DISCOVER/IPV6_DONTFRAG/IPV6_UNICAST_HOPS, and UDP_SEGMENT; SO_RCVLOWAT on TCP capped as tcp_set_rcvlowat caps it; other IP- and UDP-level options answer ENOPROTOOPT, among them IP_RECVERR and UDP_GRO, UDP_CORK, UDP_ENCAP and UDP_NO_CHECK6_TX/RX, which Linux takes (receive coalescing and tunnel encapsulation are not modeled).",
         None,
     ),
     Syscall::N_getsockopt => r(

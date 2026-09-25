@@ -45,6 +45,10 @@ pub(crate) struct Inet {
     /// `SOCK_BINDADDR_LOCK`/`SOCK_BINDPORT_LOCK`: what `bind` fixed.
     addr_locked: bool,
     port_locked: bool,
+    /// The address `bind` fixed while no port is held: a datagram
+    /// disconnect gave back a port the kernel chose and kept the address
+    /// (`__udp_disconnect`), which the socket reports and binds at again.
+    kept: Option<IpAddr>,
     /// The connected peer (`inet_daddr`, `inet_dport`).
     pub(crate) peer: Option<Endpoint>,
     peer_extra: V6Extra,
@@ -85,6 +89,7 @@ impl Inet {
             local: None,
             addr_locked: false,
             port_locked: false,
+            kept: None,
             peer: None,
             peer_extra: V6Extra::default(),
             state: State::Closed,
@@ -386,6 +391,7 @@ fn register(state: &mut ThreadRuntime, handle: c_int, local: Endpoint) -> Result
     let shared = socket.opts.reuseport || socket.opts.reuseaddr;
     let inet = as_inet_mut(socket);
     inet.local = Some(local);
+    inet.kept = None;
     if !tcp {
         let address = wire(inet, v6only);
         let bound = if shared {
@@ -460,11 +466,12 @@ fn unregister(state: &mut ThreadRuntime, handle: c_int, tcp: bool, inet: &mut In
 /// (`inet_autobind`), or to `source` when a connect picks the address.
 fn autobind(state: &mut ThreadRuntime, handle: c_int, source: Option<IpAddr>) -> Result<(), c_int> {
     let socket = sock(state, handle)?;
-    if as_inet(socket).local.is_some() {
+    let inet = as_inet(socket);
+    if inet.local.is_some() {
         return Ok(());
     }
     let tcp = is_tcp(socket);
-    let ip = source.unwrap_or(unspecified(as_inet(socket).v6).ip);
+    let ip = inet.kept.or(source).unwrap_or(unspecified(inet.v6).ip);
     let new = claim(socket, ip, false);
     let port = ephemeral(state, tcp, handle, new)?;
     register(state, handle, Endpoint { ip, port })
@@ -610,7 +617,11 @@ fn disconnect(handle: c_int, tcp: bool) -> Result<(), c_int> {
         sock_mut(&mut state, handle)?.shutdown = 0;
     } else if !inet.port_locked {
         unregister(&mut state, handle, false, &mut inet, v6only);
-        inet.local = None;
+        inet.kept = inet
+            .local
+            .take()
+            .map(|local| local.ip)
+            .filter(|_| inet.addr_locked);
     } else {
         if !inet.addr_locked {
             if let Some(local) = &mut inet.local {
@@ -934,9 +945,13 @@ pub(super) fn name(socket: &Socket, inet: &Inet, peer: bool) -> Result<Vec<u8>, 
         let peer = inet.peer.filter(|_| connected).ok_or(ENOTCONN)?;
         return Ok(encode(inet.v6, peer, inet.peer_extra));
     }
+    let unbound = Endpoint {
+        ip: inet.kept.unwrap_or(unspecified(inet.v6).ip),
+        port: 0,
+    };
     Ok(encode(
         inet.v6,
-        inet.local.unwrap_or(unspecified(inet.v6)),
+        inet.local.unwrap_or(unbound),
         V6Extra::default(),
     ))
 }
@@ -1257,14 +1272,15 @@ fn send_stream(handle: c_int, message: Outgoing) -> Result<usize, c_int> {
         }
         // `sk_stream_wait_memory` before `copy_from_iter`: bytes that cannot
         // be read matter only once the stream has room for them (a full
-        // stream waits, or is `EAGAIN`, first).
-        let written = match message.data.read(sent, STREAM_CHUNK) {
-            Ok(chunk) => with_context_raw(|context| context.net_tcp_send(sid, &chunk)),
-            Err(errno) => {
-                if with_context_raw(|context| context.net_readiness(sid))?.writable {
-                    return if sent > 0 { Ok(sent) } else { Err(errno) };
-                }
-                Ok(0)
+        // stream waits, or is `EAGAIN`, first), and a piece is read only as
+        // large as the room it goes into.
+        let room = with_context_raw(|context| context.net_readiness(sid))?.room;
+        let written = if room == 0 {
+            Ok(0)
+        } else {
+            match message.data.read(sent, STREAM_CHUNK.min(room)) {
+                Ok(chunk) => with_context_raw(|context| context.net_tcp_send(sid, &chunk)),
+                Err(errno) => return if sent > 0 { Ok(sent) } else { Err(errno) },
             }
         };
         match written {
@@ -1420,10 +1436,9 @@ fn recv_stream(handle: c_int, want: Want) -> Result<Incoming, c_int> {
     }
     let (deadline, nonblocking) = recv_deadline(handle, want.flags)?;
     let peek = want.flags & MSG_PEEK != 0;
-    // `sock_rcvlowat`: all of it under `MSG_WAITALL`, else `SO_RCVLOWAT`.
-    let target = if peek {
-        1
-    } else if want.flags & MSG_WAITALL != 0 {
+    // `sock_rcvlowat`: all of it under `MSG_WAITALL`, else `SO_RCVLOWAT`,
+    // for a peek as for a receive (`tcp_recvmsg_locked`).
+    let target = if want.flags & MSG_WAITALL != 0 {
         want.capacity
     } else {
         let lowat = sock(&lock_state(), handle)?.opts.rcvlowat.max(1) as usize;
@@ -1447,23 +1462,23 @@ fn recv_stream(handle: c_int, want: Want) -> Result<Incoming, c_int> {
             with_context_raw(|context| context.net_tcp_recv(sid, want.capacity - got.len()))
         };
         match taken {
+            // A peek sees everything queued, afresh each time it looks.
+            Ok(Some(bytes)) if !bytes.is_empty() && peek => got = bytes,
             Ok(Some(bytes)) if !bytes.is_empty() => {
                 got.extend(bytes);
-                if !peek {
-                    let peer = state
-                        .net
-                        .sockets
-                        .inet
-                        .streams
-                        .get(&key)
-                        .and_then(|pair| pair.other(handle));
-                    let wakes = peer
-                        .map(|peer| room_freed(&mut state, peer))
-                        .unwrap_or_default();
-                    drop(state);
-                    wake_all(wakes);
-                }
-                if got.len() >= target || peek {
+                let peer = state
+                    .net
+                    .sockets
+                    .inet
+                    .streams
+                    .get(&key)
+                    .and_then(|pair| pair.other(handle));
+                let wakes = peer
+                    .map(|peer| room_freed(&mut state, peer))
+                    .unwrap_or_default();
+                drop(state);
+                wake_all(wakes);
+                if got.len() >= target {
                     return Ok(done(got, want));
                 }
                 continue;
@@ -1487,8 +1502,15 @@ fn recv_stream(handle: c_int, want: Want) -> Result<Incoming, c_int> {
                 };
             }
         }
+        if peek && got.len() >= target {
+            return Ok(done(got, want));
+        }
         let socket = sock_mut(&mut state, handle)?;
-        if !got.is_empty() && (nonblocking || socket.shutdown & RCV_SHUTDOWN != 0) {
+        // With bytes in hand the receive ends, leaving a pending error for
+        // the next (`tcp_recvmsg_locked` takes `sock_error` only with none).
+        if !got.is_empty()
+            && (nonblocking || socket.shutdown & RCV_SHUTDOWN != 0 || socket.error != 0)
+        {
             return Ok(done(got, want));
         }
         if let Some(error) = socket.take_error() {

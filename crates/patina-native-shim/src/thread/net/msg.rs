@@ -244,8 +244,16 @@ fn control(handle: c_int, bytes: &[u8]) -> Result<Control, c_int> {
     }
 }
 
-/// `net.core.optmem_max`'s default: the largest control buffer a send takes.
+/// `net.core.optmem_max`'s default (128 KiB on 6.8; older kernels had
+/// 20 KiB, so a differential scenario stays below that or expects either).
 const OPTMEM_MAX: usize = 131_072;
+
+/// Whether a send's control buffer fits the socket's option memory:
+/// `sock_kmalloc` takes it only while `sk_omem_alloc + size < optmem_max`,
+/// so a buffer of `optmem_max` bytes itself is refused.
+fn control_fits(controllen: usize) -> bool {
+    controllen < OPTMEM_MAX
+}
 
 /// Who reads a control buffer: `__scm_send` for AF_UNIX (rights and
 /// credentials) and netlink (credentials); the inet protocols their own way.
@@ -309,9 +317,9 @@ fn send_one(handle: c_int, nonblocking: bool, msg: usize, flags: c_int) -> Resul
         None
     };
     let segments = iovecs(header.iov, header.iovlen)?;
-    // `sock_kmalloc`: a control buffer past `net.core.optmem_max` (its
-    // default) is refused before it is copied.
-    if header.controllen > OPTMEM_MAX {
+    // `sock_kmalloc`: a control buffer that does not fit is refused before
+    // it is copied.
+    if !control_fits(header.controllen) {
         return Err(ENOBUFS);
     }
     let control_bytes = if header.controllen > 0 {
@@ -658,6 +666,12 @@ mod tests {
 
     /// The socket level an inet socket takes: its marks need a capability a
     /// datagram's sender lacks; a stream answers every error `EINVAL`.
+    #[test]
+    fn a_control_buffer_of_optmem_max_bytes_does_not_fit() {
+        assert!(control_fits(OPTMEM_MAX - 1));
+        assert!(!control_fits(OPTMEM_MAX));
+    }
+
     #[test]
     fn inet_socket_control_answers_as_sock_cmsg_send() {
         assert_eq!(inet_socket_control(true, SCM_RIGHTS), Err(EINVAL));

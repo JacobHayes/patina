@@ -22,10 +22,8 @@
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{AT_FDCWD, Control, IoctlArg, Probe, RecvSpec, SockAddr, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -274,34 +272,5 @@ pub const SCENARIO: Scenario = Scenario {
         "close",
     ],
     needs: &[Need::Unprivileged, Need::LocalBindOnly],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "a TCP peek's target is one byte, not SO_RCVLOWAT (thread/net/inet.rs recv_stream); tcp_recvmsg_locked takes sock_rcvlowat for a peek too",
-            failure: Failure::Differs(&[Difference::check(
-                75,
-                "a blocking peek below the mark waits out its timeout, then answers what is queued",
-            )]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "SO_RCVLOWAT on TCP is not capped (thread/net/opts.rs set_socket); tcp_set_rcvlowat caps it at half the locked receive buffer, or half tcp_rmem's maximum",
-            failure: Failure::Differs(&[
-                Difference::field(
-                    82,
-                    "getsockopt",
-                    "fields.value",
-                    Observed::Int(i32::MAX as i64),
-                ),
-                Difference::check(83, "is capped at half the locked buffer"),
-                Difference::check(
-                    87,
-                    "is capped below INT_MAX (half the host's tcp_rmem maximum)",
-                ),
-            ]),
-        },
-    ],
     ..DEFAULTS
 };

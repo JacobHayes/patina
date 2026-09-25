@@ -315,47 +315,56 @@ impl SimNet {
             .ok_or_else(|| invalid_socket(socket))
     }
 
-    /// The datagram socket that receives traffic `from` dialed at `to`: the
-    /// exact binding if one exists, else a wildcard binding under the shared
-    /// routing rule ([`wildcard_bind_keys`]), and within a shared binding the
-    /// member the sender's address hashes to (a fixed member per sender, as a
-    /// kernel's reuseport group picks by flow). Returns the socket AND the
-    /// address it is bound under, because a queued packet names the address
-    /// the receiver is bound at.
+    /// The datagram socket that receives traffic `from` dialed at `to`: a
+    /// connected member whose whole 4-tuple matches, under whichever binding
+    /// it holds (a wildcard-bound socket that connects is found at its routed
+    /// source, as the kernel rehashes it there, and `compute_score` ranks the
+    /// 4-tuple match above every unconnected socket); else the exact binding
+    /// if one exists, else a wildcard binding under the shared routing rule
+    /// ([`wildcard_bind_keys`]), and within a shared binding the member the
+    /// sender's address hashes to (a fixed member per sender, as a kernel's
+    /// reuseport group picks by flow). A connected member that does not
+    /// match takes nothing. Returns the socket AND the address it is bound
+    /// under, because a queued packet names the address the receiver is
+    /// bound at.
     fn resolve_datagram(&self, from: &str, to: &str) -> Option<(SocketId, String)> {
-        std::iter::once(to.to_owned())
-            .chain(wildcard_bind_keys(to))
-            .find_map(|address| {
-                let binding = self.addresses.get(&address)?;
-                // A connected member whose 4-tuple matches outranks every
-                // unconnected one; a connected member that does not match
-                // takes nothing (`compute_score`).
-                let connected = binding.members.iter().copied().find(|member| {
+        let keys = || std::iter::once(to.to_owned()).chain(wildcard_bind_keys(to));
+        let connected = keys().find_map(|address| {
+            let binding = self.addresses.get(&address)?;
+            binding
+                .members
+                .iter()
+                .copied()
+                .find(|member| {
                     self.datagram_peers
                         .get(member)
                         .is_some_and(|(local, peer)| local == to && peer == from)
-                });
-                if let Some(member) = connected {
-                    return Some((member, address));
+                })
+                .map(|member| (member, address))
+        });
+        if connected.is_some() {
+            return connected;
+        }
+        keys().find_map(|address| {
+            let binding = self.addresses.get(&address)?;
+            let open: Vec<SocketId> = binding
+                .members
+                .iter()
+                .copied()
+                .filter(|member| !self.datagram_peers.contains_key(member))
+                .collect();
+            let member = match open.len() {
+                0 => return None,
+                1 => open[0],
+                count => {
+                    let hash = from.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                    });
+                    open[(hash % count as u64) as usize]
                 }
-                let open: Vec<SocketId> = binding
-                    .members
-                    .iter()
-                    .copied()
-                    .filter(|member| !self.datagram_peers.contains_key(member))
-                    .collect();
-                let member = match open.len() {
-                    0 => return None,
-                    1 => open[0],
-                    count => {
-                        let hash = from.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-                            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-                        });
-                        open[(hash % count as u64) as usize]
-                    }
-                };
-                Some((member, address))
-            })
+            };
+            Some((member, address))
+        })
     }
 
     /// The TCP listener that accepts a connection dialed at `to`, exact match
@@ -1099,6 +1108,7 @@ impl NetDriver for SimNet {
                 writable: true,
                 arrivals,
                 pending,
+                room: usize::MAX,
                 ..NetReadiness::default()
             });
         }
@@ -1115,6 +1125,7 @@ impl NetDriver for SimNet {
                     reset: true,
                     arrivals: endpoint.retired + endpoint.inbox.len() as u64 + 1,
                     pending: 0,
+                    room: usize::MAX,
                 });
             }
             // Mirror `tcp_recv`: `Some(nonempty)` = data, `Some(empty)` = EOF,
@@ -1136,11 +1147,15 @@ impl NetDriver for SimNet {
                     .peer
                     .and_then(|peer| self.tcp_endpoints.get(&peer))
                     .is_none_or(|peer| peer.read_closed);
-            let peer_has_space = endpoint
-                .peer
-                .and_then(|peer| self.tcp_endpoints.get(&peer))
-                .is_none_or(|peer| peer.read_closed || peer.inbox_bytes < self.tcp_buffer_bytes);
-            let writable = write_eof || peer_has_space;
+            // Mirror `tcp_send`'s acceptance: what the peer's buffer has
+            // left, or everything where the send does not wait.
+            let room = match endpoint.peer.and_then(|peer| self.tcp_endpoints.get(&peer)) {
+                Some(peer) if !write_eof && !peer.read_closed => {
+                    self.tcp_buffer_bytes.saturating_sub(peer.inbox_bytes)
+                }
+                _ => usize::MAX,
+            };
+            let writable = room > 0;
             // The FIN arrives after every byte sent before it, and is an
             // arrival of its own: a peer's shutdown re-arms an edge-triggered
             // reader even when it had nothing left to send.
@@ -1155,6 +1170,7 @@ impl NetDriver for SimNet {
                 reset: false,
                 arrivals,
                 pending: due.iter().map(|segment| segment.bytes.len()).sum(),
+                room,
             });
         }
         if let Some(listener) = self.tcp_listeners.get(&socket) {
@@ -1616,6 +1632,26 @@ mod tests {
         net.connect_datagram(receiver, "", None).unwrap();
         net.send(stranger, "127.0.0.1:7", b"s", 0).unwrap();
         assert_eq!(net.recv(receiver, 0).unwrap().unwrap().bytes, b"s");
+    }
+
+    /// A wildcard-bound socket connected from its routed source is found
+    /// by its whole 4-tuple ahead of an unconnected socket bound at that
+    /// exact address (the kernel rehashes it there); a stranger's datagram
+    /// still reaches the exact one.
+    #[test]
+    fn a_connected_wildcard_member_outranks_an_exact_open_binding() {
+        let mut net = SimNet::new();
+        let wildcard = net.bind_shared("0.0.0.0:7").unwrap();
+        let exact = net.bind_shared("127.0.0.1:7").unwrap();
+        let peer = net.bind("127.0.0.1:8").unwrap();
+        let stranger = net.bind("127.0.0.1:9").unwrap();
+        net.connect_datagram(wildcard, "127.0.0.1:7", Some("127.0.0.1:8"))
+            .unwrap();
+        net.send(peer, "127.0.0.1:7", b"p", 0).unwrap();
+        net.send(stranger, "127.0.0.1:7", b"s", 0).unwrap();
+        assert_eq!(net.recv(wildcard, 0).unwrap().unwrap().bytes, b"p");
+        assert_eq!(net.recv(exact, 0).unwrap().unwrap().bytes, b"s");
+        assert!(net.recv(wildcard, 0).unwrap().is_none());
     }
 
     #[test]

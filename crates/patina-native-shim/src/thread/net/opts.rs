@@ -31,6 +31,8 @@ const MIN_RCVBUF: i32 = 2304;
 const DEFAULT_BUFFER: i32 = 212_992;
 const TCP_SNDBUF: i32 = 16_384;
 const TCP_RCVBUF: i32 = 131_072;
+/// `tcp_rmem[2]`: the most a TCP receive buffer grows to unlocked.
+const TCP_RMEM_MAX: i32 = 6_291_456;
 /// `TCP_MSS_DEFAULT`: `TCP_MAXSEG` before any path is known.
 const TCP_MSS_DEFAULT: i32 = 536;
 
@@ -52,6 +54,8 @@ pub(crate) struct Options {
     pub(crate) rcvtimeo: u64,
     pub(crate) sndtimeo: u64,
     pub(crate) rcvbuf: i32,
+    /// `SOCK_RCVBUF_LOCK`: `SO_RCVBUF` fixed the receive buffer.
+    pub(crate) rcvbuf_locked: bool,
     pub(crate) sndbuf: i32,
     pub(crate) rcvlowat: i32,
     /// `SO_BINDTODEVICE`: the interface index, 0 for none.
@@ -119,6 +123,7 @@ impl Options {
             rcvtimeo: FOREVER,
             sndtimeo: FOREVER,
             rcvbuf: if tcp { TCP_RCVBUF } else { DEFAULT_BUFFER },
+            rcvbuf_locked: false,
             sndbuf: if tcp { TCP_SNDBUF } else { DEFAULT_BUFFER },
             rcvlowat: 1,
             bound_if: 0,
@@ -344,6 +349,7 @@ fn set_socket(
     }
     let val = int(&read(4)?);
     let on = val != 0;
+    let tcp = is_tcp(socket);
     let opts = &mut socket.opts;
     match name {
         SO_DEBUG if on => return Err(EACCES),
@@ -356,13 +362,21 @@ fn set_socket(
         SO_KEEPALIVE => opts.keepalive = on,
         SO_OOBINLINE => opts.oobinline = on,
         SO_SNDBUF => opts.sndbuf = (val.clamp(0, BUFFER_MAX) * 2).max(MIN_SNDBUF),
-        SO_RCVBUF => opts.rcvbuf = (val.clamp(0, BUFFER_MAX) * 2).max(MIN_RCVBUF),
+        SO_RCVBUF => {
+            opts.rcvbuf = (val.clamp(0, BUFFER_MAX) * 2).max(MIN_RCVBUF);
+            opts.rcvbuf_locked = true;
+        }
         SO_RCVLOWAT => {
-            opts.rcvlowat = match val {
-                ..0 => i32::MAX,
-                0 => 1,
-                val => val,
-            }
+            let val = if val < 0 { i32::MAX } else { val };
+            // `tcp_set_rcvlowat`: half the receive buffer once `SO_RCVBUF`
+            // locked it, else half `tcp_rmem`'s maximum. (It also grows an
+            // unlocked buffer to hold the mark; the model keeps its size.)
+            let val = match (tcp, opts.rcvbuf_locked) {
+                (true, true) => val.min(opts.rcvbuf >> 1),
+                (true, false) => val.min(TCP_RMEM_MAX >> 1),
+                (false, _) => val,
+            };
+            opts.rcvlowat = val.max(1);
         }
         SO_LINGER => {
             if len < 8 {

@@ -763,8 +763,11 @@ fn checked_offset(offset: u64) -> DriverResult<i64> {
 /// (`peer_write_closed`, the FIN — arrived once every byte sent before it has,
 /// and true while those bytes are still queued), whether the stream was reset, how many arrivals have become
 /// deliverable so far (`arrivals`, the edge an edge-triggered interest fires
-/// on), and what a receive would take now (`pending`: the queued bytes of a
-/// stream, the length of the next datagram). A pure inspection — no bytes are
+/// on), what a receive would take now (`pending`: the queued bytes of a
+/// stream, the length of the next datagram), and what a send would take now
+/// (`room`: the space left in a stream peer's receive buffer; `usize::MAX`
+/// where a send never waits — a datagram, or a stream whose send fails
+/// closed). A pure inspection — no bytes are
 /// consumed and no state changes — so a reactor may call it repeatedly while
 /// gathering events without perturbing the run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -777,6 +780,7 @@ pub struct NetReadiness {
     pub reset: bool,
     pub arrivals: u64,
     pub pending: usize,
+    pub room: usize,
 }
 
 /// Expected firings a rate-based fault class must have accumulated before a

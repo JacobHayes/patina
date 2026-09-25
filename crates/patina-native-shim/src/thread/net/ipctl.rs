@@ -239,9 +239,30 @@ fn interface_of(ip: IpAddr) -> Option<&'static patina_dst_driver_api::NetInterfa
     })
 }
 
-/// The MTU of the interface a destination is reached by.
+/// The MTU a datagram to `destination` meets: the loopback device's for an
+/// address of this host (the `local` table routes it through `lo`, whatever
+/// interface holds the address), else that of the interface whose prefix
+/// holds it.
 pub(super) fn mtu_to(destination: IpAddr) -> u32 {
-    interface_of(destination).map_or(65536, |interface| interface.mtu)
+    let own = |v4: Ipv4Addr| {
+        v4.is_loopback()
+            || VIRTUAL_INTERFACES
+                .iter()
+                .any(|interface| interface.ipv4.address == v4.octets())
+    };
+    let local = match destination {
+        IpAddr::V4(v4) => own(v4),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => own(v4),
+            None => v6.is_loopback() || patina_dst_driver_api::local_ipv6(v6.octets()),
+        },
+    };
+    let via = if local {
+        interface_of(IpAddr::V4(Ipv4Addr::LOCALHOST))
+    } else {
+        interface_of(destination)
+    };
+    via.map_or(65536, |interface| interface.mtu)
 }
 
 /// `in6_pktinfo`: the address, then the interface index.
@@ -444,6 +465,26 @@ mod tests {
         assert_eq!(segments(&[0u8; 128], 1, true, 65536).unwrap().len(), 128);
         assert_eq!(segments(&[0u8; 129], 1, true, 65536), Err(EINVAL));
         assert_eq!(segments(&[0u8; 1500], 1480, true, 1500), Err(EMSGSIZE));
+    }
+
+    #[test]
+    fn an_address_of_this_host_is_reached_through_the_loopback_device() {
+        let lo = interface_of(IpAddr::V4(Ipv4Addr::LOCALHOST)).unwrap().mtu;
+        let eth0 = VIRTUAL_INTERFACES
+            .iter()
+            .find(|interface| interface.ipv4.address == [10, 0, 0, 1])
+            .unwrap();
+        assert!(eth0.mtu < lo);
+        assert_eq!(mtu_to(IpAddr::V4(Ipv4Addr::LOCALHOST)), lo);
+        assert_eq!(mtu_to(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))), lo);
+        assert_eq!(
+            mtu_to(IpAddr::V6(Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped())),
+            lo
+        );
+        assert_eq!(mtu_to(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))), eth0.mtu);
+        if let Some((own, _)) = eth0.ipv6 {
+            assert_eq!(mtu_to(IpAddr::V6(Ipv6Addr::from(own))), lo);
+        }
     }
 
     #[test]

@@ -6,9 +6,7 @@
 //! wildcard-bound socket is bound at once connected, and the errno
 //! vocabulary.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{AT_FDCWD, Probe, SockAddr, neg};
@@ -342,41 +340,6 @@ pub const SCENARIO: Scenario = Scenario {
         "accept4",
         "openat",
         "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "an AF_UNSPEC disconnect resets a source address bound by number (thread/net/inet.rs); __udp_disconnect keeps it under SOCK_BINDADDR_LOCK",
-            failure: Failure::Differs(&[
-                Difference::field(
-                    104,
-                    "getsockname",
-                    "fields.addr_ip",
-                    Observed::Str("0.0.0.0"),
-                ),
-                Difference::check(105, "the port the kernel chose is given up"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "SimNet looks for a connected member bucket by bucket (patina-net-sim resolve_datagram), so an unconnected exact binding wins over a connected wildcard one; the kernel ranks the whole 4-tuple first",
-            failure: Failure::Differs(&[
-                Difference::field(140, "recvfrom", "errno", Observed::Str("EAGAIN")),
-                Difference::field(140, "recvfrom", "fields.data", Observed::Null),
-                Difference::field(140, "recvfrom", "fields.src_ip", Observed::Null),
-                Difference::field(140, "recvfrom", "fields.src_port", Observed::Null),
-                Difference::field(140, "recvfrom", "ret", Observed::Int(-1)),
-                Difference::check(141, "the connected w takes its peer's datagram"),
-                Difference::field(142, "recvfrom", "errno", Observed::Null),
-                Difference::field(142, "recvfrom", "fields.data", Observed::Str("to-w")),
-                Difference::field(142, "recvfrom", "fields.src_ip", Observed::Str("127.0.0.1")),
-                Difference::field(142, "recvfrom", "fields.src_port", Observed::Str("port@90")),
-                Difference::field(142, "recvfrom", "ret", Observed::Int(4)),
-                Difference::check(143, "not the exact x"),
-            ]),
-        },
     ],
     ..DEFAULTS
 };
