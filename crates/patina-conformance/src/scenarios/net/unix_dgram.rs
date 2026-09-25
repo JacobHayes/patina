@@ -15,8 +15,8 @@
 //! * a connected socket sends without a destination; once its peer closes,
 //!   the next send is `ECONNREFUSED` and disconnects it, so the one after is
 //!   `ENOTCONN`;
-//! * a datagram `socketpair` keeps boundaries both ways and its ends are
-//!   unnamed.
+//! * a datagram `socketpair` keeps boundaries both ways (a pair's unnamed
+//!   ends are net/unix_stream's).
 //!
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
@@ -45,11 +45,6 @@ pub fn run(p: &Probe) {
     );
     let (n, _, _) = p.recv_from(a, 16, 0, false);
     p.check("the pair is bidirectional", n == 4);
-    let (_, name, len) = p.name_of(a, false, 128);
-    p.check(
-        "a pair's ends are unnamed",
-        name == Some(SockAddr::UnixUnnamed) && len == 2,
-    );
     p.close(a);
     p.close(b);
 
@@ -187,7 +182,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_socket,
         Syscall::N_bind,
         Syscall::N_connect,
-        Syscall::N_getsockname,
         Syscall::N_getpeername,
         Syscall::N_sendto,
         Syscall::N_recvfrom,
@@ -199,7 +193,6 @@ pub const SCENARIO: Scenario = Scenario {
         "socket",
         "bind",
         "connect",
-        "getsockname",
         "getpeername",
         "sendto",
         "recvfrom",

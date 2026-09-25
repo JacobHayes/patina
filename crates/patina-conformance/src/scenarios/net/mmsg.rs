@@ -33,12 +33,12 @@ pub fn run(p: &Probe) {
     let root = p.dir();
     let a = p.socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     p.require("socket a", a >= 0);
-    p.check("bind a", p.bind_to(a, &SockAddr::v4(0)) == 0);
+    p.require("bind a", p.bind_to(a, &SockAddr::v4(0)) == 0);
     let (_, addr_a, _) = p.name_of(a, false, 128);
     let addr_a = addr_a.expect("getsockname a");
     let b = p.socket(AF_INET, SOCK_DGRAM, 0);
     p.require("socket b", b >= 0);
-    p.check("bind b", p.bind_to(b, &SockAddr::v4(0)) == 0);
+    p.require("bind b", p.bind_to(b, &SockAddr::v4(0)) == 0);
     let (_, addr_b, _) = p.name_of(b, false, 128);
     let addr_b = addr_b.expect("getsockname b");
 
@@ -130,7 +130,7 @@ pub fn run(p: &Probe) {
     // then closed, dropping what its buffer could not hold.
     let sink = p.socket(AF_INET, SOCK_DGRAM, 0);
     p.require("sink socket", sink >= 0);
-    p.check("bind the sink", p.bind_to(sink, &SockAddr::v4(0)) == 0);
+    p.require("bind the sink", p.bind_to(sink, &SockAddr::v4(0)) == 0);
     let (_, addr_sink, _) = p.name_of(sink, false, 128);
     let addr_sink = addr_sink.expect("getsockname sink");
     let flood: Vec<Outgoing<'_>> = (0..=UIO_MAXIOV)

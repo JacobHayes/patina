@@ -13,21 +13,14 @@
 //!   and the ICMP port-unreachable answer surfaces asynchronously: the
 //!   socket polls `POLLERR` and its next receive is `ECONNREFUSED`, once;
 //! * `connect` with `AF_UNSPEC` dissolves a UDP association (`ENOTCONN`
-//!   after);
-//! * `bind` to an address no interface has (TEST-NET-1: nothing is sent) is
-//!   `EADDRNOTAVAIL` (`Need::LocalBindOnly`: `ip_nonlocal_bind` off).
+//!   after).
 //!
 //! Every wait is a poll bounded by `WAIT_MS`.
 
-use crate::catalog::{DEFAULTS, Need, Scenario};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{OptionShown, Probe, SockAddr, neg};
 use libc::*;
 use patina_dst_syscalls::Syscall;
-use std::net::{Ipv4Addr, SocketAddrV4};
-
-/// An address in TEST-NET-1 (RFC 5737): no interface has it, and binding to
-/// it sends nothing.
-const DOCUMENTATION: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 
 /// How long a scenario waits for an asynchronous completion.
 const WAIT_MS: i32 = 5_000;
@@ -47,7 +40,7 @@ fn int(value: i32) -> [u8; 4] {
 fn held_port(p: &Probe) -> (i32, SockAddr) {
     let t = p.socket(AF_INET, SOCK_STREAM, 0);
     p.require("a socket to hold a port", t >= 0);
-    p.check("bind it", p.bind_to(t, &SockAddr::v4(0)) == 0);
+    p.require("bind it", p.bind_to(t, &SockAddr::v4(0)) == 0);
     let (_, addr, _) = p.name_of(t, false, 128);
     (t, addr.expect("the held socket's port"))
 }
@@ -55,8 +48,8 @@ fn held_port(p: &Probe) -> (i32, SockAddr) {
 pub fn run(p: &Probe) {
     let l = p.socket(AF_INET, SOCK_STREAM, 0);
     p.require("a listener", l >= 0);
-    p.check("bind the listener", p.bind_to(l, &SockAddr::v4(0)) == 0);
-    p.check("listen", p.listen(l, 4) == 0);
+    p.require("bind the listener", p.bind_to(l, &SockAddr::v4(0)) == 0);
+    p.require("listen", p.listen(l, 4) == 0);
     let (_, addr_l, _) = p.name_of(l, false, 128);
     let addr_l = addr_l.expect("getsockname l");
 
@@ -120,7 +113,7 @@ pub fn run(p: &Probe) {
     let closed = nobody.clone();
     let u = p.socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
     p.require("a UDP socket", u >= 0);
-    p.check("bind it", p.bind_to(u, &SockAddr::v4(0)) == 0);
+    p.require("bind it", p.bind_to(u, &SockAddr::v4(0)) == 0);
     p.check(
         "connect it to a port nobody listens on",
         p.connect_to(u, &closed) == 0,
@@ -157,14 +150,7 @@ pub fn run(p: &Probe) {
         p.name_of(u, true, 128).0 == neg(ENOTCONN),
     );
 
-    let w = p.socket(AF_INET, SOCK_DGRAM, 0);
-    p.require("an unbound socket", w >= 0);
-    p.check(
-        "bind to an address no interface has is EADDRNOTAVAIL",
-        p.bind_to(w, &SockAddr::V4(SocketAddrV4::new(DOCUMENTATION, 0))) == neg(EADDRNOTAVAIL),
-    );
-
-    for fd in [c, s, r_sock, u, w, held, l] {
+    for fd in [c, s, r_sock, u, held, l] {
         p.close(fd);
     }
     crate::scenarios::net::check_allocated_port(p, &addr_l);
@@ -204,6 +190,5 @@ pub const SCENARIO: Scenario = Scenario {
         "poll",
         "close",
     ],
-    needs: &[Need::LocalBindOnly],
     ..DEFAULTS
 };

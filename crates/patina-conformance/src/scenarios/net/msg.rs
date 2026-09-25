@@ -45,13 +45,13 @@ pub fn run(p: &Probe) {
     // ---- legacy accept and send(3)/recv(3) over a byte stream ----
     let l = p.socket(AF_INET, SOCK_STREAM, 0);
     p.require("listener", l >= 0);
-    p.check("bind the listener", p.bind_to(l, &SockAddr::v4(0)) == 0);
-    p.check("listen", p.listen(l, 4) == 0);
+    p.require("bind the listener", p.bind_to(l, &SockAddr::v4(0)) == 0);
+    p.require("listen", p.listen(l, 4) == 0);
     let (_, addr_l, _) = p.name_of(l, false, 128);
     let addr_l = addr_l.expect("getsockname l");
     let c = p.socket(AF_INET, SOCK_STREAM, 0);
     p.require("client", c >= 0);
-    p.check("connect to the listener", p.connect_to(c, &addr_l) == 0);
+    p.require("connect to the listener", p.connect_to(c, &addr_l) == 0);
     let (_, addr_c, _) = p.name_of(c, false, 128);
     let (s, peer) = p.accept_from(l, 0, true, true);
     p.require("legacy accept", s >= 0);
@@ -139,12 +139,12 @@ pub fn run(p: &Probe) {
     // ---- datagram messages ----
     let a = p.socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     p.require("socket a", a >= 0);
-    p.check("bind a", p.bind_to(a, &SockAddr::v4(0)) == 0);
+    p.require("bind a", p.bind_to(a, &SockAddr::v4(0)) == 0);
     let (_, addr_a, _) = p.name_of(a, false, 128);
     let addr_a = addr_a.expect("getsockname a");
     let b = p.socket(AF_INET, SOCK_DGRAM, 0);
     p.require("socket b", b >= 0);
-    p.check("bind b", p.bind_to(b, &SockAddr::v4(0)) == 0);
+    p.require("bind b", p.bind_to(b, &SockAddr::v4(0)) == 0);
     let (_, addr_b, _) = p.name_of(b, false, 128);
     let addr_b = addr_b.expect("getsockname b");
 

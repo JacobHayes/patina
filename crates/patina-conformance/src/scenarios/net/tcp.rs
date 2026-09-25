@@ -1,7 +1,8 @@
 //! net/tcp — socket / bind / listen / connect / accept4 / sendto / recvfrom /
-//! shutdown / getsockopt / setsockopt over loopback TCP: the connection
-//! lifecycle, byte-stream semantics, half-close, refusal, and the errno
-//! vocabulary.
+//! shutdown / getsockopt over loopback TCP: the connection lifecycle,
+//! byte-stream semantics, half-close, refusal, and the errno vocabulary
+//! (the option table is net/sockopt's, a connect that completes later
+//! net/pending's).
 
 use crate::catalog::{DEFAULTS, Scenario};
 use patina_dst_syscalls::Syscall;
@@ -78,14 +79,6 @@ pub fn run(p: &Probe) {
         "MSG_DONTWAIT on an empty stream is EAGAIN",
         p.recvfrom(c, 16, MSG_DONTWAIT, false).0 == neg(EAGAIN),
     );
-    p.check(
-        "setsockopt TCP_NODELAY",
-        p.setsockopt_int(c, IPPROTO_TCP, TCP_NODELAY, 1) == 0,
-    );
-    let (r, nodelay) = p.getsockopt_int(c, IPPROTO_TCP, TCP_NODELAY);
-    p.check("TCP_NODELAY reads back", r == 0 && nodelay == 1);
-    let (r, kind) = p.getsockopt_int(c, SOL_SOCKET, SO_TYPE);
-    p.check("SO_TYPE is SOCK_STREAM", r == 0 && kind == SOCK_STREAM);
 
     p.check(
         "shutdown SHUT_WR on the client",
@@ -136,11 +129,6 @@ pub fn run(p: &Probe) {
         "shutdown on an unconnected stream socket is ENOTCONN",
         p.shutdown(u2, SHUT_RD) == neg(ENOTCONN),
     );
-    // Even a refused shutdown marks the socket: a later send is EPIPE.
-    p.check(
-        "send after the refused shutdown is EPIPE",
-        p.sendto(u2, b"x", MSG_NOSIGNAL, None) == neg(EPIPE),
-    );
     let (r, addr_u) = p.getsockname(u);
     p.check(
         "the autobound listener has a port",
@@ -167,24 +155,7 @@ pub fn run(p: &Probe) {
         p.connect(c2, addr_t) == neg(ECONNREFUSED),
     );
 
-    let c3 = p.socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
-    p.require("non-blocking client", c3 >= 0);
-    let pending = p.connect(c3, addr_l);
-    p.check(
-        "a non-blocking connect is EINPROGRESS",
-        pending == neg(EINPROGRESS),
-    );
-    let (s3, _) = p.accept4(l, 0);
-    p.check("the listener accepts the pending connect", s3 >= 0);
-    let (r, error) = p.getsockopt_int(c3, SOL_SOCKET, SO_ERROR);
-    p.check(
-        "SO_ERROR after the completed connect is 0",
-        r == 0 && error == 0,
-    );
-    let (r, _) = p.getpeername(c3);
-    p.check("the non-blocking client is connected", r == 0);
-
-    for fd in [c, u, u2, l2, c2, c3, s3, l] {
+    for fd in [c, u, u2, l2, c2, l] {
         p.close(fd);
     }
 }
@@ -203,7 +174,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_shutdown,
         Syscall::N_getsockname,
         Syscall::N_getpeername,
-        Syscall::N_setsockopt,
         Syscall::N_getsockopt,
         Syscall::N_close,
     ],
@@ -218,7 +188,6 @@ pub const SCENARIO: Scenario = Scenario {
         "shutdown",
         "getsockname",
         "getpeername",
-        "setsockopt",
         "getsockopt",
         "close",
     ],

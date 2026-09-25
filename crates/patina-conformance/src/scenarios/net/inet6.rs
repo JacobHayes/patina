@@ -7,7 +7,8 @@
 //! * `bind` refuses an address shorter than `SIN6_LEN_RFC2133` (24) with
 //!   `EINVAL`, another family with `EAFNOSUPPORT`, and an address no
 //!   interface has with `EADDRNOTAVAIL` (a documentation-prefix address:
-//!   nothing is sent);
+//!   nothing is sent), as an AF_INET socket's `bind` does (TEST-NET-1: the
+//!   one IPv4 check here, beside its IPv6 twin under the same need);
 //! * `IPV6_V6ONLY` reads back what was set and is `EINVAL` once the socket
 //!   is bound; `SO_DOMAIN`/`SO_PROTOCOL`/`SO_TYPE` name the socket;
 //! * a stream over `::1` connects, accepts and carries bytes.
@@ -26,7 +27,7 @@ use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{OptionShown, Probe, SockAddr, neg};
 use libc::*;
 use patina_dst_syscalls::Syscall;
-use std::net::{Ipv6Addr, SocketAddrV6};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
 /// `SIN6_LEN_RFC2133`: the shortest IPv6 address `bind` accepts (no scope).
 const SIN6_LEN_RFC2133: usize = 24;
@@ -34,6 +35,9 @@ const SIN6_LEN_RFC2133: usize = 24;
 /// An address in the IPv6 documentation prefix (RFC 3849): no interface has
 /// it, and binding to it sends nothing.
 const DOCUMENTATION: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+
+/// An address in TEST-NET-1 (RFC 5737), IPv4's documentation block.
+const DOCUMENTATION4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 
 fn int(value: i32) -> [u8; 4] {
     value.to_ne_bytes()
@@ -95,6 +99,13 @@ pub fn run(p: &Probe) {
         p.bind_to(w, &SockAddr::V6(SocketAddrV6::new(DOCUMENTATION, 0, 0, 0)))
             == neg(EADDRNOTAVAIL),
     );
+    let w4 = p.socket(AF_INET, SOCK_DGRAM, 0);
+    p.require("an unbound AF_INET socket", w4 >= 0);
+    p.check(
+        "so is an AF_INET bind to one",
+        p.bind_to(w4, &SockAddr::V4(SocketAddrV4::new(DOCUMENTATION4, 0))) == neg(EADDRNOTAVAIL),
+    );
+    p.close(w4);
     p.check(
         "bind to the port in use is EADDRINUSE",
         p.bind_to(w, &addr_u) == neg(EADDRINUSE),

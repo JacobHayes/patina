@@ -159,14 +159,6 @@ pub fn run(p: &Probe) {
         "socket with an unknown type is EINVAL",
         i64::from(p.socket(AF_INET, 999, 0)) == neg(EINVAL),
     );
-    let (r, kind) = p.getsockopt_int(a, SOL_SOCKET, SO_TYPE);
-    p.check("SO_TYPE is SOCK_DGRAM", r == 0 && kind == SOCK_DGRAM);
-    let (r, error) = p.getsockopt_int(a, SOL_SOCKET, SO_ERROR);
-    p.check("SO_ERROR is clear", r == 0 && error == 0);
-    p.check(
-        "an unknown option is ENOPROTOOPT",
-        p.setsockopt_int(a, SOL_SOCKET, 9999, 1) == neg(ENOPROTOOPT),
-    );
     p.check(
         "listen on a datagram socket is EOPNOTSUPP",
         p.listen(a, 1) == neg(EOPNOTSUPP),

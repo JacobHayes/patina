@@ -43,12 +43,12 @@ const SYMBOLS: [&str; 4] = ["__recv_chk", "__recvfrom_chk", "__poll_chk", "__ppo
 pub fn run(p: &Probe) {
     let r = p.socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
     p.require("a receiver", r >= 0);
-    p.check("bind it", p.bind_to(r, &SockAddr::v4(0)) == 0);
+    p.require("bind it", p.bind_to(r, &SockAddr::v4(0)) == 0);
     let (_, addr_r, _) = p.name_of(r, false, 128);
     let addr_r = addr_r.expect("getsockname r");
     let s = p.socket(AF_INET, SOCK_DGRAM, 0);
     p.require("a sender", s >= 0);
-    p.check("bind the sender", p.bind_to(s, &SockAddr::v4(0)) == 0);
+    p.require("bind the sender", p.bind_to(s, &SockAddr::v4(0)) == 0);
     let (_, addr_s, _) = p.name_of(s, false, 128);
 
     let found: Vec<_> = SYMBOLS.iter().map(|symbol| p.resolve(symbol)).collect();

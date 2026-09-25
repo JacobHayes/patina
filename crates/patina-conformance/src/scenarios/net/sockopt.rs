@@ -3,7 +3,7 @@
 //! `sk_getsockopt`, net/ipv4/tcp.c, net/ipv4/ip_sockglue.c):
 //!
 //! * identity options: `SO_TYPE`, `SO_DOMAIN`, `SO_PROTOCOL`,
-//!   `SO_ACCEPTCONN`, `SO_ERROR`;
+//!   `SO_ACCEPTCONN`, `SO_ERROR`, of a TCP and a UDP socket;
 //! * boolean options default off and read back what was set: `SO_REUSEADDR`,
 //!   `SO_REUSEPORT`, `SO_KEEPALIVE`, `SO_BROADCAST`, `TCP_NODELAY`;
 //!   `SO_REUSEPORT` on two sockets of one owner lets both bind one UDP port;
@@ -196,11 +196,14 @@ pub fn run(p: &Probe) {
 
     let u = p.socket(AF_INET, SOCK_DGRAM, 0);
     p.require("a UDP socket", u >= 0);
-    let (r, value) = p.getsockopt_bytes(u, SOL_SOCKET, SO_PROTOCOL, 4, OptionShown::Exact);
-    p.check(
-        "SO_PROTOCOL is IPPROTO_UDP",
-        r == 0 && value == int(IPPROTO_UDP),
-    );
+    for (label, name, expected) in [
+        ("SO_TYPE is SOCK_DGRAM", SO_TYPE, SOCK_DGRAM),
+        ("SO_PROTOCOL is IPPROTO_UDP", SO_PROTOCOL, IPPROTO_UDP),
+        ("SO_ERROR is clear", SO_ERROR, 0),
+    ] {
+        let (r, value) = p.getsockopt_bytes(u, SOL_SOCKET, name, 4, OptionShown::Exact);
+        p.check(label, r == 0 && value == int(expected));
+    }
     let (r, value) = p.getsockopt_bytes(u, SOL_SOCKET, SO_BROADCAST, 4, OptionShown::Exact);
     p.check("SO_BROADCAST defaults to 0", r == 0 && value == int(0));
     p.check(
