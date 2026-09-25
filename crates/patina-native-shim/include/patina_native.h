@@ -124,6 +124,19 @@ int32_t patina_shutdown(void);
  */
 void patina_note_guest_exit_status(int32_t status);
 /*
+ * Record argv[0] at startup: its basename, truncated to 15 bytes, is every
+ * thread's name until one is set. The supervisor fixes argv[0], so the name
+ * never depends on the host binary's path. Linux.
+ */
+void patina_note_program_name(const char *argv0);
+/*
+ * glibc's pthread_getname_np/pthread_setname_np over the modeled per-thread
+ * names: ERANGE for a buffer shorter than 16 bytes or a name longer than 15,
+ * ESRCH for a handle naming no thread. Linux.
+ */
+int patina_thread_getname(uintptr_t thread, char *name, size_t len);
+int patina_thread_setname(uintptr_t thread, const char *name);
+/*
  * The runtime side of the packaged `exit` interposer. Marks the process as
  * having entered post-`main` teardown (so the root task's --yield-points hooks
  * take no scheduling point) and then terminates through the real libc `exit`

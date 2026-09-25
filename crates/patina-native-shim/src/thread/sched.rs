@@ -15,7 +15,8 @@ use super::*;
 use crate::limits::{RLIMIT_NICE, RLIMIT_RTPRIO};
 use crate::neg_errno as errno;
 use crate::registry::{IDENTITY_PID, INIT_PID};
-use crate::{E2BIG, EACCES, EFAULT};
+use crate::{E2BIG, EACCES, EFAULT, ERANGE};
+use std::ffi::CStr;
 
 const SCHED_OTHER: u32 = 0;
 const SCHED_FIFO: u32 = 1;
@@ -84,6 +85,43 @@ pub(super) struct Attrs {
     /// The I/O priority it set (`IOPRIO_CLASS_NONE` until it sets one).
     ioprio: i32,
     persona: u32,
+    /// The thread's name (`comm`), NUL-padded.
+    comm: [u8; COMM_LEN],
+}
+
+/// `TASK_COMM_LEN`: a thread name's bytes, its NUL included.
+const COMM_LEN: usize = 16;
+
+/// The name the main thread starts with, and so (by inheritance) every
+/// thread that never set one: the basename of `argv[0]`, truncated to 15
+/// bytes. The kernel takes it from the file `execve` ran, whose path is the
+/// host's; the supervisor fixes `argv[0]` (`patina-guest`), so the name is
+/// the same on every machine and in every replay, and a native run executed
+/// through a link of that name gets the same one from the kernel.
+static PROGRAM_COMM: OnceLock<[u8; COMM_LEN]> = OnceLock::new();
+
+/// A NUL-padded name from `bytes`, truncated to `COMM_LEN - 1`.
+fn comm_of(bytes: &[u8]) -> [u8; COMM_LEN] {
+    let mut comm = [0; COMM_LEN];
+    let len = bytes.len().min(COMM_LEN - 1);
+    comm[..len].copy_from_slice(&bytes[..len]);
+    comm
+}
+
+/// Record `argv[0]` at startup.
+///
+/// # Safety
+/// Non-null `argv0` must be a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_note_program_name(argv0: *const c_char) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if argv0.is_null() {
+        return;
+    }
+    // SAFETY: a NUL-terminated string, per this function's contract.
+    let path = unsafe { CStr::from_ptr(argv0) }.to_bytes();
+    let base = path.rsplit(|byte| *byte == b'/').next().unwrap_or(path);
+    let _ = PROGRAM_COMM.set(comm_of(base));
 }
 
 impl Default for Attrs {
@@ -97,6 +135,7 @@ impl Default for Attrs {
             util_max: CAPACITY,
             ioprio: 0,
             persona: 0,
+            comm: PROGRAM_COMM.get().copied().unwrap_or([0; COMM_LEN]),
         }
     }
 }
@@ -158,6 +197,78 @@ impl SchedRuntime {
     pub(super) fn finish(&mut self, task: TaskId) {
         self.tasks.remove(&tid_of(task));
     }
+}
+
+/// The calling thread's name (`PR_GET_NAME`).
+pub(crate) fn current_name() -> [u8; COMM_LEN] {
+    lock_state().sched.get(current_tid()).comm
+}
+
+/// Name the calling thread (`PR_SET_NAME`), truncating to 15 bytes.
+pub(crate) fn set_current_name(name: &[u8]) {
+    let mut state = lock_state();
+    let tid = current_tid();
+    let mut attrs = state.sched.get(tid);
+    attrs.comm = comm_of(name);
+    state.sched.set(tid, attrs);
+}
+
+/// The thread a `pthread_t` names: the caller's own, or a managed thread's.
+fn handle_tid(state: &ThreadRuntime, handle: usize) -> Option<i32> {
+    // SAFETY: the real glibc `pthread_self`, resolved through the host-alias
+    // table.
+    if handle == unsafe { (crate::hostapi::get().host_pthread_self)() } {
+        return Some(current_tid());
+    }
+    state.handles.get(&handle).map(|task| tid_of(*task))
+}
+
+/// glibc's `pthread_getname_np`: the thread's name, into a buffer of at
+/// least `TASK_COMM_LEN` bytes (`ERANGE` otherwise).
+///
+/// # Safety
+/// `name` must be writable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_thread_getname(
+    handle: usize,
+    name: *mut c_char,
+    len: usize,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if len < COMM_LEN {
+        return ERANGE;
+    }
+    let state = lock_state();
+    let Some(tid) = handle_tid(&state, handle) else {
+        return ESRCH;
+    };
+    let comm = state.sched.get(tid).comm;
+    // SAFETY: `name` holds at least `COMM_LEN` bytes, checked above.
+    unsafe { std::ptr::copy_nonoverlapping(comm.as_ptr(), name.cast::<u8>(), COMM_LEN) };
+    0
+}
+
+/// glibc's `pthread_setname_np`: name the thread; a name longer than 15
+/// bytes is `ERANGE`.
+///
+/// # Safety
+/// `name` must be a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_thread_setname(handle: usize, name: *const c_char) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: a NUL-terminated string, per this function's contract.
+    let name = unsafe { CStr::from_ptr(name) }.to_bytes();
+    if name.len() >= COMM_LEN {
+        return ERANGE;
+    }
+    let mut state = lock_state();
+    let Some(tid) = handle_tid(&state, handle) else {
+        return ESRCH;
+    };
+    let mut attrs = state.sched.get(tid);
+    attrs.comm = comm_of(name);
+    state.sched.set(tid, attrs);
+    0
 }
 
 /// The guest's live threads, main first.

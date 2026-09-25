@@ -118,10 +118,29 @@ fn probes() -> &'static Probes {
             "PATINA_NATIVE_BUILD output=",
         ));
         Probes {
-            native: native_target.join("release/conformance-probe"),
+            native: named_like_the_guest(
+                &native_target,
+                &native_target.join("release/conformance-probe"),
+            ),
             patina,
         }
     })
+}
+
+/// A link to the native probe named as `cargo patina` names every guest in
+/// its `argv[0]` (`patina-guest`), for the native runs to execute: the kernel
+/// names the main thread (`comm`) after the file `execve` ran, and the shim
+/// after `argv[0]`, so both oracles start from the same thread name. Every
+/// test process makes the same link; each renames its own into place.
+fn named_like_the_guest(target: &Path, probe: &Path) -> PathBuf {
+    let dir = target.join("guest-name");
+    std::fs::create_dir_all(&dir).expect("create the probe link's directory");
+    let link = dir.join("patina-guest");
+    let staged = dir.join(format!("patina-guest.{}", std::process::id()));
+    let _ = std::fs::remove_file(&staged);
+    std::os::unix::fs::symlink(probe, &staged).expect("link the native probe");
+    std::fs::rename(&staged, &link).expect("place the native probe's link");
+    link
 }
 
 fn logs_root() -> PathBuf {

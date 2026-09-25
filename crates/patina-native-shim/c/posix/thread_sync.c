@@ -67,17 +67,14 @@ void pthread_exit(void *retval) {
 }
 
 #ifdef __linux__
-/* A thread's name is host/kernel state (`/proc/self/task/<tid>/comm`); return a
- * fixed empty name so a guest cannot observe where, or as what, it ran — the same
- * stance as `gethostname` → "patina". */
+/* A thread's name (`comm`) is modeled per thread: the executable's by default,
+ * inherited by a new thread, and changed by these and `prctl(PR_SET_NAME)`. */
 int pthread_getname_np(pthread_t thread, char *name, size_t len) {
-    (void)thread;
-    /* glibc declares `name` nonnull (a NULL comparison is a -Werror on gcc);
-     * only guard the zero-length buffer. */
-    if (len > 0) {
-        name[0] = '\0';
-    }
-    return 0;
+    return patina_thread_getname((uintptr_t)thread, name, len);
+}
+
+int pthread_setname_np(pthread_t thread, const char *name) {
+    return patina_thread_setname((uintptr_t)thread, name);
 }
 
 #endif

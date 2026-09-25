@@ -759,6 +759,10 @@ int __libc_start_main(patina_main_fn main_fn, int argc, char **argv, void *init,
      * any guest constructors, independently of whether Context is deferred. */
     patina_init_panic_policy();
     patina_real_main = main_fn;
+    /* The main thread's name is the basename of argv[0], which the supervisor
+     * fixes to a machine-independent name: never the host binary's path,
+     * which the kernel would name it after (AT_EXECFN). */
+    patina_note_program_name(argc > 0 ? argv[0] : NULL);
     /* Arm syscall-user-dispatch (managed run on a SUD kernel) BEFORE the real
      * __libc_start_main runs the guest constructors: parse the libc region,
      * scrub AT_SYSINFO_EHDR from the auxv, install the SIGSYS handler, and arm

@@ -6,10 +6,14 @@
 //! `pthread_once` runs its routine exactly once, and a thread calling it
 //! while another runs the routine waits until the routine returns; `pthread_getname_np` reads the thread's kernel name (`comm`, which a
 //! thread inherits from its creator and the main thread takes from the
-//! executable's basename, truncated to 15 bytes), refusing a buffer
-//! shorter than `TASK_COMM_LEN` with `ERANGE`; and `pthread_cancel` of a
+//! executable's basename, truncated to 15 bytes: the native run executes a
+//! link named `patina-guest`, as `cargo patina` names every guest in its
+//! `argv[0]`), refusing a buffer
+//! shorter than `TASK_COMM_LEN` with `ERANGE`; `pthread_cancel` of a
 //! thread asleep in a cancellation point (`nanosleep`) ends it there, its
-//! join answering `PTHREAD_CANCELED`.
+//! join answering `PTHREAD_CANCELED`; and `pthread_setname_np` renames the
+//! thread (a later thread inherits the new name), refusing a name longer
+//! than 15 bytes with `ERANGE`.
 //!
 //! pthread functions return the error number rather than setting `errno`;
 //! each is recorded as `-error` on failure. A libc-only subject, so the
@@ -29,6 +33,7 @@ use crate::signals as support;
 
 unsafe extern "C" {
     fn pthread_getname_np(thread: pthread_t, name: *mut c_char, len: size_t) -> c_int;
+    fn pthread_setname_np(thread: pthread_t, name: *const c_char) -> c_int;
     fn pthread_cancel(thread: pthread_t) -> c_int;
     /// glibc's `pthread_once_t` is an `int` (`PTHREAD_ONCE_INIT` 0).
     fn pthread_once(control: *mut c_int, routine: extern "C" fn()) -> c_int;
@@ -205,6 +210,16 @@ fn getname(p: &Probe, len: usize) -> i64 {
     result
 }
 
+fn setname(p: &Probe, name: &std::ffi::CStr) -> i64 {
+    // SAFETY: a NUL-terminated name for the calling thread.
+    let result = code(unsafe { pthread_setname_np(pthread_self(), name.as_ptr()) });
+    p.rec
+        .event("pthread_setname_np", result)
+        .arg("name", name.to_string_lossy().as_ref())
+        .emit();
+    result
+}
+
 fn wait_started(p: &Probe) {
     p.rec
         .quiet(|| support::wait_until(Duration::from_millis(1), || STARTED.load(Ordering::SeqCst)));
@@ -288,6 +303,19 @@ pub fn run(p: &Probe) {
         "it ends at its next cancellation point, joined as PTHREAD_CANCELED",
         joined == 0 && value == CANCELED,
     );
+
+    p.check("pthread_setname_np", setname(p, c"renamed") == 0);
+    p.check(
+        "pthread_getname_np answers the new name",
+        getname(p, 16) == 0,
+    );
+    let on_worker =
+        std::thread::scope(|scope| scope.spawn(|| getname(p, 16)).join().expect("the worker"));
+    p.check("a thread created since inherits it", on_worker == 0);
+    p.check(
+        "a name longer than 15 bytes is ERANGE",
+        setname(p, c"sixteen-bytes-xx") == neg(ERANGE),
+    );
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -301,36 +329,23 @@ pub const SCENARIO: Scenario = Scenario {
         "pthread_detach",
         "pthread_once",
         "pthread_getname_np",
+        "pthread_setname_np",
         "pthread_cancel",
     ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim's pthread_getname_np (c/posix/thread_sync.c) answers an empty name for every thread and buffer: no thread name is modeled (the main thread's is the executable's basename, and a new thread inherits its creator's), and a buffer shorter than TASK_COMM_LEN succeeds instead of ERANGE",
-            failure: Failure::Differs(&[
-                Difference::field(19, "pthread_getname_np", "fields.name", Observed::Str("")),
-                Difference::field(21, "pthread_getname_np", "fields.name", Observed::Str("")),
-                Difference::field(23, "pthread_getname_np", "ret", Observed::Int(0)),
-                Difference::field(23, "pthread_getname_np", "errno", Observed::Null),
-                Difference::check(24, "a buffer shorter than TASK_COMM_LEN is ERANGE"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim's pthread_cancel (c/posix/thread_sync.c) is a fail-closed ENOSYS: cancellation is not modeled, so the worker is never canceled at its cancellation point and, released, returns its own value",
-            failure: Failure::Differs(&[
-                Difference::field(26, "pthread_cancel", "ret", Observed::Int(-1)),
-                Difference::field(26, "pthread_cancel", "errno", Observed::Str("ENOSYS")),
-                Difference::check(27, "pthread_cancel of a running thread"),
-                Difference::field(28, "pthread_join", "fields.value", Observed::Int(7)),
-                Difference::check(
-                    29,
-                    "it ends at its next cancellation point, joined as PTHREAD_CANCELED",
-                ),
-            ]),
-        },
-    ],
+    gaps: &[Gap {
+        status: Status::Pending(Arc::SignalsThreadsProcess),
+        vehicles: &[Vehicle::Libc],
+        what: "the shim's pthread_cancel (c/posix/thread_sync.c) is a fail-closed ENOSYS: cancellation is not modeled, so the worker is never canceled at its cancellation point and, released, returns its own value",
+        failure: Failure::Differs(&[
+            Difference::field(26, "pthread_cancel", "ret", Observed::Int(-1)),
+            Difference::field(26, "pthread_cancel", "errno", Observed::Str("ENOSYS")),
+            Difference::check(27, "pthread_cancel of a running thread"),
+            Difference::field(28, "pthread_join", "fields.value", Observed::Int(7)),
+            Difference::check(
+                29,
+                "it ends at its next cancellation point, joined as PTHREAD_CANCELED",
+            ),
+        ]),
+    }],
     ..DEFAULTS
 };

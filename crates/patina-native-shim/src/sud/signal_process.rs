@@ -48,7 +48,6 @@ const SIGRTMAX: u64 = 64;
 
 #[derive(Clone, Copy)]
 struct PrctlState {
-    name: [u8; 16],
     pdeathsig: u32,
     dumpable: u32,
     no_new_privs: bool,
@@ -62,7 +61,6 @@ struct PrctlState {
 impl PrctlState {
     const fn new() -> Self {
         Self {
-            name: [0; 16],
             pdeathsig: 0,
             dumpable: 1,
             no_new_privs: false,
@@ -143,33 +141,38 @@ fn prctl_get_auxv(arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64 {
     pr_get_auxv_copy(saved, arg2 as *mut u8, arg3 as usize, arg4, arg5)
 }
 
-fn prctl_set_name(state: &mut PrctlState, user_name: u64) -> i64 {
+/// `PR_SET_NAME`: name the calling thread, reading at most 15 bytes.
+fn prctl_set_name(user_name: u64) -> i64 {
     if user_name == 0 {
         return -EFAULT;
     }
-    let mut name = [0u8; 16];
-    // SAFETY: mirrors the kernel copy_from_user shape for this process-local
+    let mut name = [0u8; 15];
+    let mut len = 0;
+    // SAFETY: mirrors the kernel copy_from_user shape for this per-thread
     // row. A bad non-null pointer may still fault like the real kernel access;
     // the conformance row exercises the deterministic valid/null cases.
     let src = user_name as *const u8;
-    for (index, byte) in name.iter_mut().take(15).enumerate() {
-        let value = unsafe { *src.add(index) };
+    while len < name.len() {
+        let value = unsafe { *src.add(len) };
         if value == 0 {
             break;
         }
-        *byte = value;
+        name[len] = value;
+        len += 1;
     }
-    state.name = name;
+    crate::thread::sched::set_current_name(&name[..len]);
     0
 }
 
-fn prctl_get_name(state: &PrctlState, user_name: u64) -> i64 {
+/// `PR_GET_NAME`: the calling thread's name, into a 16-byte buffer.
+fn prctl_get_name(user_name: u64) -> i64 {
     if user_name == 0 {
         return -EFAULT;
     }
+    let name = crate::thread::sched::current_name();
     // SAFETY: `user_name` is the caller-provided 16-byte buffer for PR_GET_NAME.
     unsafe {
-        std::ptr::copy_nonoverlapping(state.name.as_ptr(), user_name as *mut u8, state.name.len());
+        std::ptr::copy_nonoverlapping(name.as_ptr(), user_name as *mut u8, name.len());
     }
     0
 }
@@ -191,8 +194,13 @@ fn prctl_get_pdeathsig(state: &PrctlState, user_ptr: u64) -> i64 {
 /// never reaching the host process.
 pub(super) fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64 {
     let option = prctl_option(option_reg);
-    if option == PR_GET_AUXV {
-        return prctl_get_auxv(arg2, arg3, arg4, arg5);
+    match option {
+        PR_GET_AUXV => return prctl_get_auxv(arg2, arg3, arg4, arg5),
+        // Per-thread state, in the thread runtime's lock (never under
+        // `PRCTL_STATE`'s).
+        PR_SET_NAME => return prctl_set_name(arg2),
+        PR_GET_NAME => return prctl_get_name(arg2),
+        _ => {}
     }
 
     let mut state = PRCTL_STATE.lock().unwrap();
@@ -205,8 +213,6 @@ pub(super) fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: 
         }
         PR_GET_THP_DISABLE if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 => -EINVAL,
         PR_GET_THP_DISABLE => i64::from(state.thp_disabled),
-        PR_SET_NAME => prctl_set_name(&mut state, arg2),
-        PR_GET_NAME => prctl_get_name(&state, arg2),
         PR_SET_PDEATHSIG => {
             if arg2 > SIGRTMAX {
                 -EINVAL

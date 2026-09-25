@@ -891,7 +891,13 @@ const ROWS: &[SymbolRow] = &[
         "pthread_getname_np",
         Platform::Linux,
         Serves::Syscalls(&["prctl"]),
-        SymbolStatus::Partial,
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "pthread_setname_np",
+        Platform::Linux,
+        Serves::Syscalls(&["prctl"]),
+        SymbolStatus::Modeled,
     ),
     s(
         "pthread_once",

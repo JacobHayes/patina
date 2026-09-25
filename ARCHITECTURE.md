@@ -181,6 +181,11 @@ writer's own `rdlock`/`wrlock` are `EDEADLK` and its try-locks `EBUSY`.
 a deadline already reached, or before the epoch, is `ETIMEDOUT` at once, the mutex
 released and re-acquired. `pthread_cond_clockwait` is not interposed, so the audit
 refuses a guest that imports it.
+A thread's name (`comm`) is per thread: by default the basename of `argv[0]`,
+truncated to 15 bytes — the supervisor's fixed `patina-guest`, never the host
+binary's name, which the kernel would take from the file `execve` ran — until
+`prctl(PR_SET_NAME)` or `pthread_setname_np` changes it, and a new thread inherits
+its creator's.
 
 Guest raw `rt_sigreturn` and `restart_syscall` are final `signal-abi` traps: handler
 returns use the allowed host restorer, and no guest restart-block protocol exists.

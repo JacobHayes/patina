@@ -178,6 +178,33 @@ fn mutex_relock_before_any_thread_is_a_deadlock() {
     );
 }
 
+/// The default thread name is the basename of the supervisor's fixed
+/// `argv[0]`, never the host binary's file name: a copy of the guest under
+/// another name runs, and replays the original's trace, identically.
+#[cfg(target_os = "linux")]
+#[test]
+fn thread_name_does_not_depend_on_the_binary_name() {
+    let g = Guest::assert_build("thread_name_probe.rs");
+    g.assert_audit_clean();
+    let out = g.assert_seeded_record_replay_identity(1, &[]);
+    assert_exact_line(&out, "THREAD_NAME main=patina-guest worker=patina-guest");
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("a-differently-named-copy");
+    std::fs::copy(&g.binary, &binary).unwrap();
+    let copy = Guest { dir, binary };
+    assert_eq!(out, copy.assert_run_success(1, &[]).stdout);
+    let trace = g.dir.path().join("run.patina");
+    let replay = assert_success(copy.command(
+        "replay",
+        &[
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "native-boundary-v1",
+        ],
+    ));
+    assert_eq!(out, replay.stdout, "the copy replays the original's trace");
+}
+
 #[test]
 fn udp_arrival_order_varies_by_seed() {
     let g = Guest::assert_build("udp_probe.rs");
