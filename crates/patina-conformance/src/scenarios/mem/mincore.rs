@@ -13,6 +13,7 @@
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{At, Probe, neg, page_size};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -102,6 +103,6 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/mincore",
     run,
     covers: &[Syscall::N_mincore],
-    symbols: &["syscall", "mmap", "munmap"],
+    vehicles: Vehicle::KERNEL,
     ..DEFAULTS
 };

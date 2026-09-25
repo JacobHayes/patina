@@ -70,12 +70,12 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/shadow_stack",
     run,
     covers: &[Syscall::N_map_shadow_stack],
-    symbols: &["syscall", "munmap"],
+    vehicles: Vehicle::KERNEL,
     needs: &[Need::ShadowStack],
     gaps: &[Gap {
         status: Status::Pending(Arc::MemoryIpc),
-        vehicles: Vehicle::ALL,
-        what: "map_shadow_stack is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no map_shadow_stack wrapper)",
+        vehicles: Vehicle::KERNEL,
+        what: "map_shadow_stack is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door",
         failure: Failure::Stops {
             events: 0,
             ending: Ending::Signal(libc::SIGABRT),

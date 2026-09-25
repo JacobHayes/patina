@@ -25,6 +25,7 @@
 
 use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::probe::{At, Probe, neg, page_size};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -220,7 +221,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_migrate_pages,
         Syscall::N_set_mempolicy_home_node,
     ],
-    symbols: &["syscall", "mmap", "munmap"],
+    vehicles: Vehicle::KERNEL,
     needs: &[Need::OneNumaNode],
     kernel_floor: Some(KernelFloor {
         release: "5.17",

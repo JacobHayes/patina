@@ -31,6 +31,7 @@ use super::owned::Owned;
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::owned;
 use crate::probe::{Key, Probe, SemArg, Window, neg, perm_mode};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -295,7 +296,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_semtimedop,
         Syscall::N_semctl,
     ],
-    symbols: &["syscall", "getpid"],
+    vehicles: Vehicle::KERNEL,
     needs: &[Need::SysvSem],
     ..DEFAULTS
 };

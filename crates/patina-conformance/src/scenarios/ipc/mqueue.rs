@@ -33,6 +33,7 @@ use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::owned;
 use crate::probe::{Deadline, Notify, Probe, neg};
 use crate::signals as support;
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -275,7 +276,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mq_notify,
         Syscall::N_mq_getsetattr,
     ],
-    symbols: &["syscall", "close"],
+    vehicles: Vehicle::KERNEL,
     needs: &[Need::PosixMqueue],
     ..DEFAULTS
 };

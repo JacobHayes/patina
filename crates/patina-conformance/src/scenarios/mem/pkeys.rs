@@ -134,12 +134,12 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_pkey_free,
         Syscall::N_pkey_mprotect,
     ],
-    symbols: &["syscall", "mmap", "munmap"],
+    vehicles: Vehicle::KERNEL,
     needs: &[Need::ProtectionKeys],
     gaps: &[Gap {
         status: Status::Pending(Arc::MemoryIpc),
-        vehicles: Vehicle::ALL,
-        what: "pkey_alloc is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no pkey_alloc wrapper)",
+        vehicles: Vehicle::KERNEL,
+        what: "pkey_alloc is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door",
         failure: Failure::Stops {
             events: 1,
             ending: Ending::Signal(libc::SIGABRT),

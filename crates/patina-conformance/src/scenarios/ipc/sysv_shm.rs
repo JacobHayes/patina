@@ -27,6 +27,7 @@ use super::owned::Owned;
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::owned;
 use crate::probe::{At, Key, Probe, ShmArg, neg, page_size, perm_mode};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -210,7 +211,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_shmdt,
         Syscall::N_shmctl,
     ],
-    symbols: &["syscall", "getpid"],
+    vehicles: Vehicle::KERNEL,
     needs: &[Need::SysvShm],
     ..DEFAULTS
 };

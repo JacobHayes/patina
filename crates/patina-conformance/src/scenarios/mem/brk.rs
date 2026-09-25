@@ -12,6 +12,7 @@
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{At, Probe, page_size};
+use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
 /// How many pages the scenario grows the break by.
@@ -99,6 +100,6 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/brk",
     run,
     covers: &[Syscall::N_brk],
-    symbols: &["syscall", "mmap", "munmap"],
+    vehicles: Vehicle::KERNEL,
     ..DEFAULTS
 };

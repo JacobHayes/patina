@@ -84,14 +84,14 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/process_madvise_self",
     run,
     covers: &[Syscall::N_process_madvise],
-    symbols: &["syscall", "mmap", "munmap", "close", "getpid"],
+    vehicles: Vehicle::KERNEL,
     kernel_floor: Some(KernelFloor {
         release: "6.13",
         why: "process_madvise through one's own pidfd is unprivileged and takes every advice",
     }),
     gaps: &[Gap {
         status: Status::Pending(Arc::SignalsThreadsProcess),
-        vehicles: Vehicle::ALL,
+        vehicles: Vehicle::KERNEL,
         what: "pidfd_open is Trap(unmodeled) in the registry, the self pidfd the signals arc models (a pidfd kind for the process itself), so the SUD dispatcher aborts before process_madvise is reached (its own row is Trap(unmodeled) too, closing in the memory+ipc arc)",
         failure: Failure::Stops {
             events: 4,

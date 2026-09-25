@@ -114,7 +114,7 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/protect",
     run,
     covers: &[Syscall::N_mprotect, Syscall::N_mmap, Syscall::N_munmap],
-    symbols: &["mmap", "munmap"],
+    symbols: &["mprotect", "mmap", "munmap"],
     #[cfg(target_arch = "x86_64")]
     gaps: &[Gap {
         status: Status::Pending(Arc::SignalsThreadsProcess),

@@ -148,7 +148,16 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mlockall,
         Syscall::N_munlockall,
     ],
-    symbols: &["syscall", "mmap", "munmap"],
+    symbols: &[
+        "mlock",
+        "mlock2",
+        "munlock",
+        "mlockall",
+        "munlockall",
+        "syscall",
+        "mmap",
+        "munmap",
+    ],
     needs: &[Need::LockedPages(4)],
     kernel_floor: Some(KernelFloor {
         release: "4.4",

@@ -8,6 +8,7 @@
 
 use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::probe::{Probe, neg};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -66,7 +67,7 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/membarrier",
     run,
     covers: &[Syscall::N_membarrier],
-    symbols: &["syscall"],
+    vehicles: Vehicle::KERNEL,
     needs: &[Need::Membarrier],
     kernel_floor: Some(KernelFloor {
         release: "4.16",

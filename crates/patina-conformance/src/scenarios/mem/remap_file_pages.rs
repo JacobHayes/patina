@@ -9,6 +9,7 @@
 
 use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 use crate::probe::{At, Probe, neg, page_size};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -71,7 +72,7 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/remap_file_pages",
     run,
     covers: &[Syscall::N_remap_file_pages],
-    symbols: &["syscall", "mmap", "munmap"],
+    vehicles: Vehicle::KERNEL,
     kernel_floor: Some(KernelFloor {
         release: "4.0",
         why: "remap_file_pages is an emulation over a fresh mmap since Linux 4.0",

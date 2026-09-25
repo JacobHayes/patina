@@ -505,9 +505,10 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             #[cfg(target_arch = "x86_64")]
             Syscall::N_lchown => lchown(a[0] as *const c_char, a[1] as uid_t, a[2] as gid_t) as i64,
             // The memory rows whose glibc symbol a shim-linked probe may
-            // import: the shim defines `mmap`/`munmap`/`msync`/`mremap`, and
-            // the import audit admits `mprotect`/`madvise` as process-local
-            // memory. `MAP_FAILED` is the pointer -1, which folds like `-1`.
+            // import: the shim defines `mmap`/`munmap`/`msync`/`mremap`/
+            // `mprotect` and the `mlock` family, and the import audit admits
+            // `madvise` as process-local memory. `MAP_FAILED` is the pointer
+            // -1, which folds like `-1`.
             Syscall::N_mmap => mmap(
                 a[0] as *mut c_void,
                 a[1] as size_t,
@@ -524,6 +525,13 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
                 madvise(a[0] as *mut c_void, a[1] as size_t, a[2] as c_int) as i64
             }
             Syscall::N_msync => msync(a[0] as *mut c_void, a[1] as size_t, a[2] as c_int) as i64,
+            Syscall::N_mlock => mlock(a[0] as *const c_void, a[1] as size_t) as i64,
+            Syscall::N_mlock2 => {
+                mlock2(a[0] as *const c_void, a[1] as size_t, a[2] as c_uint) as i64
+            }
+            Syscall::N_munlock => munlock(a[0] as *const c_void, a[1] as size_t) as i64,
+            Syscall::N_mlockall => mlockall(a[0] as c_int) as i64,
+            Syscall::N_munlockall => munlockall() as i64,
             Syscall::N_mremap => mremap(
                 a[0] as *mut c_void,
                 a[1] as size_t,
@@ -533,21 +541,17 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             ) as i64,
             Syscall::N_memfd_create => memfd_create(a[0] as *const c_char, a[1] as c_uint) as i64,
             // Memory and IPC rows whose glibc wrapper the shim does not define
-            // (`brk`, `mincore`, the `mlock` family, SysV shm/sem/msg, the
-            // kernel rows under glibc's `mq_*`, `pkey_*`,
-            // `remap_file_pages`, `pidfd_open`, `process_madvise`) or that
-            // glibc does not wrap at all (`membarrier`, `memfd_secret`,
-            // `map_shadow_stack`, the NUMA rows libnuma wraps, `mseal`):
-            // importing such a wrapper would make the pre-run import audit
-            // refuse the whole probe binary, so the libc spelling is glibc's
-            // own `syscall(2)` until the shim defines it.
+            // (`brk`, `mincore`, SysV shm/sem/msg, the kernel rows under
+            // glibc's `mq_*`, `pkey_*`, `remap_file_pages`, `pidfd_open`,
+            // `process_madvise`) or that glibc does not wrap at all
+            // (`membarrier`, `memfd_secret`, `map_shadow_stack`, the NUMA
+            // rows libnuma wraps, `mseal`): importing such a wrapper would
+            // make the pre-run import audit refuse the whole probe binary, so
+            // the libc spelling is glibc's own `syscall(2)` until the shim
+            // defines it. A scenario made only of such rows runs through
+            // `Vehicle::KERNEL`, not `syscall(2)` twice.
             Syscall::N_brk
             | Syscall::N_mincore
-            | Syscall::N_mlock
-            | Syscall::N_munlock
-            | Syscall::N_mlockall
-            | Syscall::N_munlockall
-            | Syscall::N_mlock2
             | Syscall::N_shmget
             | Syscall::N_shmat
             | Syscall::N_shmdt

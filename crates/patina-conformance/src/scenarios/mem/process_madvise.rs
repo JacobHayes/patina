@@ -62,10 +62,10 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/process_madvise",
     run,
     covers: &[Syscall::N_process_madvise],
-    symbols: &["syscall", "mmap", "munmap", "pipe2", "close", "getpid"],
+    vehicles: Vehicle::KERNEL,
     gaps: &[Gap {
         status: Status::Pending(Arc::SignalsThreadsProcess),
-        vehicles: Vehicle::ALL,
+        vehicles: Vehicle::KERNEL,
         what: "pidfd_open is Trap(unmodeled) in the registry, the self pidfd the signals arc models (a pidfd kind for the process itself), so the SUD dispatcher aborts before process_madvise is reached (its own row is Trap(unmodeled) too, closing in the memory+ipc arc)",
         failure: Failure::Stops {
             events: 2,
