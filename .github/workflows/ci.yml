@@ -43,7 +43,9 @@ jobs:
       # Every syscall conformance scenario must find the runner an oracle
       # (covered rows present, needed capabilities present); rows past the
       # virtual ABI that a newer runner kernel implements answer their declared
-      # ENOSYS natively instead.
+      # ENOSYS natively instead. The runners' kernel is off the pinned 6.8, so
+      # the native-versus-patina comparison only reports there (DIVERGES lines,
+      # a step-summary section); PATINA_REQUIRE_PINNED_KERNEL=1 would fail it.
       PATINA_REQUIRE_HOST_ORACLE: '1'
       # strace is the Linux whole-run syscall-containment class detector
       # (native_trace, and the conformance scenarios' leak run). It is installed

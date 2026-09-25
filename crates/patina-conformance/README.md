@@ -1,6 +1,7 @@
 # patina-dst-conformance
 
-Linux syscall conformance scenarios with the host kernel as the live oracle
+Linux syscall conformance scenarios with the host kernel as the live oracle,
+authoritative on the pinned kernel (below)
 (design: `docs/arcs/syscall-conformance.md`). Unpublished; it exists for
 `crates/cargo-patina/tests/native_conformance.rs`.
 
@@ -18,6 +19,20 @@ diagnostic): the test fails when patina fails differently, and when patina
 starts passing, until the gap is removed. A patina run that completes is also
 recorded and replayed and run directly under strace.
 
+The kernel is pinned: the scenarios assert Ubuntu 24.04's GA kernel, Ubuntu's
+build of Linux 6.8 (`patina_dst_syscalls::VIRTUAL_ABI`, the kernel the virtual
+kernel mirrors), and moving to a newer one is an explicit, wholesale
+migration. So only a host of that series (release `6.8.*`, any flavour:
+`host::pinned`) is the authoritative oracle. On any other host (GitHub's
+runners run 6.17) what sets the host apart from patina — a native check that
+fails, a difference between the native and patina streams, a gap that no
+longer matches — is reported and fails nothing: each line on stderr as
+`DIVERGES (host 6.17, pinned 6.8) …`, and each scenario's lines as a Markdown
+section appended to `$GITHUB_STEP_SUMMARY` when it is set.
+`PATINA_REQUIRE_PINNED_KERNEL=1` judges any host as the pinned one. Native
+vehicles that disagree with each other, patina's record/replay, trace and
+strace checks, and a run that crashes or overruns its deadline fail on every
+host.
 A scenario declares the registry rows it covers (`covers`, `asserts_absent`),
 the libc symbols its `libc` vehicle goes through, the host capabilities its
 native oracle needs beyond those rows (`needs`: user xattrs, file handles or

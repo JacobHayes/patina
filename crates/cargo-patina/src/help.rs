@@ -404,7 +404,7 @@ pub const HELP_FLAGS: &[Flag] = &[
         "--version",
         Some("-V"),
         Value::None,
-        "Print version.",
+        "Print version and the pinned virtual Linux kernel.",
         false,
     ),
 ];

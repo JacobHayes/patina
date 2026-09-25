@@ -827,6 +827,10 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
         }
         ParseResult::Version => {
             println!("cargo-patina {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "virtual Linux kernel: {} (pinned: Ubuntu 24.04's GA kernel)",
+                patina_dst_syscalls::VIRTUAL_ABI
+            );
             Ok(0)
         }
         ParseResult::Run(invocation) => execute(invocation),

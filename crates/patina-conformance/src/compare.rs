@@ -266,15 +266,8 @@ pub fn native_verdict(native: &Observation) -> Result<(), String> {
     if native.events.is_empty() {
         return Err(format!("recorded no event ({})", native.termination));
     }
-    if let Some(failed) = native
-        .events
-        .iter()
-        .find(|event| event.op == CHECK_OP && event.ret != 1)
-    {
-        return Err(format!(
-            "a check failed natively: {}",
-            label_of(failed).unwrap_or("?")
-        ));
+    if let Some(label) = failed_check(native) {
+        return Err(format!("a check failed natively: {label}"));
     }
     match native.termination {
         Termination::Exited(0) => Ok(()),
@@ -295,6 +288,15 @@ pub fn native_verdict(native: &Observation) -> Result<(), String> {
         }
         other => Err(format!("did not pass natively: {other}")),
     }
+}
+
+/// The label of the first check `observation` records as failed.
+pub fn failed_check(observation: &Observation) -> Option<&str> {
+    observation
+        .events
+        .iter()
+        .find(|event| event.op == CHECK_OP && event.ret != 1)
+        .map(|failed| label_of(failed).unwrap_or("?"))
 }
 
 fn label_of(event: &Event) -> Option<&str> {

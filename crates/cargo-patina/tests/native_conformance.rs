@@ -6,8 +6,21 @@
 //! scenario's first vehicle; the patina run equals it or fails exactly as the
 //! scenario's gaps declare. A patina run that completes is also recorded and
 //! replayed (identical streams; the scenario's trace facts) and run directly
-//! under strace (no host syscall escapes; the process ends as it did
-//! natively). A host that cannot be the oracle (a kernel lacking a covered
+//! under strace (no host syscall escapes; the process ends as the recorded
+//! run did).
+//!
+//! The scenarios assert the pinned kernel, Ubuntu 24.04's GA kernel (Linux
+//! 6.8, `VIRTUAL_ABI`), so only a host of that series (`host::pinned`) is
+//! authoritative: elsewhere (GitHub's runners run 6.17) whatever sets the
+//! host apart from patina — a failed native check, a native-versus-patina
+//! difference, a gap that no longer matches — is reported, `DIVERGES (host
+//! H, pinned 6.8)` on stderr and a section of `$GITHUB_STEP_SUMMARY` when
+//! set, and fails nothing; `PATINA_REQUIRE_PINNED_KERNEL=1` judges any host
+//! as the pinned one. Native vehicles that disagree, patina's record/replay,
+//! trace and strace checks, and runs that crash or overrun fail on every
+//! host.
+//!
+//! A host that cannot be the oracle (a kernel lacking a covered
 //! row or older than the scenario's kernel floor, or a run-directory
 //! filesystem, per-user limit or privilege level lacking what the scenario
 //! needs) prints `NOT RUN` with the detected reason; a detection that fails
@@ -28,6 +41,7 @@ use patina_dst_conformance::leak;
 use patina_dst_conformance::observe::parse_stream;
 use patina_dst_conformance::owned;
 use patina_dst_conformance::vehicle::Vehicle;
+use patina_dst_syscalls::{VIRTUAL_ABI, parse_release};
 use serde_json::Value;
 use std::io::Write;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -223,6 +237,128 @@ fn not_run(what: &str, reason: &NotRun) {
 
 fn required(variable: &str) -> bool {
     std::env::var(variable).as_deref() == Ok("1")
+}
+
+/// This host kernel as the oracle of the pinned one: whether a
+/// native-versus-patina judgement fails the test, or only reports.
+struct Oracle {
+    release: String,
+    /// The pinned series (`host::pinned`), or `PATINA_REQUIRE_PINNED_KERNEL=1`.
+    authoritative: bool,
+}
+
+impl Oracle {
+    fn detect() -> &'static Oracle {
+        static ORACLE: OnceLock<Oracle> = OnceLock::new();
+        ORACLE.get_or_init(|| {
+            Oracle::on(
+                &host::kernel_release(),
+                required("PATINA_REQUIRE_PINNED_KERNEL"),
+            )
+        })
+    }
+
+    fn on(release: &str, strict: bool) -> Oracle {
+        Oracle {
+            release: release.to_string(),
+            authoritative: strict || host::pinned(release),
+        }
+    }
+
+    /// A judgement of patina against the native run: its failures, on an
+    /// authoritative host; elsewhere they join `diverged` and it holds.
+    fn judged<T>(
+        &self,
+        judgement: Result<T, Vec<String>>,
+        diverged: &mut Vec<String>,
+    ) -> Result<(), Vec<String>> {
+        match judgement {
+            Ok(_) => Ok(()),
+            Err(failures) if self.authoritative => Err(failures),
+            Err(failures) => {
+                diverged.extend(failures);
+                Ok(())
+            }
+        }
+    }
+
+    fn prefix(&self) -> String {
+        let host = parse_release(&self.release).map_or_else(
+            || self.release.clone(),
+            |(major, minor, _)| format!("{major}.{minor}"),
+        );
+        format!("DIVERGES (host {host}, pinned {VIRTUAL_ABI})")
+    }
+
+    /// Print `scenario`'s divergences on `stderr` and, when `summary` names
+    /// a file (`$GITHUB_STEP_SUMMARY`), append them to it as one Markdown
+    /// section (one write, so concurrent tests' sections do not interleave).
+    fn report(
+        &self,
+        scenario: &str,
+        diverged: &[String],
+        stderr: &mut dyn Write,
+        summary: Option<&Path>,
+    ) {
+        let prefix = self.prefix();
+        for line in diverged {
+            writeln!(stderr, "{prefix} {line}").unwrap();
+        }
+        let Some(summary) = summary else { return };
+        let section = format!(
+            "### `{scenario}` diverges from the pinned kernel (report-only)\n\n\
+             Host kernel `{}`; only Linux {VIRTUAL_ABI} is authoritative.\n\n\
+             ```text\n{}\n```\n\n",
+            self.release,
+            diverged.join("\n")
+        );
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(summary)
+            .and_then(|mut file| file.write_all(section.as_bytes()))
+            .unwrap_or_else(|error| panic!("append to {}: {error}", summary.display()));
+    }
+}
+
+/// Judge a native run: an oracle (every check holds, it ends as announced)
+/// that agrees with the scenario's first vehicle (`reference`, which the
+/// first sets). Off the pinned kernel a failed native check is the host
+/// answering as its own release does: a divergence, and no oracle for
+/// patina (`Ok(false)`). Native vehicles that disagree, and a native run
+/// that fails otherwise, fail on every host.
+fn judge_native(
+    oracle: &Oracle,
+    vehicle: Vehicle,
+    native: &Observation,
+    reference: &mut Option<(Vehicle, Observation)>,
+    diverged: &mut Vec<String>,
+) -> Result<bool, Vec<String>> {
+    let judged = match compare::native_verdict(native) {
+        Ok(()) => true,
+        Err(error) if !oracle.authoritative && compare::failed_check(native).is_some() => {
+            diverged.push(format!("native: {error}"));
+            false
+        }
+        Err(error) => {
+            return Err(vec![format!(
+                "the native run is no oracle: {error}\n{}",
+                tail(&native.stderr)
+            )]);
+        }
+    };
+    match reference {
+        Some((first, observation)) => {
+            compare::vehicles_agree(observation, native).map_err(|failures| {
+                prefixed(
+                    &format!("natively, differs from {}: ", first.name()),
+                    failures,
+                )
+            })?
+        }
+        None => *reference = Some((vehicle, native.clone())),
+    }
+    Ok(judged)
 }
 
 /// Whether strace can trace a child here.
@@ -641,27 +777,17 @@ impl Leg<'_> {
 
     /// Every check of this leg; `reference` is the scenario's first native
     /// observation, which every other vehicle's must agree with.
-    fn check(&self, reference: &mut Option<(Vehicle, Observation)>) -> Result<(), Vec<String>> {
+    /// `diverged` collects what the oracle only reports.
+    fn check(
+        &self,
+        oracle: &Oracle,
+        reference: &mut Option<(Vehicle, Observation)>,
+        diverged: &mut Vec<String>,
+    ) -> Result<(), Vec<String>> {
         let native = self
             .native()
             .map_err(|error| vec![format!("native run: {error}")])?;
-        compare::native_verdict(&native).map_err(|error| {
-            vec![format!(
-                "the native run is no oracle: {error}\n{}",
-                tail(&native.stderr)
-            )]
-        })?;
-        match reference {
-            Some((vehicle, first)) => {
-                compare::vehicles_agree(first, &native).map_err(|failures| {
-                    prefixed(
-                        &format!("natively, differs from {}: ", vehicle.name()),
-                        failures,
-                    )
-                })?
-            }
-            None => *reference = Some((self.vehicle, native.clone())),
-        }
+        let compared = judge_native(oracle, self.vehicle, &native, reference, diverged)?;
 
         #[cfg(target_arch = "x86_64")]
         if self.vehicle == Vehicle::Raw {
@@ -684,8 +810,15 @@ impl Leg<'_> {
         let patina = self
             .patina(None)
             .map_err(|error| vec![format!("patina run: {error}")])?;
-        compare::judge(&native, &patina, &expected)
-            .map_err(|failures| with_stderr(prefixed("patina: ", failures), &patina))?;
+        if compared {
+            oracle
+                .judged(
+                    compare::judge(&native, &patina, &expected)
+                        .map_err(|failures| prefixed("patina: ", failures)),
+                    diverged,
+                )
+                .map_err(|failures| with_stderr(failures, &patina))?;
+        }
         if gaps.iter().any(|gap| gap.failure.ends_early()) {
             // A stopped run leaves no complete trace, and the direct run would
             // be the same refusal outside the supervisor.
@@ -696,8 +829,15 @@ impl Leg<'_> {
         let recorded = self
             .patina(Some(&trace))
             .map_err(|error| vec![format!("record: {error}")])?;
-        compare::judge(&native, &recorded, &expected)
-            .map_err(|failures| with_stderr(prefixed("record: ", failures), &recorded))?;
+        if compared {
+            oracle
+                .judged(
+                    compare::judge(&native, &recorded, &expected)
+                        .map_err(|failures| prefixed("record: ", failures)),
+                    diverged,
+                )
+                .map_err(|failures| with_stderr(failures, &recorded))?;
+        }
         let replayed = self
             .replay(&trace)
             .map_err(|error| vec![format!("replay: {error}")])?;
@@ -717,10 +857,12 @@ impl Leg<'_> {
                 .map_err(|unmet| prefixed("recorded trace: ", unmet))?;
         }
 
-        self.check_leak(&native)
+        self.check_leak(&recorded)
     }
 
-    fn check_leak(&self, native: &Observation) -> Result<(), Vec<String>> {
+    /// The shim-linked binary run directly under strace ends as the
+    /// `recorded` run did (on an authoritative host, as natively too).
+    fn check_leak(&self, recorded: &Observation) -> Result<(), Vec<String>> {
         if let Err(reason) = strace() {
             if required("PATINA_REQUIRE_STRACE") {
                 return Err(vec![format!("PATINA_REQUIRE_STRACE=1: {reason}")]);
@@ -748,24 +890,24 @@ impl Leg<'_> {
             Termination::Signaled { signal, .. } => Termination::Signaled { signal, core: None },
             other => other,
         };
-        if ending(traced.termination) != ending(native.termination) {
+        if ending(traced.termination) != ending(recorded.termination) {
             return Err(vec![format!(
-                "under strace the probe ended {}; natively {}\n{}",
+                "under strace the probe ended {}; recorded {}\n{}",
                 traced.termination,
-                native.termination,
+                recorded.termination,
                 tail(&traced.stderr)
             )]);
         }
         // A signal death is checked once more with nothing in between: the
         // shim-linked binary's own wait status, signal and core flag.
-        if matches!(native.termination, Termination::Signaled { .. }) {
+        if matches!(recorded.termination, Termination::Signaled { .. }) {
             let direct = self
                 .direct(None)
                 .map_err(|error| vec![format!("direct run: {error}")])?;
-            if direct.termination != native.termination {
+            if direct.termination != recorded.termination {
                 return Err(vec![format!(
-                    "run directly the probe ended {}; natively {}",
-                    direct.termination, native.termination
+                    "run directly the probe ended {}; recorded {}",
+                    direct.termination, recorded.termination
                 )]);
             }
         }
@@ -833,8 +975,10 @@ fn conform(name: &str) {
         not_run(&format!("{name}: native observation"), reason);
     }
     let dir = owned.path().join("run");
+    let oracle = Oracle::detect();
     let mut reference = None;
     let mut failures = Vec::new();
+    let mut diverged = Vec::new();
     for &vehicle in scenario.vehicles {
         let leg = Leg {
             scenario,
@@ -844,9 +988,20 @@ fn conform(name: &str) {
             declared_absent: declared_absent.is_some(),
         };
         std::fs::create_dir_all(&leg.logs).unwrap();
-        if let Err(leg_failures) = leg.check(&mut reference) {
+        let mut leg_diverged = Vec::new();
+        if let Err(leg_failures) = leg.check(oracle, &mut reference, &mut leg_diverged) {
             failures.extend(prefixed(&format!("{}: ", leg.name()), leg_failures));
         }
+        diverged.extend(prefixed(&format!("{}: ", leg.name()), leg_diverged));
+    }
+    if !diverged.is_empty() {
+        let summary = std::env::var_os("GITHUB_STEP_SUMMARY").filter(|path| !path.is_empty());
+        oracle.report(
+            name,
+            &diverged,
+            &mut std::io::stderr(),
+            summary.as_deref().map(Path::new),
+        );
     }
     assert!(
         failures.is_empty(),
@@ -855,6 +1010,93 @@ fn conform(name: &str) {
         failures.join("\n"),
         logs.display()
     );
+}
+
+/// A planted stream: `(op, ret)` events, a check where `op` is "check".
+fn planted(events: &[(&str, i64)], termination: Termination) -> Observation {
+    let stream: String = events
+        .iter()
+        .enumerate()
+        .map(|(seq, (op, ret))| {
+            let args = if *op == "check" {
+                serde_json::json!({"label": "planted"})
+            } else {
+                serde_json::json!({})
+            };
+            let event = serde_json::json!({
+                "seq": seq, "op": op, "args": args, "ret": ret, "errno": null,
+                "fields": {}, "norm": {},
+            });
+            format!("{event}\n")
+        })
+        .collect();
+    Observation {
+        events: parse_stream(&stream).unwrap(),
+        termination,
+        stderr: String::new(),
+    }
+}
+
+/// On a faked host off the pinned kernel a difference from patina and a
+/// failed native check are reported — printed with the prefix and
+/// summarized — and fail nothing; on the pinned kernel, or forced strict,
+/// they fail. Native vehicles that disagree fail off the pin too.
+#[test]
+fn off_the_pinned_kernel_differences_only_report() {
+    let (major, minor, _) = parse_release(VIRTUAL_ABI).unwrap();
+    let off = Oracle::on(&format!("{major}.{}.0-1017-azure", minor + 9), false);
+    let pinned = Oracle::on(&format!("{major}.{minor}.0-139-generic"), false);
+    let forced = Oracle::on(&off.release, true);
+    let native = planted(&[("close", 0), ("check", 1)], Termination::Exited(0));
+    let patina = planted(&[("close", -1), ("check", 1)], Termination::Exited(0));
+    let failed = planted(&[("close", 0), ("check", 0)], Termination::Exited(101));
+    let judge = || compare::judge(&native, &patina, &[]);
+
+    let mut diverged = Vec::new();
+    assert_eq!(off.judged(judge(), &mut diverged), Ok(()));
+    assert!(!diverged.is_empty());
+    assert!(pinned.judged(judge(), &mut Vec::new()).is_err());
+    assert!(forced.judged(judge(), &mut Vec::new()).is_err());
+
+    let before = diverged.len();
+    let mut reference = None;
+    assert_eq!(
+        judge_native(&off, Vehicle::Libc, &failed, &mut reference, &mut diverged),
+        Ok(false)
+    );
+    assert_eq!(diverged.len(), before + 1);
+    assert!(judge_native(&pinned, Vehicle::Libc, &failed, &mut None, &mut Vec::new()).is_err());
+
+    let mut reference = Some((Vehicle::Libc, native.clone()));
+    let disagreeing = planted(
+        &[("close", 0), ("check", 1), ("close", 0)],
+        Termination::Exited(0),
+    );
+    let mut none = Vec::new();
+    assert!(
+        judge_native(
+            &off,
+            Vehicle::Syscall,
+            &disagreeing,
+            &mut reference,
+            &mut none
+        )
+        .is_err()
+    );
+    assert!(none.is_empty());
+
+    let summary = tempfile::NamedTempFile::new().unwrap();
+    let mut printed = Vec::new();
+    off.report("planted", &diverged, &mut printed, Some(summary.path()));
+    let printed = String::from_utf8(printed).unwrap();
+    let summarized = std::fs::read_to_string(summary.path()).unwrap();
+    for line in &diverged {
+        assert!(
+            printed.contains(&format!("{} {line}\n", off.prefix())),
+            "{printed}"
+        );
+        assert!(summarized.contains(line.as_str()), "{summarized}");
+    }
 }
 
 #[test]

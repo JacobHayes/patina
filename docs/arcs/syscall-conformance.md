@@ -231,7 +231,14 @@ forwards into the same dispatcher instead of its two-number allowlist.
   run answers that row with its declared ENOSYS and only that row's native
   observation is not run (`PATINA_REQUIRE_HOST_ORACLE=1`,
   `PATINA_REQUIRE_SUD=1` and `PATINA_REQUIRE_STRACE=1`, set in CI, turn those
-  into failures). Every run owns a
+  into failures). The scenarios assert one pinned kernel, Ubuntu 24.04's GA
+  kernel (Ubuntu's 6.8 build, `VIRTUAL_ABI`); a bump is an explicit, wholesale
+  migration. Only a host of that series (release `6.8.*`) is authoritative:
+  elsewhere a failed native check, a native-versus-patina difference or a gap
+  that no longer matches prints `DIVERGES (host H, pinned 6.8)` and joins
+  `$GITHUB_STEP_SUMMARY` without failing (`PATINA_REQUIRE_PINNED_KERNEL=1`
+  judges any host strictly), while disagreeing native vehicles, replay, trace
+  facts, strace and crashes fail everywhere. Every run owns a
   temporary directory and runs under a deadline; a scenario's forked children
   are reaped within one.
 - The tests run in the full workspace suite (`mise run check`, CI on Linux

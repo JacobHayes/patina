@@ -57,11 +57,14 @@ pub struct DarwinEntry {
     pub variants: &'static [Variant],
 }
 
-/// The Linux kernel release whose ABI the virtual kernel declares. A number the
-/// vendored table lists but that first appeared in a newer release is
+/// The Linux kernel release whose ABI the virtual kernel declares: the pinned
+/// kernel, Ubuntu 24.04's GA kernel (Ubuntu's 6.8 build, not upstream 6.8),
+/// whose answers the conformance scenarios assert. A number the vendored
+/// table lists but that first appeared in a newer release is
 /// [`Disposition::Absent`] — `ENOSYS`, byte-identical to what a kernel of this
-/// release answers. Raising it moves every row whose `since` it passes back to
-/// its family's arc (the rule test names them).
+/// release answers. Raising it is one explicit, wholesale migration: it moves
+/// every row whose `since` it passes back to its family's arc (the rule test
+/// names them), and every scenario's answers to the new kernel's.
 pub const VIRTUAL_ABI: &str = "6.8";
 
 /// The Darwin kernel release the virtual machine reports on macOS (`uname`'s

@@ -5,7 +5,7 @@
 
 use crate::catalog::{Need, Scenario};
 use crate::vehicle::errno_name;
-use patina_dst_syscalls::{SYSCALLS, Syscall, parse_release};
+use patina_dst_syscalls::{SYSCALLS, Syscall, VIRTUAL_ABI, parse_release};
 use std::ffi::CString;
 use std::fmt;
 use std::os::unix::ffi::OsStrExt;
@@ -69,6 +69,15 @@ pub fn kernel_release() -> String {
     unsafe { std::ffi::CStr::from_ptr(name.release.as_ptr()) }
         .to_string_lossy()
         .into_owned()
+}
+
+/// Whether host kernel `release` is of the pinned series, the virtual ABI
+/// level's major.minor ([`VIRTUAL_ABI`]: Ubuntu 24.04's GA kernel, 6.8), of
+/// any patch level and flavour (`-generic`, `-azure`, `-aws` are one Ubuntu
+/// source tree). Only there is the host an authoritative oracle.
+pub fn pinned(release: &str) -> bool {
+    let series = |release| parse_release(release).map(|(major, minor, _)| (major, minor));
+    series(release).is_some() && series(release) == series(VIRTUAL_ABI)
 }
 
 fn since(row: Syscall) -> Option<(u64, u64, u64)> {
@@ -1152,6 +1161,18 @@ mod tests {
         let unmet = unmet_on(&NEEDS_6_4, "6.1.100").expect("unmet");
         assert_eq!(unmet.cause, Cause::Absent);
         assert_eq!(unmet_on(&NEEDS_6_4, "6.4.0"), None);
+    }
+
+    #[test]
+    fn only_the_virtual_abi_series_is_pinned() {
+        let (major, minor, _) = parse_release(VIRTUAL_ABI).unwrap();
+        assert!(pinned(&format!("{major}.{minor}.0-139-generic")));
+        assert!(pinned(&format!("{major}.{minor}.0-1017-azure")));
+        assert!(pinned(&format!("{major}.{minor}.12")));
+        assert!(!pinned(&format!("{major}.{}.0-1017-azure", minor + 9)));
+        assert!(!pinned(&format!("{major}.{minor}0.0")));
+        assert!(!pinned(&format!("{}.{minor}.0", major + 1)));
+        assert!(!pinned(""));
     }
 
     /// Detection fails closed: a run directory that does not exist meets no

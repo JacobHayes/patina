@@ -345,6 +345,12 @@ then `run` the resulting artifact.
 | Linux arm64 | Supported for libc-path binaries; arm64 kernels lack syscall-user-dispatch, so raw-inline-syscall binaries are *refused* (fail closed), not run. |
 | `wasm32-wasip1` | Supported via the deterministic WASI host. |
 
+On Linux the virtual kernel is pinned to Ubuntu 24.04's GA kernel (Ubuntu's
+Linux 6.8 build; `cargo patina --version` names it): `uname` reports 6.8, a
+syscall first added later answers `ENOSYS` as 6.8 does, and the syscall
+conformance scenarios assert 6.8's answers, authoritatively only on a 6.8
+host. Moving to a newer kernel is an explicit, wholesale migration.
+
 If you use [mise](https://mise.jdx.dev/): `mise run setup` installs toolchains
 and targets, `mise run check:fast` is the inner-loop signal, `mise run check` is
 the local landing gate, `mise run msrv` is the full Rust 1.86 CI/final-gate
