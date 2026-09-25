@@ -1,13 +1,17 @@
 //! net/udp — socket / bind / sendto / recvfrom / getsockname / getpeername /
 //! connect / shutdown / setsockopt / getsockopt over loopback UDP: datagram
 //! boundaries, truncation, MSG_PEEK, non-blocking EAGAIN, the 4-tuple a
-//! connected socket receives by, and the errno
+//! connected socket receives by (ahead of an unconnected socket bound at the
+//! exact address, and until an `AF_UNSPEC` disconnect), the source a
+//! wildcard-bound socket is bound at once connected, and the errno
 //! vocabulary.
 
-use crate::catalog::{DEFAULTS, Scenario};
+use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
+use crate::compare::{Difference, Failure, Observed};
+use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
-use crate::probe::{AT_FDCWD, Probe, neg};
+use crate::probe::{AT_FDCWD, Probe, SockAddr, neg};
 use libc::*;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
@@ -194,7 +198,88 @@ pub fn run(p: &Probe) {
     p.check("f sends to e", p.sendto(f, b"peer", 0, Some(addr_e)) == 4);
     let (n, data, _) = p.recvfrom(e, 64, 0, true);
     p.check("the peer's datagram does", n == 4 && data == b"peer");
-    for fd in [e, f, g] {
+    // `__udp_disconnect`: a port the kernel chose is given up (the socket
+    // reads unbound at its address); one bound by number stays, and the
+    // socket takes a stranger's datagrams again.
+    let unspec = SockAddr::Raw {
+        family: AF_UNSPEC as u16,
+        len: 16,
+    };
+    p.check("disconnect e with AF_UNSPEC", p.connect_to(e, &unspec) == 0);
+    let (_, after) = p.getsockname(e);
+    p.check(
+        "the port the kernel chose is given up",
+        after == Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
+    );
+    let k = p.socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    p.require("socket k", k >= 0);
+    p.check("bind k to that port by number", p.bind(k, addr_e) == 0);
+    p.check("connect k to f", p.connect(k, addr_f) == 0);
+    p.check("g sends to k", p.sendto(g, b"early", 0, Some(addr_e)) == 5);
+    p.check(
+        "the connected k does not take it",
+        p.recvfrom(k, 64, 0, true).0 == neg(EAGAIN),
+    );
+    p.check("disconnect k", p.connect_to(k, &unspec) == 0);
+    let (_, after) = p.getsockname(k);
+    p.check("a port bound by number stays", after == Some(addr_e));
+    p.check(
+        "g sends to k again",
+        p.sendto(g, b"again", 0, Some(addr_e)) == 5,
+    );
+    let (n, data, _) = p.recvfrom(k, 64, 0, true);
+    p.check("the disconnected k takes it", n == 5 && data == b"again");
+    // A wildcard-bound socket that connects is bound, from then on, at the
+    // source its route chose (`inet_rcv_saddr`, rehashed): getsockname says
+    // so, and its peer's datagrams reach it ahead of an unconnected socket
+    // bound at that exact address and port (`compute_score` ranks the whole
+    // 4-tuple first); a stranger's reach the exact one.
+    let w = p.socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    p.require("socket w", w >= 0);
+    p.check(
+        "SO_REUSEADDR on w",
+        p.setsockopt_int(w, SOL_SOCKET, SO_REUSEADDR, 1) == 0,
+    );
+    p.check(
+        "bind w to the wildcard",
+        p.bind(w, SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)) == 0,
+    );
+    let (_, bound_w) = p.getsockname(w);
+    let port_w = bound_w.expect("getsockname w").port();
+    let x = p.socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    p.require("socket x", x >= 0);
+    p.check(
+        "SO_REUSEADDR on x",
+        p.setsockopt_int(x, SOL_SOCKET, SO_REUSEADDR, 1) == 0,
+    );
+    let exact = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port_w);
+    p.check("bind x at w's port on 127.0.0.1", p.bind(x, exact) == 0);
+    p.check("connect w to f", p.connect(w, addr_f) == 0);
+    let (_, local_w) = p.getsockname(w);
+    p.check(
+        "the connected w reports the routed source",
+        local_w == Some(exact),
+    );
+    p.check(
+        "f sends to 127.0.0.1",
+        p.sendto(f, b"to-w", 0, Some(exact)) == 4,
+    );
+    let (n, data, _) = p.recvfrom(w, 64, 0, true);
+    p.check(
+        "the connected w takes its peer's datagram",
+        n == 4 && data == b"to-w",
+    );
+    p.check(
+        "not the exact x",
+        p.recvfrom(x, 64, 0, true).0 == neg(EAGAIN),
+    );
+    p.check(
+        "g sends there too",
+        p.sendto(g, b"to-x", 0, Some(exact)) == 4,
+    );
+    let (n, data, _) = p.recvfrom(x, 64, 0, true);
+    p.check("the exact x takes a stranger's", n == 4 && data == b"to-x");
+    for fd in [e, f, g, k, w, x] {
         p.close(fd);
     }
 
@@ -257,6 +342,41 @@ pub const SCENARIO: Scenario = Scenario {
         "accept4",
         "openat",
         "close",
+    ],
+    gaps: &[
+        Gap {
+            status: Status::Pending(Arc::NetworkReadiness),
+            vehicles: Vehicle::ALL,
+            what: "an AF_UNSPEC disconnect resets a source address bound by number (thread/net/inet.rs); __udp_disconnect keeps it under SOCK_BINDADDR_LOCK",
+            failure: Failure::Differs(&[
+                Difference::field(
+                    104,
+                    "getsockname",
+                    "fields.addr_ip",
+                    Observed::Str("0.0.0.0"),
+                ),
+                Difference::check(105, "the port the kernel chose is given up"),
+            ]),
+        },
+        Gap {
+            status: Status::Pending(Arc::NetworkReadiness),
+            vehicles: Vehicle::ALL,
+            what: "SimNet looks for a connected member bucket by bucket (patina-net-sim resolve_datagram), so an unconnected exact binding wins over a connected wildcard one; the kernel ranks the whole 4-tuple first",
+            failure: Failure::Differs(&[
+                Difference::field(140, "recvfrom", "errno", Observed::Str("EAGAIN")),
+                Difference::field(140, "recvfrom", "fields.data", Observed::Null),
+                Difference::field(140, "recvfrom", "fields.src_ip", Observed::Null),
+                Difference::field(140, "recvfrom", "fields.src_port", Observed::Null),
+                Difference::field(140, "recvfrom", "ret", Observed::Int(-1)),
+                Difference::check(141, "the connected w takes its peer's datagram"),
+                Difference::field(142, "recvfrom", "errno", Observed::Null),
+                Difference::field(142, "recvfrom", "fields.data", Observed::Str("to-w")),
+                Difference::field(142, "recvfrom", "fields.src_ip", Observed::Str("127.0.0.1")),
+                Difference::field(142, "recvfrom", "fields.src_port", Observed::Str("port@90")),
+                Difference::field(142, "recvfrom", "ret", Observed::Int(4)),
+                Difference::check(143, "not the exact x"),
+            ]),
+        },
     ],
     ..DEFAULTS
 };

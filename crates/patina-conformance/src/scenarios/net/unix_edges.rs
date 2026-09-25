@@ -10,19 +10,35 @@
 //! * an unconnected sequenced-packet socket cannot receive (`ENOTCONN`);
 //! * `SIOCINQ` on a listener is `EINVAL` (`unix_inq_len`);
 //! * connecting to a socket node needs write permission on it (`EACCES`);
-//! * a TCP stream is readable only once `SO_RCVLOWAT` bytes are queued, and
-//!   a receive waits for them (`tcp_poll`, `sock_rcvlowat`).
+//! * a TCP stream is readable only once `SO_RCVLOWAT` bytes are queued
+//!   (`tcp_poll`), yet a non-blocking receive takes fewer (`tcp_recvmsg`
+//!   stops at any data once it may not wait); a blocking peek below the mark
+//!   waits for it, here until its `SO_RCVTIMEO` (`sock_rcvlowat` is the
+//!   peek's target too);
+//! * a TCP socket's mark is capped at half its receive buffer once
+//!   `SO_RCVBUF` locked it, and below `INT_MAX` (half `tcp_rmem`'s maximum)
+//!   otherwise (`tcp_set_rcvlowat`); a datagram socket's -1 is `INT_MAX`.
 //!
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{DEFAULTS, Need, Scenario};
+use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
+use crate::compare::{Difference, Failure, Observed};
 use crate::probe::{AT_FDCWD, Control, IoctlArg, Probe, RecvSpec, SockAddr, neg};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
 /// How long a wait for an event already caused may take.
 const WAIT_MS: i32 = 5_000;
+
+/// A `struct timeval` as `setsockopt` takes it.
+fn timeval(sec: i64, usec: i64) -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&sec.to_ne_bytes());
+    bytes[8..].copy_from_slice(&usec.to_ne_bytes());
+    bytes
+}
 
 pub fn run(p: &Probe) {
     let root = p.dir();
@@ -149,12 +165,62 @@ pub fn run(p: &Probe) {
     let shown = POLLIN | POLLOUT | POLLERR | POLLHUP | POLLRDHUP;
     let (n, _) = p.poll(&[(ts, POLLIN)], 0, shown);
     p.check("two bytes queued are not readable", n == 0);
-    p.send_to(tc, b"cd", 0, None);
+    let (n, data) = p.recv(ts, 16, MSG_DONTWAIT);
+    p.check(
+        "a non-blocking receive takes them all the same",
+        n == 2 && data == b"ab",
+    );
+    p.send_to(tc, b"cdef", 0, None);
     let (n, revents) = p.poll(&[(ts, POLLIN)], WAIT_MS, shown);
     p.check("four are", n == 1 && revents == vec![POLLIN]);
     let (n, data) = p.recv(ts, 16, 0);
-    p.check("a receive takes them", n == 4 && data == b"abcd");
-    for fd in [tc, ts, tl] {
+    p.check("a receive takes them", n == 4 && data == b"cdef");
+    p.check(
+        "SO_RCVTIMEO 50 ms on the server",
+        p.setsockopt_bytes(ts, SOL_SOCKET, SO_RCVTIMEO, &timeval(0, 50_000), 16, "50ms") == 0,
+    );
+    p.send_to(tc, b"gh", 0, None);
+    let (_, before) = p.rec.quiet(|| p.clock_gettime(CLOCK_MONOTONIC));
+    let (n, data) = p.recv(ts, 16, MSG_PEEK);
+    let (_, after) = p.rec.quiet(|| p.clock_gettime(CLOCK_MONOTONIC));
+    p.check(
+        "a blocking peek below the mark waits out its timeout, then answers what is queued",
+        n == 2 && data == b"gh" && after - before >= 50_000_000,
+    );
+    let (n, _) = p.recv(ts, 16, MSG_DONTWAIT);
+    p.check("the peeked bytes are still queued", n == 2);
+    p.check(
+        "SO_RCVBUF 4096 locks the server's receive buffer (8192)",
+        p.setsockopt_int(ts, SOL_SOCKET, SO_RCVBUF, 4096) == 0,
+    );
+    p.check(
+        "SO_RCVLOWAT -1 on it",
+        p.setsockopt_int(ts, SOL_SOCKET, SO_RCVLOWAT, -1) == 0,
+    );
+    p.check(
+        "is capped at half the locked buffer",
+        p.getsockopt_int(ts, SOL_SOCKET, SO_RCVLOWAT) == (0, 4096),
+    );
+    p.check(
+        "SO_RCVLOWAT -1 on the listener",
+        p.setsockopt_int(tl, SOL_SOCKET, SO_RCVLOWAT, -1) == 0,
+    );
+    let (r, mark) = p.getsockopt_hidden(tl, SOL_SOCKET, SO_RCVLOWAT);
+    p.check(
+        "is capped below INT_MAX (half the host's tcp_rmem maximum)",
+        r == 0 && mark > 0 && mark < i32::MAX,
+    );
+    let du = p.socket(AF_INET, SOCK_DGRAM, 0);
+    p.require("a UDP socket", du >= 0);
+    p.check(
+        "SO_RCVLOWAT -1 on a datagram socket",
+        p.setsockopt_int(du, SOL_SOCKET, SO_RCVLOWAT, -1) == 0,
+    );
+    p.check(
+        "is INT_MAX",
+        p.getsockopt_int(du, SOL_SOCKET, SO_RCVLOWAT) == (0, i32::MAX),
+    );
+    for fd in [tc, ts, tl, du] {
         p.close(fd);
     }
 }
@@ -175,6 +241,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_sendto,
         Syscall::N_recvfrom,
         Syscall::N_setsockopt,
+        Syscall::N_getsockopt,
         Syscall::N_ioctl,
         #[cfg(target_arch = "x86_64")]
         Syscall::N_poll,
@@ -198,6 +265,7 @@ pub const SCENARIO: Scenario = Scenario {
         "sendto",
         "recvfrom",
         "setsockopt",
+        "getsockopt",
         "ioctl",
         "poll",
         "openat",
@@ -206,5 +274,34 @@ pub const SCENARIO: Scenario = Scenario {
         "close",
     ],
     needs: &[Need::Unprivileged, Need::LocalBindOnly],
+    gaps: &[
+        Gap {
+            status: Status::Pending(Arc::NetworkReadiness),
+            vehicles: Vehicle::ALL,
+            what: "a TCP peek's target is one byte, not SO_RCVLOWAT (thread/net/inet.rs recv_stream); tcp_recvmsg_locked takes sock_rcvlowat for a peek too",
+            failure: Failure::Differs(&[Difference::check(
+                75,
+                "a blocking peek below the mark waits out its timeout, then answers what is queued",
+            )]),
+        },
+        Gap {
+            status: Status::Pending(Arc::NetworkReadiness),
+            vehicles: Vehicle::ALL,
+            what: "SO_RCVLOWAT on TCP is not capped (thread/net/opts.rs set_socket); tcp_set_rcvlowat caps it at half the locked receive buffer, or half tcp_rmem's maximum",
+            failure: Failure::Differs(&[
+                Difference::field(
+                    82,
+                    "getsockopt",
+                    "fields.value",
+                    Observed::Int(i32::MAX as i64),
+                ),
+                Difference::check(83, "is capped at half the locked buffer"),
+                Difference::check(
+                    87,
+                    "is capped below INT_MAX (half the host's tcp_rmem maximum)",
+                ),
+            ]),
+        },
+    ],
     ..DEFAULTS
 };

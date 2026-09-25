@@ -343,6 +343,21 @@ fn write_space_edge(p: &Probe, wp: i32, writer: i32, reader: i32, tag: u64, what
         }
     }
     p.check(&format!("the {what} writer fills to EAGAIN"), filled);
+    // Consume, unrecorded, any edge the fill itself raised (on the host a
+    // TCP ACK arriving mid-fill wakes the writer), so the wait below sees
+    // only the drain's.
+    let mut stale = [epoll_event { events: 0, u64: 0 }; 8];
+    p.call_unrecorded(
+        Syscall::N_epoll_pwait,
+        [
+            wp as i64,
+            stale.as_mut_ptr() as i64,
+            stale.len() as i64,
+            0,
+            0,
+            SIGSET_BYTES,
+        ],
+    );
     let mut buf = vec![0u8; 65536];
     let mut drained = false;
     for _ in 0..65536 {
