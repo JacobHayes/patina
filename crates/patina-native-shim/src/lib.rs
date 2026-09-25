@@ -8519,8 +8519,26 @@ mod thread {
             Ok(())
         }
 
+        /// Join `target`: its value if it has finished, else wait. A detached
+        /// target is `EINVAL`, and then a join that could never end — of the
+        /// caller itself, or of a thread waiting to join the caller — is
+        /// `EDEADLK`, in glibc's order.
         fn begin_join(&mut self, me: TaskId, target: TaskId) -> Result<JoinStep, ThreadError> {
             let interrupted = self.sync_interrupted(me);
+            if self
+                .threads
+                .get(&target)
+                .is_some_and(|entry| entry.detached)
+            {
+                return Err(ThreadError::Posix(EINVAL));
+            }
+            let joins_me = self
+                .threads
+                .get(&me)
+                .is_some_and(|entry| !entry.finished && entry.joiner == Some(target));
+            if target == me || joins_me {
+                return Err(ThreadError::Posix(EDEADLK));
+            }
             let entry = self
                 .threads
                 .get_mut(&target)
@@ -9511,6 +9529,21 @@ mod thread {
     ) -> c_int {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let key = handle as usize;
+        // A thread joining itself, the main thread before the thread runtime
+        // is active too (the table below refuses a managed one): `EINVAL`
+        // once it detached itself, else `EDEADLK`, glibc's order.
+        // SAFETY: the real glibc `pthread_self`, resolved through the
+        // host-alias table.
+        #[cfg(target_os = "linux")]
+        if key == unsafe { (crate::hostapi::get().host_pthread_self)() } {
+            let me = current_task();
+            let detached = lock_state()
+                .table
+                .threads
+                .get(&me)
+                .is_some_and(|entry| entry.detached);
+            return if detached { EINVAL } else { EDEADLK };
+        }
         let me = current_task();
         let mut state = lock_state();
         let Some(&target) = state.handles.get(&key) else {
@@ -14470,6 +14503,36 @@ mod thread {
                 RwLockKind::from_glibc(2),
                 RwLockKind::PreferWriterNonrecursive
             );
+        }
+
+        #[test]
+        fn a_join_that_could_never_end_is_edeadlk() {
+            let mut table = ThreadTable::default();
+            let (a, b) = (TaskId(1), TaskId(2));
+            table.register(a);
+            table.register(b);
+            assert!(matches!(
+                table.begin_join(a, a),
+                Err(ThreadError::Posix(EDEADLK))
+            ));
+            assert!(matches!(
+                table.begin_join(a, b).unwrap(),
+                JoinStep::MustBlock
+            ));
+            // b joining a, which waits to join b.
+            assert!(matches!(
+                table.begin_join(b, a),
+                Err(ThreadError::Posix(EDEADLK))
+            ));
+            // A detached thread joining itself: not joinable, before the
+            // deadlock.
+            let c = TaskId(3);
+            table.register(c);
+            table.detach(c).unwrap();
+            assert!(matches!(
+                table.begin_join(c, c),
+                Err(ThreadError::Posix(EINVAL))
+            ));
         }
 
         #[test]

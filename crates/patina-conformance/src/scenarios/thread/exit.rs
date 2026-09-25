@@ -1,12 +1,10 @@
 //! thread/exit — glibc's `pthread_exit` ends only the calling thread, from
 //! anywhere in its start routine (nptl unwinds its frames), and its
 //! argument is the value `pthread_join` answers; the rest of the start
-//! routine never runs. A thread joining itself, a wait that could never
-//! end, is `EDEADLK`.
+//! routine never runs.
 //!
-//! The joins that end a patina run, kept out of `thread/lifecycle` so its
-//! patina leg completes (and is replayed and straced): `pthread_exit` is a
-//! named fatal there, and a self-join parks the only runnable task.
+//! Kept out of `thread/lifecycle` so its patina leg completes (and is
+//! replayed and straced): `pthread_exit` is a named fatal under patina.
 
 use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
 use crate::compare::{Ending, Failure};
@@ -63,15 +61,6 @@ pub fn run(p: &Probe) {
         "the start routine does not continue past pthread_exit",
         !PAST_EXIT.load(Ordering::SeqCst),
     );
-
-    let mut value: *mut c_void = null_mut();
-    // SAFETY: the calling thread's own handle.
-    let error = unsafe { pthread_join(pthread_self(), &mut value) };
-    p.rec
-        .event("pthread_join", -(error as i64))
-        .arg("target", "self")
-        .emit();
-    p.check("a thread joining itself is EDEADLK", error == EDEADLK);
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -83,7 +72,7 @@ pub const SCENARIO: Scenario = Scenario {
     gaps: &[Gap {
         status: Status::Pending(Arc::SignalsThreadsProcess),
         vehicles: &[Vehicle::Libc],
-        what: "pthread_exit is a named fatal (patina-native-shim src/lib.rs patina_thread_exit: a managed thread must return from its body), so the worker's call aborts the run before any event; behind it, a self-join parks the only runnable task (patina_thread_join finds the main thread's handle and blocks on itself) and the run aborts as a deadlock instead of answering EDEADLK",
+        what: "pthread_exit is a named fatal (patina-native-shim src/lib.rs patina_thread_exit: a managed thread must return from its body), so the worker's call aborts the run before any event",
         failure: Failure::Stops {
             events: 0,
             ending: Ending::Signal(libc::SIGABRT),

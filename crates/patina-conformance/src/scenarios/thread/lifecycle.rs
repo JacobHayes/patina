@@ -13,7 +13,9 @@
 //! thread asleep in a cancellation point (`nanosleep`) ends it there, its
 //! join answering `PTHREAD_CANCELED`; and `pthread_setname_np` renames the
 //! thread (a later thread inherits the new name), refusing a name longer
-//! than 15 bytes with `ERANGE`.
+//! than 15 bytes with `ERANGE`. A thread joining itself, a wait that could
+//! never end, is `EDEADLK`, unless it detached itself first: a detached
+//! thread is never joinable, `EINVAL` (glibc checks that first).
 //!
 //! pthread functions return the error number rather than setting `errno`;
 //! each is recorded as `-error` on failure. A libc-only subject, so the
@@ -109,6 +111,22 @@ extern "C-unwind" fn cancellable(_: *mut c_void) -> *mut c_void {
         unsafe { nanosleep(&pause, null_mut()) };
     }
     7 as *mut c_void
+}
+
+/// What `detached_self_join` answered: its self-detach and self-join.
+static SELF_DETACH: AtomicI32 = AtomicI32::new(i32::MIN);
+static SELF_JOIN: AtomicI32 = AtomicI32::new(i32::MIN);
+
+/// Detaches itself, then joins itself.
+extern "C" fn detached_self_join(_: *mut c_void) -> *mut c_void {
+    // SAFETY: the calling thread's own handle.
+    let me = unsafe { pthread_self() };
+    // SAFETY: as above.
+    SELF_DETACH.store(unsafe { pthread_detach(me) }, Ordering::SeqCst);
+    let mut value: *mut c_void = null_mut();
+    // SAFETY: as above, and a writable value slot.
+    SELF_JOIN.store(unsafe { pthread_join(me, &mut value) }, Ordering::SeqCst);
+    null_mut()
 }
 
 static ONCE_RUNS: AtomicUsize = AtomicUsize::new(0);
@@ -315,6 +333,33 @@ pub fn run(p: &Probe) {
     p.check(
         "a name longer than 15 bytes is ERANGE",
         setname(p, c"sixteen-bytes-xx") == neg(ERANGE),
+    );
+
+    // SAFETY: the calling thread's own handle.
+    let (joined, _) = join(p, unsafe { pthread_self() }, "self");
+    p.check("a thread joining itself is EDEADLK", joined == neg(EDEADLK));
+
+    let (created, _) = create(p, detached_self_join, 0);
+    p.check("pthread_create", created == 0);
+    p.rec.quiet(|| {
+        support::wait_until(Duration::from_millis(1), || {
+            SELF_JOIN.load(Ordering::SeqCst) != i32::MIN
+        })
+    });
+    let detached = code(SELF_DETACH.load(Ordering::SeqCst));
+    p.rec
+        .event("pthread_detach", detached)
+        .arg("target", "self")
+        .emit();
+    p.check("a thread detaches itself", detached == 0);
+    let joined = code(SELF_JOIN.load(Ordering::SeqCst));
+    p.rec
+        .event("pthread_join", joined)
+        .arg("target", "detached self")
+        .emit();
+    p.check(
+        "a detached thread joining itself is EINVAL",
+        joined == neg(EINVAL),
     );
 }
 
