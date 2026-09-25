@@ -1741,6 +1741,11 @@ fn proc_absent() {
 }
 
 #[test]
+fn proc_dl() {
+    conform("proc/dl");
+}
+
+#[test]
 fn proc_environ() {
     conform("proc/environ");
 }
