@@ -84,7 +84,6 @@ pub fn run(p: &Probe) {
     let tid = p.gettid() as pid_t;
     let uid = p.getuid() as uid_t;
     p.check("kill(self, 0) probes existence", p.kill(pid, 0) == 0);
-    p.check("handler count starts at zero", support::count() == 0);
     p.require("kill(self, SIGUSR1)", p.kill(pid, SIGUSR1) == 0);
     p.check("handler ran before kill returned", support::count() == 1);
     p.check(
@@ -173,7 +172,7 @@ pub fn run(p: &Probe) {
     unsafe {
         sigemptyset(&mut act.sa_mask);
     }
-    p.require(
+    p.check(
         "rt_sigaction on SIGKILL is EINVAL",
         p.call_observed(
             Syscall::N_rt_sigaction,

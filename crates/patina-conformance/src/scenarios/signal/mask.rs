@@ -38,7 +38,7 @@ pub fn run(p: &Probe) {
         "block SIGUSR2",
         p.rt_sigprocmask(SIG_BLOCK, Some(&blocked), Some(&mut old), 8) == 0,
     );
-    p.check(
+    p.require(
         "SIGUSR2 was not already blocked",
         !support::has(&old, SIGUSR2),
     );

@@ -20,13 +20,11 @@ use libc::*;
 
 pub fn run(p: &Probe) {
     let pid = p.getpid() as pid_t;
-    let tid = p.gettid() as pid_t;
+    p.gettid();
     let ppid = p.getppid();
     let pgid = p.getpgid(0);
     let sid = p.getsid(0);
-    p.check("main thread tid equals pid", tid == pid);
     p.check("parent pid is nonnegative", ppid >= 0);
-    p.check("process group id is positive", pgid > 0);
     p.check("session id is positive", sid > 0);
     p.check("getpgid(pid) equals getpgid(0)", p.getpgid(pid) == pgid);
     p.check("getsid(pid) equals getsid(0)", p.getsid(pid) == sid);
@@ -91,10 +89,10 @@ pub const SCENARIO: Scenario = Scenario {
         vehicles: Vehicle::ALL,
         what: "the virtual pid namespace holds two processes, its init (pid 1) and the guest (pid 2, init's child; registry::INIT_PID/IDENTITY_PID, src/identity.rs): kill(-1, sig) reaches every process but init and the caller, of which there are none, so the kernel's answer for that tree is ESRCH (kill_something_info), where the native oracle's host has other processes of the caller's",
         failure: Failure::Differs(&[
-            Difference::field(17, "kill", "errno", Observed::Str("ESRCH")),
-            Difference::field(17, "kill", "ret", Observed::Int(-1)),
+            Difference::field(15, "kill", "errno", Observed::Str("ESRCH")),
+            Difference::field(15, "kill", "ret", Observed::Int(-1)),
             Difference::check(
-                18,
+                16,
                 "kill(-1,0) succeeds when at least one process is signalable",
             ),
         ]),

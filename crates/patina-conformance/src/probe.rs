@@ -110,7 +110,7 @@ pub fn page_size() -> usize {
 }
 
 /// A negative errno in the kernel convention.
-pub fn neg(errno: i32) -> i64 {
+pub const fn neg(errno: i32) -> i64 {
     -(errno as i64)
 }
 

@@ -70,7 +70,7 @@ pub fn run(p: &Probe) {
     p.check("no handler ran", support::count() == 2);
 
     support::install_disposition(SIGPIPE, SIG_DFL);
-    p.check(
+    p.require(
         "SIGPIPE is at its default disposition",
         support::disposition(SIGPIPE) == "SIG_DFL",
     );

@@ -182,7 +182,6 @@ pub fn run(p: &Probe) {
         "rt_sigtimedwait returns the signum",
         p.rt_sigtimedwait(&set, Some(&mut si), Some(0), 8) == sig as i64,
     );
-    p.check("rt_sigtimedwait preserves SI_QUEUE", si.si_code == SI_QUEUE);
     p.check(
         "rt_sigtimedwait fills siginfo",
         si.si_signo == sig && si.si_code == SI_QUEUE,

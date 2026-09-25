@@ -107,7 +107,7 @@ pub fn run(p: &Probe) {
     );
     install();
     p.kill(p.getpid() as pid_t, SIGUSR1);
-    p.require(
+    p.check(
         "SA_ONSTACK handler ran on the alternate stack (sp inside the range)",
         ON_ALT.load(Ordering::SeqCst),
     );

@@ -16,7 +16,7 @@ use libc::*;
 pub fn run(p: &Probe) {
     let pid = p.getpid() as pid_t;
     support::install_disposition(SIGABRT, SIG_DFL);
-    p.check(
+    p.require(
         "SIGABRT is at its default disposition",
         support::disposition(SIGABRT) == "SIG_DFL",
     );
