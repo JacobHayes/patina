@@ -1,7 +1,11 @@
 //! signal/basic — a signal to self is delivered before `kill`/`tkill`/`tgkill`
 //! returns, with the `SA_SIGINFO` sender fields the kernel fills (`SI_USER`
-//! for kill, `SI_TKILL` for the thread-directed rows), and the errno
-//! vocabulary of `kill` and `rt_sigaction` (man 2 kill, man 2 rt_sigaction).
+//! for kill, `SI_TKILL` for the thread-directed rows); `tgkill`/`tkill` to
+//! another thread run the handler on THAT thread, not the sender, and signal
+//! 0 probes it; a thread that has exited is `ESRCH`; and the errno
+//! vocabulary of `kill`, `tgkill`/`tkill` (the tgid must be the caller's
+//! thread group, the tid a live thread of it, a tid ≤ 0 `EINVAL`) and
+//! `rt_sigaction` (man 2 kill, man 2 tgkill, man 2 rt_sigaction).
 
 use crate::catalog::{DEFAULTS, Generation, Scenario, TraceFacts};
 
@@ -10,7 +14,68 @@ use crate::signals as support;
 use crate::probe::{Probe, neg};
 use libc::*;
 use patina_dst_syscalls::Syscall;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+/// `tgkill` and `tkill` to a worker thread from the main thread: each runs
+/// the handler on the worker. Answers the worker's tid once it has exited.
+fn to_another_thread(p: &Probe, pid: pid_t) -> pid_t {
+    let tid_slot = AtomicI32::new(0);
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            tid_slot.store(support::gettid(), Ordering::SeqCst);
+            while !stop.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        // A failed check panics natively (`--strict`); the guard releases
+        // the worker on the way out so the scope's join cannot hang.
+        let _release = support::Release(&stop);
+        p.rec.quiet(|| {
+            support::wait_until(std::time::Duration::from_millis(1), || {
+                tid_slot.load(Ordering::SeqCst) != 0
+            });
+        });
+        p.require(
+            "the worker reported its tid",
+            tid_slot.load(Ordering::SeqCst) != 0,
+        );
+        let worker = tid_slot.load(Ordering::SeqCst);
+        p.check("the worker has its own tid", worker != support::gettid());
+
+        p.check("tgkill to the worker", p.tgkill(pid, worker, SIGUSR1) == 0);
+        support::wait_for_count(p, 4);
+        p.check(
+            "tgkill delivered exactly one handler",
+            support::count() == 4,
+        );
+        p.check(
+            "the handler ran on the worker, not the sender",
+            support::HANDLER_TID.load(Ordering::SeqCst) == worker,
+        );
+        p.check(
+            "with SI_TKILL",
+            support::LAST_CODE.load(Ordering::SeqCst) == SI_TKILL,
+        );
+        p.check("tkill to the worker", p.tkill(worker, SIGUSR1) == 0);
+        support::wait_for_count(p, 5);
+        p.check("tkill delivered another handler", support::count() == 5);
+        p.check(
+            "again on the worker",
+            support::HANDLER_TID.load(Ordering::SeqCst) == worker,
+        );
+        p.check(
+            "tgkill with signal 0 probes the worker",
+            p.tgkill(pid, worker, 0) == 0,
+        );
+        p.check(
+            "tgkill with the wrong tgid is ESRCH",
+            p.tgkill(99_999_999, worker, SIGUSR1) == neg(ESRCH),
+        );
+        p.check("no probe delivered anything", support::count() == 5);
+    });
+    tid_slot.load(Ordering::SeqCst)
+}
 
 pub fn run(p: &Probe) {
     support::reset();
@@ -56,6 +121,24 @@ pub fn run(p: &Probe) {
         support::LAST_CODE.load(Ordering::SeqCst) == SI_TKILL,
     );
 
+    let worker = to_another_thread(p, pid);
+    // The join returns when the kernel cleared the thread's tid word,
+    // which precedes the task's release; wait (unobserved) until the tid
+    // is really gone before pinning ESRCH.
+    p.rec.quiet(|| {
+        support::wait_until(std::time::Duration::from_millis(1), || {
+            p.tgkill(pid, worker, 0) == neg(ESRCH)
+        });
+    });
+    p.check(
+        "tgkill of a dead tid is ESRCH",
+        p.tgkill(pid, worker, SIGUSR1) == neg(ESRCH),
+    );
+    p.check(
+        "tkill of a dead tid is ESRCH",
+        p.tkill(worker, SIGUSR1) == neg(ESRCH),
+    );
+
     p.check(
         "kill with a signal past SIGRTMAX is EINVAL",
         p.kill(pid, 65) == neg(EINVAL),
@@ -82,7 +165,7 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "handler count is unchanged by the refused sends",
-        support::count() == 3,
+        support::count() == 5,
     );
 
     let mut act: sigaction = unsafe { std::mem::zeroed() };
@@ -130,6 +213,8 @@ pub const SCENARIO: Scenario = Scenario {
     trace: Some(TraceFacts {
         generations: &[
             Generation::process(SIGUSR1),
+            Generation::thread(SIGUSR1),
+            Generation::thread(SIGUSR1),
             Generation::thread(SIGUSR1),
             Generation::thread(SIGUSR1),
         ],

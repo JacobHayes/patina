@@ -3,7 +3,6 @@ pub mod basic;
 pub mod block;
 pub mod core_term;
 pub mod default;
-pub mod default_term;
 pub mod eintr;
 pub mod handler_flags;
 pub mod mask;

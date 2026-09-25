@@ -54,7 +54,7 @@ the row; every scenario runs through every vehicle unless noted.
 | row | semantics | kernel | probe |
 |---|---|---|---|
 | `kill(pid, sig)` | `pid > 0` the process (or thread id) named — the guest (pid 2) or the pid namespace's init (pid 1, which takes nothing: no handlers, and the kernel drops what its namespace sends it by default, so the call answers 0); `0` the caller's process group; `-1` every process but init and the caller, of which there are none (`ESRCH`); another negative number the group it negates; `sig == 0` probes (delivers nothing); `sig < 0` or `> 64` → `EINVAL`; an absent pid → `ESRCH`. A signal to self is delivered before `kill` returns (the pending signal is handled on the return to user mode) with `si_code = SI_USER`, `si_pid`/`si_uid` the sender's (the guest's pid 2, uid 1000). | `kill_something_info`, `group_send_sig_info`, `__send_signal_locked` | `signal/basic`, `proc/ids` |
-| `tkill(tid, sig)`, `tgkill(tgid, tid, sig)` | thread-directed: queued to THAT thread's private pending set and handled on that thread; to self, before the call returns, `si_code = SI_TKILL`; `tid <= 0` (`tgkill`: or `tgid <= 0`) → `EINVAL`; no such thread, or a thread outside `tgid` → `ESRCH`; a dead tid → `ESRCH`. | `do_tkill`, `do_send_specific` | `signal/basic`, `thread/kill` |
+| `tkill(tid, sig)`, `tgkill(tgid, tid, sig)` | thread-directed: queued to THAT thread's private pending set and handled on that thread; to self, before the call returns, `si_code = SI_TKILL`; `tid <= 0` (`tgkill`: or `tgid <= 0`) → `EINVAL`; no such thread, or a thread outside `tgid` → `ESRCH`; a dead tid → `ESRCH`. | `do_tkill`, `do_send_specific` | `signal/basic` |
 | `rt_sigqueueinfo(pid, sig, info)`, `rt_tgsigqueueinfo(tgid, tid, sig, info)` | queue `info` (SI_QUEUE with `si_value`); a nonnegative `si_code` (or `SI_TKILL`) is refused with `EPERM` ONLY when the target is another process — to the caller's own thread group it is accepted; `sig` out of range → `EINVAL`; absent pid/tid → `ESRCH`. `si_pid`/`si_uid` are whatever the sender wrote (glibc's `sigqueue` fills its own). | `do_rt_sigqueueinfo`, `do_rt_tgsigqueueinfo` (`task_pid_vnr(current) != pid` / `task_tgid_vnr(current) != tgid`) | `signal/queue`, `signal/wait` |
 | SIGPIPE from a write | `write` to a pipe with no readers: `send_sig(SIGPIPE, current)` then `-EPIPE`, so a handler runs before the write returns `EPIPE`; a stream-socket send to a closed peer likewise unless `MSG_NOSIGNAL`; `SIG_IGN` leaves a bare `EPIPE`; `SIG_DFL` ends the process by SIGPIPE. | `pipe_write` (fs/pipe.c), `unix_stream_sendmsg` (net/unix/af_unix.c) | `signal/pipe_term` |
 | queueing | a realtime signal (34..64) queues every instance FIFO with its payload; a standard signal coalesces to one pending instance while already pending (`legacy_queue`); a `SIG_IGN`/default-ignore signal that is not blocked is dropped at generation (`sig_ignored`), but a BLOCKED one is queued (so `sigwait`/signalfd can take it). | `__send_signal_locked`, `legacy_queue`, `sig_ignored` | `signal/queue` |
@@ -99,7 +99,7 @@ return code decides:
 
 | class | signals | virtual kernel | probe |
 |---|---|---|---|
-| Term | SIGHUP SIGINT SIGKILL SIGPIPE SIGALRM SIGTERM SIGUSR1 SIGUSR2 SIGPROF SIGVTALRM SIGSTKFLT SIGIO SIGPWR, realtime | the process ends BY THAT SIGNAL (`waitpid` reports `WTERMSIG`), after the run is finalized (§2.6); no core flag | `signal/default_term`, `signal/handler_flags`, `signal/pipe_term` |
+| Term | SIGHUP SIGINT SIGKILL SIGPIPE SIGALRM SIGTERM SIGUSR1 SIGUSR2 SIGPROF SIGVTALRM SIGSTKFLT SIGIO SIGPWR, realtime | the process ends BY THAT SIGNAL (`waitpid` reports `WTERMSIG`), after the run is finalized (§2.6); no core flag | `signal/handler_flags`, `signal/pipe_term` |
 | Core | SIGQUIT SIGILL SIGABRT SIGFPE SIGSEGV SIGBUS SIGSYS SIGTRAP SIGXCPU SIGXFSZ | ends by that signal; the wait status's core flag is set when the kernel dumped (`do_coredump` → `group_exit_code |= 0x80`) — what the host's core sink does (this host: an apport pipe pattern, which dumps regardless of `RLIMIT_CORE`); the virtual kernel dies through the real signal so the same host answers the same | `signal/core_term` |
 | Ign | SIGCHLD SIGURG SIGWINCH | dropped at generation unless blocked (§1.1) | — (state only) |
 | Cont | SIGCONT | nothing is stopped: dropped | — |
@@ -116,7 +116,7 @@ return code decides:
 | `prctl` | `PR_SET_NAME` stores 15 bytes + NUL (`PR_GET_NAME` reads them back); `PR_SET_PDEATHSIG` takes a signal number (0 clears; `> 64` → `EINVAL`), `PR_GET_PDEATHSIG` writes it (`EFAULT` for a bad pointer); `PR_SET_DUMPABLE` accepts 0 or 1 only (2 → `EINVAL`), `PR_GET_DUMPABLE` starts at 1; `PR_SET_NO_NEW_PRIVS` accepts exactly `(1, 0, 0, 0)` (`0` → `EINVAL`, a nonzero trailing argument → `EINVAL`) and is sticky; `PR_SET_TIMERSLACK` with 0 restores the 50 000 ns default, `PR_GET_TIMERSLACK` returns the current value; an unknown option → `EINVAL` (not `ENOSYS`) | `sys_prctl` (kernel/sys.c) | `proc/prctl` |
 | removed numbers | `_sysctl`, `nfsservctl`, `vserver`, `security`, `tuxcall`, `afs_syscall`, `getpmsg`, `putpmsg`, `epoll_ctl_old`, `epoll_wait_old`, `lookup_dcookie`, `create_module`, `query_module`, `get_kernel_syms`, `uselib`: `ENOSYS` (the table lists them without an implementation). Registry disposition: `SoftDeny(ENOSYS)` — the parent arc's §2.4 class for removed numbers; `Absent` is reserved by the registry's own rule test for numbers newer than the virtual ABI | `sys_ni_syscall` | `proc/absent` |
 | `getpgid`/`getsid`/`kill(0|-1, 0)`/`tgkill(pid, pid, 0)` | the one virtual process is its own group leader and session leader (pgid = sid = 1); the probes succeed | — | `proc/ids` |
-| `fork`/`clone`/`clone3`/`execve`/`execveat` | process-lifecycle traps BY DESIGN ([syscall-conformance.md](syscall-conformance.md) §7): a named abort with the pinned diagnostic; the fork-based child oracles (`signal/default` through glibc's `fork()`, libc vehicle only; `proc/traps` through the row) keep running natively, are declared `by design:` aborts at the fork's event, and the same facts are pinned in-process by `signal/default_term`, `signal/core_term`, `signal/pipe_term`, `signal/handler_flags`, `thread/main_exit`, `thread/tid_clear` | — | those two (prefix + pinned abort) |
+| `fork`/`clone`/`clone3`/`execve`/`execveat` | process-lifecycle traps BY DESIGN ([syscall-conformance.md](syscall-conformance.md) §7): a named abort with the pinned diagnostic; the fork-based child oracles (`signal/default` through glibc's `fork()`, libc vehicle only; `proc/traps` through the row) keep running natively, are declared `by design:` aborts at the fork's event, and the same facts are pinned in-process by `signal/core_term`, `signal/pipe_term`, `signal/handler_flags`, `thread/main_exit`, `thread/tid_clear` | — | those two (prefix + pinned abort) |
 | `pthread_kill(t, sig)` (libc only) | glibc: `tgkill` on the target's tid; returns the error number (`EINVAL` past SIGRTMAX); signal 0 probes | — | `thread/pthread_kill` (libc vehicle) |
 
 ## 2. The design, at file:line of this tree
@@ -267,7 +267,7 @@ Obligations:
 | `patina-dst-native-shim` | `generation_never_takes_the_runtime_lock_twice` | Generation reached from a path that holds the ThreadRuntime lock (the broken-pipe arm of pipe_write) trips the lock-order assertion; every shipped generation path runs with the lock released. |
 | `patina-dst-native-shim` | `reserved_signals_are_stripped_from_every_host_mask` | Every mask the shim installs on the host — at delivery, at spawn, from rt_sigprocmask/rt_sigsuspend on both doors — has SIGSYS (and SIGSEGV while the TSC trap is armed) removed, and a guest registration for them is the named fatal on both doors. |
 
-- Recorded traces (format ≥ 9; `signal_generated` ops, in order): `signal/basic` [10:p 10:t 10:t]; `signal/raw_action` [10:p 10:p]; `signal/queue` [34:p 34:p 34:t 10:p 10:p 35:p 34:p 34:p 12:p 10:p 34:p 34:t]; `signal/altstack` [10:p]; `signal/per_thread` [10:p 10:t].
+- Recorded traces (format ≥ 9; `signal_generated` ops, in order): `signal/basic` [10:p 10:t 10:t 10:t 10:t]; `signal/raw_action` [10:p 10:p]; `signal/queue` [34:p 34:p 34:t 10:p 10:p 35:p 34:p 34:p 12:p 10:p 34:p 34:t]; `signal/altstack` [10:p]; `signal/per_thread` [10:p 10:t].
 
 Traps: a process-global C model — `static` mask/pending/altstack objects in `c/posix/signal_process.c` with a host `rt_tgsigqueueinfo` fired at GENERATION, which lets the host kernel be the pending queue and replays without any trace op: every behaviour-only single-threaded probe passes it; delivering directly from the C `kill` interposer; a global `SIGNAL_STATE`; `tgkill` with the host pid leaking into `si_pid`; forwarding `rt_sigqueueinfo`/`rt_sigpending` to the host (the round-4 leak legs); an allowlist by signal name or uid in a leak filter.
 
@@ -303,7 +303,7 @@ Traps: returning `EINTR`/`EAGAIN` immediately from a wait (the rejected round's 
 
 Scope: §2.6 on both doors; `guest_exit.core` in the `cargo-patina` envelope (`GuestExit` gains `core` from the wait status; the harness reads it); SIGPIPE from `pipe_write` and the socketpair send path with `MSG_NOSIGNAL` honoured and `SIG_IGN` → bare `EPIPE`; Stop-class named trap; `abort()` finalizes then aborts through the host alias.
 
-Probes: `signal/default_term`, `signal/core_term`, `signal/pipe_term`, `signal/handler_flags` — through every vehicle, including the DIRECT run whose `waitpid` must read the native signal and core flag; `signal/default` (libc vehicle only) stays a by-design abort with the pinned C diagnostic.
+Probes: `signal/core_term`, `signal/pipe_term`, `signal/handler_flags` — through every vehicle, including the DIRECT run whose `waitpid` must read the native signal and core flag; `signal/default` (libc vehicle only) stays a by-design abort with the pinned C diagnostic.
 
 Obligations:
 
@@ -315,7 +315,7 @@ Obligations:
 | `patina-dst-native-shim` | `msg_nosignal_suppresses_sigpipe` | A socketpair send to a closed peer with MSG_NOSIGNAL answers EPIPE and records no generation; without the flag it records one. |
 | `patina-dst-native-shim` | `sigstop_to_self_is_a_named_trap` | A default-action Stop-class signal reaching delivery is the named fatal trap; SIGTSTP/SIGTTIN/SIGTTOU with a handler run the handler. |
 
-- Recorded traces (format ≥ 9; `signal_generated` ops, in order): `signal/default_term` [15:p]; `signal/core_term` [6:p]; `signal/handler_flags` [10:p 10:p 10:p 10:p 12:p 12:p]; `signal/pipe_term` [13:t 13:t 13:t 13:t].
+- Recorded traces (format ≥ 9; `signal_generated` ops, in order): `signal/core_term` [6:p]; `signal/handler_flags` [10:p 10:p 10:p 10:p 12:p 12:p]; `signal/pipe_term` [13:t 13:t 13:t 13:t].
 
 Traps: `exit(128 + sig)` instead of dying by the signal, with or without a supervisor that translates it back (the direct run reads `exited 143`); a `core` the envelope hardcodes per signal; copying the expected termination into the observed stream (the frozen harness refuses; the gate's selftest plants it); terminating before the trace is finalized (no complete trace → no replay leg → the trace obligation is unmet).
 
@@ -323,7 +323,7 @@ Traps: `exit(128 + sig)` instead of dying by the signal, with or without a super
 
 Scope: thread-directed delivery to the named task with the handler on that task's host thread; delivery on the target's unmask; `pthread_kill` (and the other wrappers of §2.8) as strong defs with honest symbol rows; `set_tid_address` per task with the exit-time clear + futex wake; per-thread raw `exit` and main-thread exit while a worker runs; `exit_group` without atexit.
 
-Probes: `thread/kill`, `thread/pthread_kill`, `thread/tid_clear`, `thread/main_exit`.
+Probes: `thread/pthread_kill`, `thread/tid_clear`, `thread/main_exit`.
 
 Obligations:
 
@@ -334,7 +334,7 @@ Obligations:
 | `patina-dst-native-shim` | `set_tid_address_is_cleared_and_woken_at_thread_finish` | set_tid_address returns the managed tid and records the word per task; thread_finish writes 0 to it and futex-wakes its waiters. |
 | `patina-dst-native-shim` | `raw_exit_from_main_keeps_the_process_alive` | A raw exit from the main task completes that task only; the process ends with the status of a later exit_group from another task, and a raw exit_group runs no atexit handlers. |
 
-- Recorded traces (format ≥ 9; `signal_generated` ops, in order): `thread/kill` [10:t 10:t 10:t]; `thread/pthread_kill` [10:t 10:t], libc only; `thread/tid_clear` [(none)]; `thread/main_exit` [(none)].
+- Recorded traces (format ≥ 9; `signal_generated` ops, in order): `thread/pthread_kill` [10:t 10:t], libc only; `thread/tid_clear` [(none)]; `thread/main_exit` [(none)].
 
 Traps: validating the tid and then delivering on the caller (defect 4 of the review); `pthread_exit`/raw `exit` folded onto process exit; handing the guest's `set_tid_address` word to the host kernel.
 

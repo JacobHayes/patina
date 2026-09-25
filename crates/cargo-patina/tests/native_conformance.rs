@@ -1848,11 +1848,6 @@ fn signal_default() {
 }
 
 #[test]
-fn signal_default_term() {
-    conform("signal/default_term");
-}
-
-#[test]
 fn signal_eintr() {
     conform("signal/eintr");
 }
@@ -1982,11 +1977,6 @@ fn sys_uname() {
 #[test]
 fn thread_futex() {
     conform("thread/futex");
-}
-
-#[test]
-fn thread_kill() {
-    conform("thread/kill");
 }
 
 #[test]
