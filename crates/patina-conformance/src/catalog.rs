@@ -443,7 +443,6 @@ pub const SCENARIOS: &[&Scenario] = &[
     &fs::size::SCENARIO,
     &fs::splice::SCENARIO,
     &fs::statfs::SCENARIO,
-    &fs::statfs_fault::SCENARIO,
     &fs::statvfs::SCENARIO,
     &fs::sync::SCENARIO,
     &fs::times::SCENARIO,

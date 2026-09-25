@@ -9,9 +9,11 @@
 //! f_flags carries ST_VALID (fs/statfs.c calculate_f_flags) and not
 //! ST_RDONLY; a pipe's descriptor reports PIPEFS_MAGIC and an eventfd's
 //! ANON_INODE_FS_MAGIC; ENOENT, ENOTDIR, ENAMETOOLONG, EBADF for a closed
-//! descriptor (a NULL buffer is fs/statfs_fault). ustat(2) finds the run directory's
-//! device (its superblock's s_dev), is EINVAL for a device with no mounted
-//! filesystem — judged before the buffer — and EFAULT for a NULL buffer.
+//! descriptor. ustat(2) finds the run directory's device (its superblock's
+//! s_dev), is EINVAL for a device with no mounted filesystem — judged before
+//! the buffer — and EFAULT for a NULL buffer. A NULL buffer is EFAULT for
+//! statfs and fstatfs too, after ENOENT for a missing path and EBADF for a
+//! closed descriptor.
 
 use crate::catalog::{DEFAULTS, Scenario};
 
@@ -174,6 +176,27 @@ pub fn run(p: &Probe) {
             p.ustat(NO_DEVICE, "none", true) == neg(EINVAL),
         );
     }
+
+    // ---- a NULL buffer ------------------------------------------------------
+    // The kernel fills the result with copy_to_user and answers EFAULT
+    // (fs/statfs.c do_statfs_native), whatever the path or descriptor names;
+    // a missing path and a closed descriptor are judged first.
+    p.check(
+        "statfs into a NULL buffer is EFAULT",
+        p.statfs(&root, true).0 == neg(EFAULT),
+    );
+    p.check(
+        "a missing path is ENOENT before the buffer",
+        p.statfs(&format!("{root}/missing"), true).0 == neg(ENOENT),
+    );
+    p.check(
+        "fstatfs into a NULL buffer is EFAULT",
+        p.fstatfs(dirfd, true).0 == neg(EFAULT),
+    );
+    p.check(
+        "a closed descriptor is EBADF before the buffer",
+        p.fstatfs(4000, true).0 == neg(EBADF),
+    );
 
     for f in [fd, dirfd, location, pipe[0], pipe[1], event] {
         p.close(f);

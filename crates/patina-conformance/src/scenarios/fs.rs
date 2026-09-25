@@ -32,7 +32,6 @@ pub mod renameat2;
 pub mod size;
 pub mod splice;
 pub mod statfs;
-pub mod statfs_fault;
 pub mod statvfs;
 pub mod sync;
 pub mod times;

@@ -1483,11 +1483,6 @@ fn fs_statfs() {
 }
 
 #[test]
-fn fs_statfs_fault() {
-    conform("fs/statfs_fault");
-}
-
-#[test]
 fn fs_statvfs() {
     conform("fs/statvfs");
 }
