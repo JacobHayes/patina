@@ -90,8 +90,15 @@ jobs:
       # scenarios (native_conformance) included; x86_64 also runs their raw
       # vehicle under SUD. MSRV is the full Rust 1.86 final-gate tier (the same
       # battery `mise run msrv` runs locally, conformance included). Nested
-      # Patina shim caches are compiler-identity keyed.
-      - run: cargo nextest run --profile ci --workspace --locked --partition hash:${{ matrix.shard }}/2
+      # Patina shim caches are compiler-identity keyed. Off the pinned kernel
+      # the conformance comparison only reports (to this step's job summary),
+      # and nextest hides a passing test's stderr, so the summary is repeated
+      # in the log.
+      - run: |
+          status=0
+          cargo nextest run --profile ci --workspace --locked --partition hash:${{ matrix.shard }}/2 || status=$?
+          if [ -s "$GITHUB_STEP_SUMMARY" ]; then cat "$GITHUB_STEP_SUMMARY"; fi
+          exit "$status"
       - if: matrix.shard == 1
         run: cargo test --workspace --doc --locked
       - if: matrix.shard == 1 && matrix.toolchain == 'msrv'
