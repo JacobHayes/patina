@@ -177,32 +177,15 @@ pub const SCENARIO: Scenario = Scenario {
         "pivot_root",
     ],
     needs: &[Need::Unprivileged, Need::NoControllingTerminal],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: Vehicle::KERNEL,
-            what: "acct is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)), as are vhangup, swapon, swapoff, reboot, kexec_load, kexec_file_load, init_module, finit_module, delete_module and pivot_root, where the unprivileged caller is refused by the capability check before any argument (swapon's flags aside)",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Signal(SIGABRT),
-                diagnostic: TRAP,
-            },
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Privileged),
+        vehicles: &[Vehicle::Libc],
+        what: "the shim defines none of glibc's administration wrappers (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds none (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
+        failure: Failure::Stops {
+            events: 0,
+            ending: Ending::Exit(101),
+            diagnostic: "sys/admin: cannot continue: glibc's acct resolves",
         },
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim defines none of glibc's administration wrappers (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds none (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-            failure: Failure::Stops {
-                events: 0,
-                ending: Ending::Exit(101),
-                diagnostic: "sys/admin: cannot continue: glibc's acct resolves",
-            },
-        },
-    ],
+    }],
     ..DEFAULTS
 };
-
-#[cfg(target_arch = "x86_64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall acct (nr 163, class privileged";
-#[cfg(target_arch = "aarch64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall acct (nr 89, class privileged";

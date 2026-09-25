@@ -1012,6 +1012,42 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_mount_setattr, |nr, a| {
         privileged::answer(nr, privileged::mount_setattr, a)
     }),
+    (Syscall::N_acct, |nr, a| {
+        privileged::answer(nr, privileged::acct, a)
+    }),
+    (Syscall::N_vhangup, |nr, a| {
+        privileged::answer(nr, privileged::vhangup, a)
+    }),
+    (Syscall::N_swapon, |nr, a| {
+        privileged::answer(nr, privileged::swapon, a)
+    }),
+    (Syscall::N_swapoff, |nr, a| {
+        privileged::answer(nr, privileged::swapoff, a)
+    }),
+    (Syscall::N_reboot, |nr, a| {
+        privileged::answer(nr, privileged::boot, a)
+    }),
+    (Syscall::N_kexec_load, |nr, a| {
+        privileged::answer(nr, privileged::boot, a)
+    }),
+    (Syscall::N_kexec_file_load, |nr, a| {
+        privileged::answer(nr, privileged::boot, a)
+    }),
+    (Syscall::N_init_module, |nr, a| {
+        privileged::answer(nr, privileged::module, a)
+    }),
+    (Syscall::N_finit_module, |nr, a| {
+        privileged::answer(nr, privileged::module, a)
+    }),
+    (Syscall::N_delete_module, |nr, a| {
+        privileged::answer(nr, privileged::module, a)
+    }),
+    (Syscall::N_quotactl, |nr, a| {
+        privileged::answer(nr, privileged::quotactl, a)
+    }),
+    (Syscall::N_quotactl_fd, |nr, a| {
+        privileged::answer(nr, privileged::quotactl_fd, a)
+    }),
     (Syscall::N_uname, |_, a| unsafe {
         crate::identity::uname(a[0] as *mut _, crate::thread::sched::persona())
     }),

@@ -179,7 +179,7 @@ mod linux {
     fn unmapped_raw_syscall_aborts_with_named_diagnostic() {
         let g = Guest::assert_build("raw_unmapped_probe.rs");
         if kernel_supports(KernelFeature::Sud) {
-            let out = g.assert_run_refused(1, &["SUD trapped unsupported syscall"]);
+            let out = g.assert_run_refused(1, &["SUD trapped syscall number 4095"]);
             assert!(!text(&out.stdout).contains("UNMAPPED_RET="));
         } else {
             g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);

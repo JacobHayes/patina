@@ -1,9 +1,8 @@
 use std::arch::asm;
 fn main() {
-    #[cfg(target_arch = "x86_64")]
-    let nr: i64 = 169; // reboot
-    #[cfg(target_arch = "aarch64")]
-    let nr: i64 = 142; // reboot
+    // A number past every architecture's syscall table: no registry row can
+    // name it, so no model can ever answer it.
+    let nr: i64 = 4095;
     let ret: i64;
     unsafe {
         #[cfg(target_arch = "x86_64")]

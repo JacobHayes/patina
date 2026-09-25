@@ -24,7 +24,9 @@ use crate::registry::Syscall;
 use linux_raw_sys::errno;
 use std::ffi::c_int;
 
+mod admin;
 mod mount;
+pub(super) use admin::*;
 pub(super) use mount::*;
 
 /// What a privileged row answers: the raw return value (`-errno` for a
@@ -137,13 +139,16 @@ mod tests {
 
     /// Every case, one list per group of rows.
     fn cases() -> Vec<Case> {
-        [uts_cases(), mount_cases()].into_iter().flatten().collect()
+        [uts_cases(), mount_cases(), admin_cases()]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     /// The rows that declare a capability no caller of the model reaches:
     /// the kernel checks it only past a refusal every descriptor or device
     /// of the virtual machine gets.
-    const UNREACHABLE: &[Syscall] = &[];
+    const UNREACHABLE: &[Syscall] = &[Syscall::N_quotactl, Syscall::N_quotactl_fd];
 
     /// The row's answer to `case` for a credential holding `held`.
     fn outcome(case: &Case, held: u64) -> Answer {
@@ -282,5 +287,42 @@ mod tests {
                 refusal: errno::EPERM,
             },
         ]
+    }
+
+    /// The administration rows, each asked with every argument it checks
+    /// after its capability invalid.
+    fn admin_cases() -> Vec<Case> {
+        let first = |row, check| Case {
+            row,
+            check,
+            args: [u64::MAX; 6],
+            refusal: errno::EPERM,
+        };
+        vec![
+            first(Syscall::N_acct, acct),
+            first(Syscall::N_vhangup, vhangup),
+            first(Syscall::N_swapoff, swapoff),
+            first(Syscall::N_reboot, boot),
+            first(Syscall::N_kexec_load, boot),
+            first(Syscall::N_kexec_file_load, boot),
+            first(Syscall::N_init_module, module),
+            first(Syscall::N_finit_module, module),
+            first(Syscall::N_delete_module, module),
+            Case {
+                row: Syscall::N_swapon,
+                check: swapon,
+                args: [u64::MAX, 0, 0, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+        ]
+    }
+
+    /// swapon's flags come first, for every credential.
+    #[test]
+    fn swapon_checks_its_flags_before_the_capability() {
+        let unknown_flag = [0, 1 << 30, 0, 0, 0, 0];
+        for held in [0, Capability::ALL] {
+            assert_eq!(swapon(&holding(held), &unknown_flag), refuse(errno::EINVAL));
+        }
     }
 }

@@ -1135,10 +1135,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_vhangup => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_TTY_CONFIG` (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysTtyConfig]),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_modify_ldt => r(
         id,
@@ -1209,10 +1210,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_acct => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_PACCT` before the path is read (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysPacct]),
     Syscall::N_settimeofday => r(
         id,
         Family::Time,
@@ -1239,24 +1241,27 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_swapon => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: a flag outside `SWAP_FLAGS_VALID` (`EINVAL`), then `CAP_SYS_ADMIN` before the path is read (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_swapoff => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_ADMIN` before the path is read (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_reboot => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_BOOT` in the pid namespace's owner before the magic numbers and command (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysBoot]),
     Syscall::N_sethostname => r(
         id,
         Family::Privileged,
@@ -1300,17 +1305,19 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_init_module => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_MODULE` (`may_init_module`) before the image is read (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysModule]),
     Syscall::N_delete_module => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_MODULE` before the name is read (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysModule]),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_get_kernel_syms => r(
         id,
@@ -1330,10 +1337,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_quotactl => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "A type past `MAXQUOTAS` (`EINVAL`); no device: `Q_SYNC` 0, else `ENODEV`; then the device lookup (`ENOENT`, …; `ENOTBLK`: the virtual machine has no block device), all before `CAP_SYS_ADMIN`, which no command reaches.",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_nfsservctl => r(
         id,
         Family::Removed,
@@ -1813,10 +1821,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_kexec_load => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_BOOT` (`kexec_load_check`) before the flags and segments (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysBoot]),
     Syscall::N_waitid => r(
         id,
         Family::Process,
@@ -2299,10 +2308,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_finit_module => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_MODULE` (`may_init_module`) before the flags and descriptor (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysModule]),
     Syscall::N_sched_setattr => r(
         id,
         Family::Sched,
@@ -2349,10 +2359,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_kexec_file_load => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: `CAP_SYS_BOOT` before the flags and descriptors (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysBoot]),
     Syscall::N_bpf => r(
         id,
         Family::Privileged,
@@ -2613,10 +2624,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_quotactl_fd => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "A descriptor not open (`EBADF`), a type past `MAXQUOTAS` (`EINVAL`), then no quota operations on any virtual filesystem (`ENOSYS`), all before `CAP_SYS_ADMIN`, which no command reaches.",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_landlock_create_ruleset => r(
         id,
         Family::Privileged,
