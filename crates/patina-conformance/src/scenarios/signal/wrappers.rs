@@ -23,15 +23,16 @@
 //!   in its handler, but without `SA_RESTART` once `siginterrupt(sig, 1)`
 //!   has named the signal (signal/sigintr.c `_sigintr`);
 //! * the reserved signals SIGCANCEL (32) and SIGSETXID (33): `sigprocmask`
-//!   never blocks them, and `sigaction` and `signal` refuse them (`EINVAL`);
+//!   never blocks them, and `sigaction`, `signal`, `siginterrupt` (through
+//!   `__sigaction`) and `raise` (through `__pthread_kill`) refuse them
+//!   (`EINVAL`);
 //! * `killpg(0, sig)` signals the caller's own process group (`SI_USER`),
 //!   and a negative group is `EINVAL`.
 //!
 //! A libc-only subject, so the libc vehicle alone. The native run is its
 //! own process group (the harness spawns it so), which `killpg` requires.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Generation, Scenario, Status, TraceFacts};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Generation, Scenario, TraceFacts};
 use crate::observe::{Id, Norm};
 use crate::probe::{Probe, neg};
 use crate::vehicle::{Vehicle, fold_errno};
@@ -260,6 +261,17 @@ fn reserved(p: &Probe) {
         // SAFETY: restores the default disposition (unrecorded cleanup).
         unsafe { signal(33, SIG_DFL) };
     }
+    // SAFETY: changes at most signal 32's restart flag.
+    let interrupted = fold_errno(unsafe { siginterrupt(32, 1) } as i64);
+    p.rec
+        .event("siginterrupt", interrupted)
+        .arg("sig", 32)
+        .emit();
+    p.check(
+        "siginterrupt of signal 32 is EINVAL",
+        interrupted == neg(EINVAL),
+    );
+    p.check("raise of signal 33 is EINVAL", raise_(p, 33) == neg(EINVAL));
 }
 
 pub fn run(p: &Probe) {
@@ -464,71 +476,6 @@ pub const SCENARIO: Scenario = Scenario {
         "sigsuspend",
         "siginterrupt",
         "killpg",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim's sigtimedwait and sigwaitinfo (c/posix/signal_process.c, two entry points over patina_signal_wait) hand back the kernel's siginfo unfolded: a raised signal dequeues as SI_TKILL, where glibc's wrappers rewrite SI_TKILL to SI_USER",
-            failure: Failure::Differs(&[
-                Difference::field(20, "sigtimedwait", "fields.si_code", Observed::Int(-6)),
-                Difference::check(21, "sigtimedwait dequeues it, SI_TKILL folded into SI_USER"),
-                Difference::field(26, "sigwaitinfo", "fields.si_code", Observed::Int(-6)),
-                Difference::check(27, "sigwaitinfo dequeues it, SI_TKILL folded into SI_USER"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim's sigqueue (c/posix/signal_process.c) fills a fixed sender, si_pid 1 (the virtual init, the caller's parent: the pid getppid answered) and si_uid 1000 (the virtual uid, so only the pid differs), where glibc's names the caller: getpid() and getuid()",
-            failure: Failure::Differs(&[Difference::field(
-                30,
-                "sigwaitinfo",
-                "fields.si_pid",
-                Observed::Str("pid@2"),
-            )]),
-        },
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim's signal (c/posix/signal_process.c) installs with an empty sa_mask, where glibc's (signal/signal.c __bsd_signal) blocks the signal itself in its handler",
-            failure: Failure::Differs(&[
-                Difference::field(48, "signal", "fields.mask_self", Observed::Bool(false)),
-                Difference::check(
-                    49,
-                    "signal installs with SA_RESTART, blocking the signal in its handler",
-                ),
-                Difference::field(50, "signal", "fields.mask_self", Observed::Bool(false)),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim's siginterrupt keeps no record of the signals it named (glibc's _sigintr set) and its signal always sets SA_RESTART (c/posix/signal_process.c), so signal after siginterrupt(sig, 1) still installs with SA_RESTART",
-            failure: Failure::Differs(&[
-                Difference::field(50, "signal", "fields.restart", Observed::Bool(true)),
-                Difference::check(
-                    51,
-                    "after siginterrupt(sig, 1), signal installs without SA_RESTART",
-                ),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim does not reserve glibc's internal signals SIGCANCEL (32) and SIGSETXID (33): its sigprocmask strips only the uncatchable signals and SIGSYS (thread/signals.rs host_mask), and its sigaction and signal accept any signal up to SIGRTMAX (patina_signal_action), where glibc never blocks them and refuses to install for them (EINVAL)",
-            failure: Failure::Differs(&[
-                Difference::field(58, "sigprocmask", "fields.blocked_32", Observed::Bool(true)),
-                Difference::field(58, "sigprocmask", "fields.blocked_33", Observed::Bool(true)),
-                Difference::check(59, "sigprocmask leaves the reserved signals unblocked"),
-                Difference::field(60, "sigaction", "ret", Observed::Int(0)),
-                Difference::field(60, "sigaction", "errno", Observed::Null),
-                Difference::check(61, "sigaction of signal 32 is EINVAL"),
-                Difference::field(62, "signal", "ret", Observed::Int(0)),
-                Difference::field(62, "signal", "errno", Observed::Null),
-                Difference::check(63, "signal of signal 33 is EINVAL"),
-            ]),
-        },
     ],
     trace: Some(TraceFacts {
         generations: &[

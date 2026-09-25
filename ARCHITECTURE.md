@@ -134,6 +134,14 @@ own panic handling.
 A default-fatal batch releases only its fatal signal, never another queued handler
 after finalization.
 
+The libc signal symbols add glibc's wrapper semantics over the rows they share
+with the raw door. `sigtimedwait`/`sigwaitinfo` report a signal `raise` sent
+(`SI_TKILL`) as `SI_USER`; `sigqueue` names the caller as its sender; `signal`
+blocks the signal in its handler and sets `SA_RESTART` unless `siginterrupt(sig, 1)`
+named the signal; and glibc's reserved signals 32 and 33 are never blocked by
+`sigprocmask`/`pthread_sigmask` and are `EINVAL` to `sigaction`, `signal`,
+`siginterrupt`, `raise` and `pthread_kill`. The raw rows keep the kernel's answers.
+
 Thread-directed generation queues privately and delivers on the named task's
 host thread. `pthread_kill` resolves the managed pthread handle to that task.
 `set_tid_address` stores a guest word per task, separately from glibc's host

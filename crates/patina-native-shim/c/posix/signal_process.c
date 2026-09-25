@@ -53,8 +53,36 @@ _Noreturn void exit(int status) {
 #endif
 
 #ifdef __linux__
+/* glibc's reserved signals, SIGCANCEL (32) and SIGSETXID (33)
+ * (nptl/pthreadP.h, internal-signals.h), `patina_signal_reserved`: its libc
+ * face never installs an action for them, blocks them or sends them, whatever
+ * the caller asks. The raw rows keep the kernel's answers. */
+
+/* A copy of `set` with the reserved signals cleared (glibc's
+ * `__clear_internal_signals`), or `set` itself when it holds neither. */
+static const sigset_t *patina_clear_internal_signals(const sigset_t *set, sigset_t *copy) {
+    const uint64_t internal = (UINT64_C(1) << 31) | (UINT64_C(1) << 32);
+    uint64_t word;
+    if (set == NULL) return NULL;
+    memcpy(&word, set, sizeof word);
+    if ((word & internal) == 0) return set;
+    memcpy(copy, set, sizeof *copy);
+    word &= ~internal;
+    memcpy(copy, &word, sizeof word);
+    return copy;
+}
+
+/* glibc's `_sigintr` (signal/siginterrupt.c): the signals `siginterrupt(sig,
+ * 1)` last named, which `signal` then installs without SA_RESTART. Bit
+ * `sig - 1`. */
+static uint64_t patina_sigintr;
+
 int sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
     struct patina_signal_action prior, next;
+    if (patina_signal_reserved(sig)) {
+        errno = EINVAL;
+        return -1;
+    }
     if (act != NULL) {
         next.handler = (uintptr_t)act->sa_handler;
         next.flags = (uint32_t)act->sa_flags;
@@ -71,20 +99,35 @@ int sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
     }
     return signal_result(rc);
 }
+/* glibc's `signal` (signal/signal.c `__bsd_signal`): the handler runs with
+ * its own signal blocked, restarting interrupted calls unless `siginterrupt`
+ * named the signal. */
 void (*signal(int sig, void (*handler)(int)))(int) {
+    if (handler == SIG_ERR || sig < 1 || sig > 64 || patina_signal_reserved(sig)) {
+        errno = EINVAL;
+        return SIG_ERR;
+    }
+    uint64_t bit = UINT64_C(1) << (sig - 1);
     struct patina_signal_action next = {
-        .handler = (uintptr_t)handler, .flags = SA_RESTART
+        .handler = (uintptr_t)handler,
+        .flags = (patina_sigintr & bit) != 0 ? 0 : SA_RESTART,
     }, old;
+    memset(&next.mask, 0, sizeof next.mask);
+    memcpy(&next.mask, &bit, sizeof bit);
     if (signal_result(patina_signal_action_libc(sig, &next, &old)) < 0)
         return SIG_ERR;
     return (void (*)(int))old.handler;
 }
 int pthread_sigmask(int how, const sigset_t *set, sigset_t *old) {
+    sigset_t copy;
+    set = patina_clear_internal_signals(set, &copy);
     int64_t rc = patina_signal_mask(how, (const uint64_t *)set, (uint64_t *)old, sizeof(uint64_t));
     patina_signal_deliver();
     return (int)-rc;
 }
 int sigprocmask(int how, const sigset_t *set, sigset_t *old) {
+    sigset_t copy;
+    set = patina_clear_internal_signals(set, &copy);
     return signal_result(patina_signal_mask(how, (const uint64_t *)set, (uint64_t *)old, sizeof(uint64_t)));
 }
 int sigpending(sigset_t *set) {
@@ -102,13 +145,21 @@ int sigsuspend(const sigset_t *set) {
     return signal_result(patina_signal_wait((const uint64_t *)set, NULL, NULL,
         sizeof(uint64_t), PATINA_SIGNAL_SUSPEND));
 }
-int sigtimedwait(const sigset_t *set, siginfo_t *info, const struct timespec *timeout) {
-    return signal_result(patina_signal_wait((const uint64_t *)set, info, timeout,
+/* glibc's `sigtimedwait` (sysdeps/unix/sysv/linux/sigtimedwait.c), which
+ * `sigwaitinfo` calls: a signal `raise` sent (the kernel's SI_TKILL) reads as
+ * sent by `kill`, SI_USER. */
+static int patina_sigtimedwait(const sigset_t *set, siginfo_t *info,
+                               const struct timespec *timeout) {
+    int rc = signal_result(patina_signal_wait((const uint64_t *)set, info, timeout,
         sizeof(uint64_t), PATINA_SIGNAL_DEQUEUE));
+    if (rc > 0 && info != NULL && info->si_code == SI_TKILL) info->si_code = SI_USER;
+    return rc;
+}
+int sigtimedwait(const sigset_t *set, siginfo_t *info, const struct timespec *timeout) {
+    return patina_sigtimedwait(set, info, timeout);
 }
 int sigwaitinfo(const sigset_t *set, siginfo_t *info) {
-    return signal_result(patina_signal_wait((const uint64_t *)set, info, NULL,
-        sizeof(uint64_t), PATINA_SIGNAL_DEQUEUE));
+    return patina_sigtimedwait(set, info, NULL);
 }
 int sigwait(const sigset_t *set, int *sig) {
     int64_t rc;
@@ -125,7 +176,7 @@ int sigqueue(pid_t pid, int sig, const union sigval value) {
     siginfo_t info;
     memset(&info, 0, sizeof info);
     info.si_signo = sig; info.si_code = SI_QUEUE;
-    info.si_pid = 1; info.si_uid = 1000; info.si_value = value;
+    info.si_pid = patina_pid(); info.si_uid = (uid_t)patina_uid(); info.si_value = value;
     return signal_result(patina_sud_dispatch(SYS_rt_sigqueueinfo,
         (uint64_t)pid, (uint64_t)sig, (uintptr_t)&info, 0, 0, 0, 0));
 }
@@ -139,12 +190,25 @@ int killpg(pid_t group, int sig) {
     return signal_result(patina_sud_dispatch(SYS_kill, (uint64_t)(int64_t)-group,
         (uint64_t)sig, 0, 0, 0, 0, 0));
 }
+/* glibc's `siginterrupt`: record the choice for later `signal` calls, and
+ * apply it to the installed action; through `__sigaction`, which refuses the
+ * reserved signals. */
 int siginterrupt(int sig, int interrupt) {
     struct patina_signal_action act;
+    if (patina_signal_reserved(sig)) {
+        errno = EINVAL;
+        return -1;
+    }
     if (signal_result(patina_signal_action_libc(sig, NULL, &act)) < 0)
         return -1;
-    if (interrupt) act.flags &= ~SA_RESTART;
-    else act.flags |= SA_RESTART;
+    uint64_t bit = UINT64_C(1) << (sig - 1);
+    if (interrupt) {
+        patina_sigintr |= bit;
+        act.flags &= ~SA_RESTART;
+    } else {
+        patina_sigintr &= ~bit;
+        act.flags |= SA_RESTART;
+    }
     return signal_result(patina_signal_action_libc(sig, &act, NULL));
 }
 int tgkill(pid_t tgid, pid_t tid, int sig) {
@@ -155,7 +219,13 @@ int tkill(pid_t tid, int sig) {
     return signal_result(patina_sud_dispatch(SYS_tkill, (uint64_t)tid,
         (uint64_t)sig, 0, 0, 0, 0, 0));
 }
+/* glibc's `raise` is `__pthread_kill` of the caller, which refuses the
+ * reserved signals. */
 int raise(int sig) {
+    if (patina_signal_reserved(sig)) {
+        errno = EINVAL;
+        return -1;
+    }
     return signal_result(patina_sud_dispatch(SYS_tgkill, (uint64_t)patina_pid(),
         (uint64_t)patina_thread_id(), (uint64_t)sig, 0, 0, 0, 0));
 }

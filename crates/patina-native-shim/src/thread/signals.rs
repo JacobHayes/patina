@@ -973,10 +973,19 @@ pub extern "C" fn patina_raw_exit(status: i32) -> ! {
     fatal("host exit returned")
 }
 
+/// Whether `sig` is one of glibc's reserved signals, SIGCANCEL and
+/// SIGSETXID (`internal-signals.h`), which its libc face refuses to act on:
+/// the one predicate the Rust and C wrappers share.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_signal_reserved(sig: i32) -> i32 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    i32::from(matches!(sig, GLIBC_SIGCANCEL | GLIBC_SIGSETXID))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_pthread_kill(handle: usize, sig: i32) -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if !(0..=SIGNAL_MAX).contains(&sig) || matches!(sig, GLIBC_SIGCANCEL | GLIBC_SIGSETXID) {
+    if !(0..=SIGNAL_MAX).contains(&sig) || patina_signal_reserved(sig) != 0 {
         return EINVAL;
     }
     activate();

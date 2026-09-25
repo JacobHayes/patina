@@ -675,6 +675,9 @@ enum patina_signal_wait_mode {
 int64_t patina_signal_wait(const uint64_t *set, void *info, const void *timeout,
                           size_t size, enum patina_signal_wait_mode mode);
 int patina_pthread_kill(uintptr_t thread, int sig);
+/* Nonzero for glibc's reserved signals, SIGCANCEL (32) and SIGSETXID (33),
+ * which its libc face refuses (EINVAL) to act on. */
+int patina_signal_reserved(int sig);
 int64_t patina_set_tid_address(int32_t *address);
 _Noreturn void patina_raw_exit(int status);
 _Noreturn void patina_raw_exit_group(int status);
