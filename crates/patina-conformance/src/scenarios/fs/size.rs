@@ -8,24 +8,8 @@ use crate::catalog::{DEFAULTS, Need, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
-use crate::probe::{AT_FDCWD, Probe, StatView, neg};
+use crate::probe::{AT_FDCWD, Probe, neg};
 use libc::*;
-
-fn pause(p: &Probe) {
-    p.nanosleep(0, 20_000_000);
-}
-
-fn fstat(p: &Probe, fd: i32) -> StatView {
-    let (r, st) = p.fstat(fd);
-    p.require("fstat", r == 0 && st.is_some());
-    st.unwrap()
-}
-
-fn size(p: &Probe, path: &str) -> i64 {
-    let (r, st) = p.newfstatat(AT_FDCWD, path, 0);
-    p.require("newfstatat", r == 0 && st.is_some());
-    st.unwrap().size
-}
 
 fn contents(p: &Probe, fd: i32, len: usize) -> Vec<u8> {
     p.lseek(fd, 0, SEEK_SET);
@@ -43,18 +27,18 @@ pub fn run(p: &Probe) {
     let fd = p.openat(AT_FDCWD, &file, O_RDWR | O_CREAT | O_EXCL, 0o644);
     p.require("create f", fd >= 0);
     p.write(fd, b"abcdef");
-    let before = fstat(p, fd);
-    pause(p);
+    let before = p.fstat_or_stop(fd);
+    p.tick();
     p.check("truncate shrinks", p.truncate(&file, 3) == 0);
-    p.check("the size is 3", size(p, &file) == 3);
+    p.check("the size is 3", p.stat_or_stop(&file, 0).size == 3);
     p.check("the bytes are the prefix", contents(p, fd, 8) == b"abc");
-    let shrunk = fstat(p, fd);
+    let shrunk = p.fstat_or_stop(fd);
     p.check(
         "truncate moves mtime and ctime forward",
         shrunk.mtime_ns > before.mtime_ns && shrunk.ctime_ns > before.ctime_ns,
     );
     p.check("truncate grows", p.truncate(&file, 8) == 0);
-    p.check("the size is 8", size(p, &file) == 8);
+    p.check("the size is 8", p.stat_or_stop(&file, 0).size == 8);
     p.check(
         "growth is zero-filled",
         contents(p, fd, 16) == b"abc\0\0\0\0\0",
@@ -75,7 +59,7 @@ pub fn run(p: &Probe) {
     let link = format!("{root}/l");
     p.check("symlinkat l -> f", p.symlinkat("f", AT_FDCWD, &link) == 0);
     p.check("truncate follows a symlink", p.truncate(&link, 2) == 0);
-    p.check("the target shrank", size(p, &file) == 2);
+    p.check("the target shrank", p.stat_or_stop(&file, 0).size == 2);
     let fifo = format!("{root}/p");
     p.check(
         "mknodat a FIFO",
@@ -95,7 +79,7 @@ pub fn run(p: &Probe) {
 
     // ---- ftruncate -------------------------------------------------------
     p.check("ftruncate grows", p.ftruncate(fd, 4) == 0);
-    p.check("the size is 4", fstat(p, fd).size == 4);
+    p.check("the size is 4", p.fstat_or_stop(fd).size == 4);
     p.check(
         "ftruncate negative is EINVAL",
         p.ftruncate(fd, -1) == neg(EINVAL),
@@ -133,18 +117,18 @@ pub fn run(p: &Probe) {
     p.check("ftruncate to 6", p.ftruncate(fd, 6) == 0);
     p.lseek(fd, 0, SEEK_SET);
     p.write(fd, b"abcdef");
-    let before = fstat(p, fd);
-    pause(p);
+    let before = p.fstat_or_stop(fd);
+    p.tick();
     p.check(
         "fallocate mode 0 past the end grows the file",
         p.fallocate(fd, 0, 4, 4) == 0,
     );
-    p.check("the size is 8", fstat(p, fd).size == 8);
+    p.check("the size is 8", p.fstat_or_stop(fd).size == 8);
     p.check(
         "the growth is zero-filled",
         contents(p, fd, 16) == b"abcdef\0\0",
     );
-    let grown = fstat(p, fd);
+    let grown = p.fstat_or_stop(fd);
     p.check(
         "growing moves mtime and ctime forward",
         grown.mtime_ns > before.mtime_ns && grown.ctime_ns > before.ctime_ns,
@@ -153,12 +137,12 @@ pub fn run(p: &Probe) {
         "fallocate mode 0 inside the file",
         p.fallocate(fd, 0, 0, 2) == 0,
     );
-    p.check("the size is unchanged", fstat(p, fd).size == 8);
+    p.check("the size is unchanged", p.fstat_or_stop(fd).size == 8);
     p.check(
         "FALLOC_FL_KEEP_SIZE reserves without growing",
         p.fallocate(fd, FALLOC_FL_KEEP_SIZE, 0, 4096) == 0,
     );
-    p.check("the size is still 8", fstat(p, fd).size == 8);
+    p.check("the size is still 8", p.fstat_or_stop(fd).size == 8);
     p.check(
         "FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE zeroes the range",
         p.fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 1, 2) == 0,
@@ -167,11 +151,14 @@ pub fn run(p: &Probe) {
         "the hole reads as zeros",
         contents(p, fd, 16) == b"a\0\0def\0\0",
     );
-    p.check("the size is still 8 after the hole", fstat(p, fd).size == 8);
+    p.check(
+        "the size is still 8 after the hole",
+        p.fstat_or_stop(fd).size == 8,
+    );
     p.check(
         "a hole past the end changes nothing",
         p.fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 8, 100) == 0
-            && fstat(p, fd).size == 8,
+            && p.fstat_or_stop(fd).size == 8,
     );
     p.check(
         "FALLOC_FL_PUNCH_HOLE without KEEP_SIZE is EOPNOTSUPP",
@@ -181,7 +168,7 @@ pub fn run(p: &Probe) {
         "FALLOC_FL_ZERO_RANGE zeroes and grows",
         p.fallocate(fd, FALLOC_FL_ZERO_RANGE, 6, 4) == 0,
     );
-    p.check("the size is 10", fstat(p, fd).size == 10);
+    p.check("the size is 10", p.fstat_or_stop(fd).size == 10);
     p.check(
         "the zeroed range reads as zeros",
         contents(p, fd, 16) == b"a\0\0def\0\0\0\0",
@@ -189,7 +176,7 @@ pub fn run(p: &Probe) {
     p.check(
         "FALLOC_FL_ZERO_RANGE|FALLOC_FL_KEEP_SIZE never grows",
         p.fallocate(fd, FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE, 8, 100) == 0
-            && fstat(p, fd).size == 10,
+            && p.fstat_or_stop(fd).size == 10,
     );
     p.check(
         "an unknown mode bit is EOPNOTSUPP",

@@ -28,14 +28,7 @@ const ROWS: &[Syscall] = &[
 pub fn run(p: &Probe) {
     let root = p.dir();
     for name in ["a", "b"] {
-        let fd = p.openat(
-            AT_FDCWD,
-            &format!("{root}/{name}"),
-            O_WRONLY | O_CREAT | O_EXCL,
-            0o640,
-        );
-        p.require("create file", fd >= 0);
-        p.close(fd);
+        p.create(&format!("{root}/{name}"), 0o640);
     }
     p.check(
         "mkdirat sub",

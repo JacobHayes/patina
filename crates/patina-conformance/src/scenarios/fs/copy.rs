@@ -16,23 +16,17 @@ use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
 
-use crate::probe::{AT_FDCWD, Probe, neg};
+use crate::probe::{Probe, neg};
 use libc::*;
-
-fn open(p: &Probe, path: &str, flags: i32) -> i32 {
-    let fd = p.openat(AT_FDCWD, path, flags, 0o644);
-    p.require("open", fd >= 0);
-    fd
-}
 
 pub fn run(p: &Probe) {
     let root = p.dir();
     let src_path = format!("{root}/src");
     let dst_path = format!("{root}/dst");
-    let src = open(p, &src_path, O_RDWR | O_CREAT | O_EXCL);
+    let src = p.open_or_stop(&src_path, O_RDWR | O_CREAT | O_EXCL);
     p.check("write the source", p.write(src, b"0123456789") == 10);
     p.lseek(src, 0, SEEK_SET);
-    let dst = open(p, &dst_path, O_RDWR | O_CREAT | O_EXCL);
+    let dst = p.open_or_stop(&dst_path, O_RDWR | O_CREAT | O_EXCL);
 
     // ---- copy_file_range ---------------------------------------------------
     let (r, _, _) = p.copy_file_range(src, None, dst, None, 4, 0);
@@ -79,22 +73,22 @@ pub fn run(p: &Probe) {
         "the file grew by the copy past its end",
         p.pread64(src, 32, 0).1 == b"0123456789\0\x000123",
     );
-    let append = open(p, &dst_path, O_WRONLY | O_APPEND);
+    let append = p.open_or_stop(&dst_path, O_WRONLY | O_APPEND);
     p.check(
         "an O_APPEND destination is EBADF",
         p.copy_file_range(src, None, append, None, 4, 0).0 == neg(EBADF),
     );
-    let reader = open(p, &dst_path, O_RDONLY);
+    let reader = p.open_or_stop(&dst_path, O_RDONLY);
     p.check(
         "a read-only destination is EBADF",
         p.copy_file_range(src, None, reader, None, 4, 0).0 == neg(EBADF),
     );
-    let writer = open(p, &src_path, O_WRONLY);
+    let writer = p.open_or_stop(&src_path, O_WRONLY);
     p.check(
         "a write-only source is EBADF",
         p.copy_file_range(writer, None, dst, None, 4, 0).0 == neg(EBADF),
     );
-    let dirfd = open(p, &root, O_RDONLY | O_DIRECTORY);
+    let dirfd = p.open_or_stop(&root, O_RDONLY | O_DIRECTORY);
     p.check(
         "a directory source is EISDIR",
         p.copy_file_range(dirfd, None, dst, None, 4, 0).0 == neg(EISDIR),
@@ -120,7 +114,7 @@ pub fn run(p: &Probe) {
     );
 
     // ---- sendfile ----------------------------------------------------------
-    let out = open(p, &format!("{root}/out"), O_RDWR | O_CREAT | O_EXCL);
+    let out = p.open_or_stop(&format!("{root}/out"), O_RDWR | O_CREAT | O_EXCL);
     p.lseek(src, 0, SEEK_SET);
     let (r, _) = p.sendfile(out, src, None, 4);
     p.check("sendfile at the input's cursor", r == 4);

@@ -21,7 +21,7 @@
 use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
 use crate::compare::{Difference, Ending, Failure, Observed};
 use crate::observe::Norm;
-use crate::probe::{AT_FDCWD, Probe, neg};
+use crate::probe::{Probe, neg};
 use crate::vehicle::{Vehicle, fold_errno};
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -30,20 +30,14 @@ type CopyFileRange =
     unsafe extern "C" fn(c_int, *mut off64_t, c_int, *mut off64_t, size_t, c_uint) -> ssize_t;
 type Sendfile = unsafe extern "C" fn(c_int, c_int, *mut off_t, size_t) -> ssize_t;
 
-fn open(p: &Probe, path: &str, flags: i32) -> i32 {
-    let fd = p.openat(AT_FDCWD, path, flags, 0o644);
-    p.require("open", fd >= 0);
-    fd
-}
-
 pub fn run(p: &Probe) {
     let root = p.dir();
     let src_path = format!("{root}/src");
     let dst_path = format!("{root}/dst");
-    let src = open(p, &src_path, O_RDWR | O_CREAT | O_EXCL);
+    let src = p.open_or_stop(&src_path, O_RDWR | O_CREAT | O_EXCL);
     p.check("fill src", p.write(src, b"0123456789") == 10);
     p.check("rewind src", p.lseek(src, 0, SEEK_SET) == 0);
-    let dst = open(p, &dst_path, O_RDWR | O_CREAT | O_EXCL);
+    let dst = p.open_or_stop(&dst_path, O_RDWR | O_CREAT | O_EXCL);
     let (r, [rd, wr]) = p.pipe2(0);
     p.require("pipe2", r == 0);
 
@@ -163,12 +157,12 @@ pub fn run(p: &Probe) {
         "a flag is EINVAL",
         copy_range(src, Some(0), dst, Some(0), 4, 1).0 == neg(EINVAL),
     );
-    let write_only = open(p, &src_path, O_WRONLY);
+    let write_only = p.open_or_stop(&src_path, O_WRONLY);
     p.check(
         "a write-only source is EBADF",
         copy_range(write_only, Some(0), dst, Some(0), 4, 0).0 == neg(EBADF),
     );
-    let dir = open(p, &root, O_RDONLY | O_DIRECTORY);
+    let dir = p.open_or_stop(&root, O_RDONLY | O_DIRECTORY);
     p.check(
         "a directory source is EISDIR",
         copy_range(dir, Some(0), dst, Some(0), 4, 0).0 == neg(EISDIR),
@@ -214,7 +208,7 @@ pub fn run(p: &Probe) {
         "a closed output is EBADF",
         send_file(4000, src, Some(0), 3).0 == neg(EBADF),
     );
-    let append = open(p, &dst_path, O_WRONLY | O_APPEND);
+    let append = p.open_or_stop(&dst_path, O_WRONLY | O_APPEND);
     p.check(
         "an O_APPEND output is EINVAL",
         send_file(append, src, Some(0), 3).0 == neg(EINVAL),

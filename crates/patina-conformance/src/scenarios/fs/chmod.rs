@@ -15,10 +15,6 @@ use patina_dst_syscalls::Syscall;
 use crate::probe::{AT_FDCWD, Probe, neg};
 use libc::*;
 
-fn pause(p: &Probe) {
-    p.nanosleep(0, 20_000_000);
-}
-
 /// A descriptor's `(kind, permission bits)`, if fstat answers.
 fn mode_of(p: &Probe, fd: i32) -> Option<(&'static str, u32)> {
     p.fstat(fd).1.map(|s| (s.kind, s.perm))
@@ -39,7 +35,7 @@ pub fn run(p: &Probe) {
     p.require("create f", fd >= 0);
     p.write(fd, b"data");
     let before = p.fstat(fd).1;
-    pause(p);
+    p.tick();
     p.check("fchmod 0600", p.fchmod(fd, 0o600) == 0);
     let after = p.fstat(fd).1;
     p.check(

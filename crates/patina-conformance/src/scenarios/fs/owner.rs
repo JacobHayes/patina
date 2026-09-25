@@ -9,20 +9,10 @@ use crate::catalog::{DEFAULTS, Need, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
-use crate::probe::{AT_FDCWD, Probe, StatView, neg};
+use crate::probe::{AT_FDCWD, Probe, neg};
 use libc::*;
 
 const UNCHANGED: u32 = u32::MAX;
-
-fn pause(p: &Probe) {
-    p.nanosleep(0, 20_000_000);
-}
-
-fn stat(p: &Probe, path: &str, flags: i32) -> StatView {
-    let (r, st) = p.newfstatat(AT_FDCWD, path, flags);
-    p.require("newfstatat", r == 0 && st.is_some());
-    st.unwrap()
-}
 
 pub fn run(p: &Probe) {
     let root = p.dir();
@@ -37,7 +27,7 @@ pub fn run(p: &Probe) {
     let setuid = format!("{root}/setuid");
     let fd = p.openat(AT_FDCWD, &setuid, O_RDWR | O_CREAT | O_EXCL, 0o4755);
     p.require("create setuid", fd >= 0);
-    let created = stat(p, &setuid, 0);
+    let created = p.stat_or_stop(&setuid, 0);
     p.check(
         "the creation mode kept the setuid bit",
         created.perm == 0o4755,
@@ -47,12 +37,12 @@ pub fn run(p: &Probe) {
         created.uid == uid && created.gid == gid,
     );
 
-    pause(p);
+    p.tick();
     p.check(
         "chown(-1, -1) succeeds",
         p.chown(&setuid, UNCHANGED, UNCHANGED, true) == 0,
     );
-    let killed = stat(p, &setuid, 0);
+    let killed = p.stat_or_stop(&setuid, 0);
     p.check(
         "chown kills the setuid bit even when nothing changes",
         killed.perm == 0o755,
@@ -89,12 +79,12 @@ pub fn run(p: &Probe) {
     p.require("create setgid-exec", fd >= 0);
     p.check(
         "the creation mode kept setgid with group exec",
-        stat(p, &setgid_exec, 0).perm == 0o2755,
+        p.stat_or_stop(&setgid_exec, 0).perm == 0o2755,
     );
     p.check("fchown(own, own)", p.fchown(fd, uid, gid) == 0);
     p.check(
         "fchown kills the setgid bit of a group-executable file",
-        stat(p, &setgid_exec, 0).perm == 0o755,
+        p.stat_or_stop(&setgid_exec, 0).perm == 0o755,
     );
     p.check(
         "fchown to another user is EPERM",
@@ -107,7 +97,7 @@ pub fn run(p: &Probe) {
     p.check("fchown(-1, -1)", p.fchown(fd, UNCHANGED, UNCHANGED) == 0);
     p.check(
         "fchown keeps the setgid bit of a file its group cannot execute",
-        stat(p, &setgid_noexec, 0).perm == 0o2745,
+        p.stat_or_stop(&setgid_noexec, 0).perm == 0o2745,
     );
     p.close(fd);
 
@@ -116,7 +106,7 @@ pub fn run(p: &Probe) {
     // ctime without touching the bits.
     let dir = format!("{root}/d");
     p.check("mkdirat d 3755", p.mkdirat(AT_FDCWD, &dir, 0o3755) == 0);
-    let before = stat(p, &dir, 0);
+    let before = p.stat_or_stop(&dir, 0);
     p.check(
         "mkdir keeps the sticky bit and drops setgid",
         before.perm == 0o1755,
@@ -125,9 +115,9 @@ pub fn run(p: &Probe) {
         "a new directory is owned by the caller",
         before.uid == uid && before.gid == gid,
     );
-    pause(p);
+    p.tick();
     p.check("chown on a directory", p.chown(&dir, uid, gid, true) == 0);
-    let after = stat(p, &dir, 0);
+    let after = p.stat_or_stop(&dir, 0);
     p.check(
         "chown leaves a directory's bits alone",
         after.perm == 0o1755,
@@ -181,17 +171,17 @@ pub fn run(p: &Probe) {
         "symlinkat l -> setuid",
         p.symlinkat("setuid", AT_FDCWD, &link) == 0,
     );
-    let link_stat = stat(p, &link, AT_SYMLINK_NOFOLLOW);
+    let link_stat = p.stat_or_stop(&link, AT_SYMLINK_NOFOLLOW);
     p.check(
         "a symlink is owned by the caller",
         link_stat.uid == uid && link_stat.gid == gid,
     );
-    pause(p);
+    p.tick();
     p.check(
         "lchown(own, own) on a symlink",
         p.chown(&link, uid, gid, false) == 0,
     );
-    let changed_link = stat(p, &link, AT_SYMLINK_NOFOLLOW);
+    let changed_link = p.stat_or_stop(&link, AT_SYMLINK_NOFOLLOW);
     p.check(
         "lchown moves the symlink ctime only",
         changed_link.ctime_ns > link_stat.ctime_ns
@@ -210,7 +200,7 @@ pub fn run(p: &Probe) {
             p.unlinkat(AT_FDCWD, &fifo, 0);
         }
         let before = p.fstat(fifo_fd).1.unwrap();
-        pause(p);
+        p.tick();
         p.check(
             "fchown reaches retained FIFO",
             p.fchown(fifo_fd, uid, gid) == 0,
@@ -230,7 +220,7 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "the link's mode is untouched",
-        stat(p, &link, AT_SYMLINK_NOFOLLOW).perm == 0o777,
+        p.stat_or_stop(&link, AT_SYMLINK_NOFOLLOW).perm == 0o777,
     );
     p.check(
         "chown through the link reaches the target",

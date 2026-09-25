@@ -13,26 +13,8 @@ use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
 
-use crate::probe::{AT_FDCWD, Probe, StatView, TimeArg, neg};
+use crate::probe::{AT_FDCWD, Probe, TimeArg, neg};
 use libc::*;
-
-/// Filesystem timestamps are coarse (a clock tick); a pause this long
-/// separates two stamps natively, and moves the virtual clock under patina.
-fn pause(p: &Probe) {
-    p.nanosleep(0, 20_000_000);
-}
-
-fn fstat(p: &Probe, fd: i32) -> StatView {
-    let (r, st) = p.fstat(fd);
-    p.require("fstat", r == 0 && st.is_some());
-    st.unwrap()
-}
-
-fn stat(p: &Probe, path: &str, flags: i32) -> StatView {
-    let (r, st) = p.newfstatat(AT_FDCWD, path, flags);
-    p.require("newfstatat", r == 0 && st.is_some());
-    st.unwrap()
-}
 
 const SEC: i128 = 1_000_000_000;
 
@@ -45,7 +27,7 @@ pub fn run(p: &Probe) {
     // ---- creation, data changes, reads ---------------------------------
     let fd = p.openat(AT_FDCWD, &file, O_RDWR | O_CREAT | O_EXCL, 0o644);
     p.require("create f", fd >= 0);
-    let created = fstat(p, fd);
+    let created = p.fstat_or_stop(fd);
     p.check(
         "creation stamps atime, mtime and ctime at one instant",
         created.atime_ns == created.mtime_ns && created.mtime_ns == created.ctime_ns,
@@ -61,9 +43,9 @@ pub fn run(p: &Probe) {
     );
     let btime = sx.and_then(|s| s.btime_ns);
 
-    pause(p);
+    p.tick();
     p.write(fd, b"12345");
-    let written = fstat(p, fd);
+    let written = p.fstat_or_stop(fd);
     p.check(
         "a write moves mtime forward",
         written.mtime_ns > created.mtime_ns,
@@ -82,11 +64,11 @@ pub fn run(p: &Probe) {
         r == 0 && sx.as_ref().is_some_and(|s| s.btime_ns == btime),
     );
 
-    pause(p);
+    p.tick();
     p.lseek(fd, 0, SEEK_SET);
     let (r, _) = p.read(fd, 5);
     p.check("read back", r == 5);
-    let read = fstat(p, fd);
+    let read = p.fstat_or_stop(fd);
     p.check(
         "a read leaves mtime alone",
         read.mtime_ns == written.mtime_ns,
@@ -100,20 +82,20 @@ pub fn run(p: &Probe) {
         read.atime_ns >= written.atime_ns,
     );
 
-    pause(p);
+    p.tick();
     p.check("ftruncate to the same length", p.ftruncate(fd, 5) == 0);
-    let truncated = fstat(p, fd);
+    let truncated = p.fstat_or_stop(fd);
     p.check(
         "a truncation to the same length still moves mtime and ctime",
         truncated.mtime_ns > read.mtime_ns && truncated.ctime_ns > read.ctime_ns,
     );
 
-    pause(p);
+    p.tick();
     p.check(
         "linkat f -> h",
         p.linkat(AT_FDCWD, &file, AT_FDCWD, &format!("{root}/h"), 0) == 0,
     );
-    let linked = fstat(p, fd);
+    let linked = p.fstat_or_stop(fd);
     p.check(
         "a link moves ctime forward",
         linked.ctime_ns > truncated.ctime_ns,
@@ -123,7 +105,7 @@ pub fn run(p: &Probe) {
         linked.mtime_ns == truncated.mtime_ns,
     );
 
-    pause(p);
+    p.tick();
     p.check(
         "renameat h -> g",
         p.renameat(
@@ -133,7 +115,7 @@ pub fn run(p: &Probe) {
             &format!("{root}/g"),
         ) == 0,
     );
-    let renamed = fstat(p, fd);
+    let renamed = p.fstat_or_stop(fd);
     p.check(
         "a rename moves the node's ctime forward",
         renamed.ctime_ns > linked.ctime_ns,
@@ -144,7 +126,7 @@ pub fn run(p: &Probe) {
     );
 
     // ---- explicit times ------------------------------------------------
-    pause(p);
+    p.tick();
     let r = p.utimensat(
         AT_FDCWD,
         Some(&file),
@@ -152,7 +134,7 @@ pub fn run(p: &Probe) {
         0,
     );
     p.check("utimensat with explicit nanosecond times", r == 0);
-    let set = fstat(p, fd);
+    let set = p.fstat_or_stop(fd);
     p.check(
         "atime is exactly what was set",
         set.atime_ns == 1000 * SEC + 5,
@@ -166,7 +148,7 @@ pub fn run(p: &Probe) {
         set.ctime_ns > renamed.ctime_ns,
     );
 
-    pause(p);
+    p.tick();
     let r = p.utimensat(
         AT_FDCWD,
         Some(&file),
@@ -174,7 +156,7 @@ pub fn run(p: &Probe) {
         0,
     );
     p.check("UTIME_OMIT on atime with an explicit mtime", r == 0);
-    let omitted = fstat(p, fd);
+    let omitted = p.fstat_or_stop(fd);
     p.check(
         "UTIME_OMIT leaves atime alone",
         omitted.atime_ns == set.atime_ns,
@@ -188,7 +170,7 @@ pub fn run(p: &Probe) {
         omitted.ctime_ns > set.ctime_ns,
     );
 
-    pause(p);
+    p.tick();
     let r = p.utimensat(
         AT_FDCWD,
         Some(&file),
@@ -196,7 +178,7 @@ pub fn run(p: &Probe) {
         0,
     );
     p.check("UTIME_OMIT on both is a success", r == 0);
-    let untouched = fstat(p, fd);
+    let untouched = p.fstat_or_stop(fd);
     p.check(
         "UTIME_OMIT on both changes nothing, ctime included",
         untouched.atime_ns == omitted.atime_ns
@@ -204,10 +186,10 @@ pub fn run(p: &Probe) {
             && untouched.ctime_ns == omitted.ctime_ns,
     );
 
-    pause(p);
+    p.tick();
     let r = p.utimensat(AT_FDCWD, Some(&file), Some([TimeArg::Now, TimeArg::Now]), 0);
     p.check("UTIME_NOW on both", r == 0);
-    let now = fstat(p, fd);
+    let now = p.fstat_or_stop(fd);
     p.check(
         "UTIME_NOW sets atime and mtime to one instant",
         now.atime_ns == now.mtime_ns,
@@ -223,10 +205,10 @@ pub fn run(p: &Probe) {
         now.ctime_ns == now.mtime_ns,
     );
 
-    pause(p);
+    p.tick();
     let r = p.utimensat(AT_FDCWD, Some(&file), None, 0);
     p.check("a null times pointer is now/now", r == 0);
-    let null_now = fstat(p, fd);
+    let null_now = p.fstat_or_stop(fd);
     p.check(
         "null times set atime and mtime to one later instant",
         null_now.atime_ns == null_now.mtime_ns && null_now.mtime_ns > now.mtime_ns,
@@ -257,7 +239,7 @@ pub fn run(p: &Probe) {
         "utimensat(fd, NULL, times, 0) sets the descriptor's times",
         r == 0,
     );
-    let by_fd = fstat(p, fd);
+    let by_fd = p.fstat_or_stop(fd);
     p.check(
         "the descriptor's times are what was set",
         by_fd.atime_ns == 4000 * SEC + 11 && by_fd.mtime_ns == 5000 * SEC + 13,
@@ -273,17 +255,17 @@ pub fn run(p: &Probe) {
     // ---- the microsecond and whole-second spellings --------------------
     let r = p.utimes(&file, Some([(6000, 123_456), (7000, 654_321)]));
     p.check("utimes with microsecond times", r == 0);
-    let micro = fstat(p, fd);
+    let micro = p.fstat_or_stop(fd);
     p.check(
         "utimes round-trips microseconds",
         micro.atime_ns == 6000 * SEC + 123_456_000 && micro.mtime_ns == 7000 * SEC + 654_321_000,
     );
     let r = p.utimes(&file, Some([(1, 1_000_000), (1, 0)]));
     p.check("tv_usec out of range is EINVAL", r == neg(EINVAL));
-    pause(p);
+    p.tick();
     let r = p.utimes(&file, None);
     p.check("utimes with null times is now/now", r == 0);
-    let micro_now = fstat(p, fd);
+    let micro_now = p.fstat_or_stop(fd);
     p.check(
         "utimes now/now is one later instant",
         micro_now.atime_ns == micro_now.mtime_ns && micro_now.mtime_ns > null_now.mtime_ns,
@@ -291,15 +273,15 @@ pub fn run(p: &Probe) {
 
     let r = p.utime(&file, Some((8000, 9000)));
     p.check("utime with whole-second times", r == 0);
-    let whole = fstat(p, fd);
+    let whole = p.fstat_or_stop(fd);
     p.check(
         "utime round-trips whole seconds",
         whole.atime_ns == 8000 * SEC && whole.mtime_ns == 9000 * SEC,
     );
-    pause(p);
+    p.tick();
     let r = p.utime(&file, None);
     p.check("utime with a null buffer is now/now", r == 0);
-    let whole_now = fstat(p, fd);
+    let whole_now = p.fstat_or_stop(fd);
     p.check(
         "utime now/now is one later instant",
         whole_now.atime_ns == whole_now.mtime_ns && whole_now.mtime_ns > micro_now.mtime_ns,
@@ -312,32 +294,32 @@ pub fn run(p: &Probe) {
     p.require("create d/inner", inner >= 0);
     let r = p.futimesat(dirfd, "inner", Some([(10_000, 1), (11_000, 2)]));
     p.check("futimesat relative to a directory descriptor", r == 0);
-    let via_dir = fstat(p, inner);
+    let via_dir = p.fstat_or_stop(inner);
     p.check(
         "futimesat round-trips microseconds through the dirfd",
         via_dir.atime_ns == 10_000 * SEC + 1_000 && via_dir.mtime_ns == 11_000 * SEC + 2_000,
     );
 
     // ---- directories -----------------------------------------------------
-    let before = fstat(p, dirfd);
-    pause(p);
+    let before = p.fstat_or_stop(dirfd);
+    p.tick();
     let child = p.openat(dirfd, "child", O_WRONLY | O_CREAT | O_EXCL, 0o644);
     p.require("create d/child", child >= 0);
     p.close(child);
-    let after_create = fstat(p, dirfd);
+    let after_create = p.fstat_or_stop(dirfd);
     p.check(
         "a name appearing moves the directory's mtime and ctime forward",
         after_create.mtime_ns > before.mtime_ns && after_create.ctime_ns > before.ctime_ns,
     );
-    pause(p);
+    p.tick();
     p.check("unlinkat d/child", p.unlinkat(dirfd, "child", 0) == 0);
-    let after_unlink = fstat(p, dirfd);
+    let after_unlink = p.fstat_or_stop(dirfd);
     p.check(
         "a name disappearing moves the directory's mtime and ctime forward",
         after_unlink.mtime_ns > after_create.mtime_ns
             && after_unlink.ctime_ns > after_create.ctime_ns,
     );
-    pause(p);
+    p.tick();
     let r = p.utimensat(
         dirfd,
         Some("."),
@@ -345,7 +327,7 @@ pub fn run(p: &Probe) {
         0,
     );
     p.check("utimensat on a directory", r == 0);
-    let dir_set = fstat(p, dirfd);
+    let dir_set = p.fstat_or_stop(dirfd);
     p.check(
         "a directory's times are what was set",
         dir_set.atime_ns == 12_000 * SEC && dir_set.mtime_ns == 13_000 * SEC,
@@ -353,8 +335,8 @@ pub fn run(p: &Probe) {
 
     // ---- symlinks --------------------------------------------------------
     p.check("symlinkat l -> f", p.symlinkat("f", AT_FDCWD, &link) == 0);
-    pause(p);
-    let target_before = stat(p, &file, 0);
+    p.tick();
+    let target_before = p.stat_or_stop(&file, 0);
     let r = p.utimensat(
         AT_FDCWD,
         Some(&link),
@@ -362,12 +344,12 @@ pub fn run(p: &Probe) {
         AT_SYMLINK_NOFOLLOW,
     );
     p.check("AT_SYMLINK_NOFOLLOW names the link itself", r == 0);
-    let link_times = stat(p, &link, AT_SYMLINK_NOFOLLOW);
+    let link_times = p.stat_or_stop(&link, AT_SYMLINK_NOFOLLOW);
     p.check(
         "the link's own times are what was set",
         link_times.atime_ns == 14_000 * SEC && link_times.mtime_ns == 15_000 * SEC,
     );
-    let target_after = stat(p, &file, 0);
+    let target_after = p.stat_or_stop(&file, 0);
     p.check(
         "the target's times are untouched",
         target_after.atime_ns == target_before.atime_ns
@@ -381,26 +363,26 @@ pub fn run(p: &Probe) {
         0,
     );
     p.check("without the flag the target is named", r == 0);
-    let followed = stat(p, &file, 0);
+    let followed = p.stat_or_stop(&file, 0);
     p.check(
         "the target's times are what was set through the link",
         followed.atime_ns == 16_000 * SEC && followed.mtime_ns == 17_000 * SEC,
     );
     // Traversing the link is a read of it (`pick_link` touches its atime
     // under the mount's policy), so only its mtime/ctime are pinned here.
-    let link_after = stat(p, &link, AT_SYMLINK_NOFOLLOW);
+    let link_after = p.stat_or_stop(&link, AT_SYMLINK_NOFOLLOW);
     p.check(
         "the link's own mtime and ctime are untouched",
         link_after.mtime_ns == link_times.mtime_ns && link_after.ctime_ns == link_times.ctime_ns,
     );
 
     // Class pairing: zero-transfer effects and inode-addressed timestamps.
-    pause(p);
-    let before = fstat(p, fd);
+    p.tick();
+    let before = p.fstat_or_stop(fd);
     p.lseek(fd, 100, SEEK_SET);
     p.check("zero read past EOF", p.read(fd, 0).0 == 0);
     p.check("zero write past EOF", p.write(fd, b"") == 0);
-    let after = fstat(p, fd);
+    let after = p.fstat_or_stop(fd);
     p.check(
         "zero I/O stamps nothing and never grows",
         after.size == before.size
@@ -438,7 +420,7 @@ pub fn run(p: &Probe) {
             AT_EMPTY_PATH,
         ) == 0,
     );
-    let after = fstat(p, fd);
+    let after = p.fstat_or_stop(fd);
     p.check(
         "empty path reached the inode",
         after.atime_ns == 21 * SEC + 3 && after.mtime_ns == 22 * SEC + 4,
@@ -464,7 +446,7 @@ pub fn run(p: &Probe) {
                 0,
             ) == 0,
         );
-        let after = fstat(p, pipe);
+        let after = p.fstat_or_stop(pipe);
         p.check(
             "FIFO times landed",
             after.atime_ns == 23 * SEC + 5 && after.mtime_ns == 24 * SEC + 6,
@@ -485,7 +467,7 @@ pub fn run(p: &Probe) {
             1 => p.utimes(&file, Some([(overflow, 0), (overflow, 0)])),
             _ => p.utime(&file, Some((overflow, overflow))),
         };
-        let after = fstat(p, fd);
+        let after = p.fstat_or_stop(fd);
         p.check(
             "time overflow is refused or clamped, never wrapped",
             r == neg(EINVAL) || (r == 0 && after.mtime_ns > 10_000_000_000_000_000_000),

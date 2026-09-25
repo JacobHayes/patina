@@ -454,6 +454,48 @@ impl Probe {
         }
     }
 
+    /// Sleep 20 ms: filesystem timestamps are coarse (a clock tick), and a
+    /// pause this long separates two stamps natively and moves the virtual
+    /// clock under patina.
+    pub fn tick(&self) {
+        self.nanosleep(0, 20_000_000);
+    }
+
+    /// `openat(AT_FDCWD, path, flags, 0o644)`, which the scenario cannot
+    /// continue without.
+    pub fn open_or_stop(&self, path: &str, flags: i32) -> i32 {
+        let fd = self.openat(AT_FDCWD, path, flags, 0o644);
+        self.require("open", fd >= 0);
+        fd
+    }
+
+    /// Create the empty file `path` with `mode` (`O_EXCL`), and close it.
+    pub fn create(&self, path: &str, mode: u32) {
+        let fd = self.openat(
+            AT_FDCWD,
+            path,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            mode,
+        );
+        self.require("create a file", fd >= 0);
+        self.close(fd);
+    }
+
+    /// `fstat(fd)`, which the scenario cannot continue without.
+    pub fn fstat_or_stop(&self, fd: i32) -> StatView {
+        let (r, st) = self.fstat(fd);
+        self.require("fstat", r == 0 && st.is_some());
+        st.unwrap()
+    }
+
+    /// `newfstatat(AT_FDCWD, path, flags)`, which the scenario cannot
+    /// continue without.
+    pub fn stat_or_stop(&self, path: &str, flags: i32) -> StatView {
+        let (r, st) = self.newfstatat(AT_FDCWD, path, flags);
+        self.require("newfstatat", r == 0 && st.is_some());
+        st.unwrap()
+    }
+
     pub fn call_observed(&self, row: Syscall, args: Args) -> i64 {
         let result = self.call(row, args);
         self.event(row, result).emit();

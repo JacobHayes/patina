@@ -25,11 +25,6 @@ use patina_dst_syscalls::Syscall;
 
 const NANOS: i128 = 1_000_000_000;
 
-/// Past the filesystem's timestamp granularity, so a later "now" differs.
-fn pause(p: &Probe) {
-    p.nanosleep(0, 20_000_000);
-}
-
 /// `(atime, mtime)` in nanoseconds, read without recording.
 fn times_of(p: &Probe, path: &str) -> Option<(i128, i128)> {
     let (r, st): (i64, Option<StatView>) = p
@@ -60,7 +55,7 @@ pub fn run(p: &Probe) {
         "to the microsecond",
         times_of(p, &file) == Some((1_000 * NANOS + 250_000_000, 2_000 * NANOS + 500_000_000)),
     );
-    pause(p);
+    p.tick();
     p.check("futimes NULL sets now", p.futimes(fd, None) == 0);
     p.check(
         "both to one instant after the file's creation",
@@ -95,7 +90,7 @@ pub fn run(p: &Probe) {
         "and leaves its target's alone",
         times_of(p, &file) == Some((3_000 * NANOS, 4_000 * NANOS)),
     );
-    pause(p);
+    p.tick();
     p.check("lutimes NULL sets now", p.lutimes(&link, None) == 0);
     p.check(
         "the link's both to one instant after its creation",

@@ -27,12 +27,6 @@ const XATTR_SIZE_MAX: usize = 65536;
 /// A flag bit the set rows do not define.
 const UNKNOWN_XATTR_FLAG: i32 = 4;
 
-fn create(p: &Probe, path: &str, mode: u32) {
-    let fd = p.openat(AT_FDCWD, path, O_WRONLY | O_CREAT | O_EXCL, mode);
-    p.require("create a file", fd >= 0);
-    p.close(fd);
-}
-
 pub fn run(p: &Probe) {
     let root = p.dir();
     let file = format!("{root}/f");
@@ -41,15 +35,15 @@ pub fn run(p: &Probe) {
     let fifo = format!("{root}/p");
     let readonly = format!("{root}/ro");
     let writeonly = format!("{root}/wo");
-    create(p, &file, 0o644);
+    p.create(&file, 0o644);
     p.check("mkdirat d", p.mkdirat(AT_FDCWD, &dir, 0o755) == 0);
     p.check("symlinkat l -> f", p.symlinkat("f", AT_FDCWD, &link) == 0);
     p.check(
         "mknodat p",
         p.mknodat(AT_FDCWD, &fifo, S_IFIFO | 0o644, 0) == 0,
     );
-    create(p, &readonly, 0o444);
-    create(p, &writeonly, 0o200);
+    p.create(&readonly, 0o444);
+    p.create(&writeonly, 0o200);
     let f = XattrTarget::Path(&file);
 
     // ---- set, get, list, remove by path ------------------------------------

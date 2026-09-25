@@ -56,17 +56,10 @@ fn inodes_match(p: &Probe, root: &str, entries: &[DirEntry]) -> bool {
         })
 }
 
-/// Create an empty regular file.
-fn create(p: &Probe, path: &str) {
-    let fd = p.openat(AT_FDCWD, path, O_WRONLY | O_CREAT | O_EXCL, 0o644);
-    p.require("create a file", fd >= 0);
-    p.close(fd);
-}
-
 pub fn run(p: &Probe) {
     let root = p.dir();
     for name in ["a", "b"] {
-        create(p, &format!("{root}/{name}"));
+        p.create(&format!("{root}/{name}"), 0o644);
     }
     p.check(
         "mkdirat sub",
@@ -121,7 +114,7 @@ pub fn run(p: &Probe) {
         "and keeps answering it",
         p.readdir_step(&dir, ReadSpelling::Readdir64).0 == 0,
     );
-    create(p, &format!("{root}/c"));
+    p.create(&format!("{root}/c"), 0o644);
     p.rewinddir(&dir);
     let (n, entries) = p.readdir_all(&dir, ReadSpelling::Readdir64);
     p.check(
@@ -251,11 +244,11 @@ pub fn run(p: &Probe) {
     // ---- the listing is read, not copied at opendir ------------------------------
     let snap = format!("{root}/snap");
     p.check("mkdirat snap", p.mkdirat(AT_FDCWD, &snap, 0o755) == 0);
-    create(p, &format!("{snap}/x"));
+    p.create(&format!("{snap}/x"), 0o644);
     let (r, dir) = p.opendir(&snap);
     p.require("opendir snap", r == 0);
     let dir = dir.unwrap();
-    create(p, &format!("{snap}/y"));
+    p.create(&format!("{snap}/y"), 0o644);
     let (n, entries) = p.readdir_all(&dir, ReadSpelling::Readdir);
     p.check(
         "an entry created after opendir, before the first read, is listed",
