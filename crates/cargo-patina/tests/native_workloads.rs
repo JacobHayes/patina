@@ -161,6 +161,23 @@ fn mutex_held_across_sleep_does_not_deadlock() {
     );
 }
 
+/// A normal mutex's owner relocking it before any thread exists is glibc's
+/// self-deadlock: the run ends as the scheduler's deadlock, naming the wait,
+/// not as a shim fault about the main task.
+#[cfg(target_os = "linux")]
+#[test]
+fn mutex_relock_before_any_thread_is_a_deadlock() {
+    let g = Guest::assert_build("mutex_relock_probe.rs");
+    g.assert_audit_clean();
+    let out = g.assert_run_refused(1, &["deadlock", "mutex-contended"]);
+    assert_exact_line(&out.stdout, "MUTEX_RELOCK_LOCKED");
+    assert!(
+        !text(&out.stdout).contains("MUTEX_RELOCK_RETURNED"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
 #[test]
 fn udp_arrival_order_varies_by_seed() {
     let g = Guest::assert_build("udp_probe.rs");

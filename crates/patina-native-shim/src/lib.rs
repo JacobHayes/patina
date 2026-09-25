@@ -1560,19 +1560,27 @@ mod hostcoll {
         }
     }
 
+    impl<K: Copy + PartialEq, V> HostMap<K, V> {
+        /// Return a mutable reference to the value for `key`, inserting
+        /// `make()` first if absent.
+        pub fn entry_or_insert_with(&mut self, key: K, make: impl FnOnce() -> V) -> &mut V {
+            let index = match self.index_of(&key) {
+                Some(index) => index,
+                None => {
+                    self.entries.push((key, make()));
+                    self.entries.len() - 1
+                }
+            };
+            &mut self.entries.get_mut(index).1
+        }
+    }
+
     impl<K: Copy + PartialEq, V: Default> HostMap<K, V> {
         /// Return a mutable reference to the value for `key`, inserting a default
         /// value first if absent — the [`std::collections::btree_map::Entry`]
         /// `or_default` the sync tables relied on.
         pub fn entry_or_default(&mut self, key: K) -> &mut V {
-            let index = match self.index_of(&key) {
-                Some(index) => index,
-                None => {
-                    self.entries.push((key, V::default()));
-                    self.entries.len() - 1
-                }
-            };
-            &mut self.entries.get_mut(index).1
+            self.entry_or_insert_with(key, V::default)
         }
     }
 
@@ -7766,10 +7774,114 @@ mod thread {
         }
     }
 
+    /// A mutex's type: what its owner's relock does.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    enum MutexKind {
+        /// `PTHREAD_MUTEX_NORMAL` (glibc's default, and its adaptive type):
+        /// the owner's relock deadlocks, as glibc's does — the owner parks
+        /// behind itself, and the run ends as a deadlock unless the guest has
+        /// other work. Its unlock checks no owner: whoever unlocks it frees
+        /// it, and unlocking it unlocked is 0.
+        #[default]
+        Normal,
+        /// A normal mutex that is robust or priority-inheriting: its relock
+        /// deadlocks as [`Self::Normal`]'s does, but an unlock by a thread
+        /// that does not hold it is `EPERM`, as glibc's full unlock path
+        /// answers. Decoded from glibc's flags, so only on Linux.
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        NormalOwned,
+        /// `PTHREAD_MUTEX_ERRORCHECK`: the owner's relock is `EDEADLK`.
+        ErrorCheck,
+        /// `PTHREAD_MUTEX_RECURSIVE`: the owner relocks, and the mutex is
+        /// free after as many unlocks as locks.
+        Recursive,
+    }
+
+    impl MutexKind {
+        /// The type in glibc's encoding, shared by a mutex attribute's
+        /// `mutexkind` and a mutex's `__kind`: the low two bits, and the
+        /// robust (16) and priority-inheritance (32) flags, under which a
+        /// normal mutex's unlock checks its owner. The other flags
+        /// (process-shared, priority protection, elision) change neither.
+        #[cfg(target_os = "linux")]
+        fn from_glibc(kind: c_int) -> Self {
+            const ROBUST: c_int = 16;
+            const PRIO_INHERIT: c_int = 32;
+            match kind & 3 {
+                1 => Self::Recursive,
+                2 => Self::ErrorCheck,
+                _ if kind & (ROBUST | PRIO_INHERIT) != 0 => Self::NormalOwned,
+                _ => Self::Normal,
+            }
+        }
+
+        /// The type a `pthread_mutex_init` attribute names; no attribute is
+        /// the default type.
+        ///
+        /// # Safety
+        /// Non-null `attr` must point to an initialized `pthread_mutexattr_t`.
+        unsafe fn of_attr(attr: *const c_void) -> Self {
+            #[cfg(target_os = "linux")]
+            {
+                if attr.is_null() {
+                    return Self::Normal;
+                }
+                // SAFETY: glibc's `struct pthread_mutexattr` is one `int`,
+                // `mutexkind`.
+                Self::from_glibc(unsafe { attr.cast::<c_int>().read() })
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = attr;
+                Self::ErrorCheck
+            }
+        }
+
+        /// The type of a mutex first touched without `pthread_mutex_init`:
+        /// the one its static initializer wrote (glibc's
+        /// `PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP` and
+        /// `PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP` set `__kind`).
+        ///
+        /// # Safety
+        /// `mutex` must point to a `pthread_mutex_t`.
+        unsafe fn of_static(mutex: *const c_void) -> Self {
+            #[cfg(target_os = "linux")]
+            {
+                // SAFETY: `__kind` is the fifth `int` of glibc's
+                // `struct __pthread_mutex_s` on the 64-bit targets.
+                Self::from_glibc(unsafe { mutex.cast::<c_int>().add(4).read() })
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = mutex;
+                Self::ErrorCheck
+            }
+        }
+    }
+
     #[derive(Default)]
     struct MutexEntry {
         owner: Option<TaskId>,
+        /// How many times the owner holds it: 1, or more for a recursive
+        /// mutex.
+        count: u32,
+        kind: MutexKind,
         waiters: HostDeque<TaskId>,
+    }
+
+    impl MutexEntry {
+        fn of_kind(kind: MutexKind) -> Self {
+            Self {
+                kind,
+                ..Self::default()
+            }
+        }
+
+        /// Hand the mutex to `task`, held once.
+        fn grant(&mut self, task: TaskId) {
+            self.owner = Some(task);
+            self.count = 1;
+        }
     }
 
     #[derive(Default)]
@@ -7916,19 +8028,42 @@ mod thread {
             Ok(())
         }
 
-        fn init_mutex(&mut self, key: usize) {
-            self.mutexes.insert(key, MutexEntry::default());
+        fn init_mutex(&mut self, key: usize, kind: MutexKind) {
+            self.mutexes.insert(key, MutexEntry::of_kind(kind));
         }
 
-        fn lock(&mut self, me: TaskId, key: usize) -> Result<LockStep, ThreadError> {
+        /// The mutex at `key`; one never initialized is registered as `kind`
+        /// on first touch.
+        fn mutex(&mut self, key: usize, kind: MutexKind) -> &mut MutexEntry {
+            self.mutexes
+                .entry_or_insert_with(key, || MutexEntry::of_kind(kind))
+        }
+
+        /// Lock the mutex at `key` (`kind` if first touched here).
+        fn lock(
+            &mut self,
+            me: TaskId,
+            key: usize,
+            kind: MutexKind,
+        ) -> Result<LockStep, ThreadError> {
             let interrupted = self.sync_interrupted(me);
-            let entry = self.mutexes.entry_or_default(key);
+            let entry = self.mutex(key, kind);
             match entry.owner {
                 None => {
-                    entry.owner = Some(me);
+                    entry.grant(me);
                     Ok(LockStep::Acquired)
                 }
-                Some(owner) if owner == me => Err(ThreadError::Posix(EDEADLK)),
+                Some(owner) if owner == me && entry.kind == MutexKind::ErrorCheck => {
+                    Err(ThreadError::Posix(EDEADLK))
+                }
+                Some(owner) if owner == me && entry.kind == MutexKind::Recursive => {
+                    entry.count = entry
+                        .count
+                        .checked_add(1)
+                        .ok_or(ThreadError::Posix(EWOULDBLOCK))?; // EAGAIN
+                    Ok(LockStep::Acquired)
+                }
+                // Another owner, or a normal mutex's owner relocking: wait.
                 Some(_) => {
                     refuse_nested_sync_wait(interrupted);
                     entry.waiters.push_back(me);
@@ -7937,14 +8072,24 @@ mod thread {
             }
         }
 
-        fn trylock(&mut self, me: TaskId, key: usize) -> c_int {
-            let entry = self.mutexes.entry_or_default(key);
+        /// Try to lock the mutex at `key` (`kind` if first touched here):
+        /// `EBUSY` when it is held, by the caller too unless it is recursive.
+        fn trylock(&mut self, me: TaskId, key: usize, kind: MutexKind) -> c_int {
+            let entry = self.mutex(key, kind);
             match entry.owner {
                 None => {
-                    entry.owner = Some(me);
+                    entry.grant(me);
                     0
                 }
-                Some(owner) if owner == me => EDEADLK,
+                Some(owner) if owner == me && entry.kind == MutexKind::Recursive => {
+                    match entry.count.checked_add(1) {
+                        Some(count) => {
+                            entry.count = count;
+                            0
+                        }
+                        None => EWOULDBLOCK, // EAGAIN
+                    }
+                }
                 Some(_) => EBUSY,
             }
         }
@@ -7960,10 +8105,22 @@ mod thread {
                 .get_mut(&key)
                 .ok_or(ThreadError::Posix(EINVAL))?;
             if entry.owner != Some(me) {
-                return Err(ThreadError::Posix(EPERM));
+                if entry.kind != MutexKind::Normal {
+                    return Err(ThreadError::Posix(EPERM));
+                }
+                // glibc's normal unlock checks no owner: it frees a mutex
+                // another thread holds, and one already unlocked stays so.
+                if entry.owner.is_none() {
+                    return Ok(());
+                }
+                entry.count = 1;
+            }
+            entry.count -= 1;
+            if entry.count > 0 {
+                return Ok(());
             }
             if let Some(next) = entry.waiters.pop_front() {
-                entry.owner = Some(next);
+                entry.grant(next);
                 self.notify(scheduler, next)?;
             } else {
                 entry.owner = None;
@@ -8144,7 +8301,14 @@ mod thread {
                 let entry = self.mutexes.entry_or_default(mutex_key);
                 match entry.owner {
                     None => {
-                        entry.owner = Some(task);
+                        entry.grant(task);
+                        self.notify(scheduler, task)?;
+                    }
+                    // A recursive mutex held more than once stays the
+                    // waiter's across the wait; glibc's re-lock counts it
+                    // again (its recursive relock), and the waiter resumes.
+                    Some(owner) if owner == task => {
+                        entry.count += 1;
                         self.notify(scheduler, task)?;
                     }
                     Some(_) => entry.waiters.push_back(task),
@@ -8618,8 +8782,13 @@ mod thread {
             Ok(scheduler.next()?)
         }
 
-        fn begin_lock(&mut self, me: TaskId, key: usize) -> Result<Step, ThreadError> {
-            match self.table.lock(me, key)? {
+        fn begin_lock(
+            &mut self,
+            me: TaskId,
+            key: usize,
+            kind: MutexKind,
+        ) -> Result<Step, ThreadError> {
+            match self.table.lock(me, key, kind)? {
                 LockStep::Acquired => Ok(Step::Continue),
                 LockStep::MustBlock => self.block(
                     me,
@@ -8687,6 +8856,9 @@ mod thread {
             if wait.class == BlockClass::Sync {
                 refuse_nested_sync_wait(self.table.sync_interrupted(me));
             }
+            // A wait before the first thread (a normal mutex's owner relocking
+            // it) parks the main task, so the scheduler must know it.
+            self.ensure_active()?;
             #[cfg(target_os = "linux")]
             self.register_signal_wait(me, reason, wait, None);
             #[cfg(not(target_os = "linux"))]
@@ -8718,6 +8890,8 @@ mod thread {
             if wait.class == BlockClass::Sync {
                 refuse_nested_sync_wait(self.table.sync_interrupted(me));
             }
+            // As in `block`: the main task may wait before the first thread.
+            self.ensure_active()?;
             let mut scheduler = RealScheduler;
             #[cfg(target_os = "linux")]
             self.register_signal_wait(me, reason, wait, Some((clock, deadline)));
@@ -9260,11 +9434,13 @@ mod thread {
     /// # Safety
     /// `mutex` must reference a valid `pthread_mutex_t`.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_mutex_init(mutex: *mut c_void, _attr: *const c_void) -> c_int {
+    pub unsafe extern "C" fn patina_mutex_init(mutex: *mut c_void, attr: *const c_void) -> c_int {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        // SAFETY: a null or initialized attribute, per the pthread contract.
+        let kind = unsafe { MutexKind::of_attr(attr) };
         managed_op!({
             let mut state = lock_state();
-            state.table.init_mutex(mutex as usize);
+            state.table.init_mutex(mutex as usize, kind);
             0
         })
     }
@@ -9276,9 +9452,11 @@ mod thread {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let key = mutex as usize;
+            // SAFETY: a valid `pthread_mutex_t`, per this function's contract.
+            let kind = unsafe { MutexKind::of_static(mutex) };
             let me = current_task();
             let mut state = lock_state();
-            match state.begin_lock(me, key) {
+            match state.begin_lock(me, key, kind) {
                 Ok(Step::Continue) => 0,
                 Ok(Step::Switch(picked)) => {
                     switch_and_park(state, picked, me);
@@ -9295,9 +9473,11 @@ mod thread {
     pub unsafe extern "C" fn patina_mutex_trylock(mutex: *mut c_void) -> c_int {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
+            // SAFETY: a valid `pthread_mutex_t`, per this function's contract.
+            let kind = unsafe { MutexKind::of_static(mutex) };
             let me = current_task();
             let mut state = lock_state();
-            state.table.trylock(me, mutex as usize)
+            state.table.trylock(me, mutex as usize, kind)
         })
     }
 
@@ -9377,7 +9557,7 @@ mod thread {
         let key = lock as usize;
         let me = current_task();
         let mut state = lock_state();
-        match state.begin_lock(me, key) {
+        match state.begin_lock(me, key, MutexKind::ErrorCheck) {
             Ok(Step::Continue) => {}
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Err(ThreadError::Fatal(message)) => {
@@ -9414,7 +9594,12 @@ mod thread {
         // Acquired -> 1. Held by another task (EBUSY) or already owned by this
         // task (EDEADLK) -> 0: the real single-cmpxchg trylock simply fails to
         // acquire when the word is non-zero, without trapping.
-        c_int::from(state.table.trylock(me, lock as usize) == 0)
+        c_int::from(
+            state
+                .table
+                .trylock(me, lock as usize, MutexKind::ErrorCheck)
+                == 0,
+        )
     }
 
     /// # Safety
@@ -9679,7 +9864,9 @@ mod thread {
         // signal wake removed `me` from the condition and re-granted the mutex.
         let mut state = lock_state();
         if state.timed_out.remove(&me) {
-            match state.begin_lock(me, mutex_key) {
+            // SAFETY: a valid `pthread_mutex_t`, per this function's contract.
+            let kind = unsafe { MutexKind::of_static(mutex) };
+            match state.begin_lock(me, mutex_key, kind) {
                 Ok(Step::Continue) => drop(state),
                 Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                 Err(error) => return error.into_posix(),
@@ -13711,22 +13898,146 @@ mod thread {
             let mut table = ThreadTable::default();
             let mut scheduler = DetAdapter::new(1);
             let a = TaskId(1);
-            assert!(matches!(table.lock(a, MUTEX).unwrap(), LockStep::Acquired));
+            assert!(matches!(
+                table.lock(a, MUTEX, MutexKind::Normal).unwrap(),
+                LockStep::Acquired
+            ));
             assert_eq!(table.mutexes[&MUTEX].owner, Some(a));
             table.unlock(&mut scheduler, a, MUTEX).unwrap();
             assert_eq!(table.mutexes[&MUTEX].owner, None);
         }
 
         #[test]
-        fn recursive_lock_is_reported_as_deadlock() {
+        fn an_owner_relock_follows_the_mutex_kind() {
             let mut table = ThreadTable::default();
+            let mut scheduler = DetAdapter::new(1);
             let a = TaskId(1);
-            table.lock(a, MUTEX).unwrap();
+            let b = TaskId(2);
+
+            table.init_mutex(MUTEX, MutexKind::ErrorCheck);
+            table.lock(a, MUTEX, MutexKind::Normal).unwrap();
             assert!(matches!(
-                table.lock(a, MUTEX),
+                table.lock(a, MUTEX, MutexKind::Normal),
                 Err(ThreadError::Posix(EDEADLK))
             ));
-            assert_eq!(table.trylock(a, MUTEX), EDEADLK);
+            assert_eq!(table.trylock(a, MUTEX, MutexKind::Normal), EBUSY);
+
+            // First touched here: registered with the kind the call names.
+            assert!(matches!(
+                table.lock(a, MUTEX + 1, MutexKind::Recursive).unwrap(),
+                LockStep::Acquired
+            ));
+            assert!(matches!(
+                table.lock(a, MUTEX + 1, MutexKind::Normal).unwrap(),
+                LockStep::Acquired
+            ));
+            assert_eq!(table.trylock(a, MUTEX + 1, MutexKind::Normal), 0);
+            for _ in 0..2 {
+                table.unlock(&mut scheduler, a, MUTEX + 1).unwrap();
+                assert_eq!(table.trylock(b, MUTEX + 1, MutexKind::Normal), EBUSY);
+            }
+            table.unlock(&mut scheduler, a, MUTEX + 1).unwrap();
+            assert_eq!(table.trylock(b, MUTEX + 1, MutexKind::Normal), 0);
+
+            // A normal mutex's owner waits behind itself.
+            table.lock(a, MUTEX + 2, MutexKind::Normal).unwrap();
+            assert_eq!(table.trylock(a, MUTEX + 2, MutexKind::Normal), EBUSY);
+            assert!(matches!(
+                table.lock(a, MUTEX + 2, MutexKind::Normal).unwrap(),
+                LockStep::MustBlock
+            ));
+        }
+
+        #[test]
+        fn a_normal_mutex_unlock_checks_no_owner() {
+            let mut table = ThreadTable::default();
+            let mut scheduler = DetAdapter::new(1);
+            let a = scheduler.spawn("a").unwrap();
+            let b = scheduler.spawn("b").unwrap();
+            for task in [a, b] {
+                table.register(task);
+            }
+
+            // Another thread's unlock frees it; an unlocked one stays so.
+            table.lock(a, MUTEX, MutexKind::Normal).unwrap();
+            table.unlock(&mut scheduler, b, MUTEX).unwrap();
+            assert_eq!(table.mutexes[&MUTEX].owner, None);
+            table.unlock(&mut scheduler, a, MUTEX).unwrap();
+            assert_eq!(table.trylock(b, MUTEX, MutexKind::Normal), 0);
+
+            // The owner parked on its own relock resumes holding it once
+            // another thread unlocks (a binary-semaphore hand-off).
+            scheduler.scheduler.select(Some(a)).unwrap();
+            table.lock(a, MUTEX + 1, MutexKind::Normal).unwrap();
+            assert!(matches!(
+                table.lock(a, MUTEX + 1, MutexKind::Normal).unwrap(),
+                LockStep::MustBlock
+            ));
+            scheduler.park(a, "mutex").unwrap();
+            table.unlock(&mut scheduler, b, MUTEX + 1).unwrap();
+            assert_eq!(table.mutexes[&(MUTEX + 1)].owner, Some(a));
+            assert_eq!(table.mutexes[&(MUTEX + 1)].count, 1);
+
+            // Every other type checks the owner.
+            for (key, kind) in [
+                (MUTEX + 2, MutexKind::ErrorCheck),
+                (MUTEX + 3, MutexKind::Recursive),
+                (MUTEX + 4, MutexKind::NormalOwned),
+            ] {
+                table.lock(a, key, kind).unwrap();
+                assert!(matches!(
+                    table.unlock(&mut scheduler, b, key),
+                    Err(ThreadError::Posix(EPERM))
+                ));
+                table.unlock(&mut scheduler, a, key).unwrap();
+                assert!(matches!(
+                    table.unlock(&mut scheduler, a, key),
+                    Err(ThreadError::Posix(EPERM))
+                ));
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn robust_and_priority_inheriting_normal_mutexes_check_the_owner() {
+            assert_eq!(MutexKind::from_glibc(0), MutexKind::Normal);
+            assert_eq!(MutexKind::from_glibc(3), MutexKind::Normal);
+            // Priority protection (64) and elision (256) leave it unchecked.
+            assert_eq!(MutexKind::from_glibc(64 | 256), MutexKind::Normal);
+            assert_eq!(MutexKind::from_glibc(16), MutexKind::NormalOwned);
+            assert_eq!(MutexKind::from_glibc(32 | 3), MutexKind::NormalOwned);
+            assert_eq!(MutexKind::from_glibc(16 | 1), MutexKind::Recursive);
+            assert_eq!(MutexKind::from_glibc(32 | 2), MutexKind::ErrorCheck);
+        }
+
+        #[test]
+        fn a_recursive_mutex_held_twice_survives_a_cond_wait() {
+            let mut table = ThreadTable::default();
+            let mut scheduler = DetAdapter::new(1);
+            let waiter = scheduler.spawn("waiter").unwrap();
+            let signaler = scheduler.spawn("signaler").unwrap();
+            table.register(waiter);
+            table.register(signaler);
+            table.init_mutex(MUTEX, MutexKind::Recursive);
+            table.init_cond(COND);
+
+            table.lock(waiter, MUTEX, MutexKind::Recursive).unwrap();
+            table.lock(waiter, MUTEX, MutexKind::Recursive).unwrap();
+            scheduler.scheduler.select(Some(waiter)).unwrap();
+            table
+                .cond_wait(&mut scheduler, waiter, COND, MUTEX)
+                .unwrap();
+            // One unlock of two: the waiter still holds it.
+            assert_eq!(table.mutexes[&MUTEX].owner, Some(waiter));
+            scheduler.scheduler.park(waiter, "cond").unwrap();
+
+            // The signal counts the waiter's hold again and wakes it, rather
+            // than queueing it behind itself.
+            scheduler.scheduler.select(Some(signaler)).unwrap();
+            table.cond_signal(&mut scheduler, COND).unwrap();
+            let entry = &table.mutexes[&MUTEX];
+            assert_eq!((entry.owner, entry.count), (Some(waiter), 2));
+            assert!(entry.waiters.is_empty());
         }
 
         #[test]
@@ -13743,15 +14054,24 @@ mod thread {
             // a takes the mutex; b then c arrive and block behind it, each
             // parking after selection so the scheduler transitions stay valid.
             scheduler.scheduler.select(Some(a)).unwrap();
-            assert!(matches!(table.lock(a, MUTEX).unwrap(), LockStep::Acquired));
+            assert!(matches!(
+                table.lock(a, MUTEX, MutexKind::Normal).unwrap(),
+                LockStep::Acquired
+            ));
             scheduler.yield_task(a).unwrap();
 
             scheduler.scheduler.select(Some(b)).unwrap();
-            assert!(matches!(table.lock(b, MUTEX).unwrap(), LockStep::MustBlock));
+            assert!(matches!(
+                table.lock(b, MUTEX, MutexKind::Normal).unwrap(),
+                LockStep::MustBlock
+            ));
             scheduler.park(b, "mutex").unwrap();
 
             scheduler.scheduler.select(Some(c)).unwrap();
-            assert!(matches!(table.lock(c, MUTEX).unwrap(), LockStep::MustBlock));
+            assert!(matches!(
+                table.lock(c, MUTEX, MutexKind::Normal).unwrap(),
+                LockStep::MustBlock
+            ));
             scheduler.park(c, "mutex").unwrap();
 
             // Unlocking hands ownership to the head of the FIFO queue and wakes
@@ -13897,12 +14217,12 @@ mod thread {
             let signaler = scheduler.spawn("signaler").unwrap();
             table.register(waiter);
             table.register(signaler);
-            table.init_mutex(MUTEX);
+            table.init_mutex(MUTEX, MutexKind::Normal);
             table.init_cond(COND);
 
             // The waiter owns the mutex, then waits on the condition.
             assert!(matches!(
-                table.lock(waiter, MUTEX).unwrap(),
+                table.lock(waiter, MUTEX, MutexKind::Normal).unwrap(),
                 LockStep::Acquired
             ));
             scheduler.scheduler.select(Some(waiter)).unwrap();

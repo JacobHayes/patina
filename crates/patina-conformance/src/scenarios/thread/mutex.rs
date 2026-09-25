@@ -5,7 +5,9 @@
 //!   as from any other thread; `destroy` of a held mutex is `EBUSY`; the
 //!   owner is the thread, so the main thread unlocks a mutex it locked
 //!   before it queried its signal mask or created its first thread; a
-//!   contended `lock` parks until the owner unlocks;
+//!   contended `lock` parks until the owner unlocks; `unlock` checks no
+//!   owner: another thread's unlock frees the mutex, and unlocking an
+//!   unlocked one is 0;
 //! * `PTHREAD_MUTEX_ERRORCHECK`: relocking is `EDEADLK`, `trylock` by the
 //!   owner is still `EBUSY`, and unlocking a mutex the caller does not hold
 //!   (another thread's, or an unlocked one) is `EPERM`;
@@ -18,8 +20,7 @@
 //! pthread functions return the error number; each is recorded as `-error`.
 //! A libc-only subject, so the libc vehicle alone.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -31,8 +32,8 @@ use crate::signals as support;
 
 /// A mutex of one type, at a stable address.
 struct Mutex {
-    /// Never freed: a later mutex must not reuse the address of one the
-    /// implementation may still hold (a gap below leaves one held).
+    /// Never freed: a later mutex must not reuse the address of one a faulty
+    /// implementation may still hold.
     raw: &'static mut pthread_mutex_t,
     kind: &'static str,
 }
@@ -234,6 +235,25 @@ fn default_type(p: &Probe) {
     p.check("destroy", destroy(p, &mutex) == 0);
 }
 
+/// glibc's default mutex does not check its owner on unlock
+/// (`pthread_mutex_unlock.c`, the `normal:` path).
+fn default_unlock(p: &Probe) {
+    let mutex = init(p, "default", None);
+    p.check("lock", lock(p, &mutex) == 0);
+    p.check(
+        "unlock by a thread that does not hold it succeeds",
+        worker_unlock(p, &mutex) == 0,
+    );
+    p.check(
+        "and frees it: the former owner's trylock acquires it",
+        trylock(p, &mutex) == 0,
+    );
+    p.check("unlock", unlock(p, &mutex) == 0);
+    p.check("unlock of an unlocked mutex is 0", unlock(p, &mutex) == 0);
+    // Not destroyed: glibc's extra unlock left its user count at -1, so its
+    // `destroy` would answer EBUSY, a count the model does not keep.
+}
+
 fn errorcheck_type(p: &Probe) {
     let mutex = init(p, "errorcheck", Some(PTHREAD_MUTEX_ERRORCHECK));
     p.check("lock", lock(p, &mutex) == 0);
@@ -292,6 +312,7 @@ fn initializers(p: &Probe) {
 
 pub fn run(p: &Probe) {
     default_type(p);
+    default_unlock(p);
     errorcheck_type(p);
     recursive_type(p);
     initializers(p);
@@ -309,51 +330,6 @@ pub const SCENARIO: Scenario = Scenario {
         "pthread_mutex_unlock",
         "pthread_mutex_destroy",
         "sigprocmask",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim's mutex table answers a trylock by the owner EDEADLK (patina-native-shim src/lib.rs ThreadTable::trylock), where glibc's trylock of a held mutex of any non-recursive type is EBUSY",
-            failure: Failure::Differs(&[
-                Difference::field(
-                    23,
-                    "pthread_mutex_trylock",
-                    "errno",
-                    Observed::Str("EDEADLK"),
-                ),
-                Difference::check(24, "trylock by the owner is EBUSY"),
-                Difference::field(
-                    36,
-                    "pthread_mutex_trylock",
-                    "errno",
-                    Observed::Str("EDEADLK"),
-                ),
-                Difference::check(37, "trylock by the owner is still EBUSY"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim's mutexes have no type: patina_mutex_init drops the attributes and a static initializer's kind (glibc's PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP) is never read, so every mutex is error-checking and a recursive one's relock is EDEADLK, one unlock frees it (another thread's trylock succeeds) and the second is EPERM",
-            failure: Failure::Differs(&[
-                Difference::field(49, "pthread_mutex_lock", "ret", Observed::Int(-1)),
-                Difference::field(49, "pthread_mutex_lock", "errno", Observed::Str("EDEADLK")),
-                Difference::check(50, "the owner relocks"),
-                Difference::field(53, "pthread_mutex_trylock", "ret", Observed::Int(0)),
-                Difference::field(53, "pthread_mutex_trylock", "errno", Observed::Null),
-                Difference::check(54, "still held after one of two unlocks"),
-                Difference::field(55, "pthread_mutex_unlock", "ret", Observed::Int(-1)),
-                Difference::field(55, "pthread_mutex_unlock", "errno", Observed::Str("EPERM")),
-                Difference::check(56, "unlock again"),
-                Difference::field(69, "pthread_mutex_lock", "ret", Observed::Int(-1)),
-                Difference::field(69, "pthread_mutex_lock", "errno", Observed::Str("EDEADLK")),
-                Difference::check(70, "the owner relocks"),
-                Difference::field(73, "pthread_mutex_unlock", "ret", Observed::Int(-1)),
-                Difference::field(73, "pthread_mutex_unlock", "errno", Observed::Str("EPERM")),
-                Difference::check(74, "unlock again"),
-            ]),
-        },
     ],
     ..DEFAULTS
 };

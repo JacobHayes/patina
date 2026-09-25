@@ -150,6 +150,18 @@ but also a pipe, an eventfd, a FIFO open, a futex wait or a signal-state call).
 Whatever records a thread's identity before that — a mutex or write-lock owner —
 therefore names the same task after it.
 
+Pthread mutexes keep glibc's types: the type comes from the `pthread_mutex_init`
+attribute or, for a mutex never initialized, from its static initializer's
+`__kind`. An error-checking mutex's relock is `EDEADLK`, a recursive one counts,
+and a normal (default) one's owner waits behind itself, so the run ends as a
+deadlock, before the first thread too (the wait activates the thread runtime).
+`trylock` of a held mutex is `EBUSY`, from its owner too unless the mutex is
+recursive. Unlocking a normal mutex checks no owner, as glibc's does: another
+thread's unlock frees it, and unlocking it unlocked is 0; the other types, and
+a robust or priority-inheriting normal one, answer `EPERM`. A recursive mutex
+held more than once stays held across `pthread_cond_wait`, and the wait's
+re-lock counts it again. On macOS every mutex is error-checking.
+
 Guest raw `rt_sigreturn` and `restart_syscall` are final `signal-abi` traps: handler
 returns use the allowed host restorer, and no guest restart-block protocol exists.
 `pidfd_send_signal` remains a process trap because there are no virtual pidfds;
