@@ -4,11 +4,13 @@
 //! `EFAULT`. Its own scenario, because a door that reads the array first
 //! ends the whole run (and a crash loses the captured event stream).
 //!
-//! The generic (arm64) table has no `poll` row: there every vehicle issues
-//! `ppoll` (a shape glibc's wrapper cannot pass a bad array through).
+//! glibc's wrapper cannot pass these shapes through, so the scenario runs
+//! through the kernel vehicles only. The generic (arm64) table has no `poll`
+//! row: there both issue `ppoll`.
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -48,6 +50,6 @@ pub const SCENARIO: Scenario = Scenario {
         #[cfg(not(target_arch = "x86_64"))]
         Syscall::N_ppoll,
     ],
-    symbols: &["poll"],
+    vehicles: Vehicle::KERNEL,
     ..DEFAULTS
 };

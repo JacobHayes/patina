@@ -303,14 +303,25 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
                 a[3] as *mut fd_set,
                 a[4] as *mut timeval,
             ) as i64,
-            // Network and readiness rows whose glibc wrapper the shim does not
-            // define (`sendmmsg`, `recvmmsg`, `epoll_pwait2`, `epoll_create`)
-            // or that glibc no longer issues (`eventfd`, which its wrapper
-            // spells `eventfd2`): the libc spelling is glibc's `syscall(2)`
-            // until the shim defines the wrapper.
-            Syscall::N_sendmmsg | Syscall::N_recvmmsg | Syscall::N_epoll_pwait2 => {
-                syscall_door(row, a)
-            }
+            Syscall::N_sendmmsg => sendmmsg(
+                a[0] as c_int,
+                a[1] as *mut mmsghdr,
+                a[2] as c_uint,
+                a[3] as c_int,
+            ) as i64,
+            Syscall::N_recvmmsg => recvmmsg(
+                a[0] as c_int,
+                a[1] as *mut mmsghdr,
+                a[2] as c_uint,
+                a[3] as c_int,
+                a[4] as *mut timespec,
+            ) as i64,
+            // Readiness rows whose glibc wrapper the shim does not define
+            // (`epoll_pwait2`, `epoll_create`) or that glibc no longer issues
+            // (`eventfd`, which its wrapper spells `eventfd2`): the libc
+            // spelling is glibc's `syscall(2)` until the shim defines the
+            // wrapper.
+            Syscall::N_epoll_pwait2 => syscall_door(row, a),
             #[cfg(target_arch = "x86_64")]
             Syscall::N_epoll_create | Syscall::N_eventfd => syscall_door(row, a),
             // fanotify: glibc wraps both rows, the shim defines neither (they

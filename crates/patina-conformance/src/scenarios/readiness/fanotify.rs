@@ -14,7 +14,10 @@
 //!
 //! The file handle's bytes are the host filesystem's business and are not
 //! recorded. Under patina fanotify is a named trap by design
-//! (docs/arcs/syscall-conformance.md §6, network + readiness).
+//! (docs/arcs/syscall-conformance.md §6, network + readiness), so the
+//! scenario runs through the kernel vehicles only: glibc's spelling of the
+//! fanotify rows is `syscall(2)` again, and its other wrappers would only
+//! ever be observed natively.
 
 use crate::catalog::{DEFAULTS, Gap, KernelFloor, Need, Scenario, Status};
 use crate::compare::{Ending, Failure};
@@ -168,7 +171,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_getpid,
         Syscall::N_close,
     ],
-    symbols: &["read", "ppoll", "openat", "getpid", "close"],
+    vehicles: Vehicle::KERNEL,
     needs: &[Need::Fanotify, Need::Unprivileged],
     kernel_floor: Some(KernelFloor {
         release: "5.13",
@@ -176,7 +179,7 @@ pub const SCENARIO: Scenario = Scenario {
     }),
     gaps: &[Gap {
         status: Status::ByDesign,
-        vehicles: Vehicle::ALL,
+        vehicles: Vehicle::KERNEL,
         what: "fanotify is a named trap (docs/arcs/syscall-conformance.md §6: fanotify → named trap); the native oracle alone observes the group",
         failure: Failure::Stops {
             events: 0,
