@@ -1,9 +1,14 @@
-//! fs/getdents — getdents64 over a directory descriptor: the entry set, `.`
-//! and `..`, d_type per kind, the cursor (EOF and rewind through lseek; the
-//! position after a call is its last record's d_off, and seeking to a d_off
-//! resumes after that record; SEEK_END is filesystem-specific — refused, or a
-//! position whose listing is a suffix of the whole), and the errno vocabulary. The libc
-//! door is glibc's `getdents64`.
+//! fs/getdents — listing a directory through getdents64 and x86_64's legacy
+//! getdents (`struct linux_dirent`: the type in each record's last byte, after
+//! the name's padding; fs/readdir.c filldir). Through each row: the entry set,
+//! `.` and `..`, d_type per kind, 0 at the end, a rewind through lseek, EINVAL
+//! for a buffer too small for one record, ENOTDIR for a file, EBADF for a
+//! closed descriptor. Through getdents64: an unlinked entry drops out, and the
+//! cursor (the position after a call is its last record's d_off, and seeking
+//! to a d_off resumes after that record; SEEK_END is filesystem-specific —
+//! refused, or a position whose listing is a suffix of the whole). The libc
+//! door of getdents64 is glibc's `getdents64`; glibc has no getdents wrapper,
+//! so that row's libc spelling is `syscall(2)`.
 
 use crate::catalog::{DEFAULTS, Scenario};
 
@@ -11,6 +16,14 @@ use patina_dst_syscalls::Syscall;
 
 use crate::probe::{AT_FDCWD, Probe, neg};
 use libc::*;
+
+/// The listing rows this architecture has: the generic (arm64) table has no
+/// legacy getdents.
+const ROWS: &[Syscall] = &[
+    Syscall::N_getdents64,
+    #[cfg(target_arch = "x86_64")]
+    Syscall::N_getdents,
+];
 
 pub fn run(p: &Probe) {
     let root = p.dir();
@@ -32,60 +45,77 @@ pub fn run(p: &Probe) {
         "symlinkat l -> a",
         p.symlinkat("a", AT_FDCWD, &format!("{root}/l")) == 0,
     );
-
-    let dirfd = p.openat(AT_FDCWD, &root, O_RDONLY | O_DIRECTORY, 0);
-    p.require("open the directory", dirfd >= 0);
-    let (r, entries) = p.getdents64(dirfd, 4096);
-    p.check("getdents64 returns bytes", r > 0);
-    let has = |name: &str, kind: u8| entries.iter().any(|(n, k)| n == name && *k == kind);
     p.check(
-        "regular files are DT_REG",
-        has("a", DT_REG) && has("b", DT_REG),
+        "mknodat a FIFO",
+        p.mknodat(AT_FDCWD, &format!("{root}/p"), S_IFIFO | 0o640, 0) == 0,
     );
-    p.check("the subdirectory is DT_DIR", has("sub", DT_DIR));
-    p.check("the symlink is DT_LNK", has("l", DT_LNK));
-    p.check(
-        "'.' and '..' are listed as DT_DIR",
-        has(".", DT_DIR) && has("..", DT_DIR),
-    );
-    p.check("every entry exactly once", entries.len() == 6);
-    let (r, _) = p.getdents64(dirfd, 4096);
-    p.check("a second call at the end returns 0", r == 0);
-    p.check(
-        "lseek to 0 rewinds the directory",
-        p.lseek(dirfd, 0, SEEK_SET) == 0,
-    );
-    let (r, again) = p.getdents64(dirfd, 4096);
-    p.check(
-        "after the rewind the same entries come back",
-        r > 0 && again == entries,
-    );
-    p.lseek(dirfd, 0, SEEK_SET);
-    let (r, _) = p.getdents64(dirfd, 16);
-    p.check(
-        "a buffer too small for one entry is EINVAL",
-        r == neg(EINVAL),
-    );
-
     let file = p.openat(AT_FDCWD, &format!("{root}/a"), O_RDONLY, 0);
     p.require("open a", file >= 0);
-    let (r, _) = p.getdents64(file, 4096);
-    p.check("getdents64 on a file is ENOTDIR", r == neg(ENOTDIR));
-    let (r, _) = p.getdents64(4000, 4096);
-    p.check(
-        "getdents64 on a closed descriptor is EBADF",
-        r == neg(EBADF),
-    );
+
+    for &row in ROWS {
+        let name = row.name();
+        let dirfd = p.openat(AT_FDCWD, &root, O_RDONLY | O_DIRECTORY, 0);
+        p.require("open the directory", dirfd >= 0);
+        let (r, entries) = p.getdents(row, dirfd, 4096);
+        p.check(&format!("{name} returns bytes"), r > 0);
+        let has = |entry: &str, kind: u8| entries.iter().any(|(n, k)| n == entry && *k == kind);
+        p.check(
+            &format!("{name}: regular files are DT_REG"),
+            has("a", DT_REG) && has("b", DT_REG),
+        );
+        p.check(
+            &format!("{name}: the subdirectory is DT_DIR"),
+            has("sub", DT_DIR),
+        );
+        p.check(&format!("{name}: the symlink is DT_LNK"), has("l", DT_LNK));
+        p.check(&format!("{name}: the FIFO is DT_FIFO"), has("p", DT_FIFO));
+        p.check(
+            &format!("{name}: '.' and '..' are listed as DT_DIR"),
+            has(".", DT_DIR) && has("..", DT_DIR),
+        );
+        p.check(
+            &format!("{name}: every entry exactly once"),
+            entries.len() == 7,
+        );
+        p.check(
+            &format!("{name}: a second call at the end returns 0"),
+            p.getdents(row, dirfd, 4096).0 == 0,
+        );
+        p.check(
+            &format!("{name}: lseek to 0 rewinds the directory"),
+            p.lseek(dirfd, 0, SEEK_SET) == 0,
+        );
+        let (r, again) = p.getdents(row, dirfd, 4096);
+        p.check(
+            &format!("{name}: after the rewind the same entries come back"),
+            r > 0 && again == entries,
+        );
+        p.lseek(dirfd, 0, SEEK_SET);
+        p.check(
+            &format!("{name}: a buffer too small for one record is EINVAL"),
+            p.getdents(row, dirfd, 16).0 == neg(EINVAL),
+        );
+        p.check(
+            &format!("{name} on a file is ENOTDIR"),
+            p.getdents(row, file, 4096).0 == neg(ENOTDIR),
+        );
+        p.check(
+            &format!("{name} on a closed descriptor is EBADF"),
+            p.getdents(row, 4000, 4096).0 == neg(EBADF),
+        );
+        p.close(dirfd);
+    }
 
     p.check(
         "unlinkat a",
         p.unlinkat(AT_FDCWD, &format!("{root}/a"), 0) == 0,
     );
-    p.lseek(dirfd, 0, SEEK_SET);
-    let (r, after) = p.getdents64(dirfd, 4096);
+    let dirfd = p.openat(AT_FDCWD, &root, O_RDONLY | O_DIRECTORY, 0);
+    p.require("open the directory", dirfd >= 0);
+    let (r, after) = p.getdents(Syscall::N_getdents64, dirfd, 4096);
     p.check(
         "an unlinked entry is no longer listed",
-        r > 0 && !after.iter().any(|(n, _)| n == "a") && after.len() == 5,
+        r > 0 && !after.iter().any(|(n, _)| n == "a") && after.len() == 6,
     );
     p.close(file);
     p.close(dirfd);
@@ -113,7 +143,7 @@ pub fn run(p: &Probe) {
         p.lseek(fresh, 0, SEEK_CUR) == 0,
     );
     let (r, all) = p.getdents64_cookies(fresh, 4096);
-    p.check("the whole listing in one call", r > 0 && all.len() == 5);
+    p.check("the whole listing in one call", r > 0 && all.len() == 6);
     p.check(
         "after a call the cursor is the last record's d_off",
         all.last()
@@ -144,7 +174,7 @@ pub fn run(p: &Probe) {
     };
     p.check(
         "and resumes right after that record",
-        r > 0 && all.len() == 5 && names(&rest) == names(&all[1..]),
+        r > 0 && all.len() == 6 && names(&rest) == names(&all[1..]),
     );
     let end = lseek_raw(fresh, 0, SEEK_END);
     let after_end = if end >= 0 {
@@ -166,20 +196,26 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[
         Syscall::N_getdents64,
+        #[cfg(target_arch = "x86_64")]
+        Syscall::N_getdents,
         Syscall::N_openat,
         Syscall::N_close,
         Syscall::N_lseek,
         Syscall::N_mkdirat,
         Syscall::N_symlinkat,
+        Syscall::N_mknodat,
         Syscall::N_unlinkat,
     ],
     symbols: &[
         "getdents64",
+        #[cfg(target_arch = "x86_64")]
+        "syscall",
         "openat",
         "close",
         "lseek",
         "mkdirat",
         "symlinkat",
+        "mknodat",
         "unlinkat",
     ],
     ..DEFAULTS

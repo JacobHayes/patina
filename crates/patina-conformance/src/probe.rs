@@ -792,26 +792,36 @@ impl Probe {
         (result, view, stx.stx_mask)
     }
 
-    /// One `getdents64` call over `bufsize` bytes; entries decoded as
-    /// `name:type` and recorded SORTED (listing order is the host's business).
-    pub fn getdents64(&self, fd: i32, bufsize: usize) -> (i64, Vec<(String, u8)>) {
+    /// One listing call over `bufsize` bytes through `row`: `getdents64`, or
+    /// x86_64's legacy `getdents`. Entries decoded as `name:type` and recorded
+    /// SORTED (listing order is the host's business).
+    pub fn getdents(&self, row: Syscall, fd: i32, bufsize: usize) -> (i64, Vec<(String, u8)>) {
         let mut buf = vec![0u8; bufsize];
         let result = self.call(
-            Syscall::N_getdents64,
+            row,
             [fd as i64, buf.as_mut_ptr() as i64, bufsize as i64, 0, 0, 0],
         );
-        // struct linux_dirent64 { u64 d_ino; i64 d_off; u16 d_reclen; u8 d_type; char d_name[]; }
-        let mut entries: Vec<(String, u8)> =
-            decode_dirents(&buf[..result.max(0) as usize], 19, |record| record[18])
-                .into_iter()
-                .map(|entry| (entry.name, entry.kind))
-                .collect();
+        let records = &buf[..result.max(0) as usize];
+        let decoded = match row {
+            // struct linux_dirent64 { u64 d_ino; i64 d_off; u16 d_reclen;
+            // u8 d_type; char d_name[]; }
+            Syscall::N_getdents64 => decode_dirents(records, 19, |record| record[18]),
+            // struct linux_dirent { unsigned long d_ino; unsigned long d_off;
+            // unsigned short d_reclen; char d_name[]; /* pad; char d_type */ }
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_getdents => decode_dirents(records, 18, |record| record[record.len() - 1]),
+            other => panic!("{}: not a directory listing row", other.name()),
+        };
+        let mut entries: Vec<(String, u8)> = decoded
+            .into_iter()
+            .map(|entry| (entry.name, entry.kind))
+            .collect();
         entries.sort();
         let rendered: Vec<Value> = entries
             .iter()
             .map(|(name, kind)| Value::from(format!("{name}:{kind}")))
             .collect();
-        let builder = self.event(Syscall::N_getdents64, result);
+        let builder = self.event(row, result);
         let builder = self.fd_arg(builder, "fd", fd).arg("bufsize", bufsize);
         let builder = if result >= 0 {
             builder.field("entries", Value::Array(rendered))
@@ -4343,41 +4353,6 @@ impl Probe {
         let builder = self.fd_arg(builder, "fd", fd).arg("bufsize", bufsize);
         let builder = if result >= 0 {
             builder.field("count", entries.len())
-        } else {
-            builder
-        };
-        builder.emit();
-        (result, entries)
-    }
-
-    /// One legacy `getdents` call (x86_64 only): `struct linux_dirent` puts
-    /// the type in the record's last byte, after the name's padding. Entries
-    /// recorded sorted as `name:type`, like `getdents64`.
-    #[cfg(target_arch = "x86_64")]
-    pub fn getdents(&self, fd: i32, bufsize: usize) -> (i64, Vec<(String, u8)>) {
-        let mut buf = vec![0u8; bufsize];
-        let result = self.call(
-            Syscall::N_getdents,
-            [fd as i64, buf.as_mut_ptr() as i64, bufsize as i64, 0, 0, 0],
-        );
-        // struct linux_dirent { unsigned long d_ino; unsigned long d_off;
-        // unsigned short d_reclen; char d_name[]; /* pad; char d_type */ }
-        let decoded = decode_dirents(&buf[..result.max(0) as usize], 18, |record| {
-            record[record.len() - 1]
-        });
-        let mut entries: Vec<(String, u8)> = decoded
-            .into_iter()
-            .map(|entry| (entry.name, entry.kind))
-            .collect();
-        entries.sort();
-        let rendered: Vec<Value> = entries
-            .iter()
-            .map(|(name, kind)| Value::from(format!("{name}:{kind}")))
-            .collect();
-        let builder = self.event(Syscall::N_getdents, result);
-        let builder = self.fd_arg(builder, "fd", fd).arg("bufsize", bufsize);
-        let builder = if result >= 0 {
-            builder.field("entries", Value::Array(rendered))
         } else {
             builder
         };

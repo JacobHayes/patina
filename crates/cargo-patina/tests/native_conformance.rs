@@ -1358,12 +1358,6 @@ fn fs_getdents() {
 }
 
 #[test]
-#[cfg(target_arch = "x86_64")]
-fn fs_getdents_legacy() {
-    conform("fs/getdents_legacy");
-}
-
-#[test]
 fn fs_handles() {
     conform("fs/handles");
 }

@@ -7,8 +7,6 @@ pub mod dirs;
 pub mod fifo;
 pub mod fortify;
 pub mod getdents;
-#[cfg(target_arch = "x86_64")]
-pub mod getdents_legacy;
 pub mod handles;
 pub mod inotify;
 pub mod ioctl;

@@ -418,8 +418,6 @@ pub const SCENARIOS: &[&Scenario] = &[
     &fs::fifo::SCENARIO,
     &fs::fortify::SCENARIO,
     &fs::getdents::SCENARIO,
-    #[cfg(target_arch = "x86_64")]
-    &fs::getdents_legacy::SCENARIO,
     &fs::handles::SCENARIO,
     &fs::inotify::SCENARIO,
     &fs::ioctl::SCENARIO,
