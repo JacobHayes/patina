@@ -18,18 +18,30 @@
 //! * over IPv6, `IPV6_TCLASS` (-1 is the byte 255) and `IPV6_PKTINFO` with
 //!   `IPV6_RECVTCLASS`/`IPV6_RECVPKTINFO`; a source that is no local
 //!   address is `EINVAL`, an unknown interface `ENODEV`; an IPv4 datagram on
-//!   a dual-stack socket reports both families' packet information.
+//!   a dual-stack socket reports both families' packet information;
+//! * the RFC 2292 numbers: `IPV6_2292PKTINFO` and `IPV6_2292HOPLIMIT` are
+//!   their RFC 3542 types, `IPV6_2292PKTOPTIONS` is `EINVAL`; an
+//!   `IPV6_PKTINFO` may be longer than `in6_pktinfo`, not shorter;
+//!   `IPV6_DONTFRAG` is 0 or 1;
+//! * an IPv4 source is judged before the interface (`ENETUNREACH` first),
+//!   one on network 0 included.
 //!
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{DEFAULTS, Need, Scenario};
+use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
+use crate::compare::{Ending, Failure};
 use crate::probe::{Control, Probe, RecvSpec, SockAddr, neg};
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
 const UDP_SEGMENT: i32 = 103;
+// The RFC 2292 numbers (include/uapi/linux/in6.h).
+const IPV6_2292PKTINFO: i32 = 2;
+const IPV6_2292PKTOPTIONS: i32 = 6;
+const IPV6_2292HOPLIMIT: i32 = 8;
 
 fn int(value: i32) -> Vec<u8> {
     value.to_ne_bytes().to_vec()
@@ -411,6 +423,105 @@ pub fn run(p: &Probe) {
                 ),
             ],
     );
+
+    // ---- the RFC 2292 numbers `ip6_datagram_send_ctl` still takes, and
+    // the length and range rules around them ----
+    let ipv6 = |kind: i32, data: Vec<u8>| Control::Protocol(vec![(IPPROTO_IPV6, kind, data)]);
+    p.check(
+        "IPV6_2292PKTINFO is IPV6_PKTINFO",
+        p.sendmsg(
+            s6,
+            &[b"2"],
+            Some(&to6),
+            &ipv6(IPV6_2292PKTINFO, pktinfo6(Ipv6Addr::LOCALHOST, 0)),
+            0,
+        ) == 1,
+    );
+    p.check("arrives", p.recvmsg(r6, WITH_CONTROL).result == 1);
+    p.check(
+        "and judges its source as IPV6_PKTINFO does",
+        p.sendmsg(
+            s6,
+            &[b"3"],
+            Some(&to6),
+            &ipv6(
+                IPV6_2292PKTINFO,
+                pktinfo6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 0),
+            ),
+            0,
+        ) == neg(EINVAL),
+    );
+    p.check(
+        "IPV6_2292HOPLIMIT is IPV6_HOPLIMIT",
+        p.sendmsg(s6, &[b"4"], Some(&to6), &ipv6(IPV6_2292HOPLIMIT, int(7)), 0) == 1,
+    );
+    p.check("arrives", p.recvmsg(r6, WITH_CONTROL).result == 1);
+    p.check(
+        "and is range-checked as it is",
+        p.sendmsg(
+            s6,
+            &[b"5"],
+            Some(&to6),
+            &ipv6(IPV6_2292HOPLIMIT, int(256)),
+            0,
+        ) == neg(EINVAL),
+    );
+    p.check(
+        "IPV6_2292PKTOPTIONS is EINVAL",
+        p.sendmsg(
+            s6,
+            &[b"6"],
+            Some(&to6),
+            &ipv6(IPV6_2292PKTOPTIONS, int(0)),
+            0,
+        ) == neg(EINVAL),
+    );
+    let mut long = pktinfo6(Ipv6Addr::LOCALHOST, 0);
+    long.extend([0; 4]);
+    p.check(
+        "an IPV6_PKTINFO longer than in6_pktinfo is taken",
+        p.sendmsg(s6, &[b"7"], Some(&to6), &ipv6(IPV6_PKTINFO, long), 0) == 1,
+    );
+    p.check("arrives", p.recvmsg(r6, WITH_CONTROL).result == 1);
+    p.check(
+        "a shorter one is EINVAL",
+        p.sendmsg(s6, &[b"8"], Some(&to6), &ipv6(IPV6_PKTINFO, vec![0; 16]), 0) == neg(EINVAL),
+    );
+    p.check(
+        "IPV6_DONTFRAG 1 is taken",
+        p.sendmsg(s6, &[b"9"], Some(&to6), &ipv6(IPV6_DONTFRAG, int(1)), 0) == 1,
+    );
+    p.check("arrives", p.recvmsg(r6, WITH_CONTROL).result == 1);
+    p.check(
+        "IPV6_DONTFRAG 2 is EINVAL",
+        p.sendmsg(s6, &[b"a"], Some(&to6), &ipv6(IPV6_DONTFRAG, int(2)), 0) == neg(EINVAL),
+    );
+
+    // ---- the IPv4 route lookup judges a named source before the interface ----
+    let to4 = SockAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
+    let info4 = |ifindex: i32, spec: Ipv4Addr| {
+        Control::Protocol(vec![(IPPROTO_IP, IP_PKTINFO, pktinfo4(ifindex, spec))])
+    };
+    p.check(
+        "a source that is no local address is ENETUNREACH before a missing interface",
+        p.sendmsg(
+            s4,
+            &[b"b"],
+            Some(&to4),
+            &info4(99, Ipv4Addr::new(8, 8, 8, 8)),
+            0,
+        ) == neg(ENETUNREACH),
+    );
+    p.check(
+        "a source on network 0 is no local address either",
+        p.sendmsg(
+            s4,
+            &[b"c"],
+            Some(&to4),
+            &info4(0, Ipv4Addr::new(0, 1, 2, 3)),
+            0,
+        ) == neg(ENETUNREACH),
+    );
     for fd in [s4, s6, r6] {
         p.close(fd);
     }
@@ -442,5 +553,15 @@ pub const SCENARIO: Scenario = Scenario {
         "close",
     ],
     needs: &[Need::Ipv6Loopback, Need::LocalBindOnly],
+    gaps: &[Gap {
+        status: Status::Pending(Arc::NetworkReadiness),
+        vehicles: Vehicle::ALL,
+        what: "the RFC 2292 IPv6 ancillary types are a named fatal (thread/net/ipctl.rs send_control); ip6_datagram_send_ctl takes IPV6_2292PKTINFO and IPV6_2292HOPLIMIT as their RFC 3542 types and answers IPV6_2292PKTOPTIONS EINVAL",
+        failure: Failure::Stops {
+            events: 105,
+            ending: Ending::Signal(libc::SIGABRT),
+            diagnostic: "ancillary data at level 41, type 2",
+        },
+    }],
     ..DEFAULTS
 };
