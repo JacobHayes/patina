@@ -43,6 +43,7 @@ mod fd_io;
 mod fs;
 mod mem;
 mod net;
+mod privileged;
 mod readiness;
 mod sched_identity;
 mod signal_process;
@@ -949,7 +950,11 @@ const BINDINGS: &[(Syscall, Handler)] = &[
         crate::identity::capget(a[0] as *mut _, a[1] as *mut _)
     }),
     (Syscall::N_capset, |_, a| unsafe {
-        crate::identity::capset(a[0] as *mut _, a[1] as *const _)
+        crate::identity::capset(
+            crate::identity::credential(),
+            a[0] as *mut _,
+            a[1] as *const _,
+        )
     }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_getpgrp, |_, _| crate::identity::getpgrp()),
@@ -957,6 +962,14 @@ const BINDINGS: &[(Syscall, Handler)] = &[
         crate::identity::setpgid(a[0] as i32, a[1] as i32)
     }),
     (Syscall::N_setsid, |_, _| crate::identity::setsid()),
+    // ---- privileged: the virtual credential's capability checks
+    // (`privileged`) ----
+    (Syscall::N_sethostname, |nr, a| {
+        privileged::answer(nr, privileged::set_uts_name, a)
+    }),
+    (Syscall::N_setdomainname, |nr, a| {
+        privileged::answer(nr, privileged::set_uts_name, a)
+    }),
     (Syscall::N_uname, |_, a| unsafe {
         crate::identity::uname(a[0] as *mut _, crate::thread::sched::persona())
     }),

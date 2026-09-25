@@ -5250,14 +5250,22 @@ pub extern "C" fn patina_ppid() -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_uid() -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    registry::IDENTITY_UID
+    #[cfg(target_os = "linux")]
+    let uid = identity::credential().uid;
+    #[cfg(not(target_os = "linux"))]
+    let uid = registry::IDENTITY_UID;
+    uid
 }
 
 /// The one modeled identity's group id; see [`patina_uid`].
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_gid() -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    registry::IDENTITY_GID
+    #[cfg(target_os = "linux")]
+    let gid = identity::credential().gid;
+    #[cfg(not(target_os = "linux"))]
+    let gid = registry::IDENTITY_GID;
+    gid
 }
 
 /// The virtual machine's node name (`--hostname`), a recorded run fact that
@@ -5635,8 +5643,7 @@ const S_IXGRP: u32 = 0o010;
 /// the setgid bit — so the caller writes that mode back through the one mode
 /// entry, which is also what moves `ctime`.
 fn chown_decision(uid: u32, gid: u32, kind: FsEntryKind, mode: u32) -> Result<u32, c_int> {
-    if (uid != ID_UNCHANGED && uid != registry::IDENTITY_UID)
-        || (gid != ID_UNCHANGED && gid != registry::IDENTITY_GID)
+    if (uid != ID_UNCHANGED && uid != patina_uid()) || (gid != ID_UNCHANGED && gid != patina_gid())
     {
         return Err(EPERM);
     }

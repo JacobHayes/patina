@@ -3,12 +3,17 @@
 //! `kernel/capability.c`): the rows both doors answer from the one identity
 //! the runtime models (`registry::IDENTITY_*`).
 //!
-//! The identity is an ordinary unprivileged user: its real, effective, saved
-//! and filesystem ids are all [`IDENTITY_UID`]/[`IDENTITY_GID`], its only
-//! supplementary group is its own, and every capability set is empty. So the
-//! `set*id` rows succeed exactly when every id they name is that one id (the
-//! kernel's rule for a caller without `CAP_SETUID`/`CAP_SETGID`), which
-//! changes nothing; anything else is `EPERM`.
+//! The identity is one virtual credential ([`Credential`], [`credential`]):
+//! an ordinary unprivileged user whose real, effective, saved and filesystem
+//! ids are all [`IDENTITY_UID`]/[`IDENTITY_GID`], whose only supplementary
+//! group is its own, and whose capability sets are empty but for the full
+//! bounding set every process starts with. Everything that answers "who is
+//! the caller" or "may it" reads that one credential: the id rows, `capget`,
+//! the owner `stat` reports (`patina_uid`/`patina_gid`), and the capability
+//! checks of the privileged rows (`sud::privileged`). So the `set*id` rows
+//! succeed exactly when every id they name is that one id (the kernel's rule
+//! for a caller without `CAP_SETUID`/`CAP_SETGID`), which changes nothing;
+//! anything else is `EPERM`.
 //!
 //! The process tree is a pid namespace of two processes: its init
 //! ([`INIT_PID`], leader of process group 1 and session 1) and the guest
@@ -21,9 +26,53 @@
 
 use crate::SpinMutex;
 use crate::neg_errno as errno;
-use crate::registry::{IDENTITY_GID, IDENTITY_PID, IDENTITY_UID, INIT_PID};
+use crate::registry::{Capability, IDENTITY_GID, IDENTITY_PID, IDENTITY_UID, INIT_PID};
 use crate::{EFAULT, EINVAL, EPERM, ESRCH};
 use std::ffi::c_int;
+
+/// A process's credential (`struct cred`): its ids, its supplementary
+/// groups, and its five capability sets as masks of [`Capability::bit`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Credential {
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+    pub(crate) groups: &'static [u32],
+    pub(crate) effective: u64,
+    pub(crate) permitted: u64,
+    pub(crate) inheritable: u64,
+    pub(crate) bounding: u64,
+    pub(crate) ambient: u64,
+}
+
+impl Credential {
+    /// `capable`/`ns_capable` (`cap_capable`): whether the effective set
+    /// holds `capability`. The virtual machine has one user namespace, so
+    /// the namespace a check names changes nothing.
+    pub(crate) const fn capable(&self, capability: Capability) -> bool {
+        self.effective & capability.bit() != 0
+    }
+}
+
+/// The one credential the virtual kernel runs the guest with: uid/gid
+/// [`IDENTITY_UID`]/[`IDENTITY_GID`], its own group, no capability in the
+/// effective, permitted, inheritable or ambient set, and the full bounding
+/// set (no ancestor dropped one). A future identity setting changes this
+/// value, not its readers.
+const CREDENTIAL: Credential = Credential {
+    uid: IDENTITY_UID,
+    gid: IDENTITY_GID,
+    groups: &[IDENTITY_GID],
+    effective: 0,
+    permitted: 0,
+    inheritable: 0,
+    bounding: Capability::ALL,
+    ambient: 0,
+};
+
+/// The guest's credential; see [`CREDENTIAL`].
+pub(crate) const fn credential() -> &'static Credential {
+    &CREDENTIAL
+}
 
 const GUEST: i32 = IDENTITY_PID as i32;
 const INIT: i32 = INIT_PID as i32;
@@ -94,8 +143,8 @@ pub(crate) enum Id {
 impl Id {
     fn own(self) -> u32 {
         match self {
-            Id::User => IDENTITY_UID,
-            Id::Group => IDENTITY_GID,
+            Id::User => credential().uid,
+            Id::Group => credential().gid,
         }
     }
 }
@@ -143,10 +192,8 @@ pub(crate) fn set_fs(id: Id) -> i64 {
     i64::from(id.own())
 }
 
-/// The supplementary groups: the identity's own group.
-const GROUPS: [u32; 1] = [IDENTITY_GID];
-
-/// `getgroups(size, list)`: the count for a size of 0, the list into a
+/// `getgroups(size, list)`: the credential's supplementary groups — the
+/// count for a size of 0, the list into a
 /// buffer at least that long, `EINVAL` for a shorter or negative size.
 ///
 /// # Safety
@@ -155,7 +202,8 @@ pub(crate) unsafe fn getgroups(size: i32, list: *mut u32) -> i64 {
     if size < 0 {
         return errno(EINVAL);
     }
-    let count = GROUPS.len();
+    let groups = credential().groups;
+    let count = groups.len();
     if size != 0 {
         if count > size as usize {
             return errno(EINVAL);
@@ -164,7 +212,7 @@ pub(crate) unsafe fn getgroups(size: i32, list: *mut u32) -> i64 {
             return errno(EFAULT);
         }
         // SAFETY: per this function's contract.
-        unsafe { std::ptr::copy_nonoverlapping(GROUPS.as_ptr(), list, count) };
+        unsafe { std::ptr::copy_nonoverlapping(groups.as_ptr(), list, count) };
     }
     count as i64
 }
@@ -215,8 +263,9 @@ unsafe fn cap_version(header: *mut CapHeader) -> Result<usize, c_int> {
 }
 
 /// `capget`: a NULL data pointer only negotiates the version (an unknown
-/// one answers 0 with the kernel's written back); the sets of the caller —
-/// pid 0 or its own — are empty; a negative pid is `EINVAL`, another `ESRCH`.
+/// one answers 0 with the kernel's written back); the sets of any process —
+/// pid 0 is the caller; init runs with the same credential — are the
+/// credential's; a negative pid is `EINVAL`, one no process has `ESRCH`.
 ///
 /// # Safety
 /// `header` must be NULL or a readable and writable header, `data` NULL or
@@ -242,25 +291,59 @@ pub(crate) unsafe fn capget(header: *mut CapHeader, data: *mut CapData) -> i64 {
     if pid < 0 {
         return errno(EINVAL);
     }
-    // Any process's (or thread's) sets may be read: init's are empty too.
+    // Any process's (or thread's) sets may be read.
     if pid != 0 && lookup(pid).is_none() {
         return errno(ESRCH);
     }
+    let credential = credential();
     for index in 0..count {
+        let word = |set: u64| (set >> (32 * index)) as u32;
+        let sets = CapData {
+            effective: word(credential.effective),
+            permitted: word(credential.permitted),
+            inheritable: word(credential.inheritable),
+        };
         // SAFETY: as above.
-        unsafe { data.add(index).write_unaligned(CapData::default()) };
+        unsafe { data.add(index).write_unaligned(sets) };
     }
     0
 }
 
-/// `capset`: only the caller's own sets (another pid `EPERM`), and an
-/// unprivileged caller can only keep them empty: an inheritable or permitted
-/// set beyond the current (empty) ones, or an effective set beyond the new
-/// permitted one, is `EPERM`.
+/// A process's three settable capability sets, as `capset` asks for them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CapSets {
+    effective: u64,
+    permitted: u64,
+    inheritable: u64,
+}
+
+/// `cap_capset`'s rules for `old` asking for `new`: without `CAP_SETPCAP`
+/// the new inheritable set stays within the old inheritable and permitted
+/// ones, and always within the old inheritable and bounding ones; the
+/// permitted set may only shrink; the effective set stays within the new
+/// permitted one.
+fn cap_capset(old: &Credential, new: CapSets) -> bool {
+    let capped = !old.capable(Capability::Setpcap);
+    !((capped && new.inheritable & !(old.inheritable | old.permitted) != 0)
+        || new.inheritable & !(old.inheritable | old.bounding) != 0
+        || new.permitted & !old.permitted != 0
+        || new.effective & !new.permitted != 0)
+}
+
+/// `capset` for a caller holding `credential`: only the caller's own sets
+/// (another pid `EPERM`), each assembled from its two words and cut to the
+/// capabilities the kernel knows (`mk_kernel_cap`: a bit past
+/// `CAP_LAST_CAP` is dropped, not refused), then [`cap_capset`]'s rules
+/// (`EPERM`). Sets equal to the credential's change nothing (0); the
+/// credential is fixed, so a change the rules would allow is a named fatal.
 ///
 /// # Safety
 /// As [`capget`], with `data` readable.
-pub(crate) unsafe fn capset(header: *mut CapHeader, data: *const CapData) -> i64 {
+pub(crate) unsafe fn capset(
+    credential: &Credential,
+    header: *mut CapHeader,
+    data: *const CapData,
+) -> i64 {
     if header.is_null() {
         return errno(EFAULT);
     }
@@ -278,16 +361,34 @@ pub(crate) unsafe fn capset(header: *mut CapHeader, data: *const CapData) -> i64
     if data.is_null() {
         return errno(EFAULT);
     }
-    let (mut effective, mut permitted, mut inheritable) = (0u64, 0u64, 0u64);
+    let mut new = CapSets {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    };
     for index in 0..count {
         // SAFETY: as above.
         let set = unsafe { data.add(index).read_unaligned() };
-        effective |= u64::from(set.effective) << (32 * index);
-        permitted |= u64::from(set.permitted) << (32 * index);
-        inheritable |= u64::from(set.inheritable) << (32 * index);
+        new.effective |= u64::from(set.effective) << (32 * index);
+        new.permitted |= u64::from(set.permitted) << (32 * index);
+        new.inheritable |= u64::from(set.inheritable) << (32 * index);
     }
-    if inheritable != 0 || permitted != 0 || effective & !permitted != 0 {
+    new.effective &= Capability::ALL;
+    new.permitted &= Capability::ALL;
+    new.inheritable &= Capability::ALL;
+    if !cap_capset(credential, new) {
         return errno(EPERM);
+    }
+    let old = CapSets {
+        effective: credential.effective,
+        permitted: credential.permitted,
+        inheritable: credential.inheritable,
+    };
+    if new != old {
+        crate::trap_fatal(
+            "capset: changing the capability sets is not modeled (the virtual credential is \
+             fixed); failing closed",
+        );
     }
     0
 }
@@ -554,12 +655,72 @@ mod tests {
             assert_eq!(capget(&mut header, data.as_mut_ptr()), errno(EINVAL));
             header.pid = 0;
             data[0].effective = 1 << 13;
-            assert_eq!(capset(&mut header, data.as_ptr()), errno(EPERM));
+            assert_eq!(
+                capset(credential(), &mut header, data.as_ptr()),
+                errno(EPERM)
+            );
             data[0] = CapData::default();
-            assert_eq!(capset(&mut header, data.as_ptr()), 0);
+            assert_eq!(capset(credential(), &mut header, data.as_ptr()), 0);
             header.pid = 99;
-            assert_eq!(capset(&mut header, data.as_ptr()), errno(EPERM));
+            assert_eq!(
+                capset(credential(), &mut header, data.as_ptr()),
+                errno(EPERM)
+            );
+            // Bits past `CAP_LAST_CAP` are dropped (`mk_kernel_cap`), so
+            // sets naming only those are the current, empty ones.
+            header.pid = 0;
+            data[1] = CapData {
+                effective: 0xffff_fe00,
+                permitted: 0xffff_fe00,
+                inheritable: 0xffff_fe00,
+            };
+            assert_eq!(capset(credential(), &mut header, data.as_ptr()), 0);
         }
+    }
+
+    /// `cap_capset` for credentials other than the guest's: `CAP_SETPCAP`
+    /// lets the inheritable set take a capability outside the permitted set
+    /// (but never outside the bounding set), and the permitted set never
+    /// grows.
+    #[test]
+    fn capset_follows_cap_capset_for_any_credential() {
+        let chown = Capability::Chown.bit();
+        let setpcap = Capability::Setpcap.bit();
+        let holding = |held: u64, bounding: u64| Credential {
+            effective: held,
+            permitted: held,
+            bounding,
+            ..*credential()
+        };
+        let inheriting = |set: u64| CapSets {
+            effective: 0,
+            permitted: 0,
+            inheritable: set,
+        };
+        let pcap = holding(setpcap, Capability::ALL);
+        assert!(cap_capset(
+            &pcap,
+            CapSets {
+                permitted: setpcap,
+                ..inheriting(chown)
+            }
+        ));
+        assert!(!cap_capset(&holding(0, Capability::ALL), inheriting(chown)));
+        assert!(!cap_capset(&holding(setpcap, setpcap), inheriting(chown)));
+        assert!(!cap_capset(
+            &pcap,
+            CapSets {
+                permitted: setpcap | chown,
+                ..inheriting(0)
+            }
+        ));
+        assert!(!cap_capset(
+            &pcap,
+            CapSets {
+                effective: setpcap,
+                ..inheriting(0)
+            }
+        ));
     }
 
     /// The one test that moves the guest's group and session: the tree's

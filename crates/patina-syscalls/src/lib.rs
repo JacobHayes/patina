@@ -336,6 +336,116 @@ pub fn errno_name(errno: i32) -> String {
     }
 }
 
+/// A Linux capability (`include/uapi/linux/capability.h`), numbered as the
+/// kernel numbers it: a privileged row names the ones its kernel code checks
+/// ([`SyscallRow::capabilities`]), and the virtual credential's sets are
+/// masks of their bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum Capability {
+    Chown = 0,
+    DacOverride = 1,
+    DacReadSearch = 2,
+    Fowner = 3,
+    Fsetid = 4,
+    Kill = 5,
+    Setgid = 6,
+    Setuid = 7,
+    Setpcap = 8,
+    LinuxImmutable = 9,
+    NetBindService = 10,
+    NetBroadcast = 11,
+    NetAdmin = 12,
+    NetRaw = 13,
+    IpcLock = 14,
+    IpcOwner = 15,
+    SysModule = 16,
+    SysRawio = 17,
+    SysChroot = 18,
+    SysPtrace = 19,
+    SysPacct = 20,
+    SysAdmin = 21,
+    SysBoot = 22,
+    SysNice = 23,
+    SysResource = 24,
+    SysTime = 25,
+    SysTtyConfig = 26,
+    Mknod = 27,
+    Lease = 28,
+    AuditWrite = 29,
+    AuditControl = 30,
+    Setfcap = 31,
+    MacOverride = 32,
+    MacAdmin = 33,
+    Syslog = 34,
+    WakeAlarm = 35,
+    BlockSuspend = 36,
+    AuditRead = 37,
+    Perfmon = 38,
+    Bpf = 39,
+    CheckpointRestore = 40,
+}
+
+impl Capability {
+    /// `CAP_LAST_CAP` of the [`VIRTUAL_ABI`] kernel.
+    pub const LAST: Capability = Capability::CheckpointRestore;
+    /// Every capability the virtual kernel knows, as a set: the bounding set
+    /// a process starts with.
+    pub const ALL: u64 = (1u64 << (Capability::LAST as u8 + 1)) - 1;
+
+    /// The capability's bit in a capability set.
+    pub const fn bit(self) -> u64 {
+        1u64 << self as u8
+    }
+
+    /// The kernel's name, e.g. `CAP_SYS_ADMIN`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Capability::Chown => "CAP_CHOWN",
+            Capability::DacOverride => "CAP_DAC_OVERRIDE",
+            Capability::DacReadSearch => "CAP_DAC_READ_SEARCH",
+            Capability::Fowner => "CAP_FOWNER",
+            Capability::Fsetid => "CAP_FSETID",
+            Capability::Kill => "CAP_KILL",
+            Capability::Setgid => "CAP_SETGID",
+            Capability::Setuid => "CAP_SETUID",
+            Capability::Setpcap => "CAP_SETPCAP",
+            Capability::LinuxImmutable => "CAP_LINUX_IMMUTABLE",
+            Capability::NetBindService => "CAP_NET_BIND_SERVICE",
+            Capability::NetBroadcast => "CAP_NET_BROADCAST",
+            Capability::NetAdmin => "CAP_NET_ADMIN",
+            Capability::NetRaw => "CAP_NET_RAW",
+            Capability::IpcLock => "CAP_IPC_LOCK",
+            Capability::IpcOwner => "CAP_IPC_OWNER",
+            Capability::SysModule => "CAP_SYS_MODULE",
+            Capability::SysRawio => "CAP_SYS_RAWIO",
+            Capability::SysChroot => "CAP_SYS_CHROOT",
+            Capability::SysPtrace => "CAP_SYS_PTRACE",
+            Capability::SysPacct => "CAP_SYS_PACCT",
+            Capability::SysAdmin => "CAP_SYS_ADMIN",
+            Capability::SysBoot => "CAP_SYS_BOOT",
+            Capability::SysNice => "CAP_SYS_NICE",
+            Capability::SysResource => "CAP_SYS_RESOURCE",
+            Capability::SysTime => "CAP_SYS_TIME",
+            Capability::SysTtyConfig => "CAP_SYS_TTY_CONFIG",
+            Capability::Mknod => "CAP_MKNOD",
+            Capability::Lease => "CAP_LEASE",
+            Capability::AuditWrite => "CAP_AUDIT_WRITE",
+            Capability::AuditControl => "CAP_AUDIT_CONTROL",
+            Capability::Setfcap => "CAP_SETFCAP",
+            Capability::MacOverride => "CAP_MAC_OVERRIDE",
+            Capability::MacAdmin => "CAP_MAC_ADMIN",
+            Capability::Syslog => "CAP_SYSLOG",
+            Capability::WakeAlarm => "CAP_WAKE_ALARM",
+            Capability::BlockSuspend => "CAP_BLOCK_SUSPEND",
+            Capability::AuditRead => "CAP_AUDIT_READ",
+            Capability::Perfmon => "CAP_PERFMON",
+            Capability::Bpf => "CAP_BPF",
+            Capability::CheckpointRestore => "CAP_CHECKPOINT_RESTORE",
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 /// One syscall number (per arch) and what the runtime does with it.
 #[derive(Clone, Copy, Debug)]
@@ -357,6 +467,12 @@ pub struct SyscallRow {
     /// harness runs on. A `since` newer than [`VIRTUAL_ABI`] makes the row
     /// `Absent`.
     pub since: Option<&'static str>,
+    /// The capabilities the kernel's code for this row checks (`capable`,
+    /// `ns_capable`), primary first. The dispatcher answers such a row from
+    /// the virtual credential: the checks the kernel makes before the
+    /// capability, then the kernel's refusal when the credential lacks it,
+    /// and a named fatal when it holds one whose effect is not modeled.
+    pub capabilities: &'static [Capability],
 }
 
 #[cfg(target_os = "linux")]
@@ -364,6 +480,12 @@ impl SyscallRow {
     /// Record the first kernel release carrying this number.
     pub const fn since(mut self, release: &'static str) -> Self {
         self.since = Some(release);
+        self
+    }
+
+    /// Record the capabilities the row's kernel code checks.
+    pub const fn capabilities(mut self, capabilities: &'static [Capability]) -> Self {
+        self.capabilities = capabilities;
         self
     }
 

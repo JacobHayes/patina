@@ -136,6 +136,29 @@ fn rows_are_well_formed() {
     }
 }
 
+/// A row that declares the capabilities its kernel code checks is answered
+/// from the virtual credential, so it is routed (`Modeled`): a trap or a
+/// fixed answer would ignore the credential the declaration exists for.
+/// Each capability is declared once.
+#[test]
+fn capability_rows_are_routed() {
+    for row in SYSCALLS.iter().filter(|row| !row.capabilities.is_empty()) {
+        assert_eq!(
+            row.disposition,
+            Disposition::Modeled,
+            "{}: declares capabilities but is not routed",
+            row.name
+        );
+        let distinct: BTreeSet<Capability> = row.capabilities.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            row.capabilities.len(),
+            "{}: a capability declared twice",
+            row.name
+        );
+    }
+}
+
 /// The virtual ABI rule, pinned: a row whose `since` is newer than
 /// [`VIRTUAL_ABI`] is `Absent` and nothing else is, so a raw emitter of such a
 /// number gets `ENOSYS` — exactly what a kernel of the declared level answers —

@@ -2,10 +2,10 @@
 //! generated; adding an upstream identity makes this exhaustive match fail until
 //! its actual runtime disposition is reviewed. Never infer ENOSYS from novelty.
 
+use super::{Capability, TRAP_PRIVILEGED, TRAP_PROCESS, TRAP_SIGNAL_ABI, TRAP_UNMODELED};
 use super::{
     Disposition, Family, IDENTITY_GID, IDENTITY_PID, IDENTITY_UID, INIT_PID, Syscall, SyscallRow,
 };
-use super::{TRAP_PRIVILEGED, TRAP_PROCESS, TRAP_SIGNAL_ABI, TRAP_UNMODELED};
 
 const fn r(
     id: Syscall,
@@ -23,6 +23,7 @@ const fn r(
         reasoning,
         closes_in,
         since: None,
+        capabilities: &[],
     }
 }
 
@@ -1258,17 +1259,19 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_sethostname => r(
         id,
         Family::Privileged,
-        Disposition::SoftDeny(EPERM),
-        "Naming the machine needs `CAP_SYS_ADMIN` in the UTS namespace's owner, checked before the name's length, so the unprivileged identity is answered `EPERM`; the node name is the run's `--hostname` (`uname`, `gethostname`).",
+        Disposition::Modeled,
+        "Answered from the virtual credential: naming the machine needs `CAP_SYS_ADMIN` in the UTS namespace's owner, checked before the name's length (`EPERM` without it; granted, a named fatal); the node name is the run's `--hostname` (`uname`, `gethostname`).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_setdomainname => r(
         id,
         Family::Privileged,
-        Disposition::SoftDeny(EPERM),
-        "Naming the NIS domain needs `CAP_SYS_ADMIN` in the UTS namespace's owner, checked before the name's length, so the unprivileged identity is answered `EPERM`.",
+        Disposition::Modeled,
+        "Answered from the virtual credential: naming the NIS domain needs `CAP_SYS_ADMIN` in the UTS namespace's owner, checked before the name's length (`EPERM` without it; granted, a named fatal).",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     #[cfg(target_arch = "x86_64")]
     Syscall::N_iopl => r(
         id,

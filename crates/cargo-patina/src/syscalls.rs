@@ -139,6 +139,11 @@ impl Report {
                     "reasoning": row.reasoning,
                     "closes_in": row.closes_in,
                     "since": row.since,
+                    "capabilities": row
+                        .capabilities
+                        .iter()
+                        .map(|capability| capability.name())
+                        .collect::<Vec<_>>(),
                     },
                     "symbols": self
                         .symbols_for(row)
