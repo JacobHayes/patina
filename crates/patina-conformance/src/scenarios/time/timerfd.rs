@@ -27,14 +27,10 @@
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Arm, Count, Probe, ms, neg, spec_ns};
-use crate::signals::PROGRESS_DEADLINE;
+use crate::signals::PROGRESS_DEADLINE_NS;
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
-
-fn wait_ns() -> i64 {
-    PROGRESS_DEADLINE.as_nanos() as i64
-}
 
 pub fn run(p: &Probe) {
     let fd = p.timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
@@ -82,7 +78,7 @@ pub fn run(p: &Probe) {
         "re-arming for 10 ms answers the armed setting",
         r == 0 && spec_ns(old) > 0 && spec_ns(old) <= spec_ns(second),
     );
-    let (r, revents) = p.ppoll(&[(fd, POLLIN)], Some(wait_ns()));
+    let (r, revents) = p.ppoll(&[(fd, POLLIN)], Some(PROGRESS_DEADLINE_NS));
     p.check("it turns readable at expiry", r == 1 && revents == [POLLIN]);
     let (r, count) = p.timerfd_read(fd, 8, Count::Exact);
     p.check("a read answers one expiration", r == 8 && count == 1);
@@ -134,7 +130,7 @@ pub fn run(p: &Probe) {
     // at 0 it is past only because the sleeps above advanced it.
     let (r, _, _) = p.timerfd_settime(fd, TFD_TIMER_ABSTIME, Arm::Spec((0, 1)), (0, 0));
     p.check("arm it at an absolute time long past", r == 0);
-    let (r, revents) = p.ppoll(&[(fd, POLLIN)], Some(wait_ns()));
+    let (r, revents) = p.ppoll(&[(fd, POLLIN)], Some(PROGRESS_DEADLINE_NS));
     p.check("it turns readable", r == 1 && revents == [POLLIN]);
     let (r, count) = p.timerfd_read(fd, 8, Count::Exact);
     p.check("it expired at once, once", r == 8 && count == 1);

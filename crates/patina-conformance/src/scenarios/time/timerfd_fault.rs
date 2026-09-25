@@ -14,7 +14,7 @@
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Arm, Count, Probe, neg, spec_ns};
-use crate::signals::PROGRESS_DEADLINE;
+use crate::signals::PROGRESS_DEADLINE_NS;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -68,7 +68,7 @@ pub fn run(p: &Probe) {
     );
     let (r, _, _) = p.timerfd_settime(fd, 0, Arm::Spec((0, 1_000_000)), (0, 0));
     p.check("arm it for a millisecond", r == 0);
-    let (r, revents) = p.ppoll(&[(fd, POLLIN)], Some(PROGRESS_DEADLINE.as_nanos() as i64));
+    let (r, revents) = p.ppoll(&[(fd, POLLIN)], Some(PROGRESS_DEADLINE_NS));
     p.check("it expires", r == 1 && revents == [POLLIN]);
     p.check(
         "a read into an unwritable buffer is EFAULT",

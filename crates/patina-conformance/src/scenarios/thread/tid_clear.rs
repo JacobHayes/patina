@@ -19,7 +19,6 @@ static SLOT: AtomicU32 = AtomicU32::new(0);
 static STARTED: AtomicI32 = AtomicI32::new(0);
 static THREAD_TID: AtomicI32 = AtomicI32::new(0);
 static PROBE: AtomicPtr<Probe> = AtomicPtr::new(std::ptr::null_mut());
-const WAIT: i32 = FUTEX_WAIT;
 
 pub fn run(p: &Probe) {
     let own = AtomicI32::new(0);
@@ -63,7 +62,7 @@ pub fn run(p: &Probe) {
             if SLOT.load(Ordering::SeqCst) == 0 {
                 break;
             }
-            p.futex(&SLOT, WAIT, tid, Some(WAIT_SLICE.as_nanos() as i64));
+            p.futex(&SLOT, FUTEX_WAIT, tid, Some(WAIT_SLICE.as_nanos() as i64));
         }
     });
     p.check(

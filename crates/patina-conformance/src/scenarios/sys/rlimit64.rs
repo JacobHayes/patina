@@ -27,10 +27,7 @@ use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
-/// The virtual kernel's descriptor limit, which the harness pins natively.
-const FD_LIMIT: u64 = 1024;
-/// One past the last resource (`RLIM_NLIMITS`).
-const UNKNOWN_RESOURCE: i32 = 16;
+use super::rlimit::{FD_LIMIT, UNKNOWN_RESOURCE};
 
 pub fn run(p: &Probe) {
     let get = p.resolve("getrlimit64");

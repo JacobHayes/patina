@@ -24,9 +24,9 @@ use libc::*;
 use patina_dst_syscalls::Syscall;
 
 /// The virtual kernel's descriptor limit, which the harness pins natively.
-const FD_LIMIT: u64 = 1024;
+pub(super) const FD_LIMIT: u64 = 1024;
 /// One past the last resource (`RLIM_NLIMITS`).
-const UNKNOWN_RESOURCE: i32 = 16;
+pub(super) const UNKNOWN_RESOURCE: i32 = 16;
 
 pub fn run(p: &Probe) {
     let (r, soft, hard) = p.getrlimit(RLIMIT_NOFILE as i32, Shown::Soft);

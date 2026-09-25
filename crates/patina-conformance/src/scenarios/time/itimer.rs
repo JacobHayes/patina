@@ -28,7 +28,7 @@
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, SIGSET_BYTES, micros, ms_us, neg};
-use crate::signals::{PROGRESS_DEADLINE, empty_set, has, one_set, set_of, spin_until};
+use crate::signals::{PROGRESS_DEADLINE_NS, empty_set, has, one_set, set_of, spin_until};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -37,15 +37,16 @@ use serde_json::Value;
 /// One tick at the lowest `CONFIG_HZ` the kernel offers (100).
 const TICK_US: i64 = 10_000;
 
-fn wait_ns() -> i64 {
-    PROGRESS_DEADLINE.as_nanos() as i64
-}
-
 /// Dequeue one pending `SIGALRM` within the progress deadline.
 fn alarm_expires(p: &Probe, set: &sigset_t, label: &str) {
     // SAFETY: all-zero is a valid siginfo_t.
     let mut info: siginfo_t = unsafe { std::mem::zeroed() };
-    let r = p.rt_sigtimedwait(set, Some(&mut info), Some(wait_ns()), SIGSET_BYTES as usize);
+    let r = p.rt_sigtimedwait(
+        set,
+        Some(&mut info),
+        Some(PROGRESS_DEADLINE_NS),
+        SIGSET_BYTES as usize,
+    );
     p.check(
         label,
         r == i64::from(SIGALRM) && info.si_code == crate::probe::SI_KERNEL,

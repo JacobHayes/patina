@@ -9,6 +9,7 @@ use crate::catalog::{DEFAULTS, Generation, Scenario, TraceFacts};
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{Probe, neg};
+use crate::signals as support;
 use libc::*;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
@@ -43,13 +44,7 @@ extern "C" fn onstack_handler(_: c_int) {
 }
 
 fn install() {
-    unsafe {
-        let mut sa: sigaction = std::mem::zeroed();
-        sigemptyset(&mut sa.sa_mask);
-        sa.sa_flags = SA_ONSTACK;
-        sa.sa_sigaction = onstack_handler as *const () as usize;
-        assert_eq!(sigaction(SIGUSR1, &sa, std::ptr::null_mut()), 0);
-    }
+    support::install_with(SIGUSR1, SA_ONSTACK, onstack_handler as *const () as usize);
 }
 
 pub fn run(p: &Probe) {

@@ -7,18 +7,15 @@ use crate::catalog::{DEFAULTS, Scenario, TraceFacts};
 use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
-use crate::probe::{Probe, neg};
+use crate::probe::{FUTEX_WAIT_PRIVATE, FUTEX_WAKE_PRIVATE, Probe, neg};
 use libc::*;
 use std::sync::atomic::{AtomicU32, Ordering};
-
-const WAIT: i32 = FUTEX_WAIT | FUTEX_PRIVATE_FLAG;
-const WAKE: i32 = FUTEX_WAKE | FUTEX_PRIVATE_FLAG;
 
 pub fn run(p: &Probe) {
     let word = AtomicU32::new(0);
     p.check(
         "FUTEX_WAIT with a stale expected value is EAGAIN",
-        p.futex(&word, WAIT, 1, None) == neg(EAGAIN),
+        p.futex(&word, FUTEX_WAIT_PRIVATE, 1, None) == neg(EAGAIN),
     );
     p.check(
         "a shared (not private) FUTEX_WAIT with a stale value is EAGAIN too",
@@ -26,12 +23,12 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "FUTEX_WAKE with no waiters wakes 0",
-        p.futex(&word, WAKE, 1, None) == 0,
+        p.futex(&word, FUTEX_WAKE_PRIVATE, 1, None) == 0,
     );
     let (_, before) = p.clock_gettime(CLOCK_MONOTONIC);
     p.check(
         "a timed FUTEX_WAIT nobody wakes is ETIMEDOUT",
-        p.futex(&word, WAIT, 0, Some(1_000_000)) == neg(ETIMEDOUT),
+        p.futex(&word, FUTEX_WAIT_PRIVATE, 0, Some(1_000_000)) == neg(ETIMEDOUT),
     );
     let (_, after) = p.clock_gettime(CLOCK_MONOTONIC);
     p.check(
@@ -47,17 +44,17 @@ pub fn run(p: &Probe) {
         scope.spawn(|| {
             p.rec.quiet(|| {
                 while word.load(Ordering::SeqCst) == 0 {
-                    p.futex(&word, WAIT, 0, None);
+                    p.futex(&word, FUTEX_WAIT_PRIVATE, 0, None);
                 }
             });
             word.store(2, Ordering::SeqCst);
-            p.rec.quiet(|| p.futex(&word, WAKE, 1, None));
+            p.rec.quiet(|| p.futex(&word, FUTEX_WAKE_PRIVATE, 1, None));
         });
         word.store(1, Ordering::SeqCst);
         p.rec.quiet(|| {
             while word.load(Ordering::SeqCst) != 2 {
-                p.futex(&word, WAKE, 1, None);
-                p.futex(&word, WAIT, 1, Some(1_000_000));
+                p.futex(&word, FUTEX_WAKE_PRIVATE, 1, None);
+                p.futex(&word, FUTEX_WAIT_PRIVATE, 1, Some(1_000_000));
             }
         });
     });
@@ -67,7 +64,7 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "a final FUTEX_WAKE finds nobody",
-        p.futex(&word, WAKE, i32::MAX as u32, None) == 0,
+        p.futex(&word, FUTEX_WAKE_PRIVATE, i32::MAX as u32, None) == 0,
     );
 }
 

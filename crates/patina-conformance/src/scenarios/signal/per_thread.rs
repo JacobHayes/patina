@@ -19,7 +19,7 @@ use crate::signals as support;
 
 use crate::probe::Probe;
 use libc::*;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub fn run(p: &Probe) {
     support::reset();
@@ -33,21 +33,11 @@ pub fn run(p: &Probe) {
         p.rt_sigprocmask(SIG_BLOCK, Some(&usr2), None, 8) == 0,
     );
 
-    let phase = AtomicI32::new(0);
-    let released = AtomicBool::new(false);
-    let worker_tid = AtomicI32::new(0);
+    let turns = support::Turns::default();
     let main_stack = AtomicUsize::new(0);
-    let await_phase = |wanted: i32| {
-        p.rec.quiet(|| {
-            support::wait_until(std::time::Duration::from_millis(1), || {
-                phase.load(Ordering::SeqCst) >= wanted || released.load(Ordering::SeqCst)
-            });
-        })
-    };
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let tid = support::gettid();
-            worker_tid.store(tid, Ordering::SeqCst);
+            let tid = turns.worker_starts();
             let mut inherited = support::empty_set();
             p.check(
                 "worker reads its initial mask",
@@ -61,9 +51,9 @@ pub fn run(p: &Probe) {
                 "worker blocks SIGUSR1 on its own thread",
                 p.rt_sigprocmask(SIG_BLOCK, Some(&usr1), None, 8) == 0,
             );
-            phase.store(1, Ordering::SeqCst);
+            turns.pass(1);
 
-            await_phase(2);
+            turns.wait(p, 2);
             let mut stack: stack_t = unsafe { std::mem::zeroed() };
             p.check(
                 "worker queries its altstack",
@@ -89,9 +79,9 @@ pub fn run(p: &Probe) {
                 "it is pending for the worker",
                 support::has(&pending, SIGUSR1),
             );
-            phase.store(3, Ordering::SeqCst);
+            turns.pass(3);
 
-            await_phase(4);
+            turns.wait(p, 4);
             p.check(
                 "worker unblocks SIGUSR1",
                 p.rt_sigprocmask(SIG_UNBLOCK, Some(&usr1), None, 8) == 0,
@@ -108,17 +98,13 @@ pub fn run(p: &Probe) {
                 "with SI_TKILL",
                 support::LAST_CODE.load(Ordering::SeqCst) == SI_TKILL,
             );
-            phase.store(5, Ordering::SeqCst);
+            turns.pass(5);
         });
         // A failed check panics natively (`--strict`); releasing the worker
         // on the way out keeps the scope's join from hanging.
-        let _release = support::Release(&released);
+        let _release = turns.release_guard();
 
-        await_phase(1);
-        p.require(
-            "the worker reached its first turn",
-            phase.load(Ordering::SeqCst) >= 1,
-        );
+        p.require("the worker reached its first turn", turns.wait(p, 1));
         let mut mine = support::empty_set();
         p.check(
             "main reads its mask",
@@ -155,7 +141,7 @@ pub fn run(p: &Probe) {
             "main blocks SIGUSR1 too",
             p.rt_sigprocmask(SIG_BLOCK, Some(&usr1), None, 8) == 0,
         );
-        let worker = worker_tid.load(Ordering::SeqCst);
+        let worker = turns.worker_tid();
         p.check(
             "main tgkills the worker while both block SIGUSR1",
             p.tgkill(pid, worker, SIGUSR1) == 0,
@@ -174,13 +160,9 @@ pub fn run(p: &Probe) {
             "unblocking on the main thread delivers nothing (the signal is the worker's)",
             support::count() == 1,
         );
-        phase.store(2, Ordering::SeqCst);
+        turns.pass(2);
 
-        await_phase(3);
-        p.require(
-            "the worker finished its second turn",
-            phase.load(Ordering::SeqCst) >= 3,
-        );
+        p.require("the worker finished its second turn", turns.wait(p, 3));
         p.check(
             "nothing more was delivered meanwhile",
             support::count() == 1,
@@ -195,13 +177,9 @@ pub fn run(p: &Probe) {
             still.ss_sp as usize == main_stack.load(Ordering::SeqCst)
                 && still.ss_size == memory.len(),
         );
-        phase.store(4, Ordering::SeqCst);
+        turns.pass(4);
 
-        await_phase(5);
-        p.require(
-            "the worker finished its last turn",
-            phase.load(Ordering::SeqCst) >= 5,
-        );
+        p.require("the worker finished its last turn", turns.wait(p, 5));
         let disable = stack_t {
             ss_sp: std::ptr::null_mut(),
             ss_flags: SS_DISABLE,

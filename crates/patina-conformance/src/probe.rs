@@ -109,6 +109,11 @@ pub fn page_size() -> usize {
     usize::try_from(size).expect("sysconf(_SC_PAGESIZE) answers")
 }
 
+/// `FUTEX_WAIT` on a word private to the process (the op std's locks use).
+pub const FUTEX_WAIT_PRIVATE: i32 = libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG;
+/// `FUTEX_WAKE` on a word private to the process.
+pub const FUTEX_WAKE_PRIVATE: i32 = libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG;
+
 /// A negative errno in the kernel convention.
 pub const fn neg(errno: i32) -> i64 {
     -(errno as i64)
@@ -1264,60 +1269,12 @@ impl Probe {
     }
 
     pub fn nanosleep(&self, sec: i64, nsec: i64) -> i64 {
-        let req = libc::timespec {
-            tv_sec: sec,
-            tv_nsec: nsec,
-        };
-        let mut rem = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        let result = self.call(
-            Syscall::N_nanosleep,
-            [
-                &req as *const libc::timespec as i64,
-                &mut rem as *mut libc::timespec as i64,
-                0,
-                0,
-                0,
-                0,
-            ],
-        );
-        self.event(Syscall::N_nanosleep, result)
-            .arg("sec", sec)
-            .arg("nsec", nsec)
-            .emit();
-        result
+        self.nanosleep_rem(sec, nsec).0
     }
 
+    /// `clock_nanosleep` with a NULL `rem` (relative unless `TIMER_ABSTIME`).
     pub fn clock_nanosleep(&self, clock: i32, flags: i32, sec: i64, nsec: i64) -> i64 {
-        let req = libc::timespec {
-            tv_sec: sec,
-            tv_nsec: nsec,
-        };
-        let result = self.call(
-            Syscall::N_clock_nanosleep,
-            [
-                clock as i64,
-                flags as i64,
-                &req as *const libc::timespec as i64,
-                0,
-                0,
-                0,
-            ],
-        );
-        let builder = self
-            .event(Syscall::N_clock_nanosleep, result)
-            .arg("clock", clock)
-            .arg("flags", flags);
-        // An absolute deadline is a clock reading, so it is not a stable arg.
-        let builder = if flags & libc::TIMER_ABSTIME != 0 {
-            builder.arg("absolute", true)
-        } else {
-            builder.arg("sec", sec).arg("nsec", nsec)
-        };
-        builder.emit();
-        result
+        self.clock_sleep(clock, flags, (sec, nsec), false).0
     }
 
     // ---- entropy ------------------------------------------------------------
@@ -2092,6 +2049,43 @@ impl Probe {
         result as i32
     }
 
+    /// One `read` of a whole `signalfd_siginfo` from signalfd `fd`, and the
+    /// siginfo when it read one: its signal, code, `sival_int` and sender
+    /// (by identity relation) are recorded.
+    pub fn read_signalfd(&self, fd: i32) -> Option<libc::signalfd_siginfo> {
+        let size = std::mem::size_of::<libc::signalfd_siginfo>();
+        // SAFETY: all-zero is a valid signalfd_siginfo.
+        let mut info: libc::signalfd_siginfo = unsafe { std::mem::zeroed() };
+        let n = self.call(
+            Syscall::N_read,
+            [
+                fd as i64,
+                &mut info as *mut libc::signalfd_siginfo as i64,
+                size as i64,
+                0,
+                0,
+                0,
+            ],
+        );
+        self.fd_arg(self.rec.event("read", n), "fd", fd)
+            .arg("len", size)
+            .emit();
+        if n != size as i64 {
+            return None;
+        }
+        self.rec
+            .event("signalfd_siginfo", 0)
+            .field("ssi_signo", info.ssi_signo)
+            .field("ssi_code", info.ssi_code)
+            .field("ssi_pid", info.ssi_pid)
+            .norm("fields.ssi_pid", Norm::Identity(Id::Process))
+            .field("ssi_uid", info.ssi_uid)
+            .norm("fields.ssi_uid", Norm::Identity(Id::User))
+            .field("ssi_int", info.ssi_int)
+            .emit();
+        Some(info)
+    }
+
     pub fn sigaltstack(&self, new: Option<&libc::stack_t>, old: Option<&mut libc::stack_t>) -> i64 {
         let old_ptr = old
             .as_ref()
@@ -2825,6 +2819,18 @@ impl Probe {
     /// remaining-time observation as [`Self::nanosleep_rem`]; for an absolute
     /// sleep the kernel leaves `rem` untouched, recorded as `remain_untouched`.
     pub fn clock_nanosleep_rem(&self, clock: i32, flags: i32, sec: i64, nsec: i64) -> (i64, i64) {
+        self.clock_sleep(clock, flags, (sec, nsec), true)
+    }
+
+    /// `clock_nanosleep(clock, flags, &(sec, nsec), rem)`, `rem` NULL
+    /// unless `with_rem`.
+    fn clock_sleep(
+        &self,
+        clock: i32,
+        flags: i32,
+        (sec, nsec): (i64, i64),
+        with_rem: bool,
+    ) -> (i64, i64) {
         let req = libc::timespec {
             tv_sec: sec,
             tv_nsec: nsec,
@@ -2833,13 +2839,18 @@ impl Probe {
             tv_sec: -1,
             tv_nsec: -1,
         };
+        let rem_ptr = if with_rem {
+            &mut rem as *mut libc::timespec as i64
+        } else {
+            0
+        };
         let result = self.call(
             Syscall::N_clock_nanosleep,
             [
                 clock as i64,
                 flags as i64,
                 &req as *const libc::timespec as i64,
-                &mut rem as *mut libc::timespec as i64,
+                rem_ptr,
                 0,
                 0,
             ],
@@ -2851,12 +2862,13 @@ impl Probe {
             .event(Syscall::N_clock_nanosleep, result)
             .arg("clock", clock)
             .arg("flags", flags);
+        // An absolute deadline is a clock reading, so it is not a stable arg.
         let builder = if absolute {
             builder.arg("absolute", true)
         } else {
             builder.arg("sec", sec).arg("nsec", nsec)
         };
-        let builder = if result == neg(libc::EINTR) {
+        let builder = if with_rem && result == neg(libc::EINTR) {
             if absolute {
                 builder.field("remain_untouched", rem.tv_sec == -1 && rem.tv_nsec == -1)
             } else {

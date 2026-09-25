@@ -11,62 +11,10 @@ use crate::catalog::{DEFAULTS, Generation, Scenario, TraceFacts};
 
 use crate::signals as support;
 
-use crate::observe::{Id, Norm};
 use crate::probe::{Probe, neg};
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::mem::size_of;
-
-fn read_sfd(p: &Probe, fd: i32) -> Option<signalfd_siginfo> {
-    let mut info: signalfd_siginfo = unsafe { std::mem::zeroed() };
-    let n = p.call_unrecorded(
-        Syscall::N_read,
-        [
-            fd as i64,
-            &mut info as *mut signalfd_siginfo as i64,
-            size_of::<signalfd_siginfo>() as i64,
-            0,
-            0,
-            0,
-        ],
-    );
-    p.rec
-        .event("read", n)
-        .arg("fd", fd)
-        .norm("args.fd", Norm::Relative("fd"))
-        .arg("len", size_of::<signalfd_siginfo>())
-        .emit();
-    if n == size_of::<signalfd_siginfo>() as i64 {
-        p.rec
-            .event("signalfd_siginfo", 0)
-            .field("ssi_signo", info.ssi_signo)
-            .field("ssi_code", info.ssi_code)
-            .field("ssi_pid", info.ssi_pid)
-            .norm("fields.ssi_pid", Norm::Identity(Id::Process))
-            .field("ssi_uid", info.ssi_uid)
-            .norm("fields.ssi_uid", Norm::Identity(Id::User))
-            .field("ssi_int", info.ssi_int)
-            .emit();
-        Some(info)
-    } else {
-        None
-    }
-}
-
-fn queued_info(pid: pid_t, uid: uid_t, sig: c_int, value: i32) -> siginfo_t {
-    let mut info: siginfo_t = unsafe { std::mem::zeroed() };
-    info.si_signo = sig;
-    info.si_code = SI_QUEUE;
-    #[allow(deprecated)]
-    {
-        // The union starts at offset 16: _pad[0] is padding, then
-        // si_pid, si_uid, si_value (the layout glibc's sigqueue fills).
-        info._pad[1] = pid;
-        info._pad[2] = uid as i32;
-        info._pad[3] = value;
-    }
-    info
-}
 
 pub fn run(p: &Probe) {
     support::reset();
@@ -97,12 +45,12 @@ pub fn run(p: &Probe) {
         "signalfd4 with an unknown flag is EINVAL",
         p.signalfd4(-1, &set, 0x4000) == neg(EINVAL) as i32,
     );
-    let q = queued_info(pid, uid, sig, 0x1234);
+    let q = support::queued_info(pid, uid, sig, 0x1234);
     p.check(
         "queue signal for signalfd",
         p.rt_sigqueueinfo(pid, sig, &q) == 0,
     );
-    let info = read_sfd(p, sfd).expect("queued signalfd read");
+    let info = p.read_signalfd(sfd).expect("queued signalfd read");
     p.check(
         "signalfd reports the signal number",
         info.ssi_signo == sig as u32,
@@ -134,7 +82,8 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "the read dequeues it",
-        read_sfd(p, sfd).is_some_and(|i| i.ssi_signo == sig as u32 && i.ssi_code == SI_USER),
+        p.read_signalfd(sfd)
+            .is_some_and(|i| i.ssi_signo == sig as u32 && i.ssi_code == SI_USER),
     );
     let (n, _) = p.epoll_wait(epfd, 4, 0);
     p.check("after the read the signalfd is not readable", n == 0);
@@ -172,7 +121,7 @@ pub fn run(p: &Probe) {
         );
         sfd2
     };
-    let q = queued_info(pid, uid, sig, 0x55);
+    let q = support::queued_info(pid, uid, sig, 0x55);
     p.check(
         "queue signal for sigtimedwait",
         p.rt_sigqueueinfo(pid, sig, &q) == 0,

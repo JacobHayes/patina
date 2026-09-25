@@ -18,34 +18,11 @@ use crate::catalog::{DEFAULTS, Generation, Scenario, TraceFacts};
 
 use crate::signals as support;
 
-use crate::observe::Norm;
 use crate::probe::{Probe, neg};
 use libc::*;
 use patina_dst_syscalls::Syscall;
-use serde_json::Value;
-use std::mem::size_of;
 use std::sync::atomic::Ordering;
 use std::thread;
-
-/// A helper that, for each of `sigs` in turn, waits until the calling
-/// (main) thread is parked, marks the stream and kills.
-fn delayed_kills<'a>(
-    scope: &'a thread::Scope<'a, '_>,
-    p: &'a Probe,
-    pid: pid_t,
-    sigs: &'static [c_int],
-) {
-    let main_tid = support::gettid();
-    scope.spawn(move || {
-        for &sig in sigs {
-            support::until_parked(main_tid);
-            p.mark("helper_kill", &[("sig", Value::from(sig))]);
-            unsafe {
-                kill(pid, sig);
-            }
-        }
-    });
-}
 
 pub fn run(p: &Probe) {
     support::reset();
@@ -53,7 +30,7 @@ pub fn run(p: &Probe) {
     support::install(SIGUSR1, 0, false);
 
     thread::scope(|scope| {
-        delayed_kills(scope, p, pid, &[SIGUSR1]);
+        support::delayed_kills(scope, p, pid, &[SIGUSR1]);
         p.check(
             "pause returns EINTR once a handled signal was delivered",
             p.pause() == neg(EINTR),
@@ -71,7 +48,7 @@ pub fn run(p: &Probe) {
     );
     let mut info: siginfo_t = unsafe { std::mem::zeroed() };
     thread::scope(|scope| {
-        delayed_kills(scope, p, pid, &[SIGUSR2]);
+        support::delayed_kills(scope, p, pid, &[SIGUSR2]);
         p.check(
             "rt_sigtimedwait without a timeout parks until the helper's signal",
             p.rt_sigtimedwait(&usr2, Some(&mut info), None, 8) == SIGUSR2 as i64,
@@ -87,7 +64,7 @@ pub fn run(p: &Probe) {
     );
 
     thread::scope(|scope| {
-        delayed_kills(scope, p, pid, &[SIGUSR1]);
+        support::delayed_kills(scope, p, pid, &[SIGUSR1]);
         p.check(
             "a handled signal outside the set interrupts rt_sigtimedwait with EINTR",
             p.rt_sigtimedwait(&usr2, Some(&mut info), None, 8) == neg(EINTR),
@@ -100,34 +77,18 @@ pub fn run(p: &Probe) {
 
     let sfd = p.signalfd4(-1, &usr2, 0);
     p.require("blocking signalfd", sfd >= 0);
-    let mut ssi: signalfd_siginfo = unsafe { std::mem::zeroed() };
+    let mut ssi = None;
     thread::scope(|scope| {
-        delayed_kills(scope, p, pid, &[SIGUSR2]);
-        let n = p.call_unrecorded(
-            Syscall::N_read,
-            [
-                sfd as i64,
-                &mut ssi as *mut signalfd_siginfo as i64,
-                size_of::<signalfd_siginfo>() as i64,
-                0,
-                0,
-                0,
-            ],
-        );
-        p.rec
-            .event("read", n)
-            .arg("fd", sfd)
-            .norm("args.fd", Norm::Relative("fd"))
-            .arg("len", size_of::<signalfd_siginfo>())
-            .emit();
+        support::delayed_kills(scope, p, pid, &[SIGUSR2]);
+        ssi = p.read_signalfd(sfd);
         p.check(
             "a blocking signalfd read parks until a matching signal is pending",
-            n == size_of::<signalfd_siginfo>() as i64,
+            ssi.is_some(),
         );
     });
     p.check(
         "the read dequeued the helper's signal",
-        ssi.ssi_signo == SIGUSR2 as u32 && ssi.ssi_code == SI_USER,
+        ssi.is_some_and(|ssi| ssi.ssi_signo == SIGUSR2 as u32 && ssi.ssi_code == SI_USER),
     );
     p.check(
         "no handler ran for the signalfd-dequeued signal",
@@ -139,7 +100,7 @@ pub fn run(p: &Probe) {
     support::install(SIGUSR2, 0, false);
     let empty = support::empty_set();
     thread::scope(|scope| {
-        delayed_kills(scope, p, pid, &[SIGUSR2]);
+        support::delayed_kills(scope, p, pid, &[SIGUSR2]);
         p.check(
             "rt_sigsuspend returns EINTR after delivery",
             p.rt_sigsuspend(&empty, 8) == neg(EINTR),
@@ -160,7 +121,7 @@ pub fn run(p: &Probe) {
     // so the helper's first kill only makes it pending; its second (SIGUSR1,
     // handled, unblocked) is what ends the suspend.
     thread::scope(|scope| {
-        delayed_kills(scope, p, pid, &[SIGUSR2, SIGUSR1]);
+        support::delayed_kills(scope, p, pid, &[SIGUSR2, SIGUSR1]);
         p.check(
             "rt_sigsuspend with the signal still blocked waits for an unblocked one",
             p.rt_sigsuspend(&usr2, 8) == neg(EINTR),

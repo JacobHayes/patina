@@ -33,7 +33,7 @@ use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{
     Arm, Count, MISSING_PID, Probe, SIGSET_BYTES, Sigev, TimerId, ms, neg, spec_ns,
 };
-use crate::signals::{FIRST_RT, PROGRESS_DEADLINE, empty_set, gettid, has, set_of, spin_until};
+use crate::signals::{FIRST_RT, PROGRESS_DEADLINE_NS, empty_set, gettid, has, set_of, spin_until};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -41,10 +41,6 @@ use serde_json::Value;
 
 const SIG: i32 = FIRST_RT;
 const VALUE: i32 = 0x5157;
-
-fn wait_ns() -> i64 {
-    PROGRESS_DEADLINE.as_nanos() as i64
-}
 
 /// Drain whatever of `set` is pending, unobserved (a periodic timer may have
 /// fired again before it was disarmed).
@@ -126,7 +122,7 @@ pub fn run(p: &Probe) {
     p.require("create a SIGEV_SIGNAL timer", r == 0);
     let (r, _, _) = p.timer_settime(timer, 0, Arm::Spec(ms(10)), (0, 0));
     p.check("arm it for 10 ms", r == 0);
-    let (r, overrun) = p.timer_signal_wait(&set, wait_ns(), false, Count::Exact);
+    let (r, overrun) = p.timer_signal_wait(&set, PROGRESS_DEADLINE_NS, false, Count::Exact);
     p.check("its expiry is its signal", r == i64::from(SIG));
     p.check("a one-shot expiry has no overrun", overrun == 0);
     p.check(
@@ -145,7 +141,9 @@ pub fn run(p: &Probe) {
     p.check("arm it at an absolute time long past", r == 0);
     p.check(
         "it fires at once",
-        p.timer_signal_wait(&set, wait_ns(), false, Count::Exact).0 == i64::from(SIG),
+        p.timer_signal_wait(&set, PROGRESS_DEADLINE_NS, false, Count::Exact)
+            .0
+            == i64::from(SIG),
     );
     let (_, now) = p.rec.quiet(|| p.clock_gettime(CLOCK_MONOTONIC));
     let at = now + 10_000_000;
@@ -158,7 +156,9 @@ pub fn run(p: &Probe) {
     p.check("arm it at an absolute time 10 ms ahead", r == 0);
     p.check(
         "it fires then",
-        p.timer_signal_wait(&set, wait_ns(), false, Count::Exact).0 == i64::from(SIG),
+        p.timer_signal_wait(&set, PROGRESS_DEADLINE_NS, false, Count::Exact)
+            .0
+            == i64::from(SIG),
     );
 
     let (r, _, _) = p.timer_settime(timer, 0, Arm::Spec(ms(1)), ms(1));
@@ -172,7 +172,8 @@ pub fn run(p: &Probe) {
     // (hrtimer_forward): the one the signal stands for, then overruns.
     let (_, before_dequeue) = p.rec.quiet(|| p.clock_gettime(CLOCK_MONOTONIC));
     let bound = u64::try_from((before_dequeue - armed_at) / 1_000_000 - 1).unwrap_or(0);
-    let (r, overrun) = p.timer_signal_wait(&set, wait_ns(), false, Count::AtLeast(bound));
+    let (r, overrun) =
+        p.timer_signal_wait(&set, PROGRESS_DEADLINE_NS, false, Count::AtLeast(bound));
     p.check("one signal is queued for them", r == i64::from(SIG));
     p.check(
         "the signal counts every period it stood for (at least 19 after 20 ms)",
@@ -197,7 +198,9 @@ pub fn run(p: &Probe) {
     p.check("arm it for 10 ms", r == 0);
     p.check(
         "its expiry is SIGALRM carrying its id",
-        p.timer_signal_wait(&set, wait_ns(), true, Count::Exact).0 == i64::from(SIGALRM),
+        p.timer_signal_wait(&set, PROGRESS_DEADLINE_NS, true, Count::Exact)
+            .0
+            == i64::from(SIGALRM),
     );
 
     let tid = gettid();
@@ -215,7 +218,9 @@ pub fn run(p: &Probe) {
     p.check("arm it for 10 ms", r == 0);
     p.check(
         "its expiry is its signal, to this thread",
-        p.timer_signal_wait(&set, wait_ns(), false, Count::Exact).0 == i64::from(SIG),
+        p.timer_signal_wait(&set, PROGRESS_DEADLINE_NS, false, Count::Exact)
+            .0
+            == i64::from(SIG),
     );
 
     let (r, thread) = p.timer_create(

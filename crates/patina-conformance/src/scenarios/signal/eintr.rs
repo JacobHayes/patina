@@ -15,25 +15,10 @@ use patina_dst_syscalls::Syscall;
 
 use crate::signals as support;
 
-use crate::probe::{Probe, neg};
+use crate::probe::{FUTEX_WAIT_PRIVATE, FUTEX_WAKE_PRIVATE, Probe, neg};
 use libc::*;
-use serde_json::Value;
 use std::sync::atomic::AtomicU32;
 use std::thread;
-
-const WAIT: i32 = FUTEX_WAIT | FUTEX_PRIVATE_FLAG;
-const WAKE: i32 = FUTEX_WAKE | FUTEX_PRIVATE_FLAG;
-
-fn delayed_kill<'a>(scope: &'a thread::Scope<'a, '_>, p: &'a Probe, pid: pid_t, sig: c_int) {
-    let main_tid = support::gettid();
-    scope.spawn(move || {
-        support::until_parked(main_tid);
-        p.mark("helper_kill", &[("sig", Value::from(sig))]);
-        unsafe {
-            kill(pid, sig);
-        }
-    });
-}
 
 pub fn run(p: &Probe) {
     support::reset();
@@ -44,7 +29,7 @@ pub fn run(p: &Probe) {
     p.require("pipe", r == 0);
     let [rd, wr] = fds;
     thread::scope(|scope| {
-        delayed_kill(scope, p, pid, SIGUSR1);
+        support::delayed_kills(scope, p, pid, &[SIGUSR1]);
         p.check(
             "blocking read without SA_RESTART is EINTR",
             p.read(rd, 1).0 == neg(EINTR),
@@ -58,11 +43,7 @@ pub fn run(p: &Probe) {
     support::install(SIGUSR1, SA_RESTART, false);
     thread::scope(|scope| {
         scope.spawn(|| {
-            support::until_parked(main_tid);
-            p.mark("helper_kill", &[("sig", Value::from(SIGUSR1))]);
-            unsafe {
-                kill(pid, SIGUSR1);
-            }
+            support::kill_when_parked(p, main_tid, pid, SIGUSR1);
             support::until_parked(main_tid);
             p.mark("helper_write", &[]);
             unsafe {
@@ -81,12 +62,12 @@ pub fn run(p: &Probe) {
     );
 
     thread::scope(|scope| {
-        delayed_kill(scope, p, pid, SIGUSR1);
+        support::delayed_kills(scope, p, pid, &[SIGUSR1]);
         let (r, _) = p.nanosleep_rem(1, 0);
         p.check("nanosleep is never restarted", r == neg(EINTR));
     });
     thread::scope(|scope| {
-        delayed_kill(scope, p, pid, SIGUSR1);
+        support::delayed_kills(scope, p, pid, &[SIGUSR1]);
         let (r, _) = p.clock_nanosleep_rem(CLOCK_MONOTONIC, 0, 1, 0);
         p.check(
             "a relative clock_nanosleep is never restarted",
@@ -96,7 +77,7 @@ pub fn run(p: &Probe) {
     let (_, now) = p.clock_gettime(CLOCK_MONOTONIC);
     let deadline = now + 1_000_000_000;
     thread::scope(|scope| {
-        delayed_kill(scope, p, pid, SIGUSR1);
+        support::delayed_kills(scope, p, pid, &[SIGUSR1]);
         let (r, _) = p.clock_nanosleep_rem(
             CLOCK_MONOTONIC,
             TIMER_ABSTIME,
@@ -117,7 +98,7 @@ pub fn run(p: &Probe) {
         p.epoll_ctl(epfd, EPOLL_CTL_ADD, rd, EPOLLIN as u32, 7) == 0,
     );
     thread::scope(|scope| {
-        delayed_kill(scope, p, pid, SIGUSR1);
+        support::delayed_kills(scope, p, pid, &[SIGUSR1]);
         let (n, _) = p.epoll_wait(epfd, 4, -1);
         p.check(
             "epoll_wait is never restarted, even under SA_RESTART",
@@ -128,33 +109,29 @@ pub fn run(p: &Probe) {
     let word = AtomicU32::new(0);
     thread::scope(|scope| {
         scope.spawn(|| {
-            support::until_parked(main_tid);
-            p.mark("helper_kill", &[("sig", Value::from(SIGUSR1))]);
-            unsafe {
-                kill(pid, SIGUSR1);
-            }
+            support::kill_when_parked(p, main_tid, pid, SIGUSR1);
             support::until_parked(main_tid);
             p.mark("helper_wake", &[]);
-            p.rec.quiet(|| p.futex(&word, WAKE, 1, None));
+            p.rec.quiet(|| p.futex(&word, FUTEX_WAKE_PRIVATE, 1, None));
         });
         p.check(
             "FUTEX_WAIT without a timeout restarts under SA_RESTART and returns on the wake",
-            p.futex(&word, WAIT, 0, None) == 0,
+            p.futex(&word, FUTEX_WAIT_PRIVATE, 0, None) == 0,
         );
     });
     thread::scope(|scope| {
-        delayed_kill(scope, p, pid, SIGUSR1);
+        support::delayed_kills(scope, p, pid, &[SIGUSR1]);
         p.check(
             "FUTEX_WAIT with a timeout is EINTR even under SA_RESTART",
-            p.futex(&word, WAIT, 0, Some(2_000_000_000)) == neg(EINTR),
+            p.futex(&word, FUTEX_WAIT_PRIVATE, 0, Some(2_000_000_000)) == neg(EINTR),
         );
     });
     support::install(SIGUSR1, 0, false);
     thread::scope(|scope| {
-        delayed_kill(scope, p, pid, SIGUSR1);
+        support::delayed_kills(scope, p, pid, &[SIGUSR1]);
         p.check(
             "FUTEX_WAIT without SA_RESTART is EINTR",
-            p.futex(&word, WAIT, 0, None) == neg(EINTR),
+            p.futex(&word, FUTEX_WAIT_PRIVATE, 0, None) == neg(EINTR),
         );
     });
     p.check(

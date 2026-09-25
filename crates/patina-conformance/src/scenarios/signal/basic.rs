@@ -14,33 +14,19 @@ use crate::signals as support;
 use crate::probe::{Probe, neg};
 use libc::*;
 use patina_dst_syscalls::Syscall;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::Ordering;
 
 /// `tgkill` and `tkill` to a worker thread from the main thread: each runs
 /// the handler on the worker. Answers the worker's tid once it has exited.
 fn to_another_thread(p: &Probe, pid: pid_t) -> pid_t {
-    let tid_slot = AtomicI32::new(0);
-    let stop = AtomicBool::new(false);
+    let turns = support::Turns::default();
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            tid_slot.store(support::gettid(), Ordering::SeqCst);
-            while !stop.load(Ordering::SeqCst) {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
+            turns.worker_starts();
+            turns.hold();
         });
-        // A failed check panics natively (`--strict`); the guard releases
-        // the worker on the way out so the scope's join cannot hang.
-        let _release = support::Release(&stop);
-        p.rec.quiet(|| {
-            support::wait_until(std::time::Duration::from_millis(1), || {
-                tid_slot.load(Ordering::SeqCst) != 0
-            });
-        });
-        p.require(
-            "the worker reported its tid",
-            tid_slot.load(Ordering::SeqCst) != 0,
-        );
-        let worker = tid_slot.load(Ordering::SeqCst);
+        let _release = turns.release_guard();
+        let worker = turns.await_worker(p);
         p.check("the worker has its own tid", worker != support::gettid());
 
         p.check("tgkill to the worker", p.tgkill(pid, worker, SIGUSR1) == 0);
@@ -74,7 +60,7 @@ fn to_another_thread(p: &Probe, pid: pid_t) -> pid_t {
         );
         p.check("no probe delivered anything", support::count() == 5);
     });
-    tid_slot.load(Ordering::SeqCst)
+    turns.worker_tid()
 }
 
 pub fn run(p: &Probe) {

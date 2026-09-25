@@ -11,7 +11,7 @@ use crate::signals as support;
 
 use crate::probe::{Probe, neg};
 use libc::*;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn pthread_kill_recorded(p: &Probe, thread: pthread_t, sig: c_int, target: &str) -> i64 {
     // pthread_kill returns the error number directly (never sets errno).
@@ -29,28 +29,17 @@ pub fn run(p: &Probe) {
     support::reset();
     support::install(SIGUSR1, SA_SIGINFO, true);
     let main_tid = p.gettid() as pid_t;
-    let worker_tid = AtomicI32::new(0);
+    let turns = support::Turns::default();
     let worker_pthread = AtomicU64::new(0);
-    let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
         scope.spawn(|| {
+            // Published before the tid, which the main thread waits for.
             worker_pthread.store(unsafe { pthread_self() } as u64, Ordering::SeqCst);
-            worker_tid.store(support::gettid(), Ordering::SeqCst);
-            while !stop.load(Ordering::SeqCst) {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
+            turns.worker_starts();
+            turns.hold();
         });
-        let _release = support::Release(&stop);
-        p.rec.quiet(|| {
-            support::wait_until(std::time::Duration::from_millis(1), || {
-                worker_tid.load(Ordering::SeqCst) != 0
-            });
-        });
-        p.require(
-            "the worker reported its tid",
-            worker_tid.load(Ordering::SeqCst) != 0,
-        );
-        let worker = worker_tid.load(Ordering::SeqCst);
+        let _release = turns.release_guard();
+        let worker = turns.await_worker(p);
         let handle = worker_pthread.load(Ordering::SeqCst) as pthread_t;
         p.check(
             "pthread_kill(worker, SIGUSR1)",
@@ -87,7 +76,6 @@ pub fn run(p: &Probe) {
             pthread_kill_recorded(p, handle, 65, "worker") == neg(EINVAL),
         );
         p.check("the probes delivered nothing", support::count() == 2);
-        stop.store(true, Ordering::SeqCst);
     });
 }
 

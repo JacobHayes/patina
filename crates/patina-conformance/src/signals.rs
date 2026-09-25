@@ -10,7 +10,8 @@ use libc::*;
 pub const FIRST_RT: c_int = 34;
 /// The realtime signal after [`FIRST_RT`].
 pub const SECOND_RT: c_int = 35;
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use serde_json::Value;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 pub static COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -216,6 +217,9 @@ pub fn gettid() -> pid_t {
 /// only makes it longer.
 pub const PROGRESS_DEADLINE: Duration = Duration::from_secs(20);
 
+/// [`PROGRESS_DEADLINE`] in nanoseconds, a blocking call's timeout.
+pub const PROGRESS_DEADLINE_NS: i64 = PROGRESS_DEADLINE.as_nanos() as i64;
+
 /// Poll `done` every `interval` until it holds, for at most
 /// [`PROGRESS_DEADLINE`] of sleeping; whether it held. The bound is a number of
 /// sleeps, not a clock reading, so under patina the wait adds no clock
@@ -302,6 +306,96 @@ pub fn until_parked(main_tid: pid_t) {
             std::thread::sleep(Duration::from_millis(5));
         }
         Err(_) => short_pause(),
+    }
+}
+
+/// Once the thread `main_tid` is parked ([`until_parked`]), mark the stream
+/// `helper_kill` and send `sig` to `pid`: a wait that returned before the
+/// signal existed shows as its event preceding the mark.
+pub fn kill_when_parked(p: &crate::probe::Probe, main_tid: pid_t, pid: pid_t, sig: c_int) {
+    until_parked(main_tid);
+    p.mark("helper_kill", &[("sig", Value::from(sig))]);
+    unsafe {
+        kill(pid, sig);
+    }
+}
+
+/// A helper thread in `scope` that sends `pid` each of `sigs` in turn, each
+/// once the calling thread is parked ([`kill_when_parked`]).
+pub fn delayed_kills<'a>(
+    scope: &'a std::thread::Scope<'a, '_>,
+    p: &'a crate::probe::Probe,
+    pid: pid_t,
+    sigs: &'static [c_int],
+) {
+    let main_tid = gettid();
+    scope.spawn(move || {
+        for &sig in sigs {
+            kill_when_parked(p, main_tid, pid, sig);
+        }
+    });
+}
+
+/// Turn-taking between a scenario's main thread and one worker: a phase
+/// each advances when its turn ends, the worker's published tid, and a
+/// release flag the main thread's guard sets on every exit path (including
+/// the panic a failed `--strict` check raises), so a waiting worker never
+/// hangs the scope's join. Every wait is unobserved and bounded.
+#[derive(Default)]
+pub struct Turns {
+    phase: AtomicI32,
+    worker: AtomicI32,
+    released: AtomicBool,
+}
+
+impl Turns {
+    /// On the worker, first: publish its tid; answers it.
+    pub fn worker_starts(&self) -> pid_t {
+        let tid = gettid();
+        self.worker.store(tid, Ordering::SeqCst);
+        tid
+    }
+
+    /// The tid the worker published (0 before it did).
+    pub fn worker_tid(&self) -> pid_t {
+        self.worker.load(Ordering::SeqCst)
+    }
+
+    /// On the main thread: wait for the worker's tid, which the scenario
+    /// cannot continue without.
+    pub fn await_worker(&self, p: &crate::probe::Probe) -> pid_t {
+        p.rec
+            .quiet(|| wait_until(Duration::from_millis(1), || self.worker_tid() != 0));
+        p.require("the worker reported its tid", self.worker_tid() != 0);
+        self.worker_tid()
+    }
+
+    /// End the caller's turn: enter `phase`.
+    pub fn pass(&self, phase: i32) {
+        self.phase.store(phase, Ordering::SeqCst);
+    }
+
+    /// Wait until `phase` or the release; whether `phase` was reached.
+    pub fn wait(&self, p: &crate::probe::Probe, phase: i32) -> bool {
+        p.rec.quiet(|| {
+            wait_until(Duration::from_millis(1), || {
+                self.phase.load(Ordering::SeqCst) >= phase || self.released.load(Ordering::SeqCst)
+            })
+        });
+        self.phase.load(Ordering::SeqCst) >= phase
+    }
+
+    /// On the worker, last: idle until the main thread releases it.
+    pub fn hold(&self) {
+        while !self.released.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// On the main thread, right after spawning the worker: the guard that
+    /// releases it when dropped.
+    pub fn release_guard(&self) -> Release<'_> {
+        Release(&self.released)
     }
 }
 
