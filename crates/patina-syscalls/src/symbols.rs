@@ -2049,13 +2049,13 @@ const ROWS: &[SymbolRow] = &[
         "statvfs64",
         Platform::Linux,
         Serves::Syscalls(&["statfs"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "fstatvfs64",
         Platform::Linux,
         Serves::Syscalls(&["fstatfs"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "posix_fadvise64",
@@ -2073,13 +2073,13 @@ const ROWS: &[SymbolRow] = &[
         "statvfs",
         Platform::Linux,
         Serves::Syscalls(&["statfs"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "fstatvfs",
         Platform::Linux,
         Serves::Syscalls(&["fstatfs"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "fallocate",

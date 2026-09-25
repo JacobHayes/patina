@@ -52,7 +52,7 @@
 
 #ifdef __linux__
 #include <sys/statfs.h>
-
+#include <sys/statvfs.h>
 #endif
 
 #include <sys/time.h>

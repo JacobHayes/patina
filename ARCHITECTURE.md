@@ -553,6 +553,7 @@ mkfifo, mkfifoat, mknod/mknodat (FIFOs, socket nodes, whiteouts; devices are EPE
 rename, renameat, renameat2 (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT)
 readv, writev, preadv, pwritev (one iovec decode; preadv2/pwritev2 RWF_* flags on the raw rows)
 ioctl (FIOCLEX, FIONCLEX, FIONBIO, FIONREAD), statfs, fstatfs
+statvfs, fstatvfs, statvfs64, fstatvfs64 (glibc 2.39's conversion of the one statfs description: f_type, f_flag from the mount flags, f_fsid packed high:low)
 socket, bind, connect, send, recv
 clock_gettime, gettimeofday, nanosleep
 getrandom, getentropy, /dev/urandom reads (and `dlsym`-resolved getrandom on Linux)

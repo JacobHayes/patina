@@ -810,6 +810,61 @@ int fstatfs64(int fd, struct statfs64 *out) {
     return fail_int(patina_fstatfs(fd, out));
 }
 
+/* glibc's POSIX spelling of the same description, statvfs/fstatvfs and the
+ * LFS statvfs64/fstatvfs64 (sysdeps/unix/sysv/linux/statvfs.c, fstatvfs.c,
+ * internal_statvfs.c): statfs(2), then glibc's conversion. `f_frsize` falls
+ * back to `f_bsize`; `f_fsid` packs statfs's two words, the second high;
+ * `f_favail` is `f_ffree`; `f_flag` is the mount flags statfs reports with
+ * `ST_VALID` cleared; `f_type` (new in glibc 2.39) is statfs's. `struct statvfs` and `struct statvfs64` share one layout
+ * on a 64-bit target, as `struct statfs` and `struct statfs64` do. */
+/* statfs(2)'s "f_flags is valid" bit (linux/statfs.h has no userspace name). */
+#define PATINA_ST_VALID 0x0020
+
+static int patina_statvfs_from(int result, const struct statfs *fs, struct statvfs *out) {
+    if (result < 0) return fail_int(result);
+    memset(out, 0, sizeof *out);
+    out->f_bsize = (unsigned long)fs->f_bsize;
+    out->f_frsize = (unsigned long)(fs->f_frsize != 0 ? fs->f_frsize : fs->f_bsize);
+    out->f_blocks = fs->f_blocks;
+    out->f_bfree = fs->f_bfree;
+    out->f_bavail = fs->f_bavail;
+    out->f_files = fs->f_files;
+    out->f_ffree = fs->f_ffree;
+    out->f_favail = fs->f_ffree;
+    out->f_fsid = ((unsigned long)(unsigned int)fs->f_fsid.__val[1] << 32) |
+                  (unsigned long)(unsigned int)fs->f_fsid.__val[0];
+    out->f_flag = (unsigned long)(fs->f_flags ^ PATINA_ST_VALID);
+    out->f_namemax = (unsigned long)fs->f_namelen;
+    out->f_type = (unsigned int)fs->f_type;
+    return 0;
+}
+
+static int patina_statvfs_path(const char *path, struct statvfs *out) {
+    struct statfs fs;
+    return patina_statvfs_from(patina_statfs(path, &fs), &fs, out);
+}
+
+static int patina_statvfs_fd(int fd, struct statvfs *out) {
+    struct statfs fs;
+    return patina_statvfs_from(patina_fstatfs(fd, &fs), &fs, out);
+}
+
+_Static_assert(sizeof(struct statvfs) == sizeof(struct statvfs64),
+               "statvfs64 is statvfs on a 64-bit target");
+
+int statvfs(const char *path, struct statvfs *out) {
+    return patina_statvfs_path(path, out);
+}
+int statvfs64(const char *path, struct statvfs64 *out) {
+    return patina_statvfs_path(path, (struct statvfs *)out);
+}
+int fstatvfs(int fd, struct statvfs *out) {
+    return patina_statvfs_fd(fd, out);
+}
+int fstatvfs64(int fd, struct statvfs64 *out) {
+    return patina_statvfs_fd(fd, (struct statvfs *)out);
+}
+
 static int fill_stat64(int result, const struct patina_metadata *values, struct stat64 *status) {
     if (result < 0) return -1;
     if (status == NULL) {
