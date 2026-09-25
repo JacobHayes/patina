@@ -79,7 +79,7 @@ impl Info {
         info.words[0] = u64::from(sig);
         info.words[1] = u64::from(code as u32);
         info.words[2] = u64::from(crate::registry::IDENTITY_PID)
-            | ((crate::registry::IDENTITY_UID as u64) << 32);
+            | (u64::from(crate::identity::credential().uid) << 32);
         info
     }
     fn code(self) -> i32 {

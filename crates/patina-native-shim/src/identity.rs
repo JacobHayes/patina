@@ -7,13 +7,17 @@
 //! an ordinary unprivileged user whose real, effective, saved and filesystem
 //! ids are all [`IDENTITY_UID`]/[`IDENTITY_GID`], whose only supplementary
 //! group is its own, and whose capability sets are empty but for the full
-//! bounding set every process starts with. Everything that answers "who is
-//! the caller" or "may it" reads that one credential: the id rows, `capget`,
-//! the owner `stat` reports (`patina_uid`/`patina_gid`), and the capability
-//! checks of the privileged rows (`sud::privileged`). So the `set*id` rows
-//! succeed exactly when every id they name is that one id (the kernel's rule
-//! for a caller without `CAP_SETUID`/`CAP_SETGID`), which changes nothing;
-//! anything else is `EPERM`.
+//! bounding set every process starts with. Every Linux reader of the
+//! caller's ids reads that one credential: the id rows of both doors,
+//! `capget`, the owner `stat` reports and `chown` (`crate::caller`), System V
+//! IPC ownership, `SO_PEERCRED`, a signal's `si_uid` and `PRIO_USER`; so do
+//! the capability checks of the privileged rows (`sud::privileged`). The
+//! shim's other capability refusals answer for this credential without
+//! consulting it yet (ARCHITECTURE lists what an identity setting still
+//! needs). So the `set*id` rows succeed exactly when every id they name is
+//! that one id (the kernel's rule for a caller without
+//! `CAP_SETUID`/`CAP_SETGID`), which changes nothing; anything else is
+//! `EPERM`.
 //!
 //! The process tree is a pid namespace of two processes: its init
 //! ([`INIT_PID`], leader of process group 1 and session 1) and the guest
@@ -56,8 +60,7 @@ impl Credential {
 /// The one credential the virtual kernel runs the guest with: uid/gid
 /// [`IDENTITY_UID`]/[`IDENTITY_GID`], its own group, no capability in the
 /// effective, permitted, inheritable or ambient set, and the full bounding
-/// set (no ancestor dropped one). A future identity setting changes this
-/// value, not its readers.
+/// set (no ancestor dropped one). It is fixed for the run.
 const CREDENTIAL: Credential = Credential {
     uid: IDENTITY_UID,
     gid: IDENTITY_GID,

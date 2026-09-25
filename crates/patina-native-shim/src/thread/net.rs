@@ -39,7 +39,7 @@ mod opts;
 mod unix;
 
 use crate::fdtable::DescId;
-use crate::registry::{IDENTITY_GID, IDENTITY_PID, IDENTITY_UID};
+use crate::registry::IDENTITY_PID;
 use crate::uaccess;
 use abi::*;
 
@@ -61,8 +61,8 @@ impl Creds {
     /// The one virtual process's.
     pub(crate) const PROCESS: Creds = Creds {
         pid: IDENTITY_PID as i32,
-        uid: IDENTITY_UID,
-        gid: IDENTITY_GID,
+        uid: crate::caller().uid,
+        gid: crate::caller().gid,
     };
     /// `cred_to_ucred` with no peer: pid 0 and the overflow ids.
     pub(crate) const NONE: Creds = Creds {

@@ -3,9 +3,7 @@
 //! its actual runtime disposition is reviewed. Never infer ENOSYS from novelty.
 
 use super::{Capability, TRAP_PRIVILEGED, TRAP_PROCESS, TRAP_SIGNAL_ABI, TRAP_UNMODELED};
-use super::{
-    Disposition, Family, IDENTITY_GID, IDENTITY_PID, IDENTITY_UID, INIT_PID, Syscall, SyscallRow,
-};
+use super::{Disposition, Family, IDENTITY_PID, INIT_PID, Syscall, SyscallRow};
 
 const fn r(
     id: Syscall,
@@ -774,9 +772,9 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_getuid => r(
         id,
         Family::Identity,
-        Disposition::Constant(IDENTITY_UID as i64),
-        "The one modeled non-root identity (uid 1000), the same value the C interposer returns; the identity arc makes it a `--host-*` knob.",
-        Some("time+timers+sched+identity"),
+        Disposition::Modeled,
+        "The virtual credential's uid (`crate::identity::credential`), which the C `getuid` reads too.",
+        None,
     ),
     Syscall::N_syslog => r(
         id,
@@ -788,9 +786,9 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_getgid => r(
         id,
         Family::Identity,
-        Disposition::Constant(IDENTITY_GID as i64),
-        "The one modeled non-root identity (gid 1000), the same value the C interposer returns.",
-        Some("time+timers+sched+identity"),
+        Disposition::Modeled,
+        "The virtual credential's gid (`crate::identity::credential`), which the C `getgid` reads too.",
+        None,
     ),
     Syscall::N_setuid => r(
         id,
@@ -809,16 +807,16 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_geteuid => r(
         id,
         Family::Identity,
-        Disposition::Constant(IDENTITY_UID as i64),
-        "The one modeled non-root identity (euid 1000), the same value the C interposer returns.",
-        Some("time+timers+sched+identity"),
+        Disposition::Modeled,
+        "The virtual credential's uid (`crate::identity::credential`), which the C `geteuid` reads too.",
+        None,
     ),
     Syscall::N_getegid => r(
         id,
         Family::Identity,
-        Disposition::Constant(IDENTITY_GID as i64),
-        "The one modeled non-root identity (egid 1000), the same value the C interposer returns.",
-        Some("time+timers+sched+identity"),
+        Disposition::Modeled,
+        "The virtual credential's gid (`crate::identity::credential`), which the C `getegid` reads too.",
+        None,
     ),
     Syscall::N_setpgid => r(
         id,

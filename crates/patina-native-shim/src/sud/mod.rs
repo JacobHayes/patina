@@ -896,6 +896,18 @@ const BINDINGS: &[(Syscall, Handler)] = &[
         crate::clocks::getrusage(a[0] as i32, a[1] as *mut crate::clocks::Rusage)
     }),
     // ---- identity: the one unprivileged identity (`crate::identity`) ----
+    (Syscall::N_getuid, |_, _| {
+        i64::from(crate::identity::credential().uid)
+    }),
+    (Syscall::N_geteuid, |_, _| {
+        i64::from(crate::identity::credential().uid)
+    }),
+    (Syscall::N_getgid, |_, _| {
+        i64::from(crate::identity::credential().gid)
+    }),
+    (Syscall::N_getegid, |_, _| {
+        i64::from(crate::identity::credential().gid)
+    }),
     (Syscall::N_getresuid, |_, a| unsafe {
         crate::identity::getres(
             crate::identity::Id::User,

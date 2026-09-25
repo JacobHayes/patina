@@ -35,7 +35,7 @@
 
 use super::*;
 use crate::mem::{PROT_EXEC, PROT_READ, PROT_WRITE};
-use crate::registry::{IDENTITY_GID, IDENTITY_PID, IDENTITY_UID};
+use crate::registry::IDENTITY_PID;
 use crate::{E2BIG, EEXIST, EFAULT, EFBIG, EINTR, ENOENT, ERANGE};
 
 const IPC_PRIVATE: i32 = 0;
@@ -215,8 +215,8 @@ impl Perm {
     fn new(key: i32, flags: i32) -> Self {
         Perm {
             key,
-            uid: IDENTITY_UID,
-            gid: IDENTITY_GID,
+            uid: crate::identity::credential().uid,
+            gid: crate::identity::credential().gid,
             mode: flags as u32 & S_IRWXUGO,
             seq: 0,
         }
@@ -235,8 +235,8 @@ impl Perm {
             key: self.key,
             uid: self.uid,
             gid: self.gid,
-            cuid: IDENTITY_UID,
-            cgid: IDENTITY_GID,
+            cuid: crate::identity::credential().uid,
+            cgid: crate::identity::credential().gid,
             mode: self.mode,
             seq: self.seq,
             ..IpcPerm::default()
@@ -2048,7 +2048,7 @@ fn notify_signal(signo: i32, value: u64) {
         words: [
             signo as u64,
             u64::from(SI_MESGQ as u32),
-            u64::from(IDENTITY_PID) | (u64::from(IDENTITY_UID) << 32),
+            u64::from(IDENTITY_PID) | (u64::from(crate::identity::credential().uid) << 32),
             value,
             0,
             0,

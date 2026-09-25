@@ -5242,30 +5242,62 @@ pub extern "C" fn patina_ppid() -> i32 {
     registry::INIT_PID as i32
 }
 
-/// The one modeled identity's user id — the ONE accessor every `st_uid`,
-/// `getuid`/`geteuid`, and ownership comparison reads. A guest reading an
-/// owner reads this, never a per-entry field: the deterministic filesystem
-/// stores no owner because it models one, and `chown` to anything else is
-/// `EPERM` exactly as an unprivileged process gets.
+/// Who the caller is, to the rows both OSes answer (the owner `stat`
+/// reports, `chown`, `SO_PEERCRED`, a signal's sender): on Linux the virtual
+/// credential's ids and supplementary groups (`identity::credential`). macOS
+/// has no credential yet; there the caller is the registry's fixed identity
+/// in its own group alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Caller {
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+    pub(crate) groups: &'static [u32],
+}
+
+impl Caller {
+    /// `in_group_p`: whether `gid` is the caller's group or one of its
+    /// supplementary groups.
+    pub(crate) fn in_group(&self, gid: u32) -> bool {
+        gid == self.gid || self.groups.contains(&gid)
+    }
+}
+
+/// The caller; see [`Caller`].
+pub(crate) const fn caller() -> Caller {
+    #[cfg(target_os = "linux")]
+    {
+        let credential = identity::credential();
+        Caller {
+            uid: credential.uid,
+            gid: credential.gid,
+            groups: credential.groups,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Caller {
+            uid: registry::IDENTITY_UID,
+            gid: registry::IDENTITY_GID,
+            groups: &[registry::IDENTITY_GID],
+        }
+    }
+}
+
+/// The caller's user id ([`caller`]) — what every `st_uid`, the C
+/// `getuid`/`geteuid`, and the ownership comparisons read. A guest reading
+/// an owner reads this, never a per-entry field: the deterministic
+/// filesystem stores no owner because every entry is the caller's.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_uid() -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    #[cfg(target_os = "linux")]
-    let uid = identity::credential().uid;
-    #[cfg(not(target_os = "linux"))]
-    let uid = registry::IDENTITY_UID;
-    uid
+    caller().uid
 }
 
-/// The one modeled identity's group id; see [`patina_uid`].
+/// The caller's group id; see [`patina_uid`].
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_gid() -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    #[cfg(target_os = "linux")]
-    let gid = identity::credential().gid;
-    #[cfg(not(target_os = "linux"))]
-    let gid = registry::IDENTITY_GID;
-    gid
+    caller().gid
 }
 
 /// The virtual machine's node name (`--hostname`), a recorded run fact that
@@ -5635,15 +5667,22 @@ const S_ISUID: u32 = 0o4000;
 const S_ISGID: u32 = 0o2000;
 const S_IXGRP: u32 = 0o010;
 
-/// The `chown` decision for the one modeled identity: an id that is `-1` or
-/// already the owner's is a no-op the kernel accepts; anything else needs
-/// `CAP_CHOWN` (or a supplementary group this identity is not in) and is
-/// `EPERM`. `Ok` carries the mode the kernel would store afterwards — on a
-/// non-directory `chown` kills the setuid bit and, when the group may execute,
-/// the setgid bit — so the caller writes that mode back through the one mode
-/// entry, which is also what moves `ctime`.
-fn chown_decision(uid: u32, gid: u32, kind: FsEntryKind, mode: u32) -> Result<u32, c_int> {
-    if (uid != ID_UNCHANGED && uid != patina_uid()) || (gid != ID_UNCHANGED && gid != patina_gid())
+/// The `chown` decision (`chown_ok`/`chgrp_ok`) for `caller`, who owns every
+/// entry: a uid that is `-1` or the owner's, and a gid that is `-1` or one
+/// of the caller's groups, are what the kernel lets an owner without
+/// `CAP_CHOWN` ask for; anything else is `EPERM`. `Ok` carries the mode the
+/// kernel would store afterwards — on a non-directory `chown` kills the
+/// setuid bit and, when the group may execute, the setgid bit — so the
+/// caller writes that mode back through the one mode entry, which is also
+/// what moves `ctime`.
+fn chown_decision(
+    caller: Caller,
+    uid: u32,
+    gid: u32,
+    kind: FsEntryKind,
+    mode: u32,
+) -> Result<u32, c_int> {
+    if (uid != ID_UNCHANGED && uid != caller.uid) || (gid != ID_UNCHANGED && !caller.in_group(gid))
     {
         return Err(EPERM);
     }
@@ -5655,6 +5694,27 @@ fn chown_decision(uid: u32, gid: u32, kind: FsEntryKind, mode: u32) -> Result<u3
         mode &= !S_ISGID;
     }
     Ok(mode)
+}
+
+#[cfg(test)]
+mod chown_tests {
+    use super::*;
+
+    /// A caller in a supplementary group may give its file to that group,
+    /// as `in_group_p` lets it; no other group or owner.
+    #[test]
+    fn chown_accepts_the_callers_groups_only() {
+        let caller = Caller {
+            uid: 1000,
+            gid: 1000,
+            groups: &[1000, 27],
+        };
+        let decide = |uid, gid| chown_decision(caller, uid, gid, FsEntryKind::File, 0o644);
+        assert_eq!(decide(ID_UNCHANGED, 27), Ok(0o644));
+        assert_eq!(decide(1000, 1000), Ok(0o644));
+        assert_eq!(decide(ID_UNCHANGED, 28), Err(EPERM));
+        assert_eq!(decide(1001, ID_UNCHANGED), Err(EPERM));
+    }
 }
 
 /// `chown`/`lchown`/`fchownat` on a `(dirfd, path)`; `flags` are
@@ -5687,7 +5747,7 @@ pub unsafe extern "C" fn patina_chown(
     let Some(metadata) = resolved.metadata else {
         return fail(ENOENT);
     };
-    let mode = match chown_decision(uid, gid, metadata.kind, metadata.mode) {
+    let mode = match chown_decision(caller(), uid, gid, metadata.kind, metadata.mode) {
         Ok(mode) => mode,
         Err(errno) => return fail(errno),
     };
@@ -5728,7 +5788,7 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
             Ok(metadata) => metadata,
             Err(errno) => return fail(errno),
         };
-        let mode = match chown_decision(uid, gid, metadata.kind, metadata.mode) {
+        let mode = match chown_decision(caller(), uid, gid, metadata.kind, metadata.mode) {
             Ok(mode) => mode,
             Err(errno) => return fail(errno),
         };
@@ -5748,7 +5808,7 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
         Ok(metadata) => metadata,
         Err(errno) => return fail(errno),
     };
-    let mode = match chown_decision(uid, gid, metadata.kind, metadata.mode) {
+    let mode = match chown_decision(caller(), uid, gid, metadata.kind, metadata.mode) {
         Ok(mode) => mode,
         Err(errno) => return fail(errno),
     };

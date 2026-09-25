@@ -14,7 +14,7 @@
 use super::*;
 use crate::limits::{RLIMIT_NICE, RLIMIT_RTPRIO};
 use crate::neg_errno as errno;
-use crate::registry::{IDENTITY_PID, IDENTITY_UID, INIT_PID};
+use crate::registry::{IDENTITY_PID, INIT_PID};
 use crate::{E2BIG, EACCES, EFAULT};
 
 const SCHED_OTHER: u32 = 0;
@@ -205,7 +205,7 @@ fn targets(
         }
         members
     } else if which == user {
-        if who == 0 || who as u32 == IDENTITY_UID {
+        if who == 0 || who as u32 == crate::identity::credential().uid {
             let mut members = vec![INIT];
             members.extend(threads(state));
             members

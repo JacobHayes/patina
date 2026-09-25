@@ -76,11 +76,11 @@ pub const DARWIN_RELEASE: &str = "25.0.0";
 /// The xnu build of [`DARWIN_RELEASE`], named in the Darwin `uname` version.
 pub const DARWIN_XNU: &str = "xnu-12377.1.9";
 
-/// The one identity the virtual kernel runs the guest as: an ordinary
-/// non-root user that owns every entry of the deterministic filesystem. The
-/// single source `getuid`/`geteuid` (the `Constant` rows below and the C
-/// interposers) and every `st_uid` are answered from, and what `chown` is a
-/// comparison against. The identity arc makes it a `--host-*` knob.
+/// The user the virtual kernel runs the guest as: an ordinary non-root user
+/// that owns every entry of the deterministic filesystem. On Linux it is the
+/// uid of the shim's virtual credential, which the id rows, `st_uid` and
+/// `chown` read; on macOS, which has no credential yet, those read it
+/// directly.
 pub const IDENTITY_UID: u32 = 1000;
 /// The guest process: the child of the pid namespace's init
 /// ([`INIT_PID`]), leading its own process group in init's session, as a
