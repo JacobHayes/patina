@@ -28,10 +28,8 @@
 //! their kernel defaults (`ip_default_ttl`, `conf/all/hop_limit`,
 //! `ip_no_pmtu_disc`).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{OptionShown, Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -284,28 +282,5 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &["socket", "setsockopt", "getsockopt", "close"],
     needs: &[Need::Ipv6Loopback],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "IPV6_DONTFRAG shorter than an int is EINVAL (thread/net/opts.rs set_ipv6); do_ipv6_setsockopt takes it as 0",
-            failure: Failure::Differs(&[
-                Difference::field(109, "setsockopt", "errno", Observed::Str("EINVAL")),
-                Difference::field(109, "setsockopt", "ret", Observed::Int(-1)),
-                Difference::check(110, "an IPV6_DONTFRAG shorter than an int clears it"),
-                Difference::field(111, "getsockopt", "fields.value", Observed::Int(1)),
-                Difference::check(112, "reads back 0"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
-            what: "IPV6_TCLASS on a stream overwrites its ECN bits (thread/net/opts.rs set_ipv6); do_ipv6_setsockopt keeps them",
-            failure: Failure::Differs(&[
-                Difference::field(136, "getsockopt", "fields.value", Observed::Int(0x2f)),
-                Difference::check(137, "a stream's IPV6_TCLASS keeps its ECN bits"),
-            ]),
-        },
-    ],
     ..DEFAULTS
 };

@@ -488,14 +488,20 @@ fn set_ipv6(
     }
     #[cfg(target_os = "linux")]
     {
-        if len < 4 {
+        // `do_ipv6_setsockopt` reads an `int` when there is room for one and
+        // takes 0 otherwise; every modeled option but `IPV6_DONTFRAG` then
+        // refuses the short value.
+        if len < 4 && name != IPV6_DONTFRAG {
             return Err(EINVAL);
         }
-        let val = int(&read(4)?);
+        let val = if len < 4 { 0 } else { int(&read(4)?) };
+        let stream = is_tcp(socket);
         let ip = &mut socket.opts.ip;
         match name {
-            // RFC 3542 6.5: -1 is the default class, 0.
             IPV6_TCLASS if !(-1..=0xff).contains(&val) => return Err(EINVAL),
+            // RFC 3542 6.5: -1 is the default class, 0; a stream keeps its
+            // own ECN bits.
+            IPV6_TCLASS if stream => ip.tclass = (val.max(0) as u8 & !0x3) | (ip.tclass & 0x3),
             IPV6_TCLASS => ip.tclass = val.max(0) as u8,
             IPV6_RECVTCLASS => ip.recv_tclass = val != 0,
             IPV6_RECVPKTINFO => ip.recv_pktinfo6 = val != 0,
