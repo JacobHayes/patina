@@ -201,6 +201,41 @@ ssize_t pwrite64(int fd, const void *source, size_t length, off64_t offset) {
     return fail_size(patina_pwrite(fd, source, length, (int64_t)offset));
 }
 
+/* glibc's exported internal names for read and write, which older objects
+ * import, and its `_FORTIFY_SOURCE` reads (debug/read_chk.c, pread_chk.c,
+ * pread64_chk.c): the plain call once the buffer the compiler knew holds the
+ * length asked for (`__chk_fail` otherwise, before any syscall). */
+ssize_t __read(int fd, void *destination, size_t length) {
+    return fail_size(patina_read(fd, destination, length));
+}
+
+ssize_t __write(int fd, const void *source, size_t length) {
+    return fail_size(patina_write(fd, source, length));
+}
+
+static ssize_t patina_read_chk(int fd, void *destination, size_t length, size_t buflen) {
+    if (length > buflen) patina_chk_fail();
+    return fail_size(patina_read(fd, destination, length));
+}
+
+static ssize_t patina_pread_chk(int fd, void *destination, size_t length, int64_t offset,
+                                size_t buflen) {
+    if (length > buflen) patina_chk_fail();
+    return fail_size(patina_pread(fd, destination, length, offset));
+}
+
+ssize_t __read_chk(int fd, void *destination, size_t length, size_t buflen) {
+    return patina_read_chk(fd, destination, length, buflen);
+}
+
+ssize_t __pread_chk(int fd, void *destination, size_t length, off_t offset, size_t buflen) {
+    return patina_pread_chk(fd, destination, length, (int64_t)offset, buflen);
+}
+
+ssize_t __pread64_chk(int fd, void *destination, size_t length, off64_t offset, size_t buflen) {
+    return patina_pread_chk(fd, destination, length, (int64_t)offset, buflen);
+}
+
 /* In-kernel copies: glibc's copy_file_range and sendfile are the bare
  * syscalls, so the wrappers are the rows' one model (src/transfer.rs) with
  * errno set. Rust's std reaches copy_file_range for `fs::copy`/`io::copy`

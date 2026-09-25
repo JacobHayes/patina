@@ -27,13 +27,11 @@
 //! mode it cannot pass, fails `__fortify_fail` ("invalid open call"), both
 //! with SIGABRT before any syscall.
 //!
-//! libc only, and through `dlsym`: the registry lists every one `Absent` (the
-//! shim does not define them), so the probe binary cannot import them (the
-//! pre-run audit would refuse the whole binary). Under patina `dlsym` finds
-//! none: the shim's `__wrap_dlsym` routes only its entropy names.
+//! libc only: glibc's symbols, imported (the shim defines them; the `libc`
+//! crate declares none of them).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
+use crate::compare::{Ending, Failure};
 use crate::observe::Norm;
 use crate::probe::{AT_FDCWD, Probe, neg};
 use crate::vehicle::{Vehicle, fold_errno};
@@ -52,21 +50,44 @@ type ReadlinkChk = unsafe extern "C" fn(*const c_char, *mut c_char, size_t, size
 type ReadlinkatChk =
     unsafe extern "C" fn(c_int, *const c_char, *mut c_char, size_t, size_t) -> ssize_t;
 
-const SYMBOLS: [&str; 13] = [
-    "__open",
-    "__open64",
-    "__open_2",
-    "__open64_2",
-    "__openat_2",
-    "__openat64_2",
-    "__read",
-    "__write",
-    "__read_chk",
-    "__pread_chk",
-    "__pread64_chk",
-    "__readlink_chk",
-    "__readlinkat_chk",
-];
+unsafe extern "C" {
+    fn __open(path: *const c_char, flags: c_int, ...) -> c_int;
+    fn __open64(path: *const c_char, flags: c_int, ...) -> c_int;
+    fn __open_2(path: *const c_char, flags: c_int) -> c_int;
+    fn __open64_2(path: *const c_char, flags: c_int) -> c_int;
+    fn __openat_2(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int;
+    fn __openat64_2(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int;
+    fn __read(fd: c_int, buf: *mut c_void, len: size_t) -> ssize_t;
+    fn __write(fd: c_int, buf: *const c_void, len: size_t) -> ssize_t;
+    fn __read_chk(fd: c_int, buf: *mut c_void, len: size_t, buflen: size_t) -> ssize_t;
+    fn __pread_chk(
+        fd: c_int,
+        buf: *mut c_void,
+        len: size_t,
+        offset: off64_t,
+        buflen: size_t,
+    ) -> ssize_t;
+    fn __pread64_chk(
+        fd: c_int,
+        buf: *mut c_void,
+        len: size_t,
+        offset: off64_t,
+        buflen: size_t,
+    ) -> ssize_t;
+    fn __readlink_chk(
+        path: *const c_char,
+        buf: *mut c_char,
+        len: size_t,
+        buflen: size_t,
+    ) -> ssize_t;
+    fn __readlinkat_chk(
+        dirfd: c_int,
+        path: *const c_char,
+        buf: *mut c_char,
+        len: size_t,
+        buflen: size_t,
+    ) -> ssize_t;
+}
 
 /// Every buffer the compiler would know: 16 bytes.
 const BUFLEN: usize = 16;
@@ -152,35 +173,13 @@ fn read_event(p: &Probe, op: &str, fd: i32, len: usize, r: i64, buf: &[u8]) {
 
 pub fn run(p: &Probe) {
     let root = p.dir();
-    let found: Vec<_> = SYMBOLS.iter().map(|symbol| p.resolve(symbol)).collect();
-    p.require(
-        "the fortified and internal symbols resolve",
-        found.iter().all(Option::is_some),
-    );
-    let at = |index: usize| found[index].unwrap();
-    // SAFETY: glibc's definitions, by their documented types.
-    let (open, open64, open_2, open64_2, openat_2, openat64_2) = unsafe {
-        (
-            std::mem::transmute::<*mut c_void, Open>(at(0)),
-            std::mem::transmute::<*mut c_void, Open>(at(1)),
-            std::mem::transmute::<*mut c_void, Open2>(at(2)),
-            std::mem::transmute::<*mut c_void, Open2>(at(3)),
-            std::mem::transmute::<*mut c_void, Openat2>(at(4)),
-            std::mem::transmute::<*mut c_void, Openat2>(at(5)),
-        )
-    };
-    // SAFETY: as above.
-    let (read, write, read_chk, pread_chk, pread64_chk, readlink_chk, readlinkat_chk) = unsafe {
-        (
-            std::mem::transmute::<*mut c_void, Read>(at(6)),
-            std::mem::transmute::<*mut c_void, Write>(at(7)),
-            std::mem::transmute::<*mut c_void, ReadChk>(at(8)),
-            std::mem::transmute::<*mut c_void, PreadChk>(at(9)),
-            std::mem::transmute::<*mut c_void, PreadChk>(at(10)),
-            std::mem::transmute::<*mut c_void, ReadlinkChk>(at(11)),
-            std::mem::transmute::<*mut c_void, ReadlinkatChk>(at(12)),
-        )
-    };
+    let (open, open64): (Open, Open) = (__open, __open64);
+    let (open_2, open64_2, openat_2, openat64_2): (Open2, Open2, Openat2, Openat2) =
+        (__open_2, __open64_2, __openat_2, __openat64_2);
+    let (read, write, read_chk): (Read, Write, ReadChk) = (__read, __write, __read_chk);
+    let (pread_chk, pread64_chk): (PreadChk, PreadChk) = (__pread_chk, __pread64_chk);
+    let (readlink_chk, readlinkat_chk): (ReadlinkChk, ReadlinkatChk) =
+        (__readlink_chk, __readlinkat_chk);
     let file = format!("{root}/f");
     let c_file = cstr(&file);
 
@@ -471,52 +470,15 @@ pub const SCENARIO: Scenario = Scenario {
         "fstatat",
         "fork",
     ],
-    resolves: &[
-        "__open",
-        "__open64",
-        "__open_2",
-        "__open64_2",
-        "__openat_2",
-        "__openat64_2",
-        "__read",
-        "__write",
-        "__read_chk",
-        "__pread_chk",
-        "__pread64_chk",
-        "__readlink_chk",
-        "__readlinkat_chk",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim defines none of the fortified or internal file symbols (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds none (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the gap lifts only once the shim both defines them and routes them there, or the scenario imports them directly",
-            failure: Failure::Differs(&[
-                Difference::field(0, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(1, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(2, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(3, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(4, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(5, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(6, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(7, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(8, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(9, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(10, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(11, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(12, "dlsym", "fields.resolved", Observed::Bool(false)),
-            ]),
+    gaps: &[Gap {
+        status: Status::ByDesign,
+        vehicles: &[Vehicle::Libc],
+        what: "fork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); each abort leg forks its child, so the scenario stops at the first and the abort legs run natively only (the shim's own fortify aborts are asserted by cargo-patina's native_signals `fortify_failures_are_guest_aborts`)",
+        failure: Failure::Stops {
+            events: 48,
+            ending: Ending::Signal(SIGABRT),
+            diagnostic: "patina: process spawn reached under patina: fork; the process class is a deterministic-runtime non-goal; failing closed",
         },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "with none of them resolved the scenario cannot continue",
-            failure: Failure::Stops {
-                events: 13,
-                ending: Ending::Exit(101),
-                diagnostic: "fs/fortify: cannot continue: the fortified and internal symbols resolve",
-            },
-        },
-    ],
+    }],
     ..DEFAULTS
 };

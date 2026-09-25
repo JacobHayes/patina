@@ -313,6 +313,32 @@ ssize_t readlinkat(int dirfd, const char *restrict path, char *restrict destinat
     return fail_size(patina_read_link(patina_at(dirfd), path, destination, length));
 }
 
+#ifdef __linux__
+/* glibc's `_FORTIFY_SOURCE` readlinks (debug/readlink_chk.c,
+ * readlinkat_chk.c): the plain call once the buffer the compiler knew holds
+ * the length asked for (`__chk_fail` otherwise, before any syscall). */
+static ssize_t patina_readlink_chk(const char *path, char *destination, size_t length,
+                                   size_t buflen) {
+    if (length > buflen) patina_chk_fail();
+    return fail_size(patina_read_link(PATINA_AT_FDCWD, path, destination, length));
+}
+
+static ssize_t patina_readlinkat_chk(int dirfd, const char *path, char *destination,
+                                     size_t length, size_t buflen) {
+    if (length > buflen) patina_chk_fail();
+    return fail_size(patina_read_link(patina_at(dirfd), path, destination, length));
+}
+
+ssize_t __readlink_chk(const char *path, char *destination, size_t length, size_t buflen) {
+    return patina_readlink_chk(path, destination, length, buflen);
+}
+
+ssize_t __readlinkat_chk(int dirfd, const char *path, char *destination, size_t length,
+                         size_t buflen) {
+    return patina_readlinkat_chk(dirfd, path, destination, length, buflen);
+}
+#endif
+
 /*
  * link/linkat: create a hard link. std::fs::hard_link lowers to
  * linkat(AT_FDCWD, original, AT_FDCWD, link, 0) on Linux and macOS.
@@ -479,6 +505,64 @@ int openat64(int dirfd, const char *path, int flags, ...) {
     int result = patina_openat_variadic(dirfd, path, flags, &ap);
     va_end(ap);
     return result;
+}
+
+/* glibc's exported internal names for open, which older objects import. */
+int __open(const char *path, int flags, ...) {
+    va_list ap;
+    va_start(ap, flags);
+    int result = patina_openat_variadic(AT_FDCWD, path, flags, &ap);
+    va_end(ap);
+    return result;
+}
+
+int __open64(const char *path, int flags, ...) {
+    va_list ap;
+    va_start(ap, flags);
+    int result = patina_openat_variadic(AT_FDCWD, path, flags, &ap);
+    va_end(ap);
+    return result;
+}
+
+/* glibc's `_FORTIFY_SOURCE` opens (io/open_2.c, open64_2.c, openat_2.c,
+ * openat64_2.c): the compiler saw the call pass no mode, so a flag word that
+ * needs one (`O_CREAT`, or all of `O_TMPFILE`) is `__fortify_fail`, naming the
+ * call, before any syscall; otherwise the plain open. */
+static int patina_open_needs_mode(int flags) {
+    return (flags & O_CREAT) != 0 || (flags & O_TMPFILE) == O_TMPFILE;
+}
+
+static int patina_open_2(const char *path, int flags) {
+    if (patina_open_needs_mode(flags))
+        patina_fortify_fail("invalid open call: O_CREAT or O_TMPFILE without mode");
+    return patina_openat_impl(AT_FDCWD, path, flags, 0);
+}
+
+static int patina_open64_2(const char *path, int flags) {
+    if (patina_open_needs_mode(flags))
+        patina_fortify_fail("invalid open64 call: O_CREAT or O_TMPFILE without mode");
+    return patina_openat_impl(AT_FDCWD, path, flags, 0);
+}
+
+static int patina_openat_2(int dirfd, const char *path, int flags) {
+    if (patina_open_needs_mode(flags))
+        patina_fortify_fail("invalid openat call: O_CREAT or O_TMPFILE without mode");
+    return patina_openat_impl(dirfd, path, flags, 0);
+}
+
+static int patina_openat64_2(int dirfd, const char *path, int flags) {
+    if (patina_open_needs_mode(flags))
+        patina_fortify_fail("invalid openat64 call: O_CREAT or O_TMPFILE without mode");
+    return patina_openat_impl(dirfd, path, flags, 0);
+}
+
+int __open_2(const char *path, int flags) { return patina_open_2(path, flags); }
+int __open64_2(const char *path, int flags) { return patina_open64_2(path, flags); }
+int __openat_2(int dirfd, const char *path, int flags) {
+    return patina_openat_2(dirfd, path, flags);
+}
+int __openat64_2(int dirfd, const char *path, int flags) {
+    return patina_openat64_2(dirfd, path, flags);
 }
 
 #endif

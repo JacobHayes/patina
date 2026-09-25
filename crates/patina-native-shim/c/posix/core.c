@@ -167,12 +167,24 @@ static int signal_result(int64_t rc) {
     return (int)rc;
 }
 
-/* glibc's `__chk_fail` (debug/chk_fail.c), the `_FORTIFY_SOURCE` entries'
- * answer to a buffer smaller than the call may write: the diagnostic on
- * stderr, then SIGABRT. */
-_Noreturn static void patina_chk_fail(void) {
-    static const char message[] = "*** buffer overflow detected ***: terminated\n";
-    (void)patina_stdio_write(2, message, sizeof message - 1);
+/* glibc's `__fortify_fail` (debug/fortify_fail.c), the `_FORTIFY_SOURCE`
+ * entries' answer to a call the compiler proved wrong: "*** MESSAGE ***:
+ * terminated" on stderr in one write, then SIGABRT (a guest abort). */
+_Noreturn static void patina_fortify_fail(const char *message) {
+    static const char head[] = "*** ";
+    static const char tail[] = " ***: terminated\n";
+    char line[128];
+    size_t at = 0;
+    for (size_t i = 0; i < sizeof head - 1; ++i) line[at++] = head[i];
+    for (; *message != '\0' && at < sizeof line - sizeof tail; ++message) line[at++] = *message;
+    for (size_t i = 0; i < sizeof tail - 1; ++i) line[at++] = tail[i];
+    (void)patina_stdio_write(2, line, at);
     patina_abort();
+}
+
+/* glibc's `__chk_fail` (debug/chk_fail.c): a buffer smaller than the call may
+ * write. */
+_Noreturn static void patina_chk_fail(void) {
+    patina_fortify_fail("buffer overflow detected");
 }
 #endif

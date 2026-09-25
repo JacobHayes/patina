@@ -99,6 +99,53 @@ mod raw {
         TraceBundle::load(&trace).expect("guest abort finalizes its trace");
     }
 
+    /// glibc's `_FORTIFY_SOURCE` file failures are guest aborts, as `abort`
+    /// is: glibc's exact diagnostic on stderr, SIGABRT, a finalized trace.
+    /// Every `_chk` past its buffer is `__chk_fail`; every `__open*_2` that
+    /// needs a mode is `__fortify_fail` naming its call (glibc io/open_2.c,
+    /// open64_2.c, openat_2.c, openat64_2.c).
+    #[test]
+    fn fortify_failures_are_guest_aborts() {
+        const OVERFLOW: &str = "*** buffer overflow detected ***: terminated";
+        const CASES: [(&str, &str); 9] = [
+            ("__read_chk", OVERFLOW),
+            ("__pread_chk", OVERFLOW),
+            ("__pread64_chk", OVERFLOW),
+            ("__readlink_chk", OVERFLOW),
+            ("__readlinkat_chk", OVERFLOW),
+            (
+                "__open_2",
+                "*** invalid open call: O_CREAT or O_TMPFILE without mode ***: terminated",
+            ),
+            (
+                "__open64_2",
+                "*** invalid open64 call: O_CREAT or O_TMPFILE without mode ***: terminated",
+            ),
+            (
+                "__openat_2",
+                "*** invalid openat call: O_CREAT or O_TMPFILE without mode ***: terminated",
+            ),
+            (
+                "__openat64_2",
+                "*** invalid openat64 call: O_CREAT or O_TMPFILE without mode ***: terminated",
+            ),
+        ];
+        let Some(g) = sud_c_guest("signals/signal_boundary.c") else {
+            return;
+        };
+        for (symbol, diagnostic) in CASES {
+            let (output, trace) = g.record_standalone(&[&format!("fortify-{symbol}")]);
+            let stderr = text(&output.stderr);
+            assert_eq!(output.status.signal(), Some(6), "{symbol}: {stderr}");
+            assert!(
+                stderr.lines().any(|line| line == diagnostic),
+                "{symbol}: no {diagnostic:?} line in {stderr}"
+            );
+            TraceBundle::load(&trace)
+                .unwrap_or_else(|error| panic!("{symbol}: the abort left no trace: {error}"));
+        }
+    }
+
     fn assert_internal_fatal(case: &str, diagnostic: &str) {
         let Some(g) = sud_c_guest("signals/signal_boundary.c") else {
             return;

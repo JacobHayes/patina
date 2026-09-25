@@ -35,8 +35,8 @@
  * never be rebound to a public, interposable symbol. The public definitions
  * call the same statics, so static and dynamic binding run the same code.
  *
- * Membership is structural: the entropy calls, the `_FORTIFY_SOURCE` receive
- * and poll spellings, and getifaddrs/freeifaddrs — shim definitions a
+ * Membership is structural: the entropy calls, the `_FORTIFY_SOURCE` file,
+ * receive and poll spellings, and getifaddrs/freeifaddrs — shim definitions a
  * program may reach through `dlsym` as well as by linking (a name the shim
  * defines is safe to hand out by construction; omitting one silently
  * demotes its caller to a less-modeled fallback). Names the shim does NOT
@@ -52,6 +52,15 @@ void *patina_dlsym_route(const char *symbol) {
         {"getentropy", (void *)(uintptr_t)&patina_deterministic_getentropy},
         {"getrandom", (void *)(uintptr_t)&patina_deterministic_getrandom},
 #ifdef __linux__
+        {"__open_2", (void *)(uintptr_t)&patina_open_2},
+        {"__open64_2", (void *)(uintptr_t)&patina_open64_2},
+        {"__openat_2", (void *)(uintptr_t)&patina_openat_2},
+        {"__openat64_2", (void *)(uintptr_t)&patina_openat64_2},
+        {"__read_chk", (void *)(uintptr_t)&patina_read_chk},
+        {"__pread_chk", (void *)(uintptr_t)&patina_pread_chk},
+        {"__pread64_chk", (void *)(uintptr_t)&patina_pread_chk},
+        {"__readlink_chk", (void *)(uintptr_t)&patina_readlink_chk},
+        {"__readlinkat_chk", (void *)(uintptr_t)&patina_readlinkat_chk},
         {"__recv_chk", (void *)(uintptr_t)&patina_recv_chk},
         {"__recvfrom_chk", (void *)(uintptr_t)&patina_recvfrom_chk},
         {"__poll_chk", (void *)(uintptr_t)&patina_poll_chk},

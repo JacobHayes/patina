@@ -1,9 +1,11 @@
 /* Class pairing: real libc/raw doors for reserved-signal containment,
- * single-entry state, and internal-fatal versus guest-abort finalization. */
+ * single-entry state, and internal-fatal versus guest-abort finalization
+ * (glibc's `_FORTIFY_SOURCE` failures are guest aborts too). */
 #define _GNU_SOURCE
 #include "patina_native.h"
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -15,6 +17,36 @@
 #include <unistd.h>
 
 extern int tkill(pid_t tid, int sig);
+/* glibc's fortified file spellings; declared here, as no header does
+ * without _FORTIFY_SOURCE. */
+extern int __open_2(const char *path, int flags);
+extern int __open64_2(const char *path, int flags);
+extern int __openat_2(int dirfd, const char *path, int flags);
+extern int __openat64_2(int dirfd, const char *path, int flags);
+extern ssize_t __read_chk(int fd, void *buf, size_t len, size_t buflen);
+extern ssize_t __pread_chk(int fd, void *buf, size_t len, off_t offset, size_t buflen);
+extern ssize_t __pread64_chk(int fd, void *buf, size_t len, off_t offset, size_t buflen);
+extern ssize_t __readlink_chk(const char *path, char *buf, size_t len, size_t buflen);
+extern ssize_t __readlinkat_chk(int dirfd, const char *path, char *buf, size_t len,
+                                size_t buflen);
+
+/* One fortify failure, by symbol: a length one past the buffer, or an open
+ * that needs a mode it cannot pass. Each aborts before any syscall. */
+static void fortify_failure(const char *symbol) {
+    char buf[16];
+    size_t over = sizeof buf + 1;
+    if (strcmp(symbol, "__read_chk") == 0) __read_chk(0, buf, over, sizeof buf);
+    if (strcmp(symbol, "__pread_chk") == 0) __pread_chk(0, buf, over, 0, sizeof buf);
+    if (strcmp(symbol, "__pread64_chk") == 0) __pread64_chk(0, buf, over, 0, sizeof buf);
+    if (strcmp(symbol, "__readlink_chk") == 0) __readlink_chk("l", buf, over, sizeof buf);
+    if (strcmp(symbol, "__readlinkat_chk") == 0)
+        __readlinkat_chk(AT_FDCWD, "l", buf, over, sizeof buf);
+    if (strcmp(symbol, "__open_2") == 0) __open_2("fortified", O_CREAT | O_WRONLY);
+    if (strcmp(symbol, "__open64_2") == 0) __open64_2("fortified", O_CREAT | O_WRONLY);
+    if (strcmp(symbol, "__openat_2") == 0) __openat_2(AT_FDCWD, ".", O_TMPFILE | O_RDWR);
+    if (strcmp(symbol, "__openat64_2") == 0) __openat64_2(AT_FDCWD, ".", O_TMPFILE | O_RDWR);
+    assert(!"a fortify failure returned");
+}
 extern unsigned char PATINA_SUD_ARMED;
 extern unsigned char PATINA_TSC_ARMED;
 static volatile sig_atomic_t handled;
@@ -156,6 +188,7 @@ int main(int argc, char **argv) {
     assert(argc == 2);
     assert(PATINA_SUD_ARMED); /* no unsupported-kernel false green */
     if (strcmp(argv[1], "guest-abort") == 0) abort();
+    if (strncmp(argv[1], "fortify-", 8) == 0) fortify_failure(argv[1] + 8);
     if (strcmp(argv[1], "internal-c") == 0) fork();
     if (strcmp(argv[1], "internal-rust") == 0) raw4(999999, 0, 0, 0, 0);
     if (strcmp(argv[1], "internal-context-active") == 0) {

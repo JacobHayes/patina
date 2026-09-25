@@ -558,6 +558,7 @@ posix_fadvise, posix_fadvise64 (the error number returned, errno untouched)
 getrlimit, setrlimit, getrlimit64, setrlimit64 (one definition; a NULL limit asks for and sets nothing)
 copy_file_range, sendfile, sendfile64 (the raw rows' one transfer model)
 setxattr, getxattr, listxattr, removexattr and their l*/f* spellings (the rows' per-inode attribute model)
+__open, __open64, __read, __write (glibc's exported internal names) and the _FORTIFY_SOURCE file spellings __open_2, __open64_2, __openat_2, __openat64_2, __read_chk, __pread_chk, __pread64_chk, __readlink_chk, __readlinkat_chk (glibc's __chk_fail/__fortify_fail diagnostic and SIGABRT, a guest abort, before any syscall)
 socket, bind, connect, send, recv
 clock_gettime, gettimeofday, nanosleep
 getrandom, getentropy, /dev/urandom reads (and `dlsym`-resolved getrandom on Linux)
