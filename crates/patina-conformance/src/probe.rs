@@ -4,7 +4,7 @@
 //! whatever the scenario needs to continue. Scenarios never format events by
 //! hand.
 
-use crate::observe::{EXPECT_DEATH_OP, Id, Norm};
+use crate::observe::{EXPECT_DEATH_OP, EXPECT_EXIT_OP, Id, Norm};
 use crate::record::{EventBuilder, Recorder};
 use crate::vehicle::{Args, Vehicle, errno_name};
 use patina_dst_syscalls::Syscall;
@@ -2298,6 +2298,13 @@ impl Probe {
             .event(EXPECT_DEATH_OP, 0)
             .arg("signal", signal)
             .emit();
+    }
+
+    /// Announce that the process ends by exiting with `code` (not 0): a
+    /// native exit with another status is an oracle only when this is the
+    /// last recorded event, and the patina run must then end the same way.
+    pub fn exits_with(&self, code: i32) {
+        self.rec.event(EXPECT_EXIT_OP, 0).arg("code", code).emit();
     }
 
     /// `pause`: returns only when a handled signal was delivered (`-EINTR`).

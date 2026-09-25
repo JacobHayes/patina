@@ -7,7 +7,7 @@
 //! and a gap that no longer matches is itself a failure, so the declarations
 //! are always exactly the current gap.
 
-use crate::observe::{CHECK_OP, EXPECT_DEATH_OP, Event, ParsedNorm};
+use crate::observe::{CHECK_OP, EXPECT_DEATH_OP, EXPECT_EXIT_OP, Event, ParsedNorm};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -260,14 +260,30 @@ pub fn normalize(mut events: Vec<Event>) -> Vec<Event> {
 // ---- the native oracle ------------------------------------------------------
 
 /// Whether a native observation is an oracle at all: it recorded something,
-/// every check passed, and the process exited 0 or died by the signal its
-/// last event announced.
+/// every check passed, and the process exited 0, exited with the status its
+/// last event announced, or died by the signal its last event announced.
 pub fn native_verdict(native: &Observation) -> Result<(), String> {
     if native.events.is_empty() {
         return Err(format!("recorded no event ({})", native.termination));
     }
     if let Some(label) = failed_check(native) {
         return Err(format!("a check failed natively: {label}"));
+    }
+    let announced_exit = native
+        .events
+        .last()
+        .filter(|event| event.op == EXPECT_EXIT_OP)
+        .and_then(|event| event.args.get("code"))
+        .and_then(Value::as_i64);
+    if let Some(code) = announced_exit {
+        return if native.termination == Termination::Exited(code as i32) {
+            Ok(())
+        } else {
+            Err(format!(
+                "announced exiting {code} (Probe::exits_with) but {}",
+                native.termination
+            ))
+        };
     }
     match native.termination {
         Termination::Exited(0) => Ok(()),
@@ -1160,6 +1176,39 @@ mod tests {
             core: Some(false),
         };
         assert_eq!(native_verdict(&died), Ok(()));
+    }
+
+    fn exit_announced(code: i64) -> Event {
+        let mut announced = event(3, EXPECT_EXIT_OP, 0);
+        announced.args.insert("code".to_string(), Value::from(code));
+        announced
+    }
+
+    #[test]
+    fn an_announced_native_exit_is_an_oracle() {
+        let mut exited = native();
+        exited.events.push(exit_announced(3));
+        exited.termination = Termination::Exited(3);
+        assert_eq!(native_verdict(&exited), Ok(()));
+    }
+
+    #[test]
+    fn an_unannounced_nonzero_native_exit_is_not_an_oracle() {
+        let exited = Observation {
+            termination: Termination::Exited(3),
+            ..native()
+        };
+        assert!(native_verdict(&exited).is_err());
+    }
+
+    #[test]
+    fn a_native_exit_other_than_announced_is_not_an_oracle() {
+        for termination in [Termination::Exited(0), Termination::Exited(4)] {
+            let mut exited = native();
+            exited.events.push(exit_announced(3));
+            exited.termination = termination;
+            assert!(native_verdict(&exited).is_err(), "{termination}");
+        }
     }
 
     /// A socket event: `domain`, `type`, protocol 0, the descriptor `fd`.

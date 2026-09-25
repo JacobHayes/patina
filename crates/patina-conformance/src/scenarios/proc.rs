@@ -1,10 +1,14 @@
 pub mod absent;
 pub mod dl;
 pub mod environ;
+pub mod exec;
+pub mod exit;
 pub mod ids;
 pub mod namespaces;
+pub mod pidfd_spawn;
 pub mod prctl;
 pub mod ptrace;
 pub mod seccomp;
+pub mod spawn;
 pub mod traps;
 pub mod wait;

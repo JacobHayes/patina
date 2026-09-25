@@ -33,6 +33,11 @@ pub const CHECK_OP: &str = "check";
 /// recorded event announces that very signal.
 pub const EXPECT_DEATH_OP: &str = "expect_death";
 
+/// The op a scenario records right before the process exits with a status
+/// other than 0 on purpose (`Probe::exits_with`): such an exit passes
+/// natively only when the last recorded event announces that very status.
+pub const EXPECT_EXIT_OP: &str = "expect_exit";
+
 /// Per-field normalization, declared by the scenario, never regex over text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Norm {

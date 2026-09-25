@@ -409,6 +409,14 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         entry: Entry::Symbol("res_init"),
         reason: "glibc exports no res_init (resolv.h defines it as __res_init, the name glibc 2.39 exports), so a native oracle can neither import nor dlsym it; the shim's definition serves guests that declare the name themselves. __res_init is covered by sys/nss",
     },
+    Exclusion {
+        entry: Entry::Symbol("posix_spawn_file_actions_addchdir"),
+        reason: "glibc 2.39 exports no posix_spawn_file_actions_addchdir (the POSIX.1-2024 name; it has only the _np spelling), so a native oracle can neither import nor dlsym it; the shim's deny-trap serves guests that declare the name themselves. posix_spawn_file_actions_addchdir_np is covered by proc/spawn",
+    },
+    Exclusion {
+        entry: Entry::Symbol("__libc_start_main"),
+        reason: "control plane: the shim's startup hook, which crt1.o's _start calls before main and no guest calls itself; it arms syscall-user-dispatch, the TSC trap and THP-off, then hands glibc's own __libc_start_main a main wrapper that marks teardown (c/posix/init.c). Every scenario starts through it and proc/exit ends through the exit path it prepares; there is no call a native oracle could compare",
+    },
 ];
 
 pub const SCENARIOS: &[&Scenario] = &[
@@ -503,11 +511,15 @@ pub const SCENARIOS: &[&Scenario] = &[
     &proc::absent::SCENARIO,
     &proc::dl::SCENARIO,
     &proc::environ::SCENARIO,
+    &proc::exec::SCENARIO,
+    &proc::exit::SCENARIO,
     &proc::ids::SCENARIO,
     &proc::namespaces::SCENARIO,
+    &proc::pidfd_spawn::SCENARIO,
     &proc::prctl::SCENARIO,
     &proc::ptrace::SCENARIO,
     &proc::seccomp::SCENARIO,
+    &proc::spawn::SCENARIO,
     &proc::traps::SCENARIO,
     &proc::wait::SCENARIO,
     &readiness::epoll::SCENARIO,

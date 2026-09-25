@@ -1756,6 +1756,16 @@ fn proc_environ() {
 }
 
 #[test]
+fn proc_exec() {
+    conform("proc/exec");
+}
+
+#[test]
+fn proc_exit() {
+    conform("proc/exit");
+}
+
+#[test]
 fn proc_ids() {
     conform("proc/ids");
 }
@@ -1763,6 +1773,11 @@ fn proc_ids() {
 #[test]
 fn proc_namespaces() {
     conform("proc/namespaces");
+}
+
+#[test]
+fn proc_pidfd_spawn() {
+    conform("proc/pidfd_spawn");
 }
 
 #[test]
@@ -1778,6 +1793,11 @@ fn proc_ptrace() {
 #[test]
 fn proc_seccomp() {
     conform("proc/seccomp");
+}
+
+#[test]
+fn proc_spawn() {
+    conform("proc/spawn");
 }
 
 #[test]
