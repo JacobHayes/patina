@@ -144,7 +144,7 @@ pub fn run(p: &Probe) {
     );
 
     // ---- move_pages, migrate_pages ----
-    p.check("unmap the last page", p.munmap(&a.at(3 * page), page) == 0);
+    p.require("unmap the last page", p.munmap(&a.at(3 * page), page) == 0);
     let (r, status) = p.move_pages(0, &[a.at(0), a.at(3 * page)], None, 0);
     p.check(
         "move_pages reports a page's node, and -EFAULT for an unmapped address",

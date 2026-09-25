@@ -44,7 +44,7 @@ pub fn run(p: &Probe) {
         "a misaligned address is EINVAL",
         p.map_shadow_stack("-", &plain.at(8), page, 0).0 == neg(EINVAL),
     );
-    p.check("unmap it", p.munmap(&plain.at(0), page) == 0);
+    p.require("unmap it", p.munmap(&plain.at(0), page) == 0);
     let (r, fixed) = p.map_shadow_stack("f", &plain.at(0), page, 0);
     p.check(
         "a free address takes it exactly",

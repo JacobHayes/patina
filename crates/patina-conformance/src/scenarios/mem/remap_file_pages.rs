@@ -57,7 +57,7 @@ pub fn run(p: &Probe) {
         "a private mapping is EINVAL",
         p.remap_file_pages(&private.at(0), page, 0, 0, 0) == neg(EINVAL),
     );
-    p.check(
+    p.require(
         "unmap the private page",
         p.munmap(&private.at(0), page) == 0,
     );

@@ -91,7 +91,7 @@ pub fn run(p: &Probe) {
     );
     p.check("unmap the shared page", p.munmap(&s.at(0), page) == 0);
 
-    p.check("unmap the last page", p.munmap(&a.at(3 * page), page) == 0);
+    p.require("unmap the last page", p.munmap(&a.at(3 * page), page) == 0);
     p.check(
         "a range reaching past the mapping is ENOMEM",
         p.mincore(&a.at(0), 4 * page, Some(4)).0 == neg(ENOMEM),

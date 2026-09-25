@@ -73,7 +73,7 @@ pub fn run(p: &Probe) {
         p.mlock2(&a.at(0), page, UNKNOWN_MLOCK2) == neg(EINVAL),
     );
 
-    p.check("unmap the last page", p.munmap(&a.at(3 * page), page) == 0);
+    p.require("unmap the last page", p.munmap(&a.at(3 * page), page) == 0);
     p.check(
         "mlock of a range reaching past the mapping is ENOMEM",
         p.mlock(&a.at(0), 4 * page) == neg(ENOMEM),

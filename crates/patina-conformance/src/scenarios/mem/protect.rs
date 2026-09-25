@@ -61,7 +61,7 @@ pub fn run(p: &Probe) {
         "mprotect of length 0 succeeds",
         p.mprotect(&a.at(0), 0, PROT_NONE) == 0,
     );
-    p.check("unmap the middle page", p.munmap(&a.at(page), page) == 0);
+    p.require("unmap the middle page", p.munmap(&a.at(page), page) == 0);
     p.check(
         "mprotect over a hole is ENOMEM",
         p.mprotect(&a.at(page), 2 * page, RW) == neg(ENOMEM),
@@ -121,7 +121,7 @@ pub const SCENARIO: Scenario = Scenario {
         vehicles: Vehicle::ALL,
         what: "a guest SIGSEGV handler is refused: with the rdtsc trap armed (PR_TSC_SIGSEGV, tsc.rs) the shim reserves SIGSEGV and patina_signal_action (thread/signals.rs) aborts the registration instead of routing faults outside its own rdtsc sites to the guest's handler",
         failure: Failure::Stops {
-            events: 20,
+            events: 19,
             ending: Ending::Signal(libc::SIGABRT),
             diagnostic: "patina native shim fatal: reserved signal registration would disable deterministic containment",
         },

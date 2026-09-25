@@ -7,8 +7,8 @@
 //!   pages see each other's stores; truncating the file zeroes the mapped
 //!   bytes past its new end within the last page;
 //! * a `MAP_PRIVATE` mapping's stores stay private;
-//! * `msync` of a file mapping: `MS_SYNC`, `MS_ASYNC`, `MS_INVALIDATE`
-//!   succeed; `MS_SYNC|MS_ASYNC` is `EINVAL`;
+//! * `msync(MS_SYNC)` of a file mapping succeeds (the flag rules, which do
+//!   not depend on what is mapped, are `mem/msync`'s);
 //! * refusals: `MAP_SHARED` + `PROT_WRITE` of a read-only descriptor and any
 //!   mapping of a write-only one (`EACCES`), a misaligned offset
 //!   (`EINVAL`), a pipe or a directory (`ENODEV`), a closed descriptor
@@ -123,15 +123,6 @@ pub fn run(p: &Probe) {
     p.check(
         "MS_SYNC of a file mapping succeeds",
         p.msync(&m.at(0), 2 * page, MS_SYNC) == 0,
-    );
-    p.check("MS_ASYNC succeeds", p.msync(&m.at(0), page, MS_ASYNC) == 0);
-    p.check(
-        "MS_INVALIDATE succeeds",
-        p.msync(&m.at(0), 2 * page, MS_INVALIDATE) == 0,
-    );
-    p.check(
-        "MS_SYNC with MS_ASYNC is EINVAL",
-        p.msync(&m.at(0), page, MS_SYNC | MS_ASYNC) == neg(EINVAL),
     );
 
     // ---- truncation ----

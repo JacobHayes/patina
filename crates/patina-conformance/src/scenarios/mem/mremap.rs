@@ -197,7 +197,7 @@ pub fn run(p: &Probe) {
             .0
             == neg(EINVAL),
     );
-    p.check("unmap the blocker", p.munmap(&blocker.at(0), page) == 0);
+    p.require("unmap the blocker", p.munmap(&blocker.at(0), page) == 0);
     p.check(
         "an unmapped source is EFAULT",
         p.mremap("-", &blocker.at(0), page, 2 * page, MREMAP_MAYMOVE, &null)

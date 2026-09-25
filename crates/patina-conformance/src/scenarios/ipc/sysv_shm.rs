@@ -15,7 +15,8 @@
 //! * `IPC_RMID` of an attached segment marks it `SHM_DEST` and frees its key
 //!   at once (the key is then `ENOENT`, `IPC_STAT` shows it private), the
 //!   bytes live on, Linux still lets it be attached, and the last detach
-//!   destroys it (its id is then `EINVAL`).
+//!   destroys it (its id is then `EINVAL`); `IPC_RMID` of a segment nothing
+//!   attaches destroys it at once.
 //!
 //! Keys are `ftok(3)` of the run directory; every segment is removed on
 //! every path.
@@ -188,14 +189,16 @@ pub fn run(p: &Probe) {
         i64::from(p.shmget(Key::PRIVATE, 0, IPC_CREAT | 0o600)) == neg(EINVAL),
     );
 
-    // ---- removal of the private segment ----
-    let removed = p.shmctl(id, IPC_RMID, ShmArg::None).0;
-    p.check("IPC_RMID of the private segment", removed == 0);
+    // ---- removal of the private segment, detached first ----
     p.check("detach the first view", p.shmdt(&x.at(0)) == 0);
     p.check("detach the placed view", p.shmdt(&y.at(0)) == 0);
-    let gone = p.shmctl(id, IPC_STAT, ShmArg::Stat).0;
-    p.check("it is destroyed", gone == neg(EINVAL));
-    private.removed(if gone == neg(EINVAL) { 0 } else { removed });
+    let removed = p.shmctl(id, IPC_RMID, ShmArg::None).0;
+    p.check("IPC_RMID of the unattached segment", removed == 0);
+    private.removed(removed);
+    p.check(
+        "destroys it at once: its id is EINVAL",
+        p.shmctl(id, IPC_STAT, ShmArg::Stat).0 == neg(EINVAL),
+    );
     p.check(
         "IPC_RMID of a destroyed id is EINVAL",
         p.shmctl(id, IPC_RMID, ShmArg::None).0 == neg(EINVAL),

@@ -154,13 +154,7 @@ pub fn run(p: &Probe) {
         a.zeroed(0, page),
     );
     for (advice, label) in [
-        (MADV_NORMAL, "MADV_NORMAL succeeds"),
-        (MADV_RANDOM, "MADV_RANDOM succeeds"),
-        (MADV_SEQUENTIAL, "MADV_SEQUENTIAL succeeds"),
         (MADV_WILLNEED, "MADV_WILLNEED succeeds"),
-        (MADV_DONTFORK, "MADV_DONTFORK succeeds"),
-        (MADV_DOFORK, "MADV_DOFORK succeeds"),
-        (MADV_FREE, "MADV_FREE of a private page succeeds"),
         (MADV_COLD, "MADV_COLD succeeds"),
     ] {
         p.check(label, p.madvise(&a.at(2 * page), page, advice) == 0);

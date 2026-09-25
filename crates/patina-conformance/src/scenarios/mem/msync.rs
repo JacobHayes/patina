@@ -54,7 +54,7 @@ pub fn run(p: &Probe) {
         p.msync(&a.at(1), page, MS_SYNC) == neg(EINVAL),
     );
     p.check("length 0 succeeds", p.msync(&a.at(0), 0, MS_SYNC) == 0);
-    p.check("unmap the second page", p.munmap(&a.at(page), page) == 0);
+    p.require("unmap the second page", p.munmap(&a.at(page), page) == 0);
     p.check(
         "a range reaching past the mapping is ENOMEM",
         p.msync(&a.at(0), 2 * page, MS_SYNC) == neg(ENOMEM),
