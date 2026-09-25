@@ -15,6 +15,7 @@
 //! checked by inode; openat2 results are closed unobserved.
 
 use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
+use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
 
@@ -262,6 +263,9 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "fs/openat2",
     run,
+    // glibc has no wrapper for openat2: the libc spelling would be
+    // `syscall(2)` again.
+    vehicles: Vehicle::KERNEL,
     covers: &[
         Syscall::N_openat2,
         Syscall::N_openat,
@@ -270,15 +274,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mkdirat,
         Syscall::N_symlinkat,
         Syscall::N_close,
-    ],
-    symbols: &[
-        "syscall",
-        "openat",
-        "fstatat",
-        "fstat",
-        "mkdirat",
-        "symlinkat",
-        "close",
     ],
     kernel_floor: Some(KernelFloor {
         release: "5.12",

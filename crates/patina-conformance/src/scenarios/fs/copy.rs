@@ -12,6 +12,7 @@
 //! descriptor; a negative offset is EINVAL.
 
 use crate::catalog::{DEFAULTS, Scenario};
+use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
 
@@ -190,6 +191,10 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "fs/copy",
     run,
+    // The shim defines neither copy_file_range nor sendfile, so their libc
+    // spelling would be `syscall(2)` again; fs/copy_libc goes through glibc's
+    // wrappers.
+    vehicles: Vehicle::KERNEL,
     covers: &[
         Syscall::N_copy_file_range,
         Syscall::N_sendfile,
@@ -200,9 +205,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_lseek,
         Syscall::N_pipe2,
         Syscall::N_close,
-    ],
-    symbols: &[
-        "syscall", "openat", "read", "write", "pread64", "lseek", "pipe2", "close",
     ],
     ..DEFAULTS
 };

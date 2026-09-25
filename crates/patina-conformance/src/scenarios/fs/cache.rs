@@ -185,6 +185,10 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "fs/cache",
     run,
+    // glibc has no cachestat wrapper and the shim defines neither readahead
+    // nor posix_fadvise (fs/posix_fadvise), so the libc spelling would be
+    // `syscall(2)` again.
+    vehicles: Vehicle::KERNEL,
     covers: &[
         Syscall::N_readahead,
         Syscall::N_fadvise64,
@@ -194,15 +198,14 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_pipe2,
         Syscall::N_close,
     ],
-    symbols: &["syscall", "openat", "write", "pipe2", "close"],
     kernel_floor: Some(KernelFloor {
         release: "6.5",
         why: "cachestat",
     }),
     gaps: &[Gap {
         status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::ALL,
-        what: "cachestat, readahead and fadvise64 are unmodeled Trap rows (the libc door is syscall(2) until the shim defines posix_fadvise): the first cachestat aborts",
+        vehicles: Vehicle::KERNEL,
+        what: "cachestat, readahead and fadvise64 are unmodeled Trap rows: the first cachestat aborts",
         failure: Failure::Stops {
             events: 8,
             ending: Ending::Signal(6),

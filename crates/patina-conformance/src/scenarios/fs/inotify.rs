@@ -221,6 +221,9 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "fs/inotify",
     run,
+    // The shim defines none of the inotify wrappers, so their libc spelling
+    // would be `syscall(2)` again.
+    vehicles: Vehicle::KERNEL,
     covers: &[
         #[cfg(target_arch = "x86_64")]
         Syscall::N_inotify_init,
@@ -237,10 +240,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mkdirat,
         Syscall::N_close,
     ],
-    symbols: &[
-        "syscall", "read", "ioctl", "fcntl", "openat", "write", "renameat", "unlinkat", "mkdirat",
-        "close",
-    ],
     needs: &[Need::Inotify],
     kernel_floor: Some(KernelFloor {
         release: "4.18",
@@ -250,7 +249,7 @@ pub const SCENARIO: Scenario = Scenario {
         #[cfg(target_arch = "x86_64")]
         Gap {
             status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
+            vehicles: Vehicle::KERNEL,
             what: "the inotify rows are unmodeled Trap rows (the readiness arc models them over the reactor): the first inotify_init aborts",
             failure: Failure::Stops {
                 events: 3,
@@ -261,7 +260,7 @@ pub const SCENARIO: Scenario = Scenario {
         #[cfg(not(target_arch = "x86_64"))]
         Gap {
             status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::ALL,
+            vehicles: Vehicle::KERNEL,
             what: "the inotify rows are unmodeled Trap rows (the readiness arc models them over the reactor): the first inotify_init1 aborts",
             failure: Failure::Stops {
                 events: 3,

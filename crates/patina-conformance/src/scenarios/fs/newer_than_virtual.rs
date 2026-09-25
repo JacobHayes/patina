@@ -8,6 +8,7 @@
 //! scenario is not run (`asserts_absent`).
 
 use crate::catalog::{DEFAULTS, Scenario};
+use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{Probe, neg};
@@ -33,6 +34,9 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "fs/newer_than_virtual",
     run,
+    // glibc has no wrapper for these rows: the libc spelling would be
+    // `syscall(2)` again.
+    vehicles: Vehicle::KERNEL,
     asserts_absent: &[
         Syscall::N_setxattrat,
         Syscall::N_getxattrat,
@@ -41,6 +45,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_file_getattr,
         Syscall::N_file_setattr,
     ],
-    symbols: &["syscall"],
     ..DEFAULTS
 };

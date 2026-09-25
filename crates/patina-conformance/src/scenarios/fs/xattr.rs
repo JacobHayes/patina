@@ -14,6 +14,7 @@
 //! (EBADF). Needs `user.*` attributes on the run directory's filesystem.
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
+use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
 
@@ -304,6 +305,9 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "fs/xattr",
     run,
+    // The shim defines none of the xattr wrappers, so their libc spelling
+    // would be `syscall(2)` again; fs/xattr_libc goes through glibc's wrappers.
+    vehicles: Vehicle::KERNEL,
     covers: &[
         Syscall::N_setxattr,
         Syscall::N_lsetxattr,
@@ -324,16 +328,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mknodat,
         Syscall::N_linkat,
         Syscall::N_renameat,
-    ],
-    symbols: &[
-        "syscall",
-        "openat",
-        "close",
-        "mkdirat",
-        "symlinkat",
-        "mknodat",
-        "linkat",
-        "renameat",
     ],
     needs: &[Need::UserXattrs, Need::Unprivileged],
     ..DEFAULTS

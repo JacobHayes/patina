@@ -12,6 +12,7 @@
 //! handles on the run directory's filesystem.
 
 use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
+use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
 
@@ -131,6 +132,9 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "fs/handles",
     run,
+    // The shim does not define name_to_handle_at, so its libc spelling would
+    // be `syscall(2)` again.
+    vehicles: Vehicle::KERNEL,
     covers: &[
         Syscall::N_name_to_handle_at,
         Syscall::N_openat,
@@ -138,14 +142,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_symlinkat,
         Syscall::N_mkdirat,
         Syscall::N_close,
-    ],
-    symbols: &[
-        "syscall",
-        "openat",
-        "linkat",
-        "symlinkat",
-        "mkdirat",
-        "close",
     ],
     needs: &[Need::FileHandles],
     kernel_floor: Some(KernelFloor {

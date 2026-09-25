@@ -11,6 +11,7 @@
 //! EBADF, past UIO_MAXIOV EINVAL, an unknown flag EINVAL.
 
 use crate::catalog::{DEFAULTS, Scenario};
+use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
 
@@ -187,6 +188,9 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "fs/splice",
     run,
+    // The shim defines none of splice, tee and vmsplice, so their libc
+    // spelling would be `syscall(2)` again.
+    vehicles: Vehicle::KERNEL,
     covers: &[
         Syscall::N_splice,
         Syscall::N_tee,
@@ -198,9 +202,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_lseek,
         Syscall::N_pipe2,
         Syscall::N_close,
-    ],
-    symbols: &[
-        "syscall", "openat", "read", "write", "pread64", "lseek", "pipe2", "close",
     ],
     ..DEFAULTS
 };
