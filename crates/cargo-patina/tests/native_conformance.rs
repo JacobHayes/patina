@@ -1412,6 +1412,11 @@ fn net_inet6() {
 }
 
 #[test]
+fn net_inet6_mapped() {
+    conform("net/inet6_mapped");
+}
+
+#[test]
 fn net_ipctl() {
     conform("net/ipctl");
 }

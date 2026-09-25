@@ -294,7 +294,7 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "a destination on a connected stream socket is ignored",
-        p.sendmsg(s, &[b"ok"], Some(&addr_b), &Control::None, 0) == 2,
+        p.sendmsg(s, &[b"ok"], Some(&addr_l), &Control::None, 0) == 2,
     );
     let got = p.recvmsg(
         c,

@@ -108,6 +108,13 @@ pub fn run(p: &Probe) {
         "sendto without an address on an unconnected socket is EDESTADDRREQ",
         p.sendto(c, b"z", 0, None) == neg(EDESTADDRREQ),
     );
+    // c gives SO_REUSEADDR up before it takes a port: w, below, binds port
+    // 0 with SO_REUSEADDR and could otherwise draw c's port, which the host
+    // lets two reusing sockets share (scenarios/net.rs, "Port identity").
+    p.check(
+        "clear SO_REUSEADDR on c",
+        p.setsockopt_int(c, SOL_SOCKET, SO_REUSEADDR, 0) == 0,
+    );
     p.check(
         "sendto autobinds an unbound socket",
         p.sendto(c, b"z", 0, Some(addr_b)) == 1,

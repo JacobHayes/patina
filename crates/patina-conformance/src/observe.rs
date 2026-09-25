@@ -49,7 +49,10 @@ pub enum Norm {
     /// label of the event that introduced it (`fd@57`), so sharing relations
     /// survive and absolute numbers do not. In the `fd` namespace a `close`
     /// retires the number, so a later reuse is a NEW identity on both sides;
-    /// the lowest-free reuse policy itself is a scenario `check`.
+    /// the lowest-free reuse policy itself is a scenario `check`. In the
+    /// `port` namespace a number's identity is per IP protocol: the protocol
+    /// of the AF_INET/AF_INET6 socket the event's `fd` names, as its
+    /// `socket` or `accept` event showed it.
     Relative(&'static str),
     /// An inode number: labeled by first appearance (identity relations only).
     Inode,

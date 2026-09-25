@@ -20,12 +20,27 @@
 //! after its send. Scenarios that rely on it say so and point here; the
 //! ones that wait for an asynchronous answer (an ICMP error, a completed
 //! connect) bound the wait instead.
+//!
+//! Port identity: a port label is an identity by number within one IP
+//! protocol (the comparison keys it by the protocol of the socket the event
+//! names, so a UDP and a TCP port that share a number are two ports). Within
+//! a protocol, two host-allocated ports that happen to share a number read
+//! as one. Patina's allocator does not repeat a number within a run, but the
+//! host does: a freed port may be handed out again, two `connect`s to
+//! different peers may share a source port, and binds on addresses that do
+//! not conflict (`127.0.0.1` and a v6-only `::1`) may share one. A stream
+//! therefore labels, per protocol, only ports the kernel keeps distinct from
+//! each other: held together, and either bound on conflicting addresses or
+//! a `connect` port beside `bind` ones. An address a socket only names for
+//! another protocol's port (a destination a stream ignores) is labeled as
+//! the naming socket's protocol, so it is a port of that protocol's too.
 
 pub mod fortify;
 pub mod getaddrinfo;
 pub mod getifaddrs;
 pub mod ifconfig;
 pub mod inet6;
+pub mod inet6_mapped;
 pub mod ipctl;
 pub mod ipopts;
 pub mod mmsg;

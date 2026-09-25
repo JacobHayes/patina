@@ -323,10 +323,10 @@ pub fn run(p: &Probe) {
         "a UDP_SEGMENT option past 65535 is EINVAL",
         p.setsockopt_int(s, IPPROTO_UDP, UDP_SEGMENT, 65536) == neg(EINVAL),
     );
-    p.close(s);
-    p.close(r);
 
     // ---- IPv6 ----
+    // The IPv4 pair stays open to the end: a freed UDP port could come back
+    // as an IPv6 one (scenarios/net.rs, "Port identity").
     let r6 = p.socket(AF_INET6, SOCK_DGRAM | SOCK_NONBLOCK, 0);
     p.require("an IPv6 receiver", r6 >= 0);
     p.check(
@@ -544,7 +544,7 @@ pub fn run(p: &Probe) {
             0,
         ) == neg(ENETUNREACH),
     );
-    for fd in [s4, s6, r6] {
+    for fd in [s4, s6, r6, s, r] {
         p.close(fd);
     }
 }

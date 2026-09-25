@@ -64,18 +64,54 @@ pub struct Observation {
 
 #[derive(Default)]
 struct Normalizer {
-    /// namespace → raw value → label (`fd@57`: the event that introduced it).
+    /// table → raw value → label (`fd@57`: the event that introduced it). A
+    /// namespace's table, except `port`'s, which has one per IP protocol.
     labels: HashMap<String, HashMap<i64, String>>,
     monotonic: HashMap<String, i64>,
+    /// The IP protocol of each descriptor an AF_INET or AF_INET6 `socket` or
+    /// an `accept` on one produced, until another event produces the number.
+    protocols: HashMap<i64, i64>,
+}
+
+/// The IP protocol an AF_INET or AF_INET6 `socket` event created: its
+/// protocol argument, or the type's default (TCP for a stream, UDP for a
+/// datagram) for 0. The numbers are Linux's, as the streams record them,
+/// whatever host compares them.
+fn inet_protocol(event: &Event) -> Option<i64> {
+    const AF_INET: i64 = 2;
+    const AF_INET6: i64 = 10;
+    const SOCK_STREAM: i64 = 1;
+    const SOCK_DGRAM: i64 = 2;
+    const SOCK_TYPE_MASK: i64 = 0xf;
+    const IPPROTO_TCP: i64 = 6;
+    const IPPROTO_UDP: i64 = 17;
+    let arg = |name| event.args.get(name).and_then(Value::as_i64);
+    if !matches!(arg("domain"), Some(AF_INET | AF_INET6)) {
+        return None;
+    }
+    match (arg("protocol")?, arg("type")? & SOCK_TYPE_MASK) {
+        (0, SOCK_STREAM) => Some(IPPROTO_TCP),
+        (0, SOCK_DGRAM) => Some(IPPROTO_UDP),
+        (0, _) => None,
+        (protocol, _) => Some(protocol),
+    }
 }
 
 impl Normalizer {
-    /// The label of `value` in `namespace`: the seq of the event that first
-    /// showed it (plus `.k` for the k-th new value within one event). Keyed by
-    /// the introducing event rather than a running count, so an extra
-    /// allocation on one side shifts nothing downstream.
-    fn label(&mut self, namespace: &str, value: i64, seq: u64, fresh: &mut usize) -> String {
-        let table = self.labels.entry(namespace.to_string()).or_default();
+    /// The label of `value` in `table`: `namespace@` the seq of the event
+    /// that first showed it (plus `.k` for the k-th new value of the
+    /// namespace within one event). Keyed by the introducing event rather
+    /// than a running count, so an extra allocation on one side shifts
+    /// nothing downstream.
+    fn label(
+        &mut self,
+        table: &str,
+        namespace: &str,
+        value: i64,
+        seq: u64,
+        fresh: &mut usize,
+    ) -> String {
+        let table = self.labels.entry(table.to_string()).or_default();
         if let Some(label) = table.get(&value) {
             return label.clone();
         }
@@ -97,6 +133,17 @@ impl Normalizer {
             .collect();
         let mut retire = None;
         let mut fresh: HashMap<String, usize> = HashMap::new();
+        // A port's identity is per IP protocol, as the kernel's port tables
+        // are: a UDP port and a TCP port that share a number are unrelated.
+        // The protocol is the descriptor's the event names (a destination
+        // or source is the sender's or receiver's protocol); an event naming
+        // no inet socket labels in the plain `port` table.
+        let fd = event.args.get("fd").and_then(Value::as_i64);
+        let port_table = match fd.and_then(|fd| self.protocols.get(&fd)) {
+            Some(protocol) => format!("port/{protocol}"),
+            None => "port".to_string(),
+        };
+        self.track_protocols(event, fd);
         for (path, tag) in norms {
             let Some(norm) = ParsedNorm::parse(&tag) else {
                 continue;
@@ -134,16 +181,21 @@ impl Normalizer {
                     if namespace == "fd" && event.op == "close" && path == "args.fd" {
                         retire = Some(number);
                     }
+                    let table = if namespace == "port" {
+                        &port_table
+                    } else {
+                        &namespace
+                    };
                     let fresh = fresh.entry(namespace.clone()).or_insert(0);
-                    Value::from(self.label(&namespace, number, event.seq, fresh))
+                    Value::from(self.label(table, &namespace, number, event.seq, fresh))
                 }
                 ParsedNorm::Inode => {
                     let fresh = fresh.entry("ino".to_string()).or_insert(0);
-                    Value::from(self.label("ino", number, event.seq, fresh))
+                    Value::from(self.label("ino", "ino", number, event.seq, fresh))
                 }
                 ParsedNorm::Identity(id) => {
                     let fresh = fresh.entry(id.clone()).or_insert(0);
-                    Value::from(self.label(&id, number, event.seq, fresh))
+                    Value::from(self.label(&id, &id, number, event.seq, fresh))
                 }
                 ParsedNorm::Monotonic => {
                     let relation = match self.monotonic.get(&key) {
@@ -162,6 +214,35 @@ impl Normalizer {
             if let Some(table) = self.labels.get_mut("fd") {
                 table.remove(&number);
             }
+        }
+    }
+
+    /// Record the protocol of the descriptors `event` produces (its `ret` or
+    /// a field labeled in the `fd` namespace), from the raw values: an inet
+    /// `socket`'s, an `accept`'s listener's (`fd`), or none.
+    fn track_protocols(&mut self, event: &Event, fd: Option<i64>) {
+        let protocol = match event.op.as_str() {
+            "socket" => inet_protocol(event),
+            "accept" | "accept4" => fd.and_then(|fd| self.protocols.get(&fd).copied()),
+            _ => None,
+        };
+        for (path, tag) in &event.norm {
+            if tag != "relative:fd" {
+                continue;
+            }
+            let value = match path.as_str() {
+                "ret" => Some(&event.ret),
+                _ => path
+                    .strip_prefix("fields.")
+                    .and_then(|name| event.fields.get(name)),
+            };
+            let Some(number) = value.and_then(Value::as_i64).filter(|number| *number >= 0) else {
+                continue;
+            };
+            match protocol.filter(|_| path == "ret") {
+                Some(protocol) => self.protocols.insert(number, protocol),
+                None => self.protocols.remove(&number),
+            };
         }
     }
 }
@@ -1204,5 +1285,104 @@ mod tests {
             core: Some(false),
         };
         assert_eq!(native_verdict(&died), Ok(()));
+    }
+
+    /// A socket event: `domain`, `type`, protocol 0, the descriptor `fd`.
+    fn socket(seq: u64, domain: i64, kind: i64, fd: i64) -> Event {
+        let mut event = event(seq, "socket", fd);
+        event.args.insert("domain".to_string(), Value::from(domain));
+        event.args.insert("type".to_string(), Value::from(kind));
+        event.args.insert("protocol".to_string(), Value::from(0));
+        event
+            .norm
+            .insert("ret".to_string(), Norm::Relative("fd").tag());
+        event
+    }
+
+    /// An `op` on `fd` showing `port` in `fields.{key}_port`.
+    fn port(seq: u64, op: &str, fd: i64, key: &str, port: i64) -> Event {
+        let mut event = event(seq, op, 0);
+        event.args.insert("fd".to_string(), Value::from(fd));
+        event
+            .norm
+            .insert("args.fd".to_string(), Norm::Relative("fd").tag());
+        let path = format!("{key}_port");
+        event.fields.insert(path.clone(), Value::from(port));
+        event
+            .norm
+            .insert(format!("fields.{path}"), Norm::Relative("port").tag());
+        event
+    }
+
+    /// An `accept4` on `listener` returning `fd` from peer port `peer`.
+    fn accept(seq: u64, listener: i64, fd: i64, peer: i64) -> Event {
+        let mut event = port(seq, "accept4", listener, "peer", peer);
+        event.ret = Value::from(fd);
+        event
+            .norm
+            .insert("ret".to_string(), Norm::Relative("fd").tag());
+        event
+    }
+
+    fn port_labels(events: Vec<Event>) -> Vec<Value> {
+        normalize(events)
+            .into_iter()
+            .flat_map(|event| {
+                event
+                    .fields
+                    .into_iter()
+                    .filter(|(name, _)| name.ends_with("_port"))
+                    .map(|(_, value)| value)
+            })
+            .collect()
+    }
+
+    const AF_INET: i64 = 2;
+    const AF_INET6: i64 = 10;
+    const STREAM: i64 = 1;
+    const DGRAM: i64 = 2;
+
+    /// A UDP socket at `udp`, then a TCP client at `client` whose listener
+    /// is at `listener`, and the peer the listener accepts.
+    fn udp_then_tcp(udp: i64, listener: i64, client: i64, peer: i64) -> Vec<Event> {
+        vec![
+            socket(0, AF_INET6, DGRAM, 3),
+            port(1, "getsockname", 3, "addr", udp),
+            socket(2, AF_INET, STREAM, 4),
+            port(3, "getsockname", 4, "addr", listener),
+            socket(4, AF_INET6, STREAM, 5),
+            port(5, "getsockname", 5, "addr", client),
+            accept(6, 4, 6, peer),
+            port(7, "getpeername", 6, "addr", peer),
+        ]
+    }
+
+    #[test]
+    fn equal_port_numbers_in_different_protocols_are_different_ports() {
+        let labels = port_labels(udp_then_tcp(40000, 50001, 40000, 40000));
+        assert_ne!(labels[0], labels[2], "the TCP client's port is its own");
+        assert_eq!(labels[2], labels[3], "the accepted peer is the client");
+        assert_eq!(labels[3], labels[4], "and the accepted socket is TCP");
+    }
+
+    #[test]
+    fn a_host_coincidence_across_protocols_conforms() {
+        // The host drew the TCP client's port equal to the UDP socket's;
+        // patina never repeats a number.
+        let native = observation(udp_then_tcp(40000, 50001, 40000, 40000));
+        let patina = observation(udp_then_tcp(32768, 32769, 32770, 32770));
+        assert_eq!(judge(&native, &patina, &[]), Ok(Verdict::default()));
+    }
+
+    #[test]
+    fn port_identity_within_a_protocol_is_still_compared() {
+        let native = observation(udp_then_tcp(40000, 50001, 50002, 50002));
+        // The accepted peer is not the client (a wrong peer port), and the
+        // client shows the listener's port.
+        let wrong_peer = observation(udp_then_tcp(32768, 32769, 32770, 32771));
+        let failures = judge(&native, &wrong_peer, &[]).unwrap_err();
+        assert!(failures.iter().any(|line| line.contains("accept4")));
+        let shared = observation(udp_then_tcp(32768, 32769, 32769, 32769));
+        assert!(judge(&native, &shared, &[]).is_err());
     }
 }
