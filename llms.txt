@@ -400,7 +400,7 @@ dev-dependency use under plain `cargo test`.
 native targets are `native_conformance`, `native_containment`, `native_raw`,
 `native_signals`, `native_trace` and `native_workloads`; use Cargo's test-name
 filter for a single proof (one conformance scenario is one test, e.g.
-`fs_open_rw`). All run in `check` and the Linux/macOS workspace-test CI jobs, not
+`fs_rw`). All run in `check` and the Linux/macOS workspace-test CI jobs, not
 `check:fast`. The full gate also runs receipt-checked FIFO/rustix-default/cap-std
 testbeds. See `testbeds/native-boundary/README.md` for
 exact owners and platform limits; Linux-only oracle expectations do not replace

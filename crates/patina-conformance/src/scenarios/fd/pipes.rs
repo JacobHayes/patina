@@ -128,7 +128,7 @@ pub fn run(p: &Probe) {
     let (r, unexpected) = p.pipe2(0x1);
     p.check("pipe2 with an unknown flag is EINVAL", r == neg(EINVAL));
     if r == 0 {
-        // An unexpected success is closed unobserved (see fs/open_rw).
+        // An unexpected success is closed unobserved (see fs/rw).
         p.rec.quiet(|| {
             p.close(unexpected[0]);
             p.close(unexpected[1]);

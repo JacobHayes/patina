@@ -1008,7 +1008,7 @@ fn conform(name: &str) {
 /// scenario, through their first vehicle.
 #[test]
 fn recording_changes_no_observation() {
-    for name in ["fs/open_rw", "net/tcp", "signal/basic"] {
+    for name in ["fs/rw", "net/tcp", "signal/basic"] {
         let scenario = catalog::scenario(name).unwrap();
         let owned = tempfile::Builder::new()
             .prefix("patina-conformance-")
@@ -1423,11 +1423,6 @@ fn fs_newer_than_virtual() {
 }
 
 #[test]
-fn fs_open_rw() {
-    conform("fs/open_rw");
-}
-
-#[test]
 fn fs_open_tree() {
     conform("fs/open_tree");
 }
@@ -1448,11 +1443,6 @@ fn fs_paths() {
 }
 
 #[test]
-fn fs_positional_io() {
-    conform("fs/positional_io");
-}
-
-#[test]
 fn fs_posix_fadvise() {
     conform("fs/posix_fadvise");
 }
@@ -1465,6 +1455,11 @@ fn fs_realpath() {
 #[test]
 fn fs_renameat2() {
     conform("fs/renameat2");
+}
+
+#[test]
+fn fs_rw() {
+    conform("fs/rw");
 }
 
 #[test]

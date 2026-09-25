@@ -252,7 +252,7 @@ compile_error!("KERNEL_O_LARGEFILE: spell this architecture's kernel O_LARGEFILE
 pub type SegmentsRead = (i64, Vec<Vec<u8>>);
 
 pub struct Probe {
-    /// The scenario name (`fs/open_rw`).
+    /// The scenario name (`fs/rw`).
     pub name: &'static str,
     pub vehicle: Vehicle,
     pub rec: Recorder,
