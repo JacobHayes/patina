@@ -368,7 +368,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Net,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_sock_*` entry the C interposer calls (`patina_sock_sendmsg`): gathered segments, a destination name, SCM_RIGHTS/SCM_CREDENTIALS on AF_UNIX sockets, and on a UDP socket IP_TOS/IPV6_TCLASS, IP_PKTINFO/IPV6_PKTINFO (source and interface), IP_TTL/IPV6_HOPLIMIT/IPV6_DONTFRAG (range-checked) and UDP_SEGMENT (a send cut into datagrams); IP options (IP_RETOPTS), IP_PROTOCOL, IPv6 flow labels and extension headers, timestamping and SCM_TXTIME are a named fatal.",
+        "Routed by the SUD dispatcher into the same `patina_sock_*` entry the C interposer calls (`patina_sock_sendmsg`): gathered segments, a destination name, SCM_RIGHTS/SCM_CREDENTIALS on AF_UNIX sockets, and on a UDP socket IP_TOS/IPV6_TCLASS, IP_PKTINFO/IPV6_PKTINFO (source and interface; the interface is checked to exist, not routed by), IP_TTL/IPV6_HOPLIMIT/IPV6_DONTFRAG (range-checked), the RFC 2292 IPV6_2292PKTINFO/IPV6_2292HOPLIMIT as their RFC 3542 types, and UDP_SEGMENT (a send cut into datagrams); IP options (IP_RETOPTS), IP_PROTOCOL, IPv6 flow labels and extension headers, timestamping and SCM_TXTIME are a named fatal.",
         None,
     ),
     Syscall::N_recvmsg => r(

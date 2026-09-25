@@ -29,10 +29,8 @@
 //! Reads right after a send rely on loopback delivery before the send
 //! returns (scenarios/net.rs, "Loopback delivery").
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Control, Probe, RecvSpec, SockAddr, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
@@ -553,15 +551,5 @@ pub const SCENARIO: Scenario = Scenario {
         "close",
     ],
     needs: &[Need::Ipv6Loopback, Need::LocalBindOnly],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::NetworkReadiness),
-        vehicles: Vehicle::ALL,
-        what: "the RFC 2292 IPv6 ancillary types are a named fatal (thread/net/ipctl.rs send_control); ip6_datagram_send_ctl takes IPV6_2292PKTINFO and IPV6_2292HOPLIMIT as their RFC 3542 types and answers IPV6_2292PKTOPTIONS EINVAL",
-        failure: Failure::Stops {
-            events: 105,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "ancillary data at level 41, type 2",
-        },
-    }],
     ..DEFAULTS
 };

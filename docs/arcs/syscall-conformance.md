@@ -415,7 +415,8 @@ forwards into the same dispatcher instead of its two-number allowlist.
   ECONNREFUSED on a connected socket, the EINPROGRESS connect, AF_UNSPEC
   disconnect and a reset reported once, then end-of-file; UDP sockets take
   `IP_TOS`/`IPV6_TCLASS`, `IP_PKTINFO`/`IPV6_PKTINFO` (sent and received),
-  the hop limits and `UDP_SEGMENT` (net/ipctl). AF_UNIX stream, datagram and
+  the hop limits, the RFC 2292 numbers `ip6_datagram_send_ctl` still takes
+  and `UDP_SEGMENT` (net/ipctl). AF_UNIX stream, datagram and
   seqpacket sockets (filesystem nodes with their write permission, abstract
   names, autobind, socketpairs as sockets, SCM_RIGHTS/SCM_CREDENTIALS,
   SO_PEERCRED, a listener's unaccepted connections reset when it closes) and
@@ -439,7 +440,8 @@ forwards into the same dispatcher instead of its two-number allowlist.
   IP-level control message on macOS (the latter a named fatal), UDP-Lite
   (a named fatal), `UDP_GRO` (receive coalescing: the option answers
   ENOPROTOOPT), IP options, `IP_PROTOCOL`, IPv6 flow labels and extension
-  headers (named fatals), and wakeups between two epoll scans are queued in
+  headers (named fatals), a packet-information interface index (checked to
+  exist, not routed by: the virtual network delivers by address), and wakeups between two epoll scans are queued in
   descriptor order (the model keeps no clock across sources).
 - **process lifecycle + privileged** (data only): every row `Trap(class)` with
   its one-line reasoning in the registry; `execve`/`arch_prctl`/`set_tid_address`

@@ -32,6 +32,13 @@ const UDP_HEADER: usize = 8;
 // Types the model refuses by name rather than answer.
 const IP_PROTOCOL: i32 = 52;
 const IPV6_FLOWINFO: i32 = 11;
+// The RFC 2292 numbers `ip6_datagram_send_ctl` takes as their RFC 3542
+// types (`IPV6_2292PKTOPTIONS`, 6, is `EINVAL` there, as any unknown type).
+const IPV6_2292PKTINFO: i32 = 2;
+const IPV6_2292HOPLIMIT: i32 = 8;
+/// `sizeof(struct in6_pktinfo)`: an `IPV6_PKTINFO` may be longer, not
+/// shorter.
+const IN6_PKTINFO: usize = 20;
 
 /// What one send asks of its datagrams.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -87,8 +94,9 @@ pub(super) fn send_control(
         match (*level, v4_destination) {
             // `ip_cmsg_send`, which an IPv6 socket's IPv4-mapped send reaches
             // with its IPv6 packet information converted.
+            // (Its RFC 2292 number is not converted: another level's type.)
             (SOL_IPV6, true) if v6_socket && *kind == IPV6_PKTINFO => {
-                if data.len() != 20 {
+                if data.len() < IN6_PKTINFO {
                     return Err(EINVAL);
                 }
                 let address = Ipv6Addr::from(<[u8; 16]>::try_from(&data[..16]).unwrap());
@@ -124,8 +132,8 @@ pub(super) fn send_control(
                 _ => return Err(EINVAL),
             },
             (SOL_IPV6, false) => match *kind {
-                IPV6_PKTINFO => {
-                    if data.len() != 20 {
+                IPV6_PKTINFO | IPV6_2292PKTINFO => {
+                    if data.len() < IN6_PKTINFO {
                         return Err(EINVAL);
                     }
                     let address = Ipv6Addr::from(<[u8; 16]>::try_from(&data[..16]).unwrap());
@@ -147,19 +155,21 @@ pub(super) fn send_control(
                     // The kernel takes -1 here as the byte it truncates to.
                     control.tos = int(data) as u8;
                 }
-                IPV6_HOPLIMIT => {
+                IPV6_HOPLIMIT | IPV6_2292HOPLIMIT => {
                     if data.len() != 4 || !(-1..=255).contains(&int(data)) {
                         return Err(EINVAL);
                     }
                 }
                 IPV6_DONTFRAG => {
-                    if data.len() != 4 {
+                    if data.len() != 4 || !(0..=1).contains(&int(data)) {
                         return Err(EINVAL);
                     }
                 }
                 // Flow labels and the extension headers (`IPV6_HOPOPTS`,
-                // `IPV6_RTHDR`, `IPV6_DSTOPTS`, their RFC 2292 forms).
-                IPV6_FLOWINFO | 2..=6 | 54 | 55 | 57 | 59 => unmodeled(*level, *kind),
+                // `IPV6_RTHDRDSTOPTS`, `IPV6_RTHDR`, `IPV6_DSTOPTS`, and
+                // the RFC 2292 `IPV6_2292HOPOPTS`, `IPV6_2292DSTOPTS`,
+                // `IPV6_2292RTHDR`).
+                IPV6_FLOWINFO | 3..=5 | 54 | 55 | 57 | 59 => unmodeled(*level, *kind),
                 _ => return Err(EINVAL),
             },
             // Another family's level, and the UDP level read above.
@@ -169,19 +179,23 @@ pub(super) fn send_control(
     Ok(control)
 }
 
-/// The source a send with `control` leaves from, when it names one: its
-/// interface must exist (`ENODEV`) and an IPv4 source must be an address of
-/// this host (`ENETUNREACH`, as the route lookup answers; an IPv6 one was
-/// judged with the control message).
+/// The source a send with `control` leaves from, when it names one, judged
+/// as the route lookup (`ip_route_output_key_hash_rcu`) judges it: an IPv4
+/// source first — a multicast or broadcast one is `EINVAL`, one that is no
+/// address of this host `ENETUNREACH` (an IPv6 one was judged with the
+/// control message) — then the interface, which must exist (`ENODEV`).
 pub(super) fn chosen_source(control: &SendControl) -> Result<Option<IpAddr>, c_int> {
+    match control.source {
+        Some(IpAddr::V4(v4)) if v4.is_multicast() || v4.is_broadcast() => return Err(EINVAL),
+        Some(IpAddr::V4(v4)) if !patina_dst_driver_api::local_ipv4(v4.octets()) => {
+            return Err(ENETUNREACH);
+        }
+        _ => {}
+    }
     if control.ifindex != 0 && super::iface::by_index(control.ifindex).is_none() {
         return Err(ENODEV);
     }
-    match control.source {
-        Some(IpAddr::V4(v4)) if v4.is_multicast() || v4.is_broadcast() => Err(EINVAL),
-        Some(IpAddr::V4(v4)) if !patina_dst_driver_api::local_ipv4(v4.octets()) => Err(ENETUNREACH),
-        source => Ok(source),
-    }
+    Ok(control.source)
 }
 
 /// The payload cut into the datagrams a send with segment size `gso` makes
@@ -334,6 +348,8 @@ mod tests {
             ..SendControl::default()
         };
         assert_eq!(chosen_source(&nowhere), Err(ENODEV));
+        let far_and_nowhere = SendControl { ifindex: 99, ..far };
+        assert_eq!(chosen_source(&far_and_nowhere), Err(ENETUNREACH));
         assert_eq!(
             send_control(&ip, false, true, &[(SOL_IP, 99, vec![0; 4])]),
             Err(EINVAL)
@@ -370,6 +386,52 @@ mod tests {
             send_control(&ip, true, false, &[(SOL_IPV6, IPV6_PKTINFO, bad_index)]),
             Err(ENODEV)
         );
+    }
+
+    #[test]
+    fn ipv6_control_takes_the_rfc_2292_numbers_ip6_datagram_send_ctl_does() {
+        let ip = defaults();
+        let send =
+            |kind: i32, data: Vec<u8>| send_control(&ip, true, false, &[(SOL_IPV6, kind, data)]);
+        let loopback = |extra: usize| {
+            let mut info = Ipv6Addr::LOCALHOST.octets().to_vec();
+            info.extend(0i32.to_ne_bytes());
+            info.extend(vec![0; extra]);
+            info
+        };
+        let source = Some(IpAddr::V6(Ipv6Addr::LOCALHOST));
+        assert_eq!(
+            send(IPV6_2292PKTINFO, loopback(0)).map(|c| c.source),
+            Ok(source)
+        );
+        assert_eq!(
+            send(IPV6_PKTINFO, loopback(4)).map(|c| c.source),
+            Ok(source)
+        );
+        assert_eq!(send(IPV6_PKTINFO, vec![0; 16]), Err(EINVAL));
+        assert!(send(IPV6_2292HOPLIMIT, 7i32.to_ne_bytes().to_vec()).is_ok());
+        assert_eq!(
+            send(IPV6_2292HOPLIMIT, 256i32.to_ne_bytes().to_vec()),
+            Err(EINVAL)
+        );
+        // IPV6_2292PKTOPTIONS, IPV6_CHECKSUM, IPV6_NEXTHOP.
+        for kind in [6, 7, 9] {
+            assert_eq!(send(kind, 0i32.to_ne_bytes().to_vec()), Err(EINVAL));
+        }
+        assert!(send(IPV6_DONTFRAG, 1i32.to_ne_bytes().to_vec()).is_ok());
+        assert_eq!(
+            send(IPV6_DONTFRAG, 2i32.to_ne_bytes().to_vec()),
+            Err(EINVAL)
+        );
+        // An IPv4-mapped send converts only the RFC 3542 number.
+        let mut mapped = Ipv4Addr::LOCALHOST.to_ipv6_mapped().octets().to_vec();
+        mapped.extend(0i32.to_ne_bytes());
+        let v4 = |kind: i32| send_control(&ip, true, true, &[(SOL_IPV6, kind, mapped.clone())]);
+        assert_eq!(
+            v4(IPV6_PKTINFO).map(|c| c.source),
+            Ok(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+        );
+        assert_eq!(v4(IPV6_2292PKTINFO).map(|c| c.source), Ok(None));
     }
 
     #[test]
