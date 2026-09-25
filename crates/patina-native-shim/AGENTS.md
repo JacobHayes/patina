@@ -225,8 +225,9 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 ## Signal boundaries
 
 - `host_abort` / `patina_host_abort` are private internal-fatal vehicles. They
-  never finalize a trace. Guest `abort` and fatal default dispositions finalize
-  exactly once, then use the private host vehicle; never call public `abort`
+  never finalize a trace. Guest `abort` raises SIGABRT through the virtual
+  kernel (the handler runs, then the default disposition); fatal default
+  dispositions finalize exactly once, then use the private host vehicle; never call public `abort`
   while holding shim locks. Rust ABI entries claim a thread-local panic scope;
   guest callbacks suspend it. POSIX startup installs the policy independently of
   Context; bare prefixed-C links have no guest abort interposer and do not install

@@ -791,6 +791,39 @@ pub(crate) enum GenerationInfo {
     Queued(*const Info),
 }
 
+/// glibc's `abort` (stdlib/abort.c) through the virtual kernel: unblock
+/// SIGABRT and raise it, so an installed handler runs even when the caller
+/// blocked the signal; if the handler returns, restore `SIG_DFL` and raise it
+/// again. The default action then finalizes the trace and ends the run by
+/// SIGABRT. Returns only if neither raise ended the run (the caller falls
+/// back to finalizing and the host abort).
+pub(crate) fn abort_through_kernel() {
+    const SIGABRT: i32 = 6;
+    let sigabrt = bit(SIGABRT);
+    // SAFETY: a valid one-word set and no old-set output.
+    unsafe { patina_signal_mask(SIG_UNBLOCK, &sigabrt, std::ptr::null_mut(), SIGSET_BYTES) };
+    let raise = || {
+        refresh_handler_mask();
+        let target = GenerationTarget::Thread {
+            tgid: Some(crate::registry::IDENTITY_PID as i32),
+            tid: current_tid(),
+        };
+        // SAFETY: a thread-directed kill of the caller carries no pointer.
+        unsafe { generate_signal(target, SIGABRT, GenerationInfo::Thread) };
+        deliver();
+    };
+    raise();
+    let default = Action {
+        handler: SIG_DFL,
+        flags: 0,
+        restorer: 0,
+        mask: u64::MAX,
+    };
+    // SAFETY: a valid action and no old-action output.
+    unsafe { patina_signal_action_libc(SIGABRT, &default, std::ptr::null_mut()) };
+    raise();
+}
+
 /// The one generation entry owns target and queued-info validation. Doors only
 /// marshal; a thread with tid zero can never become process-directed.
 pub(crate) unsafe fn generate_signal(

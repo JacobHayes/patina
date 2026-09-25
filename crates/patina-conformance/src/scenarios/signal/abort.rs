@@ -8,8 +8,7 @@
 //! the death stays the stream's last event. A libc-only subject, so the
 //! libc vehicle alone.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::Probe;
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -49,15 +48,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_tgkill,
     ],
     symbols: &["sigaction", "sigprocmask", "abort"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::SignalsThreadsProcess),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim's abort (c/posix/signal_process.c → patina_abort) finalizes the trace, shuts the runtime down and calls the host's abort: SIGABRT never passes the virtual kernel, so the guest's handler never runs, and the run ends by the host signal (its result classified infra). The pin is the runner's marker for a SIGABRT death with a complete trace (cargo-patina lib.rs append_native_infra_marker; the newline ends it before any `trace=incomplete`), which rules out a shim fatal (those abort without finalizing), but not another guest-side path to the same death before the handler records: patina prints nothing of its own on this path, and this stack does not change patina",
-        failure: Failure::Stops {
-            events: 1,
-            ending: Ending::Signal(SIGABRT),
-            diagnostic: "PATINA_INFRA native_run signal=6\n",
-        },
-    }],
     ..DEFAULTS
 };

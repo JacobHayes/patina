@@ -6776,8 +6776,12 @@ pub extern "C" fn patina_host_abort() -> ! {
     host_abort()
 }
 
-/// Explicit abort finalizes a healthy run, then uses libc's real abort vehicle.
-/// Internal lock-held fatal paths cannot recursively finalize the runtime.
+/// A guest's `abort` is glibc's: SIGABRT through the virtual kernel, so an
+/// installed handler runs, then the default action, which finalizes the trace
+/// and ends the run by the signal ([`thread::signals::abort_through_kernel`]).
+/// Without an installed runtime, or if the signal did not end the run, it
+/// finalizes a healthy run and uses libc's real abort vehicle. Internal
+/// lock-held fatal paths cannot recursively finalize the runtime.
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_abort() -> ! {
@@ -6790,6 +6794,9 @@ pub extern "C" fn patina_abort() -> ! {
         host_abort();
     }
     if !in_shim_critical() {
+        if slot().lock().is_some() {
+            thread::signals::abort_through_kernel();
+        }
         let _ = patina_shutdown();
     }
     unsafe { (hostapi::get().host_abort)() }

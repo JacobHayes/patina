@@ -120,9 +120,16 @@ dies by that signal; the native supervisor reports the observed wait-status
 signals are named fatal traps rather than hangs; catchable Stop signals still
 run an installed handler. Broken pipes and closed stream peers generate a
 thread-directed SIGPIPE before EPIPE, unless a socket send uses MSG_NOSIGNAL.
-An ignored SIGPIPE is recorded but dropped. Only an explicit guest `abort()`
-finalizes a healthy run before calling the resolved host abort alias. Shim-internal
-fatal paths use private Rust/C host-abort vehicles and leave the trace incomplete.
+An ignored SIGPIPE is recorded but dropped. A guest `abort()` is glibc's staged
+one: it unblocks SIGABRT and raises it through the virtual kernel, so an installed
+handler runs; if the handler returns, it restores `SIG_DFL` and raises SIGABRT
+again, and the default action finalizes the run and ends it by the signal. Once
+`main` has returned (an `abort` from an atexit handler, a static destructor or a
+thread's TLS teardown) no handler runs, and neither does it when no runtime is
+installed: the run finalizes directly before calling the resolved host abort
+alias. A SIGABRT handler that `siglongjmp`s out is the unverified nonlocal escape
+described below. Shim-internal fatal paths use private Rust/C host-abort vehicles
+and leave the trace incomplete.
 POSIX startup installs a production panic hook independently of Context setup.
 Thread-local Rust ABI ownership, suspended for guest callbacks, distinguishes
 shim panics from guest panics; owned panics report through host writes and private
