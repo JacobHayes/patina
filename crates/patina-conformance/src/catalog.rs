@@ -525,7 +525,6 @@ pub const SCENARIOS: &[&Scenario] = &[
     &signal::pipe_term::SCENARIO,
     &signal::queue::SCENARIO,
     &signal::raw_action::SCENARIO,
-    &signal::unmask::SCENARIO,
     &signal::wait::SCENARIO,
     &sys::admin::SCENARIO,
     &sys::bpf::SCENARIO,

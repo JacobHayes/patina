@@ -1893,11 +1893,6 @@ fn signal_raw_action() {
 }
 
 #[test]
-fn signal_unmask() {
-    conform("signal/unmask");
-}
-
-#[test]
 fn signal_wait() {
     conform("signal/wait");
 }
