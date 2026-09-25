@@ -15,16 +15,10 @@
 //! ENODATA to read). The `f*` rows need no access mode but refuse O_PATH
 //! (EBADF). Needs `user.*` attributes on the run directory's filesystem.
 //!
-//! The libc vehicle goes through glibc's `setxattr`, `getxattr`,
-//! `fgetxattr`, `listxattr` and `removexattr`, which the shim does not define
-//! (registry `Absent`): it reaches them through `dlsym`
-//! (`vehicle::WRAPPERS`). glibc's other xattr wrappers have no registry row
-//! yet, so no scenario can name them: the libc vehicle spells their rows
-//! `syscall(2)`.
+//! The libc vehicle goes through glibc's twelve wrappers, imported (the shim
+//! defines them).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Need, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -380,11 +374,17 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &[
         "setxattr",
+        "lsetxattr",
+        "fsetxattr",
         "getxattr",
+        "lgetxattr",
         "fgetxattr",
         "listxattr",
+        "llistxattr",
+        "flistxattr",
         "removexattr",
-        "syscall",
+        "lremovexattr",
+        "fremovexattr",
         "openat",
         "close",
         "mkdirat",
@@ -393,23 +393,6 @@ pub const SCENARIO: Scenario = Scenario {
         "linkat",
         "renameat",
     ],
-    resolves: &[
-        "setxattr",
-        "getxattr",
-        "fgetxattr",
-        "listxattr",
-        "removexattr",
-    ],
     needs: &[Need::UserXattrs, Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim defines none of setxattr/getxattr/fgetxattr/listxattr/removexattr (registry `Absent`): a guest importing one is refused by the pre-run audit, and `dlsym` finds none (the shim's `__wrap_dlsym` answers only the names in its fixed routing table, c/posix/dlsym.c `patina_dlsym_route`), so the libc leg stops at its first call",
-        failure: Failure::Stops {
-            events: 12,
-            ending: Ending::Exit(101),
-            diagnostic: "fs/xattr: cannot continue: glibc's listxattr resolves",
-        },
-    }],
     ..DEFAULTS
 };

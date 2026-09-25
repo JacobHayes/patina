@@ -455,6 +455,61 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
                 a[2] as *mut off_t,
                 a[3] as size_t,
             ) as i64,
+            Syscall::N_setxattr => setxattr(
+                a[0] as *const c_char,
+                a[1] as *const c_char,
+                a[2] as *const c_void,
+                a[3] as size_t,
+                a[4] as c_int,
+            ) as i64,
+            Syscall::N_lsetxattr => lsetxattr(
+                a[0] as *const c_char,
+                a[1] as *const c_char,
+                a[2] as *const c_void,
+                a[3] as size_t,
+                a[4] as c_int,
+            ) as i64,
+            Syscall::N_fsetxattr => fsetxattr(
+                a[0] as c_int,
+                a[1] as *const c_char,
+                a[2] as *const c_void,
+                a[3] as size_t,
+                a[4] as c_int,
+            ) as i64,
+            Syscall::N_getxattr => getxattr(
+                a[0] as *const c_char,
+                a[1] as *const c_char,
+                a[2] as *mut c_void,
+                a[3] as size_t,
+            ) as i64,
+            Syscall::N_lgetxattr => lgetxattr(
+                a[0] as *const c_char,
+                a[1] as *const c_char,
+                a[2] as *mut c_void,
+                a[3] as size_t,
+            ) as i64,
+            Syscall::N_fgetxattr => fgetxattr(
+                a[0] as c_int,
+                a[1] as *const c_char,
+                a[2] as *mut c_void,
+                a[3] as size_t,
+            ) as i64,
+            Syscall::N_listxattr => {
+                listxattr(a[0] as *const c_char, a[1] as *mut c_char, a[2] as size_t) as i64
+            }
+            Syscall::N_llistxattr => {
+                llistxattr(a[0] as *const c_char, a[1] as *mut c_char, a[2] as size_t) as i64
+            }
+            Syscall::N_flistxattr => {
+                flistxattr(a[0] as c_int, a[1] as *mut c_char, a[2] as size_t) as i64
+            }
+            Syscall::N_removexattr => {
+                removexattr(a[0] as *const c_char, a[1] as *const c_char) as i64
+            }
+            Syscall::N_lremovexattr => {
+                lremovexattr(a[0] as *const c_char, a[1] as *const c_char) as i64
+            }
+            Syscall::N_fremovexattr => fremovexattr(a[0] as c_int, a[1] as *const c_char) as i64,
             // The kernel rows split the position into (pos_l, pos_h); on a
             // 64-bit kernel pos_l is the whole position and pos_h is ignored.
             Syscall::N_preadv => preadv(
@@ -669,13 +724,6 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_sync_file_range
             | Syscall::N_preadv2
             | Syscall::N_pwritev2
-            | Syscall::N_lsetxattr
-            | Syscall::N_fsetxattr
-            | Syscall::N_lgetxattr
-            | Syscall::N_llistxattr
-            | Syscall::N_flistxattr
-            | Syscall::N_lremovexattr
-            | Syscall::N_fremovexattr
             | Syscall::N_inotify_init1
             | Syscall::N_inotify_add_watch => syscall_door(row, a),
             // The time, identity, scheduling and limit rows whose glibc
@@ -867,7 +915,7 @@ pub fn errno_name(code: i32) -> String {
     name.to_string()
 }
 
-/// glibc's wrappers for privileged and extended-attribute rows. The
+/// glibc's wrappers for privileged rows. The
 /// shim defines none of them (registry `Absent`), so the probe binary cannot
 /// import them (the pre-run audit would refuse the whole binary): the libc
 /// vehicle reaches each through `dlsym` at its row's first call
@@ -898,11 +946,6 @@ const WRAPPERS: &[(Syscall, &str)] = &[
     (Syscall::N_iopl, "iopl"),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_ioperm, "ioperm"),
-    (Syscall::N_setxattr, "setxattr"),
-    (Syscall::N_getxattr, "getxattr"),
-    (Syscall::N_fgetxattr, "fgetxattr"),
-    (Syscall::N_listxattr, "listxattr"),
-    (Syscall::N_removexattr, "removexattr"),
 ];
 
 /// The glibc wrapper the libc vehicle reaches `row` through, if it has one.
@@ -1000,23 +1043,6 @@ pub unsafe fn wrapper_door(row: Syscall, address: *mut std::ffi::c_void, a: Args
         Syscall::N_iopl => call!((c_int) -> c_int, a[0]),
         #[cfg(target_arch = "x86_64")]
         Syscall::N_ioperm => call!((c_ulong, c_ulong, c_int) -> c_int, a[0], a[1], a[2]),
-        Syscall::N_setxattr => call!(
-            (*const c_char, *const c_char, *const c_void, size_t, c_int) -> c_int,
-            a[0], a[1], a[2], a[3], a[4]
-        ),
-        Syscall::N_getxattr => call!(
-            (*const c_char, *const c_char, *mut c_void, size_t) -> ssize_t,
-            a[0], a[1], a[2], a[3]
-        ),
-        Syscall::N_fgetxattr => call!(
-            (c_int, *const c_char, *mut c_void, size_t) -> ssize_t,
-            a[0], a[1], a[2], a[3]
-        ),
-        Syscall::N_listxattr => call!(
-            (*const c_char, *mut c_char, size_t) -> ssize_t,
-            a[0], a[1], a[2]
-        ),
-        Syscall::N_removexattr => call!((*const c_char, *const c_char) -> c_int, a[0], a[1]),
         other => panic!("{}: no glibc wrapper", other.name()),
     };
     fold_errno(result)

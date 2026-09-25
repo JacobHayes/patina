@@ -54,6 +54,7 @@
 #include <sys/sendfile.h>
 #include <sys/statfs.h>
 #include <sys/statvfs.h>
+#include <sys/xattr.h>
 #endif
 
 #include <sys/time.h>

@@ -865,6 +865,50 @@ int fstatvfs64(int fd, struct statvfs64 *out) {
     return patina_statvfs_fd(fd, (struct statvfs *)out);
 }
 
+/* Extended attributes: glibc's twelve wrappers are the bare syscalls, so each
+ * is the rows' one model (src/xattr.rs) with errno set — by path (a trailing
+ * symlink followed), by link (`l*`: not followed) and by descriptor (`f*`).
+ * The model judges a NULL path in the kernel's order. */
+int setxattr(const char *path, const char *name, const void *value, size_t size, int flags) {
+    return fail_int(patina_setxattr(-1, path, PATINA_XATTR_BY_PATH, name, value, size, flags));
+}
+int lsetxattr(const char *path, const char *name, const void *value, size_t size, int flags) {
+    return fail_int(patina_setxattr(-1, path, PATINA_XATTR_BY_LINK, name, value, size, flags));
+}
+int fsetxattr(int fd, const char *name, const void *value, size_t size, int flags) {
+    return fail_int(patina_setxattr(fd, NULL, PATINA_XATTR_BY_FD, name, value, size, flags));
+}
+
+ssize_t getxattr(const char *path, const char *name, void *value, size_t size) {
+    return fail_size(patina_getxattr(-1, path, PATINA_XATTR_BY_PATH, name, value, size));
+}
+ssize_t lgetxattr(const char *path, const char *name, void *value, size_t size) {
+    return fail_size(patina_getxattr(-1, path, PATINA_XATTR_BY_LINK, name, value, size));
+}
+ssize_t fgetxattr(int fd, const char *name, void *value, size_t size) {
+    return fail_size(patina_getxattr(fd, NULL, PATINA_XATTR_BY_FD, name, value, size));
+}
+
+ssize_t listxattr(const char *path, char *list, size_t size) {
+    return fail_size(patina_listxattr(-1, path, PATINA_XATTR_BY_PATH, list, size));
+}
+ssize_t llistxattr(const char *path, char *list, size_t size) {
+    return fail_size(patina_listxattr(-1, path, PATINA_XATTR_BY_LINK, list, size));
+}
+ssize_t flistxattr(int fd, char *list, size_t size) {
+    return fail_size(patina_listxattr(fd, NULL, PATINA_XATTR_BY_FD, list, size));
+}
+
+int removexattr(const char *path, const char *name) {
+    return fail_int(patina_removexattr(-1, path, PATINA_XATTR_BY_PATH, name));
+}
+int lremovexattr(const char *path, const char *name) {
+    return fail_int(patina_removexattr(-1, path, PATINA_XATTR_BY_LINK, name));
+}
+int fremovexattr(int fd, const char *name) {
+    return fail_int(patina_removexattr(fd, NULL, PATINA_XATTR_BY_FD, name));
+}
+
 static int fill_stat64(int result, const struct patina_metadata *values, struct stat64 *status) {
     if (result < 0) return -1;
     if (status == NULL) {
