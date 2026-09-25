@@ -160,7 +160,14 @@ recursive. Unlocking a normal mutex checks no owner, as glibc's does: another
 thread's unlock frees it, and unlocking it unlocked is 0; the other types, and
 a robust or priority-inheriting normal one, answer `EPERM`. A recursive mutex
 held more than once stays held across `pthread_cond_wait`, and the wait's
-re-lock counts it again. On macOS every mutex is error-checking.
+re-lock counts it again. On macOS every mutex is error-checking. Reader/writer
+locks keep glibc's kinds the same way: by default a new reader acquires the lock
+whenever no writer holds it, and a releasing writer hands it to the waiting
+readers first; `PTHREAD_RWLOCK_PREFER_WRITER_NP` admits readers alike but hands a
+releasing writer's lock to the next waiting writer first;
+`PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP` hands over writer to writer too and
+makes a new reader wait behind a waiting writer (the only policy on macOS). The
+writer's own `rdlock`/`wrlock` are `EDEADLK` and its try-locks `EBUSY`.
 
 Guest raw `rt_sigreturn` and `restart_syscall` are final `signal-abi` traps: handler
 returns use the allowed host restorer, and no guest restart-block protocol exists.

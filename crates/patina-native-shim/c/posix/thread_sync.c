@@ -169,11 +169,13 @@ int pthread_cancel(pthread_t thread) {
 
 /*
  * pthread_rwlock_* routes reader/writer contention through the deterministic
- * scheduler (writer-preferring; FIFO among writers; blocked readers batch-woken
- * when a writer releases with no writer waiting). Rust std::sync::RwLock uses
- * the queue-based parking RwLock on the supported toolchains and does not reach
- * these symbols, so this is for C guests (and any std that lowers to pthread).
- * rwlockattr is ignored: the deterministic rwlock has one policy.
+ * scheduler (the lock's kind from the attribute or static initializer, as
+ * glibc keeps three: readers preferred by default, writer-to-writer hand-over
+ * for PREFER_WRITER_NP, which PREFER_WRITER_NONRECURSIVE_NP adds new readers
+ * waiting behind a waiting writer to; FIFO among writers; blocked readers
+ * woken together). Rust std::sync::RwLock uses the queue-based parking
+ * RwLock on the supported toolchains and does not reach these symbols, so this
+ * is for C guests (and any std that lowers to pthread).
  */
 int pthread_rwlock_init(pthread_rwlock_t *lock, const pthread_rwlockattr_t *attr) {
     return patina_rwlock_init((void *)lock, (const void *)attr);

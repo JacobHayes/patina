@@ -7,7 +7,7 @@ use std::time::Duration;
 // toolchains, so exercise the shim's deterministic pthread_rwlock interposers
 // directly through FFI. Three writer threads each hold the write lock across a
 // scheduling point, so the others park on it; the acquisition order is chosen by
-// DetScheduler (writer-preferring, FIFO), byte-identical per seed.
+// DetScheduler (FIFO among writers), byte-identical per seed.
 #[repr(C, align(16))]
 struct RawRwLock(UnsafeCell<[u8; 200]>);
 unsafe impl Sync for RawRwLock {}

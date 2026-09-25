@@ -7889,20 +7889,118 @@ mod thread {
         waiters: HostDeque<(TaskId, usize)>,
     }
 
-    /// A deterministic reader/writer lock. Writer-preferring: a new reader
-    /// blocks while any writer holds or is waiting, so a stream of readers can
-    /// never starve a waiting writer. Writers are granted in strict FIFO order;
-    /// when a writer releases and no writer is waiting, every blocked reader is
-    /// granted at once (a batch wake, like a condvar broadcast). Every wake is a
-    /// recorded scheduler decision, so the wake order is reproducible.
+    /// Which side a reader/writer lock favours when both wait
+    /// (`nptl/pthread_rwlock_common.c`).
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    #[allow(clippy::enum_variant_names)] // glibc's own names for the kinds
+    enum RwLockKind {
+        /// glibc's default, `PTHREAD_RWLOCK_PREFER_READER_NP`: a new reader
+        /// acquires the lock whenever no writer holds it, waiting writers or
+        /// not, and a releasing writer hands the lock to the waiting readers
+        /// first.
+        #[default]
+        PreferReader,
+        /// `PTHREAD_RWLOCK_PREFER_WRITER_NP`: readers are admitted as by
+        /// default, but a releasing writer hands the lock to the next
+        /// waiting writer first (glibc's writer-to-writer hand-over, which
+        /// every kind but the default takes). Decoded from glibc's
+        /// encoding, so only on Linux.
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        PreferWriter,
+        /// `PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`: a releasing writer
+        /// hands over to the next writer, and a new reader also waits while
+        /// a writer holds the lock or waits for it, so readers never starve a
+        /// writer.
+        PreferWriterNonrecursive,
+    }
+
+    impl RwLockKind {
+        /// The kind in glibc's encoding, shared by an attribute's `lockkind`
+        /// and a lock's `__flags`.
+        #[cfg(target_os = "linux")]
+        fn from_glibc(kind: c_int) -> Self {
+            match kind {
+                0 => Self::PreferReader,
+                2 => Self::PreferWriterNonrecursive,
+                // glibc tests the default by equality: any other value hands
+                // over writer to writer and admits readers.
+                _ => Self::PreferWriter,
+            }
+        }
+
+        /// The kind a `pthread_rwlock_init` attribute names; no attribute is
+        /// the default kind.
+        ///
+        /// # Safety
+        /// Non-null `attr` must point to an initialized `pthread_rwlockattr_t`.
+        unsafe fn of_attr(attr: *const c_void) -> Self {
+            #[cfg(target_os = "linux")]
+            {
+                if attr.is_null() {
+                    return Self::PreferReader;
+                }
+                // SAFETY: glibc's `struct pthread_rwlockattr` starts with the
+                // `int lockkind`.
+                Self::from_glibc(unsafe { attr.cast::<c_int>().read() })
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = attr;
+                Self::PreferWriterNonrecursive
+            }
+        }
+
+        /// The kind of a lock first touched without `pthread_rwlock_init`:
+        /// the one its static initializer wrote (glibc's
+        /// `PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP` sets
+        /// `__flags`).
+        ///
+        /// # Safety
+        /// `lock` must point to a `pthread_rwlock_t`.
+        unsafe fn of_static(lock: *const c_void) -> Self {
+            #[cfg(target_os = "linux")]
+            {
+                // SAFETY: `__flags` is the `unsigned int` at byte 48 of glibc's
+                // `struct __pthread_rwlock_arch_t` on the 64-bit targets.
+                Self::from_glibc(unsafe { lock.cast::<u8>().add(48).cast::<c_int>().read() })
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = lock;
+                Self::PreferWriterNonrecursive
+            }
+        }
+    }
+
+    /// A deterministic reader/writer lock of one [`RwLockKind`]. Writers are
+    /// granted in strict FIFO order; blocked readers are granted together (a
+    /// batch wake, like a condvar broadcast). Every wake is a recorded
+    /// scheduler decision, so the wake order is reproducible.
     #[derive(Default)]
     struct RwLockEntry {
+        kind: RwLockKind,
         /// Number of tasks currently holding the read lock.
         readers: usize,
         /// The task currently holding the write lock, if any.
         writer: Option<TaskId>,
         write_waiters: HostDeque<TaskId>,
         read_waiters: HostDeque<TaskId>,
+    }
+
+    impl RwLockEntry {
+        fn of_kind(kind: RwLockKind) -> Self {
+            Self {
+                kind,
+                ..Self::default()
+            }
+        }
+
+        /// Whether a new reader acquires the lock now.
+        fn admits_reader(&self) -> bool {
+            self.writer.is_none()
+                && (self.kind != RwLockKind::PreferWriterNonrecursive
+                    || self.write_waiters.is_empty())
+        }
     }
 
     struct ThreadEntry {
@@ -8138,19 +8236,32 @@ mod thread {
             Ok(())
         }
 
-        fn init_rwlock(&mut self, key: usize) {
-            self.rwlocks.insert(key, RwLockEntry::default());
+        fn init_rwlock(&mut self, key: usize, kind: RwLockKind) {
+            self.rwlocks.insert(key, RwLockEntry::of_kind(kind));
         }
 
-        /// Acquire the read lock. Writer-preferring: block while a writer holds
-        /// the lock or any writer is waiting.
-        fn rwlock_rdlock(&mut self, me: TaskId, key: usize) -> Result<LockStep, ThreadError> {
+        /// The lock at `key`; one never initialized is registered as `kind` on
+        /// first touch.
+        fn rwlock(&mut self, key: usize, kind: RwLockKind) -> &mut RwLockEntry {
+            self.rwlocks
+                .entry_or_insert_with(key, || RwLockEntry::of_kind(kind))
+        }
+
+        /// Acquire the read lock, blocking unless the lock admits a new reader
+        /// ([`RwLockEntry::admits_reader`]). The writer's own call is
+        /// `EDEADLK`.
+        fn rwlock_rdlock(
+            &mut self,
+            me: TaskId,
+            key: usize,
+            kind: RwLockKind,
+        ) -> Result<LockStep, ThreadError> {
             let interrupted = self.sync_interrupted(me);
-            let entry = self.rwlocks.entry_or_default(key);
+            let entry = self.rwlock(key, kind);
             if entry.writer == Some(me) {
                 return Err(ThreadError::Posix(EDEADLK));
             }
-            if entry.writer.is_none() && entry.write_waiters.is_empty() {
+            if entry.admits_reader() {
                 entry.readers += 1;
                 Ok(LockStep::Acquired)
             } else {
@@ -8162,9 +8273,14 @@ mod thread {
 
         /// Acquire the write lock: exclusive, so block unless the lock is fully
         /// idle (no readers and no writer).
-        fn rwlock_wrlock(&mut self, me: TaskId, key: usize) -> Result<LockStep, ThreadError> {
+        fn rwlock_wrlock(
+            &mut self,
+            me: TaskId,
+            key: usize,
+            kind: RwLockKind,
+        ) -> Result<LockStep, ThreadError> {
             let interrupted = self.sync_interrupted(me);
-            let entry = self.rwlocks.entry_or_default(key);
+            let entry = self.rwlock(key, kind);
             if entry.writer == Some(me) {
                 return Err(ThreadError::Posix(EDEADLK));
             }
@@ -8178,11 +8294,11 @@ mod thread {
             }
         }
 
-        fn rwlock_tryrdlock(&mut self, me: TaskId, key: usize) -> c_int {
-            let entry = self.rwlocks.entry_or_default(key);
-            if entry.writer == Some(me) {
-                EDEADLK
-            } else if entry.writer.is_none() && entry.write_waiters.is_empty() {
+        /// Try the read lock: `EBUSY` unless it admits a new reader, for the
+        /// writer too (glibc's non-blocking calls do not check the writer).
+        fn rwlock_tryrdlock(&mut self, key: usize, kind: RwLockKind) -> c_int {
+            let entry = self.rwlock(key, kind);
+            if entry.admits_reader() {
                 entry.readers += 1;
                 0
             } else {
@@ -8190,11 +8306,10 @@ mod thread {
             }
         }
 
-        fn rwlock_trywrlock(&mut self, me: TaskId, key: usize) -> c_int {
-            let entry = self.rwlocks.entry_or_default(key);
-            if entry.writer == Some(me) {
-                EDEADLK
-            } else if entry.writer.is_none() && entry.readers == 0 {
+        /// Try the write lock: `EBUSY` unless the lock is idle.
+        fn rwlock_trywrlock(&mut self, me: TaskId, key: usize, kind: RwLockKind) -> c_int {
+            let entry = self.rwlock(key, kind);
+            if entry.writer.is_none() && entry.readers == 0 {
                 entry.writer = Some(me);
                 0
             } else {
@@ -8202,9 +8317,10 @@ mod thread {
             }
         }
 
-        /// Release whichever mode `me` holds, then grant the lock to the next
-        /// waiter(s) deterministically: a waiting writer (FIFO) is preferred, and
-        /// only when none waits is every blocked reader woken together.
+        /// Release whichever mode `me` holds, then grant the idle lock to the
+        /// next waiter(s) deterministically: the preferred side first — every
+        /// blocked reader together, or the first waiting writer (FIFO) — and
+        /// the other side only when none of the preferred one waits.
         fn rwlock_unlock(
             &mut self,
             scheduler: &mut dyn Scheduler,
@@ -8227,7 +8343,15 @@ mod thread {
                 return Err(ThreadError::Posix(EPERM));
             }
             // The lock is now idle (no writer, no readers). Grant it.
-            if let Some(next) = entry.write_waiters.pop_front() {
+            // Every kind but the default hands a writer's release to the next
+            // writer; a reader's last release finds only writers waiting.
+            let readers_first = entry.kind == RwLockKind::PreferReader;
+            let next_writer = if readers_first && !entry.read_waiters.is_empty() {
+                None
+            } else {
+                entry.write_waiters.pop_front()
+            };
+            if let Some(next) = next_writer {
                 entry.writer = Some(next);
                 self.notify(scheduler, next)?;
             } else {
@@ -8798,8 +8922,13 @@ mod thread {
             }
         }
 
-        fn begin_rdlock(&mut self, me: TaskId, key: usize) -> Result<Step, ThreadError> {
-            match self.table.rwlock_rdlock(me, key)? {
+        fn begin_rdlock(
+            &mut self,
+            me: TaskId,
+            key: usize,
+            kind: RwLockKind,
+        ) -> Result<Step, ThreadError> {
+            match self.table.rwlock_rdlock(me, key, kind)? {
                 LockStep::Acquired => Ok(Step::Continue),
                 LockStep::MustBlock => self.block(
                     me,
@@ -8809,8 +8938,13 @@ mod thread {
             }
         }
 
-        fn begin_wrlock(&mut self, me: TaskId, key: usize) -> Result<Step, ThreadError> {
-            match self.table.rwlock_wrlock(me, key)? {
+        fn begin_wrlock(
+            &mut self,
+            me: TaskId,
+            key: usize,
+            kind: RwLockKind,
+        ) -> Result<Step, ThreadError> {
+            match self.table.rwlock_wrlock(me, key, kind)? {
                 LockStep::Acquired => Ok(Step::Continue),
                 LockStep::MustBlock => self.block(
                     me,
@@ -9638,20 +9772,23 @@ mod thread {
     }
 
     /// Deterministic `pthread_rwlock_*`. Reader/writer contention routes through
-    /// the scheduler exactly like the mutex/cond interposition: writer-preferring
-    /// grant order, FIFO among writers, and a batch wake of all blocked readers
-    /// when a writer releases with no writer waiting. std's own `RwLock` does not
+    /// the scheduler exactly like the mutex/cond interposition: the lock's kind
+    /// (from its attribute or static initializer; glibc's default prefers
+    /// readers) decides the grant order, writers are FIFO, and blocked readers
+    /// are woken together. std's own `RwLock` does not
     /// lower to these symbols on the supported toolchains (it uses the queue-based
     /// parking `RwLock`), so this serves C guests and any std that does.
     ///
     /// # Safety
     /// `lock` must reference a valid `pthread_rwlock_t`.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_rwlock_init(lock: *mut c_void, _attr: *const c_void) -> c_int {
+    pub unsafe extern "C" fn patina_rwlock_init(lock: *mut c_void, attr: *const c_void) -> c_int {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        // SAFETY: a null or initialized attribute, per the pthread contract.
+        let kind = unsafe { RwLockKind::of_attr(attr) };
         managed_op!({
             let mut state = lock_state();
-            state.table.init_rwlock(lock as usize);
+            state.table.init_rwlock(lock as usize, kind);
             0
         })
     }
@@ -9663,9 +9800,11 @@ mod thread {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let key = lock as usize;
+            // SAFETY: a valid `pthread_rwlock_t`, per this function's contract.
+            let kind = unsafe { RwLockKind::of_static(lock) };
             let me = current_task();
             let mut state = lock_state();
-            match state.begin_rdlock(me, key) {
+            match state.begin_rdlock(me, key, kind) {
                 Ok(Step::Continue) => 0,
                 Ok(Step::Switch(picked)) => {
                     switch_and_park(state, picked, me);
@@ -9683,9 +9822,11 @@ mod thread {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let key = lock as usize;
+            // SAFETY: a valid `pthread_rwlock_t`, per this function's contract.
+            let kind = unsafe { RwLockKind::of_static(lock) };
             let me = current_task();
             let mut state = lock_state();
-            match state.begin_wrlock(me, key) {
+            match state.begin_wrlock(me, key, kind) {
                 Ok(Step::Continue) => 0,
                 Ok(Step::Switch(picked)) => {
                     switch_and_park(state, picked, me);
@@ -9702,9 +9843,10 @@ mod thread {
     pub unsafe extern "C" fn patina_rwlock_tryrdlock(lock: *mut c_void) -> c_int {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
-            let me = current_task();
+            // SAFETY: a valid `pthread_rwlock_t`, per this function's contract.
+            let kind = unsafe { RwLockKind::of_static(lock) };
             let mut state = lock_state();
-            state.table.rwlock_tryrdlock(me, lock as usize)
+            state.table.rwlock_tryrdlock(lock as usize, kind)
         })
     }
 
@@ -9714,9 +9856,11 @@ mod thread {
     pub unsafe extern "C" fn patina_rwlock_trywrlock(lock: *mut c_void) -> c_int {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
+            // SAFETY: a valid `pthread_rwlock_t`, per this function's contract.
+            let kind = unsafe { RwLockKind::of_static(lock) };
             let me = current_task();
             let mut state = lock_state();
-            state.table.rwlock_trywrlock(me, lock as usize)
+            state.table.rwlock_trywrlock(me, lock as usize, kind)
         })
     }
 
@@ -14091,26 +14235,32 @@ mod thread {
             let a = TaskId(1);
             let b = TaskId(2);
 
-            // A write hold excludes both a reader and another writer, and the
-            // holder re-acquiring is a deadlock.
+            let kind = RwLockKind::PreferReader;
+
+            // A write hold excludes both a reader and another writer; the
+            // holder's blocking re-acquire is a deadlock, its tries are busy.
             assert!(matches!(
-                table.rwlock_wrlock(a, RWLOCK).unwrap(),
+                table.rwlock_wrlock(a, RWLOCK, kind).unwrap(),
                 LockStep::Acquired
             ));
-            assert_eq!(table.rwlock_trywrlock(b, RWLOCK), EBUSY);
-            assert_eq!(table.rwlock_tryrdlock(b, RWLOCK), EBUSY);
-            assert_eq!(table.rwlock_trywrlock(a, RWLOCK), EDEADLK);
+            assert_eq!(table.rwlock_trywrlock(b, RWLOCK, kind), EBUSY);
+            assert_eq!(table.rwlock_tryrdlock(RWLOCK, kind), EBUSY);
+            assert_eq!(table.rwlock_trywrlock(a, RWLOCK, kind), EBUSY);
             assert!(matches!(
-                table.rwlock_rdlock(a, RWLOCK),
+                table.rwlock_rdlock(a, RWLOCK, kind),
+                Err(ThreadError::Posix(EDEADLK))
+            ));
+            assert!(matches!(
+                table.rwlock_wrlock(a, RWLOCK, kind),
                 Err(ThreadError::Posix(EDEADLK))
             ));
 
             // Releasing lets multiple readers share, but a writer is then busy.
             table.rwlock_unlock(&mut scheduler, a, RWLOCK).unwrap();
-            assert_eq!(table.rwlock_tryrdlock(a, RWLOCK), 0);
-            assert_eq!(table.rwlock_tryrdlock(b, RWLOCK), 0);
+            assert_eq!(table.rwlock_tryrdlock(RWLOCK, kind), 0);
+            assert_eq!(table.rwlock_tryrdlock(RWLOCK, kind), 0);
             assert_eq!(table.rwlocks[&RWLOCK].readers, 2);
-            assert_eq!(table.rwlock_trywrlock(a, RWLOCK), EBUSY);
+            assert_eq!(table.rwlock_trywrlock(a, RWLOCK, kind), EBUSY);
 
             // A held rwlock cannot be destroyed; an idle one can.
             assert!(matches!(
@@ -14122,69 +14272,120 @@ mod thread {
             assert!(table.destroy_rwlock(RWLOCK).is_ok());
         }
 
-        #[test]
-        fn rwlock_is_writer_preferring_with_fifo_writers_and_batched_readers() {
+        /// Two readers hold the lock, a writer waits behind them, and a third
+        /// reader arrives: the lock's kind decides whether it barges past the
+        /// writer and who is granted the lock when the writer releases.
+        fn rwlock_preference(kind: RwLockKind) {
             let mut table = ThreadTable::default();
             let mut scheduler = DetAdapter::new(1);
             let r1 = scheduler.spawn("r1").unwrap();
             let r2 = scheduler.spawn("r2").unwrap();
             let w1 = scheduler.spawn("w1").unwrap();
             let r3 = scheduler.spawn("r3").unwrap();
-            for task in [r1, r2, w1, r3] {
+            let w2 = scheduler.spawn("w2").unwrap();
+            let r4 = scheduler.spawn("r4").unwrap();
+            for task in [r1, r2, w1, r3, w2, r4] {
                 table.register(task);
             }
+            table.init_rwlock(RWLOCK, kind);
+            let readers_barge = kind != RwLockKind::PreferWriterNonrecursive;
+            let writer_first = kind != RwLockKind::PreferReader;
 
             // Two readers share the lock.
-            scheduler.scheduler.select(Some(r1)).unwrap();
-            assert!(matches!(
-                table.rwlock_rdlock(r1, RWLOCK).unwrap(),
-                LockStep::Acquired
-            ));
-            scheduler.yield_task(r1).unwrap();
-            scheduler.scheduler.select(Some(r2)).unwrap();
-            assert!(matches!(
-                table.rwlock_rdlock(r2, RWLOCK).unwrap(),
-                LockStep::Acquired
-            ));
+            for reader in [r1, r2] {
+                scheduler.scheduler.select(Some(reader)).unwrap();
+                assert!(matches!(
+                    table.rwlock_rdlock(reader, RWLOCK, kind).unwrap(),
+                    LockStep::Acquired
+                ));
+                scheduler.yield_task(reader).unwrap();
+            }
             assert_eq!(table.rwlocks[&RWLOCK].readers, 2);
-            scheduler.yield_task(r2).unwrap();
 
             // A writer arrives and blocks behind the active readers.
             scheduler.scheduler.select(Some(w1)).unwrap();
             assert!(matches!(
-                table.rwlock_wrlock(w1, RWLOCK).unwrap(),
+                table.rwlock_wrlock(w1, RWLOCK, kind).unwrap(),
                 LockStep::MustBlock
             ));
             scheduler.park(w1, "rwlock-write").unwrap();
 
-            // Writer-preferring: a new reader blocks while a writer waits, even
-            // though only readers currently hold the lock.
+            // A new reader barges past the waiting writer only when readers
+            // are preferred.
             scheduler.scheduler.select(Some(r3)).unwrap();
-            assert!(matches!(
-                table.rwlock_rdlock(r3, RWLOCK).unwrap(),
-                LockStep::MustBlock
-            ));
-            scheduler.park(r3, "rwlock-read").unwrap();
+            let step = table.rwlock_rdlock(r3, RWLOCK, kind).unwrap();
+            if readers_barge {
+                assert!(matches!(step, LockStep::Acquired));
+                scheduler.yield_task(r3).unwrap();
+                table.rwlock_unlock(&mut scheduler, r3, RWLOCK).unwrap();
+            } else {
+                assert!(matches!(step, LockStep::MustBlock));
+                scheduler.park(r3, "rwlock-read").unwrap();
+            }
 
             // First reader releases: one reader remains, nothing is granted.
             table.rwlock_unlock(&mut scheduler, r1, RWLOCK).unwrap();
             assert_eq!(table.rwlocks[&RWLOCK].readers, 1);
             assert_eq!(table.rwlocks[&RWLOCK].writer, None);
 
-            // Last reader releases: the waiting writer is granted (preference).
+            // Last reader releases: the waiting writer is granted.
             table.rwlock_unlock(&mut scheduler, r2, RWLOCK).unwrap();
             assert_eq!(table.rwlocks[&RWLOCK].writer, Some(w1));
             assert_eq!(table.rwlocks[&RWLOCK].readers, 0);
 
-            // Writer releases with no writer waiting: every blocked reader is
-            // granted at once.
-            table.rwlock_unlock(&mut scheduler, w1, RWLOCK).unwrap();
-            assert_eq!(table.rwlocks[&RWLOCK].writer, None);
-            assert_eq!(table.rwlocks[&RWLOCK].readers, 1);
-            assert!(table.rwlocks[&RWLOCK].read_waiters.is_empty());
+            // With the writer holding it, a reader and a second writer wait.
+            scheduler.scheduler.select(Some(r4)).unwrap();
+            assert!(matches!(
+                table.rwlock_rdlock(r4, RWLOCK, kind).unwrap(),
+                LockStep::MustBlock
+            ));
+            scheduler.park(r4, "rwlock-read").unwrap();
+            scheduler.scheduler.select(Some(w2)).unwrap();
+            assert!(matches!(
+                table.rwlock_wrlock(w2, RWLOCK, kind).unwrap(),
+                LockStep::MustBlock
+            ));
+            scheduler.park(w2, "rwlock-write").unwrap();
 
-            table.rwlock_unlock(&mut scheduler, r3, RWLOCK).unwrap();
-            assert_eq!(table.rwlocks[&RWLOCK].readers, 0);
+            // The writer releases to the preferred side: every blocked reader
+            // at once, or the next writer.
+            table.rwlock_unlock(&mut scheduler, w1, RWLOCK).unwrap();
+            let entry = &table.rwlocks[&RWLOCK];
+            if writer_first {
+                assert_eq!(entry.writer, Some(w2));
+                let waiting = if readers_barge { 1 } else { 2 };
+                assert_eq!(entry.read_waiters.len(), waiting);
+            } else {
+                assert_eq!(entry.writer, None);
+                assert_eq!(entry.readers, 1);
+                assert!(entry.read_waiters.is_empty());
+            }
+        }
+
+        #[test]
+        fn rwlock_prefers_readers_by_default() {
+            rwlock_preference(RwLockKind::default());
+        }
+
+        #[test]
+        fn rwlock_can_hand_writer_to_writer() {
+            rwlock_preference(RwLockKind::PreferWriter);
+        }
+
+        #[test]
+        fn rwlock_can_prefer_writers_over_new_readers() {
+            rwlock_preference(RwLockKind::PreferWriterNonrecursive);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn rwlock_kinds_decode_as_glibc_compares_them() {
+            assert_eq!(RwLockKind::from_glibc(0), RwLockKind::PreferReader);
+            assert_eq!(RwLockKind::from_glibc(1), RwLockKind::PreferWriter);
+            assert_eq!(
+                RwLockKind::from_glibc(2),
+                RwLockKind::PreferWriterNonrecursive
+            );
         }
 
         #[test]
