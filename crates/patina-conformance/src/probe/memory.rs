@@ -19,6 +19,14 @@ use serde_json::Value;
 /// `mmap`'s `(len, prot, flags, fd, offset)`.
 pub type MapSpec = (usize, i32, i32, i32, i64);
 
+/// A private anonymous mapping's flags, and read-write protection.
+pub const ANON: i32 = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
+pub const RW: i32 = libc::PROT_READ | libc::PROT_WRITE;
+/// A mapping flag bit no architecture defines: bit 21, between
+/// `MAP_FIXED_NOREPLACE` (bit 20) and the huge-page size field
+/// (`MAP_HUGE_SHIFT`, 26); the newest flag, `MAP_DROPPABLE` (6.11), is 0x08.
+pub const UNKNOWN_MAP_FLAG: i32 = 0x0020_0000;
+
 /// An address a scenario passes, with the label a stream records for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct At {
@@ -149,7 +157,7 @@ impl Probe {
         self.event(row, result.min(0))
     }
 
-    fn mapped(
+    pub(super) fn mapped(
         &self,
         result: i64,
         name: &'static str,
@@ -226,18 +234,26 @@ impl Probe {
         fd: i32,
         offset: i64,
     ) -> (i64, Option<Region>) {
-        let result = self.call(
-            Syscall::N_mmap,
-            [
-                hint.raw as i64,
-                len as i64,
-                prot as i64,
-                flags as i64,
-                fd as i64,
-                offset,
-            ],
+        let spec = (len, prot, flags, fd, offset);
+        let result = self.call(Syscall::N_mmap, Self::mmap_args(hint, spec));
+        self.record_mmap(result, name, hint, spec)
+    }
+
+    /// A read-write anonymous mapping of `len` bytes — `MAP_PRIVATE` or
+    /// `MAP_SHARED` by `sharing` — that the scenario cannot continue without:
+    /// the region `name`.
+    pub fn map_anon(&self, name: &'static str, len: usize, sharing: i32) -> Region {
+        let (r, region) = self.mmap(
+            name,
+            &At::null(),
+            len,
+            RW,
+            sharing | libc::MAP_ANONYMOUS,
+            -1,
+            0,
         );
-        self.record_mmap(result, name, hint, (len, prot, flags, fd, offset))
+        self.require(&format!("map {name}"), r >= 0);
+        region.expect("a successful mapping is a region")
     }
 
     /// `mmap` through glibc's LFS alias `mmap64` on the libc vehicle (the same
@@ -253,6 +269,7 @@ impl Probe {
         fd: i32,
         offset: i64,
     ) -> (i64, Option<Region>) {
+        let spec = (len, prot, flags, fd, offset);
         let result = match self.vehicle {
             // SAFETY: the scenario owns the hint and the descriptor.
             Vehicle::Libc => fold_errno(unsafe {
@@ -265,19 +282,9 @@ impl Probe {
                     offset as libc::off64_t,
                 )
             } as i64),
-            _ => self.call(
-                Syscall::N_mmap,
-                [
-                    hint.raw as i64,
-                    len as i64,
-                    prot as i64,
-                    flags as i64,
-                    fd as i64,
-                    offset,
-                ],
-            ),
+            _ => self.call(Syscall::N_mmap, Self::mmap_args(hint, spec)),
         };
-        self.record_mmap(result, name, hint, (len, prot, flags, fd, offset))
+        self.record_mmap(result, name, hint, spec)
     }
 
     fn range_call(&self, row: Syscall, at: &At, len: usize, extra: Option<(&str, i64)>) -> i64 {

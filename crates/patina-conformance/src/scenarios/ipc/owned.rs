@@ -21,13 +21,9 @@ pub struct Owned {
 impl Owned {
     /// A System V object: `shmctl`/`semctl`/`msgctl` with `IPC_RMID`.
     pub fn sysv(row: Syscall, id: i32) -> Owned {
-        let args = match row {
-            Syscall::N_semctl => [id as i64, 0, libc::IPC_RMID as i64],
-            _ => [id as i64, libc::IPC_RMID as i64, 0],
-        };
         Owned {
             row,
-            args,
+            args: crate::owned::rmid_args(row, i64::from(id)),
             name: None,
             armed: Cell::new(id >= 0),
         }
@@ -64,15 +60,8 @@ impl Drop for Owned {
             Some(name) => name.as_ptr() as i64,
             None => self.args[0],
         };
-        // SAFETY: the removal of an object this run created; the name, when
-        // there is one, lives until the call returns.
-        unsafe {
-            libc::syscall(
-                self.row.number() as libc::c_long,
-                first,
-                self.args[1],
-                self.args[2],
-            );
-        }
+        // The removal of an object this run created; the name, when there is
+        // one, lives until the call returns.
+        crate::owned::sys(self.row, [first, self.args[1], self.args[2]]);
     }
 }

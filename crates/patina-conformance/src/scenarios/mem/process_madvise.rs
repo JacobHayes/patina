@@ -13,24 +13,14 @@
 
 use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Need, Scenario, Status};
 use crate::compare::{Ending, Failure};
-use crate::probe::{At, Probe, neg, page_size};
+use crate::probe::{Probe, neg, page_size};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
 pub fn run(p: &Probe) {
     let page = page_size();
-    let (r, a) = p.mmap(
-        "a",
-        &At::null(),
-        2 * page,
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-    p.require("map two pages", r >= 0);
-    let a = a.unwrap();
+    let a = p.map_anon("a", 2 * page, MAP_PRIVATE);
     a.fill(0, b"advised");
     let pid = p.getpid() as i32;
     let pidfd = p.pidfd_open(pid, 0);

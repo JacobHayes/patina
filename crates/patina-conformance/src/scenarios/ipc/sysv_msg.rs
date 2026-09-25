@@ -27,16 +27,13 @@
 use super::owned::Owned;
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::owned;
-use crate::probe::{Key, MsgArg, Probe, Window, neg, perm_mode};
+use crate::probe::{Key, MsgArg, Probe, UNKNOWN_IPC_CMD, Window, neg, perm_mode};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
 /// Past any `msgmax` a host can configure (it is an `int`).
 const HUGE: usize = 1 << 40;
-/// A command `msgctl` does not define (the IPC commands end at 20,
-/// `SEM_STAT_ANY`).
-const UNKNOWN_CMD: i32 = 99;
 /// The queue's byte limit after `IPC_SET`.
 const QBYTES: u64 = 8;
 
@@ -208,7 +205,7 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "an unknown command is EINVAL",
-        p.msgctl(id, UNKNOWN_CMD, MsgArg::None).0 == neg(EINVAL),
+        p.msgctl(id, UNKNOWN_IPC_CMD, MsgArg::None).0 == neg(EINVAL),
     );
 
     // ---- removal ----

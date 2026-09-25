@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 // The memory and IPC rows (`impl Probe` blocks and their argument types).
 mod ipc;
 mod memory;
-pub use ipc::{Deadline, Key, MsgArg, Notify, SemArg, ShmArg, Window, perm_mode};
-pub use memory::{At, MapSpec, Region};
+pub use ipc::{Deadline, Key, MsgArg, Notify, SemArg, ShmArg, UNKNOWN_IPC_CMD, Window, perm_mode};
+pub use memory::{ANON, At, MapSpec, RW, Region, UNKNOWN_MAP_FLAG};
 // The directory-stream API (libc only).
 mod dirent;
 pub use dirent::{Dir, DirEntry, ReadSpelling};

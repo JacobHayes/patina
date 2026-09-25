@@ -30,7 +30,7 @@
 use super::owned::Owned;
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::owned;
-use crate::probe::{Key, Probe, SemArg, Window, neg, perm_mode};
+use crate::probe::{Key, Probe, SemArg, UNKNOWN_IPC_CMD, Window, neg, perm_mode};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -42,9 +42,6 @@ const SEMVMX: i32 = 32767;
 /// Far past any host's `SEMOPM` (32 by default, 500 on most distributions).
 const TOO_MANY_OPS: usize = 1 << 20;
 const NOWAIT: i16 = IPC_NOWAIT as i16;
-/// A command `semctl` does not define (the IPC commands end at 20,
-/// `SEM_STAT_ANY`).
-const UNKNOWN_CMD: i32 = 99;
 /// How long the helper thread waits for the main thread to block.
 const BLOCK_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -120,7 +117,7 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "an unknown command is EINVAL",
-        p.semctl(id, 0, UNKNOWN_CMD, &SemArg::None).0 == neg(EINVAL),
+        p.semctl(id, 0, UNKNOWN_IPC_CMD, &SemArg::None).0 == neg(EINVAL),
     );
     // Creation and every SETVAL/SETALL since stamp `sem_ctime`.
     let changed = Window {

@@ -12,25 +12,14 @@
 //! same on every host, whatever its THP settings.
 
 use crate::catalog::{DEFAULTS, Scenario};
-use crate::probe::{At, Probe, neg, page_size};
+use crate::probe::{Probe, neg, page_size};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
 pub fn run(p: &Probe) {
     let page = page_size();
-    let null = At::null();
-    let (r, a) = p.mmap(
-        "a",
-        &null,
-        4 * page,
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-    p.require("map four pages", r >= 0);
-    let a = a.unwrap();
+    let a = p.map_anon("a", 4 * page, MAP_PRIVATE);
     p.madvise(&a.at(0), 4 * page, MADV_NOHUGEPAGE);
     let (r, resident) = p.mincore(&a.at(0), 4 * page, Some(4));
     p.check(
@@ -72,17 +61,7 @@ pub fn run(p: &Probe) {
         r == 0 && resident == [0],
     );
 
-    let (r, s) = p.mmap(
-        "s",
-        &null,
-        page,
-        PROT_READ | PROT_WRITE,
-        MAP_SHARED | MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-    p.require("map a shared page", r >= 0);
-    let s = s.unwrap();
+    let s = p.map_anon("s", page, MAP_SHARED);
     s.store(0, 1);
     let (r, resident) = p.mincore(&s.at(0), page, Some(1));
     p.check(

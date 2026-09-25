@@ -21,12 +21,10 @@
 //! transparent huge pages (`MADV_NOHUGEPAGE`, as `mem/mincore`).
 
 use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
-use crate::probe::{At, Probe, neg, page_size};
+use crate::probe::{ANON, At, Probe, RW, neg, page_size};
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
-const ANON: i32 = MAP_PRIVATE | MAP_ANONYMOUS;
-const RW: i32 = PROT_READ | PROT_WRITE;
 /// A flag bit `mlock2` does not define (`MLOCK_ONFAULT` is 1, its only one).
 const UNKNOWN_MLOCK2: u32 = 0x2;
 /// A flag bit `mlockall` does not define (`MCL_CURRENT` 1, `MCL_FUTURE` 2,
@@ -36,9 +34,7 @@ const UNKNOWN_MCL: i32 = 0x100;
 pub fn run(p: &Probe) {
     let page = page_size();
     let null = At::null();
-    let (r, a) = p.mmap("a", &null, 4 * page, RW, ANON, -1, 0);
-    p.require("map four pages", r >= 0);
-    let a = a.unwrap();
+    let a = p.map_anon("a", 4 * page, MAP_PRIVATE);
     // Unasserted: a kernel without THP answers EINVAL, and then nothing
     // could fault in more than a page anyway.
     p.madvise(&a.at(0), 4 * page, MADV_NOHUGEPAGE);

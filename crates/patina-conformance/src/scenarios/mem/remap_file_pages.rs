@@ -8,19 +8,14 @@
 //! shmem object, so no file is needed.
 
 use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
-use crate::probe::{At, Probe, neg, page_size};
+use crate::probe::{Probe, neg, page_size};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
-const RW: i32 = PROT_READ | PROT_WRITE;
-
 pub fn run(p: &Probe) {
     let page = page_size();
-    let null = At::null();
-    let (r, s) = p.mmap("s", &null, 2 * page, RW, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    p.require("map two shared pages", r >= 0);
-    let s = s.unwrap();
+    let s = p.map_anon("s", 2 * page, MAP_SHARED);
     s.fill(0, b"first");
     s.fill(page, b"second");
     p.check(
@@ -50,9 +45,7 @@ pub fn run(p: &Probe) {
         s.bytes(0, 5) == b"first",
     );
 
-    let (r, private) = p.mmap("p", &null, page, RW, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    p.require("map a private page", r >= 0);
-    let private = private.unwrap();
+    let private = p.map_anon("p", page, MAP_PRIVATE);
     p.check(
         "a private mapping is EINVAL",
         p.remap_file_pages(&private.at(0), page, 0, 0, 0) == neg(EINVAL),

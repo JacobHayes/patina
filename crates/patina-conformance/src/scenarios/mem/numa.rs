@@ -93,17 +93,7 @@ pub fn run(p: &Probe) {
     );
 
     // ---- a range's policy ----
-    let (r, a) = p.mmap(
-        "a",
-        &null,
-        4 * page,
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-    p.require("map four pages", r >= 0);
-    let a = a.unwrap();
+    let a = p.map_anon("a", 4 * page, MAP_PRIVATE);
     p.check(
         "mbind MPOL_BIND over two pages",
         p.mbind(&a.at(0), 2 * page, MPOL_BIND, Some(&[node]), 0) == 0,

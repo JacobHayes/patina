@@ -6,7 +6,7 @@
 //! succeeds. (A file mapping's write-back is `mem/mmap_file`.)
 
 use crate::catalog::{DEFAULTS, Scenario};
-use crate::probe::{At, Probe, neg, page_size};
+use crate::probe::{Probe, neg, page_size};
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -16,17 +16,7 @@ const UNKNOWN_FLAG: i32 = 0x8;
 
 pub fn run(p: &Probe) {
     let page = page_size();
-    let (r, a) = p.mmap(
-        "a",
-        &At::null(),
-        2 * page,
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-    p.require("map two pages", r >= 0);
-    let a = a.unwrap();
+    let a = p.map_anon("a", 2 * page, MAP_PRIVATE);
     a.fill(0, b"anonymous");
     for (flags, label) in [
         (MS_SYNC, "MS_SYNC of anonymous memory succeeds"),

@@ -8,8 +8,7 @@
 //!
 //! Shadow stacks are hardware: the scenario needs one to map.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{At, Probe, neg, page_size};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -72,15 +71,6 @@ pub const SCENARIO: Scenario = Scenario {
     covers: &[Syscall::N_map_shadow_stack],
     vehicles: Vehicle::KERNEL,
     needs: &[Need::ShadowStack],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::MemoryIpc),
-        vehicles: Vehicle::KERNEL,
-        what: "map_shadow_stack is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall map_shadow_stack (nr",
-        },
-    }],
+    gaps: &[unmodeled_trap!("map_shadow_stack", Vehicle::KERNEL, 0)],
     ..DEFAULTS
 };

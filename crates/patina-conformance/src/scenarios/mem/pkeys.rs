@@ -10,14 +10,12 @@
 //! Keys are hardware: the scenario needs one to allocate.
 
 use super::fault::{self, Repair};
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
-use crate::probe::{At, Probe, neg, page_size};
+use crate::catalog::{DEFAULTS, Need, Scenario};
+use crate::probe::{Probe, RW, neg, page_size};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
-const RW: i32 = PROT_READ | PROT_WRITE;
 /// `PKEY_DISABLE_ACCESS` / `PKEY_DISABLE_WRITE` (uapi/asm-generic/mman-common.h).
 #[cfg(target_arch = "x86_64")]
 const DISABLE_ACCESS: u32 = 0x1;
@@ -47,17 +45,7 @@ fn pkru() -> u32 {
 
 pub fn run(p: &Probe) {
     let page = page_size();
-    let (r, a) = p.mmap(
-        "a",
-        &At::null(),
-        2 * page,
-        RW,
-        MAP_PRIVATE | MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-    p.require("map two pages", r >= 0);
-    let a = a.unwrap();
+    let a = p.map_anon("a", 2 * page, MAP_PRIVATE);
 
     let key = p.pkey_alloc(0, 0);
     p.check("a key allocates", (1..16).contains(&key));
@@ -136,15 +124,6 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     vehicles: Vehicle::KERNEL,
     needs: &[Need::ProtectionKeys],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::MemoryIpc),
-        vehicles: Vehicle::KERNEL,
-        what: "pkey_alloc is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door",
-        failure: Failure::Stops {
-            events: 1,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall pkey_alloc (nr",
-        },
-    }],
+    gaps: &[unmodeled_trap!("pkey_alloc", Vehicle::KERNEL, 1)],
     ..DEFAULTS
 };

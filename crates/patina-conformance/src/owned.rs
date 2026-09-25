@@ -43,10 +43,21 @@ pub fn mq_name(dir: &Path) -> String {
     format!("{owner}-mq")
 }
 
-fn sys(row: Syscall, args: [i64; 3]) -> i64 {
+/// `row` with three arguments through `syscall(2)`, unrecorded: the result,
+/// or -1.
+pub fn sys(row: Syscall, args: [i64; 3]) -> i64 {
     // SAFETY: integer arguments, or a NUL-terminated name the caller owns.
     let result = unsafe { libc::syscall(row.number() as libc::c_long, args[0], args[1], args[2]) };
     if result < 0 { -1 } else { result }
+}
+
+/// The arguments of `ctl` (`shmctl`, `semctl`, `msgctl`) removing object
+/// `id` with `IPC_RMID` (`semctl` takes a semaphore number first).
+pub fn rmid_args(ctl: Syscall, id: i64) -> [i64; 3] {
+    match ctl {
+        Syscall::N_semctl => [id, 0, libc::IPC_RMID as i64],
+        _ => [id, libc::IPC_RMID as i64, 0],
+    }
 }
 
 /// Remove every IPC object a run in `dir` may have left behind; answer what
@@ -71,11 +82,7 @@ pub fn sweep(dir: &Path) -> Vec<String> {
         if id < 0 {
             continue;
         }
-        let rmid = match ctl {
-            Syscall::N_semctl => [id, 0, libc::IPC_RMID as i64],
-            _ => [id, libc::IPC_RMID as i64, 0],
-        };
-        if sys(ctl, rmid) == 0 {
+        if sys(ctl, rmid_args(ctl, id)) == 0 {
             removed.push(format!("{kind} key={key:#x}"));
         }
     }

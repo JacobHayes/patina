@@ -17,6 +17,10 @@ use crate::record::EventBuilder;
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
 
+/// A command no System V `*ctl` row defines (the IPC commands end at 20,
+/// `SEM_STAT_ANY`).
+pub const UNKNOWN_IPC_CMD: i32 = 99;
+
 /// A System V IPC key and the label a stream records for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Key {
@@ -267,25 +271,12 @@ impl Probe {
             .arg("addr", at.label.as_str())
             .arg("flags", flags)
             .arg("region", name);
-        let builder = if result >= 0 {
-            let builder = builder.field("aligned", result as usize % super::page_size() == 0);
-            if at.raw != 0 {
-                builder.field("at_addr", result as usize == at.raw)
-            } else {
-                builder
-            }
+        let builder = if result >= 0 && at.raw != 0 {
+            builder.field("at_addr", result as usize == at.raw)
         } else {
             builder
         };
-        builder.emit();
-        (
-            result,
-            (result >= 0).then_some(super::Region {
-                base: result as usize,
-                len,
-                name,
-            }),
-        )
+        self.mapped(result, name, len, builder)
     }
 
     pub fn shmdt(&self, at: &super::At) -> i64 {

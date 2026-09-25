@@ -74,17 +74,7 @@ pub fn run(p: &Probe) {
         "a break below the heap's start is refused: the current break",
         refused == before,
     );
-    let (r, other) = p.mmap(
-        "m",
-        &null,
-        page,
-        libc::PROT_READ,
-        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-    p.require("map a page", r >= 0);
-    let other = other.unwrap();
+    let other = p.map_anon("m", page, libc::MAP_PRIVATE);
     let into = other.end();
     let before = query(&null);
     let refused = query(&into);

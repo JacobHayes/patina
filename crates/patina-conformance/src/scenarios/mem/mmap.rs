@@ -18,23 +18,14 @@
 //!   requires -1 of portable callers).
 
 use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
-use crate::probe::{At, Probe, neg, page_size};
+use crate::probe::{ANON, At, Probe, RW, UNKNOWN_MAP_FLAG, neg, page_size};
 use libc::*;
 use patina_dst_syscalls::Syscall;
-
-const ANON: i32 = MAP_PRIVATE | MAP_ANONYMOUS;
-const RW: i32 = PROT_READ | PROT_WRITE;
-/// A flag bit no architecture defines: bit 21, between `MAP_FIXED_NOREPLACE`
-/// (bit 20) and the huge-page size field (`MAP_HUGE_SHIFT`, 26); the newest
-/// flag, `MAP_DROPPABLE` (6.11), is 0x08.
-const UNKNOWN_MAP_FLAG: i32 = 0x0020_0000;
 
 pub fn run(p: &Probe) {
     let page = page_size();
     let null = At::null();
-    let (r, a) = p.mmap("a", &null, 3 * page, RW, ANON, -1, 0);
-    p.require("map three private pages", r >= 0);
-    let a = a.unwrap();
+    let a = p.map_anon("a", 3 * page, MAP_PRIVATE);
     p.check("an anonymous mapping is zero-filled", a.zeroed(0, 3 * page));
     a.fill(0, b"private");
     a.fill(2 * page, b"third");
@@ -133,9 +124,7 @@ pub fn run(p: &Probe) {
     );
 
     // ---- madvise ----
-    let (r, s) = p.mmap("s", &null, 2 * page, RW, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    p.require("map two shared pages", r >= 0);
-    let s = s.unwrap();
+    let s = p.map_anon("s", 2 * page, MAP_SHARED);
     s.fill(0, b"shared");
     p.check(
         "MADV_DONTNEED of a shared page succeeds",

@@ -13,12 +13,10 @@
 //!   (`EINVAL`), an unmapped source (`EFAULT`).
 
 use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
-use crate::probe::{At, Probe, neg, page_size};
+use crate::probe::{ANON, At, Probe, RW, neg, page_size};
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
-const ANON: i32 = MAP_PRIVATE | MAP_ANONYMOUS;
-const RW: i32 = PROT_READ | PROT_WRITE;
 /// A flag bit `mremap` does not define (`MREMAP_MAYMOVE` 1, `MREMAP_FIXED`
 /// 2, `MREMAP_DONTUNMAP` 4 are all there are).
 const UNKNOWN_FLAG: i32 = 0x80;
@@ -26,9 +24,7 @@ const UNKNOWN_FLAG: i32 = 0x80;
 pub fn run(p: &Probe) {
     let page = page_size();
     let null = At::null();
-    let (r, a) = p.mmap("a", &null, 4 * page, RW, ANON, -1, 0);
-    p.require("map four pages", r >= 0);
-    let a = a.unwrap();
+    let a = p.map_anon("a", 4 * page, MAP_PRIVATE);
     a.fill(0, b"alpha");
     a.fill(page, b"beta");
 
@@ -206,9 +202,7 @@ pub fn run(p: &Probe) {
     );
 
     // ---- a second view of shared pages ----
-    let (r, s) = p.mmap("s", &null, page, RW, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    p.require("map a shared page", r >= 0);
-    let s = s.unwrap();
+    let s = p.map_anon("s", page, MAP_SHARED);
     s.fill(0, b"one");
     let (r, twin) = p.mremap("d", &s.at(0), 0, page, MREMAP_MAYMOVE, &null);
     p.check(

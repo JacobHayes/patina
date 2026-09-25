@@ -18,15 +18,9 @@
 //! The first mapping goes through `mmap64`, glibc's LFS spelling of the row.
 
 use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
-use crate::probe::{AT_FDCWD, At, Probe, Region, neg, page_size};
+use crate::probe::{AT_FDCWD, At, Probe, RW, Region, UNKNOWN_MAP_FLAG, neg, page_size};
 use libc::*;
 use patina_dst_syscalls::Syscall;
-
-const RW: i32 = PROT_READ | PROT_WRITE;
-/// A flag bit no architecture defines: bit 21, between `MAP_FIXED_NOREPLACE`
-/// (bit 20) and the huge-page size field (`MAP_HUGE_SHIFT`, 26); the newest
-/// flag, `MAP_DROPPABLE` (6.11), is 0x08.
-const UNKNOWN_MAP_FLAG: i32 = 0x0020_0000;
 
 /// An anonymous page a mapping that may fail under patina falls back to
 /// (`Region::or_spare`), so a failure differs in its checks only. Unmapping
@@ -34,17 +28,7 @@ const UNKNOWN_MAP_FLAG: i32 = 0x0020_0000;
 /// (process-local memory the exit releases), because unmapping it again
 /// could hit whatever reused its address.
 fn spare(p: &Probe, name: &'static str) -> Region {
-    let (r, spare) = p.mmap(
-        name,
-        &At::null(),
-        page_size(),
-        RW,
-        MAP_PRIVATE | MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-    p.require("map a spare page", r >= 0);
-    spare.unwrap()
+    p.map_anon(name, page_size(), MAP_PRIVATE)
 }
 
 pub fn run(p: &Probe) {

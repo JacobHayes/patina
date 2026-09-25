@@ -8,14 +8,11 @@
 //! direct-map support) and its pages are locked memory, so the scenario
 //! needs one page of it to map.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
-use crate::probe::{At, Probe, neg, page_size};
+use crate::catalog::{DEFAULTS, Need, Scenario};
+use crate::probe::{At, Probe, RW, neg, page_size};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
-
-const RW: i32 = PROT_READ | PROT_WRITE;
 
 pub fn run(p: &Probe) {
     let page = page_size();
@@ -68,15 +65,6 @@ pub const SCENARIO: Scenario = Scenario {
         "close",
     ],
     needs: &[Need::SecretMemory],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::MemoryIpc),
-        vehicles: Vehicle::ALL,
-        what: "memfd_secret is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no memfd_secret wrapper)",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall memfd_secret (nr",
-        },
-    }],
+    gaps: &[unmodeled_trap!("memfd_secret", Vehicle::ALL, 0)],
     ..DEFAULTS
 };

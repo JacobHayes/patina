@@ -27,16 +27,13 @@
 use super::owned::Owned;
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::owned;
-use crate::probe::{At, Key, Probe, ShmArg, neg, page_size, perm_mode};
+use crate::probe::{At, Key, Probe, ShmArg, UNKNOWN_IPC_CMD, neg, page_size, perm_mode};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
 /// `SHM_DEST` (uapi/linux/shm.h): marked for destruction.
 const SHM_DEST: u32 = 0o1000;
-/// A command `shmctl` does not define (the IPC commands end at 20,
-/// `SEM_STAT_ANY`).
-const UNKNOWN_CMD: i32 = 99;
 
 pub fn run(p: &Probe) {
     let page = page_size();
@@ -182,7 +179,7 @@ pub fn run(p: &Probe) {
     );
     p.check(
         "an unknown command is EINVAL",
-        p.shmctl(id, UNKNOWN_CMD, ShmArg::None).0 == neg(EINVAL),
+        p.shmctl(id, UNKNOWN_IPC_CMD, ShmArg::None).0 == neg(EINVAL),
     );
     p.check(
         "size 0 is EINVAL",

@@ -17,14 +17,12 @@ use crate::catalog::{Arc, Gap, Status};
 use crate::catalog::{DEFAULTS, Scenario};
 #[cfg(target_arch = "x86_64")]
 use crate::compare::{Ending, Failure};
-use crate::probe::{At, Probe, neg, page_size};
+use crate::probe::{Probe, RW, neg, page_size};
 #[cfg(target_arch = "x86_64")]
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
-const ANON: i32 = MAP_PRIVATE | MAP_ANONYMOUS;
-const RW: i32 = PROT_READ | PROT_WRITE;
 /// A protection bit no architecture defines (arm64's `PROT_BTI`/`PROT_MTE`
 /// are 0x10/0x20; `PROT_SEM` is 0x8).
 const UNKNOWN_PROT: i32 = 0x40;
@@ -34,10 +32,7 @@ const SEGV_ACCERR: i32 = 2;
 
 pub fn run(p: &Probe) {
     let page = page_size();
-    let null = At::null();
-    let (r, a) = p.mmap("a", &null, 3 * page, RW, ANON, -1, 0);
-    p.require("map three pages", r >= 0);
-    let a = a.unwrap();
+    let a = p.map_anon("a", 3 * page, MAP_PRIVATE);
     a.fill(0, b"guarded");
 
     p.check(
