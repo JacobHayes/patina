@@ -180,6 +180,97 @@ int sigqueue(pid_t pid, int sig, const union sigval value) {
     return signal_result(patina_sud_dispatch(SYS_rt_sigqueueinfo,
         (uint64_t)pid, (uint64_t)sig, (uintptr_t)&info, 0, 0, 0, 0));
 }
+/* glibc's signal descriptions in the C locale (string/strsignal.c, the
+ * `sigdescr` table); NULL for a number without one (0, the reserved 32 and 33,
+ * the realtime signals, anything out of range). */
+static const char *patina_sigdescr(int sig) {
+    static const char *const descriptions[] = {
+        NULL, "Hangup", "Interrupt", "Quit", "Illegal instruction",
+        "Trace/breakpoint trap", "Aborted", "Bus error", "Floating point exception",
+        "Killed", "User defined signal 1", "Segmentation fault", "User defined signal 2",
+        "Broken pipe", "Alarm clock", "Terminated", "Stack fault", "Child exited",
+        "Continued", "Stopped (signal)", "Stopped", "Stopped (tty input)",
+        "Stopped (tty output)", "Urgent I/O condition", "CPU time limit exceeded",
+        "File size limit exceeded", "Virtual timer expired", "Profiling timer expired",
+        "Window changed", "I/O possible", "Power failure", "Bad system call",
+    };
+    if (sig < 1 || sig >= (int)(sizeof descriptions / sizeof descriptions[0])) return NULL;
+    return descriptions[sig];
+}
+
+/* Append `text` to the `cap`-byte buffer `out` at `at`, keeping room for a
+ * NUL; answers the new length. */
+static size_t patina_append(char *out, size_t at, size_t cap, const char *text) {
+    while (*text != '\0' && at + 1 < cap) out[at++] = *text++;
+    out[at] = '\0';
+    return at;
+}
+
+/* `text` then `number` in decimal ("Unknown signal -1"). */
+static size_t patina_append_numbered(char *out, size_t cap, const char *text, int number) {
+    char digits[12];
+    size_t count = 0;
+    long long value = number;
+    int negative = value < 0;
+    if (negative) value = -value;
+    do {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value != 0);
+    size_t at = patina_append(out, 0, cap, text);
+    if (negative) at = patina_append(out, at, cap, "-");
+    while (count > 0 && at + 1 < cap) out[at++] = digits[--count];
+    out[at] = '\0';
+    return at;
+}
+
+/* glibc's `strsignal`: the description, "Real-time signal N" counted from
+ * SIGRTMIN (34), or "Unknown signal N", formatted into a per-thread buffer
+ * the thread's next call reuses. */
+static char *patina_strsignal(int sig) {
+    static __thread char buffer[32];
+    const char *description = patina_sigdescr(sig);
+    if (description != NULL) return (char *)description;
+    if (sig >= 34 && sig <= 64) {
+        patina_append_numbered(buffer, sizeof buffer, "Real-time signal ", sig - 34);
+    } else {
+        patina_append_numbered(buffer, sizeof buffer, "Unknown signal ", sig);
+    }
+    return buffer;
+}
+char *strsignal(int sig) { return patina_strsignal(sig); }
+
+/* The stdio slice's stream-to-descriptor map and its trap (stdio.c, later in
+ * this translation unit). */
+static int patina_sentinel_fd(FILE *stream);
+__attribute__((noreturn)) static void patina_stdio_trap(const char *symbol);
+
+/* glibc's `psignal` (signal/psignal.c `__fxprintf`): "<prefix>: <description>\n"
+ * (the bare description for a NULL or empty prefix) to the `stderr` stream,
+ * in one write whatever the prefix's length. Unlike `strsignal` it numbers no
+ * realtime signal: any number without a description is "Unknown signal N". */
+static void patina_psignal(int sig, const char *prefix) {
+    char unknown[32];
+    const char *description = patina_sigdescr(sig);
+    if (description == NULL) {
+        patina_append_numbered(unknown, sizeof unknown, "Unknown signal ", sig);
+        description = unknown;
+    }
+    int fd = patina_sentinel_fd(stderr);
+    if (fd < 0) {
+        patina_stdio_trap("psignal");
+    }
+    struct iovec parts[4];
+    int count = 0;
+    if (prefix != NULL && *prefix != '\0') {
+        parts[count++] = (struct iovec){(void *)prefix, strlen(prefix)};
+        parts[count++] = (struct iovec){(void *)": ", 2};
+    }
+    parts[count++] = (struct iovec){(void *)description, strlen(description)};
+    parts[count++] = (struct iovec){(void *)"\n", 1};
+    (void)patina_writev(fd, parts, count, 0);
+}
+void psignal(int sig, const char *prefix) { patina_psignal(sig, prefix); }
 _Noreturn void abort(void) { patina_abort(); }
 int pthread_kill(pthread_t thread, int sig) {
     return patina_pthread_kill((uintptr_t)thread, sig);

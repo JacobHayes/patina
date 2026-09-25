@@ -2289,13 +2289,13 @@ const ROWS: &[SymbolRow] = &[
         "strsignal",
         Platform::Linux,
         Serves::LibcOnly,
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "psignal",
         Platform::Linux,
         Serves::LibcOnly,
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "tgkill",

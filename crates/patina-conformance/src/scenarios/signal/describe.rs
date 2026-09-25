@@ -3,33 +3,28 @@
 //! ("User defined signal 1"), numbers the realtime ones from `SIGRTMIN`
 //! ("Real-time signal 0" for 34) and reports any other number as
 //! "Unknown signal N"; `psignal` writes `"<prefix>: <description>\n"` to
-//! standard error, the bare description with an empty prefix.
+//! standard error, the bare description with an empty prefix and the
+//! whole of a long one, and numbers no realtime signal ("Unknown signal
+//! 34").
 //!
-//! The shim leaves both undefined (registry `Absent`), so the scenario
-//! reaches glibc's definitions through `dlsym`. A libc-only subject, so the
-//! libc vehicle alone.
+//! A libc-only subject, so the libc vehicle alone.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::Probe;
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::ffi::{CStr, CString};
 
-type Strsignal = unsafe extern "C" fn(c_int) -> *mut c_char;
-type Psignal = unsafe extern "C" fn(c_int, *const c_char);
-
-fn resolve(p: &Probe, symbol: &str) -> *mut c_void {
-    let address = p.rec.quiet(|| p.resolve(symbol));
-    p.require(&format!("glibc's {symbol} resolves"), address.is_some());
-    address.unwrap_or(std::ptr::null_mut())
+unsafe extern "C" {
+    fn strsignal(sig: c_int) -> *mut c_char;
+    fn psignal(sig: c_int, prefix: *const c_char);
 }
 
 /// What `psignal(sig, prefix)` writes to fd 2, captured through a pipe.
-fn psignal_output(psignal: Psignal, sig: c_int, prefix: &CStr) -> String {
+fn psignal_output(sig: c_int, prefix: &CStr) -> String {
     let mut fds = [0; 2];
-    let mut text = [0u8; 256];
+    let mut text = [0u8; 1024];
     // SAFETY: descriptor plumbing on this process's own table; fd 2 is
     // restored before anything else writes to it.
     let len = unsafe {
@@ -49,10 +44,6 @@ fn psignal_output(psignal: Psignal, sig: c_int, prefix: &CStr) -> String {
 }
 
 pub fn run(p: &Probe) {
-    // SAFETY: glibc's definitions of these prototypes.
-    let strsignal: Strsignal = unsafe { std::mem::transmute(resolve(p, "strsignal")) };
-    let psignal: Psignal = unsafe { std::mem::transmute(resolve(p, "psignal")) };
-
     for (sig, expected) in [
         (SIGUSR1, "User defined signal 1"),
         (34, "Real-time signal 0"),
@@ -77,13 +68,49 @@ pub fn run(p: &Probe) {
         ("probe", "probe: Segmentation fault\n"),
         ("", "Segmentation fault\n"),
     ] {
-        let text = psignal_output(psignal, SIGSEGV, &CString::new(prefix).unwrap());
+        let text = psignal_output(SIGSEGV, &CString::new(prefix).unwrap());
         p.rec
             .event("psignal", 0)
             .arg("prefix", prefix)
             .field("text", text.as_str())
             .emit();
         p.check(&format!("psignal with prefix {prefix:?}"), text == expected);
+    }
+
+    // Every number around the signal range, each description compared with
+    // the native run's: the named signals, the reserved 32 and 33, the
+    // realtime ones (which psignal does not number) and past SIGRTMAX.
+    for sig in -1..=66 {
+        // SAFETY: strsignal answers a NUL-terminated string.
+        let text = unsafe { CStr::from_ptr(strsignal(sig)) }
+            .to_string_lossy()
+            .into_owned();
+        p.rec
+            .event("strsignal", 0)
+            .arg("sig", sig)
+            .field("text", text.as_str())
+            .emit();
+    }
+    // A prefix longer than any fixed line buffer is written whole.
+    let long = "p".repeat(600);
+    let text = psignal_output(SIGSEGV, &CString::new(long.as_str()).unwrap());
+    p.rec
+        .event("psignal", 0)
+        .arg("prefix_len", long.len() as i64)
+        .field("text_len", text.len() as i64)
+        .emit();
+    p.check(
+        "psignal writes a 600-byte prefix whole",
+        text == format!("{long}: Segmentation fault\n"),
+    );
+
+    for sig in [0, SIGABRT, 32, 34, 64, 65] {
+        let text = psignal_output(sig, c"probe");
+        p.rec
+            .event("psignal", 0)
+            .arg("sig", sig)
+            .field("text", text.as_str())
+            .emit();
     }
 }
 
@@ -93,16 +120,5 @@ pub const SCENARIO: Scenario = Scenario {
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_write],
     symbols: &["strsignal", "psignal"],
-    resolves: &["strsignal", "psignal"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::SignalsThreadsProcess),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim defines neither strsignal nor psignal (registry Absent), and its dlsym answers NULL for a name it does not route (c/posix/dlsym.c patina_dlsym_route), so the scenario cannot reach glibc's definitions",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Exit(101),
-            diagnostic: "signal/describe: cannot continue: glibc's strsignal resolves",
-        },
-    }],
     ..DEFAULTS
 };
