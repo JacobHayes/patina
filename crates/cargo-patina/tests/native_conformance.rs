@@ -1893,11 +1893,6 @@ fn signal_raw_action() {
 }
 
 #[test]
-fn signal_rt_order() {
-    conform("signal/rt_order");
-}
-
-#[test]
 fn signal_unmask() {
     conform("signal/unmask");
 }

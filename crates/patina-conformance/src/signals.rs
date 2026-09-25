@@ -118,6 +118,23 @@ pub fn set_of(sigs: &[c_int]) -> sigset_t {
     }
 }
 
+/// The `siginfo_t` glibc's `sigqueue` fills: `SI_QUEUE` from `pid`/`uid`
+/// with `value` as its `sival_int`.
+pub fn queued_info(pid: pid_t, uid: uid_t, sig: c_int, value: i32) -> siginfo_t {
+    let mut info: siginfo_t = unsafe { std::mem::zeroed() };
+    info.si_signo = sig;
+    info.si_code = SI_QUEUE;
+    #[allow(deprecated)]
+    {
+        // The union starts at offset 16: _pad[0] is padding, then
+        // si_pid, si_uid, si_value.
+        info._pad[1] = pid;
+        info._pad[2] = uid as i32;
+        info._pad[3] = value;
+    }
+    info
+}
+
 pub fn has(set: &sigset_t, sig: c_int) -> bool {
     unsafe { sigismember(set as *const sigset_t as *mut sigset_t, sig) == 1 }
 }

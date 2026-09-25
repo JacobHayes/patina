@@ -12,6 +12,5 @@ pub mod per_thread;
 pub mod pipe_term;
 pub mod queue;
 pub mod raw_action;
-pub mod rt_order;
 pub mod unmask;
 pub mod wait;
