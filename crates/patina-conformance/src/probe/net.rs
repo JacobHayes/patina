@@ -573,6 +573,28 @@ pub fn attributes(payload: &[u8], fixed: usize) -> Vec<(u16, Vec<u8>)> {
 }
 
 /// An `fd_set` over the descriptors in `fds`.
+/// The one value every item of `items` shares, when there are several: a
+/// flood of like items (a `vlen` past `UIO_MAXIOV`, `SCM_MAX_FD`
+/// descriptors) is recorded once with its count, which pins exactly what
+/// the full list would.
+fn shared<T: PartialEq>(items: &[T]) -> Option<&T> {
+    match items {
+        [first, rest @ ..] if !rest.is_empty() && rest.iter().all(|item| item == first) => {
+            Some(first)
+        }
+        _ => None,
+    }
+}
+
+/// `values` as recorded: the shared value and the count when every value
+/// is one (see [`shared`]), the array otherwise.
+fn list_or_shared(values: Vec<Value>) -> Value {
+    match shared(&values) {
+        Some(value) => serde_json::json!({ "each": value, "count": values.len() }),
+        None => Value::Array(values),
+    }
+}
+
 /// The `pollfd` array a poll-shaped call takes for `(fd, events)` pairs.
 pub(super) fn pollfd_array(fds: &[(i32, i16)]) -> Vec<libc::pollfd> {
     fds.iter()
@@ -1013,8 +1035,13 @@ impl Probe {
             Control::ShortHeader => builder.arg("control", "short-header"),
             Control::Rights(fds) => {
                 let mut builder = builder.arg("control", format!("rights x{}", fds.len()));
-                for (index, fd) in fds.iter().enumerate() {
-                    builder = self.fd_arg(builder, &format!("right{index}"), *fd);
+                match shared(fds) {
+                    Some(fd) => builder = self.fd_arg(builder, "right_each", *fd),
+                    None => {
+                        for (index, fd) in fds.iter().enumerate() {
+                            builder = self.fd_arg(builder, &format!("right{index}"), *fd);
+                        }
+                    }
                 }
                 builder
             }
@@ -1260,17 +1287,24 @@ impl Probe {
         let mut builder = self
             .fd_arg(self.event(Syscall::N_sendmmsg, result), "fd", fd)
             .arg("vlen", messages.len())
-            .arg("lens", Value::Array(lens))
+            .arg("lens", list_or_shared(lens))
             .arg("flags", flags);
-        for (index, message) in messages.iter().enumerate() {
-            if let Some(to) = &message.to {
-                builder = to.record(builder, false, &format!("to{index}"));
+        let destinations: Vec<Option<&SockAddr>> =
+            messages.iter().map(|message| message.to.as_ref()).collect();
+        match shared(&destinations) {
+            Some(Some(to)) => builder = to.record(builder, false, "to_each"),
+            _ => {
+                for (index, to) in destinations.iter().enumerate() {
+                    if let Some(to) = to {
+                        builder = to.record(builder, false, &format!("to{index}"));
+                    }
+                }
             }
         }
         let builder = if result >= 0 {
             builder.field(
                 "sent",
-                Value::Array(sent.iter().map(|len| Value::from(*len)).collect()),
+                list_or_shared(sent.iter().map(|len| Value::from(*len)).collect()),
             )
         } else {
             builder
@@ -2347,6 +2381,22 @@ impl Probe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_several_like_items_are_recorded_once() {
+        assert_eq!(shared(&[7, 7, 7]), Some(&7));
+        assert_eq!(shared(&[7, 7, 8]), None);
+        assert_eq!(shared(&[7]), None);
+        assert_eq!(shared::<i32>(&[]), None);
+        assert_eq!(
+            list_or_shared(vec![Value::from(0); 3]),
+            serde_json::json!({ "each": 0, "count": 3 })
+        );
+        assert_eq!(
+            list_or_shared(vec![Value::from(0), Value::from(1)]),
+            serde_json::json!([0, 1])
+        );
+    }
 
     fn roundtrip(addr: SockAddr) {
         let (raw, len) = addr.encode();
