@@ -2133,6 +2133,16 @@ fn thread_pthread_kill() {
 }
 
 #[test]
+fn thread_robust_list() {
+    conform("thread/robust_list");
+}
+
+#[test]
+fn thread_rseq() {
+    conform("thread/rseq");
+}
+
+#[test]
 fn thread_rwlock() {
     conform("thread/rwlock");
 }
@@ -2140,6 +2150,12 @@ fn thread_rwlock() {
 #[test]
 fn thread_tid_clear() {
     conform("thread/tid_clear");
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn thread_tls() {
+    conform("thread/tls");
 }
 
 #[test]

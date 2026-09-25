@@ -205,6 +205,7 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         Need::RestrictedUserfaultfd => restricted::userfaultfd(),
         Need::Aio => asyncio::aio(),
         Need::IoUring => asyncio::io_uring(),
+        Need::RseqRegistered => rseq_registered(),
     }
 }
 
@@ -772,6 +773,36 @@ mod restricted {
 /// the scenario would, then releases it. Refusals classify through
 /// [`refusal`]; a row whose errno names the missing capability says so where
 /// it is used.
+/// Whether glibc registered this thread's rseq area: registering another
+/// is `EINVAL` then. A registration that succeeds (no area was registered)
+/// is undone at once.
+fn rseq_registered() -> Result<(), NotRun> {
+    #[repr(C, align(32))]
+    struct Area([u32; 8]);
+    #[cfg(target_arch = "x86_64")]
+    const SIG: libc::c_long = 0x5305_3053;
+    #[cfg(target_arch = "aarch64")]
+    const SIG: libc::c_long = 0xd428_bc00;
+    let area = Area([0; 8]);
+    let at = &area as *const Area as libc::c_long;
+    // SAFETY: a 32-byte area alive across both calls; the second undoes a
+    // registration the first made, before `area` goes out of scope.
+    let result = unsafe { libc::syscall(libc::SYS_rseq, at, 32, 0, SIG) };
+    if result == 0 {
+        // SAFETY: as above.
+        unsafe { libc::syscall(libc::SYS_rseq, at, 32, 1, SIG) };
+        return Err(NotRun {
+            cause: Cause::Inherited,
+            detail: "rseq of a fresh area succeeded: glibc registered none (glibc.pthread.rseq=0)"
+                .into(),
+        });
+    }
+    match crate::vehicle::errno() {
+        libc::EINVAL => Ok(()),
+        errno => Err(refusal("rseq(another area)", errno)),
+    }
+}
+
 /// The asynchronous I/O interfaces: whether the host offers them at all
 /// (built in, and neither disabled nor filtered for this caller).
 mod asyncio {

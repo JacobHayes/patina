@@ -28,7 +28,7 @@ use serde_json::Value;
 /// more (so its last bit is past them): at least 1024 CPUs' worth, more on a
 /// host configured with more (`sysconf(_SC_NPROCESSORS_CONF)`), recorded as
 /// `sized`.
-fn buffer_len() -> usize {
+pub(crate) fn buffer_len() -> usize {
     // SAFETY: sysconf reads a constant.
     let configured = unsafe { sysconf(_SC_NPROCESSORS_CONF) }.max(1) as usize;
     let long = std::mem::size_of::<c_ulong>();

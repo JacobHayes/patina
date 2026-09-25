@@ -190,6 +190,10 @@ pub enum Need {
     /// (`CONFIG_IO_URING`, `kernel.io_uring_disabled` 0 or the caller in
     /// `kernel.io_uring_group`, no seccomp filter refusing the rows).
     IoUring,
+    /// glibc registered the thread's restartable-sequence area, as it does
+    /// unless `GLIBC_TUNABLES=glibc.pthread.rseq=0` (a second registration
+    /// is `EINVAL`; a kernel without `CONFIG_RSEQ` answers `ENOSYS`).
+    RseqRegistered,
 }
 
 impl Need {
@@ -230,7 +234,8 @@ impl Need {
             | Need::LocalBindOnly
             | Need::RestrictedBpf
             | Need::RestrictedPerf
-            | Need::RestrictedUserfaultfd => false,
+            | Need::RestrictedUserfaultfd
+            | Need::RseqRegistered => false,
         }
     }
 }
@@ -617,8 +622,12 @@ pub const SCENARIOS: &[&Scenario] = &[
     &thread::main_exit::SCENARIO,
     &thread::mutex::SCENARIO,
     &thread::pthread_kill::SCENARIO,
+    &thread::robust_list::SCENARIO,
+    &thread::rseq::SCENARIO,
     &thread::rwlock::SCENARIO,
     &thread::tid_clear::SCENARIO,
+    #[cfg(target_arch = "x86_64")]
+    &thread::tls::SCENARIO,
     &time::clock_res::SCENARIO,
     &time::clock_set::SCENARIO,
     &time::clocks::SCENARIO,
