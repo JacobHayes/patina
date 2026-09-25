@@ -13,5 +13,7 @@ pub mod per_thread;
 pub mod pipe_term;
 pub mod queue;
 pub mod raw_action;
+pub mod restart;
+pub mod restorer;
 pub mod wait;
 pub mod wrappers;

@@ -1996,6 +1996,16 @@ fn signal_raw_action() {
 }
 
 #[test]
+fn signal_restart() {
+    conform("signal/restart");
+}
+
+#[test]
+fn signal_restorer() {
+    conform("signal/restorer");
+}
+
+#[test]
 fn signal_wait() {
     conform("signal/wait");
 }

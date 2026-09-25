@@ -593,6 +593,8 @@ pub const SCENARIOS: &[&Scenario] = &[
     &signal::pipe_term::SCENARIO,
     &signal::queue::SCENARIO,
     &signal::raw_action::SCENARIO,
+    &signal::restart::SCENARIO,
+    &signal::restorer::SCENARIO,
     &signal::wait::SCENARIO,
     &signal::wrappers::SCENARIO,
     &sys::admin::SCENARIO,
