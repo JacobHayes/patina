@@ -1868,6 +1868,11 @@ fn signal_wait() {
 }
 
 #[test]
+fn signal_wrappers() {
+    conform("signal/wrappers");
+}
+
+#[test]
 fn sys_admin() {
     conform("sys/admin");
 }

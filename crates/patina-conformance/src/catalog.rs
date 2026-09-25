@@ -526,6 +526,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &signal::queue::SCENARIO,
     &signal::raw_action::SCENARIO,
     &signal::wait::SCENARIO,
+    &signal::wrappers::SCENARIO,
     &sys::admin::SCENARIO,
     &sys::bpf::SCENARIO,
     &sys::hostname::SCENARIO,
