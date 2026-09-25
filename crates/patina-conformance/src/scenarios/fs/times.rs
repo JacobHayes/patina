@@ -247,7 +247,6 @@ pub fn run(p: &Probe) {
 
     // The descriptor shape: utimensat(fd, NULL, times, 0), which glibc
     // spells futimens(fd, times).
-    pause(p);
     let r = p.utimensat(
         fd,
         None,
@@ -272,7 +271,6 @@ pub fn run(p: &Probe) {
     p.close(location);
 
     // ---- the microsecond and whole-second spellings --------------------
-    pause(p);
     let r = p.utimes(&file, Some([(6000, 123_456), (7000, 654_321)]));
     p.check("utimes with microsecond times", r == 0);
     let micro = fstat(p, fd);
@@ -291,7 +289,6 @@ pub fn run(p: &Probe) {
         micro_now.atime_ns == micro_now.mtime_ns && micro_now.mtime_ns > null_now.mtime_ns,
     );
 
-    pause(p);
     let r = p.utime(&file, Some((8000, 9000)));
     p.check("utime with whole-second times", r == 0);
     let whole = fstat(p, fd);
@@ -313,7 +310,6 @@ pub fn run(p: &Probe) {
     p.require("open d", dirfd >= 0);
     let inner = p.openat(dirfd, "inner", O_WRONLY | O_CREAT | O_EXCL, 0o644);
     p.require("create d/inner", inner >= 0);
-    pause(p);
     let r = p.futimesat(dirfd, "inner", Some([(10_000, 1), (11_000, 2)]));
     p.check("futimesat relative to a directory descriptor", r == 0);
     let via_dir = fstat(p, inner);
@@ -566,12 +562,12 @@ pub const SCENARIO: Scenario = Scenario {
         vehicles: Vehicle::ALL,
         what: "signed/wide filesystem timestamps: the unsigned-nanosecond ABI refuses out-of-range seconds with EINVAL; Linux accepts them and clamps to its filesystem range (checked conversion, never wrap)",
         failure: Failure::Differs(&[
-            Difference::field(190, "utimensat", "errno", Observed::Str("EINVAL")),
-            Difference::field(190, "utimensat", "ret", Observed::Int(-1)),
-            Difference::field(193, "utimes", "errno", Observed::Str("EINVAL")),
-            Difference::field(193, "utimes", "ret", Observed::Int(-1)),
-            Difference::field(196, "utime", "errno", Observed::Str("EINVAL")),
-            Difference::field(196, "utime", "ret", Observed::Int(-1)),
+            Difference::field(186, "utimensat", "errno", Observed::Str("EINVAL")),
+            Difference::field(186, "utimensat", "ret", Observed::Int(-1)),
+            Difference::field(189, "utimes", "errno", Observed::Str("EINVAL")),
+            Difference::field(189, "utimes", "ret", Observed::Int(-1)),
+            Difference::field(192, "utime", "errno", Observed::Str("EINVAL")),
+            Difference::field(192, "utime", "ret", Observed::Int(-1)),
         ]),
     }],
     ..DEFAULTS
