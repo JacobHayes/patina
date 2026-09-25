@@ -604,8 +604,9 @@ pub extern "C" fn patina_sock_connect(fd: c_int, addr: usize, len: i64) -> i64 {
     })())
 }
 
-/// `somaxconn`: the most a `listen` backlog is taken as.
-const SOMAXCONN: i32 = 4096;
+/// `net.core.somaxconn`: the most a `listen` backlog is taken as. macOS's
+/// `kern.ipc.somaxconn` is not declared; its backlog is capped the same.
+const SOMAXCONN: i32 = crate::registry::KERNEL_CONFIG.somaxconn;
 
 /// `listen(2)`.
 #[unsafe(no_mangle)]

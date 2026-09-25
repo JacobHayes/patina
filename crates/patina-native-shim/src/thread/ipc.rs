@@ -5,9 +5,9 @@
 //!
 //! Each kind has its own id space, allocated as `ipc_idr_alloc` does (a
 //! cyclic index with a sequence number that moves when the index wraps), so a
-//! removed id is `EINVAL` from then on. The virtual kernel's limits are the
-//! 6.8 defaults (`SHMMNI` 4096, `SEMMSL`/`SEMMNI` 32000, `SEMOPM` 500,
-//! `MSGMAX` 8192, `MSGMNB` 16384); the one identity owns every object it
+//! removed id is `EINVAL` from then on. The virtual kernel's limits are its
+//! declared configuration's (`registry::KERNEL_CONFIG`: `kernel.shmmni`,
+//! `kernel.sem`, `kernel.msgmax`, …); the one identity owns every object it
 //! creates, so a permission check reads the owner triad. Times are the
 //! virtual realtime clock's seconds, pids the virtual process's.
 //!
@@ -35,7 +35,7 @@
 
 use super::*;
 use crate::mem::{PROT_EXEC, PROT_READ, PROT_WRITE};
-use crate::registry::IDENTITY_PID;
+use crate::registry::{IDENTITY_PID, KERNEL_CONFIG};
 use crate::{E2BIG, EEXIST, EFAULT, EFBIG, EINTR, ENOENT, ERANGE};
 
 const IPC_PRIVATE: i32 = 0;
@@ -76,8 +76,8 @@ const IPC_MIN_CYCLE: i32 = 64;
 /// `ipcid_seq_max()`.
 const SEQ_MAX: i32 = i32::MAX >> IPCMNI_SHIFT;
 
-const SHMMNI: i32 = 4096;
-const SHMMAX: usize = usize::MAX - (1 << 24);
+const SHMMNI: i32 = KERNEL_CONFIG.shmmni;
+const SHMMAX: usize = KERNEL_CONFIG.shmmax as usize;
 const SHM_HUGETLB: i32 = 0o4000;
 const SHM_HUGE_SHIFT: i32 = 26;
 const SHM_HUGE_MASK: u32 = 0x3f;
@@ -90,9 +90,9 @@ const SHM_DEST: u32 = 0o1000;
 /// `SHMLBA`: the page, on both architectures.
 const SHMLBA: usize = crate::mem::PAGE;
 
-const SEMMNI: i32 = 32000;
-const SEMMSL: i32 = 32000;
-const SEMOPM: usize = 500;
+const SEMMNI: i32 = KERNEL_CONFIG.semmni;
+const SEMMSL: i32 = KERNEL_CONFIG.semmsl;
+const SEMOPM: usize = KERNEL_CONFIG.semopm as usize;
 const SEMVMX: i32 = 32767;
 const SEMAEM: i32 = SEMVMX;
 const SEM_UNDO: i16 = 0x1000;
@@ -104,9 +104,9 @@ const GETZCNT: i32 = 15;
 const SETVAL: i32 = 16;
 const SETALL: i32 = 17;
 
-const MSGMNI: i32 = 32000;
-const MSGMAX: usize = 8192;
-const MSGMNB: usize = 16384;
+const MSGMNI: i32 = KERNEL_CONFIG.msgmni;
+const MSGMAX: usize = KERNEL_CONFIG.msgmax as usize;
+const MSGMNB: usize = KERNEL_CONFIG.msgmnb as usize;
 const MSG_NOERROR: i32 = 0o10000;
 const MSG_EXCEPT: i32 = 0o20000;
 const MSG_COPY: i32 = 0o40000;

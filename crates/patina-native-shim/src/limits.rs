@@ -48,8 +48,8 @@ pub(crate) const MACHINE_MEMORY: u64 = 4 << 30;
 /// thread stacks: `max_threads` 32768) gives `RLIMIT_NPROC` and
 /// `RLIMIT_SIGPENDING` `max_threads / 2`.
 const THREADS_HALF: u64 = 16_384;
-/// `fs.nr_open`'s default: the highest `RLIMIT_NOFILE` a hard limit may name.
-const NR_OPEN: u64 = 1 << 20;
+/// `fs.nr_open`: the highest `RLIMIT_NOFILE` a hard limit may name.
+const NR_OPEN: u64 = crate::registry::KERNEL_CONFIG.nr_open;
 
 /// `struct rlimit64`.
 #[repr(C)]

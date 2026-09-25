@@ -11229,8 +11229,8 @@ mod thread {
     }
 
     /// The largest pipe buffer an unprivileged `F_SETPIPE_SZ` may ask for
-    /// (`/proc/sys/fs/pipe-max-size` default).
-    const PIPE_MAX_SIZE: usize = 1 << 20;
+    /// (`fs.pipe-max-size`).
+    const PIPE_MAX_SIZE: usize = crate::registry::KERNEL_CONFIG.pipe_max_size as usize;
     const PIPE_PAGE: usize = 4096;
 
     /// The channel a pipe endpoint's `F_GETPIPE_SZ`/`F_SETPIPE_SZ` act on: the

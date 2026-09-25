@@ -68,10 +68,9 @@ pub struct DarwinEntry {
 pub const VIRTUAL_ABI: &str = "6.8";
 
 /// The virtual kernel's configuration: the sysctls whose values decide what
-/// a privileged row answers, fixed as part of the pinned kernel
-/// ([`VIRTUAL_ABI`]) and never read from the host. The values are the
-/// restrictive defaults of Ubuntu 24.04's kernel (upstream's where Ubuntu
-/// keeps them). A conformance scenario whose answers depend on one declares
+/// the rows answer, fixed as part of the pinned kernel ([`VIRTUAL_ABI`]) and
+/// never read from the host. The values are the defaults of Ubuntu 24.04's
+/// kernel (upstream's where Ubuntu keeps them). A conformance scenario whose answers depend on one declares
 /// a need that the host restricts the same way (`Need::RestrictedBpf`,
 /// `Need::RestrictedPerf`, `Need::RestrictedUserfaultfd`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +99,27 @@ pub struct KernelConfig {
     /// `kernel.dmesg_restrict`. On, every `syslog` action needs
     /// `CAP_SYSLOG` (`EPERM`, before the action is looked at).
     pub dmesg_restrict: bool,
+    /// `fs.nr_open`: the highest `RLIMIT_NOFILE` a hard limit may name.
+    pub nr_open: u64,
+    /// `fs.pipe-max-size`: the largest pipe buffer `F_SETPIPE_SZ` gives a
+    /// caller without `CAP_SYS_RESOURCE` (`EPERM` past it).
+    pub pipe_max_size: u64,
+    /// `net.core.somaxconn`: the most a `listen` backlog is taken as.
+    pub somaxconn: i32,
+    /// `kernel.shmmni` and `kernel.shmmax`: the most shared memory segments,
+    /// and the largest one.
+    pub shmmni: i32,
+    pub shmmax: u64,
+    /// `kernel.sem`'s `SEMMSL`, `SEMOPM` and `SEMMNI`: the most semaphores
+    /// in a set, operations in one `semop`, and sets.
+    pub semmsl: i32,
+    pub semopm: u32,
+    pub semmni: i32,
+    /// `kernel.msgmni`, `kernel.msgmax` and `kernel.msgmnb`: the most message
+    /// queues, the largest message, and a new queue's byte limit.
+    pub msgmni: i32,
+    pub msgmax: u32,
+    pub msgmnb: u32,
 }
 
 /// The one configuration the virtual kernel runs with; see [`KernelConfig`].
@@ -118,6 +138,18 @@ pub const KERNEL_CONFIG: KernelConfig = KernelConfig {
     max_user_namespaces: 0,
     // Ubuntu's default.
     dmesg_restrict: true,
+    nr_open: 1 << 20,
+    pipe_max_size: 1 << 20,
+    somaxconn: 4096,
+    shmmni: 4096,
+    // `ULONG_MAX - (1UL << 24)`.
+    shmmax: u64::MAX - (1 << 24),
+    semmsl: 32_000,
+    semopm: 500,
+    semmni: 32_000,
+    msgmni: 32_000,
+    msgmax: 8192,
+    msgmnb: 16_384,
 };
 
 /// The Darwin kernel release the virtual machine reports on macOS (`uname`'s
