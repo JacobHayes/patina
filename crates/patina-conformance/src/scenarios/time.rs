@@ -3,6 +3,8 @@ pub mod clock_set;
 pub mod clocks;
 pub mod cputime;
 pub mod itimer;
+pub mod libc_clocks;
+pub mod localtime;
 pub mod posix_timer;
 pub mod timerfd;
 pub mod timerfd_fault;

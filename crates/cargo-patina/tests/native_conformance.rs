@@ -1321,6 +1321,16 @@ fn cred_ids() {
 }
 
 #[test]
+fn entropy_getentropy() {
+    conform("entropy/getentropy");
+}
+
+#[test]
+fn entropy_getentropy_fault() {
+    conform("entropy/getentropy_fault");
+}
+
+#[test]
 fn entropy_getrandom() {
     conform("entropy/getrandom");
 }
@@ -2065,6 +2075,16 @@ fn time_cputime() {
 #[test]
 fn time_itimer() {
     conform("time/itimer");
+}
+
+#[test]
+fn time_libc_clocks() {
+    conform("time/libc_clocks");
+}
+
+#[test]
+fn time_localtime() {
+    conform("time/localtime");
 }
 
 #[test]
