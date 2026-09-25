@@ -1726,6 +1726,11 @@ fn proc_absent() {
 }
 
 #[test]
+fn proc_environ() {
+    conform("proc/environ");
+}
+
+#[test]
 fn proc_ids() {
     conform("proc/ids");
 }

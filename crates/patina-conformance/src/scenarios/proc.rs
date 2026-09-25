@@ -1,4 +1,5 @@
 pub mod absent;
+pub mod environ;
 pub mod ids;
 pub mod namespaces;
 pub mod prctl;
