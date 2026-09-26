@@ -23,9 +23,11 @@ pid_t gettid(void) {
     return (pid_t)patina_thread_id();
 }
 
+/* glibc rereads /etc/resolv.conf here; the virtual machine has none, so the
+ * resolver state takes glibc's defaults and the answer is 0. (The state
+ * itself, `__res_state`, is audit-refused, so nothing reads it.) */
 int __res_init(void) {
-    errno = ENOSYS;
-    return -1;
+    return 0;
 }
 
 int res_init(void) {
@@ -313,16 +315,98 @@ int gethostname(char *name, size_t len) {
     return 0;
 }
 #endif
-int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen,
-               struct passwd **result) {
-    (void)uid;
-    (void)pwd;
-    (void)buf;
-    (void)buflen;
-    /* Deterministic "no such user": the guest environment is emptied, so std's
-     * home-directory lookup cleanly Nones and no host user identity leaks.
-     * `result` is declared nonnull by glibc (a NULL compare is a
-     * -Werror=nonnull-compare error under gcc), so the contract is trusted. */
-    *result = NULL;
+/*
+ * The passwd database: the virtual machine's (registry `PASSWD`, Ubuntu
+ * 24.04's container image: root first, uid 1000 the identity's), read as
+ * glibc's nss "files" module reads /etc/passwd (nss/nss_files/files-pwd.c,
+ * nss/nss_readline.c): line by line into the caller's buffer, split in place,
+ * so the entry's strings are the buffer's bytes. A line the buffer cannot
+ * hold with its newline and NUL (and fgets' truncation marker) is ERANGE,
+ * whichever line it is.
+ */
+static int patina_passwd_parse(const char *line, struct passwd *pwd, char *buf, size_t buflen) {
+    size_t length = strlen(line);
+    if (buflen < length + 3) return ERANGE;
+    memcpy(buf, line, length + 1);
+    char *fields[7];
+    char *at = buf;
+    for (int field = 0; field < 7; ++field) {
+        fields[field] = at;
+        while (*at != ':' && *at != '\0') ++at;
+        if (*at == ':') *at++ = '\0';
+    }
+    unsigned long ids[2] = {0, 0};
+    for (int id = 0; id < 2; ++id) {
+        for (const char *digit = fields[2 + id]; *digit >= '0' && *digit <= '9'; ++digit)
+            ids[id] = ids[id] * 10 + (unsigned long)(*digit - '0');
+    }
+    pwd->pw_name = fields[0];
+    pwd->pw_passwd = fields[1];
+    pwd->pw_uid = (uid_t)ids[0];
+    pwd->pw_gid = (gid_t)ids[1];
+    pwd->pw_gecos = fields[4];
+    pwd->pw_dir = fields[5];
+    pwd->pw_shell = fields[6];
+#ifdef __APPLE__
+    pwd->pw_change = 0;
+    pwd->pw_class = buf + length;
+    pwd->pw_expire = 0;
+#endif
     return 0;
 }
+
+/* `result` is declared nonnull by glibc (a NULL compare is a
+ * -Werror=nonnull-compare error under gcc), so the contract is trusted.
+ * glibc's `getXXbyYY_r` leaves errno equal to its answer, 0 when the entry
+ * is found and when it is not (nss/getXXbyYY_r.c `__set_errno (res)`). */
+int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen,
+               struct passwd **result) {
+    *result = NULL;
+    for (uint32_t index = 0;; ++index) {
+        const char *line = patina_passwd_line(index);
+        int error = line == NULL ? 0 : patina_passwd_parse(line, pwd, buf, buflen);
+        if (line == NULL || error != 0) {
+#ifdef __APPLE__
+            if (error != 0) errno = error;
+#else
+            errno = error;
+#endif
+            return error;
+        }
+        if (pwd->pw_uid == uid) {
+            *result = pwd;
+#ifndef __APPLE__
+            errno = 0;
+#endif
+            return 0;
+        }
+    }
+}
+
+#ifdef __linux__
+/* The getpwent walk over the same database: one static entry and buffer, a
+ * cursor setpwent and endpwent rewind, NULL (ENOENT) past the last entry
+ * until they do. */
+static uint32_t patina_passwd_cursor;
+static struct passwd patina_passwd_entry;
+static char patina_passwd_buffer[256];
+
+void setpwent(void) { patina_passwd_cursor = 0; }
+
+void endpwent(void) { patina_passwd_cursor = 0; }
+
+struct passwd *getpwent(void) {
+    const char *line = patina_passwd_line(patina_passwd_cursor);
+    if (line == NULL) {
+        errno = ENOENT;
+        return NULL;
+    }
+    ++patina_passwd_cursor;
+    if (patina_passwd_parse(line, &patina_passwd_entry, patina_passwd_buffer,
+                            sizeof patina_passwd_buffer) != 0) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    return &patina_passwd_entry;
+}
+#endif

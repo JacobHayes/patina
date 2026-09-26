@@ -2888,11 +2888,54 @@ fn fs_image_base() -> Result<MemFs, RuntimeError> {
             let image = FsImage::decode(&bytes).map_err(|error| {
                 RuntimeError::Config(format!("invalid filesystem image: {error}"))
             })?;
-            image.into_memfs().map_err(|error| {
-                RuntimeError::Config(format!("failed to rebuild filesystem image: {error}"))
-            })
+            image
+                .into_memfs()
+                .and_then(with_identity_home)
+                .map_err(|error| {
+                    RuntimeError::Config(format!("failed to rebuild filesystem image: {error}"))
+                })
         }
-        (None, None) => Ok(MemFs::new()),
+        (None, None) => with_identity_home(MemFs::new()).map_err(|error| {
+            RuntimeError::Config(format!("failed to seed the filesystem image: {error}"))
+        }),
+    }
+}
+
+/// The identity's home directory in a fresh image, as the pinned system's
+/// image has it: `/home` 0755, the home 0750, both the identity's (every
+/// entry is). `getpwuid_r` answers that home, so a guest that asks for its
+/// home finds a directory there. A `--mount` corpus that already holds either
+/// keeps its own; a restart snapshot is the previous incarnation's
+/// filesystem, and a home the guest removed stays removed.
+fn with_identity_home(mut fs: MemFs) -> Result<MemFs, patina_dst_abi::EffectError> {
+    use patina_dst_abi::FsClock;
+    use patina_dst_driver_api::FsDriver;
+    for (path, mode) in [("/home", 0o755), (registry::IDENTITY_HOME, 0o750)] {
+        if fs.metadata(path).is_err() {
+            fs.create_directory(FsClock::EPOCH, path, mode)?;
+        }
+    }
+    Ok(fs)
+}
+
+#[cfg(test)]
+mod identity_home_tests {
+    use super::*;
+    use patina_dst_driver_api::FsDriver;
+
+    /// The home `getpwuid_r` answers for the identity is a directory in a
+    /// fresh image, with the pinned system's modes.
+    #[test]
+    fn a_fresh_image_holds_the_identity_home() {
+        let mut fs = with_identity_home(MemFs::new()).unwrap();
+        for (path, mode) in [("/home", 0o755), (registry::IDENTITY_HOME, 0o750)] {
+            let metadata = fs.metadata(path).unwrap();
+            assert_eq!(
+                (metadata.kind, metadata.mode & 0o7777),
+                (patina_dst_abi::FsEntryKind::Directory, mode),
+                "{path}"
+            );
+        }
     }
 }
 
@@ -5315,6 +5358,18 @@ pub(crate) const fn caller() -> Caller {
 pub extern "C" fn patina_uid() -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     caller().uid
+}
+
+/// Entry `index` of the virtual machine's passwd database
+/// (`registry::PASSWD`, file order) as its `/etc/passwd` line, or NULL past
+/// the last: what the C passwd readers answer from.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_passwd_line(index: u32) -> *const c_char {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| registry::PASSWD.get(index))
+        .map_or(std::ptr::null(), |line| line.as_ptr())
 }
 
 /// The caller's group id; see [`patina_uid`].

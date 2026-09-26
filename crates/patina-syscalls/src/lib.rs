@@ -181,6 +181,36 @@ pub const IDENTITY_GID: u32 = 1000;
 /// The virtual machine's node name: what `uname` reports and `gethostname`
 /// answers.
 pub const IDENTITY_HOSTNAME: &str = "patina";
+/// [`IDENTITY_UID`]'s home directory, as its [`PASSWD`] entry names it. The
+/// native filesystem image holds it (mode 0750 under a 0755 `/home`, as the
+/// pinned system's image has them), so the home `getpwuid_r` answers exists.
+pub const IDENTITY_HOME: &str = "/home/ubuntu";
+
+/// The virtual machine's passwd database, what the libc passwd readers
+/// (`getpwuid_r`, the `getpwent` walk) answer from, in file order: the
+/// pinned system's container image's `/etc/passwd` (`ubuntu:24.04`), whose
+/// uid 1000 is [`IDENTITY_UID`]'s entry and whose first entry is root.
+pub const PASSWD: &[&core::ffi::CStr] = &[
+    c"root:x:0:0:root:/root:/bin/bash",
+    c"daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin",
+    c"bin:x:2:2:bin:/bin:/usr/sbin/nologin",
+    c"sys:x:3:3:sys:/dev:/usr/sbin/nologin",
+    c"sync:x:4:65534:sync:/bin:/bin/sync",
+    c"games:x:5:60:games:/usr/games:/usr/sbin/nologin",
+    c"man:x:6:12:man:/var/cache/man:/usr/sbin/nologin",
+    c"lp:x:7:7:lp:/var/spool/lpd:/usr/sbin/nologin",
+    c"mail:x:8:8:mail:/var/mail:/usr/sbin/nologin",
+    c"news:x:9:9:news:/var/spool/news:/usr/sbin/nologin",
+    c"uucp:x:10:10:uucp:/var/spool/uucp:/usr/sbin/nologin",
+    c"proxy:x:13:13:proxy:/bin:/usr/sbin/nologin",
+    c"www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin",
+    c"backup:x:34:34:backup:/var/backups:/usr/sbin/nologin",
+    c"list:x:38:38:Mailing List Manager:/var/list:/usr/sbin/nologin",
+    c"irc:x:39:39:ircd:/run/ircd:/usr/sbin/nologin",
+    c"_apt:x:42:65534::/nonexistent:/usr/sbin/nologin",
+    c"nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin",
+    c"ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash",
+];
 
 /// `6.8.0-139-generic` → `(6, 8, 0)`; `6.10` → `(6, 10, 0)`. `None` when the
 /// text does not start with a dotted release number.

@@ -315,3 +315,28 @@ fn native_rows_are_sorted_and_complete() {
         assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
     }
 }
+
+/// The passwd database is well-formed and agrees with the identity: seven
+/// fields per entry, unique uids, root first, and the one entry for
+/// `IDENTITY_UID` in `IDENTITY_GID`.
+#[test]
+fn the_passwd_database_holds_root_and_the_identity() {
+    let entries: Vec<Vec<&str>> = PASSWD
+        .iter()
+        .map(|line| line.to_str().unwrap().split(':').collect())
+        .collect();
+    assert!(entries.iter().all(|fields| fields.len() == 7));
+    let uids: Vec<u32> = entries
+        .iter()
+        .map(|fields| fields[2].parse().unwrap())
+        .collect();
+    assert_eq!(uids.iter().collect::<BTreeSet<_>>().len(), uids.len());
+    assert_eq!((entries[0][0], uids[0]), ("root", 0));
+    let identity: Vec<&Vec<&str>> = entries
+        .iter()
+        .filter(|fields| fields[2] == IDENTITY_UID.to_string())
+        .collect();
+    assert_eq!(identity.len(), 1);
+    assert_eq!(identity[0][3], IDENTITY_GID.to_string());
+    assert_eq!(identity[0][5], IDENTITY_HOME);
+}

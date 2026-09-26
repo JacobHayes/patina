@@ -220,6 +220,9 @@ struct patina_tm {
     const char *zone;
 };
 int32_t patina_localtime(int64_t t, const char *tz, const char *tzdir, struct patina_tm *out);
+/* Entry `index` of the virtual machine's passwd database as its /etc/passwd
+ * line (registry PASSWD, file order), or NULL past the last. */
+const char *patina_passwd_line(uint32_t index);
 int32_t patina_clock_now(uint32_t clock, uint64_t *nanos);
 int32_t patina_sleep_until(uint32_t clock, uint64_t deadline_nanos);
 int patina_sleep_until_remaining(uint32_t clock_id, uint64_t deadline_nanos, int64_t *remaining);
