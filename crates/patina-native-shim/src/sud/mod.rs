@@ -66,6 +66,9 @@ use x86_64::*;
 
 // The row-side entries the descriptor close and seek paths in `lib.rs` call.
 pub(crate) use fs::{release_dir_iteration, seek_dir_iteration};
+/// A new thread inherits its creator's locked shadow-stack features.
+#[cfg(target_arch = "x86_64")]
+pub(crate) use thread_pointer::spawned as thread_pointer_spawned;
 
 use linux_raw_sys::errno;
 use linux_raw_sys::general as uapi;
@@ -1188,6 +1191,10 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_mremap, |_, a| sys_mremap(a)),
     (Syscall::N_msync, |_, a| sys_msync(a)),
     (Syscall::N_mprotect, |_, a| sys_mprotect(a)),
+    (Syscall::N_pkey_mprotect, |_, a| sys_pkey_mprotect(a)),
+    (Syscall::N_pkey_alloc, |_, a| sys_pkey_alloc(a)),
+    (Syscall::N_pkey_free, |_, a| sys_pkey_free(a)),
+    (Syscall::N_map_shadow_stack, |_, a| sys_map_shadow_stack(a)),
     (Syscall::N_madvise, mem_passthrough),
     (Syscall::N_brk, mem_passthrough),
     (Syscall::N_mincore, mem_passthrough),

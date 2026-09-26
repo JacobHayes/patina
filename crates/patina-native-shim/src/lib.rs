@@ -10034,6 +10034,9 @@ mod thread {
         // A new thread inherits its creator's memory policy.
         #[cfg(target_os = "linux")]
         crate::numa::spawned(deterministic_thread_id(), tid_of(task));
+        // And its locked shadow-stack features.
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        crate::sud::thread_pointer_spawned(deterministic_thread_id(), tid_of(task));
         // The semaphore must exist before the host thread parks on it.
         state.sems.insert(task, Arc::new(baton::Semaphore::new()));
         #[cfg(target_os = "linux")]

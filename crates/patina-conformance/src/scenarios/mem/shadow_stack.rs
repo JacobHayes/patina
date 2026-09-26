@@ -9,6 +9,10 @@
 //! Shadow stacks are hardware: the scenario needs one to map.
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
+#[cfg(target_arch = "x86_64")]
+use crate::catalog::{Gap, Status};
+#[cfg(target_arch = "x86_64")]
+use crate::compare::{Difference, Ending, Failure, Observed};
 use crate::probe::{At, Probe, neg, page_size};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -71,6 +75,34 @@ pub const SCENARIO: Scenario = Scenario {
     covers: &[Syscall::N_map_shadow_stack],
     vehicles: Vehicle::KERNEL,
     needs: &[Need::ShadowStack],
-    gaps: &[unmodeled_trap!("map_shadow_stack", Vehicle::KERNEL, 0)],
+    #[cfg(target_arch = "x86_64")]
+    gaps: &[
+        Gap {
+            status: Status::ByDesign,
+            vehicles: Vehicle::KERNEL,
+            what: "the virtual CPU has no user shadow stacks, on any host, so its answers do not depend on whether the host's CPU has them (this oracle's does, many do not); map_shadow_stack answers EOPNOTSUPP before any argument, as 6.8 does without USER_SHSTK (patina-native-shim src/sud/mem.rs)",
+            failure: Failure::Differs(&[
+                Difference::field(0, "map_shadow_stack", "errno", Observed::Str("EOPNOTSUPP")),
+                Difference::check(1, "size 0 is EINVAL"),
+                Difference::field(2, "map_shadow_stack", "errno", Observed::Str("EOPNOTSUPP")),
+                Difference::check(3, "a token at a size that is not a multiple of 8 is EINVAL"),
+                Difference::field(4, "map_shadow_stack", "errno", Observed::Str("EOPNOTSUPP")),
+                Difference::check(5, "an unknown flag is EINVAL"),
+                Difference::field(6, "map_shadow_stack", "ret", Observed::Int(-1)),
+                Difference::field(6, "map_shadow_stack", "errno", Observed::Str("EOPNOTSUPP")),
+                Difference::field(6, "map_shadow_stack", "fields.aligned", Observed::Null),
+            ]),
+        },
+        Gap {
+            status: Status::ByDesign,
+            vehicles: Vehicle::KERNEL,
+            what: "with no shadow stack to map on the virtual CPU (the gap above), the scenario cannot go on to judge a mapping",
+            failure: Failure::Stops {
+                events: 7,
+                ending: Ending::Exit(101),
+                diagnostic: "mem/shadow_stack: cannot continue: map a shadow stack",
+            },
+        },
+    ],
     ..DEFAULTS
 };

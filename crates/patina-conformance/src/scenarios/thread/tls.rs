@@ -9,9 +9,15 @@
 //!   (the TCB's self pointer at `%fs:0`), and setting it to itself answers
 //!   0 and changes nothing; `ARCH_GET_GS` reports no GS base; CPUID does
 //!   not fault (`ARCH_GET_CPUID` 1); an unknown code is `EINVAL` and a NULL
-//!   out-pointer `EFAULT`. The answers that are the CPU's as much as the
-//!   kernel's (a base past the user address space, setting the CPUID mode)
-//!   are `thread/tls_cpu`'s, which needs the virtual machine's CPU;
+//!   out-pointer `EFAULT`. The shadow-stack codes answer what they answer
+//!   with no feature enabled, whatever the CPU (arch/x86/kernel/shstk.c
+//!   `shstk_prctl`): the status reports no feature, two features at once or
+//!   none are `EINVAL`, a lock answers 0, and then a locked feature is
+//!   `EPERM` before anything else (enabling or disabling one is the CPU's
+//!   answer, which patina's unit tests pin). The answers that are the CPU's
+//!   as much as the kernel's (a base past the user address space, setting
+//!   the CPUID mode) are `thread/tls_cpu`'s, which needs the virtual
+//!   machine's CPU;
 //! * `modify_ldt` returns an `int` in a zero-extended register (the kernel
 //!   casts its result to `unsigned int`), so its errors reach the caller as
 //!   positive values, not `-errno`: an unknown function is `ENOSYS` so
@@ -38,6 +44,13 @@ pub(super) const ARCH_SET_FS: i64 = 0x1002;
 const ARCH_GET_FS: i64 = 0x1003;
 const ARCH_GET_GS: i64 = 0x1004;
 const ARCH_GET_CPUID: i64 = 0x1011;
+/// The shadow-stack codes and features (arch/x86/include/uapi/asm/prctl.h).
+const ARCH_SHSTK_ENABLE: i64 = 0x5001;
+const ARCH_SHSTK_DISABLE: i64 = 0x5002;
+const ARCH_SHSTK_LOCK: i64 = 0x5003;
+const ARCH_SHSTK_STATUS: i64 = 0x5005;
+const ARCH_SHSTK_SHSTK: i64 = 1 << 0;
+const ARCH_SHSTK_WRSS: i64 = 1 << 1;
 /// A code `arch_prctl` does not define.
 const ARCH_UNKNOWN: i64 = 0x9999;
 /// `modify_ldt` functions: read, write (the modern form), read the default.
@@ -131,6 +144,43 @@ pub fn run(p: &Probe) {
     ] {
         p.check(what, arch_prctl(p, code, arg, arg_what) == neg(errno));
     }
+
+    let mut features = u64::MAX;
+    p.check(
+        "the shadow-stack status reports no feature",
+        arch_prctl(
+            p,
+            ARCH_SHSTK_STATUS,
+            &mut features as *mut u64 as i64,
+            "out",
+        ) == 0
+            && features == 0,
+    );
+    for (what, code, arg, arg_what) in [
+        (
+            "two features at once are EINVAL",
+            ARCH_SHSTK_ENABLE,
+            ARCH_SHSTK_SHSTK | ARCH_SHSTK_WRSS,
+            "shstk|wrss",
+        ),
+        (
+            "disabling no feature is EINVAL",
+            ARCH_SHSTK_DISABLE,
+            0,
+            "none",
+        ),
+    ] {
+        p.check(what, arch_prctl(p, code, arg, arg_what) == neg(EINVAL));
+    }
+    // Locked first, the shadow stack is never enabled, on any CPU.
+    p.check(
+        "locking the shadow stack answers 0",
+        arch_prctl(p, ARCH_SHSTK_LOCK, ARCH_SHSTK_SHSTK, "shstk") == 0,
+    );
+    p.check(
+        "enabling a locked feature is EPERM",
+        arch_prctl(p, ARCH_SHSTK_ENABLE, ARCH_SHSTK_SHSTK, "shstk") == neg(EPERM),
+    );
 
     let mut buf = [0xaau8; 64];
     p.check(

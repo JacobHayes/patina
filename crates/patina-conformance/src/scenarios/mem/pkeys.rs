@@ -10,7 +10,11 @@
 //! Keys are hardware: the scenario needs one to allocate.
 
 use super::fault::{self, Repair};
+#[cfg(target_arch = "x86_64")]
+use crate::catalog::{Arc, Gap, Status};
 use crate::catalog::{DEFAULTS, Need, Scenario};
+#[cfg(target_arch = "x86_64")]
+use crate::compare::{Difference, Ending, Failure, Observed};
 use crate::probe::{Probe, RW, neg, page_size};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -124,6 +128,40 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     vehicles: Vehicle::KERNEL,
     needs: &[Need::ProtectionKeys],
-    gaps: &[unmodeled_trap!("pkey_alloc", Vehicle::KERNEL, 1)],
+    #[cfg(target_arch = "x86_64")]
+    gaps: &[
+        Gap {
+            status: Status::ByDesign,
+            vehicles: Vehicle::KERNEL,
+            what: "the virtual CPU has no protection keys, on any host: keys are CPU state a guest reads and writes without a syscall (rdpkru/wrpkru), so no host's keys could answer the same everywhere; the rows answer as 6.8 does without OSPKE (patina-native-shim src/sud/mem.rs): the first pkey_alloc EINVAL, later ones ENOSPC, and every key but -1 EINVAL",
+            failure: Failure::Differs(&[
+                Difference::field(1, "pkey_alloc", "ret", Observed::Int(-1)),
+                Difference::field(1, "pkey_alloc", "errno", Observed::Str("EINVAL")),
+                Difference::check(2, "a key allocates"),
+                Difference::field(7, "pkey_mprotect", "args.pkey", Observed::Int(-22)),
+                Difference::field(7, "pkey_mprotect", "ret", Observed::Int(-1)),
+                Difference::field(7, "pkey_mprotect", "errno", Observed::Str("EINVAL")),
+                Difference::check(8, "tag a page with the key"),
+                Difference::field(14, "pkey_alloc", "ret", Observed::Int(-1)),
+                Difference::field(14, "pkey_alloc", "errno", Observed::Str("ENOSPC")),
+                Difference::check(15, "a write-disabled key allocates"),
+                Difference::check(16, "its rights are this thread's PKRU bits for it"),
+                Difference::field(17, "pkey_mprotect", "args.pkey", Observed::Int(-28)),
+                Difference::field(17, "pkey_mprotect", "ret", Observed::Int(-1)),
+                Difference::field(17, "pkey_mprotect", "errno", Observed::Str("EINVAL")),
+                Difference::check(18, "tag the second page with it"),
+            ]),
+        },
+        Gap {
+            status: Status::Pending(Arc::SignalsThreadsProcess),
+            vehicles: Vehicle::KERNEL,
+            what: "a guest SIGSEGV handler is refused: with the rdtsc trap armed (PR_TSC_SIGSEGV, tsc.rs) the shim reserves SIGSEGV and patina_signal_action (thread/signals.rs) aborts the registration instead of routing faults outside its own rdtsc sites to the guest's handler",
+            failure: Failure::Stops {
+                events: 20,
+                ending: Ending::Signal(libc::SIGABRT),
+                diagnostic: "patina native shim fatal: reserved signal registration would disable deterministic containment",
+            },
+        },
+    ],
     ..DEFAULTS
 };

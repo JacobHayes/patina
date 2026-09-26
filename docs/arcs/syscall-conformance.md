@@ -294,9 +294,12 @@ forwards into the same dispatcher instead of its two-number allowlist.
   answers for one node; resource limits are a 16-resource virtual table and
   locking is bookkeeping against its `RLIMIT_MEMLOCK`; no hugetlb pages are
   configured and THP is off;
-  `mincore`/`remap_file_pages` pass through; `membarrier` is modeled. Left as
-  named traps: protection keys and shadow stacks (CPU state), `memfd_secret`
-  (needs a page-cache fill the filesystem does not refuse), and the libc
+  `mincore`/`remap_file_pages` pass through; `membarrier` is modeled. The
+  virtual CPU has neither protection keys nor user shadow stacks, so those rows
+  answer as 6.8 does on a CPU without them (`ByDesign` against a host that has
+  them).
+  Left as named traps: `memfd_secret` (needs a page-cache fill the filesystem
+  does not refuse), and the libc
   `shm_*`/`sem_*`/`mq_*` and SysV wrappers (still refused by the
   audit). Scenarios for the resource limits other than `RLIMIT_MEMLOCK` come
   with the time + identity family. Locking and populating need

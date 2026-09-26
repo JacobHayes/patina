@@ -231,7 +231,9 @@ impl NativeEscape {
 }
 
 /// The escape category of a *host-identity* instruction finding: an inline read
-/// of the host CPU's own identity (x86-64 `cpuid`).
+/// of the host CPU's own identity (x86-64 `cpuid`), or of its protection-key
+/// rights register (`rdpkru`/`wrpkru`), which contradicts the virtual CPU's
+/// declared lack of keys on a host that has them.
 ///
 /// It is the one instruction category that INFORMS rather than refuses. Every
 /// other category the scan emits is a containment failure; this one is a
@@ -297,6 +299,7 @@ pub fn render_host_identity_note(sites: &[NativeEscape]) -> Option<String> {
         return None;
     }
     let mnemonics: BTreeSet<&str> = sites.iter().filter_map(|site| site.mnemonic).collect();
+    let keys = mnemonics.iter().any(|mnemonic| mnemonic.ends_with("pkru"));
     let mut note = format!(
         "host-identity reads ({}, {} site{}): unmanaged — patina neither traps nor models the host \
          CPU's identity, so the guest reads the real feature bits. This is NOT a refusal and NOT an \
@@ -309,6 +312,13 @@ pub fn render_host_identity_note(sites: &[NativeEscape]) -> Option<String> {
         sites.len(),
         if sites.len() == 1 { "" } else { "s" }
     );
+    if keys {
+        note.push_str(
+            " rdpkru/wrpkru reach the host CPU's protection-key register, which contradicts the \
+             declared virtual CPU (no protection keys): a host with keys answers its default \
+             rights, one without raises SIGILL.",
+        );
+    }
     for site in sites {
         note.push_str(&format!("\n  {} ({})", site.symbol, site.category));
         for provenance in &site.provenance {
@@ -2446,6 +2456,17 @@ mod x86_scan {
             if attr.group == Group::Seven && md == 3 && reg == 7 && rm == 1 {
                 cat = Some(("cpu-nondeterminism", "rdtscp"));
             }
+            // `mod=3, reg=5, rm=6/7` are RDPKRU/WRPKRU: the thread's
+            // protection-key rights register, the host CPU's own (a PKU host
+            // answers its default PKRU, any other raises SIGILL), where the
+            // virtual CPU declares no keys. Host-identity, visible and not
+            // refused, as cpuid: the conformance probe itself reads it.
+            if attr.group == Group::Seven && md == 3 && reg == 5 && (rm == 6 || rm == 7) {
+                cat = Some((
+                    super::HOST_IDENTITY_CATEGORY,
+                    if rm == 6 { "rdpkru" } else { "wrpkru" },
+                ));
+            }
             // group 15 (`f3 [REX.W] 0f ae`, register form): FSGSBASE. Only
             // WRFSBASE (reg 2) moves the thread pointer. The other three are
             // deliberately not findings:
@@ -2987,6 +3008,23 @@ mod x86_scan {
         /// reported NOTHING: the fastant probe found 11 cpuid sites by objdump in
         /// a binary whose 2 rdtsc sites the audit did report. RED: drop the `0xA2`
         /// arm and the category is `None` again.
+        /// `rdpkru`/`wrpkru` (`0f 01 ee`/`ef`, group 7's `mod=3, reg=5,
+        /// rm=6/7`) are host-identity: visible, not refused. RED: without
+        /// the group-7 arm they classify as nothing.
+        #[test]
+        fn classifies_protection_key_access_as_host_identity() {
+            for (bytes, mnemonic) in [
+                ([0x0f, 0x01, 0xee], "rdpkru"),
+                ([0x0f, 0x01, 0xef], "wrpkru"),
+            ] {
+                assert_eq!(decode_full(&bytes).1, Some(("host-identity", mnemonic)));
+                assert_eq!(decode(&bytes).0, 3);
+            }
+            // The group's other register forms keep their classes.
+            assert_eq!(decode(&[0x0f, 0x01, 0xf9]).1, Some("cpu-nondeterminism"));
+            assert_eq!(decode(&[0x0f, 0x01, 0xd0]).1, None, "xgetbv");
+        }
+
         #[test]
         fn classifies_cpuid_as_host_identity() {
             assert_eq!(

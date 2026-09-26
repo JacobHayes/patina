@@ -15,7 +15,8 @@
 //! reads (the FS and GS bases, the LDT) is the host kernel's on the calling
 //! thread, and so is a GS base, which neither glibc nor the shim uses in user
 //! space. The virtual CPU has no CPUID faulting, so `cpuid` never faults and
-//! the mode cannot be set.
+//! the mode cannot be set, and it has no user shadow stacks, so the
+//! shadow-stack codes answer as 6.8 does on such a CPU.
 
 use super::*;
 
@@ -26,17 +27,80 @@ const ARCH_GET_FS: i32 = 0x1003;
 const ARCH_GET_GS: i32 = 0x1004;
 const ARCH_GET_CPUID: i32 = 0x1011;
 const ARCH_SET_CPUID: i32 = 0x1012;
+const ARCH_SHSTK_ENABLE: i32 = 0x5001;
+const ARCH_SHSTK_DISABLE: i32 = 0x5002;
+const ARCH_SHSTK_LOCK: i32 = 0x5003;
+const ARCH_SHSTK_UNLOCK: i32 = 0x5004;
+const ARCH_SHSTK_STATUS: i32 = 0x5005;
+/// The shadow-stack features: the shadow stack itself, and `WRSS`.
+const ARCH_SHSTK_SHSTK: u64 = 1 << 0;
+const ARCH_SHSTK_WRSS: u64 = 1 << 1;
 /// The codes 6.8 (Ubuntu's configuration) answers that are not modeled: the
-/// xstate permissions (`ARCH_GET_XCOMP_SUPP` .. `ARCH_REQ_XCOMP_GUEST_PERM`),
-/// mapping a vDSO (`ARCH_MAP_VDSO_32`, `ARCH_MAP_VDSO_64`; the x32 one is not
-/// configured) and shadow stacks (`ARCH_SHSTK_ENABLE` .. `ARCH_SHSTK_STATUS`).
-/// Linear address masking (`0x4001`..`0x4004`) is not configured either, so
-/// those codes are `EINVAL` like any other.
-const UNMODELED_CODES: [(std::ops::RangeInclusive<i32>, &str); 3] = [
+/// xstate permissions (`ARCH_GET_XCOMP_SUPP` .. `ARCH_REQ_XCOMP_GUEST_PERM`)
+/// and mapping a vDSO (`ARCH_MAP_VDSO_32`, `ARCH_MAP_VDSO_64`; the x32 one is
+/// not configured). Linear address masking (`0x4001`..`0x4004`) is not
+/// configured either, so those codes are `EINVAL` like any other.
+const UNMODELED_CODES: [(std::ops::RangeInclusive<i32>, &str); 2] = [
     (0x1021..=0x1025, "the xstate permission codes"),
     (0x2002..=0x2003, "mapping a vDSO"),
-    (0x5001..=0x5005, "the shadow stack codes"),
 ];
+
+/// Each thread's locked shadow-stack features (`thread.features_locked`), by
+/// thread id; a thread absent has none. A new thread inherits its creator's:
+/// clone copies the thread struct.
+static SHSTK_LOCKED: crate::SpinMutex<std::collections::BTreeMap<c_int, u64>> =
+    crate::SpinMutex::new(std::collections::BTreeMap::new());
+
+/// A new thread inherits its creator's locked shadow-stack features.
+pub(crate) fn spawned(parent: c_int, child: c_int) {
+    let mut locked = SHSTK_LOCKED.lock();
+    if let Some(features) = locked.get(&parent).copied() {
+        locked.insert(child, features);
+    }
+}
+
+/// `shstk_prctl` (arch/x86/kernel/shstk.c) for the calling thread, on 6.8
+/// with `CONFIG_X86_USER_SHADOW_STACK` and a CPU without
+/// `X86_FEATURE_USER_SHSTK`, where no feature is ever enabled: `STATUS`
+/// reports none (`Ok(Some(0))`, for the caller to write), `LOCK` records the
+/// features; for the rest (`UNLOCK` from the thread itself takes the enable
+/// path, as the kernel's does), a locked feature is `EPERM`, more than one
+/// `EINVAL`, and then enabling or disabling the shadow stack or `WRSS` is
+/// `EOPNOTSUPP` (`shstk_setup`, `shstk_disable`, `wrss_control`), any other
+/// `EINVAL`.
+fn shstk_prctl(locked: &mut u64, code: i32, features: u64) -> Result<Option<u64>, u32> {
+    match code {
+        ARCH_SHSTK_STATUS => Ok(Some(0)),
+        ARCH_SHSTK_LOCK => {
+            *locked |= features;
+            Ok(None)
+        }
+        _ if features & *locked != 0 => Err(errno::EPERM),
+        _ if features.count_ones() > 1 => Err(errno::EINVAL),
+        _ if features & (ARCH_SHSTK_SHSTK | ARCH_SHSTK_WRSS) != 0 => Err(errno::EOPNOTSUPP),
+        _ => Err(errno::EINVAL),
+    }
+}
+
+/// `arch_prctl`'s shadow-stack codes for the calling thread
+/// ([`shstk_prctl`]); `STATUS` writes the features to `arg` (`EFAULT` if it
+/// cannot).
+fn sys_shstk(code: i32, arg: u64) -> i64 {
+    let tid = crate::thread::deterministic_thread_id();
+    let answer = {
+        let mut locked = SHSTK_LOCKED.lock();
+        let features = locked.entry(tid).or_default();
+        shstk_prctl(features, code, arg)
+    };
+    match answer {
+        Ok(Some(status)) => match crate::uaccess::write(arg as usize, &status) {
+            Ok(()) => 0,
+            Err(errno) => -i64::from(errno),
+        },
+        Ok(None) => 0,
+        Err(errno) => -i64::from(errno),
+    }
+}
 
 /// `TASK_SIZE_MAX` with 4-level paging, the virtual machine's: a base at or
 /// past it is `EPERM`.
@@ -96,6 +160,8 @@ pub(super) fn sys_arch_prctl(nr: i64, a: [u64; 6]) -> i64 {
         // at the argument.
         ARCH_GET_CPUID => 1,
         ARCH_SET_CPUID => -i64::from(errno::ENODEV),
+        ARCH_SHSTK_ENABLE | ARCH_SHSTK_DISABLE | ARCH_SHSTK_LOCK | ARCH_SHSTK_UNLOCK
+        | ARCH_SHSTK_STATUS => sys_shstk(code, arg),
         ARCH_SET_GS if arg >= TASK_SIZE_MAX => -i64::from(errno::EPERM),
         ARCH_SET_GS => host(nr, passed),
         ARCH_SET_FS if arg >= TASK_SIZE_MAX => -i64::from(errno::EPERM),
@@ -181,4 +247,41 @@ fn write_ldt(nr: i64, ptr: u64, bytecount: u64, old_mode: bool) -> i64 {
         if old_mode { LDT_WRITE_OLD } else { LDT_WRITE },
         desc.entry_number
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shadow-stack codes on a CPU without user shadow stacks, in
+    /// sequence on one thread: the status reports no feature; enabling or
+    /// disabling a feature is `EOPNOTSUPP` until it is locked, `EPERM` after;
+    /// two features at once, or none, is `EINVAL`.
+    #[test]
+    fn shadow_stack_codes_answer_as_a_cpu_without_them() {
+        let mut locked = 0;
+        let rows = [
+            (ARCH_SHSTK_STATUS, 0, Ok(Some(0))),
+            (ARCH_SHSTK_ENABLE, ARCH_SHSTK_SHSTK, Err(errno::EOPNOTSUPP)),
+            (ARCH_SHSTK_DISABLE, ARCH_SHSTK_SHSTK, Err(errno::EOPNOTSUPP)),
+            (ARCH_SHSTK_DISABLE, ARCH_SHSTK_WRSS, Err(errno::EOPNOTSUPP)),
+            (ARCH_SHSTK_UNLOCK, ARCH_SHSTK_SHSTK, Err(errno::EOPNOTSUPP)),
+            (
+                ARCH_SHSTK_ENABLE,
+                ARCH_SHSTK_SHSTK | ARCH_SHSTK_WRSS,
+                Err(errno::EINVAL),
+            ),
+            (ARCH_SHSTK_DISABLE, 0, Err(errno::EINVAL)),
+            (ARCH_SHSTK_LOCK, ARCH_SHSTK_SHSTK, Ok(None)),
+            (ARCH_SHSTK_ENABLE, ARCH_SHSTK_SHSTK, Err(errno::EPERM)),
+            (ARCH_SHSTK_ENABLE, ARCH_SHSTK_WRSS, Err(errno::EOPNOTSUPP)),
+        ];
+        for (index, (code, features, expected)) in rows.into_iter().enumerate() {
+            assert_eq!(
+                shstk_prctl(&mut locked, code, features),
+                expected,
+                "row {index}"
+            );
+        }
+    }
 }
