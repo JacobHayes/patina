@@ -7,6 +7,7 @@
  * - teardown: a thread printing in a loop while `main` exits; an atexit
  *   handler then prints. Only the root task runs after `main`, so the handler
  *   must neither wait for the printing thread nor refuse the run.
+ * - env-teardown: the same with `setenv` and the environment's lock.
  * - errno: the first write to stdout leaves errno as it found it.
  * - deadlock: buffered output, then a run patina refuses (a normal mutex
  *   relocked by its holder): the output reaches the capture before the abort.
@@ -33,6 +34,25 @@ static int teardown(void) {
     exit(0);
 }
 
+static void env_at_end(void) {
+    setenv("PROBE_AT_EXIT", "bye", 1);
+    printf("atexit handler set %s\n", getenv("PROBE_AT_EXIT"));
+}
+
+static void *setting(void *unused) {
+    (void)unused;
+    for (int i = 0;; ++i) setenv("PROBE_THREAD", i % 2 ? "odd" : "even", 1);
+    return NULL;
+}
+
+static int env_teardown(void) {
+    atexit(env_at_end);
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, setting, NULL) != 0) return 1;
+    for (int i = 0; i < 50; ++i) setenv("PROBE_MAIN", i % 2 ? "odd" : "even", 1);
+    exit(0);
+}
+
 static int first_write_errno(void) {
     errno = 0;
     printf("first line\n");
@@ -53,6 +73,7 @@ static int deadlock(void) {
 int main(int argc, char **argv) {
     const char *which = argc > 1 ? argv[1] : "";
     if (strcmp(which, "teardown") == 0) return teardown();
+    if (strcmp(which, "env-teardown") == 0) return env_teardown();
     if (strcmp(which, "errno") == 0) return first_write_errno();
     if (strcmp(which, "deadlock") == 0) return deadlock();
     fprintf(stderr, "unknown case: %s\n", which);

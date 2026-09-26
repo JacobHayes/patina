@@ -147,6 +147,7 @@ static int32_t patina_at(int dirfd) {
     return dirfd == AT_FDCWD ? PATINA_AT_FDCWD : dirfd;
 }
 
+#ifdef __APPLE__
 /* Loud fail-closed: one deterministic diagnostic line on captured stderr,
  * then a recoverable ENOSYS. Never falls through to the host. The line goes
  * to the captured-stderr SINK directly (not through the interposed write on
@@ -157,6 +158,8 @@ static int patina_posix_deny(const char *message) {
     errno = ENOSYS;
     return -1;
 }
+
+#endif
 
 #ifdef __linux__
 /*

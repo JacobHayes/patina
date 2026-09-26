@@ -100,18 +100,19 @@ void patina_note_boundary_symbol(const char *symbol);
 void patina_init_panic_policy(void);
 void patina_note_startup_constructor_finished(void);
 void patina_control_set_entry(const char *entry);
-char *patina_getenv(const char *name);
 /*
- * Deterministic guest environment mutation. These update the runtime's guest
- * env map — the single source of truth the getenv interposer reads — and then
- * republish the process environ array through the registered installer, so a
- * direct environ walk can never disagree with a getenv lookup. Mutation is
- * guest-driven and unrecorded; only the startup map lives in trace metadata.
- * `patina_publish_environ` republishes without mutating, for the startup path.
+ * The guest environment is the process's `environ` array, which the POSIX
+ * layer runs glibc's environment functions over. The runtime publishes the
+ * array the run starts with (the startup `--env` map, the one piece the trace
+ * records) through the registered installer; `patina_publish_environ` does so
+ * for the startup path. The gates decide when the C functions may answer:
+ * `patina_env_read_gate` 1 to read `environ`, 0 to answer NULL (before the
+ * startup constructor finishes); `patina_env_write_gate` 0 to mutate it, -1
+ * with patina_errno ENOSYS without an installed runtime. Both abort on a
+ * stored init error or an access that beat a deferred harness install.
  */
-int32_t patina_setenv(const char *name, const char *value, int32_t overwrite);
-int32_t patina_unsetenv(const char *name);
-int32_t patina_clearenv(void);
+int32_t patina_env_read_gate(void);
+int32_t patina_env_write_gate(void);
 void patina_register_environ_installer(void (*installer)(char **));
 void patina_publish_environ(void);
 /*

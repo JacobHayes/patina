@@ -1,6 +1,6 @@
 /*
  * Environment: the scrubbed host environment, the control-plane snapshot, and
- * the modeled getenv/setenv/unsetenv/clearenv map (putenv fails closed).
+ * glibc's getenv/setenv/unsetenv/putenv/clearenv over the process's `environ`.
  *
  * This file is one family slice of the native shim's single C translation unit:
  * `c/patina_posix.c` #includes every slice under `c/posix/` in a fixed order, so the
@@ -76,12 +76,10 @@ static void patina_scrub_environ(void) {
     patina_host_environ[0] = NULL;
 }
 
-/* Publish a deterministic environ array built by the Rust layer from the guest
- * env map. Direct environ readers — the Linux `environ` global, Darwin
- * `_NSGetEnviron`, std::env::vars — then see exactly what the getenv interposer
- * answers, before and after any guest setenv/unsetenv. Storage is owned (and
- * deliberately leaked) by the Rust side; this only repoints the global, which is
- * what a libc setenv does when it grows the array. */
+/* Point `environ` at `next`: the startup array the Rust layer built from the
+ * run's `--env` map (patina_publish_environ), or one the mutators below grew
+ * (NULL for clearenv), as a libc setenv repoints the global when it grows the
+ * array. */
 static void patina_environ_install(char **next) {
 #ifdef __APPLE__
     *_NSGetEnviron() = next;
@@ -102,53 +100,207 @@ const char *patina_control_getenv(const char *name) {
     return NULL;
 }
 
-char *getenv(const char *name) {
-    patina_note_boundary_symbol("getenv");
-    return patina_getenv(name);
+/*
+ * The environment functions are glibc's (stdlib/getenv.c, stdlib/setenv.c,
+ * stdlib/putenv.c; glibc 2.39), over whatever array `environ` names — the
+ * startup array the runtime published, one the guest's own `setenv` grew, or
+ * one the program assigned itself:
+ *
+ * - `getenv` answers a pointer into the first entry of the name, just past
+ *   its `=` (the entry's own bytes, never a copy);
+ * - `setenv` overwrites an existing entry in place with a fresh `name=value`
+ *   string, or appends a new name at the end, growing the array it allocated
+ *   last (or a copy of one it did not allocate);
+ * - `unsetenv` removes every entry of the name from the array in place;
+ * - `putenv` inserts the caller's own string, so a later write through it
+ *   changes the environment, and a string without `=` removes the name;
+ * - `clearenv` frees the array `setenv` allocated and leaves `environ` NULL.
+ *
+ * Replaced entry strings are never freed (a guest may still hold a `getenv`
+ * answer into one), as glibc keeps them. The mutators serialize on one lock,
+ * glibc's `envlock`, a scheduler mutex (none after `main` returns:
+ * patina_internal_lock); `getenv` takes none, as glibc's does not. The environment is process memory: nothing here is recorded, and replay
+ * reproduces it by re-executing the guest. The runtime gates both sides: a
+ * lookup before the startup constructor finishes answers NULL rather than read
+ * the ambient host environment (patina_env_read_gate), and a mutation needs an
+ * installed runtime (patina_env_write_gate).
+ */
+static pthread_mutex_t patina_env_lock = PTHREAD_MUTEX_INITIALIZER;
+/* The array the mutators allocated last (glibc's `last_environ`). */
+static char **patina_env_allocated = NULL;
+
+static char **patina_env_array(void) {
+#ifdef __APPLE__
+    return *_NSGetEnviron();
+#else
+    return environ;
+#endif
 }
 
-/* Guest-driven mutation is deterministic, so it is modeled rather than refused:
- * these update the runtime's guest env map and republish environ, keeping the
- * getenv interposer and direct environ walkers in agreement. Host libc is never
- * reached, so the scrubbed ambient environment stays scrubbed. */
+static int patina_env_name_invalid(const char *name) {
+    return name == NULL || *name == '\0' || strchr(name, '=') != NULL;
+}
+
+/* The slot of the first entry of the `length`-byte name, or the array's
+ * terminating slot (NULL when the array is), counting the entries before it. */
+static char **patina_env_find(char **array, const char *name, size_t length, size_t *before) {
+    size_t count = 0;
+    char **entry = array;
+    if (entry != NULL) {
+        for (; *entry != NULL; ++entry, ++count) {
+            if (strncmp(*entry, name, length) == 0 && (*entry)[length] == '=') break;
+        }
+    }
+    *before = count;
+    return entry;
+}
+
+char *getenv(const char *name) {
+    patina_note_boundary_symbol("getenv");
+    if (!patina_env_read_gate()) return NULL;
+    char **array = patina_env_array();
+    if (array == NULL || name[0] == '\0') return NULL;
+    size_t length = strlen(name);
+    size_t before;
+    char **entry = patina_env_find(array, name, length, &before);
+    return *entry == NULL ? NULL : *entry + length + 1;
+}
+
+/* glibc's `__add_to_environ`: `combined` is a caller's `name=value` string to
+ * insert itself (putenv), otherwise `name=value` is built from `value`. */
+static int patina_env_add(const char *name, const char *value, char *combined, int replace) {
+    size_t length = strlen(name);
+    int held = patina_internal_lock(&patina_env_lock);
+    char **array = patina_env_array();
+    size_t size;
+    char **entry = patina_env_find(array, name, length, &size);
+    int result = 0;
+    if (entry == NULL || *entry == NULL) {
+        char **grown = realloc(patina_env_allocated, (size + 2) * sizeof *grown);
+        if (grown == NULL) {
+            errno = ENOMEM;
+            result = -1;
+            goto out;
+        }
+        if (array != patina_env_allocated) memcpy(grown, array, size * sizeof *grown);
+        grown[size] = NULL;
+        grown[size + 1] = NULL;
+        entry = grown + size;
+        patina_env_allocated = grown;
+        patina_environ_install(grown);
+    }
+    if (*entry == NULL || replace) {
+        char *string = combined;
+        if (string == NULL) {
+            size_t bytes = strlen(value) + 1;
+            string = malloc(length + 1 + bytes);
+            if (string == NULL) {
+                errno = ENOMEM;
+                result = -1;
+                goto out;
+            }
+            memcpy(string, name, length);
+            string[length] = '=';
+            memcpy(string + length + 1, value, bytes);
+        }
+        *entry = string;
+    }
+out:
+    patina_internal_unlock(&patina_env_lock, held);
+    return result;
+}
+
+/* glibc's `unsetenv` body, for a validated name. */
+static void patina_env_remove(const char *name, size_t length) {
+    int held = patina_internal_lock(&patina_env_lock);
+    char **entry = patina_env_array();
+    if (entry != NULL) {
+        while (*entry != NULL) {
+            if (strncmp(*entry, name, length) == 0 && (*entry)[length] == '=') {
+                char **shift = entry;
+                do shift[0] = shift[1];
+                while (*shift++ != NULL);
+            } else {
+                ++entry;
+            }
+        }
+    }
+    patina_internal_unlock(&patina_env_lock, held);
+}
+
 int setenv(const char *name, const char *value, int overwrite) {
     patina_note_boundary_symbol("setenv");
-    return fail_int(patina_setenv(name, value, overwrite));
+    if (patina_env_name_invalid(name)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (patina_env_write_gate() != 0) return fail_int(-1);
+    return patina_env_add(name, value, NULL, overwrite);
 }
 
 int unsetenv(const char *name) {
     patina_note_boundary_symbol("unsetenv");
-    return fail_int(patina_unsetenv(name));
+    if (patina_env_name_invalid(name)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (patina_env_write_gate() != 0) return fail_int(-1);
+    patina_env_remove(name, strlen(name));
+    return 0;
 }
 
 #ifndef __APPLE__
-/* glibc/musl only; Darwin libc has no clearenv. Interposed for the same reason
- * as unsetenv: left alone it would empty the published array behind the map's
- * back, so getenv and environ would disagree for the rest of the run. */
+/* glibc/musl only; Darwin libc has no clearenv. */
 int clearenv(void) {
     patina_note_boundary_symbol("clearenv");
-    return fail_int(patina_clearenv());
+    if (patina_env_write_gate() != 0) return fail_int(-1);
+    int held = patina_internal_lock(&patina_env_lock);
+    char **array = patina_env_array();
+    if (array != NULL && array == patina_env_allocated) {
+        free(array);
+        patina_env_allocated = NULL;
+    }
+    patina_environ_install(NULL);
+    patina_internal_unlock(&patina_env_lock, held);
+    return 0;
 }
 
 #endif
 
-/* putenv is the one env mutator that stays fail-closed. Its entry remains
- * ALIASED to caller-owned memory: POSIX lets a later write through the caller's
- * buffer change the environment, and forbids the implementation from copying or
- * freeing the string. Patina's environment is an owned deterministic map, so
- * honoring that aliasing would mean tracking guest memory the runtime does not
- * own — an unmodeled effect whose divergence would surface as a silently stale
- * value rather than an error. Refuse loudly and name the modeled path. */
+/* The environment keeps `string` itself, so the caller's later writes through
+ * it are the environment's (POSIX forbids copying or freeing it). */
 int putenv(char *string) {
-    (void)string;
-    return patina_posix_deny("patina: putenv is not modeled because its entry stays aliased to caller-owned memory; use setenv (modeled and deterministic); failing closed\n");
+    patina_note_boundary_symbol("putenv");
+    if (patina_env_write_gate() != 0) return fail_int(-1);
+    const char *end = strchr(string, '=');
+    if (end == NULL) {
+        patina_env_remove(string, strlen(string));
+        return 0;
+    }
+    size_t length = (size_t)(end - string);
+    char *name = malloc(length + 1);
+    if (name == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    memcpy(name, string, length);
+    name[length] = '\0';
+    int result = patina_env_add(name, NULL, string, 1);
+    free(name);
+    return result;
 }
 
 #ifdef __linux__
-/* `secure_getenv`, like the interposed `getenv`, reads only the deterministic
- * guest environment map. */
+/* The kernel sets no `AT_SECURE` for the virtual process (its real and
+ * effective ids agree), so `secure_getenv` answers as `getenv` does. */
 char *secure_getenv(const char *name) {
     patina_note_boundary_symbol("secure_getenv");
-    return patina_getenv(name);
+    if (!patina_env_read_gate()) return NULL;
+    char **array = patina_env_array();
+    if (array == NULL || name[0] == '\0') return NULL;
+    size_t length = strlen(name);
+    size_t before;
+    char **entry = patina_env_find(array, name, length, &before);
+    return *entry == NULL ? NULL : *entry + length + 1;
 }
 #endif

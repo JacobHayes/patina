@@ -20,8 +20,7 @@
 //! The starting environment is the harness's natively and the run's `--env`
 //! map under patina, so the scenario clears it first. libc only.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
 use crate::vehicle::{Vehicle, fold_errno};
 use libc::*;
@@ -318,94 +317,6 @@ pub const SCENARIO: Scenario = Scenario {
         "geteuid",
         "getgid",
         "getegid",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
-            what: "an emptied environment is published as a one-slot array, never NULL: clearenv and every mutation republish environ from the guest env map (native shim lib.rs publish_environ), where glibc's clearenv sets environ to NULL (stdlib/setenv.c)",
-            failure: Failure::Differs(&[
-                Difference::field(2, "environ", "fields.entries", Observed::Json("[]")),
-                Difference::check(3, "clearenv leaves environ NULL"),
-                Difference::field(61, "environ", "fields.entries", Observed::Json("[]")),
-                Difference::check(63, "clearenv empties a populated environment"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
-            what: "environ lists the names sorted, not in insertion order: publish_environ rebuilds the array from the guest env BTreeMap after every mutation (native shim lib.rs), where glibc's setenv appends a new name and overwrites an existing entry in place",
-            failure: Failure::Differs(&[
-                Difference::field(
-                    10,
-                    "environ",
-                    "fields.entries",
-                    Observed::Json(r#"["A=1","B=2"]"#),
-                ),
-                Difference::check(11, "new names are appended in insertion order"),
-                Difference::field(
-                    19,
-                    "environ",
-                    "fields.entries",
-                    Observed::Json(r#"["A=3","B=2"]"#),
-                ),
-                Difference::check(20, "overwrite replaces the value in place"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
-            what: "getenv answers a per-thread copy of the value (native shim lib.rs patina_getenv, GUEST_ENV_CSTRING), not the environ entry's own bytes as glibc's getenv does, so a later getenv on the thread frees an earlier answer",
-            failure: Failure::Differs(&[
-                Difference::field(
-                    12,
-                    "getenv",
-                    "fields.aliases_environ",
-                    Observed::Bool(false),
-                ),
-                Difference::check(14, "the answer is the environ entry's own bytes"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: &[Vehicle::Libc],
-            what: "getenv, setenv and unsetenv read and write the guest env map, never the array environ names (native shim lib.rs patina_getenv, with_guest_env), so an array the program assigns to environ is invisible to getenv and replaced by the map's on the next mutation, where glibc's functions work on whatever environ names",
-            failure: Failure::Differs(&[
-                Difference::field(55, "getenv", "fields.value", Observed::Null),
-                Difference::check(56, "getenv reads the assigned array's first entry"),
-                Difference::field(
-                    58,
-                    "environ",
-                    "fields.entries",
-                    Observed::Json(r#"["B=2","E="]"#),
-                ),
-                Difference::check(59, "unsetenv removes every entry of the name from it"),
-            ]),
-        },
-        Gap {
-            status: Status::ByDesign,
-            vehicles: &[Vehicle::Libc],
-            what: "putenv fails closed (ENOSYS and a stderr diagnostic; c/posix/env.c putenv): its entry stays aliased to caller-owned memory, which the owned deterministic env map does not track, so neither the insertion, the write through the string, nor the bare-name removal happens (docs/DECISIONS.md #4; revisit once environ, not the map, is the source of truth, as the gaps above need)",
-            failure: Failure::Differs(&[
-                Difference::field(37, "putenv", "ret", Observed::Int(-1)),
-                Difference::field(37, "putenv", "errno", Observed::Str("ENOSYS")),
-                Difference::field(38, "getenv", "fields.value", Observed::Null),
-                Difference::check(39, "putenv inserts the string"),
-                Difference::field(40, "getenv", "fields.value", Observed::Null),
-                Difference::check(41, "a write through the string changes the environment"),
-                Difference::field(42, "putenv", "ret", Observed::Int(-1)),
-                Difference::field(42, "putenv", "errno", Observed::Str("ENOSYS")),
-                Difference::field(43, "getenv", "fields.value", Observed::Str("2")),
-                Difference::check(44, "putenv of a bare name removes it"),
-                Difference::field(
-                    45,
-                    "environ",
-                    "fields.entries",
-                    Observed::Json(r#"["B=2","E="]"#),
-                ),
-                Difference::check(46, "the environment holds what putenv left"),
-            ]),
-        },
     ],
     ..DEFAULTS
 };

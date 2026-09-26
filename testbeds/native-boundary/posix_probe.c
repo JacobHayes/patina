@@ -40,39 +40,42 @@ int main(void) {
     if (close(base) != 0) return 41;
     if (unlink("/state/dup") != 0) return 42;
 
-    /* The deterministic environment starts empty, and guest-driven mutation is
-     * modeled. Every assertion below checks BOTH readers -- the getenv
-     * interposer and the published environ array -- so a mutation that reached
+    /* The deterministic environment starts empty, and the environment
+     * functions are glibc's, over environ itself. Every assertion below checks
+     * BOTH the getenv answer and the environ array, so a mutation that reached
      * only one of them fails here. */
     extern char **environ;
     if (environ == NULL || environ[0] != NULL) return 50;
     if (setenv("BETA", "2", 1) != 0) return 51;
     if (setenv("ALPHA", "1", 1) != 0) return 52;
     if (getenv("ALPHA") == NULL || strcmp(getenv("ALPHA"), "1") != 0) return 53;
-    /* environ is rebuilt in key order and NULL-terminated at the right length. */
-    if (environ[0] == NULL || strcmp(environ[0], "ALPHA=1") != 0) return 54;
-    if (environ[1] == NULL || strcmp(environ[1], "BETA=2") != 0) return 55;
+    /* New names are appended (insertion order), NULL-terminated at the right
+     * length, and getenv answers the entry's own bytes. */
+    if (environ[0] == NULL || strcmp(environ[0], "BETA=2") != 0) return 54;
+    if (environ[1] == NULL || strcmp(environ[1], "ALPHA=1") != 0) return 55;
     if (environ[2] != NULL) return 56;
-    /* overwrite=0 leaves an existing key alone; overwrite=1 replaces it. */
+    if (getenv("ALPHA") != environ[1] + 6) return 79;
+    /* overwrite=0 leaves an existing value alone; overwrite=1 replaces the
+     * entry in place. */
     if (setenv("ALPHA", "ignored", 0) != 0) return 57;
     if (strcmp(getenv("ALPHA"), "1") != 0) return 58;
     if (setenv("ALPHA", "3", 1) != 0) return 59;
     if (strcmp(getenv("ALPHA"), "3") != 0) return 60;
-    if (strcmp(environ[0], "ALPHA=3") != 0) return 61;
-    /* Malformed names are EINVAL (POSIX) and must not touch the map. */
+    if (strcmp(environ[1], "ALPHA=3") != 0) return 61;
+    /* Malformed names are EINVAL (POSIX) and must not touch the array. */
     errno = 0;
     if (setenv("BAD=NAME", "x", 1) != -1 || errno != EINVAL) return 62;
     errno = 0;
     if (setenv("", "x", 1) != -1 || errno != EINVAL) return 63;
     if (environ[2] != NULL) return 64;
-    /* unsetenv drops the key from both readers; an absent key succeeds. */
+    /* unsetenv drops the name from both readers; an absent name succeeds. */
     if (unsetenv("ALPHA") != 0) return 65;
     if (getenv("ALPHA") != NULL) return 66;
     if (environ[0] == NULL || strcmp(environ[0], "BETA=2") != 0) return 67;
     if (environ[1] != NULL) return 68;
     if (unsetenv("NEVER_SET") != 0) return 69;
-    /* putenv stays fail-closed: its entry would have to stay aliased to this
-     * caller-owned buffer, which the owned deterministic map cannot model. */
+    /* putenv inserts the caller's own string, so a write through it changes
+     * the environment, and a bare name removes that name. */
     {
 #ifndef __APPLE__
         /* glibc guards putenv behind __USE_MISC/__USE_XOPEN, and
@@ -83,21 +86,24 @@ int main(void) {
         extern int putenv(char *);
 #endif
         static char aliased[] = "GAMMA=3";
-        errno = 0;
-        if (putenv(aliased) != -1 || errno != ENOSYS) return 70;
+        static char bare[] = "BETA";
+        if (putenv(aliased) != 0) return 70;
+        if (getenv("GAMMA") != aliased + 6 || environ[1] != aliased) return 71;
+        aliased[6] = '4';
+        if (strcmp(getenv("GAMMA"), "4") != 0) return 72;
+        if (putenv(bare) != 0 || getenv("BETA") != NULL) return 80;
+        if (environ[0] != aliased || environ[1] != NULL) return 81;
     }
-    if (getenv("GAMMA") != NULL) return 71;
-    if (environ[1] != NULL) return 72;
 #ifndef __APPLE__
-    /* clearenv (glibc/musl) must empty the map, not just the published array.
+    /* clearenv (glibc/musl) leaves environ NULL.
      * _POSIX_C_SOURCE turns off _DEFAULT_SOURCE, so glibc does not declare it. */
     extern int clearenv(void);
     if (setenv("DELTA", "4", 1) != 0) return 73;
     if (clearenv() != 0) return 74;
-    if (getenv("BETA") != NULL || getenv("DELTA") != NULL) return 75;
-    if (environ[0] != NULL) return 76;
+    if (getenv("GAMMA") != NULL || getenv("DELTA") != NULL) return 75;
+    if (environ != NULL) return 76;
 #else
-    if (unsetenv("BETA") != 0) return 77;
+    if (unsetenv("GAMMA") != 0) return 77;
     if (environ[0] != NULL) return 78;
 #endif
 

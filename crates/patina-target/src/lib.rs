@@ -3757,11 +3757,10 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "eventfd",
         "eventfd2",
     ];
-    // Environment reads and mutation. Reads and guest-driven mutation are
-    // modeled deterministically by the native shim, which owns the guest env map
-    // and the environ array published from it; `putenv` stays fail-closed
-    // because its entry aliases caller-owned memory. Either way an UNINTERPOSED
-    // member would reach the host environment, so the whole family is classified.
+    // Environment reads and mutation. The native shim runs glibc's environment
+    // functions over the process's own `environ`, which starts as the run's
+    // deterministic startup map. An UNINTERPOSED member would reach the host
+    // environment, so the whole family is classified.
     const ENVIRONMENT: &[&str] = &[
         "getenv",
         "secure_getenv",

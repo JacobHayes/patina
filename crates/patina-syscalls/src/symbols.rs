@@ -113,7 +113,7 @@ const ROWS: &[SymbolRow] = &[
         "putenv",
         Platform::Both,
         Serves::LibcOnly,
-        SymbolStatus::Partial,
+        SymbolStatus::Modeled,
     ),
     s(
         "getpid",

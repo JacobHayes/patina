@@ -381,6 +381,21 @@ mod stdio_lifecycle {
         }
     }
 
+    /// The environment's lock (glibc's `envlock`) is released the same way:
+    /// an atexit `setenv` beside a parked `setenv` loop.
+    #[test]
+    fn setenv_after_main_takes_no_scheduler_lock() {
+        let g = guest(CLink::PosixShim);
+        for seed in 1..=8 {
+            let output = assert_success(seeded(&g.binary, "env-teardown", seed));
+            assert_eq!(
+                text(&output.stdout),
+                "atexit handler set bye\n",
+                "seed {seed}"
+            );
+        }
+    }
+
     /// Choosing stdout's buffer asks fstat about the descriptor; the answer
     /// for the capture must not leave an errno the host's pipe would not.
     #[test]

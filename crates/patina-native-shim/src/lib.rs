@@ -139,7 +139,7 @@ mod volume;
 #[cfg(target_os = "linux")]
 mod xattr;
 
-use std::cell::{Cell, RefCell, UnsafeCell};
+use std::cell::{Cell, UnsafeCell};
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::io;
@@ -2088,7 +2088,6 @@ fn finalize_coverage() -> Result<(), String> {
 
 thread_local! {
     static LAST_ERRNO: Cell<c_int> = const { Cell::new(0) };
-    static GUEST_ENV_CSTRING: RefCell<Option<CString>> = const { RefCell::new(None) };
 }
 
 fn slot() -> &'static SpinMutex<Option<Context>> {
@@ -2719,7 +2718,7 @@ fn control_env(name: &str) -> Option<String> {
     // constructor to snapshot/scrub environ, so patina_init_from_env keeps the
     // documented PATINA_* protocol working by reading the host environment here.
     // Once the packaged POSIX constructor has finished, the live environment is
-    // scrubbed and public getenv routes through patina_getenv; do not recurse
+    // scrubbed and public getenv reads the published environ; do not recurse
     // through std::env in that post-startup path.
     std::env::var(name).ok()
 }
@@ -3139,10 +3138,10 @@ fn install(context: Result<Context, RuntimeError>) -> c_int {
         return fail(EALREADY);
     }
     *guard = Some(context);
-    // Publish `environ` from the freshly installed guest env map. The startup
+    // Publish `environ` from the freshly installed startup env map. The startup
     // constructor also publishes, but a deferred harness install (or a direct
-    // C-ABI embedder) lands here first — and its `--env`/overlay values must be
-    // visible to direct `environ` walkers, not just to the `getenv` interposer.
+    // C-ABI embedder) lands here first — and its `--env`/overlay values are the
+    // environment the guest starts from.
     publish_environ(guard.as_ref().expect("just installed").guest_env());
     set_errno(0);
     // The deterministic runtime is now installed, so the bootstrap window is over.
@@ -3741,96 +3740,87 @@ pub extern "C" fn patina_errno() -> c_int {
     LAST_ERRNO.with(Cell::get)
 }
 
-/// Look up one deterministic guest environment value for the POSIX `getenv`
-/// interposer. Before the startup constructor finishes, return NULL rather than
-/// reading the host environment: Rust/libc startup code can probe environment
-/// variables before Patina's constructor runs, and hiding those probes preserves
-/// the historical empty ambient environment without breaking ordinary guests.
-/// After startup, a standalone (non-Patina) run with no runtime keeps the same
-/// empty deterministic environment and returns NULL.
-///
-/// # Safety
-/// `name` must be a valid NUL-terminated C string when non-null.
+// ---- The guest environment ----------------------------------------------------
+//
+// The environment is the process's own `environ` array, as it is under glibc:
+// the C layer (`c/posix/env.c`) runs glibc's getenv/setenv/unsetenv/putenv/
+// clearenv over whatever array `environ` names, so a pointer `getenv` answers
+// is the entry's own bytes, new names are appended, an array the program
+// assigns is honoured and a `putenv` string stays aliased. The runtime's part
+// is the array the run STARTS with — the startup `--env` map, the one piece
+// the trace records, published once the ambient host environment is scrubbed
+// (and again when a deferred harness installs the runtime) — and the gates
+// below, which decide when the C layer may answer at all.
+//
+// Mutations are guest-driven and therefore deterministic: nothing is recorded
+// per mutation, and replay reproduces them by re-executing the guest.
+
+/// May the C `getenv` read `environ`? 1 to read it, 0 to answer NULL: before
+/// the startup constructor finishes, `environ` is still the ambient host
+/// environment, and Rust/libc startup code can probe it before Patina's
+/// constructor runs, so those probes see the historical empty environment
+/// rather than the host's. A stored init error aborts, as every entry that
+/// answers without reaching `ensure_runtime` must; so does a lookup that beat
+/// a deferred harness install.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_getenv(name: *const c_char) -> *mut c_char {
+pub extern "C" fn patina_env_read_gate() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if name.is_null() {
-        return std::ptr::null_mut();
-    }
-    let name = match unsafe { CStr::from_ptr(name) }.to_str() {
-        Ok(name) => name,
-        Err(_) => return std::ptr::null_mut(),
-    };
     if let Some(message) = init_error().lock().clone() {
         abort_with_init_error(&message);
     }
     if !STARTUP_CONSTRUCTOR_FINISHED.load(Ordering::Acquire) {
-        return std::ptr::null_mut();
+        return 0;
     }
-    let value = {
-        let guard = slot().lock();
-        let missing_context = guard.is_none();
-        let value = guard
-            .as_ref()
-            .and_then(|context| context.guest_env_var(name).map(str::to_owned));
-        drop(guard);
-        if missing_context && missing_context_is_pre_harness_install() {
-            abort_harness_before_install();
-        }
-        value
-    };
-    let Some(value) = value else {
-        return std::ptr::null_mut();
-    };
-    let Ok(value) = CString::new(value) else {
-        // RuntimeConfig validation rejects NUL bytes before build; keep this path
-        // fail-closed if an embedder bypasses that invariant.
-        let _ = host_write_all(
-            2,
-            b"patina: deterministic guest environment contained a NUL byte; failing closed\n",
-        );
-        crate::host_abort();
-    };
-    GUEST_ENV_CSTRING.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        *slot = Some(value);
-        slot.as_ref()
-            .map(|value| value.as_ptr().cast_mut())
-            .unwrap_or(std::ptr::null_mut())
-    })
+    let missing_context = slot().lock().is_none();
+    if missing_context && missing_context_is_pre_harness_install() {
+        abort_harness_before_install();
+    }
+    1
 }
 
-// ---- Deterministic guest environment mutation --------------------------------
-//
-// `setenv`/`unsetenv`/`clearenv` mutate the installed context's guest env map,
-// which is the run's single source of truth for the environment. Two readers
-// must agree with it: the `getenv` interposer above, which consults the map
-// directly, and the process `environ` array that `std::env::vars` and other
-// direct walkers iterate. Keeping them coherent means republishing `environ`
-// after every mutation.
-//
-// Republishing happens through a C-registered callback rather than a direct
-// reference to `environ`/`_NSGetEnviron`. The dependency must point C→Rust: the
-// Rust lib's own test binary links no C objects, so naming a C function here
-// would leave it with an undefined symbol (the same trap documented for
-// `PATINA_SUD_ARMED`). Registration also keeps `environ` storage owned by the
-// one layer that already manages it.
-//
-// Mutations are guest-driven and therefore deterministic. They are NOT boundary
-// effects: like `patina_getenv` they take no scheduling point, consume no step
-// budget, and emit no trace record, so replay reproduces them by re-executing
-// the guest. Only the startup `--env` map lives in the trace metadata.
+/// May the C layer mutate `environ`? 0 to go ahead, -1 (`ENOSYS`, with a
+/// diagnostic) when no runtime is installed. Unlike a lookup, a pre-startup
+/// WRITE would change the ambient host array the constructor is about to
+/// scrub, and the guest and the run would then disagree about the
+/// environment: a constructor beat Patina's, so name it and fail closed.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_env_write_gate() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if let Some(message) = init_error().lock().clone() {
+        abort_with_init_error(&message);
+    }
+    if !STARTUP_CONSTRUCTOR_FINISHED.load(Ordering::Acquire) {
+        abort_preinit_interposed_call();
+    }
+    let missing_context = slot().lock().is_none();
+    if missing_context {
+        if missing_context_is_pre_harness_install() {
+            abort_harness_before_install();
+        }
+        // A standalone run (or one past `patina_shutdown`) has no deterministic
+        // environment to mutate; refuse rather than pretend the write took.
+        let _ = host_write_all(
+            2,
+            b"patina: environment mutation requires an installed deterministic runtime; failing closed\n",
+        );
+        return fail(ENOSYS);
+    }
+    set_errno(0);
+    0
+}
 
 /// `void (*)(char **)` installed by the POSIX layer's constructor, or null when
 /// no C layer is linked (direct C-ABI embedders and the Rust lib tests). Stored
-/// as a data pointer because Rust has no atomic function-pointer type.
+/// as a data pointer because Rust has no atomic function-pointer type. The
+/// dependency points C→Rust: the Rust lib's own test binary links no C
+/// objects, so naming `environ`'s owner here would leave it undefined (the
+/// same trap documented for `PATINA_SUD_ARMED`).
 static ENVIRON_INSTALLER: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 type EnvironInstaller = unsafe extern "C" fn(*mut *mut c_char);
 
-/// Register the callback that publishes a rebuilt `environ` array. Called once
-/// from the POSIX constructor before the runtime is installed; a null pointer
-/// unregisters, leaving env mutation purely map-local.
+/// Register the callback that publishes the startup `environ` array. Called
+/// once from the POSIX constructor before the runtime is installed.
 ///
 /// # Safety
 /// `installer` must be a valid `void (*)(char **)` for the life of the process.
@@ -3856,11 +3846,10 @@ fn environ_installer() -> Option<EnvironInstaller> {
     Some(unsafe { std::mem::transmute::<*mut c_void, EnvironInstaller>(pointer) })
 }
 
-/// Rebuild the `environ` array from `env` and hand it to the registered
-/// installer. The previous array and its entry strings are deliberately leaked,
-/// glibc-style: a guest may still hold a `getenv` result or an `environ` slot
-/// from before the mutation, and freeing replaced storage would dangle it. The
-/// leak is bounded by the guest's own mutation count and is deterministic.
+/// Build the startup `environ` array from `env` (key order) and hand it to the
+/// registered installer. The array and its strings are deliberately leaked: the
+/// guest owns the environment from here on, and glibc's `setenv` copies an
+/// array it did not allocate before growing it.
 fn publish_environ(env: &BTreeMap<String, String>) {
     let Some(installer) = environ_installer() else {
         return;
@@ -3885,10 +3874,11 @@ fn publish_environ(env: &BTreeMap<String, String>) {
     unsafe { installer(array) };
 }
 
-/// Publish `environ` from the installed context, or from an empty map when no
-/// runtime is installed. Called by the POSIX constructor after the ambient host
-/// environment is scrubbed, so `environ` reflects the deterministic map (the
-/// startup `--env` set, or nothing) from the guest's first instruction.
+/// Publish `environ` from the installed context's startup map, or an empty
+/// array when no runtime is installed. Called by the POSIX constructor after
+/// the ambient host environment is scrubbed, so `environ` holds the
+/// deterministic startup environment (the `--env` set, or nothing) from the
+/// guest's first instruction.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_publish_environ() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
@@ -3897,113 +3887,6 @@ pub extern "C" fn patina_publish_environ() {
         Some(context) => publish_environ(context.guest_env()),
         None => publish_environ(&BTreeMap::new()),
     }
-}
-
-/// Borrow a C string argument as UTF-8, or `None` when null or not UTF-8.
-///
-/// # Safety
-/// `value` must be a valid NUL-terminated C string when non-null.
-unsafe fn env_str<'a>(value: *const c_char) -> Option<&'a str> {
-    if value.is_null() {
-        return None;
-    }
-    unsafe { CStr::from_ptr(value) }.to_str().ok()
-}
-
-/// Mutate the installed context's guest environment and republish `environ`.
-/// Both happen under one `slot()` lock so concurrent guest threads can never
-/// install an `environ` array that disagrees with the map.
-fn with_guest_env(apply: impl FnOnce(&mut Context) -> Result<(), RuntimeError>) -> c_int {
-    if let Some(message) = init_error().lock().clone() {
-        abort_with_init_error(&message);
-    }
-    if !STARTUP_CONSTRUCTOR_FINISHED.load(Ordering::Acquire) {
-        // Unlike `getenv` — which hides pre-startup probes behind NULL and stays
-        // consistent, because the deterministic environment really is empty then
-        // — dropping a pre-startup WRITE would leave the guest and the runtime
-        // disagreeing about the environment for the rest of the run. A
-        // constructor beat Patina's; name it and fail closed.
-        abort_preinit_interposed_call();
-    }
-    let mut guard = slot().lock();
-    let Some(context) = guard.as_mut() else {
-        drop(guard);
-        if missing_context_is_pre_harness_install() {
-            abort_harness_before_install();
-        }
-        // A standalone run (or one past `patina_shutdown`) has no deterministic
-        // environment to mutate. `getenv` can answer NULL truthfully there; a
-        // write has nowhere to land, so refuse rather than pretend it took.
-        let _ = host_write_all(
-            2,
-            b"patina: environment mutation requires an installed deterministic runtime; failing closed\n",
-        );
-        return fail(ENOSYS);
-    };
-    // The only failure the guest-env validators raise is a malformed key or
-    // value, which POSIX reports as EINVAL — a normal modeled outcome, not a
-    // refusal, so it carries no diagnostic.
-    if apply(context).is_err() {
-        return fail(EINVAL);
-    }
-    publish_environ(context.guest_env());
-    set_errno(0);
-    0
-}
-
-/// Deterministic `setenv`.
-///
-/// # Safety
-/// `name` and `value` must be valid NUL-terminated C strings when non-null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_setenv(
-    name: *const c_char,
-    value: *const c_char,
-    overwrite: c_int,
-) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: forwarded from the `setenv` interposer's C ABI contract.
-    let (Some(name), Some(value)) = (unsafe { env_str(name) }, unsafe { env_str(value) }) else {
-        return fail(EINVAL);
-    };
-    if name.is_empty() || name.contains('=') {
-        return fail(EINVAL);
-    }
-    with_guest_env(|context| {
-        context.guest_env_set(name, value, overwrite != 0)?;
-        Ok(())
-    })
-}
-
-/// Deterministic `unsetenv`. Removing an absent key succeeds, per POSIX.
-///
-/// # Safety
-/// `name` must be a valid NUL-terminated C string when non-null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_unsetenv(name: *const c_char) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: forwarded from the `unsetenv` interposer's C ABI contract.
-    let Some(name) = (unsafe { env_str(name) }) else {
-        return fail(EINVAL);
-    };
-    if name.is_empty() || name.contains('=') {
-        return fail(EINVAL);
-    }
-    with_guest_env(|context| {
-        context.guest_env_remove(name)?;
-        Ok(())
-    })
-}
-
-/// Deterministic `clearenv` (glibc/musl). Empties the map so no reader — the
-/// `getenv` interposer or a direct `environ` walk — keeps a stale entry.
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_clearenv() -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    with_guest_env(|context| {
-        context.guest_env_clear();
-        Ok(())
-    })
 }
 
 /// Fill caller-owned memory with deterministic bytes.
