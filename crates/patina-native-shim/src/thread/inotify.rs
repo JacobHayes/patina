@@ -21,7 +21,6 @@
 //! the scheduler); [`watching`] is the lock-free gate the filesystem entries
 //! check before they compute anything.
 
-use std::collections::BTreeSet;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -174,9 +173,11 @@ pub(super) struct Inotify {
     next_handle: u64,
     /// `fsnotify_sync_cookie`: the last rename cookie handed out.
     cookie: u32,
-    /// Watched inodes whose last name went while something still held them:
-    /// their `IN_DELETE_SELF` waits for the last reference.
-    doomed: BTreeSet<u64>,
+    /// Inodes whose last name went while something still held them, with
+    /// that name's directory and entry (the unhashed dentry an event on the
+    /// open file is still reported through): their `IN_DELETE_SELF` waits
+    /// for the last reference.
+    deleted: BTreeMap<u64, Option<(u64, String)>>,
 }
 
 impl Instance {
@@ -246,8 +247,15 @@ impl Instance {
 
 impl Inotify {
     /// Report `mask` to `targets` in every instance; answers the readers to
-    /// wake.
-    fn report(&mut self, targets: &[Target<'_>], mask: u32, cookie: u32) -> Vec<TaskId> {
+    /// wake. An event on an open file whose last name went (`unlinked`)
+    /// skips the watches that asked for `IN_EXCL_UNLINK`.
+    fn report(
+        &mut self,
+        targets: &[Target<'_>],
+        mask: u32,
+        cookie: u32,
+        unlinked: bool,
+    ) -> Vec<TaskId> {
         let mut wake = Vec::new();
         for instance in self.instances.values_mut() {
             let mut woken = false;
@@ -260,7 +268,9 @@ impl Inotify {
                     continue;
                 };
                 let watch = instance.watches[&wd];
-                if watch.mask & mask & ALL_EVENTS == 0 {
+                if watch.mask & mask & ALL_EVENTS == 0
+                    || (unlinked && watch.mask & IN_EXCL_UNLINK != 0)
+                {
                     continue;
                 }
                 woken |= instance.enqueue(Event {
@@ -283,8 +293,8 @@ impl Inotify {
     /// `fsnotify_inoderemove`: every watch on `ino` sees `IN_DELETE_SELF`,
     /// then ends.
     fn inode_removed(&mut self, ino: u64) -> Vec<TaskId> {
-        self.doomed.remove(&ino);
-        let mut wake = self.report(&[Target::Inode(ino)], IN_DELETE_SELF, 0);
+        self.deleted.remove(&ino);
+        let mut wake = self.report(&[Target::Inode(ino)], IN_DELETE_SELF, 0, false);
         for instance in self.instances.values_mut() {
             if let Some(&wd) = instance.by_ino.get(&ino) {
                 if instance.destroy(wd) {
@@ -315,9 +325,10 @@ impl Inotify {
 }
 
 /// Report `mask` (and `cookie`, for a rename's halves) to `targets`, waking
-/// the readers whose queue took it.
-pub(crate) fn notify(targets: &[Target<'_>], mask: u32, cookie: u32) {
-    let wake = lock_state().inotify.report(targets, mask, cookie);
+/// the readers whose queue took it; `unlinked` for an event on an open file
+/// whose last name went.
+pub(crate) fn notify(targets: &[Target<'_>], mask: u32, cookie: u32, unlinked: bool) {
+    let wake = lock_state().inotify.report(targets, mask, cookie, unlinked);
     wake_all(wake);
 }
 
@@ -333,14 +344,13 @@ pub(crate) fn watched(ino: u64) -> bool {
     lock_state().inotify.watched(ino)
 }
 
-/// `ino`'s last name is gone. With nothing else holding it, its watches see
-/// `IN_DELETE_SELF` and end now; otherwise when the last holder lets go
-/// ([`settle`]).
-pub(crate) fn unlinked(ino: u64, held: bool) {
+/// `ino`'s last name, `entry` in its directory, is gone. Held, it lives on
+/// ([`deleted`]); otherwise its watches see `IN_DELETE_SELF` and end now.
+pub(crate) fn unlinked(ino: u64, held: bool, entry: Option<(u64, String)>) {
     let wake = {
         let mut state = lock_state();
         if held {
-            state.inotify.doomed.insert(ino);
+            state.inotify.deleted.insert(ino, entry);
             Vec::new()
         } else {
             state.inotify.inode_removed(ino)
@@ -349,15 +359,21 @@ pub(crate) fn unlinked(ino: u64, held: bool) {
     wake_all(wake);
 }
 
-/// The inodes whose `IN_DELETE_SELF` waits for their last holder.
-pub(crate) fn doomed() -> Vec<u64> {
+/// The inodes whose last name went while something held them.
+pub(crate) fn deleted() -> Vec<u64> {
     if !watching() {
         return Vec::new();
     }
-    lock_state().inotify.doomed.iter().copied().collect()
+    lock_state().inotify.deleted.keys().copied().collect()
 }
 
-/// The last holder of doomed `ino` let go.
+/// The directory and name deleted `ino` had last.
+pub(crate) fn last_entry(ino: u64) -> Option<(u64, String)> {
+    lock_state().inotify.deleted.get(&ino).cloned().flatten()
+}
+
+/// The last holder of deleted `ino` let go: its watches see
+/// `IN_DELETE_SELF` and end.
 pub(crate) fn settle(ino: u64) {
     let wake = lock_state().inotify.inode_removed(ino);
     wake_all(wake);
@@ -445,12 +461,6 @@ pub(crate) unsafe fn add_watch(fd: c_int, path: *const c_char, mask: u32) -> i64
         return errno(EINVAL);
     }
     let handle = resolved.handle;
-    if mask & (IN_ATTRIB | IN_OPEN | IN_CLOSE_WRITE | IN_CLOSE_NOWRITE) != 0 {
-        crate::trap_fatal(&format!(
-            "inotify_add_watch: a watch for IN_ATTRIB, IN_OPEN or IN_CLOSE_* (mask {mask:#x}) \
-             is not modeled: failing closed"
-        ));
-    }
     if path.is_null() {
         return errno(EFAULT);
     }

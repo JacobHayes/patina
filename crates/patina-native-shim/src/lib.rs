@@ -558,6 +558,10 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
         FdKind::File | FdKind::Dir | FdKind::OPath => {
             #[cfg(target_os = "linux")]
             mem::released(release.handle);
+            #[cfg(target_os = "linux")]
+            if release.kind != FdKind::OPath {
+                fsnotify::closing(Fd(release.handle), release.status & O_WRITE != 0);
+            }
             let closed = with_context(|context| context.fs_close(Fd(release.handle)));
             #[cfg(target_os = "linux")]
             fsnotify::released();
@@ -4352,7 +4356,13 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
                 (OpenFlags::read_only(), O_READ | O_OPENED)
             };
             match with_context(|context| context.fs_open(&resolved.path, dir_flags)) {
-                Ok(fd) => bind_fs_handle(fd, FdKind::Dir, dir_status, cloexec),
+                Ok(fd) => {
+                    #[cfg(target_os = "linux")]
+                    if !path_only {
+                        fsnotify::opened(fd);
+                    }
+                    bind_fs_handle(fd, FdKind::Dir, dir_status, cloexec)
+                }
                 Err(errno) => fail(errno),
             }
         }
@@ -4398,15 +4408,20 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
                     if let (true, Some(metadata)) = (open_flags.truncate, resolved.metadata) {
                         mem::resized_ino(metadata.ino, 0);
                     }
-                    // A creating open shows the new entry; an `O_TRUNC` one
-                    // of an existing file the truncation (`handle_truncate`).
+                    // A creating open shows the new entry, then the open;
+                    // an `O_TRUNC` one of an existing file the truncation
+                    // after it (`handle_truncate`).
                     #[cfg(target_os = "linux")]
-                    match resolved.metadata {
-                        None => fsnotify::created(&resolved.path),
-                        Some(_) if open_flags.truncate => {
+                    {
+                        if resolved.metadata.is_none() {
+                            fsnotify::created(&resolved.path);
+                        }
+                        if !path_only {
+                            fsnotify::opened(fd);
+                        }
+                        if resolved.metadata.is_some() && open_flags.truncate {
                             fsnotify::on_handle(fd, fsnotify::IN_MODIFY);
                         }
-                        Some(_) => {}
                     }
                     bind_fs_handle(fd, kind, status, cloexec)
                 }
@@ -4695,7 +4710,7 @@ pub(crate) fn transferred(resolved: &Resolved, moved: isize, write: bool) -> isi
         } else {
             fsnotify::IN_ACCESS
         };
-        fsnotify::on_handle(Fd(resolved.handle), mask);
+        fsnotify::on_file(Fd(resolved.handle), mask);
     }
     moved
 }
@@ -5595,6 +5610,8 @@ pub unsafe extern "C" fn patina_chmod(
     }
     match with_context(|context| context.fs_set_mode(&resolved.path, mode)) {
         Ok(()) => {
+            #[cfg(target_os = "linux")]
+            fsnotify::on_path(&resolved.path, fsnotify::IN_ATTRIB);
             set_errno(0);
             0
         }
@@ -5613,6 +5630,8 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
     if let Some(node) = thread::fifo_ino(raw_fd) {
         return match with_context(|context| context.fs_set_inode_mode(node, mode)) {
             Ok(()) => {
+                #[cfg(target_os = "linux")]
+                fsnotify::on_inode(node, fsnotify::IN_ATTRIB);
                 set_errno(0);
                 0
             }
@@ -5629,6 +5648,8 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
     };
     match with_context(|context| context.fs_set_fd_mode(fd, mode)) {
         Ok(()) => {
+            #[cfg(target_os = "linux")]
+            fsnotify::on_handle(fd, fsnotify::IN_ATTRIB);
             set_errno(0);
             0
         }
@@ -5694,6 +5715,8 @@ pub unsafe extern "C" fn patina_utimensat(
         set_errno(0);
         return 0;
     }
+    #[cfg(target_os = "linux")]
+    let shown = fsnotify::times_mask(atime_kind != TIME_OMIT, mtime_kind != TIME_OMIT);
     if flags & !paths::RESOLVE_AT_FLAGS != 0 {
         return fail(EINVAL);
     }
@@ -5725,6 +5748,12 @@ pub unsafe extern "C" fn patina_utimensat(
         };
         return match with_context(|context| context.fs_set_inode_times_spec(ino, atime, mtime)) {
             Ok(()) => {
+                #[cfg(target_os = "linux")]
+                if descriptor.kind.is_fs() {
+                    fsnotify::on_handle(Fd(descriptor.handle), shown);
+                } else {
+                    fsnotify::on_inode(ino, shown);
+                }
                 set_errno(0);
                 0
             }
@@ -5740,6 +5769,8 @@ pub unsafe extern "C" fn patina_utimensat(
     }
     match with_context(|context| context.fs_set_times_by_path_spec(&resolved.path, atime, mtime)) {
         Ok(()) => {
+            #[cfg(target_os = "linux")]
+            fsnotify::on_path(&resolved.path, shown);
             set_errno(0);
             0
         }
@@ -5766,6 +5797,8 @@ pub extern "C" fn patina_futimens(
         set_errno(0);
         return 0;
     }
+    #[cfg(target_os = "linux")]
+    let shown = fsnotify::times_mask(atime_kind != TIME_OMIT, mtime_kind != TIME_OMIT);
     let resolved = match resolve_fd(raw_fd) {
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
@@ -5781,6 +5814,8 @@ pub extern "C" fn patina_futimens(
     if let Some(ino) = thread::fifo_ino(raw_fd) {
         return match with_context(|context| context.fs_set_inode_times_spec(ino, atime, mtime)) {
             Ok(()) => {
+                #[cfg(target_os = "linux")]
+                fsnotify::on_inode(ino, shown);
                 set_errno(0);
                 0
             }
@@ -5793,6 +5828,8 @@ pub extern "C" fn patina_futimens(
     let fd = Fd(resolved.handle);
     match with_context(|context| context.fs_set_times_spec(fd, atime, mtime)) {
         Ok(()) => {
+            #[cfg(target_os = "linux")]
+            fsnotify::on_handle(fd, shown);
             set_errno(0);
             0
         }
@@ -5903,6 +5940,10 @@ pub unsafe extern "C" fn patina_chown(
     };
     match result {
         Ok(()) => {
+            #[cfg(target_os = "linux")]
+            if uid != ID_UNCHANGED || gid != ID_UNCHANGED {
+                fsnotify::on_path(&resolved.path, fsnotify::IN_ATTRIB);
+            }
             set_errno(0);
             0
         }
@@ -5933,6 +5974,10 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
         };
         return match with_context(|context| context.fs_set_inode_mode(node, mode)) {
             Ok(()) => {
+                #[cfg(target_os = "linux")]
+                if uid != ID_UNCHANGED || gid != ID_UNCHANGED {
+                    fsnotify::on_inode(node, fsnotify::IN_ATTRIB);
+                }
                 set_errno(0);
                 0
             }
@@ -5953,6 +5998,10 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
     };
     match with_context(|context| context.fs_set_fd_mode(fd, mode)) {
         Ok(()) => {
+            #[cfg(target_os = "linux")]
+            if uid != ID_UNCHANGED || gid != ID_UNCHANGED {
+                fsnotify::on_handle(fd, fsnotify::IN_ATTRIB);
+            }
             set_errno(0);
             0
         }
@@ -6113,7 +6162,7 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
             #[cfg(target_os = "linux")]
             mem::allocated(fd.0, offset, length, zero, keep_size);
             #[cfg(target_os = "linux")]
-            fsnotify::on_handle(fd, fsnotify::IN_MODIFY);
+            fsnotify::on_file(fd, fsnotify::IN_MODIFY);
             set_errno(0);
             0
         }
@@ -6169,7 +6218,7 @@ pub extern "C" fn patina_dir_accessed(raw_fd: c_int) {
     #[cfg(target_os = "linux")]
     if let Ok(resolved) = resolve_fd(raw_fd) {
         if resolved.kind == FdKind::Dir {
-            fsnotify::on_handle(Fd(resolved.handle), fsnotify::IN_ACCESS);
+            fsnotify::on_file(Fd(resolved.handle), fsnotify::IN_ACCESS);
         }
     }
 }

@@ -186,6 +186,7 @@ pub(crate) struct Release {
     pub(crate) desc: DescId,
     pub(crate) kind: FdKind,
     pub(crate) handle: u64,
+    pub(crate) status: Status,
 }
 
 /// A resolved descriptor: what a guest number names right now.
@@ -449,6 +450,7 @@ impl GuestFdTable {
             desc,
             kind: description.kind,
             handle: description.handle,
+            status: description.status,
         })
     }
 
@@ -627,7 +629,8 @@ mod tests {
             Ok(Some(Release {
                 desc: original.desc,
                 kind: FdKind::File,
-                handle: 10
+                handle: 10,
+                status: O_READ,
             }))
         );
         assert_eq!(table.close(dup), Err(EBADF));
@@ -771,7 +774,8 @@ mod tests {
             Ok(Some(Release {
                 desc,
                 kind: FdKind::File,
-                handle: 10
+                handle: 10,
+                status: O_READ,
             }))
         );
         assert_eq!(table.release(desc), Err(EBADF));

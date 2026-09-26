@@ -441,11 +441,11 @@ forwards into the same dispatcher instead of its two-number allowlist.
   queue events synchronously through `fsnotify.rs` (the kernel's
   `fsnotify.h` hooks: entry events to the directory, file events to the
   directory then the file, self events to the inode; a deleted inode's
-  `IN_DELETE_SELF` waits for its last holder), merged and overflowed as
-  `fs/notify` does; a watch on an unlinked open file's former directory
-  sees nothing, as under `IN_EXCL_UNLINK`, and there is no per-user watch
-  limit; a watch for `IN_ATTRIB`, `IN_OPEN` or `IN_CLOSE_*` is still a
-  named fatal. Trace
+  `IN_DELETE_SELF` waits for its last holder, and an event on the open
+  file still names its last entry), merged and overflowed as `fs/notify`
+  does. There is no per-user watch limit, a FIFO endpoint's open and
+  close show nothing, and a directory removed while a descriptor holds it
+  ends its watches at once. Trace
   format 12 adds `net_bind_shared`, `net_connect`, `net_mark` and the
   unreachable send disposition. Left: urgent data (`MSG_OOB` on a stream is
   EOPNOTSUPP, so select's exception set stays empty), `--net-default-route`
