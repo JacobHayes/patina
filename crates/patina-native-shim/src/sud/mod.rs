@@ -47,6 +47,8 @@ mod privileged;
 mod readiness;
 mod sched_identity;
 mod signal_process;
+#[cfg(target_arch = "x86_64")]
+mod thread_pointer;
 mod time;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
@@ -1354,6 +1356,10 @@ const BINDINGS: &[(Syscall, Handler)] = &[
             "rt_sigreturn (nr {nr}) reached the dispatcher: both vehicles answer it first"
         ))
     }),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_arch_prctl, thread_pointer::sys_arch_prctl),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_modify_ldt, thread_pointer::sys_modify_ldt),
     (Syscall::N_set_robust_list, |_, a| {
         crate::thread::registrations::set_robust_list(a[0] as usize, a[1] as usize)
     }),

@@ -70,6 +70,24 @@ fn thread_pointer_writes_are_refused_by_name() {
     assert_eq!(mnemonics, expected);
 }
 
+// The syscall doors to the same effect: moving the FS base with
+// arch_prctl(ARCH_SET_FS), and writing an LDT descriptor an FS selector load
+// could use, stop the run by name.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn thread_pointer_syscalls_are_refused_by_name() {
+    let g = assert_build_c_guest("thread_pointer_syscalls.c", CLink::PosixShim);
+    for (case, refused) in [
+        ("tp-set-fs", "thread-pointer: arch_prctl(ARCH_SET_FS, "),
+        (
+            "tp-write-ldt",
+            "thread-pointer: modify_ldt(0x11) writing LDT entry 0 refused",
+        ),
+    ] {
+        g.assert_internal_fatal(&[case], &[refused]);
+    }
+}
+
 #[test]
 fn original_envp_is_scrubbed() {
     let g = assert_build_c_guest("envp_probe.c", CLink::PosixShim);

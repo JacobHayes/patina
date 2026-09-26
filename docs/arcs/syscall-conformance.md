@@ -448,8 +448,8 @@ forwards into the same dispatcher instead of its two-number allowlist.
   exist, not routed by: the virtual network delivers by address), and wakeups between two epoll scans are queued in
   descriptor order (the model keeps no clock across sources).
 - **process lifecycle** (data only): every row `Trap(class)` with its
-  one-line reasoning in the registry; `execve`/`arch_prctl`/`set_tid_address`
-  pre-arm rows documented as never-trapping.
+  one-line reasoning in the registry; `execve`/`set_tid_address` pre-arm
+  rows documented as never-trapping.
 - **privileged** (user decision, superseding §2.3 for these rows): a
   privileged row answers what the kernel answers an unprivileged caller,
   not a fatal trap. Each row declares the capability the kernel checks and

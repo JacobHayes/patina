@@ -922,6 +922,31 @@ Then it is `ESRCH`, or `EPERM` for init, whose memory needs `CAP_SYS_PTRACE` (a
 declared capability; granted, it is a named fatal). `proc/vm_rw` passes with
 no gap, and pins those orders for a pid no process has.
 
+The x86_64 thread-pointer rows are modeled (`src/sud/thread_pointer.rs`). The
+FS base is the thread pointer the shim's own thread-locals resolve through, so
+nothing a guest asks may move it. `arch_prctl(ARCH_SET_FS)` answers `EPERM` for
+a base past the user address space (4-level paging's `TASK_SIZE_MAX`, the
+virtual machine's) and 0 for the thread's current base, and stops the run by
+name (`thread-pointer`) for any other. `ARCH_GET_FS`, `ARCH_GET_GS` and
+`ARCH_SET_GS` go to the host kernel on the calling thread, after the code is
+decoded as the kernel's `int` (so a high bit cannot smuggle `ARCH_SET_FS` past
+the decode) and a GS base past the user address space is answered `EPERM`
+without it. The virtual CPU has no CPUID faulting: `ARCH_GET_CPUID` is 1 and
+`ARCH_SET_CPUID` is `ENODEV` for any argument, as the AMD oracle host answers.
+The codes 6.8 knows but patina does not model (the xstate permissions, mapping
+a vDSO, shadow stacks) are named fatals, and the rest `EINVAL`. `modify_ldt`
+reads go to the host; a write meets `write_ldt`'s checks (size, copy, entry
+number, the code-segment rule). An entry the kernel stores as an all-zero
+descriptor (the old form with base and limit 0, or `LDT_empty`), which no
+selector load accepts, then goes to the host from the shim's checked copy,
+never re-read from the guest; any other write is refused by name, since an LDT
+entry is what an FS selector load reads. `thread/tls` passes on every vehicle
+with no gap, and `native_containment::thread_pointer_syscalls_are_refused_by_name`
+(`testbeds/native-boundary/thread_pointer_syscalls.c`) requires the named stop
+for `ARCH_SET_FS` to another base and for a present 32-bit data segment
+written to the LDT (red with either passed to the host: the moved FS base
+killed the run with no diagnostic, and the LDT write returned).
+
 ## Dependency order
 
 ```text

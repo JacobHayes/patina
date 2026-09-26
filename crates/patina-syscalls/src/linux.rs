@@ -1145,9 +1145,9 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_modify_ldt => r(
         id,
         Family::Thread,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Thread-local kernel state. ld.so issues `set_tid_address`/`arch_prctl` before SUD arms, so the trap only fires for a raw guest emitter; the signals arc models the tid address (D6) and answers the rest.",
-        Some("signals+threads+process"),
+        Disposition::Modeled,
+        "The LDT is where an FS selector a plain `mov` loads comes from, and the shim finds its own per-thread state through the FS base, so no guest may write a usable one: a write (functions 1 and 0x11) meets `write_ldt`'s checks (the size, the copy, the entry number, the `contents` rule; `EINVAL`/`EFAULT`); an entry the kernel clears (the old form with base and limit 0, or `LDT_empty`) then goes to the host from the shim's checked copy, and any other is refused by name (`thread-pointer`). A read (0, 2) is the host kernel's on this process; any other function is `ENOSYS`. Every answer is an `int` in a zero-extended register, as the kernel returns it.",
+        None,
     ),
     Syscall::N_pivot_root => r(
         id,
@@ -1176,9 +1176,9 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_arch_prctl => r(
         id,
         Family::Thread,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Thread-local kernel state. ld.so issues `set_tid_address`/`arch_prctl` before SUD arms, so the trap only fires for a raw guest emitter; the signals arc models the tid address (D6) and answers the rest.",
-        Some("signals+threads+process"),
+        Disposition::Modeled,
+        "ld.so installs the FS base before SUD arms. The shim finds its own per-thread state through it, so `ARCH_SET_FS` never reaches the host: a base past the user address space is `EPERM`, the current base answers 0 (nothing moves), any other is refused by name (`thread-pointer`). `ARCH_GET_FS`, `ARCH_GET_GS` and `ARCH_SET_GS` (below the user address space's end, else `EPERM`) are the host kernel's on the calling thread (neither glibc nor the shim uses GS). The virtual CPU has no CPUID faulting: `ARCH_GET_CPUID` is 1 and `ARCH_SET_CPUID` `ENODEV`, whatever its argument. The codes 6.8 knows that are not modeled (the xstate permissions, mapping a vDSO, shadow stacks) are named fatals; any other is `EINVAL`.",
+        None,
     ),
     Syscall::N_adjtimex => r(
         id,

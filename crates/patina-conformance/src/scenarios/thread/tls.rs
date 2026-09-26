@@ -8,8 +8,10 @@
 //! * `arch_prctl(ARCH_GET_FS)` reports the thread pointer glibc installed
 //!   (the TCB's self pointer at `%fs:0`), and setting it to itself answers
 //!   0 and changes nothing; `ARCH_GET_GS` reports no GS base; CPUID does
-//!   not fault (`ARCH_GET_CPUID` 1); an unknown code is `EINVAL` and a NULL
-//!   out-pointer `EFAULT`;
+//!   not fault (`ARCH_GET_CPUID` 1) and, with no CPUID faulting in the CPU,
+//!   `ARCH_SET_CPUID` is `ENODEV`; an unknown code is `EINVAL`, a NULL
+//!   out-pointer `EFAULT`, and an FS or GS base past the user address space
+//!   `EPERM`;
 //! * `modify_ldt` returns an `int` in a zero-extended register (the kernel
 //!   casts its result to `unsigned int`), so its errors reach the caller as
 //!   positive values, not `-errno`: an unknown function is `ENOSYS` so
@@ -26,18 +28,22 @@
 //! none of these rows.
 
 use super::thread_pointer;
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
 /// `ARCH_*` codes (arch/x86/include/uapi/asm/prctl.h).
+const ARCH_SET_GS: i64 = 0x1001;
 const ARCH_SET_FS: i64 = 0x1002;
 const ARCH_GET_FS: i64 = 0x1003;
 const ARCH_GET_GS: i64 = 0x1004;
 const ARCH_GET_CPUID: i64 = 0x1011;
+const ARCH_SET_CPUID: i64 = 0x1012;
+/// `TASK_SIZE_MAX` with 4-level paging: the first base past the user
+/// address space.
+const TASK_SIZE_MAX: i64 = 0x7fff_ffff_f000;
 /// A code `arch_prctl` does not define.
 const ARCH_UNKNOWN: i64 = 0x9999;
 /// `modify_ldt` functions: read, write (the modern form), read the default.
@@ -119,14 +125,39 @@ pub fn run(p: &Probe) {
         "CPUID does not fault",
         arch_prctl(p, ARCH_GET_CPUID, 0, "none") == 1,
     );
-    p.check(
-        "an unknown code is EINVAL",
-        arch_prctl(p, ARCH_UNKNOWN, 0, "none") == neg(EINVAL),
-    );
-    p.check(
-        "a NULL out-pointer is EFAULT",
-        arch_prctl(p, ARCH_GET_FS, 0, "null") == neg(EFAULT),
-    );
+    for (what, code, arg, arg_what, errno) in [
+        ("an unknown code is EINVAL", ARCH_UNKNOWN, 0, "none", EINVAL),
+        (
+            "a NULL out-pointer is EFAULT",
+            ARCH_GET_FS,
+            0,
+            "null",
+            EFAULT,
+        ),
+        (
+            "an FS base past the user address space is EPERM",
+            ARCH_SET_FS,
+            TASK_SIZE_MAX,
+            "task-size-max",
+            EPERM,
+        ),
+        (
+            "a GS base past the user address space is EPERM",
+            ARCH_SET_GS,
+            TASK_SIZE_MAX,
+            "task-size-max",
+            EPERM,
+        ),
+        (
+            "enabling cpuid is ENODEV: the CPU has no CPUID faulting",
+            ARCH_SET_CPUID,
+            1,
+            "enable",
+            ENODEV,
+        ),
+    ] {
+        p.check(what, arch_prctl(p, code, arg, arg_what) == neg(errno));
+    }
 
     let mut buf = [0xaau8; 64];
     p.check(
@@ -179,15 +210,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_arch_prctl,
         Syscall::N_modify_ldt,
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::SignalsThreadsProcess),
-        vehicles: Vehicle::KERNEL,
-        what: "arch_prctl and modify_ldt are Trap(unmodeled) in the registry (ld.so's own arch_prctl runs before SUD arms; a guest's reaches the dispatcher), so it aborts at the first arch_prctl, after the thread-area rows' ENOSYS, which the soft-deny answers exactly",
-        failure: Failure::Stops {
-            events: 4,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall arch_prctl (nr 158",
-        },
-    }],
     ..DEFAULTS
 };
