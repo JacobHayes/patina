@@ -12,6 +12,8 @@ pub mod rwlock;
 pub mod tid_clear;
 #[cfg(target_arch = "x86_64")]
 pub mod tls;
+#[cfg(target_arch = "x86_64")]
+pub mod tls_cpu;
 
 /// The thread pointer glibc installed for the calling thread (x86_64: the
 /// TCB's self pointer at `%fs:0`; aarch64: `tpidr_el0`).

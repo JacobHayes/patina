@@ -193,6 +193,10 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         Need::Membarrier => memipc::membarrier(),
         Need::ProtectionKeys => memipc::protection_keys(),
         Need::ShadowStack => memipc::shadow_stack(),
+        #[cfg(target_arch = "x86_64")]
+        Need::FourLevelPaging => memipc::four_level_paging(),
+        #[cfg(target_arch = "x86_64")]
+        Need::NoCpuidFaulting => memipc::no_cpuid_faulting(),
         Need::SecretMemory => memipc::secret_memory(),
         Need::OneNumaNode => memipc::one_numa_node(),
         Need::NiceZero => timeid::nice_zero(),
@@ -1070,6 +1074,55 @@ mod memipc {
         Ok(())
     }
 
+    /// A fixed mapping at 128 TiB is past 4-level paging's user address
+    /// space (`ENOMEM`), and inside 5-level paging's, where it maps (or
+    /// `EEXIST`, something already there).
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn four_level_paging() -> Result<(), NotRun> {
+        const PAST_FOUR_LEVEL: i64 = 1 << 47;
+        let mapped = sys(
+            Syscall::N_mmap,
+            [
+                PAST_FOUR_LEVEL,
+                page(),
+                libc::PROT_NONE as i64,
+                (libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE) as i64,
+                -1,
+                0,
+            ],
+        );
+        if mapped == -i64::from(libc::ENOMEM) {
+            return Ok(());
+        }
+        if mapped >= 0 {
+            sys(Syscall::N_munmap, [mapped, page(), 0, 0, 0, 0]);
+        }
+        if mapped >= 0 || mapped == -i64::from(libc::EEXIST) {
+            return Err(unmet(
+                Cause::Absent,
+                "the user address space reaches past 128 TiB (5-level paging): \
+                 4-level paging's TASK_SIZE_MAX is an ordinary user address here"
+                    .into(),
+            ));
+        }
+        check("mmap at 128 TiB", mapped).map(drop)
+    }
+
+    /// Enabling `cpuid` (the default mode, so nothing changes) is `ENODEV`
+    /// on a CPU that cannot fault it, and 0 on one that can.
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn no_cpuid_faulting() -> Result<(), NotRun> {
+        const ARCH_SET_CPUID: i64 = 0x1012;
+        match sys(Syscall::N_arch_prctl, [ARCH_SET_CPUID, 1, 0, 0, 0, 0]) {
+            error if error == -i64::from(libc::ENODEV) => Ok(()),
+            0 => Err(unmet(
+                Cause::Absent,
+                "the CPU has CPUID faulting: arch_prctl(ARCH_SET_CPUID) answered 0".into(),
+            )),
+            error => check("arch_prctl(ARCH_SET_CPUID, 1)", error).map(drop),
+        }
+    }
+
     /// A secret page is locked memory: its mapping answers EAGAIN past
     /// `RLIMIT_MEMLOCK` (mm/secretmem.c).
     pub(super) fn secret_memory() -> Result<(), NotRun> {
@@ -1148,6 +1201,35 @@ mod memipc {
         #[test]
         fn an_impossible_lock_is_unmet_not_passed() {
             assert!(locked_pages(1 << 40).is_err());
+        }
+
+        /// Whether the kernel lists `flag` for the CPU (it clears `la57`
+        /// when it runs 4-level paging on a CPU that has 5-level).
+        #[cfg(target_arch = "x86_64")]
+        fn cpu_flag(flag: &str) -> bool {
+            let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").expect("read /proc/cpuinfo");
+            let flags = cpuinfo
+                .lines()
+                .find_map(|line| line.strip_prefix("flags"))
+                .expect("a flags line");
+            flags.split_whitespace().any(|listed| listed == flag)
+        }
+
+        #[test]
+        #[cfg(target_arch = "x86_64")]
+        fn the_cpu_needs_agree_with_the_kernels_cpu_flags() {
+            for (detected, flag) in [
+                (four_level_paging(), "la57"),
+                (no_cpuid_faulting(), "cpuid_fault"),
+            ] {
+                match detected {
+                    Ok(()) => assert!(!cpu_flag(flag), "{flag} listed, need met"),
+                    Err(reason) => {
+                        assert_eq!(reason.cause, Cause::Absent, "{flag}: {reason}");
+                        assert!(cpu_flag(flag), "{flag} not listed: {reason}");
+                    }
+                }
+            }
         }
     }
 }

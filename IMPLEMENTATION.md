@@ -942,8 +942,12 @@ number, the code-segment rule). An entry the kernel stores as an all-zero
 descriptor (the old form with base and limit 0, or `LDT_empty`), which no
 selector load accepts, then goes to the host from the shim's checked copy,
 never re-read from the guest; any other write is refused by name, since an LDT
-entry is what an FS selector load reads. `thread/tls` passes on every vehicle
-with no gap, and `native_containment::thread_pointer_syscalls_are_refused_by_name`
+entry is what an FS selector load reads. `thread/tls` and `thread/tls_cpu`
+pass on every vehicle with no gap. `thread/tls_cpu` holds the rows whose native
+answer is the CPU's (a base at 4-level paging's `TASK_SIZE_MAX`, `ARCH_SET_CPUID`),
+so a host with 5-level paging, where that base is a user address and moving the
+FS base there kills the native probe, or with CPUID faulting reports it not run;
+and `native_containment::thread_pointer_syscalls_are_refused_by_name`
 (`testbeds/native-boundary/thread_pointer_syscalls.c`) requires the named stop
 for `ARCH_SET_FS` to another base and for a present 32-bit data segment
 written to the LDT (red with either passed to the host: the moved FS base

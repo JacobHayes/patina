@@ -149,6 +149,16 @@ pub enum Need {
     /// A shadow stack maps (`map_shadow_stack`: the CPU's user shadow
     /// stacks and the kernel's support for them).
     ShadowStack,
+    /// The user address space ends at 128 TiB, as the virtual machine's
+    /// does: 4-level paging, so `TASK_SIZE_MAX` is `0x7fff_ffff_f000`. A CPU
+    /// with 5-level paging (`la57`), which the kernel enables wherever the
+    /// CPU has it, moves the end to 64 PiB, and a page at 128 TiB maps.
+    #[cfg(target_arch = "x86_64")]
+    FourLevelPaging,
+    /// The CPU cannot make `cpuid` fault (no `X86_FEATURE_CPUID_FAULT`), as
+    /// the virtual CPU cannot: `arch_prctl(ARCH_SET_CPUID)` is `ENODEV`.
+    #[cfg(target_arch = "x86_64")]
+    NoCpuidFaulting,
     /// A secret-memory page can be created and mapped (`memfd_secret`
     /// enabled, and one lockable page).
     SecretMemory,
@@ -215,6 +225,8 @@ impl Need {
             | Need::Landlock
             | Need::Aio
             | Need::IoUring => true,
+            #[cfg(target_arch = "x86_64")]
+            Need::FourLevelPaging | Need::NoCpuidFaulting => true,
             Need::UserXattrs
             | Need::Inotify
             | Need::FileHandles
@@ -628,6 +640,8 @@ pub const SCENARIOS: &[&Scenario] = &[
     &thread::tid_clear::SCENARIO,
     #[cfg(target_arch = "x86_64")]
     &thread::tls::SCENARIO,
+    #[cfg(target_arch = "x86_64")]
+    &thread::tls_cpu::SCENARIO,
     &time::clock_res::SCENARIO,
     &time::clock_set::SCENARIO,
     &time::clocks::SCENARIO,

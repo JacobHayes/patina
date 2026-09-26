@@ -2169,6 +2169,12 @@ fn thread_tls() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
+fn thread_tls_cpu() {
+    conform("thread/tls_cpu");
+}
+
+#[test]
 fn time_clock_res() {
     conform("time/clock_res");
 }

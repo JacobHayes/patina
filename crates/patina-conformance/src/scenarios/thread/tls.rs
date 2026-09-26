@@ -8,10 +8,10 @@
 //! * `arch_prctl(ARCH_GET_FS)` reports the thread pointer glibc installed
 //!   (the TCB's self pointer at `%fs:0`), and setting it to itself answers
 //!   0 and changes nothing; `ARCH_GET_GS` reports no GS base; CPUID does
-//!   not fault (`ARCH_GET_CPUID` 1) and, with no CPUID faulting in the CPU,
-//!   `ARCH_SET_CPUID` is `ENODEV`; an unknown code is `EINVAL`, a NULL
-//!   out-pointer `EFAULT`, and an FS or GS base past the user address space
-//!   `EPERM`;
+//!   not fault (`ARCH_GET_CPUID` 1); an unknown code is `EINVAL` and a NULL
+//!   out-pointer `EFAULT`. The answers that are the CPU's as much as the
+//!   kernel's (a base past the user address space, setting the CPUID mode)
+//!   are `thread/tls_cpu`'s, which needs the virtual machine's CPU;
 //! * `modify_ldt` returns an `int` in a zero-extended register (the kernel
 //!   casts its result to `unsigned int`), so its errors reach the caller as
 //!   positive values, not `-errno`: an unknown function is `ENOSYS` so
@@ -34,15 +34,10 @@ use libc::*;
 use patina_dst_syscalls::Syscall;
 
 /// `ARCH_*` codes (arch/x86/include/uapi/asm/prctl.h).
-const ARCH_SET_GS: i64 = 0x1001;
-const ARCH_SET_FS: i64 = 0x1002;
+pub(super) const ARCH_SET_FS: i64 = 0x1002;
 const ARCH_GET_FS: i64 = 0x1003;
 const ARCH_GET_GS: i64 = 0x1004;
 const ARCH_GET_CPUID: i64 = 0x1011;
-const ARCH_SET_CPUID: i64 = 0x1012;
-/// `TASK_SIZE_MAX` with 4-level paging: the first base past the user
-/// address space.
-const TASK_SIZE_MAX: i64 = 0x7fff_ffff_f000;
 /// A code `arch_prctl` does not define.
 const ARCH_UNKNOWN: i64 = 0x9999;
 /// `modify_ldt` functions: read, write (the modern form), read the default.
@@ -65,7 +60,7 @@ fn ldt_error(errno: i32) -> i64 {
     i64::from((-errno) as u32)
 }
 
-fn arch_prctl(p: &Probe, code: i64, arg: i64, what: &str) -> i64 {
+pub(super) fn arch_prctl(p: &Probe, code: i64, arg: i64, what: &str) -> i64 {
     p.observed(
         Syscall::N_arch_prctl,
         [code, arg, 0, 0, 0, 0],
@@ -132,27 +127,6 @@ pub fn run(p: &Probe) {
             0,
             "null",
             EFAULT,
-        ),
-        (
-            "an FS base past the user address space is EPERM",
-            ARCH_SET_FS,
-            TASK_SIZE_MAX,
-            "task-size-max",
-            EPERM,
-        ),
-        (
-            "a GS base past the user address space is EPERM",
-            ARCH_SET_GS,
-            TASK_SIZE_MAX,
-            "task-size-max",
-            EPERM,
-        ),
-        (
-            "enabling cpuid is ENODEV: the CPU has no CPUID faulting",
-            ARCH_SET_CPUID,
-            1,
-            "enable",
-            ENODEV,
         ),
     ] {
         p.check(what, arch_prctl(p, code, arg, arg_what) == neg(errno));

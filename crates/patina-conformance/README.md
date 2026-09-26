@@ -53,7 +53,7 @@ the facts its recorded trace must show. Where a host oracle is required
 (`PATINA_REQUIRE_HOST_ORACLE=1`, CI), an unmet need or a kernel below a
 scenario's floor fails the test — the runner is misconfigured — except a
 machine fact found absent (`Need::hardware`: protection keys, shadow stacks,
-secret memory, one NUMA node), which no runner is set up to provide: that
+secret memory, one NUMA node, 4-level paging, no CPUID faulting), which no runner is set up to provide: that
 scenario is reported `NOT RUN` on the test's stderr, past libtest's capture,
 so it shows in the job log. A killed native run can leave IPC objects behind;
 the harness sweeps every name a run derives from its directory after each
