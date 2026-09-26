@@ -198,13 +198,14 @@ pub struct NativeEscape {
     pub category: &'static str,
     pub provenance: Vec<NativeProvenance>,
     /// For an *instruction* finding, the decoded mnemonic (`rdtsc`, `rdtscp`,
-    /// `rdrand`, `rdseed`, `syscall`, `svc`, `cntvct`, `cpuid`, `wrfsbase`,
-    /// `mov fs`, `pop fs`, `lfs`, `msr tpidr_el0`); `None` for a symbol,
-    /// immediate, or undecodable finding.
+    /// `rdrand`, `rdseed`, `syscall`, `svc`, `cntvct`, `cntvctss`, `rndr`, `rndrrs`,
+    /// `cpuid`, `wrfsbase`, `mov fs`, `pop fs`, `lfs`, `msr tpidr_el0`); `None`
+    /// for a symbol, immediate, or undecodable finding.
     ///
     /// The category alone cannot decide manageability: `cpu-nondeterminism`
     /// covers both the timestamp counter (trappable via `PR_SET_TSC` on x86-64
-    /// Linux) and the RNG/system-counter reads (`rdrand`/`rdseed`/`mrs CNTVCT`),
+    /// Linux) and the RNG/system-counter reads (`rdrand`/`rdseed`/`mrs CNTVCT`/
+    /// `mrs RNDR`),
     /// which no mechanism traps. [`native_escape_is_tsc_manageable`] reads this
     /// field to keep the two apart, so an escape carrying no mnemonic is never
     /// downgraded.
@@ -511,9 +512,9 @@ pub fn native_binary_has_tsc_marker(bytes: &[u8]) -> Result<bool, TargetError> {
 ///
 /// This is the `cpu-nondeterminism` counterpart of
 /// [`native_escape_is_sud_manageable`], and it is deliberately narrower than its
-/// category: `rdrand`/`rdseed` (hardware entropy) and `mrs CNTVCT_EL0` (the arm64
-/// system counter) share the `cpu-nondeterminism` label but no mechanism traps
-/// them, so they stay refusals. The decision reads the decoded
+/// category: `rdrand`/`rdseed`/`mrs RNDR`/`mrs RNDRRS` (hardware entropy) and
+/// `mrs CNTVCT_EL0` (the arm64 system counter) share the `cpu-nondeterminism`
+/// label but no mechanism traps them, so they stay refusals. The decision reads the decoded
 /// [`NativeEscape::mnemonic`], so a finding that carries none — a symbol import, a
 /// `vsyscall` immediate, an `undecodable-instruction` — is never downgraded.
 ///
@@ -1964,8 +1965,22 @@ fn scan_vsyscall_references(
 /// supervisor call) and `mrs Xt, CNTVCT_EL0` (the virtual system counter — the
 /// arm64 analogue of `rdtsc`, and unlike `rdtsc` NOT trappable, so it carries a
 /// mnemonic only for the message, never for a downgrade; see
-/// [`native_escape_is_tsc_manageable`]), and `msr TPIDR_EL0, Xt` (a write of the
-/// thread pointer; see [`THREAD_POINTER_CATEGORY`]).
+/// [`native_escape_is_tsc_manageable`]), `mrs Xt, CNTVCTSS_EL0` (its FEAT_ECV
+/// self-synchronising twin, `0xd53be0c0 | Rt`, readable at EL0 under the same
+/// kernel control and just as untrappable), `mrs Xt, RNDR` / `mrs Xt, RNDRRS`
+/// (FEAT_RNG hardware entropy, the arm64 analogue of `rdrand`/`rdseed` and just
+/// as untrappable), and `msr TPIDR_EL0, Xt` (a write of the thread pointer; see
+/// [`THREAD_POINTER_CATEGORY`]).
+///
+/// The physical counter reads (`CNTPCT_EL0`, `CNTPCTSS_EL0`) are not findings:
+/// Linux leaves them disabled at EL0, so a read raises SIGILL and returns no
+/// time.
+///
+/// The entropy rows are exactly `mrs Xt, S3_3_C2_C4_0` (`0xd53b2400 | Rt`) and
+/// `mrs Xt, S3_3_C2_C4_1` (`0xd53b2420 | Rt`). Every other system-register access
+/// stays unclassified, including the same two registers with `L = 0` (an `msr`
+/// to a read-only register is UNDEFINED) and the unallocated `op2` values beside
+/// them.
 ///
 /// The thread-pointer row is exactly `msr S3_3_C13_C0_2, Xt` (`0xd51bd040 | Rt`).
 /// Its neighbours are deliberately not findings:
@@ -1980,6 +1995,12 @@ fn aarch64_instruction_category(instruction: u32) -> Option<(&'static str, &'sta
         Some(("direct-syscall", "svc"))
     } else if instruction & !0x1f == 0xd53b_e040 {
         Some(("cpu-nondeterminism", "cntvct"))
+    } else if instruction & !0x1f == 0xd53b_e0c0 {
+        Some(("cpu-nondeterminism", "cntvctss"))
+    } else if instruction & !0x1f == 0xd53b_2400 {
+        Some(("cpu-nondeterminism", "rndr"))
+    } else if instruction & !0x1f == 0xd53b_2420 {
+        Some(("cpu-nondeterminism", "rndrrs"))
     } else if instruction & !0x1f == 0xd51b_d040 {
         Some((THREAD_POINTER_CATEGORY, "msr tpidr_el0"))
     } else {
@@ -5099,24 +5120,48 @@ mod tests {
         words.iter().flat_map(|word| word.to_le_bytes()).collect()
     }
 
-    // The aarch64 thread-pointer write is exactly `msr TPIDR_EL0, Xt`, for every
-    // Xt. Its neighbours are not findings: the read (`mrs`), the EL0-UNDEFINED
-    // `msr TPIDRRO_EL0`, and the SME `TPIDR2_EL0` pair. RED: drop the
-    // `0xd51bd040` row and the writes classify as `None`.
+    // The forbidden aarch64 system-register accesses, for every Xt: the
+    // thread-pointer write (`msr TPIDR_EL0`), the self-synchronising virtual
+    // counter (`mrs CNTVCTSS_EL0`) and the FEAT_RNG entropy reads (`mrs
+    // RNDR`/`RNDRRS`). Their neighbours are not findings: the thread pointer's
+    // read, the EL0-UNDEFINED `msr TPIDRRO_EL0` and the SME `TPIDR2_EL0` pair;
+    // the physical counters Linux disables at EL0 (`CNTPCT`/`CNTPCTSS`), the
+    // UNDEFINED `msr` forms, the unallocated `op2` beside them, and the next
+    // `CRm`/`op1` over. RED: drop a
+    // row from `aarch64_instruction_category` and its accesses classify as
+    // `None`.
     #[test]
-    fn classifies_aarch64_thread_pointer_writes() {
+    fn classifies_aarch64_system_register_accesses() {
         for rt in 0..32u32 {
-            assert_eq!(
-                aarch64_instruction_category(0xd51b_d040 | rt),
-                Some((THREAD_POINTER_CATEGORY, "msr tpidr_el0")),
-                "msr tpidr_el0, x{rt}"
-            );
+            for (word, expected) in [
+                (0xd51b_d040, (THREAD_POINTER_CATEGORY, "msr tpidr_el0")),
+                (0xd53b_e0c0, ("cpu-nondeterminism", "cntvctss")),
+                (0xd53b_2400, ("cpu-nondeterminism", "rndr")),
+                (0xd53b_2420, ("cpu-nondeterminism", "rndrrs")),
+            ] {
+                assert_eq!(
+                    aarch64_instruction_category(word | rt),
+                    Some(expected),
+                    "{} x{rt}",
+                    expected.1
+                );
+            }
             for (neighbour, label) in [
                 (0xd53b_d040 | rt, "mrs tpidr_el0"),
                 (0xd51b_d060 | rt, "msr tpidrro_el0"),
                 (0xd53b_d060 | rt, "mrs tpidrro_el0"),
                 (0xd51b_d0a0 | rt, "msr tpidr2_el0"),
                 (0xd53b_d0a0 | rt, "mrs tpidr2_el0"),
+                (0xd51b_2400 | rt, "msr s3_3_c2_c4_0 (rndr, write)"),
+                (0xd51b_2420 | rt, "msr s3_3_c2_c4_1 (rndrrs, write)"),
+                (0xd53b_2440 | rt, "mrs s3_3_c2_c4_2"),
+                (0xd53b_2300 | rt, "mrs s3_3_c2_c3_0"),
+                (0xd53b_2500 | rt, "mrs s3_3_c2_c5_0"),
+                (0xd538_2400 | rt, "mrs s3_0_c2_c4_0"),
+                (0xd53b_e020 | rt, "mrs cntpct_el0"),
+                (0xd53b_e0a0 | rt, "mrs cntpctss_el0"),
+                (0xd51b_e0c0 | rt, "msr s3_3_c14_c0_6 (cntvctss, write)"),
+                (0xd53b_e0e0 | rt, "mrs s3_3_c14_c0_7"),
             ] {
                 assert_eq!(
                     aarch64_instruction_category(neighbour),

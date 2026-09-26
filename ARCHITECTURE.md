@@ -582,14 +582,14 @@ Static, pre-run checks reject a native binary before it executes:
   interposed, provably effect-free, or explicitly `--allow`ed; anything unknown
   is a refusal (`cargo patina audit` reports the same surface `run` enforces);
 - an **instruction scan** for raw syscall/clock/entropy opcodes (`svc`/`syscall`,
-  `rdtsc`/`rdtscp`/`rdrand`/`rdseed`, aarch64 `CNTVCT`/`RNDR`) and the x86_64
+  `rdtsc`/`rdtscp`/`rdrand`/`rdseed`, aarch64 `CNTVCT`/`CNTVCTSS`/`RNDR`/`RNDRRS`) and the x86_64
   vsyscall-page address; each finding carries its decoded mnemonic, because two
   of them are trap-managed rather than refused on x86_64 Linux — a raw-syscall
   finding is downgraded to *SUD-managed*, and a `rdtsc`/`rdtscp` finding to
   *TSC-trap-managed* (the shim arms `prctl(PR_SET_TSC, PR_TSC_SIGSEGV)` and
   answers the counter from the virtual clock). Both downgrades require the
   matching shim marker and a live platform probe, and both are reported, never
-  silent. The rest of the class (`rdrand`/`rdseed`/`CNTVCT`) has no trap and is
+  silent. The rest of the class (`rdrand`/`rdseed`/`CNTVCT`/`RNDR`) has no trap and is
   refused everywhere. The scan also refuses thread-pointer writes (x86_64
   `wrfsbase` and FS selector loads, aarch64 `msr tpidr_el0`): the shim finds its
   own per-thread state through that pointer, so no guest may move it. glibc
