@@ -18,7 +18,9 @@ pub(in crate::thread::signals) fn observe_host_call(nr: i64, args: [u64; 6]) {
             count.set(Some(n + 1));
         }
     });
-    HOST_CALLS.with(|calls| {
+    // A managed thread completes from glibc's thread-local destructor pass,
+    // after this record's own destructor may have run: observe nothing then.
+    let _ = HOST_CALLS.try_with(|calls| {
         let mut calls = calls.borrow_mut();
         let Some(calls) = calls.as_mut() else {
             return;

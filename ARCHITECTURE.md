@@ -153,6 +153,13 @@ Thread-directed generation queues privately and delivers on the named task's
 host thread. `pthread_kill` resolves the managed pthread handle to that task.
 `set_tid_address` stores a guest word per task, separately from glibc's host
 thread bookkeeping; thread completion clears the word and wakes a futex waiter.
+Each task also holds a virtual robust-futex list head: glibc's, read back from
+the host when the task starts (glibc registers it from its own text, before the
+shim runs), until the guest sets another; `pthread_create` returns once the new
+thread has taken it over. A managed thread completes after its thread-local
+destructors (its completion is the first one it registers), and completion
+walks the list first, as the kernel's exit does: a futex word the task still
+owns gains `FUTEX_OWNER_DIED` and wakes a waiter by the word's shared key.
 Raw `exit` completes only the calling task, including the leader; another live
 task can subsequently end the process with `exit_group`. Raw `exit_group`
 finalizes without running guest atexit handlers; normal libc exit retains its

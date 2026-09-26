@@ -117,6 +117,7 @@ return code decides:
 | row | semantics | kernel | probe |
 |---|---|---|---|
 | `set_tid_address(ptr)` | records `ptr` for the calling thread and returns its tid; when that thread exits the kernel writes 0 to `*ptr` and `futex_wake`s it (`FUTEX_BITSET_MATCH_ANY`) | `sys_set_tid_address`, `mm_release` (kernel/fork.c) | `thread/tid_clear` |
+| `set_robust_list(head, 24)`, `get_robust_list(pid, &head, &len)` | per-thread head, glibc's from each thread's start; any length but 24 is `EINVAL`; `get` of the caller (0) or a live tid writes 24 then the head (`EFAULT` for either), `ESRCH` for no such thread, `EPERM` for init; at exit, after the thread-local destructors, the list is walked before clear-child-tid, and an owned word gains `FUTEX_OWNER_DIED` and wakes one waiter by its shared key (a `FUTEX_WAIT_PRIVATE` waiter stays parked) | `kernel/futex/syscalls.c`, `exit_robust_list`, `handle_futex_death` | `thread/robust_list` |
 | `exit(code)` (60) | ends the CALLING thread only; the process lives while another thread runs and its `exit_group` sets the status; no atexit handlers run | `do_exit` vs `do_group_exit` | `thread/main_exit` |
 | `exit_group(code)` (231) | ends every thread; the process exit status is `code` | `do_group_exit` | `thread/main_exit` |
 | `wait4`/`waitid` | a process without children: `ECHILD` (also with `WNOHANG`); `waitid` options outside `WNOHANG|WNOWAIT|WEXITED|WSTOPPED|WCONTINUED|__WNOTHREAD|__WCLONE|__WALL`, or none of `WEXITED|WSTOPPED|WCONTINUED` → `EINVAL` | `do_wait`, `kernel_waitid` | `proc/wait` |

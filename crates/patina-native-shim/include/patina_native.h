@@ -703,6 +703,9 @@ void patina_signal_frame(uint64_t *mask, void *stack);
  * frame's saved mask at `mask`, and name the host vehicle (glibc's real
  * syscall(2)) that issues the kernel's rt_sigreturn. */
 uintptr_t patina_signal_return(uintptr_t mask);
+/* Take over the main thread's host kernel registrations (the robust-futex
+ * list head) as the main task's; a managed run's startup calls it once. */
+void patina_thread_registrations_adopt_main(void);
 #endif
 /* Private internal-fatal vehicle: never finalize the guest trace. */
 _Noreturn void patina_host_abort(void);

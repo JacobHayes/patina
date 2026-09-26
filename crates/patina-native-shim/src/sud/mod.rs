@@ -122,14 +122,6 @@ unsafe extern "C" {
     fn patina_raw_exit(status: c_int) -> !;
     fn patina_raw_exit_group(status: c_int) -> !;
     fn patina_set_tid_address(address: *mut i32) -> i64;
-    fn patina_futex_wait(addr: usize, expected: u32) -> c_int;
-    fn patina_futex_wait_timed(
-        addr: usize,
-        expected: u32,
-        clock: u32,
-        absolute: c_int,
-        timeout_nanos: u64,
-    ) -> c_int;
     fn patina_futex_wake(addr: usize, count: c_int) -> c_int;
     // Memory mappings (`crate::mem`): the one model the C mmap/munmap/mremap/
     // msync interposers call, in the raw ABI.
@@ -1359,6 +1351,12 @@ const BINDINGS: &[(Syscall, Handler)] = &[
         crate::trap_fatal(&format!(
             "rt_sigreturn (nr {nr}) reached the dispatcher: both vehicles answer it first"
         ))
+    }),
+    (Syscall::N_set_robust_list, |_, a| {
+        crate::thread::registrations::set_robust_list(a[0] as usize, a[1] as usize)
+    }),
+    (Syscall::N_get_robust_list, |nr, a| {
+        privileged::answer(nr, privileged::get_robust_list, a)
     }),
     // No restart block is ever pending (the registry row says why).
     (Syscall::N_restart_syscall, |_, _| -EINTR),

@@ -2027,17 +2027,18 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_set_robust_list => r(
         id,
         Family::Sync,
-        Disposition::SoftDeny(ENOSYS),
-        "ENOSYS: a kernel without robust futexes is a configuration every libc handles, and passing the list through would leak host-kernel behavior into the schedule.",
+        Disposition::Modeled,
+        "The calling task's virtual head (exactly `sizeof(struct robust_list_head)`, else EINVAL), which the virtual kernel walks when the task exits: owned futexes gain FUTEX_OWNER_DIED and wake a waiter on the scheduler. Each task starts with the head glibc registered from its own text, read back from the host at the task's start; the host keeps glibc's (always empty) list.",
         None,
     ),
     Syscall::N_get_robust_list => r(
         id,
         Family::Sync,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The signals+threads arc models it on the scheduler.",
-        Some("signals+threads+process"),
-    ),
+        Disposition::Modeled,
+        "The virtual head of the caller (pid 0) or of any live thread by its tid, length 24 then the head (EFAULT for either pointer); a tid no thread has is ESRCH, and init's is ptrace_may_access's EPERM without CAP_SYS_PTRACE.",
+        None,
+    )
+    .capabilities(&[Capability::SysPtrace]),
     Syscall::N_splice => r(
         id,
         Family::Fs,

@@ -846,6 +846,33 @@ dying. The host has both, so `asyncio/aio` and `asyncio/io_uring` pin the
 before its ring checks); the conformance catalog's io_uring arc is gone with
 its last pending gap.
 
+Robust-futex lists are per-task virtual state (`src/thread/registrations.rs`).
+Each task starts with the head glibc registered on its host thread, read back
+with the host's `get_robust_list` when the task starts: from `__libc_start_main`
+for the main thread, from the trampoline for a managed one. `set_robust_list`
+replaces it (exactly 24 bytes, else `EINVAL`), `get_robust_list` reports any
+live thread's by tid (`ESRCH` otherwise, init's `EPERM` without
+`CAP_SYS_PTRACE`). A new thread's takeover runs on its own host thread, off
+the baton, so `pthread_create` waits for it: asking about a thread just
+created answers the same on every run. A managed thread completes from
+glibc's thread-local destructor pass (its completion is the first destructor
+it registers), so the guest's own thread-local destructors run on the live
+task first, as they run before the kernel's exit natively; completion then
+walks the list before clearing the clear-child-tid word, as
+`exit_robust_list` does, and wakes a dead owner's futexes by their shared key
+as `handle_futex_death` does, so a `FUTEX_WAIT_PRIVATE` waiter stays parked.
+The host keeps glibc's always-empty list. Two residuals: `pthread_key_create`
+destructors, which glibc runs after the thread-local ones, still run after
+the walk on a completed task; and neither the main thread's list nor any list
+at `exit_group` is walked, which only memory outliving the process could
+show. `thread/robust_list` passes with no gap, and `native_signals` pins the
+exit walk (`a_thread_exit_walks_its_robust_list`, red with the walk
+disabled), its wakes (`a_dead_owners_walk_wakes_only_shared_waiters`), its
+place after the destructors (`thread_local_destructors_run_before_the_exit_walk`,
+against the native run) and the takeover's completion at create
+(`a_new_threads_robust_head_is_known_when_create_returns`, over eight seeds
+and three runs each).
+
 ## Dependency order
 
 ```text

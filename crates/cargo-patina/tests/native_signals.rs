@@ -78,6 +78,93 @@ fn a_handler_frame_cannot_block_the_containment_signals() {
     }
 }
 
+/// A thread's exit walks the robust list it registered (the virtual kernel's
+/// `exit_robust_list`): its own futex word gains `FUTEX_OWNER_DIED` and keeps
+/// its waiters bit, another thread's is left alone. Natively the host kernel
+/// does the same, so the guest's assertions hold on both.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_thread_exit_walks_its_robust_list() {
+    let g = assert_build_c_guest("signals/thread_registrations.c", CLink::PosixShim);
+    let output = assert_standalone_success(
+        &g.binary,
+        &["robust-exit"],
+        &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+    );
+    assert_eq!(output.stdout, b"ROBUST_EXIT_OK\n");
+}
+
+/// The exit walk wakes a dead owner's futexes as the kernel does, by their
+/// shared key: a `FUTEX_WAIT` waiter on an owned word wakes and sees
+/// `FUTEX_OWNER_DIED`, a waiter on the pending operation's zero word wakes,
+/// and a `FUTEX_WAIT_PRIVATE` waiter stays parked until woken privately.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dead_owners_walk_wakes_only_shared_waiters() {
+    let g = assert_build_c_guest("signals/thread_registrations.c", CLink::PosixShim);
+    for seed in ["7", "8"] {
+        let output = assert_standalone_success(
+            &g.binary,
+            &["robust-wake"],
+            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", seed)],
+        );
+        assert_eq!(
+            text(&output.stdout),
+            "shared woken=1 owner_died=1 waiters=1\n\
+             pending woken=1\n\
+             private left waiting=1 owner_died=1\n",
+            "seed {seed}"
+        );
+    }
+}
+
+/// The exit walk runs where the kernel's does, after the thread's
+/// thread-local destructors: one that releases its thread's robust lock
+/// still finds it held, as it does natively.
+#[cfg(target_os = "linux")]
+#[test]
+fn thread_local_destructors_run_before_the_exit_walk() {
+    let native = assert_build_c_guest("signals/thread_registrations.c", CLink::Unlinked);
+    let patina = assert_build_c_guest("signals/thread_registrations.c", CLink::PosixShim);
+    let oracle = assert_standalone_success(&native.binary, &["robust-dtor"], &[]);
+    assert_eq!(
+        text(&oracle.stdout),
+        "destructor found its lock held=1, released=1\n"
+    );
+    let output = assert_standalone_success(
+        &patina.binary,
+        &["robust-dtor"],
+        &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+    );
+    assert_eq!(text(&output.stdout), text(&oracle.stdout));
+}
+
+/// A thread just created has taken over its registrations before
+/// `pthread_create` returns: `get_robust_list` of it names glibc's head for
+/// it, on every seed and every run, where it once answered whichever state
+/// the host had scheduled the new thread to.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_new_threads_robust_head_is_known_when_create_returns() {
+    let g = assert_build_c_guest("signals/thread_registrations.c", CLink::PosixShim);
+    let expected = (0..4)
+        .map(|i| format!("thread {i}: result=0 glibc_head=1 own_view=1\n"))
+        .collect::<String>();
+    for seed in 1..=8u64 {
+        for _ in 0..3 {
+            let output = assert_standalone_success(
+                &g.binary,
+                &["robust-new"],
+                &[
+                    ("PATINA_MODE", "seeded"),
+                    ("PATINA_SEED", &seed.to_string()),
+                ],
+            );
+            assert_eq!(text(&output.stdout), expected, "seed {seed}");
+        }
+    }
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod raw {
     use super::*;

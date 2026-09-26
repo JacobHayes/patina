@@ -11,10 +11,11 @@ pub(super) fn sys_futex(args: [u64; 6]) -> i64 {
     let val = args[2] as u32;
     let timeout = args[3] as *const Timespec;
     let op = futex_op & !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+    let private = futex_op & FUTEX_PRIVATE_FLAG != 0;
     if op == FUTEX_WAIT || op == FUTEX_WAIT_BITSET {
         if timeout.is_null() {
-            // SAFETY: no dereference of `uaddr` here; the runtime treats it as a key.
-            return ret_i32(unsafe { patina_futex_wait(uaddr, val) });
+            // No dereference of `uaddr` here; the runtime treats it as a key.
+            return ret_i32(crate::thread::futex_wait(uaddr, val, private));
         }
         // FUTEX_WAIT: relative CLOCK_MONOTONIC. FUTEX_WAIT_BITSET: absolute,
         // CLOCK_REALTIME iff FUTEX_CLOCK_REALTIME — mirrors the C `syscall()` path.
@@ -28,10 +29,15 @@ pub(super) fn sys_futex(args: [u64; 6]) -> i64 {
             Ok(nanos) => nanos,
             Err(errno) => return errno,
         };
-        // SAFETY: `uaddr` is treated as a key by the runtime.
-        return ret_i32(unsafe {
-            patina_futex_wait_timed(uaddr, val, clock, absolute as c_int, timeout_nanos)
-        });
+        // `uaddr` is treated as a key by the runtime.
+        return ret_i32(crate::thread::futex_wait_timed(
+            uaddr,
+            val,
+            clock,
+            absolute as c_int,
+            timeout_nanos,
+            private,
+        ));
     }
     if op == FUTEX_WAKE || op == FUTEX_WAKE_BITSET {
         // SAFETY: `uaddr` is a key; `val` is the wake count.

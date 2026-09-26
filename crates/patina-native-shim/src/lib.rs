@@ -1134,6 +1134,8 @@ mod hostapi {
     // issues never re-traps. Declared with the six integer argument registers the
     // Linux syscall ABI uses; the glibc entry is variadic but every argument is an
     // integer passed in registers, so a fixed-arity call is ABI-compatible.
+    pub type HostThreadAtexit =
+        unsafe extern "C" fn(unsafe extern "C" fn(*mut c_void), *mut c_void, *mut c_void) -> c_int;
     pub type HostSyscall =
         unsafe extern "C" fn(c_long, c_long, c_long, c_long, c_long, c_long, c_long) -> c_long;
 
@@ -1171,6 +1173,11 @@ mod hostapi {
         /// The real glibc `syscall(2)` wrapper, the SUD dispatcher's pass-through
         /// vehicle for process-local memory-management rows.
         pub host_syscall: HostSyscall,
+        /// glibc's `__cxa_thread_atexit_impl`: a managed thread's completion
+        /// is its first-registered thread-local destructor, so it runs after
+        /// every destructor the guest registers, where the kernel's exit
+        /// (robust-list walk, clear-child-tid) follows them.
+        pub host_cxa_thread_atexit_impl: HostThreadAtexit,
     }
 
     // SAFETY: the fields are function pointers into glibc; sharing them across
@@ -1232,6 +1239,9 @@ mod hostapi {
                     c"pthread_join",
                 )),
                 host_syscall: std::mem::transmute::<*mut c_void, HostSyscall>(resolve(c"syscall")),
+                host_cxa_thread_atexit_impl: std::mem::transmute::<*mut c_void, HostThreadAtexit>(
+                    resolve(c"__cxa_thread_atexit_impl"),
+                ),
             }
         }
     }
@@ -7386,6 +7396,8 @@ mod thread {
     #[cfg(target_os = "linux")]
     pub(crate) mod readiness;
     #[cfg(target_os = "linux")]
+    pub(crate) mod registrations;
+    #[cfg(target_os = "linux")]
     pub(crate) mod sched;
     #[cfg(target_os = "linux")]
     pub(crate) mod signals;
@@ -8864,6 +8876,9 @@ mod thread {
         /// Per-thread scheduling attributes and persona.
         #[cfg(target_os = "linux")]
         sched: sched::SchedRuntime,
+        /// Per-thread kernel registrations (the robust-futex list head).
+        #[cfg(target_os = "linux")]
+        registrations: registrations::RegistrationRuntime,
         /// The interval timers, POSIX timers and timer descriptors.
         #[cfg(target_os = "linux")]
         timers: timers::Timers,
@@ -8878,6 +8893,12 @@ mod thread {
         /// `SYS_futex` through libc's `syscall` wrapper rather than pthread, so
         /// the interposed `syscall` routes those waits/wakes here.
         futexes: BTreeMap<usize, VecDeque<TaskId>>,
+        /// The tasks among [`Self::futexes`]' waiters that wait with
+        /// `FUTEX_PRIVATE_FLAG`, set or cleared each time a task parks. Only a
+        /// dead robust owner's wake tells them apart: the kernel wakes those
+        /// futexes by their shared key, which a private waiter's does not
+        /// match.
+        private_futex_waits: std::collections::BTreeSet<TaskId>,
         /// Timed waiters (`cond_timedwait`, timed futex waits) whose deadline
         /// fired: the runtime's deadlock-rescue woke them, and this shim purged
         /// them from their primitive's waiter list. On resume they return
@@ -8911,6 +8932,15 @@ mod thread {
     }
 
     impl ThreadRuntime {
+        /// Note whether `task`, parking on a futex word, waits privately.
+        fn note_futex_wait(&mut self, task: TaskId, private: bool) {
+            if private {
+                self.private_futex_waits.insert(task);
+            } else {
+                self.private_futex_waits.remove(&task);
+            }
+        }
+
         fn task_sem(&self, task: TaskId) -> Arc<baton::Semaphore> {
             Arc::clone(
                 self.sems
@@ -9197,11 +9227,14 @@ mod thread {
                 #[cfg(target_os = "linux")]
                 sched: sched::SchedRuntime::default(),
                 #[cfg(target_os = "linux")]
+                registrations: registrations::RegistrationRuntime::default(),
+                #[cfg(target_os = "linux")]
                 timers: timers::Timers::default(),
                 handles: BTreeMap::new(),
                 sems: BTreeMap::new(),
                 net: NetState::new(),
                 futexes: BTreeMap::new(),
+                private_futex_waits: std::collections::BTreeSet::new(),
                 timed_out: std::collections::BTreeSet::new(),
                 #[cfg(target_os = "macos")]
                 dispatch: BTreeMap::new(),
@@ -9397,6 +9430,19 @@ mod thread {
         unsafe {
             patina_tsc_arm_thread()
         };
+        // glibc's start_thread registered this thread with the host kernel
+        // before calling here: take the registrations over before the guest
+        // runs on it, and register the task's completion as this thread's
+        // first thread-local destructor. Then let the creator return: until
+        // now it waits, so no guest code runs beside this off-baton setup and
+        // a query of this thread's registrations answers the same every run.
+        #[cfg(target_os = "linux")]
+        let exit = {
+            registrations::adopt(task);
+            let exit = finish_after_destructors(task);
+            creation_settled().signal();
+            exit
+        };
         // Park on this task's baton semaphore until it is first scheduled.
         let sem = lock_state().task_sem(task);
         sem.wait();
@@ -9409,13 +9455,79 @@ mod thread {
             let _guest = crate::panic_boundary::PanicScope::suspend();
             routine(arg)
         };
+        // On Linux the task completes from glibc's thread-local destructor
+        // pass (`finish_after_destructors`), once the guest's own destructors
+        // ran on it.
+        #[cfg(target_os = "linux")]
+        // SAFETY: the record `finish_after_destructors` leaked; its
+        // destructor, which frees it, has not run yet.
+        unsafe {
+            (*exit).retval = ret as usize;
+        }
+        #[cfg(not(target_os = "linux"))]
         thread_finish(task, ret as usize, 0);
         ret
+    }
+
+    /// Posted by a new thread once its host registrations are taken over and
+    /// its completion is registered; `patina_thread_create` waits for it.
+    /// Creations are serialized (only the baton holder creates, and it holds
+    /// the baton while it waits), so one semaphore serves every creation.
+    #[cfg(target_os = "linux")]
+    fn creation_settled() -> &'static baton::Semaphore {
+        static SETTLED: OnceLock<baton::Semaphore> = OnceLock::new();
+        SETTLED.get_or_init(baton::Semaphore::new)
+    }
+
+    /// A managed thread's completion, waiting for its return value.
+    #[cfg(target_os = "linux")]
+    struct ThreadExit {
+        task: TaskId,
+        retval: usize,
+    }
+
+    /// Register `task`'s completion ([`thread_finish`]) as the calling
+    /// thread's first thread-local destructor. glibc runs them last-registered
+    /// first once the start routine returns, so the task completes after every
+    /// destructor the guest registered (C++ `thread_local`, Rust's
+    /// thread-locals), which therefore run on the live task, as natively they
+    /// run before the kernel's exit: the robust-list walk and the
+    /// clear-child-tid wake that a join waits for. Answers the record the
+    /// trampoline fills in with the return value.
+    #[cfg(target_os = "linux")]
+    fn finish_after_destructors(task: TaskId) -> *mut ThreadExit {
+        unsafe extern "C" fn complete(record: *mut c_void) {
+            let _panic_scope = crate::panic_boundary::PanicScope::enter();
+            // SAFETY: the record leaked below, consumed exactly once here.
+            let ThreadExit { task, retval } =
+                *unsafe { Box::from_raw(record.cast::<ThreadExit>()) };
+            thread_finish(task, retval, 0);
+        }
+        unsafe extern "C" {
+            static __dso_handle: u8;
+        }
+        let record = Box::into_raw(Box::new(ThreadExit { task, retval: 0 }));
+        // SAFETY: glibc's real `__cxa_thread_atexit_impl` with a destructor
+        // that takes the record, and this image's DSO handle.
+        let rc = unsafe {
+            (crate::hostapi::get().host_cxa_thread_atexit_impl)(
+                complete,
+                record.cast(),
+                (&raw const __dso_handle).cast_mut().cast(),
+            )
+        };
+        if rc != 0 {
+            fatal("registering a managed thread's completion failed (__cxa_thread_atexit_impl)");
+        }
+        record
     }
 
     fn thread_finish(task: TaskId, retval: usize, exit_status: i32) {
         #[cfg(not(target_os = "linux"))]
         let _ = exit_status;
+        // The kernel's exit order: the robust list, then clear-child-tid.
+        #[cfg(target_os = "linux")]
+        registrations::exit(task);
         #[cfg(target_os = "linux")]
         signals::clear_tid(task);
         let mut state = lock_state();
@@ -9497,6 +9609,8 @@ mod thread {
         crate::numa::spawned(deterministic_thread_id(), tid_of(task));
         // The semaphore must exist before the host thread parks on it.
         state.sems.insert(task, Arc::new(baton::Semaphore::new()));
+        #[cfg(target_os = "linux")]
+        creation_settled();
         let payload = Box::into_raw(Box::new(ThreadStart {
             task,
             routine: start,
@@ -9512,6 +9626,11 @@ mod thread {
             fatal(&format!("host thread creation failed with code {rc}"));
         }
         state.handles.insert(handle as usize, task);
+        drop(state);
+        // The new thread takes over its host registrations off the baton;
+        // wait for that before the guest can ask about them.
+        #[cfg(target_os = "linux")]
+        creation_settled().wait();
         // SAFETY: `thread_out` is non-null and writable per the pthread contract.
         unsafe { thread_out.write(handle) };
         0
@@ -13783,6 +13902,12 @@ mod thread {
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_futex_wait(addr: usize, expected: u32) -> c_int {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        futex_wait(addr, expected, false)
+    }
+
+    /// [`patina_futex_wait`], noting whether the wait is private
+    /// (`FUTEX_PRIVATE_FLAG`): the dispatcher's `futex` row.
+    pub(crate) fn futex_wait(addr: usize, expected: u32, private: bool) -> c_int {
         let mut restart = true;
         while restart {
             let mut state = lock_state();
@@ -13798,6 +13923,7 @@ mod thread {
             }
 
             state.futexes.entry(addr).or_default().push_back(me);
+            state.note_futex_wait(me, private);
             match state.block(
                 me,
                 "futex-wait",
@@ -13842,6 +13968,18 @@ mod thread {
         timeout_nanos: u64,
     ) -> c_int {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        futex_wait_timed(addr, expected, clock_id, absolute, timeout_nanos, false)
+    }
+
+    /// [`patina_futex_wait_timed`], noting whether the wait is private.
+    pub(crate) fn futex_wait_timed(
+        addr: usize,
+        expected: u32,
+        clock_id: u32,
+        absolute: c_int,
+        timeout_nanos: u64,
+        private: bool,
+    ) -> c_int {
         let clock = match clock_id {
             0 => ClockKind::Realtime,
             1 => ClockKind::Monotonic,
@@ -13870,6 +14008,7 @@ mod thread {
             }
         };
         state.futexes.entry(addr).or_default().push_back(me);
+        state.note_futex_wait(me, private);
         match state.block_timed(
             me,
             "futex-wait",
@@ -13901,15 +14040,39 @@ mod thread {
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_futex_wake(addr: usize, count: c_int) -> c_int {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        futex_wake(addr, count, true)
+    }
+
+    /// A kernel-side wake by the word's shared key (a dead robust owner's,
+    /// `handle_futex_death`): up to `count` waiters, skipping those that wait
+    /// privately, whose key it does not match.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn futex_wake_shared(addr: usize, count: c_int) -> c_int {
+        futex_wake(addr, count, false)
+    }
+
+    /// Wake up to `count` waiters on `addr` (all if negative), in queue
+    /// order; private waiters too unless `private` is false.
+    fn futex_wake(addr: usize, count: c_int, private: bool) -> c_int {
         let mut state = lock_state();
-        let to_wake: Vec<TaskId> = match state.futexes.get_mut(&addr) {
+        let limit = usize::try_from(count).unwrap_or(usize::MAX);
+        let ThreadRuntime {
+            futexes,
+            private_futex_waits,
+            ..
+        } = &mut *state;
+        let to_wake: Vec<TaskId> = match futexes.get_mut(&addr) {
             Some(waiters) => {
-                let take = if count < 0 {
-                    waiters.len()
-                } else {
-                    (count as usize).min(waiters.len())
-                };
-                waiters.drain(..take).collect()
+                let mut woken = Vec::new();
+                waiters.retain(|task| {
+                    let take =
+                        woken.len() < limit && (private || !private_futex_waits.contains(task));
+                    if take {
+                        woken.push(*task);
+                    }
+                    !take
+                });
+                woken
             }
             None => Vec::new(),
         };

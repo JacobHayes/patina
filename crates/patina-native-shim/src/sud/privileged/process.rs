@@ -177,3 +177,20 @@ pub(in crate::sud) fn setns(_: &Credential, a: &[u64; 6]) -> Answer {
         },
     }
 }
+
+/// `get_robust_list(pid, head_ptr, len_ptr)` (kernel/futex/syscalls.c): the
+/// pid is looked up first; init belongs to root, so reading its head is
+/// `ptrace_may_access(PTRACE_MODE_READ_REALCREDS)`'s `CAP_SYS_PTRACE`
+/// (`EPERM`). Every other pid is the thread model's: the caller's own
+/// threads, or `ESRCH`.
+pub(in crate::sud) fn get_robust_list(credential: &Credential, a: &[u64; 6]) -> Answer {
+    let pid = a[0] as i32;
+    if matches!(find_process(pid), Some((Process::Init, _))) {
+        return super::gate(credential, Capability::SysPtrace, errno::EPERM);
+    }
+    Ok(crate::thread::registrations::get_robust_list(
+        pid,
+        a[1] as usize,
+        a[2] as usize,
+    ))
+}

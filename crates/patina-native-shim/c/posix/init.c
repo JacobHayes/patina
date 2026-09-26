@@ -596,6 +596,11 @@ static void patina_sud_init(int argc, char **argv) {
     patina_signal_restorer((uintptr_t)action.sa_restorer);
     if (!managed) return;
 
+    /* ld.so registered the main thread with the host kernel from glibc text
+     * before this wrapper ran; take those registrations over as the main
+     * task's before any guest code runs (kernel-independent, like AT_RANDOM). */
+    patina_thread_registrations_adopt_main();
+
     /* Kernel support probe: PR_SYS_DISPATCH_OFF with all-zero args returns 0 on a
      * SUD kernel and -EINVAL where the feature is absent (arm64 <= 6.18, pre-5.11
      * x86). Same process, same kernel as the guest. */

@@ -161,6 +161,7 @@ mod tests {
             ioport_cases(),
             chroot_cases(),
             config_cases(),
+            robust_list_cases(),
         ]
         .into_iter()
         .flatten()
@@ -392,6 +393,16 @@ mod tests {
 
     /// `chroot` of a directory the caller may search needs
     /// `CAP_SYS_CHROOT`.
+    /// Reading init's robust list: `ptrace_may_access`.
+    fn robust_list_cases() -> Vec<Case> {
+        vec![Case {
+            row: Syscall::N_get_robust_list,
+            check: get_robust_list,
+            args: [1, 0, 0, 0, 0, 0],
+            refusal: errno::EPERM,
+        }]
+    }
+
     fn chroot_cases() -> Vec<Case> {
         vec![Case {
             row: Syscall::N_chroot,

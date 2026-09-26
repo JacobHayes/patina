@@ -16,8 +16,7 @@
 //! glibc wraps neither row, so the scenario runs through the kernel
 //! vehicles.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::observe::{Id, Norm};
 use crate::probe::{NO_SUCH_PID, Probe, neg};
 use crate::vehicle::Vehicle;
@@ -218,26 +217,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_set_robust_list, Syscall::N_get_robust_list],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: Vehicle::KERNEL,
-            what: "set_robust_list is SoftDeny(ENOSYS) in the registry, a kernel without robust futexes, though every thread's glibc registration reaches the host kernel (ld.so's before SUD arms, a managed thread's from the host pthread_create): 6.8 has them and judges the length",
-            failure: Failure::Differs(&[
-                Difference::field(0, "set_robust_list", "errno", Observed::Str("ENOSYS")),
-                Difference::check(1, "set_robust_list of any length but a head's is EINVAL"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: Vehicle::KERNEL,
-            what: "get_robust_list is Trap(unmodeled) in the registry (the signals arc models it on the scheduler), so the SUD dispatcher aborts at the first get_robust_list",
-            failure: Failure::Stops {
-                events: 2,
-                ending: Ending::Signal(libc::SIGABRT),
-                diagnostic: "patina: SUD trapped unsupported syscall get_robust_list (nr",
-            },
-        },
-    ],
     ..DEFAULTS
 };
