@@ -777,6 +777,10 @@ static void patina_fs_device(uint32_t fs, unsigned *major, unsigned *minor) {
             *major = 0;
             *minor = PATINA_NSFS_DEV_MINOR;
             break;
+        case PATINA_FS_DEVTMPFS:
+            *major = 0;
+            *minor = PATINA_DEVTMPFS_DEV_MINOR;
+            break;
         case PATINA_FS_VOLUME:
         default:
             *major = PATINA_VOLUME_DEV_MAJOR;
@@ -786,19 +790,20 @@ static void patina_fs_device(uint32_t fs, unsigned *major, unsigned *minor) {
 }
 
 /* The owner stat reports: the one modeled identity's, but for a namespace
- * file, whose nsfs inode is root's. */
+ * file's nsfs inode and the entropy device, which are root's. */
+static int patina_root_owned(const struct patina_metadata *values) {
+    return values->fs == PATINA_FS_NSFS || values->fs == PATINA_FS_DEVTMPFS;
+}
 static uid_t patina_stat_uid(const struct patina_metadata *values) {
-    return values->fs == PATINA_FS_NSFS ? 0 : (uid_t)patina_uid();
+    return patina_root_owned(values) ? 0 : (uid_t)patina_uid();
 }
 static gid_t patina_stat_gid(const struct patina_metadata *values) {
-    return values->fs == PATINA_FS_NSFS ? 0 : (gid_t)patina_gid();
+    return patina_root_owned(values) ? 0 : (gid_t)patina_gid();
 }
 
 /* The libc's own dev_t encoding of (major, minor), spelled out rather than
  * through glibc's makedev, which is an out-of-line import (gnu_dev_makedev). */
-static dev_t patina_st_dev(const struct patina_metadata *values) {
-    unsigned major, minor;
-    patina_fs_device(values->fs, &major, &minor);
+static dev_t patina_makedev(unsigned major, unsigned minor) {
 #ifdef __APPLE__
     return (dev_t)((major << 24) | minor);
 #else
@@ -806,6 +811,11 @@ static dev_t patina_st_dev(const struct patina_metadata *values) {
     return (dev_t)(((major64 & 0xfffff000u) << 32) | ((major64 & 0xfffu) << 8) |
                    ((minor64 & 0xffffff00u) << 12) | (minor64 & 0xffu));
 #endif
+}
+static dev_t patina_st_dev(const struct patina_metadata *values) {
+    unsigned major, minor;
+    patina_fs_device(values->fs, &major, &minor);
+    return patina_makedev(major, minor);
 }
 
 static void patina_split_time(struct patina_timestamp time, time_t *seconds, long *subseconds) {
@@ -855,6 +865,7 @@ static int fill_stat(int result, const struct patina_metadata *values, struct st
     memset(status, 0, sizeof *status);
     status->st_mode = patina_stat_mode(values);
     status->st_dev = patina_st_dev(values);
+    status->st_rdev = patina_makedev(values->rdev_major, values->rdev_minor);
     status->st_nlink = (nlink_t)values->nlink;
     status->st_ino = (ino_t)values->ino;
     status->st_size = (off_t)values->length;
@@ -940,22 +951,19 @@ static int patina_stat_at_values(int directory, const char *path, int flags,
 }
 
 /*
- * Existence and permission probe. The guest is one non-root identity (what
- * patina_uid reports) owning every modeled entry, so the answer reads the OWNER
- * triad of the entry's modeled permission bits — X_OK included: the bit is a
- * mode fact the kernel answers from, and whether anything can actually execute
- * is the process family's business (exec itself stays a trap).
+ * Existence and permission probe: the node's record, then the one answer the
+ * SUD row gives too (patina_access_answer: the owner triad of an entry the
+ * one non-root identity owns, the other triad of a root-owned node, EPERM for
+ * write access to an immutable one). X_OK included: the bit is a mode fact
+ * the kernel answers from, and whether anything can actually execute is the
+ * process family's business (exec itself stays a trap).
  */
 static int patina_access_impl(int dirfd, const char *path, int mode) {
     struct patina_metadata values;
     if (patina_metadata_values(dirfd, path, 0, &values) < 0) return -1;
-    unsigned owner = (values.mode >> 6) & 07;
-    unsigned wanted = 0;
-    if ((mode & R_OK) != 0) wanted |= 04;
-    if ((mode & W_OK) != 0) wanted |= 02;
-    if ((mode & X_OK) != 0) wanted |= 01;
-    if ((owner & wanted) != wanted) {
-        errno = EACCES;
+    int answer = patina_access_answer(&values, mode);
+    if (answer != 0) {
+        errno = answer;
         return -1;
     }
     return 0;
@@ -1192,6 +1200,7 @@ static int fill_stat64(int result, const struct patina_metadata *values, struct 
     memset(status, 0, sizeof *status);
     status->st_mode = patina_stat_mode(values);
     status->st_dev = patina_st_dev(values);
+    status->st_rdev = patina_makedev(values->rdev_major, values->rdev_minor);
     status->st_nlink = (nlink_t)values->nlink;
     status->st_ino = (ino64_t)values->ino;
     status->st_size = (off64_t)values->length;
@@ -1270,6 +1279,8 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
     patina_fs_device(values.fs, &major, &minor);
     status->stx_dev_major = major;
     status->stx_dev_minor = minor;
+    status->stx_rdev_major = values.rdev_major;
+    status->stx_rdev_minor = values.rdev_minor;
     return 0;
 }
 

@@ -25,8 +25,8 @@ use patina_dst_driver_api::xattr_permission;
 
 use crate::fdtable::FdKind;
 use crate::{
-    E2BIG, EFAULT, EINVAL, ENOENT, EOPNOTSUPP, ERANGE, fail, fdget, path_from_c, paths, set_errno,
-    thread, with_context,
+    E2BIG, EFAULT, EINVAL, ENOENT, EOPNOTSUPP, EPERM, ERANGE, fail, fdget, path_from_c, paths,
+    set_errno, thread, with_context,
 };
 
 /// `XATTR_NAME_MAX` / `XATTR_SIZE_MAX` / `XATTR_LIST_MAX`.
@@ -63,10 +63,15 @@ fn copy_name(name: *const c_char) -> Result<String, c_int> {
 enum Node {
     /// A node on the volume.
     Volume(XattrTarget),
-    /// A descriptor on a pseudo-filesystem (pipefs, sockfs, anon_inodefs,
-    /// mqueue): its node's mode, whether the node is a regular file (an
-    /// mqueue inode is), and no attribute handlers.
-    Pseudo { mode: u32, regular: bool },
+    /// A node on a pseudo-filesystem (pipefs, sockfs, anon_inodefs,
+    /// mqueue, nsfs): its mode, whether it is a regular file (an mqueue
+    /// inode and an nsfs inode are), whether it is immutable (an nsfs inode
+    /// is), and no attribute handlers.
+    Pseudo {
+        mode: u32,
+        regular: bool,
+        immutable: bool,
+    },
 }
 
 /// The node a path names: resolved with or without following a final
@@ -77,7 +82,14 @@ fn path_node(path: *const c_char, follow: bool) -> Result<Node, c_int> {
     }
     let path = path_from_c(path)?;
     let flags = if follow { 0 } else { paths::RESOLVE_NOFOLLOW };
-    let resolved = paths::resolve(paths::AT_FDCWD, &path, flags)?;
+    let resolved = match paths::resolve(paths::AT_FDCWD, &path, flags)? {
+        paths::Resolution::Volume(resolved) => resolved,
+        // A namespace file's nsfs inode, as its descriptor names it.
+        paths::Resolution::Virtual(paths::Virtual::Namespace(_)) if follow => {
+            return Ok(NSFS_NODE);
+        }
+        paths::Resolution::Virtual(entry) => entry.unmodeled("an extended attribute access"),
+    };
     if resolved.metadata.is_none() {
         return Err(ENOENT);
     }
@@ -95,6 +107,7 @@ fn descriptor_node(raw_fd: c_int) -> Result<Node, c_int> {
             None => Node::Pseudo {
                 mode: thread::pipe_inode_metadata(raw_fd).map_or(ANON_INODE_MODE, |m| m.mode),
                 regular: false,
+                immutable: false,
             },
         },
         FdKind::OPath
@@ -113,15 +126,13 @@ fn descriptor_node(raw_fd: c_int) -> Result<Node, c_int> {
         | FdKind::NamespacePath => Node::Pseudo {
             mode: ANON_INODE_MODE,
             regular: false,
+            immutable: false,
         },
-        // The namespace's nsfs inode: a regular file, 0444.
-        FdKind::Namespace => Node::Pseudo {
-            mode: 0o444,
-            regular: true,
-        },
+        FdKind::Namespace => NSFS_NODE,
         FdKind::MessageQueue => Node::Pseudo {
             mode: thread::ipc::mq_mode(resolved.handle).unwrap_or(0),
             regular: true,
+            immutable: false,
         },
     })
 }
@@ -129,10 +140,21 @@ fn descriptor_node(raw_fd: c_int) -> Result<Node, c_int> {
 /// The mode of an anonymous inode (`anon_inode_mkinode`: `S_IRUSR | S_IWUSR`).
 const ANON_INODE_MODE: u32 = 0o600;
 
+/// A namespace's nsfs inode: a regular file, `0444`, immutable.
+const NSFS_NODE: Node = Node::Pseudo {
+    mode: 0o444,
+    regular: true,
+    immutable: true,
+};
+
 /// A pseudo-filesystem node's answer to an attribute access: the kernel's
-/// judgment of it ([`xattr_permission`], the one every filesystem shares),
-/// then no handler (`EOPNOTSUPP`).
-fn pseudo_refusal(mode: u32, regular: bool, name: &str, write: bool) -> c_int {
+/// judgment of it ([`xattr_permission`], the one every filesystem shares,
+/// which refuses a write to an immutable inode first, `EPERM`), then no
+/// handler (`EOPNOTSUPP`).
+fn pseudo_refusal(mode: u32, regular: bool, immutable: bool, name: &str, write: bool) -> c_int {
+    if write && immutable {
+        return EPERM;
+    }
     match xattr_permission(regular, mode, name, write) {
         Ok(_) => EOPNOTSUPP,
         Err(code) => crate::effect_errno(&EffectError::new(code, "")),
@@ -192,8 +214,12 @@ pub unsafe extern "C" fn patina_getxattr(
     };
     let target = match node {
         Node::Volume(target) => target,
-        Node::Pseudo { mode, regular } => {
-            return fail(pseudo_refusal(mode, regular, &name, false)) as isize;
+        Node::Pseudo {
+            mode,
+            regular,
+            immutable,
+        } => {
+            return fail(pseudo_refusal(mode, regular, immutable, &name, false)) as isize;
         }
     };
     match with_context(|context| context.fs_get_xattr(&target, &name)) {
@@ -279,7 +305,11 @@ pub unsafe extern "C" fn patina_setxattr(
     };
     let target = match node {
         Node::Volume(target) => target,
-        Node::Pseudo { mode, regular } => return fail(pseudo_refusal(mode, regular, &name, true)),
+        Node::Pseudo {
+            mode,
+            regular,
+            immutable,
+        } => return fail(pseudo_refusal(mode, regular, immutable, &name, true)),
     };
     match with_context(|context| context.fs_set_xattr(&target, &name, bytes, flags as u32)) {
         Ok(()) => {
@@ -325,7 +355,11 @@ pub unsafe extern "C" fn patina_removexattr(
     };
     let target = match node {
         Node::Volume(target) => target,
-        Node::Pseudo { mode, regular } => return fail(pseudo_refusal(mode, regular, &name, true)),
+        Node::Pseudo {
+            mode,
+            regular,
+            immutable,
+        } => return fail(pseudo_refusal(mode, regular, immutable, &name, true)),
     };
     match with_context(|context| context.fs_remove_xattr(&target, &name)) {
         Ok(()) => {
@@ -339,7 +373,7 @@ pub unsafe extern "C" fn patina_removexattr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ENODATA, EPERM};
+    use crate::ENODATA;
     use std::ffi::CString;
 
     fn copied(name: &[u8]) -> Result<String, c_int> {
@@ -374,17 +408,47 @@ mod tests {
     #[test]
     fn a_pseudo_filesystem_node_refuses_as_xattr_permission_does() {
         let mode = ANON_INODE_MODE;
-        assert_eq!(pseudo_refusal(mode, false, "user.a", true), EPERM);
-        assert_eq!(pseudo_refusal(mode, false, "user.a", false), ENODATA);
-        assert_eq!(pseudo_refusal(mode, false, "trusted.a", false), ENODATA);
-        assert_eq!(pseudo_refusal(mode, false, "security.a", true), EPERM);
-        assert_eq!(pseudo_refusal(mode, false, "security.a", false), EOPNOTSUPP);
-        assert_eq!(pseudo_refusal(mode, false, "plain", true), EOPNOTSUPP);
-        assert_eq!(pseudo_refusal(0o400, false, "plain", true), crate::EACCES);
-        assert_eq!(pseudo_refusal(0, false, "security.a", false), EOPNOTSUPP);
+        assert_eq!(pseudo_refusal(mode, false, false, "user.a", true), EPERM);
+        assert_eq!(pseudo_refusal(mode, false, false, "user.a", false), ENODATA);
+        assert_eq!(
+            pseudo_refusal(mode, false, false, "trusted.a", false),
+            ENODATA
+        );
+        assert_eq!(
+            pseudo_refusal(mode, false, false, "security.a", true),
+            EPERM
+        );
+        assert_eq!(
+            pseudo_refusal(mode, false, false, "security.a", false),
+            EOPNOTSUPP
+        );
+        assert_eq!(
+            pseudo_refusal(mode, false, false, "plain", true),
+            EOPNOTSUPP
+        );
+        assert_eq!(
+            pseudo_refusal(0o400, false, false, "plain", true),
+            crate::EACCES
+        );
+        assert_eq!(
+            pseudo_refusal(0, false, false, "security.a", false),
+            EOPNOTSUPP
+        );
         // An mqueue inode is a regular file: `user.*` is charged against its
         // bits, and then no handler takes it.
-        assert_eq!(pseudo_refusal(0o600, true, "user.a", true), EOPNOTSUPP);
-        assert_eq!(pseudo_refusal(0o400, true, "user.a", true), crate::EACCES);
+        assert_eq!(
+            pseudo_refusal(0o600, true, false, "user.a", true),
+            EOPNOTSUPP
+        );
+        assert_eq!(
+            pseudo_refusal(0o400, true, false, "user.a", true),
+            crate::EACCES
+        );
+        // An immutable inode (a namespace file's) refuses any write first.
+        assert_eq!(pseudo_refusal(0o444, true, true, "plain", true), EPERM);
+        assert_eq!(
+            pseudo_refusal(0o444, true, true, "user.a", false),
+            EOPNOTSUPP
+        );
     }
 }

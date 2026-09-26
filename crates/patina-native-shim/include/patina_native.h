@@ -529,6 +529,7 @@ enum {
     PATINA_FS_PIPEFS = 1,
     PATINA_FS_SOCKFS = 2,
     PATINA_FS_NSFS = 3, /* a namespace file (Linux): root's, on its own device */
+    PATINA_FS_DEVTMPFS = 4, /* the entropy device (Linux): root's, on devtmpfs */
 };
 enum {
     PATINA_VOLUME_DEV_MAJOR = 8,
@@ -536,6 +537,7 @@ enum {
     PATINA_PIPEFS_DEV_MINOR = 14,
     PATINA_SOCKFS_DEV_MINOR = 8,
     PATINA_NSFS_DEV_MINOR = 4,
+    PATINA_DEVTMPFS_DEV_MINOR = 5,
 };
 
 /*
@@ -561,6 +563,8 @@ struct patina_metadata {
     uint32_t mode;
     uint32_t nlink;
     uint32_t fs; /* PATINA_FS_* */
+    uint32_t rdev_major; /* a device node's device (st_rdev); 0 for any other */
+    uint32_t rdev_minor;
     uint64_t length;
     uint64_t ino;
     struct patina_timestamp atime;
@@ -576,6 +580,12 @@ struct patina_metadata {
 int32_t patina_metadata_at(int32_t dirfd, const char *path, uint32_t flags,
                            struct patina_metadata *out);
 int32_t patina_fd_metadata_full(int32_t fd, struct patina_metadata *out);
+/*
+ * access/faccessat's answer for the node `values` describes: 0 or the errno
+ * (the owner triad of a volume entry, the other triad of a root-owned node,
+ * EPERM for write access to an immutable one).
+ */
+int32_t patina_access_answer(const struct patina_metadata *values, int32_t mode);
 #ifdef __linux__
 /*
  * Linux statfs(2)/fstatfs(2)/ustat(2): the filesystem a path (a trailing

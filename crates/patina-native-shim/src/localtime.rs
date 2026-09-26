@@ -526,11 +526,14 @@ pub unsafe extern "C" fn patina_localtime(
             text(tz).map(CStr::to_bytes),
             text(tzdir).map(CStr::to_bytes),
             |path| {
-                crate::paths::resolve(crate::paths::AT_FDCWD, path, 0).is_ok_and(|resolved| {
-                    resolved
+                // A zone file is a regular file on the volume; the entropy
+                // device and a namespace file are none.
+                matches!(
+                    crate::paths::resolve(crate::paths::AT_FDCWD, path, 0),
+                    Ok(crate::paths::Resolution::Volume(resolved)) if resolved
                         .metadata
                         .is_some_and(|metadata| metadata.kind == crate::FsEntryKind::File)
-                })
+                )
             },
         );
         match chosen {

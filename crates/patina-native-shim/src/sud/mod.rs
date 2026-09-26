@@ -388,8 +388,6 @@ const ERANGE: i64 = errno::ERANGE as i64;
 
 const EBADF: i64 = errno::EBADF as i64;
 
-const EACCES: i64 = errno::EACCES as i64;
-
 const EFAULT: i64 = errno::EFAULT as i64;
 
 const ECHILD: i64 = errno::ECHILD as i64;
@@ -578,13 +576,6 @@ const AT_STATX_SYNC_TYPE: u64 = uapi::AT_STATX_SYNC_TYPE as u64;
 
 /// The `statx(2)` mask bit reserved for a future `struct statx` expansion.
 const STATX__RESERVED: u64 = uapi::STATX__RESERVED as u64;
-
-// `access(2)` mode bits.
-const X_OK: u64 = uapi::X_OK as u64;
-
-const W_OK: u64 = uapi::W_OK as u64;
-
-const R_OK: u64 = uapi::R_OK as u64;
 
 /// `utimensat(2)` `tv_nsec` sentinels.
 const UTIME_NOW: i64 = uapi::UTIME_NOW as i64;

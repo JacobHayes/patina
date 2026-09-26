@@ -77,25 +77,28 @@ fn guest_path(address: u64) -> Result<String, c_int> {
 }
 
 /// `user_path_at(AT_FDCWD, path, …)`; see [`lookup_at`].
-fn lookup(address: u64, follow: bool) -> Result<crate::paths::Resolved, c_int> {
+fn lookup(address: u64, follow: bool) -> Result<(), c_int> {
     lookup_at(crate::paths::AT_FDCWD, address, follow)
 }
 
-/// `user_path_at(dirfd, path, …)`: the entry a guest path names, with or
-/// without following a final symlink — the resolver's refusals, and
-/// `ENOENT` for a missing entry.
-fn lookup_at(dirfd: c_int, address: u64, follow: bool) -> Result<crate::paths::Resolved, c_int> {
+/// `user_path_at(dirfd, path, …)`: whether the entry a guest path names,
+/// with or without following a final symlink, exists — the resolver's
+/// refusals, and `ENOENT` for a missing entry. The rows that look a path up
+/// refuse whatever they find (an entry the resolver answers itself too), so
+/// only its existence is answered.
+fn lookup_at(dirfd: c_int, address: u64, follow: bool) -> Result<(), c_int> {
     let path = guest_path(address)?;
     let flags = if follow {
         0
     } else {
         crate::paths::RESOLVE_NOFOLLOW
     };
-    let resolved = crate::paths::resolve(dirfd, &path, flags)?;
-    if resolved.metadata.is_none() {
-        return Err(errno::ENOENT as c_int);
+    match crate::paths::resolve(dirfd, &path, flags)? {
+        crate::paths::Resolution::Volume(resolved) if resolved.metadata.is_none() => {
+            Err(errno::ENOENT as c_int)
+        }
+        crate::paths::Resolution::Volume(_) | crate::paths::Resolution::Virtual(_) => Ok(()),
     }
-    Ok(resolved)
 }
 
 /// The capability check (`capable`, `ns_capable`, `may_mount`): `refusal`

@@ -10,6 +10,8 @@
 //! * a mount id no mount has is `ENOENT` (unique ids start past 2^32; 6.11
 //!   moves that to 2^31 and refuses an id at or below it as `EINVAL`: the id
 //!   asked for is far past both);
+//! * the entropy device is on a devtmpfs mount of the namespace, at its path
+//!   or above it;
 //! * a pipe's, a socket's or a namespace file's node is on an internal
 //!   mount `statx` names but `statmount` does not know (`ENOENT`), with no
 //!   birth time;
@@ -73,6 +75,7 @@ const FIXED: usize = 512;
 
 const STATMOUNT_MNT_BASIC: u64 = 0x2;
 const STATMOUNT_MNT_POINT: u64 = 0x10;
+const STATMOUNT_FS_TYPE: u64 = 0x20;
 const LSMT_ROOT: u64 = u64::MAX;
 const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
 /// No mount has this unique id: past every release's first id, and not
@@ -225,6 +228,56 @@ pub fn run(p: &Probe) {
     for fd in [pipe[0], pipe[1], pair[0], pair[1], ns] {
         p.close(fd);
     }
+
+    // The entropy device is on a devtmpfs mount of the namespace: `statx`
+    // names it, and `statmount` of it answers devtmpfs mounted at the
+    // device's path or a directory above it.
+    // SAFETY: plain data.
+    let mut device: statx = unsafe { std::mem::zeroed() };
+    let r = p.call_observed(
+        Syscall::N_statx,
+        [
+            AT_FDCWD as i64,
+            c"/dev/urandom".as_ptr() as i64,
+            0,
+            STATX_MNT_ID_UNIQUE as i64,
+            &mut device as *mut statx as i64,
+            0,
+        ],
+    );
+    p.check(
+        "the entropy device is on a mount of its own",
+        r == 0 && device.stx_mask & STATX_MNT_ID_UNIQUE != 0 && device.stx_mnt_id != root,
+    );
+    let r = statmount(
+        Some(&request(
+            device.stx_mnt_id,
+            STATMOUNT_MNT_POINT | STATMOUNT_FS_TYPE,
+        )),
+        buf,
+        whole,
+        0,
+    );
+    let string = |offset: u32| {
+        sm.strings
+            .get(offset as usize..)
+            .and_then(|rest| std::ffi::CStr::from_bytes_until_nul(rest).ok())
+            .map(|text| text.to_bytes().to_vec())
+    };
+    let (fs_type, point) = (string(sm.fs_type), string(sm.mnt_point));
+    p.check(
+        "statmount of it answers devtmpfs, mounted at or above the device",
+        r == 0
+            && fs_type.as_deref() == Some(b"devtmpfs".as_slice())
+            && point.is_some_and(|point| {
+                let device = b"/dev/urandom".as_slice();
+                point == b"/"
+                    || point == device
+                    || device
+                        .strip_prefix(point.as_slice())
+                        .is_some_and(|rest| rest.starts_with(b"/"))
+            }),
+    );
 
     let wanted = STATMOUNT_MNT_BASIC | STATMOUNT_MNT_POINT;
     let r = statmount(Some(&request(root, wanted)), buf, whole, 0);

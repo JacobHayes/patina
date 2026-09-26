@@ -168,7 +168,11 @@ fn path_of(bytes: &[u8]) -> Result<String, c_int> {
 /// `unix_bind_bsd`'s node: a socket entry at `path` with `0777 & ~umask`;
 /// an existing name (a trailing symlink included) is `EADDRINUSE`.
 fn make_node(path: &str) -> Result<u64, c_int> {
-    let resolved = paths::resolve(paths::AT_FDCWD, path, paths::RESOLVE_NOFOLLOW)?;
+    let resolved = match paths::resolve(paths::AT_FDCWD, path, paths::RESOLVE_NOFOLLOW)? {
+        paths::Resolution::Volume(resolved) => resolved,
+        // The name exists.
+        paths::Resolution::Virtual(_) => return Err(EADDRINUSE),
+    };
     if resolved.metadata.is_some() || paths::last_component(path) != paths::Last::Name {
         return Err(EADDRINUSE);
     }
@@ -181,8 +185,10 @@ fn make_node(path: &str) -> Result<u64, c_int> {
                 errno
             }
         })?;
-    let made = paths::resolve(paths::AT_FDCWD, path, paths::RESOLVE_NOFOLLOW)?;
-    made.metadata.map(|metadata| metadata.ino).ok_or(ENOENT)
+    match paths::resolve(paths::AT_FDCWD, path, paths::RESOLVE_NOFOLLOW)? {
+        paths::Resolution::Volume(made) => made.metadata.map(|metadata| metadata.ino).ok_or(ENOENT),
+        paths::Resolution::Virtual(entry) => entry.unmodeled("binding a socket"),
+    }
 }
 
 /// `unix_find_bsd`/`unix_find_abstract`: the socket bound at `name`, of
@@ -192,7 +198,10 @@ fn make_node(path: &str) -> Result<u64, c_int> {
 fn find(name: &UnixName, ty: i32) -> Result<c_int, c_int> {
     let handle = match name {
         UnixName::Path(path) => {
-            let resolved = paths::resolve(paths::AT_FDCWD, &path_of(path)?, 0)?;
+            let resolved = match paths::resolve(paths::AT_FDCWD, &path_of(path)?, 0)? {
+                paths::Resolution::Volume(resolved) => resolved,
+                paths::Resolution::Virtual(entry) => entry.unmodeled("connecting a socket"),
+            };
             let metadata = resolved.metadata.ok_or(ENOENT)?;
             // `unix_find_bsd`: write permission on the node (the one
             // identity owns every entry, so its owner bits), then its kind.

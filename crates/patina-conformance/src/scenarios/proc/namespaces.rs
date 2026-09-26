@@ -21,7 +21,9 @@
 //!   writing or `fchmod` of it is `EPERM`; the open flags are judged in
 //!   `do_open`'s order), which an `O_PATH` open names too; an `O_PATH`
 //!   descriptor opened nothing, so every operation that takes an opened file
-//!   refuses it (`EBADF`);
+//!   refuses it (`EBADF`); by path, every change to it is `EPERM`, as is
+//!   asking for write access, execute access `EACCES`, it has no extended
+//!   attributes, and removing it is `EACCES`;
 //! * `setns` of a descriptor not open is `EBADF` (an `O_PATH` one too), of
 //!   one that is neither a namespace nor a pidfd `EINVAL`; of the caller's
 //!   own UTS namespace (`/proc/self/ns/uts`) with another namespace type
@@ -39,7 +41,7 @@
 //! caller, and the probe stops before any call unless it is one.
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
-use crate::probe::{AT_FDCWD, Probe, neg};
+use crate::probe::{AT_FDCWD, Probe, XattrTarget, neg};
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -156,6 +158,61 @@ pub fn run(p: &Probe) {
         p.fchmod(uts, 0o400) == neg(EPERM),
     );
     p.close(uts);
+    // Path operations on the namespace file: its inode is immutable (every
+    // change `EPERM`, write access `EPERM` before the mode bits), root's and
+    // `0444` (no execute), without extended attributes; its directory is
+    // not the caller's to remove from.
+    let uts_path = "/proc/self/ns/uts";
+    for (label, answer, errno) in [
+        (
+            "it exists",
+            p.faccessat(AT_FDCWD, uts_path, F_OK, 0, false),
+            0,
+        ),
+        (
+            "it may be read",
+            p.faccessat(AT_FDCWD, uts_path, R_OK, 0, false),
+            0,
+        ),
+        (
+            "write access is EPERM",
+            p.faccessat(AT_FDCWD, uts_path, W_OK, 0, false),
+            EPERM,
+        ),
+        (
+            "execute access is EACCES",
+            p.faccessat(AT_FDCWD, uts_path, X_OK, 0, false),
+            EACCES,
+        ),
+        (
+            "changing its mode is EPERM",
+            p.fchmodat(AT_FDCWD, uts_path, 0o400),
+            EPERM,
+        ),
+        (
+            "setting its times is EPERM",
+            p.utimensat(AT_FDCWD, Some(uts_path), None, 0),
+            EPERM,
+        ),
+        ("truncating it is EPERM", p.truncate(uts_path, 0), EPERM),
+        (
+            "an attribute is EOPNOTSUPP",
+            p.getxattr(XattrTarget::Path(uts_path), "user.patina", 0).0,
+            EOPNOTSUPP,
+        ),
+        (
+            "it lists no attribute",
+            p.listxattr(XattrTarget::Path(uts_path), 0).0,
+            0,
+        ),
+        (
+            "removing it is EACCES",
+            p.unlinkat(AT_FDCWD, uts_path, 0),
+            EACCES,
+        ),
+    ] {
+        p.check(label, answer == if errno == 0 { 0 } else { neg(errno) });
+    }
     for (flags, answer) in OPENS {
         let fd = p.openat(AT_FDCWD, "/proc/self/ns/uts", flags | O_CLOEXEC, 0o600);
         p.check(
@@ -259,6 +316,13 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_fchown,
         Syscall::N_flock,
         Syscall::N_epoll_ctl,
+        Syscall::N_faccessat,
+        Syscall::N_fchmodat,
+        Syscall::N_utimensat,
+        Syscall::N_truncate,
+        Syscall::N_getxattr,
+        Syscall::N_listxattr,
+        Syscall::N_unlinkat,
     ],
     symbols: &[
         "unshare",
@@ -274,6 +338,13 @@ pub const SCENARIO: Scenario = Scenario {
         "fchown",
         "flock",
         "epoll_ctl",
+        "faccessat",
+        "fchmodat",
+        "utimensat",
+        "truncate",
+        "getxattr",
+        "listxattr",
+        "unlinkat",
     ],
     needs: &[Need::Unprivileged],
     ..DEFAULTS

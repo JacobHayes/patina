@@ -2459,7 +2459,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Fs,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver): a mask of STATX_BASIC_STATS (STATX_BLOCKS the length-derived count stat reports: allocation is not tracked) and the node's mount id always (`volume::statx_extra`: STATX_MNT_ID_UNIQUE when asked for, else STATX_MNT_ID; the mount table's for the volume, the kernel's internal mounts, which `statmount` does not know, for a pipe's or a socket's node), STATX_BTIME when requested of a filesystem that records one — with the owner from the one identity, all four timestamps from the model and the device numbers of the node's filesystem.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver): a mask of STATX_BASIC_STATS (STATX_BLOCKS the length-derived count stat reports: allocation is not tracked) and the node's mount id always (`volume::statx_extra`: STATX_MNT_ID_UNIQUE when asked for, else STATX_MNT_ID; the mount table's for the volume and the entropy device, the kernel's internal mounts, which `statmount` does not know, for a pipe's or a socket's node), STATX_BTIME when requested of a filesystem that records one — with the owner from the one identity, all four timestamps from the model and the device numbers of the node's filesystem.",
         Some("fs"),
     )
     .since("4.11"),

@@ -93,14 +93,51 @@ pub(crate) const RESOLVE_SCOPE_FLAGS: u32 = RESOLVE_BENEATH
 /// it only through a symlink or a `..` goes to the volume instead.
 pub(crate) const URANDOM: &str = "/dev/urandom";
 
-/// Whether a resolved path is the entropy device.
-pub(crate) fn is_urandom(path: &str) -> bool {
-    path == URANDOM
+/// An entry the resolver answers itself, without the volume: the shim owns
+/// its node. Every path operation matches it ([`Resolution::Virtual`]) and
+/// answers as the pinned kernel does for that node, or stops the run by name
+/// ([`Virtual::unmodeled`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Virtual {
+    /// The entropy device, [`URANDOM`].
+    Urandom,
+    /// A namespace file, `/proc/self/ns/<entry>`, by its index in
+    /// `nsfs::ENTRIES`.
+    #[cfg(target_os = "linux")]
+    Namespace(usize),
 }
 
-/// A resolved path: the canonical absolute path the driver accepts, and the
-/// final entry's metadata when it exists (`None` when the final component is
-/// missing, which is what a creating call needs to proceed).
+impl Virtual {
+    /// The canonical path that names it.
+    pub(crate) fn path(self) -> String {
+        match self {
+            Virtual::Urandom => URANDOM.to_owned(),
+            #[cfg(target_os = "linux")]
+            Virtual::Namespace(index) => {
+                format!("/proc/self/ns/{}", crate::nsfs::ENTRIES[index].name)
+            }
+        }
+    }
+
+    /// Stop the run: `operation` on this entry is not modeled.
+    pub(crate) fn unmodeled(self, operation: &str) -> ! {
+        crate::trap_fatal(&format!(
+            "{operation} of {} is not modeled; failing closed",
+            self.path()
+        ))
+    }
+}
+
+/// What a path resolves to: an entry of the volume, or a [`Virtual`] one.
+pub(crate) enum Resolution {
+    Volume(Resolved),
+    Virtual(Virtual),
+}
+
+/// A path resolved on the volume: the canonical absolute path the driver
+/// accepts, and the final entry's metadata when it exists (`None` when the
+/// final component is missing, which is what a creating call needs to
+/// proceed).
 pub(crate) struct Resolved {
     pub(crate) path: String,
     pub(crate) metadata: Option<FsMetadata>,
@@ -173,7 +210,10 @@ fn replace_cwd(new: Fd) -> Result<(), c_int> {
 /// exist, be a directory, and be searchable by the one modeled identity
 /// (`path_permission(MAY_EXEC | MAY_CHDIR)`).
 pub(crate) fn searchable_directory(dirfd: c_int, path: &str) -> Result<Resolved, c_int> {
-    let resolved = resolve(dirfd, path, 0)?;
+    // Neither the entropy device nor a namespace file is a directory.
+    let Resolution::Volume(resolved) = resolve(dirfd, path, 0)? else {
+        return Err(ENOTDIR);
+    };
     let metadata = resolved.metadata.as_ref().ok_or(ENOENT)?;
     if metadata.kind != FsEntryKind::Directory {
         return Err(ENOTDIR);
@@ -333,7 +373,7 @@ enum Step {
 /// answer alone (a missing name — is the parent there? — a refusal, a prefix
 /// through a file, a `..`) does the resolver walk the path one component at a
 /// time, expanding each symlink it meets exactly where the kernel would.
-pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolved, c_int> {
+pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolution, c_int> {
     if path.len() >= PATH_MAX {
         return Err(ENAMETOOLONG);
     }
@@ -356,10 +396,10 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolved, 
     };
     if path.is_empty() {
         let metadata = metadata(&base)?;
-        return Ok(Resolved {
+        return Ok(Resolution::Volume(Resolved {
             path: base,
             metadata,
-        });
+        }));
     }
     if components(path).any(|component| component.len() > NAME_MAX) {
         return Err(ENAMETOOLONG);
@@ -385,10 +425,7 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolved, 
             if flags & RESOLVE_NO_XDEV != 0 {
                 return Err(EXDEV);
             }
-            return Ok(Resolved {
-                path: URANDOM.to_owned(),
-                metadata: None,
-            });
+            return Ok(Resolution::Virtual(Virtual::Urandom));
         }
         // A namespace file: a magic link on procfs to the namespace's nsfs
         // inode (a regular file). A mount-bound walk stops entering procfs
@@ -411,10 +448,18 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolved, 
             if requires_directory {
                 return Err(ENOTDIR);
             }
-            return Ok(Resolved {
-                path: format!("/proc/self/ns/{}", crate::nsfs::ENTRIES[index].name),
-                metadata: None,
-            });
+            return Ok(Resolution::Virtual(Virtual::Namespace(index)));
+        }
+        // Another spelling of the namespace files (their directory, another
+        // process's or thread's view of them) names procfs, which the
+        // virtual machine does not mount.
+        #[cfg(target_os = "linux")]
+        if crate::nsfs::names_procfs(&join(&lexical)) {
+            crate::trap_fatal(&format!(
+                "{} names procfs beyond the /proc/self/ns entries, which is not modeled; \
+                 failing closed",
+                join(&lexical)
+            ));
         }
     }
     let mut hops = 0usize;
@@ -438,7 +483,7 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolved, 
                 {
                     return Err(ENOTDIR);
                 }
-                return Ok(Resolved { path, metadata });
+                return Ok(Resolution::Volume(Resolved { path, metadata }));
             }
         }
     }
@@ -484,11 +529,15 @@ pub(crate) fn final_component(dirfd: c_int, path: &str) -> Result<Last, c_int> {
         Some((parent, _)) => parent,
         None => "",
     };
-    let resolved = resolve(
+    let Resolution::Volume(resolved) = resolve(
         dirfd,
         if last == Last::Root { "/" } else { parent },
         RESOLVE_EMPTY_PATH,
-    )?;
+    )?
+    else {
+        // A virtual entry is no directory.
+        return Err(ENOTDIR);
+    };
     match resolved.metadata {
         None => Err(ENOENT),
         Some(metadata) if metadata.kind != FsEntryKind::Directory => Err(ENOTDIR),

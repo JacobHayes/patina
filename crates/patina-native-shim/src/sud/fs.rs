@@ -367,6 +367,8 @@ const fn empty_metadata() -> PatinaMetadata {
         mode: 0,
         nlink: 0,
         fs: 0,
+        rdev_major: 0,
+        rdev_minor: 0,
         length: 0,
         ino: 0,
         atime: PatinaTimestamp { sec: 0, nsec: 0 },
@@ -403,10 +405,10 @@ pub(super) fn stat_mode(values: &StatValues) -> u32 {
 }
 
 /// The owner `stat` reports, byte for byte with the C `patina_stat_uid`/
-/// `patina_stat_gid`: the one modeled identity's, but for a namespace file,
-/// whose nsfs inode is root's.
-fn stat_owner(values: &StatValues) -> (u32, u32) {
-    if values.fs == crate::PATINA_FS_NSFS {
+/// `patina_stat_gid`: the one modeled identity's, but for a namespace file's
+/// nsfs inode and the entropy device, which are root's.
+pub(crate) fn stat_owner(values: &StatValues) -> (u32, u32) {
+    if matches!(values.fs, crate::PATINA_FS_NSFS | crate::PATINA_FS_DEVTMPFS) {
         return (0, 0);
     }
     // SAFETY: plain constant reads.
@@ -422,7 +424,7 @@ fn encode_dev((major, minor): (u32, u32)) -> u64 {
 /// arch-specific (x86_64 vs the arm64 generic layout); the fields the C
 /// `fill_stat` sets are populated (the device of the node's filesystem, mode,
 /// link count, inode, size, the owner from the one modeled identity, the three
-/// timestamps, the block geometry); `st_rdev` stays zero.
+/// timestamps, the block geometry, a device node's `st_rdev`).
 #[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Default)]
@@ -476,6 +478,7 @@ impl KernelStat {
     fn from_values(values: &StatValues) -> Self {
         Self {
             st_dev: encode_dev(crate::fs_device(values.fs)),
+            st_rdev: encode_dev((values.rdev_major, values.rdev_minor)),
             st_mode: stat_mode(values),
             st_nlink: values.nlink as _,
             st_ino: values.ino,
@@ -657,6 +660,8 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
         stx_mnt_id: mount_id,
         stx_dev_major: crate::fs_device(values.fs).0,
         stx_dev_minor: crate::fs_device(values.fs).1,
+        stx_rdev_major: values.rdev_major,
+        stx_rdev_minor: values.rdev_minor,
         ..Statx::default()
     };
     if extra & STATX_BTIME != 0 {
@@ -878,8 +883,15 @@ pub(super) fn sys_name_to_handle_at(
         Ok(values) => values,
         Err(errno) => return errno,
     };
-    // A filesystem with no export operations refuses before the handle is
-    // read (`exportfs_can_encode_fh`).
+    // devtmpfs (tmpfs) can encode a handle for the entropy device's node,
+    // which the model does not; a filesystem with no export operations
+    // refuses before the handle is read (`exportfs_can_encode_fh`).
+    if values.fs == crate::PATINA_FS_DEVTMPFS {
+        crate::trap_fatal(
+            "name_to_handle_at of the entropy device (a devtmpfs file handle) is not modeled; \
+             failing closed",
+        );
+    }
     if values.fs != crate::PATINA_FS_VOLUME {
         return -EOPNOTSUPP;
     }
@@ -1186,23 +1198,9 @@ pub(super) fn sys_faccessat(dirfd: i64, path: u64, mode: u64, flags: u64) -> i64
         Ok(values) => values,
         Err(errno) => return errno,
     };
-    // The guest is one non-root identity owning every entry, so the OWNER triad
-    // is the answer — the same arithmetic the C `patina_access_impl` does.
-    let owner = (values.mode >> 6) & 0o7;
-    let mut wanted = 0;
-    if mode & R_OK != 0 {
-        wanted |= 0o4;
-    }
-    if mode & W_OK != 0 {
-        wanted |= 0o2;
-    }
-    if mode & X_OK != 0 {
-        wanted |= 0o1;
-    }
-    if owner & wanted != wanted {
-        return -EACCES;
-    }
-    0
+    // The one answer the C `access` gives too.
+    // SAFETY: `values` is a local record.
+    -i64::from(unsafe { crate::patina_access_answer(&values, mode as c_int) })
 }
 
 /// Raw `fchmodat`/`fchmodat2`, and the x86_64 legacy `chmod`. Routes to the
@@ -1272,8 +1270,8 @@ pub(super) fn sys_linkat(
 /// `readlinkat(2)`. An empty path names the descriptor itself (the `O_PATH`
 /// trick `cap-primitives` uses to test whether a component it just opened is a
 /// symlink), and since no deterministic descriptor names a symlink entry the
-/// answer is the kernel's own for a non-symlink: `EINVAL`. `bufsiz <= 0` is
-/// `EINVAL` before anything is resolved.
+/// answer is the kernel's own for an empty path naming a non-symlink:
+/// `ENOENT`. `bufsiz <= 0` is `EINVAL` before anything is resolved.
 pub(super) fn sys_readlinkat(dirfd: i64, path: u64, buf: u64, bufsize: u64) -> i64 {
     if (bufsize as i64) <= 0 {
         return -EINVAL;

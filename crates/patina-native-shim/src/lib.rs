@@ -4263,6 +4263,53 @@ pub unsafe extern "C" fn patina_openat2(
     unsafe { open_at(dirfd, path, flags, mode, resolve) }
 }
 
+/// An open of an entry the resolver answers itself.
+fn open_virtual(entry: paths::Virtual, flags: u32, cloexec: bool) -> c_int {
+    match entry {
+        paths::Virtual::Urandom => open_urandom(entry, flags, cloexec),
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Namespace(index) => open_namespace(index, flags, cloexec),
+    }
+}
+
+/// An open of the entropy device, a character device. On Linux, in
+/// `do_open`'s order: `O_CREAT|O_EXCL` is `EEXIST`, `O_DIRECTORY` `ENOTDIR`;
+/// a read-only open (`O_CREAT`, `O_TRUNC`, `O_APPEND`, `O_NONBLOCK` taken)
+/// is a [`FdKind::Urandom`] description; an `O_PATH` or writing open (which
+/// would feed the input pool) stops by name. On Darwin only a plain
+/// read-only open is modeled; anything else is `EACCES`.
+fn open_urandom(entry: paths::Virtual, flags: u32, cloexec: bool) -> c_int {
+    let status = if cfg!(target_os = "linux") {
+        if flags & O_PATH != 0 {
+            entry.unmodeled("an O_PATH open");
+        }
+        if flags & (O_CREATE | O_EXCLUSIVE) == O_CREATE | O_EXCLUSIVE {
+            return fail(EEXIST);
+        }
+        if flags & O_DIRECTORY != 0 {
+            return fail(ENOTDIR);
+        }
+        if flags & O_WRITE != 0 {
+            entry.unmodeled("an open for writing (feeding the input pool)");
+        }
+        O_READ | O_OPENED | (flags & (O_APPEND | O_NONBLOCK))
+    } else {
+        if flags & (O_WRITE | O_CREATE | O_TRUNCATE | O_APPEND | O_EXCLUSIVE | O_PATH) != 0
+            || flags & O_READ == 0
+        {
+            return fail(EACCES);
+        }
+        O_READ | O_OPENED
+    };
+    match install_fd(FdKind::Urandom, 0, status, cloexec) {
+        Ok(number) => {
+            set_errno(0);
+            number
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
 /// An open of a namespace file (`nsfs`): the link is followed to the
 /// namespace's nsfs inode, a root-owned, immutable `0444` regular file. In
 /// the kernel's order (`do_open`'s `O_DIRECTORY` check comes before
@@ -4346,7 +4393,8 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
         &path,
         scope | if nofollow { paths::RESOLVE_NOFOLLOW } else { 0 },
     ) {
-        Ok(resolved) => resolved,
+        Ok(paths::Resolution::Volume(resolved)) => resolved,
+        Ok(paths::Resolution::Virtual(entry)) => return open_virtual(entry, flags, cloexec),
         Err(errno) => return fail(errno),
     };
     // The description's status flags as `F_GETFL` reports them: the access
@@ -4385,28 +4433,6 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
             0
         },
     };
-    if paths::is_urandom(&resolved.path) {
-        if open_flags.read
-            && !open_flags.write
-            && !open_flags.create
-            && !open_flags.truncate
-            && !open_flags.append
-            && !open_flags.exclusive
-        {
-            return match install_fd(FdKind::Urandom, 0, O_READ | O_OPENED, cloexec) {
-                Ok(number) => {
-                    set_errno(0);
-                    number
-                }
-                Err(errno) => fail(errno),
-            };
-        }
-        return fail(EACCES);
-    }
-    #[cfg(target_os = "linux")]
-    if let Some(index) = nsfs::entry_at(&resolved.path) {
-        return open_namespace(index, flags, cloexec);
-    }
     let writes = open_flags.write
         || open_flags.create
         || open_flags.truncate
@@ -5703,6 +5729,10 @@ const PATINA_FS_SOCKFS: u32 = 2;
 /// A namespace file's nsfs inode (`crate::nsfs`): root's, on device 0:4.
 #[cfg(target_os = "linux")]
 const PATINA_FS_NSFS: u32 = 3;
+/// The entropy device's node (`volume::urandom_metadata`): root's, on
+/// devtmpfs (0:5).
+#[cfg(target_os = "linux")]
+const PATINA_FS_DEVTMPFS: u32 = 4;
 
 /// The `(major, minor)` device a `PATINA_FS_*` filesystem reports through
 /// `st_dev`/`stx_dev_*` (`PATINA_*_DEV_*` in `patina_native.h`): the volume is
@@ -5714,6 +5744,7 @@ pub(crate) fn fs_device(fs: u32) -> (u32, u32) {
         PATINA_FS_PIPEFS => (0, 14),
         PATINA_FS_SOCKFS => (0, 8),
         PATINA_FS_NSFS => (0, 4),
+        PATINA_FS_DEVTMPFS => (0, 5),
         _ => (8, 1),
     }
 }
@@ -5733,6 +5764,9 @@ pub struct PatinaMetadata {
     /// The `PATINA_FS_*` filesystem the node is on, which decides the device
     /// `st_dev` reports.
     pub fs: u32,
+    /// A device node's device (`st_rdev`); 0 for any other node.
+    pub rdev_major: u32,
+    pub rdev_minor: u32,
     pub length: u64,
     pub ino: u64,
     pub atime: PatinaTimestamp,
@@ -5781,6 +5815,8 @@ fn write_metadata(metadata: patina_dst_abi::FsMetadata, out: *mut PatinaMetadata
             mode: metadata.mode,
             nlink: metadata.nlink,
             fs: PATINA_FS_VOLUME,
+            rdev_major: 0,
+            rdev_minor: 0,
             length: metadata.len,
             ino: metadata.ino,
             atime: PatinaTimestamp::from_nanos(metadata.atime_nanos),
@@ -5938,27 +5974,128 @@ pub unsafe extern "C" fn patina_metadata_at(
         Err(errno) => return fail(errno),
     };
     let resolved = match paths::resolve(dirfd, &path, flags) {
-        Ok(resolved) => resolved,
+        Ok(paths::Resolution::Volume(resolved)) => resolved,
+        Ok(paths::Resolution::Virtual(entry)) => {
+            return match virtual_metadata(entry, flags & paths::RESOLVE_NOFOLLOW != 0) {
+                Some(metadata) => write_patina_metadata(metadata, out),
+                None => entry.unmodeled("the metadata"),
+            };
+        }
         Err(errno) => return fail(errno),
     };
-    #[cfg(target_os = "linux")]
-    if let Some(index) = nsfs::entry_at(&resolved.path) {
-        if flags & paths::RESOLVE_NOFOLLOW != 0 {
-            trap_fatal(
-                "the metadata of a /proc/self/ns link itself (a procfs inode) is not modeled, \
-                 only the namespace file it opens; failing closed",
-            );
-        }
-        return write_patina_metadata(nsfs::metadata(index), out);
-    }
     let Some(metadata) = resolved.metadata else {
         return fail(ENOENT);
     };
     write_metadata(metadata, out)
 }
 
-/// Write a record the shim made itself (a namespace file's).
+/// `access`/`faccessat`'s answer for the node a record describes, both
+/// doors: 0 or the errno. The caller is the one modeled identity: the owner
+/// of every volume entry (the owner triad answers), and not root, so a
+/// root-owned node (a namespace file's, the entropy device) answers from the
+/// other triad; asking a namespace file's immutable inode for write access
+/// is `EPERM` first (`inode_permission`'s `IS_IMMUTABLE`).
+///
+/// # Safety
+/// `values` must point to a readable record.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_access_answer(values: *const PatinaMetadata, mode: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: readable per this function's contract.
+    let values = unsafe { &*values };
+    const R_OK: c_int = 4;
+    const W_OK: c_int = 2;
+    const X_OK: c_int = 1;
+    let wanted = [(R_OK, 0o4), (W_OK, 0o2), (X_OK, 0o1)]
+        .into_iter()
+        .filter(|(flag, _)| mode & flag != 0)
+        .fold(0, |wanted, (_, bit)| wanted | bit);
+    #[cfg(target_os = "linux")]
+    let (immutable, root_owned) = (
+        values.fs == PATINA_FS_NSFS,
+        matches!(values.fs, PATINA_FS_NSFS | PATINA_FS_DEVTMPFS),
+    );
+    #[cfg(not(target_os = "linux"))]
+    let (immutable, root_owned) = (false, false);
+    if immutable && mode & W_OK != 0 {
+        return EPERM;
+    }
+    let triad = if root_owned {
+        values.mode & 0o7
+    } else {
+        (values.mode >> 6) & 0o7
+    };
+    if triad & wanted != wanted { EACCES } else { 0 }
+}
+
+/// A namespace file's link, read: `<type>:[<inode>]` (`ns_get_name`),
+/// truncated to the room given.
 #[cfg(target_os = "linux")]
+fn read_namespace_link(index: usize, buf: *mut c_char, len: usize) -> isize {
+    let target = nsfs::link_target(index);
+    let copied = target.len().min(len);
+    // SAFETY: the caller checked `buf` writable for `len` bytes (the C ABI
+    // of `patina_read_link`).
+    unsafe {
+        slice::from_raw_parts_mut(buf.cast::<u8>(), len)[..copied]
+            .copy_from_slice(&target.as_bytes()[..copied]);
+    }
+    set_errno(0);
+    copied as isize
+}
+
+/// A change to the attributes (mode, owner, times, size) of an entry the
+/// resolver answers itself, by `operation`: a namespace file's nsfs inode is
+/// immutable (`notify_change`: `EPERM`); the entropy device is root's, so
+/// changing its mode is `EPERM` (not the owner, no `CAP_FOWNER`), and
+/// anything else about it is not modeled.
+fn virtual_setattr(entry: paths::Virtual, operation: &str) -> c_int {
+    match entry {
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Namespace(_) => EPERM,
+        paths::Virtual::Urandom
+            if operation == "chmod"
+                && cfg!(target_os = "linux")
+                && !caller_capable(registry::Capability::Fowner) =>
+        {
+            EPERM
+        }
+        paths::Virtual::Urandom => entry.unmodeled(operation),
+    }
+}
+
+/// Whether the caller holds `capability` (Linux; the identity has none on
+/// Darwin).
+fn caller_capable(capability: registry::Capability) -> bool {
+    #[cfg(target_os = "linux")]
+    return identity::credential().capable(capability);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = capability;
+        false
+    }
+}
+
+/// The metadata of an entry the resolver answers itself, `nofollow` naming
+/// the entry itself: a namespace file's nsfs inode (its link, a procfs
+/// inode, is not modeled) and, on Linux, the entropy device's node; `None`
+/// where the model ends.
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn virtual_metadata(entry: paths::Virtual, nofollow: bool) -> Option<PatinaMetadata> {
+    match entry {
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Urandom => Some(volume::urandom_metadata()),
+        #[cfg(not(target_os = "linux"))]
+        paths::Virtual::Urandom => None,
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Namespace(_) if nofollow => None,
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Namespace(index) => Some(nsfs::metadata(index)),
+    }
+}
+
+/// Write a record the shim made itself (a namespace file's, the entropy
+/// device's).
 fn write_patina_metadata(metadata: PatinaMetadata, out: *mut PatinaMetadata) -> c_int {
     if out.is_null() {
         return fail(EINVAL);
@@ -5995,11 +6132,14 @@ pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut Patina
         };
     }
     // A namespace file is the namespace's nsfs inode (`O_PATH` too:
-    // `fstat` takes it).
+    // `fstat` takes it); the entropy device, its devtmpfs node.
     #[cfg(target_os = "linux")]
     if let Ok(resolved) = resolve_fd(raw_fd) {
         if matches!(resolved.kind, FdKind::Namespace | FdKind::NamespacePath) {
             return write_patina_metadata(nsfs::metadata(resolved.handle as usize), out);
+        }
+        if resolved.kind == FdKind::Urandom {
+            return write_patina_metadata(volume::urandom_metadata(), out);
         }
     }
     // An anonymous pipe end or a socket is on pipefs/sockfs: its node is the
@@ -6047,7 +6187,8 @@ pub unsafe extern "C" fn patina_chmod(
         Err(errno) => return fail(errno),
     };
     let resolved = match paths::resolve(dirfd, &path, flags) {
-        Ok(resolved) => resolved,
+        Ok(paths::Resolution::Volume(resolved)) => resolved,
+        Ok(paths::Resolution::Virtual(entry)) => return fail(virtual_setattr(entry, "chmod")),
         Err(errno) => return fail(errno),
     };
     match resolved.metadata.map(|metadata| metadata.kind) {
@@ -6092,10 +6233,19 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
         return 0;
     }
     // A namespace file's nsfs inode is root's and immutable
-    // (`notify_change`'s `IS_IMMUTABLE`).
+    // (`notify_change`'s `IS_IMMUTABLE`); the entropy device is root's (not
+    // the owner, no `CAP_FOWNER`).
     #[cfg(target_os = "linux")]
-    if matches!(resolve_fd(raw_fd), Ok(resolved) if resolved.kind == FdKind::Namespace) {
-        return fail(EPERM);
+    if let Ok(resolved) = resolve_fd(raw_fd) {
+        if resolved.kind == FdKind::Namespace {
+            return fail(EPERM);
+        }
+        if resolved.kind == FdKind::Urandom {
+            if caller_capable(registry::Capability::Fowner) {
+                paths::Virtual::Urandom.unmodeled("fchmod");
+            }
+            return fail(EPERM);
+        }
     }
     // A userfaultfd's inode is its own and the caller's
     // (`anon_inode_create_getfile`), so the change is allowed. Nothing reads
@@ -6217,7 +6367,10 @@ pub unsafe extern "C" fn patina_utimensat(
         };
     }
     let resolved = match paths::resolve(dirfd, &path, flags) {
-        Ok(resolved) => resolved,
+        Ok(paths::Resolution::Volume(resolved)) => resolved,
+        Ok(paths::Resolution::Virtual(entry)) => {
+            return fail(virtual_setattr(entry, "setting the times"));
+        }
         Err(errno) => return fail(errno),
     };
     if resolved.metadata.is_none() {
@@ -6361,7 +6514,10 @@ pub unsafe extern "C" fn patina_chown(
         Err(errno) => return fail(errno),
     };
     let resolved = match paths::resolve(dirfd, &path, flags) {
-        Ok(resolved) => resolved,
+        Ok(paths::Resolution::Volume(resolved)) => resolved,
+        Ok(paths::Resolution::Virtual(entry)) => {
+            return fail(virtual_setattr(entry, "changing the owner"));
+        }
         Err(errno) => return fail(errno),
     };
     let Some(metadata) = resolved.metadata else {
@@ -6455,7 +6611,15 @@ pub unsafe extern "C" fn patina_truncate(dirfd: c_int, path: *const c_char, leng
         Err(errno) => return fail(errno),
     };
     let resolved = match paths::resolve(dirfd, &path, 0) {
-        Ok(resolved) => resolved,
+        Ok(paths::Resolution::Volume(resolved)) => resolved,
+        // `vfs_truncate`: a character device is no regular file (`EINVAL`,
+        // before any permission); the immutable nsfs inode refuses (`EPERM`).
+        Ok(paths::Resolution::Virtual(paths::Virtual::Urandom)) if cfg!(target_os = "linux") => {
+            return fail(EINVAL);
+        }
+        Ok(paths::Resolution::Virtual(entry)) => {
+            return fail(virtual_setattr(entry, "truncating"));
+        }
         Err(errno) => return fail(errno),
     };
     let ino = match resolved.metadata {
@@ -6703,7 +6867,11 @@ pub unsafe extern "C" fn patina_read_dir_free(state: *mut c_void) {
     }
 }
 
-/// Resolve `(dirfd, path)` once and run `invoke` on the canonical path.
+/// Resolve `(dirfd, path)` once and run `invoke` on the canonical path. An
+/// entry the resolver answers itself exists, in a directory the caller
+/// cannot write (`/dev`, `/proc/self/ns`): a creating call answers `EEXIST`
+/// (the lookup finds it), a removing one `EACCES` (`may_delete`); that answer
+/// is `virtual_answer`.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
@@ -6711,6 +6879,7 @@ unsafe fn path_unit(
     dirfd: c_int,
     path: *const c_char,
     flags: u32,
+    virtual_answer: c_int,
     invoke: impl FnOnce(&mut Context, &str) -> Result<(), RuntimeError>,
 ) -> c_int {
     let path = match path_from_c(path) {
@@ -6718,7 +6887,8 @@ unsafe fn path_unit(
         Err(errno) => return fail(errno),
     };
     let resolved = match paths::resolve(dirfd, &path, flags) {
-        Ok(resolved) => resolved,
+        Ok(paths::Resolution::Volume(resolved)) => resolved,
+        Ok(paths::Resolution::Virtual(_)) => return fail(virtual_answer),
         Err(errno) => return fail(errno),
     };
     match with_context(|context| invoke(context, &resolved.path)) {
@@ -6745,9 +6915,13 @@ pub unsafe extern "C" fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u
     let mode = (mode & 0o1777) & !paths::umask();
     // SAFETY: Forwarded from this function's C ABI contract.
     unsafe {
-        path_unit(dirfd, path, paths::RESOLVE_NOFOLLOW, |context, path| {
-            context.fs_create_directory(path, mode)
-        })
+        path_unit(
+            dirfd,
+            path,
+            paths::RESOLVE_NOFOLLOW,
+            EEXIST,
+            |context, path| context.fs_create_directory(path, mode),
+        )
     }
 }
 
@@ -6765,9 +6939,13 @@ pub unsafe extern "C" fn patina_mkfifo(dirfd: c_int, path: *const c_char, mode: 
     let mode = (mode & 0o7777) & !paths::umask();
     // SAFETY: Forwarded from this function's C ABI contract.
     unsafe {
-        path_unit(dirfd, path, paths::RESOLVE_NOFOLLOW, |context, path| {
-            context.fs_make_fifo(path, mode)
-        })
+        path_unit(
+            dirfd,
+            path,
+            paths::RESOLVE_NOFOLLOW,
+            EEXIST,
+            |context, path| context.fs_make_fifo(path, mode),
+        )
     }
 }
 
@@ -6822,7 +7000,9 @@ pub unsafe extern "C" fn patina_mknod(
         Err(errno) => return fail(errno),
     };
     let resolved = match paths::resolve(dirfd, &spelled, paths::RESOLVE_NOFOLLOW) {
-        Ok(resolved) => resolved,
+        Ok(paths::Resolution::Volume(resolved)) => resolved,
+        // It exists.
+        Ok(paths::Resolution::Virtual(_)) => return fail(EEXIST),
         Err(errno) => return fail(errno),
     };
     if resolved.metadata.is_some() || paths::last_component(&spelled) != paths::Last::Name {
@@ -6867,6 +7047,7 @@ pub unsafe extern "C" fn patina_unlink(dirfd: c_int, path: *const c_char) -> c_i
             dirfd,
             path,
             paths::RESOLVE_NOFOLLOW,
+            EACCES,
             Context::fs_remove_file,
         )
     }
@@ -6899,6 +7080,7 @@ pub unsafe extern "C" fn patina_rmdir(dirfd: c_int, path: *const c_char) -> c_in
             dirfd,
             path,
             paths::RESOLVE_NOFOLLOW,
+            EACCES,
             Context::fs_remove_directory,
         )
     }
@@ -7016,11 +7198,13 @@ pub unsafe extern "C" fn patina_renameat2(
         });
     }
     let from = match paths::resolve(fromfd, &from, paths::RESOLVE_NOFOLLOW) {
-        Ok(resolved) => resolved,
+        Ok(paths::Resolution::Volume(resolved)) => resolved,
+        Ok(paths::Resolution::Virtual(entry)) => entry.unmodeled("renaming"),
         Err(errno) => return fail(errno),
     };
     let to = match paths::resolve(tofd, &to, paths::RESOLVE_NOFOLLOW) {
-        Ok(resolved) => resolved,
+        Ok(paths::Resolution::Volume(resolved)) => resolved,
+        Ok(paths::Resolution::Virtual(entry)) => entry.unmodeled("renaming onto"),
         Err(errno) => return fail(errno),
     };
     if from.metadata.is_none() {
@@ -7073,6 +7257,7 @@ pub unsafe extern "C" fn patina_symlink(
             dirfd,
             link_path,
             paths::RESOLVE_NOFOLLOW,
+            EEXIST,
             |context, link_path| context.fs_symlink(&target, link_path),
         )
     }
@@ -7109,11 +7294,14 @@ pub unsafe extern "C" fn patina_link(
         paths::RESOLVE_NOFOLLOW
     };
     let from = match paths::resolve(fromfd, &from, from_flags) {
-        Ok(resolved) => resolved.path,
+        Ok(paths::Resolution::Volume(resolved)) => resolved.path,
+        Ok(paths::Resolution::Virtual(entry)) => entry.unmodeled("linking"),
         Err(errno) => return fail(errno),
     };
     let to = match paths::resolve(tofd, &to, paths::RESOLVE_NOFOLLOW) {
-        Ok(resolved) => resolved.path,
+        Ok(paths::Resolution::Volume(resolved)) => resolved.path,
+        // The new name exists (`filename_create`).
+        Ok(paths::Resolution::Virtual(_)) => return fail(EEXIST),
         Err(errno) => return fail(errno),
     };
     match with_context(|context| context.fs_link(&from, &to)) {
@@ -7159,12 +7347,13 @@ pub unsafe extern "C" fn patina_read_link(
         Ok(path) => path,
         Err(errno) => return fail(errno) as isize,
     };
-    // A namespace file's descriptor names its nsfs inode, no link: an empty
-    // path is `ENOENT` (`do_readlinkat`).
+    // A descriptor whose node is not on the volume (a namespace file's nsfs
+    // inode, the entropy device, a pipe, a socket, an anonymous inode) names
+    // no link: an empty path is `ENOENT` (`do_readlinkat`).
     #[cfg(target_os = "linux")]
     if path.is_empty()
         && resolve_fd(dirfd).is_ok_and(|resolved| {
-            matches!(resolved.kind, FdKind::Namespace | FdKind::NamespacePath)
+            !matches!(resolved.kind, FdKind::File | FdKind::Dir | FdKind::OPath)
         })
     {
         return fail(ENOENT) as isize;
@@ -7174,27 +7363,23 @@ pub unsafe extern "C" fn patina_read_link(
         &path,
         paths::RESOLVE_NOFOLLOW | paths::RESOLVE_EMPTY_PATH,
     ) {
-        Ok(resolved) => resolved,
+        Ok(paths::Resolution::Volume(resolved)) => resolved,
+        // The entropy device is no link.
+        Ok(paths::Resolution::Virtual(paths::Virtual::Urandom)) => {
+            return fail(EINVAL) as isize;
+        }
+        #[cfg(target_os = "linux")]
+        Ok(paths::Resolution::Virtual(paths::Virtual::Namespace(index))) => {
+            return read_namespace_link(index, buf, len);
+        }
         Err(errno) => return fail(errno) as isize,
     };
-    // A namespace file's link reads `<type>:[<inode>]` (`ns_get_name`),
-    // truncated to the room given.
-    #[cfg(target_os = "linux")]
-    if let Some(index) = nsfs::entry_at(&resolved.path) {
-        let target = nsfs::link_target(index);
-        let copied = target.len().min(len);
-        // SAFETY: `buf` was checked and is writable for `len` bytes by this
-        // function's C ABI.
-        unsafe {
-            slice::from_raw_parts_mut(buf.cast::<u8>(), len)[..copied]
-                .copy_from_slice(&target.as_bytes()[..copied]);
-        }
-        set_errno(0);
-        return copied as isize;
-    }
     match resolved.metadata.map(|metadata| metadata.kind) {
         None => return fail(ENOENT) as isize,
         Some(FsEntryKind::Symlink) => {}
+        // The descriptor's own node, named by an empty path, is no link:
+        // `ENOENT` rather than `EINVAL` (`do_readlinkat`).
+        Some(_) if path.is_empty() => return fail(ENOENT) as isize,
         Some(
             FsEntryKind::File
             | FsEntryKind::Directory
@@ -7277,19 +7462,27 @@ pub unsafe extern "C" fn patina_resolve_path(
         Ok(path) => path,
         Err(errno) => return fail(errno) as isize,
     };
-    let resolved = match paths::resolve(dirfd, &path, flags) {
-        Ok(resolved) => resolved,
-        Err(errno) => return fail(errno) as isize,
-    };
-    // SAFETY: `kind` was checked non-null and is writable per the C ABI.
-    unsafe {
-        kind.write(
+    let (path, found) = match paths::resolve(dirfd, &path, flags) {
+        Ok(paths::Resolution::Volume(resolved)) => (
+            resolved.path,
             resolved
                 .metadata
                 .map_or(0, |metadata| metadata_kind(metadata.kind)),
-        );
-    }
-    copy_path_out(&resolved.path, buf, len)
+        ),
+        // The entropy device is a character device at its own name.
+        Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Urandom)) => {
+            (entry.path(), PATINA_ENTRY_CHAR)
+        }
+        // A namespace file's link names no path (it reads `<type>:[<inode>]`).
+        #[cfg(target_os = "linux")]
+        Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Namespace(_))) => {
+            entry.unmodeled("the canonical path")
+        }
+        Err(errno) => return fail(errno) as isize,
+    };
+    // SAFETY: `kind` was checked non-null and is writable per the C ABI.
+    unsafe { kind.write(found) };
+    copy_path_out(&path, buf, len)
 }
 
 /// `getcwd(2)`: where the working directory's NODE is now, NUL-terminated in
@@ -11953,6 +12146,8 @@ mod thread {
             } else {
                 super::PATINA_FS_PIPEFS
             },
+            rdev_major: 0,
+            rdev_minor: 0,
             length: 0,
             ino,
             atime: super::PatinaTimestamp::from_nanos(i128::from(inode.atime_nanos)),

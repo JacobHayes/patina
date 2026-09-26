@@ -235,6 +235,16 @@ fn links(p: &Probe, root: &str) {
     p.check("readlinkat on a regular file is EINVAL", r == neg(EINVAL));
     let (r, _) = p.readlinkat(AT_FDCWD, &format!("{root}/missing"), 64);
     p.check("readlinkat on a missing name is ENOENT", r == neg(ENOENT));
+    // An empty path names the descriptor's own node, which is no link:
+    // `ENOENT` (`do_readlinkat`), the answer an `O_PATH` symlink test reads.
+    let located = p.openat(AT_FDCWD, &f, O_PATH | O_CLOEXEC, 0);
+    p.require("open the file O_PATH", located >= 0);
+    let (r, _) = p.readlinkat(located, "", 64);
+    p.check(
+        "readlinkat of an empty path on a file's descriptor is ENOENT",
+        r == neg(ENOENT),
+    );
+    p.close(located);
     let dirfd = p.openat(AT_FDCWD, root, O_RDONLY | O_DIRECTORY, 0);
     p.require("open root", dirfd >= 0);
     let (r, relative) = p.readlinkat(dirfd, "l", 64);

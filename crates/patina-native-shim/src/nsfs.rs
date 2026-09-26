@@ -86,6 +86,26 @@ pub(crate) fn entry_at(path: &str) -> Option<usize> {
     ENTRIES.iter().position(|entry| entry.name == name)
 }
 
+/// Whether a canonical path names procfs's namespace files other than the
+/// caller's own entries: the `/proc/self/ns` directory itself, or the
+/// `ns` directory (and anything in it) of `/proc/thread-self` or a process
+/// by number. The virtual machine mounts no procfs to answer them.
+pub(crate) fn names_procfs(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/proc/") else {
+        return false;
+    };
+    let (owner, rest) = rest.split_once('/').unwrap_or((rest, ""));
+    let in_ns = rest == "ns" || rest.starts_with("ns/");
+    match owner {
+        // The caller's own entries are answered, and a name among them that
+        // is no entry is `ENOENT` (as nsfs's directory answers); the
+        // directory itself is not modeled.
+        "self" => rest == "ns",
+        "thread-self" => in_ns,
+        pid => !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()) && in_ns,
+    }
+}
+
 /// What the link reads: `<type>:[<inode>]` (`ns_get_name`).
 pub(crate) fn link_target(index: usize) -> String {
     let entry = &ENTRIES[index];
@@ -121,6 +141,8 @@ pub(crate) fn metadata(index: usize) -> PatinaMetadata {
         mode: 0o444,
         nlink: 1,
         fs: PATINA_FS_NSFS,
+        rdev_major: 0,
+        rdev_minor: 0,
         length: 0,
         ino: ENTRIES[index].inum,
         atime: made,
@@ -172,7 +194,13 @@ mod tests {
     #[test]
     fn the_resolver_names_the_entries_under_the_walks_rules() {
         use crate::paths::*;
-        let resolve = |path: &str, flags: u32| resolve(AT_FDCWD, path, flags).map(|r| r.path);
+        let resolve = |path: &str, flags: u32| match resolve(AT_FDCWD, path, flags) {
+            Ok(Resolution::Virtual(entry)) => Ok(entry.path()),
+            Ok(Resolution::Volume(resolved)) => {
+                panic!("{path} is on the volume: {}", resolved.path)
+            }
+            Err(errno) => Err(errno),
+        };
         let uts = "/proc/self/ns/uts";
         assert_eq!(resolve(uts, 0).as_deref(), Ok(uts));
         assert_eq!(resolve("/proc//self/./ns/uts", 0).as_deref(), Ok(uts));
@@ -184,5 +212,31 @@ mod tests {
         // The link itself is not followed, so neither restriction applies.
         let link = RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS | RESOLVE_NOFOLLOW;
         assert_eq!(resolve(uts, link).as_deref(), Ok(uts));
+    }
+
+    /// The spellings of procfs's namespace files the model does not answer
+    /// (they stop the run by name), and the ones it does.
+    #[test]
+    fn other_spellings_of_the_namespace_files_name_procfs() {
+        for path in [
+            "/proc/self/ns",
+            "/proc/thread-self/ns",
+            "/proc/thread-self/ns/uts",
+            "/proc/2/ns",
+            "/proc/2/ns/net",
+        ] {
+            assert!(names_procfs(path), "{path}");
+        }
+        for path in [
+            "/proc/self/ns/uts",
+            "/proc/self/ns/nosuch",
+            "/proc/self/maps",
+            "/proc/2/maps",
+            "/proc/x/ns/uts",
+            "/procfs/self/ns",
+            "/proc",
+        ] {
+            assert!(!names_procfs(path), "{path}");
+        }
     }
 }

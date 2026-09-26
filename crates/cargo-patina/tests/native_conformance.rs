@@ -1365,6 +1365,11 @@ fn entropy_getrandom() {
 }
 
 #[test]
+fn entropy_urandom() {
+    conform("entropy/urandom");
+}
+
+#[test]
 fn fd_pipes() {
     conform("fd/pipes");
 }

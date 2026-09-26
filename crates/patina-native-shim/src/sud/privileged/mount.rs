@@ -46,7 +46,7 @@ fn copy_mount_options(address: u64) -> Result<(), c_int> {
 /// are copied in, the target looked up (following links), `MS_NOUSER`
 /// refused (after the old magic is discarded), then `may_mount`.
 pub(in crate::sud) fn mount(credential: &Credential, a: &[u64; 6]) -> Answer {
-    mount_finding(credential, a, |target| lookup(target, true).map(drop))
+    mount_finding(credential, a, |target| lookup(target, true))
 }
 
 /// [`mount`], its target found by `find`.
@@ -76,9 +76,7 @@ pub(super) fn mount_finding(
 /// lookup (`UMOUNT_NOFOLLOW` leaves a final link unfollowed), then
 /// `may_mount` (`can_umount`), before whether the path is a mount at all.
 pub(in crate::sud) fn umount2(credential: &Credential, a: &[u64; 6]) -> Answer {
-    umount2_finding(credential, a, |target, follow| {
-        lookup(target, follow).map(drop)
-    })
+    umount2_finding(credential, a, lookup)
 }
 
 /// [`umount2`], its target found by `find` (following a final link or not).

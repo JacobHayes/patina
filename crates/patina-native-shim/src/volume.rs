@@ -230,6 +230,7 @@ impl Filesystem {
             PATINA_FS_PIPEFS => Filesystem::Pipefs,
             PATINA_FS_SOCKFS => Filesystem::Sockfs,
             crate::PATINA_FS_NSFS => Filesystem::Nsfs,
+            crate::PATINA_FS_DEVTMPFS => Filesystem::Devtmpfs,
             _ => Filesystem::Volume,
         }
     }
@@ -333,14 +334,16 @@ pub unsafe extern "C" fn patina_statfs(path: *const c_char, out: *mut KernelStat
         Err(errno) => return fail(errno),
     };
     match paths::resolve(paths::AT_FDCWD, &path, 0) {
-        Ok(resolved) if resolved.metadata.is_some() => copy_out(Filesystem::Volume.describe(), out),
-        Ok(resolved) if paths::is_urandom(&resolved.path) => {
+        Ok(paths::Resolution::Volume(resolved)) if resolved.metadata.is_some() => {
+            copy_out(Filesystem::Volume.describe(), out)
+        }
+        Ok(paths::Resolution::Volume(_)) => fail(ENOENT),
+        Ok(paths::Resolution::Virtual(paths::Virtual::Urandom)) => {
             copy_out(Filesystem::Devtmpfs.describe(), out)
         }
-        Ok(resolved) if crate::nsfs::entry_at(&resolved.path).is_some() => {
+        Ok(paths::Resolution::Virtual(paths::Virtual::Namespace(_))) => {
             copy_out(Filesystem::Nsfs.describe(), out)
         }
-        Ok(_) => fail(ENOENT),
         Err(errno) => fail(errno),
     }
 }
@@ -355,6 +358,45 @@ pub unsafe extern "C" fn patina_fstatfs(raw_fd: c_int, out: *mut KernelStatfs) -
     match descriptor_filesystem(raw_fd) {
         Ok(filesystem) => copy_out(filesystem.describe(), out),
         Err(errno) => fail(errno),
+    }
+}
+
+/// The entropy device's inode number on devtmpfs (as the pinned host's
+/// `/dev/urandom` reads live; devtmpfs numbers its nodes as boot makes them).
+const URANDOM_INO: u64 = 10;
+/// `mem`'s `urandom` device, 1:9.
+const URANDOM_DEVICE: (u32, u32) = (1, 9);
+
+/// When the entropy device's node was made, in nanoseconds on the virtual
+/// clock; 0 until first used.
+static URANDOM_MADE: crate::SpinMutex<u64> = crate::SpinMutex::new(0);
+
+/// The entropy device's node, `/dev/urandom`: a root-owned `0666` character
+/// device (1:9) on devtmpfs, one link, empty; every time the instant it was
+/// first used in the run (boot makes it; the model keeps the first use).
+pub(crate) fn urandom_metadata() -> crate::PatinaMetadata {
+    let now = crate::fs_time_unrecorded();
+    let made = {
+        let mut made = URANDOM_MADE.lock();
+        if *made == 0 {
+            *made = now;
+        }
+        *made
+    };
+    let made = crate::PatinaTimestamp::from_nanos(i128::from(made));
+    crate::PatinaMetadata {
+        kind: crate::PATINA_ENTRY_CHAR,
+        mode: 0o666,
+        nlink: 1,
+        fs: crate::PATINA_FS_DEVTMPFS,
+        rdev_major: URANDOM_DEVICE.0,
+        rdev_minor: URANDOM_DEVICE.1,
+        length: 0,
+        ino: URANDOM_INO,
+        atime: made,
+        mtime: made,
+        ctime: made,
+        btime: made,
     }
 }
 
