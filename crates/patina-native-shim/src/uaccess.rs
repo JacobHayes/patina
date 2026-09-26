@@ -473,6 +473,28 @@ pub(crate) fn read_name(addr: usize) -> Result<Vec<u8>, c_int> {
     Err(crate::ENAMETOOLONG)
 }
 
+/// The kernel's `access_ok(addr, size)`: whether the range lies in the
+/// user address space, without touching it. On x86_64 6.8's `__access_ok`
+/// takes a range that does not wrap and ends below the sign bit
+/// (`valid_user_address`), never `TASK_SIZE_MAX`; its constant-size form
+/// (`size <= PAGE_SIZE` known at compile time) checks only the pointer's
+/// sign, which the same test gives for every size this is called with that
+/// small. On aarch64 it is asm-generic's, against `1 << VA_BITS` (48,
+/// Ubuntu's config; derived, not yet read live on an arm64 6.8). A NULL
+/// range passes: only the copy then faults.
+#[cfg(target_os = "linux")]
+pub(crate) fn access_ok(addr: usize, size: usize) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    return addr
+        .checked_add(size)
+        .is_some_and(|end| (end as isize) >= 0);
+    #[cfg(target_arch = "aarch64")]
+    {
+        const TASK_SIZE_MAX: usize = 1 << 48;
+        size <= TASK_SIZE_MAX && addr <= TASK_SIZE_MAX - size
+    }
+}
+
 /// The `len` guest bytes at `addr`.
 pub(crate) fn read_bytes(addr: usize, len: usize) -> Result<Vec<u8>, c_int> {
     let mut bytes = vec![0u8; len];

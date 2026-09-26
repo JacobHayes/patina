@@ -584,6 +584,14 @@ int32_t patina_statfs(const char *path, void *out);
 int32_t patina_fstatfs(int32_t fd, void *out);
 int32_t patina_ustat(uint32_t dev, void *out);
 /*
+ * What statx adds to the basic statistics of a node on the PATINA_FS_*
+ * filesystem `fs`, asked for `mask`: the returned mask bits (the mount id's,
+ * STATX_MNT_ID_UNIQUE when asked for, else STATX_MNT_ID; STATX_BTIME when
+ * asked for and the filesystem records one), and the node's mount id,
+ * written to `mount_id`.
+ */
+uint32_t patina_statx_extra(uint32_t fs, uint32_t mask, uint64_t *mount_id);
+/*
  * Linux extended attributes. `by` names the node: PATINA_XATTR_BY_PATH the
  * entry at `path` (a final symlink followed), PATINA_XATTR_BY_LINK the entry
  * itself (the l* rows), PATINA_XATTR_BY_FD the descriptor `fd` (O_PATH is

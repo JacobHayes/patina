@@ -34,6 +34,7 @@ mod keys;
 mod landlock;
 mod lsm;
 mod mount;
+mod mount_query;
 mod process;
 mod seccomp;
 pub(super) use admin::*;
@@ -44,6 +45,7 @@ pub(super) use keys::*;
 pub(super) use landlock::*;
 pub(super) use lsm::*;
 pub(super) use mount::*;
+pub(super) use mount_query::*;
 pub(super) use process::*;
 pub(super) use seccomp::*;
 
@@ -180,8 +182,14 @@ mod tests {
 
     /// The rows that declare a capability no caller of the model reaches:
     /// the kernel checks it only past a refusal every descriptor or device
-    /// of the virtual machine gets.
-    const UNREACHABLE: &[Syscall] = &[Syscall::N_quotactl, Syscall::N_quotactl_fd];
+    /// of the virtual machine gets, or (the mount table's readers) only for
+    /// a mount the caller's root cannot reach, which every mount can.
+    const UNREACHABLE: &[Syscall] = &[
+        Syscall::N_quotactl,
+        Syscall::N_quotactl_fd,
+        Syscall::N_statmount,
+        Syscall::N_listmount,
+    ];
 
     /// The row's answer to `case` for a credential holding `held`.
     fn outcome(case: &Case, held: u64) -> Answer {

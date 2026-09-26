@@ -381,19 +381,9 @@ fn other_process(credential: &Credential, process: Process, refusal: u32) -> Ans
     }
 }
 
-/// Whether `len` bytes at `base` are a user range, as `access_ok` judges it
-/// (no wrap, and the end inside the user address space).
+/// Whether `len` bytes at `base` are a user range ([`crate::uaccess::access_ok`]).
 fn user_range(base: u64, len: u64) -> bool {
-    base.checked_add(len).is_some_and(user_end)
-}
-
-/// Whether a range ending at `end` is inside the user address space, as
-/// `access_ok` judges it (x86_64: below the sign bit; arm64: 48 bits).
-fn user_end(end: u64) -> bool {
-    #[cfg(target_arch = "x86_64")]
-    return (end as i64) >= 0;
-    #[cfg(target_arch = "aarch64")]
-    return end <= 1 << 48;
+    crate::uaccess::access_ok(base as usize, len as usize)
 }
 
 /// `process_madvise(pidfd, vec, vlen, advice, flags)` (mm/madvise.c); see

@@ -84,7 +84,7 @@ pub(crate) const RESOLVE_SCOPE_FLAGS: u32 =
 /// the driver so the entropy device exists whether or not the image has a
 /// `/dev` — recognized lexically, before the walk, so a spelling that reaches
 /// it only through a symlink or a `..` goes to the volume instead.
-const URANDOM: &str = "/dev/urandom";
+pub(crate) const URANDOM: &str = "/dev/urandom";
 
 /// Whether a resolved path is the entropy device.
 pub(crate) fn is_urandom(path: &str) -> bool {

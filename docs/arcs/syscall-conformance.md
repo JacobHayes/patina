@@ -489,8 +489,8 @@ forwards into the same dispatcher instead of its two-number allowlist.
   semaphore undo list from other threads, the user-mode `userfaultfd`
   descriptor (`mem/userfaultfd`), non-array BPF map types, detaching a BPF
   program from its attach point; and the rows still `Trap(privileged)`:
-  `statmount`/`listmount`
-  (`fs/mount_query`) and fanotify.
+  fanotify. `statmount`/`listmount` read the virtual mount table
+  (`fs/mount_query` runs without a gap).
 
 ## 7. Why the exclusions stay excluded
 

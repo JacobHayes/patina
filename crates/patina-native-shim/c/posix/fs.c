@@ -1216,10 +1216,6 @@ int fstatat64(int directory, const char *restrict path, struct stat64 *restrict 
     return fill_stat64(result, &values, status);
 }
 
-/* The one virtual volume's mount id, as statx reports it (STATX_MNT_ID is
- * always filled, like the kernel's vfs_statx). One mount, one id. */
-#define PATINA_STATX_MNT_ID UINT64_C(1)
-
 static void patina_statx_time(struct statx_timestamp *out, struct patina_timestamp time) {
     out->tv_sec = time.sec;
     out->tv_nsec = (uint32_t)time.nsec;
@@ -1227,8 +1223,9 @@ static void patina_statx_time(struct statx_timestamp *out, struct patina_timesta
 
 /*
  * statx: BASIC_STATS (BLOCKS the length-derived count stat reports) plus
- * MNT_ID, as the kernel's vfs_statx fills them whatever was asked; STATX_BTIME
- * is filled — and reported — only when requested, as ext4/xfs do.
+ * what patina_statx_extra adds, the node's mount id (MNT_ID_UNIQUE when asked
+ * for, else MNT_ID), as the kernel's vfs_statx fills it whatever was asked,
+ * and STATX_BTIME when requested and the node's filesystem records one.
  */
 int statx(int directory, const char *restrict path, int flags, unsigned int mask,
           struct statx *restrict status) {
@@ -1241,7 +1238,8 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
     int result = patina_stat_at_values(directory, path, flags, &values);
     if (result < 0) return -1;
     memset(status, 0, sizeof *status);
-    status->stx_mask = STATX_BASIC_STATS | STATX_MNT_ID;
+    uint64_t mount_id;
+    status->stx_mask = STATX_BASIC_STATS | patina_statx_extra(values.fs, mask, &mount_id);
     status->stx_blksize = (uint32_t)PATINA_STAT_BLOCK_SIZE;
     status->stx_mode = (uint16_t)patina_stat_mode(&values);
     status->stx_nlink = values.nlink;
@@ -1253,11 +1251,8 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
     patina_statx_time(&status->stx_atime, values.atime);
     patina_statx_time(&status->stx_mtime, values.mtime);
     patina_statx_time(&status->stx_ctime, values.ctime);
-    if ((mask & STATX_BTIME) != 0) {
-        status->stx_mask |= STATX_BTIME;
-        patina_statx_time(&status->stx_btime, values.btime);
-    }
-    status->stx_mnt_id = PATINA_STATX_MNT_ID;
+    if ((status->stx_mask & STATX_BTIME) != 0) patina_statx_time(&status->stx_btime, values.btime);
+    status->stx_mnt_id = mount_id;
     unsigned major, minor;
     patina_fs_device(values.fs, &major, &minor);
     status->stx_dev_major = major;

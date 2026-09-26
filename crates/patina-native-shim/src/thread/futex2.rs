@@ -87,7 +87,7 @@ fn key(word: &Word) -> Result<(), i64> {
     if word.addr % 4 != 0 {
         return Err(fail(EINVAL));
     }
-    if !registrations::user_range(word.addr, 4) {
+    if !crate::uaccess::access_ok(word.addr, 4) {
         return Err(fail(EFAULT));
     }
     if !word.private && crate::uaccess::read::<u32>(word.addr).is_err() {

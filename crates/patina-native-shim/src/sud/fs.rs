@@ -385,7 +385,7 @@ fn stat_blocks(length: u64) -> u64 {
 
 /// The one virtual volume's mount id (`stx_mnt_id`), the C
 /// `PATINA_STATX_MNT_ID`.
-const STATX_MNT_ID_VALUE: u64 = 1;
+const STATX_MNT_ID_VALUE: u64 = crate::volume::ROOT_MOUNT.id as u64;
 
 /// `st_mode`: the entry's file-type bits ORed with its permission bits, byte
 /// for byte with the C `patina_stat_mode`.
@@ -619,19 +619,19 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
         return -EFAULT;
     }
     // The exact mask the C statx interposer reports: BASIC_STATS (BLOCKS the
-    // length-derived count stat reports) plus MNT_ID (the kernel's vfs_statx
-    // fills them whatever was asked), STATX_BTIME only when requested.
+    // length-derived count stat reports) plus what `volume::statx_extra`
+    // adds: the node's mount id, and STATX_BTIME when requested and the
+    // node's filesystem records one.
     const STATX_BASIC_STATS: u32 = 0x07ff;
     const STATX_BTIME: u32 = 0x0800;
-    const STATX_MNT_ID: u32 = 0x1000;
-    let mask = flags_mask as u32;
+    let (extra, mount_id) = crate::volume::statx_extra(values.fs, flags_mask as u32);
     let timestamp = |time: crate::PatinaTimestamp| StatxTimestamp {
         tv_sec: time.sec,
         tv_nsec: time.nsec as u32,
         __reserved: 0,
     };
     let mut stx = Statx {
-        stx_mask: STATX_BASIC_STATS | STATX_MNT_ID,
+        stx_mask: STATX_BASIC_STATS | extra,
         stx_blksize: STAT_BLOCK_SIZE as u32,
         stx_mode: stat_mode(&values) as u16,
         stx_nlink: values.nlink,
@@ -644,13 +644,12 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
         stx_atime: timestamp(values.atime),
         stx_mtime: timestamp(values.mtime),
         stx_ctime: timestamp(values.ctime),
-        stx_mnt_id: STATX_MNT_ID_VALUE,
+        stx_mnt_id: mount_id,
         stx_dev_major: crate::fs_device(values.fs).0,
         stx_dev_minor: crate::fs_device(values.fs).1,
         ..Statx::default()
     };
-    if mask & STATX_BTIME != 0 {
-        stx.stx_mask |= STATX_BTIME;
+    if extra & STATX_BTIME != 0 {
         stx.stx_btime = timestamp(values.btime);
     }
     // SAFETY: `statxbuf` is the guest's `struct statx` storage.

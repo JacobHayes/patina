@@ -1099,6 +1099,12 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_keyctl, |nr, a| {
         privileged::answer(nr, privileged::keyctl, a)
     }),
+    (Syscall::N_statmount, |nr, a| {
+        privileged::answer(nr, privileged::statmount, a)
+    }),
+    (Syscall::N_listmount, |nr, a| {
+        privileged::answer(nr, privileged::listmount, a)
+    }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_iopl, |nr, a| {
         privileged::answer(nr, privileged::iopl, a)

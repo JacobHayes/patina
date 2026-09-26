@@ -349,7 +349,10 @@ On Linux the virtual kernel is pinned to Ubuntu 24.04's GA kernel (Ubuntu's
 Linux 6.8 build; `cargo patina --version` names it): `uname` reports 6.8, a
 syscall first added later answers `ENOSYS` as 6.8 does, and the syscall
 conformance scenarios assert the answers of Ubuntu 24.04 — its 6.8 kernel and
-its glibc 2.39 — authoritatively only on a host with both. Moving to a newer kernel is an explicit, wholesale migration.
+its glibc 2.39 — authoritatively only on a host with both. Ubuntu backports
+changes within the 6.8.0 series (`statmount`/`listmount` carry later
+releases' answers), so the pin is effectively the 6.8.0-139 build the oracle
+host runs: a host kernel update that moves an answer is a pin question. Moving to a newer kernel is an explicit, wholesale migration.
 
 If you use [mise](https://mise.jdx.dev/): `mise run setup` installs toolchains
 and targets, `mise run check:fast` is the inner-loop signal, `mise run check` is

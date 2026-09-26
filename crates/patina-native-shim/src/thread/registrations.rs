@@ -56,19 +56,6 @@ const RSEQ_CPU_ID_UNINITIALIZED: u32 = u32::MAX;
 /// `RSEQ_CPU_ID_REGISTRATION_FAILED`, the `cpu_id` glibc leaves in a thread's
 /// area when the kernel refused its registration.
 const RSEQ_CPU_ID_REGISTRATION_FAILED: u32 = -2i32 as u32;
-/// Whether `access_ok` admits `len` bytes at `area`: on x86_64 a range that
-/// does not wrap and ends below the sign bit (`valid_user_address`); on
-/// arm64 one that ends within the 48-bit user address space.
-pub(super) fn user_range(area: usize, len: usize) -> bool {
-    let Some(end) = area.checked_add(len) else {
-        return false;
-    };
-    #[cfg(target_arch = "x86_64")]
-    return (end as isize) >= 0;
-    #[cfg(target_arch = "aarch64")]
-    return end <= 1 << 48;
-}
-
 /// A registered rseq area (`current->rseq`, `rseq_len`, `rseq_sig`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Rseq {
@@ -273,7 +260,7 @@ pub(crate) fn rseq(area: usize, len: u32, flags: i32, sig: u32) -> i64 {
     if len < RSEQ_ORIG_SIZE || area % RSEQ_ORIG_SIZE as usize != 0 {
         return einval;
     }
-    if !user_range(area, len as usize) {
+    if !crate::uaccess::access_ok(area, len as usize) {
         return -i64::from(errno::EFAULT);
     }
     if write_cpu(area, 0).is_err() {

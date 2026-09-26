@@ -88,7 +88,6 @@ impl Filesystem {
     /// The filesystem type as the kernel registers it (`register_filesystem`,
     /// the name `/proc/filesystems` and `sysfs(2)` list), or `None` for one
     /// that is only ever mounted internally (anon_inodefs).
-    #[cfg(target_arch = "x86_64")]
     fn registered_name(self) -> Option<&'static str> {
         match self {
             Filesystem::Volume => Some("ext4"),
@@ -174,6 +173,98 @@ impl Filesystem {
     }
 }
 
+/// A mount's two ids: `mnt_id`, the small one `STATX_MNT_ID` reports, and
+/// `mnt_id_unique`, the 64-bit one `STATX_MNT_ID_UNIQUE` reports and
+/// `statmount`/`listmount` take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MountIds {
+    pub(crate) id: u32,
+    pub(crate) unique: u64,
+}
+
+impl Filesystem {
+    /// The mount a node on this filesystem is on, as `statx` names it: the
+    /// volume's and the entropy device's are in [`MOUNTS`]; every other is
+    /// one of the kernel's internal mounts (`kern_mount`), in no namespace,
+    /// so `statmount` of it is `ENOENT`. Their ids are the ones boot hands
+    /// them on the pinned 6.8.0-139 build (read live), fixed like the
+    /// volume's.
+    pub(crate) fn mount(self) -> MountIds {
+        let internal = |id: u32, unique: u64| MountIds {
+            id,
+            unique: MNT_UNIQUE_ID_BASE + unique,
+        };
+        match self {
+            Filesystem::Volume => MOUNTS[0].ids(),
+            Filesystem::Devtmpfs => MOUNTS[1].ids(),
+            Filesystem::Sockfs => internal(9, 10),
+            Filesystem::Pipefs => internal(15, 17),
+            Filesystem::AnonInodefs => internal(16, 18),
+            Filesystem::Mqueue => internal(22, 24),
+        }
+    }
+
+    /// Whether the filesystem records a birth time (`STATX_BTIME`): ext4
+    /// and tmpfs do; the pseudo-filesystems' `getattr` fills none.
+    fn has_btime(self) -> bool {
+        match self {
+            Filesystem::Volume | Filesystem::Devtmpfs => true,
+            Filesystem::Pipefs
+            | Filesystem::Sockfs
+            | Filesystem::AnonInodefs
+            | Filesystem::Mqueue => false,
+        }
+    }
+
+    /// The filesystem a `PATINA_FS_*` node is on (`fs_device`'s mapping).
+    fn of_node(fs: u32) -> Filesystem {
+        match fs {
+            PATINA_FS_PIPEFS => Filesystem::Pipefs,
+            PATINA_FS_SOCKFS => Filesystem::Sockfs,
+            _ => Filesystem::Volume,
+        }
+    }
+}
+
+/// `STATX_BTIME`, `STATX_MNT_ID`, `STATX_MNT_ID_UNIQUE`.
+const STATX_BTIME: u32 = 0x0800;
+const STATX_MNT_ID: u32 = 0x1000;
+const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
+
+/// What `vfs_statx` adds to the basic statistics of a node on the
+/// `PATINA_FS_*` filesystem `fs`, asked for `mask`: the mount id, whatever
+/// was asked (the unique one when `STATX_MNT_ID_UNIQUE` is asked for, else
+/// the small one), and `STATX_BTIME` when asked for and the filesystem
+/// records one. The mask bits, and the mount id.
+pub(crate) fn statx_extra(fs: u32, mask: u32) -> (u32, u64) {
+    let filesystem = Filesystem::of_node(fs);
+    let mount = filesystem.mount();
+    let btime = if mask & STATX_BTIME != 0 && filesystem.has_btime() {
+        STATX_BTIME
+    } else {
+        0
+    };
+    if mask & STATX_MNT_ID_UNIQUE != 0 {
+        (btime | STATX_MNT_ID_UNIQUE, mount.unique)
+    } else {
+        (btime | STATX_MNT_ID, u64::from(mount.id))
+    }
+}
+
+/// The C `statx`'s [`statx_extra`]: the mask bits to add; the mount id is
+/// written to `mount_id`.
+///
+/// # Safety
+/// `mount_id` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_statx_extra(fs: u32, mask: u32, mount_id: *mut u64) -> u32 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let (bits, id) = statx_extra(fs, mask);
+    // SAFETY: writable per this function's contract.
+    unsafe { mount_id.write(id) };
+    bits
+}
+
 /// The filesystem a descriptor is on (`fdget_raw`: an `O_PATH` descriptor
 /// names its entry on the volume). The captured standard streams have no
 /// modeled node, and answer `EBADF` as `fstat` does.
@@ -244,6 +335,98 @@ pub unsafe extern "C" fn patina_fstatfs(raw_fd: c_int, out: *mut KernelStatfs) -
     match descriptor_filesystem(raw_fd) {
         Ok(filesystem) => copy_out(filesystem.describe(), out),
         Err(errno) => fail(errno),
+    }
+}
+
+/// A mount of the virtual machine's one mount namespace, as `statmount(2)`
+/// and `listmount(2)` describe it. Every mount is reachable from the
+/// caller's root (which never moves: `chroot` is refused), so none is
+/// hidden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Mount {
+    /// `mnt_id`, the small id `statx`'s `STATX_MNT_ID` reports.
+    pub(crate) id: u32,
+    /// `mnt_id_unique`, the 64-bit id `STATX_MNT_ID_UNIQUE` reports and
+    /// `statmount`/`listmount` take.
+    pub(crate) unique: u64,
+    /// The index in [`MOUNTS`] of the mount it is mounted on; the
+    /// namespace's root is its own parent.
+    parent: usize,
+    filesystem: Filesystem,
+    /// The mount's root within its filesystem (`mnt_root`).
+    pub(crate) root: &'static str,
+    /// Where it is mounted, from the caller's root.
+    pub(crate) point: &'static str,
+    /// `MOUNT_ATTR_*` (`relatime` is 0).
+    pub(crate) attr: u64,
+}
+
+/// 6.8's first unique mount id is one past this (`mnt_id_ctr`, `1 << 32`;
+/// 6.11 moved it to `1 << 31`).
+const MNT_UNIQUE_ID_BASE: u64 = 1 << 32;
+/// `MOUNT_ATTR_NOSUID`.
+const MOUNT_ATTR_NOSUID: u64 = 0x2;
+
+/// The virtual machine's mounts, in the order they were made (so in unique
+/// id order, the order `listmount` walks): the volume at `/`, the
+/// namespace's root; and the entropy device, a bind of devtmpfs's
+/// `urandom` node onto `/dev/urandom` (what `statfs` reports it on, and the
+/// crossing `RESOLVE_NO_XDEV` refuses). The kernel's internal mounts
+/// (pipefs, sockfs, anon_inodefs, the IPC namespace's mqueue) are in no
+/// namespace, as in the kernel.
+pub(crate) const MOUNTS: [Mount; 2] = [
+    Mount {
+        id: 1,
+        unique: MNT_UNIQUE_ID_BASE + 1,
+        parent: 0,
+        filesystem: Filesystem::Volume,
+        root: "/",
+        point: "/",
+        attr: 0,
+    },
+    Mount {
+        id: 2,
+        unique: MNT_UNIQUE_ID_BASE + 2,
+        parent: 0,
+        filesystem: Filesystem::Devtmpfs,
+        root: "/urandom",
+        point: paths::URANDOM,
+        attr: MOUNT_ATTR_NOSUID,
+    },
+];
+
+/// The mount every node on the volume is on.
+pub(crate) const ROOT_MOUNT: Mount = MOUNTS[0];
+
+impl Mount {
+    /// Its ids.
+    pub(crate) const fn ids(&self) -> MountIds {
+        MountIds {
+            id: self.id,
+            unique: self.unique,
+        }
+    }
+
+    /// The mount it is mounted on.
+    pub(crate) fn parent(&self) -> &'static Mount {
+        &MOUNTS[self.parent]
+    }
+
+    /// Its superblock's device.
+    pub(crate) fn device(&self) -> (u32, u32) {
+        self.filesystem.device()
+    }
+
+    /// Its superblock's magic (`statfs`'s `f_type`).
+    pub(crate) fn magic(&self) -> u64 {
+        self.filesystem.describe().f_type as u64
+    }
+
+    /// Its filesystem's type name.
+    pub(crate) fn fs_type(&self) -> &'static str {
+        self.filesystem
+            .registered_name()
+            .expect("a mounted filesystem has a registered type")
     }
 }
 
@@ -398,6 +581,66 @@ mod tests {
         // The option is an `int`: the upper half of the word is not read.
         assert_eq!(sysfs(3 | 1 << 32, 0, 0), REGISTERED.len() as i64);
         assert_eq!(sysfs(0, 0, 0), einval);
+    }
+
+    /// The mount table agrees with what `statfs` says a path is on: the
+    /// volume at the root, the device on devtmpfs; ids ascend in table
+    /// order, and every mount hangs off the root.
+    #[test]
+    fn the_mounts_are_what_statfs_reports() {
+        assert_eq!(ROOT_MOUNT.parent(), &ROOT_MOUNT);
+        assert_eq!(ROOT_MOUNT.point, "/");
+        for pair in MOUNTS.windows(2) {
+            assert!(pair[0].id < pair[1].id && pair[0].unique < pair[1].unique);
+        }
+        for mount in &MOUNTS {
+            assert!(mount.unique > MNT_UNIQUE_ID_BASE, "{mount:?}");
+            assert_eq!(mount.parent().unique, ROOT_MOUNT.unique, "{mount:?}");
+            let mut out = KernelStatfs::default();
+            let point = std::ffi::CString::new(mount.point).unwrap();
+            // SAFETY: a valid path and a writable buffer.
+            if mount.filesystem != Filesystem::Volume {
+                assert_eq!(unsafe { patina_statfs(point.as_ptr(), &mut out) }, 0);
+                assert_eq!(out, mount.filesystem.describe(), "{mount:?}");
+            }
+            assert_eq!(mount.magic(), mount.filesystem.describe().f_type as u64);
+        }
+    }
+
+    /// Each filesystem's mount, as `statx` names it: the namespace's own
+    /// are the table's; every internal one is distinct and unknown to
+    /// `statmount`/`listmount` (`ENOENT`).
+    #[test]
+    fn statx_names_each_filesystem_s_own_mount() {
+        for filesystem in Filesystem::ALL {
+            let mount = filesystem.mount();
+            match MOUNTS.iter().find(|listed| listed.filesystem == filesystem) {
+                Some(listed) => assert_eq!(mount, listed.ids(), "{filesystem:?}"),
+                None => assert!(
+                    MOUNTS
+                        .iter()
+                        .all(|listed| listed.id != mount.id && listed.unique != mount.unique),
+                    "{filesystem:?}"
+                ),
+            }
+            assert!(mount.unique > MNT_UNIQUE_ID_BASE, "{filesystem:?}");
+            for other in Filesystem::ALL.iter().filter(|other| **other != filesystem) {
+                let theirs = other.mount();
+                assert!(
+                    mount.id != theirs.id && mount.unique != theirs.unique,
+                    "{filesystem:?}"
+                );
+            }
+        }
+        assert_eq!(
+            statx_extra(PATINA_FS_VOLUME, STATX_MNT_ID_UNIQUE),
+            (STATX_MNT_ID_UNIQUE, ROOT_MOUNT.unique)
+        );
+        assert_eq!(
+            statx_extra(PATINA_FS_VOLUME, STATX_BTIME),
+            (STATX_BTIME | STATX_MNT_ID, u64::from(ROOT_MOUNT.id))
+        );
+        assert_eq!(statx_extra(PATINA_FS_PIPEFS, STATX_BTIME).0, STATX_MNT_ID);
     }
 
     #[test]
