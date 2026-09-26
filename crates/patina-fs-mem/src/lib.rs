@@ -2245,6 +2245,10 @@ impl FsDriver for MemFs {
             .ok_or_else(|| not_found("<unlinked node>"))
     }
 
+    fn fd_ino(&mut self, fd: Fd) -> DriverResult<u64> {
+        Ok(self.description(fd)?.node)
+    }
+
     /// `sync(2)`: nothing to write back — every change is already the image.
     fn sync_all(&mut self) -> DriverResult<()> {
         Ok(())

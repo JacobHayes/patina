@@ -319,6 +319,11 @@ pub trait FsDriver: Send {
     fn fd_path(&mut self, _fd: Fd) -> DriverResult<String> {
         Err(unsupported_filesystem_operation("descriptor path"))
     }
+    /// The inode an open descriptor names (an `O_PATH` one included): the file
+    /// identity record and `flock` locks key on.
+    fn fd_ino(&mut self, fd: Fd) -> DriverResult<u64> {
+        self.fd_metadata(fd).map(|metadata| metadata.ino)
+    }
     /// Change the permission bits of the entry an INODE names (`fchmod` through
     /// the one descriptor class the filesystem does not hold — a FIFO endpoint).
     /// The mirror of [`FsDriver::inode_metadata`], and it reaches an unlinked

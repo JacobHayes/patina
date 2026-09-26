@@ -6324,6 +6324,33 @@ recording was produced by a guest whose result type no longer matches this one"
         decode_string(&operation, outcome)
     }
 
+    /// The inode an open descriptor names: the identity record and `flock`
+    /// locks key on. No modeled latency and no fault eligibility, for the
+    /// reason [`DeterministicContext::fs_fd_path`] has none: a lock is
+    /// bookkeeping that does no I/O, and no real `fcntl` or `flock` fails with
+    /// an injected `EIO`.
+    pub fn fs_fd_ino(&mut self, fd: Fd) -> Result<u64, RuntimeError> {
+        if self.filesystem.is_none() {
+            return Err(EffectError::missing_driver("filesystem").into());
+        }
+        let operation = Operation::FsFdIno { fd };
+        let expected = match self.filesystem_expected(&operation)? {
+            FilesystemExpected::Execute(expected) => expected,
+            FilesystemExpected::Captured(outcome) => return decode_u64(&operation, outcome),
+        };
+        let result = self
+            .filesystem
+            .as_mut()
+            .expect("driver was checked")
+            .fd_ino(fd);
+        let actual = match result {
+            Ok(ino) => Outcome::U64(ino),
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_u64(&operation, outcome)
+    }
+
     pub fn fs_read_link(&mut self, path: &str) -> Result<String, RuntimeError> {
         if self.filesystem.is_none() {
             return Err(EffectError::missing_driver("filesystem").into());

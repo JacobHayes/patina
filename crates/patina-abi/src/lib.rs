@@ -1146,6 +1146,13 @@ pub enum Operation {
     FsFdPath {
         fd: Fd,
     },
+    /// The inode an open descriptor names, for the bookkeeping keyed on file
+    /// identity (record and `flock` locks). Like [`Operation::FsFdPath`] it is
+    /// the lookup inside the call, not a trip to storage. The outcome carries
+    /// the inode as [`Outcome::U64`].
+    FsFdIno {
+        fd: Fd,
+    },
     /// Resolve a host name to a virtual IPv4 address. The outcome carries the
     /// dotted-quad address as [`Outcome::Bytes`], exactly like `FsReadLink`
     /// carries a link target, so a replay reproduces the resolution — including

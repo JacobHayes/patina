@@ -595,6 +595,12 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.fd_path(fd)
     }
 
+    /// Never faulted: lock bookkeeping does no I/O, and an injected error here
+    /// would be a failure no real `fcntl` or `flock` has.
+    fn fd_ino(&mut self, fd: Fd) -> DriverResult<u64> {
+        self.inner.fd_ino(fd)
+    }
+
     fn crash(&mut self) -> DriverResult<()> {
         self.inner.crash()
     }
@@ -1150,6 +1156,33 @@ mod tests {
                 assert!(allowed, "{} injected {code:?}", op.kind().name());
             }
         }
+    }
+
+    /// Lock bookkeeping keys on `fd_ino`, so it is never faulted even where
+    /// every fault-eligible descriptor lookup is.
+    #[test]
+    fn the_descriptor_inode_lookup_is_never_faulted() {
+        let mut inner = MemFs::new();
+        let fd = inner
+            .open(
+                FsClock::EPOCH,
+                "/file",
+                OpenFlags {
+                    read: true,
+                    write: true,
+                    create: true,
+                    truncate: true,
+                    append: false,
+                    exclusive: false,
+                    path_only: false,
+                    mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE,
+                },
+            )
+            .unwrap();
+        let ino = inner.fd_metadata(fd).unwrap().ino;
+        let mut fs = FaultFs::new(inner, 3).error_permille(1000);
+        assert!(fs.fd_metadata(fd).is_err());
+        assert_eq!(fs.fd_ino(fd).unwrap(), ino);
     }
 
     #[test]

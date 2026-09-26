@@ -51,7 +51,8 @@ pub use handoff::{
 ///   carry), the address a datagram was dialed at and its mark, and the
 ///   `unreachable` send disposition for a datagram nothing is bound to take.
 /// - 13: the inode of every directory-listing entry, and the `.` and `..` a
-///   descriptor listing starts with.
+///   descriptor listing starts with; `fs_fd_ino`, the inode an open descriptor
+///   names, which record and `flock` locks key on.
 pub const TRACE_FORMAT_VERSION: u32 = 13;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;

@@ -1435,6 +1435,10 @@ impl FsDriver for CrashFs {
         self.live.fd_path(fd)
     }
 
+    fn fd_ino(&mut self, fd: Fd) -> DriverResult<u64> {
+        self.live.fd_ino(fd)
+    }
+
     fn crash(&mut self) -> DriverResult<()> {
         let crashes = self.crashes.checked_add(1).ok_or_else(|| {
             EffectError::new(

@@ -726,6 +726,7 @@ pub const OP_KINDS: &[(&str, Category)] = &[
     ("fs_set_mode", Category::Fs),
     ("fs_set_fd_mode", Category::Fs),
     ("fs_fd_path", Category::Fs),
+    ("fs_fd_ino", Category::Fs),
     ("dns_resolve", Category::Net),
     ("fs_crash", Category::Crash),
     ("task_spawn", Category::Schedule),
@@ -823,6 +824,7 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
         Operation::FsSetMode { .. } => "fs_set_mode",
         Operation::FsSetFdMode { .. } => "fs_set_fd_mode",
         Operation::FsFdPath { .. } => "fs_fd_path",
+        Operation::FsFdIno { .. } => "fs_fd_ino",
         Operation::DnsResolve { .. } => "dns_resolve",
         Operation::FsCrash => "fs_crash",
         Operation::TaskSpawn { .. } => "task_spawn",
@@ -1166,6 +1168,7 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
             Operation::FsFdPath { fd: Fd(3) },
             Outcome::Bytes(b"/dir".to_vec()),
         ),
+        (Operation::FsFdIno { fd: Fd(3) }, Outcome::U64(7)),
         (
             Operation::DnsResolve {
                 name: "db.internal".into(),

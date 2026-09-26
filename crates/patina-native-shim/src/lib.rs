@@ -2182,10 +2182,29 @@ enum FlockMode {
 /// kind of description is its own inode (a socket, an eventfd) — modeled as the
 /// description itself. (The two ends of one anonymous pipe share an inode on
 /// Linux and do not here; no supported guest locks a pipe.)
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LockIdentity {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum LockIdentity {
     Inode(u64),
     Description(DescId),
+}
+
+/// What a lock on `resolved` is taken on. A filesystem descriptor's inode is
+/// read through the recorded, never-faulted `fs_fd_ino` lookup, so the
+/// conflict decision keys on the same file identity under record and replay
+/// and a lock (bookkeeping that does no I/O) cannot fail with an injected
+/// error; a FIFO endpoint's is its node's.
+pub(crate) fn lock_identity(resolved: &Resolved) -> Result<LockIdentity, c_int> {
+    if resolved.kind.is_fs() {
+        return with_context(|context| context.fs_fd_ino(Fd(resolved.handle)))
+            .map(LockIdentity::Inode);
+    }
+    let fifo = (resolved.kind == FdKind::Pipe)
+        .then(|| thread::fifo_end_ino(resolved.handle))
+        .flatten();
+    Ok(match fifo {
+        Some(ino) => LockIdentity::Inode(ino),
+        None => LockIdentity::Description(resolved.desc),
+    })
 }
 
 /// Advisory `flock` state, keyed by the open file DESCRIPTION that holds the
@@ -5089,15 +5108,9 @@ pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
         set_errno(0);
         return 0;
     };
-    // Resolve a file's inode through the recorded metadata path so the conflict
-    // decision keys on the same file identity under record and replay.
-    let identity = if resolved.kind.is_fs() {
-        match with_context(|context| context.fs_fd_metadata(Fd(resolved.handle))) {
-            Ok(metadata) => LockIdentity::Inode(metadata.ino),
-            Err(errno) => return fail(errno),
-        }
-    } else {
-        LockIdentity::Description(resolved.desc)
+    let identity = match lock_identity(&resolved) {
+        Ok(identity) => identity,
+        Err(errno) => return fail(errno),
     };
     let mut table = flock_table().lock();
     let conflict = table.iter().any(|(&holder, &(held_identity, held_mode))| {
@@ -11807,10 +11820,15 @@ mod thread {
     /// What `fstat` should report for `fd` when it is a FIFO descriptor.
     pub(crate) fn fifo_ino(fd: c_int) -> Option<u64> {
         let (end, _) = pipe_entry(fd).ok()?;
+        fifo_end_ino(end as u64)
+    }
+
+    /// The FIFO node a pipe end (by its handle) was opened through, if any.
+    pub(crate) fn fifo_end_ino(end: u64) -> Option<u64> {
         lock_state()
             .net
             .pipe_ends
-            .get(&end)
+            .get(&(end as c_int))
             .and_then(|end| end.fifo_ino)
     }
 
