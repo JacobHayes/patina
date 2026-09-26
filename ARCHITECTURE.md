@@ -227,10 +227,21 @@ refuses (only the old-style `_pthread_cleanup_push`/`_pop` are allowlisted), so 
 C guest using it runs only outside `cargo patina run` (as `native_abi`'s probe does). glibc's unwinder is `libgcc_s`, which it opens on first use; every
 shim-linked guest already links it (the shim's Rust half needs it), so the open
 finds it loaded rather than reading it through syscall-user-dispatch. The main
-thread's `pthread_exit`, and every `pthread_exit` on macOS, is a named fatal.
+thread's `pthread_exit` unwinds out of `main` as glibc's does; the
+`__libc_start_main` wrapper's cleanup record, the outermost, then tells the model
+the main thread has ended. With another thread running, the main task completes
+as a leader's raw `exit` completes it, and the process ends when its last thread
+does, through glibc's `exit(0)`: the atexit handlers run and the status is 0 (a
+main thread's raw `exit` instead leaves the last thread's end to be the process's,
+with no atexit handler, as the kernel does). The last thread stays the running
+task through that `exit(0)`, and waits for every other host thread to leave
+glibc's thread count (`__nptl_nthreads`) first, so the `exit(0)` is always its
+own; that wait is for host teardown outside the model, so it is bounded in wall-clock
+time (10 s, then a named stop) and decides nothing the run records. Every `pthread_exit` on macOS is a named fatal.
 The `pthread_key` destructors run after the thread's completion, since they follow
-the thread-local ones in `start_thread`: a joiner waits for them, but a detached
-thread's run beside the next task.
+the thread-local ones in `start_thread` (the main thread's follow its cleanup
+handlers): a joiner waits for them, but a detached thread's, and those of a main
+thread that left others running, run beside the next task.
 Cancellation on Linux keeps glibc 2.39's per-thread state (`src/thread/cancel.rs`):
 `pthread_setcancelstate`/`pthread_setcanceltype` switch it, `pthread_cancel` records
 the request, and acting on it is `pthread_exit(PTHREAD_CANCELED)` from the C

@@ -9747,12 +9747,13 @@ mod thread {
     /// from its destructor pass as a returning one does. From the guest's own
     /// frames the unwind crosses only the guest's and C ones.
     ///
-    /// Two cases are named fatals: the main thread's `pthread_exit`, and a
-    /// `pthread_exit` inside a guest signal handler (a cancellation acting
-    /// there included, which comes here too), whose unwind would cross
-    /// the shim's Rust delivery frames beneath the handler (a Rust frame
-    /// cannot be unwound: the process would abort where glibc ends the
-    /// thread).
+    /// On the main thread the value is the one a thread joining the main
+    /// thread answers; the unwind ends in the `__libc_start_main` wrapper's
+    /// cleanup record ([`patina_main_thread_exited`]). A `pthread_exit`
+    /// inside a guest signal handler (a cancellation acting there included,
+    /// which comes here too) is a named fatal: its unwind would cross the
+    /// shim's Rust delivery frames beneath the handler (a Rust frame cannot
+    /// be unwound: the process would abort where glibc ends the thread).
     #[cfg(target_os = "linux")]
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_thread_exiting(
@@ -9766,14 +9767,15 @@ mod thread {
                  the handler",
             );
         }
-        if EXIT_RECORD.with(Cell::get).is_null() {
-            fatal(
-                "pthread_exit is supported on threads the guest created, not on the main thread \
-                 (or a thread the runtime does not run); return from main instead",
-            );
+        let me = current_task();
+        if !EXIT_RECORD.with(Cell::get).is_null() {
+            thread_returned(value);
+        } else if me == MAIN_TASK {
+            MAIN_EXIT_VALUE.store(value as usize, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            fatal("pthread_exit on a thread the runtime does not run is not modeled");
         }
-        thread_returned(value);
-        lock_state().cancels.exiting(current_task());
+        lock_state().cancels.exiting(me);
         crate::hostapi::get().host_pthread_exit
     }
 
@@ -9810,7 +9812,7 @@ mod thread {
             let ThreadExit { task, retval } =
                 *unsafe { Box::from_raw(record.cast::<ThreadExit>()) };
             EXIT_RECORD.with(|cell| cell.set(core::ptr::null_mut()));
-            thread_finish(task, retval, 0);
+            thread_returns(task, retval);
         }
         unsafe extern "C" {
             static __dso_handle: u8;
@@ -9829,6 +9831,120 @@ mod thread {
             fatal("registering a managed thread's completion failed (__cxa_thread_atexit_impl)");
         }
         record
+    }
+
+    /// Set once the main thread left through `pthread_exit` (glibc's setjmp
+    /// branch in `__libc_start_call_main`): the process then ends when its last
+    /// thread does, through the `exit(0)` glibc's `start_thread` calls, where a
+    /// main thread's raw `exit` leaves the process to end with its last
+    /// thread's kernel exit.
+    #[cfg(target_os = "linux")]
+    static MAIN_EXITED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// The value the main thread's `pthread_exit` gave, which a thread joining
+    /// the main thread answers.
+    #[cfg(target_os = "linux")]
+    static MAIN_EXIT_VALUE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// A managed thread's completion once its start routine returned or it
+    /// left through `pthread_exit`. After the main thread's `pthread_exit` the
+    /// last thread does not complete: it stays the running task through
+    /// glibc's `exit(0)`, as the main thread does through a return from
+    /// `main`.
+    #[cfg(target_os = "linux")]
+    fn thread_returns(task: TaskId, retval: usize) {
+        if MAIN_EXITED.load(std::sync::atomic::Ordering::SeqCst) {
+            let last = {
+                let state = lock_state();
+                state.signals.task_count() == 1 && state.signals.has_task(task)
+            };
+            if last {
+                last_thread_exits();
+                return;
+            }
+        }
+        thread_finish(task, retval, 0);
+    }
+
+    /// The main thread's `pthread_exit`, once the guest's cleanup handlers
+    /// ran on it (the C `__libc_start_main` wrapper's cleanup record, the
+    /// outermost of the main thread's, calls this). With another thread
+    /// running, the main task completes as a leader's raw `exit` completes it
+    /// and hands the baton on; glibc then runs its `pthread_key` destructors
+    /// and retires the host thread. Alone, it is the last thread, and glibc's
+    /// `exit(0)` follows on it.
+    #[cfg(target_os = "linux")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_main_thread_exited() {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        MAIN_EXITED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let others = {
+            let state = lock_state();
+            state.active && state.signals.task_count() > 1
+        };
+        if others {
+            thread_finish(
+                current_task(),
+                MAIN_EXIT_VALUE.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+            );
+        } else {
+            last_thread_exits();
+        }
+    }
+
+    /// The last thread after the main thread's `pthread_exit`: glibc calls
+    /// `exit(0)` from the host thread that ends last, so the run's teardown
+    /// begins (the atexit hook's canary expects the flag) with status 0, and
+    /// this thread waits for every other host thread to have left glibc's
+    /// count, which makes it the one whose `exit(0)` runs the atexit
+    /// handlers, whatever the host's timing of their own teardown.
+    #[cfg(target_os = "linux")]
+    fn last_thread_exits() {
+        note_main_returned();
+        crate::patina_note_guest_exit_status(0);
+        let count = crate::hostapi::symbol(c"__nptl_nthreads")
+            .cast::<std::sync::atomic::AtomicU32>()
+            .cast_const();
+        if count.is_null() {
+            fatal(
+                "glibc's thread count (__nptl_nthreads) is not visible, so the thread that \
+                 calls exit(0) after the main thread's pthread_exit cannot be chosen",
+            );
+        }
+        // The wait is for host teardown the model does not see (the other
+        // host threads' pthread_key destructors, freeres and kernel exit, all
+        // after their tasks completed), so no virtual clock can bound it, and
+        // how long it takes decides nothing the run records. A thread wedged
+        // on the model instead (a destructor waiting on a modeled lock after
+        // its task completed) is already a named stop, since a completed task
+        // cannot park; one wedged on the host is what the wall-clock bound
+        // turns from a hang into a named stop.
+        let pause = [0i64, 100_000];
+        for _ in 0..100_000 {
+            // SAFETY: glibc's `unsigned int __nptl_nthreads`, which it updates
+            // atomically.
+            if unsafe { (*count).load(std::sync::atomic::Ordering::Acquire) } <= 1 {
+                return;
+            }
+            // SAFETY: the host's `nanosleep` on a local request.
+            unsafe {
+                crate::sud_host_syscall(
+                    crate::registry::Syscall::N_nanosleep.number() as std::ffi::c_long,
+                    pause.as_ptr() as std::ffi::c_long,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                )
+            };
+        }
+        fatal(
+            "a host thread outlived the guest's last thread by 10 s (wall clock) after the main \
+             thread's pthread_exit, wedged in its teardown outside the model: glibc would run \
+             exit(0) on whichever thread leaves last",
+        );
     }
 
     fn thread_finish(task: TaskId, retval: usize, exit_status: i32) {

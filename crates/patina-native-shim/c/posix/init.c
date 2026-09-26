@@ -885,8 +885,25 @@ static patina_main_fn patina_real_main;
 /* The program's argv[0], which glibc's dlerror names a failed lookup by. */
 static const char *patina_program_path;
 
+/*
+ * The main thread's pthread_exit unwinds out of `main` into glibc's
+ * __libc_start_call_main, running the cleanup handlers of every frame it
+ * leaves; the wrapper's record, the outermost, runs last and tells the model
+ * the main thread has ended (glibc then runs its pthread_key destructors and
+ * retires it, or ends the process with exit(0) when it is the last thread).
+ * An old-style record (patina_cleanup_push) needs no setjmp: glibc's unwinder
+ * calls it as it leaves this frame.
+ */
+static void patina_main_exited(void *unused) {
+    (void)unused;
+    patina_main_thread_exited();
+}
+
 static int patina_main_wrapper(int argc, char **argv, char **envp) {
+    struct _pthread_cleanup_buffer exited;
+    patina_cleanup_push(&exited, patina_main_exited, NULL);
     int code = patina_real_main(argc, argv, envp);
+    patina_cleanup_pop(&exited, 0);
     /*
      * The guest's `main` has returned. Mark teardown NOW — before the code
      * re-enters glibc's `exit()`, which drives `__call_tls_dtors` — so the root

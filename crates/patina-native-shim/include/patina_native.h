@@ -863,6 +863,9 @@ patina_start_routine patina_thread_prelude(void *start, void **arg);
 void patina_thread_returned(void *value);
 typedef void (*patina_host_pthread_exit_fn)(void *) __attribute__((noreturn));
 patina_host_pthread_exit_fn patina_thread_exiting(void *value);
+/* The main thread's pthread_exit, from the __libc_start_main wrapper's cleanup
+ * record once the guest's cleanup handlers ran. */
+void patina_main_thread_exited(void);
 /*
  * Cancellation (src/thread/cancel.rs). A negative answer tells the C wrapper
  * to act on the cancellation now, once the Rust call has returned:

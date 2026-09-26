@@ -178,6 +178,38 @@ fn mutex_relock_before_any_thread_is_a_deadlock() {
     );
 }
 
+/// The main thread leaving through `pthread_exit` ends only itself, as under
+/// glibc 2.39: its cleanup handler runs, a thread still running keeps the
+/// process alive and ends it, and the last thread's `exit(0)` runs the atexit
+/// handlers, with status 0 — the same on every run and on replay. The modes:
+/// no other thread, a worker still sleeping, a detached worker already ended,
+/// a worker joining the main thread (its join answers main's value).
+#[cfg(target_os = "linux")]
+#[test]
+fn main_thread_pthread_exit_ends_only_the_main_thread() {
+    let g = Guest::assert_build("main_exit_probe.rs");
+    g.assert_audit_clean();
+    for (mode, expected) in [
+        ("alone", "MAIN_EXIT cleanup\nMAIN_EXIT atexit\n"),
+        (
+            "worker",
+            "MAIN_EXIT cleanup\nMAIN_EXIT worker\nMAIN_EXIT atexit\n",
+        ),
+        (
+            "detached",
+            "MAIN_EXIT worker\nMAIN_EXIT cleanup\nMAIN_EXIT atexit\n",
+        ),
+        (
+            "joiner",
+            "MAIN_EXIT cleanup\nMAIN_EXIT joined 7\nMAIN_EXIT atexit\n",
+        ),
+    ] {
+        let env = format!("MAIN_EXIT_MODE={mode}");
+        let out = g.assert_seeded_record_replay_identity(1, &["--env", &env]);
+        assert_eq!(text(&out), expected, "{mode}");
+    }
+}
+
 /// The default thread name is the basename of the supervisor's fixed
 /// `argv[0]`, never the host binary's file name: a copy of the guest under
 /// another name runs, and replays the original's trace, identically.
