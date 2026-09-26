@@ -6,7 +6,7 @@ mod fault;
 pub(crate) mod fd;
 mod waits;
 pub(crate) use fault::with_altstack_below;
-use fault::{mirror_onstack, trap_routed};
+use fault::{Scoped, SegvBlock, mirror_onstack, trap_routed};
 use patina_dst_abi::SignalTarget;
 use std::sync::atomic::Ordering;
 use waits::Blocked;
@@ -20,6 +20,8 @@ pub(super) use constants::*;
 thread_local! {
     // Nested handler boundaries must refresh the virtual mask before generation.
     static RELEASING_FRAMES: Cell<bool> = const { Cell::new(false) };
+    // A guest restorer's frame blocked SIGSEGV for the mask its return installs.
+    static RESTORED_SEGV: Cell<bool> = const { Cell::new(false) };
     // Only mask/stack-changing entries need to rewrite a SIGSYS return frame.
     static FRAME_DIRTY: Cell<u8> = const { Cell::new(0) };
 }
@@ -37,6 +39,14 @@ pub extern "C" fn patina_signal_restorer(restorer: usize) {
 pub(super) fn bit(sig: impl Into<i64>) -> u64 {
     1u64 << (sig.into() - 1)
 }
+/// The kernel's `SYNCHRONOUS_MASK`: signals an instruction raises, dequeued
+/// before any other pending one.
+const SYNCHRONOUS: u64 = 1 << (SIGSEGV - 1)
+    | 1 << (SIGBUS - 1)
+    | 1 << (SIGILL - 1)
+    | 1 << (SIGTRAP - 1)
+    | 1 << (SIGFPE - 1)
+    | 1 << (SIGSYS - 1);
 fn uncatchable(mask: u64) -> u64 {
     mask & !bit(SIGKILL) & !bit(SIGSTOP)
 }
@@ -148,12 +158,15 @@ impl Pending {
     fn mask(&self) -> u64 {
         self.0.keys().fold(0, |mask, sig| mask | bit(*sig))
     }
+    /// `next_signal`: the synchronous signals first, then the lowest number.
     fn take(&mut self, eligible: u64) -> Option<Instance> {
-        let sig = self
-            .0
-            .keys()
-            .copied()
-            .find(|sig| eligible & bit(*sig) != 0)?;
+        let ready = self.mask() & eligible;
+        let synchronous = ready & SYNCHRONOUS;
+        let pick = if synchronous != 0 { synchronous } else { ready };
+        if pick == 0 {
+            return None;
+        }
+        let sig = pick.trailing_zeros() as u8 + 1;
         let queue = self.0.get_mut(&sig).unwrap();
         let instance = queue.pop_front();
         if queue.is_empty() {
@@ -182,6 +195,13 @@ struct Interrupt {
 
 pub(super) struct SignalRuntime {
     actions: [Action; 65],
+    /// How often the guest has set each signal's action: a delivery batch's
+    /// member whose count moved since its dequeue runs the action it was
+    /// dequeued with, which the host no longer holds.
+    changes: [u32; 65],
+    /// Signals whose host action is, for the frame being built, the one a
+    /// batch member was dequeued with, not the guest's current one.
+    swapped: u64,
     shared: Pending,
     tasks: BTreeMap<TaskId, TaskSignals>,
     next_seq: u64,
@@ -194,6 +214,8 @@ impl Default for SignalRuntime {
     fn default() -> Self {
         Self {
             actions: [Action::default(); 65],
+            changes: [0; 65],
+            swapped: 0,
             shared: Pending::default(),
             tasks: BTreeMap::new(),
             next_seq: 0,
@@ -274,6 +296,7 @@ impl SignalRuntime {
         self.shared.take(eligible)
     }
     fn action(&mut self, sig: u8, action: Action) -> Action {
+        self.changes[sig as usize] = self.changes[sig as usize].wrapping_add(1);
         let old = std::mem::replace(&mut self.actions[sig as usize], action);
         if action.handler == SIG_IGN || (action.handler == SIG_DFL && ignored(sig)) {
             self.shared.0.remove(&sig);
@@ -393,6 +416,41 @@ pub(crate) fn host_mask(mask: u64) -> u64 {
     }
     mask
 }
+/// The guest's view of a host mask this thread runs under: SIGSEGV, which the
+/// host never blocks under the counter trap, is blocked where the guest has
+/// it blocked ([`fault::blocked`]); an unknown block reads as unblocked, and
+/// every reader it matters to names it.
+pub(super) fn with_segv(host: u64) -> u64 {
+    host | segv_bit(segv_blocked())
+}
+fn segv_blocked() -> SegvBlock {
+    if trap_routed(SIGSEGV) {
+        fault::blocked()
+    } else {
+        SegvBlock::No
+    }
+}
+/// A mask the guest installs whole sets SIGSEGV's block.
+pub(super) fn set_segv(mask: u64) {
+    if trap_routed(SIGSEGV) {
+        fault::set(if mask & bit(SIGSEGV) != 0 {
+            SegvBlock::Yes
+        } else {
+            SegvBlock::No
+        });
+    }
+}
+fn segv_bit(blocked: SegvBlock) -> u64 {
+    if blocked == SegvBlock::Yes {
+        bit(SIGSEGV)
+    } else {
+        0
+    }
+}
+const SEGV_UNKNOWN: &str = "SIGSEGV's block is read below a SIGSEGV handler that blocks it: a \
+                            handler still running and one left by siglongjmp cannot be told \
+                            apart there";
+
 pub(super) fn read_mask() -> u64 {
     if let Some(mask) = fault::serving_counter_read() {
         return mask;
@@ -468,6 +526,9 @@ pub extern "C" fn patina_signal_return(mask: usize) -> usize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if let Ok(saved) = crate::uaccess::read::<u64>(mask) {
         let kept = host_mask(saved);
+        if trap_routed(SIGSEGV) && saved & bit(SIGSEGV) != 0 {
+            RESTORED_SEGV.set(true);
+        }
         if kept != saved {
             containment_kept_unblocked(saved & !kept);
             if crate::uaccess::write(mask, &kept).is_err() {
@@ -484,26 +545,22 @@ pub extern "C" fn patina_signal_return(mask: usize) -> usize {
     crate::hostapi::get().host_syscall as usize
 }
 
-/// A handler asked, through its frame's saved mask, to block a signal
-/// containment runs on (`dropped`): it stays unblocked, where natively the
-/// handler's return would block it. Said once per run on the host's stderr.
+/// A handler asked, through its frame's saved mask, to block a signal the
+/// host must keep unblocked (`dropped`). SIGSEGV's block under the counter
+/// trap is kept virtually ([`fault`]); SIGSYS stays unblocked, where natively
+/// the handler's return would block it. Said once per run on the host's
+/// stderr.
 fn containment_kept_unblocked(dropped: u64) {
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if SAID.swap(true, Ordering::Relaxed) {
+    if dropped & bit(SIGSYS) == 0 || SAID.swap(true, Ordering::Relaxed) {
         return;
     }
-    let names = [(SIGSYS, "SIGSYS"), (SIGSEGV, "SIGSEGV")]
-        .into_iter()
-        .filter(|(sig, _)| dropped & bit(*sig) != 0)
-        .map(|(_, name)| name)
-        .collect::<Vec<_>>()
-        .join(" and ");
-    let line = format!(
-        "patina: a signal handler's frame mask blocks {names}, which containment keeps \
-         unblocked: the handler's return leaves it unblocked, where a native run would \
-         block it\n"
+    let _ = crate::host_write_all(
+        2,
+        b"patina: a signal handler's frame mask blocks SIGSYS, which containment keeps \
+          unblocked: the handler's return leaves it unblocked, where a native run would \
+          block it\n",
     );
-    let _ = crate::host_write_all(2, line.as_bytes());
 }
 
 /// Called at the boundary return, not at generation. No lock survives a host
@@ -514,12 +571,13 @@ pub extern "C" fn patina_signal_deliver() {
     deliver();
 }
 
-/// Host masks are authoritative inside nested guest handlers. Refresh at the
-/// boundary, before generation chooses a recipient; generation itself stays
-/// host-free. Outside frame release the no-pending path needs no host syscall.
+/// Host masks are authoritative inside nested guest handlers, and inside a
+/// handler the counter trap ran (which `siglongjmp` may have left). Refresh at
+/// the boundary, before generation chooses a recipient; generation itself
+/// stays host-free. Outside both the no-pending path needs no host syscall.
 pub(crate) fn refresh_handler_mask() {
-    if RELEASING_FRAMES.with(Cell::get) {
-        let mask = read_mask();
+    if RELEASING_FRAMES.with(Cell::get) || fault::scoped() {
+        let mask = with_segv(read_mask());
         if let Some(task) = lock_state().signals.tasks.get_mut(&current_task()) {
             task.mask = mask;
         }
@@ -529,6 +587,12 @@ pub(crate) fn refresh_handler_mask() {
 pub(crate) fn deliver() {
     if crate::in_shim_bootstrap() || task_completed() || main_returned() {
         return;
+    }
+    // A dequeued action a handler left by `siglongjmp` before its batch gave
+    // the current one back ([`dequeued_action`]): its frame is built.
+    let swapped = lock_state().signals.swapped;
+    if swapped != 0 {
+        current_action(swapped);
     }
     super::timers::fire_due();
     refresh_handler_mask();
@@ -545,9 +609,18 @@ pub(crate) fn deliver() {
                 return;
             }
         }
-        let mask = read_mask();
+        let segv = segv_blocked();
+        let mask = read_mask() | segv_bit(segv);
         let batch = {
             let mut state = lock_state();
+            if segv == SegvBlock::Unknown
+                && (state.signals.tasks[&me].private.mask() | state.signals.shared.mask())
+                    & bit(SIGSEGV)
+                    != 0
+            {
+                drop(state);
+                crate::trap_fatal(SEGV_UNKNOWN);
+            }
             state.signals.tasks.get_mut(&me).unwrap().mask = mask;
             let mut batch = Vec::new();
             let mut eligible = !mask;
@@ -557,6 +630,7 @@ pub(crate) fn deliver() {
                 {
                     continue;
                 }
+                let seen = state.signals.changes[instance.sig as usize];
                 if action.flags & SA_RESETHAND != 0 {
                     // Linux resets only sa_handler; flags, mask and restorer
                     // remain observable through rt_sigaction after delivery.
@@ -572,7 +646,7 @@ pub(crate) fn deliver() {
                         eligible &= !bit(instance.sig);
                     }
                 }
-                batch.push((instance, action));
+                batch.push((instance, action, seen));
             }
             if !batch.is_empty() {
                 // A cancel that reached this thread inside a sleep, before
@@ -584,7 +658,7 @@ pub(crate) fn deliver() {
                     );
                 }
                 if fault::serving_counter_read().is_some()
-                    && batch.iter().any(|(_, action)| action.handler != SIG_DFL)
+                    && batch.iter().any(|(_, action, _)| action.handler != SIG_DFL)
                 {
                     drop(state);
                     fault::stop_while_serving("a signal handler would run");
@@ -596,6 +670,42 @@ pub(crate) fn deliver() {
         if batch.is_empty() {
             return;
         }
+        let routed = |(instance, action, _): &(Instance, Action, u32)| {
+            action.handler != SIG_DFL && trap_routed(instance.sig)
+        };
+        // The SIGSEGV block each member's handler runs under: the batch's,
+        // or blocked from the first member whose frame blocks it on.
+        let mut running = segv;
+        let blocks = batch
+            .iter()
+            .map(|(instance, action, _)| {
+                if action.handler != SIG_DFL
+                    && (action.mask & bit(SIGSEGV) != 0
+                        || (instance.sig == SIGSEGV && action.flags & SA_NODEFER == 0))
+                {
+                    running = SegvBlock::Yes;
+                }
+                running
+            })
+            .collect::<Vec<_>>();
+        // The kernel dequeues the members in order and builds each frame
+        // over the last, so the last dequeued runs first. Re-queued on the
+        // host (all this thread's), they are built in the host's order,
+        // synchronous first then by number: one unblock releases them all
+        // when that is the batch's order, no signal repeats (the host would
+        // merge it) and their handlers share one SIGSEGV block. Otherwise
+        // each is queued and released alone at its own turn, last dequeued
+        // first, as a trap-routed SIGSEGV (which cannot wait blocked on the
+        // host) always is: nothing of the batch waits on the host while an
+        // earlier handler runs, which may leave by `siglongjmp` (natively
+        // losing the frames below it) or change a later member's action.
+        let key = |sig: u8| (SYNCHRONOUS & bit(sig) == 0, sig);
+        let one_by_one = batch.iter().any(routed)
+            || batch
+                .windows(2)
+                .any(|pair| key(pair[0].0.sig) > key(pair[1].0.sig))
+            || (1..batch.len()).any(|i| batch[..i].iter().any(|m| m.0.sig == batch[i].0.sig))
+            || (trap_routed(SIGSEGV) && blocks.windows(2).any(|pair| pair[0] != pair[1]));
         install_mask(u64::MAX);
         let pid = host(SYS_GETPID, [0; 6]);
         let tid = host(SYS_GETTID, [0; 6]);
@@ -615,15 +725,8 @@ pub(crate) fn deliver() {
                 fatal("host signal-frame queue failed (rt_tgsigqueueinfo)");
             }
         };
-        // A trap-routed signal cannot wait blocked on the host: it is queued
-        // once the other frames have run, and the trap's frame runs the
-        // action its dequeue captured.
-        let mut routed = None;
-        for (instance, action) in batch {
-            if action.handler != SIG_DFL && trap_routed(instance.sig) {
-                routed = Some((instance, action));
-                continue;
-            }
+        let mut swapped = 0;
+        for (instance, action, seen) in &batch {
             if action.handler == SIG_DFL {
                 if matches!(instance.sig, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU) {
                     fatal("default Stop-class signal would stop the only virtual process");
@@ -649,21 +752,66 @@ pub(crate) fn deliver() {
                 }
                 // Release only the dying signal; queued handler frames stay blocked.
                 install_mask(!bit(instance.sig));
+                queue(instance);
+            } else if !one_by_one {
+                swapped |= dequeued_action(instance.sig, *action, *seen);
+                queue(instance);
             }
-            queue(&instance);
         }
         let was_releasing = RELEASING_FRAMES.with(|flag| flag.replace(true));
         let outer_dirty = FRAME_DIRTY.with(Cell::get);
+        RESTORED_SEGV.set(false);
+        let mut scope = Scoped::new();
+        scope.open();
         crate::sud::with_signal_delivery(|| {
             let _guest = crate::panic_boundary::PanicScope::suspend();
-            install_mask(mask);
-            if let Some((instance, action)) = &routed {
-                fault::send(*action);
-                mirror_onstack(action.flags);
-                queue(instance);
+            if !one_by_one {
+                fault::set(blocks[0]);
+                install_mask(mask);
+                current_action(swapped);
+                return;
             }
+            // Each member at its turn, under the mask its frame saves
+            // natively (the earlier members' handlers' masks), with the
+            // action its dequeue captured.
+            for (i, member) in batch.iter().enumerate().rev() {
+                let (instance, action, seen) = *member;
+                let saved = batch[..i].iter().fold(mask, |held, (member, action, _)| {
+                    let own = if action.flags & SA_NODEFER == 0 {
+                        bit(member.sig)
+                    } else {
+                        0
+                    };
+                    held | action.mask | own
+                });
+                if routed(member) {
+                    // The trap's frame runs the action its dequeue captured.
+                    fault::set(if i == 0 { segv } else { blocks[i - 1] });
+                    install_mask(saved);
+                    fault::send(action);
+                    mirror_onstack(action.flags);
+                    queue(&instance);
+                } else if action.handler != SIG_DFL {
+                    fault::set(blocks[i]);
+                    let swapped = dequeued_action(instance.sig, action, seen);
+                    install_mask(saved);
+                    queue(&instance);
+                    current_action(swapped);
+                }
+                // Natively the next member's handler starts under what this
+                // one's `rt_sigreturn` installed: its frame's saved mask,
+                // which the handler may have edited.
+                if i > 0 && action.handler != SIG_DFL && read_mask() != host_mask(saved) {
+                    crate::trap_fatal(
+                        "a signal handler edited its frame's saved mask (uc_sigmask) while more \
+                         frames of its delivery batch were still to run: not modeled",
+                    );
+                }
+            }
+            // The first member's frame saved `mask`: its `rt_sigreturn` left
+            // that installed, or what its handler edited it to.
         });
-        if routed.is_some() {
+        if batch.iter().any(routed) {
             let flags = lock_state().signals.actions[usize::from(SIGSEGV)].flags;
             mirror_onstack(flags);
         }
@@ -677,18 +825,81 @@ pub(crate) fn deliver() {
         // if no pending work remains for another loop. glibc's restorer (and
         // arm64's kernel trampoline) returns with no trap to strip that mask,
         // so a containment signal a handler added is taken out again here,
-        // before a later raw syscall or counter read meets it blocked.
+        // before a later raw syscall or counter read meets it blocked; a
+        // SIGSEGV block it added is kept virtually.
         let restored = read_mask();
         let kept = host_mask(restored);
         if kept != restored {
             containment_kept_unblocked(restored & !kept);
             install_mask(kept);
         }
+        scope.close();
+        if trap_routed(SIGSEGV) && (RESTORED_SEGV.take() || restored & bit(SIGSEGV) != 0) {
+            fault::set(SegvBlock::Yes);
+        }
+        let mask = with_segv(kept);
         let mut state = lock_state();
         let task = state.signals.tasks.get_mut(&me).unwrap();
-        task.mask = kept;
+        task.mask = mask;
         task.delivering -= 1;
     }
+}
+
+/// Before a batch member's frame is built: the host holds the action `sig`
+/// was dequeued with (`action`, when its change count was `seen`), as the
+/// kernel builds the frame natively, where the guest set another since (an
+/// earlier handler of the batch, or another thread meanwhile) or another
+/// frame's dequeued action stands in for it. Answers the signal to give its
+/// current action back once the frame is built ([`current_action`]). That is
+/// after the handler has run, not before: the kernel builds the frame on the
+/// unblock's return and enters the handler at once, with no shim code between
+/// (only a shim trampoline as the host handler could restore it first). A
+/// handler that leaves by `siglongjmp` skips the restore, and the next
+/// delivery point makes it; meanwhile a signal the host raises itself (a
+/// synchronous fault) of that number would still meet the dequeued action.
+fn dequeued_action(sig: u8, action: Action, seen: u32) -> u64 {
+    {
+        let mut state = lock_state();
+        let signals = &mut state.signals;
+        if signals.changes[usize::from(sig)] == seen && signals.swapped & bit(sig) == 0 {
+            return 0;
+        }
+        signals.swapped |= bit(sig);
+    }
+    install_host_action(sig, action);
+    bit(sig)
+}
+
+/// The frames of `signals` are built: the host holds their current actions
+/// again.
+fn current_action(signals: u64) {
+    for sig in (1..=64u8).filter(|sig| signals & bit(*sig) != 0) {
+        let action = {
+            let mut state = lock_state();
+            state.signals.swapped &= !bit(sig);
+            state.signals.actions[usize::from(sig)]
+        };
+        install_host_action(sig, action);
+    }
+}
+
+/// The host action that stands for the guest's `action` of `sig`.
+fn install_host_action(sig: u8, action: Action) -> i64 {
+    if trap_routed(sig) {
+        mirror_onstack(action.flags);
+        return 0;
+    }
+    host(
+        SYS_RT_SIGACTION,
+        [
+            u64::from(sig),
+            &action as *const _ as u64,
+            0,
+            SIGSET_BYTES as u64,
+            0,
+            0,
+        ],
+    )
 }
 
 /// Libc-layout marshalling supplies glibc's init-time restorer; raw callers keep
@@ -778,22 +989,7 @@ pub unsafe extern "C" fn patina_signal_action(
         let action = unsafe { *action };
         // A trap-routed action stays virtual: the host keeps the trap's
         // handler, which runs this one for each fault it does not answer.
-        let rc = if trap_routed(sig as u8) {
-            mirror_onstack(action.flags);
-            0
-        } else {
-            host(
-                SYS_RT_SIGACTION,
-                [
-                    sig as u64,
-                    &action as *const _ as u64,
-                    0,
-                    SIGSET_BYTES as u64,
-                    0,
-                    0,
-                ],
-            )
-        };
+        let rc = install_host_action(sig as u8, action);
         if rc != 0 {
             return -i64::from(
                 std::io::Error::last_os_error()
@@ -828,22 +1024,39 @@ pub unsafe extern "C" fn patina_signal_mask(
     }
     let me = activate();
     let previous = read_mask();
+    let segv = segv_blocked();
     if !old.is_null() {
+        if segv == SegvBlock::Unknown {
+            crate::trap_fatal(SEGV_UNKNOWN);
+        }
         unsafe {
-            old.write(previous);
+            old.write(previous | segv_bit(segv));
         }
     }
-    let mask = if set.is_null() {
-        previous
+    let (mask, segv) = if set.is_null() {
+        (previous, segv)
     } else {
         let set = unsafe { *set };
-        host_mask(match how {
+        // SIGSEGV's block is the guest's own under the counter trap.
+        let named = set & bit(SIGSEGV) != 0;
+        let segv = match how {
+            SIG_BLOCK if named => SegvBlock::Yes,
+            SIG_UNBLOCK if named => SegvBlock::No,
+            SIG_SETMASK if named => SegvBlock::Yes,
+            SIG_SETMASK => SegvBlock::No,
+            _ => segv,
+        };
+        if trap_routed(SIGSEGV) && (named || how == SIG_SETMASK) {
+            fault::set(segv);
+        }
+        let mask = host_mask(match how {
             SIG_BLOCK => previous | set,
             SIG_UNBLOCK => previous & !set,
             _ => set,
-        })
+        });
+        (mask, segv)
     };
-    lock_state().signals.tasks.get_mut(&me).unwrap().mask = mask;
+    lock_state().signals.tasks.get_mut(&me).unwrap().mask = mask | segv_bit(segv);
     install_mask(mask);
     0
 }
@@ -861,8 +1074,17 @@ pub unsafe extern "C" fn patina_signal_pending(set: *mut u8, size: usize) -> i64
     }
     let me = activate();
     super::timers::fire_due();
+    let segv = segv_blocked();
+    let mask = read_mask() | segv_bit(segv);
     let mut state = lock_state();
-    state.signals.tasks.get_mut(&me).unwrap().mask = read_mask();
+    state.signals.tasks.get_mut(&me).unwrap().mask = mask;
+    if segv == SegvBlock::Unknown
+        && (state.signals.tasks[&me].private.mask() | state.signals.shared.mask()) & bit(SIGSEGV)
+            != 0
+    {
+        drop(state);
+        crate::trap_fatal(SEGV_UNKNOWN);
+    }
     let pending = state.signals.pending(me).to_ne_bytes();
     unsafe {
         std::ptr::copy_nonoverlapping(pending.as_ptr(), set, size);
@@ -1194,9 +1416,14 @@ pub(super) unsafe fn with_temporary_mask(mask: *const u64, body: impl FnOnce() -
         return body();
     }
     let me = activate();
-    let old = read_mask();
-    let temporary = host_mask(unsafe { *mask });
-    lock_state().signals.tasks.get_mut(&me).unwrap().mask = temporary;
+    let old = with_segv(read_mask());
+    let requested = unsafe { *mask };
+    let temporary = host_mask(requested);
+    // The wait's SIGSEGV block is the temporary mask's, until it returns.
+    let mut scope = Scoped::new();
+    scope.open();
+    set_segv(requested);
+    lock_state().signals.tasks.get_mut(&me).unwrap().mask = with_segv(temporary);
     install_mask(temporary);
     let pending = lock_state().signals.has_deliverable(me);
     let rc = if pending {
@@ -1205,6 +1432,7 @@ pub(super) unsafe fn with_temporary_mask(mask: *const u64, body: impl FnOnce() -
     } else {
         body()
     };
+    scope.close();
     lock_state().signals.tasks.get_mut(&me).unwrap().mask = old;
     install_mask(old);
     rc

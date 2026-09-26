@@ -10826,6 +10826,7 @@ mod thread {
         #[cfg(target_os = "linux")]
         {
             let mask = lock_state().signals.mask(task);
+            signals::set_segv(mask);
             signals::install_mask(mask);
         }
         (routine, arg)

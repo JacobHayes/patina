@@ -266,7 +266,8 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   Raw actions retain the caller's exact flags/restorer; libc actions use the
   glibc restorer captured at initialization. `SIGSYS` cannot be replaced by a
   guest, a `SIGSEGV` action under the counter trap stays virtual, and every mask
-  a guest installs loses both. A handler can still add
+  a guest installs loses both on the host; SIGSEGV's block is kept virtually
+  instead (`src/thread/signals/fault.rs`). A handler can still add
   them to its frame's saved mask: a guest restorer's frame is stripped before the
   kernel's `rt_sigreturn`, but glibc's restorer (and arm64's kernel trampoline)
   returns with no trap, so the delivery point strips the restored mask again once

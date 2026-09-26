@@ -271,8 +271,20 @@ context, so a return retries the instruction, an edited context resumes and
 carries the guest's `SA_ONSTACK`, and a default or ignored action takes the
 fault as the default action does. A handler with a restorer of its own, or a
 SIGSEGV sent from outside the run, is a named stop. A SIGSEGV patina delivers
-itself (`kill`, `raise`) is queued after its batch's other frames, running the
-action its dequeue captured. A counter read
+itself (`kill`, `raise`) is dequeued as 6.8 dequeues it (synchronous signals
+first, a thread's own before the process's) and runs the action its dequeue
+captured. A delivery batch whose re-queued frames the host would build in
+another order than 6.8's (or whose signals repeat, or whose handlers run under
+different SIGSEGV blocks) queues and releases them one at a time, last dequeued
+first, each under the mask its frame saves natively and with the action its
+dequeue captured, so the handlers run in 6.8's frame order: nothing waits on the
+host meanwhile, so a handler that leaves by `siglongjmp` loses the frames below
+it and a handler that changes a later member's action leaves that frame its
+dequeued one, both as natively (that action stays on the host until the
+member's handler returns, or after a `siglongjmp` until the next delivery
+point). A handler that edits its frame's saved mask while frames of its batch
+are still to run is a named stop: natively the next handler starts under the
+edit. A counter read
 taken on the alternate stack is served back on the interrupted stack, and no
 guest code runs until it is answered: every signal but the containment ones is
 held blocked meanwhile (one that arrives is delivered once the trap returns,
@@ -287,11 +299,19 @@ the read's end gives the kernel back the stack it held at the read's entry. A
 SIGSEGV the kernel sends itself that the guest's action takes as the default
 is taken at once rather than retried, since retrying need not raise it again;
 a core dump then records a sent SIGSEGV (`SI_TKILL`, no address) where natively
-it records the kernel's, with the same wait status. A SIGSEGV while shim code owns the thread (an entry, a shim lock, the
-trap's own glue) is a named stop, never the guest's. SIGSEGV stays out of
-every host mask, a handler's included, so a fault inside a handler that
-natively blocks SIGSEGV runs the handler again where the kernel would take the
-default action. On arm64 there is no
+it records the kernel's, with the same wait status. A SIGSEGV while shim code owns
+the thread (an entry, a shim lock, the trap's own glue) is a named stop, never
+the guest's. The host never blocks
+SIGSEGV, so the guest's block is kept per thread (`src/thread/signals/fault.rs`):
+visible mask changes set it, and a handler, delivery batch or temporary mask
+restores it on return. A scope the guest left by `siglongjmp` is found by the
+kernel's own stack test (off its alternate stack, above its frame, or its frame
+overwritten); below a trap-run handler's intact frame on an ordinary stack, a
+fault, pending SIGSEGV or mask read whose answer depends on whether the handler
+is still running is a named stop. With the block known, a blocked fault takes
+the default action and a blocked sent SIGSEGV stays pending, as in 6.8. Left
+by `longjmp` (no mask restore) a handler's block is taken as restored, and a
+`setcontext` onto another stack is outside the stack test. On arm64 there is no
 trap: the guest's action is installed on the host and the kernel delivers
 faults directly.
 

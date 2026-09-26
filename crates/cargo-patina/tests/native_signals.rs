@@ -48,21 +48,56 @@ fn libc_sleep_returns_remaining_seconds_on_signal() {
 /// A guest's own SIGSEGV handler gets each SIGSEGV the kernel would give it —
 /// a stack overflow on its alternate stack, an access fault, both left by
 /// `siglongjmp`, a raised one with the sender's code and `SA_RESETHAND`, a
-/// fault whose edited context resumes — while the timestamp-counter trap
-/// keeps the host disposition, so the guest prints what it prints natively.
+/// fault whose edited context resumes — in the kernel's frame order among
+/// other pending signals (whose frames, built beneath its own, are lost with
+/// it when it leaves by `siglongjmp`, and run the action they were dequeued
+/// with when it changes theirs), while the timestamp-counter trap keeps the host
+/// disposition, so the guest prints what it prints natively. A fault or a
+/// raise the handler blocks takes the default action as natively (never a
+/// second run of the handler); on an ordinary stack, where the shim cannot
+/// tell a nested fault from a `siglongjmp`'d handler, it stops by name.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
+    use std::os::unix::process::ExitStatusExt;
     let native = assert_build_c_guest("signals/segv_routing.c", CLink::Unlinked);
     let patina = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShim);
-    for case in ["overflow", "raise", "resume"] {
+    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
+    for case in [
+        "overflow",
+        "raise",
+        "resume",
+        "order-shared",
+        "order-mask",
+        "order-escape",
+        "order-reset",
+        "nodefer-std",
+        "nodefer-rt",
+    ] {
         let oracle = assert_standalone_success(&native.binary, &[case], &[]);
-        let output = assert_standalone_success(
-            &patina.binary,
-            &[case],
-            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
-        );
+        let output = assert_standalone_success(&patina.binary, &[case], &env);
         assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");
+    }
+    // Natively the next frame's handler starts under an upper handler's
+    // edited saved mask; the shim cannot carry that over and stops by name.
+    assert_standalone_success(&native.binary, &["nodefer-edit"], &[]);
+    let output = standalone_output(&patina.binary, &["nodefer-edit"], &env);
+    assert_eq!(output.status.signal(), Some(6), "{output:?}");
+    assert!(text(&output.stderr).contains("saved mask"), "{output:?}");
+    for case in ["nested", "nested-stack", "reraise"] {
+        let oracle = standalone_output(&native.binary, &[case], &[]);
+        let output = standalone_output(&patina.binary, &[case], &env);
+        assert_eq!(oracle.status.signal(), Some(11), "{case}: {oracle:?}");
+        let stopped = case == "nested-stack"
+            && cfg!(target_arch = "x86_64")
+            && kernel_supports(KernelFeature::Tsc);
+        let expected = if stopped { 6 } else { 11 };
+        assert_eq!(output.status.signal(), Some(expected), "{case}: {output:?}");
+        // A fault's default action does not flush the captured output; a
+        // raised signal's and a named stop do.
+        if case == "reraise" || stopped {
+            assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");
+        }
     }
 }
 
@@ -237,7 +272,7 @@ mod raw {
         assert_state("handler");
     }
     #[test]
-    fn libc_and_raw_masks_cannot_block_reserved_signals() {
+    fn libc_and_raw_masks_keep_the_traps_armed() {
         assert_state("masks");
     }
     #[test]

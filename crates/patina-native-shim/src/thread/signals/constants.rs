@@ -1,5 +1,9 @@
 //! Linux signal ABI constants (kernel numbering, including NPTL's reserved pair).
 //! Kept here because the shim's kernel-layout ABI is independent of libc layouts.
+pub(in crate::thread) const SIGILL: u8 = 4;
+pub(in crate::thread) const SIGTRAP: u8 = 5;
+pub(in crate::thread) const SIGBUS: u8 = 7;
+pub(in crate::thread) const SIGFPE: u8 = 8;
 pub(in crate::thread) const SIGKILL: u8 = 9;
 pub(in crate::thread) const SIGSEGV: u8 = 11;
 pub(in crate::thread) const SIGCHLD: u8 = 17;

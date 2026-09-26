@@ -11,7 +11,8 @@ detectors and the signals-family conformance scenarios supply the complementary
 raw-door, trace/replay and host-oracle evidence.
 
 `signal_boundary.c` supplies independent named cases for libc/raw prctl state,
-handler visibility through tgkill/tkill, reserved mask stripping (including
+handler visibility through tgkill/tkill, reserved masks (SIGSYS stripped,
+SIGSEGV's block kept virtually while counter reads still trap, including
 handler-time temporary masks), and sigwait retry after an unrelated handler.
 The `native_signals` target also records guest abort and C/raw/internal-context
 fatal paths: guest abort must publish a complete trace; each internal fatal
@@ -27,9 +28,14 @@ missing evidence fatal.
 `segv_routing.c` gives a guest its own SIGSEGV handler: an `SA_ONSTACK` one
 catches a stack overflow on its alternate stack and an access fault, leaving
 both by `siglongjmp`; an `SA_RESETHAND` one receives a raised SIGSEGV with
-the sender's code; and one edits the faulting context to resume past the
-store. `native_signals` runs it natively as the oracle and under the shim, and
-requires the same output. Its
+the sender's code; one edits the faulting context to resume past the store;
+one that blocks SIGSEGV faults inside itself or re-raises it; and a pending
+SIGSEGV meets a pending SIGUSR1 in 6.8's frame order, also when the SIGSEGV
+handler leaves by `siglongjmp` or resets SIGUSR1's action; repeated
+`SA_NODEFER` signals run as often, in the order and under the saved masks
+6.8 gives them. `native_signals` runs it
+natively as the oracle and under the shim, and requires the same output and
+deaths (on an ordinary stack the nested fault is a named stop instead). Its
 `alarm` cases, in `native_containment`, fire a timer while counter reads taken
 on the alternate stack are served off it, on an ordinary stack and on one too
 small to leave a nested frame room: natively both run on, and under the shim

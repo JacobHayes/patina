@@ -285,7 +285,15 @@ check removed), and while a counter read is served off the alternate stack no gu
 a timer's handler that would run during it, and a cut too small for a nested
 frame, are named stops where the native run goes on
 (`counter_reads_served_off_the_alternate_stack_run_no_guest_code`); `native_signals::a_guest_segv_handler_gets_what_the_kernel_would_give_it`
-compares the faults it does get with the native run. `rdrand_is_refused_on_every_kernel` builds
+compares the faults it does get with the native run, including a blocked fault's
+default action, a re-raise kept pending, and 6.8's frame order among pending
+signals (also when the upper handler leaves by `siglongjmp`, losing the frame
+below it, or resets the lower member's action, which its frame still runs: red
+before, a misleading named stop and a SIGUSR1 death), and repeated `SA_NODEFER`
+signals (a standard one pending to the thread and the process runs twice, and
+queued RT instances run last queued first, each frame saving its native mask:
+red before, one run and a reversed order); an upper handler that edits its
+saved mask with frames of its batch still to run is a named stop. `rdrand_is_refused_on_every_kernel` builds
 no TSC guest and requires no TSC capability. Unsupported capabilities execute
 named refusal assertions; the SUD-only vDSO check reports missing evidence.
 `PATINA_REQUIRE_SUD=1` makes missing SUD fatal in tests and the ecosystem wrapper;

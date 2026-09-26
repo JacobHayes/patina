@@ -17,11 +17,26 @@
 //! code owns it (an entry, a shim lock held, the trap's own glue) is a named
 //! stop ([`patina_trap_shim_fault`]), never the guest's.
 //!
-//! SIGSEGV stays out of every host mask here as everywhere under the trap (a
-//! counter read must trap wherever it runs, a handler included): a handler
-//! runs with SIGSEGV unblocked, so a fault inside it runs it again where the
-//! kernel, finding SIGSEGV blocked, would take the default action.
+//! **Blocking SIGSEGV.** The host can never block SIGSEGV (a counter read
+//! must trap wherever it runs), so whether the guest has it blocked is kept
+//! here, per thread ([`SegvBlock`]). Visible mask changes set it; a handler, a
+//! delivery batch or a temporary mask opens a scope whose return restores it.
+//! glibc's `siglongjmp` and `setcontext` restore a mask without a system call
+//! the shim sees, so a scope a guest left that way is found by the kernel's
+//! own stack test ([`left`]): off the scope's alternate stack, above its
+//! frame, or with its frame overwritten. On an ordinary stack, below an
+//! intact frame, a handler still running and one left by `siglongjmp` whose
+//! caller went deeper look the same; where the two would answer differently
+//! the answer is [`SegvBlock::Unknown`], which every caller turns into a named
+//! stop. A spare signal bit carried in the host mask cannot stand in for
+//! SIGSEGV instead: there is none (SIGKILL and SIGSTOP cannot be blocked,
+//! SIGSYS is containment's own, and every other bit is a guest signal's), and
+//! a borrowed one reads back wrong wherever the guest sets the two apart:
+//! `sigfillset` less SIGSEGV (blocking all but the synchronous signals), a
+//! non-`SA_NODEFER` SIGSEGV handler's frame, any real use of the borrowed
+//! signal (SIGRTMAX, say).
 use super::*;
+use std::cell::RefCell;
 
 /// Take the fault as the kernel's default action does: the trap restores the
 /// default disposition and the retried instruction kills the process.
@@ -67,13 +82,13 @@ pub(super) fn mirror_onstack(flags: u64) {
     }
 }
 
-/// The trap handler's first act: take the thread for the shim. Answers 1
-/// when guest code was interrupted, 0 when shim code already owned the thread
-/// (an entry, a shim lock held, or the trap's own glue), whose fault is
-/// [`patina_trap_shim_fault`].
+/// The trap handler's first act: take the thread for the shim, with the
+/// interrupted stack pointer. Answers 1 when guest code was interrupted, 0
+/// when shim code already owned the thread (an entry, a shim lock held, or
+/// the trap's own glue), whose fault is [`patina_trap_shim_fault`].
 #[unsafe(no_mangle)]
-pub extern "C" fn patina_trap_enter() -> i32 {
-    let owned = crate::panic_boundary::claim() || crate::in_shim_critical();
+pub extern "C" fn patina_trap_enter(sp: usize) -> i32 {
+    let owned = crate::panic_boundary::claim(sp) || crate::in_shim_critical();
     i32::from(!owned)
 }
 
@@ -81,6 +96,12 @@ pub extern "C" fn patina_trap_enter() -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_trap_leave() {
     crate::panic_boundary::release();
+}
+
+/// The SIGSYS door's interrupted stack pointer, for the entry it calls next.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_note_guest_sp(sp: usize) {
+    crate::panic_boundary::note_guest_sp(sp);
 }
 
 /// A fault while shim code owned the thread: a named stop, never the guest's
@@ -204,6 +225,14 @@ thread_local! {
     /// While the trap serves a counter read off the alternate stack
     /// ([`with_altstack_below`]): the guest's host mask the read interrupted.
     static SERVING: Cell<Option<u64>> = const { Cell::new(None) };
+    static SEGV: RefCell<SegvMask> = const {
+        RefCell::new(SegvMask {
+            current: SegvBlock::No,
+            scopes: [None; SCOPES],
+            depth: 0,
+            next: 0x5e67_5c09_e000_0001,
+        })
+    };
 }
 
 /// The next SIGSEGV this thread takes is the one [`deliver`] queues, with
@@ -316,11 +345,6 @@ pub(super) fn stop_while_serving(what: &str) -> ! {
     ))
 }
 
-/// The kernel's `on_sig_stack`.
-fn on(sp: usize, (base, size): (usize, usize)) -> bool {
-    sp > base && sp - base <= size
-}
-
 fn kernel_altstack() -> Stack {
     let mut stack = Stack::default();
     if host(
@@ -339,18 +363,278 @@ fn install_altstack(stack: Stack) {
     }
 }
 
+/// Whether SIGSEGV is blocked for this thread's guest code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SegvBlock {
+    No,
+    Yes,
+    /// Blocked if a handler is still running, not if it was left by
+    /// `siglongjmp`, and the two cannot be told apart.
+    Unknown,
+}
+
+/// Guest code whose return restores the SIGSEGV state it started under: a
+/// handler the trap runs, a delivery batch, a temporary mask.
+#[derive(Clone, Copy)]
+struct Scope {
+    /// The shim entry that opened it: while that entry runs, it has not been
+    /// left.
+    entry: u64,
+    /// A word of the frame that encloses the scope and everything it runs:
+    /// a stack pointer above it has left the scope.
+    canary: usize,
+    /// What was written there.
+    value: u64,
+    /// The alternate stack the frame is on, if it is on one.
+    alt: Option<(usize, usize)>,
+    /// Opened by shim code (a delivery batch, a temporary mask), whose own
+    /// frames the guest code it runs is below.
+    shim: bool,
+    /// The state the scope's return restores.
+    saved: SegvBlock,
+}
+
+const SCOPES: usize = 16;
+
+struct SegvMask {
+    current: SegvBlock,
+    scopes: [Option<Scope>; SCOPES],
+    depth: usize,
+    next: u64,
+}
+
+/// Where guest code runs: its stack pointer, the alternate stack, and the
+/// shim entry serving it.
+#[derive(Clone, Copy)]
+struct Position {
+    sp: usize,
+    alt: Option<(usize, usize)>,
+    entry: u64,
+}
+
+/// The kernel's `on_sig_stack`.
+fn on(sp: usize, (base, size): (usize, usize)) -> bool {
+    sp > base && sp - base <= size
+}
+
+impl Position {
+    /// The guest code the running shim entry interrupted.
+    fn guest() -> Self {
+        let stack = kernel_altstack();
+        let (sp, entry) = crate::panic_boundary::guest_entry();
+        Self {
+            sp,
+            alt: (stack.flags & SS_DISABLE == 0).then_some((stack.base, stack.size)),
+            entry,
+        }
+    }
+}
+
+/// Whether guest code at `at` has provably left `scope`.
+fn left(scope: &Scope, at: &Position) -> bool {
+    if at.entry == scope.entry {
+        return false;
+    }
+    let comparable = match scope.alt {
+        // Off the frame's alternate stack, nothing the scope runs is running.
+        Some(alt) if !on(at.sp, alt) => return true,
+        Some(_) => true,
+        // An ordinary stack's frame cannot be compared from an alternate one.
+        None => !at.alt.is_some_and(|alt| on(at.sp, alt)),
+    };
+    if comparable && at.sp > scope.canary {
+        return true;
+    }
+    // Overwritten: what ran there since has left the scope.
+    !crate::uaccess::read::<u64>(scope.canary).is_ok_and(|value| value == scope.value)
+}
+
+/// The state at `at` under `scopes` (none of whose tops is provably left).
+fn answer(scopes: &[Option<Scope>], current: SegvBlock, at: &Position) -> SegvBlock {
+    let Some((top, below)) = scopes.split_last() else {
+        return current;
+    };
+    let top = top.expect("live scope");
+    if left(&top, at) {
+        return answer(below, top.saved, at);
+    }
+    // Asked by the entry that opened it, on its alternate stack, or below
+    // the shim's own intact frame: still inside.
+    if top.entry == at.entry || top.alt.is_some() || top.shim {
+        return current;
+    }
+    // On an ordinary stack below the trap's intact frame: still inside the
+    // handler, or left by `siglongjmp` and deeper since. Known only where
+    // both answer the same.
+    if answer(below, top.saved, at) == current {
+        current
+    } else {
+        SegvBlock::Unknown
+    }
+}
+
+impl SegvMask {
+    fn at(&mut self, at: &Position) -> SegvBlock {
+        while let Some(top) = self.depth.checked_sub(1).and_then(|top| self.scopes[top]) {
+            if !left(&top, at) {
+                break;
+            }
+            self.current = top.saved;
+            self.depth -= 1;
+        }
+        answer(&self.scopes[..self.depth], self.current, at)
+    }
+    fn open(&mut self, canary: *mut u64, alt: Option<(usize, usize)>, shim: bool) {
+        if self.depth == SCOPES {
+            crate::trap_fatal(
+                "signal handlers under the counter trap nest deeper than the shim tracks \
+                 SIGSEGV's block for: not modeled",
+            );
+        }
+        let value = self.next;
+        self.next = self.next.wrapping_add(2);
+        // SAFETY: the caller's own frame word.
+        unsafe { canary.write_volatile(value) };
+        self.scopes[self.depth] = Some(Scope {
+            entry: crate::panic_boundary::guest_entry().1,
+            canary: canary as usize,
+            value,
+            alt,
+            shim,
+            saved: self.current,
+        });
+        self.depth += 1;
+    }
+    /// The scope whose frame word is `canary` returned, and with it every
+    /// scope opened inside it. Nothing if it was already found left.
+    fn close(&mut self, canary: usize) {
+        let open = &self.scopes[..self.depth];
+        if let Some(index) = open
+            .iter()
+            .rposition(|scope| scope.is_some_and(|scope| scope.canary == canary))
+        {
+            self.current = open[index].expect("open scope").saved;
+            self.depth = index;
+        }
+    }
+}
+
+/// Whether SIGSEGV is blocked for the guest code the running entry serves.
+pub(super) fn blocked() -> SegvBlock {
+    if SEGV.with_borrow(|segv| segv.depth) == 0 {
+        return SEGV.with_borrow(|segv| segv.current);
+    }
+    let at = Position::guest();
+    SEGV.with_borrow_mut(|segv| segv.at(&at))
+}
+
+/// Whether the thread has a scope to leave.
+pub(super) fn scoped() -> bool {
+    SEGV.with_borrow(|segv| segv.depth) != 0
+}
+
+/// The guest's own mask changes SIGSEGV's block to `state`.
+pub(super) fn set(state: SegvBlock) {
+    SEGV.with_borrow_mut(|segv| segv.current = state);
+}
+
+/// A scope opened in the frame that holds this guard, closed in place by
+/// [`Scoped::close`] (or its drop). The scope is found by the address its
+/// word had when it opened, so moving the guard can never lose it.
+#[must_use]
+pub(super) struct Scoped {
+    canary: u64,
+    /// Where `canary` was when the scope opened; 0 while none is open.
+    at: usize,
+}
+impl Scoped {
+    /// Opens nothing where the trap is not armed: the host holds SIGSEGV's
+    /// block itself there.
+    pub(super) fn new() -> Self {
+        Self { canary: 0, at: 0 }
+    }
+    /// Open the scope. The guard stays where it is until it closes: its word
+    /// is what tells a scope still running from one left.
+    pub(super) fn open(&mut self) {
+        if !trap_routed(SIGSEGV) {
+            return;
+        }
+        let canary = &mut self.canary as *mut u64;
+        let stack = kernel_altstack();
+        let alt = (stack.flags & SS_DISABLE == 0)
+            .then_some((stack.base, stack.size))
+            .filter(|alt| on(canary as usize, *alt));
+        SEGV.with_borrow_mut(|segv| segv.open(canary, alt, true));
+        self.at = canary as usize;
+    }
+    /// The scope returned: the block is again what it opened under.
+    pub(super) fn close(&mut self) {
+        let at = std::mem::take(&mut self.at);
+        if at != 0 {
+            SEGV.with_borrow_mut(|segv| segv.close(at));
+        }
+    }
+}
+impl Drop for Scoped {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+#[cfg(test)]
+pub(super) fn open_scopes() -> (usize, SegvBlock) {
+    SEGV.with_borrow(|segv| (segv.depth, segv.current))
+}
+
+/// The trap frame a SIGSEGV arrived on, as the C handler describes it.
+#[repr(C)]
+pub struct Frame {
+    /// The interrupted stack pointer.
+    sp: usize,
+    /// The alternate stack the kernel saved in the frame (`uc_stack`).
+    stack: Stack,
+    /// A word of the C handler's own frame: every guest handler it calls runs
+    /// below it.
+    canary: *mut u64,
+    /// The frame's saved mask (`uc_sigmask`), which `rt_sigreturn` installs.
+    mask: *mut u64,
+}
+
+#[cfg(test)]
+impl Frame {
+    /// A frame on no alternate stack for a fault at `sp`.
+    pub(super) fn below(sp: usize, canary: *mut u64, mask: *mut u64) -> Self {
+        Self {
+            sp,
+            stack: Stack::default(),
+            canary,
+            mask,
+        }
+    }
+}
+
 /// A SIGSEGV the trap's handler did not answer as a counter read, with the
 /// frame's siginfo. On [`FAULT_HANDLER`] the guest handler to run is written
 /// to `handler` and the mask it runs under is installed; its return goes
 /// through [`patina_signal_fault_return`].
 ///
 /// # Safety
-/// `info` names the trap frame's siginfo and `handler` writable storage for
-/// one action.
+/// `info` names the trap frame's siginfo, `frame` describes that frame and
+/// `handler` is writable storage for one action.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_signal_fault(info: *const Info, handler: *mut Action) -> i32 {
+pub unsafe extern "C" fn patina_signal_fault(
+    info: *const Info,
+    frame: *const Frame,
+    handler: *mut Action,
+) -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let info = unsafe { *info };
+    let (info, frame) = unsafe { (*info, &*frame) };
+    let alt = (frame.stack.flags & SS_DISABLE == 0).then_some((frame.stack.base, frame.stack.size));
+    let at = Position {
+        sp: frame.sp,
+        alt,
+        entry: crate::panic_boundary::guest_entry().1,
+    };
     let action = match SENT.take() {
         Some(action) => action,
         None => {
@@ -361,10 +645,20 @@ pub unsafe extern "C" fn patina_signal_fault(info: *const Info, handler: *mut Ac
                      the counter trap: not modeled",
                 );
             }
+            // `force_sig_info_to_task`: a fault the thread blocks takes the
+            // default action.
+            match SEGV.with_borrow_mut(|segv| segv.at(&at)) {
+                SegvBlock::No => {}
+                SegvBlock::Yes => return FAULT_DEFAULT,
+                SegvBlock::Unknown => crate::trap_fatal(
+                    "a SIGSEGV fault below a SIGSEGV handler that blocks it: a fault inside the \
+                     handler (which the kernel takes as the default action) and one after a \
+                     siglongjmp out of it cannot be told apart",
+                ),
+            }
             let mut state = lock_state();
             let action = state.signals.actions[usize::from(SIGSEGV)];
-            // `force_sig_info_to_task`: a synchronous fault that the thread
-            // ignores takes the default action.
+            // Ignored, it takes the default action too.
             if matches!(action.handler, SIG_DFL | SIG_IGN) {
                 return FAULT_DEFAULT;
             }
@@ -383,10 +677,17 @@ pub unsafe extern "C" fn patina_signal_fault(info: *const Info, handler: *mut Ac
              the counter trap: its return is not modeled",
         );
     }
+    let canary_alt = alt.filter(|alt| on(frame.canary as usize, *alt));
+    SEGV.with_borrow_mut(|segv| {
+        segv.open(frame.canary, canary_alt, false);
+        if action.flags & SA_NODEFER == 0 || action.mask & bit(SIGSEGV) != 0 {
+            segv.current = SegvBlock::Yes;
+        }
+    });
     let before = read_mask();
     let running = host_mask(before | action.mask);
     if let Some(task) = lock_state().signals.tasks.get_mut(&current_task()) {
-        task.mask = running;
+        task.mask = with_segv(running);
     }
     if running != before {
         install_mask(running);
@@ -396,22 +697,41 @@ pub unsafe extern "C" fn patina_signal_fault(info: *const Info, handler: *mut Ac
 }
 
 /// A guest handler [`patina_signal_fault`] named returned to the trap's
-/// frame, whose saved mask at `frame_mask` the kernel installs next. The
-/// containment signals are kept out of it, as out of every frame (one the
-/// handler added is named once).
+/// frame, whose saved mask the kernel installs next. The containment signals
+/// are kept out of it, as out of every frame; SIGSEGV's block is what the
+/// fault interrupted, or blocked if the handler added it to the frame. The
+/// signals the handler's mask held back are delivered as its return
+/// unblocks them.
 ///
 /// # Safety
-/// `frame_mask` names the trap frame's saved mask.
+/// `frame` describes the trap frame [`patina_signal_fault`] was given.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_signal_fault_return(frame_mask: *mut u64) {
+pub unsafe extern "C" fn patina_signal_fault_return(frame: *const Frame) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let saved = unsafe { *frame_mask };
+    let frame = unsafe { &*frame };
+    let saved = unsafe { *frame.mask };
     let kept = host_mask(saved);
     if kept != saved {
         containment_kept_unblocked(saved & !kept);
-        unsafe { frame_mask.write(kept) };
+        unsafe { frame.mask.write(kept) };
     }
-    if let Some(task) = lock_state().signals.tasks.get_mut(&current_task()) {
-        task.mask = kept;
+    SEGV.with_borrow_mut(|segv| {
+        segv.close(frame.canary as usize);
+        if saved & bit(SIGSEGV) != 0 {
+            segv.current = SegvBlock::Yes;
+        }
+    });
+    let me = current_task();
+    let deliverable = {
+        let mut state = lock_state();
+        let Some(task) = state.signals.tasks.get_mut(&me) else {
+            return;
+        };
+        task.mask = with_segv(kept);
+        state.signals.has_deliverable(me)
+    };
+    if deliverable {
+        install_mask(kept);
+        deliver();
     }
 }

@@ -219,6 +219,8 @@ extern long patina_sud_dispatch(long nr, unsigned long a0, unsigned long a1,
                                 unsigned long a4, unsigned long a5,
                                 uintptr_t call_addr);
 _Noreturn void patina_sud_report_fatal(const char *message);
+/* The interrupted stack pointer of the guest code the next entry serves. */
+void patina_note_guest_sp(uintptr_t sp);
 _Noreturn void patina_sud_report_fatal_addr(const char *message, long nr,
                                             uintptr_t addr);
 /* The arming flag is OWNED by the Rust lib (an exported AtomicU8 in a writable
@@ -565,6 +567,11 @@ static void patina_sud_sigsys(int sig, siginfo_t *info, void *ucontext) {
 #else
 #error "SUD SIGSYS handler: unsupported architecture"
 #endif
+#if defined(__x86_64__)
+    patina_note_guest_sp((uintptr_t)r[REG_RSP]);
+#elif defined(__aarch64__)
+    patina_note_guest_sp((uintptr_t)uc->uc_mcontext.sp);
+#endif
     long ret = patina_sud_dispatch(nr, a0, a1, a2, a3, a4, a5, call_addr);
     patina_signal_frame((uint64_t *)&uc->uc_sigmask, &uc->uc_stack);
 #if defined(__x86_64__)
@@ -689,8 +696,8 @@ static void patina_sud_init(int argc, char **argv) {
  * it (this handler's own glue included) stops by name, never the guest's.
  *
  * The host action is SA_NODEFER: a routed handler runs with SIGSEGV
- * unblocked, as every guest mask keeps it, so its counter reads still trap.
- * It carries SA_ONSTACK exactly
+ * unblocked on the host (its block is kept virtually), so its counter reads
+ * still trap. It carries SA_ONSTACK exactly
  * when the guest's action does, so the kernel builds the frame on the stack
  * the guest's handler expects — which is also what lets a stack-overflow
  * handler (Rust std's among them) run at all. A counter read taken on the
@@ -840,12 +847,19 @@ enum {
     PATINA_FAULT_DEFAULT = 0,
     PATINA_FAULT_HANDLER = 1,
 };
-extern int patina_trap_enter(void);
+struct patina_fault_frame {
+    uintptr_t sp;
+    stack_t stack;
+    volatile uint64_t *canary;
+    uint64_t *mask;
+};
+extern int patina_trap_enter(uintptr_t sp);
 extern void patina_trap_leave(void);
 _Noreturn void patina_trap_shim_fault(const siginfo_t *info, uintptr_t pc);
 extern void patina_tsc_declined(uintptr_t rip);
-extern int patina_signal_fault(const siginfo_t *info, struct patina_signal_action *handler);
-extern void patina_signal_fault_return(uint64_t *frame_mask);
+extern int patina_signal_fault(const siginfo_t *info, const struct patina_fault_frame *frame,
+                               struct patina_signal_action *handler);
+extern void patina_signal_fault_return(const struct patina_fault_frame *frame);
 
 static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
     ucontext_t *uc = (ucontext_t *)ucontext;
@@ -855,7 +869,7 @@ static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
     int saved_errno = errno;
     /* The shim takes the thread first: a fault while it already owned it (an
      * entry, a shim lock, this handler's own glue) is the shim's, by name. */
-    if (!patina_trap_enter()) patina_trap_shim_fault(info, rip);
+    if (!patina_trap_enter(sp)) patina_trap_shim_fault(info, rip);
     /* Provenance, exactly as the SIGSYS handler requires it: the kernel's own
      * #GP, at an instruction in the main executable's text. A counter read from
      * ld.so, another DSO, or the vDSO is not guest code — reading three bytes at
@@ -895,8 +909,10 @@ static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
         /* A counter read this trap does not answer stops by name here. */
         patina_tsc_declined(rip);
     }
+    volatile uint64_t canary = 0;
+    struct patina_fault_frame frame = {sp, uc->uc_stack, &canary, (uint64_t *)(void *)&uc->uc_sigmask};
     struct patina_signal_action handler;
-    int route = patina_signal_fault(info, &handler);
+    int route = patina_signal_fault(info, &frame, &handler);
     patina_trap_leave();
     errno = saved_errno;
     if (route == PATINA_FAULT_HANDLER) {
@@ -905,8 +921,8 @@ static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
         ((void (*)(int, siginfo_t *, void *))handler.handler)(sig, info, ucontext);
         /* errno is the thread's, as natively: the handler's value stands. */
         saved_errno = errno;
-        (void)patina_trap_enter();
-        patina_signal_fault_return((uint64_t *)(void *)&uc->uc_sigmask);
+        (void)patina_trap_enter(sp);
+        patina_signal_fault_return(&frame);
         patina_trap_leave();
         errno = saved_errno;
         return;

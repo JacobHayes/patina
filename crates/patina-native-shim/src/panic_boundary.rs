@@ -4,6 +4,17 @@ use std::cell::Cell;
 
 thread_local! {
     static IN_SHIM: Cell<bool> = const { Cell::new(false) };
+    /// Where the guest's stack stood when the shim last took the thread from
+    /// it: the address below which guest code was running. A door that knows
+    /// the interrupted stack pointer exactly (a trap frame's) notes it first.
+    #[cfg(target_os = "linux")]
+    static GUEST_SP: Cell<usize> = const { Cell::new(0) };
+    #[cfg(target_os = "linux")]
+    static NOTED_SP: Cell<usize> = const { Cell::new(0) };
+    /// Which of this thread's guest-interrupting entries is running: each
+    /// time the shim takes the thread from guest code it is a new one.
+    #[cfg(target_os = "linux")]
+    static ENTRY: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
 }
 
 // Only POSIX-interposed binaries need this policy. Bare prefixed-C links have
@@ -14,6 +25,10 @@ static POLICY_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 #[must_use]
 pub(crate) struct PanicScope {
     previous: bool,
+    #[cfg(target_os = "linux")]
+    previous_sp: usize,
+    #[cfg(target_os = "linux")]
+    previous_entry: u64,
     #[cfg(not(test))]
     panicking_on_entry: bool,
     // Ownership belongs to the calling host thread, never another thread.
@@ -27,8 +42,28 @@ impl PanicScope {
         Self::set(false)
     }
     fn set(value: bool) -> Self {
+        let previous = IN_SHIM.with(|scope| scope.replace(value));
+        #[cfg(target_os = "linux")]
+        let (previous_sp, previous_entry) = (GUEST_SP.get(), ENTRY.get().0);
+        // A door's noted stack pointer belongs to the entry it calls next,
+        // whoever owned the thread then: never to a later one.
+        #[cfg(target_os = "linux")]
+        let noted = if value { NOTED_SP.replace(0) } else { 0 };
+        #[cfg(target_os = "linux")]
+        if value && !previous {
+            let here = 0u8;
+            took(if noted != 0 {
+                noted
+            } else {
+                std::hint::black_box(&here) as *const u8 as usize
+            });
+        }
         Self {
-            previous: IN_SHIM.with(|scope| scope.replace(value)),
+            previous,
+            #[cfg(target_os = "linux")]
+            previous_sp,
+            #[cfg(target_os = "linux")]
+            previous_entry,
             #[cfg(not(test))]
             panicking_on_entry: std::thread::panicking(),
             _thread: std::marker::PhantomData,
@@ -52,7 +87,20 @@ impl Drop for PanicScope {
             crate::host_abort();
         }
         IN_SHIM.with(|scope| scope.set(self.previous));
+        #[cfg(target_os = "linux")]
+        {
+            GUEST_SP.set(self.previous_sp);
+            ENTRY.set((self.previous_entry, ENTRY.get().1));
+        }
     }
+}
+
+/// The shim took the thread from guest code whose stack pointer was `sp`.
+#[cfg(target_os = "linux")]
+fn took(sp: usize) {
+    GUEST_SP.set(sp);
+    let (_, next) = ENTRY.get();
+    ENTRY.set((next + 1, next + 1));
 }
 
 pub(crate) fn in_shim() -> bool {
@@ -61,10 +109,30 @@ pub(crate) fn in_shim() -> bool {
 
 /// A fault handler takes the thread for the shim before it does anything
 /// else, so a fault in its own glue (a stack switch, a prologue) is known to
-/// be the shim's. Answers whether shim code already owned the thread.
+/// be the shim's. `sp` is the interrupted stack pointer. Answers whether shim
+/// code already owned the thread.
 #[cfg(target_os = "linux")]
-pub(crate) fn claim() -> bool {
-    IN_SHIM.with(|scope| scope.replace(true))
+pub(crate) fn claim(sp: usize) -> bool {
+    NOTED_SP.set(0);
+    let owned = IN_SHIM.with(|scope| scope.replace(true));
+    if !owned {
+        took(sp);
+    }
+    owned
+}
+
+/// The exact stack pointer of the guest code the next entry interrupts, from
+/// a door that has it (the SIGSYS frame's).
+#[cfg(target_os = "linux")]
+pub(crate) fn note_guest_sp(sp: usize) {
+    NOTED_SP.set(sp);
+}
+
+/// Where the guest's stack stood when the shim took the thread from it, and
+/// which entry that was.
+#[cfg(target_os = "linux")]
+pub(crate) fn guest_entry() -> (usize, u64) {
+    (GUEST_SP.get(), ENTRY.get().0)
 }
 
 /// Hand the thread back to the guest code a fault handler interrupted.
@@ -162,7 +230,10 @@ mod tests {
                                 first.contains("panic_boundary::in_shim()"),
                                 "guest abort inspects caller ownership first"
                             );
-                        } else if matches!(name, "patina_trap_enter" | "patina_trap_leave") {
+                        } else if matches!(
+                            name,
+                            "patina_trap_enter" | "patina_trap_leave" | "patina_note_guest_sp"
+                        ) {
                             // A fault handler's own claim and release are the
                             // ownership itself.
                             assert!(

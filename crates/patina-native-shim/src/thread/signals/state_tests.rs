@@ -241,6 +241,118 @@ fn stacked_delivery_releases_frames_with_one_host_unblock() {
     });
 }
 
+/// When the host would build a batch's frames in another order (a thread's
+/// own SIGUSR2, dequeued first, and the process's SIGUSR1), each is queued
+/// alone at its own turn, last dequeued first, under the mask its frame
+/// saves natively: nothing of the batch waits on the host while an
+/// earlier handler runs, which could leave by `siglongjmp` or change a later
+/// member's action.
+#[test]
+fn stacked_delivery_out_of_host_order_releases_each_frame_last_first() {
+    isolated(|| {
+        install_handler(SIGUSR1, handler, 0, 0);
+        install_handler(SIGUSR2, handler, 0, 0);
+        set_mask(SIG_BLOCK, bit(SIGUSR1) | bit(SIGUSR2));
+        generate(SIGUSR1);
+        directed(current_task(), SIGUSR2);
+        set_mask(SIG_UNBLOCK, bit(SIGUSR1) | bit(SIGUSR2));
+        let calls = capture_transport(|| patina_signal_deliver());
+        assert_eq!(
+            calls,
+            vec![
+                HostCall::Mask(host_mask(u64::MAX)),
+                HostCall::Mask(bit(SIGUSR2)),
+                HostCall::Queue(SIGUSR1 as u8),
+                HostCall::Mask(0),
+                HostCall::Queue(SIGUSR2 as u8)
+            ]
+        );
+        assert_eq!(HANDLERS.load(Ordering::SeqCst), 2);
+    });
+}
+
+/// Run `body` 128 KiB deeper on the stack than the caller.
+#[inline(never)]
+fn deeper(body: impl FnOnce()) {
+    let mut pad = [0u8; 128 * 1024];
+    std::hint::black_box(&mut pad);
+    body();
+    std::hint::black_box(&pad);
+}
+
+/// The SIGSEGV scopes the shim opens (a delivery batch, a temporary mask)
+/// close where they opened: afterwards nothing is left open and the block is
+/// what it was before, so a fault from code deeper than the batch's dead
+/// frame (its words intact) reaches the guest's handler, not the default
+/// action a handler's block would give it.
+#[test]
+fn shim_scopes_close_where_they_opened() {
+    isolated(|| {
+        crate::PATINA_TSC_ARMED.store(1, Ordering::Relaxed);
+        let usr1 = install_handler(SIGUSR1, handler, 0, u64::MAX);
+        set_mask(SIG_BLOCK, bit(SIGUSR1));
+        generate(SIGUSR1);
+        set_mask(SIG_UNBLOCK, bit(SIGUSR1));
+        deeper(|| patina_signal_deliver());
+        assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
+        let after_delivery = fault::open_scopes();
+        let blocked = bit(SIGSEGV);
+        deeper(|| assert_eq!(unsafe { with_temporary_mask(&blocked, || 0) }, 0));
+        let after_temporary = fault::open_scopes();
+        patina_signal_restorer(usr1.restorer);
+        let segv = Action {
+            handler: handler as *const () as usize,
+            flags: SA_RESTORER,
+            restorer: usr1.restorer,
+            mask: 0,
+        };
+        assert_eq!(
+            unsafe {
+                patina_signal_action(
+                    i32::from(SIGSEGV),
+                    &segv,
+                    std::ptr::null_mut(),
+                    SIGSET_BYTES,
+                )
+            },
+            0
+        );
+        // An access fault (`SEGV_MAPERR`) from far below every frame so far.
+        let mut info = Info { words: [0; 16] };
+        info.words[0] = u64::from(SIGSEGV);
+        info.words[1] = 1;
+        let (mut canary, mut mask) = (0u64, 0u64);
+        let frame = fault::Frame::below(1, &mut canary, &mut mask);
+        let mut routed = Action::default();
+        let route = unsafe { fault::patina_signal_fault(&info, &frame, &mut routed) };
+        if route == 1 {
+            unsafe { fault::patina_signal_fault_return(&frame) };
+        }
+        assert_eq!(
+            (after_delivery, after_temporary, route),
+            ((0, SegvBlock::No), (0, SegvBlock::No), 1)
+        );
+    });
+}
+
+/// One delivery runs more batches than scopes can nest (each instance of a
+/// real-time signal whose handler defers it is a batch of its own), as
+/// natively: every batch's scope is closed before the next opens.
+#[test]
+fn one_delivery_runs_more_batches_than_scopes_nest() {
+    isolated(|| {
+        crate::PATINA_TSC_ARMED.store(1, Ordering::Relaxed);
+        install_handler(SIGRTMIN, handler, 0, 0);
+        set_mask(SIG_BLOCK, bit(SIGRTMIN));
+        for _ in 0..20 {
+            generate(SIGRTMIN);
+        }
+        set_mask(SIG_UNBLOCK, bit(SIGRTMIN));
+        patina_signal_deliver();
+        assert_eq!(HANDLERS.load(Ordering::SeqCst), 20);
+    });
+}
+
 #[test]
 fn raw_rt_sigaction_installs_and_reports_oldact() {
     isolated(|| {

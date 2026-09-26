@@ -12,6 +12,34 @@
  *                 default handler with the flags kept;
  *   resume        a handler steps the faulting context past the store, and
  *                 the edited context is what resumes;
+ *   nested        a fault inside an SA_ONSTACK handler that blocks SIGSEGV
+ *                 takes the default action, never a second run of the
+ *                 handler (which exits 42);
+ *   nested-stack  the same on the ordinary stack, where the shim cannot tell
+ *                 it from a siglongjmp'd handler and stops by name instead;
+ *   reraise       a handler that resets SIGSEGV and raises it keeps it
+ *                 pending, runs on, and dies as it returns;
+ *   order-shared  a process-directed SIGSEGV pending with a thread-directed
+ *                 SIGUSR1: the private one is dequeued first, so the SIGSEGV
+ *                 frame is on top and its handler runs first;
+ *   order-mask    a SIGSEGV whose sa_mask blocks everything, pending with a
+ *                 lower-numbered SIGUSR1: synchronous first, so only it runs,
+ *                 with SIGUSR1 still pending, and SIGUSR1 after it;
+ *   order-escape  order-shared with a SIGSEGV handler that recovers by
+ *                 siglongjmp: SIGUSR1's frame, built beneath it, is lost with
+ *                 it, and unblocking SIGUSR1 again delivers nothing;
+ *   order-reset   order-shared with a SIGSEGV handler that resets SIGUSR1 to
+ *                 the default: SIGUSR1's frame, built beneath it, still runs
+ *                 the handler it was dequeued with;
+ *   nodefer-std   an SA_NODEFER SIGUSR1 pending both to the thread and to the
+ *                 process: two frames, the process's (dequeued second) on
+ *                 top, so its handler runs first, under the first one's mask;
+ *   nodefer-rt    the same with two queued SIGRTMIN instances: the second
+ *                 queued runs first, and only its frame saves the first
+ *                 handler's mask;
+ *   nodefer-edit  nodefer-std whose first handler edits its frame's saved
+ *                 mask, which the second starts under natively: under the
+ *                 shim a named stop;
  *   alarm         (x86_64) SA_ONSTACK alarms fire while counter reads taken
  *                 on the alternate stack are served: native, the handlers run
  *                 and the reads go on; under the shim a handler that would run
@@ -25,6 +53,7 @@
  */
 #define _GNU_SOURCE
 #include <assert.h>
+#include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>
@@ -109,6 +138,10 @@ static void raised(void) {
     counter_read();
 }
 
+static void say(const char *text) {
+    assert(write(1, text, strlen(text)) == (ssize_t)strlen(text));
+}
+
 static volatile char *no_access(void) {
     volatile char *page = mmap(NULL, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(page != MAP_FAILED);
@@ -155,6 +188,150 @@ static void resume(void) {
     install(SIGSEGV, on_resume, 0, 0);
     store(no_access());
     printf("RESUMED calls=%d code=%d\n", (int)calls, (int)code);
+}
+
+static volatile char *wild;
+static volatile sig_atomic_t entered;
+static void on_nested(int sig, siginfo_t *info, void *context) {
+    (void)sig;
+    (void)info;
+    (void)context;
+    /* Run again where the kernel takes the default action. */
+    if (entered++) _exit(42);
+    say("HANDLER\n");
+    wild[0] = 1;
+    say("HANDLER RETURNED\n");
+}
+
+static void nested(int onstack) {
+    if (onstack) on_alt_stack();
+    install(SIGSEGV, on_nested, onstack ? SA_ONSTACK : 0, 0);
+    wild = no_access();
+    wild[0] = 1;
+    say("NOT KILLED\n");
+}
+
+static void on_reraise(int sig, siginfo_t *info, void *context) {
+    (void)sig;
+    (void)info;
+    (void)context;
+    signal(SIGSEGV, SIG_DFL);
+    assert(raise(SIGSEGV) == 0);
+    say("AFTER RAISE\n");
+}
+
+static void reraise(void) {
+    on_alt_stack();
+    install(SIGSEGV, on_reraise, SA_ONSTACK, 0);
+    assert(raise(SIGSEGV) == 0);
+    say("NOT KILLED\n");
+}
+
+static char order[8];
+static volatile sig_atomic_t ordered;
+static void note(char c) {
+    order[ordered++] = c;
+}
+static void on_usr1(int sig, siginfo_t *info, void *context) {
+    (void)sig;
+    (void)info;
+    (void)context;
+    note('U');
+}
+enum order_case { ORDER_RETURN, ORDER_ESCAPE, ORDER_RESET };
+static enum order_case order_how;
+static sigjmp_buf order_escape;
+static void on_ordered_segv(int sig, siginfo_t *info, void *context) {
+    sigset_t pending;
+    (void)sig;
+    (void)info;
+    (void)context;
+    assert(sigpending(&pending) == 0);
+    note('S');
+    if (sigismember(&pending, SIGUSR1)) note('p');
+    if (order_how == ORDER_ESCAPE) siglongjmp(order_escape, 1);
+    if (order_how == ORDER_RESET) signal(SIGUSR1, SIG_DFL);
+}
+
+static void block_both(int how) {
+    sigset_t both;
+    sigemptyset(&both);
+    sigaddset(&both, SIGUSR1);
+    sigaddset(&both, SIGSEGV);
+    assert(sigprocmask(how, &both, NULL) == 0);
+}
+
+static void *order_sender(void *main_thread) {
+    assert(pthread_kill(*(pthread_t *)main_thread, SIGUSR1) == 0);
+    assert(kill(getpid(), SIGSEGV) == 0);
+    return NULL;
+}
+
+static void ordered_delivery(int shared, enum order_case how) {
+    order_how = how;
+    install(SIGUSR1, on_usr1, 0, 0);
+    install(SIGSEGV, on_ordered_segv, 0, !shared);
+    block_both(SIG_BLOCK);
+    sigset_t blocked;
+    assert(sigprocmask(SIG_BLOCK, NULL, &blocked) == 0);
+    assert(sigismember(&blocked, SIGSEGV));
+    if (shared) {
+        pthread_t self = pthread_self(), sender;
+        assert(pthread_create(&sender, NULL, order_sender, &self) == 0);
+        assert(pthread_join(sender, NULL) == 0);
+    } else {
+        assert(raise(SIGUSR1) == 0);
+        assert(raise(SIGSEGV) == 0);
+    }
+    assert(ordered == 0);
+    if (sigsetjmp(order_escape, 1) == 0) block_both(SIG_UNBLOCK);
+    printf("ORDER %.*s\n", (int)ordered, order);
+    if (how == ORDER_RETURN) return;
+    sigset_t pending;
+    struct sigaction now;
+    assert(sigpending(&pending) == 0);
+    assert(sigaction(SIGUSR1, NULL, &now) == 0);
+    block_both(SIG_UNBLOCK);
+    printf("AFTER %.*s pending=%d default=%d\n", (int)ordered, order,
+           sigismember(&pending, SIGUSR1), now.sa_handler == SIG_DFL);
+}
+
+static char runs[16];
+static volatile sig_atomic_t ran;
+static int edit;
+static void on_nodefer(int sig, siginfo_t *info, void *context) {
+    ucontext_t *uc = context;
+    if (sig == SIGUSR1) runs[ran++] = info->si_code == SI_TKILL ? 't' : 'k';
+    else runs[ran++] = (char)('0' + info->si_value.sival_int);
+    runs[ran++] = sigismember(&uc->uc_sigmask, sig) ? 'B' : '-';
+    runs[ran++] = sigismember(&uc->uc_sigmask, SIGUSR2) ? 'M' : '-';
+    if (edit) sigaddset(&uc->uc_sigmask, SIGWINCH);
+}
+
+/* Each run prints who sent it and whether its frame's saved mask blocks the
+ * signal itself (B) and the handler's sa_mask (M). */
+static void nodefer(int rt) {
+    int sig = rt ? SIGRTMIN : SIGUSR1;
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = on_nodefer;
+    action.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigemptyset(&action.sa_mask);
+    sigaddset(&action.sa_mask, SIGUSR2);
+    assert(sigaction(sig, &action, NULL) == 0);
+    sigset_t one;
+    sigemptyset(&one);
+    sigaddset(&one, sig);
+    assert(sigprocmask(SIG_BLOCK, &one, NULL) == 0);
+    if (rt) {
+        assert(sigqueue(getpid(), sig, (union sigval){.sival_int = 1}) == 0);
+        assert(sigqueue(getpid(), sig, (union sigval){.sival_int = 2}) == 0);
+    } else {
+        assert(pthread_kill(pthread_self(), sig) == 0);
+        assert(kill(getpid(), sig) == 0);
+    }
+    assert(sigprocmask(SIG_UNBLOCK, &one, NULL) == 0);
+    printf("NODEFER %.*s\n", (int)ran, runs);
 }
 
 static volatile sig_atomic_t alarms;
@@ -213,6 +390,27 @@ int main(int argc, char **argv) {
         raised();
     } else if (strcmp(argv[1], "resume") == 0) {
         resume();
+    } else if (strcmp(argv[1], "nested") == 0) {
+        nested(1);
+    } else if (strcmp(argv[1], "nested-stack") == 0) {
+        nested(0);
+    } else if (strcmp(argv[1], "reraise") == 0) {
+        reraise();
+    } else if (strcmp(argv[1], "order-shared") == 0) {
+        ordered_delivery(1, ORDER_RETURN);
+    } else if (strcmp(argv[1], "order-mask") == 0) {
+        ordered_delivery(0, ORDER_RETURN);
+    } else if (strcmp(argv[1], "order-escape") == 0) {
+        ordered_delivery(1, ORDER_ESCAPE);
+    } else if (strcmp(argv[1], "order-reset") == 0) {
+        ordered_delivery(1, ORDER_RESET);
+    } else if (strcmp(argv[1], "nodefer-std") == 0) {
+        nodefer(0);
+    } else if (strcmp(argv[1], "nodefer-rt") == 0) {
+        nodefer(1);
+    } else if (strcmp(argv[1], "nodefer-edit") == 0) {
+        edit = 1;
+        nodefer(0);
     } else if (strcmp(argv[1], "alarm") == 0) {
         alarm_reads(0);
     } else if (strcmp(argv[1], "alarm-small") == 0) {

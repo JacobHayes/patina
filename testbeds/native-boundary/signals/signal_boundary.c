@@ -53,7 +53,7 @@ extern unsigned char PATINA_SUD_ARMED;
 extern unsigned char PATINA_TSC_ARMED;
 static volatile sig_atomic_t handled;
 static void *empty_task(void *value) { return value; }
-static void assert_safe_mask(void);
+static uint64_t assert_safe_mask(void);
 static void handler(int sig) {
     assert(sig == SIGUSR1);
     assert_safe_mask();
@@ -74,12 +74,19 @@ static long raw4(long nr, long a, long b, long c, long d) {
                      : "rcx", "r11", "memory");
     return result;
 }
-static void assert_safe_mask(void) {
+/* SIGSYS stays unblocked; SIGSEGV's block is the guest's own, kept virtually,
+ * while the host still traps a counter read. */
+static uint64_t assert_safe_mask(void) {
     uint64_t mask = UINT64_MAX;
     assert(raw4(SYS_rt_sigprocmask, SIG_BLOCK, 0, (long)&mask, sizeof mask) == 0);
     assert((mask & (UINT64_C(1) << (SIGSYS - 1))) == 0);
-    if (PATINA_TSC_ARMED)
-        assert((mask & (UINT64_C(1) << (SIGSEGV - 1))) == 0);
+    if (PATINA_TSC_ARMED) {
+        uint32_t lo, hi;
+        __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        (void)lo;
+        (void)hi;
+    }
+    return mask;
 }
 static void *sender(void *arg) {
     (void)arg;
@@ -124,13 +131,17 @@ static void handler_visibility(void) {
 }
 
 static void reserved_masks(void) {
+    const uint64_t segv = UINT64_C(1) << (SIGSEGV - 1);
     sigset_t all;
     sigfillset(&all);
     assert(sigprocmask(SIG_SETMASK, &all, NULL) == 0);
-    assert_safe_mask();
+    assert(assert_safe_mask() & segv);
     uint64_t kernel_all = UINT64_MAX;
     assert(raw4(SYS_rt_sigprocmask, SIG_SETMASK, (long)&kernel_all, 0, sizeof kernel_all) == 0);
-    assert_safe_mask(); /* checks the SIGSYS frame did not restore a reserved bit */
+    /* The SIGSYS frame did not restore a reserved bit. */
+    assert(assert_safe_mask() & segv);
+    assert(raw4(SYS_rt_sigprocmask, SIG_UNBLOCK, (long)&segv, 0, sizeof segv) == 0);
+    assert(!(assert_safe_mask() & segv));
 }
 
 /* The handler's raw mask query consumes an inner SIGSYS frame fixup. */

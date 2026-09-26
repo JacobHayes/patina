@@ -199,12 +199,16 @@ pub unsafe extern "C" fn patina_signal_wait(
         return -i64::from(EFAULT);
     }
     let me = activate();
-    let old = read_mask();
+    let old = with_segv(read_mask());
     lock_state().signals.tasks.get_mut(&me).unwrap().mask = old;
     let wanted = if set.is_null() { 0 } else { unsafe { *set } };
+    // The suspension's SIGSEGV block is its mask's, until it returns.
+    let mut scope = Scoped::new();
     if mode == WaitMode::Suspend {
+        scope.open();
+        set_segv(wanted);
         install_mask(wanted);
-        lock_state().signals.tasks.get_mut(&me).unwrap().mask = host_mask(wanted);
+        lock_state().signals.tasks.get_mut(&me).unwrap().mask = with_segv(host_mask(wanted));
     }
     let deadline = if timeout.is_null() {
         None
