@@ -80,6 +80,7 @@
 #include <sys/random.h>
 #include <sys/sysinfo.h>
 #include <sys/syscall.h>
+#include <termios.h>
 #include <ucontext.h>
 
 #endif

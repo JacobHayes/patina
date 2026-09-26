@@ -245,6 +245,7 @@ int32_t patina_cpu_time_nanos(uint64_t *nanos);
  */
 struct timespec;
 int64_t patina_clock_gettime(int clock, struct timespec *time);
+int64_t patina_clock_getres(int clock, struct timespec *res);
 int64_t patina_clock_nanosleep(int clock, int flags, const struct timespec *request,
                                struct timespec *remain);
 #endif

@@ -12,32 +12,23 @@
 //! Every call starts from a termios of 0xAA bytes, so each recorded byte is
 //! one glibc wrote.
 //!
-//! The shim leaves `tcgetattr` undefined (registry `Absent`), so the
-//! scenario reaches glibc's definition through `dlsym`. libc only.
+//! The pipe and the closed number come first. libc only.
 
 use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::compare::{Difference, Ending, Failure, Observed};
 use crate::observe::Norm;
 use crate::probe::{AT_FDCWD, Probe, neg};
 use crate::vehicle::{Vehicle, fold_errno};
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
-type Tcgetattr = unsafe extern "C" fn(c_int, *mut termios) -> c_int;
-
-fn resolve(p: &Probe, symbol: &str) -> *mut c_void {
-    let address = p.rec.quiet(|| p.resolve(symbol));
-    p.require(&format!("glibc's {symbol} resolves"), address.is_some());
-    address.unwrap_or(std::ptr::null_mut())
-}
-
 /// `tcgetattr(fd)`: the result and, on success, the settings.
-fn get(p: &Probe, tcgetattr: Tcgetattr, fd: c_int, what: &str) -> (i64, Option<termios>) {
+fn get(p: &Probe, fd: c_int, what: &str) -> (i64, Option<termios>) {
     // SAFETY: a termios of 0xAA bytes is a valid out-parameter, and marks
     // every byte tcgetattr leaves unwritten.
     let mut t: termios = unsafe { std::mem::zeroed() };
     unsafe { std::ptr::write_bytes(&raw mut t, 0xAA, 1) };
-    // SAFETY: glibc's tcgetattr into a live termios.
+    // SAFETY: tcgetattr into a live termios.
     let r = fold_errno(i64::from(unsafe { tcgetattr(fd, &mut t) }));
     let event = p
         .rec
@@ -77,12 +68,19 @@ fn standard(t: termios) -> bool {
 }
 
 pub fn run(p: &Probe) {
-    // SAFETY: glibc's definition of this prototype.
-    let tcgetattr: Tcgetattr = unsafe { std::mem::transmute(resolve(p, "tcgetattr")) };
+    let (r, [rd, wr]) = p.pipe2(0);
+    p.require("pipe2", r == 0);
+    p.check("a pipe is ENOTTY", get(p, rd, "pipe").0 == neg(ENOTTY));
+    p.close(rd);
+    p.close(wr);
+    p.check(
+        "a closed number is EBADF",
+        get(p, rd, "closed").0 == neg(EBADF),
+    );
 
     let master = p.openat(AT_FDCWD, "/dev/ptmx", O_RDWR | O_NOCTTY, 0);
     p.require("open a pseudoterminal master", master >= 0);
-    let (r, t) = get(p, tcgetattr, master, "pty master");
+    let (r, t) = get(p, master, "pty master");
     p.check(
         "the master answers its peer's settings",
         r == 0 && t.is_some_and(standard),
@@ -102,26 +100,13 @@ pub fn run(p: &Probe) {
         .emit();
     p.require("open the peer", peer >= 0);
     let peer = peer as c_int;
-    let (r, t) = get(p, tcgetattr, peer, "pty peer");
+    let (r, t) = get(p, peer, "pty peer");
     p.check(
         "the peer answers the pts driver's initial settings",
         r == 0 && t.is_some_and(standard),
     );
     p.close(peer);
     p.close(master);
-
-    let (r, [rd, wr]) = p.pipe2(0);
-    p.require("pipe2", r == 0);
-    p.check(
-        "a pipe is ENOTTY",
-        get(p, tcgetattr, rd, "pipe").0 == neg(ENOTTY),
-    );
-    p.close(rd);
-    p.close(wr);
-    p.check(
-        "a closed number is EBADF",
-        get(p, tcgetattr, rd, "closed").0 == neg(EBADF),
-    );
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -135,16 +120,26 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
     ],
     symbols: &["tcgetattr", "ioctl", "openat", "pipe2", "close"],
-    resolves: &["tcgetattr"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim defines no tcgetattr (registry Absent), and its dlsym answers NULL for a name it does not route (c/posix/dlsym.c patina_dlsym_route), so the scenario cannot reach glibc's definition",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Exit(101),
-            diagnostic: "fd/termios: cannot continue: glibc's tcgetattr resolves",
+    gaps: &[
+        Gap {
+            status: Status::Pending(Arc::Fs),
+            vehicles: &[Vehicle::Libc],
+            what: "the virtual machine has no pseudoterminals: an open of /dev/ptmx answers ENOSYS (no terminal device is modeled)",
+            failure: Failure::Differs(&[
+                Difference::field(7, "openat", "ret", Observed::Int(-1)),
+                Difference::field(7, "openat", "errno", Observed::Str("ENOSYS")),
+            ]),
         },
-    }],
+        Gap {
+            status: Status::Pending(Arc::Fs),
+            vehicles: &[Vehicle::Libc],
+            what: "without a pseudoterminal the pty half cannot run; tcgetattr's answers for a pipe and a closed number match",
+            failure: Failure::Stops {
+                events: 8,
+                ending: Ending::Exit(101),
+                diagnostic: "fd/termios: cannot continue: open a pseudoterminal master",
+            },
+        },
+    ],
     ..DEFAULTS
 };

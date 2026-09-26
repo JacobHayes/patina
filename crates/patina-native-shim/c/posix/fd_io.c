@@ -442,6 +442,35 @@ int ioctl(int fd, unsigned long request, ...) {
     return fail_int(patina_ioctl(fd, (uint64_t)request, arg));
 }
 
+#ifdef __linux__
+/* glibc's tcgetattr (sysdeps/unix/sysv/linux/tcgetattr.c): TCGETS into the
+ * kernel's termios through the same entry the ioctl row takes, then the user
+ * struct: the flags and line discipline copied, the kernel's 19 control
+ * characters followed by _POSIX_VDISABLE, and both speeds the baud bits of
+ * c_cflag. No descriptor the virtual machine has is a terminal, so a valid
+ * number answers the ioctl row's ENOTTY and nothing is written. */
+struct patina_kernel_termios {
+    tcflag_t c_iflag, c_oflag, c_cflag, c_lflag;
+    cc_t c_line;
+    cc_t c_cc[19];
+};
+
+int tcgetattr(int fd, struct termios *termios_p) {
+    struct patina_kernel_termios kernel;
+    if (fail_int(patina_ioctl(fd, TCGETS, &kernel)) != 0) return -1;
+    termios_p->c_iflag = kernel.c_iflag;
+    termios_p->c_oflag = kernel.c_oflag;
+    termios_p->c_cflag = kernel.c_cflag;
+    termios_p->c_lflag = kernel.c_lflag;
+    termios_p->c_line = kernel.c_line;
+    termios_p->c_ispeed = termios_p->c_ospeed = kernel.c_cflag & (CBAUD | CBAUDEX);
+    memcpy(termios_p->c_cc, kernel.c_cc, sizeof kernel.c_cc);
+    memset(termios_p->c_cc + sizeof kernel.c_cc, _POSIX_VDISABLE,
+           sizeof termios_p->c_cc - sizeof kernel.c_cc);
+    return 0;
+}
+#endif
+
 /*
  * In-process pipe / socketpair (class g, in-process slice). Both endpoints stay
  * inside this one guest process — the common case is an async runtime's own

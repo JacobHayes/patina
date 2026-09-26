@@ -2025,13 +2025,13 @@ const ROWS: &[SymbolRow] = &[
         "__clock_gettime",
         Platform::Linux,
         Serves::Syscalls(&["clock_gettime"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "__gettimeofday",
         Platform::Linux,
         Serves::Syscalls(&["gettimeofday"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "getrlimit64",
@@ -2073,7 +2073,7 @@ const ROWS: &[SymbolRow] = &[
         "clock_getres",
         Platform::Linux,
         Serves::Syscalls(&["clock_getres"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "statvfs",
@@ -2325,7 +2325,7 @@ const ROWS: &[SymbolRow] = &[
         "tcgetattr",
         Platform::Linux,
         Serves::Syscalls(&["ioctl"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "getifaddrs",

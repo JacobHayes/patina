@@ -9,8 +9,7 @@
  * serves; a new interposer needs a symbol row (the object scan fails otherwise).
  */
 
-int clock_gettime(clockid_t clock_id, struct timespec *time) {
-    patina_note_boundary_symbol("clock_gettime");
+static int patina_clock_gettime_libc(clockid_t clock_id, struct timespec *time) {
 #ifdef __linux__
     /* Every Linux clock id is decoded once, in Rust, for both doors. */
     int64_t result = patina_clock_gettime((int)clock_id, time);
@@ -42,6 +41,32 @@ int clock_gettime(clockid_t clock_id, struct timespec *time) {
 #endif
 }
 
+int clock_gettime(clockid_t clock_id, struct timespec *time) {
+    patina_note_boundary_symbol("clock_gettime");
+    return patina_clock_gettime_libc(clock_id, time);
+}
+
+#ifdef __linux__
+/* glibc's internal spelling (GLIBC_PRIVATE), which static archives built
+ * against glibc call directly: the same clock. */
+int __clock_gettime(clockid_t clock_id, struct timespec *time) {
+    patina_note_boundary_symbol("__clock_gettime");
+    return patina_clock_gettime_libc(clock_id, time);
+}
+
+/* The clock_getres row: the high-resolution clocks resolve to 1 ns, a NULL
+ * `res` is not written, an unknown clock is EINVAL. */
+int clock_getres(clockid_t clock_id, struct timespec *res) {
+    patina_note_boundary_symbol("clock_getres");
+    int64_t result = patina_clock_getres((int)clock_id, res);
+    if (result < 0) {
+        errno = (int)-result;
+        return -1;
+    }
+    return 0;
+}
+#endif
+
 /*
  * Whole-second CLOCK_REALTIME. Bundled C libraries reach for `time` where Rust
  * would use `SystemTime::now` (SQLite's `unixCurrentTime`/`unixRandomness` seed
@@ -61,9 +86,11 @@ time_t time(time_t *out) {
     return seconds;
 }
 
-int gettimeofday(struct timeval *restrict time, void *restrict zone) {
-    patina_note_boundary_symbol("gettimeofday");
-    (void)zone;
+/* glibc's gettimeofday (sysdeps/unix/sysv/linux/gettimeofday.c): a time zone
+ * it is given is zeroed, never the kernel's `sys_tz`; the time is the
+ * realtime clock in microseconds. */
+static int patina_gettimeofday(struct timeval *restrict time, void *restrict zone) {
+    if (zone != NULL) memset(zone, 0, sizeof(struct timezone));
     uint64_t nanos = 0;
     if (patina_clock_now(PATINA_CLOCK_REALTIME, &nanos) != 0) {
         errno = patina_errno();
@@ -73,6 +100,19 @@ int gettimeofday(struct timeval *restrict time, void *restrict zone) {
     time->tv_usec = (suseconds_t)((nanos % UINT64_C(1000000000)) / UINT64_C(1000));
     return 0;
 }
+
+int gettimeofday(struct timeval *restrict time, void *restrict zone) {
+    patina_note_boundary_symbol("gettimeofday");
+    return patina_gettimeofday(time, zone);
+}
+
+#ifdef __linux__
+/* The IFUNC-resolved internal spelling static archives reach. */
+int __gettimeofday(struct timeval *restrict time, void *restrict zone) {
+    patina_note_boundary_symbol("__gettimeofday");
+    return patina_gettimeofday(time, zone);
+}
+#endif
 
 static int patina_nanosleep(const struct timespec *duration, struct timespec *remaining) {
     if (duration == NULL || duration->tv_sec < 0 || duration->tv_nsec < 0 ||

@@ -1,5 +1,5 @@
-//! time/libc_clocks — the glibc spellings of the clock rows the shim leaves
-//! undefined (registry `Absent`): `clock_getres`, the internal
+//! time/libc_clocks — the glibc spellings of the clock rows no other
+//! scenario's libc vehicle calls: `clock_getres`, the internal
 //! `__clock_gettime` (GLIBC_PRIVATE, which some static archives call) and
 //! `__gettimeofday`. They answer as their rows do:
 //!
@@ -13,11 +13,9 @@
 //!   given (glibc answers `tz` itself, where the row fills in the kernel's
 //!   `sys_tz`).
 //!
-//! The scenario reaches glibc's definitions through `dlsym`, looking every
-//! name up (recorded) before it needs one. libc only.
+//! libc only.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::observe::Norm;
 use crate::probe::{Probe, neg};
 use crate::vehicle::{Vehicle, fold_errno};
@@ -32,15 +30,10 @@ struct Timezone {
 }
 
 type ClockFn = unsafe extern "C" fn(clockid_t, *mut timespec) -> c_int;
-type GettimeofdayFn = unsafe extern "C" fn(*mut timeval, *mut c_void) -> c_int;
 
-/// Look up each of `symbols` (every lookup recorded), then require them all.
-fn resolve_all<const N: usize>(p: &Probe, symbols: [&str; N]) -> [*mut c_void; N] {
-    let found = symbols.map(|symbol| p.resolve(symbol));
-    for (symbol, address) in symbols.iter().zip(&found) {
-        p.require(&format!("glibc's {symbol} resolves"), address.is_some());
-    }
-    found.map(|address| address.unwrap_or(std::ptr::null_mut()))
+unsafe extern "C" {
+    fn __clock_gettime(clock: clockid_t, time: *mut timespec) -> c_int;
+    fn __gettimeofday(time: *mut timeval, zone: *mut c_void) -> c_int;
 }
 
 /// `clock_getres(clock, res)` (`with_res` false: a NULL `res`).
@@ -54,7 +47,7 @@ fn getres(p: &Probe, f: ClockFn, clock: clockid_t, with_res: bool) -> (i64, i64)
     } else {
         std::ptr::null_mut()
     };
-    // SAFETY: glibc's clock_getres; `out` is live or NULL.
+    // SAFETY: clock_getres; `out` is live or NULL.
     let r = fold_errno(i64::from(unsafe { f(clock, out) }));
     let ns = res.tv_sec * 1_000_000_000 + res.tv_nsec;
     let event = p
@@ -77,7 +70,7 @@ fn gettime(p: &Probe, f: ClockFn, clock: clockid_t) -> (i64, i128) {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    // SAFETY: glibc's __clock_gettime into a live timespec.
+    // SAFETY: __clock_gettime into a live timespec.
     let r = fold_errno(i64::from(unsafe { f(clock, &mut ts) }));
     let ns = i128::from(ts.tv_sec) * 1_000_000_000 + i128::from(ts.tv_nsec);
     let event = p.rec.event("__clock_gettime", r).arg("clock", clock);
@@ -93,37 +86,28 @@ fn gettime(p: &Probe, f: ClockFn, clock: clockid_t) -> (i64, i128) {
 }
 
 pub fn run(p: &Probe) {
-    let [clock_getres, clock_gettime, gettimeofday] =
-        resolve_all(p, ["clock_getres", "__clock_gettime", "__gettimeofday"]);
-    // SAFETY: glibc's definitions of these prototypes.
-    let (clock_getres, clock_gettime, gettimeofday): (ClockFn, ClockFn, GettimeofdayFn) = unsafe {
-        (
-            std::mem::transmute::<*mut c_void, ClockFn>(clock_getres),
-            std::mem::transmute::<*mut c_void, ClockFn>(clock_gettime),
-            std::mem::transmute::<*mut c_void, GettimeofdayFn>(gettimeofday),
-        )
-    };
+    let (getres_fn, gettime_fn): (ClockFn, ClockFn) = (clock_getres, __clock_gettime);
 
-    let (r, ns) = getres(p, clock_getres, CLOCK_MONOTONIC, true);
+    let (r, ns) = getres(p, getres_fn, CLOCK_MONOTONIC, true);
     p.check("CLOCK_MONOTONIC resolves to 1 ns", r == 0 && ns == 1);
     p.check(
         "a NULL res is not written and succeeds",
-        getres(p, clock_getres, CLOCK_MONOTONIC, false).0 == 0,
+        getres(p, getres_fn, CLOCK_MONOTONIC, false).0 == 0,
     );
     p.check(
         "an unknown clock's resolution is EINVAL",
-        getres(p, clock_getres, 99, true).0 == neg(EINVAL),
+        getres(p, getres_fn, 99, true).0 == neg(EINVAL),
     );
 
-    let (r, first) = gettime(p, clock_gettime, CLOCK_MONOTONIC);
-    let (r2, second) = gettime(p, clock_gettime, CLOCK_MONOTONIC);
+    let (r, first) = gettime(p, gettime_fn, CLOCK_MONOTONIC);
+    let (r2, second) = gettime(p, gettime_fn, CLOCK_MONOTONIC);
     p.check(
         "__clock_gettime reads a monotonic clock",
         r == 0 && r2 == 0 && second >= first,
     );
     p.check(
         "an unknown clock is EINVAL",
-        gettime(p, clock_gettime, 99).0 == neg(EINVAL),
+        gettime(p, gettime_fn, 99).0 == neg(EINVAL),
     );
 
     let (r, before) = p.clock_gettime(CLOCK_REALTIME);
@@ -135,9 +119,9 @@ pub fn run(p: &Probe) {
         tz_minuteswest: 77,
         tz_dsttime: 77,
     };
-    // SAFETY: glibc's __gettimeofday into a live timeval and timezone.
+    // SAFETY: __gettimeofday into a live timeval and timezone.
     let r2 = fold_errno(i64::from(unsafe {
-        gettimeofday(&mut tv, (&raw mut tz).cast())
+        __gettimeofday(&mut tv, (&raw mut tz).cast())
     }));
     let us = i128::from(tv.tv_sec) * 1_000_000 + i128::from(tv.tv_usec);
     p.rec
@@ -177,29 +161,6 @@ pub const SCENARIO: Scenario = Scenario {
         "__gettimeofday",
         "clock_gettime",
     ],
-    resolves: &["clock_getres", "__clock_gettime", "__gettimeofday"],
     needs: &[Need::HighResTimers],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim defines none of clock_getres, __clock_gettime and __gettimeofday (registry Absent), and its dlsym answers NULL for a name it does not route (c/posix/dlsym.c patina_dlsym_route): every lookup fails",
-            failure: Failure::Differs(&[
-                Difference::field(0, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(1, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(2, "dlsym", "fields.resolved", Observed::Bool(false)),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[Vehicle::Libc],
-            what: "with none of glibc's definitions reachable, the scenario cannot call them",
-            failure: Failure::Stops {
-                events: 3,
-                ending: Ending::Exit(101),
-                diagnostic: "time/libc_clocks: cannot continue: glibc's clock_getres resolves",
-            },
-        },
-    ],
     ..DEFAULTS
 };
