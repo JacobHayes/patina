@@ -81,6 +81,8 @@ enum {
     PATINA_FD_PIDFD = 15,    /* a process descriptor (Linux) */
     PATINA_FD_LANDLOCK_RULESET = 16, /* a Landlock ruleset (Linux) */
     PATINA_FD_USERFAULTFD = 17, /* a userfaultfd descriptor (Linux) */
+    PATINA_FD_NAMESPACE = 18,   /* a namespace file, /proc/self/ns/<type> (Linux) */
+    PATINA_FD_NAMESPACE_PATH = 19, /* a namespace file opened O_PATH (Linux) */
 };
 
 enum {
@@ -273,7 +275,8 @@ int64_t patina_clock_nanosleep(int clock, int flags, const struct timespec *requ
  * (a `..` out of it, an absolute path or symlink: EXDEV); IN_ROOT makes the
  * base the root; NO_SYMLINKS refuses any symlink (ELOOP); NO_XDEV refuses
  * leaving the volume (/dev/urandom: EXDEV); CACHED refuses a creating or
- * truncating open (EAGAIN).
+ * truncating open (EAGAIN); NO_MAGICLINKS refuses a magic link, a
+ * /proc/self/ns entry (ELOOP).
  */
 #define PATINA_AT_FDCWD (-100)
 enum {
@@ -284,6 +287,7 @@ enum {
     PATINA_RESOLVE_NO_SYMLINKS = 1u << 4,
     PATINA_RESOLVE_NO_XDEV = 1u << 5,
     PATINA_RESOLVE_CACHED = 1u << 6,
+    PATINA_RESOLVE_NO_MAGICLINKS = 1u << 7,
 };
 /*
  * The resolver itself, for the callers that want the canonical NAME
@@ -524,12 +528,14 @@ enum {
     PATINA_FS_VOLUME = 0,
     PATINA_FS_PIPEFS = 1,
     PATINA_FS_SOCKFS = 2,
+    PATINA_FS_NSFS = 3, /* a namespace file (Linux): root's, on its own device */
 };
 enum {
     PATINA_VOLUME_DEV_MAJOR = 8,
     PATINA_VOLUME_DEV_MINOR = 1,
     PATINA_PIPEFS_DEV_MINOR = 14,
     PATINA_SOCKFS_DEV_MINOR = 8,
+    PATINA_NSFS_DEV_MINOR = 4,
 };
 
 /*

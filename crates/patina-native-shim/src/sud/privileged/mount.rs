@@ -240,7 +240,9 @@ pub(in crate::sud) fn fsconfig(_: &Credential, a: &[u64; 6]) -> Answer {
             | FdKind::TimerFd
             | FdKind::Pidfd
             | FdKind::LandlockRuleset
-            | FdKind::Userfaultfd => refuse(errno::EINVAL),
+            | FdKind::Userfaultfd
+            | FdKind::Namespace
+            | FdKind::NamespacePath => refuse(errno::EINVAL),
         },
     }
 }

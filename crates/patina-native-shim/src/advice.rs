@@ -42,8 +42,9 @@ fn is_fifo(resolved: &Resolved) -> bool {
 /// with a mapping `sync_file_range` writes back (the rest are `ESPIPE`).
 fn has_mapping(resolved: &Resolved) -> bool {
     match resolved.kind {
-        // An mqueue inode is a regular file.
-        FdKind::File | FdKind::Dir | FdKind::MessageQueue => true,
+        // An mqueue inode and a namespace file's nsfs inode are regular
+        // files.
+        FdKind::File | FdKind::Dir | FdKind::MessageQueue | FdKind::Namespace => true,
         FdKind::OPath
         | FdKind::Stdin
         | FdKind::Stdout
@@ -57,7 +58,8 @@ fn has_mapping(resolved: &Resolved) -> bool {
         | FdKind::Epoll
         | FdKind::Pidfd
         | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd => false,
+        | FdKind::Userfaultfd
+        | FdKind::NamespacePath => false,
     }
 }
 
@@ -151,7 +153,9 @@ pub extern "C" fn patina_syncfs(raw_fd: c_int) -> c_int {
             | FdKind::MessageQueue
             | FdKind::Pidfd
             | FdKind::LandlockRuleset
-            | FdKind::Userfaultfd => false,
+            | FdKind::Userfaultfd
+            | FdKind::Namespace
+            | FdKind::NamespacePath => false,
         };
         if on_volume {
             crate::fs_sync_volume()

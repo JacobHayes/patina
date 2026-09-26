@@ -109,9 +109,15 @@ fn descriptor_node(raw_fd: c_int) -> Result<Node, c_int> {
         | FdKind::Epoll
         | FdKind::Pidfd
         | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd => Node::Pseudo {
+        | FdKind::Userfaultfd
+        | FdKind::NamespacePath => Node::Pseudo {
             mode: ANON_INODE_MODE,
             regular: false,
+        },
+        // The namespace's nsfs inode: a regular file, 0444.
+        FdKind::Namespace => Node::Pseudo {
+            mode: 0o444,
+            regular: true,
         },
         FdKind::MessageQueue => Node::Pseudo {
             mode: thread::ipc::mq_mode(resolved.handle).unwrap_or(0),

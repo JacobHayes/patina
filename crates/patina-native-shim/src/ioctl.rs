@@ -116,7 +116,11 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
             | FdKind::Epoll
             | FdKind::SignalFd
             | FdKind::Pidfd
-            | FdKind::LandlockRuleset => fail(ENOTTY),
+            | FdKind::LandlockRuleset
+            | FdKind::NamespacePath => fail(ENOTTY),
+            // A namespace file's nsfs inode is an empty regular file.
+            #[cfg(target_os = "linux")]
+            FdKind::Namespace => put_int(arg, 0),
             // Not a regular file: the request goes to the descriptor's own
             // ioctl, which knows no `FIONREAD`.
             #[cfg(target_os = "linux")]
@@ -147,6 +151,15 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
                 Some(Err(errno)) => fail(errno),
                 None => fail(ENOTTY),
             }
+        }
+        // A namespace file's own requests (`ns_ioctl`) are not modeled;
+        // it answers any other `ENOTTY`.
+        #[cfg(target_os = "linux")]
+        _ if resolved.kind == FdKind::Namespace && crate::nsfs::is_ns_ioctl(request) => {
+            crate::trap_fatal(&format!(
+                "ioctl: namespace request {request:#x} on a namespace file is not modeled; \
+                 failing closed"
+            ))
         }
         // Every other request goes to the userfaultfd's own ioctl.
         #[cfg(target_os = "linux")]

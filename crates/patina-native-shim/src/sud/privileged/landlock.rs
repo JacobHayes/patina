@@ -181,7 +181,7 @@ pub(in crate::sud) fn landlock_add_rule(_: &Credential, a: &[u64; 6]) -> Answer 
 /// `get_path_from_fd` of a path rule's parent: `fdget_raw` (an `O_PATH`
 /// descriptor names its entry) is `EBADF` for a number not open, then a
 /// ruleset, or a node on an internal filesystem or mount (an anonymous
-/// pipe's pipefs, sockfs, the anonymous inodes, a queue's internal mqueue
+/// pipe's pipefs, sockfs, the anonymous inodes, nsfs, a queue's internal mqueue
 /// mount, a memfd's shmem or hugetlbfs mount, secret memory's), is
 /// `EBADFD`. An entry on the volume, a FIFO there, and `/dev/urandom` on
 /// devtmpfs pass, and the rule is added.
@@ -212,7 +212,9 @@ fn parent_beneath(parent: c_int) -> Answer {
         | FdKind::TimerFd
         | FdKind::Pidfd
         | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd => refuse(errno::EBADFD),
+        | FdKind::Userfaultfd
+        | FdKind::Namespace
+        | FdKind::NamespacePath => refuse(errno::EBADFD),
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Err(Unmodeled::Path(
             "a captured standard stream as a path rule's parent (the stream has no modeled node)"
                 .into(),

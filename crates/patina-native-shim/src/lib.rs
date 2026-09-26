@@ -121,6 +121,9 @@ mod limits;
 mod localtime;
 #[cfg(target_os = "linux")]
 mod mem;
+// The caller's namespace files, `/proc/self/ns/*`. See `nsfs.rs`.
+#[cfg(target_os = "linux")]
+mod nsfs;
 #[cfg(target_os = "linux")]
 mod numa;
 mod panic_boundary;
@@ -514,9 +517,10 @@ pub(crate) fn resolve_fd(raw_fd: c_int) -> Result<Resolved, c_int> {
 /// What a guest number names for an operation on an OPENED file — the kernel's
 /// `fdget`, which refuses an `O_PATH` descriptor with `EBADF` exactly as it
 /// refuses an empty slot (`read`, `ioctl`, `fsync`, the `f*xattr` rows, ...).
+/// Every `O_PATH` description is a path-only kind ([`FdKind::is_path_only`]).
 pub(crate) fn fdget(raw_fd: c_int) -> Result<Resolved, c_int> {
     match resolve_fd(raw_fd)? {
-        resolved if resolved.kind == FdKind::OPath => Err(EBADF),
+        resolved if resolved.kind.is_path_only() => Err(EBADF),
         resolved => Ok(resolved),
     }
 }
@@ -591,6 +595,8 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
             mem::userfaultfd::released(release.handle);
             Ok(())
         }
+        #[cfg(target_os = "linux")]
+        FdKind::Namespace | FdKind::NamespacePath => Ok(()),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => {
             thread::kqueue_close(release.handle);
@@ -4257,6 +4263,55 @@ pub unsafe extern "C" fn patina_openat2(
     unsafe { open_at(dirfd, path, flags, mode, resolve) }
 }
 
+/// An open of a namespace file (`nsfs`): the link is followed to the
+/// namespace's nsfs inode, a root-owned, immutable `0444` regular file. In
+/// the kernel's order (`do_open`'s `O_DIRECTORY` check comes before
+/// `may_open`'s): under `O_PATH`, `O_DIRECTORY` is `ENOTDIR`, then
+/// `O_NOFOLLOW` names the link itself, which has no descriptor here (a named
+/// deny), else an [`FdKind::NamespacePath`] description; otherwise
+/// `O_CREAT|O_EXCL` is `EEXIST`, `O_DIRECTORY` `ENOTDIR`, `O_NOFOLLOW`
+/// `ELOOP`, and write access or `O_TRUNC` `EPERM` (the inode is immutable);
+/// a read-only open is a [`FdKind::Namespace`] description, `O_APPEND` and
+/// `O_NONBLOCK` kept as status.
+#[cfg(target_os = "linux")]
+fn open_namespace(index: usize, flags: u32, cloexec: bool) -> c_int {
+    let nofollow = flags & O_NOFOLLOW != 0;
+    let (kind, status) = if flags & O_PATH != 0 {
+        if flags & O_DIRECTORY != 0 {
+            return fail(ENOTDIR);
+        }
+        if nofollow {
+            return deny(DENY_O_PATH_SYMLINK);
+        }
+        (FdKind::NamespacePath, O_PATH)
+    } else {
+        if flags & (O_CREATE | O_EXCLUSIVE) == O_CREATE | O_EXCLUSIVE {
+            return fail(EEXIST);
+        }
+        if flags & O_DIRECTORY != 0 {
+            return fail(ENOTDIR);
+        }
+        if nofollow {
+            return fail(ELOOP);
+        }
+        if flags & (O_WRITE | O_TRUNCATE) != 0 {
+            return fail(EPERM);
+        }
+        (
+            FdKind::Namespace,
+            O_READ | O_OPENED | (flags & (O_APPEND | O_NONBLOCK)),
+        )
+    };
+    nsfs::made(index);
+    match install_fd(kind, index as u64, status, cloexec) {
+        Ok(number) => {
+            set_errno(0);
+            number
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
 /// The one open behind [`patina_openat`] and `patina_openat2`.
 ///
 /// # Safety
@@ -4347,6 +4402,10 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
             };
         }
         return fail(EACCES);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(index) = nsfs::entry_at(&resolved.path) {
+        return open_namespace(index, flags, cloexec);
     }
     let writes = open_flags.write
         || open_flags.create
@@ -4802,6 +4861,12 @@ unsafe fn read_resolved(
             Ok(read) => read as isize,
             Err(errno) => fail(errno) as isize,
         },
+        // `O_PATH` opened nothing to read (`fdget`).
+        #[cfg(target_os = "linux")]
+        FdKind::NamespacePath => fail(EBADF) as isize,
+        // An nsfs inode has no read method (`FMODE_CAN_READ`).
+        #[cfg(target_os = "linux")]
+        FdKind::Namespace => fail(EINVAL) as isize,
         // SAFETY: forwarded from this function's own contract.
         #[cfg(target_os = "linux")]
         FdKind::MessageQueue if resolved.status & O_READ != 0 => unsafe {
@@ -4896,6 +4961,9 @@ unsafe fn write_resolved(
         // Opened read-only: `vfs_write`'s `FMODE_WRITE` check refuses first.
         #[cfg(target_os = "linux")]
         FdKind::Userfaultfd => fail(EBADF) as isize,
+        // Read-only (or `O_PATH`): no write access.
+        #[cfg(target_os = "linux")]
+        FdKind::Namespace | FdKind::NamespacePath => fail(EBADF) as isize,
         // A queue file has no write method: EBADF without write access, EINVAL
         // with it.
         #[cfg(target_os = "linux")]
@@ -4927,6 +4995,10 @@ fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved, u64), c_in
         FdKind::File | FdKind::Dir => Ok((resolved, offset)),
         #[cfg(target_os = "linux")]
         FdKind::MessageQueue => Ok((resolved, offset)),
+        // An nsfs inode is a regular file: positioned, but it can neither
+        // be read nor (read-only) written.
+        #[cfg(target_os = "linux")]
+        FdKind::Namespace => Ok((resolved, offset)),
         FdKind::OPath
         | FdKind::Stdin
         | FdKind::Stdout
@@ -4941,7 +5013,8 @@ fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved, u64), c_in
         | FdKind::TimerFd
         | FdKind::Pidfd
         | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd => Err(ESPIPE),
+        | FdKind::Userfaultfd
+        | FdKind::NamespacePath => Err(ESPIPE),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => Err(ESPIPE),
     }
@@ -4960,6 +5033,10 @@ unsafe fn fs_pread(
     }
     if resolved.kind == FdKind::Dir {
         return fail(EISDIR) as isize;
+    }
+    #[cfg(target_os = "linux")]
+    if resolved.kind == FdKind::Namespace {
+        return fail(EINVAL) as isize;
     }
     #[cfg(target_os = "linux")]
     if resolved.kind == FdKind::MessageQueue {
@@ -5413,7 +5490,7 @@ fn release_posix_locks(raw_fd: c_int) {
     let Ok(resolved) = resolve_fd(raw_fd) else {
         return;
     };
-    if resolved.kind == FdKind::OPath {
+    if resolved.kind.is_path_only() {
         return;
     }
     if let Ok(file) = lock_identity(&resolved) {
@@ -5474,6 +5551,10 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
         {
             return i64::from(fail(EBADF));
         }
+        #[cfg(target_os = "linux")]
+        Ok(resolved) if resolved.kind == FdKind::NamespacePath => {
+            return i64::from(fail(EBADF));
+        }
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
         // `noop_llseek`: the position stays where it is, 0, for any whence
         // `ksys_lseek` passes on.
@@ -5527,7 +5608,7 @@ fn seek_data_or_hole(handle: Fd, offset: i64, data: bool) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fsync(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let handle = match resolve_fd(raw_fd) {
+    let handle = match fdget(raw_fd) {
         // Secret memory has nothing to write back (no `fsync` operation).
         #[cfg(target_os = "linux")]
         Ok(resolved) if resolved.kind == FdKind::File && mem::secret(resolved.handle) => {
@@ -5563,7 +5644,7 @@ fn fs_sync_volume() -> Result<(), c_int> {
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_set_len(raw_fd: c_int, length: u64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let handle = match resolve_fd(raw_fd) {
+    let handle = match fdget(raw_fd) {
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
         Ok(_) => return fail(EINVAL),
         Err(errno) => return fail(errno),
@@ -5619,6 +5700,9 @@ fn metadata_kind(kind: FsEntryKind) -> u32 {
 const PATINA_FS_VOLUME: u32 = 0;
 const PATINA_FS_PIPEFS: u32 = 1;
 const PATINA_FS_SOCKFS: u32 = 2;
+/// A namespace file's nsfs inode (`crate::nsfs`): root's, on device 0:4.
+#[cfg(target_os = "linux")]
+const PATINA_FS_NSFS: u32 = 3;
 
 /// The `(major, minor)` device a `PATINA_FS_*` filesystem reports through
 /// `st_dev`/`stx_dev_*` (`PATINA_*_DEV_*` in `patina_native.h`): the volume is
@@ -5629,6 +5713,7 @@ pub(crate) fn fs_device(fs: u32) -> (u32, u32) {
     match fs {
         PATINA_FS_PIPEFS => (0, 14),
         PATINA_FS_SOCKFS => (0, 8),
+        PATINA_FS_NSFS => (0, 4),
         _ => (8, 1),
     }
 }
@@ -5856,10 +5941,32 @@ pub unsafe extern "C" fn patina_metadata_at(
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
     };
+    #[cfg(target_os = "linux")]
+    if let Some(index) = nsfs::entry_at(&resolved.path) {
+        if flags & paths::RESOLVE_NOFOLLOW != 0 {
+            trap_fatal(
+                "the metadata of a /proc/self/ns link itself (a procfs inode) is not modeled, \
+                 only the namespace file it opens; failing closed",
+            );
+        }
+        return write_patina_metadata(nsfs::metadata(index), out);
+    }
     let Some(metadata) = resolved.metadata else {
         return fail(ENOENT);
     };
     write_metadata(metadata, out)
+}
+
+/// Write a record the shim made itself (a namespace file's).
+#[cfg(target_os = "linux")]
+fn write_patina_metadata(metadata: PatinaMetadata, out: *mut PatinaMetadata) -> c_int {
+    if out.is_null() {
+        return fail(EINVAL);
+    }
+    // SAFETY: `out` was checked and is writable per the C ABI contract.
+    unsafe { out.write(metadata) };
+    set_errno(0);
+    0
 }
 
 /// Read full metadata for a deterministic descriptor.
@@ -5886,6 +5993,14 @@ pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut Patina
             Ok(metadata) => write_metadata(metadata, out),
             Err(errno) => fail(errno),
         };
+    }
+    // A namespace file is the namespace's nsfs inode (`O_PATH` too:
+    // `fstat` takes it).
+    #[cfg(target_os = "linux")]
+    if let Ok(resolved) = resolve_fd(raw_fd) {
+        if matches!(resolved.kind, FdKind::Namespace | FdKind::NamespacePath) {
+            return write_patina_metadata(nsfs::metadata(resolved.handle as usize), out);
+        }
     }
     // An anonymous pipe end or a socket is on pipefs/sockfs: its node is the
     // shim's own, and answers without a trip to the filesystem.
@@ -5975,6 +6090,12 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
     if thread::pipe_inode_set_mode(raw_fd, mode).is_some() {
         set_errno(0);
         return 0;
+    }
+    // A namespace file's nsfs inode is root's and immutable
+    // (`notify_change`'s `IS_IMMUTABLE`).
+    #[cfg(target_os = "linux")]
+    if matches!(resolve_fd(raw_fd), Ok(resolved) if resolved.kind == FdKind::Namespace) {
+        return fail(EPERM);
     }
     // A userfaultfd's inode is its own and the caller's
     // (`anon_inode_create_getfile`), so the change is allowed. Nothing reads
@@ -6130,13 +6251,10 @@ pub extern "C" fn patina_futimens(
         set_errno(0);
         return 0;
     }
-    let resolved = match resolve_fd(raw_fd) {
+    let resolved = match fdget(raw_fd) {
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
     };
-    if resolved.kind == FdKind::OPath {
-        return fail(EBADF);
-    }
     let (atime, mtime) = match resolve_time_arguments(atime_kind, atime, mtime_kind, mtime) {
         Ok(times) => times,
         Err(errno) => return fail(errno),
@@ -6278,13 +6396,10 @@ pub unsafe extern "C" fn patina_chown(
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let resolved = match resolve_fd(raw_fd) {
+    let resolved = match fdget(raw_fd) {
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
     };
-    if resolved.kind == FdKind::OPath {
-        return fail(EBADF);
-    }
     if let Some(node) = thread::fifo_ino(raw_fd) {
         let metadata = match with_context(|context| context.fs_inode_metadata(node)) {
             Ok(metadata) => metadata,
@@ -6420,7 +6535,7 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
     };
-    if resolved.kind == FdKind::OPath || resolved.status & O_WRITE == 0 {
+    if resolved.kind.is_path_only() || resolved.status & O_WRITE == 0 {
         return fail(EBADF);
     }
     match resolved.kind {
@@ -6440,7 +6555,9 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         | FdKind::TimerFd
         | FdKind::Pidfd
         | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd => {
+        | FdKind::Userfaultfd
+        | FdKind::Namespace
+        | FdKind::NamespacePath => {
             return fail(ENODEV);
         }
         // A queue is a regular file (judged after the range, below).
@@ -7042,6 +7159,16 @@ pub unsafe extern "C" fn patina_read_link(
         Ok(path) => path,
         Err(errno) => return fail(errno) as isize,
     };
+    // A namespace file's descriptor names its nsfs inode, no link: an empty
+    // path is `ENOENT` (`do_readlinkat`).
+    #[cfg(target_os = "linux")]
+    if path.is_empty()
+        && resolve_fd(dirfd).is_ok_and(|resolved| {
+            matches!(resolved.kind, FdKind::Namespace | FdKind::NamespacePath)
+        })
+    {
+        return fail(ENOENT) as isize;
+    }
     let resolved = match paths::resolve(
         dirfd,
         &path,
@@ -7050,6 +7177,21 @@ pub unsafe extern "C" fn patina_read_link(
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno) as isize,
     };
+    // A namespace file's link reads `<type>:[<inode>]` (`ns_get_name`),
+    // truncated to the room given.
+    #[cfg(target_os = "linux")]
+    if let Some(index) = nsfs::entry_at(&resolved.path) {
+        let target = nsfs::link_target(index);
+        let copied = target.len().min(len);
+        // SAFETY: `buf` was checked and is writable for `len` bytes by this
+        // function's C ABI.
+        unsafe {
+            slice::from_raw_parts_mut(buf.cast::<u8>(), len)[..copied]
+                .copy_from_slice(&target.as_bytes()[..copied]);
+        }
+        set_errno(0);
+        return copied as isize;
+    }
     match resolved.metadata.map(|metadata| metadata.kind) {
         None => return fail(ENOENT) as isize,
         Some(FsEntryKind::Symlink) => {}
@@ -7956,7 +8098,9 @@ mod thread {
             | FdKind::TimerFd
             | FdKind::Pidfd
             | FdKind::LandlockRuleset
-            | FdKind::Userfaultfd => Err(super::ENOTSOCK),
+            | FdKind::Userfaultfd
+            | FdKind::Namespace
+            | FdKind::NamespacePath => Err(super::ENOTSOCK),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::ENOTSOCK),
         }
@@ -7984,7 +8128,9 @@ mod thread {
             | FdKind::TimerFd
             | FdKind::Pidfd
             | FdKind::LandlockRuleset
-            | FdKind::Userfaultfd => Err(super::EBADF),
+            | FdKind::Userfaultfd
+            | FdKind::Namespace
+            | FdKind::NamespacePath => Err(super::EBADF),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::EBADF),
         }
@@ -13103,6 +13249,11 @@ mod thread {
             FdKind::File | FdKind::Dir | FdKind::OPath | FdKind::Urandom => {
                 (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM, (0, 0))
             }
+            // An nsfs inode has no poll method either.
+            #[cfg(target_os = "linux")]
+            FdKind::Namespace | FdKind::NamespacePath => {
+                (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM, (0, 0))
+            }
             // `timerfd_poll`: readable while an expiration is unread; every
             // firing is an arrival.
             #[cfg(target_os = "linux")]
@@ -14452,16 +14603,22 @@ mod thread {
                 Err(errno) if errno == super::super::EBADF => return fail(errno),
                 id => id,
             };
-            let Some(target) = super::super::fd_table().lock().resolve(fd) else {
+            // `fdget` of the target: an `O_PATH` descriptor opened nothing
+            // to watch.
+            let Some(target) = super::super::fd_table()
+                .lock()
+                .resolve(fd)
+                .filter(|target| !target.kind.is_path_only())
+            else {
                 return fail(super::super::EBADF);
             };
             if matches!(
                 target.kind,
                 FdKind::File
                     | FdKind::Dir
-                    | FdKind::OPath
                     | FdKind::Urandom
                     | FdKind::LandlockRuleset
+                    | FdKind::Namespace
             ) {
                 return fail(EPERM);
             }

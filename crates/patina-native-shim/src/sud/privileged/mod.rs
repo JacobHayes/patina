@@ -472,6 +472,20 @@ mod tests {
                 ],
                 refusal: errno::EPERM,
             },
+            // A mount namespace's install needs `CAP_SYS_CHROOT` too.
+            Case {
+                row: Syscall::N_setns,
+                check: |credential, a| install(credential, a[1]),
+                args: [
+                    0,
+                    u64::from(linux_raw_sys::general::CLONE_NEWNS),
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+                refusal: errno::EPERM,
+            },
             Case {
                 row: Syscall::N_kcmp,
                 check: kcmp,

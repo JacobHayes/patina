@@ -410,12 +410,6 @@ const EOVERFLOW: i64 = errno::EOVERFLOW as i64;
 
 const E2BIG: i64 = errno::E2BIG as i64;
 
-// The descriptor kinds `patina_fd_kind` answers (`PATINA_FD_*` in
-// `patina_native.h`): the one oracle a row consults when its meaning depends
-// on what a number names. Everything else about a descriptor is answered by
-// the universal `patina_*` entries, which resolve the number themselves.
-const PATINA_FD_DIR: c_int = 4;
-
 // Patina clock ids (see `patina_native.h`).
 const PATINA_CLOCK_REALTIME: u32 = 0;
 
@@ -460,6 +454,8 @@ const PATINA_RESOLVE_NO_SYMLINKS: u32 = 1 << 4;
 const PATINA_RESOLVE_NO_XDEV: u32 = 1 << 5;
 
 const PATINA_RESOLVE_CACHED: u32 = 1 << 6;
+
+const PATINA_RESOLVE_NO_MAGICLINKS: u32 = 1 << 7;
 
 // Kernel `open(2)` flag bits: x86_64 and arm64 disagree on `O_DIRECTORY`,
 // `O_NOFOLLOW`, `O_DIRECT` and `O_LARGEFILE`.

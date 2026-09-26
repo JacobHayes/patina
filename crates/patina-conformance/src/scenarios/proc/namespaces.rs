@@ -15,10 +15,19 @@
 //!   single-threaded caller gets one is the host's user-namespace policy
 //!   (`user.max_user_namespaces`, Ubuntu's AppArmor restriction), and it
 //!   would move the probe.
-//! * `setns` of a descriptor not open is `EBADF`, of one that is neither a
-//!   namespace nor a pidfd `EINVAL`; of the caller's own UTS namespace
-//!   (`/proc/self/ns/uts`) with another namespace type `EINVAL`, and
-//!   otherwise `EPERM` (`CAP_SYS_ADMIN` over the namespace: `validate_ns`).
+//! * the caller's namespace files (`/proc/self/ns/*`) are links that read
+//!   `<type>:[<inode>]` and open the namespace's nsfs inode: a root-owned,
+//!   read-only regular file of that inode number, immutable (opening it for
+//!   writing or `fchmod` of it is `EPERM`; the open flags are judged in
+//!   `do_open`'s order), which an `O_PATH` open names too; an `O_PATH`
+//!   descriptor opened nothing, so every operation that takes an opened file
+//!   refuses it (`EBADF`);
+//! * `setns` of a descriptor not open is `EBADF` (an `O_PATH` one too), of
+//!   one that is neither a namespace nor a pidfd `EINVAL`; of the caller's
+//!   own UTS namespace (`/proc/self/ns/uts`) with another namespace type
+//!   `EINVAL`, and otherwise `EPERM` (`CAP_SYS_ADMIN` over the namespace:
+//!   `validate_ns`); of its own user namespace `EINVAL` (`userns_install`
+//!   refuses the namespace the caller is in, before any capability).
 //!
 //! The libc vehicle goes through glibc's `unshare` and `setns`, which the
 //! shim defines.
@@ -29,10 +38,8 @@
 //! the probe changes. The harness runs the scenario only for an unprivileged
 //! caller, and the probe stops before any call unless it is one.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{AT_FDCWD, Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -130,8 +137,110 @@ pub fn run(p: &Probe) {
         setns(uts, CLONE_NEWUTS) == neg(EPERM),
     );
     p.check("with any type too", setns(uts, 0) == neg(EPERM));
+    let (read, target) = p.readlinkat(AT_FDCWD, "/proc/self/ns/uts", 64);
+    let (_, file) = p.fstat(uts);
+    p.check(
+        "the link reads uts:[inode], the inode the open file has",
+        read > 0
+            && file
+                .as_ref()
+                .is_some_and(|file| target == format!("uts:[{}]", file.ino)),
+    );
+    p.check(
+        "a namespace file is a root-owned, read-only regular file",
+        file.as_ref()
+            .is_some_and(|file| file.kind == "reg" && file.perm == 0o444 && file.uid == 0),
+    );
+    p.check(
+        "its immutable inode refuses fchmod (EPERM)",
+        p.fchmod(uts, 0o400) == neg(EPERM),
+    );
     p.close(uts);
+    for (flags, answer) in OPENS {
+        let fd = p.openat(AT_FDCWD, "/proc/self/ns/uts", flags | O_CLOEXEC, 0o600);
+        p.check(
+            &format!("an open with flags {flags:#o} answers {answer}"),
+            if answer == 0 {
+                fd >= 0
+            } else {
+                fd == neg(answer) as i32
+            },
+        );
+        if fd >= 0 {
+            p.close(fd);
+        }
+    }
+    let path_only = p.openat(AT_FDCWD, "/proc/self/ns/uts", O_PATH | O_CLOEXEC, 0);
+    p.require("open the caller's UTS namespace O_PATH", path_only >= 0);
+    let (_, named) = p.fstat(path_only);
+    p.check(
+        "an O_PATH descriptor names the same file",
+        named
+            .zip(file)
+            .is_some_and(|(named, file)| named.ino == file.ino),
+    );
+    p.check(
+        "setns of an O_PATH descriptor is EBADF",
+        setns(path_only, 0) == neg(EBADF),
+    );
+    // An `O_PATH` descriptor opened nothing: every operation that takes an
+    // opened file (`fdget`) refuses it.
+    let epoll = p.epoll_create1(EPOLL_CLOEXEC);
+    p.require("epoll_create1", epoll >= 0);
+    for (what, answer) in [
+        ("fsync", p.fsync(path_only)),
+        ("ftruncate", p.ftruncate(path_only, 0)),
+        (
+            "getdents64",
+            p.getdents(Syscall::N_getdents64, path_only, 256).0,
+        ),
+        ("fchown", p.fchown(path_only, u32::MAX, u32::MAX)),
+        ("fchmod", p.fchmod(path_only, 0o400)),
+        ("flock", p.flock(path_only, LOCK_SH)),
+        (
+            "epoll_ctl",
+            p.epoll_ctl(epoll, EPOLL_CTL_ADD, path_only, EPOLLIN as u32, 0),
+        ),
+    ] {
+        p.check(
+            &format!("{what} of an O_PATH descriptor is EBADF"),
+            answer == neg(EBADF),
+        );
+    }
+    p.close(epoll);
+    p.close(path_only);
+    let user = p.openat(AT_FDCWD, "/proc/self/ns/user", O_RDONLY | O_CLOEXEC, 0);
+    p.require("open the caller's user namespace", user >= 0);
+    p.check(
+        "joining the user namespace the caller is in is EINVAL",
+        setns(user, 0) == neg(EINVAL),
+    );
+    p.close(user);
 }
+
+/// Opens of `/proc/self/ns/uts` and their answers (0: a descriptor), in the
+/// kernel's order: `O_CREAT|O_EXCL` (`EEXIST`), then `O_DIRECTORY`
+/// (`ENOTDIR`, before the link a trailing `O_NOFOLLOW` names is judged),
+/// then `O_NOFOLLOW` (`ELOOP`), then write access or `O_TRUNC` on the
+/// immutable inode (`EPERM`); `O_PATH` takes only `O_DIRECTORY`.
+const OPENS: [(c_int, c_int); 16] = [
+    (O_RDONLY, 0),
+    (O_WRONLY, EPERM),
+    (O_RDWR, EPERM),
+    (O_RDONLY | O_TRUNC, EPERM),
+    (O_CREAT, 0),
+    (O_CREAT | O_WRONLY, EPERM),
+    (O_CREAT | O_EXCL, EEXIST),
+    (O_CREAT | O_EXCL | O_NOFOLLOW, EEXIST),
+    (O_NOFOLLOW, ELOOP),
+    (O_WRONLY | O_NOFOLLOW, ELOOP),
+    (O_DIRECTORY, ENOTDIR),
+    (O_NOFOLLOW | O_DIRECTORY, ENOTDIR),
+    (O_WRONLY | O_DIRECTORY, ENOTDIR),
+    (O_PATH | O_DIRECTORY, ENOTDIR),
+    (O_PATH | O_NOFOLLOW | O_DIRECTORY, ENOTDIR),
+    (O_APPEND | O_NONBLOCK, 0),
+];
 
 pub const SCENARIO: Scenario = Scenario {
     name: "proc/namespaces",
@@ -141,29 +250,31 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_setns,
         Syscall::N_openat,
         Syscall::N_close,
+        Syscall::N_readlinkat,
+        Syscall::N_fstat,
+        Syscall::N_fchmod,
+        Syscall::N_fsync,
+        Syscall::N_ftruncate,
+        Syscall::N_getdents64,
+        Syscall::N_fchown,
+        Syscall::N_flock,
+        Syscall::N_epoll_ctl,
     ],
-    symbols: &["unshare", "setns", "openat", "close"],
+    symbols: &[
+        "unshare",
+        "setns",
+        "openat",
+        "close",
+        "readlinkat",
+        "fstat",
+        "fchmod",
+        "fsync",
+        "ftruncate",
+        "getdents64",
+        "fchown",
+        "flock",
+        "epoll_ctl",
+    ],
     needs: &[Need::Unprivileged],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: Vehicle::ALL,
-            what: "the virtual filesystem has no namespace files: /proc/self/ns/uts is ENOENT where the kernel opens the caller's UTS namespace",
-            failure: Failure::Differs(&[
-                Difference::field(38, "openat", "errno", Observed::Str("ENOENT")),
-                Difference::field(38, "openat", "ret", Observed::Int(-1)),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Privileged),
-            vehicles: Vehicle::ALL,
-            what: "without a namespace file the scenario cannot continue, so setns's namespace-type and CAP_SYS_ADMIN checks are never reached (patina-native-shim sud/privileged/process.rs setns refuses every descriptor the model holds)",
-            failure: Failure::Stops {
-                events: 39,
-                ending: Ending::Exit(101),
-                diagnostic: "proc/namespaces: cannot continue: open the caller's UTS namespace",
-            },
-        },
-    ],
     ..DEFAULTS
 };

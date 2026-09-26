@@ -94,6 +94,17 @@ pub(crate) enum FdKind {
     /// `mem::userfaultfd`.
     #[cfg(target_os = "linux")]
     Userfaultfd,
+    /// A namespace file (`/proc/self/ns/<type>`; the namespace's nsfs inode,
+    /// a regular file), opened read-only; `handle` is the entry's index in
+    /// `nsfs::ENTRIES`.
+    #[cfg(target_os = "linux")]
+    Namespace,
+    /// A namespace file opened `O_PATH`: it names the nsfs inode (`fstat`,
+    /// `fstatfs`, the `*at` rows' base) but opened nothing, so every
+    /// operation that takes a file (`fdget`) is `EBADF`, as for
+    /// [`FdKind::OPath`]; `handle` is the entry's index in `nsfs::ENTRIES`.
+    #[cfg(target_os = "linux")]
+    NamespacePath,
     /// A virtual kqueue; `handle` is the registry id.
     #[cfg(target_os = "macos")]
     Kqueue,
@@ -129,6 +140,10 @@ impl FdKind {
             FdKind::LandlockRuleset => 16,
             #[cfg(target_os = "linux")]
             FdKind::Userfaultfd => 17,
+            #[cfg(target_os = "linux")]
+            FdKind::Namespace => 18,
+            #[cfg(target_os = "linux")]
+            FdKind::NamespacePath => 19,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => 11,
         }
@@ -153,7 +168,9 @@ impl FdKind {
             | FdKind::TimerFd
             | FdKind::Pidfd
             | FdKind::LandlockRuleset
-            | FdKind::Userfaultfd => false,
+            | FdKind::Userfaultfd
+            | FdKind::Namespace
+            | FdKind::NamespacePath => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }
@@ -161,6 +178,38 @@ impl FdKind {
 }
 
 impl FdKind {
+    /// Whether the description was opened `O_PATH`: it names an entry but
+    /// opened nothing, so `fdget` (every operation that takes a file) refuses
+    /// it, `EBADF`, and only `fdget_raw`'s users (`fstat`, `fstatfs`, `fcntl`,
+    /// `close`, `dup`, the `*at` rows' base) take it.
+    pub(crate) fn is_path_only(self) -> bool {
+        match self {
+            FdKind::OPath => true,
+            #[cfg(target_os = "linux")]
+            FdKind::NamespacePath => true,
+            FdKind::Stdin
+            | FdKind::Stdout
+            | FdKind::Stderr
+            | FdKind::File
+            | FdKind::Dir
+            | FdKind::Urandom
+            | FdKind::Socket
+            | FdKind::Pipe => false,
+            #[cfg(target_os = "linux")]
+            FdKind::EventFd
+            | FdKind::Epoll
+            | FdKind::SignalFd
+            | FdKind::MessageQueue
+            | FdKind::TimerFd
+            | FdKind::Pidfd
+            | FdKind::LandlockRuleset
+            | FdKind::Userfaultfd
+            | FdKind::Namespace => false,
+            #[cfg(target_os = "macos")]
+            FdKind::Kqueue => false,
+        }
+    }
+
     /// Whether the description's `llseek` is `noop_llseek` (Linux): a seek
     /// leaves the position, always 0, where it is. The entropy device's
     /// (`random_fops`) and the eventfd, epoll, signalfd, timerfd and
@@ -184,7 +233,11 @@ impl FdKind {
             | FdKind::Socket
             | FdKind::Pipe => false,
             #[cfg(target_os = "linux")]
-            FdKind::MessageQueue | FdKind::Pidfd | FdKind::LandlockRuleset => false,
+            FdKind::MessageQueue
+            | FdKind::Pidfd
+            | FdKind::LandlockRuleset
+            | FdKind::Namespace
+            | FdKind::NamespacePath => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }

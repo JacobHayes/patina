@@ -73,11 +73,18 @@ pub(crate) const RESOLVE_NO_XDEV: u32 = 1 << 5;
 /// memory, so the walk is unchanged; the open refuses a creating or
 /// truncating one (`EAGAIN`), which could not complete without I/O.
 pub(crate) const RESOLVE_CACHED: u32 = 1 << 6;
-/// The restrictions `openat2`'s `RESOLVE_*` word decodes onto. It has no
-/// magic links to refuse: no entry here is one.
+/// Follow no magic link (`RESOLVE_NO_MAGICLINKS`): the `/proc/self/ns`
+/// entries are the only ones; meeting one is `ELOOP`.
 #[cfg(target_os = "linux")]
-pub(crate) const RESOLVE_SCOPE_FLAGS: u32 =
-    RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV | RESOLVE_CACHED;
+pub(crate) const RESOLVE_NO_MAGICLINKS: u32 = 1 << 7;
+/// The restrictions `openat2`'s `RESOLVE_*` word decodes onto.
+#[cfg(target_os = "linux")]
+pub(crate) const RESOLVE_SCOPE_FLAGS: u32 = RESOLVE_BENEATH
+    | RESOLVE_IN_ROOT
+    | RESOLVE_NO_SYMLINKS
+    | RESOLVE_NO_XDEV
+    | RESOLVE_CACHED
+    | RESOLVE_NO_MAGICLINKS;
 
 /// The one path that names a device the shim owns rather than a filesystem
 /// entry, on a mount of its own (devtmpfs). It is resolved without consulting
@@ -282,6 +289,15 @@ fn fd_path(guest_fd: c_int, empty_path: bool) -> Result<String, c_int> {
         | FdKind::Userfaultfd => {
             return Err(ENOTDIR);
         }
+        // A namespace file's nsfs inode is a regular file, but no path
+        // names it: an empty-path operation on it is not modeled.
+        #[cfg(target_os = "linux")]
+        FdKind::Namespace | FdKind::NamespacePath if empty_path => crate::trap_fatal(
+            "an empty-path operation on a namespace file (its nsfs inode has no path in the \
+             model) is not modeled; failing closed",
+        ),
+        #[cfg(target_os = "linux")]
+        FdKind::Namespace | FdKind::NamespacePath => return Err(ENOTDIR),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => return Err(ENOTDIR),
     };
@@ -371,6 +387,32 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolved, 
             }
             return Ok(Resolved {
                 path: URANDOM.to_owned(),
+                metadata: None,
+            });
+        }
+        // A namespace file: a magic link on procfs to the namespace's nsfs
+        // inode (a regular file). A mount-bound walk stops entering procfs
+        // (`EXDEV`); one that follows no symlink (`pick_link`) or no magic
+        // link (`nd_jump_link`) stops at it (`ELOOP`), and a scoped one may
+        // not jump through it (`EXDEV`); a trailing `/` follows it to a
+        // non-directory (`ENOTDIR`).
+        #[cfg(target_os = "linux")]
+        if let Some(index) = crate::nsfs::entry_at(&join(&lexical)) {
+            if flags & RESOLVE_NO_XDEV != 0 {
+                return Err(EXDEV);
+            }
+            let trailing_link = flags & RESOLVE_NOFOLLOW != 0 && !requires_directory;
+            if !trailing_link && flags & (RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS) != 0 {
+                return Err(ELOOP);
+            }
+            if scoped && !trailing_link {
+                return Err(EXDEV);
+            }
+            if requires_directory {
+                return Err(ENOTDIR);
+            }
+            return Ok(Resolved {
+                path: format!("/proc/self/ns/{}", crate::nsfs::ENTRIES[index].name),
                 metadata: None,
             });
         }

@@ -196,8 +196,8 @@ const RESOLVE_CACHED: u64 = uapi::RESOLVE_CACHED as u64;
 /// and any nonzero byte past the known fields `E2BIG`), then
 /// `build_open_flags`' strict checks, then the one open entry with its
 /// resolution restricted. A restriction with nothing to refuse here is
-/// accepted as the no-op it is: no entry is a magic link, and the volume is
-/// memory, so every lookup `RESOLVE_CACHED` allows is cached.
+/// accepted as the no-op it is: the volume is memory, so every lookup
+/// `RESOLVE_CACHED` allows is cached.
 pub(super) fn sys_openat2(dirfd: i64, path: u64, how: u64, size: u64) -> i64 {
     let Ok(size) = usize::try_from(size) else {
         return -E2BIG;
@@ -265,6 +265,7 @@ pub(super) fn sys_openat2(dirfd: i64, path: u64, how: u64, size: u64) -> i64 {
         (RESOLVE_BENEATH, PATINA_RESOLVE_BENEATH),
         (RESOLVE_IN_ROOT, PATINA_RESOLVE_IN_ROOT),
         (RESOLVE_CACHED, PATINA_RESOLVE_CACHED),
+        (RESOLVE_NO_MAGICLINKS, PATINA_RESOLVE_NO_MAGICLINKS),
     ] {
         if resolve & bit != 0 {
             scope |= restriction;
@@ -401,6 +402,17 @@ pub(super) fn stat_mode(values: &StatValues) -> u32 {
     kind | (values.mode & 0o7777)
 }
 
+/// The owner `stat` reports, byte for byte with the C `patina_stat_uid`/
+/// `patina_stat_gid`: the one modeled identity's, but for a namespace file,
+/// whose nsfs inode is root's.
+fn stat_owner(values: &StatValues) -> (u32, u32) {
+    if values.fs == crate::PATINA_FS_NSFS {
+        return (0, 0);
+    }
+    // SAFETY: plain constant reads.
+    unsafe { (patina_uid(), patina_gid()) }
+}
+
 /// The kernel's `new_encode_dev`: the 32-bit device word `struct stat` carries.
 fn encode_dev((major, minor): (u32, u32)) -> u64 {
     u64::from((minor & 0xff) | (major << 8) | ((minor & !0xff) << 12))
@@ -468,9 +480,8 @@ impl KernelStat {
             st_nlink: values.nlink as _,
             st_ino: values.ino,
             st_size: values.length as i64,
-            // SAFETY: plain constant reads.
-            st_uid: unsafe { patina_uid() },
-            st_gid: unsafe { patina_gid() },
+            st_uid: stat_owner(values).0,
+            st_gid: stat_owner(values).1,
             st_blksize: STAT_BLOCK_SIZE as _,
             st_blocks: stat_blocks(values.length) as i64,
             st_atime: values.atime.sec,
@@ -635,9 +646,8 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
         stx_blksize: STAT_BLOCK_SIZE as u32,
         stx_mode: stat_mode(&values) as u16,
         stx_nlink: values.nlink,
-        // SAFETY: plain constant reads.
-        stx_uid: unsafe { patina_uid() },
-        stx_gid: unsafe { patina_gid() },
+        stx_uid: stat_owner(&values).0,
+        stx_gid: stat_owner(&values).1,
         stx_ino: values.ino,
         stx_size: values.length,
         stx_blocks: stat_blocks(values.length),
@@ -966,12 +976,13 @@ pub(super) fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
 }
 
 pub(super) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFormat) -> i64 {
-    // Linux directory iteration needs a directory descriptor: a number that
-    // names nothing is EBADF, anything else (a file, a socket) is ENOTDIR.
-    match fd_kind(fd) {
-        None => return -EBADF,
-        Some(PATINA_FD_DIR) => {}
-        Some(_) => return -ENOTDIR,
+    // Linux directory iteration needs an opened directory (`fdget_pos`): a
+    // number that names nothing, or an `O_PATH` one, is EBADF; anything else
+    // (a file, a socket) is ENOTDIR.
+    match c_int::try_from(fd).map(crate::fdget) {
+        Err(_) | Ok(Err(_)) => return -EBADF,
+        Ok(Ok(resolved)) if resolved.kind == crate::fdtable::FdKind::Dir => {}
+        Ok(Ok(_)) => return -ENOTDIR,
     }
     if dirp == 0 {
         return -EFAULT;

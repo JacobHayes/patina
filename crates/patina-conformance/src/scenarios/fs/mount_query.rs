@@ -10,8 +10,9 @@
 //! * a mount id no mount has is `ENOENT` (unique ids start past 2^32; 6.11
 //!   moves that to 2^31 and refuses an id at or below it as `EINVAL`: the id
 //!   asked for is far past both);
-//! * a pipe's or a socket's node is on an internal mount `statx` names
-//!   but `statmount` does not know (`ENOENT`), with no birth time;
+//! * a pipe's, a socket's or a namespace file's node is on an internal
+//!   mount `statx` names but `statmount` does not know (`ENOENT`), with no
+//!   birth time;
 //! * `statmount` of the root's mount (its id from `statx`'s
 //!   `STATX_MNT_ID_UNIQUE`) answers the requested mask, that id and the
 //!   mount point `/`; a buffer with no room for a requested string is
@@ -178,13 +179,19 @@ pub fn run(p: &Probe) {
     );
     p.check("a unique mount id is past 2^32", root > 1 << 32);
 
-    // A pipe's and a socket's nodes are on the kernel's internal mounts
-    // (pipefs, sockfs), in no namespace: `statx` names a mount of their own,
-    // which `statmount` does not know, and neither filesystem records a
-    // birth time.
+    // A pipe's, a socket's and a namespace file's nodes are on the kernel's
+    // internal mounts (pipefs, sockfs, nsfs), in no namespace: `statx` names
+    // a mount of their own, which `statmount` does not know, and none of
+    // those filesystems records a birth time.
     let (_, pipe) = p.pipe2(0);
     let (_, pair) = p.socketpair(AF_UNIX, SOCK_STREAM, 0);
-    for (what, fd) in [("a pipe", pipe[0]), ("a socket", pair[0])] {
+    let ns = p.openat(AT_FDCWD, "/proc/self/ns/uts", O_RDONLY | O_CLOEXEC, 0);
+    p.require("open the caller's UTS namespace", ns >= 0);
+    for (what, fd) in [
+        ("a pipe", pipe[0]),
+        ("a socket", pair[0]),
+        ("a namespace file", ns),
+    ] {
         // SAFETY: plain data.
         let mut node: statx = unsafe { std::mem::zeroed() };
         let r = p.call_observed(
@@ -215,7 +222,7 @@ pub fn run(p: &Probe) {
             ) == neg(ENOENT),
         );
     }
-    for fd in [pipe[0], pipe[1], pair[0], pair[1]] {
+    for fd in [pipe[0], pipe[1], pair[0], pair[1], ns] {
         p.close(fd);
     }
 

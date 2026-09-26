@@ -735,11 +735,9 @@ fn map_file(addr: usize, len: usize, prot: c_int, flags: c_int, fd: c_int, offse
         return fail(EINVAL);
     }
     // `fget` never returns an `O_PATH` file.
-    let resolved = match crate::resolve_fd(fd) {
-        Ok(resolved) if resolved.kind != FdKind::OPath && resolved.status & crate::O_PATH == 0 => {
-            resolved
-        }
-        _ => return fail(EBADF),
+    let resolved = match crate::fdget(fd) {
+        Ok(resolved) => resolved,
+        Err(_) => return fail(EBADF),
     };
     // A hugetlbfs file maps in whole huge pages; any other file refuses
     // `MAP_HUGETLB`.

@@ -8,7 +8,7 @@
 
 use super::{Mappings, huge_page_size};
 use crate::fdtable::FdKind;
-use crate::{EBADF, EINVAL, SpinMutex};
+use crate::{EINVAL, SpinMutex};
 use patina_dst_abi::Fd;
 use patina_dst_abi::seals::{F_ALL_SEALS, F_SEAL_EXEC, F_SEAL_SEAL};
 use std::collections::BTreeMap;
@@ -171,11 +171,7 @@ pub unsafe extern "C" fn patina_memfd_create(name: *const c_char, flags: u32) ->
 /// The descriptor `fcntl`'s seal commands act on: `EBADF` for a closed or
 /// `O_PATH` one.
 fn sealable(fd: c_int) -> Result<crate::fdtable::Resolved, c_int> {
-    let resolved = crate::resolve_fd(fd)?;
-    if resolved.kind == FdKind::OPath || resolved.status & crate::O_PATH != 0 {
-        return Err(EBADF);
-    }
-    Ok(resolved)
+    crate::fdget(fd)
 }
 
 /// `fcntl(F_GET_SEALS)`: the seals of an anonymous file; every other

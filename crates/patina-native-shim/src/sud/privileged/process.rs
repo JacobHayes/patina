@@ -160,12 +160,22 @@ const JOINABLE: u64 = NEW_NAMESPACES | NEWUSER;
 
 /// `setns(fd, nstype)` (kernel/nsproxy.c): a descriptor not open (`O_PATH`
 /// included: `fdget`) is `EBADF`, then one that is neither a namespace file
-/// nor a pidfd `EINVAL`. The model holds no namespace file; through a pidfd,
-/// no namespace or an unknown one is `EINVAL`, then [`join_namespaces`].
+/// nor a pidfd `EINVAL`. A namespace file names one of the caller's own
+/// namespaces (`crate::nsfs`): a type other than its own (`nstype`, an
+/// `int`; 0 takes any) is `EINVAL`, then [`install`]. Through a pidfd, no
+/// namespace or an unknown one is `EINVAL`, then [`join_namespaces`].
 pub(in crate::sud) fn setns(credential: &Credential, a: &[u64; 6]) -> Answer {
     match crate::fdget(a[0] as c_int) {
         Err(code) => refuse(code),
         Ok(resolved) => match resolved.kind {
+            FdKind::Namespace => {
+                let entry = &crate::nsfs::ENTRIES[resolved.handle as usize];
+                let nstype = a[1] as u32;
+                if nstype != 0 && nstype != entry.flag {
+                    return refuse(errno::EINVAL);
+                }
+                install(credential, u64::from(entry.flag))
+            }
             FdKind::Pidfd => {
                 let nstype = u64::from(a[1] as u32);
                 if nstype == 0 || nstype & !JOINABLE != 0 {
@@ -191,7 +201,8 @@ pub(in crate::sud) fn setns(credential: &Credential, a: &[u64; 6]) -> Answer {
             | FdKind::MessageQueue
             | FdKind::TimerFd
             | FdKind::LandlockRuleset
-            | FdKind::Userfaultfd => refuse(errno::EINVAL),
+            | FdKind::Userfaultfd
+            | FdKind::NamespacePath => refuse(errno::EINVAL),
         },
     }
 }
@@ -208,11 +219,24 @@ pub(super) fn join_namespaces(credential: &Credential, nstype: u64, process: Pro
     if !ptrace_may_access(credential, process) {
         return refuse(errno::EPERM);
     }
+    install(credential, nstype)
+}
+
+/// Installing the caller's own namespaces, `nstype`'s, in the kernel's
+/// order: the user namespace is the caller's own (`userns_install`:
+/// `EINVAL`), a time namespace asked alone meets `timens_install`'s
+/// single-thread rule (`EUSERS`) before its capability, and every install
+/// needs `CAP_SYS_ADMIN` (`EPERM`), the mount namespace's `CAP_SYS_CHROOT`
+/// as well (`mntns_install`); holding them is where the model ends.
+pub(super) fn install(credential: &Credential, nstype: u64) -> Answer {
     if nstype & NEWUSER != 0 {
         return refuse(errno::EINVAL);
     }
     if nstype == u64::from(CLONE_NEWTIME) && crate::thread::live_threads() != 1 {
         return refuse(errno::EUSERS);
+    }
+    if nstype & u64::from(CLONE_NEWNS) != 0 && !credential.capable(Capability::SysChroot) {
+        return refuse(errno::EPERM);
     }
     super::gate(credential, Capability::SysAdmin, errno::EPERM)
 }

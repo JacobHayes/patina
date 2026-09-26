@@ -2281,10 +2281,10 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Privileged,
         Disposition::Modeled,
-        "A descriptor not open (`EBADF`), then no namespace file or pidfd (`EINVAL`; the model holds no namespace file). Through a pidfd, no namespace or an unknown one is `EINVAL`; then `validate_nsset`: init's namespaces need `ptrace_may_access` (init is root's: `CAP_SYS_PTRACE`, `EPERM`), the one user namespace is the caller's own (`EINVAL`), a time namespace alone with another thread alive is `EUSERS`, and every install needs `CAP_SYS_ADMIN` (`EPERM`).",
+        "A descriptor not open (`EBADF`, `O_PATH` included), then no namespace file or pidfd (`EINVAL`). A namespace file (`/proc/self/ns/*`, `nsfs`: one of the caller's own namespaces) named with another type is `EINVAL`, then its install. Through a pidfd, no namespace or an unknown one is `EINVAL`; then `validate_nsset`: init's namespaces need `ptrace_may_access` (init is root's: `CAP_SYS_PTRACE`, `EPERM`), then each install. The one user namespace is the caller's own (`EINVAL`), a time namespace alone with another thread alive is `EUSERS`, and every install needs `CAP_SYS_ADMIN` (`EPERM`), a mount namespace's `CAP_SYS_CHROOT` too.",
         None,
     )
-    .capabilities(&[Capability::SysAdmin, Capability::SysPtrace]),
+    .capabilities(&[Capability::SysAdmin, Capability::SysPtrace, Capability::SysChroot]),
     Syscall::N_getcpu => r(
         id,
         Family::Sched,

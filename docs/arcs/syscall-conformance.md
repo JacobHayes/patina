@@ -477,15 +477,14 @@ forwards into the same dispatcher instead of its two-number allowlist.
   (`patina_dst_syscalls::KERNEL_CONFIG`) and the shim's glibc wrappers
   (`c/posix/privileged.c`, `chroot` included); `fs/mount`, `fs/mount_api`,
   `fs/open_tree`, `sys/admin`, `sys/quota`, `sys/ioport`, `sys/root`,
-  `sys/perf`, `sys/bpf`, `proc/ptrace`, `proc/seccomp` (its queries,
-  and its mode checks up to the named fatal that entering a mode is) and
-  `sys/landlock` (rulesets as a descriptor kind; enforcing one is a named
-  fatal), `sys/lsm` (the declared stack, capability, Landlock and Yama)
-  and `sys/keys` (the process keyring and its `user` keys) run without a
-  gap. **Open**:
-  `proc/namespaces` stops where it opens `/proc/self/ns/uts`, which the
-  virtual filesystem lacks, before `setns`'s namespace checks; named fatals
-  where the model ends: unsharing filesystem state, descriptors or the
+  `sys/perf`, `sys/bpf`, `proc/ptrace`, `proc/namespaces` (the caller's
+  `/proc/self/ns/*` files), `proc/seccomp` (its queries, and its mode
+  checks up to the named fatal that entering a mode is) and `sys/landlock`
+  (rulesets as a descriptor kind; enforcing one is a named fatal),
+  `sys/lsm` (the declared stack, capability, Landlock and Yama) and
+  `sys/keys` (the process keyring and its `user` keys) run without a gap.
+  **Open**: named fatals where the model ends: unsharing filesystem
+  state, descriptors or the
   semaphore undo list from other threads, registering a `userfaultfd`
   range (the descriptor and its handshake are modeled: `mem/userfaultfd`
   runs without a gap), non-array BPF map types, detaching a BPF

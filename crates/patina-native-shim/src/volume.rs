@@ -48,6 +48,7 @@ const SOCKFS_MAGIC: i64 = 0x534F_434B;
 const ANON_INODE_FS_MAGIC: i64 = 0x0904_1934;
 const TMPFS_MAGIC: i64 = 0x0102_1994;
 const MQUEUE_MAGIC: i64 = 0x1980_0202;
+const NSFS_MAGIC: i64 = 0x6e73_6673;
 
 /// `statfs(2)` `f_flags`: the answer is valid (`ST_VALID`, set by
 /// `calculate_f_flags` on every answer) and the mount's atime policy.
@@ -73,16 +74,18 @@ enum Filesystem {
     AnonInodefs,
     Devtmpfs,
     Mqueue,
+    Nsfs,
 }
 
 impl Filesystem {
-    const ALL: [Filesystem; 6] = [
+    const ALL: [Filesystem; 7] = [
         Filesystem::Volume,
         Filesystem::Pipefs,
         Filesystem::Sockfs,
         Filesystem::AnonInodefs,
         Filesystem::Devtmpfs,
         Filesystem::Mqueue,
+        Filesystem::Nsfs,
     ];
 
     /// The filesystem type as the kernel registers it (`register_filesystem`,
@@ -93,7 +96,7 @@ impl Filesystem {
             Filesystem::Volume => Some("ext4"),
             Filesystem::Pipefs => Some("pipefs"),
             Filesystem::Sockfs => Some("sockfs"),
-            Filesystem::AnonInodefs => None,
+            Filesystem::AnonInodefs | Filesystem::Nsfs => None,
             Filesystem::Devtmpfs => Some("devtmpfs"),
             Filesystem::Mqueue => Some("mqueue"),
         }
@@ -107,6 +110,7 @@ impl Filesystem {
             Filesystem::AnonInodefs => ANON_INODEFS_DEVICE,
             Filesystem::Devtmpfs => DEVTMPFS_DEVICE,
             Filesystem::Mqueue => MQUEUE_DEVICE,
+            Filesystem::Nsfs => fs_device(crate::PATINA_FS_NSFS),
         }
     }
 
@@ -154,11 +158,13 @@ impl Filesystem {
             Filesystem::Pipefs
             | Filesystem::Sockfs
             | Filesystem::AnonInodefs
-            | Filesystem::Mqueue => KernelStatfs {
+            | Filesystem::Mqueue
+            | Filesystem::Nsfs => KernelStatfs {
                 f_type: match self {
                     Filesystem::Pipefs => PIPEFS_MAGIC,
                     Filesystem::Sockfs => SOCKFS_MAGIC,
                     Filesystem::Mqueue => MQUEUE_MAGIC,
+                    Filesystem::Nsfs => NSFS_MAGIC,
                     _ => ANON_INODE_FS_MAGIC,
                 },
                 f_bsize: crate::PAGE_SIZE as i64,
@@ -197,6 +203,7 @@ impl Filesystem {
         match self {
             Filesystem::Volume => MOUNTS[0].ids(),
             Filesystem::Devtmpfs => MOUNTS[1].ids(),
+            Filesystem::Nsfs => internal(3, 4),
             Filesystem::Sockfs => internal(9, 10),
             Filesystem::Pipefs => internal(15, 17),
             Filesystem::AnonInodefs => internal(16, 18),
@@ -212,7 +219,8 @@ impl Filesystem {
             Filesystem::Pipefs
             | Filesystem::Sockfs
             | Filesystem::AnonInodefs
-            | Filesystem::Mqueue => false,
+            | Filesystem::Mqueue
+            | Filesystem::Nsfs => false,
         }
     }
 
@@ -221,6 +229,7 @@ impl Filesystem {
         match fs {
             PATINA_FS_PIPEFS => Filesystem::Pipefs,
             PATINA_FS_SOCKFS => Filesystem::Sockfs,
+            crate::PATINA_FS_NSFS => Filesystem::Nsfs,
             _ => Filesystem::Volume,
         }
     }
@@ -286,6 +295,7 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
         | FdKind::Pidfd
         | FdKind::LandlockRuleset
         | FdKind::Userfaultfd => Ok(Filesystem::AnonInodefs),
+        FdKind::Namespace | FdKind::NamespacePath => Ok(Filesystem::Nsfs),
         FdKind::MessageQueue => Ok(Filesystem::Mqueue),
         FdKind::Urandom => Ok(Filesystem::Devtmpfs),
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Err(EBADF),
@@ -320,6 +330,9 @@ pub unsafe extern "C" fn patina_statfs(path: *const c_char, out: *mut KernelStat
         Ok(resolved) if resolved.metadata.is_some() => copy_out(Filesystem::Volume.describe(), out),
         Ok(resolved) if paths::is_urandom(&resolved.path) => {
             copy_out(Filesystem::Devtmpfs.describe(), out)
+        }
+        Ok(resolved) if crate::nsfs::entry_at(&resolved.path).is_some() => {
+            copy_out(Filesystem::Nsfs.describe(), out)
         }
         Ok(_) => fail(ENOENT),
         Err(errno) => fail(errno),
@@ -434,7 +447,11 @@ impl Mount {
 /// The filesystem types the virtual kernel registers, in the order 6.8
 /// registers them at boot (the order the pinned host's `/proc/filesystems`
 /// lists them in): each filesystem a node can be on that has a registered
-/// type, and nothing else.
+/// type, and nothing else. procfs, whose `/proc/self/ns` links the model
+/// answers, is left out: no node the model keeps is on it (a namespace
+/// file opens an nsfs inode), and the kernel registers many more types than
+/// the model has (tmpfs, sysfs, proc, …), which a caller listing them finds
+/// missing either way.
 #[cfg(target_arch = "x86_64")]
 const REGISTERED: [Filesystem; 5] = [
     Filesystem::Devtmpfs,

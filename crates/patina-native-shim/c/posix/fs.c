@@ -773,12 +773,25 @@ static void patina_fs_device(uint32_t fs, unsigned *major, unsigned *minor) {
             *major = 0;
             *minor = PATINA_SOCKFS_DEV_MINOR;
             break;
+        case PATINA_FS_NSFS:
+            *major = 0;
+            *minor = PATINA_NSFS_DEV_MINOR;
+            break;
         case PATINA_FS_VOLUME:
         default:
             *major = PATINA_VOLUME_DEV_MAJOR;
             *minor = PATINA_VOLUME_DEV_MINOR;
             break;
     }
+}
+
+/* The owner stat reports: the one modeled identity's, but for a namespace
+ * file, whose nsfs inode is root's. */
+static uid_t patina_stat_uid(const struct patina_metadata *values) {
+    return values->fs == PATINA_FS_NSFS ? 0 : (uid_t)patina_uid();
+}
+static gid_t patina_stat_gid(const struct patina_metadata *values) {
+    return values->fs == PATINA_FS_NSFS ? 0 : (gid_t)patina_gid();
 }
 
 /* The libc's own dev_t encoding of (major, minor), spelled out rather than
@@ -845,8 +858,8 @@ static int fill_stat(int result, const struct patina_metadata *values, struct st
     status->st_nlink = (nlink_t)values->nlink;
     status->st_ino = (ino_t)values->ino;
     status->st_size = (off_t)values->length;
-    status->st_uid = (uid_t)patina_uid();
-    status->st_gid = (gid_t)patina_gid();
+    status->st_uid = patina_stat_uid(values);
+    status->st_gid = patina_stat_gid(values);
     status->st_blksize = (blksize_t)PATINA_STAT_BLOCK_SIZE;
     status->st_blocks = (blkcnt_t)patina_stat_blocks(values->length);
 #ifdef __APPLE__
@@ -1182,8 +1195,8 @@ static int fill_stat64(int result, const struct patina_metadata *values, struct 
     status->st_nlink = (nlink_t)values->nlink;
     status->st_ino = (ino64_t)values->ino;
     status->st_size = (off64_t)values->length;
-    status->st_uid = (uid_t)patina_uid();
-    status->st_gid = (gid_t)patina_gid();
+    status->st_uid = patina_stat_uid(values);
+    status->st_gid = patina_stat_gid(values);
     status->st_blksize = (blksize_t)PATINA_STAT_BLOCK_SIZE;
     status->st_blocks = (blkcnt64_t)patina_stat_blocks(values->length);
     patina_split_time(values->atime, &status->st_atim.tv_sec, &status->st_atim.tv_nsec);
@@ -1243,8 +1256,8 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
     status->stx_blksize = (uint32_t)PATINA_STAT_BLOCK_SIZE;
     status->stx_mode = (uint16_t)patina_stat_mode(&values);
     status->stx_nlink = values.nlink;
-    status->stx_uid = patina_uid();
-    status->stx_gid = patina_gid();
+    status->stx_uid = (uint32_t)patina_stat_uid(&values);
+    status->stx_gid = (uint32_t)patina_stat_gid(&values);
     status->stx_ino = values.ino;
     status->stx_size = values.length;
     status->stx_blocks = patina_stat_blocks(values.length);
