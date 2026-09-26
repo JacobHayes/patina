@@ -350,8 +350,8 @@ is stated plainly:
    state, including after unlink; anonymous pipe/socket/stream descriptors
    without modeled filesystem inodes refuse loudly instead of dropping effects.
    Timestamps are signed: a pre-epoch or out-of-range time is truncated to the
-   filesystem's range, as the kernel does. Allocation extents are unmodeled: statx
-   omits BLOCKS instead of claiming allocation derived from file length.
+   filesystem's range, as the kernel does. Allocation is untracked: st_blocks and
+   stx_blocks count a file's length, and SEEK_DATA/SEEK_HOLE see no holes.
    The symbol registry (`crates/patina-native-shim/src/registry/symbols.rs`)
    enumerates this surface: every public symbol the shim defines carries a
    status — `Modeled`, `Partial` (a subset modeled, the rest refuses loudly),

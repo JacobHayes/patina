@@ -618,9 +618,9 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
     if statxbuf == 0 {
         return -EFAULT;
     }
-    // An honest mask, the exact one the C statx interposer reports:
-    // BASIC_STATS except unmodeled BLOCKS, plus MNT_ID (the kernel's
-    // vfs_statx fills them whatever was asked), STATX_BTIME only when requested.
+    // The exact mask the C statx interposer reports: BASIC_STATS (BLOCKS the
+    // length-derived count stat reports) plus MNT_ID (the kernel's vfs_statx
+    // fills them whatever was asked), STATX_BTIME only when requested.
     const STATX_BASIC_STATS: u32 = 0x07ff;
     const STATX_BTIME: u32 = 0x0800;
     const STATX_MNT_ID: u32 = 0x1000;
@@ -631,7 +631,7 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
         __reserved: 0,
     };
     let mut stx = Statx {
-        stx_mask: (STATX_BASIC_STATS & !0x400) | STATX_MNT_ID,
+        stx_mask: STATX_BASIC_STATS | STATX_MNT_ID,
         stx_blksize: STAT_BLOCK_SIZE as u32,
         stx_mode: stat_mode(&values) as u16,
         stx_nlink: values.nlink,
@@ -640,7 +640,7 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
         stx_gid: unsafe { patina_gid() },
         stx_ino: values.ino,
         stx_size: values.length,
-        stx_blocks: 0, // Allocation extents are not modeled.
+        stx_blocks: stat_blocks(values.length),
         stx_atime: timestamp(values.atime),
         stx_mtime: timestamp(values.mtime),
         stx_ctime: timestamp(values.ctime),

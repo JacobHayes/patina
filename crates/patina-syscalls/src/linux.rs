@@ -2115,7 +2115,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Fs,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fallocate`): mode 0 and KEEP_SIZE reserve, PUNCH_HOLE|KEEP_SIZE and ZERO_RANGE zero the range, the range-shifting modes are EOPNOTSUPP; EINVAL/EBADF/ESPIPE/EISDIR/ENODEV in the kernel's order; one recorded operation whatever the range. Modeled modes are 0, KEEP_SIZE, PUNCH_HOLE|KEEP_SIZE, ZERO_RANGE and ZERO_RANGE|KEEP_SIZE; Linux itself refuses unknown/self-contradictory combinations, while valid COLLAPSE_RANGE/INSERT_RANGE remain unmodeled EOPNOTSUPP. No allocation extent accounting is claimed via statx BLOCKS.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fallocate`): mode 0 and KEEP_SIZE reserve, PUNCH_HOLE|KEEP_SIZE and ZERO_RANGE zero the range, the range-shifting modes are EOPNOTSUPP; EINVAL/EBADF/ESPIPE/EISDIR/ENODEV in the kernel's order; one recorded operation whatever the range. Modeled modes are 0, KEEP_SIZE, PUNCH_HOLE|KEEP_SIZE, ZERO_RANGE and ZERO_RANGE|KEEP_SIZE; Linux itself refuses unknown/self-contradictory combinations, while valid COLLAPSE_RANGE/INSERT_RANGE remain unmodeled EOPNOTSUPP. Allocation is not tracked: a reservation adds no blocks (stat and statx count the length).",
         None,
     ),
     Syscall::N_timerfd_settime => r(
@@ -2458,7 +2458,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Fs,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver): an honest mask — STATX_BASIC_STATS and STATX_MNT_ID always, STATX_BTIME when requested — with the owner from the one identity and all four timestamps from the model; the device numbers (`stx_dev_*`) stay zero until the volume model of the fs arc.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver): a mask of STATX_BASIC_STATS (STATX_BLOCKS the length-derived count stat reports: allocation is not tracked) and STATX_MNT_ID always, STATX_BTIME when requested — with the owner from the one identity and all four timestamps from the model; the device numbers (`stx_dev_*`) stay zero until the volume model of the fs arc.",
         Some("fs"),
     )
     .since("4.11"),

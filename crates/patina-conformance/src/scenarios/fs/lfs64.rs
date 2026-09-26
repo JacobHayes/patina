@@ -46,7 +46,8 @@
 //!
 //! libc only: the plain names are the libc vehicle of the row scenarios.
 
-use crate::catalog::{DEFAULTS, Scenario};
+use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
+use crate::compare::{Difference, Failure, Observed};
 use crate::probe::{AT_FDCWD, Probe, StatBy, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -254,6 +255,19 @@ pub fn run(p: &Probe) {
         "posix_fallocate64 on a pipe returns ESPIPE",
         p.posix_fallocate64(wr, 0, 4096) == neg(ESPIPE),
     );
+
+    // A file that is all hole: the volume tracks no allocation (ByDesign).
+    let sparse = p.open64(&format!("{root}/sparse"), O_RDWR | O_CREAT | O_EXCL, 0o600);
+    p.require("open64 creates sparse", sparse >= 0);
+    p.check(
+        "ftruncate64 grows sparse to 1 MiB without writing",
+        p.ftruncate64(sparse, 1 << 20) == 0,
+    );
+    p.check(
+        "SEEK_DATA in a file that is all hole is ENXIO",
+        p.lseek64(sparse, 0, SEEK_DATA) == neg(ENXIO),
+    );
+    p.close(sparse);
 
     // ---- the stat64 family -------------------------------------------------
     let link = format!("{root}/l");
@@ -523,5 +537,15 @@ pub const SCENARIO: Scenario = Scenario {
         "close",
         "getpid",
     ],
+    gaps: &[Gap {
+        status: Status::ByDesign,
+        vehicles: &[Vehicle::Libc],
+        what: "allocation is not tracked: the volume holds a regular file's bytes densely (patina-fs-mem Inode.contents) and neither the crash model nor the restart snapshot carries which blocks a file has allocated, so sparse files, FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE and the holes an extending write or truncate leaves are not modeled: SEEK_DATA/SEEK_HOLE answer as for a file without holes, and st_blocks/stx_blocks count the length",
+        failure: Failure::Differs(&[
+            Difference::field(100, "lseek64", "ret", Observed::Int(0)),
+            Difference::field(100, "lseek64", "errno", Observed::Null),
+            Difference::check(101, "SEEK_DATA in a file that is all hole is ENXIO"),
+        ]),
+    }],
     ..DEFAULTS
 };

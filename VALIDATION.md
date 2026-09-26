@@ -651,8 +651,11 @@ Timestamps are signed: any second is accepted, a time before the epoch is kept,
 and one past the filesystem's range is truncated to it as the kernel's
 `timestamp_truncate` does (the volume is ext4's 1901-12-13 to 2446-05-10, a
 memfd tmpfs's every 64-bit second), never refused and never wrapped.
-Remaining intentional gaps: allocation extents are not modeled, so statx omits BLOCKS; traditional stat's
-length-derived blocks are not an allocation inventory. Anonymous descriptors
+Remaining intentional gaps: allocation is not tracked (sparse files,
+`KEEP_SIZE`, `PUNCH_HOLE`, the holes an extending write or truncate leaves), so
+`st_blocks` and `stx_blocks` count the length and `SEEK_DATA`/`SEEK_HOLE`
+answer as for a file without holes (the `fs/lfs64` and `fs/size` ByDesign
+gaps). Anonymous descriptors
 without filesystem inodes refuse metadata mutation loudly.
 
 ### Signal-wait confidence boundary

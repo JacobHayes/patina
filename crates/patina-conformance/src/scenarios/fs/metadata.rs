@@ -2,9 +2,7 @@
 //! report): kinds, permission bits, link counts, sizes, inode identity, and
 //! the AT_* flag vocabulary (timestamps are fs/times).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -187,16 +185,5 @@ pub const SCENARIO: Scenario = Scenario {
         "symlinkat",
         "linkat",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::ALL,
-        what: "allocation accounting: STATX_BLOCKS is absent because allocation extents are not modeled; length-derived blocks would lie after KEEP_SIZE or PUNCH_HOLE",
-        failure: Failure::Differs(&[
-            Difference::field(46, "statx", "fields.mask", Observed::Int(1023)),
-            Difference::field(49, "statx", "fields.mask", Observed::Int(3071)),
-            Difference::field(51, "statx", "fields.mask", Observed::Int(1023)),
-            Difference::check(48, "statx fills every basic field"),
-        ]),
-    }],
     ..DEFAULTS
 };

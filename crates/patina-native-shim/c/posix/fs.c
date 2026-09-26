@@ -1226,9 +1226,9 @@ static void patina_statx_time(struct statx_timestamp *out, struct patina_timesta
 }
 
 /*
- * statx: BASIC_STATS except BLOCKS (no allocation extent model), plus MNT_ID,
- * as the kernel's vfs_statx fills them whatever was asked; STATX_BTIME is
- * filled — and reported — only when requested, as ext4/xfs do.
+ * statx: BASIC_STATS (BLOCKS the length-derived count stat reports) plus
+ * MNT_ID, as the kernel's vfs_statx fills them whatever was asked; STATX_BTIME
+ * is filled — and reported — only when requested, as ext4/xfs do.
  */
 int statx(int directory, const char *restrict path, int flags, unsigned int mask,
           struct statx *restrict status) {
@@ -1241,7 +1241,7 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
     int result = patina_stat_at_values(directory, path, flags, &values);
     if (result < 0) return -1;
     memset(status, 0, sizeof *status);
-    status->stx_mask = (STATX_BASIC_STATS & ~STATX_BLOCKS) | STATX_MNT_ID;
+    status->stx_mask = STATX_BASIC_STATS | STATX_MNT_ID;
     status->stx_blksize = (uint32_t)PATINA_STAT_BLOCK_SIZE;
     status->stx_mode = (uint16_t)patina_stat_mode(&values);
     status->stx_nlink = values.nlink;
@@ -1249,7 +1249,7 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
     status->stx_gid = patina_gid();
     status->stx_ino = values.ino;
     status->stx_size = values.length;
-    status->stx_blocks = 0; /* Allocation extents are not modeled. */
+    status->stx_blocks = patina_stat_blocks(values.length);
     patina_statx_time(&status->stx_atime, values.atime);
     patina_statx_time(&status->stx_mtime, values.mtime);
     patina_statx_time(&status->stx_ctime, values.ctime);

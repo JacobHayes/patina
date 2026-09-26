@@ -540,8 +540,9 @@ File fsync stages timestamp metadata by inode, and directory fsync stages the
 directory's timestamps; crash reconstruction restores them without manufacturing
 new effects, includes symlinks, and preserves surviving new entries' birth times.
 Zero-count I/O is timestamp- and size-inert. Guest-sized growth reserves storage
-fallibly, and reports ENOSPC on capacity failure. Allocation extents are not
-modeled: statx omits STATX_BLOCKS rather than claiming length-derived allocation.
+fallibly, and reports ENOSPC on capacity failure. Allocation is not
+tracked: `st_blocks` and `stx_blocks` count a file's length, and
+SEEK_DATA/SEEK_HOLE answer as for a file without holes.
 Timestamps are signed nanoseconds: a set time of any second is truncated to the
 target filesystem's range (ext4's for the volume, tmpfs's for a memfd) as the
 kernel's `timestamp_truncate` does, never refused and never wrapped.
