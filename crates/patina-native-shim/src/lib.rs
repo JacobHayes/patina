@@ -3935,29 +3935,29 @@ pub extern "C" fn patina_publish_environ() {
     }
 }
 
-/// Fill caller-owned memory with deterministic bytes.
+/// Fill caller-owned memory with deterministic bytes: 0, or -1 with `EFAULT`
+/// for a buffer the guest cannot write (the bytes are drawn either way,
+/// except for a NULL buffer).
 ///
 /// # Safety
-/// `destination` must be writable for `length` bytes when `length` is nonzero.
+/// `destination` is a guest address; it is written only through `uaccess`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_entropy(destination: *mut c_void, length: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if length != 0 && destination.is_null() {
-        return fail(EINVAL);
+        return fail(EFAULT);
     }
     let result = with_context(|context| context.entropy_bytes(length));
     match result {
-        Ok(bytes) => {
-            if length != 0 {
-                // SAFETY: Guaranteed by this function's C ABI contract.
-                unsafe {
-                    slice::from_raw_parts_mut(destination.cast::<u8>(), length)
-                        .copy_from_slice(&bytes);
-                }
+        // Copied as the kernel's `copy_to_user` copies: a buffer the guest
+        // cannot write is `EFAULT`, never a fault in shim code.
+        Ok(bytes) => match uaccess::write_bytes(destination as usize, &bytes) {
+            Ok(()) => {
+                set_errno(0);
+                0
             }
-            set_errno(0);
-            0
-        }
+            Err(errno) => fail(errno),
+        },
         Err(errno) => fail(errno),
     }
 }

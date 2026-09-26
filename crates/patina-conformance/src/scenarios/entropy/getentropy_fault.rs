@@ -5,8 +5,7 @@
 //! Its own scenario, because a door that writes the buffer itself ends the
 //! whole run (and a crash loses the captured event stream). libc only.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
 use crate::vehicle::{Vehicle, fold_errno};
 use libc::*;
@@ -43,15 +42,5 @@ pub const SCENARIO: Scenario = Scenario {
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_getrandom, Syscall::N_mmap, Syscall::N_munmap],
     symbols: &["getentropy", "mmap", "munmap"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::TimeTimersSchedIdentity),
-        vehicles: &[Vehicle::Libc],
-        what: "getentropy copies the drawn bytes into the buffer itself (native shim lib.rs patina_entropy, copy_from_slice), so a read-only buffer is a SIGSEGV in the guest where glibc's getrandom answers EFAULT; the crash also loses the captured event stream",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(SIGSEGV),
-            diagnostic: "PATINA_INFRA native_run signal=11",
-        },
-    }],
     ..DEFAULTS
 };

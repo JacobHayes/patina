@@ -23,7 +23,14 @@
  * `patina_entropy` stream.
  */
 
+/* glibc's getentropy (misc/getentropy.c): a request past 256 bytes is EIO
+ * before anything is drawn; otherwise getrandom's answer, EFAULT for a buffer
+ * it cannot write. */
 static int patina_deterministic_getentropy(void *destination, size_t length) {
+    if (length > 256) {
+        errno = EIO;
+        return -1;
+    }
     if (patina_entropy(destination, length) != 0) {
         errno = patina_errno();
         return -1;

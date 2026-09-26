@@ -6,8 +6,7 @@
 //! buffer too). Two draws differ; the bytes themselves are never recorded.
 //! libc only.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
 use crate::vehicle::{Vehicle, fold_errno};
 use libc::*;
@@ -68,27 +67,5 @@ pub const SCENARIO: Scenario = Scenario {
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_getrandom],
     symbols: &["getentropy"],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[Vehicle::Libc],
-            what: "getentropy serves a request of any length (c/posix/entropy.c patina_deterministic_getentropy over native shim lib.rs patina_entropy), where glibc refuses one past 256 bytes with EIO (GETENTROPY_MAX) before drawing into the buffer",
-            failure: Failure::Differs(&[
-                Difference::field(6, "getentropy", "ret", Observed::Int(0)),
-                Difference::field(6, "getentropy", "errno", Observed::Null),
-                Difference::check(7, "257 bytes is EIO"),
-                Difference::check(8, "a refused request draws nothing"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[Vehicle::Libc],
-            what: "a NULL buffer is EINVAL (native shim lib.rs patina_entropy), where glibc passes getrandom's EFAULT through",
-            failure: Failure::Differs(&[
-                Difference::field(11, "getentropy", "errno", Observed::Str("EINVAL")),
-                Difference::check(12, "a NULL buffer is EFAULT"),
-            ]),
-        },
-    ],
     ..DEFAULTS
 };
