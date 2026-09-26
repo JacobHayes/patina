@@ -2,7 +2,8 @@
 //!
 //! * the best-effort class takes a level 0..7 and reads back (for pid 0 and
 //!   the caller's own pid); the idle class is open to anyone; so is going
-//!   back to best effort, at any level;
+//!   back to best effort, at any level; bits above the 16 the kernel keeps
+//!   are dropped;
 //! * the realtime class needs `CAP_SYS_NICE` or `CAP_SYS_ADMIN` (`EPERM`);
 //!   an unknown class, and an unknown `which` to either row, are `EINVAL`; a
 //!   pid no process has is `ESRCH`.
@@ -57,6 +58,14 @@ pub fn run(p: &Probe) {
     p.check(
         "reads back",
         p.ioprio_get(WHO_PROCESS, Who::Caller, true) == CLASS_BE << 13,
+    );
+    p.check(
+        "a priority with bit 16 set is accepted by its low class",
+        p.ioprio_set(WHO_PROCESS, Who::Caller, CLASS_BE | 8, 3) == 0,
+    );
+    p.check(
+        "and reads back as its low 16 bits",
+        p.ioprio_get(WHO_PROCESS, Who::Caller, true) == (CLASS_BE << 13) | 3,
     );
     p.check(
         "the realtime class is EPERM",

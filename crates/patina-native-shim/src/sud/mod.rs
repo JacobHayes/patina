@@ -1406,6 +1406,9 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_get_robust_list, |nr, a| {
         privileged::answer(nr, privileged::get_robust_list, a)
     }),
+    (Syscall::N_kcmp, |nr, a| {
+        privileged::answer(nr, privileged::kcmp, a)
+    }),
     // No restart block is ever pending (the registry row says why).
     (Syscall::N_restart_syscall, |_, _| -EINTR),
     (Syscall::N_rt_sigpending, |_, a| unsafe {

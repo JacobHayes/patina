@@ -13346,7 +13346,7 @@ mod thread {
     #[cfg(target_os = "linux")]
     use epoll::EpollSlot;
     #[cfg(target_os = "linux")]
-    pub(crate) use epoll::{epoll_close, forget_description};
+    pub(crate) use epoll::{epoll_close, epoll_target, forget_description};
 
     // ------------------------------------------------------------------
     // epoll readiness reactor (Linux) — the mirror of `mod kqueue` above over
@@ -13582,6 +13582,17 @@ mod thread {
         /// driver never closes underneath a wait.
         pub(crate) fn epoll_close(handle: u64) {
             lock_state().net.epolls.remove(&handle);
+        }
+
+        /// The description an epoll instance's interest in `(tfd, toff)`
+        /// watches (`get_epoll_tfile_raw_ptr`, `ep_find_tfd`): the `toff`-th
+        /// of the interests registered for descriptor number `tfd`, of which
+        /// the model holds one at most.
+        pub(crate) fn epoll_target(handle: u64, tfd: c_int, toff: u32) -> Option<DescId> {
+            let state = lock_state();
+            let slot = state.net.epolls.get(&handle)?;
+            let interest = slot.ep.interests.get(&tfd).filter(|_| toff == 0)?;
+            Some(interest.desc)
         }
 
         /// Drop every interest registered against a description whose last

@@ -389,11 +389,11 @@ mod tests {
 
     /// `chroot` of a directory the caller may search needs
     /// `CAP_SYS_CHROOT`.
-    /// Reading init's robust list: `ptrace_may_access`. Copying init's
-    /// memory: `mm_access`, past a local vector with a byte to copy. Taking
-    /// one of init's descriptors through its pidfd: `ptrace_may_access`.
-    /// Joining init's UTS namespace through its pidfd: `ptrace_may_access`,
-    /// then `utsns_install`.
+    /// Reading init's robust list and comparing its objects:
+    /// `ptrace_may_access`. Copying init's memory: `mm_access`, past a local
+    /// vector with a byte to copy. Taking one of init's descriptors through
+    /// its pidfd: `ptrace_may_access`. Joining init's UTS namespace through
+    /// its pidfd: `ptrace_may_access`, then `utsns_install`.
     /// Advising a process's memory through its pidfd: init's `mm_access`,
     /// then `CAP_SYS_NICE`, even for the guest's own.
     fn robust_list_cases() -> Vec<Case> {
@@ -452,6 +452,12 @@ mod tests {
                     0,
                     0,
                 ],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_kcmp,
+                check: kcmp,
+                args: [1, 1, u64::MAX, 0, 0, 0],
                 refusal: errno::EPERM,
             },
         ]

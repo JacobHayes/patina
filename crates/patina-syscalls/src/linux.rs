@@ -2311,10 +2311,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_kcmp => r(
         id,
         Family::Process,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Self-process only: the signals arc answers these for the guest's own process, pid 2 (a pidfd kind, dup-of-self, self-comparison), and ESRCH/EBADF for any other.",
-        Some("signals+threads+process"),
-    ),
+        Disposition::Modeled,
+        "The guest's own tasks (`sud::privileged::kcmp`): they share every object but their I/O contexts (a task has its own once `ioprio_set` gives it one, or it is created by one with a valid priority); descriptors compare by description, an epoll target by the description its interest watches, and distinct objects answer 1 or 2 by a deterministic order. A pid no process has is ESRCH; init is EPERM without CAP_SYS_PTRACE.",
+        None,
+    )
+    .capabilities(&[Capability::SysPtrace]),
     Syscall::N_finit_module => r(
         id,
         Family::Privileged,

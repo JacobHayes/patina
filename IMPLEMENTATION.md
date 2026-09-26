@@ -1021,6 +1021,28 @@ gap; the shim's `futex2` unit tests pin the parked deadline, the restart, a
 requeued `futex_waitv` entry, an outcome kept across a handler and a
 multiplexed waiter's key and bitset.
 
+`kcmp` answers for the guest's own tasks (`sud::privileged::kcmp`). Both pids
+are looked up first (`ESRCH`); init is `EPERM` through the capability gate
+(`CAP_SYS_PTRACE`, declared on the row; granted, a named fatal), before the
+type is checked. The guest's threads share one address space, descriptor
+table, filesystem state, signal handlers and semaphore undo list. Each thread
+has its own I/O context once it has one: `ioprio_set` gives a thread one, and
+a thread created by one with a valid priority gets a fresh one, since glibc
+passes no `CLONE_IO` (`src/thread/sched.rs`); a priority keeps its low 16
+bits, as the kernel's `unsigned short` does. `KCMP_FILE` compares
+descriptions (an `O_PATH` descriptor's too; the index is an `unsigned int`).
+`KCMP_EPOLL_TFD` follows 6.8's order: the slot is copied in (`EFAULT`), then
+the first descriptor (`EBADF`), the epoll descriptor (`EBADF`, or `EINVAL` for
+another kind), then the interest at `(tfd, toff)` (`ENOENT`). One residual:
+the epoll model holds one interest per descriptor number, so any `toff > 0`
+is `ENOENT`, where 6.8 can hold a second interest with the same `tfd` (the
+first's file `dup`ed elsewhere and closed, another file opened at that number
+and added) and finds it at `toff = 1`, as CRIU uses it. Two distinct
+objects answer 1 or 2 by the order of their identities (description ids, I/O
+context ids), where the kernel orders obfuscated addresses. `proc/kcmp` passes
+with no gap and adds the epoll order, the `O_PATH` and index legs, and two
+threads' objects.
+
 ## Dependency order
 
 ```text

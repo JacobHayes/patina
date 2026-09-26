@@ -1,5 +1,6 @@
-//! The rows that reach other processes and namespaces: `ptrace`, `unshare`
-//! and `setns`. The virtual pid namespace holds init and the guest, the
+//! The rows that reach other processes and namespaces: `ptrace`, `unshare`,
+//! `setns`, and those that inspect a process (`get_robust_list`,
+//! `process_vm_*`, `kcmp`). The virtual pid namespace holds init and the guest, the
 //! guest traces no one and nothing traces it, and the machine has one of
 //! each namespace, which the guest names only through a process's pidfd.
 
@@ -426,4 +427,95 @@ pub(in crate::sud) fn process_vm_readv(credential: &Credential, a: &[u64; 6]) ->
 /// `process_vm_writev`; see [`process_vm`].
 pub(in crate::sud) fn process_vm_writev(credential: &Credential, a: &[u64; 6]) -> Answer {
     process_vm(credential, a, true)
+}
+
+/// `enum kcmp_type` (include/uapi/linux/kcmp.h).
+const KCMP_FILE: i32 = 0;
+const KCMP_VM: i32 = 1;
+const KCMP_FILES: i32 = 2;
+const KCMP_FS: i32 = 3;
+const KCMP_SIGHAND: i32 = 4;
+const KCMP_IO: i32 = 5;
+const KCMP_SYSVSEM: i32 = 6;
+const KCMP_EPOLL_TFD: i32 = 7;
+
+/// `kcmp_ptr`: 0 for one object, else 1 or 2 by the order of the two
+/// objects' identities (natively their obfuscated addresses, an order only
+/// the host knows; here the identities' own).
+fn order<T: Ord>(first: T, second: T) -> i64 {
+    i64::from(first < second) | i64::from(first > second) << 1
+}
+
+/// The description a task's descriptor names (`get_file_raw_ptr`, whose
+/// index is an `unsigned int`): an `O_PATH` descriptor's too.
+fn description(index: u64) -> Option<crate::fdtable::DescId> {
+    crate::resolve_fd(index as u32 as c_int)
+        .ok()
+        .map(|resolved| resolved.desc)
+}
+
+/// `kcmp(pid1, pid2, type, idx1, idx2)` (kernel/kcmp.c): both pids are
+/// looked up first (`ESRCH`); init belongs to root, so inspecting it is
+/// `ptrace_may_access`'s `CAP_SYS_PTRACE` (`EPERM`), before the type. Two
+/// tasks of the guest share their address space, descriptor table,
+/// filesystem state, signal handlers and semaphore undo list (0), and each
+/// has its own I/O context once it has one
+/// (`crate::thread::sched::io_context`). `KCMP_FILE` compares the
+/// descriptions two descriptors name (`EBADF` for either not open);
+/// `KCMP_EPOLL_TFD` is [`epoll_target`]'s; another type is `EINVAL`.
+pub(in crate::sud) fn kcmp(credential: &Credential, a: &[u64; 6]) -> Answer {
+    let (first, second) = (a[0] as i32, a[1] as i32);
+    let (Some((one, _)), Some((other, _))) = (find_process(first), find_process(second)) else {
+        return refuse(errno::ESRCH);
+    };
+    if one == Process::Init || other == Process::Init {
+        return super::gate(credential, Capability::SysPtrace, errno::EPERM);
+    }
+    match a[2] as i32 {
+        KCMP_FILE => match (description(a[3]), description(a[4])) {
+            (Some(one), Some(other)) => Ok(order(one, other)),
+            _ => refuse(errno::EBADF),
+        },
+        KCMP_VM | KCMP_FILES | KCMP_FS | KCMP_SIGHAND | KCMP_SYSVSEM => Ok(0),
+        KCMP_IO => Ok(order(
+            crate::thread::sched::io_context(first),
+            crate::thread::sched::io_context(second),
+        )),
+        KCMP_EPOLL_TFD => epoll_target(a[3], a[4]),
+        _ => refuse(errno::EINVAL),
+    }
+}
+
+/// `struct kcmp_epoll_slot`: the epoll descriptor, and the target
+/// descriptor number and its offset among that number's interests.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct EpollSlot {
+    efd: u32,
+    tfd: u32,
+    toff: u32,
+}
+
+/// `kcmp_epoll_target`: the slot copied in (`EFAULT`), the first task's
+/// descriptor (`EBADF`), the second task's epoll descriptor (`EBADF` when
+/// not open, `EINVAL` when not an epoll instance), the interest it holds for
+/// `(tfd, toff)` (`ENOENT`), then the two descriptions as `KCMP_FILE`
+/// compares them.
+fn epoll_target(index: u64, slot: u64) -> Answer {
+    let Ok(slot) = crate::uaccess::read::<EpollSlot>(slot as usize) else {
+        return refuse(errno::EFAULT);
+    };
+    let Some(file) = description(index) else {
+        return refuse(errno::EBADF);
+    };
+    let Ok(epoll) = crate::resolve_fd(slot.efd as c_int) else {
+        return refuse(errno::EBADF);
+    };
+    if epoll.kind != FdKind::Epoll {
+        return refuse(errno::EINVAL);
+    }
+    match crate::thread::epoll_target(epoll.handle, slot.tfd as c_int, slot.toff) {
+        Some(target) => Ok(order(file, target)),
+        None => refuse(errno::ENOENT),
+    }
 }

@@ -84,6 +84,9 @@ pub(super) struct Attrs {
     util_max: u32,
     /// The I/O priority it set (`IOPRIO_CLASS_NONE` until it sets one).
     ioprio: i32,
+    /// The identity of its I/O context (`task->io_context`), `None` until
+    /// it has one (see [`SchedRuntime::set_ioprio`], [`SchedRuntime::spawn`]).
+    io_context: Option<u64>,
     persona: u32,
     /// The thread's name (`comm`), NUL-padded.
     comm: [u8; COMM_LEN],
@@ -134,6 +137,7 @@ impl Default for Attrs {
             util_min: 0,
             util_max: CAPACITY,
             ioprio: 0,
+            io_context: None,
             persona: 0,
             comm: PROGRAM_COMM.get().copied().unwrap_or([0; COMM_LEN]),
         }
@@ -164,6 +168,8 @@ fn nice_allowed(nice: i32) -> bool {
 #[derive(Default)]
 pub(super) struct SchedRuntime {
     tasks: BTreeMap<i32, Attrs>,
+    /// The I/O contexts made so far, the next one's identity.
+    io_contexts: u64,
 }
 
 impl SchedRuntime {
@@ -175,12 +181,38 @@ impl SchedRuntime {
         self.tasks.insert(tid, attrs);
     }
 
+    /// A new I/O context's identity (`alloc_io_context`).
+    fn new_io_context(&mut self) -> u64 {
+        self.io_contexts += 1;
+        self.io_contexts
+    }
+
+    /// `set_task_ioprio`: the thread's I/O context takes the priority, the
+    /// thread getting one first if it has none. The context keeps 16 bits
+    /// (`io_context.ioprio` is an `unsigned short`).
+    fn set_ioprio(&mut self, tid: i32, ioprio: i32) {
+        let mut attrs = self.get(tid);
+        attrs.ioprio = i32::from(ioprio as u16);
+        if attrs.io_context.is_none() {
+            attrs.io_context = Some(self.new_io_context());
+        }
+        self.set(tid, attrs);
+    }
+
     /// `sched_fork`/`copy_io`: a new thread inherits its creator's
     /// attributes; under `SCHED_RESET_ON_FORK` a realtime or deadline policy
     /// falls back to `SCHED_OTHER` at nice 0, a negative nice resets to 0,
-    /// and the flag clears.
+    /// and the flag clears. It shares no I/O context (glibc passes no
+    /// `CLONE_IO`): it gets one of its own when its creator's holds a valid
+    /// priority (`ioprio_valid`: a class other than `IOPRIO_CLASS_NONE`),
+    /// and none otherwise.
     pub(super) fn spawn(&mut self, child: TaskId, parent: TaskId) {
         let mut attrs = self.get(tid_of(parent));
+        let valid = attrs.ioprio >> IOPRIO_CLASS_SHIFT != IOPRIO_CLASS_NONE;
+        attrs.io_context = attrs
+            .io_context
+            .filter(|_| valid)
+            .map(|_| self.new_io_context());
         if attrs.reset_on_fork {
             if rt_policy(attrs.policy) || attrs.policy == SCHED_DEADLINE {
                 attrs.policy = SCHED_OTHER;
@@ -790,11 +822,15 @@ pub(crate) fn ioprio_set(which: i32, who: i32, ioprio: i32) -> i64 {
         return errno(ESRCH);
     }
     for tid in targets {
-        let mut attrs = state.sched.get(tid);
-        attrs.ioprio = ioprio;
-        state.sched.set(tid, attrs);
+        state.sched.set_ioprio(tid, ioprio);
     }
     0
+}
+
+/// The identity of the I/O context of thread `tid` (the pid for the main
+/// thread), `None` while it has none: what `kcmp(KCMP_IO)` compares.
+pub(crate) fn io_context(tid: i32) -> Option<u64> {
+    lock_state().sched.get(tid).io_context
 }
 
 /// `ioprio_get(which, who)`: the best (lowest) of the named threads'.
@@ -928,6 +964,28 @@ mod tests {
         );
         runtime.spawn(TaskId(3), parent);
         assert_eq!(runtime.get(tid_of(TaskId(3))), runtime.get(tid_of(parent)));
+    }
+
+    /// A thread gets an I/O context of its own from its first I/O
+    /// priority and keeps it; a thread it creates gets another only while
+    /// that priority is valid.
+    #[test]
+    fn io_contexts_come_from_io_priorities_and_are_never_shared() {
+        let mut runtime = SchedRuntime::default();
+        let parent = TaskId(1);
+        let context = |runtime: &SchedRuntime, task| runtime.get(tid_of(task)).io_context;
+        runtime.spawn(TaskId(2), parent);
+        assert_eq!(context(&runtime, TaskId(2)), None);
+        runtime.set_ioprio(tid_of(parent), IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT);
+        let own = context(&runtime, parent);
+        assert!(own.is_some());
+        runtime.spawn(TaskId(3), parent);
+        assert_eq!(context(&runtime, TaskId(3)), None);
+        runtime.set_ioprio(tid_of(parent), (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | 4);
+        assert_eq!(context(&runtime, parent), own);
+        runtime.spawn(TaskId(4), parent);
+        let child = context(&runtime, TaskId(4));
+        assert!(child.is_some() && child != own);
     }
 
     #[test]
