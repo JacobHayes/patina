@@ -71,14 +71,17 @@ pub(crate) use fs::{release_dir_iteration, seek_dir_iteration};
 pub(crate) use thread_pointer::spawned as thread_pointer_spawned;
 
 /// A new thread `child`, created by `parent`, inherits the per-task state
-/// the kernel copies at `clone`: `no_new_privs`.
+/// the kernel copies at `clone`: `no_new_privs`, and its credentials'
+/// process keyring.
 pub(crate) fn task_spawned(parent: c_int, child: c_int) {
     signal_process::no_new_privs_spawned(parent, child);
+    privileged::keyring_spawned(parent, child);
 }
 
 /// Thread `tid` exited: its per-task state goes with it.
 pub(crate) fn task_exited(tid: c_int) {
     signal_process::no_new_privs_exited(tid);
+    privileged::keyring_exited(tid);
 }
 
 use linux_raw_sys::errno;
@@ -1086,6 +1089,15 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     }),
     (Syscall::N_lsm_set_self_attr, |nr, a| {
         privileged::answer(nr, privileged::lsm_set_self_attr, a)
+    }),
+    (Syscall::N_add_key, |nr, a| {
+        privileged::answer(nr, privileged::add_key, a)
+    }),
+    (Syscall::N_request_key, |nr, a| {
+        privileged::answer(nr, privileged::request_key, a)
+    }),
+    (Syscall::N_keyctl, |nr, a| {
+        privileged::answer(nr, privileged::keyctl, a)
     }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_iopl, |nr, a| {

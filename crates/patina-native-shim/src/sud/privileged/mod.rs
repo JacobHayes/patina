@@ -30,6 +30,7 @@ mod admin;
 #[cfg(target_arch = "x86_64")]
 mod ioport;
 mod kernel;
+mod keys;
 mod landlock;
 mod lsm;
 mod mount;
@@ -39,6 +40,7 @@ pub(super) use admin::*;
 #[cfg(target_arch = "x86_64")]
 pub(super) use ioport::*;
 pub(super) use kernel::*;
+pub(super) use keys::*;
 pub(super) use landlock::*;
 pub(super) use lsm::*;
 pub(super) use mount::*;
@@ -169,6 +171,7 @@ mod tests {
             config_cases(),
             robust_list_cases(),
             sandbox_cases(),
+            key_cases(),
         ]
         .into_iter()
         .flatten()
@@ -584,6 +587,26 @@ mod tests {
                 refusal: errno::EPERM,
             },
         ]
+    }
+
+    /// Handing the process keyring (made on demand) to root needs
+    /// `CAP_SYS_ADMIN` (`EACCES`).
+    fn key_cases() -> Vec<Case> {
+        const KEYCTL_CHOWN: u64 = 4;
+        const KEY_SPEC_PROCESS_KEYRING: i64 = -2;
+        vec![Case {
+            row: Syscall::N_keyctl,
+            check: keyctl,
+            args: [
+                KEYCTL_CHOWN,
+                KEY_SPEC_PROCESS_KEYRING as u64,
+                0,
+                u64::from(u32::MAX),
+                0,
+                0,
+            ],
+            refusal: errno::EACCES,
+        }]
     }
 
     /// `PTRACE_O_SUSPEND_SECCOMP` needs `CAP_SYS_ADMIN`; past it, seizing

@@ -11,20 +11,27 @@
 //!   place (same serial, new payload); `request_key` finds it by type and
 //!   description without an upcall (no callout information), and misses
 //!   anything else with `ENOKEY`;
-//! * `keyctl`: `KEYCTL_READ` answers the payload, `KEYCTL_DESCRIBE`
+//! * `keyctl`: `KEYCTL_READ` answers the payload, and of the process
+//!   keyring the serials it links (the one key); `KEYCTL_DESCRIBE`
 //!   `type;uid;gid;perm;description` with the caller's ids and the default
-//!   permissions `3f010000`; handing the key to another user or to a group
+//!   permissions `3f010000`, into too little room only its length; handing the key to another user or to a group
 //!   the caller is not in needs `CAP_SYS_ADMIN` (`keyctl_chown_key`:
 //!   `EACCES`), to itself nothing; a thread keyring not asked to be created
-//!   is `ENOKEY`; an unknown operation `EOPNOTSUPP`; a revoked key reads
-//!   `EKEYREVOKED`.
+//!   is `ENOKEY`; `KEYCTL_CAPABILITIES` answers the kernel's two bytes and
+//!   clears the rest of the room; an unknown operation `EOPNOTSUPP`; a
+//!   revoked key reads `EKEYREVOKED`;
+//! * the process keyring belongs to the credentials of the thread that made
+//!   it, and of the threads created after (`install_process_keyring`,
+//!   `copy_creds`): a thread that already existed has none (`ENOKEY`), does
+//!   not possess the keys in it (reading one is `EACCES`: their owner may
+//!   only view them), and its own `add_key` makes it a keyring and a new
+//!   key; a thread created after the keyring reads them.
 //!
-//! Every key lives in the process keyring, which dies with the probe. The
+//! Every key lives in a process keyring, which dies with the probe. The
 //! serial is a random number, so it compares as a label; the description's
 //! length depends on the ids, so it is checked, not recorded.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::observe::Norm;
 use crate::probe::{Probe, neg};
 use crate::vehicle::Vehicle;
@@ -39,6 +46,7 @@ const KEYCTL_CHOWN: i64 = 4;
 const KEYCTL_DESCRIBE: i64 = 6;
 const KEYCTL_REVOKE: i64 = 3;
 const KEYCTL_READ: i64 = 11;
+const KEYCTL_CAPABILITIES: i64 = 31;
 /// No `KEYCTL_*` operation.
 const KEYCTL_UNKNOWN: i64 = 9999;
 /// A group no account is in (gid 0 may hold the caller on some hosts).
@@ -48,6 +56,100 @@ const TOO_BIG: i64 = 1024 * 1024;
 
 pub fn run(p: &Probe) {
     p.require_unprivileged();
+    std::thread::scope(|scope| {
+        // A thread created before any keyring exists.
+        let (go, wait) = std::sync::mpsc::channel::<i64>();
+        let older = scope.spawn(move || {
+            if let Ok(serial) = wait.recv() {
+                older_thread(p, serial);
+            }
+        });
+        let serial = main_thread(p);
+        let _ = go.send(serial);
+        let _ = older.join();
+        let newer = scope.spawn(move || {
+            let mut buf = [0u8; 8];
+            p.call_observed(
+                Syscall::N_keyctl,
+                [
+                    KEYCTL_READ,
+                    serial,
+                    buf.as_mut_ptr() as i64,
+                    buf.len() as i64,
+                    0,
+                    0,
+                ],
+            )
+        });
+        p.check(
+            "a thread created after the keyring possesses its keys",
+            newer.join().ok() == Some(1),
+        );
+        rest(p, serial);
+    });
+}
+
+/// Record `r` as a key's serial, a label.
+fn key(p: &Probe, r: i64) -> i64 {
+    p.rec
+        .event("key", r)
+        .norm("ret", Norm::Relative("key"))
+        .emit();
+    r
+}
+
+/// `add_key("user", description, payload, ring)`, unrecorded.
+fn add_user_key(p: &Probe, description: &CStr, payload: &[u8], ring: i64) -> i64 {
+    p.call_unrecorded(
+        Syscall::N_add_key,
+        [
+            c"user".as_ptr() as i64,
+            description.as_ptr() as i64,
+            payload.as_ptr() as i64,
+            payload.len() as i64,
+            ring,
+            0,
+        ],
+    )
+}
+
+/// On a thread that existed before the process keyring: `serial` is a key
+/// in the keyring another thread made.
+fn older_thread(p: &Probe, serial: i64) {
+    let mut buf = [0u8; 8];
+    p.check(
+        "a thread older than the process keyring has none",
+        p.call_observed(
+            Syscall::N_keyctl,
+            [KEYCTL_GET_KEYRING_ID, KEY_SPEC_PROCESS_KEYRING, 0, 0, 0, 0],
+        ) == neg(ENOKEY),
+    );
+    p.check(
+        "nor possesses the keys in it: reading one is EACCES",
+        p.call_observed(
+            Syscall::N_keyctl,
+            [
+                KEYCTL_READ,
+                serial,
+                buf.as_mut_ptr() as i64,
+                buf.len() as i64,
+                0,
+                0,
+            ],
+        ) == neg(EACCES),
+    );
+    let own = key(
+        p,
+        add_user_key(p, c"patina:key", b"o", KEY_SPEC_PROCESS_KEYRING),
+    );
+    p.check(
+        "its own add_key makes it a keyring and a new key",
+        own > 0 && own != serial,
+    );
+}
+
+/// The main thread's rows up to its first key, whose serial it answers.
+fn main_thread(p: &Probe) -> i64 {
     let add_key = |kind: *const c_char, description: &CStr, payload: &[u8], ring: i64| {
         p.call_observed(
             Syscall::N_add_key,
@@ -106,36 +208,16 @@ pub fn run(p: &Probe) {
         ) == neg(ENODEV),
     );
 
-    let key = |r: i64| {
-        p.rec
-            .event("key", r)
-            .norm("ret", Norm::Relative("key"))
-            .emit();
-        r
-    };
-    let serial = key(p.call_unrecorded(
-        Syscall::N_add_key,
-        [
-            user as i64,
-            name.as_ptr() as i64,
-            b"v".as_ptr() as i64,
-            1,
-            KEY_SPEC_PROCESS_KEYRING,
-            0,
-        ],
-    ));
+    let serial = key(p, add_user_key(p, name, b"v", KEY_SPEC_PROCESS_KEYRING));
     p.require("a user key in the process keyring", serial > 0);
-    let again = key(p.call_unrecorded(
-        Syscall::N_add_key,
-        [
-            user as i64,
-            name.as_ptr() as i64,
-            b"w".as_ptr() as i64,
-            1,
-            KEY_SPEC_PROCESS_KEYRING,
-            0,
-        ],
-    ));
+    serial
+}
+
+/// The main thread's rows from its first key on.
+fn rest(p: &Probe, serial: i64) {
+    let user = c"user".as_ptr();
+    let name = c"patina:key";
+    let again = key(p, add_user_key(p, name, b"w", KEY_SPEC_PROCESS_KEYRING));
     p.check(
         "adding the same type and description updates that key",
         again == serial,
@@ -143,7 +225,7 @@ pub fn run(p: &Probe) {
     let request = |description: &CStr| [user as i64, description.as_ptr() as i64, 0, 0, 0, 0];
     p.check(
         "request_key finds it without an upcall",
-        key(p.call_unrecorded(Syscall::N_request_key, request(name))) == serial,
+        key(p, p.call_unrecorded(Syscall::N_request_key, request(name))) == serial,
     );
     p.check(
         "request_key of a description no key has is ENOKEY",
@@ -164,6 +246,17 @@ pub fn run(p: &Probe) {
         ) == 1
             && buf[0] == b'w',
     );
+    let mut linked = [0i32; 2];
+    p.check(
+        "KEYCTL_READ of the process keyring answers the serial it links",
+        keyctl(
+            KEYCTL_READ,
+            KEY_SPEC_PROCESS_KEYRING,
+            linked.as_mut_ptr() as i64,
+            std::mem::size_of_val(&linked) as i64,
+        ) == 4
+            && i64::from(linked[0]) == serial,
+    );
     let uid = p.getuid();
     let gid = p.getgid();
     let described = p.call_unrecorded(
@@ -183,6 +276,16 @@ pub fn run(p: &Probe) {
         described == expected.len() as i64 + 1
             && CStr::from_bytes_until_nul(&buf).map(CStr::to_bytes) == Ok(expected.as_bytes()),
     );
+    buf.fill(0);
+    // The length depends on the ids, so it is checked, not recorded.
+    let short = p.call_unrecorded(
+        Syscall::N_keyctl,
+        [KEYCTL_DESCRIBE, serial, buf.as_mut_ptr() as i64, 4, 0, 0],
+    );
+    p.check(
+        "KEYCTL_DESCRIBE into too little room answers the length and copies nothing",
+        short == expected.len() as i64 + 1 && buf[..4] == [0; 4],
+    );
     p.check(
         "handing the key to another user is EACCES (no CAP_SYS_ADMIN)",
         keyctl(KEYCTL_CHOWN, serial, 0, -1) == neg(EACCES),
@@ -198,6 +301,24 @@ pub fn run(p: &Probe) {
     p.check(
         "a thread keyring not asked to be created is ENOKEY",
         keyctl(KEYCTL_GET_KEYRING_ID, KEY_SPEC_THREAD_KEYRING, 0, 0) == neg(ENOKEY),
+    );
+    let mut capabilities = [0xffu8; 4];
+    let answered = keyctl(
+        KEYCTL_CAPABILITIES,
+        capabilities.as_mut_ptr() as i64,
+        capabilities.len() as i64,
+        0,
+    );
+    p.rec
+        .event("keyctl_capabilities", 0)
+        .field(
+            "bytes",
+            format!("{:02x}{:02x}", capabilities[0], capabilities[1]).as_str(),
+        )
+        .emit();
+    p.check(
+        "KEYCTL_CAPABILITIES answers its two bytes and clears the rest of the room",
+        answered == 2 && capabilities[2..] == [0, 0],
     );
     p.check(
         "an unknown operation is EOPNOTSUPP",
@@ -229,20 +350,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_getgid,
     ],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: Vehicle::KERNEL,
-        what: "add_key is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)), as are request_key and keyctl, where the kernel keeps an unprivileged caller's keys (a model of the process keyring is needed) and refuses handing them to other ids (EACCES, no CAP_SYS_ADMIN)",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(SIGABRT),
-            diagnostic: TRAP,
-        },
-    }],
     ..DEFAULTS
 };
-
-#[cfg(target_arch = "x86_64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall add_key (nr 248, class privileged";
-#[cfg(target_arch = "aarch64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall add_key (nr 217, class privileged";

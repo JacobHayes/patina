@@ -130,6 +130,14 @@ pub struct KernelConfig {
     /// a process attribute (`LSM_ATTR_*`): no `getselfattr` or
     /// `setselfattr` hook.
     pub lsm_modules: &'static [u64],
+    /// `kernel.keys.maxkeys` and `kernel.keys.maxbytes`: the most keys, and
+    /// bytes of descriptions, payloads and links, a user other than root
+    /// may own (`EDQUOT` past them).
+    pub keys_maxkeys: u32,
+    pub keys_maxbytes: u32,
+    /// `kernel.keys.gc_delay`: the seconds a revoked key stays in its
+    /// keyrings before the collector removes it.
+    pub keys_gc_delay: u64,
 }
 
 /// The one configuration the virtual kernel runs with; see [`KernelConfig`].
@@ -167,6 +175,9 @@ pub const KERNEL_CONFIG: KernelConfig = KernelConfig {
     // Ubuntu's `lsm=` order without lockdown, integrity or AppArmor, which
     // are host policy.
     lsm_modules: &[100, 110, 105],
+    keys_maxkeys: 200,
+    keys_maxbytes: 20_000,
+    keys_gc_delay: 300,
 };
 
 /// The Darwin kernel release the virtual machine reports on macOS (`uname`'s
