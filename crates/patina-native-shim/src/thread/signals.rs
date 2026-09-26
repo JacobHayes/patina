@@ -885,7 +885,9 @@ pub(crate) fn abort_through_kernel() {
 }
 
 /// The one generation entry owns target and queued-info validation. Doors only
-/// marshal; a thread with tid zero can never become process-directed.
+/// marshal; a thread with tid zero can never become process-directed. As in
+/// 6.8, the target is found first (`ESRCH`) and the signal judged on it
+/// (`check_kill_permission`: an invalid one `EINVAL`, then the permission).
 pub(crate) unsafe fn generate_signal(
     target: GenerationTarget,
     sig: i32,
@@ -895,9 +897,7 @@ pub(crate) unsafe fn generate_signal(
         !crate::in_shim_critical(),
         "signal generation under the runtime lock"
     );
-    if !(0..=SIGNAL_MAX).contains(&sig) {
-        return -i64::from(EINVAL);
-    }
+    let valid = (0..=SIGNAL_MAX).contains(&sig);
     let queued = matches!(info, GenerationInfo::Queued(_));
     let info = match info {
         GenerationInfo::User => Info::new(sig as u8, SI_USER),
@@ -922,6 +922,7 @@ pub(crate) unsafe fn generate_signal(
             // space (a kernel code to another pid was refused as forged), so
             // `check_kill_permission` judges it by the target's credential.
             match crate::identity::signal_target(pid, !queued) {
+                Some(_) if !valid => return -i64::from(EINVAL),
                 Some(process) if !crate::identity::may_signal(process, sig) => {
                     return -i64::from(EPERM);
                 }
@@ -946,6 +947,8 @@ pub(crate) unsafe fn generate_signal(
                 // under the permission check; past it init drops the signal.
                 return if tgid.is_some_and(|pid| pid != init) {
                     -i64::from(ESRCH)
+                } else if !valid {
+                    -i64::from(EINVAL)
                 } else if crate::identity::may_signal(crate::identity::Process::Init, sig) {
                     0
                 } else {
@@ -964,6 +967,9 @@ pub(crate) unsafe fn generate_signal(
         if !state.signals.tasks.contains_key(&task) {
             return -i64::from(ESRCH);
         }
+    }
+    if !valid {
+        return -i64::from(EINVAL);
     }
     if sig == 0 {
         return 0;

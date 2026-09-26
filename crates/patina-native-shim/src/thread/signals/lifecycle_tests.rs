@@ -449,6 +449,12 @@ fn generation_validates_typed_targets_before_recording() {
         for (target, sig, expected) in [
             (process(GUEST), -1, EINVAL),
             (process(GUEST), 65, EINVAL),
+            // The target is found before the signal is judged, and init's
+            // permission after it.
+            (process(3), 65, ESRCH),
+            (process(INIT), 65, EINVAL),
+            (thread(Some(GUEST), 999), 65, ESRCH),
+            (thread(Some(INIT), INIT), 65, EINVAL),
             (process(3), 0, ESRCH),
             (process(-3), 0, ESRCH),
             // Every process but init and the caller: none.

@@ -136,6 +136,20 @@ pub fn run(p: &Probe) {
         "kill of a pid that does not exist is ESRCH",
         p.kill(99_999_999, SIGUSR1) == neg(ESRCH),
     );
+    // The target is looked up before the signal is judged
+    // (`check_kill_permission` runs on a found task).
+    for (result, label) in [
+        (
+            p.kill(99_999_999, 65),
+            "kill of a pid that does not exist is ESRCH before an invalid signal",
+        ),
+        (
+            p.tgkill(pid, 99_999_999, 65),
+            "tgkill of a tid outside the thread group is ESRCH before an invalid signal",
+        ),
+    ] {
+        p.check(label, result == neg(ESRCH));
+    }
     p.check(
         "tgkill with a tid of 0 is EINVAL",
         p.tgkill(pid, 0, SIGUSR1) == neg(EINVAL),
