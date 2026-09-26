@@ -1376,6 +1376,9 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_process_mrelease, |_, a| {
         pidfd::sys_process_mrelease(a[0], a[1])
     }),
+    (Syscall::N_process_madvise, |nr, a| {
+        privileged::answer(nr, privileged::process_madvise, a)
+    }),
     (Syscall::N_process_vm_readv, |nr, a| {
         privileged::answer(nr, privileged::process_vm_readv, a)
     }),

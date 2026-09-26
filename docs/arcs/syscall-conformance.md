@@ -296,8 +296,8 @@ forwards into the same dispatcher instead of its two-number allowlist.
   configured and THP is off;
   `mincore`/`remap_file_pages` pass through; `membarrier` is modeled. Left as
   named traps: protection keys and shadow stacks (CPU state), `memfd_secret`
-  (needs a page-cache fill the filesystem does not refuse), `process_madvise`
-  (needs the signals arc's self pidfd), and the libc `shm_*`/`sem_*`/`mq_*` and SysV wrappers (still refused by the
+  (needs a page-cache fill the filesystem does not refuse), and the libc
+  `shm_*`/`sem_*`/`mq_*` and SysV wrappers (still refused by the
   audit). Scenarios for the resource limits other than `RLIMIT_MEMLOCK` come
   with the time + identity family. Locking and populating need
   `MADV_POPULATE_*` (Linux 5.14, SUD needs 5.11): on an older host the first

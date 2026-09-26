@@ -2615,10 +2615,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_process_madvise => r(
         id,
         Family::Mem,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Needs a pidfd for the process itself (`pidfd_open`, the signals arc's self pidfd kind); at the virtual ABI level (6.8) advising oneself also needs `CAP_SYS_NICE`, so an unprivileged caller is `EPERM` once a pidfd reaches it. Named trap until the self pidfd lands.",
-        Some("signals+threads+process"),
-    ),
+        Disposition::Modeled,
+        "Through a pidfd (`FdKind::Pidfd`), in 6.8's order: a flag (`EINVAL`), the vector (`import_iovec`: `EINVAL`/`EFAULT`), a descriptor that is no pidfd (`EBADF`), an advice outside `MADV_COLD`/`PAGEOUT`/`WILLNEED`/`COLLAPSE` (`EINVAL`), init's memory without `CAP_SYS_PTRACE` (`EACCES`), then `CAP_SYS_NICE`, which 6.8 requires even of a process advising itself (`EPERM`; granted, a named fatal).",
+        None,
+    )
+    .capabilities(&[Capability::SysPtrace, Capability::SysNice]),
     Syscall::N_epoll_pwait2 => r(
         id,
         Family::Readiness,

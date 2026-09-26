@@ -13,6 +13,7 @@ use linux_raw_sys::general::{
     CLONE_NEWTIME, CLONE_NEWUSER, CLONE_NEWUTS, CLONE_SIGHAND, CLONE_SYSVSEM, CLONE_THREAD,
     CLONE_VM,
 };
+use linux_raw_sys::general::{MADV_COLD, MADV_COLLAPSE, MADV_PAGEOUT, MADV_WILLNEED};
 use linux_raw_sys::ptrace::{
     PTRACE_ATTACH, PTRACE_O_MASK, PTRACE_O_SUSPEND_SECCOMP, PTRACE_SEIZE, PTRACE_TRACEME,
 };
@@ -374,6 +375,47 @@ fn user_end(end: u64) -> bool {
     return (end as i64) >= 0;
     #[cfg(target_arch = "aarch64")]
     return end <= 1 << 48;
+}
+
+/// `process_madvise(pidfd, vec, vlen, advice, flags)` (mm/madvise.c); see
+/// [`madvise_from`].
+pub(in crate::sud) fn process_madvise(credential: &Credential, a: &[u64; 6]) -> Answer {
+    madvise_from(credential, a, || crate::sud::pidfd::target(a[0] as c_int))
+}
+
+/// `process_madvise` with the process the pidfd names found by `target`, in
+/// 6.8's order: a flag (`EINVAL`); the vector (`import_iovec`, as
+/// [`local_bytes`] takes it); the descriptor (`EBADF`); an advice outside
+/// the non-destructive set a pidfd takes (`EINVAL`); init's memory
+/// (`mm_access`: `CAP_SYS_PTRACE`, else `EACCES`); then `CAP_SYS_NICE`, which
+/// 6.8 requires even of a process advising itself (`EPERM`; the exemption
+/// came in 6.13), before any range is looked at. Past it, the advice itself
+/// is where the model ends.
+pub(super) fn madvise_from(
+    credential: &Credential,
+    a: &[u64; 6],
+    target: impl FnOnce() -> Result<Process, u32>,
+) -> Answer {
+    if a[4] as u32 != 0 {
+        return refuse(errno::EINVAL);
+    }
+    if let Err(code) = local_bytes(a[1], a[2]) {
+        return refuse(code);
+    }
+    let process = match target() {
+        Ok(process) => process,
+        Err(code) => return refuse(code),
+    };
+    if !matches!(
+        a[3] as i32 as u32,
+        MADV_COLD | MADV_PAGEOUT | MADV_WILLNEED | MADV_COLLAPSE
+    ) {
+        return refuse(errno::EINVAL);
+    }
+    if process == Process::Init && !credential.capable(Capability::SysPtrace) {
+        return refuse(errno::EACCES);
+    }
+    super::gate(credential, Capability::SysNice, errno::EPERM)
 }
 
 /// `process_vm_readv`; see [`process_vm`].

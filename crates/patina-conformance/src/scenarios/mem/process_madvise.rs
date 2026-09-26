@@ -11,8 +11,7 @@
 //! Only the process's own pidfd: advising another process is a
 //! cross-process effect the single-process model has no counterpart for.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::probe::{Probe, neg, page_size};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -84,16 +83,6 @@ pub const SCENARIO: Scenario = Scenario {
     vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_process_madvise],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::SignalsThreadsProcess),
-        vehicles: Vehicle::KERNEL,
-        what: "process_madvise is Trap(unmodeled) in the registry, so the SUD dispatcher aborts at its first call, once the self pidfd has been opened",
-        failure: Failure::Stops {
-            events: 3,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall process_madvise (nr",
-        },
-    }],
     kernel_floor: Some(KernelFloor {
         release: "5.10",
         why: "process_madvise first appears in Linux 5.10 (the registry row carries no date)",

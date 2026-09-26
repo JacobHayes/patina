@@ -394,6 +394,8 @@ mod tests {
     /// one of init's descriptors through its pidfd: `ptrace_may_access`.
     /// Joining init's UTS namespace through its pidfd: `ptrace_may_access`,
     /// then `utsns_install`.
+    /// Advising a process's memory through its pidfd: init's `mm_access`,
+    /// then `CAP_SYS_NICE`, even for the guest's own.
     fn robust_list_cases() -> Vec<Case> {
         static BYTE: [u8; 1] = [0];
         let range = Box::leak(Box::new([BYTE.as_ptr() as u64, 1]));
@@ -413,6 +415,22 @@ mod tests {
             },
             copy(Syscall::N_process_vm_readv, process_vm_readv),
             copy(Syscall::N_process_vm_writev, process_vm_writev),
+            Case {
+                row: Syscall::N_process_madvise,
+                check: |credential, a| {
+                    madvise_from(credential, a, || Ok(crate::identity::Process::Guest))
+                },
+                args: [0, 0, 0, u64::from(linux_raw_sys::general::MADV_COLD), 0, 0],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_process_madvise,
+                check: |credential, a| {
+                    madvise_from(credential, a, || Ok(crate::identity::Process::Init))
+                },
+                args: [0, 0, 0, u64::from(linux_raw_sys::general::MADV_COLD), 0, 0],
+                refusal: errno::EACCES,
+            },
             Case {
                 row: Syscall::N_pidfd_getfd,
                 check: |credential, a| {
