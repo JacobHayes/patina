@@ -372,6 +372,8 @@ const EFAULT: i64 = errno::EFAULT as i64;
 
 const ECHILD: i64 = errno::ECHILD as i64;
 
+const ESRCH: i64 = errno::ESRCH as i64;
+
 const ENOTDIR: i64 = errno::ENOTDIR as i64;
 
 const EINVAL: i64 = errno::EINVAL as i64;
@@ -1434,7 +1436,7 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_tgkill, |_, a| {
         sys_tgkill(a[0] as i64, a[1] as i64, a[2] as i64)
     }),
-    (Syscall::N_wait4, |_, _| sys_wait4()),
+    (Syscall::N_wait4, |_, a| sys_wait4(a[0], a[2])),
     (Syscall::N_waitid, |_, a| sys_waitid(a[3])),
     (Syscall::N_getpgid, |_, a| {
         crate::identity::getpgid(a[0] as i32)

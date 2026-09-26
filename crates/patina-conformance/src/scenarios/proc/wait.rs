@@ -1,11 +1,9 @@
 //! proc/wait — childless wait4/waitid answers: ECHILD for any child, the
 //! process itself and its process group, with and without WNOHANG, and
-//! invalid option EINVAL (checked before any child is looked for,
-//! kernel/exit.c kernel_wait4).
+//! invalid option EINVAL and wait4's `INT_MIN` pid ESRCH (checked before any
+//! child is looked for, kernel/exit.c kernel_wait4).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{Probe, neg};
@@ -53,6 +51,14 @@ pub fn run(p: &Probe) {
         "waitid invalid options are EINVAL",
         p.waitid(P_ALL as i32, 0, 0x4000_0000).0 == neg(EINVAL),
     );
+    p.check(
+        "wait4 with WEXITED, a waitid option, is EINVAL",
+        p.wait4(-1, WEXITED).0 == neg(EINVAL),
+    );
+    p.check(
+        "wait4(INT_MIN) is ESRCH",
+        p.wait4(i32::MIN, WNOHANG).0 == neg(ESRCH),
+    );
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -60,14 +66,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[Syscall::N_wait4, Syscall::N_waitid, Syscall::N_getpid],
     symbols: &["waitid", "getpid"],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::SignalsThreadsProcess),
-        vehicles: Vehicle::ALL,
-        what: "wait4 answers ECHILD whatever its options (native shim sud/signal_process.rs sys_wait4, which the C waitpid dispatches to as well), where the kernel refuses an unknown option bit with EINVAL before looking for a child (kernel/exit.c kernel_wait4)",
-        failure: Failure::Differs(&[
-            Difference::field(9, "wait4", "errno", Observed::Str("ECHILD")),
-            Difference::check(10, "wait4 with an unknown option bit is EINVAL"),
-        ]),
-    }],
     ..DEFAULTS
 };

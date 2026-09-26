@@ -252,8 +252,25 @@ pub(super) fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: 
     }
 }
 
-pub(super) fn sys_wait4() -> i64 {
-    -ECHILD
+/// `wait4(2)` in the kernel's order (kernel/exit.c `kernel_wait4`): an
+/// option bit outside `WNOHANG|WUNTRACED|WCONTINUED|__WNOTHREAD|__WCLONE|
+/// __WALL` is `EINVAL` and a pid of `INT_MIN` `ESRCH`, both before any child
+/// is looked for; the virtual process has no child, so the rest is `ECHILD`.
+pub(super) fn sys_wait4(pid: u64, options: u64) -> i64 {
+    const WNOHANG: u32 = 0x0000_0001;
+    const WUNTRACED: u32 = 0x0000_0002;
+    const WCONTINUED: u32 = 0x0000_0008;
+    const __WNOTHREAD: u32 = 0x2000_0000;
+    const __WALL: u32 = 0x4000_0000;
+    const __WCLONE: u32 = 0x8000_0000;
+    const ALLOWED: u32 = WNOHANG | WUNTRACED | WCONTINUED | __WNOTHREAD | __WCLONE | __WALL;
+    if (options as u32) & !ALLOWED != 0 {
+        -EINVAL
+    } else if pid as i32 == i32::MIN {
+        -ESRCH
+    } else {
+        -ECHILD
+    }
 }
 
 pub(super) fn sys_waitid(options: u64) -> i64 {
@@ -369,7 +386,13 @@ mod tests {
 
     #[test]
     fn wait_rows_answer_echild_and_einval() {
-        assert_eq!(sys_wait4(), -ECHILD);
+        let any = (-1i64) as u64;
+        assert_eq!(sys_wait4(any, 0), -ECHILD);
+        assert_eq!(sys_wait4(any, 0x0000_0001 | 0x4000_0000), -ECHILD); // WNOHANG|__WALL
+        assert_eq!(sys_wait4(any, 0x100), -EINVAL);
+        assert_eq!(sys_wait4(any, 0x0000_0004), -EINVAL); // WEXITED is waitid's
+        assert_eq!(sys_wait4(i32::MIN as u64, 0), -ESRCH);
+        assert_eq!(sys_wait4(i32::MIN as u64, 0x100), -EINVAL); // options first
         assert_eq!(sys_waitid(0x0000_0004), -ECHILD); // WEXITED
         assert_eq!(sys_waitid(0x0000_0004 | 0x0000_0001), -ECHILD); // WEXITED|WNOHANG
         assert_eq!(sys_waitid(0), -EINVAL);
