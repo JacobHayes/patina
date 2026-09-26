@@ -567,7 +567,7 @@ pub(crate) fn deliver() {
                 if matches!(instance.sig, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU) {
                     fatal("default Stop-class signal would stop the only virtual process");
                 }
-                if crate::patina_shutdown() != 0 {
+                if crate::shutdown_run() != 0 {
                     fatal("signal termination finalization failed");
                 }
                 let default = Action::default();
@@ -1049,7 +1049,7 @@ pub(super) fn clear_tid(task: TaskId) {
 pub extern "C" fn patina_raw_exit_group(status: i32) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_guest_exit_status(status & 255);
-    if crate::patina_shutdown() != 0 {
+    if crate::shutdown_run() != 0 {
         fatal("exit_group finalization failed");
     }
     note_main_returned();

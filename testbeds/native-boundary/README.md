@@ -5,7 +5,7 @@ Each guest's internal assertions and its harness assertions form the proof.
 
 | Cargo test target | Proof | Platforms |
 |---|---|---|
-| `native_abi` | Prefixed C crash/checkpoint and env protocol; POSIX fd/env/path ABI; pipe/socketpair wakeups; reactor fields and exact virtual deadlines | Linux x86_64 + arm64, macOS; epoll/eventfd Linux-only, kqueue/nsec Darwin-only |
+| `native_abi` | Prefixed C crash/checkpoint and env protocol; POSIX fd/env/path ABI; C stdio at the edges of a run (teardown, a refusal, the first write); pipe/socketpair wakeups; reactor fields and exact virtual deadlines | Linux x86_64 + arm64, macOS; epoll/eventfd Linux-only, kqueue/nsec Darwin-only |
 | `native_containment` | Import/instruction refusals, host env/envp isolation, dlsym routing, SUD arming/refusal, auxv, SIGSYS, TSC, real faults and handler protection | Both OSes; SUD/auxv Linux; TSC/vsyscall x86_64 Linux |
 | `native_workloads` | std, the virtual realtime epoch and node name (defaults, `--realtime-epoch`, `--hostname`), independent entropy sources, locks/timers (a timer and a wait ending at one instant: interval timer vs `nanosleep`, timer descriptor vs `poll`, Linux; a mutex relocked before the first thread is a deadlock, Linux), thread names independent of the binary's file name (Linux), UDP/TCP, tokio signal driver + parking_lot + product-selected rustix backend | Linux x86_64 + arm64, macOS |
 | `native_raw` | Mixed raw/libc descriptor parity, legacy syscall aliases, exact virtual identity, soft refusals, prctl state/refusals, raw ppoll timeout writeback and pipe readiness | x86_64 Linux; unsupported SUD executes refusal assertions |

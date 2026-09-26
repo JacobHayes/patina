@@ -105,6 +105,31 @@
 
 #endif
 
+/* Defined in stdio.c and registered at startup (init.c): the flush the
+ * runtime makes on its exit paths, and the hand-over of buffered stdout the
+ * runtime makes before every refusal ends the run. */
+static void patina_stdio_flush_at_exit(void);
+static size_t patina_stdio_take_pending(const void **bytes);
+
+/*
+ * A lock the POSIX layer takes for libc's own state (a stream's `_IO_lock_t`,
+ * the environment's `envlock`), over the scheduler's mutex so concurrent
+ * threads queue on it: whether it was taken. After `main` returns only the root
+ * task runs — every other task stays parked where it was, at a scheduling
+ * point, with the state consistent — so there is nothing to exclude, and
+ * waiting on a lock a parked task holds would be a scheduling operation past
+ * the end of the run, which the runtime refuses. None is taken then, as
+ * glibc's exit flush (`_IO_cleanup`) takes none.
+ */
+static int patina_internal_lock(pthread_mutex_t *lock) {
+    if (patina_in_teardown()) return 0;
+    return patina_mutex_lock(lock) == 0;
+}
+
+static void patina_internal_unlock(pthread_mutex_t *lock, int held) {
+    if (held) (void)patina_mutex_unlock(lock);
+}
+
 static int fail_int(int result) {
     if (result < 0) errno = patina_errno();
     return result;

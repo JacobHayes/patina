@@ -2223,7 +2223,7 @@ pub(crate) fn trap_fatal(message: &str) -> ! {
     // output would be lost with the diagnostic: flush it first, exactly as the
     // C layer's process-class traps do, so a probe that dies here still leaves
     // its event stream behind for the conformance differ.
-    let _ = flush_captured_stdio();
+    let _ = flush_before_refusal();
     let text = format!("patina: {message}\n");
     let _ = host_write_all(2, text.as_bytes());
     crate::host_abort();
@@ -2345,7 +2345,7 @@ fn runtime_errno(error: &RuntimeError) -> c_int {
 /// here is what preserves that marker; mirrors [`abort_with_init_error`] /
 /// [`abort_with_buggify_marker`].
 fn abort_after_flushing_output() -> ! {
-    let _ = flush_captured_stdio();
+    let _ = flush_before_refusal();
     crate::host_abort();
 }
 
@@ -2481,7 +2481,7 @@ run under `cargo patina run` (or with the PATINA_MODE protocol set); no determin
 /// captured guest stdio is flushed first so the diagnostic lands after any
 /// buffered output, mirroring the process-class deny-trap path.
 fn abort_with_init_error(message: &str) -> ! {
-    let _ = flush_captured_stdio();
+    let _ = flush_before_refusal();
     // Written in pieces rather than through one `format!`: this is reachable
     // from the shim-bootstrap window, where a custom global allocator may still
     // be initializing and an allocation here would re-enter it. Same bytes.
@@ -2527,7 +2527,7 @@ fn missing_context_is_pre_harness_install() -> bool {
 }
 
 fn abort_harness_before_install() -> ! {
-    let _ = flush_captured_stdio();
+    let _ = flush_before_refusal();
     let message: &[u8] = b"patina: harness has not installed the runtime yet; an interposed \
 effect reached the deterministic boundary before patina_dst_harness::run/run_with installed the \
 runtime. Do all configuration and application effects inside the harness closure.\n";
@@ -2659,6 +2659,7 @@ fn with_context_msg<T>(
     // and named rather than record/consume a trace op that would otherwise resurface
     // as an unexplained record/replay op-count divergence at some far-away index.
     if thread::main_returned() {
+        let _ = flush_before_refusal();
         let _ = host_write_all(
             2,
             b"patina native shim fatal: a managed scheduling operation reached the trace after \
@@ -3367,14 +3368,65 @@ run through Patina, e.g. `cargo patina run <manifest> --target native --harness`
     patina_dst_runtime::HARNESS_ERR_CONFIG
 }
 
-/// Finalize the runtime, writing any recorded trace and flushing captured
-/// stdio. Idempotent: the packaged startup path registers this through `atexit`
-/// so record mode finalizes on normal exit without an explicit call, and a
-/// second call (for example an application that still calls it explicitly) is a
-/// no-op.
+/// `void (*)(void)` the POSIX layer registers at startup: the flush of its
+/// stdio buffers, or null when no C layer is linked (direct C-ABI embedders
+/// and the Rust lib tests). Stored as a data pointer, as the environ installer
+/// is.
+static STREAM_FLUSHER: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+/// `size_t (*)(const void **)` registered beside the flusher: hands over the
+/// bytes stdout's buffer holds and empties it, writing nothing (see
+/// [`salvage_buffered_stdout`]).
+static STREAM_SALVAGE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+type StreamFlusher = unsafe extern "C" fn();
+type StreamSalvage = unsafe extern "C" fn(*mut *const c_void) -> usize;
+
+/// Register the POSIX layer's stdio flush, which [`patina_shutdown`] runs
+/// first, and the salvage of its stdout buffer, which every refusal runs
+/// ([`flush_before_refusal`]). Null pointers unregister.
+///
+/// # Safety
+/// `flusher` must be a valid `void (*)(void)` and `salvage` a valid
+/// `size_t (*)(const void **)` for the life of the process.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_register_stream_flusher(
+    flusher: Option<StreamFlusher>,
+    salvage: Option<StreamSalvage>,
+) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let flusher = flusher.map_or(std::ptr::null_mut(), |flusher| flusher as *mut c_void);
+    let salvage = salvage.map_or(std::ptr::null_mut(), |salvage| salvage as *mut c_void);
+    STREAM_FLUSHER.store(flusher, Ordering::Release);
+    STREAM_SALVAGE.store(salvage, Ordering::Release);
+}
+
+/// Finalize the runtime on an exit path, writing any recorded trace and
+/// flushing captured stdio. The guest's stdio buffers are written first, as
+/// glibc's `exit` flushes them after the atexit handlers (`_IO_cleanup`); the
+/// runtime's own abort, fatal-signal and raw `exit_group` paths call
+/// [`shutdown_run`] instead, since glibc flushes on none of them. Idempotent:
+/// the packaged startup path registers this through `atexit` so record mode
+/// finalizes on normal exit without an explicit call, and a second call (for
+/// example an application that still calls it explicitly) is a no-op.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_shutdown() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let pointer = STREAM_FLUSHER.load(Ordering::Acquire);
+    if !pointer.is_null() && slot().lock().is_some() {
+        // SAFETY: non-null only after `patina_register_stream_flusher` stored a
+        // valid `StreamFlusher`. The flush writes through the guest's own
+        // descriptors, so it is guest code for the panic boundary.
+        let flusher = unsafe { std::mem::transmute::<*mut c_void, StreamFlusher>(pointer) };
+        let _guest = crate::panic_boundary::PanicScope::suspend();
+        unsafe { flusher() };
+    }
+    shutdown_run()
+}
+
+/// Finalize the runtime without flushing the guest's stdio buffers (see
+/// [`patina_shutdown`]).
+pub(crate) fn shutdown_run() -> c_int {
     thread::deactivate();
     let context = {
         let mut guard = slot().lock();
@@ -3547,26 +3599,81 @@ fn report_shutdown_error(message: &str) {
 }
 
 /// Flush captured stdout/stderr to the real host descriptors WITHOUT finalizing
-/// the run (unlike [`patina_shutdown`], which also finishes the trace/record).
-/// The process-class deny-traps in `c/patina_posix.c` call this immediately
+/// the run (unlike [`patina_shutdown`], which also finishes the trace/record),
+/// salvaging what the C streams buffered ([`flush_before_refusal`]). The
+/// process-class deny-traps in `c/patina_posix.c` call this immediately
 /// before `host_abort()`: `host_abort()` skips the atexit-driven shutdown flush, so
 /// without it the guest's buffered output and the deny diagnostic would be lost.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_flush_captured_stdio() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    match flush_captured_stdio() {
+    match flush_before_refusal() {
         Ok(()) => 0,
         Err(_) => -1,
     }
 }
 
+/// Write what the capture holds to the host, as the end of a run does. The
+/// guest's own stdio buffers are not touched: [`shutdown_run`] and the
+/// crash-restart `_exit` end the run the way glibc's abort, fatal signal and
+/// `_exit` do, and those lose them.
 fn flush_captured_stdio() -> io::Result<()> {
+    flush_capture(false)
+}
+
+/// The flush every path on which PATINA ends the run makes before it aborts:
+/// a refusal, an internal fatal, a liveness or step-budget stop, a verdict, a
+/// failed initialization. The guest did not choose to end there, so the
+/// output it buffered in C `stdout` (which glibc would have written at a later
+/// flush) is handed to the capture too: the lines leading up to the refusal
+/// are what a user debugs it from.
+fn flush_before_refusal() -> io::Result<()> {
+    flush_capture(true)
+}
+
+fn flush_capture(salvage: bool) -> io::Result<()> {
     let mut capture = stdio_slot().lock();
     let stdout = std::mem::take(&mut capture.stdout);
     let stderr = std::mem::take(&mut capture.stderr);
     drop(capture);
     host_write_all(1, &stdout)?;
+    if salvage {
+        salvage_buffered_stdout()?;
+    }
     host_write_all(2, &stderr)
+}
+
+/// Write what C `stdout` has buffered straight to the host's stdout, after the
+/// captured bytes: the POSIX layer's registered salvage empties the buffer and
+/// hands it over. Only while descriptor 1 is still the capture: bytes bound
+/// for a descriptor the guest redirected (`dup2` onto a file) would be a
+/// filesystem effect, and are lost as glibc loses them. Allocates nothing and
+/// takes no scheduling point (this runs on fatal paths, some from the
+/// bootstrap window); a descriptor table this thread already holds is
+/// undecidable, so the buffer is dropped rather than guessed at.
+fn salvage_buffered_stdout() -> io::Result<()> {
+    let pointer = STREAM_SALVAGE.load(Ordering::Acquire);
+    if pointer.is_null() {
+        return Ok(());
+    }
+    let to_capture = FD_TABLE.get().is_some_and(|table| {
+        table
+            .acquire()
+            .is_ok_and(|table| table.kind(1) == Some(FdKind::Stdout))
+    });
+    // SAFETY: non-null only after `patina_register_stream_flusher` stored a
+    // valid `StreamSalvage`.
+    let salvage = unsafe { std::mem::transmute::<*mut c_void, StreamSalvage>(pointer) };
+    let mut bytes: *const c_void = std::ptr::null();
+    // SAFETY: the salvage writes one pointer through `bytes`.
+    let length = unsafe { salvage(&mut bytes) };
+    if !to_capture || length == 0 || bytes.is_null() {
+        return Ok(());
+    }
+    // SAFETY: the salvage answers the stream's own buffer and the count of
+    // bytes it holds; nothing writes to it again before the process aborts.
+    let pending = unsafe { slice::from_raw_parts(bytes.cast::<u8>(), length) };
+    host_write_all(1, pending)
 }
 
 fn stdio_slot() -> &'static SpinMutex<StdioCapture> {
@@ -6814,7 +6921,7 @@ pub extern "C" fn patina_abort() -> ! {
         if slot().lock().is_some() {
             thread::signals::abort_through_kernel();
         }
-        let _ = patina_shutdown();
+        let _ = shutdown_run();
     }
     unsafe { (hostapi::get().host_abort)() }
 }
@@ -6833,6 +6940,17 @@ pub extern "C" fn patina_abort() -> ! {
 pub extern "C" fn patina_note_main_returned() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     thread::note_main_returned();
+}
+
+/// Whether the process is in its post-`main` teardown (1) or not (0). After
+/// `main` returns only the root task runs, so the POSIX layer's internal locks
+/// (a stream's, the environment's) have nothing left to exclude, and waiting
+/// on one a parked task holds would be a scheduling operation past the end of
+/// the run — the refusal in `with_context_msg`. They are not taken then.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_in_teardown() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    c_int::from(thread::main_returned())
 }
 
 /// Linux interposer-engagement canary. `patina_finalize_atexit` (patina_posix.c)
@@ -6913,7 +7031,7 @@ unsafe fn buggify_label<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
 /// from. A system-under-test finding does NOT come through here: it is reported
 /// as a verdict ([`abort_after_verdict`]).
 fn abort_with_buggify_marker(marker: &str, label: &str) -> ! {
-    let _ = flush_captured_stdio();
+    let _ = flush_before_refusal();
     let line = format!("{marker} label={label}\n");
     let _ = host_write_all(2, line.as_bytes());
     crate::host_abort();
@@ -6926,7 +7044,7 @@ fn abort_with_buggify_marker(marker: &str, label: &str) -> ! {
 /// hand-formatted marker would be a duplicate channel — and the classifier reads
 /// the verdict, never a marker (`docs/arcs/outcome-channel.md`).
 fn abort_after_verdict() -> ! {
-    let _ = flush_captured_stdio();
+    let _ = flush_before_refusal();
     crate::host_abort();
 }
 
@@ -7713,7 +7831,7 @@ mod thread {
         // an unmodeled flag) still leaves its event stream for the conformance
         // differ, which is what lets the testbed declare the death at an exact
         // event instead of writing the whole probe off.
-        let _ = super::flush_captured_stdio();
+        let _ = super::flush_before_refusal();
         let text = format!("patina native shim fatal: {message}\n");
         let _ = host_write_all(2, text.as_bytes());
         crate::host_abort();

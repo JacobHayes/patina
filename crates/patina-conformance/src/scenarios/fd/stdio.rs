@@ -4,6 +4,9 @@
 //! * `stdout` onto a pipe is fully buffered: `printf` and the other writers
 //!   leave the pipe empty (`FIONREAD` 0) until `fflush(stdout)` or
 //!   `fflush(NULL)` writes the whole buffer; the bytes then arrive in order;
+//! * the buffer is the pipe's `st_blksize` (at most `BUFSIZ`): a longer
+//!   write fills it, writes it and keeps the rest (libio/fileops.c
+//!   `_IO_file_doallocate`, `_IO_new_file_xsputn`);
 //! * the writers' answers: `printf`/`fprintf`/`vfprintf` the byte count,
 //!   `puts` the count with its newline, `fputs` 1, `putchar`/`fputc` the
 //!   byte, `fwrite` the whole items (0 for a zero size);
@@ -16,8 +19,7 @@
 //! from the platform ABI's layout (every argument on the overflow area).
 //! libc only.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::Probe;
 use crate::vehicle::{Vehicle, fold_errno};
 use libc::*;
@@ -84,6 +86,25 @@ fn vfprintf_with(stream: *mut FILE, format: &std::ffi::CStr, arguments: &mut [u6
         // SAFETY: as above.
         unsafe { vfprintf(stream, format.as_ptr(), list) }
     }
+}
+
+/// How far a write overshoots stdout's buffer.
+const OVERSHOOT: usize = 4;
+
+/// The buffer glibc gives a stream on `fd` (`_IO_file_doallocate`): its
+/// `st_blksize` below `BUFSIZ`, `BUFSIZ` otherwise. A pipe's is the page size.
+fn stream_buffer(fd: c_int) -> usize {
+    // SAFETY: fstat fills the zeroed struct it is handed.
+    let blksize = unsafe {
+        let mut status: stat = std::mem::zeroed();
+        assert_eq!(fstat(fd, &mut status), 0);
+        status.st_blksize
+    };
+    let bufsiz = BUFSIZ as usize;
+    usize::try_from(blksize)
+        .ok()
+        .filter(|&size| size > 0 && size < bufsiz)
+        .unwrap_or(bufsiz)
 }
 
 /// One observation made while a descriptor was redirected, recorded later:
@@ -220,12 +241,15 @@ fn of(seen: &[Seen], op: &str, nth: usize) -> i64 {
 
 pub fn run(p: &Probe) {
     // ---- stdout: fully buffered onto a pipe --------------------------------------
+    let mut buffer = 0;
     let (out, received) = session(1, true, |pipe| {
+        buffer = stream_buffer(1);
         // SAFETY: the stream global, NUL-terminated literals, and variadic
         // arguments matching their conversions.
         unsafe {
             let out = stdout;
             let mut arguments = [c"va".as_ptr() as u64, 7, u64::from(b'z')];
+            let long = vec![b'L'; buffer + OVERSHOOT];
             vec![
                 writer("printf", Some(("format", "%s=%d\\n")), || {
                     i64::from(printf(c"%s=%d\n".as_ptr(), c"n".as_ptr(), 42))
@@ -268,6 +292,14 @@ pub fn run(p: &Probe) {
                 pending(pipe),
                 writer("fflush", Some(("stream", "NULL")), || {
                     i64::from(fflush(std::ptr::null_mut()))
+                }),
+                pending(pipe),
+                writer("fwrite", Some(("items", "buffer+4 of 1")), || {
+                    fwrite(long.as_ptr().cast(), 1, long.len(), out) as i64
+                }),
+                pending(pipe),
+                writer("fflush", Some(("stream", "stdout")), || {
+                    i64::from(fflush(out))
                 }),
                 pending(pipe),
             ]
@@ -316,9 +348,20 @@ pub fn run(p: &Probe) {
         "fflush(NULL) writes them",
         of(&out, "fflush", 1) == 0 && of(&out, "FIONREAD", 3) == 41,
     );
+    let long = (buffer + OVERSHOOT) as i64;
+    p.check(
+        "a write past the buffer fills it and writes it, st_blksize bytes",
+        of(&out, "fwrite", 2) == long && of(&out, "FIONREAD", 4) == 41 + buffer as i64,
+    );
+    p.check(
+        "the rest waits for the flush",
+        of(&out, "fflush", 2) == 0 && of(&out, "FIONREAD", 5) == 41 + long,
+    );
+    let mut expected = b"n=42\nline\nxyabchello![  2.7|a  |ff]va-7-z".to_vec();
+    expected.extend(std::iter::repeat_n(b'L', buffer + OVERSHOOT));
     p.check(
         "the pipe received every byte in order",
-        received == b"n=42\nline\nxyabchello![  2.7|a  |ff]va-7-z",
+        received == expected,
     );
 
     // ---- stderr: unbuffered --------------------------------------------------------
@@ -392,44 +435,7 @@ pub const SCENARIO: Scenario = Scenario {
     ],
     symbols: &[
         "printf", "puts", "putchar", "fputc", "fputs", "fwrite", "fprintf", "vfprintf", "fflush",
-        "stdout", "stderr", "pipe2", "dup", "dup2", "ioctl", "read", "close",
-    ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "the standard streams are unbuffered: every writer goes straight to the descriptor through patina_write and fflush does nothing (c/posix/stdio.c), where glibc fully buffers stdout onto a pipe until a flush",
-            failure: Failure::Differs(&[
-                Difference::field(1, "FIONREAD", "ret", Observed::Int(5)),
-                Difference::field(12, "FIONREAD", "ret", Observed::Int(41)),
-                Difference::check(17, "the buffered output waits in the stream"),
-                Difference::check(26, "the writers since the flush wait in the stream"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "with the streams unbuffered a write error surfaces at the writer, not at the flush: fputc answers EOF (setting no errno) on a closed descriptor and fflush answers 0 (c/posix/stdio.c fputc, fflush), where glibc's fputc buffers the byte and its fflush answers EOF with EBADF",
-            failure: Failure::Differs(&[
-                Difference::field(36, "fputc", "fields.returned", Observed::Int(-1)),
-                Difference::field(37, "fflush", "fields.returned", Observed::Int(0)),
-                Difference::field(37, "fflush", "fields.errno", Observed::Null),
-                Difference::check(38, "buffered writers succeed on a closed descriptor"),
-                Difference::check(39, "the flush answers EOF with EBADF"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "puts and fputs answer 0 on success (c/posix/stdio.c), where glibc's puts answers the bytes written with the newline and its fputs 1 (libio/ioputs.c, libio/iofputs.c); POSIX asks only for a non-negative number",
-            failure: Failure::Differs(&[
-                Difference::field(4, "puts", "fields.returned", Observed::Int(0)),
-                Difference::field(7, "fputs", "fields.returned", Observed::Int(0)),
-                Difference::check(19, "puts answers the count with its newline"),
-                Difference::check(22, "fputs answers 1"),
-                Difference::field(31, "fputs", "fields.returned", Observed::Int(0)),
-            ]),
-        },
+        "stdout", "stderr", "pipe2", "dup", "dup2", "fstat", "ioctl", "read", "close",
     ],
     ..DEFAULTS
 };

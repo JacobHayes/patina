@@ -982,6 +982,9 @@ __attribute__((constructor(101))) static void patina_native_start(void) {
      * guest env map, and a deferred harness install happens after this
      * constructor returns. */
     patina_register_environ_installer(patina_environ_install);
+    /* And the stdio flush the end of the run makes on its exit paths, with
+     * the stdout salvage its refusals make. */
+    patina_register_stream_flusher(patina_stdio_flush_at_exit, patina_stdio_take_pending);
     /* Deferred harness init (PATINA_DEFER_INIT=1, set by `cargo patina run
      * --harness`): still capture the control plane, still register finalization,
      * still scrub the environment — but leave the runtime UNINSTALLED so

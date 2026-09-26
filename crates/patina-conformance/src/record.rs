@@ -34,6 +34,25 @@ impl EventBuilder<'_> {
     pub fn emit(self) {
         self.recorder.emit(self.event);
     }
+
+    /// Emit through C stdio's `stdout` instead of the recorder's own
+    /// descriptor writes, and leave it unflushed: the line reaches the
+    /// stream only when libc writes the stream's buffer out — onto a pipe,
+    /// at the latest when `exit` flushes it after the atexit handlers.
+    pub fn emit_through_stdio(self) {
+        self.recorder.emit_with(self.event, |line| {
+            let line = std::ffi::CString::new(line).expect("an event line holds no NUL");
+            // SAFETY: the process's C `stdout` and a NUL-terminated line.
+            let r = unsafe { libc::fputs(line.as_ptr(), C_STDOUT) };
+            assert!(r >= 0, "fputs to stdout failed");
+        });
+    }
+}
+
+unsafe extern "C" {
+    /// C stdio's `stdout` (the shim's sentinel under patina).
+    #[link_name = "stdout"]
+    static mut C_STDOUT: *mut libc::FILE;
 }
 
 /// The process-wide JSONL writer. Thread-safe: managed threads under patina and
@@ -89,7 +108,18 @@ impl Recorder {
         }
     }
 
-    pub fn emit(&self, mut event: Event) {
+    pub fn emit(&self, event: Event) {
+        self.emit_with(event, |line| {
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            out.write_all(line).expect("stdout write");
+            out.flush().expect("stdout flush");
+        });
+    }
+
+    /// Number `event`, journal it, and hand its line (newline included) to
+    /// `write`.
+    fn emit_with(&self, mut event: Event, write: impl FnOnce(&[u8])) {
         if QUIET.with(std::cell::Cell::get) != 0 {
             return;
         }
@@ -98,13 +128,10 @@ impl Recorder {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         event.seq = self.seq.fetch_add(1, Ordering::SeqCst);
-        let line = serde_json::to_string(&event).expect("event serializes");
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
+        let mut line = serde_json::to_string(&event).expect("event serializes");
         crate::journal::append(line.as_bytes());
-        out.write_all(line.as_bytes()).expect("stdout write");
-        out.write_all(b"\n").expect("stdout write");
-        out.flush().expect("stdout flush");
+        line.push('\n');
+        write(line.as_bytes());
     }
 
     /// Run `body` with this thread's recording suspended (setup/teardown and

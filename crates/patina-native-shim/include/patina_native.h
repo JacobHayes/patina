@@ -114,6 +114,17 @@ int32_t patina_unsetenv(const char *name);
 int32_t patina_clearenv(void);
 void patina_register_environ_installer(void (*installer)(char **));
 void patina_publish_environ(void);
+/*
+ * The POSIX layer's stdio flush and stdout salvage, registered at startup.
+ * patina_shutdown calls the flush first, so the exit paths (the atexit
+ * finalizer, a harness's finalize) write what the streams buffered, as glibc's
+ * exit does; the runtime's abort, fatal-signal and raw exit_group paths
+ * finalize without it. The salvage hands over (and empties) stdout's buffer
+ * without writing it: every path on which patina itself ends the run (a
+ * refusal, a fatal, a verdict) writes those bytes after the captured ones.
+ */
+void patina_register_stream_flusher(void (*flusher)(void),
+                                    size_t (*salvage)(const void **bytes));
 int32_t patina_shutdown(void);
 
 /*
@@ -153,6 +164,11 @@ _Noreturn void patina_exit(int32_t status);
  * interposer cannot see (glibc calls `exit` through a hidden internal alias).
  */
 void patina_note_main_returned(void);
+/*
+ * 1 once the process is in post-`main` teardown (only the root task runs), 0
+ * before: the POSIX layer's internal locks are not taken then.
+ */
+int32_t patina_in_teardown(void);
 #ifdef __linux__
 /*
  * Syscall-user-dispatch (SUD) boundary (Linux only). `patina_sud_dispatch` is
@@ -178,8 +194,9 @@ void patina_assert_teardown_engaged(void);
 #endif
 /*
  * Flush captured stdout/stderr to the real host descriptors WITHOUT finalizing
- * the run (unlike patina_shutdown). The process-class deny-traps call this
- * before patina_host_abort() so the guest's output and the deny diagnostic reach the
+ * the run (unlike patina_shutdown), with what stdout's buffer holds after the
+ * captured stdout. The process-class deny-traps call this before
+ * patina_host_abort() so the guest's output and the deny diagnostic reach the
  * operator even though the private fatal vehicle skips the atexit-driven shutdown flush.
  */
 int32_t patina_flush_captured_stdio(void);

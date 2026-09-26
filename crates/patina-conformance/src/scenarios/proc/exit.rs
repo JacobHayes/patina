@@ -3,15 +3,15 @@
 //! * `exit` runs the `atexit` handlers in the reverse order of their
 //!   registration, a handler registered while they run before the ones
 //!   still pending, and the process then exits with the status given (3);
+//! * after the handlers, `exit` flushes the stdio buffers (`_IO_cleanup`):
+//!   the last handler's final events go through C stdio's `stdout`, fully
+//!   buffered onto the harness's pipe, unflushed, so they reach the stream
+//!   only through that flush;
 //! * `waitpid` (posix/waitpid.c) finds no child to reap (ECHILD); proc/wait
 //!   holds the wait4 row itself, on every vehicle.
 //!
 //! The handlers record their own events after `exit` is called; the last
-//! one checks the order and announces the status. glibc's `exit` also
-//! flushes the stdio buffers after the handlers (`_IO_cleanup`); nothing
-//! here observes that (the probe's standard output carries its event
-//! stream), so a model that buffers the streams, as fd/stdio's gap asks,
-//! must bring its own evidence of the flush at exit. libc only.
+//! one checks the order and announces the status. libc only.
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
@@ -44,7 +44,16 @@ extern "C" fn first() {
         "handlers run last-registered first, a late one before the rest",
         ran == [3, 4, 2, 1],
     );
-    p.exits_with(STATUS);
+    // Left in stdout's buffer: only the flush after the handlers writes
+    // these two, the status announcement last.
+    p.rec
+        .event("stdio_buffered", 0)
+        .arg("stream", "stdout")
+        .emit_through_stdio();
+    p.rec
+        .event(crate::observe::EXPECT_EXIT_OP, 0)
+        .arg("code", STATUS)
+        .emit_through_stdio();
 }
 
 /// The status the scenario exits with.
@@ -114,6 +123,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_wait4, Syscall::N_exit_group],
-    symbols: &["waitpid", "exit"],
+    symbols: &["waitpid", "exit", "fputs", "stdout"],
     ..DEFAULTS
 };

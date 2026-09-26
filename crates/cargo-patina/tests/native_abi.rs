@@ -344,3 +344,73 @@ mod darwin {
         }
     }
 }
+
+/// The C streams at the edges of a run (`stdio_lifecycle_probe.c`): the end of
+/// `main`, the first write, and a run patina refuses. Class pairing: the
+/// fd/stdio and proc/exit conformance scenarios hold the streams' buffering to
+/// the host; these hold what the scheduler and the refusal paths do to them.
+mod stdio_lifecycle {
+    use super::*;
+
+    fn guest(link: CLink) -> Guest {
+        assert_build_c_guest("stdio_lifecycle_probe.c", link)
+    }
+
+    fn seeded(binary: &std::path::Path, case: &str, seed: u64) -> std::process::Output {
+        let seed = seed.to_string();
+        standalone_output(
+            binary,
+            &[case],
+            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", &seed)],
+        )
+    }
+
+    /// Only the root task runs after `main`: an atexit handler's `printf` must
+    /// not wait on the stream lock a parked printing thread holds (that wait
+    /// is a scheduling operation past the end of `main`, a refusal).
+    #[test]
+    fn stdio_after_main_takes_no_scheduler_lock() {
+        let g = guest(CLink::PosixShim);
+        for seed in 1..=8 {
+            let output = assert_success(seeded(&g.binary, "teardown", seed));
+            let stdout = text(&output.stdout);
+            assert!(
+                stdout.contains("main 49\n") && stdout.ends_with("atexit handler says bye\n"),
+                "seed {seed}: {stdout}"
+            );
+        }
+    }
+
+    /// Choosing stdout's buffer asks fstat about the descriptor; the answer
+    /// for the capture must not leave an errno the host's pipe would not.
+    #[test]
+    fn the_first_write_leaves_errno_alone() {
+        let native = assert_success(standalone_output(
+            &guest(CLink::Unlinked).binary,
+            &["errno"],
+            &[],
+        ));
+        let patina = assert_success(seeded(&guest(CLink::PosixShim).binary, "errno", 1));
+        assert_eq!(text(&patina.stdout), text(&native.stdout));
+    }
+
+    /// A refusal ends the run by the private abort, which glibc's exit flush
+    /// never sees: the output the guest buffered before it still reaches the
+    /// capture (Linux: Darwin's static mutexes are error-checking, so the
+    /// relock is EDEADLK there, not a refusal).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refusal_keeps_the_buffered_output() {
+        assert_refusal_keeps_output("deadlock");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_refusal_keeps_output(case: &str) {
+        use std::os::unix::process::ExitStatusExt;
+        let g = guest(CLink::PosixShim);
+        let output = seeded(&g.binary, case, 1);
+        assert_eq!(output.status.signal(), Some(6), "{}", text(&output.stderr));
+        assert!(!output.stderr.is_empty(), "a refusal names itself");
+        assert_eq!(text(&output.stdout), "progress before the refusal\n");
+    }
+}
