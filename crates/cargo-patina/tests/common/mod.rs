@@ -132,6 +132,7 @@ pub fn compile_posix_object(dir: &Path) -> PathBuf {
             "-std=c11",
             "-D_POSIX_C_SOURCE=200809L",
             "-fno-stack-protector",
+            "-fasynchronous-unwind-tables",
             "-Wall",
             "-Wextra",
             "-Werror",

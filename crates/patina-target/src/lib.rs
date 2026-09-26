@@ -3408,12 +3408,17 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
     // These pthread helpers expose only the current managed host-thread handle
     // or configure thread/lock attributes in caller-owned memory. Creation and
     // synchronization are provided by Patina interposers, not by these helpers.
+    // `_pthread_cleanup_push`/`_pthread_cleanup_pop` link and unlink a
+    // caller-owned cleanup record in the calling thread's chain, which glibc's
+    // unwind runs when the thread exits (the exit itself is interposed).
     const PTHREAD_LOCAL_HELPERS: &[&str] = &[
         "pthread_attr_destroy",
         "pthread_attr_getguardsize",
         "pthread_attr_getstack",
         "pthread_attr_init",
         "pthread_attr_setstacksize",
+        "pthread_cleanup_pop",
+        "pthread_cleanup_push",
         "pthread_condattr_destroy",
         "pthread_condattr_init",
         "pthread_condattr_setclock",

@@ -247,6 +247,35 @@ static patina_host_sigaction_fn patina_real_sigaction(void) {
     return patina_host_sigaction;
 }
 
+/*
+ * glibc's old-style cleanup records (_pthread_cleanup_push/_pop), reached as
+ * host aliases and resolved once: a record pushed in a frame runs when glibc's
+ * forced unwind (pthread_exit, a cancellation acting) leaves that frame.
+ */
+typedef void (*patina_cleanup_push_fn)(struct _pthread_cleanup_buffer *, void (*)(void *),
+                                       void *);
+typedef void (*patina_cleanup_pop_fn)(struct _pthread_cleanup_buffer *, int);
+static patina_cleanup_push_fn patina_host_cleanup_push;
+static patina_cleanup_pop_fn patina_host_cleanup_pop;
+
+static void patina_cleanup_push(struct _pthread_cleanup_buffer *buffer,
+                                void (*routine)(void *), void *arg) {
+    if (patina_host_cleanup_push == NULL || patina_host_cleanup_pop == NULL) {
+        patina_host_cleanup_push =
+            (patina_cleanup_push_fn)__real_dlsym(RTLD_NEXT, "_pthread_cleanup_push");
+        patina_host_cleanup_pop =
+            (patina_cleanup_pop_fn)__real_dlsym(RTLD_NEXT, "_pthread_cleanup_pop");
+        if (patina_host_cleanup_push == NULL || patina_host_cleanup_pop == NULL) {
+            patina_sud_report_fatal("could not resolve glibc's _pthread_cleanup_push/_pop");
+        }
+    }
+    patina_host_cleanup_push(buffer, routine, arg);
+}
+
+static void patina_cleanup_pop(struct _pthread_cleanup_buffer *buffer, int execute) {
+    patina_host_cleanup_pop(buffer, execute);
+}
+
 static int patina_env_has(const char *name, char **argv, int argc) {
     char **envp = argv + argc + 1;
     size_t nlen = strlen(name);

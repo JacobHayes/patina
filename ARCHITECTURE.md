@@ -208,6 +208,29 @@ binary's name, which the kernel would take from the file `execve` ran — until
 its creator's. A join of a detached thread is `EINVAL`, and then one that could
 never end — of the caller itself, or of a thread waiting to join the caller — is
 `EDEADLK`.
+On Linux `pthread_exit` ends a thread the guest created as a return from its
+start routine does, with the value a join answers: the model records the value,
+then the C interposer calls glibc's own `pthread_exit`, whose forced unwind runs
+the cleanup handlers and returns into `start_thread` for the thread-local and
+`pthread_key` destructors. From the guest's own frames the unwind crosses only
+those and C ones (the host start routine is the C layer's `patina_thread_body`);
+a Rust frame could not be unwound. A guest signal handler runs above the shim's
+Rust delivery frames, so a `pthread_exit` inside one is a named fatal (the
+per-task delivery depth, `src/thread/signals.rs`); a handler that leaves by
+`siglongjmp` leaves that depth raised, so a later `pthread_exit` on the thread
+stops the same way. An init routine `pthread_once` runs that exits instead of
+returning resets the control (a cleanup record around it, glibc's
+`clear_once_control`), and a waiting or later caller runs the init. C's
+`pthread_cleanup_push` macro compiles to imports of `__sigsetjmp`,
+`__pthread_register_cancel` and `__pthread_unwind_next`, which the pre-run audit
+refuses (only the old-style `_pthread_cleanup_push`/`_pop` are allowlisted), so a
+C guest using it runs only outside `cargo patina run` (as `native_abi`'s probe does). glibc's unwinder is `libgcc_s`, which it opens on first use; every
+shim-linked guest already links it (the shim's Rust half needs it), so the open
+finds it loaded rather than reading it through syscall-user-dispatch. The main
+thread's `pthread_exit`, and every `pthread_exit` on macOS, is a named fatal.
+The `pthread_key` destructors run after the thread's completion, since they follow
+the thread-local ones in `start_thread`: a joiner waits for them, but a detached
+thread's run beside the next task.
 
 A handler installed with the caller's own `SA_RESTORER` (a raw action, as Go's
 runtime installs) returns into the caller's stub, and the stub's `rt_sigreturn`

@@ -850,6 +850,20 @@ int32_t patina_thread_create(void **thread, const void *attr,
 int32_t patina_thread_join(void *thread, void **retval);
 int32_t patina_thread_detach(void *thread);
 void patina_thread_exit(void *retval);
+#ifdef __linux__
+/*
+ * The Linux thread lifecycle's C halves (c/posix/thread_sync.c): the host start
+ * routine calls the guest routine between the prelude (which answers it and
+ * its argument) and the epilogue, and pthread_exit records its value, then
+ * calls the glibc pthread_exit the model answers. Each returns before glibc's
+ * forced unwind starts, so the unwind crosses no Rust frame.
+ */
+typedef void *(*patina_start_routine)(void *);
+patina_start_routine patina_thread_prelude(void *start, void **arg);
+void patina_thread_returned(void *value);
+typedef void (*patina_host_pthread_exit_fn)(void *) __attribute__((noreturn));
+patina_host_pthread_exit_fn patina_thread_exiting(void *value);
+#endif
 int32_t patina_mutex_init(void *mutex, const void *attr);
 int32_t patina_mutex_lock(void *mutex);
 int32_t patina_mutex_trylock(void *mutex);

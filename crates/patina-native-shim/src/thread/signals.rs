@@ -165,6 +165,10 @@ struct TaskSignals {
     mask: u64,
     private: Pending,
     clear_child_tid: Option<usize>,
+    /// How many delivery batches this task is inside ([`deliver`]): while it
+    /// is not 0, the task runs a guest handler above the shim's own delivery
+    /// frames, which no unwind may cross.
+    delivering: u32,
 }
 
 struct Interrupt {
@@ -212,6 +216,14 @@ impl SignalRuntime {
     }
     pub(super) fn mask(&self, task: TaskId) -> u64 {
         self.tasks[&task].mask
+    }
+    /// Whether `task` runs a guest signal handler: glibc's forced unwind
+    /// (`pthread_exit`) from there would cross the shim's Rust delivery
+    /// frames, which cannot be unwound.
+    pub(super) fn in_handler(&self, task: TaskId) -> bool {
+        self.tasks
+            .get(&task)
+            .is_some_and(|task| task.delivering > 0)
     }
     pub(super) fn spawn(&mut self, task: TaskId, parent: Option<TaskId>) {
         let mask = parent.map_or(0, |parent| self.tasks[&parent].mask);
@@ -554,6 +566,9 @@ pub(crate) fn deliver() {
                 }
                 batch.push((instance, action));
             }
+            if !batch.is_empty() {
+                state.signals.tasks.get_mut(&me).unwrap().delivering += 1;
+            }
             batch
         };
         if batch.is_empty() {
@@ -627,7 +642,10 @@ pub(crate) fn deliver() {
             containment_kept_unblocked(restored & !kept);
             install_mask(kept);
         }
-        lock_state().signals.tasks.get_mut(&me).unwrap().mask = kept;
+        let mut state = lock_state();
+        let task = state.signals.tasks.get_mut(&me).unwrap();
+        task.mask = kept;
+        task.delivering -= 1;
     }
 }
 

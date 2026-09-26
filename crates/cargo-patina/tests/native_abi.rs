@@ -301,6 +301,30 @@ mod linux {
         );
     }
 
+    /// A C guest's `pthread_exit` runs the cleanup handler
+    /// `pthread_cleanup_push` registered (the setjmp form C compiles to, which
+    /// glibc's unwind longjmps into and continues from), and the join answers
+    /// its value.
+    #[test]
+    fn c_pthread_exit_runs_cleanup_handlers() {
+        let g = assert_build_c_guest("pthread_exit_probe.c", CLink::PosixShim);
+        let (output, _) = g.record_standalone(&[]);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            text(&output.stdout),
+            "NATIVE_PTHREAD_EXIT cleanup=7\nNATIVE_PTHREAD_EXIT value=42\n"
+        );
+    }
+
+    /// A `pthread_exit` inside a guest signal handler (glibc ends the thread)
+    /// would unwind through the shim's Rust delivery frames beneath the
+    /// handler: the run stops by name instead of aborting in the unwinder.
+    #[test]
+    fn c_pthread_exit_in_a_signal_handler_stops_by_name() {
+        let g = assert_build_c_guest("pthread_exit_probe.c", CLink::PosixShim);
+        g.assert_internal_fatal(&["handler"], &["signal handler"]);
+    }
+
     #[test]
     fn epoll_timeout_advances_exact_virtual_time() {
         let g = Guest::assert_build("epoll_timeout_probe.rs");

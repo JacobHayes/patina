@@ -1175,6 +1175,11 @@ mod hostapi {
         /// threads deterministically at the managed-join point.
         pub host_pthread_join: HostPthreadJoin,
         pub host_pthread_detach: unsafe extern "C" fn(*mut c_void) -> c_int,
+        /// The real glibc `pthread_exit`: the C `pthread_exit` interposer calls
+        /// it (never Rust, whose frames cannot be unwound) once the model has
+        /// the thread's value, so glibc's own forced unwind runs the cleanup
+        /// handlers and `start_thread` the destructors.
+        pub host_pthread_exit: unsafe extern "C" fn(*mut c_void) -> !,
         /// The real glibc `syscall(2)` wrapper, the SUD dispatcher's pass-through
         /// vehicle for process-local memory-management rows.
         pub host_syscall: HostSyscall,
@@ -1250,6 +1255,10 @@ mod hostapi {
                 host_pthread_join: std::mem::transmute::<*mut c_void, HostPthreadJoin>(resolve(
                     c"pthread_join",
                 )),
+                host_pthread_exit: std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "C" fn(*mut c_void) -> !,
+                >(resolve(c"pthread_exit")),
                 host_syscall: std::mem::transmute::<*mut c_void, HostSyscall>(resolve(c"syscall")),
                 host_cxa_thread_atexit_impl: std::mem::transmute::<*mut c_void, HostThreadAtexit>(
                     resolve(c"__cxa_thread_atexit_impl"),
@@ -9557,8 +9566,11 @@ mod thread {
         "ret",
     );
 
-    extern "C" fn thread_trampoline(raw: *mut c_void) -> *mut c_void {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    /// Everything a managed thread does before its guest routine runs, on the
+    /// new host thread: take the task, arm the per-thread traps, take the
+    /// host registrations over, register the completion, then wait for the
+    /// baton. Answers the guest routine and its argument.
+    fn thread_prelude(raw: *mut c_void) -> (StartRoutine, *mut c_void) {
         // SAFETY: `raw` is the `Box<ThreadStart>` leaked in patina_thread_create.
         let start = unsafe { Box::from_raw(raw.cast::<ThreadStart>()) };
         let ThreadStart { task, routine, arg } = *start;
@@ -9588,12 +9600,11 @@ mod thread {
         // now it waits, so no guest code runs beside this off-baton setup and
         // a query of this thread's registrations answers the same every run.
         #[cfg(target_os = "linux")]
-        let exit = {
+        {
             registrations::adopt(task);
-            let exit = finish_after_destructors(task);
+            EXIT_RECORD.with(|cell| cell.set(finish_after_destructors(task)));
             creation_settled().signal();
-            exit
-        };
+        }
         // Park on this task's baton semaphore until it is first scheduled.
         let sem = lock_state().task_sem(task);
         sem.wait();
@@ -9602,6 +9613,15 @@ mod thread {
             let mask = lock_state().signals.mask(task);
             signals::install_mask(mask);
         }
+        (routine, arg)
+    }
+
+    /// The host start routine where the C layer is not linked (the shim's own
+    /// unit tests, and macOS, where no `pthread_exit` reaches the model): the
+    /// prelude, the guest routine, then the completion.
+    extern "C" fn thread_trampoline(raw: *mut c_void) -> *mut c_void {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        let (routine, arg) = thread_prelude(raw);
         let ret = {
             let _guest = crate::panic_boundary::PanicScope::suspend();
             routine(arg)
@@ -9610,14 +9630,130 @@ mod thread {
         // pass (`finish_after_destructors`), once the guest's own destructors
         // ran on it.
         #[cfg(target_os = "linux")]
-        // SAFETY: the record `finish_after_destructors` leaked; its
-        // destructor, which frees it, has not run yet.
-        unsafe {
-            (*exit).retval = ret as usize;
-        }
+        thread_returned(ret);
         #[cfg(not(target_os = "linux"))]
-        thread_finish(task, ret as usize, 0);
+        thread_finish(current_task(), ret as usize, 0);
         ret
+    }
+
+    // The C layer's host start routine (`c/posix/thread_sync.c`), which calls
+    // the guest routine from C: the one frame glibc's forced unwind
+    // (`pthread_exit`, cancellation) crosses between the guest's frames and
+    // `start_thread` is then C, never a Rust frame, which could not be
+    // unwound. Weak, as `patina_sud_arm_thread` is: a link without the C layer
+    // leaves it unresolved, and `thread_trampoline` serves.
+    #[cfg(target_os = "linux")]
+    core::arch::global_asm!(
+        ".weak patina_thread_body",
+        ".pushsection .data.rel.ro.patina_thread_body,\"aw\"",
+        ".balign 8",
+        ".globl patina_thread_body_address",
+        ".hidden patina_thread_body_address",
+        "patina_thread_body_address:",
+        ".quad patina_thread_body",
+        ".popsection",
+    );
+    #[cfg(target_os = "linux")]
+    unsafe extern "C" {
+        static patina_thread_body_address: usize;
+    }
+
+    /// The host start routine of a managed thread: the C body where the C
+    /// layer is linked, else [`thread_trampoline`].
+    fn host_start_routine() -> StartRoutine {
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: a plain data word the link filled in: the C body's
+            // address, or 0.
+            let body = unsafe { std::ptr::read_volatile(&raw const patina_thread_body_address) };
+            if body != 0 {
+                // SAFETY: the C body has the start routine's signature.
+                return unsafe { std::mem::transmute::<usize, StartRoutine>(body) };
+            }
+        }
+        thread_trampoline
+    }
+
+    /// The C body's prelude: [`thread_prelude`], answering the guest routine
+    /// and writing its argument.
+    ///
+    /// # Safety
+    /// `raw` must be the payload `patina_thread_create` handed the host
+    /// thread, and `arg` writable.
+    #[cfg(target_os = "linux")]
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_thread_prelude(
+        raw: *mut c_void,
+        arg: *mut *mut c_void,
+    ) -> StartRoutine {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        let (routine, argument) = thread_prelude(raw);
+        // SAFETY: writable, per this function's contract.
+        unsafe { arg.write(argument) };
+        routine
+    }
+
+    thread_local! {
+        /// The completion record of the managed thread running on this host
+        /// thread, from its prelude until the completion consumes it.
+        #[cfg(target_os = "linux")]
+        static EXIT_RECORD: Cell<*mut ThreadExit> = const { Cell::new(core::ptr::null_mut()) };
+    }
+
+    /// Hand the completion the value the thread ends with.
+    #[cfg(target_os = "linux")]
+    fn thread_returned(value: *mut c_void) {
+        let record = EXIT_RECORD.with(Cell::get);
+        if record.is_null() {
+            fatal("a managed thread ended with no completion registered");
+        }
+        // SAFETY: the record `finish_after_destructors` leaked; its
+        // destructor, which frees it and clears the cell, has not run yet.
+        unsafe { (*record).retval = value as usize };
+    }
+
+    /// The C body's epilogue once the guest routine returned: its value is
+    /// the thread's.
+    #[cfg(target_os = "linux")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_thread_returned(value: *mut c_void) {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        thread_returned(value);
+    }
+
+    /// `pthread_exit(value)` on the calling thread, the model's half: the
+    /// value becomes the thread's, which its completion hands a joiner. It
+    /// returns glibc's `pthread_exit` for the C interposer to call: glibc's
+    /// forced unwind then runs the cleanup handlers and `start_thread` the
+    /// thread-local and `pthread_key` destructors, and the thread completes
+    /// from its destructor pass as a returning one does. From the guest's own
+    /// frames the unwind crosses only the guest's and C ones.
+    ///
+    /// Two cases are named fatals: the main thread's `pthread_exit`, and a
+    /// `pthread_exit` inside a guest signal handler, whose unwind would cross
+    /// the shim's Rust delivery frames beneath the handler (a Rust frame
+    /// cannot be unwound: the process would abort where glibc ends the
+    /// thread).
+    #[cfg(target_os = "linux")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_thread_exiting(
+        value: *mut c_void,
+    ) -> unsafe extern "C" fn(*mut c_void) -> ! {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        if lock_state().signals.in_handler(current_task()) {
+            fatal(
+                "pthread_exit inside a signal handler is not modeled: glibc's unwind would \
+                 cross the shim's signal-delivery frames beneath the handler",
+            );
+        }
+        if EXIT_RECORD.with(Cell::get).is_null() {
+            fatal(
+                "pthread_exit is supported on threads the guest created, not on the main thread \
+                 (or a thread the runtime does not run); return from main instead",
+            );
+        }
+        thread_returned(value);
+        crate::hostapi::get().host_pthread_exit
     }
 
     /// Posted by a new thread once its host registrations are taken over and
@@ -9652,6 +9788,7 @@ mod thread {
             // SAFETY: the record leaked below, consumed exactly once here.
             let ThreadExit { task, retval } =
                 *unsafe { Box::from_raw(record.cast::<ThreadExit>()) };
+            EXIT_RECORD.with(|cell| cell.set(core::ptr::null_mut()));
             thread_finish(task, retval, 0);
         }
         unsafe extern "C" {
@@ -9770,7 +9907,8 @@ mod thread {
         let mut handle: *mut c_void = core::ptr::null_mut();
         // SAFETY: `spawn_host_thread` creates a real, non-interposed host OS
         // thread; `payload` is consumed exactly once by the trampoline.
-        let rc = unsafe { spawn_host_thread(&mut handle, attr, thread_trampoline, payload.cast()) };
+        let rc =
+            unsafe { spawn_host_thread(&mut handle, attr, host_start_routine(), payload.cast()) };
         if rc != 0 {
             // SAFETY: the trampoline never ran, so `payload` is still owned.
             drop(unsafe { Box::from_raw(payload) });
@@ -9894,9 +10032,10 @@ mod thread {
         }
     }
 
-    /// `pthread_exit` is fail-closed: the deterministic runtime cannot terminate
-    /// one host thread mid-body without the host's own thread destructor, and
-    /// Rust threads always return from their body rather than calling it.
+    /// `pthread_exit` where the model does not reach it, fail-closed: on macOS
+    /// (whose libsystem ends a thread without an unwind the model could
+    /// follow) and through the prefixed C ABI. On Linux the C interposer goes
+    /// through [`patina_thread_exiting`] instead.
     ///
     /// # Safety
     /// C ABI entry point; the argument is an opaque pointer.

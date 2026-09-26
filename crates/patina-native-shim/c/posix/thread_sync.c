@@ -61,10 +61,39 @@ int pthread_detach(pthread_t thread) {
     return patina_thread_detach((void *)thread);
 }
 
+#ifdef __linux__
+/*
+ * A managed thread's host start routine. glibc's start_thread calls it, and it
+ * calls the guest routine, so the frames a forced unwind (pthread_exit) crosses
+ * between the guest's and start_thread are this one and the guest's: the
+ * unwind runs the guest's cleanup handlers, glibc longjmps into start_thread,
+ * which runs the destructors, and the thread completes from its destructor
+ * pass as a returning one does. The model's halves are Rust calls that return
+ * before the guest routine runs and after it returned.
+ */
+void *patina_thread_body(void *start) {
+    void *arg;
+    patina_start_routine routine = patina_thread_prelude(start, &arg);
+    void *value = routine(arg);
+    patina_thread_returned(value);
+    return value;
+}
+
+/*
+ * The model takes the value and answers glibc's own pthread_exit, called here
+ * in C once no Rust frame is left on the stack: its forced unwind could not
+ * cross one.
+ */
+void pthread_exit(void *retval) {
+    patina_host_pthread_exit_fn host_exit = patina_thread_exiting(retval);
+    host_exit(retval);
+}
+#else
 void pthread_exit(void *retval) {
     patina_thread_exit(retval);
     __builtin_unreachable();
 }
+#endif
 
 #ifdef __linux__
 /* A thread's name (`comm`) is modeled per thread: the executable's by default,
@@ -224,6 +253,23 @@ static struct patina_once_entry *patina_once_registry;
 static pthread_mutex_t patina_once_guard = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t patina_once_cond = PTHREAD_COND_INITIALIZER;
 
+#ifdef __linux__
+/*
+ * An init routine that never returns (it calls pthread_exit, or a
+ * cancellation acts in it) leaves the control fresh again and wakes the
+ * callers waiting on it, one of which then runs the init: glibc's
+ * clear_once_control, a cleanup record around the routine (nptl
+ * pthread_once.c), run as the unwind leaves this frame.
+ */
+static void patina_once_reset(void *arg) {
+    struct patina_once_entry *entry = arg;
+    pthread_mutex_lock(&patina_once_guard);
+    entry->state = 0;
+    pthread_cond_broadcast(&patina_once_cond);
+    pthread_mutex_unlock(&patina_once_guard);
+}
+#endif
+
 int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
     /* Both parameters are declared nonnull by libc (a NULL compare is -Werror
      * under gcc), so the contract is trusted — the gethostname precedent. */
@@ -252,7 +298,14 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
     }
     entry->state = 1;
     pthread_mutex_unlock(&patina_once_guard);
+#ifdef __linux__
+    struct _pthread_cleanup_buffer reset;
+    patina_cleanup_push(&reset, patina_once_reset, entry);
     init_routine();
+    patina_cleanup_pop(&reset, 0);
+#else
+    init_routine();
+#endif
     pthread_mutex_lock(&patina_once_guard);
     entry->state = 2;
     pthread_cond_broadcast(&patina_once_cond);

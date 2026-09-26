@@ -5389,10 +5389,14 @@ const PATINA_POSIX_OBJECT: ShimObject = ShimObject {
     source: PATINA_POSIX_C,
     header: Some(("patina_native.h", PATINA_NATIVE_H)),
     companion_sources: PATINA_POSIX_C_FAMILIES,
+    // Unwind tables, stated rather than left to the target's default: glibc's
+    // forced unwind (`pthread_exit`) crosses the layer's `pthread_exit` and
+    // thread body frames.
     cc_flags: &[
         "-std=c11",
         "-D_POSIX_C_SOURCE=200809L",
         "-fno-stack-protector",
+        "-fasynchronous-unwind-tables",
         "-Wall",
         "-Wextra",
         "-Werror",
