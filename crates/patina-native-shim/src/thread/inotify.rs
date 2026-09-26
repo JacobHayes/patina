@@ -81,6 +81,30 @@ const EMFILE: c_int = 24;
 const MAX_QUEUED_EVENTS: usize = 16384;
 const MAX_USER_INSTANCES: usize = 128;
 
+/// `INOTIFY_WATCH_COST`: `sizeof(struct inotify_inode_mark)` and twice
+/// `sizeof(struct inode)`, 80 and 632 bytes in the BTF of Ubuntu's
+/// 6.8.0-139 on x86_64 and arm64 alike.
+const WATCH_COST: u64 = 80 + 2 * 632;
+
+/// `max_user_watches` as `inotify_user_setup` sizes it for the virtual
+/// machine's memory: 1% of its pages' bytes over [`WATCH_COST`], clamped to
+/// 8192..=1048576 (31954 for 4 GiB). The guest is the one process of its
+/// user, so every watch of every instance counts.
+const MAX_USER_WATCHES: usize = {
+    let pages = crate::limits::MACHINE_MEMORY / 4096;
+    let watches = ((pages / 100) << 12) / WATCH_COST;
+    if watches < 8192 {
+        8192
+    } else if watches > 1_048_576 {
+        1_048_576
+    } else {
+        watches as usize
+    }
+};
+
+/// `ENOSPC`.
+const ENOSPC: c_int = 28;
+
 /// `sizeof(struct inotify_event)`: the header every event starts with.
 const HEADER: usize = 16;
 
@@ -233,6 +257,19 @@ impl Instance {
         }
         self.cursor = if wd == i32::MAX { 1 } else { wd + 1 };
         wd
+    }
+
+    /// `inotify_new_watch`: the next descriptor is taken before the
+    /// per-user limit is judged against the `live` watches, so an `ENOSPC`
+    /// still moves the cursor. The caller counts a new watch in [`WATCHES`].
+    fn new_watch(&mut self, ino: u64, mask: u32, live: usize) -> Result<i32, c_int> {
+        let wd = self.allocate_wd();
+        if live >= MAX_USER_WATCHES {
+            return Err(ENOSPC);
+        }
+        self.watches.insert(wd, Watch { ino, mask });
+        self.by_ino.insert(ino, wd);
+        Ok(wd)
     }
 
     fn queued_bytes(&self) -> usize {
@@ -397,7 +434,8 @@ fn instance_handle(fd: c_int) -> Result<u64, c_int> {
 /// stops at a trailing symlink, `IN_ONLYDIR` wants a directory), read
 /// permission on what it names (`EACCES`); then the watch the instance has
 /// on that inode takes the mask (`IN_MASK_ADD` adds to it; `IN_MASK_CREATE`
-/// wants none, `EEXIST`), or a new one gets the next descriptor.
+/// wants none, `EEXIST`), or a new one gets the next descriptor, past the
+/// per-user limit `ENOSPC`.
 ///
 /// # Safety
 /// `path`, when non-null, must point to a NUL-terminated string.
@@ -470,17 +508,13 @@ pub(crate) unsafe fn add_watch(fd: c_int, path: *const c_char, mask: u32) -> i64
         };
         return i64::from(wd);
     }
-    let wd = instance.allocate_wd();
-    instance.watches.insert(
-        wd,
-        Watch {
-            ino: metadata.ino,
-            mask: wanted,
-        },
-    );
-    instance.by_ino.insert(metadata.ino, wd);
-    WATCHES.fetch_add(1, Ordering::Relaxed);
-    i64::from(wd)
+    match instance.new_watch(metadata.ino, wanted, WATCHES.load(Ordering::Relaxed)) {
+        Ok(wd) => {
+            WATCHES.fetch_add(1, Ordering::Relaxed);
+            i64::from(wd)
+        }
+        Err(code) => errno(code),
+    }
 }
 
 /// `inotify_rm_watch(fd, wd)`: `EBADF` for no descriptor, `EINVAL` for one
@@ -702,5 +736,23 @@ mod tests {
         assert_eq!(instance.allocate_wd(), i32::MAX);
         instance.watches.insert(i32::MAX, watch);
         assert_eq!(instance.allocate_wd(), 1);
+    }
+
+    #[test]
+    fn past_the_user_watch_limit_a_new_watch_is_enospc_and_still_takes_a_descriptor() {
+        let mut instance = Instance {
+            cursor: 1,
+            ..Instance::default()
+        };
+        assert_eq!(
+            instance.new_watch(10, IN_MODIFY, MAX_USER_WATCHES - 1),
+            Ok(1)
+        );
+        assert_eq!(
+            instance.new_watch(11, IN_MODIFY, MAX_USER_WATCHES),
+            Err(ENOSPC)
+        );
+        assert!(!instance.by_ino.contains_key(&11));
+        assert_eq!(instance.new_watch(11, IN_MODIFY, 0), Ok(3));
     }
 }

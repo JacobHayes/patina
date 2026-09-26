@@ -389,6 +389,15 @@ fn names(p: &Probe, ino: i32, root: &str) {
     let [wa, wb, wx] = [&a, &b, &x].map(|path| p.inotify_add_watch(ino, path, IN_ALL_EVENTS));
     let [xa, xb] =
         [&a, &b].map(|path| p.inotify_add_watch(excl, path, IN_ALL_EVENTS | IN_EXCL_UNLINK));
+    p.check("fchmodat a/x setuid", p.fchmodat(AT_FDCWD, &x, 0o4755) == 0);
+    p.check(
+        "fchownat a/x changing no owner",
+        p.fchownat(AT_FDCWD, &x, u32::MAX, u32::MAX, 0) == 0,
+    );
+    p.check(
+        "exchange a/x and b/y, two links of one inode",
+        p.renameat2(AT_FDCWD, &x, AT_FDCWD, &y, RENAME_EXCHANGE) == 0,
+    );
     let fd = p.openat(AT_FDCWD, &y, O_WRONLY, 0);
     p.require("open b/y", fd >= 0);
     p.check("write b/y", p.write(fd, b"1") == 1);
@@ -397,9 +406,14 @@ fn names(p: &Probe, ino: i32, root: &str) {
     p.check("unlinkat a/x", p.unlinkat(AT_FDCWD, &x, 0) == 0);
     p.close(fd);
     p.check(
-        "a hard link's events name the link opened; the last name's removal deletes it at once",
+        "a chown killing setuid is IN_ATTRIB, an exchange of two links of one inode nothing; \
+         a hard link's events name the link opened; the last name's removal deletes it at once",
         described(&p.inotify_read(ino, 4096).1)
             == [
+                (wa, IN_ATTRIB, "x"),
+                (wx, IN_ATTRIB, ""),
+                (wa, IN_ATTRIB, "x"),
+                (wx, IN_ATTRIB, ""),
                 (wb, IN_OPEN, "y"),
                 (wx, IN_OPEN, ""),
                 (wb, IN_MODIFY, "y"),
@@ -419,6 +433,8 @@ fn names(p: &Probe, ino: i32, root: &str) {
         "IN_EXCL_UNLINK skips the events through a name that went",
         described(&p.inotify_read(excl, 4096).1)
             == [
+                // The two attribute changes merge here.
+                (xa, IN_ATTRIB, "x"),
                 (xb, IN_OPEN, "y"),
                 (xb, IN_MODIFY, "y"),
                 (xb, IN_DELETE, "y"),
@@ -591,6 +607,9 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_fchmod,
         Syscall::N_linkat,
         Syscall::N_mknodat,
+        Syscall::N_fchmodat,
+        Syscall::N_fchownat,
+        Syscall::N_renameat2,
         Syscall::N_getdents64,
         Syscall::N_close,
     ],

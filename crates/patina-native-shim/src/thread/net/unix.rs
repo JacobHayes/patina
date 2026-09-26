@@ -167,7 +167,7 @@ fn path_of(bytes: &[u8]) -> Result<String, c_int> {
 
 /// `unix_bind_bsd`'s node: a socket entry at `path` with `0777 & ~umask`;
 /// an existing name (a trailing symlink included) is `EADDRINUSE`.
-fn make_node(path: &str) -> Result<u64, c_int> {
+fn make_node(path: &str) -> Result<paths::Resolved, c_int> {
     let resolved = match paths::resolve(paths::AT_FDCWD, path, paths::RESOLVE_NOFOLLOW)? {
         paths::Resolution::Volume(resolved) => resolved,
         // The name exists.
@@ -188,7 +188,8 @@ fn make_node(path: &str) -> Result<u64, c_int> {
     #[cfg(target_os = "linux")]
     crate::fsnotify::created(&resolved.path);
     match paths::resolve(paths::AT_FDCWD, path, paths::RESOLVE_NOFOLLOW)? {
-        paths::Resolution::Volume(made) => made.metadata.map(|metadata| metadata.ino).ok_or(ENOENT),
+        paths::Resolution::Volume(made) if made.metadata.is_some() => Ok(made),
+        paths::Resolution::Volume(_) => Err(ENOENT),
         paths::Resolution::Virtual(entry) => entry.unmodeled("binding a socket"),
     }
 }
@@ -267,14 +268,21 @@ pub(super) fn bind(handle: c_int, bytes: &[u8]) -> Result<(), c_int> {
         UnixName::Unnamed => autobind(&mut lock_state(), handle),
         UnixName::Path(ref path) => {
             let target = path_of(path)?;
-            let ino = make_node(&target)?;
+            let made = make_node(&target)?;
+            let ino = made.metadata.as_ref().expect("made a node").ino;
             let mut state = lock_state();
             let unix = as_unix_mut(sock_mut(&mut state, handle)?);
             if unix.name != UnixName::Unnamed {
                 // The kernel refuses a second bind only after the node
-                // exists, then takes the node back out.
+                // exists, then takes the node back out (`vfs_unlink`).
                 drop(state);
-                let _ = crate::with_context(|context| context.fs_remove_file(&target));
+                let removed = crate::with_context(|context| context.fs_remove_file(&target));
+                #[cfg(target_os = "linux")]
+                if let (Ok(()), Some(before)) = (removed, &made.metadata) {
+                    crate::fsnotify::removed(&made.path, before);
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = removed;
                 return Err(EINVAL);
             }
             unix.name = name.clone();

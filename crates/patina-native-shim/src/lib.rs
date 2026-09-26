@@ -6595,6 +6595,14 @@ fn chown_decision(
     Ok(mode)
 }
 
+/// Whether a `chown` shows `IN_ATTRIB` (`fsnotify_change`): an owner or a
+/// group was given, or the setuid/setgid bits it kills were set
+/// (`ATTR_KILL_SUID` becomes `ATTR_MODE`).
+#[cfg(target_os = "linux")]
+fn chown_notifies(uid: u32, gid: u32, before: u32, after: u32) -> bool {
+    uid != ID_UNCHANGED || gid != ID_UNCHANGED || before != after
+}
+
 #[cfg(test)]
 mod chown_tests {
     use super::*;
@@ -6667,7 +6675,7 @@ pub unsafe extern "C" fn patina_chown(
     match result {
         Ok(()) => {
             #[cfg(target_os = "linux")]
-            if uid != ID_UNCHANGED || gid != ID_UNCHANGED {
+            if chown_notifies(uid, gid, metadata.mode, mode) {
                 fsnotify::on_path(&resolved.path, fsnotify::IN_ATTRIB);
             }
             set_errno(0);
@@ -6698,7 +6706,7 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
         return match with_context(|context| context.fs_set_inode_mode(node, mode)) {
             Ok(()) => {
                 #[cfg(target_os = "linux")]
-                if uid != ID_UNCHANGED || gid != ID_UNCHANGED {
+                if chown_notifies(uid, gid, metadata.mode, mode) {
                     fifo_changed(raw_fd, fsnotify::IN_ATTRIB);
                 }
                 set_errno(0);
@@ -6722,7 +6730,7 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
     match with_context(|context| context.fs_set_fd_mode(fd, mode)) {
         Ok(()) => {
             #[cfg(target_os = "linux")]
-            if uid != ID_UNCHANGED || gid != ID_UNCHANGED {
+            if chown_notifies(uid, gid, metadata.mode, mode) {
                 fsnotify::on_handle(fd, fsnotify::IN_ATTRIB);
             }
             set_errno(0);

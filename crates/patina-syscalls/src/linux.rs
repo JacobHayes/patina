@@ -1884,7 +1884,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Readiness,
         Disposition::Modeled,
-        "A watch on the inode a path names (`thread::inotify`): the mask, the descriptor, the path (`IN_DONT_FOLLOW`, `IN_ONLYDIR`) and read permission judged in the kernel's order; `IN_MASK_ADD`/`IN_MASK_CREATE`; descriptors allocated cyclically from 1. No per-user watch limit (`ENOSPC`) is modeled.",
+        "A watch on the inode a path names (`thread::inotify`): the mask, the descriptor, the path (`IN_DONT_FOLLOW`, `IN_ONLYDIR`) and read permission judged in the kernel's order; `IN_MASK_ADD`/`IN_MASK_CREATE`; descriptors allocated cyclically from 1; past 6.8's per-user limit for the virtual machine's memory (31954 watches) ENOSPC.",
         None,
     ),
     Syscall::N_inotify_rm_watch => r(

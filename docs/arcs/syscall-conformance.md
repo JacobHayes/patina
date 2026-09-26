@@ -462,8 +462,9 @@ forwards into the same dispatcher instead of its two-number allowlist.
   and attribute changes reach the directory and the FIFO, its reads and
   writes only the FIFO (Ubuntu's 6.8 carries the special-file fix of
   CVE-2025-68788 from 6.8.0-108). A watch on `/dev`, the entropy device's
-  directory, stops by name. There is no per-user watch limit.
-  Trace
+  directory, stops by name. The per-user limits are 6.8's for the virtual
+  machine: 128 instances, 16384 queued events, 31954 watches (1% of 4 GiB
+  over `INOTIFY_WATCH_COST`). Trace
   format 12 adds `net_bind_shared`, `net_connect`, `net_mark` and the
   unreachable send disposition. Urgent data on a TCP stream is modeled per
   connection direction (`inet.rs`): `MSG_OOB` makes a send's last byte

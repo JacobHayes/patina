@@ -564,8 +564,12 @@ pub(crate) fn moved(from: &str, to: &str, source: &FsMetadata, target: Option<&F
 }
 
 /// `RENAME_EXCHANGE`: the held names swap, then two moves, each with its own
-/// cookie.
+/// cookie. Exchanging two names of one inode changes nothing (`vfs_rename`
+/// returns before any of it).
 pub(crate) fn exchanged(first: &str, second: &str, a: &FsMetadata, b: &FsMetadata) {
+    if a.ino == b.ino {
+        return;
+    }
     if held_parent(first).is_some() || held_parent(second).is_some() {
         if let (Some(first_name), Some(second_name)) = (parent(first), parent(second)) {
             DENTRIES
