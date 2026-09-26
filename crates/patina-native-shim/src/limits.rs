@@ -16,6 +16,8 @@
 //! CPU time, stack, core dumps or processes against them yet.
 
 use crate::SpinMutex;
+use crate::identity::Process;
+use crate::registry::Capability;
 use std::ffi::c_int;
 
 // The resources with a starting value of their own; `RLIMIT_CPU`, `FSIZE`,
@@ -78,15 +80,13 @@ const INITIAL: [Rlimit; RLIM_NLIMITS] = {
     limits
 };
 
-/// The guest's limits, then init's: `prlimit64` reaches init too (it runs
-/// as the same user), and changes there change nothing the guest sees.
-static LIMITS: SpinMutex<[[Rlimit; RLIM_NLIMITS]; 2]> = SpinMutex::new([INITIAL, INITIAL]);
-const GUEST: usize = 0;
-const INIT: usize = 1;
+/// The guest's limits: the only ones a guest may read or change (init's are
+/// root's, which `prlimit64` refuses it).
+static LIMITS: SpinMutex<[Rlimit; RLIM_NLIMITS]> = SpinMutex::new(INITIAL);
 
 /// The guest's soft limit of `resource` now.
 pub(crate) fn soft(resource: u32) -> u64 {
-    LIMITS.lock()[GUEST][resource as usize].cur
+    LIMITS.lock()[resource as usize].cur
 }
 
 /// `do_prlimit` on the table: `old` is the limit before, `new` replaces it.
@@ -115,8 +115,11 @@ fn exchange(
     Ok(old)
 }
 
-/// `prlimit64(2)` for the virtual process: the old limit into `old` when
-/// non-NULL, then `new` when non-NULL. 0 or `-errno`.
+/// `prlimit64(2)`: the process (`ESRCH`), then `check_prlimit_permission`:
+/// another process's limits, read or written, need its ids to be the
+/// caller's or `CAP_SYS_RESOURCE` (init, root's: `EPERM`, before the
+/// resource is looked at). For the guest's own, the old limit into `old`
+/// when non-NULL, then `new` when non-NULL. 0 or `-errno`.
 ///
 /// # Safety
 /// `new` must be NULL or readable, `old` NULL or writable.
@@ -131,19 +134,27 @@ pub unsafe extern "C" fn patina_prlimit(
     // SAFETY: per this function's contract.
     let new = (!new.is_null()).then(|| unsafe { new.read_unaligned() });
     let process = match pid {
-        0 => GUEST,
+        0 => Process::Guest,
         pid => match crate::identity::lookup(pid) {
-            Some((crate::identity::Process::Guest, _)) => GUEST,
-            Some((crate::identity::Process::Init, _)) => INIT,
+            Some((process, _)) => process,
             None => return -i64::from(crate::ESRCH),
         },
     };
-    let result = exchange(&mut LIMITS.lock()[process], resource, new);
+    if process != Process::Guest {
+        let caller = crate::identity::credential();
+        if !caller.same_ids(process.credential()) && !caller.capable(Capability::SysResource) {
+            return -i64::from(crate::EPERM);
+        }
+        crate::trap_fatal(
+            "prlimit64 of another process: its limits are not modeled; failing closed",
+        );
+    }
+    let result = exchange(&mut LIMITS.lock(), resource, new);
     let previous = match result {
         Ok(previous) => previous,
         Err(errno) => return -i64::from(errno),
     };
-    if let (Some(new), RLIMIT_NOFILE, GUEST) = (new, resource, process) {
+    if let (Some(new), RLIMIT_NOFILE) = (new, resource) {
         crate::set_fd_limit(new.cur);
     }
     if !old.is_null() {

@@ -18,13 +18,14 @@
 //! the privileged rows (`sud::privileged`). A check the kernel makes against
 //! another process reads that process's credential: `capget` of a pid, the
 //! signal permission check ([`may_signal`]), the ptrace-mode check
-//! ([`ptrace_may_access`]), `PRIO_USER`'s members and the scheduling rows'
-//! owner checks (`thread::sched`). The shim's other capability
-//! refusals answer for the guest's credential without consulting it yet
-//! (ARCHITECTURE lists what an identity setting still needs). So the
-//! `set*id` rows succeed exactly when every id they name is that one id
-//! (the kernel's rule for a caller without `CAP_SETUID`/`CAP_SETGID`),
-//! which changes nothing; anything else is `EPERM`.
+//! ([`ptrace_may_access`]), `PRIO_USER`'s members, the scheduling rows'
+//! owner checks (`thread::sched`) and `prlimit64`'s (`crate::limits`). The
+//! shim's other capability refusals answer for the guest's credential
+//! without consulting it yet (ARCHITECTURE lists what an identity setting
+//! still needs). So the `set*id` rows succeed exactly when every id they
+//! name is that one id (the kernel's rule for a caller without
+//! `CAP_SETUID`/`CAP_SETGID`), which changes nothing; anything else is
+//! `EPERM`.
 //!
 //! The process tree is a pid namespace of two processes: its init
 //! ([`INIT_PID`], leader of process group 1 and session 1) and the guest
@@ -55,6 +56,13 @@ pub(crate) struct Credential {
 }
 
 impl Credential {
+    /// Whether `other`'s real, effective and saved user and group ids are
+    /// all this credential's (each credential holds one uid and one gid):
+    /// the id match of `__ptrace_may_access` and `check_prlimit_permission`.
+    pub(crate) const fn same_ids(&self, other: &Credential) -> bool {
+        self.uid == other.uid && self.gid == other.gid
+    }
+
     /// `capable`/`ns_capable` (`cap_capable`): whether the effective set
     /// holds `capability`. The virtual machine has one user namespace, so
     /// the namespace a check names changes nothing.
@@ -175,9 +183,8 @@ pub(crate) fn may_signal(target: Process, sig: i32) -> bool {
 /// the capability (the kernel's further refusal of a non-dumpable target
 /// passes with the capability too, so it never decides an answer here).
 pub(crate) fn ptrace_may_access(caller: &Credential, target: Process) -> bool {
-    let theirs = target.credential();
     target == Process::Guest
-        || (caller.uid == theirs.uid && caller.gid == theirs.gid)
+        || caller.same_ids(target.credential())
         || caller.capable(Capability::SysPtrace)
 }
 

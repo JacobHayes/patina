@@ -8,7 +8,8 @@
 //!   for the caller's own pid;
 //! * the soft value moves freely below the hard one and back up to it;
 //! * a soft value above the hard one is `EINVAL`; an unknown resource is
-//!   `EINVAL` to every row; `prlimit64` of a pid no process has is `ESRCH`;
+//!   `EINVAL` to every row; `prlimit64` of a pid no process has is `ESRCH`,
+//!   and of init, root's, `EPERM` even to read (`check_prlimit_permission`);
 //! * a hard limit may be lowered, never raised again without
 //!   `CAP_SYS_RESOURCE` (`EPERM`, `RLIM_INFINITY` included); `prlimit64`
 //!   answers the old limits while it sets the new.
@@ -90,6 +91,13 @@ pub fn run(p: &Probe) {
     );
 
     p.check(
+        "prlimit64 of init, root's process, is EPERM even to read",
+        p.prlimit64(Who::Init, RLIMIT_NOFILE as i32, None, true, Shown::Relation)
+            .0
+            == neg(EPERM),
+    );
+
+    p.check(
         "the core limit lowers to zero",
         p.setrlimit(RLIMIT_CORE as i32, 0, 0) == 0,
     );
@@ -147,6 +155,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_prlimit64,
     ],
     symbols: &["getrlimit", "setrlimit", "getpid", "syscall"],
-    needs: &[Need::Unprivileged],
+    needs: &[Need::Unprivileged, Need::RootInit],
     ..DEFAULTS
 };
