@@ -3,7 +3,9 @@
 //!
 //! * the answer counts set bits across the three sets: a UDP socket that is
 //!   readable and writable counts twice; urgent TCP data sets the
-//!   exception bit (`tcp_poll` `EPOLLPRI`);
+//!   exception bit (`tcp_poll` `EPOLLPRI`) until it is received out of
+//!   band, once (`tcp_recv_urg`), and the urgent byte alone is not readable:
+//!   out of line it is no stream data, which skips it;
 //! * a descriptor in a set that is not open is `EBADF`; a negative `nfds`
 //!   `EINVAL`;
 //! * select's timeout is normalized, not refused, when its microseconds
@@ -21,11 +23,9 @@
 //! (glibc's own spelling). glibc's `pselect` copies its timeout, so what the
 //! pselect6 row writes back is never recorded.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, SIGSET_BYTES, Sets, SockAddr, neg};
 use crate::signals::one_set;
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -146,6 +146,34 @@ pub fn run(p: &Probe) {
         "urgent data sets the exception bit",
         n == 1 && ready.except == [true],
     );
+    let readable = Sets {
+        read: &[s],
+        ..Sets::default()
+    };
+    p.check(
+        "the urgent byte alone is not readable",
+        p.select(s + 1, readable, Some((0, 0))).0 == 0,
+    );
+    let (n, data, _) = p.recv_from(s, 16, MSG_OOB, false);
+    p.check(
+        "the urgent byte is received out of band",
+        n == 1 && data == b"!",
+    );
+    p.check(
+        "taken, it no longer sets the exception bit",
+        p.select(s + 1, except, Some((0, 0))).0 == 0,
+    );
+    p.check(
+        "it is taken once",
+        p.recv_from(s, 16, MSG_OOB, false).0 == neg(EINVAL),
+    );
+    p.check("send stream data", p.send_to(c, b"ab", 0, None) == 2);
+    p.check(
+        "the stream data arrives",
+        p.select(s + 1, readable, Some(WAIT)).0 == 1,
+    );
+    let (n, data, _) = p.recv_from(s, 16, 0, false);
+    p.check("the stream skips the urgent byte", n == 2 && data == b"ab");
 
     let x = p.socket(AF_INET, SOCK_DGRAM, 0);
     p.require("a socket to close", x >= 0);
@@ -206,18 +234,5 @@ pub const SCENARIO: Scenario = Scenario {
         "clock_gettime",
         "close",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::NetworkReadiness),
-        vehicles: Vehicle::ALL,
-        what: "MSG_OOB on a connected stream answers EOPNOTSUPP (c/posix/net.c sendto: `patina_stream_flags_supported`), so no urgent byte sets the exception bit",
-        failure: Failure::Differs(&[
-            Difference::field(42, "sendto", "errno", Observed::Str("EOPNOTSUPP")),
-            Difference::field(42, "sendto", "ret", Observed::Int(-1)),
-            Difference::check(43, "send an urgent byte"),
-            Difference::field(44, "select", "fields.e0_ready", Observed::Bool(false)),
-            Difference::field(44, "select", "ret", Observed::Int(0)),
-            Difference::check(45, "urgent data sets the exception bit"),
-        ]),
-    }],
     ..DEFAULTS
 };

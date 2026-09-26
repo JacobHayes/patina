@@ -102,11 +102,13 @@ impl Inet {
     }
 }
 
-/// The two sockets of one connection.
+/// The two sockets of one connection, and its two directions.
 #[derive(Clone, Copy, Default)]
 struct Pair {
     client: Option<c_int>,
     server: Option<c_int>,
+    to_server: Direction,
+    to_client: Direction,
 }
 
 impl Pair {
@@ -117,6 +119,78 @@ impl Pair {
             self.client
         } else {
             None
+        }
+    }
+
+    /// The direction `handle` sends into.
+    fn sending(&mut self, handle: c_int) -> &mut Direction {
+        if self.client == Some(handle) {
+            &mut self.to_server
+        } else {
+            &mut self.to_client
+        }
+    }
+
+    /// The direction `handle` receives from, as it stands.
+    fn received(&self, handle: c_int) -> Direction {
+        if self.client == Some(handle) {
+            self.to_client
+        } else {
+            self.to_server
+        }
+    }
+
+    /// The direction `handle` receives from.
+    fn receiving(&mut self, handle: c_int) -> &mut Direction {
+        if self.client == Some(handle) {
+            &mut self.to_client
+        } else {
+            &mut self.to_server
+        }
+    }
+}
+
+/// One direction of a connection's byte stream, as far as urgent data needs
+/// it: the bytes written into it (`write_seq`), the bytes the receiver took
+/// out (`copied_seq`, a skipped urgent byte included) and the urgent byte
+/// (`tcp_mark_urg` at the sender, `tcp_check_urg`/`tcp_urg` at the
+/// receiver). It lives with the connection, so a connection not yet
+/// accepted keeps what was sent to it.
+#[derive(Clone, Copy, Default)]
+struct Direction {
+    written: u64,
+    taken: u64,
+    urgent: Option<Urgent>,
+}
+
+/// The urgent byte: its offset in the stream, its value, and whether a
+/// `MSG_OOB` receive took it (`TCP_URG_READ`). The receiver learns of it
+/// when the byte arrives, and forgets it once reading passes it.
+#[derive(Clone, Copy, Debug)]
+struct Urgent {
+    at: u64,
+    byte: u8,
+    read: bool,
+}
+
+impl Direction {
+    /// The urgent byte, once it has arrived (`pending` bytes wait unread).
+    fn arrived(&self, pending: usize) -> Option<Urgent> {
+        self.urgent
+            .filter(|urgent| urgent.at < self.taken + pending as u64)
+    }
+
+    /// How many bytes a receive may take before the urgent byte stops it
+    /// (`tcp_recvmsg_locked` stops at the mark); `Some(0)` at the mark.
+    fn before_mark(&self) -> Option<u64> {
+        self.urgent.map(|urgent| urgent.at - self.taken)
+    }
+
+    /// The receiver took `count` bytes: past the urgent byte, it is gone.
+    fn took(&mut self, count: usize) {
+        self.taken += count as u64;
+        if self.urgent.is_some_and(|urgent| urgent.at < self.taken) {
+            self.urgent = None;
         }
     }
 }
@@ -1230,7 +1304,53 @@ fn send_datagram(handle: c_int, message: Outgoing) -> Result<usize, c_int> {
     Ok(message.data.len())
 }
 
+/// A stream send; under `MSG_OOB` the last byte it wrote is the urgent byte
+/// (`tcp_push` → `tcp_mark_urg`), which the receiver takes out of band.
+/// One urgent byte is modeled at a time: a second before the receiver passed
+/// the first (whose replacement 6.8 judges as the new mark arrives) is a
+/// named fatal. Darwin's urgent data is not modeled (`EOPNOTSUPP`).
 fn send_stream(handle: c_int, message: Outgoing) -> Result<usize, c_int> {
+    if message.flags & MSG_OOB == 0 {
+        return send_stream_bytes(handle, &message);
+    }
+    if cfg!(target_os = "macos") {
+        return Err(EOPNOTSUPP);
+    }
+    let sent = send_stream_bytes(handle, &message)?;
+    if sent == 0 {
+        return Ok(sent);
+    }
+    let byte = message.data.read(sent - 1, 1)?[0];
+    let mut state = lock_state();
+    let State::Established { ref key, .. } = as_inet(sock(&state, handle)?).state else {
+        return Ok(sent);
+    };
+    let key = key.clone();
+    let Some(pair) = state.net.sockets.inet.streams.get_mut(&key) else {
+        return Ok(sent);
+    };
+    let direction = pair.sending(handle);
+    if direction.urgent.is_some() {
+        fatal(
+            "a second urgent byte (MSG_OOB) before the receiver passed the first is not \
+             modeled; failing closed",
+        );
+    }
+    direction.urgent = Some(Urgent {
+        at: direction.written - 1,
+        byte,
+        read: false,
+    });
+    let peer = pair.other(handle);
+    let wakes = peer
+        .map(|peer| waiters(&mut state, peer, Dir::Recv))
+        .unwrap_or_default();
+    drop(state);
+    wake_all(wakes);
+    Ok(sent)
+}
+
+fn send_stream_bytes(handle: c_int, message: &Outgoing) -> Result<usize, c_int> {
     let nosigpipe = sock(&lock_state(), handle)?.opts.nosigpipe();
     let failed = |errno: c_int| {
         if errno == EPIPE {
@@ -1238,9 +1358,6 @@ fn send_stream(handle: c_int, message: Outgoing) -> Result<usize, c_int> {
         }
         Err(errno)
     };
-    if message.flags & MSG_OOB != 0 {
-        return Err(EOPNOTSUPP);
-    }
     let deadline = super::deadline(sock(&lock_state(), handle)?.opts.send_timeout())?;
     let nonblocking = message.flags & MSG_DONTWAIT != 0 || deadline == Some(now()?);
     let mut sent = 0;
@@ -1298,8 +1415,11 @@ fn send_stream(handle: c_int, message: Outgoing) -> Result<usize, c_int> {
                     .sockets
                     .inet
                     .streams
-                    .get(&key)
-                    .and_then(|pair| pair.other(handle));
+                    .get_mut(&key)
+                    .and_then(|pair| {
+                        pair.sending(handle).written += written as u64;
+                        pair.other(handle)
+                    });
                 let wakes = peer
                     .map(|peer| waiters(&mut state, peer, Dir::Recv))
                     .unwrap_or_default();
@@ -1418,7 +1538,10 @@ fn recv_stream(handle: c_int, want: Want) -> Result<Incoming, c_int> {
         let socket = sock_mut(&mut state, handle)?;
         match as_inet(socket).state {
             State::Listening { .. } => return Err(ENOTCONN),
-            State::Established { .. } if want.flags & MSG_OOB != 0 => return Err(EINVAL),
+            State::Established { .. } if want.flags & MSG_OOB != 0 => {
+                drop(state);
+                return recv_urgent(handle, want);
+            }
             State::Established { .. } => {}
             State::Closed if want.flags & MSG_OOB != 0 => return Err(EINVAL),
             // Never connected, or a connect that failed.
@@ -1456,23 +1579,81 @@ fn recv_stream(handle: c_int, want: Want) -> Result<Incoming, c_int> {
             return Ok(done(got, want));
         };
         let key = key.clone();
+        let inline = socket.opts.oobinline;
+        // The urgent mark stops a receive before it (`tcp_recvmsg_locked`):
+        // at the mark, a receive with bytes in hand ends, and one without
+        // skips an urgent byte not kept inline.
+        let mark = state
+            .net
+            .sockets
+            .inet
+            .streams
+            .get(&key)
+            .and_then(|pair| pair.received(handle).before_mark());
+        let skip = mark == Some(0) && !inline;
+        if mark == Some(0) && !peek {
+            if !got.is_empty() {
+                return Ok(done(got, want));
+            }
+            // An error, or nothing to skip yet, is the receive's own to
+            // answer below.
+            if skip {
+                if let Ok(Some(skipped)) = with_context_raw(|context| context.net_tcp_recv(sid, 1))
+                {
+                    if let (false, Some(pair)) = (
+                        skipped.is_empty(),
+                        state.net.sockets.inet.streams.get_mut(&key),
+                    ) {
+                        pair.receiving(handle).took(1);
+                        continue;
+                    }
+                }
+            }
+        }
+        let room = |left: usize| match mark {
+            Some(before) if before > 0 => left.min(usize::try_from(before).unwrap_or(left)),
+            _ => left,
+        };
         let taken = if peek {
-            with_context_raw(|context| context.net_tcp_peek(sid, want.capacity))
+            with_context_raw(|context| context.net_tcp_peek(sid, want.capacity + usize::from(skip)))
+                .map(|bytes| {
+                    bytes.and_then(|mut bytes| {
+                        if skip && !bytes.is_empty() {
+                            bytes.remove(0);
+                            if bytes.is_empty() {
+                                return None;
+                            }
+                        }
+                        bytes.truncate(room(bytes.len()));
+                        Some(bytes)
+                    })
+                })
         } else {
-            with_context_raw(|context| context.net_tcp_recv(sid, want.capacity - got.len()))
+            with_context_raw(|context| context.net_tcp_recv(sid, room(want.capacity - got.len())))
         };
         match taken {
-            // A peek sees everything queued, afresh each time it looks.
-            Ok(Some(bytes)) if !bytes.is_empty() && peek => got = bytes,
+            // A peek sees everything queued, afresh each time it looks, and
+            // ends at the mark.
+            Ok(Some(bytes)) if !bytes.is_empty() && peek => {
+                let reached = mark.is_some_and(|before| before > 0 && bytes.len() as u64 >= before);
+                got = bytes;
+                if reached {
+                    return Ok(done(got, want));
+                }
+            }
             Ok(Some(bytes)) if !bytes.is_empty() => {
+                let count = bytes.len();
                 got.extend(bytes);
                 let peer = state
                     .net
                     .sockets
                     .inet
                     .streams
-                    .get(&key)
-                    .and_then(|pair| pair.other(handle));
+                    .get_mut(&key)
+                    .and_then(|pair| {
+                        pair.receiving(handle).took(count);
+                        pair.other(handle)
+                    });
                 let wakes = peer
                     .map(|peer| room_freed(&mut state, peer))
                     .unwrap_or_default();
@@ -1535,6 +1716,54 @@ fn recv_stream(handle: c_int, want: Want) -> Result<Incoming, c_int> {
     }
 }
 
+/// `tcp_recv_urg`: the urgent byte, out of band. With none arrived, one
+/// already taken, or `SO_OOBINLINE`, `EINVAL`; a zero-length buffer takes it
+/// as `MSG_TRUNC`; `MSG_PEEK` leaves it.
+fn recv_urgent(handle: c_int, want: Want) -> Result<Incoming, c_int> {
+    let mut state = lock_state();
+    let socket = sock(&state, handle)?;
+    let inline = socket.opts.oobinline;
+    let State::Established {
+        socket: sid,
+        ref key,
+    } = as_inet(socket).state
+    else {
+        return Err(EINVAL);
+    };
+    let key = key.clone();
+    let pending = with_context_raw(|context| context.net_readiness(sid))?.pending;
+    let Some(pair) = state.net.sockets.inet.streams.get_mut(&key) else {
+        return Err(EINVAL);
+    };
+    let direction = pair.receiving(handle);
+    let urgent = match direction.arrived(pending) {
+        Some(urgent) if !inline && !urgent.read => urgent,
+        _ => return Err(EINVAL),
+    };
+    if want.flags & MSG_PEEK == 0 {
+        direction.urgent = Some(Urgent {
+            read: true,
+            ..urgent
+        });
+    }
+    if want.capacity == 0 {
+        return Ok(Incoming {
+            flags: MSG_OOB | MSG_TRUNC,
+            ..Incoming::default()
+        });
+    }
+    Ok(Incoming {
+        data: if want.flags & MSG_TRUNC != 0 {
+            Vec::new()
+        } else {
+            vec![urgent.byte]
+        },
+        len: 1,
+        flags: MSG_OOB,
+        ..Incoming::default()
+    })
+}
+
 /// A stream receive's answer: the bytes, discarded under `MSG_TRUNC`.
 fn done(got: Vec<u8>, want: Want) -> Incoming {
     let len = got.len();
@@ -1551,7 +1780,12 @@ fn done(got: Vec<u8>, want: Want) -> Incoming {
 
 /// The kernel poll mask (`udp_poll`/`datagram_poll`, `tcp_poll`) and the
 /// arrivals so far.
-pub(super) fn poll(socket: &Socket, inet: &Inet) -> (u32, u64) {
+pub(super) fn poll(
+    state: &ThreadRuntime,
+    handle: c_int,
+    socket: &Socket,
+    inet: &Inet,
+) -> (u32, u64) {
     let readiness =
         |sid: SocketId| with_context_raw(|context| context.net_readiness(sid)).unwrap_or_default();
     let mut mask = 0;
@@ -1584,8 +1818,29 @@ pub(super) fn poll(socket: &Socket, inet: &Inet) -> (u32, u64) {
             }
             (mask | POLLHUP | POLLOUT | POLLWRNORM, 0)
         }
-        State::Established { socket: sid, .. } => {
+        State::Established {
+            socket: sid,
+            ref key,
+        } => {
             let ready = readiness(sid);
+            let direction = state
+                .net
+                .sockets
+                .inet
+                .streams
+                .get(key)
+                .map(|pair| pair.received(handle))
+                .unwrap_or_default();
+            let urgent = direction.arrived(ready.pending);
+            // `tcp_poll`: at the mark the urgent byte out of line is not
+            // data, so one more byte must wait; an urgent byte not yet
+            // taken is `EPOLLPRI`.
+            let at_mark = urgent.is_some_and(|urgent| urgent.at == direction.taken);
+            let needed = socket.opts.rcvlowat.max(1) as usize
+                + usize::from(at_mark && !socket.opts.oobinline);
+            if urgent.is_some_and(|urgent| !urgent.read) {
+                mask |= POLLPRI;
+            }
             let mut shutdown = socket.shutdown;
             if ready.peer_write_closed {
                 shutdown |= RCV_SHUTDOWN;
@@ -1601,7 +1856,7 @@ pub(super) fn poll(socket: &Socket, inet: &Inet) -> (u32, u64) {
                 mask |= POLLIN | POLLRDNORM | POLLRDHUP;
             }
             // `tcp_stream_is_readable`: as much as `SO_RCVLOWAT` asks.
-            if ready.pending > 0 && ready.pending >= socket.opts.rcvlowat.max(1) as usize {
+            if ready.pending >= needed {
                 mask |= POLLIN | POLLRDNORM;
             }
             if shutdown & SEND_SHUTDOWN != 0 || ready.writable {
@@ -1624,4 +1879,33 @@ pub(super) fn pending(socket: &Socket, inet: &Inet) -> Result<i32, c_int> {
         (State::Closed, _) => 0,
     };
     Ok(i32::try_from(pending).unwrap_or(i32::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Direction, Urgent};
+
+    #[test]
+    fn the_urgent_byte_stops_a_receive_arrives_with_its_byte_and_goes_once_passed() {
+        let mut direction = Direction {
+            written: 4,
+            taken: 0,
+            urgent: Some(Urgent {
+                at: 3,
+                byte: b'!',
+                read: false,
+            }),
+        };
+        // Three bytes before the mark; the mark is known once its byte is in.
+        assert_eq!(direction.before_mark(), Some(3));
+        assert!(direction.arrived(3).is_none());
+        assert!(direction.arrived(4).is_some());
+        direction.took(3);
+        assert_eq!(direction.before_mark(), Some(0));
+        assert!(direction.urgent.is_some());
+        // Taking the byte itself (skipped, or read inline) passes the mark.
+        direction.took(1);
+        assert!(direction.urgent.is_none());
+        assert_eq!(direction.before_mark(), None);
+    }
 }

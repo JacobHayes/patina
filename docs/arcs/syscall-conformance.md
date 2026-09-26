@@ -448,8 +448,14 @@ forwards into the same dispatcher instead of its two-number allowlist.
   close show nothing, and a directory removed while a descriptor holds it
   ends its watches at once. Trace
   format 12 adds `net_bind_shared`, `net_connect`, `net_mark` and the
-  unreachable send disposition. Left: urgent data (`MSG_OOB` on a stream is
-  EOPNOTSUPP, so select's exception set stays empty), `--net-default-route`
+  unreachable send disposition. Urgent data on a TCP stream is modeled per
+  connection direction (`inet.rs`): `MSG_OOB` makes a send's last byte
+  urgent, which the receiver learns of as it arrives (`EPOLLPRI`, the byte
+  not counted as readable at the mark), takes once with `MSG_OOB`, and
+  otherwise skips in the stream unless `SO_OOBINLINE`; a receive stops at
+  the mark. Left: a second urgent byte before the receiver passed the first
+  (a named fatal), `SIOCATMARK`, urgent data on AF_UNIX streams and on
+  Darwin (EOPNOTSUPP), `--net-default-route`
   (no default route: off-table is ENETUNREACH),
   fanotify (a named trap by design), the `SIOCGIF*` requests and every
   IP-level control message on macOS (the latter a named fatal), UDP-Lite
