@@ -45,6 +45,27 @@ fn libc_sleep_returns_remaining_seconds_on_signal() {
     assert_interruptible_wait("sleep");
 }
 
+/// A guest's own SIGSEGV handler gets each SIGSEGV the kernel would give it —
+/// a stack overflow on its alternate stack, an access fault, both left by
+/// `siglongjmp`, a raised one with the sender's code and `SA_RESETHAND`, a
+/// fault whose edited context resumes — while the timestamp-counter trap
+/// keeps the host disposition, so the guest prints what it prints natively.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
+    let native = assert_build_c_guest("signals/segv_routing.c", CLink::Unlinked);
+    let patina = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShim);
+    for case in ["overflow", "raise", "resume"] {
+        let oracle = assert_standalone_success(&native.binary, &[case], &[]);
+        let output = assert_standalone_success(
+            &patina.binary,
+            &[case],
+            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+        );
+        assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");
+    }
+}
+
 /// A handler that adds the containment signals to its frame's saved mask
 /// gets them blocked natively when it returns, and the guest runs on. Under
 /// patina the return must leave them unblocked (whichever restorer ran), so

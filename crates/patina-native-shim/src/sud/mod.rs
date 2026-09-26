@@ -48,6 +48,7 @@ mod privileged;
 mod readiness;
 mod sched_identity;
 mod signal_process;
+pub(crate) use signal_process::auxv_value;
 #[cfg(target_arch = "x86_64")]
 mod thread_pointer;
 mod time;
@@ -641,7 +642,8 @@ thread_local! {
     static IN_DISPATCH: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Only the kernel-frame release may re-enter dispatch as guest code.
+/// Only the kernel-frame release may re-enter dispatch as guest code: a raw
+/// syscall, or a counter read, from a handler it runs.
 pub(crate) fn with_signal_delivery(body: impl FnOnce()) {
     struct Restore(bool);
     impl Drop for Restore {
@@ -650,7 +652,7 @@ pub(crate) fn with_signal_delivery(body: impl FnOnce()) {
         }
     }
     let _restore = Restore(IN_DISPATCH.with(|cell| cell.replace(false)));
-    body();
+    crate::tsc::with_guest_reads(body);
 }
 
 /// Run `body` with the reentry guard held. Re-entrant dispatch aborts loudly.

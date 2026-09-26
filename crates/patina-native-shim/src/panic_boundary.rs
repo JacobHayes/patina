@@ -59,6 +59,20 @@ pub(crate) fn in_shim() -> bool {
     IN_SHIM.with(Cell::get)
 }
 
+/// A fault handler takes the thread for the shim before it does anything
+/// else, so a fault in its own glue (a stack switch, a prologue) is known to
+/// be the shim's. Answers whether shim code already owned the thread.
+#[cfg(target_os = "linux")]
+pub(crate) fn claim() -> bool {
+    IN_SHIM.with(|scope| scope.replace(true))
+}
+
+/// Hand the thread back to the guest code a fault handler interrupted.
+#[cfg(target_os = "linux")]
+pub(crate) fn release() {
+    IN_SHIM.with(|scope| scope.set(false));
+}
+
 // The library test harness owns its hook and deliberately catches test panics.
 #[cfg(test)]
 pub(crate) fn install() {}
@@ -147,6 +161,13 @@ mod tests {
                             assert!(
                                 first.contains("panic_boundary::in_shim()"),
                                 "guest abort inspects caller ownership first"
+                            );
+                        } else if matches!(name, "patina_trap_enter" | "patina_trap_leave") {
+                            // A fault handler's own claim and release are the
+                            // ownership itself.
+                            assert!(
+                                first.contains("crate::panic_boundary::"),
+                                "{name} is an ownership primitive"
                             );
                         } else {
                             assert!(

@@ -16,10 +16,24 @@ handler-time temporary masks), and sigwait retry after an unrelated handler.
 The `native_signals` target also records guest abort and C/raw/internal-context
 fatal paths: guest abort must publish a complete trace; each internal fatal
 must leave it incomplete. The internal-context case nests a custom operation.
-`native_containment` owns the libc/raw SIGSYS and armed-SIGSEGV registration
-refusals, alongside its existing Rust `signal(handler)` guests. These inline
-raw cases require x86_64 Linux SUD; missing capability is reported explicitly
-and `PATINA_REQUIRE_SUD=1` makes missing evidence fatal.
+`native_containment` owns the libc/raw SIGSYS registration refusals and, under
+the timestamp-counter trap, the SIGSEGV cases: a registration through either
+door leaves the counter read answered and the handler unrun, and a fault in the
+shim's own code (a raw `rt_sigprocmask` with a wild set pointer) is a named
+stop rather than reaching the handler. These inline raw cases require x86_64 Linux SUD;
+missing capability is reported explicitly and `PATINA_REQUIRE_SUD=1` makes
+missing evidence fatal.
+
+`segv_routing.c` gives a guest its own SIGSEGV handler: an `SA_ONSTACK` one
+catches a stack overflow on its alternate stack and an access fault, leaving
+both by `siglongjmp`; an `SA_RESETHAND` one receives a raised SIGSEGV with
+the sender's code; and one edits the faulting context to resume past the
+store. `native_signals` runs it natively as the oracle and under the shim, and
+requires the same output. Its
+`alarm` cases, in `native_containment`, fire a timer while counter reads taken
+on the alternate stack are served off it, on an ordinary stack and on one too
+small to leave a nested frame room: natively both run on, and under the shim
+each is a named stop, since no guest code runs during such a read.
 
 `frame_mask.c` has a handler add SIGSYS and SIGSEGV to its frame's saved mask,
 returning through glibc's restorer and (x86_64) through the guest's own raw

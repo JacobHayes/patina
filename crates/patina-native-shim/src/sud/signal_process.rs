@@ -29,6 +29,20 @@ pub static PATINA_SUD_AUXV_BASE: AtomicUsize = AtomicUsize::new(0);
 #[unsafe(no_mangle)]
 pub static PATINA_SUD_AUXV_LEN: AtomicUsize = AtomicUsize::new(0);
 
+/// The value of the kernel's auxv entry `key`, from the region init captured
+/// (its entries the scrub leaves as they are), if it has one.
+pub(crate) fn auxv_value(key: u64) -> Option<u64> {
+    let base = PATINA_SUD_AUXV_BASE.load(Ordering::Relaxed);
+    let len = PATINA_SUD_AUXV_LEN.load(Ordering::Relaxed);
+    if base == 0 {
+        return None;
+    }
+    // SAFETY: the initial stack's aux array, captured once at init and never
+    // mutated after it.
+    let pairs = unsafe { std::slice::from_raw_parts(base as *const [u64; 2], len / 16) };
+    pairs.iter().find(|pair| pair[0] == key).map(|pair| pair[1])
+}
+
 const PR_SET_NAME: u32 = 15;
 const PR_GET_NAME: u32 = 16;
 const PR_SET_PDEATHSIG: u32 = 1;

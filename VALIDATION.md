@@ -277,8 +277,15 @@ No-SUD execution is refused before opening an invalid replay trace. SIGSYS
 protection and AT_RANDOM seeding are kernel-independent. TSC checks separately
 cover exact clock values and trace metadata (`tsc_reads_answer_from_virtual_clock`),
 seeded jitter (`tsc_sleep_jitter_moves_counter`), genuine faults
-(`genuine_segv_is_not_swallowed`) and handler protection
-(`sigsegv_handler_hijack_is_refused`). `rdrand_is_refused_on_every_kernel` builds
+(`genuine_segv_is_not_swallowed`) and the trap's ownership against a guest
+SIGSEGV handler: it never sees a counter read
+(`sigsegv_handler_cannot_take_over_the_counter_trap`) or a fault in the shim's
+own code (`shim_faults_never_reach_a_guest_segv_handler`, red with the shim-code
+check removed), and while a counter read is served off the alternate stack no guest code runs:
+a timer's handler that would run during it, and a cut too small for a nested
+frame, are named stops where the native run goes on
+(`counter_reads_served_off_the_alternate_stack_run_no_guest_code`); `native_signals::a_guest_segv_handler_gets_what_the_kernel_would_give_it`
+compares the faults it does get with the native run. `rdrand_is_refused_on_every_kernel` builds
 no TSC guest and requires no TSC capability. Unsupported capabilities execute
 named refusal assertions; the SUD-only vDSO check reports missing evidence.
 `PATINA_REQUIRE_SUD=1` makes missing SUD fatal in tests and the ecosystem wrapper;

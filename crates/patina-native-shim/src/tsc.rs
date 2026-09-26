@@ -8,8 +8,13 @@
 //! text, then calls [`patina_tsc_dispatch`], which decodes the instruction and —
 //! for the two counter reads — returns the value the handler writes into
 //! `EDX:EAX` (plus `IA32_TSC_AUX` in `ECX` for `rdtscp`) before stepping `RIP`
-//! past the instruction. Anything else the handler leaves alone: a genuine
-//! segmentation fault is never swallowed.
+//! past the instruction. A counter read the trap does not answer (outside the
+//! main executable's text, or in a prefixed encoding) is a named stop
+//! ([`patina_tsc_declined`]): natively it reads the counter and runs on, so
+//! handing it to the guest's handler as a fault would be a wrong answer.
+//! Anything else is not a counter read: the handler sends it where the kernel
+//! would under the guest's own SIGSEGV action (`thread/signals/fault.rs`), so a
+//! genuine segmentation fault is never swallowed.
 //!
 //! **Interposer parity.** The counter is not a second clock. It is the run's
 //! virtual monotonic clock read through the SAME `patina_clock_now` entry point
@@ -37,7 +42,7 @@
 //! `native_escape_is_tsc_manageable` in `patina-target`.
 
 use std::cell::Cell;
-use std::ffi::{c_int, c_uint};
+use std::ffi::{c_int, c_uint, c_void};
 
 unsafe extern "C" {
     fn patina_clock_now(clock: u32, nanos: *mut u64) -> c_int;
@@ -72,6 +77,58 @@ thread_local! {
     static IN_DISPATCH: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Guest code a signal delivery runs inside a counter read (a handler the
+/// read's scheduling point releases) may read the counter itself. None runs
+/// inside a read served off the alternate stack: that is a named stop
+/// (`with_altstack_below`).
+#[cfg(target_os = "linux")]
+pub(crate) fn with_guest_reads(body: impl FnOnce()) {
+    let outer = IN_DISPATCH.with(|cell| cell.replace(false));
+    body();
+    IN_DISPATCH.with(|cell| cell.set(outer));
+}
+
+/// Whether `bytes` start with a counter read under any run of legacy and REX
+/// prefixes, as the CPU would execute it.
+fn prefixed_counter_read(bytes: &[u8]) -> bool {
+    let prefixes = bytes
+        .iter()
+        .take_while(|byte| {
+            matches!(
+                byte,
+                0x26 | 0x2e | 0x36 | 0x3e | 0x64 | 0x65 | 0x66 | 0x67 | 0xf0 | 0xf2 | 0xf3
+            ) || (0x40..=0x4f).contains(*byte)
+        })
+        .count();
+    classify(&bytes[prefixes..]).is_some()
+}
+
+/// The longest x86 instruction.
+#[cfg(target_os = "linux")]
+const MAX_INSN: usize = 15;
+
+/// A kernel #GP the trap did not answer, at `rip`. A counter read (outside the
+/// main executable's text, or in a prefixed encoding) is a named stop; any
+/// other returns, to be sent where the kernel would send it.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_tsc_declined(rip: usize) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let mut bytes = [0u8; MAX_INSN];
+    // Byte by byte: the instruction may end at an unmapped page.
+    let readable = (0..MAX_INSN)
+        .take_while(|&offset| {
+            crate::uaccess::read_into(rip + offset, &mut bytes[offset..=offset]).is_ok()
+        })
+        .count();
+    if prefixed_counter_read(&bytes[..readable]) {
+        crate::trap_fatal(
+            "a timestamp-counter read the trap does not answer (outside the main executable's \
+             text, or in a prefixed encoding): not modeled",
+        );
+    }
+}
+
 /// Classify the instruction at the start of `bytes` as a timestamp-counter read,
 /// returning `(kind, instruction length)`.
 ///
@@ -104,7 +161,10 @@ fn counter_now() -> Option<u64> {
 /// The SIGSEGV timestamp-counter dispatch entry point. The C handler passes the
 /// bytes at the faulting `RIP` (already validated to lie in the main
 /// executable's text) and out-parameters for the counter value, the `rdtscp`
-/// auxiliary value, and the instruction length.
+/// auxiliary value, and the instruction length. `served` is non-null when the
+/// read is served off the alternate stack the trap's frame is on: it says
+/// where the live frames there are, which the kernel's alternate stack ends
+/// below meanwhile (`with_altstack_below`).
 ///
 /// Returns [`PATINA_TSC_NONE`] when the faulting instruction is not a counter
 /// read — the handler must then take the ordinary fault path, because the
@@ -126,6 +186,7 @@ pub unsafe extern "C" fn patina_tsc_dispatch(
     tsc_out: *mut u64,
     aux_out: *mut c_uint,
     length_out: *mut usize,
+    served: *const c_void,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if bytes.is_null() || available == 0 {
@@ -148,7 +209,13 @@ pub unsafe extern "C" fn patina_tsc_dispatch(
         );
     }
     IN_DISPATCH.with(|cell| cell.set(true));
-    let value = counter_now();
+    #[cfg(target_os = "linux")]
+    let value = crate::thread::signals::with_altstack_below(served.cast(), counter_now);
+    #[cfg(not(target_os = "linux"))]
+    let value = {
+        let _ = served;
+        counter_now()
+    };
     IN_DISPATCH.with(|cell| cell.set(false));
     let Some(value) = value else {
         crate::trap_fatal(
@@ -202,11 +269,28 @@ mod tests {
     }
 
     #[test]
-    fn a_prefixed_encoding_is_not_claimed() {
+    fn a_prefixed_encoding_is_not_answered_but_is_known_for_a_counter_read() {
         // `f3 0f 31` is not an encoding any compiler emits, and stepping RIP by
-        // 2 from the prefix byte would land mid-instruction. Fail closed.
-        assert_eq!(classify(&[0xf3, 0x0f, 0x31]), None);
-        assert_eq!(classify(&[0x66, 0x0f, 0x01, 0xf9]), None);
+        // 2 from the prefix byte would land mid-instruction: never answered.
+        // The CPU still executes it as a counter read, so the declined path
+        // must recognise it (and stop by name), where a genuine #GP routes.
+        for bytes in [
+            &[0xf3, 0x0f, 0x31][..],
+            &[0x66, 0x0f, 0x01, 0xf9][..],
+            &[0x48, 0x0f, 0x31][..],
+            &[0x2e, 0x41, 0x0f, 0x01, 0xf9][..],
+        ] {
+            assert_eq!(classify(bytes), None, "{bytes:02x?}");
+            assert!(prefixed_counter_read(bytes), "{bytes:02x?}");
+        }
+        for bytes in [
+            &[0xf3, 0x0f, 0x01, 0xf8][..],
+            &[0x66, 0x90][..],
+            &[0x0f][..],
+            &[][..],
+        ] {
+            assert!(!prefixed_counter_read(bytes), "{bytes:02x?}");
+        }
     }
 
     #[test]
@@ -218,13 +302,29 @@ mod tests {
         let mut aux = 0u32;
         let mut length = 0usize;
         // SAFETY: valid pointers into local storage.
-        let kind =
-            unsafe { patina_tsc_dispatch(bytes.as_ptr(), 2, &mut tsc, &mut aux, &mut length) };
+        let kind = unsafe {
+            patina_tsc_dispatch(
+                bytes.as_ptr(),
+                2,
+                &mut tsc,
+                &mut aux,
+                &mut length,
+                std::ptr::null(),
+            )
+        };
         assert_eq!(kind, PATINA_TSC_NONE);
         // A null/empty window likewise.
         // SAFETY: as above.
-        let kind =
-            unsafe { patina_tsc_dispatch(std::ptr::null(), 3, &mut tsc, &mut aux, &mut length) };
+        let kind = unsafe {
+            patina_tsc_dispatch(
+                std::ptr::null(),
+                3,
+                &mut tsc,
+                &mut aux,
+                &mut length,
+                std::ptr::null(),
+            )
+        };
         assert_eq!(kind, PATINA_TSC_NONE);
     }
 }

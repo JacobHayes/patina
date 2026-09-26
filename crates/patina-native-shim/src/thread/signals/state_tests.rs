@@ -431,28 +431,28 @@ fn generation_never_takes_the_runtime_lock_twice() {
 
 #[test]
 fn reserved_signals_are_stripped_from_every_host_mask() {
-    if let Ok(mode) = std::env::var("PATINA_SIGNAL_REFUSAL") {
+    if std::env::var_os("PATINA_SIGNAL_REFUSAL").is_some() {
         isolated(|| {
             crate::PATINA_TSC_ARMED.store(1, Ordering::Relaxed);
-            let sig = if mode == "sys" { SIGSYS } else { SIGSEGV };
             let action = Action {
                 handler: handler as *const () as usize,
                 ..Action::default()
             };
             unsafe {
-                patina_signal_action(i32::from(sig), &action, std::ptr::null_mut(), SIGSET_BYTES);
+                patina_signal_action(
+                    i32::from(SIGSYS),
+                    &action,
+                    std::ptr::null_mut(),
+                    SIGSET_BYTES,
+                );
             }
         });
         return;
     }
     if std::env::var("PATINA_SIGNAL_UNIT_CHILD").as_deref() != Ok(test_name().as_str()) {
-        for mode in ["sys", "segv"] {
-            let output = reexec(&test_name(), &[("PATINA_SIGNAL_REFUSAL", mode)]);
-            assert!(!output.status.success());
-            assert!(
-                String::from_utf8_lossy(&output.stderr).contains("reserved signal registration")
-            );
-        }
+        let output = reexec(&test_name(), &[("PATINA_SIGNAL_REFUSAL", "sys")]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("reserved signal registration"));
     }
     isolated(|| {
         crate::PATINA_TSC_ARMED.store(1, Ordering::Relaxed);
@@ -496,6 +496,65 @@ fn reserved_signals_are_stripped_from_every_host_mask() {
         );
         assert_eq!(HANDLERS.load(Ordering::SeqCst), 2);
         set_mask(SIG_SETMASK, 0);
+    });
+}
+
+/// Under the timestamp-counter trap a guest SIGSEGV action is virtual: the
+/// host keeps the trap's handler, which only takes the guest action's
+/// `SA_ONSTACK`, and `sigaction` reports the guest's own action back.
+#[test]
+fn trap_routed_sigsegv_action_stays_virtual() {
+    isolated(|| {
+        crate::PATINA_TSC_ARMED.store(1, Ordering::Relaxed);
+        let host_action = || {
+            let mut action = Action::default();
+            assert_eq!(
+                host(
+                    SYS_RT_SIGACTION,
+                    [
+                        u64::from(SIGSEGV),
+                        0,
+                        &mut action as *mut _ as u64,
+                        SIGSET_BYTES as u64,
+                        0,
+                        0
+                    ],
+                ),
+                0
+            );
+            action
+        };
+        let trap = host_action();
+        for flags in [SA_ONSTACK, 0] {
+            let guest = Action {
+                handler: handler as *const () as usize,
+                flags,
+                mask: bit(SIGUSR1),
+                ..Action::default()
+            };
+            let mut old = Action::default();
+            assert_eq!(
+                unsafe { patina_signal_action(i32::from(SIGSEGV), &guest, &mut old, SIGSET_BYTES) },
+                0
+            );
+            let installed = host_action();
+            assert_eq!(installed.handler, trap.handler);
+            assert_eq!(installed.mask, trap.mask);
+            assert_eq!(installed.flags & SA_ONSTACK, flags);
+            let mut reported = Action::default();
+            assert_eq!(
+                unsafe {
+                    patina_signal_action(
+                        i32::from(SIGSEGV),
+                        std::ptr::null(),
+                        &mut reported,
+                        SIGSET_BYTES,
+                    )
+                },
+                0
+            );
+            assert_eq!(reported, guest);
+        }
     });
 }
 

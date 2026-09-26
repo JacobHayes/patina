@@ -2,8 +2,11 @@
 //! transfers a delivery batch to kernel-built frames after releasing the lock.
 use super::*;
 use crate::EINTR;
+mod fault;
 pub(crate) mod fd;
 mod waits;
+pub(crate) use fault::with_altstack_below;
+use fault::{mirror_onstack, trap_routed};
 use patina_dst_abi::SignalTarget;
 use std::sync::atomic::Ordering;
 use waits::Blocked;
@@ -391,6 +394,9 @@ pub(crate) fn host_mask(mask: u64) -> u64 {
     mask
 }
 pub(super) fn read_mask() -> u64 {
+    if let Some(mask) = fault::serving_counter_read() {
+        return mask;
+    }
     let mut mask = 0u64;
     if host(
         SYS_RT_SIGPROCMASK,
@@ -577,6 +583,12 @@ pub(crate) fn deliver() {
                          cancellation has ended under glibc: not modeled",
                     );
                 }
+                if fault::serving_counter_read().is_some()
+                    && batch.iter().any(|(_, action)| action.handler != SIG_DFL)
+                {
+                    drop(state);
+                    fault::stop_while_serving("a signal handler would run");
+                }
                 state.signals.tasks.get_mut(&me).unwrap().delivering += 1;
             }
             batch
@@ -587,7 +599,31 @@ pub(crate) fn deliver() {
         install_mask(u64::MAX);
         let pid = host(SYS_GETPID, [0; 6]);
         let tid = host(SYS_GETTID, [0; 6]);
+        let queue = |instance: &Instance| {
+            let rc = host(
+                SYS_RT_TGSIGQUEUEINFO,
+                [
+                    pid as u64,
+                    tid as u64,
+                    instance.sig as u64,
+                    &instance.info as *const _ as u64,
+                    0,
+                    0,
+                ],
+            );
+            if rc != 0 {
+                fatal("host signal-frame queue failed (rt_tgsigqueueinfo)");
+            }
+        };
+        // A trap-routed signal cannot wait blocked on the host: it is queued
+        // once the other frames have run, and the trap's frame runs the
+        // action its dequeue captured.
+        let mut routed = None;
         for (instance, action) in batch {
+            if action.handler != SIG_DFL && trap_routed(instance.sig) {
+                routed = Some((instance, action));
+                continue;
+            }
             if action.handler == SIG_DFL {
                 if matches!(instance.sig, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU) {
                     fatal("default Stop-class signal would stop the only virtual process");
@@ -614,27 +650,23 @@ pub(crate) fn deliver() {
                 // Release only the dying signal; queued handler frames stay blocked.
                 install_mask(!bit(instance.sig));
             }
-            let rc = host(
-                SYS_RT_TGSIGQUEUEINFO,
-                [
-                    pid as u64,
-                    tid as u64,
-                    instance.sig as u64,
-                    &instance.info as *const _ as u64,
-                    0,
-                    0,
-                ],
-            );
-            if rc != 0 {
-                fatal("host signal-frame queue failed (rt_tgsigqueueinfo)");
-            }
+            queue(&instance);
         }
         let was_releasing = RELEASING_FRAMES.with(|flag| flag.replace(true));
         let outer_dirty = FRAME_DIRTY.with(Cell::get);
         crate::sud::with_signal_delivery(|| {
             let _guest = crate::panic_boundary::PanicScope::suspend();
             install_mask(mask);
+            if let Some((instance, action)) = &routed {
+                fault::send(*action);
+                mirror_onstack(action.flags);
+                queue(instance);
+            }
         });
+        if routed.is_some() {
+            let flags = lock_state().signals.actions[usize::from(SIGSEGV)].flags;
+            mirror_onstack(flags);
+        }
         // Inner SIGSYS fixups may consume these bits while handlers run. The
         // enclosing frame still owns its changes, including the release mask.
         FRAME_DIRTY.with(|dirty| dirty.set(dirty.get() | outer_dirty | FRAME_MASK));
@@ -713,10 +745,7 @@ pub unsafe extern "C" fn patina_signal_action(
     {
         return -i64::from(EINVAL);
     }
-    if !action.is_null()
-        && (sig == i32::from(SIGSYS)
-            || (sig == i32::from(SIGSEGV) && crate::PATINA_TSC_ARMED.load(Ordering::Relaxed) != 0))
-    {
+    if !action.is_null() && sig == i32::from(SIGSYS) {
         fatal("reserved signal registration would disable deterministic containment");
     }
     // Rust std performs registration before a deferred harness installs Context.
@@ -725,10 +754,7 @@ pub unsafe extern "C" fn patina_signal_action(
     let mut previous = state.signals.actions[sig as usize];
     // Rust std installs stack-overflow handlers only over SIG_DFL. Report the
     // reserved host disposition so it does not try to replace our containment.
-    if action.is_null()
-        && (sig == i32::from(SIGSYS)
-            || (sig == i32::from(SIGSEGV) && crate::PATINA_TSC_ARMED.load(Ordering::Relaxed) != 0))
-    {
+    if action.is_null() && sig == i32::from(SIGSYS) {
         let rc = host(
             SYS_RT_SIGACTION,
             [
@@ -750,17 +776,24 @@ pub unsafe extern "C" fn patina_signal_action(
     }
     if !action.is_null() {
         let action = unsafe { *action };
-        let rc = host(
-            SYS_RT_SIGACTION,
-            [
-                sig as u64,
-                &action as *const _ as u64,
-                0,
-                SIGSET_BYTES as u64,
-                0,
-                0,
-            ],
-        );
+        // A trap-routed action stays virtual: the host keeps the trap's
+        // handler, which runs this one for each fault it does not answer.
+        let rc = if trap_routed(sig as u8) {
+            mirror_onstack(action.flags);
+            0
+        } else {
+            host(
+                SYS_RT_SIGACTION,
+                [
+                    sig as u64,
+                    &action as *const _ as u64,
+                    0,
+                    SIGSET_BYTES as u64,
+                    0,
+                    0,
+                ],
+            )
+        };
         if rc != 0 {
             return -i64::from(
                 std::io::Error::last_os_error()
@@ -845,6 +878,9 @@ pub unsafe extern "C" fn patina_signal_altstack(stack: *const Stack, old: *mut S
     // One managed task per host thread: the kernel is the sole altstack store
     // and validator, and builds frames on that very stack (no shadow state).
     // Startup stack registration likewise requires no Context/scheduler.
+    if fault::serving_counter_read().is_some() {
+        fault::stop_while_serving("a sigaltstack call");
+    }
     let mut previous = Stack::default();
     let rc = host(
         SYS_SIGALTSTACK,

@@ -1,4 +1,6 @@
-/* Class pairing: real libc/raw doors for reserved-signal containment,
+/* Class pairing: real libc/raw doors for reserved-signal containment
+ * (SIGSYS refused; a SIGSEGV registration kept off the counter trap and the
+ * shim's own faults),
  * single-entry state, and internal-fatal versus guest-abort finalization
  * (glibc's `_FORTIFY_SOURCE` failures are guest aborts too). */
 #define _GNU_SOURCE
@@ -56,6 +58,11 @@ static void handler(int sig) {
     assert(sig == SIGUSR1);
     assert_safe_mask();
     handled++;
+}
+/* A guest SIGSEGV handler that must never see what the shim owns. */
+static void hijacked(int sig) {
+    (void)sig;
+    _exit(97);
 }
 
 static long raw4(long nr, long a, long b, long c, long d) {
@@ -207,13 +214,25 @@ int main(int argc, char **argv) {
     }
     int reserved = strstr(argv[1], "segv") ? SIGSEGV : SIGSYS;
     if (strncmp(argv[1], "reserved-", 9) == 0) {
+        void (*action)(int) = reserved == SIGSEGV ? hijacked : handler;
         if (reserved == SIGSEGV) assert(PATINA_TSC_ARMED);
-        if (strstr(argv[1], "libc")) signal(reserved, handler);
+        if (strstr(argv[1], "libc")) signal(reserved, action);
         else {
-            struct patina_signal_action act = {.handler = (uintptr_t)handler};
+            struct patina_signal_action act = {.handler = (uintptr_t)action};
             raw4(SYS_rt_sigaction, reserved, (long)&act, 0, sizeof(uint64_t));
         }
-        return 98;
+        if (reserved == SIGSYS) return 98;
+        /* The SIGSEGV registration stays the guest's own: the counter trap
+         * still answers the read, and a fault in the shim's own code (its
+         * entry reading a wild signal-set pointer) is never the handler's. */
+        uint32_t lo, hi;
+        __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        (void)lo;
+        (void)hi;
+        if (strstr(argv[1], "shim-fault"))
+            raw4(SYS_rt_sigprocmask, SIG_BLOCK, 8, 0, sizeof(uint64_t));
+        assert(patina_shutdown() == 0);
+        return 0;
     }
     if (strcmp(argv[1], "prctl") == 0) prctl_state();
     else if (strcmp(argv[1], "handler") == 0) handler_visibility();

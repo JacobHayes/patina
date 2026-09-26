@@ -207,18 +207,32 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   the one that triggers the abort.
 - A trap handler must contain a determinism escape without swallowing anything
   else. Both traps (`SIGSYS` for syscall-user-dispatch, `SIGSEGV` for the
-  timestamp counter) decode at the faulting IP, act only on encodings they fully
-  recognize, and hand every other fault to the disposition they displaced — a
-  genuine segmentation fault still kills the process, at the true address. A
-  handler that "helpfully" resumes on an unrecognized fault would step the guest
-  past an instruction it never executed.
+  timestamp counter) decode at the faulting IP and act only on encodings they
+  fully recognize. Every other `SIGSEGV` goes where the kernel would send it
+  under the guest's own (virtual) action (`src/thread/signals/fault.rs`): the
+  guest's handler runs from the trap's frame, or the default action takes the
+  fault, and a genuine segmentation fault still kills the process at the true
+  address. A handler that "helpfully" resumes on an unrecognized fault would
+  step the guest past an instruction it never executed. The trap takes the
+  thread for the shim first (`patina_trap_enter`), so a `SIGSEGV` while shim
+  code owns it (an entry, a shim lock held, the trap's own glue) is a named
+  stop, never handed to the guest.
 - Installing a signal handler at init changes what Rust std does later. std
   installs its stack-overflow `SIGSEGV`/`SIGBUS` handlers only over `SIG_DFL`
-  (`sys::pal::unix::stack_overflow::init`), and the shim arms from
-  `__libc_start_main`, i.e. first — so while the timestamp-counter trap is armed
-  a stack overflow dies on the default action instead of printing std's message.
-  That is the accepted trade (the fault still kills, with the right address and a
-  core dump); check this interaction before adding any new handler.
+  (`sys::pal::unix::stack_overflow::init`), so `sigaction` reports the guest's
+  virtual `SIGSEGV` action, not the trap's. The trap's host action carries that
+  action's `SA_ONSTACK` so a guard-page fault can reach it at all, which puts
+  counter reads on std's 8 KiB signal stack too: the trap answers them back on
+  the interrupted stack, since the runtime does not fit there, with the
+  kernel's alternate stack cut off below its live frames meanwhile
+  (`with_altstack_below`), and no guest code runs until the read is answered
+  (a delivery that would run a handler is a named stop); the cut must leave
+  room for a nested frame, the trap's own and a named stop's (std's 8 KiB
+  stack does: 5008 bytes left against a 4632-byte floor on an AVX-512 host).
+  std's overflow
+  report itself (a `write` and an `abort` through the shim) still overflows that
+  stack, so a Rust stack overflow dies of SIGSEGV without std's message. Check
+  this interaction before adding any new handler.
 - A trap that the audit cleared a binary against must fail CLOSED at arming
   time. The gate decides "this binary is trap-managed here" from a marker plus a
   live platform probe; if arming then quietly did not happen, a contained escape
@@ -250,8 +264,9 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   refusal, before enqueue or notification changes (also after an outer grant).
 - Alternate stacks live in the kernel per host thread, not in a shim shadow.
   Raw actions retain the caller's exact flags/restorer; libc actions use the
-  glibc restorer captured at initialization. `SIGSYS`/`SIGSEGV` cannot be replaced
-  by a guest, and every mask a guest installs loses them. A handler can still add
+  glibc restorer captured at initialization. `SIGSYS` cannot be replaced by a
+  guest, a `SIGSEGV` action under the counter trap stays virtual, and every mask
+  a guest installs loses both. A handler can still add
   them to its frame's saved mask: a guest restorer's frame is stripped before the
   kernel's `rt_sigreturn`, but glibc's restorer (and arm64's kernel trampoline)
   returns with no trap, so the delivery point strips the restored mask again once

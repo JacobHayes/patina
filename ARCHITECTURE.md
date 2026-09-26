@@ -259,6 +259,42 @@ sleep, and for an asynchronous cancel of another thread. `pthread_join` is a
 cancellation point only where it waits, as in glibc: the join of a thread that
 has ended returns with the request still pending. On macOS `pthread_cancel` answers `ENOSYS`.
 
+On x86_64 Linux the timestamp-counter trap owns the host SIGSEGV disposition,
+so a guest's SIGSEGV action is virtual, reported back by `sigaction`. The trap's
+handler answers a kernel-sent `rdtsc`/`rdtscp` in the main executable's text; a
+counter read it does not answer (outside that text, or prefixed) is a named
+stop, since natively it reads the counter and runs on. It sends every other
+SIGSEGV where the kernel would under the guest's action: the guest handler runs
+from the trap's own kernel-built frame (the kernel's siginfo and the faulting
+context, so a return retries the instruction, an edited context resumes and
+`siglongjmp` leaves), `SA_RESETHAND` resets the virtual handler, the host action
+carries the guest's `SA_ONSTACK`, and a default or ignored action takes the
+fault as the default action does. A handler with a restorer of its own, or a
+SIGSEGV sent from outside the run, is a named stop. A SIGSEGV patina delivers
+itself (`kill`, `raise`) is queued after its batch's other frames, running the
+action its dequeue captured. A counter read
+taken on the alternate stack is served back on the interrupted stack, and no
+guest code runs until it is answered: every signal but the containment ones is
+held blocked meanwhile (one that arrives is delivered once the trap returns,
+after the instruction, as it may be natively), and a delivery that would run a
+handler, a `sigaltstack` call or a nested counter read is a named stop. The
+kernel's alternate stack is cut off below the trap's live frames meanwhile, so
+the one frame it can still build there (a fault in the shim's own code, itself
+a named stop) lands below them; the cut must leave room for that frame
+(`AT_MINSIGSTKSZ`), the trap's own frames and the stop's, or the read is a
+named stop, and
+the read's end gives the kernel back the stack it held at the read's entry. A
+SIGSEGV the kernel sends itself that the guest's action takes as the default
+is taken at once rather than retried, since retrying need not raise it again;
+a core dump then records a sent SIGSEGV (`SI_TKILL`, no address) where natively
+it records the kernel's, with the same wait status. A SIGSEGV while shim code owns the thread (an entry, a shim lock, the
+trap's own glue) is a named stop, never the guest's. SIGSEGV stays out of
+every host mask, a handler's included, so a fault inside a handler that
+natively blocks SIGSEGV runs the handler again where the kernel would take the
+default action. On arm64 there is no
+trap: the guest's action is installed on the host and the kernel delivers
+faults directly.
+
 A handler installed with the caller's own `SA_RESTORER` (a raw action, as Go's
 runtime installs) returns into the caller's stub, and the stub's `rt_sigreturn`
 (trapped by SUD, or a tail call into the shim's `syscall(2)` entry) resumes at

@@ -350,19 +350,87 @@ mod linux {
             }
         }
 
+        /// A guest SIGSEGV handler, through either door, is the guest's own
+        /// action: the trap keeps the host disposition, so the counter read
+        /// after the registration is still answered from the virtual clock
+        /// and never reaches the handler.
         #[test]
-        fn sigsegv_handler_hijack_is_refused() {
+        fn sigsegv_handler_cannot_take_over_the_counter_trap() {
             let g = Guest::assert_build("tsc_hijack_probe.rs");
             if kernel_supports(KernelFeature::Tsc) {
-                g.assert_run_refused(1, &[RESERVED_SIGNAL_DIAGNOSTIC]);
+                assert_eq!(
+                    text(&g.assert_run_success(1, &[]).stdout),
+                    "HIJACK answered=true handler_calls=0\n"
+                );
                 if let Some(c) = sud_c_guest("signals/signal_boundary.c") {
                     for door in ["reserved-segv-libc", "reserved-segv-raw"] {
-                        c.assert_internal_fatal(&[door], &[RESERVED_SIGNAL_DIAGNOSTIC]);
+                        let (output, _) = c.record_standalone(&[door]);
+                        assert!(output.status.success(), "{door}: {output:?}");
                     }
                 }
             } else {
                 g.assert_run_refused(1, &["cpu-nondeterminism"]);
             }
+        }
+
+        /// A counter read the trap does not answer (here a REX-prefixed
+        /// `rdtsc`, which the CPU executes as one) is a named stop: natively
+        /// it reads the counter and runs on, so the guest's handler must not
+        /// get it as a SIGSEGV.
+        #[test]
+        fn a_counter_read_the_trap_declines_is_a_named_stop() {
+            use std::os::unix::process::ExitStatusExt;
+            if !kernel_supports(KernelFeature::Tsc) {
+                return;
+            }
+            let native = assert_build_c_guest("signals/segv_routing.c", CLink::Unlinked);
+            let patina = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShim);
+            assert_standalone_success(&native.binary, &["prefixed"], &[]);
+            let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
+            let output = standalone_output(&patina.binary, &["prefixed"], &env);
+            assert_eq!(output.status.signal(), Some(6), "{output:?}");
+        }
+
+        /// A counter read the trap took on the alternate stack is served off
+        /// it while the trap's frames stay live there, and no guest code runs
+        /// until it is answered. Each row runs natively and stops by name
+        /// under the shim: a timer's handler that would run during such a
+        /// read (`alarm`), and a stack with too little room below the trap's
+        /// frames for a nested frame and the trap's own (`alarm-small`).
+        #[test]
+        fn counter_reads_served_off_the_alternate_stack_run_no_guest_code() {
+            use std::os::unix::process::ExitStatusExt;
+            if !kernel_supports(KernelFeature::Tsc) {
+                return;
+            }
+            let native = assert_build_c_guest("signals/segv_routing.c", CLink::Unlinked);
+            let patina = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShim);
+            let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
+            for (case, stop) in [
+                ("alarm", "signal handler would run"),
+                ("alarm-small", "leaves too little"),
+            ] {
+                assert_standalone_success(&native.binary, &[case], &[]);
+                let output = standalone_output(&patina.binary, &[case], &env);
+                assert_eq!(output.status.signal(), Some(6), "{case}: {output:?}");
+                assert!(text(&output.stderr).contains(stop), "{case}: {output:?}");
+            }
+        }
+
+        /// A fault in the shim's own code (here a SUD row reading a wild
+        /// signal-set pointer) is a named stop that takes the default action,
+        /// never handed to the guest's SIGSEGV handler to run over shim state.
+        #[test]
+        fn shim_faults_never_reach_a_guest_segv_handler() {
+            use std::os::unix::process::ExitStatusExt;
+            if !kernel_supports(KernelFeature::Tsc) {
+                return;
+            }
+            let Some(c) = sud_c_guest("signals/signal_boundary.c") else {
+                return;
+            };
+            let (output, _) = c.record_standalone(&["reserved-segv-shim-fault"]);
+            assert_eq!(output.status.signal(), Some(11), "{output:?}");
         }
 
         fn json_contains(
