@@ -25,8 +25,8 @@
 //! out of bounds, unless that geometry is exactly one submission and two
 //! completion entries with every offset inside its mapping.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Gap, Need, Scenario, Status};
+use crate::compare::{Difference, Ending, Failure, Observed};
 use crate::probe::{AT_FDCWD, Probe, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -413,15 +413,37 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_io_uring_register,
     ],
     needs: &[Need::IoUring],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::IoUring),
-        vehicles: Vehicle::KERNEL,
-        what: "the io_uring rows are Trap(unmodeled), where the registry's plan until the io_uring arc models rings over the readiness reactor is a soft-deny: io_uring_setup ENOSYS, which tokio/mio/monoio probe for and fall back from. Today the SUD dispatcher aborts at the first io_uring_setup; once the soft-deny lands this gap becomes an io_uring_setup ENOSYS difference at event 0",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall io_uring_setup (nr",
+    gaps: &[
+        Gap {
+            status: Status::ByDesign,
+            vehicles: Vehicle::KERNEL,
+            what: "the io_uring rows are SoftDeny(ENOSYS) in the registry: the virtual kernel is built without io_uring (CONFIG_IO_URING=n), which tokio-uring, liburing's feature checks and mio/monoio probe for at io_uring_setup and fall back from, so every setup answers ENOSYS where the host kernel has rings",
+            failure: Failure::Differs(&[
+                Difference::field(0, "io_uring_setup", "errno", Observed::Str("ENOSYS")),
+                Difference::check(1, "io_uring_setup of no entries is EINVAL"),
+                Difference::field(2, "io_uring_setup", "errno", Observed::Str("ENOSYS")),
+                Difference::check(3, "io_uring_setup with NULL parameters is EFAULT"),
+                Difference::field(4, "io_uring_setup", "errno", Observed::Str("ENOSYS")),
+                Difference::check(5, "a reserved field set is EINVAL"),
+                Difference::field(6, "io_uring_setup", "errno", Observed::Str("ENOSYS")),
+                Difference::check(7, "an unknown setup flag is EINVAL"),
+                Difference::field(8, "io_uring_setup", "errno", Observed::Str("ENOSYS")),
+                Difference::field(8, "io_uring_setup", "fields.cq_entries", Observed::Int(0)),
+                Difference::field(8, "io_uring_setup", "fields.features", Observed::Int(0)),
+                Difference::field(8, "io_uring_setup", "fields.sq_entries", Observed::Int(0)),
+                Difference::field(8, "io_uring_setup", "ret", Observed::Int(-1)),
+            ]),
         },
-    }],
+        Gap {
+            status: Status::ByDesign,
+            vehicles: Vehicle::KERNEL,
+            what: "with no ring to create (io_uring_setup is ENOSYS), the scenario stops before its ring checks",
+            failure: Failure::Stops {
+                events: 9,
+                ending: Ending::Exit(101),
+                diagnostic: "cannot continue: create a ring",
+            },
+        },
+    ],
     ..DEFAULTS
 };

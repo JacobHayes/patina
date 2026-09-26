@@ -126,7 +126,7 @@ audit. And no gate compares patina's answers with the host kernel's, so a
    cwd is modeled. A unified Linux-like fd table is a foundation.
 4. **Soft-deny ENOSYS only where ENOSYS is a real kernel outcome callers already
    probe for** (rseq, membarrier until the memory+ipc arc models it,
-   cachestat, io_uring until its arc, removed numbers). Every stop-gap row
+   cachestat, io_uring and Linux AIO, removed numbers). Every stop-gap row
    names the arc that closes it.
 5. **Oracle = the host kernel.** Probes are self-checking Rust programs that
    also emit typed observation events; the same binary runs natively, under
@@ -275,8 +275,8 @@ forwards into the same dispatcher instead of its two-number allowlist.
   aliases via host aliases), sem (with SEM_UNDO bookkeeping), msg; POSIX mq
   (fd-backed, blocking on the scheduler) and named/unnamed `sem_*`
   interposers (the baton keeps its host-alias `sem_*`; guest symbols route to
-  the scheduler); mincore/mlock constants; Linux AIO soft-deny (closes in the
-  io_uring arc); membarrier modeled (single process: QUERY reports the modeled
+  the scheduler); mincore/mlock constants; Linux AIO soft-deny (a kernel
+  built without AIO, §7); membarrier modeled (single process: QUERY reports the modeled
   commands, the rest are ordered no-ops with the kernel's exact validation), its
   SoftDeny(ENOSYS) a stop-gap until then. Its scenarios are `mem/*` and `ipc/*`, one per row group,
   within one process and its threads; the hardware- and limit-dependent ones
@@ -297,8 +297,7 @@ forwards into the same dispatcher instead of its two-number allowlist.
   `mincore`/`remap_file_pages` pass through; `membarrier` is modeled. Left as
   named traps: protection keys and shadow stacks (CPU state), `memfd_secret`
   (needs a page-cache fill the filesystem does not refuse), `process_madvise`
-  (needs the signals arc's self pidfd), the Linux AIO rows (`asyncio/aio`),
-  and the libc `shm_*`/`sem_*`/`mq_*` and SysV wrappers (still refused by the
+  (needs the signals arc's self pidfd), and the libc `shm_*`/`sem_*`/`mq_*` and SysV wrappers (still refused by the
   audit). Scenarios for the resource limits other than `RLIMIT_MEMLOCK` come
   with the time + identity family. Locking and populating need
   `MADV_POPULATE_*` (Linux 5.14, SUD needs 5.11): on an older host the first
@@ -494,15 +493,18 @@ forwards into the same dispatcher instead of its two-number allowlist.
   answer ENOSYS because the kernel cannot answer anything else.
 - **Host-network escape.** Any address outside the virtual interface table is
   ENETUNREACH; that is a model answer, not a hole.
-- **io_uring.** A submission/completion ring model over the readiness reactor
-  is its own arc (`docs/arcs/io-uring.md`, queued after this one); until then
-  `io_uring_setup` → ENOSYS, which tokio/mio/monoio probe for, and the
-  Linux AIO rows → ENOSYS (a kernel built without AIO). Today both are
-  still named traps, a bug against that plan: a guest that probes at
-  startup dies instead of falling back. `asyncio/io_uring` and
-  `asyncio/aio` pin the traps as pending on this arc, and assert the
-  kernel's answers (a ring's parameters and opcode probe, a no-op round
-  trip; AIO on a file and a cancellable poll) that a ring model must meet.
+- **io_uring and Linux AIO.** The virtual kernel is built without both
+  (`CONFIG_IO_URING=n`, `CONFIG_AIO=n`): all nine rows (`io_uring_setup`,
+  `io_uring_enter`, `io_uring_register`, `io_setup`, `io_destroy`,
+  `io_submit`, `io_cancel`, `io_getevents`, `io_pgetevents`) are
+  SoftDeny(ENOSYS), which tokio-uring, liburing's feature checks,
+  mio/monoio and libaio users probe for and fall back from. The host has
+  real rings, so `asyncio/io_uring` and `asyncio/aio` pin the ENOSYS
+  answers as by-design differences, and keep asserting the kernel's
+  answers (a ring's parameters and opcode probe, a no-op round trip; AIO
+  on a file and a cancellable poll). A submission/completion ring model
+  over the readiness reactor would be its own arc, not started and with no
+  arc doc yet; it would turn those differences into the scenarios' targets.
 
 ## 8. Sequencing and landing
 

@@ -838,6 +838,14 @@ that interrupts a wait ends it at the wait's own resumption in the shim
 itself never needs a restart block either. With it the `signal-abi` trap class
 has no rows left and is removed. `signal/restart` passes with no gap.
 
+The nine Linux AIO and io_uring rows answer `ENOSYS`, a virtual kernel built
+without either (`CONFIG_AIO=n`, `CONFIG_IO_URING=n`), where they used to trap:
+a guest that probes for io_uring or libaio at startup now falls back instead of
+dying. The host has both, so `asyncio/aio` and `asyncio/io_uring` pin the
+`ENOSYS` answers as by-design differences (and `asyncio/io_uring` the stop
+before its ring checks); the conformance catalog's io_uring arc is gone with
+its last pending gap.
+
 ## Dependency order
 
 ```text

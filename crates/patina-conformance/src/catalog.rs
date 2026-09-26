@@ -245,8 +245,8 @@ impl Need {
 /// run deadline, so a hang gap's cost stays visible where it is declared.
 pub const MAX_HANG_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// The family arc (docs/arcs/syscall-conformance.md §6, and the io_uring
-/// arc §7 queues after it) that models a pending gap away.
+/// The family arc (docs/arcs/syscall-conformance.md §6) that models a
+/// pending gap away.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arc {
     Fs,
@@ -255,11 +255,10 @@ pub enum Arc {
     SignalsThreadsProcess,
     NetworkReadiness,
     Privileged,
-    IoUring,
 }
 
 impl Arc {
-    /// The arc's name as §6 (or, for io_uring, §7 and the registry) spells it.
+    /// The arc's name as §6 and the registry spell it.
     pub fn name(self) -> &'static str {
         match self {
             Arc::Fs => "fs",
@@ -268,7 +267,6 @@ impl Arc {
             Arc::SignalsThreadsProcess => "signals+threads+process",
             Arc::NetworkReadiness => "network+readiness",
             Arc::Privileged => "privileged",
-            Arc::IoUring => "io_uring",
         }
     }
 }
