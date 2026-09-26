@@ -76,6 +76,7 @@
     X(chown) \
     X(chroot) \
     X(clearenv) \
+    X(clearerr) \
     X(clock_getres) \
     X(clock_gettime) \
     X(clock_nanosleep) \
@@ -110,10 +111,12 @@
     X(fcntl64) \
     X(fdatasync) \
     X(fdopendir) \
+    X(ferror) \
     X(fflush) \
     X(fgetxattr) \
     X(flistxattr) \
     X(flock) \
+    X(flockfile) \
     X(fprintf) \
     X(fputc) \
     X(fputs) \
@@ -136,6 +139,7 @@
     X(fsync) \
     X(ftruncate) \
     X(ftruncate64) \
+    X(funlockfile) \
     X(futimens) \
     X(futimes) \
     X(futimesat) \
@@ -303,9 +307,12 @@
     X(sendmmsg) \
     X(sendmsg) \
     X(sendto) \
+    X(setbuf) \
+    X(setbuffer) \
     X(setenv) \
     X(setgid) \
     X(setgroups) \
+    X(setlinebuf) \
     X(setns) \
     X(setpgid) \
     X(setpwent) \
@@ -314,6 +321,7 @@
     X(setsid) \
     X(setsockopt) \
     X(setuid) \
+    X(setvbuf) \
     X(setxattr) \
     X(shutdown) \
     X(sigaction) \

@@ -452,6 +452,25 @@ mod stdio_lifecycle {
         patina_dst_trace::TraceBundle::load(&trace).expect("a failed assert finalizes its trace");
     }
 
+    /// glibc's buffering modes (`setvbuf`, `setbuf`, `setlinebuf`, line
+    /// buffering, `ferror`/`clearerr`, `flockfile`) observed on a pipe after
+    /// every call: the same report natively and under patina. Linux: the
+    /// rules are glibc's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn buffering_modes_match_the_host() {
+        let source = "stdio_modes_probe.c";
+        let native = assert_success(standalone_output(
+            &assert_build_c_guest(source, CLink::Unlinked).binary,
+            &[],
+            &[],
+        ));
+        let g = assert_build_c_guest(source, CLink::PosixShim);
+        let patina = assert_success(seeded(&g.binary, "", 1));
+        assert!(!native.stdout.is_empty());
+        assert_eq!(text(&patina.stdout), text(&native.stdout));
+    }
+
     #[cfg(target_os = "linux")]
     fn assert_refusal_keeps_output(case: &str) {
         use std::os::unix::process::ExitStatusExt;
