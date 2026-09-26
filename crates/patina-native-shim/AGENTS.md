@@ -14,11 +14,14 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   the specific surface.
 - Dynamic resolution (`dlsym` on Linux) is a second, non-static path into libc:
   the guest never imports the name, so the pre-run audit cannot see it. It
-  answers from one curated entropy routing table and NULL otherwise. Adding a
-  name to that table is only legitimate when the shim already defines that symbol
-  deterministically — the table returns the code the static linker would have
-  bound the caller to, never a host entry, and never a public interposable symbol
-  (the pointers handed out have internal linkage). Returning NULL is not
+  answers every name the shim defines as a libc contract (the registry's
+  `Modeled`/`Partial` rows; `posix_source_lints::dlsym_routes_are_the_registry_definitions`
+  holds `c/posix/dlsym.c`'s lists to them) and NULL otherwise — never a
+  deny-trapped name, a control-plane entry or a host entry. The table returns
+  the code the static linker would have bound the caller to, and never a
+  public interposable symbol: the pointers handed out are hidden aliases of the
+  definitions, resolved when the shim is linked, so they equal the definitions'
+  addresses and cannot be rebound at load time. Returning NULL is not
   automatically the conservative answer: for a symbol the shim models, NULL sends
   the caller down a *less* modeled fallback (this is exactly how `rand::rng()`
   ended up polling the unmodeled `/dev/random` on Linux).

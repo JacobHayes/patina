@@ -23,18 +23,34 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn getpid() -> i32;
+}
+
 fn main() {
-    // std's optional-symbol probe, dynamic loading, an unmodeled entropy symbol,
-    // and ordinary host effects must all still resolve to nothing.
+    // std's optional-symbol probe, dynamic loading, an unmodeled entropy
+    // symbol, a deny-trapped escape and the empty name resolve to nothing.
     for denied in [
         "__pthread_get_minstack",
         "dlopen",
         "arc4random_buf",
-        "open",
-        "getpid",
+        "fork",
         "",
     ] {
-        assert!(table(denied).is_null(), "dlsym allowlist leaked {denied:?}");
+        assert!(table(denied).is_null(), "dlsym table leaked {denied:?}");
+    }
+    // On Linux every name the shim defines resolves, to the very definition
+    // the static link bound; macOS's table is the entropy pair alone.
+    #[cfg(target_os = "linux")]
+    {
+        let linked = getpid as unsafe extern "C" fn() -> i32;
+        assert_eq!(table("getpid"), linked as *mut c_void, "getpid is not the linked definition");
+        assert!(!table("open").is_null(), "open is not routed");
+    }
+    #[cfg(not(target_os = "linux"))]
+    for unrouted in ["open", "getpid"] {
+        assert!(table(unrouted).is_null(), "the macOS table leaked {unrouted:?}");
     }
 
     let getrandom_ptr = table("getrandom");
@@ -81,7 +97,7 @@ fn main() {
         {
             // RTLD_DEFAULT is NULL on glibc: the handle both the `getrandom`
             // crate and std pass. The wrapped dlsym must hand back the very
-            // pointer the table holds, and must still refuse everything else.
+            // pointer the table holds, and must still refuse a host name.
             let name = CString::new("getrandom").unwrap();
             let resolved = unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) };
             assert_eq!(

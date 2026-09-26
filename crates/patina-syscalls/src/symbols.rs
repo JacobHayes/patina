@@ -2343,7 +2343,7 @@ const ROWS: &[SymbolRow] = &[
         "dlerror",
         Platform::Linux,
         Serves::LibcOnly,
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "dlopen",

@@ -15135,6 +15135,58 @@ mod source_lints {
 mod posix_source_lints {
     use super::{POSIX_C_FAMILY_SOURCES, POSIX_C_SOURCE};
 
+    /// The names one X-macro list in `c/posix/dlsym.c` holds.
+    #[cfg(target_os = "linux")]
+    fn routed(list: &str) -> std::collections::BTreeSet<String> {
+        let (_, source) = POSIX_C_FAMILY_SOURCES
+            .iter()
+            .find(|(relative, _)| *relative == "posix/dlsym.c")
+            .expect("the dlsym slice is exported");
+        let start = source
+            .find(&format!("#define {list}(X)"))
+            .unwrap_or_else(|| panic!("dlsym.c defines {list}"));
+        source[start..]
+            .lines()
+            .skip(1)
+            .map_while(|line| line.trim().strip_prefix("X("))
+            .map(|rest| rest.split(')').next().unwrap().to_owned())
+            .collect()
+    }
+
+    /// Linux's dlsym table is exactly the registry's libc definitions: every
+    /// `Modeled` or `Partial` row this architecture defines (`__wrap_dlsym`
+    /// answering as `dlsym`), so a name the shim defines is never NULL to a
+    /// dynamic lookup and nothing else is ever routed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dlsym_routes_are_the_registry_definitions() {
+        use crate::registry::{Platform, SYMBOLS, SymbolStatus};
+        let expected: std::collections::BTreeSet<String> = SYMBOLS
+            .iter()
+            .filter(|row| matches!(row.platform, Platform::Linux | Platform::Both))
+            .filter(|row| matches!(row.status, SymbolStatus::Modeled | SymbolStatus::Partial))
+            .map(|row| row.name)
+            .filter(|name| *name != "__wrap_dlsym")
+            .map(str::to_owned)
+            .collect();
+        let mut table = routed("PATINA_ROUTED");
+        let assembly = routed("PATINA_ROUTED_ASM");
+        assert!(table.is_disjoint(&assembly));
+        table.extend(assembly);
+        let x86 = routed("PATINA_ROUTED_X86_64");
+        assert!(table.is_disjoint(&x86));
+        if cfg!(target_arch = "x86_64") {
+            table.extend(x86);
+        }
+        let missing: Vec<_> = expected.difference(&table).collect();
+        let extra: Vec<_> = table.difference(&expected).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "c/posix/dlsym.c's routing lists and the registry disagree: \
+             missing {missing:?}, not defined as a libc contract {extra:?}"
+        );
+    }
+
     #[test]
     fn posix_umbrella_includes_every_family_slice() {
         let included: Vec<&str> = POSIX_C_SOURCE

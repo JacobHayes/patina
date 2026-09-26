@@ -112,7 +112,7 @@ fn host_environment_canaries_never_enter_guest_or_replay() {
 }
 
 #[test]
-fn dlsym_routes_only_seeded_entropy() {
+fn dlsym_routes_the_shim_definitions_and_no_host_name() {
     let g = Guest::assert_build("dlsym_probe.rs");
     g.assert_audit_clean();
     let out = g.assert_seeded_record_replay_identity(1, &[]);

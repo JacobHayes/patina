@@ -109,7 +109,12 @@ __asm__(".text\n"
         "  popq %rsp\n"
         "  movl $15, %edi\n"
         "  jmpq *%rax\n"
-        ".size syscall, .-syscall\n");
+        ".size syscall, .-syscall\n"
+        /* dlsym's route to this entry (c/posix/dlsym.c): a hidden alias,
+         * resolved when the shim is linked, as its C aliases are. */
+        ".globl patina_route_syscall\n"
+        ".hidden patina_route_syscall\n"
+        ".set patina_route_syscall, syscall\n");
 #elif defined(__aarch64__)
 __asm__(".text\n"
         ".globl syscall\n"
@@ -130,7 +135,12 @@ __asm__(".text\n"
         "  mov x16, x0\n"
         "  mov x0, #139\n"
         "  br x16\n"
-        ".size syscall, .-syscall\n");
+        ".size syscall, .-syscall\n"
+        /* dlsym's route to this entry (c/posix/dlsym.c): a hidden alias,
+         * resolved when the shim is linked, as its C aliases are. */
+        ".globl patina_route_syscall\n"
+        ".hidden patina_route_syscall\n"
+        ".set patina_route_syscall, syscall\n");
 #else
 #error "syscall(2) entry: unsupported architecture"
 #endif
@@ -843,6 +853,8 @@ typedef int (*patina_libc_start_main_fn)(patina_main_fn, int, char **, void *,
 extern void *__real_dlsym(void *handle, const char *symbol);
 
 static patina_main_fn patina_real_main;
+/* The program's argv[0], which glibc's dlerror names a failed lookup by. */
+static const char *patina_program_path;
 
 static int patina_main_wrapper(int argc, char **argv, char **envp) {
     int code = patina_real_main(argc, argv, envp);
@@ -870,6 +882,7 @@ int __libc_start_main(patina_main_fn main_fn, int argc, char **argv, void *init,
      * any guest constructors, independently of whether Context is deferred. */
     patina_init_panic_policy();
     patina_real_main = main_fn;
+    patina_program_path = argc > 0 ? argv[0] : NULL;
     /* The main thread's name is the basename of argv[0], which the supervisor
      * fixes to a machine-independent name: never the host binary's path,
      * which the kernel would name it after (AT_EXECFN). */

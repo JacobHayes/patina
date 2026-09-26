@@ -12,12 +12,13 @@
 
 /*
  * Deterministic entropy implementations behind BOTH the public interposers and
- * the `dlsym` routing table (c/posix/dlsym.c).
+ * macOS's `dlsym` routing table (c/posix/dlsym.c; Linux's hands out hidden
+ * aliases of the public definitions instead).
  *
- * These have internal linkage on purpose. `__wrap_dlsym` hands their addresses
- * to a caller that will hold and call them later, and the host-alias doctrine
- * says a pointer the shim gives out must name a shim-owned entry that can never
- * be rebound to a public, interposable symbol. Routing the public `getentropy`/
+ * These have internal linkage on purpose: the table hands their addresses to a
+ * caller that will hold and call them later, and the host-alias doctrine says a
+ * pointer the shim gives out must name a shim-owned entry that can never be
+ * rebound to a public, interposable symbol. Routing the public `getentropy`/
  * `getrandom` interposers through the same statics keeps the static-link path
  * and the dynamic-lookup path bit-for-bit the same code over the same
  * `patina_entropy` stream.

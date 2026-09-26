@@ -79,9 +79,8 @@ probe binary (the pre-run audit would refuse all of it), so its scenario
 reaches glibc's definition through `dlsym` (`Probe::resolve`) and names it in
 `resolves` (a scenario whose rows glibc has no wrapper for runs through
 `Vehicle::KERNEL` only, not `syscall(2)` twice). Under patina that lookup
-answers NULL: the shim's `__wrap_dlsym` routes
-only a fixed list of names it defines (`c/posix/dlsym.c`
-`patina_dlsym_route`), so such a scenario's gap lifts only when the shim
-both defines the symbol and routes it. A catalog
+answers NULL: the shim's `__wrap_dlsym` answers only the names the shim
+defines (`c/posix/dlsym.c` `patina_dlsym_route`), so such a scenario's gap
+lifts once the shim defines the symbol. A catalog
 test fails once a `resolves` name stops being registry-`Absent`: the
 scenario then imports it directly.
