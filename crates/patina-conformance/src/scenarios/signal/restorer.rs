@@ -12,7 +12,12 @@
 //!
 //! The action is installed and reported back raw (glibc's `sigaction` would
 //! substitute its own restorer), so the scenario runs through the kernel
-//! vehicles; `rt_sigreturn` itself is always the stub's instruction.
+//! vehicles; `rt_sigreturn` itself is always the stub's own. On x86_64 the
+//! stub is the `syscall` instruction (patina's SUD dispatcher traps it). On
+//! arm64 the stub tail-calls glibc's `syscall(2)`, which leaves the stack
+//! (the frame) alone. A raw `svc` anywhere in the probe would make patina
+//! refuse the whole binary on arm64, which has no syscall-user-dispatch; that
+//! is also why the raw vehicle is x86_64-only.
 
 use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
 use crate::compare::{Ending, Failure};
@@ -45,9 +50,8 @@ std::arch::global_asm!(
     ".hidden patina_conformance_restorer",
     ".type patina_conformance_restorer,%function",
     "patina_conformance_restorer:",
-    "mov x8, #{rt_sigreturn}",
-    "svc #0",
-    "udf #0",
+    "mov x0, #{rt_sigreturn}",
+    "b syscall",
     ".size patina_conformance_restorer, . - patina_conformance_restorer",
     ".popsection",
     rt_sigreturn = const libc::SYS_rt_sigreturn,
