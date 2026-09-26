@@ -191,6 +191,43 @@ void ZSTD_trace_decompress_end(unsigned long long ctx, const void *trace) {
 #endif
 
 #ifdef __linux__
+/*
+ * A thread ends: with pthread_exit's value, or with PTHREAD_CANCELED when it
+ * acts on a cancellation (glibc's __do_cancel). The model takes the value,
+ * then glibc's own pthread_exit unwinds, called here in C once no Rust frame
+ * is left on the stack: its forced unwind could not cross one.
+ */
+__attribute__((noreturn)) static void patina_exit_thread(void *value) {
+    patina_host_pthread_exit_fn host_exit = patina_thread_exiting(value);
+    host_exit(value);
+}
+
+__attribute__((noreturn)) static void patina_act_on_cancel(void) {
+    patina_exit_thread(PTHREAD_CANCELED);
+}
+
+/*
+ * A cancellation point the model acts at, as glibc's cancellable syscalls
+ * are: a pending cancel acts at the entry, and one that arrives while the
+ * thread waits inside acts as the wait returns.
+ */
+#define PATINA_CANCEL_ENTER(outer)            \
+    int32_t outer = patina_cancel_enter();    \
+    if (outer < 0) patina_act_on_cancel()
+#define PATINA_CANCEL_LEAVE(outer)                               \
+    do {                                                         \
+        if (patina_cancel_leave(outer) < 0) patina_act_on_cancel(); \
+    } while (0)
+
+/*
+ * Every other glibc cancellation point the shim defines: the model does not
+ * act there, so a thread reaching one with a cancel to act on stops the run by
+ * name, where glibc would end the thread at the entry. `name` is the glibc
+ * cancellation point reached (patina-syscalls src/cancellation.rs lists them,
+ * and a gate holds each wrapper to its check).
+ */
+#define PATINA_CANCEL_POINT(name) patina_cancel_point(name)
+
 static int signal_result(int64_t rc) {
     patina_signal_deliver();
     if (rc < 0) { errno = (int)-rc; return -1; }
@@ -217,4 +254,7 @@ _Noreturn static void patina_fortify_fail(const char *message) {
 _Noreturn static void patina_chk_fail(void) {
     patina_fortify_fail("buffer overflow detected");
 }
+#else
+/* macOS: cancellation is not modeled (pthread_cancel answers ENOSYS). */
+#define PATINA_CANCEL_POINT(name) ((void)0)
 #endif

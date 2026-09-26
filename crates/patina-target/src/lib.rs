@@ -1075,6 +1075,13 @@ enum NativeImportDecision {
     Denied(&'static str),
 }
 
+/// Whether the pre-run audit lets an ELF guest import `symbol` with no
+/// `--allow`: an allowlisted known-safe import, rather than a refusal.
+pub fn native_elf_import_allowed(symbol: &str) -> bool {
+    native_import_decision(symbol, NativeFormat::Elf, &BTreeSet::new())
+        == NativeImportDecision::Allowed
+}
+
 fn native_import_decision(
     symbol: &str,
     format: NativeFormat,

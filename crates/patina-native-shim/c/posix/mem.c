@@ -63,6 +63,7 @@ int munmap(void *address, size_t length) {
 }
 
 int msync(void *address, size_t length, int flags) {
+    PATINA_CANCEL_POINT("msync");
     return patina_mem_failed(patina_msync((uintptr_t)address, length, flags)) ? -1 : 0;
 }
 

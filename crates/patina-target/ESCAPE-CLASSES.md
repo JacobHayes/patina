@@ -335,7 +335,7 @@ is stated plainly:
    over: `mmap` is deliberately **not** in the `shared-memory-ipc` list (it
    would be a dead label, since the allowlist wins first).
 5. **Interposed-but-unsupported symbols.** A symbol the shim *defines* to
-   fail-closed at runtime (e.g. `pthread_cancel`
+   fail-closed at runtime (e.g. macOS `pthread_cancel`
    and any not-yet-modeled interposer) is not an import, so the symbol audit
    cannot distinguish it from a fully-modeled one. These do not escape silently —
    they return `ENOSYS` with a loud `patina: … failing closed` diagnostic at call

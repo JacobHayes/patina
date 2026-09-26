@@ -59,6 +59,7 @@ int32_t CCRandomGenerateBytes(void *destination, size_t length) {
 
 #ifdef __linux__
 ssize_t getrandom(void *destination, size_t length, unsigned int flags) {
+    PATINA_CANCEL_POINT("getrandom");
     return patina_deterministic_getrandom(destination, length, flags);
 }
 

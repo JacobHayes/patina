@@ -79,14 +79,8 @@ void *patina_thread_body(void *start) {
     return value;
 }
 
-/*
- * The model takes the value and answers glibc's own pthread_exit, called here
- * in C once no Rust frame is left on the stack: its forced unwind could not
- * cross one.
- */
 void pthread_exit(void *retval) {
-    patina_host_pthread_exit_fn host_exit = patina_thread_exiting(retval);
-    host_exit(retval);
+    patina_exit_thread(retval);
 }
 #else
 void pthread_exit(void *retval) {
@@ -133,11 +127,13 @@ int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr) {
 }
 
 int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
+    PATINA_CANCEL_POINT("pthread_cond_wait");
     return patina_cond_wait((void *)cond, (void *)mutex);
 }
 
 int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
                            const struct timespec *abstime) {
+    PATINA_CANCEL_POINT("pthread_cond_timedwait");
     return patina_cond_timedwait((void *)cond, (void *)mutex, (const void *)abstime);
 }
 
@@ -182,16 +178,40 @@ int pthread_cond_destroy(pthread_cond_t *cond) {
     return patina_cond_destroy((void *)cond);
 }
 
+#ifdef __linux__
 /*
- * pthread synchronization Patina does not model deterministically is denied
- * (fail-closed) rather than allowed to fall through to the host, where it would
- * block a real thread outside the scheduler. (pthread_barrier_* and
- * pthread_spin_* do not exist on Darwin and are left to a future Linux layer.)
+ * Cancellation (src/thread/cancel.rs): the model keeps each thread's state and
+ * requests, and a negative answer means the caller acts on a cancellation now,
+ * glibc's pthread_exit(PTHREAD_CANCELED), from C.
  */
+int pthread_cancel(pthread_t thread) {
+    int rc = patina_thread_cancel((uintptr_t)thread);
+    if (rc < 0) patina_act_on_cancel();
+    return rc;
+}
+
+int pthread_setcancelstate(int state, int *oldstate) {
+    int rc = patina_cancel_setstate(state, oldstate);
+    if (rc < 0) patina_act_on_cancel();
+    return rc;
+}
+
+int pthread_setcanceltype(int type, int *oldtype) {
+    int rc = patina_cancel_settype(type, oldtype);
+    if (rc < 0) patina_act_on_cancel();
+    return rc;
+}
+
+void pthread_testcancel(void) {
+    if (patina_cancel_test()) patina_act_on_cancel();
+}
+#else
+/* macOS: cancellation is not modeled, and a cancel fails closed. */
 int pthread_cancel(pthread_t thread) {
     (void)thread;
     return ENOSYS;
 }
+#endif
 
 /*
  * pthread_rwlock_* routes reader/writer contention through the deterministic
@@ -289,8 +309,10 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
         entry->next = patina_once_registry;
         patina_once_registry = entry;
     }
+    /* The model's wait, not the pthread_cond_wait interposer's: glibc's
+     * pthread_once waits without being a cancellation point. */
     while (entry->state == 1) {
-        pthread_cond_wait(&patina_once_cond, &patina_once_guard);
+        patina_cond_wait((void *)&patina_once_cond, (void *)&patina_once_guard);
     }
     if (entry->state == 2) {
         pthread_mutex_unlock(&patina_once_guard);

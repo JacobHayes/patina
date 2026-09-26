@@ -182,11 +182,13 @@ static void patina_stream_unlock(struct patina_stream *s, int held) {
 
 /* Write `length` bytes to the stream's descriptor, retrying a short write
  * (`_IO_new_file_write`): the bytes written. A failed write leaves its errno
- * and sets the stream's error flag. */
+ * and sets the stream's error flag. Each write is glibc's cancellable one, so
+ * the stdio functions are cancellation points exactly where they write. */
 static size_t patina_stream_write_out(struct patina_stream *s, const unsigned char *data,
                                       size_t length) {
     size_t done = 0;
     while (done < length) {
+        PATINA_CANCEL_POINT("write");
         intptr_t written = patina_write(s->fd, data + done, length - done);
         if (written < 0) {
             errno = patina_errno();

@@ -221,9 +221,11 @@ impl SignalRuntime {
     /// (`pthread_exit`) from there would cross the shim's Rust delivery
     /// frames, which cannot be unwound.
     pub(super) fn in_handler(&self, task: TaskId) -> bool {
-        self.tasks
-            .get(&task)
-            .is_some_and(|task| task.delivering > 0)
+        self.depth(task) > 0
+    }
+    /// How many delivery batches `task` is inside: 0 outside every handler.
+    pub(super) fn depth(&self, task: TaskId) -> u32 {
+        self.tasks.get(&task).map_or(0, |task| task.delivering)
     }
     pub(super) fn spawn(&mut self, task: TaskId, parent: Option<TaskId>) {
         let mask = parent.map_or(0, |parent| self.tasks[&parent].mask);
@@ -567,6 +569,14 @@ pub(crate) fn deliver() {
                 batch.push((instance, action));
             }
             if !batch.is_empty() {
+                // A cancel that reached this thread inside a sleep, before
+                // the sleep waits, has ended glibc's thread: no handler runs.
+                if state.cancels.acts_in_point(me, state.signals.depth(me)) {
+                    fatal(
+                        "a signal handler would run inside a sleep whose thread a pending \
+                         cancellation has ended under glibc: not modeled",
+                    );
+                }
                 state.signals.tasks.get_mut(&me).unwrap().delivering += 1;
             }
             batch

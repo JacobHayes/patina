@@ -23,6 +23,7 @@ fn foreign_identity_and_missing_classification_fail_compilation() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     for name in [
         "lib.rs",
+        "cancellation.rs",
         "generated.rs",
         "linux.rs",
         "darwin.rs",

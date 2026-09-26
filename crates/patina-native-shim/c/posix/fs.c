@@ -458,6 +458,7 @@ static int patina_openat_variadic(int dirfd, const char *path, int flags, va_lis
 }
 
 int open(const char *path, int flags, ...) {
+    PATINA_CANCEL_POINT("open");
     va_list ap;
     va_start(ap, flags);
     int result = patina_openat_variadic(AT_FDCWD, path, flags, &ap);
@@ -471,6 +472,7 @@ int open(const char *path, int flags, ...) {
  * section rather than Apple-only.
  */
 int openat(int dirfd, const char *path, int flags, ...) {
+    PATINA_CANCEL_POINT("openat");
     va_list ap;
     va_start(ap, flags);
     int result = patina_openat_variadic(dirfd, path, flags, &ap);
@@ -485,11 +487,13 @@ int openat(int dirfd, const char *path, int flags, ...) {
  * deterministic FS. Being a strong def it also drops off the guest import table.
  */
 int creat(const char *path, mode_t mode) {
+    PATINA_CANCEL_POINT("creat");
     return patina_openat_impl(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC, mode);
 }
 
 #ifdef __linux__
 int open64(const char *path, int flags, ...) {
+    PATINA_CANCEL_POINT("open64");
     va_list ap;
     va_start(ap, flags);
     int result = patina_openat_variadic(AT_FDCWD, path, flags, &ap);
@@ -500,6 +504,7 @@ int open64(const char *path, int flags, ...) {
 /* glibc's LFS alias of openat (rustix's libc backend lowers its fs calls onto
  * the *64 names on 64-bit Linux). */
 int openat64(int dirfd, const char *path, int flags, ...) {
+    PATINA_CANCEL_POINT("openat64");
     va_list ap;
     va_start(ap, flags);
     int result = patina_openat_variadic(dirfd, path, flags, &ap);
@@ -556,12 +561,20 @@ static int patina_openat64_2(int dirfd, const char *path, int flags) {
     return patina_openat_impl(dirfd, path, flags, 0);
 }
 
-int __open_2(const char *path, int flags) { return patina_open_2(path, flags); }
-int __open64_2(const char *path, int flags) { return patina_open64_2(path, flags); }
+int __open_2(const char *path, int flags) {
+    PATINA_CANCEL_POINT("__open_2");
+    return patina_open_2(path, flags);
+}
+int __open64_2(const char *path, int flags) {
+    PATINA_CANCEL_POINT("__open64_2");
+    return patina_open64_2(path, flags);
+}
 int __openat_2(int dirfd, const char *path, int flags) {
+    PATINA_CANCEL_POINT("__openat_2");
     return patina_openat_2(dirfd, path, flags);
 }
 int __openat64_2(int dirfd, const char *path, int flags) {
+    PATINA_CANCEL_POINT("__openat64_2");
     return patina_openat64_2(dirfd, path, flags);
 }
 
@@ -1292,10 +1305,12 @@ int truncate64(const char *path, off64_t length) {
 }
 
 int fallocate(int fd, int mode, off_t offset, off_t length) {
+    PATINA_CANCEL_POINT("fallocate");
     return fail_int(patina_fallocate(fd, (uint32_t)mode, (int64_t)offset, (int64_t)length));
 }
 
 int fallocate64(int fd, int mode, off64_t offset, off64_t length) {
+    PATINA_CANCEL_POINT("fallocate64");
     return fail_int(patina_fallocate(fd, (uint32_t)mode, (int64_t)offset, (int64_t)length));
 }
 

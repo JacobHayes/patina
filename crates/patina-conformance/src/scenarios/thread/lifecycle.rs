@@ -11,7 +11,13 @@
 //! `argv[0]`), refusing a buffer
 //! shorter than `TASK_COMM_LEN` with `ERANGE`; `pthread_cancel` of a
 //! thread asleep in a cancellation point (`nanosleep`) ends it there, its
-//! join answering `PTHREAD_CANCELED`; and `pthread_setname_np` renames the
+//! join answering `PTHREAD_CANCELED`, while a thread that disabled
+//! cancellation sleeps through its cancellation points until it enables it
+//! again and `pthread_testcancel` acts on the pending request (an unknown
+//! cancel state or type is `EINVAL`); an asynchronously cancellable thread
+//! ends at once: at its own `pthread_cancel`, at becoming asynchronous with
+//! a request pending, and at enabling cancellation while asynchronous with
+//! one pending; and `pthread_setname_np` renames the
 //! thread (a later thread inherits the new name), refusing a name longer
 //! than 15 bytes with `ERANGE`. A thread joining itself, a wait that could
 //! never end, is `EDEADLK`, unless it detached itself first: a detached
@@ -21,8 +27,7 @@
 //! each is recorded as `-error` on failure. A libc-only subject, so the
 //! libc vehicle alone.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -37,6 +42,9 @@ unsafe extern "C" {
     fn pthread_getname_np(thread: pthread_t, name: *mut c_char, len: size_t) -> c_int;
     fn pthread_setname_np(thread: pthread_t, name: *const c_char) -> c_int;
     fn pthread_cancel(thread: pthread_t) -> c_int;
+    fn pthread_setcancelstate(state: c_int, old: *mut c_int) -> c_int;
+    fn pthread_setcanceltype(kind: c_int, old: *mut c_int) -> c_int;
+    fn pthread_testcancel();
     /// glibc's `pthread_once_t` is an `int` (`PTHREAD_ONCE_INIT` 0).
     fn pthread_once(control: *mut c_int, routine: extern "C" fn()) -> c_int;
 }
@@ -54,6 +62,9 @@ fn recorded(p: &Probe, op: &str, error: c_int) -> i64 {
 
 /// glibc's `PTHREAD_CANCELED`, `(void *) -1`.
 const CANCELED: usize = usize::MAX;
+/// `PTHREAD_CANCEL_ENABLE` / `PTHREAD_CANCEL_DISABLE` (glibc's pthread.h).
+const CANCEL_ENABLE: c_int = 0;
+const CANCEL_DISABLE: c_int = 1;
 
 type Start = extern "C" fn(*mut c_void) -> *mut c_void;
 
@@ -111,6 +122,175 @@ extern "C-unwind" fn cancellable(_: *mut c_void) -> *mut c_void {
         unsafe { nanosleep(&pause, null_mut()) };
     }
     7 as *mut c_void
+}
+
+/// What `uncancellable` answered: disabling and re-enabling cancellation
+/// (with the state each replaced), and whether it ran past its sleeps and
+/// past `pthread_testcancel`.
+static DISABLED: AtomicI32 = AtomicI32::new(i32::MIN);
+static DISABLED_OLD: AtomicI32 = AtomicI32::new(i32::MIN);
+static ENABLED: AtomicI32 = AtomicI32::new(i32::MIN);
+static ENABLED_OLD: AtomicI32 = AtomicI32::new(i32::MIN);
+static SLEPT_THROUGH: AtomicBool = AtomicBool::new(false);
+static PAST_TESTCANCEL: AtomicBool = AtomicBool::new(false);
+
+/// Disables cancellation, then sleeps in `nanosleep` until released: a
+/// cancel requested meanwhile stays pending. Enabled again, it is acted on at
+/// `pthread_testcancel`, so the thread never answers 8.
+extern "C-unwind" fn uncancellable(_: *mut c_void) -> *mut c_void {
+    let mut old: c_int = -1;
+    // SAFETY: a writable old-state slot.
+    DISABLED.store(
+        unsafe { pthread_setcancelstate(CANCEL_DISABLE, &mut old) },
+        Ordering::SeqCst,
+    );
+    DISABLED_OLD.store(old, Ordering::SeqCst);
+    STARTED.store(true, Ordering::SeqCst);
+    let pause = timespec {
+        tv_sec: 0,
+        tv_nsec: 1_000_000,
+    };
+    while !RELEASED.load(Ordering::SeqCst) {
+        // SAFETY: a valid request and no remainder.
+        unsafe { nanosleep(&pause, null_mut()) };
+    }
+    SLEPT_THROUGH.store(true, Ordering::SeqCst);
+    // SAFETY: as above.
+    ENABLED.store(
+        unsafe { pthread_setcancelstate(CANCEL_ENABLE, &mut old) },
+        Ordering::SeqCst,
+    );
+    ENABLED_OLD.store(old, Ordering::SeqCst);
+    // SAFETY: no arguments.
+    unsafe { pthread_testcancel() };
+    PAST_TESTCANCEL.store(true, Ordering::SeqCst);
+    8 as *mut c_void
+}
+
+/// A deferred cancel of a thread with cancellation disabled, and the state
+/// and type interposers' refusals of an unknown value.
+fn disabled_cancel(p: &Probe) {
+    let mut old: c_int = -1;
+    p.check(
+        "an unknown cancel state is EINVAL",
+        // SAFETY: a writable old-state slot.
+        recorded(p, "pthread_setcancelstate", unsafe {
+            pthread_setcancelstate(2, &mut old)
+        }) == neg(EINVAL),
+    );
+    p.check(
+        "an unknown cancel type is EINVAL",
+        // SAFETY: as above.
+        recorded(p, "pthread_setcanceltype", unsafe {
+            pthread_setcanceltype(2, &mut old)
+        }) == neg(EINVAL),
+    );
+    reset();
+    // SAFETY: as for `cancellable`.
+    let start: Start = unsafe {
+        std::mem::transmute::<extern "C-unwind" fn(*mut c_void) -> *mut c_void, Start>(
+            uncancellable,
+        )
+    };
+    let (created, worker) = create(p, start, 0);
+    p.require("pthread_create", created == 0);
+    wait_started(p);
+    // SAFETY: the worker is joinable and running.
+    let canceled = recorded(p, "pthread_cancel", unsafe { pthread_cancel(worker) });
+    p.check(
+        "pthread_cancel of a thread with cancellation disabled",
+        canceled == 0,
+    );
+    RELEASED.store(true, Ordering::SeqCst);
+    let (joined, value) = join(p, worker, "uncancellable");
+    p.rec
+        .event(
+            "pthread_setcancelstate",
+            code(DISABLED.load(Ordering::SeqCst)),
+        )
+        .arg("state", "disable")
+        .field("old", DISABLED_OLD.load(Ordering::SeqCst))
+        .emit();
+    p.rec
+        .event(
+            "pthread_setcancelstate",
+            code(ENABLED.load(Ordering::SeqCst)),
+        )
+        .arg("state", "enable")
+        .field("old", ENABLED_OLD.load(Ordering::SeqCst))
+        .field("slept_through", SLEPT_THROUGH.load(Ordering::SeqCst))
+        .field("past_testcancel", PAST_TESTCANCEL.load(Ordering::SeqCst))
+        .emit();
+    p.check(
+        "disabled, it sleeps through its cancellation points; enabled, testcancel acts",
+        joined == 0
+            && value == CANCELED
+            && DISABLED_OLD.load(Ordering::SeqCst) == CANCEL_ENABLE
+            && ENABLED_OLD.load(Ordering::SeqCst) == CANCEL_DISABLE
+            && SLEPT_THROUGH.load(Ordering::SeqCst)
+            && !PAST_TESTCANCEL.load(Ordering::SeqCst),
+    );
+}
+
+/// `PTHREAD_CANCEL_DEFERRED` / `PTHREAD_CANCEL_ASYNCHRONOUS`.
+const CANCEL_DEFERRED: c_int = 0;
+const CANCEL_ASYNCHRONOUS: c_int = 1;
+
+/// Whether `ends_asynchronously` ran past the call that should have ended it.
+static PAST_ASYNC: AtomicBool = AtomicBool::new(false);
+
+/// Ends itself through asynchronous cancellation, three ways by `arg`: 0, an
+/// asynchronous self-cancel; 1, a deferred self-cancel, then becoming
+/// asynchronous; 2, a self-cancel while disabled and asynchronous, then
+/// enabling. Each acts inside the call that completes the condition.
+extern "C-unwind" fn ends_asynchronously(arg: *mut c_void) -> *mut c_void {
+    let mut old: c_int = -1;
+    // SAFETY: writable old-state slots and the calling thread's own handle.
+    unsafe {
+        match arg as usize {
+            0 => {
+                pthread_setcanceltype(CANCEL_ASYNCHRONOUS, &mut old);
+                pthread_cancel(pthread_self());
+            }
+            1 => {
+                pthread_setcanceltype(CANCEL_DEFERRED, &mut old);
+                pthread_cancel(pthread_self());
+                pthread_setcanceltype(CANCEL_ASYNCHRONOUS, &mut old);
+            }
+            _ => {
+                pthread_setcancelstate(CANCEL_DISABLE, &mut old);
+                pthread_setcanceltype(CANCEL_ASYNCHRONOUS, &mut old);
+                pthread_cancel(pthread_self());
+                pthread_setcancelstate(CANCEL_ENABLE, &mut old);
+            }
+        }
+    }
+    PAST_ASYNC.store(true, Ordering::SeqCst);
+    9 as *mut c_void
+}
+
+/// Asynchronous cancellation acts at once, in each of its three entries.
+fn asynchronous_cancels(p: &Probe) {
+    for (how, arg) in [
+        ("an asynchronous self-cancel", 0usize),
+        ("becoming asynchronous with a cancel pending", 1),
+        ("enabling while asynchronous with a cancel pending", 2),
+    ] {
+        PAST_ASYNC.store(false, Ordering::SeqCst);
+        // SAFETY: as for `cancellable`.
+        let start: Start = unsafe {
+            std::mem::transmute::<extern "C-unwind" fn(*mut c_void) -> *mut c_void, Start>(
+                ends_asynchronously,
+            )
+        };
+        let (created, worker) = create(p, start, arg);
+        p.require("pthread_create", created == 0);
+        let (joined, value) = join(p, worker, how);
+        p.check(
+            &format!("{how} ends the thread at once, joined as PTHREAD_CANCELED"),
+            joined == 0 && value == CANCELED && !PAST_ASYNC.load(Ordering::SeqCst),
+        );
+    }
 }
 
 /// What `detached_self_join` answered: its self-detach and self-join.
@@ -321,6 +501,8 @@ pub fn run(p: &Probe) {
         "it ends at its next cancellation point, joined as PTHREAD_CANCELED",
         joined == 0 && value == CANCELED,
     );
+    disabled_cancel(p);
+    asynchronous_cancels(p);
 
     p.check("pthread_setname_np", setname(p, c"renamed") == 0);
     p.check(
@@ -376,21 +558,9 @@ pub const SCENARIO: Scenario = Scenario {
         "pthread_getname_np",
         "pthread_setname_np",
         "pthread_cancel",
+        "pthread_setcancelstate",
+        "pthread_setcanceltype",
+        "pthread_testcancel",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::SignalsThreadsProcess),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim's pthread_cancel (c/posix/thread_sync.c) is a fail-closed ENOSYS: cancellation is not modeled, so the worker is never canceled at its cancellation point and, released, returns its own value",
-        failure: Failure::Differs(&[
-            Difference::field(26, "pthread_cancel", "ret", Observed::Int(-1)),
-            Difference::field(26, "pthread_cancel", "errno", Observed::Str("ENOSYS")),
-            Difference::check(27, "pthread_cancel of a running thread"),
-            Difference::field(28, "pthread_join", "fields.value", Observed::Int(7)),
-            Difference::check(
-                29,
-                "it ends at its next cancellation point, joined as PTHREAD_CANCELED",
-            ),
-        ]),
-    }],
     ..DEFAULTS
 };

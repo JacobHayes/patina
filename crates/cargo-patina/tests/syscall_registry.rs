@@ -311,3 +311,169 @@ fn c_trap_parser_recognizes_every_trap_shape() {
     assert!(traps.contains(&("IOIteratorNext".to_owned(), "host-introspection".to_owned())));
     assert_eq!(traps.len(), native_deny_trap_symbols().len());
 }
+
+/// Every definition of the public C function `name` in `sources`: its text
+/// from the signature (at column 0) through the closing brace at column 0,
+/// or its one line. A declaration (a `;` before any `{`) is none.
+fn c_definitions(sources: &[&str], name: &str) -> Vec<String> {
+    let call = format!("{name}(");
+    let starts_definition = |line: &str| {
+        !line.starts_with([' ', '\t', '#', '/', '*', '}'])
+            && line.find(&call).is_some_and(|at| {
+                let head = &line[..at];
+                !head.trim().is_empty() && (head.ends_with(' ') || head.ends_with('*'))
+            })
+    };
+    let mut found = Vec::new();
+    for source in sources {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut index = 0;
+        while index < lines.len() {
+            if !starts_definition(lines[index]) {
+                index += 1;
+                continue;
+            }
+            let mut text = String::new();
+            let mut opened = false;
+            while index < lines.len() {
+                let line = lines[index];
+                text.push_str(line);
+                text.push('\n');
+                index += 1;
+                if !opened {
+                    match (line.find('{'), line.find(';')) {
+                        (Some(brace), Some(semi)) if semi < brace => break,
+                        (None, Some(_)) => break,
+                        (Some(_), _) => opened = true,
+                        (None, None) => {}
+                    }
+                    if opened && line.trim_end().ends_with('}') {
+                        found.push(std::mem::take(&mut text));
+                        break;
+                    }
+                } else if line == "}" {
+                    found.push(std::mem::take(&mut text));
+                    break;
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The cancellation-point gate over `sources`: each of glibc's cancellation
+/// points the shim defines (`status`) either acts (a sleep bracketed by
+/// `PATINA_CANCEL_ENTER`, or `pthread_testcancel`) or checks at its entry in
+/// every definition (`PATINA_CANCEL_POINT("name")`); one it does not define
+/// (or lists as `Absent`) is an import the audit refuses (`allowed` false);
+/// a deny-trap aborts by name at the call. Every entry check names one of
+/// glibc's points. Answers each violation.
+fn cancellation_gaps(
+    sources: &[&str],
+    status: impl Fn(&str) -> Option<SymbolStatus>,
+    allowed: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    use patina_dst_native_shim::registry::cancellation::{
+        ACTS_AT, GLIBC_CANCELLATION_POINTS, ONLY_WHERE_IT_WAITS,
+    };
+    let mut gaps = Vec::new();
+    for &name in GLIBC_CANCELLATION_POINTS {
+        match status(name) {
+            // A deny-trap aborts by name at the call; a join stops where it
+            // would wait (the model's cancellable wait classes).
+            Some(SymbolStatus::Deny(_)) => {}
+            Some(_) if ONLY_WHERE_IT_WAITS.contains(&name) => {}
+            None | Some(SymbolStatus::Absent) => {
+                if allowed(name) {
+                    gaps.push(format!(
+                        "{name}: not defined by the shim, yet an allowed import"
+                    ));
+                }
+            }
+            Some(_) => {
+                let definitions = c_definitions(sources, name);
+                if definitions.is_empty() {
+                    gaps.push(format!("{name}: a symbol row, but no C definition found"));
+                }
+                let check = format!("PATINA_CANCEL_POINT(\"{name}\")");
+                for definition in definitions {
+                    let meets = if ACTS_AT.contains(&name) {
+                        definition.contains("PATINA_CANCEL_ENTER")
+                            || definition.contains("patina_cancel_test(")
+                    } else {
+                        definition.contains(&check)
+                    };
+                    if !meets {
+                        gaps.push(format!(
+                            "{name}: a definition without its cancellation check"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for source in sources {
+        for named in source.split("PATINA_CANCEL_POINT(\"").skip(1) {
+            let named = named.split('"').next().unwrap_or_default();
+            if !GLIBC_CANCELLATION_POINTS.contains(&named) {
+                gaps.push(format!(
+                    "{named}: an entry check names no glibc cancellation point"
+                ));
+            }
+        }
+    }
+    gaps
+}
+
+/// A pending cancel reaching any glibc cancellation point a guest can reach
+/// acts as glibc's does or stops the run by name, never passes silently:
+/// every such point is a shim C wrapper that acts or checks, or an import the
+/// audit refuses (patina-syscalls `cancellation.rs`).
+#[cfg(target_os = "linux")]
+#[test]
+fn every_glibc_cancellation_point_acts_stops_or_is_refused() {
+    let sources: Vec<&str> = patina_dst_native_shim::POSIX_C_FAMILY_SOURCES
+        .iter()
+        .map(|(_, source)| *source)
+        .collect();
+    let status = |name: &str| {
+        SYMBOLS
+            .iter()
+            .find(|symbol| symbol.name == name && symbol.platform.defines_on(Os::Linux))
+            .map(|symbol| symbol.status)
+    };
+    let gaps = cancellation_gaps(
+        &sources,
+        status,
+        patina_dst_target::native_elf_import_allowed,
+    );
+    assert!(
+        gaps.is_empty(),
+        "cancellation points the model would pass silently: {gaps:#?}"
+    );
+}
+
+/// Non-vacuity: a wrapper without its check, an allowed import, and a check
+/// naming no cancellation point are each reported; the checked wrapper and
+/// the acting sleep are not.
+#[test]
+fn planted_cancellation_gaps_are_reported() {
+    let sources = [
+        "ssize_t read(int fd, void *to, size_t n) {\n    return patina_read(fd, to, n);\n}\n",
+        "ssize_t write(int fd, const void *from, size_t n) { PATINA_CANCEL_POINT(\"write\"); return 0; }\n",
+        "int sleep(unsigned s) {\n    PATINA_CANCEL_ENTER(outer);\n    PATINA_CANCEL_LEAVE(outer);\n}\n",
+        "int getpid(void) {\n    PATINA_CANCEL_POINT(\"getpid\");\n}\n",
+    ];
+    let status = |name: &str| {
+        matches!(name, "read" | "write" | "sleep" | "getpid").then_some(SymbolStatus::Modeled)
+    };
+    let gaps = cancellation_gaps(&sources, status, |name| name == "usleep");
+    assert_eq!(
+        gaps,
+        [
+            "read: a definition without its cancellation check",
+            "usleep: not defined by the shim, yet an allowed import",
+            "getpid: an entry check names no glibc cancellation point",
+        ]
+    );
+}

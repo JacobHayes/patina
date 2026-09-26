@@ -10,6 +10,7 @@
  */
 
 int poll(struct pollfd *descriptors, nfds_t count, int timeout) {
+    PATINA_CANCEL_POINT("poll");
 #ifdef __linux__
     return signal_result(patina_poll(descriptors, count,
         timeout < 0 ? -1 : (int64_t)timeout * 1000000, NULL, NULL));
@@ -248,11 +249,13 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
 }
 
 int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout) {
+    PATINA_CANCEL_POINT("epoll_wait");
     return fail_int(patina_epoll_wait(epfd, events, maxevents, timeout));
 }
 
 int epoll_pwait(int epfd, struct epoll_event *events, int maxevents, int timeout,
                 const sigset_t *sigmask) {
+    PATINA_CANCEL_POINT("epoll_pwait");
     return signal_result(patina_epoll_wait_masked(epfd, events, maxevents,
         timeout, (const uint64_t *)sigmask));
 }
@@ -271,18 +274,21 @@ static int64_t readiness_timeout(const struct timespec *ts) {
     return ts->tv_nsec > INT64_MAX - base ? INT64_MAX : base + ts->tv_nsec;
 }
 int ppoll(struct pollfd *fds, nfds_t count, const struct timespec *timeout, const sigset_t *mask) {
+    PATINA_CANCEL_POINT("ppoll");
     int64_t nanos = readiness_timeout(timeout);
     if (nanos == -2) { errno = EINVAL; return -1; }
     return signal_result(patina_poll(fds, count, nanos, (const uint64_t *)mask, NULL));
 }
 int select(int nfds, fd_set *restrict read, fd_set *restrict write,
            fd_set *restrict except, struct timeval *restrict timeout) {
+    PATINA_CANCEL_POINT("select");
     return signal_result(patina_select_timeval(nfds, (uint64_t *)read, (uint64_t *)write,
         (uint64_t *)except, (uintptr_t)timeout));
 }
 int pselect(int nfds, fd_set *restrict read, fd_set *restrict write,
             fd_set *restrict except, const struct timespec *restrict timeout,
             const sigset_t *restrict mask) {
+    PATINA_CANCEL_POINT("pselect");
     int64_t nanos = readiness_timeout(timeout);
     if (nanos == -2) { errno = EINVAL; return -1; }
     return signal_result(patina_select(nfds, (uint64_t *)read, (uint64_t *)write,
@@ -309,11 +315,13 @@ static int patina_ppoll_chk(struct pollfd *fds, nfds_t nfds, const struct timesp
 }
 
 int __poll_chk(struct pollfd *fds, nfds_t nfds, int timeout, size_t fdslen) {
+    PATINA_CANCEL_POINT("__poll_chk");
     return patina_poll_chk(fds, nfds, timeout, fdslen);
 }
 
 int __ppoll_chk(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
                 const sigset_t *mask, size_t fdslen) {
+    PATINA_CANCEL_POINT("__ppoll_chk");
     return patina_ppoll_chk(fds, nfds, timeout, mask, fdslen);
 }
 #endif

@@ -888,6 +888,24 @@ const ROWS: &[SymbolRow] = &[
         SymbolStatus::Partial,
     ),
     s(
+        "pthread_setcancelstate",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "pthread_setcanceltype",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::Partial,
+    ),
+    s(
+        "pthread_testcancel",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::Modeled,
+    ),
+    s(
         "pthread_getname_np",
         Platform::Linux,
         Serves::Syscalls(&["prctl"]),

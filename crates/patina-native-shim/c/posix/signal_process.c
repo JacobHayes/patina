@@ -12,6 +12,7 @@
 
 #ifndef __linux__
 int pause(void) {
+    PATINA_CANCEL_POINT("pause");
     errno = ENOSYS;
     return -1;
 }
@@ -138,10 +139,12 @@ int sigaltstack(const stack_t *stack, stack_t *old) {
     return signal_result(patina_signal_altstack(stack, old));
 }
 int pause(void) {
+    PATINA_CANCEL_POINT("pause");
     return signal_result(patina_signal_wait(NULL, NULL, NULL,
         sizeof(uint64_t), PATINA_SIGNAL_PAUSE));
 }
 int sigsuspend(const sigset_t *set) {
+    PATINA_CANCEL_POINT("sigsuspend");
     return signal_result(patina_signal_wait((const uint64_t *)set, NULL, NULL,
         sizeof(uint64_t), PATINA_SIGNAL_SUSPEND));
 }
@@ -156,12 +159,15 @@ static int patina_sigtimedwait(const sigset_t *set, siginfo_t *info,
     return rc;
 }
 int sigtimedwait(const sigset_t *set, siginfo_t *info, const struct timespec *timeout) {
+    PATINA_CANCEL_POINT("sigtimedwait");
     return patina_sigtimedwait(set, info, timeout);
 }
 int sigwaitinfo(const sigset_t *set, siginfo_t *info) {
+    PATINA_CANCEL_POINT("sigwaitinfo");
     return patina_sigtimedwait(set, info, NULL);
 }
 int sigwait(const sigset_t *set, int *sig) {
+    PATINA_CANCEL_POINT("sigwait");
     int64_t rc;
     do {
         rc = patina_signal_wait((const uint64_t *)set, NULL, NULL,
@@ -358,6 +364,7 @@ int execvp(const char *file, char *const argv[]) {
     patina_process_trap("execvp");
 }
 pid_t waitpid(pid_t pid, int *status, int options) {
+    PATINA_CANCEL_POINT("waitpid");
 #ifdef __linux__
     return signal_result(patina_sud_dispatch(SYS_wait4, (uint64_t)pid,
         (uintptr_t)status, (uint64_t)options, 0, 0, 0, 0));
@@ -553,6 +560,7 @@ int posix_spawn_file_actions_addchdir(posix_spawn_file_actions_t *acts, const ch
     patina_process_trap("posix_spawn_file_actions_addchdir");
 }
 int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options) {
+    PATINA_CANCEL_POINT("waitid");
     return signal_result(patina_sud_dispatch(SYS_waitid, (uint64_t)idtype,
         id, (uintptr_t)infop, (uint64_t)options, 0, 0, 0));
 }

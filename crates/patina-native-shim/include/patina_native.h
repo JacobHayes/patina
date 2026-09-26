@@ -863,6 +863,21 @@ patina_start_routine patina_thread_prelude(void *start, void **arg);
 void patina_thread_returned(void *value);
 typedef void (*patina_host_pthread_exit_fn)(void *) __attribute__((noreturn));
 patina_host_pthread_exit_fn patina_thread_exiting(void *value);
+/*
+ * Cancellation (src/thread/cancel.rs). A negative answer tells the C wrapper
+ * to act on the cancellation now, once the Rust call has returned:
+ * pthread_exit(PTHREAD_CANCELED). patina_cancel_enter/leave bracket a
+ * cancellation point the model acts at; leave takes what enter answered.
+ */
+int32_t patina_thread_cancel(uintptr_t thread);
+int32_t patina_cancel_setstate(int32_t state, int32_t *old);
+int32_t patina_cancel_settype(int32_t type, int32_t *old);
+int32_t patina_cancel_test(void);
+int32_t patina_cancel_enter(void);
+int32_t patina_cancel_leave(int32_t outer);
+/* The entry of every other glibc cancellation point the shim defines: a
+ * thread with a cancel to act on stops the run by name. */
+void patina_cancel_point(const char *name);
 #endif
 int32_t patina_mutex_init(void *mutex, const void *attr);
 int32_t patina_mutex_lock(void *mutex);

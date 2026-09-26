@@ -7470,6 +7470,8 @@ pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usi
 /// primitives only provide the vehicle and the blocking.
 mod thread {
     #[cfg(target_os = "linux")]
+    pub(crate) mod cancel;
+    #[cfg(target_os = "linux")]
     pub(crate) mod futex2;
     #[cfg(target_os = "linux")]
     pub(crate) mod ipc;
@@ -8965,6 +8967,9 @@ mod thread {
         /// The interval timers, POSIX timers and timer descriptors.
         #[cfg(target_os = "linux")]
         timers: timers::Timers,
+        /// Every thread's cancellation state.
+        #[cfg(target_os = "linux")]
+        cancels: cancel::Cancels,
         /// Real host `pthread_t` bits mapped to the managed task they run.
         handles: BTreeMap<usize, TaskId>,
         /// Per-task baton semaphores.
@@ -9249,6 +9254,8 @@ mod thread {
             if wait.class == BlockClass::Sync {
                 refuse_nested_sync_wait(self.table.sync_interrupted(me));
             }
+            #[cfg(target_os = "linux")]
+            self.refuse_unmodeled_cancellation(me, reason, &wait);
             // A wait before the first thread (a normal mutex's owner relocking
             // it) parks the main task, so the scheduler must know it.
             self.ensure_active()?;
@@ -9283,6 +9290,8 @@ mod thread {
             if wait.class == BlockClass::Sync {
                 refuse_nested_sync_wait(self.table.sync_interrupted(me));
             }
+            #[cfg(target_os = "linux")]
+            self.refuse_unmodeled_cancellation(me, reason, &wait);
             // As in `block`: the main task may wait before the first thread.
             self.ensure_active()?;
             let mut scheduler = RealScheduler;
@@ -9389,6 +9398,8 @@ mod thread {
                 registrations: registrations::RegistrationRuntime::default(),
                 #[cfg(target_os = "linux")]
                 timers: timers::Timers::default(),
+                #[cfg(target_os = "linux")]
+                cancels: cancel::Cancels::default(),
                 handles: BTreeMap::new(),
                 sems: BTreeMap::new(),
                 net: NetState::new(),
@@ -9496,6 +9507,13 @@ mod thread {
     ) -> Option<c_int> {
         let me = current_task();
         let mut state = lock_state();
+        // A cancel that arrived since the sleep's entry acts now, as the
+        // sleep returns: glibc's thread, asynchronously cancellable inside
+        // the sleep, ended at once, before any virtual time passed.
+        #[cfg(target_os = "linux")]
+        if state.cancel_ends_sleep(me) {
+            return Some(0);
+        }
         if !state.active {
             return None;
         }
@@ -9730,7 +9748,8 @@ mod thread {
     /// frames the unwind crosses only the guest's and C ones.
     ///
     /// Two cases are named fatals: the main thread's `pthread_exit`, and a
-    /// `pthread_exit` inside a guest signal handler, whose unwind would cross
+    /// `pthread_exit` inside a guest signal handler (a cancellation acting
+    /// there included, which comes here too), whose unwind would cross
     /// the shim's Rust delivery frames beneath the handler (a Rust frame
     /// cannot be unwound: the process would abort where glibc ends the
     /// thread).
@@ -9742,8 +9761,9 @@ mod thread {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
         if lock_state().signals.in_handler(current_task()) {
             fatal(
-                "pthread_exit inside a signal handler is not modeled: glibc's unwind would \
-                 cross the shim's signal-delivery frames beneath the handler",
+                "pthread_exit, or a cancellation acting, inside a signal handler is not \
+                 modeled: glibc's unwind would cross the shim's signal-delivery frames beneath \
+                 the handler",
             );
         }
         if EXIT_RECORD.with(Cell::get).is_null() {
@@ -9753,6 +9773,7 @@ mod thread {
             );
         }
         thread_returned(value);
+        lock_state().cancels.exiting(current_task());
         crate::hostapi::get().host_pthread_exit
     }
 
@@ -9827,6 +9848,8 @@ mod thread {
         state.signals.finish(task);
         #[cfg(target_os = "linux")]
         state.sched.finish(task);
+        #[cfg(target_os = "linux")]
+        state.cancels.finish(task);
         // Detached handles remain targetable while live, then disappear with
         // their ThreadEntry; completed joinable handles remain until reaped.
         if !state.table.threads.contains_key(&task) {
@@ -9945,12 +9968,17 @@ mod thread {
         #[cfg(target_os = "linux")]
         if key == unsafe { (crate::hostapi::get().host_pthread_self)() } {
             let me = current_task();
-            let detached = lock_state()
+            let state = lock_state();
+            if state
                 .table
                 .threads
                 .get(&me)
-                .is_some_and(|entry| entry.detached);
-            return if detached { EINVAL } else { EDEADLK };
+                .is_some_and(|entry| entry.detached)
+            {
+                return EINVAL;
+            }
+            state.refuse_deadlocked_join(me);
+            return EDEADLK;
         }
         let me = current_task();
         let mut state = lock_state();
@@ -9974,7 +10002,14 @@ mod thread {
             Ok(JoinResolve::Blocked(Step::Continue)) => {
                 fatal("join parked without transferring the baton")
             }
-            Err(error) => return error.into_posix(),
+            Err(error) => {
+                let error = error.into_posix();
+                #[cfg(target_os = "linux")]
+                if error == EDEADLK {
+                    state.refuse_deadlocked_join(me);
+                }
+                return error;
+            }
         };
         // The managed join is complete (the worker's task has exited the
         // scheduler). Now REAP the real host thread so the worker fully unwinds

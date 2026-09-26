@@ -270,8 +270,11 @@
     X(pthread_rwlock_trywrlock) \
     X(pthread_rwlock_unlock) \
     X(pthread_rwlock_wrlock) \
+    X(pthread_setcancelstate) \
+    X(pthread_setcanceltype) \
     X(pthread_setname_np) \
     X(pthread_sigmask) \
+    X(pthread_testcancel) \
     X(ptrace) \
     X(putchar) \
     X(putenv) \

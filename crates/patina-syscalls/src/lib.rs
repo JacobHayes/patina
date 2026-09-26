@@ -620,6 +620,7 @@ pub fn rows_for() -> Vec<(u32, &'static SyscallRow)> {
     rows
 }
 
+pub mod cancellation;
 pub mod symbols;
 pub use symbols::SYMBOLS;
 /// Which platform's shim objects define a symbol.

@@ -39,6 +39,7 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len) {
 }
 
 int connect(int fd, const struct sockaddr *addr, socklen_t len) {
+    PATINA_CANCEL_POINT("connect");
     return (int)sock_result(patina_sock_connect(fd, (uintptr_t)addr, (int32_t)len));
 }
 
@@ -47,11 +48,13 @@ int listen(int fd, int backlog) {
 }
 
 int accept(int fd, struct sockaddr *addr, socklen_t *len) {
+    PATINA_CANCEL_POINT("accept");
     return (int)sock_result(patina_sock_accept(fd, (uintptr_t)addr, (uintptr_t)len, 0));
 }
 
 #ifdef __linux__
 int accept4(int fd, struct sockaddr *addr, socklen_t *len, int flags) {
+    PATINA_CANCEL_POINT("accept4");
     return (int)sock_result(patina_sock_accept(fd, (uintptr_t)addr, (uintptr_t)len, flags));
 }
 #endif
@@ -80,39 +83,47 @@ int getsockopt(int fd, int level, int optname, void *value, socklen_t *len) {
 
 ssize_t sendto(int fd, const void *buf, size_t len, int flags,
                const struct sockaddr *addr, socklen_t alen) {
+    PATINA_CANCEL_POINT("sendto");
     return sock_result(patina_sock_sendto(fd, (uintptr_t)buf, len, flags, (uintptr_t)addr,
                                           (int32_t)alen));
 }
 
 ssize_t send(int fd, const void *buf, size_t len, int flags) {
+    PATINA_CANCEL_POINT("send");
     return sock_result(patina_sock_sendto(fd, (uintptr_t)buf, len, flags, 0, 0));
 }
 
 ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
                  struct sockaddr *addr, socklen_t *alen) {
+    PATINA_CANCEL_POINT("recvfrom");
     return sock_result(patina_sock_recvfrom(fd, (uintptr_t)buf, len, flags, (uintptr_t)addr,
                                             (uintptr_t)alen));
 }
 
 ssize_t recv(int fd, void *buf, size_t len, int flags) {
+    PATINA_CANCEL_POINT("recv");
     return sock_result(patina_sock_recvfrom(fd, (uintptr_t)buf, len, flags, 0, 0));
 }
 
 ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
+    PATINA_CANCEL_POINT("sendmsg");
     return sock_result(patina_sock_sendmsg(fd, (uintptr_t)msg, flags));
 }
 
 ssize_t recvmsg(int fd, struct msghdr *msg, int flags) {
+    PATINA_CANCEL_POINT("recvmsg");
     return sock_result(patina_sock_recvmsg(fd, (uintptr_t)msg, flags));
 }
 
 #ifdef __linux__
 int sendmmsg(int fd, struct mmsghdr *vec, unsigned int vlen, int flags) {
+    PATINA_CANCEL_POINT("sendmmsg");
     return (int)sock_result(patina_sock_sendmmsg(fd, (uintptr_t)vec, vlen, flags));
 }
 
 int recvmmsg(int fd, struct mmsghdr *vec, unsigned int vlen, int flags,
              struct timespec *timeout) {
+    PATINA_CANCEL_POINT("recvmmsg");
     return (int)sock_result(
         patina_sock_recvmmsg(fd, (uintptr_t)vec, vlen, flags, (uintptr_t)timeout));
 }
@@ -135,11 +146,13 @@ static ssize_t patina_recvfrom_chk(int fd, void *buf, size_t len, size_t buflen,
 }
 
 ssize_t __recv_chk(int fd, void *buf, size_t len, size_t buflen, int flags) {
+    PATINA_CANCEL_POINT("__recv_chk");
     return patina_recv_chk(fd, buf, len, buflen, flags);
 }
 
 ssize_t __recvfrom_chk(int fd, void *buf, size_t len, size_t buflen, int flags,
                        struct sockaddr *addr, socklen_t *alen) {
+    PATINA_CANCEL_POINT("__recvfrom_chk");
     return patina_recvfrom_chk(fd, buf, len, buflen, flags, addr, alen);
 }
 #endif

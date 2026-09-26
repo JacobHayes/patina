@@ -231,6 +231,22 @@ thread's `pthread_exit`, and every `pthread_exit` on macOS, is a named fatal.
 The `pthread_key` destructors run after the thread's completion, since they follow
 the thread-local ones in `start_thread`: a joiner waits for them, but a detached
 thread's run beside the next task.
+Cancellation on Linux keeps glibc 2.39's per-thread state (`src/thread/cancel.rs`):
+`pthread_setcancelstate`/`pthread_setcanceltype` switch it, `pthread_cancel` records
+the request, and acting on it is `pthread_exit(PTHREAD_CANCELED)` from the C
+wrapper. A deferred request acts at the sleeps (`nanosleep`, `clock_nanosleep`,
+`sleep`: at the entry when it is already pending, and at once when it arrives
+inside, before any virtual time passes, the cancel ending the wait) and at
+`pthread_testcancel`; making the thread asynchronous acts on a pending one at
+once. Every other glibc cancellation point a guest can reach is a C wrapper that
+checks at its entry, or an import the audit refuses, and the list is glibc's own
+(`crates/patina-syscalls/src/cancellation.rs`, gated against the shim's C and the
+audit): a thread reaching one with a cancel to act on stops the run by name, as it
+does when it would block in such a wait, when a cancel would have to end a thread
+blocked in one, when a cancel reaches a thread running a signal handler inside a
+sleep, and for an asynchronous cancel of another thread. `pthread_join` is a
+cancellation point only where it waits, as in glibc: the join of a thread that
+has ended returns with the request still pending. On macOS `pthread_cancel` answers `ENOSYS`.
 
 A handler installed with the caller's own `SA_RESTORER` (a raw action, as Go's
 runtime installs) returns into the caller's stub, and the stub's `rt_sigreturn`

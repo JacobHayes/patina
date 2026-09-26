@@ -144,7 +144,14 @@ static int patina_nanosleep(const struct timespec *duration, struct timespec *re
 }
 
 int nanosleep(const struct timespec *duration, struct timespec *remaining) {
+#ifdef __linux__
+    PATINA_CANCEL_ENTER(outer);
+    int rc = patina_nanosleep(duration, remaining);
+    PATINA_CANCEL_LEAVE(outer);
+    return rc;
+#else
     return patina_nanosleep(duration, remaining);
+#endif
 }
 
 #ifdef __linux__
@@ -159,7 +166,10 @@ int nanosleep(const struct timespec *duration, struct timespec *remaining) {
 int clock_nanosleep(clockid_t clock_id, int flags, const struct timespec *request,
                     struct timespec *remain) {
     if (clock_id == CLOCK_THREAD_CPUTIME_ID) return EINVAL;
-    return (int)-patina_clock_nanosleep((int)clock_id, flags, request, remain);
+    PATINA_CANCEL_ENTER(outer);
+    int rc = (int)-patina_clock_nanosleep((int)clock_id, flags, request, remain);
+    PATINA_CANCEL_LEAVE(outer);
+    return rc;
 }
 
 #endif
@@ -202,7 +212,14 @@ struct tm *localtime_r(const time_t *timep, struct tm *result) {
 unsigned int sleep(unsigned int seconds) {
     struct timespec duration = {(time_t)seconds, 0};
     struct timespec remaining = {0, 0};
-    if (patina_nanosleep(&duration, &remaining) == 0) return 0;
+#ifdef __linux__
+    PATINA_CANCEL_ENTER(outer);
+    int rc = patina_nanosleep(&duration, &remaining);
+    PATINA_CANCEL_LEAVE(outer);
+#else
+    int rc = patina_nanosleep(&duration, &remaining);
+#endif
+    if (rc == 0) return 0;
     if (errno == EINTR)
         return (unsigned int)remaining.tv_sec + (remaining.tv_nsec != 0);
     return seconds;

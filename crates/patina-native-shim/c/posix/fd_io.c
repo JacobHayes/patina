@@ -74,6 +74,14 @@ static uint32_t patina_setfl_from_posix(int flags) {
 
 static int patina_fcntl_record_lock(int fd, int command, struct flock *lock);
 
+/* The record-lock commands that wait for a conflicting lock to go. */
+static int patina_fcntl_waits(int command) {
+#ifdef F_OFD_SETLKW
+    if (command == F_OFD_SETLKW) return 1;
+#endif
+    return command == F_SETLKW;
+}
+
 int fcntl(int fd, int command, ...) {
     /* POSIX record locks (F_GETLK/F_SETLK/F_SETLKW) and the Linux open-file-
      * description variants (F_OFD_*) carry a pointer: see
@@ -84,6 +92,9 @@ int fcntl(int fd, int command, ...) {
         || command == F_OFD_GETLK || command == F_OFD_SETLK || command == F_OFD_SETLKW
 #endif
     ) {
+        /* Only the waiting lock commands are cancellable (glibc's
+         * __libc_fcntl64). */
+        if (patina_fcntl_waits(command)) PATINA_CANCEL_POINT("fcntl");
         va_list ap;
         va_start(ap, command);
         struct flock *lock = va_arg(ap, struct flock *);
@@ -156,6 +167,7 @@ int fcntl(int fd, int command, ...) {
  * `fcntl` re-reads it as whichever type the command defines.
  */
 int fcntl64(int fd, int command, ...) {
+    if (patina_fcntl_waits(command)) PATINA_CANCEL_POINT("fcntl64");
     va_list ap;
     va_start(ap, command);
     void *argument = va_arg(ap, void *);
@@ -166,10 +178,12 @@ int fcntl64(int fd, int command, ...) {
 #endif
 
 ssize_t read(int fd, void *destination, size_t length) {
+    PATINA_CANCEL_POINT("read");
     return fail_size(patina_read(fd, destination, length));
 }
 
 ssize_t write(int fd, const void *source, size_t length) {
+    PATINA_CANCEL_POINT("write");
     return fail_size(patina_write(fd, source, length));
 }
 
@@ -182,10 +196,12 @@ ssize_t write(int fd, const void *source, size_t length) {
  * concurrency. A description without offset addressing (a pipe, a socket, the
  * captured streams) is ESPIPE, matching the kernel. */
 ssize_t pread(int fd, void *destination, size_t length, off_t offset) {
+    PATINA_CANCEL_POINT("pread");
     return fail_size(patina_pread(fd, destination, length, (int64_t)offset));
 }
 
 ssize_t pwrite(int fd, const void *source, size_t length, off_t offset) {
+    PATINA_CANCEL_POINT("pwrite");
     return fail_size(patina_pwrite(fd, source, length, (int64_t)offset));
 }
 
@@ -195,9 +211,11 @@ ssize_t pwrite(int fd, const void *source, size_t length, off_t offset) {
  * they must reach the same deterministic positional I/O as pread/pwrite rather
  * than be denied. off64_t is always 64-bit, so the full offset is preserved. */
 ssize_t pread64(int fd, void *destination, size_t length, off64_t offset) {
+    PATINA_CANCEL_POINT("pread64");
     return fail_size(patina_pread(fd, destination, length, (int64_t)offset));
 }
 ssize_t pwrite64(int fd, const void *source, size_t length, off64_t offset) {
+    PATINA_CANCEL_POINT("pwrite64");
     return fail_size(patina_pwrite(fd, source, length, (int64_t)offset));
 }
 
@@ -225,14 +243,17 @@ static ssize_t patina_pread_chk(int fd, void *destination, size_t length, int64_
 }
 
 ssize_t __read_chk(int fd, void *destination, size_t length, size_t buflen) {
+    PATINA_CANCEL_POINT("__read_chk");
     return patina_read_chk(fd, destination, length, buflen);
 }
 
 ssize_t __pread_chk(int fd, void *destination, size_t length, off_t offset, size_t buflen) {
+    PATINA_CANCEL_POINT("__pread_chk");
     return patina_pread_chk(fd, destination, length, (int64_t)offset, buflen);
 }
 
 ssize_t __pread64_chk(int fd, void *destination, size_t length, off64_t offset, size_t buflen) {
+    PATINA_CANCEL_POINT("__pread64_chk");
     return patina_pread_chk(fd, destination, length, (int64_t)offset, buflen);
 }
 
@@ -242,6 +263,7 @@ ssize_t __pread64_chk(int fd, void *destination, size_t length, off64_t offset, 
  * between files. off_t is off64_t on a 64-bit target. */
 ssize_t copy_file_range(int fd_in, off64_t *off_in, int fd_out, off64_t *off_out, size_t length,
                         unsigned int flags) {
+    PATINA_CANCEL_POINT("copy_file_range");
     return fail_size(patina_copy_file_range(fd_in, (int64_t *)off_in, fd_out, (int64_t *)off_out,
                                             length, (uint32_t)flags));
 }
@@ -268,6 +290,7 @@ int flock(int fd, int operation) {
 }
 
 int close(int fd) {
+    PATINA_CANCEL_POINT("close");
     return fail_int(patina_close(fd));
 }
 
@@ -303,27 +326,33 @@ int close_range(unsigned int first, unsigned int last, int flags) {
  * WAL frames with ONE pwritev (turso's UnixFile::pwritev is the live example),
  * so these reach the same deterministic positional I/O as pread/pwrite. */
 ssize_t writev(int fd, const struct iovec *vectors, int count) {
+    PATINA_CANCEL_POINT("writev");
     return fail_size(patina_writev(fd, vectors, count, 0));
 }
 
 ssize_t readv(int fd, const struct iovec *vectors, int count) {
+    PATINA_CANCEL_POINT("readv");
     return fail_size(patina_readv(fd, vectors, count, 0));
 }
 
 ssize_t preadv(int fd, const struct iovec *vectors, int count, off_t offset) {
+    PATINA_CANCEL_POINT("preadv");
     return fail_size(patina_preadv(fd, vectors, count, (int64_t)offset, 0));
 }
 
 ssize_t pwritev(int fd, const struct iovec *vectors, int count, off_t offset) {
+    PATINA_CANCEL_POINT("pwritev");
     return fail_size(patina_pwritev(fd, vectors, count, (int64_t)offset, 0));
 }
 
 #ifdef __linux__
 /* Large-file variants, the same way pread64/pwrite64 mirror pread/pwrite. */
 ssize_t preadv64(int fd, const struct iovec *vectors, int count, off64_t offset) {
+    PATINA_CANCEL_POINT("preadv64");
     return fail_size(patina_preadv(fd, vectors, count, (int64_t)offset, 0));
 }
 ssize_t pwritev64(int fd, const struct iovec *vectors, int count, off64_t offset) {
+    PATINA_CANCEL_POINT("pwritev64");
     return fail_size(patina_pwritev(fd, vectors, count, (int64_t)offset, 0));
 }
 
@@ -343,6 +372,7 @@ off_t lseek(int fd, off_t offset, int whence) {
 }
 
 int fsync(int fd) {
+    PATINA_CANCEL_POINT("fsync");
     return fail_int(patina_fsync(fd));
 }
 
@@ -352,6 +382,7 @@ int fsync(int fd) {
  * data-vs-metadata distinction), so route it to patina_fsync — a durability
  * guarantee at least as strong as fdatasync's, and deterministic. */
 int fdatasync(int fd) {
+    PATINA_CANCEL_POINT("fdatasync");
     return fail_int(patina_fsync(fd));
 }
 
