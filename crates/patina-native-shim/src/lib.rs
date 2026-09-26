@@ -114,8 +114,11 @@ mod identity;
 // too. See `darwin_identity.rs`.
 #[cfg(any(target_os = "macos", test))]
 mod darwin_identity;
+// `localtime_r`'s time zone: glibc's TZ rules over the virtual machine. See
+// `localtime.rs`.
 #[cfg(target_os = "linux")]
 mod limits;
+mod localtime;
 #[cfg(target_os = "linux")]
 mod mem;
 #[cfg(target_os = "linux")]

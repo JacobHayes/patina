@@ -15,8 +15,7 @@
 //!
 //! libc only.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
 use crate::vehicle::{Vehicle, errno};
 use libc::*;
@@ -158,103 +157,5 @@ pub const SCENARIO: Scenario = Scenario {
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_clock_gettime],
     symbols: &["localtime_r", "setenv", "clock_gettime"],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[Vehicle::Libc],
-            what: "localtime_r ignores TZ and converts to UTC (c/posix/time.c localtime_r over patina_utc_from_time: zone \"UTC\", offset 0, never daylight time), where glibc applies the POSIX rule TZ names",
-            failure: Failure::Differs(&[
-                Difference::field(
-                    0,
-                    "localtime_r",
-                    "fields.date",
-                    Observed::Str("1970-01-01 00:00:00"),
-                ),
-                Difference::field(0, "localtime_r", "fields.gmtoff", Observed::Int(0)),
-                Difference::field(0, "localtime_r", "fields.wday", Observed::Int(4)),
-                Difference::field(0, "localtime_r", "fields.yday", Observed::Int(0)),
-                Difference::field(0, "localtime_r", "fields.zone", Observed::Str("UTC")),
-                Difference::check(1, "0 is [1969, 12, 31, 19, 0, 0] XST"),
-                Difference::field(
-                    2,
-                    "localtime_r",
-                    "fields.date",
-                    Observed::Str("1969-12-31 23:59:59"),
-                ),
-                Difference::field(2, "localtime_r", "fields.gmtoff", Observed::Int(0)),
-                Difference::field(2, "localtime_r", "fields.zone", Observed::Str("UTC")),
-                Difference::check(3, "-1 is [1969, 12, 31, 18, 59, 59] XST"),
-                Difference::field(
-                    4,
-                    "localtime_r",
-                    "fields.date",
-                    Observed::Str("2023-07-22 04:26:40"),
-                ),
-                Difference::field(4, "localtime_r", "fields.gmtoff", Observed::Int(0)),
-                Difference::field(4, "localtime_r", "fields.isdst", Observed::Int(0)),
-                Difference::field(4, "localtime_r", "fields.zone", Observed::Str("UTC")),
-                Difference::check(5, "1690000000 is [2023, 7, 22, 0, 26, 40] XDT"),
-                Difference::field(
-                    6,
-                    "localtime_r",
-                    "fields.date",
-                    Observed::Str("2023-03-12 06:59:59"),
-                ),
-                Difference::field(6, "localtime_r", "fields.gmtoff", Observed::Int(0)),
-                Difference::field(6, "localtime_r", "fields.zone", Observed::Str("UTC")),
-                Difference::check(7, "1678604399 is [2023, 3, 12, 1, 59, 59] XST"),
-                Difference::field(
-                    8,
-                    "localtime_r",
-                    "fields.date",
-                    Observed::Str("2023-03-12 07:00:00"),
-                ),
-                Difference::field(8, "localtime_r", "fields.gmtoff", Observed::Int(0)),
-                Difference::field(8, "localtime_r", "fields.isdst", Observed::Int(0)),
-                Difference::field(8, "localtime_r", "fields.zone", Observed::Str("UTC")),
-                Difference::check(9, "1678604400 is [2023, 3, 12, 3, 0, 0] XDT"),
-                Difference::field(
-                    10,
-                    "localtime_r",
-                    "fields.date",
-                    Observed::Str("2023-11-05 05:59:59"),
-                ),
-                Difference::field(10, "localtime_r", "fields.gmtoff", Observed::Int(0)),
-                Difference::field(10, "localtime_r", "fields.isdst", Observed::Int(0)),
-                Difference::field(10, "localtime_r", "fields.zone", Observed::Str("UTC")),
-                Difference::check(11, "1699163999 is [2023, 11, 5, 1, 59, 59] XDT"),
-                Difference::field(
-                    12,
-                    "localtime_r",
-                    "fields.date",
-                    Observed::Str("2023-11-05 06:00:00"),
-                ),
-                Difference::field(12, "localtime_r", "fields.gmtoff", Observed::Int(0)),
-                Difference::field(12, "localtime_r", "fields.zone", Observed::Str("UTC")),
-                Difference::check(13, "1699164000 is [2023, 11, 5, 1, 0, 0] XST"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::TimeTimersSchedIdentity),
-            vehicles: &[Vehicle::Libc],
-            what: "localtime_r converts a time whose year overflows int, truncating the year (c/posix/time.c patina_utc_from_time), where glibc answers NULL with EOVERFLOW",
-            failure: Failure::Differs(&[
-                Difference::field(14, "localtime_r", "ret", Observed::Int(0)),
-                Difference::field(14, "localtime_r", "errno", Observed::Null),
-                Difference::field(
-                    14,
-                    "localtime_r",
-                    "fields.date",
-                    Observed::Str("219250468-12-04 15:30:07"),
-                ),
-                Difference::field(14, "localtime_r", "fields.wday", Observed::Int(0)),
-                Difference::field(14, "localtime_r", "fields.yday", Observed::Int(338)),
-                Difference::field(14, "localtime_r", "fields.isdst", Observed::Int(0)),
-                Difference::field(14, "localtime_r", "fields.gmtoff", Observed::Int(0)),
-                Difference::field(14, "localtime_r", "fields.zone", Observed::Str("UTC")),
-                Difference::check(15, "a year past int is EOVERFLOW"),
-            ]),
-        },
-    ],
     ..DEFAULTS
 };

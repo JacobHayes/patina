@@ -471,14 +471,15 @@ void CFRelease(const void *cf) { (void)cf; }
 
 /* --- iana-time-zone 0.1.65 / chrono::Local timezone surface ---
  *
- * The runtime models a single fixed timezone, UTC (see localtime_r above:
- * tm_gmtoff 0, tm_zone "UTC"), so report UTC here for a consistent world.
+ * The virtual machine ships no time zone database, and its default zone (TZ
+ * unset: localtime_r's tm_gmtoff 0, tm_zone "UTC") is UTC, so report UTC as
+ * the system time zone for a consistent world.
  * tz_darwin.rs flow: CFTimeZoneResetSystem() (cache invalidate; a no-op here) ->
  * a non-NULL CFTimeZoneCopySystem() -> CFTimeZoneGetName() -> as_utf8()
  * (CFStringGetCStringPtr, UTF-8) yields "UTC". Returning the C string directly
  * keeps the fallback conversion (CFStringGetLength/CFStringGetBytes) unreachable.
  * get_timezone() therefore returns Ok("UTC"); chrono::Local resolves the same
- * fixed UTC offset it gets from the localtime_r interposer, deterministically.
+ * UTC offset it gets from the localtime_r interposer when TZ is unset.
  */
 void CFTimeZoneResetSystem(void) {}
 const void *CFTimeZoneCopySystem(void) { return &patina_cf_system_timezone; }

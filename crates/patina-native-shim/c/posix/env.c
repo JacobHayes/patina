@@ -155,8 +155,9 @@ static char **patina_env_find(char **array, const char *name, size_t length, siz
     return entry;
 }
 
-char *getenv(const char *name) {
-    patina_note_boundary_symbol("getenv");
+/* glibc's getenv body, shared with the shim's own readers of the guest's
+ * environment (`localtime_r`'s TZ): the value of the first entry of `name`. */
+static char *patina_env_lookup(const char *name) {
     if (!patina_env_read_gate()) return NULL;
     char **array = patina_env_array();
     if (array == NULL || name[0] == '\0') return NULL;
@@ -164,6 +165,11 @@ char *getenv(const char *name) {
     size_t before;
     char **entry = patina_env_find(array, name, length, &before);
     return *entry == NULL ? NULL : *entry + length + 1;
+}
+
+char *getenv(const char *name) {
+    patina_note_boundary_symbol("getenv");
+    return patina_env_lookup(name);
 }
 
 /* glibc's `__add_to_environ`: `combined` is a caller's `name=value` string to
@@ -295,12 +301,6 @@ int putenv(char *string) {
  * effective ids agree), so `secure_getenv` answers as `getenv` does. */
 char *secure_getenv(const char *name) {
     patina_note_boundary_symbol("secure_getenv");
-    if (!patina_env_read_gate()) return NULL;
-    char **array = patina_env_array();
-    if (array == NULL || name[0] == '\0') return NULL;
-    size_t length = strlen(name);
-    size_t before;
-    char **entry = patina_env_find(array, name, length, &before);
-    return *entry == NULL ? NULL : *entry + length + 1;
+    return patina_env_lookup(name);
 }
 #endif

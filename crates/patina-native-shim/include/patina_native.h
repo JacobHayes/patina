@@ -207,6 +207,19 @@ int32_t patina_entropy(void *destination, size_t length);
  * word the Linux kernel refuses (GRND_* outside NONBLOCK|RANDOM|INSECURE, or
  * INSECURE with RANDOM). */
 intptr_t patina_getrandom(void *destination, size_t length, uint32_t flags);
+/*
+ * localtime_r's conversion (src/localtime.rs): `t` in the zone `tz` (TZ, or
+ * NULL when unset) and `tzdir` (TZDIR) name at the FIRST call, as glibc reads
+ * TZ once. 0 with `out` filled, or -1 with patina_errno EOVERFLOW. A zoneinfo
+ * file where glibc would read one is a named fatal. `zone` lives for the
+ * process.
+ */
+struct patina_tm {
+    int32_t sec, min, hour, mday, mon, year, wday, yday, isdst;
+    int64_t gmtoff;
+    const char *zone;
+};
+int32_t patina_localtime(int64_t t, const char *tz, const char *tzdir, struct patina_tm *out);
 int32_t patina_clock_now(uint32_t clock, uint64_t *nanos);
 int32_t patina_sleep_until(uint32_t clock, uint64_t deadline_nanos);
 int patina_sleep_until_remaining(uint32_t clock_id, uint64_t deadline_nanos, int64_t *remaining);

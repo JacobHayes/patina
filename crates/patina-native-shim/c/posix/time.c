@@ -1,5 +1,5 @@
 /*
- * Time: clocks, sleeps, and the UTC-only localtime model.
+ * Time: clocks, sleeps, and localtime_r.
  *
  * This file is one family slice of the native shim's single C translation unit:
  * `c/patina_posix.c` #includes every slice under `c/posix/` in a fixed order, so the
@@ -124,71 +124,36 @@ int clock_nanosleep(clockid_t clock_id, int flags, const struct timespec *reques
 
 #endif
 
-/* The single fixed timezone the runtime models. A mutable static (not a string
- * literal) so it binds to `struct tm::tm_zone` whether the platform types that
- * field as `char *` (Darwin/BSD) or `const char *` (glibc) without a cast. */
-static char patina_tm_zone_utc[] = "UTC";
-
 /*
- * Broken-down UTC from a time_t, as a PURE function of the input seconds — no
- * host timezone database, /etc/localtime, or environment. The runtime models a
- * single fixed timezone (UTC): tm_gmtoff is 0 and tm_zone is "UTC" (the BSD/GNU
- * `struct tm` extension fields, visible here under _DARWIN_C_SOURCE/_GNU_SOURCE),
- * so a local-offset probe observes a zero offset and `now_local()` collapses
- * onto `now_utc()`. The civil-from-days decomposition is Howard Hinnant's
- * algorithm (proleptic Gregorian, whole time_t range), so identical seconds
- * always yield identical fields regardless of host locale or clock.
+ * localtime_r: glibc's time zone over the virtual machine (src/localtime.rs):
+ * TZ, read at the first call as glibc reads it, names a POSIX rule string or a
+ * zoneinfo file; the machine ships no zoneinfo, so a name glibc cannot find a
+ * file for answers what glibc answers then (UTC for an unset or empty TZ, the
+ * rule string otherwise), and a zoneinfo file the guest put where glibc would
+ * read it is a named refusal. A year past `int` is EOVERFLOW.
  */
-static void patina_utc_from_time(time_t seconds, struct tm *out) {
-    int64_t secs = (int64_t)seconds;
-    int64_t days = secs / 86400;
-    int64_t rem = secs % 86400;
-    if (rem < 0) {
-        rem += 86400;
-        days -= 1;
-    }
-    int sec_of_day = (int)rem;
-    out->tm_hour = sec_of_day / 3600;
-    out->tm_min = (sec_of_day % 3600) / 60;
-    out->tm_sec = sec_of_day % 60;
-    /* 1970-01-01 was a Thursday (=4). Floor-mod into 0..6 with Sunday=0. */
-    int wday = (int)(((days % 7) + 4) % 7);
-    if (wday < 0) {
-        wday += 7;
-    }
-    out->tm_wday = wday;
-    /* days-from-civil inverse (epoch shifted to 0000-03-01 so leap days fall at
-     * the end of the 400-year era). */
-    int64_t z = days + 719468;
-    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
-    unsigned doe = (unsigned)(z - era * 146097);                          /* [0, 146096] */
-    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; /* [0, 399]   */
-    int64_t y = (int64_t)yoe + era * 400;
-    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100); /* [0, 365] */
-    unsigned mp = (5 * doy + 2) / 153;                      /* [0, 11]  */
-    unsigned d = doy - (153 * mp + 2) / 5 + 1;              /* [1, 31]  */
-    unsigned m = mp < 10 ? mp + 3 : mp - 9;                 /* [1, 12]  */
-    if (m <= 2) {
-        y += 1;
-    }
-    out->tm_mday = (int)d;
-    out->tm_mon = (int)m - 1;
-    out->tm_year = (int)(y - 1900);
-    static const int cumulative[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
-    int leap = ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) ? 1 : 0;
-    out->tm_yday = cumulative[out->tm_mon] + (int)d - 1 + (out->tm_mon > 1 ? leap : 0);
-    out->tm_isdst = 0;
-    out->tm_gmtoff = 0;
-    out->tm_zone = patina_tm_zone_utc;
-}
-
 struct tm *localtime_r(const time_t *timep, struct tm *result) {
     if (timep == NULL || result == NULL) {
         errno = EFAULT;
         return NULL;
     }
-    memset(result, 0, sizeof *result);
-    patina_utc_from_time(*timep, result);
+    struct patina_tm tm;
+    if (patina_localtime((int64_t)*timep, patina_env_lookup("TZ"), patina_env_lookup("TZDIR"),
+                         &tm) != 0) {
+        errno = patina_errno();
+        return NULL;
+    }
+    result->tm_sec = tm.sec;
+    result->tm_min = tm.min;
+    result->tm_hour = tm.hour;
+    result->tm_mday = tm.mday;
+    result->tm_mon = tm.mon;
+    result->tm_year = tm.year;
+    result->tm_wday = tm.wday;
+    result->tm_yday = tm.yday;
+    result->tm_isdst = tm.isdst;
+    result->tm_gmtoff = (long)tm.gmtoff;
+    result->tm_zone = (char *)tm.zone;
     return result;
 }
 

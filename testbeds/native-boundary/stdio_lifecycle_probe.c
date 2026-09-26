@@ -11,12 +11,18 @@
  * - errno: the first write to stdout leaves errno as it found it.
  * - deadlock: buffered output, then a run patina refuses (a normal mutex
  *   relocked by its holder): the output reaches the capture before the abort.
+ * - zoneinfo: the same before another refusal, `localtime_r` over a zoneinfo
+ *   file the guest put at /etc/localtime.
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
 
 static void at_end(void) { printf("atexit handler says bye\n"); }
 
@@ -70,12 +76,25 @@ static int deadlock(void) {
     return 0;
 }
 
+static int zoneinfo(void) {
+    printf("progress before the refusal\n");
+    mkdir("/etc", 0755);
+    int fd = open("/etc/localtime", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, "TZif", 4) != 4 || close(fd) != 0) return 1;
+    time_t now = 0;
+    struct tm local;
+    localtime_r(&now, &local);
+    printf("unreachable\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *which = argc > 1 ? argv[1] : "";
     if (strcmp(which, "teardown") == 0) return teardown();
     if (strcmp(which, "env-teardown") == 0) return env_teardown();
     if (strcmp(which, "errno") == 0) return first_write_errno();
     if (strcmp(which, "deadlock") == 0) return deadlock();
+    if (strcmp(which, "zoneinfo") == 0) return zoneinfo();
     fprintf(stderr, "unknown case: %s\n", which);
     return 2;
 }

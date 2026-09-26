@@ -419,6 +419,14 @@ mod stdio_lifecycle {
         assert_refusal_keeps_output("deadlock");
     }
 
+    /// The same through the trap-class refusal (`trap_fatal`): a zoneinfo file
+    /// `localtime_r` would read.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_trap_refusal_keeps_the_buffered_output() {
+        assert_refusal_keeps_output("zoneinfo");
+    }
+
     #[cfg(target_os = "linux")]
     fn assert_refusal_keeps_output(case: &str) {
         use std::os::unix::process::ExitStatusExt;
