@@ -150,7 +150,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::FdIo,
         Disposition::Modeled,
-        "FIONBIO/FIOCLEX/FIONCLEX are modeled by descriptor class, FIONREAD on pipes and sockets (`SIOCINQ`), and on a socket the interface requests over the virtual interface table (SIOCGIFNAME/INDEX/FLAGS/MTU/HWADDR/ADDR/NETMASK/BRDADDR/CONF; SIOCSIF* is EPERM); every other request answers ENOTTY exactly like the C interposer.",
+        "FIONBIO/FIOCLEX/FIONCLEX are modeled by descriptor class, FIONREAD on pipes and sockets (`SIOCINQ`), and on a socket the interface requests over the virtual interface table (SIOCGIFNAME/INDEX/FLAGS/MTU/HWADDR/ADDR/NETMASK/BRDADDR/CONF; SIOCSIF* is EPERM); `do_vfs_ioctl`'s other requests before any file's own (`ioctl::vfs`: FIOASYNC, FIOQSIZE, FIGETBSZ, FIFREEZE/FITHAW `EPERM`, FS_IOC_FIEMAP, FIBMAP `EPERM` on a regular file; cloning, extent maps, file attributes and preallocation on the volume stop by name); a userfaultfd's, a namespace file's and the entropy device's own requests; every other request answers ENOTTY exactly like the C interposer. The request is an `unsigned int` on both doors.",
         None,
     ),
     Syscall::N_pread64 => r(

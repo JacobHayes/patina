@@ -458,9 +458,8 @@ static int patina_fcntl_record_lock(int fd, int command, struct flock *lock) {
     return 0;
 }
 
-/* ioctl: the generic descriptor requests (FIOCLEX/FIONCLEX/FIONBIO/FIONREAD)
- * are answered by the one Rust entry the SUD row calls too; anything else is
- * ENOTTY there. */
+/* ioctl: the one Rust entry the SUD row calls too (patina_ioctl), which reads
+ * the request as the kernel's unsigned int. */
 int ioctl(int fd, unsigned long request, ...) {
     va_list ap;
     va_start(ap, request);

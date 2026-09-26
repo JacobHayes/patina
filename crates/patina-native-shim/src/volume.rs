@@ -302,6 +302,12 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
     }
 }
 
+/// The block size of the superblock a descriptor's node is on
+/// (`FIGETBSZ`): `statfs`'s `f_bsize`.
+pub(crate) fn block_size(raw_fd: c_int) -> Result<i32, c_int> {
+    descriptor_filesystem(raw_fd).map(|filesystem| filesystem.describe().f_bsize as i32)
+}
+
 /// Copy a description out, as `do_statfs_native` does last: a NULL buffer is
 /// `EFAULT`, after everything else has been judged.
 fn copy_out(description: KernelStatfs, out: *mut KernelStatfs) -> c_int {

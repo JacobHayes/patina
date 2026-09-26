@@ -20,14 +20,17 @@
 //! * as a file it is read-only (a write `EBADF`), seeks nowhere
 //!   (`noop_llseek`: 0) and has an inode of its own, the caller's (`fchmod`
 //!   succeeds); a read into a buffer outside the user address space is
-//!   `EFAULT` before the descriptor's own read (`vfs_read`'s `access_ok`).
+//!   `EFAULT` before the descriptor's own read (`vfs_read`'s `access_ok`);
+//!   `do_vfs_ioctl` answers its generic requests first (no `fasync`, no
+//!   size, a page-sized block, freezing `EPERM`), the descriptor's own
+//!   ioctl the rest (`EINVAL`).
 //!
 //! Neither creating a descriptor nor the handshake registers anything: the
 //! probe never asks it to handle a fault.
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::observe::Norm;
-use crate::probe::{Probe, neg};
+use crate::probe::{IoctlArg, Probe, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -47,6 +50,12 @@ const UFFD_API: u64 = 0xaa;
 const UFFDIO_API: u64 = 0xc018_aa3f;
 /// `sizeof(struct uffd_msg)`.
 const MESSAGE: usize = 32;
+/// Generic requests (`fs.h`, `ioctls.h`).
+const FIOASYNC: u64 = 0x5452;
+const FIOQSIZE: u64 = 0x5460;
+const FIGETBSZ: u64 = 0x2;
+const FIFREEZE: u64 = 0xc004_5877;
+const FS_IOC_GETFLAGS: u64 = 0x8008_6601;
 /// An address past every architecture's user address space.
 const KERNEL_ADDRESS: i64 = 0xffff_8000_0000_0000_u64 as i64;
 /// The features no configuration masks (fs/userfaultfd.c `userfaultfd_api`
@@ -190,6 +199,32 @@ fn descriptor(p: &Probe, fd: i32) {
         p.lseek(fd, 0, SEEK_HOLE + 1) == neg(EINVAL),
     );
     p.check("fchmod of it succeeds", p.fchmod(fd, 0o600) == 0);
+    // `do_vfs_ioctl` answers its requests before the descriptor's own ioctl,
+    // which refuses the rest (`EINVAL`).
+    for (name, request, arg, errno, value) in [
+        ("FIOASYNC", FIOASYNC, IoctlArg::In(0), 0, None),
+        ("FIOASYNC", FIOASYNC, IoctlArg::In(1), ENOTTY, None),
+        ("FIOQSIZE", FIOQSIZE, IoctlArg::Out, ENOTTY, None),
+        ("FIGETBSZ", FIGETBSZ, IoctlArg::Out, 0, Some(4096)),
+        ("FIFREEZE", FIFREEZE, IoctlArg::Out, EPERM, None),
+        (
+            "FS_IOC_GETFLAGS",
+            FS_IOC_GETFLAGS,
+            IoctlArg::Out,
+            EINVAL,
+            None,
+        ),
+    ] {
+        let (r, got) = p.ioctl(fd, request, name, arg);
+        p.check(
+            &format!("{name} of it"),
+            if errno == 0 {
+                r == 0 && got == value
+            } else {
+                r == neg(errno)
+            },
+        );
+    }
     p.check(
         "a read into a buffer past the user address space is EFAULT, before the file's own read",
         p.call_observed(

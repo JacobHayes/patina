@@ -692,7 +692,7 @@ getcwd, chdir, fchdir, umask (modeled process state: the working directory is a 
 mkfifo, mkfifoat, mknod/mknodat (FIFOs, socket nodes, whiteouts; devices are EPERM for the one non-root identity)
 rename, renameat, renameat2 (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT)
 readv, writev, preadv, pwritev (one iovec decode; preadv2/pwritev2 RWF_* flags on the raw rows)
-ioctl (FIOCLEX, FIONCLEX, FIONBIO, FIONREAD), statfs, fstatfs
+ioctl (FIOCLEX, FIONCLEX, FIONBIO, FIONREAD, and on Linux the rest of do_vfs_ioctl's requests before any file's own, a named stop where the model ends), statfs, fstatfs
 statvfs, fstatvfs, statvfs64, fstatvfs64 (glibc 2.39's conversion of the one statfs description: f_type, f_flag from the mount flags, f_fsid packed high:low)
 posix_fadvise, posix_fadvise64 (the error number returned, errno untouched)
 getrlimit, setrlimit, getrlimit64, setrlimit64 (one definition; a NULL limit asks for and sets nothing)
