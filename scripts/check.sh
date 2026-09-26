@@ -30,7 +30,10 @@ Usage: scripts/check.sh <full|fast|msrv>
         not part of the ordinary local landing gate.
 
 Successful rungs are silent; the overall result includes retained logs with
-per-rung commands and timings. On failure, the complete rung log and exact
+per-rung commands and timings, and counts the conformance scenarios the host
+could not judge (NOT RUN, named on the next line). The full profile requires a
+host oracle (PATINA_REQUIRE_HOST_ORACLE=1, as CI sets; set it to 0 to relax):
+a NOT RUN other than a missing hardware feature fails it. On failure, the complete rung log and exact
 command are printed. The runner uses one Cargo target dir for serial work and one
 under target/check/parallel/ for each parallel rung. PATINA_CHECK_JOBS is
 intentionally not exposed: the full profile uses bounded, reviewed concurrency
@@ -48,7 +51,6 @@ esac
 logs=$(mktemp -d "${TMPDIR:-/tmp}/patina-check.XXXXXX") || exit 1
 total_start=$(date +%s)
 passed=0
-skipped=0
 pids=()
 labels=()
 commands=()
@@ -60,8 +62,14 @@ finish() {
   local status=$?
   local result=PASS
   ((status == 0)) || result=FAIL
-  printf 'OVERALL %s %s (passed=%s skipped=%s; %ss); logs: %s\n' \
-    "$result" "$profile" "$passed" "$skipped" "$(( $(date +%s) - total_start ))" "$logs"
+  # The harness prints `NOT RUN <scenario>: <reason>` past libtest's capture,
+  # so the line can start mid-line after progress dots.
+  local not_run
+  not_run=$(cat "$logs"/*.log 2>/dev/null | grep -o 'NOT RUN [^:]*' | sort -u)
+  printf 'OVERALL %s %s (passed=%s not_run=%s; %ss); logs: %s\n' \
+    "$result" "$profile" "$passed" "$(grep -c . <<<"$not_run")" \
+    "$(( $(date +%s) - total_start ))" "$logs"
+  [[ -z $not_run ]] || printf '%s\n' "$not_run"
 }
 
 stop_children() {
@@ -301,7 +309,10 @@ run_fast() {
 
 case $profile in
   selftest) run_rung 'output contract selftest' output_selftest ;;
-  full) run_full ;;
+  full)
+    export PATINA_REQUIRE_HOST_ORACLE="${PATINA_REQUIRE_HOST_ORACLE:-1}"
+    run_full
+    ;;
   fast) run_fast ;;
   msrv) run_rung 'MSRV full compatibility suite' run_msrv_full ;;
 esac
