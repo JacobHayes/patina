@@ -37,7 +37,7 @@ use crate::thread::signals::{
 use std::cell::Cell;
 
 use crate::registry::{Arch, Disposition, SYSCALLS, SyscallRow};
-use crate::{PatinaFlock, PatinaMetadata};
+use crate::{PatinaFlock, PatinaMetadata, PatinaTimestamp};
 
 mod fd_io;
 mod fs;
@@ -240,16 +240,16 @@ unsafe extern "C" {
         path: *const c_char,
         flags: u32,
         atime_kind: u32,
-        atime_nanos: u64,
+        atime: PatinaTimestamp,
         mtime_kind: u32,
-        mtime_nanos: u64,
+        mtime: PatinaTimestamp,
     ) -> c_int;
     fn patina_futimens(
         fd: c_int,
         atime_kind: u32,
-        atime_nanos: u64,
+        atime: PatinaTimestamp,
         mtime_kind: u32,
-        mtime_nanos: u64,
+        mtime: PatinaTimestamp,
     ) -> c_int;
     fn patina_chown(dirfd: c_int, path: *const c_char, flags: u32, uid: u32, gid: u32) -> c_int;
     fn patina_fchown(fd: c_int, uid: u32, gid: u32) -> c_int;

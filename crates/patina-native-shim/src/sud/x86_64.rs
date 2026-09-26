@@ -77,13 +77,16 @@ struct KernelUtimbuf {
 }
 
 /// A `timeval` time argument (`utimes`/`futimesat`): microseconds in range.
-fn timeval_argument(time: &Timeval) -> Result<(u32, u64), i64> {
-    if !(0..1_000_000).contains(&time.tv_usec) || time.tv_sec < 0 {
+fn timeval_argument(time: &Timeval) -> Result<TimeArgument, i64> {
+    if !(0..1_000_000).contains(&time.tv_usec) {
         return Err(-EINVAL);
     }
     Ok((
         crate::TIME_SET,
-        checked_time(time.tv_sec, time.tv_usec as u64 * 1_000)?,
+        PatinaTimestamp {
+            sec: time.tv_sec,
+            nsec: time.tv_usec * 1_000,
+        },
     ))
 }
 
@@ -120,18 +123,13 @@ pub(super) fn sys_futimesat(dirfd: i64, path: u64, times: u64) -> i64 {
 /// `utime(2)`: whole-second times; a null buffer is now/now.
 pub(super) fn sys_utime(path: u64, times: u64) -> i64 {
     let (atime, mtime) = if times == 0 {
-        ((crate::TIME_NOW, 0), (crate::TIME_NOW, 0))
+        let now = (crate::TIME_NOW, PatinaTimestamp::default());
+        (now, now)
     } else {
         // SAFETY: `times` is the guest's `struct utimbuf`.
         let buf = unsafe { (times as *const KernelUtimbuf).read_unaligned() };
-        if buf.actime < 0 || buf.modtime < 0 {
-            return -EINVAL;
-        }
-        let (Ok(atime), Ok(mtime)) = (checked_time(buf.actime, 0), checked_time(buf.modtime, 0))
-        else {
-            return -EINVAL;
-        };
-        ((crate::TIME_SET, atime), (crate::TIME_SET, mtime))
+        let whole = |sec| (crate::TIME_SET, PatinaTimestamp { sec, nsec: 0 });
+        (whole(buf.actime), whole(buf.modtime))
     };
     let path = match guest_path(path) {
         Ok(path) => path,

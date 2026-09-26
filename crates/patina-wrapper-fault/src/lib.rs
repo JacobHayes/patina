@@ -371,8 +371,8 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         &mut self,
         clock: FsClock,
         fd: Fd,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        atime_nanos: Option<i128>,
+        mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::SetTimes) {
             return Err(error);
@@ -384,8 +384,8 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         &mut self,
         clock: FsClock,
         ino: u64,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        atime_nanos: Option<i128>,
+        mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::SetTimes) {
             return Err(error);
@@ -398,8 +398,8 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         &mut self,
         clock: FsClock,
         path: &str,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        atime_nanos: Option<i128>,
+        mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::SetTimesByPath) {
             return Err(error);

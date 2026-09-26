@@ -540,6 +540,14 @@ enum {
  * owner is not a field: every entry belongs to the one modeled identity,
  * read through patina_uid/patina_gid.
  */
+/*
+ * A timestamp as the kernel's timespec64 holds it: signed seconds since the
+ * epoch (a time before it is negative) and nanoseconds in [0, 999999999].
+ */
+struct patina_timestamp {
+    int64_t sec;
+    int64_t nsec;
+};
 struct patina_metadata {
     uint32_t kind;
     uint32_t mode;
@@ -547,10 +555,10 @@ struct patina_metadata {
     uint32_t fs; /* PATINA_FS_* */
     uint64_t length;
     uint64_t ino;
-    uint64_t atime_nanos;
-    uint64_t mtime_nanos;
-    uint64_t ctime_nanos;
-    uint64_t btime_nanos;
+    struct patina_timestamp atime;
+    struct patina_timestamp mtime;
+    struct patina_timestamp ctime;
+    struct patina_timestamp btime;
 };
 /*
  * The metadata of what (dirfd, path) resolves to — the one entry behind the
@@ -642,8 +650,11 @@ int32_t patina_uname(void *name);
  * utimensat(2) on a (dirfd, path) (`flags` are PATINA_RESOLVE_*; NOFOLLOW
  * sets a symlink's own times; EMPTY_PATH reaches the descriptor's inode,
  * including O_PATH) and futimens(3) on a descriptor. Each time is a
- * (kind, nanos) pair: PATINA_TIME_OMIT leaves it alone, PATINA_TIME_NOW sets
- * the virtual clock's now AFTER modeled latency, PATINA_TIME_SET sets `nanos`. Both OMIT is the
+ * (kind, timestamp) pair: PATINA_TIME_OMIT leaves it alone, PATINA_TIME_NOW
+ * sets the virtual clock's now AFTER modeled latency, PATINA_TIME_SET sets the
+ * timestamp, any second, truncated to the target filesystem's range as the
+ * kernel's timestamp_truncate does (the volume is ext4's 1901-12-13 to
+ * 2446-05-10, a memfd tmpfs's every 64-bit second). Both OMIT is the
  * kernel's early success (nothing crosses the boundary). ctime moves whenever
  * either time does. A futimens O_PATH descriptor is EBADF. FIFO endpoints
  * reach retained inode state; kinds without a modeled inode refuse loudly.
@@ -654,9 +665,10 @@ enum {
     PATINA_TIME_SET = 2,
 };
 int32_t patina_utimensat(int32_t dirfd, const char *path, uint32_t flags, uint32_t atime_kind,
-                         uint64_t atime_nanos, uint32_t mtime_kind, uint64_t mtime_nanos);
-int32_t patina_futimens(int32_t fd, uint32_t atime_kind, uint64_t atime_nanos,
-                        uint32_t mtime_kind, uint64_t mtime_nanos);
+                         struct patina_timestamp atime, uint32_t mtime_kind,
+                         struct patina_timestamp mtime);
+int32_t patina_futimens(int32_t fd, uint32_t atime_kind, struct patina_timestamp atime,
+                        uint32_t mtime_kind, struct patina_timestamp mtime);
 /*
  * chown/lchown/fchownat on a (dirfd, path) (`flags` are PATINA_RESOLVE_*) and
  * fchown on a descriptor. `uid`/`gid` are the kernel's uid_t/gid_t: UINT32_MAX

@@ -368,10 +368,10 @@ const fn empty_metadata() -> PatinaMetadata {
         fs: 0,
         length: 0,
         ino: 0,
-        atime_nanos: 0,
-        mtime_nanos: 0,
-        ctime_nanos: 0,
-        btime_nanos: 0,
+        atime: PatinaTimestamp { sec: 0, nsec: 0 },
+        mtime: PatinaTimestamp { sec: 0, nsec: 0 },
+        ctime: PatinaTimestamp { sec: 0, nsec: 0 },
+        btime: PatinaTimestamp { sec: 0, nsec: 0 },
     }
 }
 
@@ -473,12 +473,12 @@ impl KernelStat {
             st_gid: unsafe { patina_gid() },
             st_blksize: STAT_BLOCK_SIZE as _,
             st_blocks: stat_blocks(values.length) as i64,
-            st_atime: (values.atime_nanos / NANOS_PER_SEC) as i64,
-            st_atime_nsec: (values.atime_nanos % NANOS_PER_SEC) as _,
-            st_mtime: (values.mtime_nanos / NANOS_PER_SEC) as i64,
-            st_mtime_nsec: (values.mtime_nanos % NANOS_PER_SEC) as _,
-            st_ctime: (values.ctime_nanos / NANOS_PER_SEC) as i64,
-            st_ctime_nsec: (values.ctime_nanos % NANOS_PER_SEC) as _,
+            st_atime: values.atime.sec,
+            st_atime_nsec: values.atime.nsec as _,
+            st_mtime: values.mtime.sec,
+            st_mtime_nsec: values.mtime.nsec as _,
+            st_ctime: values.ctime.sec,
+            st_ctime_nsec: values.ctime.nsec as _,
             ..Self::default()
         }
     }
@@ -625,9 +625,9 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
     const STATX_BTIME: u32 = 0x0800;
     const STATX_MNT_ID: u32 = 0x1000;
     let mask = flags_mask as u32;
-    let timestamp = |nanos: u64| StatxTimestamp {
-        tv_sec: (nanos / NANOS_PER_SEC) as i64,
-        tv_nsec: (nanos % NANOS_PER_SEC) as u32,
+    let timestamp = |time: crate::PatinaTimestamp| StatxTimestamp {
+        tv_sec: time.sec,
+        tv_nsec: time.nsec as u32,
         __reserved: 0,
     };
     let mut stx = Statx {
@@ -641,9 +641,9 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
         stx_ino: values.ino,
         stx_size: values.length,
         stx_blocks: 0, // Allocation extents are not modeled.
-        stx_atime: timestamp(values.atime_nanos),
-        stx_mtime: timestamp(values.mtime_nanos),
-        stx_ctime: timestamp(values.ctime_nanos),
+        stx_atime: timestamp(values.atime),
+        stx_mtime: timestamp(values.mtime),
+        stx_ctime: timestamp(values.ctime),
         stx_mnt_id: STATX_MNT_ID_VALUE,
         stx_dev_major: crate::fs_device(values.fs).0,
         stx_dev_minor: crate::fs_device(values.fs).1,
@@ -651,7 +651,7 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
     };
     if mask & STATX_BTIME != 0 {
         stx.stx_mask |= STATX_BTIME;
-        stx.stx_btime = timestamp(values.btime_nanos);
+        stx.stx_btime = timestamp(values.btime);
     }
     // SAFETY: `statxbuf` is the guest's `struct statx` storage.
     unsafe { (statxbuf as *mut Statx).write(stx) };
@@ -1360,23 +1360,25 @@ struct KernelTimespec {
     tv_nsec: i64,
 }
 
-/// One `utimensat` time argument decoded onto the runtime's `PATINA_TIME_*`
-/// vocabulary, exactly as the kernel decodes it: `UTIME_NOW`/`UTIME_OMIT` in
-/// `tv_nsec`, else a nanosecond count that must be in range (`EINVAL`).
-pub(super) fn checked_time(seconds: i64, fraction: u64) -> Result<u64, i64> {
-    u64::try_from(seconds)
-        .ok()
-        .and_then(|s| s.checked_mul(NANOS_PER_SEC))
-        .and_then(|n| n.checked_add(fraction))
-        .ok_or(-EINVAL)
-}
+/// A time argument on the runtime's `PATINA_TIME_*` vocabulary.
+pub(super) type TimeArgument = (u32, PatinaTimestamp);
 
-fn time_argument(time: &KernelTimespec) -> Result<(u32, u64), i64> {
+/// One `utimensat` time argument decoded as the kernel decodes it:
+/// `UTIME_NOW`/`UTIME_OMIT` in `tv_nsec`, else nanoseconds that must be in
+/// range (`EINVAL`) beside any second (the entry truncates it to the
+/// filesystem's range).
+fn time_argument(time: &KernelTimespec) -> Result<TimeArgument, i64> {
     match time.tv_nsec {
-        UTIME_NOW => Ok((crate::TIME_NOW, 0)),
-        UTIME_OMIT => Ok((crate::TIME_OMIT, 0)),
-        nsec if !(0..NANOS_PER_SEC as i64).contains(&nsec) || time.tv_sec < 0 => Err(-EINVAL),
-        nsec => Ok((crate::TIME_SET, checked_time(time.tv_sec, nsec as u64)?)),
+        UTIME_NOW => Ok((crate::TIME_NOW, PatinaTimestamp::default())),
+        UTIME_OMIT => Ok((crate::TIME_OMIT, PatinaTimestamp::default())),
+        nsec if !(0..NANOS_PER_SEC as i64).contains(&nsec) => Err(-EINVAL),
+        nsec => Ok((
+            crate::TIME_SET,
+            PatinaTimestamp {
+                sec: time.tv_sec,
+                nsec,
+            },
+        )),
     }
 }
 
@@ -1384,10 +1386,11 @@ fn time_argument(time: &KernelTimespec) -> Result<(u32, u64), i64> {
 /// pointer is now/now.
 pub(super) fn times_arguments<T: Copy>(
     times: u64,
-    decode: impl Fn(&T) -> Result<(u32, u64), i64>,
-) -> Result<[(u32, u64); 2], i64> {
+    decode: impl Fn(&T) -> Result<TimeArgument, i64>,
+) -> Result<[TimeArgument; 2], i64> {
     if times == 0 {
-        return Ok([(crate::TIME_NOW, 0), (crate::TIME_NOW, 0)]);
+        let now = (crate::TIME_NOW, PatinaTimestamp::default());
+        return Ok([now, now]);
     }
     // SAFETY: `times` is the guest's two-element array.
     let pair = unsafe { (times as *const [T; 2]).read_unaligned() };

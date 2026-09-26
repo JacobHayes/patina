@@ -52,7 +52,9 @@ pub use handoff::{
 ///   `unreachable` send disposition for a datagram nothing is bound to take.
 /// - 13: the inode of every directory-listing entry, and the `.` and `..` a
 ///   descriptor listing starts with; `fs_fd_ino`, the inode an open descriptor
-///   names, which record and `flock` locks key on.
+///   names, which record and `flock` locks key on; signed timestamps: every
+///   metadata outcome's and set-times operation's nanoseconds may be negative
+///   (before the epoch) or past what 64 bits hold (up to the volume's range).
 pub const TRACE_FORMAT_VERSION: u32 = 13;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;

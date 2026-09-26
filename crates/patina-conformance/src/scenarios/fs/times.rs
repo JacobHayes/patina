@@ -1,15 +1,15 @@
 //! fs/times — the four timestamps and the utimensat family: what a creation,
 //! a write, a read, a truncation, a link, a rename and a directory change do to
 //! atime/mtime/ctime/btime; explicit times (nanosecond, microsecond and
-//! whole-second spellings), UTIME_NOW, UTIME_OMIT, the null-times shape, the
+//! whole-second spellings; any second, one before the epoch kept and one past
+//! the filesystem's range clamped to it), UTIME_NOW, UTIME_OMIT, the
+//! null-times shape, the
 //! descriptor shape, AT_SYMLINK_NOFOLLOW, and the EINVAL/EFAULT/EBADF/ENOENT
 //! vocabulary. Absolute times are never recorded — only their relations, as
 //! checks — and no check depends on the mount's atime policy (the oracle may
 //! be `noatime`, the virtual kernel is `relatime`).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -453,8 +453,37 @@ pub fn run(p: &Probe) {
         );
     }
     p.close(pipe);
-    // Linux accepts and clamps to its filesystem range; Patina's unsigned
-    // nanosecond ABI explicitly refuses unrepresentable values (registry gap).
+    // Any second is accepted: a time before the epoch is kept exactly (ext4,
+    // xfs and tmpfs all hold it), and one past the filesystem's range is
+    // clamped to it (`timestamp_truncate`), never refused and never wrapped.
+    p.check(
+        "a time before the epoch is accepted",
+        p.utimensat(
+            fd,
+            None,
+            Some([TimeArg::Set(-1, 5), TimeArg::Set(-2, 7)]),
+            0,
+        ) == 0,
+    );
+    let after = p.fstat_or_stop(fd);
+    p.check(
+        "and read back exactly",
+        after.atime_ns == -SEC + 5 && after.mtime_ns == -2 * SEC + 7,
+    );
+    p.check(
+        "a time far before the filesystem's range is accepted",
+        p.utimensat(
+            fd,
+            None,
+            Some([TimeArg::Set(i64::MIN, 0), TimeArg::Set(i64::MIN, 0)]),
+            0,
+        ) == 0,
+    );
+    let after = p.fstat_or_stop(fd);
+    p.check(
+        "and clamped before the epoch, never wrapped past it",
+        after.mtime_ns < 0,
+    );
     let overflow = 18_446_744_074;
     for spelling in 0..3 {
         let r = match spelling {
@@ -469,8 +498,8 @@ pub fn run(p: &Probe) {
         };
         let after = p.fstat_or_stop(fd);
         p.check(
-            "time overflow is refused or clamped, never wrapped",
-            r == neg(EINVAL) || (r == 0 && after.mtime_ns > 10_000_000_000_000_000_000),
+            "a time past the filesystem's range is clamped to it, never wrapped",
+            r == 0 && after.mtime_ns > 10_000_000_000_000_000_000,
         );
     }
     // Exercise the literal libc symbol too: the adapter above intentionally
@@ -539,18 +568,5 @@ pub const SCENARIO: Scenario = Scenario {
         "unlinkat",
         "symlinkat",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::ALL,
-        what: "signed/wide filesystem timestamps: the unsigned-nanosecond ABI refuses out-of-range seconds with EINVAL; Linux accepts them and clamps to its filesystem range (checked conversion, never wrap)",
-        failure: Failure::Differs(&[
-            Difference::field(186, "utimensat", "errno", Observed::Str("EINVAL")),
-            Difference::field(186, "utimensat", "ret", Observed::Int(-1)),
-            Difference::field(189, "utimes", "errno", Observed::Str("EINVAL")),
-            Difference::field(189, "utimes", "ret", Observed::Int(-1)),
-            Difference::field(192, "utime", "errno", Observed::Str("EINVAL")),
-            Difference::field(192, "utime", "ret", Observed::Int(-1)),
-        ]),
-    }],
     ..DEFAULTS
 };

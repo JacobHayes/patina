@@ -349,8 +349,8 @@ is stated plainly:
    Timestamp/ownership mutation on named FIFO endpoints reaches retained inode
    state, including after unlink; anonymous pipe/socket/stream descriptors
    without modeled filesystem inodes refuse loudly instead of dropping effects.
-   Pre-epoch and overflowing timestamp inputs remain an explicit EINVAL gap in
-   the unsigned-nanosecond ABI. Allocation extents are also unmodeled: statx
+   Timestamps are signed: a pre-epoch or out-of-range time is truncated to the
+   filesystem's range, as the kernel does. Allocation extents are unmodeled: statx
    omits BLOCKS instead of claiming allocation derived from file length.
    The symbol registry (`crates/patina-native-shim/src/registry/symbols.rs`)
    enumerates this surface: every public symbol the shim defines carries a

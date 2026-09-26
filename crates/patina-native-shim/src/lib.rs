@@ -5618,10 +5618,38 @@ pub struct PatinaMetadata {
     pub fs: u32,
     pub length: u64,
     pub ino: u64,
-    pub atime_nanos: u64,
-    pub mtime_nanos: u64,
-    pub ctime_nanos: u64,
-    pub btime_nanos: u64,
+    pub atime: PatinaTimestamp,
+    pub mtime: PatinaTimestamp,
+    pub ctime: PatinaTimestamp,
+    pub btime: PatinaTimestamp,
+}
+
+/// A timestamp across the C boundary (`struct patina_timestamp`), as the
+/// kernel's `timespec64` holds one: signed seconds and nanoseconds in
+/// `[0, 1e9)`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PatinaTimestamp {
+    pub sec: i64,
+    pub nsec: i64,
+}
+
+const NANOS_PER_SECOND: i128 = 1_000_000_000;
+
+impl PatinaTimestamp {
+    /// Signed nanoseconds since the epoch, split with the nanoseconds never
+    /// negative (-1 ns is second -1, nanosecond 999999999).
+    pub(crate) fn from_nanos(nanos: i128) -> Self {
+        let sec = nanos.div_euclid(NANOS_PER_SECOND);
+        Self {
+            sec: i64::try_from(sec).unwrap_or(if sec < 0 { i64::MIN } else { i64::MAX }),
+            nsec: nanos.rem_euclid(NANOS_PER_SECOND) as i64,
+        }
+    }
+
+    fn nanos(self) -> i128 {
+        i128::from(self.sec) * NANOS_PER_SECOND + i128::from(self.nsec)
+    }
 }
 
 fn write_metadata(metadata: patina_dst_abi::FsMetadata, out: *mut PatinaMetadata) -> c_int {
@@ -5638,10 +5666,10 @@ fn write_metadata(metadata: patina_dst_abi::FsMetadata, out: *mut PatinaMetadata
             fs: PATINA_FS_VOLUME,
             length: metadata.len,
             ino: metadata.ino,
-            atime_nanos: metadata.atime_nanos,
-            mtime_nanos: metadata.mtime_nanos,
-            ctime_nanos: metadata.ctime_nanos,
-            btime_nanos: metadata.btime_nanos,
+            atime: PatinaTimestamp::from_nanos(metadata.atime_nanos),
+            mtime: PatinaTimestamp::from_nanos(metadata.mtime_nanos),
+            ctime: PatinaTimestamp::from_nanos(metadata.ctime_nanos),
+            btime: PatinaTimestamp::from_nanos(metadata.btime_nanos),
         });
     }
     0
@@ -5937,27 +5965,25 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
 pub const TIME_OMIT: u32 = 0;
 /// Set the time to the virtual clock's now.
 pub const TIME_NOW: u32 = 1;
-/// Set the time to the nanoseconds given beside the kind.
+/// Set the time to the timestamp given beside the kind.
 pub const TIME_SET: u32 = 2;
 
-/// Decode requests without sampling NOW; the runtime resolves it after latency.
+/// Decode requests without sampling NOW (the runtime resolves it after
+/// latency); the filesystem truncates a set time to its range.
 fn resolve_time_arguments(
     atime_kind: u32,
-    atime_nanos: u64,
+    atime: PatinaTimestamp,
     mtime_kind: u32,
-    mtime_nanos: u64,
+    mtime: PatinaTimestamp,
 ) -> Result<(patina_dst_runtime::FsTime, patina_dst_runtime::FsTime), c_int> {
     use patina_dst_runtime::FsTime;
-    let pick = |kind, nanos| match kind {
+    let pick = |kind, time: PatinaTimestamp| match kind {
         TIME_OMIT => Ok(FsTime::Omit),
         TIME_NOW => Ok(FsTime::Now),
-        TIME_SET => Ok(FsTime::Nanos(nanos)),
+        TIME_SET => Ok(FsTime::Nanos(time.nanos())),
         _ => Err(EINVAL),
     };
-    Ok((
-        pick(atime_kind, atime_nanos)?,
-        pick(mtime_kind, mtime_nanos)?,
-    ))
+    Ok((pick(atime_kind, atime)?, pick(mtime_kind, mtime)?))
 }
 
 /// `utimensat(2)` on a `(dirfd, path)`: set the entry's access and
@@ -5977,9 +6003,9 @@ pub unsafe extern "C" fn patina_utimensat(
     path: *const c_char,
     flags: u32,
     atime_kind: u32,
-    atime_nanos: u64,
+    atime: PatinaTimestamp,
     mtime_kind: u32,
-    mtime_nanos: u64,
+    mtime: PatinaTimestamp,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     abort_if_init_failed();
@@ -5994,16 +6020,20 @@ pub unsafe extern "C" fn patina_utimensat(
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
-    let (atime, mtime) =
-        match resolve_time_arguments(atime_kind, atime_nanos, mtime_kind, mtime_nanos) {
-            Ok(times) => times,
-            Err(errno) => return fail(errno),
+    let descriptor =
+        if path.is_empty() && flags & paths::RESOLVE_EMPTY_PATH != 0 && dirfd != paths::AT_FDCWD {
+            match resolve_fd(dirfd) {
+                Ok(descriptor) => Some(descriptor),
+                Err(errno) => return fail(errno),
+            }
+        } else {
+            None
         };
-    if path.is_empty() && flags & paths::RESOLVE_EMPTY_PATH != 0 && dirfd != paths::AT_FDCWD {
-        let descriptor = match resolve_fd(dirfd) {
-            Ok(descriptor) => descriptor,
-            Err(errno) => return fail(errno),
-        };
+    let (atime, mtime) = match resolve_time_arguments(atime_kind, atime, mtime_kind, mtime) {
+        Ok(times) => times,
+        Err(errno) => return fail(errno),
+    };
+    if let Some(descriptor) = descriptor {
         let ino = if let Some(ino) = thread::fifo_ino(dirfd) {
             ino
         } else if descriptor.kind.is_fs() {
@@ -6049,9 +6079,9 @@ pub unsafe extern "C" fn patina_utimensat(
 pub extern "C" fn patina_futimens(
     raw_fd: c_int,
     atime_kind: u32,
-    atime_nanos: u64,
+    atime: PatinaTimestamp,
     mtime_kind: u32,
-    mtime_nanos: u64,
+    mtime: PatinaTimestamp,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     abort_if_init_failed();
@@ -6066,11 +6096,10 @@ pub extern "C" fn patina_futimens(
     if resolved.kind == FdKind::OPath {
         return fail(EBADF);
     }
-    let (atime, mtime) =
-        match resolve_time_arguments(atime_kind, atime_nanos, mtime_kind, mtime_nanos) {
-            Ok(times) => times,
-            Err(errno) => return fail(errno),
-        };
+    let (atime, mtime) = match resolve_time_arguments(atime_kind, atime, mtime_kind, mtime) {
+        Ok(times) => times,
+        Err(errno) => return fail(errno),
+    };
     if let Some(ino) = thread::fifo_ino(raw_fd) {
         return match with_context(|context| context.fs_set_inode_times_spec(ino, atime, mtime)) {
             Ok(()) => {
@@ -11724,10 +11753,10 @@ mod thread {
             },
             length: 0,
             ino,
-            atime_nanos: inode.atime_nanos,
-            mtime_nanos: inode.mtime_nanos,
-            ctime_nanos: inode.ctime_nanos,
-            btime_nanos: 0,
+            atime: super::PatinaTimestamp::from_nanos(i128::from(inode.atime_nanos)),
+            mtime: super::PatinaTimestamp::from_nanos(i128::from(inode.mtime_nanos)),
+            ctime: super::PatinaTimestamp::from_nanos(i128::from(inode.ctime_nanos)),
+            btime: super::PatinaTimestamp::default(),
         })
     }
 
@@ -15960,6 +15989,19 @@ mod posix_source_lints {
                 "{relative}: system headers belong in posix/core.c, which every slice shares"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::PatinaTimestamp;
+
+    #[test]
+    fn a_stored_time_splits_with_its_nanoseconds_never_negative() {
+        const SEC: i128 = 1_000_000_000;
+        let at = |sec, nsec| PatinaTimestamp { sec, nsec };
+        assert_eq!(PatinaTimestamp::from_nanos(-SEC + 5), at(-1, 5));
+        assert_eq!(PatinaTimestamp::from_nanos(-1), at(-1, 999_999_999));
     }
 }
 

@@ -24,8 +24,10 @@ const MAGIC: &[u8; 8] = b"PATFSSNP";
 /// contents), a FIFO, a socket node or a whiteout — so a hard link to any of
 /// them is a second name for one node across a restart, and adds the extended
 /// attributes, by the node they belong to. Version 5 kept symlinks as
-/// per-path records and FIFOs as a section of their own.
-const VERSION: u32 = 6;
+/// per-path records and FIFOs as a section of their own. Version 7 stores
+/// every timestamp as signed 128-bit nanoseconds (a time before the epoch, or
+/// past what 64-bit nanoseconds hold).
+const VERSION: u32 = 7;
 
 /// Deliberately conservative structural bounds for a restart handoff. The
 /// decoder checks them before allocating from untrusted bytes, so corrupt
@@ -535,7 +537,7 @@ fn encode_metadata(bytes: &mut Vec<u8>, metadata: &EntryMetadata) {
 }
 
 /// The encoded size of the four timestamps.
-const TIMES_BYTES: usize = 4 * 8;
+const TIMES_BYTES: usize = 4 * 16;
 /// The encoded size of one [`EntryMetadata`]: inode id, four timestamps, mode.
 const METADATA_BYTES: usize = 8 + TIMES_BYTES + 4;
 
@@ -580,6 +582,11 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes(bytes.try_into().expect("4 bytes")))
     }
 
+    fn take_i128(&mut self) -> Result<i128, FsSnapshotError> {
+        let bytes = self.take(16)?;
+        Ok(i128::from_le_bytes(bytes.try_into().expect("16 bytes")))
+    }
+
     fn take_u64(&mut self) -> Result<u64, FsSnapshotError> {
         let bytes = self.take(8)?;
         Ok(u64::from_le_bytes(bytes.try_into().expect("8 bytes")))
@@ -622,10 +629,10 @@ impl<'a> Reader<'a> {
 
     fn take_times(&mut self) -> Result<Times, FsSnapshotError> {
         Ok(Times {
-            atime_nanos: self.take_u64()?,
-            mtime_nanos: self.take_u64()?,
-            ctime_nanos: self.take_u64()?,
-            btime_nanos: self.take_u64()?,
+            atime_nanos: self.take_i128()?,
+            mtime_nanos: self.take_i128()?,
+            ctime_nanos: self.take_i128()?,
+            btime_nanos: self.take_i128()?,
         })
     }
 
@@ -727,8 +734,14 @@ mod tests {
             )
             .unwrap();
         fs.write(FsClock::EPOCH, fd, b"stable").unwrap();
-        fs.set_times(FsClock::EPOCH, fd, Some(30), Some(40))
-            .unwrap();
+        // A time before the epoch, and one past what 64-bit nanoseconds hold.
+        fs.set_times(
+            FsClock::EPOCH,
+            fd,
+            Some(-30),
+            Some(15_032_385_535_000_000_000),
+        )
+        .unwrap();
         fs.close(fd).unwrap();
         fs.link(FsClock::EPOCH, "/state/log", "/state/log.link")
             .unwrap();
@@ -742,7 +755,7 @@ mod tests {
         fs
     }
 
-    /// A hand-built v6 stream. Every case below probes namespace structure,
+    /// A hand-built v7 stream. Every case below probes namespace structure,
     /// so each inode is a regular file at its ordinary creation mode, each
     /// directory at its own, change and birth times are zero, and no node
     /// carries attributes.
@@ -763,18 +776,18 @@ mod tests {
         for (path, ino, atime, mtime) in directories {
             encode_path(&mut bytes, path);
             bytes.extend_from_slice(&ino.to_le_bytes());
-            bytes.extend_from_slice(&atime.to_le_bytes());
-            bytes.extend_from_slice(&mtime.to_le_bytes());
-            bytes.extend_from_slice(&[0u8; 16]);
+            bytes.extend_from_slice(&i128::from(*atime).to_le_bytes());
+            bytes.extend_from_slice(&i128::from(*mtime).to_le_bytes());
+            bytes.extend_from_slice(&[0u8; 32]);
             bytes.extend_from_slice(&crate::DIRECTORY_MODE.to_le_bytes());
         }
         for (ino, links, atime, mtime, contents) in inodes {
             bytes.extend_from_slice(&ino.to_le_bytes());
             bytes.push(kind_code(FsEntryKind::File));
             bytes.extend_from_slice(&links.to_le_bytes());
-            bytes.extend_from_slice(&atime.to_le_bytes());
-            bytes.extend_from_slice(&mtime.to_le_bytes());
-            bytes.extend_from_slice(&[0u8; 16]);
+            bytes.extend_from_slice(&i128::from(*atime).to_le_bytes());
+            bytes.extend_from_slice(&i128::from(*mtime).to_le_bytes());
+            bytes.extend_from_slice(&[0u8; 32]);
             bytes.extend_from_slice(&crate::FILE_MODE.to_le_bytes());
             encode_field(&mut bytes, contents);
         }
@@ -837,7 +850,10 @@ mod tests {
         assert_eq!(log.kind, FsEntryKind::File);
         assert_eq!(log.ino, link.ino);
         assert_eq!(log.nlink, 2);
-        assert_eq!((log.atime_nanos, log.mtime_nanos), (30, 40));
+        assert_eq!(
+            (log.atime_nanos, log.mtime_nanos),
+            (-30, 15_032_385_535_000_000_000)
+        );
         assert_eq!(imported.contents("/state/log.link").unwrap(), b"stable");
 
         let directory = imported.metadata("/state").unwrap();

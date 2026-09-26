@@ -542,8 +542,9 @@ new effects, includes symlinks, and preserves surviving new entries' birth times
 Zero-count I/O is timestamp- and size-inert. Guest-sized growth reserves storage
 fallibly, and reports ENOSPC on capacity failure. Allocation extents are not
 modeled: statx omits STATX_BLOCKS rather than claiming length-derived allocation.
-The unsigned-nanosecond timestamp ABI refuses negative/overflowing seconds with
-EINVAL; signed/wide kernel timestamps remain an explicit registry gap.
+Timestamps are signed nanoseconds: a set time of any second is truncated to the
+target filesystem's range (ext4's for the volume, tmpfs's for a memfd) as the
+kernel's `timestamp_truncate` does, never refused and never wrapped.
 
 
 Wrapper drivers compose around concrete drivers:

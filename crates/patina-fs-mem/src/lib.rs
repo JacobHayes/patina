@@ -41,16 +41,16 @@ const RELATIME_REFRESH_NANOS: u64 = 24 * 60 * 60 * 1_000_000_000;
 /// the [`FsClock`] each operation is handed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Times {
-    atime_nanos: u64,
-    mtime_nanos: u64,
-    ctime_nanos: u64,
-    btime_nanos: u64,
+    atime_nanos: i128,
+    mtime_nanos: i128,
+    ctime_nanos: i128,
+    btime_nanos: i128,
 }
 
 impl Times {
     /// A freshly created entry: all four at `now`.
     fn created(clock: FsClock) -> Self {
-        let now = clock.now_nanos;
+        let now = i128::from(clock.now_nanos);
         Self {
             atime_nanos: now,
             mtime_nanos: now,
@@ -62,14 +62,14 @@ impl Times {
     /// The entry's DATA changed (a write, a truncation, an allocation; for a
     /// directory, a name appeared or disappeared): `mtime` and `ctime`.
     fn data_changed(&mut self, clock: FsClock) {
-        self.mtime_nanos = clock.now_nanos;
-        self.ctime_nanos = clock.now_nanos;
+        self.mtime_nanos = i128::from(clock.now_nanos);
+        self.ctime_nanos = i128::from(clock.now_nanos);
     }
 
     /// The entry's METADATA changed (mode, link count, name, explicit times):
     /// `ctime` only.
     fn metadata_changed(&mut self, clock: FsClock) {
-        self.ctime_nanos = clock.now_nanos;
+        self.ctime_nanos = i128::from(clock.now_nanos);
     }
 
     /// The entry was READ: `atime`, under the clock's policy. `relatime` is
@@ -78,14 +78,14 @@ impl Times {
     /// it alone — and no policy rewrites an access time that already reads
     /// `now`.
     fn accessed(&mut self, clock: FsClock) {
-        let now = clock.now_nanos;
+        let now = i128::from(clock.now_nanos);
         let due = match clock.atime {
             AtimePolicy::NoAtime => false,
             AtimePolicy::Strict => true,
             AtimePolicy::Relatime => {
                 self.mtime_nanos >= self.atime_nanos
                     || self.ctime_nanos >= self.atime_nanos
-                    || now.saturating_sub(self.atime_nanos) >= RELATIME_REFRESH_NANOS
+                    || now - self.atime_nanos >= i128::from(RELATIME_REFRESH_NANOS)
             }
         };
         if due && self.atime_nanos != now {
@@ -93,18 +93,56 @@ impl Times {
         }
     }
 
-    /// `utimensat`: `None` leaves a time alone. Any change stamps `ctime`.
-    fn set(&mut self, clock: FsClock, atime: Option<u64>, mtime: Option<u64>) {
+    /// `utimensat`: `None` leaves a time alone, and a set one is truncated to
+    /// the filesystem's range. Any change stamps `ctime`.
+    fn set(&mut self, clock: FsClock, atime: Option<i128>, mtime: Option<i128>, range: TimeRange) {
         if atime.is_none() && mtime.is_none() {
             return;
         }
         if let Some(value) = atime {
-            self.atime_nanos = value;
+            self.atime_nanos = range.truncate(value);
         }
         if let Some(value) = mtime {
-            self.mtime_nanos = value;
+            self.mtime_nanos = range.truncate(value);
         }
         self.metadata_changed(clock);
+    }
+}
+
+/// The seconds a filesystem's timestamps hold (`s_time_min`/`s_time_max`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimeRange {
+    /// A named node: ext4 with 256-byte inodes, `EXT4_TIMESTAMP_MIN` to
+    /// `EXT4_EXTRA_TIMESTAMP_MAX` (1901-12-13 to 2446-05-10).
+    Ext4,
+    /// An anonymous file (`memfd_create`): tmpfs, every 64-bit second.
+    Tmpfs,
+}
+
+impl TimeRange {
+    fn of(inode: &Inode) -> Self {
+        if inode.seals.is_some() {
+            TimeRange::Tmpfs
+        } else {
+            TimeRange::Ext4
+        }
+    }
+
+    /// The kernel's `timestamp_truncate`: the seconds clamped to the range,
+    /// the nanoseconds dropped at either bound (both filesystems keep whole
+    /// nanoseconds). A time is never refused and never wraps.
+    fn truncate(self, nanos: i128) -> i128 {
+        const NANOS_PER_SECOND: i128 = 1_000_000_000;
+        let (min, max) = match self {
+            TimeRange::Ext4 => (i128::from(i32::MIN), (1 << 34) - 1 + i128::from(i32::MIN)),
+            TimeRange::Tmpfs => (i128::from(i64::MIN), i128::from(i64::MAX)),
+        };
+        let sec = nanos.div_euclid(NANOS_PER_SECOND).clamp(min, max);
+        if sec == min || sec == max {
+            sec * NANOS_PER_SECOND
+        } else {
+            nanos
+        }
     }
 }
 
@@ -508,10 +546,10 @@ impl MemFs {
     pub fn restore_times(
         &mut self,
         path: &str,
-        atime_nanos: u64,
-        mtime_nanos: u64,
-        ctime_nanos: u64,
-        btime_nanos: u64,
+        atime_nanos: i128,
+        mtime_nanos: i128,
+        ctime_nanos: i128,
+        btime_nanos: i128,
     ) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
         let times = self.times_mut(&path).ok_or_else(|| not_found(&path))?;
@@ -1829,8 +1867,8 @@ impl FsDriver for MemFs {
         &mut self,
         clock: FsClock,
         fd: Fd,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        atime_nanos: Option<i128>,
+        mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
         let description = self.description(fd)?;
         if description.path_only {
@@ -1845,11 +1883,12 @@ impl FsDriver for MemFs {
                 .node_path(node, kind)
                 .ok_or_else(|| not_found("<removed directory>"))?;
             let times = self.times_mut(&path).expect("a named directory has times");
-            times.set(clock, atime_nanos, mtime_nanos);
+            times.set(clock, atime_nanos, mtime_nanos, TimeRange::Ext4);
             return Ok(());
         }
         let inode = self.inodes.get_mut(&node).ok_or_else(|| invalid_fd(fd))?;
-        inode.times.set(clock, atime_nanos, mtime_nanos);
+        let range = TimeRange::of(inode);
+        inode.times.set(clock, atime_nanos, mtime_nanos, range);
         Ok(())
     }
 
@@ -1857,20 +1896,21 @@ impl FsDriver for MemFs {
         &mut self,
         clock: FsClock,
         ino: u64,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        atime_nanos: Option<i128>,
+        mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
-        let times = if let Some(inode) = self.inodes.get_mut(&ino) {
-            &mut inode.times
+        let (times, range) = if let Some(inode) = self.inodes.get_mut(&ino) {
+            let range = TimeRange::of(inode);
+            (&mut inode.times, range)
         } else {
-            &mut self
+            let entry = self
                 .directories
                 .values_mut()
                 .find(|entry| entry.ino == ino)
-                .ok_or_else(|| not_found("<inode>"))?
-                .times
+                .ok_or_else(|| not_found("<inode>"))?;
+            (&mut entry.times, TimeRange::Ext4)
         };
-        times.set(clock, atime_nanos, mtime_nanos);
+        times.set(clock, atime_nanos, mtime_nanos, range);
         Ok(())
     }
 
@@ -1878,13 +1918,14 @@ impl FsDriver for MemFs {
         &mut self,
         clock: FsClock,
         path: &str,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        atime_nanos: Option<i128>,
+        mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
+        // A path names a node on the volume, never an anonymous file.
         let times = self.times_mut(&path).ok_or_else(|| not_found(&path))?;
-        times.set(clock, atime_nanos, mtime_nanos);
+        times.set(clock, atime_nanos, mtime_nanos, TimeRange::Ext4);
         Ok(())
     }
 
@@ -4324,7 +4365,7 @@ mod tests {
         }
     }
 
-    fn times(fs: &mut MemFs, path: &str) -> (u64, u64, u64, u64) {
+    fn times(fs: &mut MemFs, path: &str) -> (i128, i128, i128, i128) {
         let metadata = fs.metadata(path).unwrap();
         (
             metadata.atime_nanos,
@@ -4461,19 +4502,19 @@ mod tests {
         // A day later it refreshes again.
         let day = super::RELATIME_REFRESH_NANOS;
         fs.read(FsClock::at(20 + day), fd, 1).unwrap();
-        assert_eq!(times(&mut fs, "/f").0, 20 + day);
+        assert_eq!(times(&mut fs, "/f").0, i128::from(20 + day));
         // A metadata change (ctime >= atime) re-arms it as well.
         fs.set_fd_mode(FsClock::at(20 + day + 5), fd, 0o600)
             .unwrap();
         fs.read(FsClock::at(20 + day + 6), fd, 1).unwrap();
-        assert_eq!(times(&mut fs, "/f").0, 20 + day + 6);
+        assert_eq!(times(&mut fs, "/f").0, i128::from(20 + day + 6));
         // strictatime: every read; noatime: never.
         let strict = FsClock {
             now_nanos: 20 + day + 7,
             atime: AtimePolicy::Strict,
         };
         fs.read(strict, fd, 1).unwrap();
-        assert_eq!(times(&mut fs, "/f").0, 20 + day + 7);
+        assert_eq!(times(&mut fs, "/f").0, i128::from(20 + day + 7));
         let noatime = FsClock {
             now_nanos: 20 + day + 9,
             atime: AtimePolicy::NoAtime,
@@ -4481,7 +4522,7 @@ mod tests {
         fs.set_fd_mode(FsClock::at(20 + day + 8), fd, 0o644)
             .unwrap();
         fs.read(noatime, fd, 1).unwrap();
-        assert_eq!(times(&mut fs, "/f").0, 20 + day + 7);
+        assert_eq!(times(&mut fs, "/f").0, i128::from(20 + day + 7));
         fs.close(fd).unwrap();
         // Directory listings and readlink are reads of their entries.
         fs.create_directory(FsClock::at(100), "/d", 0o755).unwrap();
@@ -4560,6 +4601,44 @@ mod tests {
             ErrorCode::InvalidHandle,
             "an O_PATH descriptor cannot set times (futimens is EBADF)"
         );
+    }
+
+    /// `timestamp_truncate`, for every door that sets times (the native
+    /// shim and the WASI host alike): a named node holds ext4's range, an
+    /// anonymous file tmpfs's.
+    #[test]
+    fn a_set_time_is_truncated_to_the_filesystems_range_never_refused_or_wrapped() {
+        const SEC: i128 = 1_000_000_000;
+        let (ext4_min, ext4_max) = (-(1 << 31), 15_032_385_535);
+        let mut fs = MemFs::new();
+        let fd = fs
+            .open(FsClock::EPOCH, "/f", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.close(fd).unwrap();
+        let atime = |fs: &mut MemFs| times(fs, "/f").0;
+        // Inside the range a time is kept exactly, before the epoch too.
+        fs.set_times_by_path(FsClock::EPOCH, "/f", Some(-SEC + 5), None)
+            .unwrap();
+        assert_eq!(atime(&mut fs), -SEC + 5);
+        // Past either end it clamps, and the nanoseconds go with it, as they
+        // do at the bound itself.
+        for (set, stored) in [
+            (i128::from(u64::MAX), ext4_max * SEC),
+            (i128::from(i64::MIN) * SEC + 7, ext4_min * SEC),
+            (ext4_max * SEC + 7, ext4_max * SEC),
+        ] {
+            fs.set_times_by_path(FsClock::EPOCH, "/f", Some(set), None)
+                .unwrap();
+            assert_eq!(atime(&mut fs), stored);
+        }
+        // An anonymous file (tmpfs) holds every 64-bit second.
+        let fd = fs
+            .create_anonymous(FsClock::EPOCH, "buffer", 0o777, 0, 0)
+            .unwrap();
+        let past_ext4 = (ext4_max + 1) * SEC + 7;
+        fs.set_times(FsClock::EPOCH, fd, None, Some(past_ext4))
+            .unwrap();
+        assert_eq!(fs.fd_metadata(fd).unwrap().mtime_nanos, past_ext4);
     }
 
     #[test]

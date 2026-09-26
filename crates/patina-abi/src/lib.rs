@@ -580,6 +580,77 @@ pub enum XattrTarget {
     Inode(u64),
 }
 
+/// Signed nanoseconds on the wire: a JSON number where a 64-bit one holds it
+/// (every time a clock stamps, and every set time on the volume, which ends
+/// before `u64::MAX` nanoseconds), else its decimal string (a memfd's time
+/// past 64-bit nanoseconds). serde's buffering of tagged enums carries no
+/// 128-bit integers, so an `i128` never reaches it as one.
+pub mod nanos {
+    use serde::de::{self, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(nanos: &i128, serializer: S) -> Result<S::Ok, S::Error> {
+        if let Ok(value) = i64::try_from(*nanos) {
+            serializer.serialize_i64(value)
+        } else if let Ok(value) = u64::try_from(*nanos) {
+            serializer.serialize_u64(value)
+        } else {
+            serializer.collect_str(nanos)
+        }
+    }
+
+    struct Nanos;
+
+    impl Visitor<'_> for Nanos {
+        type Value = i128;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("signed nanoseconds, as an integer or a decimal string")
+        }
+
+        fn visit_i64<E: de::Error>(self, value: i64) -> Result<i128, E> {
+            Ok(i128::from(value))
+        }
+
+        fn visit_u64<E: de::Error>(self, value: u64) -> Result<i128, E> {
+            Ok(i128::from(value))
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<i128, E> {
+            value.parse().map_err(E::custom)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i128, D::Error> {
+        deserializer.deserialize_any(Nanos)
+    }
+
+    /// The same, for a time that may be absent (`UTIME_OMIT`).
+    pub mod option {
+        use serde::{Deserialize, Deserializer, Serializer};
+
+        #[derive(Deserialize)]
+        struct Wrapped(#[serde(with = "super")] i128);
+
+        pub fn serialize<S: Serializer>(
+            nanos: &Option<i128>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            match nanos {
+                Some(nanos) => super::serialize(nanos, serializer),
+                None => serializer.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<i128>, D::Error> {
+            Ok(Option::<Wrapped>::deserialize(deserializer)?.map(|Wrapped(nanos)| nanos))
+        }
+    }
+}
+
 /// Deterministic filesystem metadata exposed at the effect boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FsMetadata {
@@ -591,20 +662,26 @@ pub struct FsMetadata {
     /// directory counts itself and every subdirectory's `..` (`2 +
     /// subdirectories`), as every Unix filesystem reports it.
     pub nlink: u32,
-    /// Access time, nanoseconds since the epoch on the virtual clock. Updated
+    /// Access time, nanoseconds since the epoch on the virtual clock (signed:
+    /// a time before the epoch is negative, and a set time reaches the
+    /// filesystem's own range, which `i64` nanoseconds cannot hold). Updated
     /// by reads under the [`FsClock`]'s [`AtimePolicy`], and set explicitly by
     /// the set-times operations.
-    pub atime_nanos: u64,
+    #[serde(with = "nanos")]
+    pub atime_nanos: i128,
     /// Modification time: the last change to the entry's DATA (a write, a
     /// truncation, an allocation; for a directory, a name appearing or
     /// disappearing in it). Set explicitly by the set-times operations.
-    pub mtime_nanos: u64,
+    #[serde(with = "nanos")]
+    pub mtime_nanos: i128,
     /// Inode change time: the last change to the entry's data OR metadata (a
     /// mode change, a link count change, a rename, a set-times call). Never
     /// settable directly, exactly as on Linux.
-    pub ctime_nanos: u64,
+    #[serde(with = "nanos")]
+    pub ctime_nanos: i128,
     /// Birth time: when the entry was created. Never changes.
-    pub btime_nanos: u64,
+    #[serde(with = "nanos")]
+    pub btime_nanos: i128,
     /// POSIX permission bits (`0o7777`) — the mode WITHOUT the file-type bits,
     /// which [`FsMetadata::kind`] already carries. A creating call stores the
     /// mode it is handed verbatim: the umask is process state the caller above
@@ -1020,18 +1097,24 @@ pub enum Operation {
     },
     FsSetTimes {
         fd: Fd,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        #[serde(with = "nanos::option")]
+        atime_nanos: Option<i128>,
+        #[serde(with = "nanos::option")]
+        mtime_nanos: Option<i128>,
     },
     FsSetInodeTimes {
         ino: u64,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        #[serde(with = "nanos::option")]
+        atime_nanos: Option<i128>,
+        #[serde(with = "nanos::option")]
+        mtime_nanos: Option<i128>,
     },
     FsSetTimesByPath {
         path: String,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        #[serde(with = "nanos::option")]
+        atime_nanos: Option<i128>,
+        #[serde(with = "nanos::option")]
+        mtime_nanos: Option<i128>,
     },
     FsReadDirectory {
         path: String,
@@ -1611,6 +1694,25 @@ mod tests {
         let json = serde_json::to_string(&fifo).unwrap();
         assert!(json.contains("\"kind\":\"fifo\""));
         assert_eq!(serde_json::from_str::<FsMetadata>(&json).unwrap(), fifo);
+
+        // Signed times round-trip inside the tagged enums too: before the
+        // epoch, past 64-bit signed nanoseconds, and past 64 bits at all.
+        let wide = FsMetadata {
+            atime_nanos: -1,
+            mtime_nanos: 15_032_385_535_000_000_000,
+            ctime_nanos: i128::from(i64::MIN) * 1_000_000_000,
+            ..fifo
+        };
+        let outcome = Outcome::Metadata(wide);
+        let json = serde_json::to_string(&outcome).unwrap();
+        assert_eq!(serde_json::from_str::<Outcome>(&json).unwrap(), outcome);
+        let operation = Operation::FsSetTimes {
+            fd: Fd(3),
+            atime_nanos: Some(-5),
+            mtime_nanos: None,
+        };
+        let json = serde_json::to_string(&operation).unwrap();
+        assert_eq!(serde_json::from_str::<Operation>(&json).unwrap(), operation);
         let entry = FsDirectoryEntry {
             name: "pipe".into(),
             kind: FsEntryKind::Fifo,

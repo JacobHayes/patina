@@ -51,7 +51,7 @@ fn a_default_runtime_reads_the_default_epoch_at_monotonic_zero() {
     context.fs_create_directory("/d", 0o755).unwrap();
     assert_eq!(
         context.fs_metadata("/d").unwrap().btime_nanos,
-        DEFAULT_REALTIME_EPOCH_NANOS
+        i128::from(DEFAULT_REALTIME_EPOCH_NANOS)
     );
     assert_eq!(
         RuntimeConfig::seeded(0).realtime_epoch_nanos(),

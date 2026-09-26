@@ -80,19 +80,21 @@
 pub enum FsTime {
     Omit,
     Now,
-    Nanos(u64),
+    /// Signed nanoseconds since the epoch; the filesystem truncates them to
+    /// its range.
+    Nanos(i128),
 }
 impl FsTime {
-    fn resolve(self, clock: FsClock) -> Option<u64> {
+    fn resolve(self, clock: FsClock) -> Option<i128> {
         match self {
             Self::Omit => None,
-            Self::Now => Some(clock.now_nanos),
+            Self::Now => Some(i128::from(clock.now_nanos)),
             Self::Nanos(n) => Some(n),
         }
     }
 }
-impl From<Option<u64>> for FsTime {
-    fn from(value: Option<u64>) -> Self {
+impl From<Option<i128>> for FsTime {
+    fn from(value: Option<i128>) -> Self {
         value.map_or(Self::Omit, Self::Nanos)
     }
 }
@@ -5912,8 +5914,8 @@ recording was produced by a guest whose result type no longer matches this one"
     pub fn fs_set_times(
         &mut self,
         fd: Fd,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        atime_nanos: Option<i128>,
+        mtime_nanos: Option<i128>,
     ) -> Result<(), RuntimeError> {
         self.fs_set_times_spec(fd, atime_nanos.into(), mtime_nanos.into())
     }
@@ -5943,8 +5945,8 @@ recording was produced by a guest whose result type no longer matches this one"
     pub fn fs_set_times_by_path(
         &mut self,
         path: &str,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        atime_nanos: Option<i128>,
+        mtime_nanos: Option<i128>,
     ) -> Result<(), RuntimeError> {
         self.fs_set_times_by_path_spec(path, atime_nanos.into(), mtime_nanos.into())
     }
@@ -5974,8 +5976,8 @@ recording was produced by a guest whose result type no longer matches this one"
     pub fn fs_set_inode_times(
         &mut self,
         ino: u64,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        atime_nanos: Option<i128>,
+        mtime_nanos: Option<i128>,
     ) -> Result<(), RuntimeError> {
         self.fs_set_inode_times_spec(ino, atime_nanos.into(), mtime_nanos.into())
     }
@@ -12197,17 +12199,23 @@ class=crash|0 class=buggify|0"
         // Realtime stamps: the default epoch plus the 10ns of modeled latency.
         assert_eq!(
             context.fs_metadata("/d").unwrap().btime_nanos,
-            DEFAULT_REALTIME_EPOCH_NANOS + 10
+            i128::from(DEFAULT_REALTIME_EPOCH_NANOS + 10)
         );
         let fd = context
             .fs_open("/d/f", OpenFlags::create_truncate_write())
             .unwrap();
         context.fs_set_len(fd, 2).unwrap();
         let now = context.now(ClockKind::Realtime).unwrap();
-        assert_eq!(context.fs_fd_metadata(fd).unwrap().mtime_nanos, now);
+        assert_eq!(
+            context.fs_fd_metadata(fd).unwrap().mtime_nanos,
+            i128::from(now)
+        );
         context.fs_set_times(fd, Some(1), Some(2)).unwrap();
         let now = context.now(ClockKind::Realtime).unwrap();
-        assert_eq!(context.fs_fd_metadata(fd).unwrap().ctime_nanos, now);
+        assert_eq!(
+            context.fs_fd_metadata(fd).unwrap().ctime_nanos,
+            i128::from(now)
+        );
     }
 
     #[test]

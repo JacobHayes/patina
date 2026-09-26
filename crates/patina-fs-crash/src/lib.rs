@@ -185,10 +185,10 @@ struct BaselineSymlink {
 /// crash instant).
 #[derive(Clone, Copy, Debug, Default)]
 struct DurableTimes {
-    atime_nanos: u64,
-    mtime_nanos: u64,
-    ctime_nanos: u64,
-    btime_nanos: u64,
+    atime_nanos: i128,
+    mtime_nanos: i128,
+    ctime_nanos: i128,
+    btime_nanos: i128,
 }
 
 impl From<FsMetadata> for DurableTimes {
@@ -1289,8 +1289,8 @@ impl FsDriver for CrashFs {
         &mut self,
         clock: FsClock,
         fd: Fd,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        atime_nanos: Option<i128>,
+        mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
         self.live.set_times(clock, fd, atime_nanos, mtime_nanos)
     }
@@ -1299,8 +1299,8 @@ impl FsDriver for CrashFs {
         &mut self,
         clock: FsClock,
         ino: u64,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        atime_nanos: Option<i128>,
+        mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
         self.live
             .set_inode_times(clock, ino, atime_nanos, mtime_nanos)
@@ -1310,8 +1310,8 @@ impl FsDriver for CrashFs {
         &mut self,
         clock: FsClock,
         path: &str,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        atime_nanos: Option<i128>,
+        mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
         self.live
             .set_times_by_path(clock, path, atime_nanos, mtime_nanos)

@@ -146,8 +146,8 @@ pub trait FsDriver: Send {
         &mut self,
         _clock: FsClock,
         _fd: Fd,
-        _atime_nanos: Option<u64>,
-        _mtime_nanos: Option<u64>,
+        _atime_nanos: Option<i128>,
+        _mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("set times"))
     }
@@ -156,8 +156,8 @@ pub trait FsDriver: Send {
         &mut self,
         _clock: FsClock,
         _ino: u64,
-        _atime_nanos: Option<u64>,
-        _mtime_nanos: Option<u64>,
+        _atime_nanos: Option<i128>,
+        _mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("set inode times"))
     }
@@ -165,8 +165,8 @@ pub trait FsDriver: Send {
         &mut self,
         _clock: FsClock,
         _path: &str,
-        _atime_nanos: Option<u64>,
-        _mtime_nanos: Option<u64>,
+        _atime_nanos: Option<i128>,
+        _mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("set times by path"))
     }

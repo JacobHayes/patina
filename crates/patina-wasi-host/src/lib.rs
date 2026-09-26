@@ -814,7 +814,11 @@ impl Preview1Host {
             _ => return Err(WasiHostError::DeniedFd(fd)),
         };
         self.context
-            .fs_set_times(handle, atime_nanos, mtime_nanos)
+            .fs_set_times(
+                handle,
+                atime_nanos.map(i128::from),
+                mtime_nanos.map(i128::from),
+            )
             .map_err(Into::into)
     }
 
@@ -830,7 +834,11 @@ impl Preview1Host {
             self.resolve_path_with_terminal_follow(directory, path, follow_symlink, false)?;
         self.ensure_writable(&path)?;
         self.context
-            .fs_set_times_by_path(&path, atime_nanos, mtime_nanos)
+            .fs_set_times_by_path(
+                &path,
+                atime_nanos.map(i128::from),
+                mtime_nanos.map(i128::from),
+            )
             .map_err(Into::into)
     }
 
@@ -3332,11 +3340,17 @@ fn write_filestat(
     stat[16] = filetype;
     stat[24..32].copy_from_slice(&u64::from(metadata.nlink).to_le_bytes());
     stat[32..40].copy_from_slice(&metadata.len.to_le_bytes());
-    stat[40..48].copy_from_slice(&metadata.atime_nanos.to_le_bytes());
-    stat[48..56].copy_from_slice(&metadata.mtime_nanos.to_le_bytes());
-    stat[56..64].copy_from_slice(&metadata.ctime_nanos.to_le_bytes());
+    stat[40..48].copy_from_slice(&wasi_timestamp(metadata.atime_nanos).to_le_bytes());
+    stat[48..56].copy_from_slice(&wasi_timestamp(metadata.mtime_nanos).to_le_bytes());
+    stat[56..64].copy_from_slice(&wasi_timestamp(metadata.ctime_nanos).to_le_bytes());
     memory(caller)?.write(caller, offset(pointer)?, &stat)?;
     Ok(())
+}
+
+/// A WASI `timestamp` is unsigned nanoseconds: a time before the epoch (only
+/// a native guest can set one) reads as the epoch, never wrapped.
+fn wasi_timestamp(nanos: i128) -> u64 {
+    u64::try_from(nanos.max(0)).unwrap_or(u64::MAX)
 }
 
 fn host_parent_path(path: &str) -> &str {
@@ -4021,7 +4035,10 @@ mod tests {
             .unwrap();
         assert_eq!((atime, mtime), (Some(wake), Some(wake)));
         host.fd_filestat_set_times(fd, atime, mtime).unwrap();
-        assert_eq!(host.fd_metadata(fd).unwrap().0.atime_nanos, wake);
+        assert_eq!(
+            host.fd_metadata(fd).unwrap().0.atime_nanos,
+            i128::from(wake)
+        );
         assert!(matches!(
             host.filestat_set_times_values(1, 2, WASI_FSTFLAG_ATIM | WASI_FSTFLAG_ATIM_NOW),
             Err(WasiHostError::InvalidInput)
