@@ -32,8 +32,7 @@
 //! glibc 2.39 wraps none of the rows, so the scenario runs through the
 //! kernel vehicles. Every word is the scenario's own.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 use crate::probe::{Probe, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -489,16 +488,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_futex_requeue,
         Syscall::N_futex_waitv,
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::SignalsThreadsProcess),
-        vehicles: Vehicle::KERNEL,
-        what: "the futex2 rows are Trap(unmodeled) in the registry (the scheduler models only the multiplexed futex row), so the SUD dispatcher aborts at the first futex_wake",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall futex_wake (nr",
-        },
-    }],
     kernel_floor: Some(KernelFloor {
         release: "6.7",
         why: "futex_wake, futex_wait and futex_requeue first appear in Linux 6.7 (their registry rows carry no date)",

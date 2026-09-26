@@ -7461,6 +7461,8 @@ pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usi
 /// primitives only provide the vehicle and the blocking.
 mod thread {
     #[cfg(target_os = "linux")]
+    pub(crate) mod futex2;
+    #[cfg(target_os = "linux")]
     pub(crate) mod ipc;
     pub(crate) mod net;
     #[cfg(target_os = "linux")]
@@ -8965,6 +8967,10 @@ mod thread {
         /// `SYS_futex` through libc's `syscall` wrapper rather than pthread, so
         /// the interposed `syscall` routes those waits/wakes here.
         futexes: BTreeMap<usize, VecDeque<FutexWaiter>>,
+        /// The futex2 index a wake unqueued, per woken task: the highest, as
+        /// `futex_unqueue_multiple` reports it. The task takes it on resume.
+        #[cfg(target_os = "linux")]
+        futex_woken: BTreeMap<TaskId, u32>,
         /// Timed waiters (`cond_timedwait`, timed futex waits) whose deadline
         /// fired: the runtime's deadlock-rescue woke them, and this shim purged
         /// them from their primitive's waiter list. On resume they return
@@ -9001,16 +9007,31 @@ mod thread {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct FutexWaiter {
         task: TaskId,
-        /// Whether it waits by the word's private key (`FUTEX_PRIVATE_FLAG`),
-        /// which a wake by the shared key (a dead robust owner's) does not
-        /// match.
+        /// The waiter's bitset: a wake whose bitset shares no bit with it
+        /// passes it by (`FUTEX_BITSET_MATCH_ANY` but for `futex_wait` and
+        /// `FUTEX_WAIT_BITSET`).
+        bitset: u32,
+        /// Whether it waits by the word's private key (`FUTEX_PRIVATE_FLAG`,
+        /// `FUTEX2_PRIVATE`), which a wake by the shared key (a dead robust
+        /// owner's, a shared futex2 wake) does not match, nor a private
+        /// futex2 wake a shared waiter.
         private: bool,
+        /// Its index in its futex2 wait (`futex_waitv`'s vector; 0 for
+        /// `futex_wait`), which a wake reports to it; `None` for a
+        /// multiplexed `futex` wait.
+        slot: Option<u32>,
     }
 
     impl FutexWaiter {
-        /// A multiplexed `futex` row's waiter (`FUTEX_WAIT`).
-        fn multiplexed(task: TaskId, private: bool) -> Self {
-            FutexWaiter { task, private }
+        /// A multiplexed `futex` row's waiter (`FUTEX_WAIT`,
+        /// `FUTEX_WAIT_BITSET`).
+        fn multiplexed(task: TaskId, private: bool, bitset: u32) -> Self {
+            FutexWaiter {
+                task,
+                bitset,
+                private,
+                slot: None,
+            }
         }
     }
 
@@ -9045,10 +9066,16 @@ mod thread {
         }
 
         /// Wake the tasks of unqueued waiters (`futex_wake_mark`), each
-        /// once; it leaves every other queue it waits on.
+        /// once: it leaves every other queue it waits on, and a futex2
+        /// waiter learns the highest index unqueued.
         fn wake_futex_waiters(&mut self, woken: &[FutexWaiter]) {
             let mut tasks = Vec::new();
             for waiter in woken {
+                #[cfg(target_os = "linux")]
+                if let Some(slot) = waiter.slot {
+                    let highest = self.futex_woken.entry(waiter.task).or_insert(slot);
+                    *highest = (*highest).max(slot);
+                }
                 if !tasks.contains(&waiter.task) {
                     tasks.push(waiter.task);
                 }
@@ -9287,11 +9314,12 @@ mod thread {
             #[cfg(target_os = "linux")]
             {
                 if self.signals.blocked.get(&task).is_some_and(|blocked| {
-                    blocked.class == BlockClass::TimedFutex
-                        || blocked
-                            .locs
-                            .iter()
-                            .any(|loc| matches!(loc, WaiterLoc::Cond(..) | WaiterLoc::Ipc(..)))
+                    blocked.locs.iter().any(|loc| {
+                        matches!(
+                            loc,
+                            WaiterLoc::Cond(..) | WaiterLoc::Ipc(..) | WaiterLoc::Futex(..)
+                        )
+                    })
                 }) {
                     self.timed_out.insert(task);
                 }
@@ -9356,6 +9384,8 @@ mod thread {
                 sems: BTreeMap::new(),
                 net: NetState::new(),
                 futexes: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                futex_woken: BTreeMap::new(),
                 timed_out: std::collections::BTreeSet::new(),
                 #[cfg(target_os = "macos")]
                 dispatch: BTreeMap::new(),
@@ -9474,8 +9504,8 @@ mod thread {
         // A bare sleep is on no waiter list; clear a defensive timer flag anyway.
         lock_state().timed_out.remove(&me);
         #[cfg(target_os = "linux")]
-        if signals::resume_with(|| {
-            if !remaining.is_null() {
+        if signals::resume_with(|resumed| {
+            if resumed != signals::Resumed::Normal && !remaining.is_null() {
                 // Snapshot at interruption, not after a handler that may itself
                 // advance virtual time. A clock failure must never invent rem=0.
                 let now = with_context_raw(|context| context.now(clock))
@@ -14032,12 +14062,12 @@ mod thread {
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_futex_wait(addr: usize, expected: u32) -> c_int {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        futex_wait(addr, expected, false)
+        futex_wait(addr, expected, false, u32::MAX)
     }
 
     /// [`patina_futex_wait`], noting whether the wait is private
-    /// (`FUTEX_PRIVATE_FLAG`): the dispatcher's `futex` row.
-    pub(crate) fn futex_wait(addr: usize, expected: u32, private: bool) -> c_int {
+    /// (`FUTEX_PRIVATE_FLAG`) and its bitset: the dispatcher's `futex` row.
+    pub(crate) fn futex_wait(addr: usize, expected: u32, private: bool, bitset: u32) -> c_int {
         let mut restart = true;
         while restart {
             let mut state = lock_state();
@@ -14052,7 +14082,7 @@ mod thread {
                 return super::fail(EWOULDBLOCK);
             }
 
-            state.queue_futex_waiter(addr, FutexWaiter::multiplexed(me, private));
+            state.queue_futex_waiter(addr, FutexWaiter::multiplexed(me, private, bitset));
             match state.block(
                 me,
                 "futex-wait",
@@ -14097,10 +14127,19 @@ mod thread {
         timeout_nanos: u64,
     ) -> c_int {
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
-        futex_wait_timed(addr, expected, clock_id, absolute, timeout_nanos, false)
+        futex_wait_timed(
+            addr,
+            expected,
+            clock_id,
+            absolute,
+            timeout_nanos,
+            false,
+            u32::MAX,
+        )
     }
 
-    /// [`patina_futex_wait_timed`], noting whether the wait is private.
+    /// [`patina_futex_wait_timed`], noting whether the wait is private and
+    /// its bitset.
     pub(crate) fn futex_wait_timed(
         addr: usize,
         expected: u32,
@@ -14108,6 +14147,7 @@ mod thread {
         absolute: c_int,
         timeout_nanos: u64,
         private: bool,
+        bitset: u32,
     ) -> c_int {
         let clock = match clock_id {
             0 => ClockKind::Realtime,
@@ -14136,7 +14176,7 @@ mod thread {
                 Err(errno) => return super::fail(errno),
             }
         };
-        state.queue_futex_waiter(addr, FutexWaiter::multiplexed(me, private));
+        state.queue_futex_waiter(addr, FutexWaiter::multiplexed(me, private, bitset));
         match state.block_timed(
             me,
             "futex-wait",
@@ -14148,16 +14188,20 @@ mod thread {
             Ok(Step::Continue) => drop(state),
             Err(error) => return error.into_posix(),
         }
+        // Whether the deadline ended the wait is read before a pending
+        // handler runs, which could itself wait and take the flag.
         #[cfg(target_os = "linux")]
-        if signals::resume() == signals::Resumed::Eintr {
-            return super::fail(super::EINTR);
-        }
-        let mut state = lock_state();
-        if state.timed_out.remove(&me) {
-            super::fail(ETIMEDOUT)
-        } else {
-            0
-        }
+        let timed_out = {
+            let mut timed_out = false;
+            let resumed = signals::resume_with(|_| timed_out = lock_state().timed_out.remove(&me));
+            if resumed == signals::Resumed::Eintr {
+                return super::fail(super::EINTR);
+            }
+            timed_out
+        };
+        #[cfg(not(target_os = "linux"))]
+        let timed_out = lock_state().timed_out.remove(&me);
+        if timed_out { super::fail(ETIMEDOUT) } else { 0 }
     }
 
     /// FUTEX_WAKE: wake up to `count` tasks (all if `count < 0`) parked on

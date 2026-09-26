@@ -130,20 +130,23 @@ pub(crate) enum Resumed {
 
 /// Consume one resume outcome and deliver before applying the syscall restart rule.
 pub(crate) fn resume() -> Resumed {
-    resume_with(|| {})
+    resume_with(|_| {})
 }
 
 /// The resume of a blocking call is a delivery point: a signal that came
 /// pending while the task waited without interrupting it (one generated as
-/// its own deadline ended the wait) is delivered before the call returns, as
-/// the kernel delivers on the way back to user space.
-pub(in crate::thread) fn resume_with(before_delivery: impl FnOnce()) -> Resumed {
+/// its own deadline ended the wait, or after a wake) is delivered before the
+/// call returns, as the kernel delivers on the way back to user space. The
+/// call's result is settled first: `before_delivery` reads it, given the
+/// resume's outcome, before any handler runs.
+pub(in crate::thread) fn resume_with(before_delivery: impl FnOnce(Resumed)) -> Resumed {
     let me = current_task();
     let outcome = {
         let mut state = lock_state();
         state.remove_signal_wait(me);
         let Some(interrupt) = state.signals.interrupted.remove(&me) else {
             drop(state);
+            before_delivery(Resumed::Normal);
             deliver();
             return Resumed::Normal;
         };
@@ -158,7 +161,7 @@ pub(in crate::thread) fn resume_with(before_delivery: impl FnOnce()) -> Resumed 
             Resumed::Eintr
         }
     };
-    before_delivery();
+    before_delivery(outcome);
     deliver();
     outcome
 }

@@ -1,7 +1,7 @@
 //! thread/futex — the futex row behind std's locks and parking: value
 //! mismatch (private and shared), wake with no waiters, a timed wait on the clock, an unknown op,
-//! and a real handshake with a second thread (the racy loop is unobserved; the
-//! outcome is).
+//! an empty bitset, a requeue, and a real handshake with a second thread (the racy loop is
+//! unobserved; the outcome is).
 
 use crate::catalog::{DEFAULTS, Scenario, TraceFacts};
 use crate::vehicle::Vehicle;
@@ -39,6 +39,19 @@ pub fn run(p: &Probe) {
         "an unknown futex op is ENOSYS",
         p.futex(&word, 999, 0, None) == neg(ENOSYS),
     );
+    // The probe passes 0 as `val3`: an empty bitset, and a requeue's `cmpval`.
+    p.check(
+        "FUTEX_WAIT_BITSET with an empty bitset is EINVAL",
+        p.futex(&word, FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, 0, None) == neg(EINVAL),
+    );
+    p.check(
+        "and so is FUTEX_WAKE_BITSET",
+        p.futex(&word, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, None) == neg(EINVAL),
+    );
+    p.check(
+        "FUTEX_REQUEUE with nobody queued moves nobody",
+        p.futex(&word, FUTEX_REQUEUE | FUTEX_PRIVATE_FLAG, 1, None) == 0,
+    );
 
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -65,6 +78,10 @@ pub fn run(p: &Probe) {
     p.check(
         "a final FUTEX_WAKE finds nobody",
         p.futex(&word, FUTEX_WAKE_PRIVATE, i32::MAX as u32, None) == 0,
+    );
+    p.check(
+        "FUTEX_CMP_REQUEUE of a word that no longer holds cmpval is EAGAIN",
+        p.futex(&word, FUTEX_CMP_REQUEUE | FUTEX_PRIVATE_FLAG, 1, None) == neg(EAGAIN),
     );
 }
 

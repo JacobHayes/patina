@@ -125,7 +125,6 @@ unsafe extern "C" {
     fn patina_raw_exit(status: c_int) -> !;
     fn patina_raw_exit_group(status: c_int) -> !;
     fn patina_set_tid_address(address: *mut i32) -> i64;
-    fn patina_futex_wake(addr: usize, count: c_int) -> c_int;
     // Memory mappings (`crate::mem`): the one model the C mmap/munmap/mremap/
     // msync interposers call, in the raw ABI.
     fn patina_mmap(
@@ -494,6 +493,10 @@ const FUTEX_WAKE: u64 = uapi::FUTEX_WAKE as u64;
 const FUTEX_WAIT_BITSET: u64 = uapi::FUTEX_WAIT_BITSET as u64;
 
 const FUTEX_WAKE_BITSET: u64 = uapi::FUTEX_WAKE_BITSET as u64;
+
+const FUTEX_REQUEUE: u64 = uapi::FUTEX_REQUEUE as u64;
+
+const FUTEX_CMP_REQUEUE: u64 = uapi::FUTEX_CMP_REQUEUE as u64;
 
 const FUTEX_PRIVATE_FLAG: u64 = uapi::FUTEX_PRIVATE_FLAG as u64;
 
@@ -1146,6 +1149,18 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     }),
     // ---- sync / sched / identity / entropy ----
     (Syscall::N_futex, |_, a| sys_futex(a)),
+    (Syscall::N_futex_wait, |_, a| {
+        crate::thread::futex2::futex_wait(a)
+    }),
+    (Syscall::N_futex_wake, |_, a| {
+        crate::thread::futex2::futex_wake(a)
+    }),
+    (Syscall::N_futex_requeue, |_, a| {
+        crate::thread::futex2::futex_requeue(a)
+    }),
+    (Syscall::N_futex_waitv, |_, a| {
+        crate::thread::futex2::futex_waitv(a)
+    }),
     (Syscall::N_getrandom, |_, a| sys_getrandom(a[0], a[1], a[2])),
     // SAFETY: plain runtime entry, no pointers.
     (Syscall::N_sched_yield, |_, _| {

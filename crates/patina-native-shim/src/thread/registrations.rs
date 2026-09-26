@@ -59,7 +59,7 @@ const RSEQ_CPU_ID_REGISTRATION_FAILED: u32 = -2i32 as u32;
 /// Whether `access_ok` admits `len` bytes at `area`: on x86_64 a range that
 /// does not wrap and ends below the sign bit (`valid_user_address`); on
 /// arm64 one that ends within the 48-bit user address space.
-fn user_range(area: usize, len: usize) -> bool {
+pub(super) fn user_range(area: usize, len: usize) -> bool {
     let Some(end) = area.checked_add(len) else {
         return false;
     };
