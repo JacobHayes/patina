@@ -10,10 +10,11 @@
 //!
 //! Only the process's own pidfd: advising another process is a
 //! cross-process effect the single-process model has no counterpart for.
+//!
+//! The libc vehicle goes through glibc 2.36's `process_madvise`.
 
 use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::probe::{Probe, neg, page_size};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -80,8 +81,8 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "mem/process_madvise",
     run,
-    vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_process_madvise],
+    symbols: &["process_madvise"],
     needs: &[Need::Unprivileged],
     kernel_floor: Some(KernelFloor {
         release: "5.10",

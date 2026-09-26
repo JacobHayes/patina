@@ -219,6 +219,9 @@
     X(openat64) \
     X(opendir) \
     X(pause) \
+    X(pidfd_getfd) \
+    X(pidfd_open) \
+    X(pidfd_send_signal) \
     X(pipe) \
     X(pipe2) \
     X(pivot_root) \
@@ -234,6 +237,10 @@
     X(preadv) \
     X(preadv64) \
     X(printf) \
+    X(process_madvise) \
+    X(process_mrelease) \
+    X(process_vm_readv) \
+    X(process_vm_writev) \
     X(pselect) \
     X(psignal) \
     X(pthread_atfork) \
@@ -377,8 +384,10 @@
     X(writev)
 
 #define PATINA_ROUTED_X86_64(X) \
+    X(arch_prctl) \
     X(ioperm) \
-    X(iopl)
+    X(iopl) \
+    X(modify_ldt)
 
 /* Names whose definition is an assembly entry (`syscall`, init.c): the entry
  * defines its hidden `patina_route_` alias itself, since a C alias cannot

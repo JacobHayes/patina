@@ -471,6 +471,52 @@ int posix_spawnattr_setsigdefault(posix_spawnattr_t *restrict attr,
 
 #ifdef __linux__
 /*
+ * Process descriptors, advice and reaping through them, and the calling
+ * process's memory by pid: glibc's thin wrappers, each entering its row's one
+ * model through the SUD dispatcher.
+ */
+int pidfd_open(pid_t pid, unsigned int flags) {
+    return signal_result(patina_sud_dispatch(SYS_pidfd_open, (uint64_t)(int64_t)pid,
+        (uint64_t)flags, 0, 0, 0, 0, 0));
+}
+int pidfd_getfd(int pidfd, int targetfd, unsigned int flags) {
+    return signal_result(patina_sud_dispatch(SYS_pidfd_getfd, (uint64_t)(int64_t)pidfd,
+        (uint64_t)(int64_t)targetfd, (uint64_t)flags, 0, 0, 0, 0));
+}
+int pidfd_send_signal(int pidfd, int sig, siginfo_t *info, unsigned int flags) {
+    return signal_result(patina_sud_dispatch(SYS_pidfd_send_signal, (uint64_t)(int64_t)pidfd,
+        (uint64_t)(int64_t)sig, (uintptr_t)info, (uint64_t)flags, 0, 0, 0));
+}
+/* Advice covers at most MAX_RW_COUNT bytes (import_iovec), which an int
+ * holds. */
+ssize_t process_madvise(int pidfd, const struct iovec *iov, size_t vlen, int advice,
+                        unsigned int flags) {
+    return signal_result(patina_sud_dispatch(SYS_process_madvise, (uint64_t)(int64_t)pidfd,
+        (uintptr_t)iov, (uint64_t)vlen, (uint64_t)(int64_t)advice, (uint64_t)flags, 0, 0));
+}
+int process_mrelease(int pidfd, unsigned int flags) {
+    return signal_result(patina_sud_dispatch(SYS_process_mrelease, (uint64_t)(int64_t)pidfd,
+        (uint64_t)flags, 0, 0, 0, 0, 0));
+}
+/* A copy moves at most MAX_RW_COUNT bytes, which an int holds. */
+ssize_t process_vm_readv(pid_t pid, const struct iovec *local, unsigned long liovcnt,
+                         const struct iovec *remote, unsigned long riovcnt,
+                         unsigned long flags) {
+    return signal_result(patina_sud_dispatch(SYS_process_vm_readv, (uint64_t)(int64_t)pid,
+        (uintptr_t)local, (uint64_t)liovcnt, (uintptr_t)remote, (uint64_t)riovcnt,
+        (uint64_t)flags, 0));
+}
+ssize_t process_vm_writev(pid_t pid, const struct iovec *local, unsigned long liovcnt,
+                          const struct iovec *remote, unsigned long riovcnt,
+                          unsigned long flags) {
+    return signal_result(patina_sud_dispatch(SYS_process_vm_writev, (uint64_t)(int64_t)pid,
+        (uintptr_t)local, (uint64_t)liovcnt, (uintptr_t)remote, (uint64_t)riovcnt,
+        (uint64_t)flags, 0));
+}
+#endif
+
+#ifdef __linux__
+/*
  * Linux-only spawn/IPC/effect surface that newer glibc's std pulls in and macOS
  * does not (so it only shows up in the Linux import audit). These follow the
  * fork/posix_spawnp deny-trap doctrine above: a strong def drops the symbol off

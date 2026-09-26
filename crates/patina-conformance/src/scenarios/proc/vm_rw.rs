@@ -16,10 +16,8 @@
 //! The ptrace-mode check these calls make passes for the caller's own
 //! process. Only the caller's own memory is ever named: another process's
 //! would be a cross-process effect the single-process model has no
-//! counterpart for. glibc 2.39 wraps both rows, but the registry has no
-//! symbol row for them (the shim defines neither), so the probe binary
-//! cannot import them — the pre-run audit would refuse it — and the
-//! scenario runs through the kernel vehicles.
+//! counterpart for. The libc vehicle goes through glibc's wrappers of both
+//! rows.
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::observe::{Id, Norm};
@@ -326,7 +324,8 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "proc/vm_rw",
     run,
-    vehicles: Vehicle::KERNEL,
+    vehicles: Vehicle::ALL,
     covers: &[Syscall::N_process_vm_readv, Syscall::N_process_vm_writev],
+    symbols: &["process_vm_readv", "process_vm_writev"],
     ..DEFAULTS
 };

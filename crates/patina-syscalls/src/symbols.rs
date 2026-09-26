@@ -1146,6 +1146,62 @@ const ROWS: &[SymbolRow] = &[
         SymbolStatus::Deny("process"),
     ),
     s(
+        "pidfd_open",
+        Platform::Linux,
+        Serves::Syscalls(&["pidfd_open"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "pidfd_getfd",
+        Platform::Linux,
+        Serves::Syscalls(&["pidfd_getfd"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "pidfd_send_signal",
+        Platform::Linux,
+        Serves::Syscalls(&["pidfd_send_signal"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "process_madvise",
+        Platform::Linux,
+        Serves::Syscalls(&["process_madvise"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "process_mrelease",
+        Platform::Linux,
+        Serves::Syscalls(&["process_mrelease"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "process_vm_readv",
+        Platform::Linux,
+        Serves::Syscalls(&["process_vm_readv"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "process_vm_writev",
+        Platform::Linux,
+        Serves::Syscalls(&["process_vm_writev"]),
+        SymbolStatus::Modeled,
+    ),
+    #[cfg(target_arch = "x86_64")]
+    s(
+        "arch_prctl",
+        Platform::Linux,
+        Serves::Syscalls(&["arch_prctl"]),
+        SymbolStatus::Modeled,
+    ),
+    #[cfg(target_arch = "x86_64")]
+    s(
+        "modify_ldt",
+        Platform::Linux,
+        Serves::Syscalls(&["modify_ldt"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
         "posix_spawn_file_actions_init",
         Platform::Both,
         Serves::LibcOnly,

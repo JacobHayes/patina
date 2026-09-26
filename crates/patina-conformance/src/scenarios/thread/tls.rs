@@ -21,11 +21,10 @@
 //!   empty entry gives the task an LDT, which a read then answers in full,
 //!   zero-filling what lies past its one zeroed entry.
 //!
-//! glibc exports `arch_prctl` and `modify_ldt`, but the registry has no
-//! symbol row for them (the shim defines neither), so the probe binary
-//! cannot import them — the pre-run audit would refuse it — and the
-//! scenario runs through the kernel vehicles. The generic (arm64) table has
-//! none of these rows.
+//! The libc vehicle goes through glibc's `arch_prctl` and `modify_ldt`
+//! (`modify_ldt`'s `int` widened as the register holds it) and `syscall(2)`
+//! for the thread-area rows, which glibc does not wrap. The generic (arm64)
+//! table has none of these rows.
 
 use super::thread_pointer;
 use crate::catalog::{DEFAULTS, Scenario};
@@ -203,12 +202,13 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "thread/tls",
     run,
-    vehicles: Vehicle::KERNEL,
+    vehicles: Vehicle::ALL,
     covers: &[
         Syscall::N_set_thread_area,
         Syscall::N_get_thread_area,
         Syscall::N_arch_prctl,
         Syscall::N_modify_ldt,
     ],
+    symbols: &["arch_prctl", "modify_ldt"],
     ..DEFAULTS
 };

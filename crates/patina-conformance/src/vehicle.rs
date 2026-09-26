@@ -114,6 +114,35 @@ unsafe extern "C" {
     fn getdents64(fd: libc::c_int, buffer: *mut libc::c_void, length: libc::size_t) -> isize;
 }
 
+// glibc's wrappers of the process-descriptor rows (2.36) and the x86_64
+// thread-pointer rows, which the libc crate does not declare.
+unsafe extern "C" {
+    fn pidfd_open(pid: libc::pid_t, flags: libc::c_uint) -> libc::c_int;
+    fn pidfd_getfd(pidfd: libc::c_int, targetfd: libc::c_int, flags: libc::c_uint) -> libc::c_int;
+    fn pidfd_send_signal(
+        pidfd: libc::c_int,
+        sig: libc::c_int,
+        info: *mut libc::siginfo_t,
+        flags: libc::c_uint,
+    ) -> libc::c_int;
+    fn process_madvise(
+        pidfd: libc::c_int,
+        iov: *const libc::iovec,
+        vlen: libc::size_t,
+        advice: libc::c_int,
+        flags: libc::c_uint,
+    ) -> libc::ssize_t;
+    fn process_mrelease(pidfd: libc::c_int, flags: libc::c_uint) -> libc::c_int;
+    #[cfg(target_arch = "x86_64")]
+    fn arch_prctl(code: libc::c_int, addr: libc::c_ulong) -> libc::c_int;
+    #[cfg(target_arch = "x86_64")]
+    fn modify_ldt(
+        func: libc::c_int,
+        ptr: *mut libc::c_void,
+        bytecount: libc::c_ulong,
+    ) -> libc::c_int;
+}
+
 // glibc's wrappers of privileged rows the libc crate does not declare.
 unsafe extern "C" {
     fn pivot_root(new_root: *const libc::c_char, put_old: *const libc::c_char) -> libc::c_int;
@@ -659,8 +688,8 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             Syscall::N_memfd_create => memfd_create(a[0] as *const c_char, a[1] as c_uint) as i64,
             // Memory and IPC rows whose glibc wrapper the shim does not define
             // (`brk`, `mincore`, SysV shm/sem/msg, the kernel rows under
-            // glibc's `mq_*`, `pkey_*`, `remap_file_pages`, `pidfd_open`,
-            // `process_madvise`) or that glibc does not wrap at all
+            // glibc's `mq_*`, `pkey_*`, `remap_file_pages`) or that glibc
+            // does not wrap at all
             // (`membarrier`, `memfd_secret`, `map_shadow_stack`, the NUMA
             // rows libnuma wraps): importing such a wrapper would
             // make the pre-run import audit refuse the whole probe binary, so
@@ -694,14 +723,64 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_pkey_alloc
             | Syscall::N_pkey_free
             | Syscall::N_map_shadow_stack
-            | Syscall::N_pidfd_open
-            | Syscall::N_process_madvise
             | Syscall::N_mbind
             | Syscall::N_set_mempolicy
             | Syscall::N_get_mempolicy
             | Syscall::N_migrate_pages
             | Syscall::N_move_pages
             | Syscall::N_set_mempolicy_home_node => syscall_door(row, a),
+            // glibc's thin wrappers of the process-descriptor rows (2.36) and
+            // of the calling process's memory by pid (2.15), which the shim
+            // defines.
+            Syscall::N_pidfd_open => pidfd_open(a[0] as pid_t, a[1] as c_uint) as i64,
+            Syscall::N_pidfd_getfd => {
+                pidfd_getfd(a[0] as c_int, a[1] as c_int, a[2] as c_uint) as i64
+            }
+            Syscall::N_pidfd_send_signal => pidfd_send_signal(
+                a[0] as c_int,
+                a[1] as c_int,
+                a[2] as *mut siginfo_t,
+                a[3] as c_uint,
+            ) as i64,
+            Syscall::N_process_madvise => process_madvise(
+                a[0] as c_int,
+                a[1] as *const iovec,
+                a[2] as size_t,
+                a[3] as c_int,
+                a[4] as c_uint,
+            ) as i64,
+            Syscall::N_process_mrelease => process_mrelease(a[0] as c_int, a[1] as c_uint) as i64,
+            Syscall::N_process_vm_readv => process_vm_readv(
+                a[0] as pid_t,
+                a[1] as *const iovec,
+                a[2] as c_ulong,
+                a[3] as *const iovec,
+                a[4] as c_ulong,
+                a[5] as c_ulong,
+            ) as i64,
+            Syscall::N_process_vm_writev => process_vm_writev(
+                a[0] as pid_t,
+                a[1] as *const iovec,
+                a[2] as c_ulong,
+                a[3] as *const iovec,
+                a[4] as c_ulong,
+                a[5] as c_ulong,
+            ) as i64,
+            // The x86_64 thread-pointer rows' glibc wrappers, which the shim
+            // defines. `modify_ldt`'s answer is an `int` the kernel returns
+            // in a zero-extended register (errors too), and glibc hands that
+            // `int` back as it is: widened again as the register holds it.
+            // The 32-bit thread-area rows have no wrapper.
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_arch_prctl => arch_prctl(a[0] as c_int, a[1] as c_ulong) as i64,
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_modify_ldt => {
+                return i64::from(
+                    modify_ldt(a[0] as c_int, a[1] as *mut c_void, a[2] as c_ulong) as u32,
+                );
+            }
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_set_thread_area | Syscall::N_get_thread_area => syscall_door(row, a),
             // glibc 2.30's thin wrappers of the thread-identity rows, and its
             // `signalfd`, which issues signalfd4 with the kernel's 8-byte
             // sigset (the size every probe call passes).

@@ -32,10 +32,8 @@
 //!   process, the caller's or init's, whose memory is not being freed
 //!   (`EINVAL`): nothing is ever reaped.
 //!
-//! glibc 2.39 wraps `pidfd_open`, `pidfd_getfd` and `pidfd_send_signal`, but
-//! the registry has no symbol row for them (the shim defines none), so the
-//! probe binary cannot import them — the pre-run audit would refuse it — and
-//! the scenario runs through the kernel vehicles.
+//! The libc vehicle goes through glibc 2.36's `pidfd_open`, `pidfd_getfd`,
+//! `pidfd_send_signal` and `process_mrelease`, and its `setns`.
 
 use super::ids::INIT_SHARES_THE_CREDENTIAL;
 use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
@@ -330,16 +328,23 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "proc/pidfd",
     run,
-    vehicles: Vehicle::KERNEL,
+    vehicles: Vehicle::ALL,
     covers: &[
         Syscall::N_pidfd_open,
         Syscall::N_pidfd_getfd,
         Syscall::N_pidfd_send_signal,
         Syscall::N_process_mrelease,
     ],
+    symbols: &[
+        "pidfd_open",
+        "pidfd_getfd",
+        "pidfd_send_signal",
+        "process_mrelease",
+        "setns",
+    ],
     gaps: &[Gap {
         status: Status::ByDesign,
-        vehicles: Vehicle::KERNEL,
+        vehicles: Vehicle::ALL,
         what: INIT_SHARES_THE_CREDENTIAL,
         failure: Failure::Differs(&[
             Difference::field(56, "pidfd_send_signal", "errno", Observed::Null),

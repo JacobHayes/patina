@@ -971,7 +971,7 @@ credential gate: init's namespaces need `CAP_SYS_PTRACE` (`EPERM`), the one
 user namespace is the caller's own (`EINVAL`), and every other install needs
 `CAP_SYS_ADMIN` (`EPERM`). `waitid(P_PIDFD)` takes the process through its
 pidfd (`EBADF` for a descriptor that is no pidfd) and, like every `which`,
-finds no child: `ECHILD` (`proc/wait`). `proc/pidfd` passes on both vehicles
+finds no child: `ECHILD` (`proc/wait`). `proc/pidfd` passes on every vehicle
 with only the init-signal difference, including the checks added for a
 non-leader thread, init's pidfd, `setns` and the siginfo paths.
 `process_madvise` through a pidfd answers from the credential in 6.8's order:
@@ -980,6 +980,18 @@ non-destructive set, init's `mm_access` (`EACCES` without `CAP_SYS_PTRACE`),
 then `CAP_SYS_NICE` (`EPERM`), which 6.8 requires even of a process advising
 itself; granted, the advice is a named fatal. `mem/process_madvise` passes
 with no gap.
+
+glibc's wrappers of these rows are the shim's too, so the pre-run audit admits
+a guest that imports them: `pidfd_open`, `pidfd_getfd`, `pidfd_send_signal`,
+`process_mrelease`, `process_madvise`, `process_vm_readv` and
+`process_vm_writev` (`c/posix/signal_process.c`), and on x86_64 `arch_prctl`
+and `modify_ldt` (`c/posix/thread_sync.c`), each entering its row's model
+through the SUD dispatcher, with `Serves::Syscalls` symbol rows and `dlsym`
+routes. `modify_ldt` hands back its row's zero-extended `int` as glibc's
+wrapper does (-22 for `EINVAL`, `errno` untouched). glibc's public
+`__arch_prctl` alias has no row, so a guest importing it is refused by the
+audit. `proc/pidfd`, `proc/vm_rw`, `mem/process_madvise` and `thread/tls` run
+all three vehicles.
 
 ## Dependency order
 

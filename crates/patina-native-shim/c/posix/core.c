@@ -76,6 +76,7 @@
 #include <sched.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/pidfd.h>
 #include <sys/prctl.h>
 #include <sys/random.h>
 #include <sys/sysinfo.h>

@@ -259,3 +259,22 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
     pthread_mutex_unlock(&patina_once_guard);
     return 0;
 }
+
+#if defined(__linux__) && defined(__x86_64__)
+/*
+ * The x86_64 thread-pointer rows' glibc wrappers (glibc declares neither in a
+ * header). Both enter the one model (`src/sud/thread_pointer.rs`), which
+ * refuses by name whatever would move the thread pointer. `modify_ldt`'s row
+ * answers an int in a zero-extended register, errors included, and glibc's
+ * wrapper hands that int back as it is (-22 for EINVAL, errno untouched):
+ * `signal_result` does the same, since such a value is never negative.
+ */
+int arch_prctl(int code, unsigned long addr) {
+    return signal_result(patina_sud_dispatch(SYS_arch_prctl, (uint64_t)(int64_t)code,
+        (uint64_t)addr, 0, 0, 0, 0, 0));
+}
+int modify_ldt(int func, void *ptr, unsigned long bytecount) {
+    return signal_result(patina_sud_dispatch(SYS_modify_ldt, (uint64_t)(int64_t)func,
+        (uintptr_t)ptr, (uint64_t)bytecount, 0, 0, 0, 0));
+}
+#endif
