@@ -113,6 +113,18 @@ One more known-safe addition comes from the glibc side of the same sweep:
   diagnostic difference on an already-fatal path.
   (`classifies_the_glibc_assert_failure_hook_as_known_safe`.)
 
+And three data words ld.so exports, once the shim took over the area they
+describe:
+
+- **`__rseq_offset`, `__rseq_size`, `__rseq_flags`** (ELF only) — where each
+  thread's restartable-sequence area sits from the thread pointer, its size
+  and its flags, set by ld.so before any constructor and constant after. The
+  area itself is the virtual kernel's: every thread's host registration is
+  taken over when its task starts, so the area reads the virtual CPU and the
+  host never writes it. The shim cannot define these words (ld.so owns them),
+  so they are audit entries rather than symbol rows.
+  (`admits_glibcs_rseq_layout_words_on_elf_only`.)
+
 ### Normalization: glibc C-standard alias generations
 
 glibc keeps a distinct alias for every function whose signature or semantics

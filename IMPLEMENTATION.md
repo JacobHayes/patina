@@ -895,12 +895,15 @@ writes a sentinel into the main thread's and two threads' CPU fields and
 requires it to survive a handled signal: the host kernel rewrites a registered
 area at every signal delivery, so the check catches a live host registration
 on every run (red with the host unregistration skipped; comparing the fields
-alone caught that only when the host happened to move the thread). A stated residual: a guest handler for a synchronous signal (its own
+alone caught that only when the host happened to move the thread). A stated
+residual: a guest handler for a synchronous signal (its own
 `SIGSEGV`, `SIGBUS`, `SIGFPE` or `SIGILL`) that returns, raised inside a
 restartable sequence's critical section, resumes at the faulting instruction
 rather than the sequence's abort handler, and `rseq_cs` is never cleared
 lazily; both are deterministic, and the fix, if one is wanted, is an
-instruction-pointer fixup before such a handler runs.
+instruction-pointer fixup before such a handler runs. The pre-run audit
+now admits ld.so's layout words `__rseq_offset`, `__rseq_size` and
+`__rseq_flags` on ELF: the area they locate is the virtual kernel's.
 
 `process_vm_readv`/`process_vm_writev` aimed at the guest's own process are
 passed to the host kernel on this process's host pid, the vehicle the shim's

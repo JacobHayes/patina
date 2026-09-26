@@ -19,11 +19,9 @@
 //! an unregistered thread each candidate address would be registered,
 //! handing the kernel thread-local memory to write CPU ids into.
 //!
-//! glibc wraps no rseq (its `__rseq_offset` names the area, but the registry
-//! has no symbol row for it, so the probe binary cannot import it — the
-//! pre-run audit would refuse it — and patina's `dlsym` answers NULL for
-//! it), so the scenario finds the area through the kernel and runs through
-//! the kernel vehicles. Every call is refused: glibc's registration is
+//! glibc wraps no rseq, so the scenario finds the area through the kernel
+//! (not through `__rseq_offset`, which patina's `dlsym` answers NULL for)
+//! and runs through the kernel vehicles. Every call is refused: glibc's registration is
 //! never changed.
 
 use super::thread_pointer;

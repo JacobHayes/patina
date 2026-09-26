@@ -3409,6 +3409,13 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
     // aborting, so it is never an import there; glibc's stays libc's own, and its
     // message may land on the real stderr instead of the captured sink.
     const ASSERT_FAILURE: &[&str] = &["assert_fail"];
+    // ld.so's restartable-sequence layout words (`__rseq_offset`, `__rseq_size`,
+    // `__rseq_flags`): constants of the loaded glibc naming where each thread's
+    // rseq area sits from the thread pointer. The area itself is the virtual
+    // kernel's: the shim takes glibc's registration off the host at every
+    // task's start, so what a guest reads through them is the virtual CPU,
+    // never a host CPU id.
+    const RSEQ_LAYOUT: &[&str] = &["rseq_offset", "rseq_size", "rseq_flags"];
 
     symbol.starts_with("ITM_")
         || ERRNO.contains(&symbol)
@@ -3421,6 +3428,7 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
         || PURE_COMPUTE.contains(&symbol)
         || GLIBC_THREAD_AND_ERROR_HELPERS.contains(&symbol)
         || ASSERT_FAILURE.contains(&symbol)
+        || RSEQ_LAYOUT.contains(&symbol)
 }
 
 /// Classify a denied import into a guest-escape *class* for error quality and
@@ -5738,6 +5746,25 @@ mod tests {
                 normalize_native_symbol(symbol),
                 symbol,
                 "{symbol} is not a glibc generation alias and must be left alone"
+            );
+        }
+    }
+
+    // ld.so's rseq layout words locate an area the virtual kernel owns; Darwin
+    // has no rseq, hence ELF-only.
+    #[test]
+    fn admits_glibcs_rseq_layout_words_on_elf_only() {
+        let empty = BTreeSet::new();
+        for word in ["__rseq_offset", "__rseq_size", "__rseq_flags"] {
+            assert_eq!(
+                native_import_decision(word, NativeFormat::Elf, &empty),
+                NativeImportDecision::Allowed,
+                "{word}: the rseq area it locates is virtual"
+            );
+            assert_eq!(
+                native_import_decision(word, NativeFormat::MachO, &empty),
+                NativeImportDecision::Denied("unknown-import"),
+                "{word}: Darwin has no rseq"
             );
         }
     }
