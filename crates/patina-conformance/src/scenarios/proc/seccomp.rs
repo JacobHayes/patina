@@ -17,13 +17,16 @@
 //!   `no_new_privs` needs `CAP_SYS_ADMIN` (`seccomp_prepare_filter`:
 //!   `EACCES`) before the program is checked.
 //!
+//! * prctl's `PR_SET_SECCOMP` refuses a mode it does not know (`EINVAL`)
+//!   and runs a filter through the same checks (an unreadable program:
+//!   `EFAULT`).
+//!
 //! The one program offered is a single invalid instruction: without the
 //! capability it is refused as `EACCES`, with it (or with `no_new_privs`)
 //! as `EINVAL`, so no filter is ever installed. The scenario requires the
 //! caller to start without `no_new_privs` (proc/prctl asserts it).
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -43,6 +46,8 @@ const NEW_LISTENER: i64 = 1 << 3;
 const WAIT_KILLABLE_RECV: i64 = 1 << 5;
 /// No `SECCOMP_RET_*` action.
 const UNKNOWN_ACTION: u32 = 0x1234_0000;
+/// No `SECCOMP_MODE_*`.
+const UNKNOWN_MODE: u64 = 99;
 /// One past `BPF_MAXINSNS`.
 const TOO_LONG: u16 = 4097;
 
@@ -173,6 +178,15 @@ pub fn run(p: &Probe) {
         "without no_new_privs a filter is EACCES (no CAP_SYS_ADMIN) before its program is checked",
         filter(0, Some(&program(1))) == neg(EACCES),
     );
+
+    p.check(
+        "PR_SET_SECCOMP with a mode no kernel has is EINVAL",
+        p.prctl(PR_SET_SECCOMP, UNKNOWN_MODE, 0, 0, 0) == neg(EINVAL),
+    );
+    p.check(
+        "PR_SET_SECCOMP's filter meets the same checks: an unreadable program is EFAULT",
+        p.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER as u64, 0, 0, 0) == neg(EFAULT),
+    );
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -181,22 +195,7 @@ pub const SCENARIO: Scenario = Scenario {
     // glibc has no wrapper for the row: the libc spelling would be
     // `syscall(2)` again.
     vehicles: Vehicle::KERNEL,
-    covers: &[Syscall::N_seccomp],
+    covers: &[Syscall::N_seccomp, Syscall::N_prctl],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: Vehicle::KERNEL,
-        what: "seccomp is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)) where the kernel answers the queries to anyone and refuses a filter without no_new_privs as EACCES (no CAP_SYS_ADMIN)",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(SIGABRT),
-            diagnostic: TRAP,
-        },
-    }],
     ..DEFAULTS
 };
-
-#[cfg(target_arch = "x86_64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall seccomp (nr 317, class privileged";
-#[cfg(target_arch = "aarch64")]
-const TRAP: &str = "patina: SUD trapped unsupported syscall seccomp (nr 277, class privileged";

@@ -1,6 +1,6 @@
 //! SUD rows — signals and process control: `rt_sigaction` (SIGSYS re-registration
-//! is fatal), and `prctl`, whose only routed option is `PR_GET_AUXV` served from
-//! the shim's scrubbed auxv.
+//! is fatal), and `prctl`'s option table (`PR_GET_AUXV` served from the shim's
+//! scrubbed auxv, `PR_SET_SECCOMP` through the seccomp row's model).
 
 use super::*;
 
@@ -35,6 +35,8 @@ const PR_SET_PDEATHSIG: u32 = 1;
 const PR_GET_PDEATHSIG: u32 = 2;
 const PR_GET_DUMPABLE: u32 = 3;
 const PR_SET_DUMPABLE: u32 = 4;
+const PR_GET_SECCOMP: u32 = 21;
+const PR_SET_SECCOMP: u32 = 22;
 const PR_SET_NO_NEW_PRIVS: u32 = 38;
 const PR_GET_NO_NEW_PRIVS: u32 = 39;
 const PR_SET_TIMERSLACK: u32 = 29;
@@ -50,7 +52,6 @@ const SIGRTMAX: u64 = 64;
 struct PrctlState {
     pdeathsig: u32,
     dumpable: u32,
-    no_new_privs: bool,
     timerslack_ns: u64,
     /// `MMF_DISABLE_THP` as the guest last set it. The host process runs with
     /// THP off whatever the guest asks (`__libc_start_main`), so residency
@@ -63,7 +64,6 @@ impl PrctlState {
         Self {
             pdeathsig: 0,
             dumpable: 1,
-            no_new_privs: false,
             timerslack_ns: DEFAULT_TIMERSLACK_NS,
             thp_disabled: true,
         }
@@ -71,6 +71,33 @@ impl PrctlState {
 }
 
 static PRCTL_STATE: Mutex<PrctlState> = Mutex::new(PrctlState::new());
+
+/// The threads that set `no_new_privs`, by thread id. The kernel keeps it
+/// per task (`PFA_NO_NEW_PRIVS`), a new thread copies its creator's
+/// (`dup_task_struct`), and nothing clears it.
+static NO_NEW_PRIVS: crate::SpinMutex<std::collections::BTreeSet<c_int>> =
+    crate::SpinMutex::new(std::collections::BTreeSet::new());
+
+/// The calling thread's `no_new_privs` (`task_no_new_privs`), which gates
+/// installing a seccomp filter and enforcing a Landlock ruleset.
+pub(super) fn no_new_privs() -> bool {
+    NO_NEW_PRIVS
+        .lock()
+        .contains(&crate::thread::deterministic_thread_id())
+}
+
+/// A new thread inherits its creator's `no_new_privs`.
+pub(super) fn no_new_privs_spawned(parent: c_int, child: c_int) {
+    let mut set = NO_NEW_PRIVS.lock();
+    if set.contains(&parent) {
+        set.insert(child);
+    }
+}
+
+/// An exited thread's `no_new_privs` goes with it.
+pub(super) fn no_new_privs_exited(tid: c_int) {
+    NO_NEW_PRIVS.lock().remove(&tid);
+}
 
 /// Read a `prctl` option register as the kernel does. The kernel's prctl entry
 /// is `SYSCALL_DEFINE5(prctl, int, option, …)` and immediately narrows it to an
@@ -200,6 +227,15 @@ pub(super) fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: 
         // `PRCTL_STATE`'s).
         PR_SET_NAME => return prctl_set_name(arg2),
         PR_GET_NAME => return prctl_get_name(arg2),
+        // No seccomp mode is ever entered: the model stops by name first.
+        PR_GET_SECCOMP => return 0,
+        PR_SET_SECCOMP => {
+            return super::privileged::answer(
+                Syscall::N_prctl.number() as i64,
+                super::privileged::prctl_set_seccomp,
+                [arg2, arg3, 0, 0, 0, 0],
+            );
+        }
         _ => {}
     }
 
@@ -230,10 +266,12 @@ pub(super) fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: 
             }
             _ => -EINVAL,
         },
-        PR_GET_NO_NEW_PRIVS => i64::from(state.no_new_privs),
+        PR_GET_NO_NEW_PRIVS => i64::from(no_new_privs()),
         PR_SET_NO_NEW_PRIVS => {
             if arg2 == 1 && arg3 == 0 && arg4 == 0 && arg5 == 0 {
-                state.no_new_privs = true;
+                NO_NEW_PRIVS
+                    .lock()
+                    .insert(crate::thread::deterministic_thread_id());
                 0
             } else {
                 -EINVAL
@@ -343,6 +381,7 @@ mod tests {
         static SERIAL: Mutex<()> = Mutex::new(());
         let guard = SERIAL.lock().unwrap();
         *PRCTL_STATE.lock().unwrap() = PrctlState::new();
+        NO_NEW_PRIVS.lock().clear();
         guard
     }
 
@@ -356,6 +395,12 @@ mod tests {
         assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS as u64, 0, 0, 0, 0), 1);
         assert_eq!(sys_prctl(PR_SET_NO_NEW_PRIVS as u64, 0, 0, 0, 0), -EINVAL);
         assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS as u64, 0, 0, 0, 0), 1);
+    }
+
+    /// No seccomp mode is ever entered, whatever the arguments.
+    #[test]
+    fn prctl_reads_no_seccomp_mode() {
+        assert_eq!(sys_prctl(PR_GET_SECCOMP as u64, 1, 2, 3, 4), 0);
     }
 
     #[test]

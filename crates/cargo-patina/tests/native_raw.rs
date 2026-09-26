@@ -115,25 +115,23 @@ mod linux {
         }
     }
 
+    /// The prctl doors patina refuses: an unknown option is `EINVAL`, and
+    /// entering seccomp strict mode, through prctl (whose filter argument
+    /// strict mode ignores) or seccomp(2), stops the run by name before the
+    /// host could enter it.
     #[test]
-    fn prctl_unsupported_option_returns_einval() {
-        assert_prctl_refused("unsupported");
-    }
-
-    #[test]
-    fn prctl_privileged_option_returns_einval() {
-        assert_prctl_refused("privileged");
-    }
-
-    fn assert_prctl_refused(mode: &str) {
+    fn prctl_refusals_answer_or_stop_by_name() {
         let g = Guest::assert_build_with("raw", &["--bin", "raw_prctl_refusal"]);
-        if kernel_supports(KernelFeature::Sud) {
-            assert_eq!(
-                text(&g.assert_run_success(1, &["--", mode]).stdout),
-                "PRCTL_REFUSED errno=22\n"
-            );
-        } else {
+        if !kernel_supports(KernelFeature::Sud) {
             g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);
+            return;
+        }
+        assert_eq!(
+            text(&g.assert_run_success(1, &["--", "unsupported"]).stdout),
+            "PRCTL_REFUSED errno=22\n"
+        );
+        for (door, row) in [("prctl-strict", "prctl"), ("seccomp-strict", "seccomp")] {
+            g.assert_internal_fatal(&[door], &[&format!("{row}: entering strict mode")]);
         }
     }
 }

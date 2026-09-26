@@ -1,7 +1,9 @@
 //! proc/prctl — the process-local prctl options (man 2 prctl): PR_SET_NAME
 //! truncation to 15 bytes, PR_SET/GET_PDEATHSIG (a signal number, EINVAL past
 //! SIGRTMAX), PR_SET/GET_DUMPABLE (only 0 or 1 settable; 2 is EINVAL),
-//! PR_SET_NO_NEW_PRIVS (only 1, with zero trailing arguments; sticky),
+//! PR_SET_NO_NEW_PRIVS (only 1, with zero trailing arguments; sticky; per
+//! thread, so a thread created after it inherits it and one that already
+//! existed does not),
 //! PR_SET/GET_TIMERSLACK (0 restores the 50 µs default), and EINVAL (not
 //! ENOSYS) for an unknown option.
 
@@ -93,6 +95,33 @@ pub fn run(p: &Probe) {
         got == b"abcdefghijklmno",
     );
 
+    // `no_new_privs` is a task flag (`PFA_NO_NEW_PRIVS`), copied at `clone`:
+    // a thread that exists before the rows set it keeps reading 0.
+    std::thread::scope(|scope| {
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let older = scope.spawn(move || {
+            wait.recv()
+                .is_ok()
+                .then(|| p.prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0))
+        });
+        rows(p);
+        let newer = scope
+            .spawn(|| p.prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0))
+            .join();
+        p.check(
+            "a thread created after PR_SET_NO_NEW_PRIVS inherits it",
+            newer.ok() == Some(1),
+        );
+        let _ = go.send(());
+        p.check(
+            "a thread that existed before reads its own, unset",
+            older.join().ok().flatten() == Some(0),
+        );
+    });
+}
+
+/// Each of [`ROWS`], in order.
+fn rows(p: &Probe) {
     for (option, arg, answer) in ROWS {
         let name = option_name(*option);
         let mut written = -1i32;

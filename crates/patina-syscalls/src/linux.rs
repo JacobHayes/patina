@@ -1169,7 +1169,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Process,
         Disposition::Modeled,
-        "One Rust option table on libc and raw doors: name, pdeathsig, dumpable, no-new-privs, timerslack, scrubbed AUXV, an inert VMA control, and the THP-disable flag (set at start, as the shim runs the process with THP off; a guest clearing it reads it cleared, while the host stays off, so residency stays per base page); unknown options return EINVAL.",
+        "One Rust option table on libc and raw doors: name, pdeathsig, dumpable, no-new-privs, seccomp (`PR_GET_SECCOMP` reads 0, since no mode is ever entered; `PR_SET_SECCOMP` runs through the seccomp row's model), timerslack, scrubbed AUXV, an inert VMA control, and the THP-disable flag (set at start, as the shim runs the process with THP off; a guest clearing it reads it cleared, while the host stays off, so residency stays per base page); unknown options return EINVAL.",
         None,
     ),
     #[cfg(target_arch = "x86_64")]
@@ -2348,10 +2348,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_seccomp => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "In `do_seccomp`'s order (`op` and `flags` as `unsigned int`): an unknown operation is `EINVAL`; `SECCOMP_GET_ACTION_AVAIL` refuses a flag (`EINVAL`) and an unreadable action (`EFAULT`), and answers 0 for 6.8's eight actions, `EOPNOTSUPP` for any other; `SECCOMP_GET_NOTIF_SIZES` refuses a flag and answers 80, 24 and 64. Strict mode with a flag or an argument, and a filter with an unknown flag, `TSYNC|NEW_LISTENER` without `TSYNC_ESRCH` or `WAIT_KILLABLE_RECV` without `NEW_LISTENER`, are `EINVAL`; then the program's copy (`EFAULT`) and length (0 or past `BPF_MAXINSNS`: `EINVAL`); then without `no_new_privs`, `CAP_SYS_ADMIN` (`EACCES`). Entering strict mode, and installing a filter with `no_new_privs` (or the capability), are named fatals: patina does not enforce a guest's seccomp mode. The program's instructions are never read, so the classic-BPF checks (`bpf_check_classic`, `seccomp_check_filter`) are not modeled: with `no_new_privs`, a program they would refuse (`EINVAL`), or whose instructions cannot be read (`EFAULT`), ends at the same named fatal. `no_new_privs` is the calling thread's.",
         None,
-    ),
+    )
+    .capabilities(&[Capability::SysAdmin]),
     Syscall::N_getrandom => r(
         id,
         Family::Entropy,

@@ -10335,6 +10335,8 @@ mod thread {
         registrations::exit(task);
         #[cfg(target_os = "linux")]
         signals::clear_tid(task);
+        #[cfg(target_os = "linux")]
+        crate::sud::task_exited(tid_of(task));
         let mut state = lock_state();
         let mut scheduler = RealScheduler;
         if let Err(ThreadError::Fatal(message)) = state.table.exit(&mut scheduler, task, retval) {
@@ -10417,6 +10419,9 @@ mod thread {
         // And its locked shadow-stack features.
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         crate::sud::thread_pointer_spawned(deterministic_thread_id(), tid_of(task));
+        // And its per-task credential state.
+        #[cfg(target_os = "linux")]
+        crate::sud::task_spawned(deterministic_thread_id(), tid_of(task));
         // The semaphore must exist before the host thread parks on it.
         state.sems.insert(task, Arc::new(baton::Semaphore::new()));
         #[cfg(target_os = "linux")]

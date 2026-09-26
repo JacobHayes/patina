@@ -32,12 +32,14 @@ mod ioport;
 mod kernel;
 mod mount;
 mod process;
+mod seccomp;
 pub(super) use admin::*;
 #[cfg(target_arch = "x86_64")]
 pub(super) use ioport::*;
 pub(super) use kernel::*;
 pub(super) use mount::*;
 pub(super) use process::*;
+pub(super) use seccomp::*;
 
 /// What a privileged row answers: the raw return value (`-errno` for a
 /// refusal), or the point past which the model does not go.
@@ -162,6 +164,7 @@ mod tests {
             chroot_cases(),
             config_cases(),
             robust_list_cases(),
+            sandbox_cases(),
         ]
         .into_iter()
         .flatten()
@@ -545,6 +548,29 @@ mod tests {
                 refusal: errno::EPERM,
             },
         ]
+    }
+
+    /// One instruction: a program `seccomp_prepare_filter` takes to its
+    /// privilege check.
+    static ONE_INSTRUCTION: [u64; 2] = [1, 0];
+
+    /// A filter without `no_new_privs` needs `CAP_SYS_ADMIN` (`EACCES`)
+    /// once its flags, copy and length pass.
+    fn sandbox_cases() -> Vec<Case> {
+        const SECCOMP_SET_MODE_FILTER: u64 = 1;
+        vec![Case {
+            row: Syscall::N_seccomp,
+            check: |credential, a| seccomp_as(credential, a, false),
+            args: [
+                SECCOMP_SET_MODE_FILTER,
+                0,
+                ONE_INSTRUCTION.as_ptr() as u64,
+                0,
+                0,
+                0,
+            ],
+            refusal: errno::EACCES,
+        }]
     }
 
     /// `PTRACE_O_SUSPEND_SECCOMP` needs `CAP_SYS_ADMIN`; past it, seizing
