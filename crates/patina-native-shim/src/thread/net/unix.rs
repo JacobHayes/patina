@@ -170,6 +170,9 @@ fn path_of(bytes: &[u8]) -> Result<String, c_int> {
 fn make_node(path: &str) -> Result<paths::Resolved, c_int> {
     let resolved = match paths::resolve(paths::AT_FDCWD, path, paths::RESOLVE_NOFOLLOW)? {
         paths::Resolution::Volume(resolved) => resolved,
+        // A devpts name no pair has: no room to make one there (devpts's
+        // root is root's `0755`).
+        paths::Resolution::Virtual(entry) if !entry.exists() => return Err(EACCES),
         // The name exists.
         paths::Resolution::Virtual(_) => return Err(EADDRINUSE),
     };

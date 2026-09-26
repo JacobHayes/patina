@@ -66,7 +66,9 @@ fn has_mapping(resolved: &Resolved) -> bool {
         | FdKind::Pidfd
         | FdKind::LandlockRuleset
         | FdKind::Userfaultfd
-        | FdKind::NamespacePath => false,
+        | FdKind::NamespacePath
+        | FdKind::PtyMaster
+        | FdKind::PtySlave => false,
     }
 }
 
@@ -253,7 +255,9 @@ pub extern "C" fn patina_syncfs(raw_fd: c_int) -> c_int {
             | FdKind::LandlockRuleset
             | FdKind::Userfaultfd
             | FdKind::Namespace
-            | FdKind::NamespacePath => false,
+            | FdKind::NamespacePath
+            | FdKind::PtyMaster
+            | FdKind::PtySlave => false,
         };
         if on_volume {
             crate::fs_sync_volume()

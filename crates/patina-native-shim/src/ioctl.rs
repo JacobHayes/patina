@@ -166,6 +166,15 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
                 Some(unread) => put_int(arg, unread),
                 None => fail(ENOTTY),
             },
+            // `TIOCINQ`: what a read would take now (`n_tty_ioctl`).
+            #[cfg(target_os = "linux")]
+            FdKind::PtyMaster | FdKind::PtySlave => {
+                let side = thread::pty::Side::of(resolved.kind).expect("a pty kind");
+                match thread::pty::inq(side, resolved.handle as u32) {
+                    Ok(queued) => put_int(arg, queued),
+                    Err(errno) => fail(errno),
+                }
+            }
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => fail(ENOTTY),
         },
@@ -192,6 +201,14 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
                 None => fail(ENOTTY),
             }
         }
+        // A pseudoterminal's own requests (`tty_ioctl`).
+        #[cfg(target_os = "linux")]
+        _ if thread::pty::Side::of(resolved.kind).is_some() => thread::pty::ioctl(
+            thread::pty::Side::of(resolved.kind).expect("a pty kind"),
+            resolved.handle as u32,
+            request,
+            arg as usize,
+        ),
         // A namespace file's own requests (`ns_ioctl`) are not modeled;
         // it answers any other `ENOTTY`.
         #[cfg(target_os = "linux")]
@@ -304,7 +321,11 @@ mod vfs {
             }
             FdKind::File => Inode::Volume { directory: false },
             FdKind::MessageQueue | FdKind::Namespace => Inode::Regular { attributes: false },
-            FdKind::Pipe | FdKind::Socket | FdKind::Urandom => Inode::Special { fasync: true },
+            FdKind::Pipe
+            | FdKind::Socket
+            | FdKind::Urandom
+            | FdKind::PtyMaster
+            | FdKind::PtySlave => Inode::Special { fasync: true },
             FdKind::EventFd
             | FdKind::Epoll
             | FdKind::SignalFd

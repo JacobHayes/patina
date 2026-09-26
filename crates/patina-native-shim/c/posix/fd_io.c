@@ -22,15 +22,36 @@
  * isatty: whether a descriptor is a terminal is a nondeterministic property of
  * how the run was launched (pipe vs file vs tty), and programs branch on it —
  * search tools, for instance, derive heading/color/line-number defaults from it. A
- * fully interposed guest must never observe host terminal state, so report a
- * deterministic "not a terminal" for every open descriptor: captured guest stdio
- * is never a tty under the runtime, and standard input is a stream at EOF. A
- * number that names nothing is EBADF, as the kernel answers. Interposing here
- * (rather than allow-listing the import) makes guest output provably
- * independent of host tty state instead of merely "neutral given the flags".
- * This is a strong definition, so the guest's isatty reference binds here and
- * the libc symbol drops off the import table.
+ * fully interposed guest must never observe host terminal state: captured guest
+ * stdio is never a tty under the runtime, and standard input is a stream at EOF.
+ * On Linux it is glibc's (termios/isatty.c): a TCGETS through the ioctl row's
+ * entry succeeds exactly for the virtual machine's own terminals, its
+ * pseudoterminals, and anything else answers that row's errno (ENOTTY, EBADF,
+ * EINVAL from the entropy device, EIO from a hung-up slave). Darwin has no
+ * modeled terminal: "not a terminal" for every open descriptor, EBADF for a
+ * number that names nothing. Interposing here (rather than allow-listing the
+ * import) makes guest output provably independent of host tty state instead of
+ * merely "neutral given the flags". This is a strong definition, so the guest's
+ * isatty reference binds here and the libc symbol drops off the import table.
  */
+#ifdef __linux__
+struct patina_kernel_termios {
+    tcflag_t c_iflag, c_oflag, c_cflag, c_lflag;
+    cc_t c_line;
+    cc_t c_cc[19];
+};
+
+/* The one TCGETS both isatty and the stdio buffering choice ask, so the
+ * shim never calls the interposable isatty itself. */
+static int patina_isatty(int fd) {
+    struct patina_kernel_termios kernel;
+    return fail_int(patina_ioctl(fd, TCGETS, &kernel)) == 0;
+}
+
+int isatty(int fd) {
+    return patina_isatty(fd);
+}
+#else
 int isatty(int fd) {
     if (patina_fd_kind(fd) < 0) {
         errno = EBADF;
@@ -39,6 +60,7 @@ int isatty(int fd) {
     errno = ENOTTY;
     return 0;
 }
+#endif
 
 /* The platform's file-status flags <-> the shim's PATINA_O_* status vocabulary,
  * for F_GETFL/F_SETFL. Only the bits the kernel reports through F_GETFL are
@@ -64,6 +86,9 @@ static int patina_getfl_to_posix(uint32_t status) {
      * remembers which those are. glibc defines the O_LARGEFILE macro as 0 on
      * 64-bit targets, so the bit is the kernel's, for this architecture. */
     if (status & PATINA_O_OPENED) flags |= PATINA_KERNEL_O_LARGEFILE;
+    /* A slave opened through TIOCGPTPEER keeps the O_CLOEXEC it was opened
+     * with in f_flags (dentry_open strips only O_CREAT/O_EXCL/O_NOCTTY/O_TRUNC). */
+    if (status & PATINA_O_CLOEXEC) flags |= O_CLOEXEC;
 #endif
     return flags;
 }
@@ -497,13 +522,8 @@ int ioctl(int fd, unsigned long request, ...) {
  * kernel's termios through the same entry the ioctl row takes, then the user
  * struct: the flags and line discipline copied, the kernel's 19 control
  * characters followed by _POSIX_VDISABLE, and both speeds the baud bits of
- * c_cflag. No descriptor the virtual machine has is a terminal, so a valid
- * number answers the ioctl row's ENOTTY and nothing is written. */
-struct patina_kernel_termios {
-    tcflag_t c_iflag, c_oflag, c_cflag, c_lflag;
-    cc_t c_line;
-    cc_t c_cc[19];
-};
+ * c_cflag. A descriptor that is not a terminal answers the ioctl row's errno
+ * and nothing is written. */
 
 int tcgetattr(int fd, struct termios *termios_p) {
     struct patina_kernel_termios kernel;

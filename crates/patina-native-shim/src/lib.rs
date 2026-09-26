@@ -214,6 +214,8 @@ const EINVAL: c_int = 22;
 const EFAULT: c_int = 14;
 const EIO: c_int = 5;
 #[cfg(target_os = "linux")]
+const ENOTTY: c_int = 25;
+#[cfg(target_os = "linux")]
 const ENOMEM: c_int = 12;
 const EISDIR: c_int = 21;
 const ENOENT: c_int = 2;
@@ -335,6 +337,10 @@ const O_DIRECTORY: u32 = 1 << 11;
 /// descriptions' `F_GETFL`, and a pipe, socket or `O_PATH` handle never carries
 /// it. Never accepted from a caller (`O_ALL` excludes it).
 const O_OPENED: u32 = 1 << 10;
+/// `O_NOCTTY`: the opened terminal must not become the caller's controlling
+/// terminal. Nothing but a pseudoterminal's slave reads it (a no-op on every
+/// other entry), and it is never status.
+const O_NOCTTY: u32 = 1 << 12;
 const O_ALL: u32 = O_READ
     | O_WRITE
     | O_CREATE
@@ -345,7 +351,8 @@ const O_ALL: u32 = O_READ
     | O_NONBLOCK
     | O_PATH
     | O_CLOEXEC
-    | O_DIRECTORY;
+    | O_DIRECTORY
+    | O_NOCTTY;
 /// The status bits `F_SETFL` may change (the kernel ignores every other bit in
 /// the argument, including the access mode).
 const O_SETFL_MASK: u32 = O_APPEND | O_NONBLOCK;
@@ -617,6 +624,16 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
         }
         #[cfg(target_os = "linux")]
         FdKind::Namespace | FdKind::NamespacePath => Ok(()),
+        #[cfg(target_os = "linux")]
+        FdKind::PtyMaster => {
+            thread::pty::release(thread::pty::Side::Master, release.handle as u32);
+            Ok(())
+        }
+        #[cfg(target_os = "linux")]
+        FdKind::PtySlave => {
+            thread::pty::release(thread::pty::Side::Slave, release.handle as u32);
+            Ok(())
+        }
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => {
             thread::kqueue_close(release.handle);
@@ -4346,6 +4363,14 @@ fn open_virtual(entry: paths::Virtual, flags: u32, cloexec: bool) -> c_int {
         paths::Virtual::Urandom => open_urandom(entry, flags, cloexec),
         #[cfg(target_os = "linux")]
         paths::Virtual::Namespace(index) => open_namespace(index, flags, cloexec),
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Ptmx => thread::pty::open_master(flags, cloexec),
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Pts(index) => thread::pty::open_slave(index, flags, cloexec),
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Devpts => entry.unmodeled("an open"),
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Tty => thread::pty::open_tty(flags),
     }
 }
 
@@ -5033,6 +5058,16 @@ unsafe fn read_resolved(
         },
         #[cfg(target_os = "linux")]
         FdKind::MessageQueue => fail(EBADF) as isize,
+        // `vfs_read`'s `FMODE_READ`, then the tty's read.
+        #[cfg(target_os = "linux")]
+        FdKind::PtyMaster | FdKind::PtySlave if resolved.status & O_READ == 0 => {
+            fail(EBADF) as isize
+        }
+        // SAFETY: forwarded from this function's own contract.
+        #[cfg(target_os = "linux")]
+        FdKind::PtyMaster | FdKind::PtySlave => unsafe {
+            thread::pty::read(resolved, destination, length, nonblocking)
+        },
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => fail(EINVAL) as isize,
     }
@@ -5133,6 +5168,15 @@ unsafe fn write_resolved(
         FdKind::MessageQueue if resolved.status & O_WRITE == 0 => fail(EBADF) as isize,
         #[cfg(target_os = "linux")]
         FdKind::MessageQueue => fail(EINVAL) as isize,
+        #[cfg(target_os = "linux")]
+        FdKind::PtyMaster | FdKind::PtySlave if resolved.status & O_WRITE == 0 => {
+            fail(EBADF) as isize
+        }
+        // SAFETY: forwarded from this function's own contract.
+        #[cfg(target_os = "linux")]
+        FdKind::PtyMaster | FdKind::PtySlave => unsafe {
+            thread::pty::write(resolved, source, length, nonblocking)
+        },
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => fail(EINVAL) as isize,
     }
@@ -5178,7 +5222,9 @@ fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved, u64), c_in
         | FdKind::Pidfd
         | FdKind::LandlockRuleset
         | FdKind::Userfaultfd
-        | FdKind::NamespacePath => Err(ESPIPE),
+        | FdKind::NamespacePath
+        | FdKind::PtyMaster
+        | FdKind::PtySlave => Err(ESPIPE),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => Err(ESPIPE),
     }
@@ -5874,6 +5920,15 @@ const PATINA_FS_NSFS: u32 = 3;
 /// devtmpfs (0:5).
 #[cfg(target_os = "linux")]
 const PATINA_FS_DEVTMPFS: u32 = 4;
+/// A pseudoterminal's slave node (`thread::pty`): its opener's and the tty
+/// group's, on devpts (0:24).
+#[cfg(target_os = "linux")]
+const PATINA_FS_DEVPTS: u32 = 5;
+/// The pseudoterminal multiplexer's node, `/dev/ptmx`: root's and the tty
+/// group's, on devtmpfs (0:5) like the entropy device's, bound at its own
+/// path.
+#[cfg(target_os = "linux")]
+const PATINA_FS_PTMX: u32 = 6;
 
 /// The `(major, minor)` device a `PATINA_FS_*` filesystem reports through
 /// `st_dev`/`stx_dev_*` (`PATINA_*_DEV_*` in `patina_native.h`): the volume is
@@ -5885,7 +5940,8 @@ pub(crate) fn fs_device(fs: u32) -> (u32, u32) {
         PATINA_FS_PIPEFS => (0, 14),
         PATINA_FS_SOCKFS => (0, 8),
         PATINA_FS_NSFS => (0, 4),
-        PATINA_FS_DEVTMPFS => (0, 5),
+        PATINA_FS_DEVTMPFS | PATINA_FS_PTMX => (0, 5),
+        PATINA_FS_DEVPTS => (0, 24),
         _ => (8, 1),
     }
 }
@@ -6116,6 +6172,7 @@ pub unsafe extern "C" fn patina_metadata_at(
     };
     let resolved = match paths::resolve(dirfd, &path, flags) {
         Ok(paths::Resolution::Volume(resolved)) => resolved,
+        Ok(paths::Resolution::Virtual(entry)) if !entry.exists() => return fail(ENOENT),
         Ok(paths::Resolution::Virtual(entry)) => {
             return match virtual_metadata(entry, flags & paths::RESOLVE_NOFOLLOW != 0) {
                 Some(metadata) => write_patina_metadata(metadata, out),
@@ -6152,21 +6209,55 @@ pub unsafe extern "C" fn patina_access_answer(values: *const PatinaMetadata, mod
         .filter(|(flag, _)| mode & flag != 0)
         .fold(0, |wanted, (_, bit)| wanted | bit);
     #[cfg(target_os = "linux")]
-    let (immutable, root_owned) = (
-        values.fs == PATINA_FS_NSFS,
-        matches!(values.fs, PATINA_FS_NSFS | PATINA_FS_DEVTMPFS),
-    );
+    let immutable = values.fs == PATINA_FS_NSFS;
     #[cfg(not(target_os = "linux"))]
-    let (immutable, root_owned) = (false, false);
+    let immutable = false;
     if immutable && mode & W_OK != 0 {
         return EPERM;
     }
-    let triad = if root_owned {
-        values.mode & 0o7
-    } else {
+    let (uid, gid) = node_owner(values.fs);
+    let caller = caller();
+    let triad = if uid == caller.uid {
         (values.mode >> 6) & 0o7
+    } else if caller.in_group(gid) {
+        (values.mode >> 3) & 0o7
+    } else {
+        values.mode & 0o7
     };
     if triad & wanted != wanted { EACCES } else { 0 }
+}
+
+/// The owner `stat` reports for a node on the `PATINA_FS_*` filesystem
+/// `fs`, both doors: the caller's ([`caller`]), but for a namespace file's
+/// nsfs inode and the entropy device, which are root's, the pseudoterminal
+/// multiplexer, root's and the tty group's, and a pseudoterminal's slave
+/// node, its opener's (the caller's) and the tty group's.
+pub(crate) fn node_owner(fs: u32) -> (u32, u32) {
+    let caller = caller();
+    match fs {
+        #[cfg(target_os = "linux")]
+        PATINA_FS_NSFS | PATINA_FS_DEVTMPFS => (0, 0),
+        #[cfg(target_os = "linux")]
+        PATINA_FS_PTMX => (0, thread::pty::TTY_GID),
+        #[cfg(target_os = "linux")]
+        PATINA_FS_DEVPTS => (caller.uid, thread::pty::TTY_GID),
+        _ => (caller.uid, caller.gid),
+    }
+}
+
+/// The C face of [`node_owner`].
+///
+/// # Safety
+/// `uid` and `gid` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_node_owner(fs: u32, uid: *mut u32, gid: *mut u32) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let (owner, group) = node_owner(fs);
+    // SAFETY: writable per this function's contract.
+    unsafe {
+        uid.write(owner);
+        gid.write(group);
+    }
 }
 
 /// A namespace file's link, read: `<type>:[<inode>]` (`ns_get_name`),
@@ -6187,21 +6278,34 @@ fn read_namespace_link(index: usize, buf: *mut c_char, len: usize) -> isize {
 
 /// A change to the attributes (mode, owner, times, size) of an entry the
 /// resolver answers itself, by `operation`: a namespace file's nsfs inode is
-/// immutable (`notify_change`: `EPERM`); the entropy device is root's, so
-/// changing its mode is `EPERM` (not the owner, no `CAP_FOWNER`), and
-/// anything else about it is not modeled.
+/// immutable (`notify_change`: `EPERM`); the entropy device and the
+/// pseudoterminal multiplexer are root's, so changing their mode is `EPERM`
+/// (not the owner, no `CAP_FOWNER`); a devpts name no pair has is `ENOENT`;
+/// anything else about them (a slave node is its opener's to change) is not
+/// modeled.
 fn virtual_setattr(entry: paths::Virtual, operation: &str) -> c_int {
+    let root_owned_device = match entry {
+        paths::Virtual::Urandom => true,
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Ptmx => true,
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Namespace(_)
+        | paths::Virtual::Pts(_)
+        | paths::Virtual::Devpts
+        | paths::Virtual::Tty => false,
+    };
     match entry {
         #[cfg(target_os = "linux")]
         paths::Virtual::Namespace(_) => EPERM,
-        paths::Virtual::Urandom
-            if operation == "chmod"
-                && cfg!(target_os = "linux")
-                && !caller_capable(registry::Capability::Fowner) =>
+        _ if !entry.exists() => ENOENT,
+        _ if root_owned_device
+            && operation == "chmod"
+            && cfg!(target_os = "linux")
+            && !caller_capable(registry::Capability::Fowner) =>
         {
             EPERM
         }
-        paths::Virtual::Urandom => entry.unmodeled(operation),
+        _ => entry.unmodeled(operation),
     }
 }
 
@@ -6219,8 +6323,9 @@ fn caller_capable(capability: registry::Capability) -> bool {
 
 /// The metadata of an entry the resolver answers itself, `nofollow` naming
 /// the entry itself: a namespace file's nsfs inode (its link, a procfs
-/// inode, is not modeled) and, on Linux, the entropy device's node; `None`
-/// where the model ends.
+/// inode, is not modeled) and, on Linux, the entropy device's node and the
+/// pseudoterminals' (devpts's root is not modeled); `None` where the model
+/// ends.
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn virtual_metadata(entry: paths::Virtual, nofollow: bool) -> Option<PatinaMetadata> {
     match entry {
@@ -6232,6 +6337,12 @@ fn virtual_metadata(entry: paths::Virtual, nofollow: bool) -> Option<PatinaMetad
         paths::Virtual::Namespace(_) if nofollow => None,
         #[cfg(target_os = "linux")]
         paths::Virtual::Namespace(index) => Some(nsfs::metadata(index)),
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Ptmx => Some(thread::pty::ptmx_metadata()),
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Pts(index) => thread::pty::node(index),
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Devpts | paths::Virtual::Tty => None,
     }
 }
 
@@ -6281,6 +6392,14 @@ pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut Patina
         }
         if resolved.kind == FdKind::Urandom {
             return write_patina_metadata(volume::urandom_metadata(), out);
+        }
+        // A pseudoterminal's master is the multiplexer's node; a slave, its
+        // devpts node.
+        if let Some(side) = thread::pty::Side::of(resolved.kind) {
+            return match thread::pty::fd_metadata(side, resolved.handle as u32) {
+                Some(metadata) => write_patina_metadata(metadata, out),
+                None => fail(EBADF),
+            };
         }
     }
     // An anonymous pipe end or a socket is on pipefs/sockfs: its node is the
@@ -6907,7 +7026,9 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         | FdKind::LandlockRuleset
         | FdKind::Userfaultfd
         | FdKind::Namespace
-        | FdKind::NamespacePath => return fail(ENODEV),
+        | FdKind::NamespacePath
+        | FdKind::PtyMaster
+        | FdKind::PtySlave => return fail(ENODEV),
         // A queue is a regular file (judged after the range, below).
         #[cfg(target_os = "linux")]
         FdKind::MessageQueue => {}
@@ -7107,6 +7228,15 @@ unsafe fn path_unit(
     };
     let resolved = match paths::resolve(dirfd, &path, flags) {
         Ok(paths::Resolution::Volume(resolved)) => resolved,
+        // A devpts name no pair has: nothing to remove, and no room to
+        // create one (devpts's root is root's `0755`).
+        Ok(paths::Resolution::Virtual(entry)) if !entry.exists() => {
+            return fail(if virtual_answer == EEXIST {
+                EACCES
+            } else {
+                ENOENT
+            });
+        }
         Ok(paths::Resolution::Virtual(_)) => return fail(virtual_answer),
         Err(errno) => return fail(errno),
     };
@@ -7223,6 +7353,7 @@ pub unsafe extern "C" fn patina_mknod(
     };
     let resolved = match paths::resolve(dirfd, &spelled, paths::RESOLVE_NOFOLLOW) {
         Ok(paths::Resolution::Volume(resolved)) => resolved,
+        Ok(paths::Resolution::Virtual(entry)) if !entry.exists() => return fail(EACCES),
         // It exists.
         Ok(paths::Resolution::Virtual(_)) => return fail(EEXIST),
         Err(errno) => return fail(errno),
@@ -7536,6 +7667,7 @@ pub unsafe extern "C" fn patina_link(
     };
     let to = match paths::resolve(tofd, &to, paths::RESOLVE_NOFOLLOW) {
         Ok(paths::Resolution::Volume(resolved)) => resolved.path,
+        Ok(paths::Resolution::Virtual(entry)) if !entry.exists() => return fail(EACCES),
         // The new name exists (`filename_create`).
         Ok(paths::Resolution::Virtual(_)) => return fail(EEXIST),
         Err(errno) => return fail(errno),
@@ -7611,6 +7743,11 @@ pub unsafe extern "C" fn patina_read_link(
         #[cfg(target_os = "linux")]
         Ok(paths::Resolution::Virtual(paths::Virtual::Namespace(index))) => {
             return read_namespace_link(index, buf, len);
+        }
+        // The terminal nodes and devpts's root are no links either.
+        #[cfg(target_os = "linux")]
+        Ok(paths::Resolution::Virtual(entry)) => {
+            return fail(if entry.exists() { EINVAL } else { ENOENT }) as isize;
         }
         Err(errno) => return fail(errno) as isize,
     };
@@ -7716,6 +7853,23 @@ pub unsafe extern "C" fn patina_resolve_path(
         // A namespace file's link names no path (it reads `<type>:[<inode>]`).
         #[cfg(target_os = "linux")]
         Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Namespace(_))) => {
+            entry.unmodeled("the canonical path")
+        }
+        // The pseudoterminal nodes are character devices at their own names,
+        // devpts's root a directory.
+        #[cfg(target_os = "linux")]
+        Ok(paths::Resolution::Virtual(entry @ (paths::Virtual::Ptmx | paths::Virtual::Pts(_)))) => {
+            (
+                entry.path(),
+                if entry.exists() { PATINA_ENTRY_CHAR } else { 0 },
+            )
+        }
+        #[cfg(target_os = "linux")]
+        Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Devpts)) => {
+            (entry.path(), PATINA_ENTRY_DIRECTORY)
+        }
+        #[cfg(target_os = "linux")]
+        Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Tty)) => {
             entry.unmodeled("the canonical path")
         }
         Err(errno) => return fail(errno) as isize,
@@ -8491,6 +8645,8 @@ mod thread {
     pub(crate) mod locks;
     pub(crate) mod net;
     #[cfg(target_os = "linux")]
+    pub(crate) mod pty;
+    #[cfg(target_os = "linux")]
     pub(crate) mod readiness;
     #[cfg(target_os = "linux")]
     pub(crate) mod registrations;
@@ -8549,7 +8705,9 @@ mod thread {
             | FdKind::LandlockRuleset
             | FdKind::Userfaultfd
             | FdKind::Namespace
-            | FdKind::NamespacePath => Err(super::ENOTSOCK),
+            | FdKind::NamespacePath
+            | FdKind::PtyMaster
+            | FdKind::PtySlave => Err(super::ENOTSOCK),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::ENOTSOCK),
         }
@@ -8580,7 +8738,9 @@ mod thread {
             | FdKind::LandlockRuleset
             | FdKind::Userfaultfd
             | FdKind::Namespace
-            | FdKind::NamespacePath => Err(super::EBADF),
+            | FdKind::NamespacePath
+            | FdKind::PtyMaster
+            | FdKind::PtySlave => Err(super::EBADF),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::EBADF),
         }
@@ -9982,6 +10142,9 @@ mod thread {
         /// System V IPC objects and their waiters.
         #[cfg(target_os = "linux")]
         ipc: ipc::Ipc,
+        /// The pseudoterminal pairs and their waiters.
+        #[cfg(target_os = "linux")]
+        ptys: pty::Ptys,
         /// Record and OFD locks, and the tasks waiting on them.
         locks: locks::Locks,
         /// Per-thread scheduling attributes and persona.
@@ -10421,6 +10584,8 @@ mod thread {
                 signals: signals::SignalRuntime::default(),
                 #[cfg(target_os = "linux")]
                 ipc: ipc::Ipc::default(),
+                #[cfg(target_os = "linux")]
+                ptys: pty::Ptys::default(),
                 locks: locks::Locks::default(),
                 #[cfg(target_os = "linux")]
                 sched: sched::SchedRuntime::default(),
@@ -13771,6 +13936,10 @@ mod thread {
                 }
                 (mask, ipc::mq_event_seqs(state, handle))
             }
+            #[cfg(target_os = "linux")]
+            FdKind::PtyMaster => pty::poll(state, pty::Side::Master, handle as u32),
+            #[cfg(target_os = "linux")]
+            FdKind::PtySlave => pty::poll(state, pty::Side::Slave, handle as u32),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => (0, (0, 0)),
         }

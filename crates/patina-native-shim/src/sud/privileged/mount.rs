@@ -241,7 +241,9 @@ pub(in crate::sud) fn fsconfig(_: &Credential, a: &[u64; 6]) -> Answer {
             | FdKind::LandlockRuleset
             | FdKind::Userfaultfd
             | FdKind::Namespace
-            | FdKind::NamespacePath => refuse(errno::EINVAL),
+            | FdKind::NamespacePath
+            | FdKind::PtyMaster
+            | FdKind::PtySlave => refuse(errno::EINVAL),
         },
     }
 }

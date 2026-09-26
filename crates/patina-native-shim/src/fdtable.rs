@@ -109,6 +109,16 @@ pub(crate) enum FdKind {
     /// [`FdKind::OPath`]; `handle` is the entry's index in `nsfs::ENTRIES`.
     #[cfg(target_os = "linux")]
     NamespacePath,
+    /// A pseudoterminal master (`/dev/ptmx`; 6.8's `ptm_unix98_ops` tty on
+    /// devtmpfs's `ptmx` node); `handle` is the pair's devpts index in
+    /// `thread::pty`. One description per pair: every open of `/dev/ptmx`
+    /// makes a new pair.
+    #[cfg(target_os = "linux")]
+    PtyMaster,
+    /// A pseudoterminal slave (`/dev/pts/<index>`, or `TIOCGPTPEER` on its
+    /// master; `pty_unix98_ops`); `handle` is the pair's devpts index.
+    #[cfg(target_os = "linux")]
+    PtySlave,
     /// A virtual kqueue; `handle` is the registry id.
     #[cfg(target_os = "macos")]
     Kqueue,
@@ -150,6 +160,10 @@ impl FdKind {
             FdKind::NamespacePath => 19,
             #[cfg(target_os = "linux")]
             FdKind::Inotify => 20,
+            #[cfg(target_os = "linux")]
+            FdKind::PtyMaster => 21,
+            #[cfg(target_os = "linux")]
+            FdKind::PtySlave => 22,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => 11,
         }
@@ -177,7 +191,9 @@ impl FdKind {
             | FdKind::LandlockRuleset
             | FdKind::Userfaultfd
             | FdKind::Namespace
-            | FdKind::NamespacePath => false,
+            | FdKind::NamespacePath
+            | FdKind::PtyMaster
+            | FdKind::PtySlave => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }
@@ -212,7 +228,9 @@ impl FdKind {
             | FdKind::LandlockRuleset
             | FdKind::Userfaultfd
             | FdKind::Inotify
-            | FdKind::Namespace => false,
+            | FdKind::Namespace
+            | FdKind::PtyMaster
+            | FdKind::PtySlave => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }
@@ -221,8 +239,8 @@ impl FdKind {
     /// Whether the description's `llseek` is `noop_llseek` (Linux): a seek
     /// leaves the position, always 0, where it is. The entropy device's
     /// (`random_fops`) and the eventfd, epoll, signalfd, timerfd,
-    /// userfaultfd and inotify files' are; a pidfd, a Landlock ruleset and a
-    /// namespace file have none (`ESPIPE`).
+    /// userfaultfd and inotify files' are; a pidfd, a Landlock ruleset, a
+    /// namespace file and a tty (`no_llseek`) have none (`ESPIPE`).
     pub(crate) fn seeks_nowhere(self) -> bool {
         match self {
             FdKind::Urandom => cfg!(target_os = "linux"),
@@ -246,7 +264,9 @@ impl FdKind {
             | FdKind::Pidfd
             | FdKind::LandlockRuleset
             | FdKind::Namespace
-            | FdKind::NamespacePath => false,
+            | FdKind::NamespacePath
+            | FdKind::PtyMaster
+            | FdKind::PtySlave => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }
@@ -367,6 +387,13 @@ impl GuestFdTable {
             index += 1;
         }
         Err(EMFILE)
+    }
+
+    /// Whether a number is free for [`Self::install`] (`EMFILE` otherwise):
+    /// what `get_unused_fd_flags` judges before an open it precedes.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn has_free(&self) -> Result<(), c_int> {
+        self.lowest_free(0).map(|_| ())
     }
 
     fn set_slot(&mut self, index: usize, slot: Slot) {

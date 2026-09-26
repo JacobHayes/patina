@@ -66,8 +66,9 @@ pub(crate) const RESOLVE_BENEATH: u32 = 1 << 2;
 pub(crate) const RESOLVE_IN_ROOT: u32 = 1 << 3;
 /// Follow no symlink (`RESOLVE_NO_SYMLINKS`): meeting one is `ELOOP`.
 pub(crate) const RESOLVE_NO_SYMLINKS: u32 = 1 << 4;
-/// Cross no mount (`RESOLVE_NO_XDEV`): the volume is one mount, and the one
-/// entry outside it, `/dev/urandom`, is `EXDEV`.
+/// Cross no mount (`RESOLVE_NO_XDEV`): the volume is one mount, and the
+/// entries outside it (`/dev/urandom`, `/dev/ptmx`, `/dev/tty`, devpts at
+/// `/dev/pts`) are `EXDEV`.
 pub(crate) const RESOLVE_NO_XDEV: u32 = 1 << 5;
 /// Resolve from the cache alone (`RESOLVE_CACHED`). Every lookup here is in
 /// memory, so the walk is unchanged; the open refuses a creating or
@@ -93,6 +94,21 @@ pub(crate) const RESOLVE_SCOPE_FLAGS: u32 = RESOLVE_BENEATH
 /// it only through a symlink or a `..` goes to the volume instead.
 pub(crate) const URANDOM: &str = "/dev/urandom";
 
+/// The pseudoterminal multiplexer, devtmpfs's `ptmx` node (Linux), resolved
+/// the same way.
+#[cfg(target_os = "linux")]
+pub(crate) const PTMX: &str = "/dev/ptmx";
+
+/// Where devpts is mounted (Linux): its root, whose entries are the live
+/// pseudoterminals' slave nodes by index, resolved the same way.
+#[cfg(target_os = "linux")]
+pub(crate) const DEVPTS: &str = "/dev/pts";
+
+/// The controlling terminal's alias, devtmpfs's `tty` node (Linux), resolved
+/// the same way.
+#[cfg(target_os = "linux")]
+pub(crate) const TTY: &str = "/dev/tty";
+
 /// An entry the resolver answers itself, without the volume: the shim owns
 /// its node. Every path operation matches it ([`Resolution::Virtual`]) and
 /// answers as the pinned kernel does for that node, or stops the run by name
@@ -105,6 +121,22 @@ pub(crate) enum Virtual {
     /// `nsfs::ENTRIES`.
     #[cfg(target_os = "linux")]
     Namespace(usize),
+    /// The pseudoterminal multiplexer, [`PTMX`].
+    #[cfg(target_os = "linux")]
+    Ptmx,
+    /// `/dev/pts/<index>`: a devpts name in its canonical decimal spelling,
+    /// the slave node of the pair with that index while one is live
+    /// (`thread::pty::node`), no entry otherwise.
+    #[cfg(target_os = "linux")]
+    Pts(u32),
+    /// devpts's root, [`DEVPTS`]: a directory the model does not list or
+    /// describe, answered only where the answer needs neither.
+    #[cfg(target_os = "linux")]
+    Devpts,
+    /// `/dev/tty`, [`TTY`]: the caller's controlling terminal, which the
+    /// virtual process never has.
+    #[cfg(target_os = "linux")]
+    Tty,
 }
 
 impl Virtual {
@@ -116,6 +148,24 @@ impl Virtual {
             Virtual::Namespace(index) => {
                 format!("/proc/self/ns/{}", crate::nsfs::ENTRIES[index].name)
             }
+            #[cfg(target_os = "linux")]
+            Virtual::Ptmx => PTMX.to_owned(),
+            #[cfg(target_os = "linux")]
+            Virtual::Pts(index) => format!("{DEVPTS}/{index}"),
+            #[cfg(target_os = "linux")]
+            Virtual::Devpts => DEVPTS.to_owned(),
+            #[cfg(target_os = "linux")]
+            Virtual::Tty => TTY.to_owned(),
+        }
+    }
+
+    /// Whether the entry exists: a devpts index names a node only while its
+    /// pair is live; every other entry always exists.
+    pub(crate) fn exists(self) -> bool {
+        match self {
+            #[cfg(target_os = "linux")]
+            Virtual::Pts(index) => crate::thread::pty::node(index).is_some(),
+            _ => true,
         }
     }
 
@@ -212,9 +262,16 @@ fn replace_cwd(new: Fd) -> Result<(), c_int> {
 /// exist, be a directory, and be searchable by the one modeled identity
 /// (`path_permission(MAY_EXEC | MAY_CHDIR)`).
 pub(crate) fn searchable_directory(dirfd: c_int, path: &str) -> Result<Resolved, c_int> {
-    // Neither the entropy device nor a namespace file is a directory.
-    let Resolution::Volume(resolved) = resolve(dirfd, path, 0)? else {
-        return Err(ENOTDIR);
+    let resolved = match resolve(dirfd, path, 0)? {
+        Resolution::Volume(resolved) => resolved,
+        // devpts's root is a directory, but not one the model can hold.
+        #[cfg(target_os = "linux")]
+        Resolution::Virtual(entry @ Virtual::Devpts) => {
+            entry.unmodeled("holding as the working or root directory")
+        }
+        Resolution::Virtual(entry) if !entry.exists() => return Err(ENOENT),
+        // The devices and the namespace files are no directories.
+        Resolution::Virtual(_) => return Err(ENOTDIR),
     };
     let metadata = resolved.metadata.as_ref().ok_or(ENOENT)?;
     if metadata.kind != FsEntryKind::Directory {
@@ -311,6 +368,36 @@ fn child(parent: &[String], name: &str) -> String {
     }
 }
 
+/// The terminal entries a lexical path names: the multiplexer, the
+/// controlling terminal's alias, devpts's root, and a devpts index in its
+/// canonical decimal spelling (`devpts_pty_new` names a node `%d`). Any other
+/// name under devpts (its own `ptmx` node, a name no index spells, a path
+/// through a slave node) stops the run by name.
+#[cfg(target_os = "linux")]
+fn devices(path: &str) -> Option<Virtual> {
+    if path == PTMX {
+        return Some(Virtual::Ptmx);
+    }
+    if path == TTY {
+        return Some(Virtual::Tty);
+    }
+    let rest = path.strip_prefix(DEVPTS)?;
+    if rest.is_empty() {
+        return Some(Virtual::Devpts);
+    }
+    let name = rest.strip_prefix('/')?;
+    let canonical = !name.is_empty()
+        && name.bytes().all(|byte| byte.is_ascii_digit())
+        && (name == "0" || !name.starts_with('0'));
+    match name.parse::<u32>() {
+        Ok(index) if canonical => Some(Virtual::Pts(index)),
+        _ => crate::trap_fatal(&format!(
+            "{path} names no pseudoterminal devpts models (its root and /dev/pts/<index> are); \
+             failing closed"
+        )),
+    }
+}
+
 /// The path a descriptor's node has now — a directory descriptor for a relative
 /// path, any filesystem descriptor for the empty-path form.
 fn fd_path(guest_fd: c_int, empty_path: bool) -> Result<String, c_int> {
@@ -335,7 +422,9 @@ fn fd_path(guest_fd: c_int, empty_path: bool) -> Result<String, c_int> {
         | FdKind::MessageQueue
         | FdKind::Pidfd
         | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd => {
+        | FdKind::Userfaultfd
+        | FdKind::PtyMaster
+        | FdKind::PtySlave => {
             return Err(ENOTDIR);
         }
         // A namespace file's nsfs inode is a regular file, but no path
@@ -435,6 +524,18 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolution
                 return Err(EXDEV);
             }
             return Ok(Resolution::Virtual(Virtual::Urandom));
+        }
+        // A trailing `/` asks a device node for a directory (`ENOTDIR`), or
+        // a missing one for nothing (`ENOENT`).
+        #[cfg(target_os = "linux")]
+        if let Some(entry) = devices(&join(&lexical)) {
+            if flags & RESOLVE_NO_XDEV != 0 {
+                return Err(EXDEV);
+            }
+            if requires_directory && entry != Virtual::Devpts {
+                return Err(if entry.exists() { ENOTDIR } else { ENOENT });
+            }
+            return Ok(Resolution::Virtual(entry));
         }
         // A namespace file: a magic link on procfs to the namespace's nsfs
         // inode (a regular file). A mount-bound walk stops entering procfs

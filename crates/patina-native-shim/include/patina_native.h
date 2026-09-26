@@ -49,6 +49,9 @@ enum {
      * directory descriptor whether or not the caller asked. The description
      * keeps it as a status flag, which Linux's F_GETFL reports. */
     PATINA_O_DIRECTORY = 1u << 11,
+    /* The opened terminal must not become the caller's controlling terminal:
+     * read only by a pseudoterminal slave's open (Linux), never status. */
+    PATINA_O_NOCTTY = 1u << 12,
 };
 
 /*
@@ -84,6 +87,8 @@ enum {
     PATINA_FD_NAMESPACE = 18,   /* a namespace file, /proc/self/ns/<type> (Linux) */
     PATINA_FD_NAMESPACE_PATH = 19, /* a namespace file opened O_PATH (Linux) */
     PATINA_FD_INOTIFY = 20,  /* an inotify instance (Linux) */
+    PATINA_FD_PTY_MASTER = 21,  /* a pseudoterminal master, /dev/ptmx (Linux) */
+    PATINA_FD_PTY_SLAVE = 22,   /* a pseudoterminal slave, /dev/pts/N (Linux) */
 };
 
 enum {
@@ -538,6 +543,8 @@ enum {
     PATINA_FS_SOCKFS = 2,
     PATINA_FS_NSFS = 3, /* a namespace file (Linux): root's, on its own device */
     PATINA_FS_DEVTMPFS = 4, /* the entropy device (Linux): root's, on devtmpfs */
+    PATINA_FS_DEVPTS = 5, /* a pseudoterminal slave (Linux): the opener's, group tty, on devpts */
+    PATINA_FS_PTMX = 6, /* /dev/ptmx (Linux): root's, group tty, on devtmpfs */
 };
 enum {
     PATINA_VOLUME_DEV_MAJOR = 8,
@@ -546,6 +553,7 @@ enum {
     PATINA_SOCKFS_DEV_MINOR = 8,
     PATINA_NSFS_DEV_MINOR = 4,
     PATINA_DEVTMPFS_DEV_MINOR = 5,
+    PATINA_DEVPTS_DEV_MINOR = 24,
 };
 
 /*
@@ -671,6 +679,10 @@ int32_t patina_pid(void);
 int32_t patina_ppid(void);
 uint32_t patina_uid(void);
 uint32_t patina_gid(void);
+/* The owner stat reports for a node on the PATINA_FS_* filesystem `fs`: the
+ * caller's, but for the nodes the virtual kernel's boot or devpts makes
+ * (namespace files, the entropy device, /dev/ptmx, a pseudoterminal's slave). */
+void patina_node_owner(uint32_t fs, uint32_t *uid, uint32_t *gid);
 #ifdef __APPLE__
 /*
  * uname(3) on Darwin: the virtual Darwin kernel (`Darwin`, the run's node

@@ -7,15 +7,17 @@
 //!   characters past the kernel's 19 with `_POSIX_VDISABLE`; the master
 //!   answers the same, its peer's (`tty_mode_ioctl` acts on `tty->link`);
 //! * a pipe is ENOTTY (fs/ioctl holds the other kinds to `TCGETS`), a
-//!   closed number EBADF.
+//!   closed number EBADF;
+//! * the pair's window size starts zero, and one the master sets
+//!   (`TIOCSWINSZ`) is what the peer and the master read back
+//!   (`TIOCGWINSZ`, `tiocgwinsz` of `tty->link` for the master).
 //!
 //! Every call starts from a termios of 0xAA bytes, so each recorded byte is
 //! one glibc wrote.
 //!
 //! The pipe and the closed number come first. libc only.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::observe::Norm;
 use crate::probe::{AT_FDCWD, Probe, neg};
 use crate::vehicle::{Vehicle, fold_errno};
@@ -51,6 +53,42 @@ fn get(p: &Probe, fd: c_int, what: &str) -> (i64, Option<termios>) {
     };
     event.emit();
     (r, (r == 0).then_some(t))
+}
+
+/// `ioctl(fd, request, &winsize)` for a window-size request: the result and
+/// the size as it stands after the call.
+fn winsize(
+    p: &Probe,
+    fd: c_int,
+    request: c_ulong,
+    set: Option<[u16; 4]>,
+    what: &str,
+) -> (i64, [u16; 4]) {
+    let [row, col, xpixel, ypixel] = set.unwrap_or([0xAAAA; 4]);
+    let mut ws = libc::winsize {
+        ws_row: row,
+        ws_col: col,
+        ws_xpixel: xpixel,
+        ws_ypixel: ypixel,
+    };
+    // SAFETY: a live winsize for the request to read or fill.
+    let r = fold_errno(i64::from(unsafe { ioctl(fd, request, &mut ws) }));
+    let size = [ws.ws_row, ws.ws_col, ws.ws_xpixel, ws.ws_ypixel];
+    p.rec
+        .event(
+            if set.is_some() {
+                "TIOCSWINSZ"
+            } else {
+                "TIOCGWINSZ"
+            },
+            r,
+        )
+        .arg("fd", fd)
+        .norm("args.fd", Norm::Relative("fd"))
+        .arg("what", what)
+        .field("size", size.to_vec())
+        .emit();
+    (r, size)
 }
 
 /// The pts driver's initial settings, as glibc hands them out.
@@ -105,6 +143,24 @@ pub fn run(p: &Probe) {
         "the peer answers the pts driver's initial settings",
         r == 0 && t.is_some_and(standard),
     );
+
+    p.check(
+        "the pair's window size starts zero",
+        winsize(p, peer, TIOCGWINSZ, None, "pty peer") == (0, [0; 4]),
+    );
+    let size = [24, 80, 640, 480];
+    p.check(
+        "the master sets the pair's window size",
+        winsize(p, master, TIOCSWINSZ, Some(size), "pty master").0 == 0,
+    );
+    p.check(
+        "the peer reads it",
+        winsize(p, peer, TIOCGWINSZ, None, "pty peer") == (0, size),
+    );
+    p.check(
+        "and so does the master",
+        winsize(p, master, TIOCGWINSZ, None, "pty master") == (0, size),
+    );
     p.close(peer);
     p.close(master);
 }
@@ -120,26 +176,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
     ],
     symbols: &["tcgetattr", "ioctl", "openat", "pipe2", "close"],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "the virtual machine has no pseudoterminals: an open of /dev/ptmx answers ENOSYS (no terminal device is modeled)",
-            failure: Failure::Differs(&[
-                Difference::field(7, "openat", "ret", Observed::Int(-1)),
-                Difference::field(7, "openat", "errno", Observed::Str("ENOSYS")),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "without a pseudoterminal the pty half cannot run; tcgetattr's answers for a pipe and a closed number match",
-            failure: Failure::Stops {
-                events: 8,
-                ending: Ending::Exit(101),
-                diagnostic: "fd/termios: cannot continue: open a pseudoterminal master",
-            },
-        },
-    ],
     ..DEFAULTS
 };

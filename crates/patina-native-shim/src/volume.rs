@@ -49,11 +49,13 @@ const ANON_INODE_FS_MAGIC: i64 = 0x0904_1934;
 const TMPFS_MAGIC: i64 = 0x0102_1994;
 const MQUEUE_MAGIC: i64 = 0x1980_0202;
 const NSFS_MAGIC: i64 = 0x6e73_6673;
+const DEVPTS_SUPER_MAGIC: i64 = 0x1cd1;
 
 /// `statfs(2)` `f_flags`: the answer is valid (`ST_VALID`, set by
 /// `calculate_f_flags` on every answer) and the mount's atime policy.
 const ST_VALID: i64 = 0x0020;
 const ST_NOSUID: i64 = 0x0002;
+const ST_NOEXEC: i64 = 0x0008;
 const ST_RELATIME: i64 = 0x1000;
 
 /// `NAME_MAX`.
@@ -75,10 +77,11 @@ enum Filesystem {
     Devtmpfs,
     Mqueue,
     Nsfs,
+    Devpts,
 }
 
 impl Filesystem {
-    const ALL: [Filesystem; 7] = [
+    const ALL: [Filesystem; 8] = [
         Filesystem::Volume,
         Filesystem::Pipefs,
         Filesystem::Sockfs,
@@ -86,6 +89,7 @@ impl Filesystem {
         Filesystem::Devtmpfs,
         Filesystem::Mqueue,
         Filesystem::Nsfs,
+        Filesystem::Devpts,
     ];
 
     /// The filesystem type as the kernel registers it (`register_filesystem`,
@@ -99,6 +103,7 @@ impl Filesystem {
             Filesystem::AnonInodefs | Filesystem::Nsfs => None,
             Filesystem::Devtmpfs => Some("devtmpfs"),
             Filesystem::Mqueue => Some("mqueue"),
+            Filesystem::Devpts => Some("devpts"),
         }
     }
 
@@ -111,6 +116,7 @@ impl Filesystem {
             Filesystem::Devtmpfs => DEVTMPFS_DEVICE,
             Filesystem::Mqueue => MQUEUE_DEVICE,
             Filesystem::Nsfs => fs_device(crate::PATINA_FS_NSFS),
+            Filesystem::Devpts => fs_device(crate::PATINA_FS_DEVPTS),
         }
     }
 
@@ -154,6 +160,16 @@ impl Filesystem {
                 f_frsize: crate::PAGE_SIZE as i64,
                 f_flags: ST_VALID | ST_NOSUID | ST_RELATIME,
                 f_spare: [0; 4],
+            },
+            // `simple_statfs`, on a mount of the namespace.
+            Filesystem::Devpts => KernelStatfs {
+                f_type: DEVPTS_SUPER_MAGIC,
+                f_bsize: crate::PAGE_SIZE as i64,
+                f_fsid: self.fsid(),
+                f_namelen: NAME_MAX,
+                f_frsize: crate::PAGE_SIZE as i64,
+                f_flags: ST_VALID | ST_NOSUID | ST_NOEXEC | ST_RELATIME,
+                ..KernelStatfs::default()
             },
             Filesystem::Pipefs
             | Filesystem::Sockfs
@@ -203,6 +219,7 @@ impl Filesystem {
         match self {
             Filesystem::Volume => MOUNTS[0].ids(),
             Filesystem::Devtmpfs => MOUNTS[1].ids(),
+            Filesystem::Devpts => MOUNTS[3].ids(),
             Filesystem::Nsfs => internal(3, 4),
             Filesystem::Sockfs => internal(9, 10),
             Filesystem::Pipefs => internal(15, 17),
@@ -220,7 +237,18 @@ impl Filesystem {
             | Filesystem::Sockfs
             | Filesystem::AnonInodefs
             | Filesystem::Mqueue
-            | Filesystem::Nsfs => false,
+            | Filesystem::Nsfs
+            | Filesystem::Devpts => false,
+        }
+    }
+
+    /// The superblock's block size (`s_blocksize`, what `FIGETBSZ`
+    /// answers): `statfs`'s `f_bsize`, but devpts's 1 KiB, which
+    /// `simple_statfs` does not report.
+    fn block_size(self) -> i32 {
+        match self {
+            Filesystem::Devpts => 1024,
+            _ => self.describe().f_bsize as i32,
         }
     }
 
@@ -230,7 +258,8 @@ impl Filesystem {
             PATINA_FS_PIPEFS => Filesystem::Pipefs,
             PATINA_FS_SOCKFS => Filesystem::Sockfs,
             crate::PATINA_FS_NSFS => Filesystem::Nsfs,
-            crate::PATINA_FS_DEVTMPFS => Filesystem::Devtmpfs,
+            crate::PATINA_FS_DEVTMPFS | crate::PATINA_FS_PTMX => Filesystem::Devtmpfs,
+            crate::PATINA_FS_DEVPTS => Filesystem::Devpts,
             _ => Filesystem::Volume,
         }
     }
@@ -248,7 +277,12 @@ const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
 /// records one. The mask bits, and the mount id.
 pub(crate) fn statx_extra(fs: u32, mask: u32) -> (u32, u64) {
     let filesystem = Filesystem::of_node(fs);
-    let mount = filesystem.mount();
+    // The multiplexer's node is devtmpfs's, bound at its own path.
+    let mount = if fs == crate::PATINA_FS_PTMX {
+        MOUNTS[2].ids()
+    } else {
+        filesystem.mount()
+    };
     let btime = if mask & STATX_BTIME != 0 && filesystem.has_btime() {
         STATX_BTIME
     } else {
@@ -299,7 +333,8 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
         | FdKind::Userfaultfd => Ok(Filesystem::AnonInodefs),
         FdKind::Namespace | FdKind::NamespacePath => Ok(Filesystem::Nsfs),
         FdKind::MessageQueue => Ok(Filesystem::Mqueue),
-        FdKind::Urandom => Ok(Filesystem::Devtmpfs),
+        FdKind::Urandom | FdKind::PtyMaster => Ok(Filesystem::Devtmpfs),
+        FdKind::PtySlave => Ok(Filesystem::Devpts),
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Err(EBADF),
     }
 }
@@ -307,7 +342,7 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
 /// The block size of the superblock a descriptor's node is on
 /// (`FIGETBSZ`): `statfs`'s `f_bsize`.
 pub(crate) fn block_size(raw_fd: c_int) -> Result<i32, c_int> {
-    descriptor_filesystem(raw_fd).map(|filesystem| filesystem.describe().f_bsize as i32)
+    descriptor_filesystem(raw_fd).map(Filesystem::block_size)
 }
 
 /// Copy a description out, as `do_statfs_native` does last: a NULL buffer is
@@ -344,6 +379,18 @@ pub unsafe extern "C" fn patina_statfs(path: *const c_char, out: *mut KernelStat
         }
         Ok(paths::Resolution::Virtual(paths::Virtual::Namespace(_))) => {
             copy_out(Filesystem::Nsfs.describe(), out)
+        }
+        Ok(paths::Resolution::Virtual(paths::Virtual::Ptmx)) => {
+            copy_out(Filesystem::Devtmpfs.describe(), out)
+        }
+        Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Pts(_))) if !entry.exists() => {
+            fail(ENOENT)
+        }
+        Ok(paths::Resolution::Virtual(paths::Virtual::Pts(_) | paths::Virtual::Devpts)) => {
+            copy_out(Filesystem::Devpts.describe(), out)
+        }
+        Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Tty)) => {
+            entry.unmodeled("the filesystem statistics")
         }
         Err(errno) => fail(errno),
     }
@@ -429,15 +476,19 @@ pub(crate) struct Mount {
 const MNT_UNIQUE_ID_BASE: u64 = 1 << 32;
 /// `MOUNT_ATTR_NOSUID`.
 const MOUNT_ATTR_NOSUID: u64 = 0x2;
+/// `MOUNT_ATTR_NOEXEC`.
+const MOUNT_ATTR_NOEXEC: u64 = 0x8;
 
 /// The virtual machine's mounts, in the order they were made (so in unique
 /// id order, the order `listmount` walks): the volume at `/`, the
-/// namespace's root; and the entropy device, a bind of devtmpfs's
-/// `urandom` node onto `/dev/urandom` (what `statfs` reports it on, and the
-/// crossing `RESOLVE_NO_XDEV` refuses). The kernel's internal mounts
-/// (pipefs, sockfs, anon_inodefs, the IPC namespace's mqueue) are in no
-/// namespace, as in the kernel.
-pub(crate) const MOUNTS: [Mount; 2] = [
+/// namespace's root; the entropy device, a bind of devtmpfs's `urandom`
+/// node onto `/dev/urandom` (what `statfs` reports it on, and the crossing
+/// `RESOLVE_NO_XDEV` refuses); the pseudoterminal multiplexer, a bind of
+/// devtmpfs's `ptmx` node onto `/dev/ptmx`, the same way; and devpts at
+/// `/dev/pts`, mounted as the pinned host mounts it (`nosuid,noexec`). The
+/// kernel's internal mounts (pipefs, sockfs, anon_inodefs, the IPC
+/// namespace's mqueue) are in no namespace, as in the kernel.
+pub(crate) const MOUNTS: [Mount; 4] = [
     Mount {
         id: 1,
         unique: MNT_UNIQUE_ID_BASE + 1,
@@ -455,6 +506,24 @@ pub(crate) const MOUNTS: [Mount; 2] = [
         root: "/urandom",
         point: paths::URANDOM,
         attr: MOUNT_ATTR_NOSUID,
+    },
+    Mount {
+        id: 4,
+        unique: MNT_UNIQUE_ID_BASE + 3,
+        parent: 0,
+        filesystem: Filesystem::Devtmpfs,
+        root: "/ptmx",
+        point: paths::PTMX,
+        attr: MOUNT_ATTR_NOSUID,
+    },
+    Mount {
+        id: 5,
+        unique: MNT_UNIQUE_ID_BASE + 5,
+        parent: 0,
+        filesystem: Filesystem::Devpts,
+        root: "/",
+        point: paths::DEVPTS,
+        attr: MOUNT_ATTR_NOSUID | MOUNT_ATTR_NOEXEC,
     },
 ];
 
@@ -502,10 +571,11 @@ impl Mount {
 /// the model has (tmpfs, sysfs, proc, …), which a caller listing them finds
 /// missing either way.
 #[cfg(target_arch = "x86_64")]
-const REGISTERED: [Filesystem; 5] = [
+const REGISTERED: [Filesystem; 6] = [
     Filesystem::Devtmpfs,
     Filesystem::Sockfs,
     Filesystem::Pipefs,
+    Filesystem::Devpts,
     Filesystem::Volume,
     Filesystem::Mqueue,
 ];

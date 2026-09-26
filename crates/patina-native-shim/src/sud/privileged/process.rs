@@ -203,7 +203,9 @@ pub(in crate::sud) fn setns(credential: &Credential, a: &[u64; 6]) -> Answer {
             | FdKind::Inotify
             | FdKind::LandlockRuleset
             | FdKind::Userfaultfd
-            | FdKind::NamespacePath => refuse(errno::EINVAL),
+            | FdKind::NamespacePath
+            | FdKind::PtyMaster
+            | FdKind::PtySlave => refuse(errno::EINVAL),
         },
     }
 }

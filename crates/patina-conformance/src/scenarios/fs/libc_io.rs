@@ -16,8 +16,7 @@
 //!
 //! libc only.
 
-use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::observe::Norm;
 use crate::probe::{AT_FDCWD, Probe, neg};
 use crate::vehicle::{Vehicle, errno, fold_errno};
@@ -232,22 +231,5 @@ pub const SCENARIO: Scenario = Scenario {
         "pipe2",
         "close",
     ],
-    gaps: &[Gap {
-        status: Status::ByDesign,
-        vehicles: &[Vehicle::Libc],
-        what: "a run has no terminal: the only device the virtual volume serves is /dev/urandom (native shim paths.rs), so opening /dev/ptmx is ENOSYS, and the shim's isatty answers not-a-terminal for every descriptor (c/posix/fd_io.c isatty: host terminal state must not reach the guest)",
-        failure: Failure::Differs(&[
-            Difference::field(56, "openat", "ret", Observed::Int(-1)),
-            Difference::field(56, "openat", "errno", Observed::Str("ENOSYS")),
-            Difference::check(57, "open a pseudoterminal master"),
-            Difference::field(58, "isatty", "args.fd", Observed::Int(-38)),
-            Difference::field(58, "isatty", "ret", Observed::Int(-1)),
-            Difference::field(58, "isatty", "errno", Observed::Str("EBADF")),
-            Difference::check(59, "a terminal is one"),
-            Difference::field(66, "close", "args.fd", Observed::Int(-38)),
-            Difference::field(66, "close", "ret", Observed::Int(-1)),
-            Difference::field(66, "close", "errno", Observed::Str("EBADF")),
-        ]),
-    }],
     ..DEFAULTS
 };

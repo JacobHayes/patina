@@ -142,6 +142,9 @@ pub(super) fn openat_patina_flags(flags: u64) -> u32 {
     if flags & O_DIRECTORY != 0 {
         patina_flags |= PATINA_O_DIRECTORY;
     }
+    if flags & uapi::O_NOCTTY as u64 != 0 {
+        patina_flags |= PATINA_O_NOCTTY;
+    }
     patina_flags
 }
 
@@ -162,12 +165,12 @@ pub(super) const OPENAT_SUPPORTED_FLAGS: u64 = O_ACCMODE
     | O_NOFOLLOW
     | O_DIRECTORY
     | O_PATH
-    | O_NONBLOCK;
+    | O_NONBLOCK
+    | uapi::O_NOCTTY as u64;
 
 /// Every flag `open(2)` defines (`VALID_OPEN_FLAGS`): what `openat2` accepts
 /// before refusing the rest, where `openat` silently drops unknown bits.
 const OPEN_VALID_FLAGS: u64 = OPENAT_SUPPORTED_FLAGS
-    | uapi::O_NOCTTY as u64
     | uapi::__O_SYNC as u64
     | uapi::O_DSYNC as u64
     | uapi::FASYNC as u64
@@ -386,6 +389,17 @@ fn stat_blocks(length: u64) -> u64 {
     length.div_ceil(STAT_BLOCK_SIZE) * (STAT_BLOCK_SIZE / 512)
 }
 
+/// `st_blksize`: the volume's block, but for a devpts node, whose inode
+/// takes its superblock's 1 KiB (`devpts_fill_super`). Byte for byte with
+/// the C `patina_stat_blksize`.
+fn stat_blksize(values: &StatValues) -> u64 {
+    if values.fs == crate::PATINA_FS_DEVPTS {
+        1024
+    } else {
+        STAT_BLOCK_SIZE
+    }
+}
+
 /// The one virtual volume's mount id (`stx_mnt_id`), the C
 /// `PATINA_STATX_MNT_ID`.
 const STATX_MNT_ID_VALUE: u64 = crate::volume::ROOT_MOUNT.id as u64;
@@ -404,15 +418,10 @@ pub(super) fn stat_mode(values: &StatValues) -> u32 {
     kind | (values.mode & 0o7777)
 }
 
-/// The owner `stat` reports, byte for byte with the C `patina_stat_uid`/
-/// `patina_stat_gid`: the one modeled identity's, but for a namespace file's
-/// nsfs inode and the entropy device, which are root's.
+/// The owner `stat` reports, the one the C door reports too
+/// ([`crate::node_owner`]).
 pub(crate) fn stat_owner(values: &StatValues) -> (u32, u32) {
-    if matches!(values.fs, crate::PATINA_FS_NSFS | crate::PATINA_FS_DEVTMPFS) {
-        return (0, 0);
-    }
-    // SAFETY: plain constant reads.
-    unsafe { (patina_uid(), patina_gid()) }
+    crate::node_owner(values.fs)
 }
 
 /// The kernel's `new_encode_dev`: the 32-bit device word `struct stat` carries.
@@ -485,7 +494,7 @@ impl KernelStat {
             st_size: values.length as i64,
             st_uid: stat_owner(values).0,
             st_gid: stat_owner(values).1,
-            st_blksize: STAT_BLOCK_SIZE as _,
+            st_blksize: stat_blksize(values) as _,
             st_blocks: stat_blocks(values.length) as i64,
             st_atime: values.atime.sec,
             st_atime_nsec: values.atime.nsec as _,
@@ -646,7 +655,7 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
     };
     let mut stx = Statx {
         stx_mask: STATX_BASIC_STATS | extra,
-        stx_blksize: STAT_BLOCK_SIZE as u32,
+        stx_blksize: stat_blksize(&values) as u32,
         stx_mode: stat_mode(&values) as u16,
         stx_nlink: values.nlink,
         stx_uid: stat_owner(&values).0,

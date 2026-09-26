@@ -247,6 +247,12 @@ fn getfl_to_kernel(status: u32) -> i64 {
     if status & PATINA_O_OPENED != 0 {
         flags |= O_LARGEFILE;
     }
+    // A slave opened through `TIOCGPTPEER` keeps the `O_CLOEXEC` it was
+    // opened with in `f_flags` (`dentry_open` strips only `O_CREAT`,
+    // `O_EXCL`, `O_NOCTTY` and `O_TRUNC`).
+    if status & PATINA_O_CLOEXEC != 0 {
+        flags |= O_CLOEXEC;
+    }
     flags as i64
 }
 

@@ -198,7 +198,14 @@ fn parent_beneath(parent: c_int) -> Answer {
         {
             refuse(errno::EBADFD)
         }
-        FdKind::File | FdKind::Dir | FdKind::OPath | FdKind::Urandom => Ok(0),
+        // devtmpfs's `ptmx` node and a devpts node are on mounts of the
+        // namespace, like the entropy device.
+        FdKind::File
+        | FdKind::Dir
+        | FdKind::OPath
+        | FdKind::Urandom
+        | FdKind::PtyMaster
+        | FdKind::PtySlave => Ok(0),
         FdKind::Pipe => match crate::thread::pipe_filesystem(parent) {
             Some(crate::PATINA_FS_PIPEFS) => refuse(errno::EBADFD),
             Some(_) => Ok(0),

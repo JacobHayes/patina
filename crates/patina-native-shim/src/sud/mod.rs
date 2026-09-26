@@ -248,9 +248,6 @@ unsafe extern "C" {
     fn patina_sync() -> c_int;
     fn patina_syncfs(fd: c_int) -> c_int;
     fn patina_fstatfs(fd: c_int, out: *mut c_void) -> c_int;
-    // The one modeled identity, for st_uid/st_gid.
-    fn patina_uid() -> u32;
-    fn patina_gid() -> u32;
     // Timestamps, ownership and sizes: the same entries the C utimensat/chown/
     // truncate/fallocate families call.
     fn patina_utimensat(
@@ -441,6 +438,8 @@ const PATINA_O_CLOEXEC: u32 = 1 << 9;
 const PATINA_O_OPENED: u32 = 1 << 10;
 
 const PATINA_O_DIRECTORY: u32 = 1 << 11;
+
+const PATINA_O_NOCTTY: u32 = 1 << 12;
 
 // Patina path-resolution flags (see `patina_native.h`).
 const PATINA_RESOLVE_NOFOLLOW: u32 = 1 << 0;

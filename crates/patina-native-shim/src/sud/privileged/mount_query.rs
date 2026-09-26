@@ -418,26 +418,28 @@ mod tests {
 
     #[test]
     fn listmount_lists_what_is_reachable() {
-        let [root, device] = MOUNTS;
+        let uniques = MOUNTS.map(|mount| mount.unique);
+        let [root, _, _, last] = MOUNTS;
+        let below = &uniques[1..];
         let mut ids = [0u64; 8];
         let below_root = request(24, 0, LSMT_ROOT, 0);
-        assert_eq!(listmount_of(&below_root, &mut ids), 2);
-        assert_eq!(ids[..2], [root.unique, device.unique]);
+        assert_eq!(listmount_of(&below_root, &mut ids), 4);
+        assert_eq!(ids[..4], uniques);
         // Below a mount: not the mount itself.
-        assert_eq!(listmount_of(&request(24, 0, root.unique, 0), &mut ids), 1);
-        assert_eq!(ids[0], device.unique);
-        assert_eq!(listmount_of(&request(24, 0, device.unique, 0), &mut ids), 0);
+        assert_eq!(listmount_of(&request(24, 0, root.unique, 0), &mut ids), 3);
+        assert_eq!(ids[..3], *below);
+        assert_eq!(listmount_of(&request(24, 0, last.unique, 0), &mut ids), 0);
         // Past a last id; `u64::MAX` wraps to the start.
         assert_eq!(
             listmount_of(&request(24, 0, LSMT_ROOT, root.unique), &mut ids),
-            1
+            3
         );
-        assert_eq!(ids[0], device.unique);
+        assert_eq!(ids[..3], *below);
         assert_eq!(
             listmount_of(&request(24, 0, LSMT_ROOT, u64::MAX), &mut ids),
-            2
+            4
         );
-        assert_eq!(listmount_of(&request(24, 0, LSMT_ROOT, 5), &mut ids), 2);
+        assert_eq!(listmount_of(&request(24, 0, LSMT_ROOT, 5), &mut ids), 4);
         // Room for one.
         assert_eq!(listmount_of(&below_root, &mut ids[..1]), 1);
         assert_eq!(listmount_of(&below_root, &mut ids[..0]), 0);
@@ -452,7 +454,7 @@ mod tests {
             listmount(credential(), &args(0, 0, 1_000_001, 0)),
             e(errno::EOVERFLOW)
         );
-        assert_eq!(listmount(credential(), &args(r, at, 1_000_000, 0)), Ok(2));
+        assert_eq!(listmount(credential(), &args(r, at, 1_000_000, 0)), Ok(4));
         assert_eq!(
             listmount(credential(), &args(0, 0, 1_000_001, 1)),
             e(errno::EINVAL)
@@ -469,6 +471,6 @@ mod tests {
         let a = absent.as_ptr() as u64;
         assert_eq!(listmount(credential(), &args(a, 0, 8, 0)), e(errno::ENOENT));
         assert_eq!(listmount(credential(), &args(r, 0, 8, 0)), e(errno::EFAULT));
-        assert_eq!(listmount(credential(), &args(r, at, 8, 1 << 32)), Ok(2));
+        assert_eq!(listmount(credential(), &args(r, at, 8, 1 << 32)), Ok(4));
     }
 }

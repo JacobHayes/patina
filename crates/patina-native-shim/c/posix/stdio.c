@@ -52,8 +52,9 @@ FILE *stderr = &patina_sentinel_stderr_storage;
  *   (`_IO_file_doallocate`): an fstat of its descriptor, `st_blksize` bytes
  *   when that answers below BUFSIZ and BUFSIZ otherwise (a closed descriptor
  *   included), or libio's one-byte `_shortbuf` when it is unbuffered. A
- *   terminal would make it line buffered, which cannot happen here: no
- *   descriptor is a terminal under patina (`isatty`). Darwin's libc
+ *   terminal (a character device with a pseudoterminal slave's major, or one
+ *   `isatty` accepts) makes it line buffered; the captured streams never
+ *   are one, but a pseudoterminal a guest puts at 1 or 2 is. Darwin's libc
  *   (`__swhatbuf`) takes `st_blksize` whenever fstat answers, its BUFSIZ
  *   (1024) otherwise.
  * - stdout starts fully buffered, stderr unbuffered. `setvbuf`, `setbuf`,
@@ -204,7 +205,10 @@ static size_t patina_stream_write_out(struct patina_stream *s, const unsigned ch
  * descriptor's fstat answer. The captured streams have no node, so fstat
  * answers EBADF for them where the host's pipe or terminal would answer: the
  * size falls back as for a failed fstat, and errno stays as the caller left
- * it, as it does over the host's descriptor. */
+ * it, as it does over the host's descriptor. On Linux a character device that
+ * is a terminal makes the stream line buffered: glibc's DEV_TTY_P (the
+ * pseudoterminal slaves' majors, 136-143) or `local_isatty`, which keeps
+ * errno. */
 static void patina_stream_doallocate(struct patina_stream *s) {
     size_t size = PATINA_STDIO_BUFSIZ;
     int saved = errno;
@@ -214,6 +218,12 @@ static void patina_stream_doallocate(struct patina_stream *s) {
 #ifdef __APPLE__
         if (status.st_blksize > 0) size = (size_t)status.st_blksize;
 #else
+        if (S_ISCHR(status.st_mode)) {
+            unsigned major = values.rdev_major;
+            int before = errno;
+            if ((major >= 136 && major <= 143) || patina_isatty(s->fd)) s->line = 1;
+            errno = before;
+        }
         if (status.st_blksize > 0 && (size_t)status.st_blksize < size) {
             size = (size_t)status.st_blksize;
         }
@@ -646,7 +656,13 @@ static int patina_stream_setvbuf(struct patina_stream *s, unsigned char *buffer,
             s->line = 0;
             s->unbuffered = 0;
             if (buffer == NULL) {
-                if (s->bytes == NULL) patina_stream_doallocate(s);
+                /* Allocated now, with line buffering off again, so a later
+                 * allocation cannot take a terminal's line buffering back
+                 * (`_IO_setvbuf`). */
+                if (s->bytes == NULL) {
+                    patina_stream_doallocate(s);
+                    s->line = 0;
+                }
                 goto out;
             }
             break;
