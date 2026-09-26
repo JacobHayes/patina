@@ -435,11 +435,21 @@ forwards into the same dispatcher instead of its two-number allowlist.
   tail, edge-triggered ones re-queued on each wakeup their source makes (an
   arrival, a receive that frees room for a writer, a condition rising),
   EPOLLEXCLUSIVE validated (its wake-one is "one or more": every instance
-  sees the event). Pipe writes of at most `PIPE_BUF` bytes are atomic. Trace
+  sees the event). Pipe writes of at most `PIPE_BUF` bytes are atomic.
+  inotify is an fd kind over the deterministic filesystem
+  (`thread/inotify.rs`): watches name inodes, and the filesystem entries
+  queue events synchronously through `fsnotify.rs` (the kernel's
+  `fsnotify.h` hooks: entry events to the directory, file events to the
+  directory then the file, self events to the inode; a deleted inode's
+  `IN_DELETE_SELF` waits for its last holder), merged and overflowed as
+  `fs/notify` does; a watch on an unlinked open file's former directory
+  sees nothing, as under `IN_EXCL_UNLINK`, and there is no per-user watch
+  limit; a watch for `IN_ATTRIB`, `IN_OPEN` or `IN_CLOSE_*` is still a
+  named fatal. Trace
   format 12 adds `net_bind_shared`, `net_connect`, `net_mark` and the
   unreachable send disposition. Left: urgent data (`MSG_OOB` on a stream is
   EOPNOTSUPP, so select's exception set stays empty), `--net-default-route`
-  (no default route: off-table is ENETUNREACH), inotify (still a trap),
+  (no default route: off-table is ENETUNREACH),
   fanotify (a named trap by design), the `SIOCGIF*` requests and every
   IP-level control message on macOS (the latter a named fatal), UDP-Lite
   (a named fatal), `UDP_GRO` (receive coalescing), `UDP_CORK`, `UDP_ENCAP`

@@ -39,6 +39,17 @@ fn answered(result: Result<usize, c_int>) -> isize {
     }
 }
 
+/// A transfer from `input` to `output` answered `moved`: when bytes moved,
+/// the input's watches see `IN_ACCESS` and the output's `IN_MODIFY`.
+fn notified(input: c_int, output: c_int, moved: isize) -> isize {
+    for (fd, write) in [(input, false), (output, true)] {
+        if let Ok(resolved) = fdget(fd) {
+            crate::transferred(&resolved, moved, write);
+        }
+    }
+    moved
+}
+
 /// The pipe a descriptor is, for a splice: an anonymous pipe's or a FIFO's
 /// end.
 fn pipe_of(resolved: &Resolved) -> Option<u64> {
@@ -122,7 +133,7 @@ pub unsafe extern "C" fn patina_copy_file_range(
     flags: u32,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    answered((|| {
+    let moved = answered((|| {
         let input = fdget(fd_in)?;
         let output = fdget(fd_out)?;
         if flags != 0 {
@@ -172,7 +183,8 @@ pub unsafe extern "C" fn patina_copy_file_range(
         source.advance(from, moved)?;
         destination.advance(to, moved)?;
         Ok(moved)
-    })())
+    })());
+    notified(fd_in, fd_out, moved)
 }
 
 /// `sendfile(2)`: the input first — open for reading (`EBADF`), addressable
@@ -192,7 +204,7 @@ pub unsafe extern "C" fn patina_sendfile(
     count: usize,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    answered((|| {
+    let moved = answered((|| {
         let input = fdget(in_fd)?;
         if input.status & O_READ == 0 {
             return Err(EBADF);
@@ -257,7 +269,8 @@ pub unsafe extern "C" fn patina_sendfile(
         };
         position.advance(from, moved)?;
         Ok(moved)
-    })())
+    })());
+    notified(in_fd, out_fd, moved)
 }
 
 /// Splice a file into a pipe: wait for room, then read at most that much from
@@ -323,7 +336,7 @@ pub unsafe extern "C" fn patina_splice(
     flags: u32,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    answered((|| {
+    let moved = answered((|| {
         if len == 0 {
             return Ok(0);
         }
@@ -406,7 +419,8 @@ pub unsafe extern "C" fn patina_splice(
             }
             (None, None) => Err(EINVAL),
         }
-    })())
+    })());
+    notified(fd_in, fd_out, moved)
 }
 
 /// `tee(2)`: an unknown flag `EINVAL` first, then a zero length is 0, both

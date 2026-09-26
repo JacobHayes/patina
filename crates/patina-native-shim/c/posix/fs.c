@@ -201,13 +201,17 @@ DIR *fdopendir(int fd) {
 struct dirent *readdir(DIR *dirp) {
     struct patina_dir *directory = (struct patina_dir *)(void *)dirp;
     uint32_t kind = 0;
+    if (directory->index == 0) patina_dir_accessed(directory->owned_fd);
     int result = patina_read_dir_next(directory->state, directory->entry.d_name,
                                       sizeof directory->entry.d_name, &kind);
     if (result < 0) {
         errno = patina_errno();
         return NULL;
     }
-    if (result == 0) return NULL;
+    if (result == 0) {
+        patina_dir_accessed(directory->owned_fd);
+        return NULL;
+    }
     patina_fill_dirent_common(&directory->entry, directory->index, kind);
     directory->index += 1;
     return &directory->entry;
@@ -230,13 +234,17 @@ int readdir_r(DIR *restrict dirp, struct dirent *restrict entry,
 struct dirent64 *readdir64(DIR *dirp) {
     struct patina_dir *directory = (struct patina_dir *)(void *)dirp;
     uint32_t kind = 0;
+    if (directory->index == 0) patina_dir_accessed(directory->owned_fd);
     int result = patina_read_dir_next(directory->state, directory->entry64.d_name,
                                       sizeof directory->entry64.d_name, &kind);
     if (result < 0) {
         errno = patina_errno();
         return NULL;
     }
-    if (result == 0) return NULL;
+    if (result == 0) {
+        patina_dir_accessed(directory->owned_fd);
+        return NULL;
+    }
     /* Deterministic synthetic inode: one-based snapshot index in driver order. */
     directory->entry64.d_ino = (ino64_t)(directory->index + 1);
     directory->entry64.d_reclen = (unsigned short)sizeof directory->entry64;

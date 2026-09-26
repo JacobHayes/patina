@@ -116,6 +116,12 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
             | FdKind::Epoll
             | FdKind::SignalFd
             | FdKind::Pidfd => fail(ENOTTY),
+            // The bytes every queued event takes.
+            #[cfg(target_os = "linux")]
+            FdKind::Inotify => match thread::inotify::queued(resolved.handle) {
+                Some(queued) => put_int(arg, i32::try_from(queued).unwrap_or(i32::MAX)),
+                None => fail(ENOTTY),
+            },
             // An mqueue inode is a regular file: its size less the position.
             #[cfg(target_os = "linux")]
             FdKind::MessageQueue => match thread::ipc::mq_unread(resolved.handle) {
@@ -137,6 +143,17 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
                 }
                 Some(Err(errno)) => fail(errno),
                 None => fail(ENOTTY),
+            }
+        }
+        // `inotify_ioctl`: the next watch descriptor tried, by value.
+        #[cfg(target_os = "linux")]
+        thread::inotify::INOTIFY_IOC_SETNEXTWD if resolved.kind == FdKind::Inotify => {
+            match thread::inotify::set_next_wd(resolved.handle, arg as u64) {
+                Ok(()) => {
+                    set_errno(0);
+                    0
+                }
+                Err(errno) => fail(errno),
             }
         }
         _ => fail(ENOTTY),

@@ -147,6 +147,13 @@ fn cwd_handle() -> Result<Fd, c_int> {
     }
 }
 
+/// The working directory's driver handle, when one is held: a reference on
+/// its node.
+#[cfg(target_os = "linux")]
+pub(crate) fn cwd_held() -> Option<Fd> {
+    *CWD.lock()
+}
+
 /// Where the working directory's node is NOW. `ENOENT` once its last name is
 /// gone, exactly as `getcwd(2)` answers for an unlinked directory.
 pub(crate) fn cwd_path() -> Result<String, c_int> {
@@ -158,6 +165,8 @@ fn replace_cwd(new: Fd) -> Result<(), c_int> {
     let previous = CWD.lock().replace(new);
     if let Some(previous) = previous {
         with_context(|context| context.fs_close(previous))?;
+        #[cfg(target_os = "linux")]
+        crate::fsnotify::released();
     }
     Ok(())
 }
@@ -274,6 +283,7 @@ fn fd_path(guest_fd: c_int, empty_path: bool) -> Result<String, c_int> {
         #[cfg(target_os = "linux")]
         FdKind::EventFd
         | FdKind::TimerFd
+        | FdKind::Inotify
         | FdKind::Epoll
         | FdKind::SignalFd
         | FdKind::MessageQueue

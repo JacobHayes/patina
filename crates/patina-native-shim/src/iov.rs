@@ -19,8 +19,8 @@ use patina_dst_abi::{Fd, SeekWhence};
 use crate::fdtable::{FdKind, Resolved};
 use crate::{
     EBADF, EFAULT, EINVAL, EOPNOTSUPP, O_NONBLOCK, O_READ, O_WRITE, fail, fdget, fs_pread,
-    fs_pwrite, positional_target, positional_write_offset, read_resolved, set_errno, with_context,
-    write_resolved,
+    fs_pwrite, positional_target, positional_write_offset, read_resolved, set_errno, transferred,
+    with_context, write_resolved,
 };
 
 /// Linux and Darwin `UIO_MAXIOV`: the most segments one vector may carry.
@@ -226,7 +226,8 @@ pub unsafe extern "C" fn patina_readv(
     }
     let nonblocking = resolved.status & O_NONBLOCK != 0 || flags & RWF_NOWAIT != 0;
     // SAFETY: forwarded from this function's own contract.
-    unsafe { cursor_readv(resolved, &segments, nonblocking) }
+    let moved = unsafe { cursor_readv(resolved, &segments, nonblocking) };
+    transferred(&resolved, moved, false)
 }
 
 /// `writev(2)`, and `pwritev2` at position -1 with its `RWF_*` flags.
@@ -260,7 +261,8 @@ pub unsafe extern "C" fn patina_writev(
     }
     let nonblocking = resolved.status & O_NONBLOCK != 0 || flags & RWF_NOWAIT != 0;
     // SAFETY: forwarded from this function's own contract.
-    unsafe { cursor_writev(resolved, &segments, nonblocking, flags) }
+    let moved = unsafe { cursor_writev(resolved, &segments, nonblocking, flags) };
+    transferred(&resolved, moved, true)
 }
 
 /// `preadv(2)`/`preadv2` at a position: scatter reads at `offset` that leave
@@ -299,14 +301,14 @@ pub unsafe extern "C" fn patina_preadv(
         // SAFETY: the segment is guest memory writable for its length.
         let got = unsafe { fs_pread(resolved, segment.base, segment.len, offset + moved as u64) };
         if got < 0 {
-            return finish(moved, Some(crate::patina_errno()));
+            return transferred(&resolved, finish(moved, Some(crate::patina_errno())), false);
         }
         moved += got as usize;
         if (got as usize) < segment.len {
             break;
         }
     }
-    finish(moved, None)
+    transferred(&resolved, finish(moved, None), false)
 }
 
 /// `pwritev(2)`/`pwritev2` at a position: gather writes that leave the cursor
@@ -359,7 +361,11 @@ pub unsafe extern "C" fn patina_pwritev(
             break;
         }
     }
-    sync_written(resolved, moved, flags, stopped)
+    transferred(
+        &resolved,
+        sync_written(resolved, moved, flags, stopped),
+        true,
+    )
 }
 
 #[cfg(test)]

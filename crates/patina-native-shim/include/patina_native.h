@@ -78,6 +78,7 @@ enum {
     PATINA_FD_MQUEUE = 13,   /* a POSIX message queue (Linux) */
     PATINA_FD_TIMERFD = 14,  /* a timer descriptor (Linux) */
     PATINA_FD_PIDFD = 15,    /* a process descriptor (Linux) */
+    PATINA_FD_INOTIFY = 16,  /* an inotify instance (Linux) */
 };
 
 enum {
@@ -661,6 +662,12 @@ int32_t patina_read_dir(int32_t fd, void **state);
  */
 int32_t patina_read_dir_next(void *state, char *name_buf, size_t buf_len, uint32_t *kind);
 void patina_read_dir_free(void *state);
+/*
+ * A getdents on the directory descriptor fd: what an inotify watch sees of
+ * it (IN_ACCESS). readdir calls it where glibc's readdir reads the kernel:
+ * for the first entry and at each end of the directory.
+ */
+void patina_dir_accessed(int32_t fd);
 /*
  * The namespace operations, each on a resolved (dirfd, path). A trailing
  * symlink is never followed by these: the kernel creates, removes and renames

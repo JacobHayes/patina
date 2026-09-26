@@ -77,6 +77,10 @@ pub(crate) enum FdKind {
     /// A timer descriptor (`timerfd_create`); `handle` keys the timer table.
     #[cfg(target_os = "linux")]
     TimerFd,
+    /// An inotify instance (`inotify_init1`); `handle` keys the instance
+    /// table.
+    #[cfg(target_os = "linux")]
+    Inotify,
     /// A process descriptor (`pidfd_open`; 6.8's anonymous `[pidfd]` inode);
     /// `handle` is the virtual pid of the process it names, init or the
     /// guest. It has no class object: nothing is freed with it.
@@ -113,6 +117,8 @@ impl FdKind {
             FdKind::TimerFd => 14,
             #[cfg(target_os = "linux")]
             FdKind::Pidfd => 15,
+            #[cfg(target_os = "linux")]
+            FdKind::Inotify => 16,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => 11,
         }
@@ -135,6 +141,7 @@ impl FdKind {
             | FdKind::SignalFd
             | FdKind::MessageQueue
             | FdKind::TimerFd
+            | FdKind::Inotify
             | FdKind::Pidfd => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
@@ -228,6 +235,17 @@ impl GuestFdTable {
                 .expect("the three standard descriptors fit any limit");
         }
         table
+    }
+
+    /// The driver handle of every deterministic-filesystem description, a
+    /// hidden retention's included: what holds a node open.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fs_handles(&self) -> Vec<u64> {
+        self.descriptions
+            .values()
+            .filter(|description| description.kind.is_fs())
+            .map(|description| description.handle)
+            .collect()
     }
 
     /// The bound no new number reaches (`EMFILE`, `F_DUPFD`'s `EINVAL`).

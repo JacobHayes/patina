@@ -968,6 +968,8 @@ pub(super) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFormat) -> 
         Some(PATINA_FD_DIR) => {}
         Some(_) => return -ENOTDIR,
     }
+    // `iterate_dir` reaches the directory before anything is copied out.
+    crate::patina_dir_accessed(fd as c_int);
     if dirp == 0 {
         return -EFAULT;
     }

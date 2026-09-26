@@ -189,7 +189,8 @@ pub(in crate::sud) fn setns(credential: &Credential, a: &[u64; 6]) -> Answer {
             | FdKind::SignalFd
             | FdKind::Epoll
             | FdKind::MessageQueue
-            | FdKind::TimerFd => refuse(errno::EINVAL),
+            | FdKind::TimerFd
+            | FdKind::Inotify => refuse(errno::EINVAL),
         },
     }
 }

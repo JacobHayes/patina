@@ -15,8 +15,7 @@
 //! directory's removal queues IN_DELETE_SELF then IN_IGNORED. Needs an inotify
 //! instance and watch within the caller's limits.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
@@ -245,29 +244,5 @@ pub const SCENARIO: Scenario = Scenario {
         release: "4.18",
         why: "IN_MASK_CREATE",
     }),
-    gaps: &[
-        #[cfg(target_arch = "x86_64")]
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::KERNEL,
-            what: "the inotify rows are unmodeled Trap rows (the readiness arc models them over the reactor): the first inotify_init aborts",
-            failure: Failure::Stops {
-                events: 3,
-                ending: Ending::Signal(6),
-                diagnostic: "unsupported syscall inotify_init",
-            },
-        },
-        #[cfg(not(target_arch = "x86_64"))]
-        Gap {
-            status: Status::Pending(Arc::NetworkReadiness),
-            vehicles: Vehicle::KERNEL,
-            what: "the inotify rows are unmodeled Trap rows (the readiness arc models them over the reactor): the first inotify_init1 aborts",
-            failure: Failure::Stops {
-                events: 3,
-                ending: Ending::Signal(6),
-                diagnostic: "unsupported syscall inotify_init1",
-            },
-        },
-    ],
     ..DEFAULTS
 };

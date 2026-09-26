@@ -12,10 +12,8 @@
 //!
 //! Needs an inotify instance and watch within the caller's limits.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{AT_FDCWD, Probe, SIGSET_BYTES, Sets};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -130,15 +128,5 @@ pub const SCENARIO: Scenario = Scenario {
         "close",
     ],
     needs: &[Need::Inotify],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::NetworkReadiness),
-        vehicles: Vehicle::ALL,
-        what: "the inotify rows are unmodeled Trap rows (the readiness arc models them over the reactor): the first inotify_init1 aborts, so no inotify readiness is observed",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "unsupported syscall inotify_init1",
-        },
-    }],
     ..DEFAULTS
 };

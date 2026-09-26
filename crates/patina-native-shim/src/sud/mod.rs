@@ -878,6 +878,17 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_timer_delete, |_, a| {
         crate::thread::timers::timer_delete(a[0] as i32)
     }),
+    // ---- inotify ----
+    (Syscall::N_inotify_init1, |_, a| {
+        crate::thread::inotify::init1(a[0] as i32)
+    }),
+    // SAFETY: `a[1]` is the guest's path pointer (NULL is `EFAULT`).
+    (Syscall::N_inotify_add_watch, |_, a| unsafe {
+        crate::thread::inotify::add_watch(arg_fd(a[0]) as c_int, a[1] as *const c_char, a[2] as u32)
+    }),
+    (Syscall::N_inotify_rm_watch, |_, a| {
+        crate::thread::inotify::rm_watch(arg_fd(a[0]) as c_int, a[1] as i32)
+    }),
     (Syscall::N_timerfd_create, |_, a| {
         crate::thread::timers::timerfd_create(a[0] as i32, a[1] as c_int)
     }),
@@ -1894,6 +1905,10 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_pipe, |_, a| sys_pipe2(a[0], 0)),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_eventfd, |_, a| sys_eventfd2(a[0], 0)),
+    #[cfg(target_arch = "x86_64")]
+    (Syscall::N_inotify_init, |_, _| {
+        crate::thread::inotify::init1(0)
+    }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_epoll_create, |_, a| sys_epoll_create(a[0])),
     // `epoll_wait` is `epoll_pwait` with no signal mask, in the kernel too.

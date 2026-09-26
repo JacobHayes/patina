@@ -173,9 +173,12 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
         },
         FdKind::Socket => Ok(Filesystem::Sockfs),
         // 6.8's pidfd is an anonymous inode too (pidfs came in 6.9).
-        FdKind::EventFd | FdKind::TimerFd | FdKind::SignalFd | FdKind::Epoll | FdKind::Pidfd => {
-            Ok(Filesystem::AnonInodefs)
-        }
+        FdKind::EventFd
+        | FdKind::TimerFd
+        | FdKind::Inotify
+        | FdKind::SignalFd
+        | FdKind::Epoll
+        | FdKind::Pidfd => Ok(Filesystem::AnonInodefs),
         FdKind::MessageQueue => Ok(Filesystem::Mqueue),
         FdKind::Urandom => Ok(Filesystem::Devtmpfs),
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Err(EBADF),
