@@ -8,10 +8,12 @@
 //! the baton goes where the seeded scheduler sends it. These are the values
 //! the rows read back and the permission rules an unprivileged caller meets
 //! (no `CAP_SYS_NICE`; `RLIMIT_NICE`/`RLIMIT_RTPRIO` from the virtual limit
-//! table). The virtual machine has one CPU: the affinity of every thread is
-//! that CPU, and every thread runs on it.
+//! table; another user's process, init, root's, is not the caller's to
+//! change: [`same_owner`]). The virtual machine has one CPU: the affinity of
+//! every thread is that CPU, and every thread runs on it.
 
 use super::*;
+use crate::identity::Process;
 use crate::limits::{RLIMIT_NICE, RLIMIT_RTPRIO};
 use crate::neg_errno as errno;
 use crate::registry::{IDENTITY_PID, INIT_PID};
@@ -59,10 +61,14 @@ const RR_TIMESLICE_NS: u64 = 100_000_000;
 const PRIO_PROCESS: i32 = 0;
 const PRIO_PGRP: i32 = 1;
 const PRIO_USER: i32 = 2;
+/// The process, group and user selectors of `getpriority`/`setpriority`.
+const PRIO_WHICH: [i32; 3] = [PRIO_PROCESS, PRIO_PGRP, PRIO_USER];
 
 const IOPRIO_WHO_PROCESS: i32 = 1;
 const IOPRIO_WHO_PGRP: i32 = 2;
 const IOPRIO_WHO_USER: i32 = 3;
+/// The process, group and user selectors of `ioprio_set`/`ioprio_get`.
+const IOPRIO_WHICH: [i32; 3] = [IOPRIO_WHO_PROCESS, IOPRIO_WHO_PGRP, IOPRIO_WHO_USER];
 const IOPRIO_CLASS_NONE: i32 = 0;
 const IOPRIO_CLASS_RT: i32 = 1;
 const IOPRIO_CLASS_BE: i32 = 2;
@@ -321,18 +327,49 @@ fn find(state: &ThreadRuntime, pid: i32) -> Option<i32> {
     (tid == INIT || threads(state).contains(&tid)).then_some(tid)
 }
 
+/// The process a thread [`find`] found belongs to.
+fn process_of(tid: i32) -> Process {
+    if tid == INIT {
+        Process::Init
+    } else {
+        Process::Guest
+    }
+}
+
+/// Whether the thread's process is the caller's user's, by its credential:
+/// the owner rules of `check_same_owner` (the sched rows),
+/// `set_one_prio_perm` (`setpriority`) and `set_task_ioprio` (`ioprio_set`)
+/// compare the caller's uid with the target's real or effective one, which
+/// agree when each credential holds one uid. The caller has no
+/// `CAP_SYS_NICE` to pass them otherwise, so init, root's, is `EPERM`.
+fn same_owner(tid: i32) -> bool {
+    process_of(tid).credential().uid == crate::identity::credential().uid
+}
+
+/// What a `who` of 0 names to a row's user selector.
+#[derive(Clone, Copy)]
+enum UserZero {
+    /// The caller's uid: `getpriority`/`setpriority` (`kernel/sys.c`: `uid =
+    /// cred->uid`) and `ioprio_get` (it compares with `user->uid`).
+    Caller,
+    /// uid 0 itself: `ioprio_set` makes the uid from `who` before it takes
+    /// `current_user()` for 0, and matches tasks against that uid.
+    Root,
+}
+
 /// The threads a `which`/`who` pair of `getpriority`/`setpriority`/
-/// `ioprio_*` names: `None` for an unknown `which`, an empty list for a
-/// `who` naming no process. A group holds init's thread when it is group 1
-/// and the guest's threads when it is the guest's; every thread runs as the
-/// one user.
+/// `ioprio_*` names, in the kernel's order: `None` for an unknown `which`,
+/// an empty list for a `who` naming no process. A group holds the guest's
+/// threads when it is the guest's, then init's thread when it is group 1
+/// (the kernel walks a group's most recent member first); a user holds the
+/// processes whose credential is that uid's (for 0, the row's
+/// [`UserZero`]), in the order they started.
 fn targets(
     state: &ThreadRuntime,
     which: i32,
     who: i32,
-    process: i32,
-    group: i32,
-    user: i32,
+    [process, group, user]: [i32; 3],
+    user_zero: UserZero,
 ) -> Option<Vec<i32>> {
     Some(if which == process {
         find(state, who).into_iter().collect()
@@ -340,21 +377,26 @@ fn targets(
         let own = crate::identity::pgid();
         let group = if who == 0 { own } else { who };
         let mut members = Vec::new();
-        if group == INIT {
-            members.push(INIT);
-        }
         if group == own {
             members.extend(threads(state));
         }
+        if group == INIT {
+            members.push(INIT);
+        }
         members
     } else if which == user {
-        if who == 0 || who as u32 == crate::identity::credential().uid {
-            let mut members = vec![INIT];
-            members.extend(threads(state));
-            members
-        } else {
-            Vec::new()
+        let uid = match (who, user_zero) {
+            (0, UserZero::Caller) => crate::identity::credential().uid,
+            _ => who as u32,
+        };
+        let mut members = Vec::new();
+        if Process::Init.credential().uid == uid {
+            members.push(INIT);
         }
+        if Process::Guest.credential().uid == uid {
+            members.extend(threads(state));
+        }
+        members
     } else {
         return None;
     })
@@ -364,7 +406,7 @@ fn targets(
 /// named (the raw row's encoding; glibc converts it back).
 pub(crate) fn getpriority(which: i32, who: i32) -> i64 {
     let state = lock_state();
-    let Some(targets) = targets(&state, which, who, PRIO_PROCESS, PRIO_PGRP, PRIO_USER) else {
+    let Some(targets) = targets(&state, which, who, PRIO_WHICH, UserZero::Caller) else {
         return errno(EINVAL);
     };
     targets
@@ -374,17 +416,23 @@ pub(crate) fn getpriority(which: i32, who: i32) -> i64 {
         .unwrap_or(errno(ESRCH))
 }
 
-/// `setpriority(which, who, nice)`: the nice value clamped to `-20..=19`;
-/// raising a thread's priority past what `RLIMIT_NICE` allows is `EACCES`.
+/// `setpriority(which, who, nice)`: the nice value clamped to `-20..=19`,
+/// set on every named thread the caller may change; another user's is
+/// `EPERM` ([`same_owner`]), and raising a thread's priority past what
+/// `RLIMIT_NICE` allows `EACCES`. The last refusal is the answer.
 pub(crate) fn setpriority(which: i32, who: i32, nice: i32) -> i64 {
     let mut state = lock_state();
-    let Some(targets) = targets(&state, which, who, PRIO_PROCESS, PRIO_PGRP, PRIO_USER) else {
+    let Some(targets) = targets(&state, which, who, PRIO_WHICH, UserZero::Caller) else {
         return errno(EINVAL);
     };
     let nice = nice.clamp(MIN_NICE, MAX_NICE);
     let mut result = errno(ESRCH);
     for tid in targets {
         let mut attrs = state.sched.get(tid);
+        if !same_owner(tid) {
+            result = errno(EPERM);
+            continue;
+        }
         if nice < attrs.nice && !nice_allowed(nice) {
             result = errno(EACCES);
             continue;
@@ -475,7 +523,9 @@ fn deadline_params_valid(request: &Request) -> bool {
         && (DL_PERIOD_MIN_US * 1000..=DL_PERIOD_MAX_US * 1000).contains(&period)
 }
 
-/// `__sched_setscheduler` for an unprivileged caller.
+/// `__sched_setscheduler` for an unprivileged caller: past the argument
+/// checks (`EINVAL`), `user_check_sched_setscheduler`'s `EPERM`s, another
+/// user's thread ([`same_owner`]) among them.
 fn setscheduler(state: &mut ThreadRuntime, tid: i32, request: Request) -> i64 {
     let current = state.sched.get(tid);
     let (policy, reset_on_fork) = if request.policy < 0 {
@@ -509,6 +559,7 @@ fn setscheduler(state: &mut ThreadRuntime, tid: i32, request: Request) -> i64 {
         })
         || policy == SCHED_DEADLINE
         || (current.policy == SCHED_IDLE && policy != SCHED_IDLE && !nice_allowed(current.nice))
+        || !same_owner(tid)
         || (current.reset_on_fork && !reset_on_fork);
     if privileged {
         return errno(EPERM);
@@ -792,7 +843,8 @@ fn effective_ioprio(attrs: Attrs) -> i32 {
 /// `ioprio_set(which, who, ioprio)`: the realtime class needs
 /// `CAP_SYS_NICE` (`EPERM`), an unknown class or a level past 7 is `EINVAL`
 /// (checked first), then an unknown `which` is `EINVAL` and nobody named
-/// `ESRCH`.
+/// `ESRCH`; the named threads are set in turn, stopping at the first of
+/// another user's (`EPERM`, [`same_owner`]).
 pub(crate) fn ioprio_set(which: i32, who: i32, ioprio: i32) -> i64 {
     let class = (ioprio >> IOPRIO_CLASS_SHIFT) & 7;
     let level = ioprio & 7;
@@ -808,20 +860,16 @@ pub(crate) fn ioprio_set(which: i32, who: i32, ioprio: i32) -> i64 {
         return errno(code);
     }
     let mut state = lock_state();
-    let Some(targets) = targets(
-        &state,
-        which,
-        who,
-        IOPRIO_WHO_PROCESS,
-        IOPRIO_WHO_PGRP,
-        IOPRIO_WHO_USER,
-    ) else {
+    let Some(targets) = targets(&state, which, who, IOPRIO_WHICH, UserZero::Root) else {
         return errno(EINVAL);
     };
     if targets.is_empty() {
         return errno(ESRCH);
     }
     for tid in targets {
+        if !same_owner(tid) {
+            return errno(EPERM);
+        }
         state.sched.set_ioprio(tid, ioprio);
     }
     0
@@ -836,14 +884,7 @@ pub(crate) fn io_context(tid: i32) -> Option<u64> {
 /// `ioprio_get(which, who)`: the best (lowest) of the named threads'.
 pub(crate) fn ioprio_get(which: i32, who: i32) -> i64 {
     let state = lock_state();
-    let Some(targets) = targets(
-        &state,
-        which,
-        who,
-        IOPRIO_WHO_PROCESS,
-        IOPRIO_WHO_PGRP,
-        IOPRIO_WHO_USER,
-    ) else {
+    let Some(targets) = targets(&state, which, who, IOPRIO_WHICH, UserZero::Caller) else {
         return errno(EINVAL);
     };
     targets
@@ -899,9 +940,10 @@ pub(crate) unsafe fn getaffinity(pid: i32, len: u32, mask: *mut u8) -> i64 {
 }
 
 /// `sched_setaffinity(pid, len, mask)`: the mask is read first (a short one
-/// padded with zeros), then the pid (`ESRCH`); a mask naming no CPU the
-/// machine has is `EINVAL`. The affinity of every thread is the one CPU, so
-/// an accepted mask changes nothing.
+/// padded with zeros), then the pid (`ESRCH`), then another user's thread is
+/// `EPERM` ([`same_owner`]); a mask naming no CPU the machine has is
+/// `EINVAL`. The affinity of every thread is the one CPU, so an accepted
+/// mask changes nothing.
 ///
 /// # Safety
 /// `mask` must be NULL or readable for `len` bytes.
@@ -913,8 +955,11 @@ pub(crate) unsafe fn setaffinity(pid: i32, len: u32, mask: *const u8) -> i64 {
     let mut bytes = [0u8; CPUMASK_BYTES];
     // SAFETY: per this function's contract.
     unsafe { std::ptr::copy_nonoverlapping(mask, bytes.as_mut_ptr(), read) };
-    if find(&lock_state(), pid).is_none() {
+    let Some(tid) = find(&lock_state(), pid) else {
         return errno(ESRCH);
+    };
+    if !same_owner(tid) {
+        return errno(EPERM);
     }
     if u64::from_ne_bytes(bytes) & 1 == 0 {
         return errno(EINVAL);
@@ -986,6 +1031,27 @@ mod tests {
         runtime.spawn(TaskId(4), parent);
         let child = context(&runtime, TaskId(4));
         assert!(child.is_some() && child != own);
+    }
+
+    /// Init is another user's process (root's): outside the caller's user,
+    /// and refusing a change wherever it is named, after the guest's own
+    /// threads in a group they share.
+    #[test]
+    fn init_is_another_users_process() {
+        crate::thread::signals::tests::isolated(|| {
+            let best_effort = |level| (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | level;
+            assert_eq!(setpriority(PRIO_PROCESS, 0, 5), 0);
+            assert_eq!(getpriority(PRIO_USER, 0), 15);
+            assert_eq!(setpriority(PRIO_PROCESS, INIT, 5), errno(EPERM));
+            let own = ioprio_get(IOPRIO_WHO_PROCESS, 0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_USER, 0, best_effort(2)), errno(EPERM));
+            assert_eq!(ioprio_get(IOPRIO_WHO_PROCESS, 0), own);
+            assert_eq!(crate::identity::setpgid(0, INIT), 0);
+            assert_eq!(setpriority(PRIO_PGRP, 0, 6), errno(EPERM));
+            assert_eq!(getpriority(PRIO_PROCESS, 0), 14);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PGRP, 0, best_effort(3)), errno(EPERM));
+            assert_eq!(ioprio_get(IOPRIO_WHO_PROCESS, 0), i64::from(best_effort(3)));
+        });
     }
 
     #[test]

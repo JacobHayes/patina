@@ -11,14 +11,15 @@
 //!   least the mask's CPUs, `_SC_NPROCESSORS_CONF` at least the online ones;
 //! * pinned to the current CPU, the mask reads back as that CPU alone and
 //!   the task runs there; an empty mask, and one naming only CPUs past the
-//!   kernel's, are `EINVAL`; a pid no process has `ESRCH`; the original mask
-//!   restores.
+//!   kernel's, are `EINVAL`; a pid no process has `ESRCH`; init's affinity,
+//!   root's, is not the caller's to set (`EPERM`, `check_same_owner`); the
+//!   original mask restores.
 //!
 //! Which and how many CPUs there are is the host's business (the virtual
 //! kernel's is a model constant): masks and CPU numbers are related, never
 //! recorded.
 
-use crate::catalog::{DEFAULTS, Scenario};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, Who, neg};
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -141,6 +142,11 @@ pub fn run(p: &Probe) {
         "sched_setaffinity of a pid no process has is ESRCH",
         p.sched_setaffinity(Who::Missing, &one, "sized", "the current CPU") == neg(ESRCH),
     );
+    p.require_unprivileged();
+    p.check(
+        "sched_setaffinity of init, root's process, is EPERM",
+        p.sched_setaffinity(Who::Init, &one, "sized", "the current CPU") == neg(EPERM),
+    );
     p.check(
         "the original mask restores",
         p.sched_setaffinity(Who::Caller, &mask, "sized", "the original") == 0,
@@ -165,5 +171,6 @@ pub const SCENARIO: Scenario = Scenario {
         "getpid",
         "syscall",
     ],
+    needs: &[Need::Unprivileged, Need::RootInit],
     ..DEFAULTS
 };

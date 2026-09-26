@@ -1046,21 +1046,21 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Sched,
         Disposition::Modeled,
-        "Per-thread nice values (`thread::sched`), answered in the raw row's `20 - nice` encoding for a thread, the process group or the user (the highest priority named); nobody named is `ESRCH`, an unknown `which` `EINVAL`.",
+        "Per-thread nice values (`thread::sched`), answered in the raw row's `20 - nice` encoding for a thread, the process group or the user (its processes by their credentials; the highest priority named); nobody named is `ESRCH`, an unknown `which` `EINVAL`.",
         None,
     ),
     Syscall::N_setpriority => r(
         id,
         Family::Sched,
         Disposition::Modeled,
-        "Per-thread nice values (`thread::sched`), clamped to -20..19; raising a priority past what `RLIMIT_NICE` allows is `EACCES`; nobody named is `ESRCH`, an unknown `which` `EINVAL`.",
+        "Per-thread nice values (`thread::sched`), clamped to -20..19; another user's process (init, root's) is `EPERM` (`set_one_prio_perm`), raising a priority past what `RLIMIT_NICE` allows `EACCES`, the last refusal answering; nobody named is `ESRCH`, an unknown `which` `EINVAL`.",
         None,
     ),
     Syscall::N_sched_setparam => r(
         id,
         Family::Sched,
         Disposition::Modeled,
-        "`__sched_setscheduler` with the policy kept, for an unprivileged caller (`thread::sched`): a normal policy takes priority 0, a realtime one 1..99 within `RLIMIT_RTPRIO`.",
+        "`__sched_setscheduler` with the policy kept, for an unprivileged caller (`thread::sched`): a normal policy takes priority 0, a realtime one 1..99 within `RLIMIT_RTPRIO`; another user's thread (init, root's) is `EPERM` (`check_same_owner`).",
         None,
     ),
     Syscall::N_sched_getparam => r(
@@ -1074,7 +1074,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Sched,
         Disposition::Modeled,
-        "`__sched_setscheduler` for an unprivileged caller (`thread::sched`): the normal policies freely, a realtime one within `RLIMIT_RTPRIO`, never `SCHED_DEADLINE`; `SCHED_RESET_ON_FORK` may be set and not cleared, and `SCHED_IDLE` left only as `RLIMIT_NICE` allows (`EPERM`). Recorded per thread; the deterministic scheduler's choices do not change.",
+        "`__sched_setscheduler` for an unprivileged caller (`thread::sched`): the normal policies freely, a realtime one within `RLIMIT_RTPRIO`, never `SCHED_DEADLINE`; `SCHED_RESET_ON_FORK` may be set and not cleared, and `SCHED_IDLE` left only as `RLIMIT_NICE` allows (`EPERM`); another user's thread (init, root's) is `EPERM` (`check_same_owner`). Recorded per thread; the deterministic scheduler's choices do not change.",
         None,
     ),
     Syscall::N_sched_getscheduler => r(
@@ -1517,7 +1517,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Sched,
         Disposition::Modeled,
-        "The virtual machine has one CPU (`thread::sched`; the C `sched_setaffinity` too): a mask naming it is accepted and changes nothing, a mask naming no CPU the machine has is `EINVAL`, a pid no thread has `ESRCH`.",
+        "The virtual machine has one CPU (`thread::sched`; the C `sched_setaffinity` too): a mask naming it is accepted and changes nothing, a mask naming no CPU the machine has is `EINVAL`, a pid no thread has `ESRCH`, another user's thread (init, root's) `EPERM` (`check_same_owner`).",
         None,
     ),
     Syscall::N_sched_getaffinity => r(
@@ -1862,7 +1862,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Sched,
         Disposition::Modeled,
-        "Per-thread I/O priority (`thread::sched`): the realtime class needs `CAP_SYS_NICE` (`EPERM`), an unknown class `EINVAL`, both before `which` (`EINVAL`) and `who` (`ESRCH`).",
+        "Per-thread I/O priority (`thread::sched`): the realtime class needs `CAP_SYS_NICE` (`EPERM`), an unknown class `EINVAL`, both before `which` (`EINVAL`) and `who` (`ESRCH`); the named threads are set in turn up to another user's (init, root's: `EPERM`, `set_task_ioprio`). `IOPRIO_WHO_USER` 0 names uid 0 itself, not the caller's user (`make_kuid(…, who)`), so init refuses it.",
         None,
     ),
     Syscall::N_ioprio_get => r(
@@ -2328,7 +2328,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Sched,
         Disposition::Modeled,
-        "`sched_copy_attr`'s size negotiation (`E2BIG` with the kernel's size written back) and `__sched_setscheduler` for an unprivileged caller, utilization clamps included (`thread::sched`).",
+        "`sched_copy_attr`'s size negotiation (`E2BIG` with the kernel's size written back) and `__sched_setscheduler` for an unprivileged caller, utilization clamps included, another user's thread (init, root's) `EPERM` (`thread::sched`).",
         None,
     ),
     Syscall::N_sched_getattr => r(

@@ -174,8 +174,9 @@ pub const IDENTITY_PID: u32 = 2;
 /// The pid namespace's init: the guest's parent, leader of process group 1
 /// and session 1, running as root (uid and gid 0, every capability) as a
 /// machine's init does, so the guest may not signal it (but for `SIGCONT`
-/// within its session, which init, with no signal handlers, drops) or reach
-/// it in ptrace mode; asleep (its CPU time is its startup's).
+/// within its session, which init, with no signal handlers, drops), reach it
+/// in ptrace mode, or change its scheduling; asleep (its CPU time is its
+/// startup's).
 pub const INIT_PID: u32 = 1;
 /// The group of [`IDENTITY_UID`]; see there.
 pub const IDENTITY_GID: u32 = 1000;

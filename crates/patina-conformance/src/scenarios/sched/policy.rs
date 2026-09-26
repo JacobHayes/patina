@@ -9,7 +9,8 @@
 //!   `SCHED_OTHER`/`SCHED_BATCH`/`SCHED_IDLE`/`SCHED_DEADLINE`; an unknown
 //!   policy (-1, the unimplemented 4, 8) is `EINVAL`;
 //! * a normal policy takes only priority 0 and a realtime one only 1..99
-//!   (`EINVAL` otherwise); an unknown policy is `EINVAL`;
+//!   (`EINVAL` otherwise); an unknown policy is `EINVAL`; init's policy,
+//!   root's, is not the caller's to set (`EPERM`, `check_same_owner`);
 //! * `sched_rr_get_interval` of a normal task answers its slice (the host
 //!   scheduler's, recorded as under a second);
 //! * an unprivileged caller moves between the normal policies, but with
@@ -121,6 +122,11 @@ pub fn run(p: &Probe) {
         "an unknown policy is EINVAL",
         p.sched_setscheduler(Who::Caller, 99, 0) == neg(EINVAL),
     );
+    p.require_unprivileged();
+    p.check(
+        "sched_setscheduler of init, root's process, is EPERM",
+        p.sched_setscheduler(Who::Init, SCHED_OTHER, 0) == neg(EPERM),
+    );
     let (r, _) = p.sched_rr_get_interval(Who::Caller);
     p.check(
         "sched_rr_get_interval answers a normal task's slice",
@@ -199,6 +205,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_sched_rr_get_interval,
     ],
     symbols: &["sched_yield", "syscall", "getpid", "setrlimit"],
-    needs: &[Need::Unprivileged],
+    needs: &[Need::Unprivileged, Need::RootInit],
     ..DEFAULTS
 };

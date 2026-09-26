@@ -13,7 +13,8 @@
 //!   is `E2BIG` with the kernel's size written back into `size`, and so is a
 //!   larger struct whose bytes past the kernel's are not all zero (a zero
 //!   tail is accepted); a flag argument, an unknown policy or an unknown
-//!   `sched_flags` bit is `EINVAL`;
+//!   `sched_flags` bit is `EINVAL`; init's attributes, root's, are not the
+//!   caller's to set (`EPERM`, `check_same_owner`);
 //! * the nice value moves down in priority freely; with `RLIMIT_NICE` at 0
 //!   (lowered here; lowering is always allowed) it cannot move back up
 //!   (`EPERM`).
@@ -192,6 +193,13 @@ pub fn run(p: &Probe) {
             .0
             == neg(ESRCH),
     );
+    p.require_unprivileged();
+    p.check(
+        "init, root's process, is EPERM",
+        p.sched_setattr(Who::Init, normal(SCHED_ATTR_SIZE_VER1, 0), 56, None, 0)
+            .0
+            == neg(EPERM),
+    );
 
     p.check(
         "nice moves down in priority",
@@ -220,7 +228,7 @@ pub const SCENARIO: Scenario = Scenario {
     // repeat the syscall one.
     vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_sched_setattr, Syscall::N_sched_getattr],
-    needs: &[Need::Unprivileged, Need::NiceZero],
+    needs: &[Need::Unprivileged, Need::RootInit, Need::NiceZero],
     kernel_floor: Some(KernelFloor {
         release: "5.3",
         why: "struct sched_attr's second version (56 bytes, the utilization clamps) first appears in Linux 5.3",

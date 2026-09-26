@@ -14,11 +14,12 @@
 //! permitted. Every Linux reader of the caller's ids reads the guest's: the
 //! id rows of both doors, the owner `stat` reports and `chown`
 //! (`crate::caller`), System V IPC ownership, `SO_PEERCRED`, a signal's
-//! `si_uid` and `PRIO_USER`; so do the capability checks of the privileged
-//! rows (`sud::privileged`). A check the kernel makes against another
-//! process reads that process's credential: `capget` of a pid, the signal
-//! permission check ([`may_signal`]) and the ptrace-mode check
-//! ([`ptrace_may_access`]). The shim's other capability
+//! `si_uid` and `PRIO_USER`'s default user; so do the capability checks of
+//! the privileged rows (`sud::privileged`). A check the kernel makes against
+//! another process reads that process's credential: `capget` of a pid, the
+//! signal permission check ([`may_signal`]), the ptrace-mode check
+//! ([`ptrace_may_access`]), `PRIO_USER`'s members and the scheduling rows'
+//! owner checks (`thread::sched`). The shim's other capability
 //! refusals answer for the guest's credential without consulting it yet
 //! (ARCHITECTURE lists what an identity setting still needs). So the
 //! `set*id` rows succeed exactly when every id they name is that one id

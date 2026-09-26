@@ -6,11 +6,18 @@
 //!   are dropped;
 //! * the realtime class needs `CAP_SYS_NICE` or `CAP_SYS_ADMIN` (`EPERM`);
 //!   an unknown class, and an unknown `which` to either row, are `EINVAL`; a
-//!   pid no process has is `ESRCH`.
+//!   pid no process has is `ESRCH`;
+//! * init's priority, root's, is not the caller's to set (`EPERM`,
+//!   `set_task_ioprio`), and neither is that of `IOPRIO_WHO_USER` 0: to
+//!   `ioprio_set` 6.8 makes it uid 0 itself (`make_kuid(…, who)`), not the
+//!   caller's user as `ioprio_get` and `getpriority` read it, and init, the
+//!   first of root's processes, refuses before any is set.
 //!
-//! Only the caller's own priority is read or set: `IOPRIO_WHO_USER` would
-//! reach every process of the user. What a task that never set one reads is
-//! not asserted (the default changed across releases).
+//! Only the caller's own priority is changed: both refusals come after the
+//! unprivileged guard, and `IOPRIO_WHO_USER` of the caller's own uid, which
+//! would reach every process of the user, is never asked. What a task that
+//! never set one reads is not asserted (the default changed across
+//! releases).
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, Who, neg};
@@ -19,6 +26,7 @@ use libc::*;
 use patina_dst_syscalls::Syscall;
 
 const WHO_PROCESS: i32 = 1;
+const WHO_USER: i32 = 3;
 const CLASS_RT: i64 = 1;
 const CLASS_BE: i64 = 2;
 const CLASS_IDLE: i64 = 3;
@@ -91,6 +99,15 @@ pub fn run(p: &Probe) {
         "ioprio_get of it is ESRCH",
         p.ioprio_get(WHO_PROCESS, Who::Missing, true) == neg(ESRCH),
     );
+    p.require_unprivileged();
+    p.check(
+        "ioprio_set of init, root's process, is EPERM",
+        p.ioprio_set(WHO_PROCESS, Who::Init, CLASS_BE, 4) == neg(EPERM),
+    );
+    p.check(
+        "ioprio_set of user 0 names root's processes, not the caller's: EPERM at init",
+        p.ioprio_set(WHO_USER, Who::Raw(0), CLASS_BE, 4) == neg(EPERM),
+    );
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -100,6 +117,6 @@ pub const SCENARIO: Scenario = Scenario {
     // repeat the syscall one.
     vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_ioprio_set, Syscall::N_ioprio_get],
-    needs: &[Need::Unprivileged],
+    needs: &[Need::Unprivileged, Need::RootInit],
     ..DEFAULTS
 };

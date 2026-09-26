@@ -6,6 +6,8 @@
 //!   process group (it leads its own, alone);
 //! * a pid or group no process has is `ESRCH`, and so is a user with no
 //!   process; an unknown `which` is `EINVAL`, to either row;
+//! * init's nice, root's, is not the caller's to set (`EPERM`,
+//!   `set_one_prio_perm`);
 //! * lowering the priority (raising nice) is always allowed, clamped to 19;
 //!   with `RLIMIT_NICE` at 0 (lowered here; lowering is always allowed)
 //!   raising it again is `EACCES`.
@@ -71,6 +73,11 @@ pub fn run(p: &Probe) {
         "setpriority of a pid no process has is ESRCH",
         p.setpriority(PRIO_PROCESS as i32, Who::Missing, 19) == neg(ESRCH),
     );
+    p.require_unprivileged();
+    p.check(
+        "setpriority of init, root's process, is EPERM",
+        p.setpriority(PRIO_PROCESS as i32, Who::Init, 0) == neg(EPERM),
+    );
     p.check(
         "setpriority of an unknown which is EINVAL",
         p.setpriority(3, Who::Caller, 19) == neg(EINVAL),
@@ -92,6 +99,6 @@ pub const SCENARIO: Scenario = Scenario {
     // repeat the syscall one.
     vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_getpriority, Syscall::N_setpriority],
-    needs: &[Need::Unprivileged, Need::NiceZero],
+    needs: &[Need::Unprivileged, Need::RootInit, Need::NiceZero],
     ..DEFAULTS
 };
