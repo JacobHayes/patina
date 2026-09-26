@@ -503,6 +503,13 @@ int32_t patina_memfd_create(const char *name, uint32_t flags);
 int32_t patina_memfd_secret(uint32_t flags);
 int32_t patina_get_seals(int32_t fd);
 int32_t patina_add_seals(int32_t fd, uint32_t seals);
+/* fcntl F_SETOWN/F_SETOWN_EX/F_SETSIG: EBADF for a closed or O_PATH
+ * descriptor, otherwise a named fatal (SIGIO and SIGURG are not modeled). */
+int32_t patina_fcntl_owner(int32_t fd);
+/* fcntl F_GETOWN/F_GETSIG (ex 0) and F_GETOWN_EX (ex 1, owner the struct
+ * f_owner_ex): EBADF for a closed or O_PATH descriptor, EFAULT for an
+ * owner that cannot be written, otherwise 0 (nothing sets an owner). */
+int32_t patina_fcntl_owner_get(int32_t fd, int32_t ex, void *owner);
 enum {
     PATINA_ENTRY_FILE = 1,
     PATINA_ENTRY_DIRECTORY = 2,

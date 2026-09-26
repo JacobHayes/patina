@@ -5,7 +5,9 @@
 //!   readable and writable counts twice; urgent TCP data sets the
 //!   exception bit (`tcp_poll` `EPOLLPRI`) until it is received out of
 //!   band, once (`tcp_recv_urg`), and the urgent byte alone is not readable:
-//!   out of line it is no stream data, which skips it;
+//!   out of line it is no stream data, which skips it; a receive stops at
+//!   the mark, where `SIOCATMARK` is 1, and a connection whose client closed
+//!   before the accept keeps its urgent byte;
 //! * a descriptor in a set that is not open is `EBADF`; a negative `nfds`
 //!   `EINVAL`;
 //! * select's timeout is normalized, not refused, when its microseconds
@@ -24,7 +26,7 @@
 //! pselect6 row writes back is never recorded.
 
 use crate::catalog::{DEFAULTS, Scenario};
-use crate::probe::{Probe, SIGSET_BYTES, Sets, SockAddr, neg};
+use crate::probe::{IoctlArg, Probe, SIGSET_BYTES, SIOCATMARK, Sets, SockAddr, neg};
 use crate::signals::one_set;
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -174,6 +176,45 @@ pub fn run(p: &Probe) {
     );
     let (n, data, _) = p.recv_from(s, 16, 0, false);
     p.check("the stream skips the urgent byte", n == 2 && data == b"ab");
+    p.check(
+        "send stream data ending in an urgent byte",
+        p.send_to(c, b"xy!", MSG_OOB, None) == 3,
+    );
+    p.check("send more stream data", p.send_to(c, b"cd", 0, None) == 2);
+    p.check(
+        "the urgent byte arrives",
+        p.select(s + 1, except, Some(WAIT)).0 == 1,
+    );
+    let at_mark = |fd| p.ioctl(fd, SIOCATMARK, "SIOCATMARK", IoctlArg::Out);
+    p.check(
+        "before the mark, SIOCATMARK is 0",
+        at_mark(s) == (0, Some(0)),
+    );
+    let (n, data, _) = p.recv_from(s, 16, 0, false);
+    p.check("a receive stops at the mark", n == 2 && data == b"xy");
+    p.check("at the mark, SIOCATMARK is 1", at_mark(s) == (0, Some(1)));
+    let (n, data, _) = p.recv_from(s, 16, MSG_OOB, false);
+    p.check("the second urgent byte out of band", n == 1 && data == b"!");
+    let (n, data, _) = p.recv_from(s, 16, 0, false);
+    p.check("then the data after it", n == 2 && data == b"cd");
+    p.check("past the mark, SIOCATMARK is 0", at_mark(s) == (0, Some(0)));
+
+    let early = p.socket(AF_INET, SOCK_STREAM, 0);
+    p.require("a client closing before its accept", early >= 0);
+    p.check("connect it", p.connect_to(early, &addr_l) == 0);
+    p.check(
+        "send it an urgent byte",
+        p.send_to(early, b"ab!", MSG_OOB, None) == 3,
+    );
+    p.close(early);
+    let (e, _) = p.accept_from(l, 0, false, false);
+    p.require("accept the closed client's connection", e >= 0);
+    let (n, data, _) = p.recv_from(e, 16, MSG_OOB, false);
+    p.check(
+        "a connection closed before its accept keeps its urgent byte",
+        n == 1 && data == b"!",
+    );
+    p.close(e);
 
     let x = p.socket(AF_INET, SOCK_DGRAM, 0);
     p.require("a socket to close", x >= 0);
@@ -217,6 +258,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_getsockname,
         Syscall::N_sendto,
         Syscall::N_recvfrom,
+        Syscall::N_ioctl,
         Syscall::N_clock_gettime,
         Syscall::N_close,
     ],
@@ -231,6 +273,7 @@ pub const SCENARIO: Scenario = Scenario {
         "getsockname",
         "sendto",
         "recvfrom",
+        "ioctl",
         "clock_gettime",
         "close",
     ],

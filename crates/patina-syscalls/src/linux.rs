@@ -150,7 +150,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::FdIo,
         Disposition::Modeled,
-        "FIONBIO/FIOCLEX/FIONCLEX are modeled by descriptor class, FIONREAD on pipes and sockets (`SIOCINQ`), and on a socket the interface requests over the virtual interface table (SIOCGIFNAME/INDEX/FLAGS/MTU/HWADDR/ADDR/NETMASK/BRDADDR/CONF; SIOCSIF* is EPERM); `do_vfs_ioctl`'s other requests before any file's own (`ioctl::vfs`: FIOASYNC, FIOQSIZE, FIGETBSZ, FIFREEZE/FITHAW `EPERM`, FS_IOC_FIEMAP, FIBMAP `EPERM` on a regular file; cloning, extent maps, file attributes and preallocation on the volume stop by name); a userfaultfd's, a namespace file's, an inotify instance's (FIONREAD, INOTIFY_IOC_SETNEXTWD) and the entropy device's own requests; every other request answers ENOTTY exactly like the C interposer. The request is an `unsigned int` on both doors.",
+        "FIONBIO/FIOCLEX/FIONCLEX are modeled by descriptor class, FIONREAD on pipes and sockets (`SIOCINQ`), and on a socket the interface requests over the virtual interface table (SIOCGIFNAME/INDEX/FLAGS/MTU/HWADDR/ADDR/NETMASK/BRDADDR/CONF; SIOCSIF* is EPERM), and SIOCATMARK on a TCP or AF_UNIX socket; `do_vfs_ioctl`'s other requests before any file's own (`ioctl::vfs`: FIOASYNC, FIOQSIZE, FIGETBSZ, FIFREEZE/FITHAW `EPERM`, FS_IOC_FIEMAP, FIBMAP `EPERM` on a regular file; cloning, extent maps, file attributes and preallocation on the volume stop by name); a userfaultfd's, a namespace file's, an inotify instance's (FIONREAD, INOTIFY_IOC_SETNEXTWD) and the entropy device's own requests; every other request answers ENOTTY exactly like the C interposer. The request is an `unsigned int` on both doors.",
         None,
     ),
     Syscall::N_pread64 => r(
@@ -352,7 +352,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Net,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_sock_*` entry the C interposer calls (`patina_sock_sendto`): MSG_DONTWAIT and MSG_NOSIGNAL, other flags ignored as the protocols ignore them; MSG_OOB on a stream is EOPNOTSUPP (urgent data is not modeled).",
+        "Routed by the SUD dispatcher into the same `patina_sock_*` entry the C interposer calls (`patina_sock_sendto`): MSG_DONTWAIT and MSG_NOSIGNAL, other flags ignored as the protocols ignore them; MSG_OOB makes a TCP send's last byte urgent, is a named fatal on an AF_UNIX stream once the send's refusals passed (EOPNOTSUPP empty, EISCONN/EOPNOTSUPP with a name, ENOTCONN, EPIPE), ENOTCONN on an unconnected sequenced-packet socket and EOPNOTSUPP otherwise.",
         None,
     ),
     Syscall::N_recvfrom => r(
@@ -550,7 +550,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::FdIo,
         Disposition::Modeled,
-        "F_GETFD/F_SETFD (per number), F_GETFL/F_SETFL (per open file description: access mode, O_APPEND, O_NONBLOCK), F_DUPFD/F_DUPFD_CLOEXEC (lowest free number at or above the minimum; EINVAL past RLIMIT_NOFILE), F_GETPIPE_SZ/F_SETPIPE_SZ are modeled through the shim's descriptor table, and the record locks through its lock model (POSIX locks owned by the process and released by any close of the file, OFD locks owned by the open file description; ranges split and merge as fs/locks.c keeps them, F_SETLKW waits on the scheduler, a POSIX wait closing a cycle is EDEADLK); an unknown command answers EINVAL on an open number and EBADF on a closed one, like the C interposer.",
+        "F_GETFD/F_SETFD (per number), F_GETFL/F_SETFL (per open file description: access mode, O_APPEND, O_NONBLOCK), F_DUPFD/F_DUPFD_CLOEXEC (lowest free number at or above the minimum; EINVAL past RLIMIT_NOFILE), F_GETPIPE_SZ/F_SETPIPE_SZ are modeled through the shim's descriptor table, and the record locks through its lock model (POSIX locks owned by the process and released by any close of the file, OFD locks owned by the open file description; ranges split and merge as fs/locks.c keeps them, F_SETLKW waits on the scheduler, a POSIX wait closing a cycle is EDEADLK); F_SETOWN/F_SETOWN_EX/F_SETSIG are a named fatal on an open number (SIGIO and SIGURG are not delivered), so F_GETOWN/F_GETSIG answer 0 and F_GETOWN_EX {F_OWNER_TID, 0}; an unknown command answers EINVAL on an open number and EBADF on a closed one, like the C interposer.",
         None,
     ),
     Syscall::N_flock => r(

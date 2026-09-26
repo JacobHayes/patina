@@ -597,12 +597,25 @@ pub(super) fn close(
 /// Send one message (`unix_stream_sendmsg`, `unix_dgram_sendmsg`,
 /// `unix_seqpacket_sendmsg`).
 pub(super) fn send(handle: c_int, message: Outgoing) -> Result<usize, c_int> {
+    let (ty, connected) = {
+        let state = lock_state();
+        let socket = sock(&state, handle)?;
+        (socket.ty, matches!(as_unix(socket).state, State::Connected))
+    };
     if message.flags & MSG_OOB != 0 {
-        return Err(EOPNOTSUPP);
+        match ty {
+            // Ubuntu's 6.8 builds `CONFIG_AF_UNIX_OOB`: a stream takes the
+            // last byte of a non-empty send out of band, which is not
+            // modeled; the send's own refusals come first (`send_stream`).
+            // An empty one is `EOPNOTSUPP` before anything.
+            SOCK_STREAM if !message.data.is_empty() => return send_stream(handle, message, true),
+            // `unix_seqpacket_sendmsg` judges the connection first.
+            SOCK_SEQPACKET if !connected => return Err(ENOTCONN),
+            _ => return Err(EOPNOTSUPP),
+        }
     }
-    let ty = sock(&lock_state(), handle)?.ty;
     if ty == SOCK_STREAM {
-        send_stream(handle, message)
+        send_stream(handle, message, false)
     } else {
         send_record(handle, message, ty)
     }
@@ -624,7 +637,9 @@ fn creds_for(
     (passcred(handle) || passcred(peer)).then_some(Creds::PROCESS)
 }
 
-fn send_stream(handle: c_int, mut message: Outgoing) -> Result<usize, c_int> {
+/// A stream's send; `urgent` for one with `MSG_OOB`, which stops by name
+/// once the send's refusals (a name, no peer, a shut-down end) passed.
+fn send_stream(handle: c_int, mut message: Outgoing, urgent: bool) -> Result<usize, c_int> {
     let nosigpipe = sock(&lock_state(), handle)?.opts.nosigpipe();
     let broken = |sent: usize| {
         if sent == 0 {
@@ -661,6 +676,13 @@ fn send_stream(handle: c_int, mut message: Outgoing) -> Result<usize, c_int> {
             drop(state);
             return broken(sent);
         };
+        if urgent {
+            drop(state);
+            crate::trap_fatal(
+                "MSG_OOB on an AF_UNIX stream socket (CONFIG_AF_UNIX_OOB) is not modeled; \
+                 failing closed",
+            );
+        }
         let room = sndbuf.saturating_sub(as_unix(other).queued);
         if room == 0 && sent < message.data.len() {
             if nonblocking || expired(deadline)? {
@@ -804,14 +826,23 @@ fn peeked(rights: &[DescId]) -> Vec<DescId> {
 /// Receive one message (`unix_stream_recvmsg`, `unix_dgram_recvmsg`,
 /// `unix_seqpacket_recvmsg`).
 pub(super) fn recv(handle: c_int, want: Want) -> Result<Incoming, c_int> {
-    if want.flags & MSG_OOB != 0 {
-        return Err(EOPNOTSUPP);
-    }
-    let (ty, timeout) = {
+    let (ty, timeout, connected) = {
         let state = lock_state();
         let socket = sock(&state, handle)?;
-        (socket.ty, socket.opts.recv_timeout())
+        let connected = matches!(as_unix(socket).state, State::Connected);
+        (socket.ty, socket.opts.recv_timeout(), connected)
     };
+    // A stream's urgent byte (`unix_stream_recv_urg`) never exists here, as
+    // an out-of-band send stops by name: `EINVAL`, as 6.8 answers with none
+    // queued. The record types have no urgent data: `EOPNOTSUPP`, after a
+    // sequenced packet's connection check (`unix_seqpacket_recvmsg`).
+    if want.flags & MSG_OOB != 0 {
+        return Err(match ty {
+            SOCK_STREAM => EINVAL,
+            SOCK_SEQPACKET if !connected => ENOTCONN,
+            _ => EOPNOTSUPP,
+        });
+    }
     let deadline = super::deadline(timeout)?;
     let nonblocking = want.flags & MSG_DONTWAIT != 0 || timeout == Some(0);
     if ty == SOCK_STREAM {

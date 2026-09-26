@@ -471,9 +471,19 @@ forwards into the same dispatcher instead of its two-number allowlist.
   urgent, which the receiver learns of as it arrives (`EPOLLPRI`, the byte
   not counted as readable at the mark), takes once with `MSG_OOB`, and
   otherwise skips in the stream unless `SO_OOBINLINE`; a receive stops at
-  the mark. Left: a second urgent byte before the receiver passed the first
-  (a named fatal), `SIOCATMARK`, urgent data on AF_UNIX streams and on
-  Darwin (EOPNOTSUPP), `--net-default-route`
+  the mark, which `SIOCATMARK` reports, and a connection whose client
+  closed before its accept keeps its urgent byte until the accept or its
+  listener's close. Left: a second connection from a client address an
+  earlier one still holds (open or in a backlog), a second urgent
+  byte before the receiver passed the first, a blocking urgent send that
+  waits after sending part of its bytes, urgent data on AF_UNIX streams
+  (6.8 builds `CONFIG_AF_UNIX_OOB`; the send's own refusals come first)
+  and `F_SETOWN`/`F_SETSIG` (SIGIO and SIGURG are not delivered, so
+  `F_GETOWN`/`F_GETSIG` answer the unset 0), each a named fatal; an
+  out-of-band receive on an AF_UNIX stream is EINVAL, as with no urgent
+  byte queued, and on an unconnected sequenced-packet socket ENOTCONN;
+  Darwin
+  answers EOPNOTSUPP; `--net-default-route`
   (no default route: off-table is ENETUNREACH),
   fanotify (a named trap by design), the `SIOCGIF*` requests and every
   IP-level control message on macOS (the latter a named fatal), UDP-Lite

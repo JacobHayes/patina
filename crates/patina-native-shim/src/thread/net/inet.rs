@@ -102,11 +102,16 @@ impl Inet {
     }
 }
 
-/// The two sockets of one connection, and its two directions.
+/// The two sockets of one connection, and its two directions. It lives
+/// until both sides are gone and no listener's backlog holds it: a
+/// connection whose client closed before the accept keeps what it sent (an
+/// urgent byte included) until it is accepted or its listener closes.
 #[derive(Clone, Copy, Default)]
 struct Pair {
     client: Option<c_int>,
     server: Option<c_int>,
+    /// The listener whose backlog holds the connection until its accept.
+    backlog: Option<c_int>,
     to_server: Direction,
     to_client: Direction,
 }
@@ -793,6 +798,16 @@ fn connect_stream(handle: c_int, bytes: &[u8], nonblocking: bool) -> Result<(), 
         .expect("the connect just bound the socket");
     let key = local.wire();
     let to = peer.wire();
+    // Connections are told apart by the client's address: a second one from
+    // an address an earlier connection still holds (open, or waiting in a
+    // backlog) cannot be.
+    if state.net.sockets.inet.streams.contains_key(&key) {
+        fatal(
+            "a TCP connection from an address an earlier connection still holds (open, or \
+             waiting in a listener's backlog) is not modeled; failing closed",
+        );
+    }
+    let backlog = listener_at(&state, &to);
     let outcome = with_context_raw(|context| context.net_tcp_connect(&key, &to));
     let socket = sock_mut(&mut state, handle)?;
     let inet = as_inet_mut(socket);
@@ -804,14 +819,14 @@ fn connect_stream(handle: c_int, bytes: &[u8], nonblocking: bool) -> Result<(), 
                 key: key.clone(),
             };
             inet.peer = Some(peer);
-            state
-                .net
-                .sockets
-                .inet
-                .streams
-                .entry(key)
-                .or_default()
-                .client = Some(handle);
+            state.net.sockets.inet.streams.insert(
+                key,
+                Pair {
+                    client: Some(handle),
+                    backlog,
+                    ..Pair::default()
+                },
+            );
             wake_listener(&mut state, &to)
         }
         Err(errno) if errno == ECONNREFUSED => {
@@ -847,11 +862,26 @@ fn connect_stream(handle: c_int, bytes: &[u8], nonblocking: bool) -> Result<(), 
 
 /// Wake whoever waits on the listener a connection to `to` reached, counting
 /// the arrival.
-fn wake_listener(state: &mut ThreadRuntime, to: &str) -> Vec<TaskId> {
-    let listener = std::iter::once(to.to_owned())
+/// The listener a connection to `to` reaches, if one listens here.
+fn listener_at(state: &ThreadRuntime, to: &str) -> Option<c_int> {
+    std::iter::once(to.to_owned())
         .chain(wildcard_bind_keys(to))
-        .find_map(|address| state.net.sockets.inet.listeners.get(&address).copied());
-    let Some(listener) = listener else {
+        .find_map(|address| state.net.sockets.inet.listeners.get(&address).copied())
+}
+
+/// Listener `listener` closed: the connections still in its backlog are
+/// gone with it (`inet_csk_listen_stop`), once neither side holds them.
+fn listener_closed(tables: &mut Tables, listener: c_int) {
+    tables.streams.retain(|_, pair| {
+        if pair.backlog == Some(listener) {
+            pair.backlog = None;
+        }
+        pair.client.is_some() || pair.server.is_some() || pair.backlog.is_some()
+    });
+}
+
+fn wake_listener(state: &mut ThreadRuntime, to: &str) -> Vec<TaskId> {
+    let Some(listener) = listener_at(state, to) else {
         return Vec::new();
     };
     if let Some(socket) = state.net.sockets.table.get_mut(&listener) {
@@ -997,14 +1027,15 @@ fn adopt(
     let mut socket = Socket::new(family, ty, protocol, Proto::Inet(inet_state), inode);
     socket.opts = opts;
     state.net.sockets.table.insert(handle, socket);
-    state
+    let pair = state
         .net
         .sockets
         .inet
         .streams
         .entry(accepted.peer)
-        .or_default()
-        .server = Some(handle);
+        .or_default();
+    pair.server = Some(handle);
+    pair.backlog = None;
     (handle, encode(v6, peer, V6Extra::default()))
 }
 
@@ -1083,6 +1114,7 @@ fn stop_listening(handle: c_int) -> Result<(), c_int> {
     } = std::mem::replace(&mut inet.state, State::Closed)
     {
         state.net.sockets.inet.listeners.remove(&address);
+        listener_closed(&mut state.net.sockets.inet, handle);
         with_context_raw(|context| context.net_close(sid))?;
     }
     let wakes = waiters(&mut state, handle, Dir::Recv);
@@ -1105,7 +1137,7 @@ fn drop_stream(state: &mut ThreadRuntime, handle: c_int, key: &str) -> Vec<TaskI
     if pair.server == Some(handle) {
         pair.server = None;
     }
-    if pair.client.is_none() && pair.server.is_none() {
+    if pair.client.is_none() && pair.server.is_none() && pair.backlog.is_none() {
         tables.streams.remove(key);
     }
     let mut wakes = Vec::new();
@@ -1150,6 +1182,7 @@ pub(super) fn close(
             address,
         } => {
             state.net.sockets.inet.listeners.remove(&address);
+            listener_closed(&mut state.net.sockets.inet, handle);
             with_context_raw(|context| context.net_close(sid))?;
         }
         State::Established { socket: sid, key } => {
@@ -1404,6 +1437,14 @@ fn send_stream_bytes(handle: c_int, message: &Outgoing) -> Result<usize, c_int> 
             Ok(0) => {
                 if nonblocking || expired(deadline)? {
                     return if sent > 0 { Ok(sent) } else { Err(EWOULDBLOCK) };
+                }
+                if message.flags & MSG_OOB != 0 && sent > 0 {
+                    // `tcp_sendmsg_locked` pushes with `MSG_OOB` before it
+                    // waits, marking the last byte sent so far urgent too.
+                    fatal(
+                        "a MSG_OOB send that waits for room after sending part of its bytes \
+                         (an urgent mark at each wait) is not modeled; failing closed",
+                    );
                 }
                 park(state, handle, Dir::Send, deadline, "tcp-send")
                     .or_else(|errno| if sent > 0 { Ok(()) } else { Err(errno) })?;
@@ -1868,6 +1909,31 @@ pub(super) fn poll(
 }
 
 /// `SIOCINQ`: the next datagram's length, or a stream's queued bytes.
+/// `SIOCATMARK` (`tcp_ioctl`): whether the urgent byte has arrived and the
+/// next byte a receive would take is it; never for a socket not connected.
+#[cfg(target_os = "linux")]
+pub(super) fn at_mark(state: &ThreadRuntime, handle: c_int, inet: &Inet) -> Result<bool, c_int> {
+    let State::Established {
+        socket: sid,
+        ref key,
+    } = inet.state
+    else {
+        return Ok(false);
+    };
+    let pending = with_context_raw(|context| context.net_readiness(sid))?.pending;
+    let direction = state
+        .net
+        .sockets
+        .inet
+        .streams
+        .get(key)
+        .map(|pair| pair.received(handle))
+        .unwrap_or_default();
+    Ok(direction
+        .arrived(pending)
+        .is_some_and(|urgent| urgent.at == direction.taken))
+}
+
 pub(super) fn pending(socket: &Socket, inet: &Inet) -> Result<i32, c_int> {
     let readiness = |sid: SocketId| {
         with_context_raw(|context| context.net_readiness(sid)).map(|ready| ready.pending)

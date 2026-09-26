@@ -201,7 +201,6 @@ impl Payload {
         self.len
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -996,6 +995,22 @@ pub(crate) fn socket_pending(handle: u64) -> Result<i32, c_int> {
         Proto::Unix(unix) => unix::pending(socket, unix),
         #[cfg(target_os = "linux")]
         Proto::Netlink(netlink) => Ok(netlink::pending(netlink)),
+    }
+}
+
+/// `SIOCATMARK` on socket `handle`: whether the next byte is the urgent one
+/// (TCP), never on an AF_UNIX socket (no urgent byte is modeled there);
+/// `None` for a socket whose family answers no such request (`ENOTTY`).
+#[cfg(target_os = "linux")]
+pub(crate) fn at_mark(handle: u64) -> Option<Result<bool, c_int>> {
+    let state = lock_state();
+    let socket = state.net.sockets.table.get(&(handle as c_int))?;
+    match &socket.proto {
+        Proto::Inet(inet) if socket.ty == SOCK_STREAM => {
+            Some(inet::at_mark(&state, handle as c_int, inet))
+        }
+        Proto::Unix(_) => Some(Ok(false)),
+        _ => None,
     }
 }
 

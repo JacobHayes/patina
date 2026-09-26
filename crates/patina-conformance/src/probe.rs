@@ -439,9 +439,9 @@ fn lens_of(segments: &[&[u8]]) -> Vec<usize> {
 mod net;
 pub use net::{
     ARPHRD_LOOPBACK, AddrInfo, Control, IFNAMSIZ, IFREQ, IfAnswer, IfField, Incoming, NlMsg,
-    OptionShown, Outgoing, Ready, Received, RecvSpec, SIOCGIFADDR, SIOCGIFBRDADDR, SIOCGIFCONF,
-    SIOCGIFFLAGS, SIOCGIFHWADDR, SIOCGIFINDEX, SIOCGIFMTU, SIOCGIFNAME, SIOCGIFNETMASK,
-    SOCKADDR_UN, SUN_PATH, Sets, SockAddr, attributes, eai_name, family_name, nl,
+    OptionShown, Outgoing, Ready, Received, RecvSpec, SIOCATMARK, SIOCGIFADDR, SIOCGIFBRDADDR,
+    SIOCGIFCONF, SIOCGIFFLAGS, SIOCGIFHWADDR, SIOCGIFINDEX, SIOCGIFMTU, SIOCGIFNAME,
+    SIOCGIFNETMASK, SOCKADDR_UN, SUN_PATH, Sets, SockAddr, attributes, eai_name, family_name, nl,
 };
 
 impl Probe {

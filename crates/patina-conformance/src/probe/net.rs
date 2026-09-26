@@ -24,6 +24,10 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
 // ---- kernel ABI constants the libc crate spells per target or not at all ----
 
+/// `SIOCATMARK` (asm-generic/sockios.h): whether the next byte is the urgent
+/// one.
+pub const SIOCATMARK: u64 = 0x8905;
+
 /// `SIOCGIF*` requests (include/uapi/linux/sockios.h; one table on every
 /// Linux architecture).
 pub const SIOCGIFNAME: u64 = 0x8910;

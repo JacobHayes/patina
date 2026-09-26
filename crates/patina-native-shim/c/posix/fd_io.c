@@ -104,6 +104,15 @@ int fcntl(int fd, int command, ...) {
         va_end(ap);
         return patina_fcntl_record_lock(fd, command, lock);
     }
+#ifdef F_GETOWN_EX
+    if (command == F_GETOWN_EX) {
+        va_list ap;
+        va_start(ap, command);
+        void *owner = va_arg(ap, void *);
+        va_end(ap);
+        return fail_int(patina_fcntl_owner_get(fd, 1, owner));
+    }
+#endif
     va_list ap;
     va_start(ap, command);
     int argument = va_arg(ap, int);
@@ -140,6 +149,21 @@ int fcntl(int fd, int command, ...) {
             return fail_int(patina_add_seals(fd, (uint32_t)argument));
         case F_GET_SEALS:
             return fail_int(patina_get_seals(fd));
+#endif
+        /* SIGIO and SIGURG are never delivered: a named fatal. */
+        case F_SETOWN:
+#ifdef F_SETOWN_EX
+        case F_SETOWN_EX:
+#endif
+#ifdef F_SETSIG
+        case F_SETSIG:
+#endif
+            return fail_int(patina_fcntl_owner(fd));
+#ifdef __linux__
+        /* Nothing sets an owner or a signal: the unset answers. */
+        case F_GETOWN:
+        case F_GETSIG:
+            return fail_int(patina_fcntl_owner_get(fd, 0, NULL));
 #endif
 #ifdef __APPLE__
         /* Rust std maps File::sync_all to F_FULLFSYNC on Darwin. */

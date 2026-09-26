@@ -2293,6 +2293,43 @@ pub(crate) fn trap_fatal(message: &str) -> ! {
     crate::host_abort();
 }
 
+/// `fcntl(F_SETOWN)`, `F_SETOWN_EX` and `F_SETSIG`: who `SIGIO` and
+/// `SIGURG` go to. Neither signal is delivered, so on an open descriptor
+/// this stops by name rather than answer as if they would be; a closed or
+/// `O_PATH` one is `EBADF` first.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fcntl_owner(raw_fd: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if let Err(errno) = fdget(raw_fd) {
+        return fail(errno);
+    }
+    trap_fatal(
+        "fcntl setting a descriptor's owner or signal (F_SETOWN, F_SETOWN_EX, F_SETSIG) is not \
+         modeled: SIGIO and SIGURG are never delivered; failing closed",
+    );
+}
+
+/// `fcntl(F_GETOWN)`, `F_GETSIG` and, with `ex` nonzero, `F_GETOWN_EX`
+/// into `owner` (the guest's `struct f_owner_ex`). Nothing ever sets a
+/// descriptor's owner or signal (the setters stop by name,
+/// [`patina_fcntl_owner`]), so the answers are 6.8's for a file with none:
+/// 0, 0 and `{F_OWNER_TID, 0}` (`EFAULT` for memory that cannot take it).
+/// A closed or `O_PATH` descriptor is `EBADF` first (`check_fcntl_cmd`).
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fcntl_owner_get(raw_fd: c_int, ex: c_int, owner: *mut c_void) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if let Err(errno) = fdget(raw_fd) {
+        return fail(errno);
+    }
+    if ex != 0 {
+        if let Err(errno) = uaccess::write(owner as usize, &[0i32; 2]) {
+            return fail(errno);
+        }
+    }
+    set_errno(0);
+    0
+}
+
 /// C-callable loud fail-closed for the SUD C layer (arming failures, region
 /// discovery). The C side formats no message text of its own (it references no
 /// non-allowlisted stdio), so the diagnostic is emitted here through the glibc

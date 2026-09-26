@@ -1,6 +1,7 @@
 //! fd/table — the descriptor table: lowest-free allocation with holes, dup /
 //! dup2 / dup3 / F_DUPFD binding numbers to one open file description, the
-//! per-number FD_CLOEXEC bit versus per-description status flags, close_range,
+//! per-number FD_CLOEXEC bit versus per-description status flags, a
+//! description's unset owner and signal (F_GETOWN, F_GETSIG), close_range,
 //! EMFILE at RLIMIT_NOFILE (the harness pins the native run to the virtual
 //! kernel's 1024), redirecting a standard stream with dup2 and reopening a
 //! closed standard number, standard input at EOF (the harness feeds
@@ -16,6 +17,9 @@ use patina_dst_syscalls::Syscall;
 
 use crate::probe::{AT_FDCWD, Probe, neg};
 use libc::*;
+
+/// `F_GETSIG` (`asm-generic/fcntl.h`), which the libc crate does not define.
+const F_GETSIG: i32 = 11;
 
 pub fn run(p: &Probe) {
     let root = p.dir();
@@ -67,6 +71,10 @@ pub fn run(p: &Probe) {
     p.check(
         "F_SETFL cannot change the access mode",
         p.fcntl(a, F_SETFL, 0) == 0 && p.fcntl(a, F_GETFL, 0) as i32 & O_ACCMODE == O_RDWR,
+    );
+    p.check(
+        "with no owner or signal set, F_GETOWN and F_GETSIG answer 0",
+        p.fcntl(a, F_GETOWN, 0) == 0 && p.fcntl(a, F_GETSIG, 0) == 0,
     );
 
     // ---- dup2 / dup3: a chosen number ----

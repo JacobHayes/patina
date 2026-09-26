@@ -308,6 +308,15 @@ pub(super) fn sys_fcntl(fd: i64, command: u64, arg: u64) -> i64 {
             // fcntl(2) contract; the entry refuses a null one EFAULT.
             ret_i32(unsafe { patina_record_lock(cfd, command as u32, arg as *mut PatinaFlock) })
         }
+        // SAFETY: no pointers.
+        F_SETOWN | F_SETOWN_EX | F_SETSIG => ret_i32(unsafe { patina_fcntl_owner(cfd) }),
+        // SAFETY: no pointer is read or written.
+        F_GETOWN | F_GETSIG => {
+            ret_i32(unsafe { patina_fcntl_owner_get(cfd, 0, std::ptr::null_mut()) })
+        }
+        // SAFETY: the entry writes the guest's `struct f_owner_ex` through
+        // `uaccess`, EFAULT for memory that cannot take it.
+        F_GETOWN_EX => ret_i32(unsafe { patina_fcntl_owner_get(cfd, 1, arg as *mut c_void) }),
         // An unknown command on an open descriptor is EINVAL; on a closed one
         // the kernel answers EBADF first (C parity).
         _ => {

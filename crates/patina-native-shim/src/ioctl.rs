@@ -57,6 +57,10 @@ use request::{FIOCLEX, FIONBIO, FIONCLEX, FIONREAD};
 
 const ENOTTY: c_int = 25;
 
+/// `SIOCATMARK` (`asm-generic/sockios.h`).
+#[cfg(target_os = "linux")]
+const SIOCATMARK: u64 = 0x8905;
+
 /// Write an `int` answer through the guest's argument (`EFAULT` for memory
 /// that cannot take it).
 fn put_int(arg: *mut c_void, value: i32) -> c_int {
@@ -165,6 +169,15 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => fail(ENOTTY),
         },
+        // `SIOCATMARK`: whether the next byte is the urgent one.
+        #[cfg(target_os = "linux")]
+        SIOCATMARK if resolved.kind == FdKind::Socket => {
+            match thread::net::at_mark(resolved.handle) {
+                Some(Ok(at)) => put_int(arg, i32::from(at)),
+                Some(Err(errno)) => fail(errno),
+                None => fail(ENOTTY),
+            }
+        }
         // The interface requests a socket answers over the virtual
         // interface table.
         #[cfg(target_os = "linux")]

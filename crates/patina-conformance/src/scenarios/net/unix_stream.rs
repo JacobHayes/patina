@@ -14,6 +14,10 @@
 //!   `ENOENT`, a length past `sizeof(struct sockaddr_un)` or another family
 //!   `EINVAL`; `listen` before `bind` is `EINVAL` (no autobind for listen),
 //!   and `SIOCINQ` on a listener `EINVAL` (`unix_inq_len`);
+//! * with no urgent byte queued an out-of-band receive is `EINVAL`
+//!   (`unix_stream_recv_urg`) and `SIOCATMARK` is 0; an out-of-band send
+//!   meets the send's refusals first (`EPIPE` after `SHUT_WR`, `ENOTCONN`
+//!   unconnected);
 //! * names: the listener's is its path (`addrlen` = the path + its NUL +
 //!   the family), a connected client's is unnamed (`addrlen` 2), the
 //!   accepted socket's is the listener's path, and the client's peer is the
@@ -32,7 +36,7 @@
 //! returns (scenarios/net.rs, "Loopback delivery").
 
 use crate::catalog::{DEFAULTS, Scenario};
-use crate::probe::{AT_FDCWD, IoctlArg, Probe, SOCKADDR_UN, SockAddr, neg};
+use crate::probe::{AT_FDCWD, IoctlArg, Probe, SIOCATMARK, SOCKADDR_UN, SockAddr, neg};
 use crate::scenarios::net::{abstract_name, epipe_raises_sigpipe};
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -51,6 +55,14 @@ pub fn run(p: &Probe) {
         "a pair's ends are unnamed",
         name == Some(SockAddr::UnixUnnamed) && len == 2,
     );
+    p.check(
+        "with no urgent byte queued, an out-of-band receive is EINVAL",
+        p.recv_from(b, 16, MSG_OOB | MSG_DONTWAIT, false).0 == neg(EINVAL),
+    );
+    p.check(
+        "and SIOCATMARK is 0",
+        p.ioctl(b, SIOCATMARK, "SIOCATMARK", IoctlArg::Out) == (0, Some(0)),
+    );
     p.check("shut down a's writing side", p.shutdown(a, SHUT_WR) == 0);
     p.check(
         "b reads EOF",
@@ -65,6 +77,10 @@ pub fn run(p: &Probe) {
     p.check(
         "a send after SHUT_WR is EPIPE",
         p.send_to(a, b"x", MSG_NOSIGNAL, None) == neg(EPIPE),
+    );
+    p.check(
+        "an out-of-band one too, refused before any byte goes out of band",
+        p.send_to(a, b"x", MSG_OOB | MSG_NOSIGNAL, None) == neg(EPIPE),
     );
 
     p.check("queue bytes for b", p.send_to(b, b"queued", 0, None) == 6);
@@ -104,6 +120,10 @@ pub fn run(p: &Probe) {
     p.check(
         "listen before bind is EINVAL",
         p.listen(l, 4) == neg(EINVAL),
+    );
+    p.check(
+        "an out-of-band send unconnected is ENOTCONN",
+        p.send_to(l, b"x", MSG_OOB | MSG_NOSIGNAL, None) == neg(ENOTCONN),
     );
     p.check(
         "bind to a path in the run directory",

@@ -179,6 +179,10 @@ unsafe extern "C" {
     fn patina_memfd_secret(flags: u32) -> c_int;
     fn patina_get_seals(fd: c_int) -> c_int;
     fn patina_add_seals(fd: c_int, seals: u32) -> c_int;
+    // fcntl's owner commands: setting one is a named fatal on an open
+    // descriptor, reading one the unset answer.
+    fn patina_fcntl_owner(fd: c_int) -> c_int;
+    fn patina_fcntl_owner_get(fd: c_int, ex: c_int, owner: *mut c_void) -> c_int;
 
     // Filesystem metadata / directory iteration (the same records the C
     // stat/statx/getdents interposers normalize).
@@ -599,6 +603,12 @@ const F_SETPIPE_SZ: u64 = uapi::F_SETPIPE_SZ as u64;
 const F_GETPIPE_SZ: u64 = uapi::F_GETPIPE_SZ as u64;
 const F_ADD_SEALS: u64 = uapi::F_ADD_SEALS as u64;
 const F_GET_SEALS: u64 = uapi::F_GET_SEALS as u64;
+const F_SETOWN: u64 = uapi::F_SETOWN as u64;
+const F_SETOWN_EX: u64 = uapi::F_SETOWN_EX as u64;
+const F_SETSIG: u64 = uapi::F_SETSIG as u64;
+const F_GETOWN: u64 = uapi::F_GETOWN as u64;
+const F_GETOWN_EX: u64 = uapi::F_GETOWN_EX as u64;
+const F_GETSIG: u64 = uapi::F_GETSIG as u64;
 
 const F_GETLK: u64 = uapi::F_GETLK as u64;
 
