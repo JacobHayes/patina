@@ -1682,6 +1682,14 @@ const BINDINGS: &[(Syscall, Handler)] = &[
             )
         })
     }),
+    (Syscall::N_cachestat, |_, a| {
+        crate::advice::cachestat(
+            arg_fd(a[0]) as c_int,
+            a[1] as usize,
+            a[2] as usize,
+            a[3] as u32,
+        )
+    }),
     (Syscall::N_fstatfs, |_, a| sys_fstatfs(arg_fd(a[0]), a[1])),
     (Syscall::N_getdents64, |_, a| {
         sys_getdents64(arg_fd(a[0]), a[1], a[2])

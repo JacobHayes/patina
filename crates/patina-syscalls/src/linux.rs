@@ -2696,9 +2696,9 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_cachestat => r(
         id,
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
-        Some("fs"),
+        Disposition::Modeled,
+        "Page-cache accounting (`advice::cachestat`): EBADF (O_PATH included), EFAULT for the range, EINVAL for flags, in that order. The filesystem holds every file in memory, so every page of a regular file up to its end is cached and none dirty, under writeback or evicted; anything else has no pages.",
+        None,
     ),
     Syscall::N_fchmodat2 => r(
         id,
