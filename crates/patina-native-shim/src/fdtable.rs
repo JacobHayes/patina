@@ -9,11 +9,12 @@
 //! description only when its last number goes. Every class the shim models —
 //! captured stdio, deterministic-filesystem files and directories, the
 //! `/dev/urandom` device, virtual sockets, in-process pipes, eventfds,
-//! readiness reactors and process descriptors — is a description here, and the
-//! guest number is the ONLY thing the guest sees. The class-specific tables (the
-//! net module's sockets and pipe ends, the driver's handles) are keyed by the
-//! description's `handle`, which no guest ever observes, so a guest number is a
-//! pure function of the deterministic call sequence and is never recorded.
+//! readiness reactors, process descriptors and Landlock rulesets — is a
+//! description here, and the guest number is the ONLY thing the guest sees. The
+//! class-specific tables (the net module's sockets and pipe ends, the driver's
+//! handles) are keyed by the description's `handle`, which no guest ever
+//! observes, so a guest number is a pure function of the deterministic call
+//! sequence and is never recorded.
 //!
 //! This module is the data structure alone: no runtime calls, no scheduling
 //! points, no locks of its own. `lib.rs` owns the single global instance behind
@@ -82,6 +83,12 @@ pub(crate) enum FdKind {
     /// guest. It has no class object: nothing is freed with it.
     #[cfg(target_os = "linux")]
     Pidfd,
+    /// A Landlock ruleset (`landlock_create_ruleset`; 6.8's anonymous
+    /// `[landlock-ruleset]` inode); `handle` packs the access rights it
+    /// handles, the filesystem ones in the low 32 bits and the network ones
+    /// above. It has no class object: nothing is freed with it.
+    #[cfg(target_os = "linux")]
+    LandlockRuleset,
     /// A virtual kqueue; `handle` is the registry id.
     #[cfg(target_os = "macos")]
     Kqueue,
@@ -113,6 +120,8 @@ impl FdKind {
             FdKind::TimerFd => 14,
             #[cfg(target_os = "linux")]
             FdKind::Pidfd => 15,
+            #[cfg(target_os = "linux")]
+            FdKind::LandlockRuleset => 16,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => 11,
         }
@@ -135,7 +144,8 @@ impl FdKind {
             | FdKind::SignalFd
             | FdKind::MessageQueue
             | FdKind::TimerFd
-            | FdKind::Pidfd => false,
+            | FdKind::Pidfd
+            | FdKind::LandlockRuleset => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }

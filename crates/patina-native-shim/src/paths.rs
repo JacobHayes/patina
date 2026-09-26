@@ -277,7 +277,8 @@ fn fd_path(guest_fd: c_int, empty_path: bool) -> Result<String, c_int> {
         | FdKind::Epoll
         | FdKind::SignalFd
         | FdKind::MessageQueue
-        | FdKind::Pidfd => {
+        | FdKind::Pidfd
+        | FdKind::LandlockRuleset => {
             return Err(ENOTDIR);
         }
         #[cfg(target_os = "macos")]

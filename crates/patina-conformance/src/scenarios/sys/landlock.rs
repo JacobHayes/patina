@@ -15,8 +15,11 @@
 //!   descriptor (none: `EBADF`; another kind: `EBADFD`), then a known rule
 //!   type (`EINVAL`), then for a path rule (`add_rule_path_beneath`) a
 //!   readable attribute (`EFAULT`) allowing something (`ENOMSG`) the
-//!   ruleset handles (`EINVAL`), and only then an open parent (`EBADF`); a
-//!   network port rule on a ruleset handling no network access is `EINVAL`;
+//!   ruleset handles (`EINVAL`), and only then an open parent (`EBADF`)
+//!   that is no node of an internal filesystem or mount, such as a pipe's
+//!   or a memfd's (`EBADFD`);
+//!   a network port rule on a ruleset handling no network access is
+//!   `EINVAL`;
 //! * `landlock_restrict_self` without `no_new_privs` is `EPERM`
 //!   (`CAP_SYS_ADMIN`) before its flags and descriptor are looked at.
 //!
@@ -24,8 +27,7 @@
 //! passed descriptor -1 with a flag no kernel defines, which is `EINVAL`
 //! past the privilege check on every kernel.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::observe::Norm;
 use crate::probe::{AT_FDCWD, Probe, neg};
 use crate::vehicle::Vehicle;
@@ -200,6 +202,33 @@ pub fn run(p: &Probe) {
             ) == neg(errno),
         );
     }
+    let (piped, pipe) = p.pipe2(O_CLOEXEC);
+    p.require("a pipe", piped == 0);
+    let under_pipe = beneath(ACCESS_FS_READ_FILE, pipe[0]);
+    p.check(
+        "a parent on an internal filesystem (a pipe's) is EBADFD",
+        add(
+            ruleset,
+            LANDLOCK_RULE_PATH_BENEATH,
+            &under_pipe as *const PathBeneath as *const u8,
+            0,
+        ) == neg(EBADFD),
+    );
+    p.close(pipe[0]);
+    p.close(pipe[1]);
+    let memfd = p.memfd_create("patina-landlock", MFD_CLOEXEC);
+    p.require("a memfd", memfd >= 0);
+    let under_memfd = beneath(ACCESS_FS_READ_FILE, memfd);
+    p.check(
+        "a parent on an internal mount (a memfd's) is EBADFD",
+        add(
+            ruleset,
+            LANDLOCK_RULE_PATH_BENEATH,
+            &under_memfd as *const PathBeneath as *const u8,
+            0,
+        ) == neg(EBADFD),
+    );
+    p.close(memfd);
     let port = NetPort {
         allowed_access: ACCESS_NET_BIND_TCP,
         port: 80,
@@ -240,6 +269,8 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_landlock_restrict_self,
         Syscall::N_fcntl,
         Syscall::N_openat,
+        Syscall::N_pipe2,
+        Syscall::N_memfd_create,
         Syscall::N_close,
     ],
     needs: &[Need::Unprivileged, Need::Landlock],
@@ -247,15 +278,5 @@ pub const SCENARIO: Scenario = Scenario {
         release: "6.7",
         why: "Landlock ABI 4: network port rules (security/landlock/syscalls.c)",
     }),
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: Vehicle::KERNEL,
-        what: "landlock_create_ruleset is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)), as are landlock_add_rule and landlock_restrict_self, where the kernel builds rulesets for anyone and refuses enforcing one without no_new_privs as EPERM (no CAP_SYS_ADMIN)",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall landlock_create_ruleset (nr 444, class privileged",
-        },
-    }],
     ..DEFAULTS
 };

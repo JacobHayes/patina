@@ -107,7 +107,8 @@ fn descriptor_node(raw_fd: c_int) -> Result<Node, c_int> {
         | FdKind::TimerFd
         | FdKind::SignalFd
         | FdKind::Epoll
-        | FdKind::Pidfd => Node::Pseudo {
+        | FdKind::Pidfd
+        | FdKind::LandlockRuleset => Node::Pseudo {
             mode: ANON_INODE_MODE,
             regular: false,
         },

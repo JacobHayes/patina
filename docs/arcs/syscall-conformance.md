@@ -477,16 +477,17 @@ forwards into the same dispatcher instead of its two-number allowlist.
   (`patina_dst_syscalls::KERNEL_CONFIG`) and the shim's glibc wrappers
   (`c/posix/privileged.c`, `chroot` included); `fs/mount`, `fs/mount_api`,
   `fs/open_tree`, `sys/admin`, `sys/quota`, `sys/ioport`, `sys/root`,
-  `sys/perf`, `sys/bpf`, `proc/ptrace` and `proc/seccomp` (its queries,
-  and its mode checks up to the named fatal that entering a mode is) run
-  without a gap. **Open**:
+  `sys/perf`, `sys/bpf`, `proc/ptrace`, `proc/seccomp` (its queries,
+  and its mode checks up to the named fatal that entering a mode is) and
+  `sys/landlock` (rulesets as a descriptor kind; enforcing one is a named
+  fatal) run without a gap. **Open**:
   `proc/namespaces` stops where it opens `/proc/self/ns/uts`, which the
   virtual filesystem lacks, before `setns`'s namespace checks; named fatals
   where the model ends: unsharing filesystem state, descriptors or the
   semaphore undo list from other threads, the user-mode `userfaultfd`
   descriptor (`mem/userfaultfd`), non-array BPF map types, detaching a BPF
   program from its attach point; and the rows still `Trap(privileged)`:
-  keyrings (`sys/keys`), Landlock (`sys/landlock`), the LSM attribute calls
+  keyrings (`sys/keys`), the LSM attribute calls
   (`sys/lsm`), `statmount`/`listmount`
   (`fs/mount_query`) and fanotify.
 

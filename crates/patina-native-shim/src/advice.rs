@@ -55,7 +55,8 @@ fn has_mapping(resolved: &Resolved) -> bool {
         | FdKind::TimerFd
         | FdKind::SignalFd
         | FdKind::Epoll
-        | FdKind::Pidfd => false,
+        | FdKind::Pidfd
+        | FdKind::LandlockRuleset => false,
     }
 }
 
@@ -147,7 +148,8 @@ pub extern "C" fn patina_syncfs(raw_fd: c_int) -> c_int {
             | FdKind::SignalFd
             | FdKind::Epoll
             | FdKind::MessageQueue
-            | FdKind::Pidfd => false,
+            | FdKind::Pidfd
+            | FdKind::LandlockRuleset => false,
         };
         if on_volume {
             crate::fs_sync_volume()

@@ -585,7 +585,7 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
             Ok(())
         }
         #[cfg(target_os = "linux")]
-        FdKind::Pidfd => Ok(()),
+        FdKind::Pidfd | FdKind::LandlockRuleset => Ok(()),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => {
             thread::kqueue_close(release.handle);
@@ -4785,7 +4785,7 @@ unsafe fn read_resolved(
             thread::timers::timerfd_read(resolved.handle, nonblocking, destination as usize, length)
         }
         #[cfg(target_os = "linux")]
-        FdKind::Epoll | FdKind::Pidfd => fail(EINVAL) as isize,
+        FdKind::Epoll | FdKind::Pidfd | FdKind::LandlockRuleset => fail(EINVAL) as isize,
         // SAFETY: forwarded from this function's own contract.
         #[cfg(target_os = "linux")]
         FdKind::MessageQueue if resolved.status & O_READ != 0 => unsafe {
@@ -4872,7 +4872,11 @@ unsafe fn write_resolved(
         #[cfg(target_os = "linux")]
         FdKind::EventFd => unsafe { thread::eventfd_write(resolved.handle, source, length) },
         #[cfg(target_os = "linux")]
-        FdKind::Epoll | FdKind::SignalFd | FdKind::TimerFd | FdKind::Pidfd => fail(EINVAL) as isize,
+        FdKind::Epoll
+        | FdKind::SignalFd
+        | FdKind::TimerFd
+        | FdKind::Pidfd
+        | FdKind::LandlockRuleset => fail(EINVAL) as isize,
         // A queue file has no write method: EBADF without write access, EINVAL
         // with it.
         #[cfg(target_os = "linux")]
@@ -4912,9 +4916,12 @@ fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved, u64), c_in
         | FdKind::Socket
         | FdKind::Pipe => Err(ESPIPE),
         #[cfg(target_os = "linux")]
-        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::TimerFd | FdKind::Pidfd => {
-            Err(ESPIPE)
-        }
+        FdKind::EventFd
+        | FdKind::Epoll
+        | FdKind::SignalFd
+        | FdKind::TimerFd
+        | FdKind::Pidfd
+        | FdKind::LandlockRuleset => Err(ESPIPE),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => Err(ESPIPE),
     }
@@ -6393,7 +6400,12 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         | FdKind::Urandom
         | FdKind::Socket => return fail(ENODEV),
         #[cfg(target_os = "linux")]
-        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::TimerFd | FdKind::Pidfd => {
+        FdKind::EventFd
+        | FdKind::Epoll
+        | FdKind::SignalFd
+        | FdKind::TimerFd
+        | FdKind::Pidfd
+        | FdKind::LandlockRuleset => {
             return fail(ENODEV);
         }
         // A queue is a regular file (judged after the range, below).
@@ -7907,7 +7919,8 @@ mod thread {
             | FdKind::SignalFd
             | FdKind::MessageQueue
             | FdKind::TimerFd
-            | FdKind::Pidfd => Err(super::ENOTSOCK),
+            | FdKind::Pidfd
+            | FdKind::LandlockRuleset => Err(super::ENOTSOCK),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::ENOTSOCK),
         }
@@ -7933,7 +7946,8 @@ mod thread {
             | FdKind::SignalFd
             | FdKind::MessageQueue
             | FdKind::TimerFd
-            | FdKind::Pidfd => Err(super::EBADF),
+            | FdKind::Pidfd
+            | FdKind::LandlockRuleset => Err(super::EBADF),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::EBADF),
         }
@@ -13058,6 +13072,10 @@ mod thread {
             // exited, which a process never sees of itself or of init.
             #[cfg(target_os = "linux")]
             FdKind::Pidfd => (0, (0, 0)),
+            // A ruleset has no poll method: `DEFAULT_POLLMASK`, and `EPERM`
+            // at `epoll_ctl`, as for a file.
+            #[cfg(target_os = "linux")]
+            FdKind::LandlockRuleset => (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM, (0, 0)),
             #[cfg(target_os = "linux")]
             FdKind::MessageQueue => {
                 let (readable, writable) = ipc::mq_readiness(state, handle);
@@ -14349,8 +14367,9 @@ mod thread {
         /// scheduling point, no trace event. The kernel's `do_epoll_ctl`
         /// order: the event is copied in for every op but DEL (`EFAULT`);
         /// both numbers must name something (`EBADF`, `epfd` first); the
-        /// target must be pollable (`EPERM`: a file, a directory, a device);
-        /// `EPOLLWAKEUP` is dropped (it needs CAP_BLOCK_SUSPEND); `epfd` must
+        /// target must be pollable (`EPERM`: a file, a directory, a device,
+        /// a Landlock ruleset); `EPOLLWAKEUP` is dropped (it needs
+        /// CAP_BLOCK_SUSPEND); `epfd` must
         /// be an epoll instance other than the target (`EINVAL`);
         /// `EPOLLEXCLUSIVE` is `EINVAL` on MOD, with bits outside
         /// `EPOLLEXCLUSIVE_OK_BITS` or on an epoll target; then ADD is
@@ -14389,7 +14408,11 @@ mod thread {
             };
             if matches!(
                 target.kind,
-                FdKind::File | FdKind::Dir | FdKind::OPath | FdKind::Urandom
+                FdKind::File
+                    | FdKind::Dir
+                    | FdKind::OPath
+                    | FdKind::Urandom
+                    | FdKind::LandlockRuleset
             ) {
                 return fail(EPERM);
             }

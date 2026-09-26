@@ -115,7 +115,8 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
             | FdKind::TimerFd
             | FdKind::Epoll
             | FdKind::SignalFd
-            | FdKind::Pidfd => fail(ENOTTY),
+            | FdKind::Pidfd
+            | FdKind::LandlockRuleset => fail(ENOTTY),
             // An mqueue inode is a regular file: its size less the position.
             #[cfg(target_os = "linux")]
             FdKind::MessageQueue => match thread::ipc::mq_unread(resolved.handle) {

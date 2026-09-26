@@ -120,6 +120,11 @@ pub struct KernelConfig {
     pub msgmni: i32,
     pub msgmax: u32,
     pub msgmnb: u32,
+    /// The Landlock ABI version `landlock_create_ruleset` reports (4 on
+    /// 6.7–6.9: network port rules), and the errata mask Ubuntu's backport
+    /// of `LANDLOCK_CREATE_RULESET_ERRATA` (6.15's) reports.
+    pub landlock_abi: i64,
+    pub landlock_errata: i64,
 }
 
 /// The one configuration the virtual kernel runs with; see [`KernelConfig`].
@@ -150,6 +155,9 @@ pub const KERNEL_CONFIG: KernelConfig = KernelConfig {
     msgmni: 32_000,
     msgmax: 8192,
     msgmnb: 16_384,
+    landlock_abi: 4,
+    // Errata 1 and 3, as 6.8.0-139 answers.
+    landlock_errata: 5,
 };
 
 /// The Darwin kernel release the virtual machine reports on macOS (`uname`'s

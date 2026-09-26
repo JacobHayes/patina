@@ -30,6 +30,7 @@ mod admin;
 #[cfg(target_arch = "x86_64")]
 mod ioport;
 mod kernel;
+mod landlock;
 mod mount;
 mod process;
 mod seccomp;
@@ -37,6 +38,7 @@ pub(super) use admin::*;
 #[cfg(target_arch = "x86_64")]
 pub(super) use ioport::*;
 pub(super) use kernel::*;
+pub(super) use landlock::*;
 pub(super) use mount::*;
 pub(super) use process::*;
 pub(super) use seccomp::*;
@@ -554,23 +556,32 @@ mod tests {
     /// privilege check.
     static ONE_INSTRUCTION: [u64; 2] = [1, 0];
 
-    /// A filter without `no_new_privs` needs `CAP_SYS_ADMIN` (`EACCES`)
-    /// once its flags, copy and length pass.
+    /// Without `no_new_privs`, a seccomp filter needs `CAP_SYS_ADMIN`
+    /// (`EACCES`) once its flags, copy and length pass, and enforcing a
+    /// Landlock ruleset needs it (`EPERM`) before anything else.
     fn sandbox_cases() -> Vec<Case> {
         const SECCOMP_SET_MODE_FILTER: u64 = 1;
-        vec![Case {
-            row: Syscall::N_seccomp,
-            check: |credential, a| seccomp_as(credential, a, false),
-            args: [
-                SECCOMP_SET_MODE_FILTER,
-                0,
-                ONE_INSTRUCTION.as_ptr() as u64,
-                0,
-                0,
-                0,
-            ],
-            refusal: errno::EACCES,
-        }]
+        vec![
+            Case {
+                row: Syscall::N_seccomp,
+                check: |credential, a| seccomp_as(credential, a, false),
+                args: [
+                    SECCOMP_SET_MODE_FILTER,
+                    0,
+                    ONE_INSTRUCTION.as_ptr() as u64,
+                    0,
+                    0,
+                    0,
+                ],
+                refusal: errno::EACCES,
+            },
+            Case {
+                row: Syscall::N_landlock_restrict_self,
+                check: |credential, a| restrict_self_as(credential, a, false),
+                args: [u64::MAX, u64::MAX, 0, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+        ]
     }
 
     /// `PTRACE_O_SUSPEND_SECCOMP` needs `CAP_SYS_ADMIN`; past it, seizing

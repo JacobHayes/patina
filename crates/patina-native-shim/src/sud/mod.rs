@@ -1069,6 +1069,15 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_seccomp, |nr, a| {
         privileged::answer(nr, privileged::seccomp, a)
     }),
+    (Syscall::N_landlock_create_ruleset, |nr, a| {
+        privileged::answer(nr, privileged::landlock_create_ruleset, a)
+    }),
+    (Syscall::N_landlock_add_rule, |nr, a| {
+        privileged::answer(nr, privileged::landlock_add_rule, a)
+    }),
+    (Syscall::N_landlock_restrict_self, |nr, a| {
+        privileged::answer(nr, privileged::landlock_restrict_self, a)
+    }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_iopl, |nr, a| {
         privileged::answer(nr, privileged::iopl, a)
