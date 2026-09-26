@@ -179,6 +179,26 @@ fn dlsym_routes_the_shim_definitions_and_no_host_name() {
     g.assert_seed_variation(&[1, 2], &[]);
 }
 
+/// A fault in the shim's own code (planted in a shim entry) is the shim's on
+/// every Linux arch, for SIGSEGV and SIGBUS alike: a named stop that takes the
+/// signal's default action, never the guest's handler for it. The planted
+/// entry says so on stderr before it faults, so an earlier death cannot pass.
+#[cfg(target_os = "linux")]
+#[test]
+fn shim_faults_are_named_stops_never_the_guests() {
+    use std::os::unix::process::ExitStatusExt;
+    let g = assert_build_c_guest("signals/shim_fault.c", CLink::PosixShimPlanted);
+    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")];
+    for (case, sig) in [("segv", 11), ("bus", 7)] {
+        let output = standalone_output(&g.binary, &[case], &env);
+        assert_eq!(output.status.signal(), Some(sig), "{case}: {output:?}");
+        assert!(
+            text(&output.stderr).contains("PATINA_PLANTED_FAULT"),
+            "{case}: {output:?}"
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;

@@ -216,7 +216,10 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   step the guest past an instruction it never executed. The trap takes the
   thread for the shim first (`patina_trap_enter`), so a `SIGSEGV` while shim
   code owns it (an entry, a shim lock held, the trap's own glue) is a named
-  stop, never handed to the guest.
+  stop, never handed to the guest. `SIGBUS`, and `SIGSEGV` where the trap is not
+  armed, get the same from a front handler on every Linux arch
+  (`patina_fault_front`), whose host action carries the guest action's flags,
+  mask and restorer; macOS guest handlers are still the host's own.
 - Installing a signal handler at init changes what Rust std does later. std
   installs its stack-overflow `SIGSEGV`/`SIGBUS` handlers only over `SIG_DFL`
   (`sys::pal::unix::stack_overflow::init`), so `sigaction` reports the guest's

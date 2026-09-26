@@ -51,6 +51,20 @@ impl PanicScope {
         let noted = if value { NOTED_SP.replace(0) } else { 0 };
         #[cfg(target_os = "linux")]
         if value && !previous {
+            // The shim never hands the thread to guest code (a suspended
+            // scope) while it holds a shim lock. A handler that interrupted
+            // shim code runs, and leaves by `siglongjmp`, with the thread still
+            // the shim's, so it never reaches this: relocking a lock it left
+            // held is the lock's own self-deadlock stop.
+            #[cfg(not(test))]
+            if crate::in_shim_critical() {
+                let _ = crate::host_write_all(
+                    2,
+                    b"patina: guest code entered the shim while this thread holds a shim lock: \
+                      not modeled\n",
+                );
+                crate::host_abort();
+            }
             let here = 0u8;
             took(if noted != 0 {
                 noted

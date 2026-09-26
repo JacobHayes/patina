@@ -286,8 +286,9 @@ point). A handler that edits its frame's saved mask while frames of its batch
 are still to run is a named stop: natively the next handler starts under the
 edit. A counter read
 taken on the alternate stack is served back on the interrupted stack, and no
-guest code runs until it is answered: every signal but the containment ones is
-held blocked meanwhile (one that arrives is delivered once the trap returns,
+guest code runs until it is answered: every signal but the containment ones and
+SIGBUS (whose front handler names a fault in the shim's own code) is held
+blocked meanwhile (one that arrives is delivered once the trap returns,
 after the instruction, as it may be natively), and a delivery that would run a
 handler, a `sigaltstack` call or a nested counter read is a named stop. The
 kernel's alternate stack is cut off below the trap's live frames meanwhile, so
@@ -311,9 +312,16 @@ fault, pending SIGSEGV or mask read whose answer depends on whether the handler
 is still running is a named stop. With the block known, a blocked fault takes
 the default action and a blocked sent SIGSEGV stays pending, as in 6.8. Left
 by `longjmp` (no mask restore) a handler's block is taken as restored, and a
-`setcontext` onto another stack is outside the stack test. On arm64 there is no
-trap: the guest's action is installed on the host and the kernel delivers
-faults directly.
+`setcontext` onto another stack is outside the stack test. On every Linux arch
+SIGBUS, and SIGSEGV where the trap is not armed (arm64), has a front handler
+instead: its host action carries the guest's flags, mask and restorer, so the
+kernel builds and blocks as for the guest's handler, and the front handler
+takes the thread for the shim first, so a fault in the shim's own code is a
+named stop there too, then runs the guest's virtual action from the frame.
+A host-installed handler that interrupted shim code runs with the thread still
+the shim's, and leaves it so by `siglongjmp`: relocking a shim lock it left
+held is the lock's self-deadlock stop, and a later fault is the shim's (a named
+stop). On macOS guest handlers are still the host's own.
 
 A handler installed with the caller's own `SA_RESTORER` (a raw action, as Go's
 runtime installs) returns into the caller's stub, and the stub's `rt_sigreturn`

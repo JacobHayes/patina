@@ -326,6 +326,8 @@ pub enum CLink {
     Unlinked,
     Shim,
     PosixShim,
+    /// The POSIX layer over a shim built with `planted-faults`.
+    PosixShimPlanted,
 }
 
 /// Compile a C guest with an explicit linkage contract.
@@ -350,13 +352,19 @@ pub fn assert_build_c_guest(name: &str, link: CLink) -> Guest {
         CLink::Shim => {
             cc.arg(ARCHIVE.get_or_init(super::shim_archive));
         }
-        CLink::PosixShim => {
+        CLink::PosixShim | CLink::PosixShimPlanted => {
+            static PLANTED: OnceLock<PathBuf> = OnceLock::new();
             let (_, object) = POSIX.get_or_init(|| {
                 let dir = tempfile::tempdir().unwrap();
                 let obj = super::compile_posix_object(dir.path());
                 (dir, obj)
             });
-            cc.arg(object).arg(ARCHIVE.get_or_init(super::shim_archive));
+            let archive = if matches!(link, CLink::PosixShimPlanted) {
+                PLANTED.get_or_init(|| super::shim_archive_with(&["planted-faults"]))
+            } else {
+                ARCHIVE.get_or_init(super::shim_archive)
+            };
+            cc.arg(object).arg(archive);
             if cfg!(target_os = "linux") {
                 cc.arg("-Wl,--wrap=dlsym");
             }

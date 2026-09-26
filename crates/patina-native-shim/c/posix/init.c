@@ -735,6 +735,17 @@ extern unsigned char PATINA_TSC_ARMED;
 #endif
 
 #ifdef __linux__
+/* Every fault handler's side of the boundary with the Rust signal state (see
+ * src/thread/signals/fault.rs): it takes the thread for the shim first, and a
+ * fault while the shim already owned it is a named stop. */
+enum {
+    PATINA_FAULT_DEFAULT = 0,
+    PATINA_FAULT_HANDLER = 1,
+};
+extern int patina_trap_enter(uintptr_t sp);
+extern void patina_trap_leave(void);
+_Noreturn void patina_trap_shim_fault(const siginfo_t *info, uintptr_t pc);
+
 #if defined(__x86_64__)
 /* The SIGSEGV disposition the trap displaced, so a fault it does not recognize
  * is taken exactly as it would have been. x86-only, like the handler that reads
@@ -841,21 +852,14 @@ static int patina_tsc_on_switched_stack(const ucontext_t *uc) {
            !patina_on_stack((uintptr_t)uc->uc_mcontext.gregs[REG_RSP], &uc->uc_stack);
 }
 
-/* The trap's side of the boundary with the Rust signal state (see
+/* The counter trap's side of the boundary with the Rust signal state (see
  * src/thread/signals/fault.rs). */
-enum {
-    PATINA_FAULT_DEFAULT = 0,
-    PATINA_FAULT_HANDLER = 1,
-};
 struct patina_fault_frame {
     uintptr_t sp;
     stack_t stack;
     volatile uint64_t *canary;
     uint64_t *mask;
 };
-extern int patina_trap_enter(uintptr_t sp);
-extern void patina_trap_leave(void);
-_Noreturn void patina_trap_shim_fault(const siginfo_t *info, uintptr_t pc);
 extern void patina_tsc_declined(uintptr_t rip);
 extern int patina_signal_fault(const siginfo_t *info, const struct patina_fault_frame *frame,
                                struct patina_signal_action *handler);
@@ -931,6 +935,67 @@ static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
 }
 
 #endif
+
+/* ==========================================================================
+ * Fault front handler (Linux, every arch). SIGBUS always, and SIGSEGV where
+ * the timestamp-counter trap does not own it (arm64, or an x86-64 kernel
+ * without PR_SET_TSC): the host disposition is this handler, and the guest's
+ * action is virtual (src/thread/signals/fault.rs). The host action carries the
+ * guest action's flags, mask and restorer, so the kernel builds the frame, and
+ * blocks, as it would for the guest's handler; this handler takes the thread
+ * for the shim first, so a fault in the shim's own code is a named stop, and
+ * otherwise runs the guest's handler from the same frame, or takes the fault
+ * as the default action does.
+ * ========================================================================== */
+extern int patina_fault_route(int sig, const siginfo_t *info,
+                              struct patina_signal_action *handler);
+extern void patina_fault_front_installed(uintptr_t handler);
+
+static void patina_fault_front(int sig, siginfo_t *info, void *ucontext) {
+    ucontext_t *uc = (ucontext_t *)ucontext;
+#if defined(__x86_64__)
+    uintptr_t pc = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+    uintptr_t sp = (uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
+#elif defined(__aarch64__)
+    uintptr_t pc = (uintptr_t)uc->uc_mcontext.pc;
+    uintptr_t sp = (uintptr_t)uc->uc_mcontext.sp;
+#endif
+    int saved_errno = errno;
+    if (!patina_trap_enter(sp)) patina_trap_shim_fault(info, pc);
+    struct patina_signal_action handler;
+    int route = patina_fault_route(sig, info, &handler);
+    patina_trap_leave();
+    errno = saved_errno;
+    if (route == PATINA_FAULT_HANDLER) {
+        ((void (*)(int, siginfo_t *, void *))handler.handler)(sig, info, ucontext);
+        return;
+    }
+    /* The retried instruction takes the fault under the default action. */
+    struct sigaction deflt;
+    memset(&deflt, 0, sizeof deflt);
+    deflt.sa_handler = SIG_DFL;
+    (void)patina_host_sigaction(sig, &deflt, NULL);
+}
+
+/* Install the front handler for a managed run, BEFORE guest constructors (so
+ * Rust std's own handlers register over it, virtually), after the counter trap
+ * took SIGSEGV where it arms. */
+static void patina_fault_front_init(int argc, char **argv) {
+    if (!patina_env_has("PATINA_MODE", argv, argc)) return;
+    if (patina_real_sigaction() == NULL) {
+        patina_sud_report_fatal("fault handler: sigaction could not be resolved");
+    }
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = patina_fault_front;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    if (patina_host_sigaction(SIGBUS, &action, NULL) != 0 ||
+        (!patina_tsc_armed && patina_host_sigaction(SIGSEGV, &action, NULL) != 0)) {
+        patina_sud_report_fatal("fault handler: failed to install the SIGBUS/SIGSEGV handler");
+    }
+    patina_fault_front_installed((uintptr_t)patina_fault_front);
+}
 #endif
 
 #ifdef __linux__
@@ -1097,6 +1162,9 @@ int __libc_start_main(patina_main_fn main_fn, int argc, char **argv, void *init,
      * guest's inline rdtsc/rdtscp is answered from the virtual clock instead of
      * reading the host counter. A no-op on every other platform or run. */
     patina_tsc_init(argc, argv);
+    /* Put the fault front handler before SIGBUS (and SIGSEGV where the counter
+     * trap does not own it), so a fault in the shim's own code is a named stop. */
+    patina_fault_front_init(argc, argv);
 #ifndef PR_SET_THP_DISABLE
 #define PR_SET_THP_DISABLE 41
 #endif

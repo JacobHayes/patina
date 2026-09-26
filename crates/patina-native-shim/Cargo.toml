@@ -11,6 +11,11 @@ links = "patina-dst-native-shim"
 [lib]
 crate-type = ["rlib", "staticlib"]
 
+[features]
+# A shim export that faults in shim code on demand, for the containment tests
+# (`patina_planted_fault`); never in a guest's build.
+planted-faults = []
+
 [dependencies]
 linux-raw-sys.workspace = true
 patina-dst-syscalls.workspace = true

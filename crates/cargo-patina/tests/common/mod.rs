@@ -54,11 +54,22 @@ pub fn workspace_manifest() -> PathBuf {
 
 /// Build (idempotently) and locate `libpatina_dst_native_shim.a`.
 pub fn shim_archive() -> PathBuf {
-    let profile = profile_dir();
-    let target_dir = profile
+    shim_archive_with(&[])
+}
+
+/// The shim archive built with `features`, in a target directory of its own
+/// so it never replaces the plain one other guests link.
+pub fn shim_archive_with(features: &[&str]) -> PathBuf {
+    let mut profile = profile_dir();
+    let mut target_dir = profile
         .parent()
         .expect("profile dir has a target parent")
         .to_path_buf();
+    if !features.is_empty() {
+        let variant = features.join("+");
+        target_dir = target_dir.join(&variant);
+        profile = target_dir.join(profile.file_name().expect("profile name"));
+    }
     let mut build = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     build
         .arg("build")
@@ -69,6 +80,9 @@ pub fn shim_archive() -> PathBuf {
         .arg("patina-dst-native-shim")
         .arg("--target-dir")
         .arg(&target_dir);
+    if !features.is_empty() {
+        build.arg("--features").arg(features.join(","));
+    }
     if profile.file_name().and_then(|n| n.to_str()) == Some("release") {
         build.arg("--release");
     }

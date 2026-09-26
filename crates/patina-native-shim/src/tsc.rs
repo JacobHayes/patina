@@ -107,6 +107,20 @@ fn prefixed_counter_read(bytes: &[u8]) -> bool {
 #[cfg(target_os = "linux")]
 const MAX_INSN: usize = 15;
 
+/// Whether the instruction at `pc` is a counter read, in any encoding the CPU
+/// executes as one. Allocation-free.
+#[cfg(target_os = "linux")]
+pub(crate) fn counter_read_at(pc: usize) -> bool {
+    let mut bytes = [0u8; MAX_INSN];
+    // Byte by byte: the instruction may end at an unmapped page.
+    let readable = (0..MAX_INSN)
+        .take_while(|&offset| {
+            crate::uaccess::read_into(pc + offset, &mut bytes[offset..=offset]).is_ok()
+        })
+        .count();
+    prefixed_counter_read(&bytes[..readable])
+}
+
 /// A kernel #GP the trap did not answer, at `rip`. A counter read (outside the
 /// main executable's text, or in a prefixed encoding) is a named stop; any
 /// other returns, to be sent where the kernel would send it.
@@ -114,14 +128,7 @@ const MAX_INSN: usize = 15;
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_tsc_declined(rip: usize) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let mut bytes = [0u8; MAX_INSN];
-    // Byte by byte: the instruction may end at an unmapped page.
-    let readable = (0..MAX_INSN)
-        .take_while(|&offset| {
-            crate::uaccess::read_into(rip + offset, &mut bytes[offset..=offset]).is_ok()
-        })
-        .count();
-    if prefixed_counter_read(&bytes[..readable]) {
+    if counter_read_at(rip) {
         crate::trap_fatal(
             "a timestamp-counter read the trap does not answer (outside the main executable's \
              text, or in a prefixed encoding): not modeled",

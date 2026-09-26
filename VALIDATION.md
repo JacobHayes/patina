@@ -293,7 +293,11 @@ before, a misleading named stop and a SIGUSR1 death), and repeated `SA_NODEFER`
 signals (a standard one pending to the thread and the process runs twice, and
 queued RT instances run last queued first, each frame saving its native mask:
 red before, one run and a reversed order); an upper handler that edits its
-saved mask with frames of its batch still to run is a named stop. `rdrand_is_refused_on_every_kernel` builds
+saved mask with frames of its batch still to run is a named stop.
+`shim_faults_are_named_stops_never_the_guests` plants a SIGSEGV and a
+SIGBUS in a shim entry (the shim built with `planted-faults`) under a guest
+handler for each, on every Linux arch: both are named stops, never the handler
+(red before the front handler: SIGBUS ran it). `rdrand_is_refused_on_every_kernel` builds
 no TSC guest and requires no TSC capability. Unsupported capabilities execute
 named refusal assertions; the SUD-only vDSO check reports missing evidence.
 `PATINA_REQUIRE_SUD=1` makes missing SUD fatal in tests and the ecosystem wrapper;

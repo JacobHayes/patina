@@ -15,7 +15,11 @@
 //! **The shim's own faults.** The trap takes the thread for the shim before
 //! anything else ([`patina_trap_enter`]); a SIGSEGV that arrives while shim
 //! code owns it (an entry, a shim lock held, the trap's own glue) is a named
-//! stop ([`patina_trap_shim_fault`]), never the guest's.
+//! stop ([`patina_trap_shim_fault`]), never the guest's. The same holds on
+//! every Linux arch for SIGBUS, and for SIGSEGV where the trap is not armed:
+//! a front handler (`patina_fault_front`, `c/posix/init.c`) owns their host
+//! disposition, with the guest's flags, mask and restorer, and runs the
+//! guest's virtual action from its frame ([`patina_fault_route`]).
 //!
 //! **Blocking SIGSEGV.** The host can never block SIGSEGV (a counter read
 //! must trap wherever it runs), so whether the guest has it blocked is kept
@@ -47,6 +51,123 @@ const FAULT_HANDLER: i32 = 1;
 /// Whether the timestamp-counter trap owns `sig`'s host disposition.
 pub(super) fn trap_routed(sig: u8) -> bool {
     sig == SIGSEGV && crate::PATINA_TSC_ARMED.load(Ordering::Relaxed) != 0
+}
+
+/// The front handler's address, once the C layer installed it.
+static FRONT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The C layer put the fault front handler at `handler` before SIGBUS, and
+/// before SIGSEGV where the counter trap does not own it.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fault_front_installed(handler: usize) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    FRONT.store(handler, Ordering::Relaxed);
+}
+
+/// Whether the fault front handler owns `sig`'s host disposition.
+pub(super) fn front_routed(sig: u8) -> bool {
+    matches!(sig, SIGBUS | SIGSEGV) && !trap_routed(sig) && FRONT.load(Ordering::Relaxed) != 0
+}
+
+/// The host action that stands for a guest's `action` on a front-routed
+/// signal: the front handler, with the guest action's flags, mask and
+/// restorer, so the kernel builds and blocks as for the guest's handler.
+/// `SA_RESETHAND` resets the virtual action only: the front handler stays.
+pub(super) fn front_action(action: Action) -> Action {
+    let mut front = Action {
+        handler: FRONT.load(Ordering::Relaxed),
+        flags: action.flags & !SA_RESETHAND | SA_SIGINFO,
+        ..action
+    };
+    // A default or ignored action returns from the front handler too.
+    #[cfg(target_arch = "x86_64")]
+    if matches!(action.handler, SIG_DFL | SIG_IGN) && action.flags & SA_RESTORER == 0 {
+        front.flags |= SA_RESTORER;
+        front.restorer = RESTORER.load(Ordering::Relaxed);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = &mut front;
+    front
+}
+
+/// A SIGBUS, or a SIGSEGV the counter trap does not own, reached the front
+/// handler from guest code. On [`FAULT_HANDLER`] the guest handler to run
+/// from the frame is written to `handler`; on [`FAULT_DEFAULT`] the retried
+/// instruction takes the fault under the default action.
+///
+/// # Safety
+/// `info` names the frame's siginfo and `handler` writable storage for one
+/// action.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_fault_route(
+    sig: i32,
+    info: *const Info,
+    handler: *mut Action,
+) -> i32 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let sig = sig as u8;
+    let info = unsafe { *info };
+    let action = match take_sent(sig, &info) {
+        Some(action) => action,
+        None => {
+            if info.code() <= 0 {
+                crate::trap_fatal(
+                    "a SIGBUS or SIGSEGV sent from outside the run (another process's kill) \
+                     reached the fault handler: not modeled",
+                );
+            }
+            let mut state = lock_state();
+            let action = state.signals.actions[usize::from(sig)];
+            // `force_sig_info_to_task`: an ignored fault takes the default
+            // action (a blocked one never reaches here: the host blocks it).
+            if matches!(action.handler, SIG_DFL | SIG_IGN) {
+                return FAULT_DEFAULT;
+            }
+            if action.flags & SA_RESETHAND != 0 {
+                state.signals.actions[usize::from(sig)].handler = SIG_DFL;
+            }
+            action
+        }
+    };
+    unsafe { handler.write(action) };
+    FAULT_HANDLER
+}
+
+/// A planted fault in shim code, for the containment tests: a read inside a
+/// shim entry of an unmapped address (`bus` 0, SIGSEGV) or of a file mapping
+/// past the file's end (`bus` 1, SIGBUS). Said on the host's stderr first,
+/// so the stop it ends in is known to be this one.
+#[cfg(feature = "planted-faults")]
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_planted_fault(bus: i32) -> u8 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    use patina_dst_syscalls::Syscall;
+    let address = if bus == 0 {
+        8
+    } else {
+        let syscall = |call: Syscall, args: [i64; 6]| unsafe {
+            crate::sud_host_syscall(
+                call.number() as i64,
+                args[0],
+                args[1],
+                args[2],
+                args[3],
+                args[4],
+                args[5],
+            )
+        };
+        let name = c"planted";
+        let fd = syscall(
+            Syscall::N_memfd_create,
+            [name.as_ptr() as i64, 0, 0, 0, 0, 0],
+        );
+        // PROT_READ, MAP_SHARED: one page of an empty file.
+        let page = syscall(Syscall::N_mmap, [0, 4096, 1, 1, fd, 0]);
+        assert!(fd >= 0 && page > 0, "planted fault setup");
+        page as usize
+    };
+    let _ = crate::host_write_all(2, b"PATINA_PLANTED_FAULT\n");
+    unsafe { std::ptr::read_volatile(address as *const u8) }
 }
 
 /// Give the trap's host action the guest action's `SA_ONSTACK`: the kernel
@@ -116,7 +237,23 @@ pub unsafe extern "C" fn patina_trap_shim_fault(info: *const Info, pc: usize) ->
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let info = unsafe { *info };
     let mut line = Line::default();
-    line.text(b"patina: fault inside the shim's own code: signal ");
+    // Guest code the shim runs while it owns the thread (a guest allocator
+    // it calls, say) may read the counter: the trap cannot answer it there.
+    #[cfg(target_arch = "x86_64")]
+    let counter = trap_routed(SIGSEGV)
+        && info.signo() == SIGSEGV
+        && info.code() == SI_KERNEL
+        && crate::tsc::counter_read_at(pc);
+    #[cfg(not(target_arch = "x86_64"))]
+    let counter = false;
+    if counter {
+        line.text(
+            b"patina: a timestamp-counter read while the shim owned the thread (guest code it \
+              ran, an allocator say): not modeled: signal ",
+        );
+    } else {
+        line.text(b"patina: fault inside the shim's own code: signal ");
+    }
     line.number(info.signo().into(), 10);
     line.text(b" code ");
     line.number(u64::from(info.code() as u32), 16);
@@ -179,13 +316,13 @@ fn take_default(sig: u8) -> ! {
 
 /// One diagnostic line built without allocating.
 struct Line {
-    bytes: [u8; 160],
+    bytes: [u8; 256],
     len: usize,
 }
 impl Default for Line {
     fn default() -> Self {
         Self {
-            bytes: [0; 160],
+            bytes: [0; 256],
             len: 0,
         }
     }
@@ -218,10 +355,11 @@ impl Line {
 }
 
 thread_local! {
-    /// The action a SIGSEGV [`deliver`] is about to queue captured at its
-    /// dequeue: its frame runs that one, as the kernel's does, whatever a
-    /// sibling handler of the same batch installs meanwhile.
-    static SENT: Cell<Option<Action>> = const { Cell::new(None) };
+    /// The action a SIGSEGV or SIGBUS [`deliver`] is about to queue captured
+    /// at its dequeue, with the instance's siginfo: its frame runs that one,
+    /// as the kernel's does, whatever a sibling handler of the same batch
+    /// installs meanwhile.
+    static SENT: [Cell<Option<(Action, Info)>>; 2] = const { [Cell::new(None), Cell::new(None)] };
     /// While the trap serves a counter read off the alternate stack
     /// ([`with_altstack_below`]): the guest's host mask the read interrupted.
     static SERVING: Cell<Option<u64>> = const { Cell::new(None) };
@@ -235,10 +373,18 @@ thread_local! {
     };
 }
 
-/// The next SIGSEGV this thread takes is the one [`deliver`] queues, with
-/// the action captured at its dequeue.
-pub(super) fn send(action: Action) {
-    SENT.set(Some(action));
+/// The next `sig` (SIGSEGV or SIGBUS) this thread takes is the one
+/// [`deliver`] queues, with the action captured at its dequeue.
+pub(super) fn send(sig: u8, action: Action, info: &Info) {
+    SENT.with(|sent| sent[usize::from(sig == SIGBUS)].set(Some((action, *info))));
+}
+/// The action captured for the `sig` this thread takes with `info`, if it is
+/// the one [`deliver`] queued: a genuine fault is not, nor is anything once
+/// an upper handler left that frame unrun by `siglongjmp`.
+fn take_sent(sig: u8, info: &Info) -> Option<Action> {
+    SENT.with(|sent| sent[usize::from(sig == SIGBUS)].take())
+        .filter(|(_, sent)| info.code() <= 0 && sent.words[..3] == info.words[..3])
+        .map(|(action, _)| action)
 }
 
 /// A counter read the trap took on the alternate stack, to be served off it
@@ -264,7 +410,8 @@ const STOP_FRAMES: usize = 1024;
 /// off it (`served`; null: served where the trap's frame is, which needs
 /// nothing). No guest code runs until the read is done, so none can build a
 /// frame over the trap's live frames there or register a stack meanwhile:
-/// every signal but the containment ones is held blocked (the
+/// every signal but the containment ones and SIGBUS (whose front handler
+/// names a fault in the shim's own code) is held blocked (the
 /// trap frame's `rt_sigreturn` installs the guest's mask again, and what
 /// arrived meanwhile is delivered then, after the instruction, as it may be
 /// natively), and a delivery that would run a handler, a `sigaltstack` or a
@@ -295,7 +442,7 @@ pub(crate) fn with_altstack_below<T>(served: *const Served, body: impl FnOnce() 
         );
     }
     let mut interrupted = 0u64;
-    let held = host_mask(u64::MAX);
+    let held = host_mask(!bit(SIGBUS));
     if host(
         SYS_RT_SIGPROCMASK,
         [
@@ -635,7 +782,7 @@ pub unsafe extern "C" fn patina_signal_fault(
         alt,
         entry: crate::panic_boundary::guest_entry().1,
     };
-    let action = match SENT.take() {
+    let action = match take_sent(SIGSEGV, &info) {
         Some(action) => action,
         None => {
             // No kernel fault path uses such a code, and patina queued none.

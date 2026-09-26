@@ -45,6 +45,7 @@ pub(in crate::thread) const SI_TIMER: i32 = -2;
 pub(in crate::thread) const SI_QUEUE: i32 = -1;
 #[cfg(target_arch = "x86_64")]
 pub(in crate::thread) const SA_RESTORER: u64 = 0x0400_0000;
+pub(in crate::thread) const SA_SIGINFO: u64 = 0x4;
 pub(in crate::thread) const SA_NODEFER: u64 = 0x4000_0000;
 pub(in crate::thread) const SA_ONSTACK: u64 = 0x0800_0000;
 

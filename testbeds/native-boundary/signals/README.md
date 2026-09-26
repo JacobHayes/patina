@@ -41,6 +41,12 @@ on the alternate stack are served off it, on an ordinary stack and on one too
 small to leave a nested frame room: natively both run on, and under the shim
 each is a named stop, since no guest code runs during such a read.
 
+`shim_fault.c` calls a fault planted in a shim entry (`patina_planted_fault`,
+in a shim built with the `planted-faults` feature) under a guest handler for
+the signal: a SIGSEGV and a SIGBUS, which `native_containment` requires to be
+named stops that take the default action, never the handler, on every Linux
+arch.
+
 `frame_mask.c` has a handler add SIGSYS and SIGSEGV to its frame's saved mask,
 returning through glibc's restorer and (x86_64) through the guest's own raw
 and `syscall(2)` stubs; a raw syscall and a timestamp-counter read must still

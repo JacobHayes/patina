@@ -754,6 +754,9 @@ pub(crate) fn deliver() {
                 install_mask(!bit(instance.sig));
                 queue(instance);
             } else if !one_by_one {
+                if fault::front_routed(instance.sig) {
+                    fault::send(instance.sig, *action, &instance.info);
+                }
                 swapped |= dequeued_action(instance.sig, *action, *seen);
                 queue(instance);
             }
@@ -788,11 +791,14 @@ pub(crate) fn deliver() {
                     // The trap's frame runs the action its dequeue captured.
                     fault::set(if i == 0 { segv } else { blocks[i - 1] });
                     install_mask(saved);
-                    fault::send(action);
+                    fault::send(SIGSEGV, action, &instance.info);
                     mirror_onstack(action.flags);
                     queue(&instance);
                 } else if action.handler != SIG_DFL {
                     fault::set(blocks[i]);
+                    if fault::front_routed(instance.sig) {
+                        fault::send(instance.sig, action, &instance.info);
+                    }
                     let swapped = dequeued_action(instance.sig, action, seen);
                     install_mask(saved);
                     queue(&instance);
@@ -889,6 +895,11 @@ fn install_host_action(sig: u8, action: Action) -> i64 {
         mirror_onstack(action.flags);
         return 0;
     }
+    let action = if fault::front_routed(sig) {
+        fault::front_action(action)
+    } else {
+        action
+    };
     host(
         SYS_RT_SIGACTION,
         [
@@ -988,7 +999,9 @@ pub unsafe extern "C" fn patina_signal_action(
     if !action.is_null() {
         let action = unsafe { *action };
         // A trap-routed action stays virtual: the host keeps the trap's
-        // handler, which runs this one for each fault it does not answer.
+        // handler, which runs this one for each fault it does not answer. A
+        // front-routed one too: the host keeps the front handler, with this
+        // action's flags, mask and restorer.
         let rc = install_host_action(sig as u8, action);
         if rc != 0 {
             return -i64::from(
