@@ -593,7 +593,11 @@ Static, pre-run checks reject a native binary before it executes:
   refused everywhere. The scan also refuses thread-pointer writes (x86_64
   `wrfsbase` and FS selector loads, aarch64 `msr tpidr_el0`): the shim finds its
   own per-thread state through that pointer, so no guest may move it. glibc
-  installs it from ld.so, outside the scanned image, so no glibc site is allowed;
+  installs it from ld.so, outside the scanned image, so no glibc site is allowed.
+  On x86_64 it refuses the i386 syscall entries (`int 0x80`, `sysenter`), whose
+  32-bit syscall ABI the shim never services, and the far transfers (`lcall`/
+  `ljmp`/`lret`/`iret`) that could switch the CPU to 32-bit code the scan does
+  not decode;
 - WASI module imports are audited against the host's explicit allowlist before
   instantiation.
 

@@ -194,6 +194,8 @@ Completed foundations:
 
 35. Thread-pointer writes are refused by the instruction scan. The shim resolves its own thread-locals through the thread pointer, so a guest may not move it: `arch_prctl(ARCH_SET_FS)` already could not, and the scan now refuses the syscall-free ways, x86_64 `wrfsbase` and the FS selector loads (`mov fs`, `pop fs`, `lfs`) and aarch64 `msr tpidr_el0`, as category `thread-pointer` with the decoded mnemonic (also in the JSON `finding_details`). Reads, GS writes, `TPIDRRO_EL0` and `TPIDR2_EL0` are not findings. glibc 2.39 installs the pointer in ld.so, outside the scanned image, so no glibc site needs allowing; a static glibc image's own `__libc_setup_tls` write is refused like its inline `svc`. See `crates/patina-target/ESCAPE-CLASSES.md`.
 
+36. The x86_64 instruction scan refuses the ways into the kernel's 32-bit syscall ABI and the CPU's 32-bit compatibility mode. `int 0x80` and `sysenter` are `direct-syscall` findings that are never SUD-downgraded: where the kernel has IA32 emulation SUD traps them, but they arrive with the i386 ABI, which the shim's SIGSYS handler aborts on, so the audit now refuses them before the run on every kernel. The far transfers that load CS (`lcall`/`ljmp` through memory, `lret`, `iret`) are refused as category `far-transfer`, since code reached through a 32-bit code selector is not what the 64-bit decoder scanned (Go's `crypto/internal/boring/sig.StandardCrypto` marker trips this rule, a known blocker for Go guests); the direct far forms (`9a`/`ea`) are invalid in 64-bit mode and were already undecodable. A refusal naming any of them carries a note saying why no kernel runs them contained.
+
 Remaining:
 
 1. Non-zero TCP latency over `SimNet`.

@@ -475,8 +475,17 @@ pub fn native_binary_has_sud_marker(bytes: &[u8]) -> Result<bool, TargetError> {
 /// *instruction* (`instruction@…`), as opposed to a `cpu-nondeterminism`
 /// register read (`rdtsc`/`mrs CNTVCT`), which SUD cannot trap and which still
 /// refuses. This is the escape set the SUD audit downgrade applies to.
+///
+/// The decision reads the decoded [`NativeEscape::mnemonic`]: the x86-64
+/// 32-bit entries (`int 0x80`, `sysenter`) are `direct-syscall` too. SUD
+/// traps them where the kernel has IA32 emulation, but they arrive with the i386
+/// syscall ABI, which the shim's handler refuses (it accepts only its own arch's
+/// `si_arch`); elsewhere they fault. Downgrading them would admit a binary the
+/// run then aborts, so they stay refusals.
 pub fn native_escape_is_sud_manageable(escape: &NativeEscape) -> bool {
-    escape.category == "direct-syscall" && escape.symbol.starts_with("instruction@")
+    escape.category == "direct-syscall"
+        && escape.symbol.starts_with("instruction@")
+        && matches!(escape.mnemonic, Some("syscall" | "svc"))
 }
 
 /// The shim's timestamp-counter trap entry symbol, defined only when a shim that
@@ -629,6 +638,51 @@ pub fn render_thread_pointer_note(blocked: &[NativeEscape]) -> Option<String> {
          write, and an instruction offset has no symbol for --allow to clear. Remove the \
          instruction: keep glibc's thread-local storage (the pointer glibc installs) rather \
          than installing your own.",
+        mnemonics.into_iter().collect::<Vec<_>>().join("/")
+    ))
+}
+
+/// The escape category of a *far-transfer* instruction finding: an x86-64 far
+/// call, jump or return (`lcall`/`ljmp` through memory, `lret`, `iret`), each of
+/// which loads CS from a selector the guest chooses.
+///
+/// Loading a 32-bit code selector (Linux's `__USER32_CS`) switches the CPU to
+/// compatibility mode. From then on the instructions run as 32-bit code, which
+/// the audit's 64-bit decoder does not describe: a thread-pointer write or an
+/// entropy read there can sit where the 64-bit walk sees something else. The
+/// transfer is refused so that every instruction the scan approves runs in the
+/// mode it was decoded in. Compilers do not emit these instructions for
+/// user-space 64-bit code; the direct far forms (`9a`/`ea`) are invalid in 64-bit mode and already
+/// fail closed as undecodable.
+pub const FAR_TRANSFER_CATEGORY: &str = "far-transfer";
+
+/// The refusal note for blocked findings that reach the x86-64 kernel's 32-bit
+/// syscall ABI or the CPU's 32-bit compatibility mode, naming them, or `None`
+/// when the blocked set has none:
+/// the i386 syscall entries (`int 0x80`, `sysenter`) and the far transfers
+/// ([`FAR_TRANSFER_CATEGORY`]). Neither has a downgrade on any kernel, which the
+/// generic direct-syscall hint would otherwise contradict.
+pub fn render_compat_mode_note(blocked: &[NativeEscape]) -> Option<String> {
+    let mnemonics: BTreeSet<&str> = blocked
+        .iter()
+        .filter(|escape| {
+            escape.symbol.starts_with("instruction@")
+                && (escape.category == FAR_TRANSFER_CATEGORY
+                    || (escape.category == "direct-syscall"
+                        && !native_escape_is_sud_manageable(escape)))
+        })
+        .filter_map(|escape| escape.mnemonic)
+        .collect();
+    if mnemonics.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "note: the {} site(s) above leave the native 64-bit ABI. int 0x80 and sysenter enter \
+         the kernel's i386 syscall ABI, which the shim never services (where the kernel traps \
+         them into syscall-user-dispatch, its handler accepts only native syscalls; elsewhere \
+         they fault), and a far call, jump or return can switch the CPU to a 32-bit code segment \
+         whose instructions this 64-bit scan does not decode. No kernel runs either contained. \
+         Remove the instruction.",
         mnemonics.into_iter().collect::<Vec<_>>().join("/")
     ))
 }
@@ -2029,16 +2083,20 @@ fn aarch64_instruction_category(instruction: u32) -> Option<(&'static str, &'sta
 /// three-byte maps (`0f 38`/`0f 3a`) *are* length-decoded: default codegen emits
 /// them (the `sha2` crate's x86 backend uses `pshufb`/`palignr`/`pblendw` and the
 /// SHA extensions `sha256rnds2`/`sha256msg1`/`sha256msg2`), and — like VEX below —
-/// none of their opcodes are forbidden (`syscall`/`rdtsc`/`rdrand`/`rdseed` live
-/// only in the legacy two-byte `0f` map), so measuring them cannot hide a
+/// none of their opcodes are forbidden (every forbidden opcode lives in the
+/// one-byte or the legacy two-byte `0f` map), so measuring them cannot hide a
 /// forbidden instruction. VEX (AVX/AVX2, both the two-byte `c5` and three-byte
 /// `c4` forms) is length-decoded for the same reason — default codegen emits it
 /// (`vmovdqa`/`vzeroupper`/...) and its opcodes are never forbidden, so it is
 /// measured only to reach the next real boundary. Because
 /// every real instruction advances the cursor to its true successor, a forbidden
 /// opcode embedded in another instruction's operand is never at a tested
-/// boundary. The length decoder is proven against `objdump -d` boundaries over
-/// real probe binaries (see `x86_decoder_matches_objdump_corpus`).
+/// boundary. The decoder assumes 64-bit mode throughout, so the instructions
+/// that could leave it are refused as `far-transfer` (`lcall`/`ljmp` through
+/// memory, `lret`, `iret`); the direct far forms (`9a`/`ea`) are invalid in
+/// 64-bit mode and fail closed as undecodable. The length decoder is proven
+/// against `objdump -d` boundaries over real probe binaries (see
+/// `x86_decoder_matches_objdump_corpus`).
 mod x86_scan {
     /// Immediate-operand width classes. Widths that depend on the effective
     /// operand/address size are resolved from the `0x66`/`0x67`/REX.W prefixes.
@@ -2097,6 +2155,10 @@ mod x86_scan {
         /// `8e` (`mov Sreg, r/m16`): ModRM.reg names the segment register
         /// loaded, and reg 4 is FS.
         MovSreg,
+        /// `ff` (group 5): reg 3 is `lcall m16:xx` and reg 5 is `ljmp m16:xx`,
+        /// the far transfers that load CS. The rest (inc/dec/near call/near
+        /// jmp/push) is not forbidden.
+        Five,
     }
 
     enum Step {
@@ -2339,6 +2401,13 @@ mod x86_scan {
             }
         };
         let mut cat = attr.cat;
+        // `int imm8` (`cd ib`): vector 0x80 is the kernel's i386 syscall gate,
+        // open to 64-bit processes when the kernel has IA32 emulation (Ubuntu's
+        // default). Every other vector enters no syscall: it traps or faults
+        // (SIGTRAP/SIGSEGV).
+        if op == 0xCD && b.get(p) == Some(&0x80) {
+            cat = Some(("direct-syscall", "int 0x80"));
+        }
         let mut imm = attr.imm;
         if attr.modrm {
             let m = match b.get(p) {
@@ -2388,6 +2457,15 @@ mod x86_scan {
             // no FSGSBASE and no syscall. GS (reg 5) is left alone, as above.
             if attr.group == Group::MovSreg && reg == 4 {
                 cat = Some((super::THREAD_POINTER_CATEGORY, "mov fs"));
+            }
+            // Far call/jmp through memory (`ff /3`, `ff /5`) loads CS from the
+            // operand's selector, and a 32-bit code selector switches the CPU to
+            // compatibility mode, where this 64-bit decoder no longer describes
+            // the code that runs. The register form (`mod = 3`) is #UD; it is
+            // flagged too, erring toward refusal.
+            if attr.group == Group::Five && (reg == 3 || reg == 5) {
+                let mnemonic = if reg == 3 { "lcall" } else { "ljmp" };
+                cat = Some((super::FAR_TRANSFER_CATEGORY, mnemonic));
             }
             // group 3 (`f6`/`f7`): only TEST (reg 0 or 1) carries an immediate.
             imm = match imm {
@@ -2482,6 +2560,16 @@ mod x86_scan {
         })
     }
 
+    /// A no-ModRM opcode whose bytes alone fix its category.
+    fn classified(imm: Imm, cat: Forbidden) -> Option<OpAttr> {
+        Some(OpAttr {
+            modrm: false,
+            imm,
+            cat: Some(cat),
+            group: Group::None,
+        })
+    }
+
     /// One-byte opcode attributes. `None` = fail closed (opcodes invalid in
     /// 64-bit mode, which valid code never emits). Prefix bytes and `0x0f` are
     /// consumed by the caller and never reach here.
@@ -2530,10 +2618,11 @@ mod x86_scan {
             0xC7 => attr(true, Z),                // grp11 mov Ev, Iz
             0xC8 => attr(false, Fixed(3)),        // enter iw, ib
             0xC9 => attr(false, None),            // leave
-            0xCA => attr(false, Fixed(2)),        // retf imm16
-            0xCB | 0xCC => attr(false, None),     // retf / int3
-            0xCD => attr(false, Fixed(1)),        // int imm8
-            0xCF => attr(false, None),            // iret
+            0xCA => classified(Fixed(2), (super::FAR_TRANSFER_CATEGORY, "lret")), // retf imm16
+            0xCB => classified(None, (super::FAR_TRANSFER_CATEGORY, "lret")), // retf
+            0xCC => attr(false, None),            // int3
+            0xCD => attr(false, Fixed(1)),        // int imm8 (0x80 resolved by the caller)
+            0xCF => classified(None, (super::FAR_TRANSFER_CATEGORY, "iret")), // iret/iretq
             0xD0..=0xD3 => attr(true, None),      // grp2 shift by 1 / CL
             0xD7 => attr(false, None),            // xlat
             0xD8..=0xDF => attr(true, None),      // x87 (always ModRM, no immediate)
@@ -2547,19 +2636,20 @@ mod x86_scan {
             0xF7 => attr(true, Group3Z),          // grp3 Ev
             0xF8..=0xFD => attr(false, None),     // clc..std
             0xFE => attr(true, None),             // grp4 inc/dec Eb
-            0xFF => attr(true, None),             // grp5
+            0xFF => grouped(Group::Five),         // grp5 (reg 3/5 = lcall/ljmp)
             // Prefixes (consumed by the caller) and any hole: fail closed.
             _ => Option::None,
         }
     }
 
     /// Two-byte (`0f xx`) opcode attributes. `None` = fail closed. The forbidden
-    /// opcodes are `0f 05` (syscall), `0f 31` (rdtsc), `0f 01 f9` (rdtscp,
-    /// resolved from ModRM by the caller) and `0f c7 /6`, `/7` (rdrand, rdseed,
-    /// likewise resolved from ModRM.reg); `0f a2` (cpuid) is classified here too,
-    /// as the informational `host-identity` category rather than a refusal. The
-    /// thread-pointer writes are `f3 0f ae /2` (wrfsbase, resolved from the
-    /// prefix and ModRM), `0f a1` (pop fs) and `0f b4` (lfs).
+    /// opcodes are `0f 05` (syscall), `0f 34` (sysenter), `0f 31` (rdtsc),
+    /// `0f 01 f9` (rdtscp, resolved from ModRM by the caller) and `0f c7 /6`,
+    /// `/7` (rdrand, rdseed, likewise resolved from ModRM.reg); `0f a2` (cpuid)
+    /// is classified here too, as the informational `host-identity` category
+    /// rather than a refusal. The thread-pointer writes are `f3 0f ae /2`
+    /// (wrfsbase, resolved from the prefix and ModRM), `0f a1` (pop fs) and
+    /// `0f b4` (lfs).
     fn two_byte(op2: u8) -> Option<OpAttr> {
         use Imm::*;
         match op2 {
@@ -2567,6 +2657,16 @@ mod x86_scan {
                 modrm: false,
                 imm: None,
                 cat: Some(("direct-syscall", "syscall")),
+                group: Group::None,
+            }),
+            // SYSENTER: the i386 fast-syscall entry. On Intel it is valid in
+            // 64-bit mode and enters the kernel's 32-bit syscall ABI where the
+            // kernel has IA32 emulation (on AMD it is #UD → SIGILL). Same
+            // length rules as the no-ModRM row below.
+            0x34 => Some(OpAttr {
+                modrm: false,
+                imm: None,
+                cat: Some(("direct-syscall", "sysenter")),
                 group: Group::None,
             }),
             0x31 => Some(OpAttr {
@@ -2630,8 +2730,9 @@ mod x86_scan {
                 group: Group::None,
             }),
             // No ModRM, no immediate (clts/syscall-family/push-pop-seg/bswap/
-            // rsm/...; `0f a2` cpuid and `0f a1` pop fs are matched above with
-            // the same length rules and an added classification).
+            // rsm/...; `0f 34` sysenter, `0f a2` cpuid and `0f a1` pop fs are
+            // matched above with the same length rules and an added
+            // classification).
             0x06
             | 0x07
             | 0x08
@@ -2641,7 +2742,6 @@ mod x86_scan {
             | 0x30
             | 0x32
             | 0x33
-            | 0x34
             | 0x35
             | 0x37
             | 0x77
@@ -2778,13 +2878,52 @@ mod x86_scan {
             }
         }
 
+        /// `(bytes, length, classification)`, lengths and mnemonics as objdump
+        /// decodes them. Besides the 64-bit syscall and the counter/entropy
+        /// reads, the i386 syscall entries (`int 0x80`, `sysenter`) are direct
+        /// syscalls, and the far transfers that load CS (`lcall`/`ljmp` through
+        /// memory, `lret`, `iret`) are `far-transfer`. Their neighbours are not
+        /// findings: other `int` vectors, the privileged `sysexit`/`sysret`, the
+        /// near forms of group 5, and near `ret`. RED: drop a decoder arm and its
+        /// row decodes as `None`.
         #[test]
         fn flags_real_forbidden_opcodes_at_a_boundary() {
-            assert_eq!(decode(&[0x0f, 0x05]).1, Some("direct-syscall"));
-            assert_eq!(decode(&[0x0f, 0x31]).1, Some("cpu-nondeterminism"));
-            assert_eq!(decode(&[0x0f, 0xc7, 0xf0]).1, Some("cpu-nondeterminism")); // rdrand
-            // group 9 reg != 6 (cmpxchg8b) is not forbidden.
-            assert_eq!(decode(&[0x48, 0x0f, 0xc7, 0x08]).1, None);
+            let far = super::super::FAR_TRANSFER_CATEGORY;
+            let cases: &[(&[u8], usize, Option<Forbidden>)] = &[
+                (&[0x0f, 0x05], 2, Some(("direct-syscall", "syscall"))),
+                (&[0x0f, 0x31], 2, Some(("cpu-nondeterminism", "rdtsc"))),
+                (
+                    &[0x0f, 0xc7, 0xf0],
+                    3,
+                    Some(("cpu-nondeterminism", "rdrand")),
+                ),
+                (&[0xcd, 0x80], 2, Some(("direct-syscall", "int 0x80"))),
+                (&[0x0f, 0x34], 2, Some(("direct-syscall", "sysenter"))),
+                (&[0xff, 0x18], 2, Some((far, "lcall"))), // lcall *(%rax)
+                (&[0x48, 0xff, 0x18], 3, Some((far, "lcall"))), // m16:64
+                (&[0xff, 0x2c, 0x24], 3, Some((far, "ljmp"))), // ljmp *(%rsp)
+                (&[0xff, 0x2d, 0, 0, 0, 0], 6, Some((far, "ljmp"))), // ljmp *0(%rip)
+                (&[0xcb], 1, Some((far, "lret"))),
+                (&[0x48, 0xcb], 2, Some((far, "lret"))), // lretq
+                (&[0xca, 0x08, 0x00], 3, Some((far, "lret"))), // lret $8
+                (&[0xcf], 1, Some((far, "iret"))),
+                (&[0x48, 0xcf], 2, Some((far, "iret"))), // iretq
+                (&[0x48, 0x0f, 0xc7, 0x08], 4, None),    // cmpxchg8b (group 9 reg 1)
+                (&[0xcd, 0x03], 2, None),                // int $3
+                (&[0xcd, 0x81], 2, None),                // int $0x81
+                (&[0xcc], 1, None),                      // int3
+                (&[0x0f, 0x35], 2, None),                // sysexit (privileged)
+                (&[0x0f, 0x07], 2, None),                // sysret (privileged)
+                (&[0xff, 0x10], 2, None),                // call *(%rax)
+                (&[0xff, 0x20], 2, None),                // jmp *(%rax)
+                (&[0xff, 0xd0], 2, None),                // call *%rax
+                (&[0xff, 0xe0], 2, None),                // jmp *%rax
+                (&[0xff, 0x30], 2, None),                // push (%rax)
+                (&[0xc2, 0x08, 0x00], 3, None),          // ret $8
+            ];
+            for (bytes, len, expected) in cases {
+                assert_eq!(decode_full(bytes), (*len, *expected), "{bytes:02x?}");
+            }
         }
 
         /// The two counter/entropy reads the opcode table did not classify.
@@ -4309,12 +4448,32 @@ mod tests {
         // reads (rdtsc/mrs CNTVCT) cannot be trapped by SUD — downgrading either
         // would silently widen the gate. RED: flip any arm below and the
         // downgrade would admit an untappable escape.
-        let trappable = NativeEscape::new(
+        for mnemonic in ["syscall", "svc"] {
+            assert!(native_escape_is_sud_manageable(&instruction_finding(
+                "direct-syscall",
+                mnemonic
+            )));
+        }
+        // The i386 entries are direct syscalls SUD traps but the shim refuses
+        // (wrong `si_arch`), so they keep refusing, and the refusal says why.
+        for mnemonic in ["int 0x80", "sysenter"] {
+            let compat = instruction_finding("direct-syscall", mnemonic);
+            assert!(!native_escape_is_sud_manageable(&compat), "{mnemonic}");
+            assert!(render_compat_mode_note(&[compat]).is_some(), "{mnemonic}");
+        }
+        assert!(
+            render_compat_mode_note(&[instruction_finding("direct-syscall", "syscall")]).is_none()
+        );
+        assert!(
+            render_compat_mode_note(&[instruction_finding(FAR_TRANSFER_CATEGORY, "ljmp")])
+                .is_some()
+        );
+        let no_mnemonic = NativeEscape::new(
             "instruction@.text+0x42".into(),
             "direct-syscall",
             vec![NativeProvenance::unknown()],
         );
-        assert!(native_escape_is_sud_manageable(&trappable));
+        assert!(!native_escape_is_sud_manageable(&no_mnemonic));
         let by_name = NativeEscape::new(
             "syscall".into(),
             "direct-syscall",

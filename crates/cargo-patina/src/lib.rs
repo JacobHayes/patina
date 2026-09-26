@@ -36,9 +36,9 @@ use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
     native_binary_has_sud_marker, native_binary_has_tsc_marker, native_binary_is_shim_linked,
     native_deny_trap_armed, native_escape_is_sud_manageable, native_escape_is_tsc_manageable,
-    native_host_identity_sites, render_cpu_nondeterminism_note, render_host_identity_note,
-    render_inert_weak_imports, render_native_escapes_grouped, render_thread_pointer_note,
-    render_tsc_managed_note, shim_control_plane_symbols,
+    native_host_identity_sites, render_compat_mode_note, render_cpu_nondeterminism_note,
+    render_host_identity_note, render_inert_weak_imports, render_native_escapes_grouped,
+    render_thread_pointer_note, render_tsc_managed_note, shim_control_plane_symbols,
 };
 use patina_dst_trace::{
     CrashRestartSegments, HandoffSealKey, IncarnationHandoff, Sha256Digest, TraceBundle,
@@ -4737,6 +4737,9 @@ fn emit_native_audit_violation(
         if let Some(note) = render_thread_pointer_note(denied) {
             eprintln!("{note}");
         }
+        if let Some(note) = render_compat_mode_note(denied) {
+            eprintln!("{note}");
+        }
     }
 }
 
@@ -6769,6 +6772,12 @@ them.",
         if let Some(note) = render_thread_pointer_note(&blocked) {
             // A moved thread pointer corrupts the shim itself, so the note names
             // the instruction and says why no downgrade exists for it.
+            message.push('\n');
+            message.push_str(&note);
+        }
+        if let Some(note) = render_compat_mode_note(&blocked) {
+            // int 0x80/sysenter are direct syscalls SUD cannot manage, so the
+            // SUD hint above does not cover them; say why they stay refused.
             message.push('\n');
             message.push_str(&note);
         }
