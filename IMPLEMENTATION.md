@@ -873,6 +873,35 @@ against the native run) and the takeover's completion at create
 (`a_new_threads_robust_head_is_known_when_create_returns`, over eight seeds
 and three runs each).
 
+Restartable sequences are modeled the same way. ld.so and `start_thread`
+register every thread's rseq area with the host from glibc text, and the host
+kernel then kept writing host CPU ids into it, a determinism leak readable
+through `__rseq_offset`, while the guest's own `rseq` answered `ENOSYS`. Now
+each task's start unregisters glibc's area from the host (found as the thread
+pointer plus `__rseq_offset`, `max(__rseq_size, 32)` bytes) and registers it
+virtually, writing the virtual CPU's fields (`cpu_id`/`cpu_id_start` 0, node 0,
+`mm_cid` 0). `rseq` answers `sys_rseq`'s refusals in their order from the
+virtual registration, and `membarrier` now offers the rseq pair, trivially
+satisfied on the one virtual CPU. Two alternatives were rejected: disabling
+glibc's registration with `GLIBC_TUNABLES=glibc.pthread.rseq=0` makes the guest
+see a kernel without rseq, which the pinned 6.8 kernel is not, and leaves the
+host registration question to every exec path; keeping the host registration
+cannot be made deterministic. A host unregistration that is refused leaves
+nothing to take over only when glibc's own registration failed (its area's
+`cpu_id` reads `RSEQ_CPU_ID_REGISTRATION_FAILED`); any other refusal stops
+the run by name rather than leave the host writing the area. `thread/rseq`
+passes with no gap, and `native_signals::rseq_areas_are_never_written_by_the_host`
+writes a sentinel into the main thread's and two threads' CPU fields and
+requires it to survive a handled signal: the host kernel rewrites a registered
+area at every signal delivery, so the check catches a live host registration
+on every run (red with the host unregistration skipped; comparing the fields
+alone caught that only when the host happened to move the thread). A stated residual: a guest handler for a synchronous signal (its own
+`SIGSEGV`, `SIGBUS`, `SIGFPE` or `SIGILL`) that returns, raised inside a
+restartable sequence's critical section, resumes at the faulting instruction
+rather than the sequence's abort handler, and `rseq_cs` is never cleared
+lazily; both are deterministic, and the fix, if one is wanted, is an
+instruction-pointer fixup before such a handler runs.
+
 ## Dependency order
 
 ```text

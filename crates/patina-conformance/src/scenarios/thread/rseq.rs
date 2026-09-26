@@ -27,8 +27,7 @@
 //! never changed.
 
 use super::thread_pointer;
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Difference, Ending, Failure, Observed};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, Who, neg};
 use crate::scenarios::sched::affinity::buffer_len;
 use crate::vehicle::Vehicle;
@@ -213,29 +212,5 @@ pub const SCENARIO: Scenario = Scenario {
     vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_rseq],
     needs: &[Need::RseqRegistered],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: Vehicle::KERNEL,
-            what: "rseq is SoftDeny(ENOSYS) in the registry, a kernel without restartable sequences, though every thread's glibc registration reaches the host kernel (ld.so's before SUD arms, a managed thread's from the host pthread_create), which keeps the area's CPU fields current: 6.8 has rseq, and refuses a second registration",
-            failure: Failure::Differs(&[
-                Difference::field(0, "rseq", "errno", Observed::Str("ENOSYS")),
-                Difference::check(
-                    1,
-                    "registering another area is EINVAL: glibc registered the thread",
-                ),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::SignalsThreadsProcess),
-            vehicles: Vehicle::KERNEL,
-            what: "every rseq answers ENOSYS, so the scenario sees no glibc registration and stops before searching for one",
-            failure: Failure::Stops {
-                events: 2,
-                ending: Ending::Exit(101),
-                diagnostic: "cannot continue: glibc registered the thread",
-            },
-        },
-    ],
     ..DEFAULTS
 };

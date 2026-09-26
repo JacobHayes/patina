@@ -165,6 +165,33 @@ fn a_new_threads_robust_head_is_known_when_create_returns() {
     }
 }
 
+/// glibc's rseq registration of every thread is taken off the host and kept
+/// virtually: the area stays registered (a second registration is `EBUSY`)
+/// and names the one virtual CPU, and the host never writes it. The host
+/// kernel rewrites a registered area's CPU fields at every signal delivery,
+/// so a sentinel that survives a handled signal proves no host registration
+/// is left, deterministically. Patina only: natively the host's registration
+/// overwrites the sentinel, by design.
+#[cfg(target_os = "linux")]
+#[test]
+fn rseq_areas_are_never_written_by_the_host() {
+    let g = assert_build_c_guest("signals/thread_registrations.c", CLink::PosixShim);
+    for seed in ["7", "8"] {
+        let output = assert_standalone_success(
+            &g.binary,
+            &["rseq-sentinel"],
+            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", seed)],
+        );
+        assert_eq!(
+            text(&output.stdout),
+            "main virtual_cpu=1 start_kept=1 id_kept=1\n\
+             thread virtual_cpu=1 start_kept=1 id_kept=1\n\
+             thread virtual_cpu=1 start_kept=1 id_kept=1\n",
+            "seed {seed}"
+        );
+    }
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod raw {
     use super::*;

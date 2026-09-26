@@ -34,7 +34,11 @@ exit walk to mark only the word the thread owned `FUTEX_OWNER_DIED`;
 owner's words and prints which the walk woke; `robust-dtor` releases a robust
 lock from a thread-local destructor (run natively as the oracle too); and
 `robust-new` asks `get_robust_list` about threads just created, over several
-seeds and runs.
+seeds and runs. `rseq-sentinel` reads the main thread's and two threads' rseq
+areas through `__rseq_offset`, requires each registered and naming the CPU
+`sched_getcpu` answers, and writes a sentinel to their CPU fields that must
+survive a handled signal (the host kernel rewrites a registered area at every
+delivery), so a host registration left behind is caught on every run.
 
 Every case uses `cargo-patina/tests/common` for compilation and process-group
 deadlines. `native_raw` separately owns prctl modeled/unsupported/privileged

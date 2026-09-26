@@ -2469,8 +2469,8 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_rseq => r(
         id,
         Family::Sync,
-        Disposition::SoftDeny(ENOSYS),
-        "ENOSYS: a kernel without restartable sequences is a configuration glibc handles at startup; registering one would tie the guest to host CPU identity.",
+        Disposition::Modeled,
+        "One virtual registration per task, with sys_rseq's refusals in its order (another area or length EINVAL, another signature EPERM, the same one EBUSY; a new one needs 32 bytes, 32-byte alignment and a user range). glibc's registration of each thread is taken off the host when the task starts (the host would keep writing host CPU ids into it) and becomes the task's virtual one; a registered area reads the one virtual CPU, 0, on node 0 with concurrency id 0, and no sequence is ever preempted (tasks switch only at boundary calls), so none is ever aborted.",
         None,
     ),
     #[cfg(target_arch = "x86_64")]

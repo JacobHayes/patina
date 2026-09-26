@@ -21,10 +21,21 @@
  *                the offset the main thread's head sits at), as the new
  *                thread itself finds. It prints, per thread, whether both
  *                agree.
+ *   rseq-sentinel glibc's rseq area of the main thread and of two more,
+ *                found through __rseq_offset: registered (a second
+ *                registration is EBUSY) and naming the CPU sched_getcpu
+ *                answers. A sentinel written to its CPU fields must survive
+ *                a handled signal: the host kernel rewrites them at every
+ *                signal delivery while it holds a registration, so a
+ *                surviving sentinel shows the host holds none. Patina only:
+ *                natively the host's registration rewrites it.
  */
 #define _GNU_SOURCE
 #include <assert.h>
+#include <errno.h>
+#include <sched.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -222,6 +233,77 @@ static int robust_new(void) {
     return 0;
 }
 
+#if defined(__x86_64__)
+#define RSEQ_SIG 0x53053053u
+#elif defined(__aarch64__)
+#define RSEQ_SIG 0xd428bc00u
+#endif
+
+extern const ptrdiff_t __rseq_offset;
+extern const unsigned int __rseq_size;
+
+struct rseq_area {
+    uint32_t cpu_id_start;
+    uint32_t cpu_id;
+    uint64_t rseq_cs;
+    uint32_t flags;
+    uint32_t node_id;
+    uint32_t mm_cid;
+};
+
+#define SENTINEL 0xfffffff0u
+
+static void on_sentinel_signal(int sig) { (void)sig; }
+
+/* The calling thread's area: registered, naming the virtual CPU, and never
+ * written by the host across a handled signal. */
+static void rseq_sentinel_fields(int out[3]) {
+    struct rseq_area *area =
+        (struct rseq_area *)((char *)__builtin_thread_pointer() + __rseq_offset);
+    unsigned int len = __rseq_size < 32 ? 32 : __rseq_size;
+    assert(syscall(SYS_rseq, area, len, 0, RSEQ_SIG) == -1 && errno == EBUSY);
+    volatile uint32_t *cpu_id_start = &area->cpu_id_start;
+    volatile uint32_t *cpu_id = &area->cpu_id;
+    out[0] = *cpu_id == (uint32_t)sched_getcpu();
+    uint32_t start = *cpu_id_start, id = *cpu_id;
+    *cpu_id_start = SENTINEL;
+    *cpu_id = SENTINEL;
+    assert(raise(SIGUSR1) == 0);
+    out[1] = *cpu_id_start == SENTINEL;
+    out[2] = *cpu_id == SENTINEL;
+    *cpu_id_start = start;
+    *cpu_id = id;
+}
+
+static int thread_sentinels[2][3];
+
+static void *rseq_thread(void *slot) {
+    rseq_sentinel_fields(slot);
+    return NULL;
+}
+
+static int rseq_sentinel(void) {
+    assert(__rseq_size > 0);
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_handler = on_sentinel_signal;
+    assert(sigaction(SIGUSR1, &action, NULL) == 0);
+    int main_sentinel[3];
+    rseq_sentinel_fields(main_sentinel);
+    for (int i = 0; i < 2; i++) {
+        pthread_t thread;
+        assert(pthread_create(&thread, NULL, rseq_thread, thread_sentinels[i]) == 0);
+        assert(pthread_join(thread, NULL) == 0);
+    }
+    printf("main virtual_cpu=%d start_kept=%d id_kept=%d\n", main_sentinel[0], main_sentinel[1],
+           main_sentinel[2]);
+    for (int i = 0; i < 2; i++) {
+        printf("thread virtual_cpu=%d start_kept=%d id_kept=%d\n", thread_sentinels[i][0],
+               thread_sentinels[i][1], thread_sentinels[i][2]);
+    }
+    return 0;
+}
+
 static int robust_exit(void) {
     /* A tid no thread of the guest has: the main thread's is the pid. */
     foreign_word = (uint32_t)getpid() + 1000;
@@ -240,6 +322,7 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "robust-wake") == 0) return robust_wake();
     if (strcmp(argv[1], "robust-dtor") == 0) return robust_dtor();
     if (strcmp(argv[1], "robust-new") == 0) return robust_new();
+    if (strcmp(argv[1], "rseq-sentinel") == 0) return rseq_sentinel();
     fprintf(stderr, "unknown case %s\n", argv[1]);
     return 2;
 }

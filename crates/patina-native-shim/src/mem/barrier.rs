@@ -17,10 +17,11 @@ const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: c_int = 1 << 4;
 const MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE: c_int = 1 << 5;
 const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE: c_int = 1 << 6;
 const MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ: c_int = 1 << 7;
+const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ: c_int = 1 << 8;
 const MEMBARRIER_CMD_GET_REGISTRATIONS: c_int = 1 << 9;
 const MEMBARRIER_CMD_FLAG_CPU: u32 = 1 << 0;
-/// What `MEMBARRIER_CMD_QUERY` answers: every command but the rseq pair, as a
-/// kernel without `CONFIG_RSEQ` does (`rseq` is not modeled either).
+/// What `MEMBARRIER_CMD_QUERY` answers: every command (restartable
+/// sequences are modeled, `crate::thread::registrations`).
 const MEMBARRIER_COMMANDS: c_int = MEMBARRIER_CMD_GLOBAL
     | MEMBARRIER_CMD_GLOBAL_EXPEDITED
     | MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
@@ -28,12 +29,15 @@ const MEMBARRIER_COMMANDS: c_int = MEMBARRIER_CMD_GLOBAL
     | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
     | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
     | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
+    | MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ
+    | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ
     | MEMBARRIER_CMD_GET_REGISTRATIONS;
 
 /// The process's membarrier registrations, as the registration commands name
 /// them (`MEMBARRIER_CMD_GET_REGISTRATIONS` answers exactly this). Registering
 /// for sync-core also registers the plain private expedited state, which is
-/// what the kernel's `membarrier_state` reports, but not its readiness.
+/// what the kernel's `membarrier_state` reports, but not its readiness; so
+/// does registering for rseq.
 static MEMBARRIER_REGISTERED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 /// The registrations a barrier checks (`*_READY`).
 static MEMBARRIER_READY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
@@ -78,10 +82,18 @@ pub(crate) fn membarrier(cmd: c_int, flags: u32, _cpu_id: c_int) -> i64 {
             MEMBARRIER_READY.fetch_or(cmd, Ordering::AcqRel);
             register(cmd | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED)
         }
+        // No sequence is ever running on another CPU: every task runs on the
+        // one virtual CPU, and a sequence is never preempted.
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ => {
+            barrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ)
+        }
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ => {
+            MEMBARRIER_READY.fetch_or(cmd, Ordering::AcqRel);
+            register(cmd | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED)
+        }
         MEMBARRIER_CMD_GET_REGISTRATIONS => {
             i64::from(MEMBARRIER_REGISTERED.load(Ordering::Acquire))
         }
-        // The rseq pair and every unknown command.
         _ => -i64::from(EINVAL),
     }
 }
@@ -99,13 +111,19 @@ mod tests {
         );
         assert_eq!(membarrier(MEMBARRIER_CMD_QUERY, 1, 0), -i64::from(EINVAL));
         assert_eq!(membarrier(1 << 20, 0, 0), -i64::from(EINVAL));
+        // The rseq barrier takes the CPU flag (and no other), and waits for
+        // its own registration.
+        assert_eq!(
+            membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ, 2, 0),
+            -i64::from(EINVAL)
+        );
         assert_eq!(
             membarrier(
                 MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ,
                 MEMBARRIER_CMD_FLAG_CPU,
                 0
             ),
-            -i64::from(EINVAL)
+            -i64::from(crate::EPERM)
         );
         assert_eq!(
             membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0),
@@ -141,5 +159,25 @@ mod tests {
             -i64::from(EINVAL)
         );
         assert_eq!(membarrier(MEMBARRIER_CMD_GLOBAL_EXPEDITED, 0, 0), 0);
+        assert_eq!(
+            membarrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ, 0, 0),
+            0
+        );
+        assert_eq!(
+            membarrier(
+                MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ,
+                MEMBARRIER_CMD_FLAG_CPU,
+                0
+            ),
+            0
+        );
+        assert_eq!(
+            membarrier(MEMBARRIER_CMD_GET_REGISTRATIONS, 0, 0),
+            i64::from(
+                MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
+                    | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
+                    | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ
+            )
+        );
     }
 }

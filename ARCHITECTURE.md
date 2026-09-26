@@ -160,6 +160,12 @@ thread has taken it over. A managed thread completes after its thread-local
 destructors (its completion is the first one it registers), and completion
 walks the list first, as the kernel's exit does: a futex word the task still
 owns gains `FUTEX_OWNER_DIED` and wakes a waiter by the word's shared key.
+glibc's restartable-sequence registration of each thread is
+taken off the host when the task starts, since the host kernel would keep
+writing host CPU ids into the area, and kept as the task's virtual
+registration: the area reads the one virtual CPU (0, node 0, concurrency id 0),
+and `rseq` answers from the virtual registration. Tasks switch only at boundary
+calls, which a restartable sequence never contains, so none is ever aborted.
 Raw `exit` completes only the calling task, including the leader; another live
 task can subsequently end the process with `exit_group`. Raw `exit_group`
 finalizes without running guest atexit handlers; normal libc exit retains its

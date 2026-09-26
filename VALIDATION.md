@@ -193,7 +193,11 @@ integration testing, with reviewable guests in `testbeds/native-boundary/`:
   claims of host equivalence.
 - `native_signals`: Linux C readiness interruption, temporary masks and timeout
   contracts; x86_64 Linux libc/raw prctl sharing, handler/mask visibility, sigwait
-  retry, and complete guest-abort versus incomplete internal-fatal traces. Shared
+  retry, and complete guest-abort versus incomplete internal-fatal traces; Linux
+  per-thread kernel registrations: a thread's exit walks the robust list it
+  registered (`a_thread_exit_walks_its_robust_list`), and glibc's rseq areas
+  read the virtual CPU and keep a sentinel across a handled signal, which a
+  live host registration would overwrite (`rseq_areas_are_never_written_by_the_host`). Shared
   Linux/macOS cases check internal panic ownership, catchable guest panics, and
   process answers plus uninterrupted virtual sleep with repeat/replay identity.
 - `native_trace`: the whole-run std strace detector with a planted escape on

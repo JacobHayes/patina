@@ -1210,6 +1210,13 @@ mod hostapi {
         ptr
     }
 
+    /// A host symbol by name, from the images after the main executable (the
+    /// loader's and glibc's data symbols too), or null where none defines it.
+    pub fn symbol(name: &CStr) -> *mut c_void {
+        // SAFETY: as in `resolve`.
+        unsafe { __real_dlsym(RTLD_NEXT, name.as_ptr()) }
+    }
+
     fn build() -> HostApi {
         // SAFETY: each resolved pointer is transmuted to the real C ABI signature
         // of the glibc symbol it names.
