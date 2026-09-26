@@ -583,6 +583,8 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
             thread::ipc::mq_close(release.handle);
             Ok(())
         }
+        #[cfg(target_os = "linux")]
+        FdKind::Pidfd => Ok(()),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => {
             thread::kqueue_close(release.handle);
@@ -4732,7 +4734,7 @@ unsafe fn read_resolved(
             thread::timers::timerfd_read(resolved.handle, nonblocking, destination as usize, length)
         }
         #[cfg(target_os = "linux")]
-        FdKind::Epoll => fail(EINVAL) as isize,
+        FdKind::Epoll | FdKind::Pidfd => fail(EINVAL) as isize,
         // SAFETY: forwarded from this function's own contract.
         #[cfg(target_os = "linux")]
         FdKind::MessageQueue if resolved.status & O_READ != 0 => unsafe {
@@ -4816,7 +4818,7 @@ unsafe fn write_resolved(
         #[cfg(target_os = "linux")]
         FdKind::EventFd => unsafe { thread::eventfd_write(resolved.handle, source, length) },
         #[cfg(target_os = "linux")]
-        FdKind::Epoll | FdKind::SignalFd | FdKind::TimerFd => fail(EINVAL) as isize,
+        FdKind::Epoll | FdKind::SignalFd | FdKind::TimerFd | FdKind::Pidfd => fail(EINVAL) as isize,
         // A queue file has no write method: EBADF without write access, EINVAL
         // with it.
         #[cfg(target_os = "linux")]
@@ -4853,7 +4855,9 @@ fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved, u64), c_in
         | FdKind::Socket
         | FdKind::Pipe => Err(ESPIPE),
         #[cfg(target_os = "linux")]
-        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::TimerFd => Err(ESPIPE),
+        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::TimerFd | FdKind::Pidfd => {
+            Err(ESPIPE)
+        }
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => Err(ESPIPE),
     }
@@ -6011,7 +6015,7 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         | FdKind::Urandom
         | FdKind::Socket => return fail(ENODEV),
         #[cfg(target_os = "linux")]
-        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::TimerFd => {
+        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd | FdKind::TimerFd | FdKind::Pidfd => {
             return fail(ENODEV);
         }
         // A queue is a regular file (judged after the range, below).
@@ -7512,7 +7516,8 @@ mod thread {
             | FdKind::Epoll
             | FdKind::SignalFd
             | FdKind::MessageQueue
-            | FdKind::TimerFd => Err(super::ENOTSOCK),
+            | FdKind::TimerFd
+            | FdKind::Pidfd => Err(super::ENOTSOCK),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::ENOTSOCK),
         }
@@ -7537,7 +7542,8 @@ mod thread {
             | FdKind::Epoll
             | FdKind::SignalFd
             | FdKind::MessageQueue
-            | FdKind::TimerFd => Err(super::EBADF),
+            | FdKind::TimerFd
+            | FdKind::Pidfd => Err(super::EBADF),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::EBADF),
         }
@@ -12286,6 +12292,10 @@ mod thread {
             }
             #[cfg(target_os = "linux")]
             FdKind::Epoll => (0, (0, 0)),
+            // `pidfd_poll`: readable once the process's thread group has
+            // exited, which a process never sees of itself or of init.
+            #[cfg(target_os = "linux")]
+            FdKind::Pidfd => (0, (0, 0)),
             #[cfg(target_os = "linux")]
             FdKind::MessageQueue => {
                 let (readable, writable) = ipc::mq_readiness(state, handle);

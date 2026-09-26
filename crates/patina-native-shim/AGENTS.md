@@ -267,8 +267,9 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   first. Anything that re-enters `syscall(2)` must keep that entry's stack
   pointer contract. `restart_syscall` answers `EINTR`: no restart block is
   ever pending (waits a handler interrupts end at their own resumption).
-  `pidfd_send_signal` is a final process trap because no virtual pidfd exists;
-  this is a declared limitation, not a modeled self-pidfd implementation.
+  A pidfd (`FdKind::Pidfd`, `src/sud/pidfd.rs`) names the guest's process or
+  init by its virtual pid; `pidfd_send_signal` generates through
+  `generate_signal` like `kill`, never a host signal.
 - `cargo-patina/tests/native_signals.rs` and `native_containment.rs` use the
   shared `tests/common` builder and `testbeds/native-boundary/signals/` guests
   to build fresh strong C interposers and execute real

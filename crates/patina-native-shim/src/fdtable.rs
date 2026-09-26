@@ -8,12 +8,12 @@
 //! number to the same description; `close` releases one number and frees the
 //! description only when its last number goes. Every class the shim models —
 //! captured stdio, deterministic-filesystem files and directories, the
-//! `/dev/urandom` device, virtual sockets, in-process pipes, eventfds and
-//! readiness reactors — is a description here, and the guest number is the ONLY
-//! thing the guest sees. The class-specific tables (the net module's sockets and
-//! pipe ends, the driver's handles) are keyed by the description's `handle`,
-//! which no guest ever observes, so a guest number is a pure function of the
-//! deterministic call sequence and is never recorded.
+//! `/dev/urandom` device, virtual sockets, in-process pipes, eventfds,
+//! readiness reactors and process descriptors — is a description here, and the
+//! guest number is the ONLY thing the guest sees. The class-specific tables (the
+//! net module's sockets and pipe ends, the driver's handles) are keyed by the
+//! description's `handle`, which no guest ever observes, so a guest number is a
+//! pure function of the deterministic call sequence and is never recorded.
 //!
 //! This module is the data structure alone: no runtime calls, no scheduling
 //! points, no locks of its own. `lib.rs` owns the single global instance behind
@@ -77,6 +77,11 @@ pub(crate) enum FdKind {
     /// A timer descriptor (`timerfd_create`); `handle` keys the timer table.
     #[cfg(target_os = "linux")]
     TimerFd,
+    /// A process descriptor (`pidfd_open`; 6.8's anonymous `[pidfd]` inode);
+    /// `handle` is the virtual pid of the process it names, init or the
+    /// guest. It has no class object: nothing is freed with it.
+    #[cfg(target_os = "linux")]
+    Pidfd,
     /// A virtual kqueue; `handle` is the registry id.
     #[cfg(target_os = "macos")]
     Kqueue,
@@ -106,6 +111,8 @@ impl FdKind {
             FdKind::MessageQueue => 13,
             #[cfg(target_os = "linux")]
             FdKind::TimerFd => 14,
+            #[cfg(target_os = "linux")]
+            FdKind::Pidfd => 15,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => 11,
         }
@@ -127,7 +134,8 @@ impl FdKind {
             | FdKind::Epoll
             | FdKind::SignalFd
             | FdKind::MessageQueue
-            | FdKind::TimerFd => false,
+            | FdKind::TimerFd
+            | FdKind::Pidfd => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }

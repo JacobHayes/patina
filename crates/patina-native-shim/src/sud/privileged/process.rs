@@ -1,7 +1,7 @@
 //! The rows that reach other processes and namespaces: `ptrace`, `unshare`
 //! and `setns`. The virtual pid namespace holds init and the guest, the
 //! guest traces no one and nothing traces it, and the machine has one of
-//! each namespace, none of which the guest can name by a descriptor.
+//! each namespace, which the guest names only through a process's pidfd.
 
 use super::{Answer, Unmodeled, refuse};
 use crate::FdKind;
@@ -150,16 +150,27 @@ pub(in crate::sud) fn unshare(credential: &Credential, a: &[u64; 6]) -> Answer {
     Ok(0)
 }
 
+/// The namespaces `setns` may join through a pidfd (`check_setns_flags`).
+const JOINABLE: u64 = NEW_NAMESPACES | NEWUSER;
+
 /// `setns(fd, nstype)` (kernel/nsproxy.c): a descriptor not open (`O_PATH`
 /// included: `fdget`) is `EBADF`, then one that is neither a namespace file
-/// nor a pidfd `EINVAL` — every descriptor the model holds, so the
-/// capability checks of joining are never reached.
-pub(in crate::sud) fn setns(_: &Credential, a: &[u64; 6]) -> Answer {
+/// nor a pidfd `EINVAL`. The model holds no namespace file; through a pidfd,
+/// no namespace or an unknown one is `EINVAL`, then [`join_namespaces`].
+pub(in crate::sud) fn setns(credential: &Credential, a: &[u64; 6]) -> Answer {
     match crate::fdget(a[0] as c_int) {
         Err(code) => refuse(code),
-        // No kind the model has is a namespace file or a pidfd: a new kind
-        // (a pidfd) must decide here whether it is one.
         Ok(resolved) => match resolved.kind {
+            FdKind::Pidfd => {
+                let nstype = u64::from(a[1] as u32);
+                if nstype == 0 || nstype & !JOINABLE != 0 {
+                    return refuse(errno::EINVAL);
+                }
+                match crate::sud::pidfd::target(a[0] as c_int) {
+                    Ok(process) => join_namespaces(credential, nstype, process),
+                    Err(code) => refuse(code),
+                }
+            }
             FdKind::Stdin
             | FdKind::Stdout
             | FdKind::Stderr
@@ -178,8 +189,59 @@ pub(in crate::sud) fn setns(_: &Credential, a: &[u64; 6]) -> Answer {
     }
 }
 
+/// `validate_nsset`: joining the namespaces of the process a pidfd names.
+/// Reading them is `ptrace_may_access(PTRACE_MODE_READ_REALCREDS)`, which
+/// init, not dumpable, allows only with `CAP_SYS_PTRACE` (`EPERM`). Then each
+/// namespace asked for is installed in the kernel's order. The machine has
+/// one of each, so the user namespace is the caller's own (`userns_install`:
+/// `EINVAL`), a time namespace asked alone meets `timens_install`'s
+/// single-thread rule (`EUSERS`) before its capability, and every install
+/// needs `CAP_SYS_ADMIN` (`EPERM`); holding it is where the model ends.
+pub(super) fn join_namespaces(credential: &Credential, nstype: u64, process: Process) -> Answer {
+    if process == Process::Init && !credential.capable(Capability::SysPtrace) {
+        return refuse(errno::EPERM);
+    }
+    if nstype & NEWUSER != 0 {
+        return refuse(errno::EINVAL);
+    }
+    if nstype == u64::from(CLONE_NEWTIME) && crate::thread::live_threads() != 1 {
+        return refuse(errno::EUSERS);
+    }
+    super::gate(credential, Capability::SysAdmin, errno::EPERM)
+}
+
+/// `pidfd_getfd(pidfd, fd, flags)` (kernel/pid.c); see [`getfd_from`].
+pub(in crate::sud) fn pidfd_getfd(credential: &Credential, a: &[u64; 6]) -> Answer {
+    getfd_from(credential, a, || crate::sud::pidfd::target(a[0] as c_int))
+}
+
+/// `pidfd_getfd` with the process the pidfd names found by `target`: a flag
+/// (`EINVAL`), then the descriptor (`EBADF`). Taking a descriptor of init,
+/// which is not dumpable, is `ptrace_may_access(PTRACE_MODE_ATTACH_REALCREDS)`:
+/// `CAP_SYS_PTRACE` (`EPERM`). One of the guest's own (`O_PATH` included:
+/// `fget_task` takes any) is duplicated in the one table, sharing its open
+/// file, close-on-exec (`receive_fd`): `EBADF` for a number not open, then
+/// `EMFILE`.
+pub(super) fn getfd_from(
+    credential: &Credential,
+    a: &[u64; 6],
+    target: impl FnOnce() -> Result<Process, u32>,
+) -> Answer {
+    if a[2] as u32 != 0 {
+        return refuse(errno::EINVAL);
+    }
+    match target() {
+        Err(code) => refuse(code),
+        Ok(Process::Init) => super::gate(credential, Capability::SysPtrace, errno::EPERM),
+        Ok(Process::Guest) => Ok(match crate::fd_table().lock().dup(a[1] as c_int, 0, true) {
+            Ok(fd) => i64::from(fd),
+            Err(code) => -i64::from(code),
+        }),
+    }
+}
+
 /// `get_robust_list(pid, head_ptr, len_ptr)` (kernel/futex/syscalls.c): the
-/// pid is looked up first; init belongs to root, so reading its head is
+/// pid is looked up first; init is not dumpable, so reading its head is
 /// `ptrace_may_access(PTRACE_MODE_READ_REALCREDS)`'s `CAP_SYS_PTRACE`
 /// (`EPERM`). Every other pid is the thread model's: the caller's own
 /// threads, or `ESRCH`.

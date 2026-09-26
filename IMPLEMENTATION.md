@@ -947,6 +947,34 @@ for `ARCH_SET_FS` to another base and for a present 32-bit data segment
 written to the LDT (red with either passed to the host: the moved FS base
 killed the run with no diagnostic, and the LDT write returned).
 
+Process descriptors are a descriptor-table kind, `FdKind::Pidfd`, whose
+handle is the virtual pid it names, the guest's process or init
+(`src/sud/pidfd.rs`). It is 6.8's anonymous `[pidfd]` inode: read-write,
+close-on-exec, `O_NONBLOCK` with `PIDFD_NONBLOCK`, never readable (neither
+process exits while the guest runs), `EINVAL` to read or write, `ESPIPE` to
+seek, `ENOTTY` to ioctl, on the anonymous-inode filesystem. `pidfd_open` takes
+a thread-group leader only (6.8 has no thread pidfds). `pidfd_getfd`
+duplicates one of the guest's own descriptors in the one table (the same open
+file, close-on-exec; `O_PATH` ones too, as `fget_task` takes them), and one of
+init's needs `CAP_SYS_PTRACE` through the privileged gate. `pidfd_send_signal`
+checks its flags, the descriptor and a caller's siginfo (copied, carrying
+`sig`, a kernel or `tkill` code only to the caller's own thread's pid) in
+`pidfd_send_signal`'s order, then generates for the process as `kill` does,
+so init takes nothing: the virtual init runs as the guest's uid, where the
+pinned oracle's pid 1 is root's and refuses the guest's signals (`EPERM`), a
+by-design difference `proc/pidfd` (a signal through init's pidfd) and
+`proc/ids` (`kill(1, 0)`) pin. Its 6.8 fallback to a `/proc/<pid>` directory
+has nothing to find: the virtual machine mounts no procfs. `process_mrelease`
+finds every process alive and not exiting: `EINVAL`. `setns` through a pidfd
+checks its namespace flags (`EINVAL`), then `validate_nsset` through the
+credential gate: init's namespaces need `CAP_SYS_PTRACE` (`EPERM`), the one
+user namespace is the caller's own (`EINVAL`), and every other install needs
+`CAP_SYS_ADMIN` (`EPERM`). `waitid(P_PIDFD)` takes the process through its
+pidfd (`EBADF` for a descriptor that is no pidfd) and, like every `which`,
+finds no child: `ECHILD` (`proc/wait`). `proc/pidfd` passes on both vehicles
+with only the init-signal difference, including the checks added for a
+non-leader thread, init's pidfd, `setns` and the siginfo paths.
+
 ## Dependency order
 
 ```text

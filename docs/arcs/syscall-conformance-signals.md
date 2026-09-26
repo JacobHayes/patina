@@ -13,9 +13,9 @@ oracle, this text is the index.
 The numbered design below records the original plan. These deltas describe the
 implementation; they do not change the scenarios or the required unit tests.
 
-- `pidfd_send_signal(self)` is not a generation door: virtual pidfds do not exist,
-  and `pidfd_send_signal` is a final `process` trap. This is a deliberate limit,
-  not a claim of self-pidfd support.
+- `pidfd_send_signal(self)` is a generation door since the pidfd descriptor
+  kind landed (`src/sud/pidfd.rs`): it validates its flags, descriptor and
+  siginfo as 6.8 does, then generates for the process as `kill` does.
 - `TaskSignals` has neither an `altstack` mirror nor an `in_delivery` flag. The
   host kernel owns each task's alternate stack; host masks describe legitimate
   nested delivery. Enclosing SIGSYS mask/stack dirty bits survive inner-frame

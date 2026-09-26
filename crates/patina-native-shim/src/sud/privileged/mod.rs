@@ -171,11 +171,7 @@ mod tests {
     /// The rows that declare a capability no caller of the model reaches:
     /// the kernel checks it only past a refusal every descriptor or device
     /// of the virtual machine gets.
-    const UNREACHABLE: &[Syscall] = &[
-        Syscall::N_quotactl,
-        Syscall::N_quotactl_fd,
-        Syscall::N_setns,
-    ];
+    const UNREACHABLE: &[Syscall] = &[Syscall::N_quotactl, Syscall::N_quotactl_fd];
 
     /// The row's answer to `case` for a credential holding `held`.
     fn outcome(case: &Case, held: u64) -> Answer {
@@ -394,7 +390,10 @@ mod tests {
     /// `chroot` of a directory the caller may search needs
     /// `CAP_SYS_CHROOT`.
     /// Reading init's robust list: `ptrace_may_access`. Copying init's
-    /// memory: `mm_access`, past a local vector with a byte to copy.
+    /// memory: `mm_access`, past a local vector with a byte to copy. Taking
+    /// one of init's descriptors through its pidfd: `ptrace_may_access`.
+    /// Joining init's UTS namespace through its pidfd: `ptrace_may_access`,
+    /// then `utsns_install`.
     fn robust_list_cases() -> Vec<Case> {
         static BYTE: [u8; 1] = [0];
         let range = Box::leak(Box::new([BYTE.as_ptr() as u64, 1]));
@@ -414,6 +413,29 @@ mod tests {
             },
             copy(Syscall::N_process_vm_readv, process_vm_readv),
             copy(Syscall::N_process_vm_writev, process_vm_writev),
+            Case {
+                row: Syscall::N_pidfd_getfd,
+                check: |credential, a| {
+                    getfd_from(credential, a, || Ok(crate::identity::Process::Init))
+                },
+                args: [0; 6],
+                refusal: errno::EPERM,
+            },
+            Case {
+                row: Syscall::N_setns,
+                check: |credential, a| {
+                    join_namespaces(credential, a[1], crate::identity::Process::Init)
+                },
+                args: [
+                    0,
+                    u64::from(linux_raw_sys::general::CLONE_NEWUTS),
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+                refusal: errno::EPERM,
+            },
         ]
     }
 

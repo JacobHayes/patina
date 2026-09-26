@@ -724,9 +724,9 @@ Poll/select/pselect6 remain network+readiness-owned despite being implemented to
 support signal interruption; their dedicated host-conformance oracle has not
 landed. A guest restorer's `rt_sigreturn` returns through the host kernel's
 (`signal/restorer`, both vehicles and both arches), and `restart_syscall` answers
-`EINTR` since no restart is ever pending (`signal/restart`); pidfd signal
-sending remains a process trap (no virtual pidfds), a stated deviation from the
-signals spec's self-pidfd mention. Ambient host signals and siglongjmp escape from
+`EINTR` since no restart is ever pending (`signal/restart`); a pidfd of the
+guest's own process or of init generates as `kill` does (`proc/pidfd`, both
+vehicles). Ambient host signals and siglongjmp escape from
 a handler remain outside verified deterministic behavior.
 
 The portable `native_signals` process/sleep detector checks waitpid's ECHILD

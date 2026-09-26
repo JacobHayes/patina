@@ -273,7 +273,17 @@ pub(super) fn sys_wait4(pid: u64, options: u64) -> i64 {
     }
 }
 
-pub(super) fn sys_waitid(options: u64) -> i64 {
+/// `waitid(2)` in the kernel's order (kernel/exit.c `kernel_waitid_prepare`):
+/// an option bit outside the allowed set, or no event class, is `EINVAL`;
+/// then `which`: a `P_PID` pid of 0 or less and a negative `P_PGID` or
+/// `P_PIDFD` id are `EINVAL`, a `P_PIDFD` descriptor that is no pidfd
+/// `EBADF` (`pidfd_get_pid`), any other `which` `EINVAL`. The virtual
+/// process has no child, so the rest is `ECHILD`.
+pub(super) fn sys_waitid(which: u64, upid: u64, options: u64) -> i64 {
+    const P_ALL: i32 = 0;
+    const P_PID: i32 = 1;
+    const P_PGID: i32 = 2;
+    const P_PIDFD: i32 = 3;
     const WNOHANG: u32 = 0x0000_0001;
     const WSTOPPED: u32 = 0x0000_0002;
     const WEXITED: u32 = 0x0000_0004;
@@ -288,9 +298,18 @@ pub(super) fn sys_waitid(options: u64) -> i64 {
 
     let options = options as u32;
     if (options & !ALLOWED) != 0 || (options & WAIT_CLASSES) == 0 {
-        -EINVAL
-    } else {
-        -ECHILD
+        return -EINVAL;
+    }
+    let upid = upid as i32;
+    match which as i32 {
+        P_PID if upid <= 0 => -EINVAL,
+        P_PGID | P_PIDFD if upid < 0 => -EINVAL,
+        P_PIDFD => match super::pidfd::target(upid) {
+            Ok(_) => -ECHILD,
+            Err(code) => -i64::from(code),
+        },
+        P_ALL | P_PID | P_PGID => -ECHILD,
+        _ => -EINVAL,
     }
 }
 
@@ -393,10 +412,10 @@ mod tests {
         assert_eq!(sys_wait4(any, 0x0000_0004), -EINVAL); // WEXITED is waitid's
         assert_eq!(sys_wait4(i32::MIN as u64, 0), -ESRCH);
         assert_eq!(sys_wait4(i32::MIN as u64, 0x100), -EINVAL); // options first
-        assert_eq!(sys_waitid(0x0000_0004), -ECHILD); // WEXITED
-        assert_eq!(sys_waitid(0x0000_0004 | 0x0000_0001), -ECHILD); // WEXITED|WNOHANG
-        assert_eq!(sys_waitid(0), -EINVAL);
-        assert_eq!(sys_waitid(0x0001_0000), -EINVAL);
-        assert_eq!(sys_waitid(0x4000_0000), -EINVAL); // __WALL alone lacks an event class
+        assert_eq!(sys_waitid(0, 0, 0x0000_0004), -ECHILD); // P_ALL, WEXITED
+        assert_eq!(sys_waitid(0, 0, 0x0000_0004 | 0x0000_0001), -ECHILD); // WEXITED|WNOHANG
+        assert_eq!(sys_waitid(0, 0, 0), -EINVAL);
+        assert_eq!(sys_waitid(0, 0, 0x0001_0000), -EINVAL);
+        assert_eq!(sys_waitid(0, 0, 0x4000_0000), -EINVAL); // __WALL alone lacks an event class
     }
 }

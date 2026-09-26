@@ -87,11 +87,11 @@ pub const SCENARIO: Scenario = Scenario {
     gaps: &[Gap {
         status: Status::Pending(Arc::SignalsThreadsProcess),
         vehicles: Vehicle::KERNEL,
-        what: "pidfd_open is Trap(unmodeled) in the registry, the self pidfd the signals arc models (a pidfd kind for the process itself), so the SUD dispatcher aborts before process_madvise is reached (its own row is Trap(unmodeled) too, closing in the memory+ipc arc)",
+        what: "process_madvise is Trap(unmodeled) in the registry, so the SUD dispatcher aborts at its first call, once the self pidfd has been opened",
         failure: Failure::Stops {
-            events: 2,
+            events: 3,
             ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall pidfd_open (nr",
+            diagnostic: "patina: SUD trapped unsupported syscall process_madvise (nr",
         },
     }],
     kernel_floor: Some(KernelFloor {

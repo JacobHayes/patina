@@ -276,7 +276,8 @@ fn fd_path(guest_fd: c_int, empty_path: bool) -> Result<String, c_int> {
         | FdKind::TimerFd
         | FdKind::Epoll
         | FdKind::SignalFd
-        | FdKind::MessageQueue => {
+        | FdKind::MessageQueue
+        | FdKind::Pidfd => {
             return Err(ENOTDIR);
         }
         #[cfg(target_os = "macos")]

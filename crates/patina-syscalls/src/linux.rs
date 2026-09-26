@@ -1834,7 +1834,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Process,
         Disposition::Modeled,
-        "Childless process row: invalid waitid option sets answer EINVAL; otherwise Patina has no child processes, so waitid answers ECHILD without reaching the host.",
+        "Childless process row, in `kernel_waitid_prepare`'s order: invalid option sets answer EINVAL; a `P_PID` pid of 0 or less, a negative `P_PGID`/`P_PIDFD` id and an unknown `which` EINVAL; a `P_PIDFD` descriptor that is no pidfd EBADF; otherwise Patina has no child processes, so waitid answers ECHILD without reaching the host.",
         None,
     ),
     Syscall::N_add_key => r(
@@ -2281,10 +2281,10 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Privileged,
         Disposition::Modeled,
-        "A descriptor not open (`EBADF`), then no namespace file or pidfd (`EINVAL`): every descriptor the model holds, so `CAP_SYS_ADMIN` over a namespace is never reached.",
+        "A descriptor not open (`EBADF`), then no namespace file or pidfd (`EINVAL`; the model holds no namespace file). Through a pidfd, no namespace or an unknown one is `EINVAL`; then `validate_nsset`: init's namespaces need `ptrace_may_access` (not dumpable: `CAP_SYS_PTRACE`, `EPERM`), the one user namespace is the caller's own (`EINVAL`), a time namespace alone with another thread alive is `EUSERS`, and every install needs `CAP_SYS_ADMIN` (`EPERM`).",
         None,
     )
-    .capabilities(&[Capability::SysAdmin]),
+    .capabilities(&[Capability::SysAdmin, Capability::SysPtrace]),
     Syscall::N_getcpu => r(
         id,
         Family::Sched,
@@ -2496,8 +2496,8 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_pidfd_send_signal => r(
         id,
         Family::Signal,
-        Disposition::Trap(TRAP_PROCESS),
-        "By-design trap: the descriptor table has no pidfd kind, including a self pidfd; pidfd signal delivery is not implemented. Use modeled kill/tgkill for the virtual process/tasks.",
+        Disposition::Modeled,
+        "A flag is `EINVAL` (6.8 defines none), a descriptor that is no pidfd `EBADF` (the virtual machine mounts no procfs, so no directory is a `/proc/<pid>` one); a caller's siginfo is copied (`EFAULT`), must carry `sig` (`EINVAL`) and may forge a kernel or `tkill` code only to its own thread's pid (`EPERM`); the signal is then generated for the process as `kill` generates it (`SI_USER` without a siginfo), init taking nothing.",
         None,
     ),
     Syscall::N_io_uring_setup => r(
@@ -2571,9 +2571,9 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_pidfd_open => r(
         id,
         Family::Process,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Self-process only: the signals arc answers these for the guest's own process, pid 2 (a pidfd kind, dup-of-self, self-comparison), and ESRCH/EBADF for any other.",
-        Some("signals+threads+process"),
+        Disposition::Modeled,
+        "A descriptor-table kind (`FdKind::Pidfd`, 6.8's anonymous `[pidfd]` inode) naming the guest's process or init: an unknown flag (`PIDFD_THREAD` is 6.9's) or a pid of 0 or less is `EINVAL`, no such pid `ESRCH`, a thread that leads no group `EINVAL`; the descriptor is read-write, close-on-exec, `O_NONBLOCK` with `PIDFD_NONBLOCK`, and never readable (neither process exits while the guest runs).",
+        None,
     ),
     Syscall::N_clone3 => r(
         id,
@@ -2600,10 +2600,11 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_pidfd_getfd => r(
         id,
         Family::Process,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Self-process only: the signals arc answers these for the guest's own process, pid 2 (a pidfd kind, dup-of-self, self-comparison), and ESRCH/EBADF for any other.",
-        Some("signals+threads+process"),
-    ),
+        Disposition::Modeled,
+        "A flag is `EINVAL`, a descriptor that is no pidfd `EBADF`; one of init's needs `CAP_SYS_PTRACE` (`EPERM`; granted, a named fatal); one of the guest's own is duplicated in the one descriptor table, sharing its open file, close-on-exec (`EBADF` for a number not open).",
+        None,
+    )
+    .capabilities(&[Capability::SysPtrace]),
     Syscall::N_faccessat2 => r(
         id,
         Family::Fs,
@@ -2672,9 +2673,9 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_process_mrelease => r(
         id,
         Family::Process,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Self-process only: the signals arc answers these for the guest's own process, pid 2 (a pidfd kind, dup-of-self, self-comparison), and ESRCH/EBADF for any other.",
-        Some("signals+threads+process"),
+        Disposition::Modeled,
+        "A flag is `EINVAL`, a descriptor that is no pidfd `EBADF`; every process a pidfd names is alive and not exiting, so there is no memory to reap: `EINVAL`.",
+        None,
     ),
     Syscall::N_futex_waitv => r(
         id,

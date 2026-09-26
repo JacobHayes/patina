@@ -43,6 +43,7 @@ mod fd_io;
 mod fs;
 mod mem;
 mod net;
+mod pidfd;
 mod privileged;
 mod readiness;
 mod sched_identity;
@@ -1363,6 +1364,18 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_set_robust_list, |_, a| {
         crate::thread::registrations::set_robust_list(a[0] as usize, a[1] as usize)
     }),
+    (Syscall::N_pidfd_open, |_, a| {
+        pidfd::sys_pidfd_open(a[0], a[1])
+    }),
+    (Syscall::N_pidfd_getfd, |nr, a| {
+        privileged::answer(nr, privileged::pidfd_getfd, a)
+    }),
+    (Syscall::N_pidfd_send_signal, |_, a| {
+        pidfd::sys_pidfd_send_signal(a)
+    }),
+    (Syscall::N_process_mrelease, |_, a| {
+        pidfd::sys_process_mrelease(a[0], a[1])
+    }),
     (Syscall::N_process_vm_readv, |nr, a| {
         privileged::answer(nr, privileged::process_vm_readv, a)
     }),
@@ -1443,7 +1456,7 @@ const BINDINGS: &[(Syscall, Handler)] = &[
         sys_tgkill(a[0] as i64, a[1] as i64, a[2] as i64)
     }),
     (Syscall::N_wait4, |_, a| sys_wait4(a[0], a[2])),
-    (Syscall::N_waitid, |_, a| sys_waitid(a[3])),
+    (Syscall::N_waitid, |_, a| sys_waitid(a[0], a[1], a[3])),
     (Syscall::N_getpgid, |_, a| {
         crate::identity::getpgid(a[0] as i32)
     }),

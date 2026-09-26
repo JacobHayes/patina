@@ -237,7 +237,8 @@ pub(in crate::sud) fn fsconfig(_: &Credential, a: &[u64; 6]) -> Answer {
             | FdKind::SignalFd
             | FdKind::Epoll
             | FdKind::MessageQueue
-            | FdKind::TimerFd => refuse(errno::EINVAL),
+            | FdKind::TimerFd
+            | FdKind::Pidfd => refuse(errno::EINVAL),
         },
     }
 }

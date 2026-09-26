@@ -111,7 +111,11 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
                 Err(errno) => fail(errno),
             },
             #[cfg(target_os = "linux")]
-            FdKind::EventFd | FdKind::TimerFd | FdKind::Epoll | FdKind::SignalFd => fail(ENOTTY),
+            FdKind::EventFd
+            | FdKind::TimerFd
+            | FdKind::Epoll
+            | FdKind::SignalFd
+            | FdKind::Pidfd => fail(ENOTTY),
             // An mqueue inode is a regular file: its size less the position.
             #[cfg(target_os = "linux")]
             FdKind::MessageQueue => match thread::ipc::mq_unread(resolved.handle) {

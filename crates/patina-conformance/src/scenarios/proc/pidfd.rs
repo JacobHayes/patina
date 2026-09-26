@@ -1,32 +1,45 @@
-//! proc/pidfd — a descriptor for the caller's own process (kernel/pid.c
-//! `pidfd_open`, `pidfd_getfd`; kernel/signal.c `pidfd_send_signal`;
-//! mm/oom_kill.c `process_mrelease`), as 6.8 answers them:
+//! proc/pidfd — a descriptor for the caller's own process, and for init
+//! (kernel/pid.c `pidfd_open`, `pidfd_getfd`; kernel/signal.c
+//! `pidfd_send_signal`; mm/oom_kill.c `process_mrelease`), as 6.8 answers
+//! them:
 //!
-//! * `pidfd_open` refuses an undefined flag and 6.9's `PIDFD_THREAD`, and a
-//!   pid that is no process (`EINVAL` for 0 and -1), answers `ESRCH` for a
-//!   pid past `PID_MAX_LIMIT`,
-//!   and opens the caller's own process: always close-on-exec, read-write,
-//!   non-blocking when asked, and not readable while the process runs;
+//! * `pidfd_open` refuses an undefined flag and 6.9's `PIDFD_THREAD`, a pid
+//!   that is no process (`EINVAL` for 0 and -1) and a thread that leads no
+//!   thread group (`EINVAL`: 6.8 has no thread pidfds), answers `ESRCH` for a
+//!   pid past `PID_MAX_LIMIT`, and opens the caller's own process (and
+//!   init): always close-on-exec, read-write, non-blocking when asked, and
+//!   not readable while the process runs;
 //! * `pidfd_getfd` duplicates one of the caller's descriptors through its
 //!   own pidfd (a ptrace-mode check the caller always passes on itself):
 //!   the copy shares the open file and is close-on-exec; a flag is `EINVAL`,
-//!   and a target descriptor not open, or a descriptor that is no pidfd,
-//!   `EBADF`;
-//! * `pidfd_send_signal` probes with signal 0 (0), refuses an undefined
-//!   flag, 6.9's `PIDFD_SIGNAL_THREAD` and an invalid signal (`EINVAL`) and a descriptor that is no pidfd (`EBADF`),
-//!   and sends a blocked SIGUSR1 to the caller as a process-directed signal
-//!   from itself (`SI_USER`), which `rt_sigtimedwait` then takes;
+//!   a target descriptor not open, or a descriptor that is no pidfd,
+//!   `EBADF`, and one of init's descriptors `EPERM` (the ptrace-mode check
+//!   init does not pass);
+//! * `setns` through a pidfd refuses the caller's own user namespace
+//!   (`EINVAL`) and joining another namespace of its own without
+//!   `CAP_SYS_ADMIN` (`EPERM`), and init's namespaces at the ptrace-mode check
+//!   (`EPERM`);
+//! * `pidfd_send_signal` probes with signal 0 (0) and refuses it to init,
+//!   root's process (`EPERM`), refuses an undefined
+//!   flag, 6.9's `PIDFD_SIGNAL_THREAD` and an invalid signal (`EINVAL`) and
+//!   a descriptor that is no pidfd (`EBADF`), and sends a blocked SIGUSR1 to
+//!   the caller as a process-directed signal from itself (`SI_USER`), which
+//!   `rt_sigtimedwait` then takes; with a siginfo, one naming another signal
+//!   is `EINVAL` and an unreadable one `EFAULT`, and one the caller queues to
+//!   itself (`SI_QUEUE`) arrives as sent;
 //! * `process_mrelease` refuses a flag before looking at the descriptor
-//!   (`EINVAL`) and a descriptor that is no pidfd (`EBADF`). It is only ever
-//!   given invalid arguments: reaping a process's memory is never asked for.
+//!   (`EINVAL`) and a descriptor that is no pidfd (`EBADF`), and a live
+//!   process, the caller's or init's, whose memory is not being freed
+//!   (`EINVAL`): nothing is ever reaped.
 //!
 //! glibc 2.39 wraps `pidfd_open`, `pidfd_getfd` and `pidfd_send_signal`, but
 //! the registry has no symbol row for them (the shim defines none), so the
 //! probe binary cannot import them — the pre-run audit would refuse it — and
 //! the scenario runs through the kernel vehicles.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use super::ids::INIT_SHARES_THE_CREDENTIAL;
+use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
+use crate::compare::{Difference, Failure, Observed};
 use crate::observe::Norm;
 use crate::probe::{AT_FDCWD, CLOSED_FD, NO_SUCH_PID, Probe, SIGSET_BYTES, neg};
 use crate::vehicle::Vehicle;
@@ -77,6 +90,19 @@ fn send_signal(p: &Probe, pidfd: i32, what: &str, sig: i32, flags: i64) -> i64 {
     )
 }
 
+/// `pidfd_send_signal` with a siginfo, recorded by what it holds.
+fn send_info(p: &Probe, pidfd: i32, sig: i32, info: *const siginfo_t, what: &str) -> i64 {
+    p.observed(
+        Syscall::N_pidfd_send_signal,
+        [pidfd as i64, sig as i64, info as i64, 0, 0, 0],
+        &[
+            ("pidfd", "self".into()),
+            ("sig", sig.into()),
+            ("info", what.into()),
+        ],
+    )
+}
+
 fn mrelease(p: &Probe, pidfd: i32, what: &str, flags: i64) -> i64 {
     p.observed(
         Syscall::N_process_mrelease,
@@ -122,6 +148,26 @@ pub fn run(p: &Probe) {
         "a pid no process has is ESRCH",
         p.pidfd_open(NO_SUCH_PID, 0) == neg(ESRCH) as i32,
     );
+    let (tid_sender, tid) = std::sync::mpsc::channel();
+    let (release, parked) = std::sync::mpsc::channel::<()>();
+    let other = std::thread::spawn(move || {
+        // SAFETY: gettid has no preconditions.
+        tid_sender.send(unsafe { gettid() }).unwrap();
+        let _ = parked.recv();
+    });
+    let tid = tid.recv().unwrap();
+    p.check(
+        "a thread that leads no thread group is EINVAL",
+        p.observed(
+            Syscall::N_pidfd_open,
+            [tid as i64, 0, 0, 0, 0, 0],
+            &[("pid", "another-thread".into()), ("flags", 0.into())],
+        ) == neg(EINVAL),
+    );
+    release.send(()).unwrap();
+    other.join().unwrap();
+    let init = p.pidfd_open(1, 0);
+    p.require("open init's pidfd", init >= 0);
 
     let path = format!("{}/shared", p.dir());
     let file = p.openat(AT_FDCWD, &path, O_RDWR | O_CREAT | O_EXCL, 0o644);
@@ -148,6 +194,40 @@ pub fn run(p: &Probe) {
         "a descriptor that is no pidfd is EBADF",
         getfd(p, file, "file", file, 0) == neg(EBADF),
     );
+    p.check(
+        "taking one of init's descriptors is EPERM (a ptrace attach init refuses)",
+        getfd(p, init, "init", 0, 0) == neg(EPERM),
+    );
+    for (fd, what, nstype, errno, label) in [
+        (
+            pidfd,
+            "self",
+            CLONE_NEWUSER,
+            EINVAL,
+            "setns into the caller's own user namespace is EINVAL",
+        ),
+        (
+            pidfd,
+            "self",
+            CLONE_NEWUTS,
+            EPERM,
+            "setns into a namespace through the caller's pidfd is EPERM (no CAP_SYS_ADMIN)",
+        ),
+        (
+            init,
+            "init",
+            CLONE_NEWUTS,
+            EPERM,
+            "setns into init's namespaces is EPERM (the ptrace-mode check)",
+        ),
+    ] {
+        let r = p.observed(
+            Syscall::N_setns,
+            [fd as i64, nstype as i64, 0, 0, 0, 0],
+            &[("pidfd", what.into()), ("nstype", nstype.into())],
+        );
+        p.check(label, r == neg(errno));
+    }
 
     p.check(
         "signal 0 through the pidfd probes the process",
@@ -168,6 +248,10 @@ pub fn run(p: &Probe) {
     p.check(
         "pidfd_send_signal on a descriptor that is no pidfd is EBADF",
         send_signal(p, file, "file", 0, 0) == neg(EBADF),
+    );
+    p.check(
+        "signal 0 through init's pidfd is EPERM: init is root's",
+        send_signal(p, init, "init", 0, 0) == neg(EPERM),
     );
     // SAFETY: plain sigset_t manipulation on a local.
     let usr1 = unsafe {
@@ -191,6 +275,30 @@ pub fn run(p: &Probe) {
         "the signal is pending for the process and taken, sent by the caller (SI_USER)",
         taken == i64::from(SIGUSR1) && info.si_code == SI_USER,
     );
+    // SAFETY: an all-zero siginfo is a valid record to fill.
+    let mut queued: siginfo_t = unsafe { std::mem::zeroed() };
+    queued.si_signo = SIGUSR2;
+    queued.si_code = SI_QUEUE;
+    p.check(
+        "a siginfo naming another signal is EINVAL",
+        send_info(p, pidfd, SIGUSR1, &queued, "other-signal") == neg(EINVAL),
+    );
+    p.check(
+        "an unreadable siginfo is EFAULT",
+        send_info(p, pidfd, SIGUSR1, std::ptr::dangling(), "unmapped") == neg(EFAULT),
+    );
+    queued.si_signo = SIGUSR1;
+    p.check(
+        "the caller may queue its own siginfo to itself",
+        send_info(p, pidfd, SIGUSR1, &queued, "queued") == 0,
+    );
+    // SAFETY: as above.
+    let mut arrived: siginfo_t = unsafe { std::mem::zeroed() };
+    let taken = p.rt_sigtimedwait(&usr1, Some(&mut arrived), Some(0), SIGSET_BYTES as usize);
+    p.check(
+        "and it arrives as sent (SI_QUEUE)",
+        taken == i64::from(SIGUSR1) && arrived.si_code == SI_QUEUE,
+    );
     p.require(
         "unblock SIGUSR1",
         p.rt_sigprocmask(SIG_UNBLOCK, Some(&usr1), None, SIGSET_BYTES as usize) == 0,
@@ -208,7 +316,13 @@ pub fn run(p: &Probe) {
         "process_mrelease of a descriptor not open is EBADF",
         mrelease(p, CLOSED_FD, "closed", 0) == neg(EBADF),
     );
-    for fd in [copy, file, nonblocking, pidfd] {
+    for (fd, what) in [(pidfd, "self"), (init, "init")] {
+        p.check(
+            &format!("process_mrelease of a live process ({what}) is EINVAL"),
+            mrelease(p, fd, what, 0) == neg(EINVAL),
+        );
+    }
+    for fd in [copy, file, nonblocking, init, pidfd] {
         p.close(fd);
     }
 }
@@ -224,14 +338,14 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_process_mrelease,
     ],
     gaps: &[Gap {
-        status: Status::Pending(Arc::SignalsThreadsProcess),
+        status: Status::ByDesign,
         vehicles: Vehicle::KERNEL,
-        what: "pidfd_open is Trap(unmodeled) in the registry: the descriptor table has no pidfd kind, which the signals arc adds for the process itself (pidfd_send_signal is a by-design process trap behind it, pidfd_getfd and process_mrelease unmodeled traps), so the SUD dispatcher aborts at the first pidfd_open",
-        failure: Failure::Stops {
-            events: 1,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall pidfd_open (nr",
-        },
+        what: INIT_SHARES_THE_CREDENTIAL,
+        failure: Failure::Differs(&[
+            Difference::field(56, "pidfd_send_signal", "errno", Observed::Null),
+            Difference::field(56, "pidfd_send_signal", "ret", Observed::Int(0)),
+            Difference::check(57, "signal 0 through init's pidfd is EPERM: init is root's"),
+        ]),
     }],
     ..DEFAULTS
 };

@@ -77,6 +77,7 @@ enum {
     PATINA_FD_SIGNALFD = 12, /* a virtual signal queue reader (Linux) */
     PATINA_FD_MQUEUE = 13,   /* a POSIX message queue (Linux) */
     PATINA_FD_TIMERFD = 14,  /* a timer descriptor (Linux) */
+    PATINA_FD_PIDFD = 15,    /* a process descriptor (Linux) */
 };
 
 enum {
