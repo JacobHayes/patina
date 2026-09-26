@@ -12,8 +12,7 @@
 //! writeback pages are cached pages, recently evicted pages are evicted
 //! pages, and a range past EOF (or a pipe) has none.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, KernelFloor, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
@@ -202,15 +201,5 @@ pub const SCENARIO: Scenario = Scenario {
         release: "6.5",
         why: "cachestat",
     }),
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::KERNEL,
-        what: "cachestat, readahead and fadvise64 are unmodeled Trap rows: the first cachestat aborts",
-        failure: Failure::Stops {
-            events: 8,
-            ending: Ending::Signal(6),
-            diagnostic: "unsupported syscall cachestat",
-        },
-    }],
     ..DEFAULTS
 };

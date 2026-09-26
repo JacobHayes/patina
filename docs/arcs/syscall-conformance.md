@@ -126,7 +126,7 @@ audit. And no gate compares patina's answers with the host kernel's, so a
    cwd is modeled. A unified Linux-like fd table is a foundation.
 4. **Soft-deny ENOSYS only where ENOSYS is a real kernel outcome callers already
    probe for** (membarrier until the memory+ipc arc models it,
-   cachestat, io_uring and Linux AIO, removed numbers). Every stop-gap row
+   io_uring and Linux AIO, removed numbers). Every stop-gap row
    names the arc that closes it.
 5. **Oracle = the host kernel.** Probes are self-checking Rust programs that
    also emit typed observation events; the same binary runs natively, under
@@ -268,7 +268,8 @@ forwards into the same dispatcher instead of its two-number allowlist.
   st_uid/st_gid from the identity knob; real `d_ino`;
   libc-only holes strong-defined: fopen family, mkstemp/mkdtemp/tmpfile,
   realpath, scandir, statvfs, remove; ustat/sysfs/name_to_handle_at constants;
-  cachestat ENOSYS.
+  cachestat over files the filesystem holds whole in memory (every page up
+  to the end cached, none dirty, under writeback or evicted).
 - **memory + ipc**: MAP_SHARED coherence with fs-mem (whole-file flush at read
   boundaries while a writable shared mapping is live); memfd_create + seals;
   shm_open/unlink over `/dev/shm` in fs-mem; SysV shm (host memfd-backed
