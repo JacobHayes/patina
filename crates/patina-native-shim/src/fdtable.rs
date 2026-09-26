@@ -78,6 +78,10 @@ pub(crate) enum FdKind {
     /// A timer descriptor (`timerfd_create`); `handle` keys the timer table.
     #[cfg(target_os = "linux")]
     TimerFd,
+    /// An inotify instance (`inotify_init1`); `handle` keys the instance
+    /// table.
+    #[cfg(target_os = "linux")]
+    Inotify,
     /// A process descriptor (`pidfd_open`; 6.8's anonymous `[pidfd]` inode);
     /// `handle` is the virtual pid of the process it names, init or the
     /// guest. It has no class object: nothing is freed with it.
@@ -144,6 +148,8 @@ impl FdKind {
             FdKind::Namespace => 18,
             #[cfg(target_os = "linux")]
             FdKind::NamespacePath => 19,
+            #[cfg(target_os = "linux")]
+            FdKind::Inotify => 20,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => 11,
         }
@@ -166,6 +172,7 @@ impl FdKind {
             | FdKind::SignalFd
             | FdKind::MessageQueue
             | FdKind::TimerFd
+            | FdKind::Inotify
             | FdKind::Pidfd
             | FdKind::LandlockRuleset
             | FdKind::Userfaultfd
@@ -204,6 +211,7 @@ impl FdKind {
             | FdKind::Pidfd
             | FdKind::LandlockRuleset
             | FdKind::Userfaultfd
+            | FdKind::Inotify
             | FdKind::Namespace => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
@@ -212,9 +220,9 @@ impl FdKind {
 
     /// Whether the description's `llseek` is `noop_llseek` (Linux): a seek
     /// leaves the position, always 0, where it is. The entropy device's
-    /// (`random_fops`) and the eventfd, epoll, signalfd, timerfd and
-    /// userfaultfd files' are; a pidfd, a Landlock ruleset and a namespace
-    /// file have none (`ESPIPE`).
+    /// (`random_fops`) and the eventfd, epoll, signalfd, timerfd,
+    /// userfaultfd and inotify files' are; a pidfd, a Landlock ruleset and a
+    /// namespace file have none (`ESPIPE`).
     pub(crate) fn seeks_nowhere(self) -> bool {
         match self {
             FdKind::Urandom => cfg!(target_os = "linux"),
@@ -223,7 +231,8 @@ impl FdKind {
             | FdKind::Epoll
             | FdKind::SignalFd
             | FdKind::TimerFd
-            | FdKind::Userfaultfd => true,
+            | FdKind::Userfaultfd
+            | FdKind::Inotify => true,
             FdKind::Stdin
             | FdKind::Stdout
             | FdKind::Stderr
@@ -330,6 +339,17 @@ impl GuestFdTable {
                 .expect("the three standard descriptors fit any limit");
         }
         table
+    }
+
+    /// The driver handle of every deterministic-filesystem description, a
+    /// hidden retention's included: what holds a node open.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fs_handles(&self) -> Vec<u64> {
+        self.descriptions
+            .values()
+            .filter(|description| description.kind.is_fs())
+            .map(|description| description.handle)
+            .collect()
     }
 
     /// The bound no new number reaches (`EMFILE`, `F_DUPFD`'s `EINVAL`).

@@ -185,6 +185,8 @@ fn make_node(path: &str) -> Result<u64, c_int> {
                 errno
             }
         })?;
+    #[cfg(target_os = "linux")]
+    crate::fsnotify::created(&resolved.path);
     match paths::resolve(paths::AT_FDCWD, path, paths::RESOLVE_NOFOLLOW)? {
         paths::Resolution::Volume(made) => made.metadata.map(|metadata| metadata.ino).ok_or(ENOENT),
         paths::Resolution::Virtual(entry) => entry.unmodeled("binding a socket"),

@@ -291,6 +291,7 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
         // 6.8's pidfd is an anonymous inode too (pidfs came in 6.9).
         FdKind::EventFd
         | FdKind::TimerFd
+        | FdKind::Inotify
         | FdKind::SignalFd
         | FdKind::Epoll
         | FdKind::Pidfd

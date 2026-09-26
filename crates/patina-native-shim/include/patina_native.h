@@ -83,6 +83,7 @@ enum {
     PATINA_FD_USERFAULTFD = 17, /* a userfaultfd descriptor (Linux) */
     PATINA_FD_NAMESPACE = 18,   /* a namespace file, /proc/self/ns/<type> (Linux) */
     PATINA_FD_NAMESPACE_PATH = 19, /* a namespace file opened O_PATH (Linux) */
+    PATINA_FD_INOTIFY = 20,  /* an inotify instance (Linux) */
 };
 
 enum {

@@ -13,7 +13,8 @@
 //! object: a pipe's `FIONREAD` is the bytes queued in it, a socket's
 //! (`SIOCINQ`) what a receive would take now, and a socket answers the
 //! interface requests (`SIOCGIF*`, `thread::net::iface`); a userfaultfd, a
-//! namespace file and the entropy device have ioctls of their own; any
+//! namespace file, an inotify instance and the entropy device have ioctls
+//! of their own; any
 //! other request, and `FIONREAD` on a directory or a descriptor with no such
 //! answer, is `ENOTTY`.
 //!
@@ -149,6 +150,12 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
                 request,
                 arg as usize,
             )),
+            // `inotify_ioctl`: the bytes every queued event takes.
+            #[cfg(target_os = "linux")]
+            FdKind::Inotify => match thread::inotify::queued(resolved.handle) {
+                Some(queued) => put_int(arg, i32::try_from(queued).unwrap_or(i32::MAX)),
+                None => fail(ENOTTY),
+            },
             // An mqueue inode is a regular file: its size less the position.
             #[cfg(target_os = "linux")]
             FdKind::MessageQueue => match thread::ipc::mq_unread(resolved.handle) {
@@ -200,6 +207,17 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
                 ))
             }
             fail(EINVAL)
+        }
+        // `inotify_ioctl`: the next watch descriptor tried, by value.
+        #[cfg(target_os = "linux")]
+        thread::inotify::INOTIFY_IOC_SETNEXTWD if resolved.kind == FdKind::Inotify => {
+            match thread::inotify::set_next_wd(resolved.handle, arg as u64) {
+                Ok(()) => {
+                    set_errno(0);
+                    0
+                }
+                Err(errno) => fail(errno),
+            }
         }
         _ => fail(ENOTTY),
     }
@@ -281,6 +299,8 @@ mod vfs {
             | FdKind::Pidfd
             | FdKind::LandlockRuleset
             | FdKind::Userfaultfd => Inode::Special { fasync: false },
+            // `inotify_fops` has `fsnotify_fasync`.
+            FdKind::Inotify => Inode::Special { fasync: true },
             // `fdget` refused these before any request is looked at.
             FdKind::OPath | FdKind::NamespacePath => Inode::Special { fasync: false },
         }

@@ -107,6 +107,10 @@ mod iov;
 mod advice;
 #[cfg(target_os = "linux")]
 mod clocks;
+// The filesystem's notification hooks: what an inotify watch sees of each
+// filesystem entry. See `fsnotify.rs`.
+#[cfg(target_os = "linux")]
+mod fsnotify;
 #[cfg(target_os = "linux")]
 mod identity;
 // The virtual Darwin kernel's self-description (`uname` on macOS). Built
@@ -559,7 +563,10 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
         FdKind::File | FdKind::Dir | FdKind::OPath => {
             #[cfg(target_os = "linux")]
             mem::released(release.handle);
-            with_context(|context| context.fs_close(Fd(release.handle)))
+            let closed = with_context(|context| context.fs_close(Fd(release.handle)));
+            #[cfg(target_os = "linux")]
+            fsnotify::released();
+            closed
         }
         FdKind::Socket => thread::net::socket_close(release.handle),
         FdKind::Pipe => thread::pipe_close(release.handle),
@@ -576,6 +583,11 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
         #[cfg(target_os = "linux")]
         FdKind::TimerFd => {
             thread::timers::timerfd_close(release.handle);
+            Ok(())
+        }
+        #[cfg(target_os = "linux")]
+        FdKind::Inotify => {
+            thread::inotify::close(release.handle);
             Ok(())
         }
         #[cfg(target_os = "linux")]
@@ -4510,6 +4522,16 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
                     if let (true, Some(metadata)) = (open_flags.truncate, resolved.metadata) {
                         mem::resized_ino(metadata.ino, 0);
                     }
+                    // A creating open shows the new entry; an `O_TRUNC` one
+                    // of an existing file the truncation (`handle_truncate`).
+                    #[cfg(target_os = "linux")]
+                    match resolved.metadata {
+                        None => fsnotify::created(&resolved.path),
+                        Some(_) if open_flags.truncate => {
+                            fsnotify::on_handle(fd, fsnotify::IN_MODIFY);
+                        }
+                        Some(_) => {}
+                    }
                     bind_fs_handle(fd, kind, status, cloexec)
                 }
                 Err(errno) => fail(errno),
@@ -4798,6 +4820,24 @@ fn stdin_read() -> isize {
     0
 }
 
+/// A read (`write` false) or write through `resolved` moved `moved` bytes:
+/// when something moved on a filesystem description, its watches see
+/// `IN_ACCESS` or `IN_MODIFY` (`fsnotify_access`/`fsnotify_modify`, once per
+/// call). Answers `moved`.
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+pub(crate) fn transferred(resolved: &Resolved, moved: isize, write: bool) -> isize {
+    #[cfg(target_os = "linux")]
+    if moved > 0 && matches!(resolved.kind, FdKind::File | FdKind::Dir) {
+        let mask = if write {
+            fsnotify::IN_MODIFY
+        } else {
+            fsnotify::IN_ACCESS
+        };
+        fsnotify::on_handle(Fd(resolved.handle), mask);
+    }
+    moved
+}
+
 /// Read bytes into caller-owned memory.
 ///
 /// # Safety
@@ -4818,7 +4858,8 @@ pub unsafe extern "C" fn patina_read(
     };
     let nonblocking = resolved.status & O_NONBLOCK != 0;
     // SAFETY: forwarded from this function's own contract.
-    unsafe { read_resolved(resolved, destination, length, nonblocking) }
+    let moved = unsafe { read_resolved(resolved, destination, length, nonblocking) };
+    transferred(&resolved, moved, false)
 }
 
 /// The transfer `read(2)` makes on what a number names, by kind. `nonblocking`
@@ -4873,6 +4914,10 @@ unsafe fn read_resolved(
         #[cfg(target_os = "linux")]
         FdKind::TimerFd => {
             thread::timers::timerfd_read(resolved.handle, nonblocking, destination as usize, length)
+        }
+        #[cfg(target_os = "linux")]
+        FdKind::Inotify => {
+            thread::inotify::read(resolved.handle, nonblocking, destination as usize, length)
         }
         #[cfg(target_os = "linux")]
         FdKind::Epoll | FdKind::Pidfd | FdKind::LandlockRuleset => fail(EINVAL) as isize,
@@ -4943,7 +4988,8 @@ pub unsafe extern "C" fn patina_write(
     };
     let nonblocking = resolved.status & O_NONBLOCK != 0;
     // SAFETY: forwarded from this function's own contract.
-    unsafe { write_resolved(resolved, source, length, nonblocking) }
+    let moved = unsafe { write_resolved(resolved, source, length, nonblocking) };
+    transferred(&resolved, moved, true)
 }
 
 /// The transfer `write(2)` makes on what a number names, by kind; see
@@ -4990,6 +5036,9 @@ unsafe fn write_resolved(
         // Read-only (or `O_PATH`): no write access.
         #[cfg(target_os = "linux")]
         FdKind::Namespace | FdKind::NamespacePath => fail(EBADF) as isize,
+        // An instance is opened `O_RDONLY`.
+        #[cfg(target_os = "linux")]
+        FdKind::Inotify => fail(EBADF) as isize,
         // A queue file has no write method: EBADF without write access, EINVAL
         // with it.
         #[cfg(target_os = "linux")]
@@ -5037,6 +5086,7 @@ fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved, u64), c_in
         | FdKind::Epoll
         | FdKind::SignalFd
         | FdKind::TimerFd
+        | FdKind::Inotify
         | FdKind::Pidfd
         | FdKind::LandlockRuleset
         | FdKind::Userfaultfd
@@ -5107,7 +5157,8 @@ pub unsafe extern "C" fn patina_pread(
         return fail(EFAULT) as isize;
     }
     // SAFETY: forwarded from this function's own contract.
-    unsafe { fs_pread(resolved, destination, length, offset) }
+    let moved = unsafe { fs_pread(resolved, destination, length, offset) };
+    transferred(&resolved, moved, false)
 }
 
 /// # Safety
@@ -5195,7 +5246,8 @@ pub unsafe extern "C" fn patina_pwrite(
         return fail(EFAULT) as isize;
     }
     // SAFETY: forwarded from this function's own contract.
-    unsafe { fs_pwrite_resolved(resolved, source, length, offset, false) }
+    let moved = unsafe { fs_pwrite_resolved(resolved, source, length, offset, false) };
+    transferred(&resolved, moved, true)
 }
 
 /// `LOCK_SH`/`LOCK_EX`/`LOCK_NB`/`LOCK_UN` from `<sys/file.h>` — identical values
@@ -5686,6 +5738,7 @@ pub extern "C" fn patina_set_len(raw_fd: c_int, length: u64) -> c_int {
             {
                 mem::resized(handle.0, length);
                 mem::secret_resized(handle.0, length);
+                fsnotify::on_handle(handle, fsnotify::IN_MODIFY);
             }
             0
         }
@@ -6637,6 +6690,8 @@ pub unsafe extern "C" fn patina_truncate(dirfd: c_int, path: *const c_char, leng
         Ok(()) => {
             #[cfg(target_os = "linux")]
             mem::resized_ino(ino, length);
+            #[cfg(target_os = "linux")]
+            fsnotify::on_path(&resolved.path, fsnotify::IN_MODIFY);
             #[cfg(not(target_os = "linux"))]
             let _ = ino;
             set_errno(0);
@@ -6717,13 +6772,12 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         | FdKind::Epoll
         | FdKind::SignalFd
         | FdKind::TimerFd
+        | FdKind::Inotify
         | FdKind::Pidfd
         | FdKind::LandlockRuleset
         | FdKind::Userfaultfd
         | FdKind::Namespace
-        | FdKind::NamespacePath => {
-            return fail(ENODEV);
-        }
+        | FdKind::NamespacePath => return fail(ENODEV),
         // A queue is a regular file (judged after the range, below).
         #[cfg(target_os = "linux")]
         FdKind::MessageQueue => {}
@@ -6758,6 +6812,8 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         Ok(()) => {
             #[cfg(target_os = "linux")]
             mem::allocated(fd.0, offset, length, zero, keep_size);
+            #[cfg(target_os = "linux")]
+            fsnotify::on_handle(fd, fsnotify::IN_MODIFY);
             set_errno(0);
             0
         }
@@ -6803,6 +6859,18 @@ pub unsafe extern "C" fn patina_read_dir(raw_fd: c_int, state_out: *mut *mut c_v
             0
         }
         Err(errno) => fail(errno),
+    }
+}
+
+/// A getdents on directory descriptor `raw_fd` reached the directory
+/// (`iterate_dir`): its watches see `IN_ACCESS`, whatever the call then
+/// answers.
+#[cfg(target_os = "linux")]
+pub(crate) fn dir_accessed(raw_fd: c_int) {
+    if let Ok(resolved) = resolve_fd(raw_fd) {
+        if resolved.kind == FdKind::Dir {
+            fsnotify::on_handle(Fd(resolved.handle), fsnotify::IN_ACCESS);
+        }
     }
 }
 
@@ -6867,11 +6935,31 @@ pub unsafe extern "C" fn patina_read_dir_free(state: *mut c_void) {
     }
 }
 
-/// Resolve `(dirfd, path)` once and run `invoke` on the canonical path. An
-/// entry the resolver answers itself exists, in a directory the caller
-/// cannot write (`/dev`, `/proc/self/ns`): a creating call answers `EEXIST`
-/// (the lookup finds it), a removing one `EACCES` (`may_delete`); that answer
-/// is `virtual_answer`.
+/// What a path entry that took effect shows the filesystem's watches.
+#[derive(Clone, Copy)]
+enum Notice {
+    /// The entry came into existence.
+    Created,
+    /// The entry, as resolved before, is gone.
+    Removed,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn notice(notice: Notice, resolved: &paths::Resolved) {
+    #[cfg(target_os = "linux")]
+    match (notice, &resolved.metadata) {
+        (Notice::Created, _) => fsnotify::created(&resolved.path),
+        (Notice::Removed, Some(before)) => fsnotify::removed(&resolved.path, before),
+        (Notice::Removed, None) => {}
+    }
+}
+
+/// Resolve `(dirfd, path)` once and run `invoke` on the canonical path; what
+/// took effect is shown to the filesystem's watches as `notice`. An entry
+/// the resolver answers itself exists, in a directory the caller cannot
+/// write (`/dev`, `/proc/self/ns`): a creating call answers `EEXIST` (the
+/// lookup finds it), a removing one `EACCES` (`may_delete`); that answer is
+/// `virtual_answer`.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
@@ -6881,6 +6969,7 @@ unsafe fn path_unit(
     flags: u32,
     virtual_answer: c_int,
     invoke: impl FnOnce(&mut Context, &str) -> Result<(), RuntimeError>,
+    notice: Notice,
 ) -> c_int {
     let path = match path_from_c(path) {
         Ok(path) => path,
@@ -6893,6 +6982,7 @@ unsafe fn path_unit(
     };
     match with_context(|context| invoke(context, &resolved.path)) {
         Ok(()) => {
+            self::notice(notice, &resolved);
             set_errno(0);
             0
         }
@@ -6921,6 +7011,7 @@ pub unsafe extern "C" fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u
             paths::RESOLVE_NOFOLLOW,
             EEXIST,
             |context, path| context.fs_create_directory(path, mode),
+            Notice::Created,
         )
     }
 }
@@ -6945,6 +7036,7 @@ pub unsafe extern "C" fn patina_mkfifo(dirfd: c_int, path: *const c_char, mode: 
             paths::RESOLVE_NOFOLLOW,
             EEXIST,
             |context, path| context.fs_make_fifo(path, mode),
+            Notice::Created,
         )
     }
 }
@@ -7016,6 +7108,7 @@ pub unsafe extern "C" fn patina_mknod(
     };
     match result {
         Ok(()) => {
+            notice(Notice::Created, &resolved);
             set_errno(0);
             0
         }
@@ -7049,6 +7142,7 @@ pub unsafe extern "C" fn patina_unlink(dirfd: c_int, path: *const c_char) -> c_i
             paths::RESOLVE_NOFOLLOW,
             EACCES,
             Context::fs_remove_file,
+            Notice::Removed,
         )
     }
 }
@@ -7082,6 +7176,7 @@ pub unsafe extern "C" fn patina_rmdir(dirfd: c_int, path: *const c_char) -> c_in
             paths::RESOLVE_NOFOLLOW,
             EACCES,
             Context::fs_remove_directory,
+            Notice::Removed,
         )
     }
 }
@@ -7210,7 +7305,8 @@ pub unsafe extern "C" fn patina_renameat2(
     if from.metadata.is_none() {
         return fail(ENOENT);
     }
-    let result = if flags & RENAME_EXCHANGE != 0 {
+    let exchange = flags & RENAME_EXCHANGE != 0;
+    let result = if exchange {
         if to.metadata.is_none() {
             return fail(ENOENT);
         }
@@ -7224,6 +7320,15 @@ pub unsafe extern "C" fn patina_renameat2(
     };
     match result {
         Ok(()) => {
+            #[cfg(target_os = "linux")]
+            if let Some(source) = &from.metadata {
+                match (exchange, &to.metadata) {
+                    (true, Some(other)) => fsnotify::exchanged(&from.path, &to.path, source, other),
+                    (_, target) => fsnotify::moved(&from.path, &to.path, source, target.as_ref()),
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = exchange;
             set_errno(0);
             0
         }
@@ -7259,6 +7364,7 @@ pub unsafe extern "C" fn patina_symlink(
             paths::RESOLVE_NOFOLLOW,
             EEXIST,
             |context, link_path| context.fs_symlink(&target, link_path),
+            Notice::Created,
         )
     }
 }
@@ -7294,7 +7400,7 @@ pub unsafe extern "C" fn patina_link(
         paths::RESOLVE_NOFOLLOW
     };
     let from = match paths::resolve(fromfd, &from, from_flags) {
-        Ok(paths::Resolution::Volume(resolved)) => resolved.path,
+        Ok(paths::Resolution::Volume(resolved)) => resolved,
         Ok(paths::Resolution::Virtual(entry)) => entry.unmodeled("linking"),
         Err(errno) => return fail(errno),
     };
@@ -7304,8 +7410,12 @@ pub unsafe extern "C" fn patina_link(
         Ok(paths::Resolution::Virtual(_)) => return fail(EEXIST),
         Err(errno) => return fail(errno),
     };
-    match with_context(|context| context.fs_link(&from, &to)) {
+    match with_context(|context| context.fs_link(&from.path, &to)) {
         Ok(()) => {
+            #[cfg(target_os = "linux")]
+            if let Some(source) = &from.metadata {
+                fsnotify::linked(source, &to);
+            }
             set_errno(0);
             0
         }
@@ -8232,6 +8342,8 @@ mod thread {
     #[cfg(target_os = "linux")]
     pub(crate) mod futex2;
     #[cfg(target_os = "linux")]
+    pub(crate) mod inotify;
+    #[cfg(target_os = "linux")]
     pub(crate) mod ipc;
     pub(crate) mod locks;
     pub(crate) mod net;
@@ -8289,6 +8401,7 @@ mod thread {
             | FdKind::SignalFd
             | FdKind::MessageQueue
             | FdKind::TimerFd
+            | FdKind::Inotify
             | FdKind::Pidfd
             | FdKind::LandlockRuleset
             | FdKind::Userfaultfd
@@ -8319,6 +8432,7 @@ mod thread {
             | FdKind::SignalFd
             | FdKind::MessageQueue
             | FdKind::TimerFd
+            | FdKind::Inotify
             | FdKind::Pidfd
             | FdKind::LandlockRuleset
             | FdKind::Userfaultfd
@@ -9739,6 +9853,9 @@ mod thread {
         /// Every thread's cancellation state.
         #[cfg(target_os = "linux")]
         cancels: cancel::Cancels,
+        /// The inotify instances and their watches.
+        #[cfg(target_os = "linux")]
+        inotify: inotify::Inotify,
         /// Real host `pthread_t` bits mapped to the managed task they run.
         handles: BTreeMap<usize, TaskId>,
         /// Per-task baton semaphores.
@@ -10170,6 +10287,8 @@ mod thread {
                 timers: timers::Timers::default(),
                 #[cfg(target_os = "linux")]
                 cancels: cancel::Cancels::default(),
+                #[cfg(target_os = "linux")]
+                inotify: inotify::Inotify::default(),
                 handles: BTreeMap::new(),
                 sems: BTreeMap::new(),
                 net: NetState::new(),
@@ -13456,6 +13575,16 @@ mod thread {
                 let (readable, fires) = timers::timerfd_poll(state, handle);
                 (if readable { POLLIN | POLLRDNORM } else { 0 }, (fires, 0))
             }
+            // `inotify_poll`: readable while an event is queued; every queued
+            // event is an arrival.
+            #[cfg(target_os = "linux")]
+            FdKind::Inotify => {
+                let (readable, arrivals) = inotify::poll(state, handle);
+                (
+                    if readable { POLLIN | POLLRDNORM } else { 0 },
+                    (arrivals, 0),
+                )
+            }
             #[cfg(target_os = "linux")]
             FdKind::Epoll => (0, (0, 0)),
             // `pidfd_poll`: readable once the process's thread group has
@@ -13571,6 +13700,9 @@ mod thread {
         TimerFdRecv(u64),
         /// Parked in `F_SETLKW` on a record or OFD lock.
         RecordLock,
+        /// Linux: parked on an inotify instance's readers.
+        #[cfg(target_os = "linux")]
+        InotifyRecv(u64),
     }
 
     /// Register `me` on the waiter queue of every watched `(direction, fd)`
@@ -13619,6 +13751,13 @@ mod thread {
             if resolved.kind == FdKind::TimerFd {
                 if dir == ReadyDir::Read {
                     locs.extend(timers::timerfd_watch(state, resolved.handle, me));
+                }
+                continue;
+            }
+            #[cfg(target_os = "linux")]
+            if resolved.kind == FdKind::Inotify {
+                if dir == ReadyDir::Read {
+                    locs.extend(inotify::watch(state, resolved.handle, me));
                 }
                 continue;
             }
@@ -13771,6 +13910,8 @@ mod thread {
                 #[cfg(target_os = "linux")]
                 WaiterLoc::TimerFdRecv(handle) => timers::timerfd_unwatch(state, handle, me),
                 WaiterLoc::RecordLock => locks::unwait(state, me),
+                #[cfg(target_os = "linux")]
+                WaiterLoc::InotifyRecv(handle) => inotify::unwatch(state, handle, me),
             }
         }
     }

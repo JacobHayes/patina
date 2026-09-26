@@ -200,6 +200,7 @@ pub(in crate::sud) fn setns(credential: &Credential, a: &[u64; 6]) -> Answer {
             | FdKind::Epoll
             | FdKind::MessageQueue
             | FdKind::TimerFd
+            | FdKind::Inotify
             | FdKind::LandlockRuleset
             | FdKind::Userfaultfd
             | FdKind::NamespacePath => refuse(errno::EINVAL),

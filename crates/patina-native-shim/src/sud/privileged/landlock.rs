@@ -210,6 +210,7 @@ fn parent_beneath(parent: c_int) -> Answer {
         | FdKind::Epoll
         | FdKind::MessageQueue
         | FdKind::TimerFd
+        | FdKind::Inotify
         | FdKind::Pidfd
         | FdKind::LandlockRuleset
         | FdKind::Userfaultfd
