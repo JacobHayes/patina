@@ -101,6 +101,207 @@ char *realpath(const char *restrict path, char *restrict destination) {
     return destination;
 }
 
+#ifdef __linux__
+/*
+ * The directory stream as glibc 2.39 builds it (sysdeps/unix/sysv/linux/
+ * opendir.c, readdir64.c, readdir64_r.c, rewinddir.c, telldir.c, seekdir.c,
+ * closedir.c): a DIR is its descriptor and a buffer of getdents64 records. Nothing is read at open; a read
+ * refills the buffer through the dispatcher's getdents64 row, so the stream
+ * reads the directory through its descriptor, shares the descriptor's position
+ * with a raw getdents64 and lseek, and fails as they fail.
+ */
+enum { PATINA_DIR_ALLOCATION = 32768 };
+
+struct patina_dir {
+    int fd;
+    /* Bytes of records in `data`, and the offset of the next one. */
+    size_t size;
+    size_t offset;
+    /* The last record's d_off: the position telldir answers. */
+    off_t filepos;
+    _Alignas(struct dirent64) unsigned char data[PATINA_DIR_ALLOCATION];
+};
+
+/* On a 64-bit glibc `struct dirent` IS `struct dirent64` (readdir aliases
+ * readdir64), and both are the kernel's linux_dirent64 record. */
+_Static_assert(sizeof(struct dirent) == sizeof(struct dirent64) &&
+                   offsetof(struct dirent, d_name) == offsetof(struct dirent64, d_name),
+               "struct dirent is struct dirent64 on a 64-bit glibc");
+
+static DIR *patina_alloc_dir(int fd) {
+    struct patina_dir *directory = malloc(sizeof *directory);
+    if (directory == NULL) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    directory->fd = fd;
+    directory->size = 0;
+    directory->offset = 0;
+    directory->filepos = 0;
+    return (DIR *)(void *)directory;
+}
+
+/* glibc's opendir: O_RDONLY|O_NDELAY|O_DIRECTORY|O_CLOEXEC, nothing read. */
+DIR *opendir(const char *path) {
+    int fd = patina_openat(PATINA_AT_FDCWD, path,
+                           PATINA_O_READ | PATINA_O_NONBLOCK | PATINA_O_DIRECTORY |
+                               PATINA_O_CLOEXEC,
+                           0);
+    if (fd < 0) {
+        errno = patina_errno();
+        return NULL;
+    }
+    DIR *directory = patina_alloc_dir(fd);
+    if (directory == NULL) patina_close(fd);
+    return directory;
+}
+
+/* glibc's fdopendir: fstat (ENOTDIR for anything but a directory), F_GETFL (an
+ * O_PATH descriptor opened nothing: EBADF), then FD_CLOEXEC on the adopted
+ * descriptor (__alloc_dir), which closedir closes. */
+DIR *fdopendir(int fd) {
+    struct patina_metadata values;
+    if (patina_fd_metadata_full(fd, &values) < 0) {
+        errno = patina_errno();
+        return NULL;
+    }
+    if (values.kind != PATINA_ENTRY_DIRECTORY) {
+        errno = ENOTDIR;
+        return NULL;
+    }
+    int status = patina_fd_getfl(fd);
+    if (status < 0) {
+        errno = patina_errno();
+        return NULL;
+    }
+    if (status & PATINA_O_PATH) {
+        errno = EBADF;
+        return NULL;
+    }
+    if (patina_fd_setfd(fd, 1) < 0) {
+        errno = patina_errno();
+        return NULL;
+    }
+    return patina_alloc_dir(fd);
+}
+
+/* The next record, refilling the buffer when it is spent: NULL with *error 0
+ * at the end of the directory (getdents64's 0, or the ENOENT of a removed
+ * directory POSIX treats as the end), or NULL with the read's errno. */
+static struct dirent64 *patina_dir_next(struct patina_dir *directory, int *error) {
+    *error = 0;
+    if (directory->offset >= directory->size) {
+        long bytes = patina_sud_dispatch(SYS_getdents64, (unsigned long)directory->fd,
+                                         (uintptr_t)directory->data, sizeof directory->data,
+                                         0, 0, 0, 0);
+        if (bytes <= 0) {
+            if (bytes < 0 && bytes != -ENOENT) *error = (int)-bytes;
+            return NULL;
+        }
+        directory->size = (size_t)bytes;
+        directory->offset = 0;
+    }
+    struct dirent64 *entry = (struct dirent64 *)(void *)&directory->data[directory->offset];
+    directory->offset += entry->d_reclen;
+    directory->filepos = entry->d_off;
+    return entry;
+}
+
+/* glibc declares the DIR/dirent parameters nonnull (NULL is caller UB, and
+ * -Wnonnull-compare rejects defensive checks), so these trust the contract.
+ * At the end a read answers NULL and leaves errno alone. */
+struct dirent64 *readdir64(DIR *dirp) {
+    int error;
+    struct dirent64 *entry = patina_dir_next((struct patina_dir *)(void *)dirp, &error);
+    if (error != 0) errno = error;
+    return entry;
+}
+
+struct dirent *readdir(DIR *dirp) {
+    return (struct dirent *)(void *)readdir64(dirp);
+}
+
+/* readdir_r and readdir64_r (one function in glibc) copy the record into the
+ * caller's entry and return the read's error number (0 and a NULL result at
+ * the end). */
+static int patina_readdir_r(DIR *dirp, struct dirent64 *entry, struct dirent64 **result) {
+    int error;
+    struct dirent64 *next = patina_dir_next((struct patina_dir *)(void *)dirp, &error);
+    if (next == NULL) {
+        *result = NULL;
+        if (error != 0) errno = error;
+        return error;
+    }
+    memcpy(entry, next, next->d_reclen);
+    *result = entry;
+    return 0;
+}
+
+int readdir_r(DIR *restrict dirp, struct dirent *restrict entry,
+              struct dirent **restrict result) {
+    return patina_readdir_r(dirp, (struct dirent64 *)(void *)entry,
+                            (struct dirent64 **)(void *)result);
+}
+
+int readdir64_r(DIR *restrict dirp, struct dirent64 *restrict entry,
+                struct dirent64 **restrict result) {
+    return patina_readdir_r(dirp, entry, result);
+}
+
+/*
+ * glibc's getdents64 is the syscall with the length clamped to INT_MAX (the
+ * kernel's length checks use an int). This one forwards into the dispatcher's
+ * getdents64 row, so the libc wrapper, readdir and a raw getdents64 read one
+ * per-descriptor iteration.
+ */
+ssize_t getdents64(int fd, void *buffer, size_t length) {
+    if (length > INT_MAX) length = INT_MAX;
+    return dispatch_result(patina_sud_dispatch(SYS_getdents64, (unsigned long)fd,
+                                               (uintptr_t)buffer, length, 0, 0, 0, 0));
+}
+
+/* closedir answers close's result on the stream's descriptor; a NULL stream
+ * is EINVAL, glibc's own check (the empty asm keeps the test the header's
+ * nonnull declaration would let the compiler drop). */
+int closedir(DIR *dirp) {
+    __asm__("" : "+r"(dirp));
+    if (dirp == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    int fd = ((struct patina_dir *)(void *)dirp)->fd;
+    free(dirp);
+    return fail_int(patina_close(fd));
+}
+
+/* rewinddir seeks the descriptor back to the start and drops the buffer;
+ * seekdir seeks it to a position telldir answered. */
+static void patina_dir_seek(DIR *dirp, long position) {
+    struct patina_dir *directory = (struct patina_dir *)(void *)dirp;
+    (void)patina_seek(directory->fd, position, SEEK_SET);
+    directory->size = 0;
+    directory->offset = 0;
+    directory->filepos = position;
+}
+
+void rewinddir(DIR *dirp) {
+    patina_dir_seek(dirp, 0);
+}
+
+void seekdir(DIR *dirp, long position) {
+    patina_dir_seek(dirp, position);
+}
+
+long telldir(DIR *dirp) {
+    return (long)((struct patina_dir *)(void *)dirp)->filepos;
+}
+
+int dirfd(DIR *dirp) {
+    return ((struct patina_dir *)(void *)dirp)->fd;
+}
+
+#else
+/* Darwin's directory stream: a snapshot of the listing, taken at open. */
 struct patina_dir {
     void *state;
     /* Every DIR owns a virtual directory descriptor, which closedir releases:
@@ -110,9 +311,6 @@ struct patina_dir {
      * not a second lookup of a name. */
     int owned_fd;
     struct dirent entry;
-#ifdef __linux__
-    struct dirent64 entry64;
-#endif
 };
 
 static unsigned char patina_dirent_type(uint32_t kind) {
@@ -130,9 +328,7 @@ static unsigned char patina_dirent_type(uint32_t kind) {
 static void patina_fill_dirent_common(struct dirent *entry, uint64_t ino, uint32_t kind) {
     entry->d_ino = (ino_t)ino;
     entry->d_reclen = (unsigned short)sizeof *entry;
-#ifdef __APPLE__
     entry->d_namlen = (uint8_t)strlen(entry->d_name);
-#endif
     entry->d_type = patina_dirent_type(kind);
 }
 
@@ -224,38 +420,6 @@ int readdir_r(DIR *restrict dirp, struct dirent *restrict entry,
     return 0;
 }
 
-#ifdef __linux__
-struct dirent64 *readdir64(DIR *dirp) {
-    struct patina_dir *directory = (struct patina_dir *)(void *)dirp;
-    uint32_t kind = 0;
-    uint64_t ino = 0;
-    int result = patina_read_dir_next(directory->state, directory->entry64.d_name,
-                                      sizeof directory->entry64.d_name, &kind, &ino);
-    if (result < 0) {
-        errno = patina_errno();
-        return NULL;
-    }
-    if (result == 0) return NULL;
-    directory->entry64.d_ino = (ino64_t)ino;
-    directory->entry64.d_reclen = (unsigned short)sizeof directory->entry64;
-    directory->entry64.d_type = patina_dirent_type(kind);
-    return &directory->entry64;
-}
-
-/*
- * glibc's getdents64 is the syscall with the length clamped to INT_MAX (the
- * kernel's length checks use an int). This one forwards into the dispatcher's
- * getdents64 row, so the libc wrapper and a raw getdents64 read one
- * per-descriptor iteration.
- */
-ssize_t getdents64(int fd, void *buffer, size_t length) {
-    if (length > INT_MAX) length = INT_MAX;
-    return dispatch_result(patina_sud_dispatch(SYS_getdents64, (unsigned long)fd,
-                                               (uintptr_t)buffer, length, 0, 0, 0, 0));
-}
-
-#endif
-
 int closedir(DIR *dirp) {
     struct patina_dir *directory = (struct patina_dir *)(void *)dirp;
     patina_read_dir_free(directory->state);
@@ -281,6 +445,8 @@ int dirfd(DIR *dirp) {
     struct patina_dir *directory = (struct patina_dir *)(void *)dirp;
     return directory->owned_fd;
 }
+
+#endif
 
 /*
  * symlinkat/readlinkat and their AT_FDCWD spellings. symlinkat resolves only

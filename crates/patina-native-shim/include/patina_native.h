@@ -46,7 +46,8 @@ enum {
     PATINA_O_OPENED = 1u << 10,
     /* The entry must be a directory (ENOTDIR otherwise). Not a driver flag: the
      * resolver already knows the entry's kind, and a directory is opened as a
-     * directory descriptor whether or not the caller asked. */
+     * directory descriptor whether or not the caller asked. The description
+     * keeps it as a status flag, which Linux's F_GETFL reports. */
     PATINA_O_DIRECTORY = 1u << 11,
 };
 
@@ -384,7 +385,8 @@ int32_t patina_ioctl(int32_t fd, uint64_t request, void *arg);
  * above it), the number getrlimit and sysconf(_SC_OPEN_MAX) must report.
  * F_GETFD/F_SETFD read and write the number's FD_CLOEXEC bit; F_GETFL/F_SETFL
  * read and write the description's status flags in the PATINA_O_* vocabulary
- * (access mode, PATINA_O_APPEND, PATINA_O_NONBLOCK, PATINA_O_PATH; only the
+ * (access mode, PATINA_O_APPEND, PATINA_O_NONBLOCK, PATINA_O_PATH,
+ * PATINA_O_DIRECTORY when the open asked for it; only the
  * first two are settable, as the kernel ignores the rest of an F_SETFL
  * argument); patina_fd_set_nonblocking flips PATINA_O_NONBLOCK alone (FIONBIO,
  * SOCK_NONBLOCK on accept).

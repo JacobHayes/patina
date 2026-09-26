@@ -1,12 +1,13 @@
-//! The directory-stream API (dirent.h): `opendir`, `fdopendir`, the three
-//! reads (`readdir`, `readdir64`, `readdir_r`), `rewinddir`, `dirfd` and
-//! `closedir`. glibc's calls, not rows: the libc vehicle is the only door, and
+//! The directory-stream API (dirent.h): `opendir`, `fdopendir`, the four
+//! reads (`readdir`, `readdir64`, `readdir_r`, `readdir64_r`), `rewinddir`,
+//! `telldir`, `seekdir`, `dirfd` and `closedir`. glibc's calls, not rows: the libc vehicle is the only door, and
 //! each event is named for the function it recorded.
 //!
 //! Entry order is the filesystem's business (hash order on ext4), so a full
 //! listing is recorded sorted, and a single step records only whether it
 //! produced an entry. `d_ino` and `d_off` are never recorded: the inode is
-//! related to `stat`'s by the scenario, and the offset is a filesystem cookie.
+//! related to `stat`'s by the scenario, and the offset (`telldir`'s answer
+//! too) is a filesystem cookie.
 
 use super::{Probe, cstr};
 use crate::observe::Norm;
@@ -22,6 +23,7 @@ pub enum ReadSpelling {
     Readdir,
     Readdir64,
     ReaddirR,
+    Readdir64R,
 }
 
 impl ReadSpelling {
@@ -30,6 +32,7 @@ impl ReadSpelling {
             ReadSpelling::Readdir => "readdir",
             ReadSpelling::Readdir64 => "readdir64",
             ReadSpelling::ReaddirR => "readdir_r",
+            ReadSpelling::Readdir64R => "readdir64_r",
         }
     }
 }
@@ -40,9 +43,9 @@ pub struct DirEntry {
     pub name: String,
     pub kind: u8,
     pub ino: u64,
-    /// `readdir_r` pointed `*result` at the caller's own `entry` (glibc
-    /// copies the record there); true for the other spellings, which have
-    /// no caller buffer.
+    /// `readdir_r`/`readdir64_r` pointed `*result` at the caller's own
+    /// `entry` (glibc copies the record there); true for the other
+    /// spellings, which have no caller buffer.
     pub result_is_entry: bool,
 }
 
@@ -119,6 +122,23 @@ fn read_one(dir: &Dir, spelling: ReadSpelling) -> Result<Option<DirEntry>, i32> 
                     ..entry_of(entry.d_name.as_ptr(), entry.d_type, entry.d_ino)
                 }))
             }
+            ReadSpelling::Readdir64R => {
+                let mut storage: libc::dirent64 = std::mem::zeroed();
+                let mut result: *mut libc::dirent64 = std::ptr::null_mut();
+                #[allow(deprecated)]
+                let code = libc::readdir64_r(dir.0, &mut storage, &mut result);
+                if code != 0 {
+                    return Err(code);
+                }
+                if result.is_null() {
+                    return Ok(None);
+                }
+                let entry = &*result;
+                Ok(Some(DirEntry {
+                    result_is_entry: std::ptr::eq(result, &storage),
+                    ..entry_of(entry.d_name.as_ptr(), entry.d_type, entry.d_ino)
+                }))
+            }
         }
     }
 }
@@ -165,7 +185,7 @@ impl Probe {
         };
         let builder = self.rec.event(spelling.name(), result);
         match (&entry, spelling) {
-            (Some(entry), ReadSpelling::ReaddirR) => builder
+            (Some(entry), ReadSpelling::ReaddirR | ReadSpelling::Readdir64R) => builder
                 .field("result_is_entry", entry.result_is_entry)
                 .emit(),
             _ => builder.emit(),
@@ -196,7 +216,7 @@ impl Probe {
             .event(spelling.name(), result)
             .arg("until", "end")
             .field("entries", listed);
-        let builder = if spelling == ReadSpelling::ReaddirR {
+        let builder = if matches!(spelling, ReadSpelling::ReaddirR | ReadSpelling::Readdir64R) {
             builder.field(
                 "result_is_entry",
                 entries.iter().all(|entry| entry.result_is_entry),
@@ -212,6 +232,35 @@ impl Probe {
         // SAFETY: an open stream.
         unsafe { libc::rewinddir(dir.0) };
         self.rec.event("rewinddir", 0).emit();
+    }
+
+    /// `telldir(dir)`: the stream's position, a cookie only `seekdir` reads
+    /// (recorded as 0, or the `-errno` of a -1).
+    pub fn telldir(&self, dir: &Dir) -> i64 {
+        // SAFETY: an open stream.
+        let position = unsafe { libc::telldir(dir.0) };
+        let result = if position < 0 { -i64::from(errno()) } else { 0 };
+        self.rec.event("telldir", result).emit();
+        position
+    }
+
+    /// `seekdir(dir, position)`, to a position `telldir` answered.
+    pub fn seekdir(&self, dir: &Dir, position: i64) {
+        // SAFETY: an open stream.
+        unsafe { libc::seekdir(dir.0, position) };
+        self.rec.event("seekdir", 0).emit();
+    }
+
+    /// `closedir(NULL)`: 0, or the `-errno` of a -1.
+    pub fn closedir_null(&self) -> i64 {
+        // SAFETY: glibc checks the stream for NULL before using it.
+        let result =
+            crate::vehicle::fold_errno(i64::from(unsafe { libc::closedir(std::ptr::null_mut()) }));
+        self.rec
+            .event("closedir", result)
+            .arg("dirp", "NULL")
+            .emit();
+        result
     }
 
     /// `dirfd(dir)`: the descriptor the stream reads.

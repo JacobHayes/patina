@@ -42,7 +42,8 @@ int isatty(int fd) {
 
 /* The platform's file-status flags <-> the shim's PATINA_O_* status vocabulary,
  * for F_GETFL/F_SETFL. Only the bits the kernel reports through F_GETFL are
- * translated: the access mode, O_APPEND, O_NONBLOCK, and O_PATH. */
+ * translated: the access mode, O_APPEND, O_NONBLOCK, O_PATH, and on Linux
+ * O_DIRECTORY and O_LARGEFILE. */
 static int patina_getfl_to_posix(uint32_t status) {
     int flags;
     int readable = (status & PATINA_O_READ) != 0;
@@ -56,6 +57,8 @@ static int patina_getfl_to_posix(uint32_t status) {
     if (status & PATINA_O_PATH) flags |= O_PATH;
 #endif
 #ifdef __linux__
+    /* Linux keeps O_DIRECTORY in the description's f_flags; XNU does not. */
+    if (status & PATINA_O_DIRECTORY) flags |= O_DIRECTORY;
     /* A 64-bit kernel forces O_LARGEFILE into every open(2)-minted description
      * (fs/open.c build_open_how) and F_GETFL reports it; the shim's table
      * remembers which those are. glibc defines the O_LARGEFILE macro as 0 on

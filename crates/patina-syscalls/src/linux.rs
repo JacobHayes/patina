@@ -1620,7 +1620,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Fs,
         Disposition::Modeled,
-        "Serves a per-directory-fd snapshot taken through `patina_read_dir`, the entry the C `readdir` uses, `.` and `..` first, each entry with its inode; the C `getdents64` forwards here.",
+        "Serves a per-directory-fd snapshot of the driver's descriptor listing, taken by the first read after an open or a seek: `.` and `..` first, each entry with its inode. The C `readdir` family and `getdents64` read through here, as glibc's do.",
         Some("fs"),
     ),
     Syscall::N_set_tid_address => r(

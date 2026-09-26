@@ -242,6 +242,9 @@ fn getfl_to_kernel(status: u32) -> i64 {
     if status & PATINA_O_PATH != 0 {
         flags |= O_PATH;
     }
+    if status & PATINA_O_DIRECTORY != 0 {
+        flags |= O_DIRECTORY;
+    }
     // A 64-bit kernel forces O_LARGEFILE into every open(2)-minted description
     // (fs/open.c build_open_how); the shim's table remembers which those are.
     if status & PATINA_O_OPENED != 0 {

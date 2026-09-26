@@ -288,6 +288,7 @@
     X(read) \
     X(readdir) \
     X(readdir64) \
+    X(readdir64_r) \
     X(readdir_r) \
     X(readlink) \
     X(readlinkat) \
@@ -310,6 +311,7 @@
     X(sched_setaffinity) \
     X(sched_yield) \
     X(secure_getenv) \
+    X(seekdir) \
     X(select) \
     X(send) \
     X(sendfile) \
@@ -364,6 +366,7 @@
     X(sysconf) \
     X(sysinfo) \
     X(tcgetattr) \
+    X(telldir) \
     X(tgkill) \
     X(time) \
     X(tkill) \

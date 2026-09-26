@@ -4271,9 +4271,11 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
     };
     // The description's status flags as `F_GETFL` reports them: the access
     // mode, `O_APPEND`, `O_NONBLOCK`; an `O_PATH` description carries only
-    // `O_PATH` (the kernel reads no access mode under it).
+    // `O_PATH` (the kernel reads no access mode under it). `O_DIRECTORY` stays
+    // on a description that asked for it (fs/open.c keeps it in `f_flags`,
+    // under `O_PATH` too), which only a directory's can have.
     let status = if path_only {
-        O_PATH
+        O_PATH | (flags & O_DIRECTORY)
     } else {
         (flags & (O_READ | O_WRITE | O_APPEND | O_NONBLOCK)) | O_OPENED
     };
@@ -4344,9 +4346,12 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
                 return fail(EISDIR);
             }
             let (dir_flags, dir_status) = if path_only {
-                (OpenFlags::path_only(), O_PATH)
+                (OpenFlags::path_only(), status)
             } else {
-                (OpenFlags::read_only(), O_READ | O_OPENED)
+                (
+                    OpenFlags::read_only(),
+                    O_READ | O_OPENED | (flags & (O_NONBLOCK | O_DIRECTORY)),
+                )
             };
             match with_context(|context| context.fs_open(&resolved.path, dir_flags)) {
                 Ok(fd) => bind_fs_handle(fd, FdKind::Dir, dir_status, cloexec),

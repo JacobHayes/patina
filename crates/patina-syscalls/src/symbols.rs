@@ -302,6 +302,12 @@ const ROWS: &[SymbolRow] = &[
         SymbolStatus::Modeled,
     ),
     s(
+        "readdir64_r",
+        Platform::Linux,
+        Serves::Syscalls(&["getdents64"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
         "closedir",
         Platform::Both,
         Serves::Syscalls(&["close"]),
@@ -311,6 +317,18 @@ const ROWS: &[SymbolRow] = &[
         "rewinddir",
         Platform::Both,
         Serves::Syscalls(&["lseek"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "seekdir",
+        Platform::Linux,
+        Serves::Syscalls(&["lseek"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "telldir",
+        Platform::Linux,
+        Serves::LibcOnly,
         SymbolStatus::Modeled,
     ),
     s(

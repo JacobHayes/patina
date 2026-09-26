@@ -12,12 +12,11 @@
 //!
 //! Linux directory ITERATION (`getdents64`) is the one thing a plain filesystem
 //! fd cannot answer, so this layer keeps a per-dir-fd position and entry
-//! snapshot on the side, taken through the SAME `patina_read_dir` entry the
-//! interposed `opendir` uses. The snapshot is taken by the first `getdents64`
-//! after an open or a seek, and dropped by a seek and by `close`. A `DIR*` from
-//! the C `opendir`/`fdopendir` holds a snapshot and position of its own, so a
-//! guest mixing `readdir(d)` with a raw `getdents64(dirfd(d))` reads two
-//! cursors where a kernel has one.
+//! snapshot on the side, taken through `patina_read_dir`. The snapshot is taken
+//! by the first `getdents64` after an open or a seek, and dropped by a seek and
+//! by `close`. The C `readdir` family reads through this row into its `DIR`'s
+//! buffer, as glibc's does, so a guest mixing `readdir(d)` with a raw
+//! `getdents64(dirfd(d))` reads one cursor.
 
 use super::*;
 
