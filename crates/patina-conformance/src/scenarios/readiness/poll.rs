@@ -149,9 +149,13 @@ pub fn run(p: &Probe) {
     let (_, before) = p.rec.quiet(|| p.clock_gettime(CLOCK_MONOTONIC));
     let (n, data) = p.recv(ls, 16, MSG_PEEK);
     let (_, after) = p.rec.quiet(|| p.clock_gettime(CLOCK_MONOTONIC));
+    // SO_RCVTIMEO is a jiffies timeout, and 6.8 lets jiffies stall up to
+    // five ticks behind the monotonic clock under a preempted VM
+    // (`tick_sched_do_timer`, MAX_STALLED_JIFFIES): 20 ms at HZ=250, so half
+    // the timeout still tells a wait from an immediate answer.
     p.check(
         "a blocking peek below the mark waits out its timeout, then answers what is queued",
-        n == 2 && data == b"gh" && after - before >= 50_000_000,
+        n == 2 && data == b"gh" && after - before >= 25_000_000,
     );
     let (n, _) = p.recv(ls, 16, MSG_DONTWAIT);
     p.check("the peeked bytes are still queued", n == 2);
