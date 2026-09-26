@@ -8317,12 +8317,14 @@ fn main() {
         const F_OFD_GETLK: i32 = 36;
         const F_OFD_SETLK: i32 = 37;
         // Open-file-description locks DO contend inside one process: a second
-        // open's whole-file F_OFD_SETLK meets the first's (the same per-inode
-        // table flock uses) and reports EAGAIN; a byte-range OFD lock and
-        // F_OFD_GETLK are a soft ENOSYS rather than a fabricated answer; the
-        // first description's release lets the second acquire. The second
-        // opener is read-write: a write lock needs a writable description
-        // (fcntl_setlk's access-mode check answers EBADF otherwise).
+        // open's whole-file F_OFD_SETLK meets the first's and reports EAGAIN;
+        // a byte-range lock through the holder joins its own lock, and
+        // F_OFD_GETLK through it finds no other owner's; the first
+        // description's release lets the second acquire. (errno is printed
+        // after each call and a success leaves it alone, so it still reads
+        // the EAGAIN.) The second opener is read-write: a write lock needs a
+        // writable description (fcntl_setlk's access-mode check answers EBADF
+        // otherwise).
         let mut first = whole(F_WRLCK);
         let ofd_first = unsafe { fcntl(fd, F_OFD_SETLK, &mut first as *mut Flock) };
         let second = OpenOptions::new()
@@ -8380,10 +8382,9 @@ fn native_fcntl_record_locks_are_modeled_for_the_lone_opener() {
     );
     if cfg!(target_os = "linux") {
         assert!(
-            stdout.contains(
-                "FCNTL_OFD first=0 second=-1/11 range=-1/38 getlk=-1/38 release=0 retry=0"
-            ),
-            "a whole-file OFD lock must contend across descriptions like flock, byte-range/F_OFD_GETLK must be ENOSYS, and release must let the second opener in:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            stdout
+                .contains("FCNTL_OFD first=0 second=-1/11 range=0/11 getlk=0/11 release=0 retry=0"),
+            "an OFD lock must contend across descriptions, the holder's byte-range lock and F_OFD_GETLK must succeed, and release must let the second opener in:\nstdout:\n{stdout}\nstderr:\n{stderr}"
         );
     }
 }

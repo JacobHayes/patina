@@ -415,58 +415,47 @@ int ftruncate64(int fd, off64_t length) {
 #endif
 
 /* POSIX record locks (F_GETLK/F_SETLK/F_SETLKW) and the Linux open-file-
- * description variants (F_OFD_*). A run is ONE process, and process-scoped
- * record locks never conflict with locks the same process already holds
- * (POSIX: they are merged, and any close releases them all), so on an open
- * descriptor F_SETLK/F_SETLKW succeed and F_GETLK reports the range as
- * unlocked — exactly what the lone opener sees on the host. Storage engines
- * take such a whole-file lock on every open (turso via rustix fcntl_lock is
- * the live example); left unmodeled, the lock reports ENOSYS and the engine
- * aborts at unlock. OFD locks DO conflict across descriptions inside one
- * process: a whole-file OFD lock routes to the per-description flock table
- * (shared/exclusive/unlock; non-blocking for F_OFD_SETLK); a byte-range OFD
- * lock and F_OFD_GETLK stay a soft ENOSYS rather than a fabricated answer. */
+ * description variants (F_OFD_*): the platform's commands, lock types and
+ * struct flock translated onto patina_record_lock's, which both doors call.
+ * An unknown lock type passes through as one the entry refuses (EINVAL). */
 static int patina_fcntl_record_lock(int fd, int command, struct flock *lock) {
-    if (lock == NULL) { errno = EINVAL; return -1; }
-    /* Descriptor validity is a TABLE check only: a record lock is pure
-     * bookkeeping that does no I/O, so it must not consult the filesystem
-     * driver, whose descriptor lookup is fault-eligible (an injected EIO on
-     * fcntl(F_UNLCK) would be a fabricated failure mode — real fcntl locks
-     * cannot fail that way). The kernel's fcntl_setlk then checks the lock
-     * type against the description's access mode: a read lock needs a readable
-     * description and a write lock a writable one, else EBADF. */
-    int status = patina_fd_getfl(fd);
-    if (status < 0) { errno = EBADF; return -1; }
-    if (lock->l_type != F_RDLCK && lock->l_type != F_WRLCK && lock->l_type != F_UNLCK) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (command != F_GETLK
-#ifdef F_OFD_GETLK
-        && command != F_OFD_GETLK
+    uint32_t patina_command;
+    switch (command) {
+        case F_GETLK: patina_command = PATINA_F_GETLK; break;
+        case F_SETLK: patina_command = PATINA_F_SETLK; break;
+        case F_SETLKW: patina_command = PATINA_F_SETLKW; break;
+#ifdef F_OFD_SETLK
+        case F_OFD_GETLK: patina_command = PATINA_F_OFD_GETLK; break;
+        case F_OFD_SETLK: patina_command = PATINA_F_OFD_SETLK; break;
+        case F_OFD_SETLKW: patina_command = PATINA_F_OFD_SETLKW; break;
 #endif
-    ) {
-        if ((lock->l_type == F_RDLCK && !(status & PATINA_O_READ)) ||
-            (lock->l_type == F_WRLCK && !(status & PATINA_O_WRITE))) {
-            errno = EBADF;
-            return -1;
+        default: errno = EINVAL; return -1;
+    }
+    if (lock == NULL) return fail_int(patina_record_lock(fd, patina_command, NULL));
+    struct patina_flock request = {
+        .l_type = lock->l_type == F_RDLCK   ? PATINA_F_RDLCK
+                  : lock->l_type == F_WRLCK ? PATINA_F_WRLCK
+                  : lock->l_type == F_UNLCK ? PATINA_F_UNLCK
+                                            : -1,
+        .l_whence = lock->l_whence,
+        .l_start = (int64_t)lock->l_start,
+        .l_len = (int64_t)lock->l_len,
+        .l_pid = (int32_t)lock->l_pid,
+    };
+    int result = patina_record_lock(fd, patina_command, &request);
+    if (result < 0) return fail_int(result);
+    if (patina_command == PATINA_F_GETLK || patina_command == PATINA_F_OFD_GETLK) {
+        lock->l_type = request.l_type == PATINA_F_RDLCK   ? F_RDLCK
+                       : request.l_type == PATINA_F_WRLCK ? F_WRLCK
+                                                          : F_UNLCK;
+        if (request.l_type != PATINA_F_UNLCK) {
+            lock->l_whence = SEEK_SET;
+            lock->l_start = (off_t)request.l_start;
+            lock->l_len = (off_t)request.l_len;
+            lock->l_pid = (pid_t)request.l_pid;
         }
     }
-    if (command == F_GETLK) { lock->l_type = F_UNLCK; return 0; }
-    if (command == F_SETLK || command == F_SETLKW) return 0;
-#ifdef F_OFD_SETLK
-    if (command == F_OFD_GETLK) { errno = ENOSYS; return -1; }
-    if (!(lock->l_whence == SEEK_SET && lock->l_start == 0 && lock->l_len == 0)) {
-        errno = ENOSYS;
-        return -1;
-    }
-    int op = lock->l_type == F_RDLCK ? LOCK_SH : lock->l_type == F_WRLCK ? LOCK_EX : LOCK_UN;
-    if (command == F_OFD_SETLK) op |= LOCK_NB;
-    return fail_int(patina_flock(fd, op));
-#else
-    errno = ENOSYS;
-    return -1;
-#endif
+    return 0;
 }
 
 /* ioctl: the generic descriptor requests (FIOCLEX/FIONCLEX/FIONBIO/FIONREAD)

@@ -42,9 +42,6 @@ pub(super) fn sys_close(fd: i64) -> i64 {
     ret_i32(unsafe { patina_close(fd as c_int) })
 }
 
-// `lseek(2)` whence values.
-pub(super) const SEEK_SET: u64 = 0;
-
 pub(super) fn sys_lseek(fd: i64, offset: i64, whence: u64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
@@ -304,64 +301,12 @@ pub(super) fn sys_fcntl(fd: i64, command: u64, arg: u64) -> i64 {
         F_GETPIPE_SZ => ret_i32(unsafe { patina_pipe_size(cfd) }),
         // SAFETY: no pointers.
         F_SETPIPE_SZ => ret_i32(unsafe { patina_pipe_set_size(cfd, arg as c_int) }),
-        // POSIX record locks and their OFD variants: mirror the C fcntl lock arm
-        // EXACTLY (patina_posix.c). One process per run, so process-scoped
-        // record locks never conflict with themselves: F_SETLK/F_SETLKW succeed
-        // on an open descriptor and F_GETLK reports the range unlocked. A
-        // whole-file OFD lock routes to the per-description flock table; a
-        // byte-range OFD lock and F_OFD_GETLK are a soft -ENOSYS.
+        // POSIX record locks and their OFD variants: the one entry the C fcntl
+        // calls too, reading the guest's kernel-layout `struct flock`.
         F_GETLK | F_SETLK | F_SETLKW | F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW => {
-            if arg == 0 {
-                return -EINVAL;
-            }
-            // Table check only, as in C: a record lock does no I/O and must not
-            // consult the (fault-eligible) filesystem descriptor lookup. The
-            // kernel's fcntl_setlk then checks the lock type against the
-            // description's access mode (a read lock needs a readable
-            // description, a write lock a writable one: EBADF).
-            // SAFETY: no pointers.
-            let status = unsafe { patina_fd_getfl(cfd) };
-            if status < 0 {
-                return -EBADF;
-            }
-            let status = status as u32;
-            let lock_ptr = arg as *mut KernelFlock;
-            // SAFETY: `arg` is the guest's `struct flock` per the fcntl(2) contract.
-            let lock = unsafe { lock_ptr.read() };
-            if lock.l_type != F_RDLCK && lock.l_type != F_WRLCK && lock.l_type != F_UNLCK {
-                return -EINVAL;
-            }
-            if command != F_GETLK
-                && command != F_OFD_GETLK
-                && ((lock.l_type == F_RDLCK && status & PATINA_O_READ == 0)
-                    || (lock.l_type == F_WRLCK && status & PATINA_O_WRITE == 0))
-            {
-                return -EBADF;
-            }
-            match command {
-                F_GETLK => {
-                    // SAFETY: same guest struct, writable per the F_GETLK contract.
-                    unsafe { (*lock_ptr).l_type = F_UNLCK };
-                    0
-                }
-                F_SETLK | F_SETLKW => 0,
-                F_OFD_GETLK => -ENOSYS,
-                _ => {
-                    if !(lock.l_whence as u64 == SEEK_SET && lock.l_start == 0 && lock.l_len == 0) {
-                        return -ENOSYS;
-                    }
-                    let mut op = match lock.l_type {
-                        F_RDLCK => LOCK_SH,
-                        F_WRLCK => LOCK_EX,
-                        _ => LOCK_UN,
-                    };
-                    if command == F_OFD_SETLK {
-                        op |= LOCK_NB;
-                    }
-                    // SAFETY: no pointers.
-                    ret_i32(unsafe { patina_flock(cfd, op) })
-                }
-            }
+            // SAFETY: `arg` is the guest's `struct flock` (or null) per the
+            // fcntl(2) contract; the entry refuses a null one EFAULT.
+            ret_i32(unsafe { patina_record_lock(cfd, command as u32, arg as *mut PatinaFlock) })
         }
         // An unknown command on an open descriptor is EINVAL; on a closed one
         // the kernel answers EBADF first (C parity).

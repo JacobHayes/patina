@@ -38,12 +38,15 @@
 //!   while `F_OFD_GETLK` through a second open file description reports it
 //!   (range and owner pid) and `F_OFD_SETLK` there is EAGAIN (EBADF for a
 //!   write lock through a read-only descriptor or a closed number, EINVAL
-//!   for an unknown command).
+//!   for an unknown command); an unlock splits a lock and a relock merges it
+//!   back, any close of the file but an `O_PATH` one releases the process's
+//!   POSIX locks and the last close of a description its OFD locks,
+//!   `F_OFD_SETLKW` waits for a POSIX lock, and `F_GETLK` reports an OFD lock
+//!   with pid -1.
 //!
 //! libc only: the plain names are the libc vehicle of the row scenarios.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{AT_FDCWD, Probe, StatBy, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -389,6 +392,79 @@ pub fn run(p: &Probe) {
         "fcntl64 F_SETLK a write lock through a read-only descriptor is EBADF",
         p.fcntl64_lock(reader, F_SETLK, wr_lock, 0, 0).0 == neg(EBADF),
     );
+    // An unlock cuts the whole-file lock in two, reported piece by piece in
+    // list order; relocking the gap merges the pieces back into one.
+    p.fcntl64_lock(fd, F_SETLK, unlocked, 100, 50);
+    let (r, lock) = p.fcntl64_lock(other, F_OFD_GETLK, wr_lock, 120, 1);
+    p.check(
+        "F_SETLK F_UNLCK frees the range it names",
+        r == 0 && lock.l_type == unlocked,
+    );
+    let (r, lock) = p.fcntl64_lock(other, F_OFD_GETLK, wr_lock, 0, 200);
+    p.check(
+        "the lock is split in two, the lower piece reported first",
+        r == 0 && lock.l_type == wr_lock && (lock.l_start, lock.l_len) == (0, 100),
+    );
+    let (r, lock) = p.fcntl64_lock(other, F_OFD_GETLK, wr_lock, 150, 1);
+    p.check(
+        "the upper piece runs to the end of the file",
+        r == 0 && (lock.l_start, lock.l_len) == (150, 0),
+    );
+    p.fcntl64_lock(fd, F_SETLK, wr_lock, 100, 50);
+    let (r, lock) = p.fcntl64_lock(other, F_OFD_GETLK, wr_lock, 120, 1);
+    p.check(
+        "relocking the gap merges the pieces back into one",
+        r == 0 && lock.l_type == wr_lock && (lock.l_start, lock.l_len) == (0, 0),
+    );
+    let path_only = p.open64(&file, O_PATH, 0);
+    p.require("open64 f O_PATH", path_only >= 0);
+    p.close(path_only);
+    let (r, lock) = p.fcntl64_lock(other, F_OFD_GETLK, wr_lock, 0, 0);
+    p.check(
+        "closing an O_PATH descriptor of the file keeps the process's POSIX locks",
+        r == 0 && lock.l_type == wr_lock,
+    );
+    p.close(reader);
+    let (r, lock) = p.fcntl64_lock(other, F_OFD_GETLK, wr_lock, 0, 0);
+    p.check(
+        "closing another descriptor of the file releases the process's POSIX locks",
+        r == 0 && lock.l_type == unlocked,
+    );
+    // F_OFD_SETLKW waits while the process holds the range: the main thread
+    // sleeps holding it (so a helper that has not yet asked still meets it)
+    // and then lets go. An OFD lock belongs to its description, and F_GETLK
+    // reports it with pid -1.
+    p.fcntl64_lock(fd, F_SETLK, wr_lock, 0, 10);
+    let waited = std::thread::scope(|scope| {
+        let helper = scope.spawn(|| {
+            p.rec
+                .quiet(|| p.fcntl64_lock(other, F_OFD_SETLKW, wr_lock, 0, 10).0)
+        });
+        p.rec.quiet(|| p.nanosleep(0, 10_000_000));
+        p.fcntl64_lock(fd, F_SETLK, unlocked, 0, 10);
+        helper.join().expect("the helper")
+    });
+    p.check(
+        "F_OFD_SETLKW takes the range once the POSIX lock is released",
+        waited == 0,
+    );
+    let (r, lock) = p.fcntl64_lock(fd, F_GETLK, wr_lock, 0, 10);
+    p.check(
+        "F_GETLK reports another description's OFD lock with pid -1",
+        r == 0
+            && lock.l_type == wr_lock
+            && (lock.l_start, lock.l_len) == (0, 10)
+            && lock.l_pid == -1,
+    );
+    let fourth = p.open64(&file, O_RDWR, 0);
+    p.require("open64 f a fourth time", fourth >= 0);
+    p.fcntl64_lock(fourth, F_OFD_SETLK, wr_lock, 20, 5);
+    p.close(fourth);
+    let (r, lock) = p.fcntl64_lock(other, F_OFD_GETLK, wr_lock, 0, 0);
+    p.check(
+        "the last close of a description releases its OFD locks",
+        r == 0 && lock.l_type == unlocked,
+    );
     p.check(
         "fcntl64 of a closed number is EBADF",
         p.fcntl64(4000, F_GETFD, 0) == neg(EBADF),
@@ -398,7 +474,7 @@ pub fn run(p: &Probe) {
         p.fcntl64(fd, UNKNOWN_FCNTL, 0) == neg(EINVAL),
     );
 
-    for fd in [fd, reader, other, dir, rd, wr] {
+    for fd in [fd, other, dir, rd, wr] {
         p.close(fd);
     }
 }
@@ -447,41 +523,5 @@ pub const SCENARIO: Scenario = Scenario {
         "close",
         "getpid",
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: &[Vehicle::Libc],
-        what: "the shim records no POSIX record lock (c/posix/fd_io.c patina_fcntl_record_lock: F_SETLK succeeds as a no-op), answers F_OFD_GETLK ENOSYS, and routes a whole-file F_OFD_SETLK to its flock table, which finds no conflicting POSIX lock (0 where the kernel's is EAGAIN)",
-        failure: Failure::Differs(&[
-            Difference::field(142, "fcntl64", "ret", Observed::Int(-1)),
-            Difference::field(142, "fcntl64", "errno", Observed::Str("ENOSYS")),
-            Difference::field(142, "fcntl64", "fields.l_start", Observed::Null),
-            Difference::field(142, "fcntl64", "fields.l_len", Observed::Null),
-            Difference::field(142, "fcntl64", "fields.l_pid", Observed::Null),
-            Difference::check(
-                143,
-                "F_OFD_GETLK through the other description finds it, its range whole",
-            ),
-            Difference::field(144, "fcntl64", "ret", Observed::Int(-1)),
-            Difference::field(144, "fcntl64", "errno", Observed::Str("ENOSYS")),
-            Difference::field(144, "fcntl64", "fields.l_type", Observed::Int(1)),
-            Difference::check(145, "and no lock below it"),
-            Difference::field(150, "fcntl64", "ret", Observed::Int(-1)),
-            Difference::field(150, "fcntl64", "errno", Observed::Str("ENOSYS")),
-            Difference::field(150, "fcntl64", "fields.l_type", Observed::Int(0)),
-            Difference::field(150, "fcntl64", "fields.l_start", Observed::Null),
-            Difference::field(150, "fcntl64", "fields.l_len", Observed::Null),
-            Difference::field(150, "fcntl64", "fields.l_pid", Observed::Null),
-            Difference::check(
-                151,
-                "F_OFD_GETLK through the other description reports it: the whole file, the caller's pid",
-            ),
-            Difference::field(152, "fcntl64", "ret", Observed::Int(0)),
-            Difference::field(152, "fcntl64", "errno", Observed::Null),
-            Difference::check(
-                153,
-                "F_OFD_SETLK a write lock through the other description is EAGAIN",
-            ),
-        ]),
-    }],
     ..DEFAULTS
 };

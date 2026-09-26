@@ -550,7 +550,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::FdIo,
         Disposition::Modeled,
-        "F_GETFD/F_SETFD (per number), F_GETFL/F_SETFL (per open file description: access mode, O_APPEND, O_NONBLOCK), F_DUPFD/F_DUPFD_CLOEXEC (lowest free number at or above the minimum; EINVAL past RLIMIT_NOFILE), F_GETPIPE_SZ/F_SETPIPE_SZ, and the record-lock family are modeled through the shim's descriptor table; an unknown command answers EINVAL on an open number and EBADF on a closed one, like the C interposer.",
+        "F_GETFD/F_SETFD (per number), F_GETFL/F_SETFL (per open file description: access mode, O_APPEND, O_NONBLOCK), F_DUPFD/F_DUPFD_CLOEXEC (lowest free number at or above the minimum; EINVAL past RLIMIT_NOFILE), F_GETPIPE_SZ/F_SETPIPE_SZ are modeled through the shim's descriptor table, and the record locks through its lock model (POSIX locks owned by the process and released by any close of the file, OFD locks owned by the open file description; ranges split and merge as fs/locks.c keeps them, F_SETLKW waits on the scheduler, a POSIX wait closing a cycle is EDEADLK); an unknown command answers EINVAL on an open number and EBADF on a closed one, like the C interposer.",
         None,
     ),
     Syscall::N_flock => r(

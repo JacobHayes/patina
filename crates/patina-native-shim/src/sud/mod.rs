@@ -36,8 +36,8 @@ use crate::thread::signals::{
 };
 use std::cell::Cell;
 
-use crate::PatinaMetadata;
 use crate::registry::{Arch, Disposition, SYSCALLS, SyscallRow};
+use crate::{PatinaFlock, PatinaMetadata};
 
 mod fd_io;
 mod fs;
@@ -121,6 +121,7 @@ unsafe extern "C" {
     fn patina_fsync(fd: c_int) -> c_int;
     fn patina_set_len(fd: c_int, length: u64) -> c_int;
     fn patina_flock(fd: c_int, operation: c_int) -> c_int;
+    fn patina_record_lock(fd: c_int, command: u32, lock: *mut PatinaFlock) -> c_int;
     fn patina_dup(fd: c_int) -> c_int;
     fn patina_getrandom(destination: *mut c_void, length: usize, flags: u32) -> isize;
     fn patina_sched_yield() -> c_int;
@@ -609,32 +610,6 @@ const F_OFD_GETLK: u64 = uapi::F_OFD_GETLK as u64;
 const F_OFD_SETLK: u64 = uapi::F_OFD_SETLK as u64;
 
 const F_OFD_SETLKW: u64 = uapi::F_OFD_SETLKW as u64;
-
-const F_RDLCK: i16 = uapi::F_RDLCK as i16;
-
-const F_WRLCK: i16 = uapi::F_WRLCK as i16;
-
-const F_UNLCK: i16 = uapi::F_UNLCK as i16;
-
-const LOCK_SH: c_int = uapi::LOCK_SH as c_int;
-
-const LOCK_EX: c_int = uapi::LOCK_EX as c_int;
-
-const LOCK_NB: c_int = uapi::LOCK_NB as c_int;
-
-const LOCK_UN: c_int = uapi::LOCK_UN as c_int;
-
-/// Kernel `struct flock` as the x86_64 / aarch64 Linux ABI lays it out (the
-/// only two SUD platforms): what rustix's `fcntl_lock` hands `fcntl(2)`.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct KernelFlock {
-    l_type: i16,
-    l_whence: i16,
-    l_start: i64,
-    l_len: i64,
-    l_pid: i32,
-}
 
 const FD_CLOEXEC: i64 = uapi::FD_CLOEXEC as i64;
 
@@ -2289,7 +2264,7 @@ mod tests {
 
     #[test]
     fn flag_words_the_kernel_refuses_or_ignores() {
-        use uapi::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM, LOCK_MAND};
+        use uapi::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM, LOCK_MAND, LOCK_SH};
         let mut buf = [0u8; 256];
         let buf = buf.as_mut_ptr() as u64;
         let (insecure, nonblock, random) = (

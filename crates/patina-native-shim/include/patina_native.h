@@ -375,6 +375,37 @@ int32_t patina_set_len(int32_t fd, uint64_t length);
  */
 int32_t patina_flock(int32_t fd, int32_t operation);
 /*
+ * fcntl(2)'s record locks, in Linux's numbering and the 64-bit kernel's
+ * `struct flock` layout (the C fcntl translates its platform's): POSIX locks
+ * (PATINA_F_GETLK/SETLK/SETLKW, owned by the process, released by any close of
+ * the file) and OFD locks (PATINA_F_OFD_*, owned by the open file
+ * description, released with it). A test writes the first conflicting lock
+ * (l_pid its process, -1 for an OFD lock) or PATINA_F_UNLCK back; a set that
+ * conflicts is EAGAIN, or with a SETLKW form waits (EDEADLK where a POSIX wait
+ * would close a cycle). A NULL lock is EFAULT.
+ */
+enum {
+    PATINA_F_GETLK = 5,
+    PATINA_F_SETLK = 6,
+    PATINA_F_SETLKW = 7,
+    PATINA_F_OFD_GETLK = 36,
+    PATINA_F_OFD_SETLK = 37,
+    PATINA_F_OFD_SETLKW = 38,
+};
+enum {
+    PATINA_F_RDLCK = 0,
+    PATINA_F_WRLCK = 1,
+    PATINA_F_UNLCK = 2,
+};
+struct patina_flock {
+    int16_t l_type;
+    int16_t l_whence;
+    int64_t l_start;
+    int64_t l_len;
+    int32_t l_pid;
+};
+int32_t patina_record_lock(int32_t fd, uint32_t command, struct patina_flock *lock);
+/*
  * ioctl(2)'s generic descriptor requests, `request` in the platform's own
  * numbering: FIOCLEX/FIONCLEX set/clear FD_CLOEXEC, FIONBIO reads an int
  * through `arg` (EFAULT for NULL) into the description's O_NONBLOCK, FIONREAD
