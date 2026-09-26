@@ -13,7 +13,9 @@
  *   relocked by its holder): the output reaches the capture before the abort.
  * - zoneinfo: the same before another refusal, `localtime_r` over a zoneinfo
  *   file the guest put at /etc/localtime.
+ * - assert: a failed C `assert()`, glibc's message on stderr and SIGABRT.
  */
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -88,6 +90,12 @@ static int zoneinfo(void) {
     return 0;
 }
 
+static int assert_fails(const char *which) {
+    printf("buffered before the assertion\n");
+    assert(which[0] == 'x');
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *which = argc > 1 ? argv[1] : "";
     if (strcmp(which, "teardown") == 0) return teardown();
@@ -95,6 +103,7 @@ int main(int argc, char **argv) {
     if (strcmp(which, "errno") == 0) return first_write_errno();
     if (strcmp(which, "deadlock") == 0) return deadlock();
     if (strcmp(which, "zoneinfo") == 0) return zoneinfo();
+    if (strcmp(which, "assert") == 0) return assert_fails(which);
     fprintf(stderr, "unknown case: %s\n", which);
     return 2;
 }

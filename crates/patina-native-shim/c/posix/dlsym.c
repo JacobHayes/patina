@@ -43,6 +43,7 @@
  */
 #ifdef __linux__
 #define PATINA_ROUTED(X) \
+    X(__assert_fail) \
     X(__clock_gettime) \
     X(__gettimeofday) \
     X(__libc_current_sigrtmax) \

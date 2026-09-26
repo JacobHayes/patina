@@ -99,19 +99,14 @@ Two pure, effect-free symbols surfaced by the ecosystem audit sweep are
 
 Both are covered by `classifies_ecosystem_audit_symbol_batch`.
 
-One more known-safe addition comes from the glibc side of the same sweep:
-
-- **`__assert_fail`** (ELF only) — glibc's `assert()` failure hook, which aws-lc's
-  asserts lower onto. It runs only once an assertion has ALREADY failed, and its
-  whole body is "print the failed expression to stderr, then `abort()`": the same
-  terminal, value-free outcome as `abort`, which has always been known-safe. No
-  host state flows back to the guest because there is no guest left to read it.
-  Darwin's counterpart `__assert_rtn` is a strong shim def (it routes the message
-  to the captured stderr sink before aborting) and so is never an import there,
-  which is why the row is ELF-only; the honest residual is that glibc's own
-  message may land on the real stderr rather than the captured sink — a
-  diagnostic difference on an already-fatal path.
-  (`classifies_the_glibc_assert_failure_hook_as_known_safe`.)
+The glibc side of the same sweep also met **`__assert_fail`**, glibc's
+`assert()` failure hook, which aws-lc's asserts lower onto. It is not
+known-safe: libc's hook writes through libc's `stderr`, and in a shim-linked
+guest that global is the shim's sentinel, so the hook crashed on it. The shim
+defines it instead (glibc's message on the stream, then a guest `abort`), as it
+defines Darwin's `__assert_rtn`, so neither is an import of a linked guest, and
+an import of either means the link lost the definition: `unknown-import`
+(`an_imported_assert_failure_hook_is_refused`).
 
 And three data words ld.so exports, once the shim took over the area they
 describe:

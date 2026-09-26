@@ -427,6 +427,31 @@ mod stdio_lifecycle {
         assert_refusal_keeps_output("zoneinfo");
     }
 
+    /// A failed C `assert()` is glibc's: the same message on stderr, the
+    /// buffered stdout lost, death by SIGABRT, and (a guest abort) a finalized
+    /// trace. glibc's own hook wrote through its `stderr`, which in a guest is
+    /// the shim's sentinel, and died of SIGSEGV.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_assert_is_glibcs_abort() {
+        use std::os::unix::process::ExitStatusExt;
+        let native = standalone_output(&guest(CLink::Unlinked).binary, &["assert"], &[]);
+        let g = guest(CLink::PosixShim);
+        let patina = seeded(&g.binary, "assert", 1);
+        assert_eq!(native.status.signal(), Some(6), "{}", text(&native.stderr));
+        assert_eq!(patina.status.signal(), Some(6), "{}", text(&patina.stderr));
+        assert_eq!(text(&patina.stderr), text(&native.stderr));
+        assert_eq!(text(&patina.stdout), text(&native.stdout));
+        let (recorded, trace) = g.record_standalone(&["assert"]);
+        assert_eq!(
+            recorded.status.signal(),
+            Some(6),
+            "{}",
+            text(&recorded.stderr)
+        );
+        patina_dst_trace::TraceBundle::load(&trace).expect("a failed assert finalizes its trace");
+    }
+
     #[cfg(target_os = "linux")]
     fn assert_refusal_keeps_output(case: &str) {
         use std::os::unix::process::ExitStatusExt;

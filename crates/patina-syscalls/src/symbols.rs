@@ -1626,6 +1626,12 @@ const ROWS: &[SymbolRow] = &[
         SymbolStatus::Modeled,
     ),
     s(
+        "__assert_fail",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::Modeled,
+    ),
+    s(
         "sysctl",
         Platform::Darwin,
         Serves::Darwin(&["sysctl"]),

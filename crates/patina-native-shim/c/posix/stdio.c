@@ -359,6 +359,40 @@ int fprintf(FILE *stream, const char *format, ...) {
     return written;
 }
 
+#ifndef __APPLE__
+/* Put a formatted message into a stream (the printf family's engine). */
+static int patina_stream_printf(struct patina_stream *s, const char *format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    int written = patina_stream_vprintf(s, format, arguments);
+    va_end(arguments);
+    return written;
+}
+
+/*
+ * glibc's `assert()` failure hook (assert/assert.c `__assert_fail_base`,
+ * glibc 2.39): "PROGRAM: FILE:LINE: FUNCTION: Assertion `EXPR' failed." put
+ * into stderr (one write, the stream being unbuffered), PROGRAM the basename
+ * of argv[0] (`__progname`; with no program name the prefix and its separator
+ * are left out, and so is FUNCTION's when there is none), then `abort()`:
+ * SIGABRT through the virtual kernel, so a handler runs and the default action
+ * finalizes the trace. What stdout buffered is lost, as glibc's abort loses
+ * it. glibc's own hook would write through its stderr, which is not this
+ * stream: the `stderr` global names the sentinel.
+ */
+_Noreturn void __assert_fail(const char *assertion, const char *file, unsigned int line,
+                             const char *function) {
+    const char *program = patina_program_path != NULL ? patina_program_path : "";
+    const char *slash = strrchr(program, '/');
+    if (slash != NULL) program = slash + 1;
+    (void)patina_stream_printf(&patina_stream_stderr, "%s%s%s:%u: %s%sAssertion `%s' failed.\n",
+                               program, program[0] != '\0' ? ": " : "", file, line,
+                               function != NULL ? function : "", function != NULL ? ": " : "",
+                               assertion);
+    patina_abort();
+}
+#endif
+
 /* `printf`/`puts`/`putchar` bind implicitly to the stdout sentinel, so no
  * sentinel check is needed: they can never see a leaked host FILE*. On ELF this
  * family is also what keeps glibc's own printf away from the sentinel globals —

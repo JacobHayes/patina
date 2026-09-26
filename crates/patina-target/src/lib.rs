@@ -3398,17 +3398,6 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
     // for Rust's stack-overflow guard. The XPG strerror_r alias is the pure
     // message formatter behind std::io::Error display.
     const GLIBC_THREAD_AND_ERROR_HELPERS: &[&str] = &["pthread_getattr_np", "xpg_strerror_r"];
-    // glibc's `assert()` failure hook (aws-lc's asserts lower onto it). It is
-    // reached only once an assertion has ALREADY failed, and its whole body is
-    // "print the failed expression to stderr, then `abort()`" — the same terminal,
-    // value-free outcome as `abort` itself, which is known-safe under TERMINATION
-    // above. No host state flows back into the guest, because there is no guest
-    // left to read it: the process is over, loudly and at a reproducible point.
-    // Honest residual (diagnostic only): Darwin's counterpart `__assert_rtn` is a
-    // strong shim def that routes the message to the CAPTURED stderr sink before
-    // aborting, so it is never an import there; glibc's stays libc's own, and its
-    // message may land on the real stderr instead of the captured sink.
-    const ASSERT_FAILURE: &[&str] = &["assert_fail"];
     // ld.so's restartable-sequence layout words (`__rseq_offset`, `__rseq_size`,
     // `__rseq_flags`): constants of the loaded glibc naming where each thread's
     // rseq area sits from the thread pointer. The area itself is the virtual
@@ -3427,7 +3416,6 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
         || BYTE_ORDER.contains(&symbol)
         || PURE_COMPUTE.contains(&symbol)
         || GLIBC_THREAD_AND_ERROR_HELPERS.contains(&symbol)
-        || ASSERT_FAILURE.contains(&symbol)
         || RSEQ_LAYOUT.contains(&symbol)
 }
 
@@ -5768,26 +5756,20 @@ mod tests {
         }
     }
 
-    // glibc's `assert()` failure hook. It is reached only after an assertion has
-    // already failed, and its whole body is "write a diagnostic to stderr, then
-    // `abort()`" — a terminal path, the same deterministic outcome as the
-    // already-known-safe `abort`, with no value flowing back into the guest.
-    // Darwin's counterpart `__assert_rtn` is a strong shim def (it routes the
-    // diagnostic to the captured stderr sink before aborting) so it never appears
-    // as an import there; glibc's stays libc's, hence ELF-only.
+    // The `assert()` failure hooks are shim definitions on both platforms
+    // (glibc's `__assert_fail`, Darwin's `__assert_rtn`): a shim-linked guest
+    // binds to them and never imports them. libc's own hook writes through
+    // libc's `stderr`, which in a guest is the shim's sentinel, so an import
+    // means the link lost the definition — refused, not known-safe.
     #[test]
-    fn classifies_the_glibc_assert_failure_hook_as_known_safe() {
+    fn an_imported_assert_failure_hook_is_refused() {
         let empty = BTreeSet::new();
-        assert_eq!(
-            native_import_decision("__assert_fail", NativeFormat::Elf, &empty),
-            NativeImportDecision::Allowed,
-            "glibc's assert hook is a terminate-with-diagnostic path, not an escape"
-        );
-        assert_eq!(
-            native_import_decision("__assert_fail", NativeFormat::MachO, &empty),
-            NativeImportDecision::Denied("unknown-import"),
-            "Darwin has no `__assert_fail`; the row must stay ELF-only"
-        );
+        for format in [NativeFormat::Elf, NativeFormat::MachO] {
+            assert_eq!(
+                native_import_decision("__assert_fail", format, &empty),
+                NativeImportDecision::Denied("unknown-import"),
+            );
+        }
     }
 
     /// Build a dynamically-linked-shaped ELF64 x86_64 executable carrying a
@@ -6065,15 +6047,16 @@ mod tests {
         ];
         let mut dynamic: Vec<(&str, bool, bool)> =
             weak_hooks.iter().map(|name| (*name, true, false)).collect();
+        // aws-lc's `__assert_fail` binds to the shim's definition in a linked
+        // guest, so it is no longer part of the import residual.
         dynamic.push(("__isoc23_sscanf", false, false));
-        dynamic.push(("__assert_fail", false, false));
 
         let bytes = elf_with_symbol_bindings(&dynamic, &[]);
         let audit = NativeAudit::audit(&bytes, &BTreeSet::new())
             .expect("the aws-lc residual must audit clean with zero --allow");
         assert_eq!(
             audit.inert_weak_imports, weak_hooks,
-            "the five weak hooks are inert; the two glibc symbols are known-safe, not inert"
+            "the five weak hooks are inert; the glibc symbol is known-safe, not inert"
         );
     }
 
