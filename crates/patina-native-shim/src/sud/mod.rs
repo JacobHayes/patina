@@ -1355,6 +1355,12 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_set_robust_list, |_, a| {
         crate::thread::registrations::set_robust_list(a[0] as usize, a[1] as usize)
     }),
+    (Syscall::N_process_vm_readv, |nr, a| {
+        privileged::answer(nr, privileged::process_vm_readv, a)
+    }),
+    (Syscall::N_process_vm_writev, |nr, a| {
+        privileged::answer(nr, privileged::process_vm_writev, a)
+    }),
     (Syscall::N_rseq, |_, a| {
         crate::thread::registrations::rseq(a[0] as usize, a[1] as u32, a[2] as i32, a[3] as u32)
     }),

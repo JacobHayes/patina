@@ -6,6 +6,10 @@
 //!   a write copies the other way;
 //! * a flag is `EINVAL`, as is a vector longer than `IOV_MAX` on either
 //!   side; a pid no process has is `ESRCH`; no vectors copy nothing (0);
+//! * for a pid no process has, the checks made before the lookup keep their
+//!   order: a remote vector with no byte to copy answers 0, a local vector
+//!   of several ranges has each range checked (`EFAULT`), and a single local
+//!   range is clamped to `MAX_RW_COUNT` before its range is checked;
 //! * a fault on either side before anything is copied is `EFAULT`, and one
 //!   after a first range is a short count: the copy stops at the fault.
 //!
@@ -17,8 +21,7 @@
 //! cannot import them — the pre-run audit would refuse it — and the
 //! scenario runs through the kernel vehicles.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::observe::{Id, Norm};
 use crate::probe::{NO_SUCH_PID, Probe, neg};
 use crate::vehicle::Vehicle;
@@ -28,19 +31,31 @@ use serde_json::Value;
 
 /// An address below `vm.mmap_min_addr`: never mapped.
 const UNMAPPED: usize = 0x1000;
+/// An address past the user address space on both arches (the first
+/// kernel address on x86_64, beyond 48 bits on arm64).
+const KERNEL: usize = 0xffff_8000_0000_0000;
 /// One more vector than `IOV_MAX` (`UIO_MAXIOV`).
 const TOO_MANY: usize = 1025;
+/// A single range's length far past `MAX_RW_COUNT`, which the kernel clamps
+/// to before it checks the range.
+const HUGE: usize = 0x7fff_ffff_ffff_0000;
+/// Where that range starts: static data, low enough in the address space
+/// that `MAX_RW_COUNT` bytes from it stay a user range on both arches (a
+/// stack buffer near the top of arm64's 48-bit space would not).
+static HUGE_BASE: [u8; 8] = [0; 8];
 
-/// One side's vector, as the event records it: each range's length and
-/// whether it is mapped (never its address).
+/// One side's vector, as the event records it: each range's length and where
+/// it points, never its address.
 fn shape(ranges: &[iovec]) -> Value {
     ranges
         .iter()
         .map(|range| {
-            serde_json::json!({
-                "len": range.iov_len,
-                "mapped": range.iov_base as usize != UNMAPPED,
-            })
+            let at = match range.iov_base as usize {
+                UNMAPPED => "unmapped",
+                KERNEL => "kernel",
+                _ => "mapped",
+            };
+            serde_json::json!({ "len": range.iov_len, "at": at })
         })
         .collect::<Vec<_>>()
         .into()
@@ -56,6 +71,13 @@ fn range(bytes: &mut [u8]) -> iovec {
 fn unmapped(len: usize) -> iovec {
     iovec {
         iov_base: UNMAPPED as *mut c_void,
+        iov_len: len,
+    }
+}
+
+fn kernel(len: usize) -> iovec {
+    iovec {
+        iov_base: KERNEL as *mut c_void,
         iov_len: len,
     }
 }
@@ -176,6 +198,50 @@ pub fn run(p: &Probe) {
         "no vectors copy nothing",
         copy(p, false, pid, &[], &[], None, 0) == 0,
     );
+    p.check(
+        "another pid with no remote range copies nothing before the lookup",
+        copy(p, false, NO_SUCH_PID, &[range(&mut target)], &[], None, 0) == 0,
+    );
+    p.check(
+        "another pid with only an empty remote range copies nothing before the lookup",
+        copy(
+            p,
+            false,
+            NO_SUCH_PID,
+            &[range(&mut target)],
+            &[range(&mut source[..0])],
+            None,
+            0,
+        ) == 0,
+    );
+    let mut pair = [0u8; 4];
+    p.check(
+        "a local range past the user address space among several is EFAULT before the lookup",
+        copy(
+            p,
+            false,
+            NO_SUCH_PID,
+            &[range(&mut pair), kernel(4)],
+            &[range(&mut source)],
+            None,
+            0,
+        ) == neg(EFAULT),
+    );
+    p.check(
+        "a single local range is clamped to MAX_RW_COUNT before its range check",
+        copy(
+            p,
+            false,
+            NO_SUCH_PID,
+            &[iovec {
+                iov_base: HUGE_BASE.as_ptr().cast_mut().cast(),
+                iov_len: HUGE,
+            }],
+            &[range(&mut source)],
+            None,
+            0,
+        ) == neg(ESRCH),
+    );
     for (counts, label) in [
         (
             (TOO_MANY, 1),
@@ -262,15 +328,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_process_vm_readv, Syscall::N_process_vm_writev],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::SignalsThreadsProcess),
-        vehicles: Vehicle::KERNEL,
-        what: "process_vm_readv and process_vm_writev are Trap(unmodeled) in the registry (the signals arc answers them for the process itself through the shim's uaccess, and ESRCH for any other pid), so the SUD dispatcher aborts at the first process_vm_readv",
-        failure: Failure::Stops {
-            events: 1,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall process_vm_readv (nr",
-        },
-    }],
     ..DEFAULTS
 };

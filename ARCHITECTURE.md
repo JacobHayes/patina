@@ -219,6 +219,10 @@ through its restorer without a trap. A guest's `restart_syscall` answers
 `EINTR`: a restart block is pending only after a wait the kernel interrupted
 without running a handler (a stop, a tracer), which the virtual kernel never
 does; a handler that interrupts a wait ends it at the wait's own resumption.
+`process_vm_readv`/`process_vm_writev` aimed at the guest's own process (its
+pid or a thread's tid) are the host kernel's copies on this process, so their
+refusals, faults and short counts are the kernel's; any other pid is refused
+after the checks the kernel makes first (`ESRCH`, or `EPERM` for init).
 `pidfd_send_signal` remains a process trap because there are no virtual pidfds;
 this does not implement the signals spec's self-pidfd aspiration. Ambient
 host signals are outside the deterministic model and can execute a handler

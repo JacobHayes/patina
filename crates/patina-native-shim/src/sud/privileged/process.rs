@@ -194,3 +194,132 @@ pub(in crate::sud) fn get_robust_list(credential: &Credential, a: &[u64; 6]) -> 
         a[2] as usize,
     ))
 }
+
+/// `UIO_MAXIOV`: the most ranges one vector may hold.
+const UIO_MAXIOV: u64 = 1024;
+/// `MAX_RW_COUNT` (`INT_MAX & PAGE_MASK`): the most one call moves, and the
+/// length a single local range is clamped to before its range is checked.
+const MAX_RW_COUNT: u64 = 0x7fff_f000;
+/// `sizeof(struct iovec)`.
+const IOVEC_BYTES: u64 = 16;
+/// The page size `process_vm_rw_core` counts remote pages in.
+const PAGE_SIZE: u64 = 4096;
+
+/// One side's vector as `iovec_from_user` takes it: at most `UIO_MAXIOV`
+/// ranges (`EINVAL`), the vector itself a user range (`EFAULT`), then each
+/// range read in turn (`EFAULT`) and refused if longer than `SSIZE_MAX`
+/// (`EINVAL`). Answers the ranges.
+fn ranges(at: u64, count: u64) -> Result<Vec<[u64; 2]>, u32> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if count > UIO_MAXIOV {
+        return Err(errno::EINVAL);
+    }
+    if !user_range(at, count * IOVEC_BYTES) {
+        return Err(errno::EFAULT);
+    }
+    let mut ranges = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let range = crate::uaccess::read::<[u64; 2]>((at + index * IOVEC_BYTES) as usize)
+            .map_err(|_| errno::EFAULT)?;
+        if (range[1] as i64) < 0 {
+            return Err(errno::EINVAL);
+        }
+        ranges.push(range);
+    }
+    Ok(ranges)
+}
+
+/// The local vector as `import_iovec` takes it (its count is an `unsigned
+/// int`): answers the bytes it spans. A single range is clamped to
+/// `MAX_RW_COUNT` before its range check (`import_ubuf`); several are each
+/// checked unclamped, the running total then clamped (`__import_iovec`).
+fn local_bytes(at: u64, count: u64) -> Result<u64, u32> {
+    let local = ranges(at, u64::from(count as u32))?;
+    if let [[base, len]] = local[..] {
+        let len = len.min(MAX_RW_COUNT);
+        return if user_range(base, len) {
+            Ok(len)
+        } else {
+            Err(errno::EFAULT)
+        };
+    }
+    let mut total = 0;
+    for [base, len] in local {
+        if !user_range(base, len) {
+            return Err(errno::EFAULT);
+        }
+        total += len.min(MAX_RW_COUNT - total);
+    }
+    Ok(total)
+}
+
+/// Whether the remote vector names a page to copy (`process_vm_rw_core`'s
+/// `nr_pages`, counted before the target is looked up).
+fn remote_pages(remote: &[[u64; 2]]) -> bool {
+    remote.iter().any(|[base, len]| {
+        *len > 0
+            && (base.wrapping_add(*len).wrapping_sub(1) / PAGE_SIZE)
+                .wrapping_sub(base / PAGE_SIZE)
+                .wrapping_add(1)
+                != 0
+    })
+}
+
+/// `process_vm_readv`/`process_vm_writev(pid, local, liovcnt, remote,
+/// riovcnt, flags)` (mm/process_vm_access.c `process_vm_rw`). The guest's own
+/// process (by its pid or any of its threads' tids) is the host kernel's to
+/// answer, on this process. Any other pid meets the checks made before the
+/// target is looked up, in their order: a flag (`EINVAL`), the local vector
+/// ([`local_bytes`]), nothing to copy (0), the remote vector, no remote page
+/// to copy (0); then no such process (`ESRCH`), or init, whose memory needs
+/// `CAP_SYS_PTRACE` (`mm_access`'s `EACCES`, reported `EPERM`).
+fn process_vm(credential: &Credential, a: &[u64; 6], write: bool) -> Answer {
+    let found = find_process(a[0] as i32);
+    if matches!(found, Some((Process::Guest, _))) {
+        return Ok(crate::uaccess::guest_process_vm(write, a));
+    }
+    if a[5] != 0 {
+        return refuse(errno::EINVAL);
+    }
+    match local_bytes(a[1], a[2]) {
+        Ok(0) => return Ok(0),
+        Ok(_) => {}
+        Err(code) => return refuse(code),
+    }
+    match ranges(a[3], a[4]) {
+        Ok(remote) if !remote_pages(&remote) => return Ok(0),
+        Ok(_) => {}
+        Err(code) => return refuse(code),
+    }
+    match found {
+        Some((Process::Init, _)) => super::gate(credential, Capability::SysPtrace, errno::EPERM),
+        _ => refuse(errno::ESRCH),
+    }
+}
+
+/// Whether `len` bytes at `base` are a user range, as `access_ok` judges it
+/// (no wrap, and the end inside the user address space).
+fn user_range(base: u64, len: u64) -> bool {
+    base.checked_add(len).is_some_and(user_end)
+}
+
+/// Whether a range ending at `end` is inside the user address space, as
+/// `access_ok` judges it (x86_64: below the sign bit; arm64: 48 bits).
+fn user_end(end: u64) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    return (end as i64) >= 0;
+    #[cfg(target_arch = "aarch64")]
+    return end <= 1 << 48;
+}
+
+/// `process_vm_readv`; see [`process_vm`].
+pub(in crate::sud) fn process_vm_readv(credential: &Credential, a: &[u64; 6]) -> Answer {
+    process_vm(credential, a, false)
+}
+
+/// `process_vm_writev`; see [`process_vm`].
+pub(in crate::sud) fn process_vm_writev(credential: &Credential, a: &[u64; 6]) -> Answer {
+    process_vm(credential, a, true)
+}

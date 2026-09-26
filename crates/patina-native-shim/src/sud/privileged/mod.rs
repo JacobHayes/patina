@@ -393,14 +393,28 @@ mod tests {
 
     /// `chroot` of a directory the caller may search needs
     /// `CAP_SYS_CHROOT`.
-    /// Reading init's robust list: `ptrace_may_access`.
+    /// Reading init's robust list: `ptrace_may_access`. Copying init's
+    /// memory: `mm_access`, past a local vector with a byte to copy.
     fn robust_list_cases() -> Vec<Case> {
-        vec![Case {
-            row: Syscall::N_get_robust_list,
-            check: get_robust_list,
-            args: [1, 0, 0, 0, 0, 0],
+        static BYTE: [u8; 1] = [0];
+        let range = Box::leak(Box::new([BYTE.as_ptr() as u64, 1]));
+        let vector = range.as_ptr() as u64;
+        let copy = |row, check| Case {
+            row,
+            check,
+            args: [1, vector, 1, vector, 1, 0],
             refusal: errno::EPERM,
-        }]
+        };
+        vec![
+            Case {
+                row: Syscall::N_get_robust_list,
+                check: get_robust_list,
+                args: [1, 0, 0, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+            copy(Syscall::N_process_vm_readv, process_vm_readv),
+            copy(Syscall::N_process_vm_writev, process_vm_writev),
+        ]
     }
 
     fn chroot_cases() -> Vec<Case> {

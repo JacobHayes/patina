@@ -37,76 +37,70 @@ struct Range {
 }
 
 /// This process's HOST pid, the target `process_vm_readv` names (the guest's
-/// `getpid` answers the virtual process's). It is kept on a page mapped
-/// `MADV_WIPEONFORK`, so a forked child (the test harness forks) finds it
-/// zeroed and asks again rather than copying through its parent's pid;
-/// where that page cannot be had, it is asked every time.
+/// `getpid` answers the virtual process's). It is kept on a page of its own,
+/// read-only once the pid is written (a wild or hostile guest store cannot
+/// retarget the copies at another host process) and mapped `MADV_WIPEONFORK`,
+/// so a forked child (the test harness forks) finds it zeroed and publishes a
+/// page of its own rather than copying through its parent's pid; where no
+/// such page can be had, the pid is asked every time.
 #[cfg(target_os = "linux")]
 fn host_pid() -> std::ffi::c_long {
-    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
-    /// The page's address; `usize::MAX` when there is none to be had.
-    static PAGE: AtomicUsize = AtomicUsize::new(0);
-    let mut page = PAGE.load(Ordering::Acquire);
-    if page == 0 {
-        let mine = wipe_on_fork_page();
-        page = mine.unwrap_or(usize::MAX);
-        if let Err(existing) = PAGE.compare_exchange(0, page, Ordering::AcqRel, Ordering::Acquire) {
-            // Another thread's page won the race: give this one back.
-            if let Some(mine) = mine {
-                // SAFETY: the page this call mapped, never published.
-                unsafe {
-                    crate::sud_host_syscall(
-                        patina_dst_syscalls::Syscall::N_munmap.number() as std::ffi::c_long,
-                        mine as std::ffi::c_long,
-                        4096,
-                        0,
-                        0,
-                        0,
-                        0,
-                    );
-                }
-            }
-            page = existing;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let page = PID_PAGE.load(Ordering::Acquire);
+    if page != 0 && page != usize::MAX {
+        // SAFETY: a live page this module mapped and never unmaps once
+        // published; its first eight bytes are the slot.
+        let known = unsafe { &*(page as *const AtomicI64) }.load(Ordering::Relaxed);
+        if known != 0 {
+            return known;
         }
     }
-    let ask = || {
-        // SAFETY: `getpid` takes no arguments and cannot fail.
-        unsafe {
-            crate::sud_host_syscall(
-                patina_dst_syscalls::Syscall::N_getpid.number() as std::ffi::c_long,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            )
-        }
+    // SAFETY: `getpid` takes no arguments and cannot fail.
+    let pid = unsafe {
+        crate::sud_host_syscall(
+            patina_dst_syscalls::Syscall::N_getpid.number() as std::ffi::c_long,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
     };
     if page == usize::MAX {
-        return ask();
+        return pid;
     }
-    // SAFETY: the page is a live, zero-initialized anonymous mapping this
-    // module made and never unmaps; its first eight bytes are this slot.
-    let slot = unsafe { &*(page as *const AtomicI64) };
-    match slot.load(Ordering::Relaxed) {
-        0 => {
-            let pid = ask();
-            slot.store(pid, Ordering::Relaxed);
-            pid
-        }
-        known => known,
+    // No page yet, or a parent's wiped by a fork: publish one holding this
+    // process's pid. A wiped page stays mapped (another thread may be reading
+    // it); one page per fork generation.
+    let fresh = pid_page(pid).unwrap_or(usize::MAX);
+    if PID_PAGE
+        .compare_exchange(page, fresh, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+        && fresh != usize::MAX
+    {
+        // Another thread published first: give this page back.
+        host_munmap(fresh);
     }
+    pid
 }
 
-/// One anonymous page a fork gives the child zeroed (`MADV_WIPEONFORK`).
+/// [`host_pid`]'s page: 0 before the first, `usize::MAX` when there is none
+/// to be had.
 #[cfg(target_os = "linux")]
-fn wipe_on_fork_page() -> Option<usize> {
+static PID_PAGE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One page holding `pid` in its first eight bytes, then made read-only and
+/// advised `MADV_WIPEONFORK` (a forked child sees it zeroed).
+#[cfg(target_os = "linux")]
+fn pid_page(pid: std::ffi::c_long) -> Option<usize> {
     use patina_dst_syscalls::Syscall;
+    const PROT_READ: std::ffi::c_long = 0x1;
     const PROT_READ_WRITE: std::ffi::c_long = 0x3;
     const MAP_PRIVATE_ANONYMOUS: std::ffi::c_long = 0x22;
     const MADV_WIPEONFORK: std::ffi::c_long = 18;
-    // SAFETY: an anonymous private mapping of one page, then advice on it.
+    // SAFETY: an anonymous private mapping of one page, written once before
+    // it is protected and advised.
     unsafe {
         let page = crate::sud_host_syscall(
             Syscall::N_mmap.number() as std::ffi::c_long,
@@ -120,28 +114,33 @@ fn wipe_on_fork_page() -> Option<usize> {
         if page == -1 {
             return None;
         }
-        let advised = crate::sud_host_syscall(
-            Syscall::N_madvise.number() as std::ffi::c_long,
-            page,
+        (page as *mut std::ffi::c_long).write(pid);
+        let call = |row: Syscall, arg: std::ffi::c_long| {
+            crate::sud_host_syscall(row.number() as std::ffi::c_long, page, 4096, arg, 0, 0, 0)
+        };
+        if call(Syscall::N_mprotect, PROT_READ) != 0
+            || call(Syscall::N_madvise, MADV_WIPEONFORK) != 0
+        {
+            host_munmap(page as usize);
+            return None;
+        }
+        Some(page as usize)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn host_munmap(page: usize) {
+    // SAFETY: a page this module mapped and never published.
+    unsafe {
+        crate::sud_host_syscall(
+            patina_dst_syscalls::Syscall::N_munmap.number() as std::ffi::c_long,
+            page as std::ffi::c_long,
             4096,
-            MADV_WIPEONFORK,
+            0,
             0,
             0,
             0,
         );
-        if advised != 0 {
-            crate::sud_host_syscall(
-                Syscall::N_munmap.number() as std::ffi::c_long,
-                page,
-                4096,
-                0,
-                0,
-                0,
-                0,
-            );
-            return None;
-        }
-        Some(page as usize)
     }
 }
 
@@ -170,6 +169,32 @@ fn raw_result(result: std::ffi::c_long) -> std::ffi::c_long {
     } else {
         result
     }
+}
+
+/// The guest's own `process_vm_readv` (`write` false) or `process_vm_writev`
+/// of its own process: the host kernel's, on this process's host pid, with the
+/// guest's vectors, counts and flags as given, so every refusal, fault and
+/// short count is the kernel's own. Raw result: `-errno` on failure.
+#[cfg(target_os = "linux")]
+pub(crate) fn guest_process_vm(write: bool, args: &[u64; 6]) -> i64 {
+    let row = if write {
+        patina_dst_syscalls::Syscall::N_process_vm_writev
+    } else {
+        patina_dst_syscalls::Syscall::N_process_vm_readv
+    };
+    // SAFETY: the kernel judges every guest pointer; this process is the target.
+    let result = unsafe {
+        crate::sud_host_syscall(
+            row.number() as std::ffi::c_long,
+            host_pid(),
+            args[1] as std::ffi::c_long,
+            args[2] as std::ffi::c_long,
+            args[3] as std::ffi::c_long,
+            args[4] as std::ffi::c_long,
+            args[5] as std::ffi::c_long,
+        )
+    };
+    raw_result(result)
 }
 
 /// What a `process_vm_readv`/`writev` of `len` bytes that returned `copied`
@@ -644,6 +669,20 @@ mod tests {
     /// A range whose end wraps past the top of the address space is no
     /// user range: `EFAULT` both ways, as `access_ok` (and on Linux the copy
     /// vehicle) answers.
+    /// The host pid the copies target sits on a read-only page: a guest
+    /// store through the kernel's own user access is refused, and the pid
+    /// stays this process's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_host_pid_slot_is_read_only() {
+        let pid = host_pid();
+        assert_eq!(pid, std::process::id() as std::ffi::c_long);
+        let page = PID_PAGE.load(std::sync::atomic::Ordering::Acquire);
+        assert_ne!(page, 0);
+        assert_eq!(write_bytes(page, &[0; 8]), Err(EFAULT));
+        assert_eq!(host_pid(), pid);
+    }
+
     #[test]
     fn a_range_that_wraps_the_address_space_is_efault() {
         assert_eq!(read_bytes(usize::MAX - 3, 8), Err(EFAULT));

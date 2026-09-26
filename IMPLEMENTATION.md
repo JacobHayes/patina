@@ -902,6 +902,19 @@ rather than the sequence's abort handler, and `rseq_cs` is never cleared
 lazily; both are deterministic, and the fix, if one is wanted, is an
 instruction-pointer fixup before such a handler runs.
 
+`process_vm_readv`/`process_vm_writev` aimed at the guest's own process are
+passed to the host kernel on this process's host pid, the vehicle the shim's
+own guest-memory copies already use and the one the strace leak filter admits,
+so every refusal, fault and short count is the kernel's. The host pid sits on a
+page of its own, read-only once written, so no guest store can point those
+copies at another host process. Any other pid meets the checks `process_vm_rw`
+makes before its lookup, in 6.8's order: a flag; the local vector (a single
+range clamped to `MAX_RW_COUNT` before its range check, several each checked
+unclamped); nothing to copy (0); the remote vector; no remote page to copy (0).
+Then it is `ESRCH`, or `EPERM` for init, whose memory needs `CAP_SYS_PTRACE` (a
+declared capability; granted, it is a named fatal). `proc/vm_rw` passes with
+no gap, and pins those orders for a pid no process has.
+
 ## Dependency order
 
 ```text

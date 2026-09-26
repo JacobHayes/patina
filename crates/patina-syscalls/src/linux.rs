@@ -2295,22 +2295,24 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_process_vm_readv => r(
         id,
         Family::Process,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Self-process only: the signals arc answers these for pid 1 (a pidfd kind, dup-of-self, self-readv/writev) and ESRCH/EBADF for any other process.",
-        Some("signals+threads+process"),
-    ),
+        Disposition::Modeled,
+        "The guest's own process (its pid, or any of its threads' tids) is copied by the host kernel on this process, so its refusals, faults and short counts are the kernel's; any other pid meets the flag and vector checks first, then ESRCH, or for init mm_access's EPERM without CAP_SYS_PTRACE.",
+        None,
+    )
+    .capabilities(&[Capability::SysPtrace]),
     Syscall::N_process_vm_writev => r(
         id,
         Family::Process,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Self-process only: the signals arc answers these for pid 1 (a pidfd kind, dup-of-self, self-readv/writev) and ESRCH/EBADF for any other process.",
-        Some("signals+threads+process"),
-    ),
+        Disposition::Modeled,
+        "The guest's own process (its pid, or any of its threads' tids) is copied by the host kernel on this process, so its refusals, faults and short counts are the kernel's; any other pid meets the flag and vector checks first, then ESRCH, or for init mm_access's EPERM without CAP_SYS_PTRACE.",
+        None,
+    )
+    .capabilities(&[Capability::SysPtrace]),
     Syscall::N_kcmp => r(
         id,
         Family::Process,
         Disposition::Trap(TRAP_UNMODELED),
-        "Self-process only: the signals arc answers these for pid 1 (a pidfd kind, dup-of-self, self-readv/writev) and ESRCH/EBADF for any other process.",
+        "Self-process only: the signals arc answers these for the guest's own process, pid 2 (a pidfd kind, dup-of-self, self-comparison), and ESRCH/EBADF for any other.",
         Some("signals+threads+process"),
     ),
     Syscall::N_finit_module => r(
@@ -2570,7 +2572,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Process,
         Disposition::Trap(TRAP_UNMODELED),
-        "Self-process only: the signals arc answers these for pid 1 (a pidfd kind, dup-of-self, self-readv/writev) and ESRCH/EBADF for any other process.",
+        "Self-process only: the signals arc answers these for the guest's own process, pid 2 (a pidfd kind, dup-of-self, self-comparison), and ESRCH/EBADF for any other.",
         Some("signals+threads+process"),
     ),
     Syscall::N_clone3 => r(
@@ -2599,7 +2601,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Process,
         Disposition::Trap(TRAP_UNMODELED),
-        "Self-process only: the signals arc answers these for pid 1 (a pidfd kind, dup-of-self, self-readv/writev) and ESRCH/EBADF for any other process.",
+        "Self-process only: the signals arc answers these for the guest's own process, pid 2 (a pidfd kind, dup-of-self, self-comparison), and ESRCH/EBADF for any other.",
         Some("signals+threads+process"),
     ),
     Syscall::N_faccessat2 => r(
@@ -2671,7 +2673,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Process,
         Disposition::Trap(TRAP_UNMODELED),
-        "Self-process only: the signals arc answers these for pid 1 (a pidfd kind, dup-of-self, self-readv/writev) and ESRCH/EBADF for any other process.",
+        "Self-process only: the signals arc answers these for the guest's own process, pid 2 (a pidfd kind, dup-of-self, self-comparison), and ESRCH/EBADF for any other.",
         Some("signals+threads+process"),
     ),
     Syscall::N_futex_waitv => r(
