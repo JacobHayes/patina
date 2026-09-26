@@ -314,6 +314,7 @@ pub unsafe extern "C" fn patina_setxattr(
     };
     match with_context(|context| context.fs_set_xattr(&target, &name, bytes, flags as u32)) {
         Ok(()) => {
+            crate::fsnotify::xattr_changed(&target);
             set_errno(0);
             0
         }
@@ -364,6 +365,7 @@ pub unsafe extern "C" fn patina_removexattr(
     };
     match with_context(|context| context.fs_remove_xattr(&target, &name)) {
         Ok(()) => {
+            crate::fsnotify::xattr_changed(&target);
             set_errno(0);
             0
         }

@@ -12,15 +12,23 @@
 //! event is EAGAIN on a non-blocking instance and a buffer too small for the
 //! next event is EINVAL; FIONREAD reports the bytes queued. rm_watch queues
 //! IN_IGNORED and is EINVAL for a descriptor not watched; a watched
-//! directory's removal queues IN_DELETE_SELF then IN_IGNORED. Needs an inotify
-//! instance and watch within the caller's limits.
+//! directory's removal queues IN_DELETE_SELF then IN_IGNORED. An event on a
+//! file reaches its directory's watch with its name, then its own watch
+//! (fsnotify_parent), for an open, a write, an attribute change, a close and
+//! a read alike; an event equal to the last one queued merges into it, and
+//! IN_ONESHOT ends a watch after one event. A rename over a watched file
+//! queues, after the pair, the replaced file's IN_ATTRIB (its link count),
+//! the moved file's IN_MOVE_SELF and the replaced file's deletion; an open
+//! file outlives its last name, its events still naming it, until its close
+//! deletes it. Needs an inotify instance and watch within the caller's
+//! limits.
 
 use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
 
-use crate::probe::{AT_FDCWD, IoctlArg, Probe, neg};
+use crate::probe::{AT_FDCWD, InotifyEvent, IoctlArg, Probe, neg};
 use libc::*;
 
 /// The bytes one event with `name` takes: the 16-byte header and, when there
@@ -214,7 +222,148 @@ pub fn run(p: &Probe) {
         "the directory's removal: IN_DELETE of its entry, IN_DELETE_SELF, IN_IGNORED",
         masks == [IN_DELETE, IN_DELETE_SELF, IN_IGNORED] && got.iter().all(|event| event.wd == wd),
     );
+    file_events(p, ino, &root);
     p.close(ino);
+}
+
+/// Which events each operation queues, in order. A directory and a file in
+/// it are watched for everything: an event on the file reaches the
+/// directory's watch with its name, then the file's own.
+fn file_events(p: &Probe, ino: i32, root: &str) {
+    let dir = format!("{root}/e");
+    let file = format!("{dir}/f");
+    let target = format!("{dir}/g");
+    let other = format!("{dir}/x");
+    p.check("mkdirat e", p.mkdirat(AT_FDCWD, &dir, 0o755) == 0);
+    let dir_wd = p.inotify_add_watch(ino, &dir, IN_ALL_EVENTS);
+    let lone = p.inotify_init1(IN_NONBLOCK);
+    p.require("a second instance", lone >= 0);
+    let fd = p.openat(AT_FDCWD, &file, O_RDWR | O_CREAT | O_EXCL, 0o644);
+    p.require("create e/f", fd >= 0);
+    let file_wd = p.inotify_add_watch(ino, &file, IN_ALL_EVENTS);
+    p.check(
+        "watch e/f alone for modification",
+        p.inotify_add_watch(lone, &file, IN_MODIFY) > 0,
+    );
+    p.check("write e/f", p.write(fd, b"ab") == 2);
+    p.check("write e/f again", p.write(fd, b"c") == 1);
+    p.check("fchmod e/f", p.fchmod(fd, 0o600) == 0);
+    p.close(fd);
+    let reader = p.openat(AT_FDCWD, &file, O_RDONLY, 0);
+    p.require("open e/f to read", reader >= 0);
+    p.check("read e/f", p.read(reader, 1).0 == 1);
+    p.close(reader);
+    let on_file = |mask| [(dir_wd, mask, "f"), (file_wd, mask, "")];
+    let expected: Vec<(i32, u32, &str)> = [(dir_wd, IN_CREATE, "f"), (dir_wd, IN_OPEN, "f")]
+        .into_iter()
+        .chain(
+            [
+                IN_MODIFY,
+                IN_MODIFY,
+                IN_ATTRIB,
+                IN_CLOSE_WRITE,
+                IN_OPEN,
+                IN_ACCESS,
+                IN_CLOSE_NOWRITE,
+            ]
+            .into_iter()
+            .flat_map(on_file),
+        )
+        .collect();
+    p.check(
+        "create, open, write twice, fchmod, close, open, read, close: the directory's event, then the file's",
+        described(&p.inotify_read(ino, 4096).1) == expected,
+    );
+    let (_, got) = p.inotify_read(lone, 4096);
+    p.check(
+        "two writes in a row queue one event",
+        got.len() == 1 && got[0].mask == IN_MODIFY,
+    );
+
+    // ---- IN_ONESHOT --------------------------------------------------------
+    p.check(
+        "watch e once for a creation",
+        p.inotify_add_watch(lone, &dir, IN_CREATE | IN_ONESHOT) > 0,
+    );
+    for path in [&target, &other] {
+        let created = p.openat(AT_FDCWD, path, O_WRONLY | O_CREAT | O_EXCL, 0o644);
+        p.require("create a file in e", created >= 0);
+        p.close(created);
+    }
+    let (_, got) = p.inotify_read(lone, 4096);
+    let masks: Vec<(u32, &str)> = got
+        .iter()
+        .map(|event| (event.mask, event.name.as_str()))
+        .collect();
+    p.check(
+        "a one-shot watch reports the first creation and ends",
+        masks == [(IN_CREATE, "g"), (IN_IGNORED, "")],
+    );
+    p.close(lone);
+    let target_wd = p.inotify_add_watch(ino, &target, IN_ALL_EVENTS);
+    p.check("watch e/g", target_wd > 0);
+    p.inotify_read(ino, 4096);
+
+    // ---- self events -------------------------------------------------------
+    p.check(
+        "rename e/f over e/g",
+        p.renameat(AT_FDCWD, &file, AT_FDCWD, &target) == 0,
+    );
+    let got = p.inotify_read(ino, 4096).1;
+    p.check(
+        "the rename pair, the replaced file's link count and deletion, the moved file's move",
+        described(&got)
+            == [
+                (dir_wd, IN_MOVED_FROM, "f"),
+                (dir_wd, IN_MOVED_TO, "g"),
+                (target_wd, IN_ATTRIB, ""),
+                (file_wd, IN_MOVE_SELF, ""),
+                (target_wd, IN_DELETE_SELF, ""),
+                (target_wd, IN_IGNORED, ""),
+            ],
+    );
+    let held = p.openat(AT_FDCWD, &target, O_WRONLY, 0);
+    p.require("open e/g to write", held >= 0);
+    p.check(
+        "unlinkat e/g while open",
+        p.unlinkat(AT_FDCWD, &target, 0) == 0,
+    );
+    p.check("write the unlinked e/g", p.write(held, b"z") == 1);
+    let got = p.inotify_read(ino, 4096).1;
+    p.check(
+        "an open file outlives its last name: no IN_DELETE_SELF yet, and its events still name it",
+        described(&got)
+            == [
+                (dir_wd, IN_OPEN, "g"),
+                (file_wd, IN_OPEN, ""),
+                (file_wd, IN_ATTRIB, ""),
+                (dir_wd, IN_DELETE, "g"),
+                (dir_wd, IN_MODIFY, "g"),
+                (file_wd, IN_MODIFY, ""),
+            ],
+    );
+    p.close(held);
+    let got = p.inotify_read(ino, 4096).1;
+    p.check(
+        "closing it deletes the file",
+        described(&got)
+            == [
+                (dir_wd, IN_CLOSE_WRITE, "g"),
+                (file_wd, IN_CLOSE_WRITE, ""),
+                (file_wd, IN_DELETE_SELF, ""),
+                (file_wd, IN_IGNORED, ""),
+            ],
+    );
+    p.check("unlinkat e/x", p.unlinkat(AT_FDCWD, &other, 0) == 0);
+    p.check("unlinkat e", p.unlinkat(AT_FDCWD, &dir, AT_REMOVEDIR) == 0);
+}
+
+/// Each event's watch descriptor, mask and name.
+fn described(events: &[InotifyEvent]) -> Vec<(i32, u32, &str)> {
+    events
+        .iter()
+        .map(|event| (event.wd, event.mask, event.name.as_str()))
+        .collect()
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -237,6 +386,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_renameat,
         Syscall::N_unlinkat,
         Syscall::N_mkdirat,
+        Syscall::N_fchmod,
         Syscall::N_close,
     ],
     needs: &[Need::Inotify],

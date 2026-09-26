@@ -20,19 +20,19 @@
 //!
 //! Every lookup here is the kernel's own inside the call (an unrecorded
 //! driver read, no latency, no fault), and nothing is computed while no watch
-//! exists ([`inotify::watching`]). An open file whose last name went reports
-//! to its own watches only: its former directory's watches see nothing, as
-//! under `IN_EXCL_UNLINK`.
+//! exists ([`inotify::watching`]). An event on an open file whose last name
+//! went still reaches that name's directory (the unhashed dentry keeps its
+//! parent), but not a watch that asked for `IN_EXCL_UNLINK`.
 
 use patina_dst_abi::{Fd, FsEntryKind, FsMetadata};
 
 use crate::thread::inotify::{
-    self, IN_ATTRIB, IN_CREATE, IN_DELETE, IN_ISDIR, IN_MOVE_SELF, IN_MOVED_FROM, IN_MOVED_TO,
-    Target,
+    self, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_CREATE, IN_DELETE, IN_ISDIR, IN_MOVE_SELF,
+    IN_MOVED_FROM, IN_MOVED_TO, IN_OPEN, Target,
 };
 use crate::with_context_raw as with_context;
 
-pub(crate) use crate::thread::inotify::{IN_ACCESS, IN_MODIFY};
+pub(crate) use crate::thread::inotify::{IN_ACCESS, IN_ATTRIB, IN_MODIFY};
 pub(crate) use inotify::watching;
 
 fn lookup(path: &str) -> Option<FsMetadata> {
@@ -58,29 +58,49 @@ fn isdir(metadata: &FsMetadata) -> u32 {
     }
 }
 
+/// The directory inode holding the entry canonical `path` names, and the
+/// entry's name.
+fn parent(path: &str) -> Option<(u64, &str)> {
+    let (dir, name) = split(path)?;
+    Some((lookup(dir)?.ino, name))
+}
+
 /// A directory-entry event on the entry `path` names.
 fn entry(path: &str, mask: u32, cookie: u32) {
-    let Some((dir, name)) = split(path) else {
-        return;
-    };
-    if let Some(dir) = lookup(dir) {
-        inotify::notify(&[Target::Entry { dir: dir.ino, name }], mask, cookie);
+    if let Some((dir, name)) = parent(path) {
+        inotify::notify(&[Target::Entry { dir, name }], mask, cookie, false);
     }
 }
 
-/// An event on a file at `path` (none for one whose last name went).
-fn child(path: Option<&str>, metadata: &FsMetadata, mask: u32) {
+/// An event on a file: its directory's watches with `name`, then its own;
+/// `unlinked` when its last name went.
+fn child(parent: Option<(u64, &str)>, metadata: &FsMetadata, mask: u32, unlinked: bool) {
     let mask = mask | isdir(metadata);
-    let parent = path
-        .and_then(split)
-        .and_then(|(dir, name)| Some((lookup(dir)?.ino, name)));
+    let own = Target::Inode(metadata.ino);
     match parent {
-        Some((dir, name)) => inotify::notify(
-            &[Target::Entry { dir, name }, Target::Inode(metadata.ino)],
-            mask,
-            0,
-        ),
-        None => inotify::notify(&[Target::Inode(metadata.ino)], mask, 0),
+        Some((dir, name)) => {
+            inotify::notify(&[Target::Entry { dir, name }, own], mask, 0, unlinked);
+        }
+        None => inotify::notify(&[own], mask, 0, unlinked),
+    }
+}
+
+/// An event on the file a driver handle is open on: where its entry is now,
+/// or, for one whose last name went, where it was.
+fn on_open_file(handle: Fd, mask: u32, filtered: bool) {
+    if !watching() {
+        return;
+    }
+    let Ok(metadata) = with_context(|context| context.fs_fd_metadata_unrecorded(handle)) else {
+        return;
+    };
+    match with_context(|context| context.fs_fd_path_unrecorded(handle)) {
+        Ok(path) => child(parent(&path), &metadata, mask, false),
+        Err(_) => {
+            let last = inotify::last_entry(metadata.ino);
+            let parent = last.as_ref().map(|(dir, name)| (*dir, name.as_str()));
+            child(parent, &metadata, mask, filtered);
+        }
     }
 }
 
@@ -94,10 +114,13 @@ fn held(ino: u64) -> bool {
     })
 }
 
-/// `ino`'s last name went.
-fn last_name_gone(ino: u64) {
-    if inotify::watched(ino) {
-        inotify::unlinked(ino, held(ino));
+/// `ino`'s last name, `path`, went.
+fn last_name_gone(ino: u64, path: &str) {
+    if held(ino) {
+        let entry = parent(path).map(|(dir, name)| (dir, name.to_owned()));
+        inotify::unlinked(ino, true, entry);
+    } else if inotify::watched(ino) {
+        inotify::unlinked(ino, false, None);
     }
 }
 
@@ -117,7 +140,8 @@ pub(crate) fn linked(source: &FsMetadata, to: &str) {
     if !watching() {
         return;
     }
-    inotify::notify(&[Target::Inode(source.ino)], IN_ATTRIB | isdir(source), 0);
+    let own = [Target::Inode(source.ino)];
+    inotify::notify(&own, IN_ATTRIB | isdir(source), 0, false);
     entry(to, IN_CREATE | isdir(source), 0);
 }
 
@@ -130,10 +154,10 @@ pub(crate) fn removed(path: &str, before: &FsMetadata) {
     }
     let directory = before.kind == FsEntryKind::Directory;
     if !directory {
-        inotify::notify(&[Target::Inode(before.ino)], IN_ATTRIB, 0);
+        inotify::notify(&[Target::Inode(before.ino)], IN_ATTRIB, 0, false);
     }
     if directory || before.nlink <= 1 {
-        last_name_gone(before.ino);
+        last_name_gone(before.ino, path);
     }
     entry(path, IN_DELETE | isdir(before), 0);
 }
@@ -148,12 +172,13 @@ pub(crate) fn moved(from: &str, to: &str, source: &FsMetadata, target: Option<&F
     entry(from, IN_MOVED_FROM | isdir(source), cookie);
     entry(to, IN_MOVED_TO | isdir(source), cookie);
     if let Some(target) = target {
-        inotify::notify(&[Target::Inode(target.ino)], IN_ATTRIB | isdir(target), 0);
+        let own = [Target::Inode(target.ino)];
+        inotify::notify(&own, IN_ATTRIB | isdir(target), 0, false);
     }
-    inotify::notify(&[Target::Inode(source.ino)], IN_MOVE_SELF, 0);
+    inotify::notify(&[Target::Inode(source.ino)], IN_MOVE_SELF, 0, false);
     if let Some(target) = target {
         if target.kind == FsEntryKind::Directory || target.nlink <= 1 {
-            last_name_gone(target.ino);
+            last_name_gone(target.ino, to);
         }
     }
 }
@@ -164,32 +189,81 @@ pub(crate) fn exchanged(first: &str, second: &str, a: &FsMetadata, b: &FsMetadat
     moved(second, first, b, None);
 }
 
-/// An event on the file at `path` (`fsnotify_change` and friends).
+/// A changed attribute of the file at `path` (`fsnotify_change`,
+/// `fsnotify_xattr`).
 pub(crate) fn on_path(path: &str, mask: u32) {
     if !watching() {
         return;
     }
     if let Some(metadata) = lookup(path) {
-        child(Some(path), &metadata, mask);
+        child(parent(path), &metadata, mask, false);
     }
 }
 
-/// An event on the file a driver handle is open on (`fsnotify_file`).
-pub(crate) fn on_handle(handle: Fd, mask: u32) {
-    if !watching() {
-        return;
+/// A changed attribute of a node known only by inode (a FIFO's endpoint):
+/// its own watches.
+pub(crate) fn on_inode(ino: u64, mask: u32) {
+    if watching() {
+        inotify::notify(&[Target::Inode(ino)], mask, 0, false);
     }
-    let Ok(metadata) = with_context(|context| context.fs_fd_metadata_unrecorded(handle)) else {
-        return;
+}
+
+/// An extended attribute of `target` changed (`fsnotify_xattr`).
+pub(crate) fn xattr_changed(target: &patina_dst_abi::XattrTarget) {
+    use patina_dst_abi::XattrTarget;
+    match target {
+        XattrTarget::Path(path) => on_path(path, IN_ATTRIB),
+        XattrTarget::Fd(handle) => on_handle(*handle, IN_ATTRIB),
+        XattrTarget::Inode(ino) => on_inode(*ino, IN_ATTRIB),
+    }
+}
+
+/// A changed attribute of the file a driver handle is open on
+/// (`fsnotify_change` through a descriptor): `IN_EXCL_UNLINK` does not
+/// apply.
+pub(crate) fn on_handle(handle: Fd, mask: u32) {
+    on_open_file(handle, mask, false);
+}
+
+/// An access through a description (`fsnotify_file`: a read, a write, an
+/// allocation, an open, a close).
+pub(crate) fn on_file(handle: Fd, mask: u32) {
+    on_open_file(handle, mask, true);
+}
+
+/// `fsnotify_open`.
+pub(crate) fn opened(handle: Fd) {
+    on_file(handle, IN_OPEN);
+}
+
+/// `fsnotify_close`: the last reference to a description went, opened with
+/// write access or without; its handle is still open.
+pub(crate) fn closing(handle: Fd, wrote: bool) {
+    let mask = if wrote {
+        IN_CLOSE_WRITE
+    } else {
+        IN_CLOSE_NOWRITE
     };
-    let path = with_context(|context| context.fs_fd_path_unrecorded(handle)).ok();
-    child(path.as_deref(), &metadata, mask);
+    on_file(handle, mask);
+}
+
+/// What setting times shows (`fsnotify_change`): both times `IN_ATTRIB`, the
+/// access time alone `IN_ACCESS`, the modification time alone `IN_MODIFY`,
+/// neither nothing.
+pub(crate) fn times_mask(atime: bool, mtime: bool) -> u32 {
+    match (atime, mtime) {
+        (true, true) => IN_ATTRIB,
+        (true, false) => IN_ACCESS,
+        (false, true) => IN_MODIFY,
+        (false, false) => 0,
+    }
 }
 
 /// A reference to the filesystem let go (a description closed, the working
-/// directory moved): a deleted inode nothing holds any more ends its watches.
+/// directory moved): a deleted inode nothing holds any more is gone, and its
+/// watches end.
 pub(crate) fn released() {
-    for ino in inotify::doomed() {
+    for ino in inotify::deleted() {
         if !held(ino) {
             inotify::settle(ino);
         }
