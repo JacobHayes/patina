@@ -96,6 +96,16 @@ fn path_node(path: *const c_char, follow: bool) -> Result<Node, c_int> {
     Ok(Node::Volume(XattrTarget::Path(resolved.path)))
 }
 
+/// The FIFO endpoint a descriptor row names, whose node an inode target is.
+#[cfg(target_os = "linux")]
+fn fifo_end(by: c_int, raw_fd: c_int) -> Option<u64> {
+    (by == XATTR_BY_FD)
+        .then(|| fdget(raw_fd).ok())
+        .flatten()
+        .filter(|resolved| resolved.kind == FdKind::Pipe)
+        .map(|resolved| resolved.handle)
+}
+
 /// The node a descriptor holds (`fdget`: an empty slot or an `O_PATH`
 /// descriptor is `EBADF`).
 fn descriptor_node(raw_fd: c_int) -> Result<Node, c_int> {
@@ -314,7 +324,8 @@ pub unsafe extern "C" fn patina_setxattr(
     };
     match with_context(|context| context.fs_set_xattr(&target, &name, bytes, flags as u32)) {
         Ok(()) => {
-            crate::fsnotify::xattr_changed(&target);
+            #[cfg(target_os = "linux")]
+            crate::fsnotify::xattr_changed(&target, fifo_end(by, raw_fd));
             set_errno(0);
             0
         }
@@ -365,7 +376,8 @@ pub unsafe extern "C" fn patina_removexattr(
     };
     match with_context(|context| context.fs_remove_xattr(&target, &name)) {
         Ok(()) => {
-            crate::fsnotify::xattr_changed(&target);
+            #[cfg(target_os = "linux")]
+            crate::fsnotify::xattr_changed(&target, fifo_end(by, raw_fd));
             set_errno(0);
             0
         }

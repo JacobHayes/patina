@@ -573,7 +573,11 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
             closed
         }
         FdKind::Socket => thread::net::socket_close(release.handle),
-        FdKind::Pipe => thread::pipe_close(release.handle),
+        FdKind::Pipe => {
+            #[cfg(target_os = "linux")]
+            fsnotify::fifo_closed(release.handle, release.status & O_WRITE != 0);
+            thread::pipe_close(release.handle)
+        }
         #[cfg(target_os = "linux")]
         FdKind::SignalFd => {
             thread::signals::fd::close(release.handle);
@@ -4212,6 +4216,14 @@ fn bind_fs_handle(fd: Fd, kind: FdKind, status: u32, cloexec: bool) -> c_int {
     }
 }
 
+/// A changed attribute of the node FIFO endpoint `raw_fd` is open on.
+#[cfg(target_os = "linux")]
+fn fifo_changed(raw_fd: c_int, mask: u32) {
+    if let Ok(end) = resolve_fd(raw_fd) {
+        fsnotify::fifo_changed(end.handle, mask);
+    }
+}
+
 /// [`bind_fs_handle`] for a handle the filesystem opened on canonical `path`,
 /// which it holds the name of (`fsnotify::bound`).
 fn bound_fs_handle(fd: Fd, path: &str, kind: FdKind, status: u32, cloexec: bool) -> c_int {
@@ -4517,14 +4529,18 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
             // Only an `O_PATH` open of a FIFO is a filesystem descriptor.
             match with_context(|context| context.fs_open(&resolved.path, open_flags)) {
                 Ok(fd) => bound_fs_handle(fd, &resolved.path, kind, status, cloexec),
-                Err(errno) if errno == EINVAL && !path_only => thread::fifo_open(
-                    resolved.metadata.expect("a FIFO entry has metadata").ino,
-                    open_flags.read,
-                    open_flags.write,
-                    nonblocking,
-                    status,
-                    cloexec,
-                ),
+                Err(errno) if errno == EINVAL && !path_only => {
+                    let ino = resolved.metadata.expect("a FIFO entry has metadata").ino;
+                    thread::fifo_open(
+                        ino,
+                        &resolved.path,
+                        open_flags.read,
+                        open_flags.write,
+                        nonblocking,
+                        status,
+                        cloexec,
+                    )
+                }
                 Err(errno) => fail(errno),
             }
         }
@@ -4852,19 +4868,23 @@ fn stdin_read() -> isize {
 }
 
 /// A read (`write` false) or write through `resolved` moved `moved` bytes:
-/// when something moved on a filesystem description, its watches see
-/// `IN_ACCESS` or `IN_MODIFY` (`fsnotify_access`/`fsnotify_modify`, once per
-/// call). Answers `moved`.
+/// when something moved on a filesystem description or a FIFO endpoint, its
+/// watches see `IN_ACCESS` or `IN_MODIFY` (`fsnotify_access`/
+/// `fsnotify_modify`, once per call). Answers `moved`.
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 pub(crate) fn transferred(resolved: &Resolved, moved: isize, write: bool) -> isize {
     #[cfg(target_os = "linux")]
-    if moved > 0 && matches!(resolved.kind, FdKind::File | FdKind::Dir) {
+    if moved > 0 {
         let mask = if write {
             fsnotify::IN_MODIFY
         } else {
             fsnotify::IN_ACCESS
         };
-        fsnotify::on_file(Fd(resolved.handle), mask);
+        match resolved.kind {
+            FdKind::File | FdKind::Dir => fsnotify::on_file(Fd(resolved.handle), mask),
+            FdKind::Pipe => fsnotify::fifo_moved(resolved.handle, mask),
+            _ => {}
+        }
     }
     moved
 }
@@ -6309,7 +6329,7 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
         return match with_context(|context| context.fs_set_inode_mode(node, mode)) {
             Ok(()) => {
                 #[cfg(target_os = "linux")]
-                fsnotify::on_inode(node, fsnotify::IN_ATTRIB);
+                fifo_changed(raw_fd, fsnotify::IN_ATTRIB);
                 set_errno(0);
                 0
             }
@@ -6456,7 +6476,7 @@ pub unsafe extern "C" fn patina_utimensat(
                 if descriptor.kind.is_fs() {
                     fsnotify::on_handle(Fd(descriptor.handle), shown);
                 } else {
-                    fsnotify::on_inode(ino, shown);
+                    fsnotify::fifo_changed(descriptor.handle, shown);
                 }
                 set_errno(0);
                 0
@@ -6518,7 +6538,7 @@ pub extern "C" fn patina_futimens(
         return match with_context(|context| context.fs_set_inode_times_spec(ino, atime, mtime)) {
             Ok(()) => {
                 #[cfg(target_os = "linux")]
-                fsnotify::on_inode(ino, shown);
+                fifo_changed(raw_fd, shown);
                 set_errno(0);
                 0
             }
@@ -6679,7 +6699,7 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
             Ok(()) => {
                 #[cfg(target_os = "linux")]
                 if uid != ID_UNCHANGED || gid != ID_UNCHANGED {
-                    fsnotify::on_inode(node, fsnotify::IN_ATTRIB);
+                    fifo_changed(raw_fd, fsnotify::IN_ATTRIB);
                 }
                 set_errno(0);
                 0
@@ -12542,8 +12562,10 @@ mod thread {
     /// `open(O_WRONLY)` is what wakes a reader parked here — and a FIFO nobody
     /// ever opens for writing surfaces as the runtime's deadlock report rather
     /// than a hung process.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     pub(crate) fn fifo_open(
         ino: u64,
+        path: &str,
         read: bool,
         write: bool,
         nonblocking: bool,
@@ -12629,12 +12651,24 @@ mod thread {
             }
         };
         drop(state);
+        // The open holds the name it was opened through from here, before
+        // any wait (`fifo_open` runs with the dentry held), so a rename or
+        // unlink while it waits moves or unhashes that name.
+        #[cfg(target_os = "linux")]
+        crate::fsnotify::fifo_bound(end as u64, ino, path);
+        // An open that fails lets its name go without a close event, then
+        // closes through the ordinary path.
+        let abandon = || {
+            #[cfg(target_os = "linux")]
+            crate::fsnotify::fifo_abandoned(end as u64);
+            super::patina_close(fd);
+        };
         // The channel is the node's one reference: taken when it comes into
         // existence, dropped when it is reclaimed. Outside the state lock, like
         // every other runtime call from this module.
         if opened_channel {
             if let Err(errno) = super::with_context(|context| context.fs_retain_inode(ino)) {
-                super::patina_close(fd);
+                abandon();
                 wake_all(woken);
                 return super::fail(errno);
             }
@@ -12678,18 +12712,20 @@ mod thread {
                         // the ordinary close path, so the partner's EOF/`EPIPE`
                         // bookkeeping and the channel reclamation are the usual
                         // ones.
-                        super::patina_close(fd);
+                        abandon();
                         return super::fail(errno);
                     }
                 }
                 lock_state().timed_out.remove(&me);
                 #[cfg(target_os = "linux")]
                 if signals::resume() == signals::Resumed::Eintr {
-                    super::patina_close(fd);
+                    abandon();
                     return super::fail(super::EINTR);
                 }
             }
         }
+        #[cfg(target_os = "linux")]
+        crate::fsnotify::fifo_opened(end as u64);
         super::set_errno(0);
         fd
     }

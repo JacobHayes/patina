@@ -40,9 +40,15 @@ fn answered(result: Result<usize, c_int>) -> isize {
 }
 
 /// A transfer from `input` to `output` answered `moved`: when bytes moved,
-/// the input's watches see `IN_ACCESS` and the output's `IN_MODIFY`.
-fn notified(input: c_int, output: c_int, moved: isize) -> isize {
-    for (fd, write) in [(input, false), (output, true)] {
+/// the input's watches see `IN_ACCESS` and the output's `IN_MODIFY`, in
+/// that order, or the output's first (`output_first`: a splice, whose
+/// `do_splice` notifies the output first).
+fn notified(input: c_int, output: c_int, moved: isize, output_first: bool) -> isize {
+    let mut sides = [(input, false), (output, true)];
+    if output_first {
+        sides.reverse();
+    }
+    for (fd, write) in sides {
         if let Ok(resolved) = fdget(fd) {
             crate::transferred(&resolved, moved, write);
         }
@@ -203,7 +209,7 @@ pub unsafe extern "C" fn patina_copy_file_range(
         destination.advance(to, moved)?;
         Ok(moved)
     })());
-    notified(fd_in, fd_out, moved)
+    notified(fd_in, fd_out, moved, false)
 }
 
 /// `sendfile(2)`: the input first — open for reading (`EBADF`), addressable
@@ -293,7 +299,7 @@ pub unsafe extern "C" fn patina_sendfile(
         position.advance(from, moved)?;
         Ok(moved)
     })());
-    notified(in_fd, out_fd, moved)
+    notified(in_fd, out_fd, moved, false)
 }
 
 /// Splice a file into a pipe: wait for room, then read at most that much from
@@ -445,7 +451,7 @@ pub unsafe extern "C" fn patina_splice(
             (None, None) => Err(EINVAL),
         }
     })());
-    notified(fd_in, fd_out, moved)
+    notified(fd_in, fd_out, moved, true)
 }
 
 /// `tee(2)`: an unknown flag `EINVAL` first, then a zero length is 0, both
@@ -455,7 +461,7 @@ pub unsafe extern "C" fn patina_splice(
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_tee(fd_in: c_int, fd_out: c_int, len: usize, flags: u32) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    answered((|| {
+    let moved = answered((|| {
         if flags & !SPLICE_F_ALL != 0 {
             return Err(EINVAL);
         }
@@ -475,7 +481,8 @@ pub extern "C" fn patina_tee(fd_in: c_int, fd_out: c_int, len: usize, flags: u32
             }
             _ => Err(EINVAL),
         }
-    })())
+    })());
+    notified(fd_in, fd_out, moved, false)
 }
 
 /// `vmsplice(2)`: an unknown flag `EINVAL`; the descriptor (`EBADF`) and its
@@ -496,7 +503,8 @@ pub unsafe extern "C" fn patina_vmsplice(
     flags: u32,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    answered((|| {
+    let mut into = false;
+    let moved = answered((|| {
         if flags & !SPLICE_F_ALL != 0 {
             return Err(EINVAL);
         }
@@ -508,6 +516,7 @@ pub unsafe extern "C" fn patina_vmsplice(
         } else {
             return Err(EBADF);
         };
+        into = into_pipe;
         // SAFETY: forwarded from this function's own contract.
         let segments = unsafe { import(vector, count)? };
         let total: usize = segments.iter().map(|segment| segment.len).sum();
@@ -550,5 +559,9 @@ pub unsafe extern "C" fn patina_vmsplice(
             }
             Ok(scattered)
         }
-    })())
+    })());
+    if let Ok(resolved) = fdget(raw_fd) {
+        crate::transferred(&resolved, moved, into);
+    }
+    moved
 }

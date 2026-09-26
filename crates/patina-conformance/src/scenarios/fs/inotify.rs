@@ -21,7 +21,10 @@
 //! the moved file's IN_MOVE_SELF and the replaced file's deletion; an open
 //! file outlives its last name, its events still naming it, until its close
 //! deletes it; events through a descriptor name the link it was opened
-//! through, and IN_EXCL_UNLINK skips them once that name went. Needs an
+//! through, and IN_EXCL_UNLINK skips them once that name went. A FIFO's
+//! opens, closes and attribute changes reach its directory too, its reads
+//! and writes only its own watch; an open waiting for its partner holds the
+//! name it was opened through, which a rename meanwhile moves. Needs an
 //! inotify instance and watch within the caller's limits.
 
 use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
@@ -225,6 +228,7 @@ pub fn run(p: &Probe) {
     );
     file_events(p, ino, &root);
     names(p, ino, &root);
+    fifo(p, ino, &root);
     p.close(ino);
 }
 
@@ -455,6 +459,107 @@ fn names(p: &Probe, ino: i32, root: &str) {
     p.check("unlinkat b", p.unlinkat(AT_FDCWD, &b, AT_REMOVEDIR) == 0);
 }
 
+/// A FIFO's opens, closes and attribute changes reach its directory's
+/// watches and its own; its reads and writes only its own. Open when its
+/// last name goes, it is deleted at its close.
+fn fifo(p: &Probe, ino: i32, root: &str) {
+    let dir = format!("{root}/p");
+    let node = format!("{dir}/f");
+    // What the directories removed before this left queued.
+    p.inotify_read(ino, 4096);
+    p.check("mkdirat p", p.mkdirat(AT_FDCWD, &dir, 0o755) == 0);
+    p.check(
+        "mkfifo p/f",
+        p.mknodat(AT_FDCWD, &node, S_IFIFO | 0o644, 0) == 0,
+    );
+    let wd = p.inotify_add_watch(ino, &dir, IN_ALL_EVENTS);
+    let own = p.inotify_add_watch(ino, &node, IN_ALL_EVENTS);
+    let reader = p.openat(AT_FDCWD, &node, O_RDONLY | O_NONBLOCK, 0);
+    let writer = p.openat(AT_FDCWD, &node, O_WRONLY | O_NONBLOCK, 0);
+    p.require("open both ends of p/f", reader >= 0 && writer >= 0);
+    p.check("write p/f", p.write(writer, b"z") == 1);
+    p.check("read p/f", p.read(reader, 1).0 == 1);
+    p.check("fchmod p/f", p.fchmod(writer, 0o600) == 0);
+    p.close(writer);
+    p.close(reader);
+    let both = p.openat(AT_FDCWD, &node, O_RDWR, 0);
+    p.require("open p/f to read and write", both >= 0);
+    p.check(
+        "unlinkat p/f while open",
+        p.unlinkat(AT_FDCWD, &node, 0) == 0,
+    );
+    p.close(both);
+    let on_fifo = |mask| [(wd, mask, "f"), (own, mask, "")];
+    let expected: Vec<(i32, u32, &str)> = on_fifo(IN_OPEN)
+        .into_iter()
+        .chain(on_fifo(IN_OPEN))
+        .chain([(own, IN_MODIFY, ""), (own, IN_ACCESS, "")])
+        .chain(
+            [IN_ATTRIB, IN_CLOSE_WRITE, IN_CLOSE_NOWRITE, IN_OPEN]
+                .into_iter()
+                .flat_map(on_fifo),
+        )
+        .chain([(own, IN_ATTRIB, ""), (wd, IN_DELETE, "f")])
+        .chain(on_fifo(IN_CLOSE_WRITE))
+        .chain([(own, IN_DELETE_SELF, ""), (own, IN_IGNORED, "")])
+        .collect();
+    p.check(
+        "a FIFO's opens, closes and fchmod reach both watches, its reads and writes its own",
+        described(&p.inotify_read(ino, 4096).1) == expected,
+    );
+
+    // A blocking open holds the name it resolved while it waits for a
+    // writer: a rename then moves that name, and its IN_OPEN carries the
+    // new one. The helper's rename and open (through a second link, so the
+    // two opens' events differ) are unrecorded; the host orders the opens'
+    // events, so they are read unrecorded and compared as a set.
+    let (renamed, link) = (format!("{dir}/g"), format!("{dir}/k"));
+    p.check(
+        "mkfifo p/f again",
+        p.mknodat(AT_FDCWD, &node, S_IFIFO | 0o644, 0) == 0,
+    );
+    p.check(
+        "link p/f as p/k",
+        p.linkat(AT_FDCWD, &node, AT_FDCWD, &link, 0) == 0,
+    );
+    p.inotify_read(ino, 4096);
+    let main_tid = crate::signals::gettid();
+    let (reader, writer) = std::thread::scope(|scope| {
+        let helper = scope.spawn(|| {
+            crate::signals::until_parked(main_tid);
+            p.rec.quiet(|| {
+                p.renameat(AT_FDCWD, &node, AT_FDCWD, &renamed);
+                p.openat(AT_FDCWD, &link, O_WRONLY | O_NONBLOCK, 0)
+            })
+        });
+        let reader = p.openat(AT_FDCWD, &node, O_RDONLY, 0);
+        (reader, helper.join().expect("the helper thread"))
+    });
+    p.require(
+        "open p/f, renamed while waiting",
+        reader >= 0 && writer >= 0,
+    );
+    let mut opened: Vec<String> = p
+        .rec
+        .quiet(|| p.inotify_read(ino, 4096))
+        .1
+        .into_iter()
+        .filter(|event| event.wd == wd && event.mask == IN_OPEN)
+        .map(|event| event.name)
+        .collect();
+    opened.sort();
+    p.check(
+        "an open waiting on a FIFO holds its name: renamed meanwhile, its IN_OPEN has the new one",
+        opened == ["g", "k"],
+    );
+    p.close(writer);
+    p.close(reader);
+    for path in [&renamed, &link] {
+        p.check("unlinkat a FIFO link", p.unlinkat(AT_FDCWD, path, 0) == 0);
+    }
+    p.check("unlinkat p", p.unlinkat(AT_FDCWD, &dir, AT_REMOVEDIR) == 0);
+}
+
 /// Each event's watch descriptor, mask and name.
 fn described(events: &[InotifyEvent]) -> Vec<(i32, u32, &str)> {
     events
@@ -485,6 +590,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mkdirat,
         Syscall::N_fchmod,
         Syscall::N_linkat,
+        Syscall::N_mknodat,
         Syscall::N_getdents64,
         Syscall::N_close,
     ],
