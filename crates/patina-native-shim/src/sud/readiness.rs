@@ -84,9 +84,8 @@ pub(super) fn sys_eventfd2(initval: u64, flags: i64) -> i64 {
 /// `ppoll(2)` uses a temporary task mask and a relative timespec. Unlike
 /// libc's wrapper, the raw row writes the unslept timeout back to the guest.
 pub(super) fn sys_ppoll(fds: u64, nfds: u64, timeout: u64, sigmask: u64, sigsetsize: u64) -> i64 {
-    if sigmask != 0 && sigsetsize != 8 {
-        return -EINVAL;
-    }
+    // 6.8's order: the timeout, then the mask's size (`set_user_sigmask`,
+    // whose copy-in `patina_poll` does before the descriptors).
     let timeout_ptr = timeout as *mut Timespec;
     let timeout = if timeout == 0 {
         None
@@ -102,6 +101,9 @@ pub(super) fn sys_ppoll(fds: u64, nfds: u64, timeout: u64, sigmask: u64, sigsets
                 .saturating_add(ts.tv_nsec as u64),
         )
     };
+    if sigmask != 0 && sigsetsize != 8 {
+        return -EINVAL;
+    }
     let mut remaining = timeout.unwrap_or(0);
     let rc = unsafe {
         crate::thread::readiness::patina_poll(
@@ -147,6 +149,18 @@ pub(super) fn sys_select(
             )
         };
     };
+    // 6.8's order: the (set, size) argpack is copied in
+    // (`get_sigset_argpack`), then the timeout, then the size is judged
+    // (`set_user_sigmask`, whose copy-in `patina_select` does before the
+    // sets).
+    let pair = if sigarg == 0 {
+        [0, 0]
+    } else {
+        match crate::uaccess::read::<[u64; 2]>(sigarg as usize) {
+            Ok(pair) => pair,
+            Err(_) => return -EFAULT,
+        }
+    };
     let nanos = if timeout == 0 {
         -1
     } else {
@@ -155,15 +169,10 @@ pub(super) fn sys_select(
             Err(e) => return e,
         }
     };
-    let mask = if let Some(arg) = Some(sigarg).filter(|arg| *arg != 0) {
-        let pair = unsafe { &*(arg as *const [u64; 2]) };
-        if pair[0] != 0 && pair[1] != 8 {
-            return -EINVAL;
-        }
-        pair[0] as *const u64
-    } else {
-        std::ptr::null()
-    };
+    if pair[0] != 0 && pair[1] != 8 {
+        return -EINVAL;
+    }
+    let mask = pair[0] as *const u64;
     let mut remaining = nanos.max(0) as u64;
     let rc = unsafe {
         crate::thread::readiness::patina_select(

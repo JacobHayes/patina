@@ -1,6 +1,6 @@
 //! poll/select are adapters over the same readiness predicates and per-source
 //! wait queues as epoll. All use no-restart signal waits and atomic mask swaps.
-use super::signals::{Resumed, resume, with_temporary_mask};
+use super::signals::{Resumed, resume, temporary_mask, with_mask, with_temporary_mask};
 use super::*;
 use crate::EINTR;
 
@@ -126,9 +126,13 @@ pub unsafe extern "C" fn patina_poll(
     remaining: *mut u64,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // `do_sys_poll`: the count is judged against the limit before the array
-    // is read, the array is copied in whole, and every `revents` is copied
-    // back out once the wait ends, whatever it answered.
+    // `ppoll`: the signal mask is copied in before `do_sys_poll` judges the
+    // count against the limit, then reads the array whole; every `revents`
+    // is copied back out once the wait ends, whatever it answered.
+    let mask = match temporary_mask(mask) {
+        Ok(mask) => mask,
+        Err(errno) => return errno,
+    };
     if count > crate::fd_limit() {
         return -i64::from(EINVAL);
     }
@@ -136,15 +140,13 @@ pub unsafe extern "C" fn patina_poll(
         Ok(local) => local,
         Err(errno) => return -i64::from(errno),
     };
-    let rc = unsafe {
-        with_temporary_mask(mask, || {
-            poll(
-                &mut local,
-                (timeout >= 0).then_some(timeout as u64),
-                remaining.as_mut(),
-            )
-        })
-    };
+    let rc = with_mask(mask, || {
+        poll(
+            &mut local,
+            (timeout >= 0).then_some(timeout as u64),
+            unsafe { remaining.as_mut() },
+        )
+    });
     match crate::uaccess::write_slice(fds as usize, &local) {
         Ok(()) => rc,
         Err(errno) => -i64::from(errno),
@@ -191,6 +193,12 @@ pub unsafe extern "C" fn patina_select(
     remaining: *mut u64,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // `do_pselect`: the signal mask is copied in before `core_sys_select`
+    // judges the count and reads the sets.
+    let mask = match temporary_mask(mask) {
+        Ok(mask) => mask,
+        Err(errno) => return errno,
+    };
     if nfds < 0 {
         return -i64::from(EINVAL);
     }
@@ -235,15 +243,11 @@ pub unsafe extern "C" fn patina_select(
             });
         }
     }
-    let rc = unsafe {
-        with_temporary_mask(mask, || {
-            poll(
-                &mut fds,
-                (timeout >= 0).then_some(timeout as u64),
-                remaining.as_mut(),
-            )
+    let rc = with_mask(mask, || {
+        poll(&mut fds, (timeout >= 0).then_some(timeout as u64), unsafe {
+            remaining.as_mut()
         })
-    };
+    });
     if rc < 0 {
         return rc;
     }

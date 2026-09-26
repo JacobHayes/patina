@@ -279,9 +279,9 @@ cover exact clock values and trace metadata (`tsc_reads_answer_from_virtual_cloc
 seeded jitter (`tsc_sleep_jitter_moves_counter`), genuine faults
 (`genuine_segv_is_not_swallowed`) and the trap's ownership against a guest
 SIGSEGV handler: it never sees a counter read
-(`sigsegv_handler_cannot_take_over_the_counter_trap`) or a fault in the shim's
-own code (`shim_faults_never_reach_a_guest_segv_handler`, red with the shim-code
-check removed), and while a counter read is served off the alternate stack no guest code runs:
+(`sigsegv_handler_cannot_take_over_the_counter_trap`) or a counter read it
+declines, which is a named stop (`a_counter_read_the_trap_declines_is_a_named_stop`,
+a REX-prefixed `rdtsc`; red before: the guest's handler ran), and while a counter read is served off the alternate stack no guest code runs:
 a timer's handler that would run during it, and a cut too small for a nested
 frame, are named stops where the native run goes on
 (`counter_reads_served_off_the_alternate_stack_run_no_guest_code`); `native_signals::a_guest_segv_handler_gets_what_the_kernel_would_give_it`
@@ -753,8 +753,14 @@ landed. A guest restorer's `rt_sigreturn` returns through the host kernel's
 (`signal/restorer`, both vehicles and both arches), and `restart_syscall` answers
 `EINTR` since no restart is ever pending (`signal/restart`); a pidfd of the
 guest's own process or of init generates as `kill` does (`proc/pidfd`, both
-vehicles). Ambient host signals and siglongjmp escape from
-a handler remain outside verified deterministic behavior.
+vehicles). The signal rows copy the guest's pointers as the kernel does, so a
+pointer it cannot use is `EFAULT` after whatever the call did before the copy
+(`signal/fault`, the raw vehicles: glibc's wrappers fault in user space; red
+before: the shim's own read of the pointer ended the run), and in 6.8's order
+where the call judges other arguments too (`ppoll`'s mask before its count,
+`pselect6`'s argpack before its timeout; red before: `EINVAL`). Ambient host signals
+and siglongjmp escape from a handler remain outside verified deterministic
+behavior.
 
 The portable `native_signals` process/sleep detector checks waitpid's ECHILD
 answer without modifying status, getppid=1 (the pid namespace's init), and exact virtual-time sleep, including

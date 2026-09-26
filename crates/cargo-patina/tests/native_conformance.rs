@@ -1971,6 +1971,11 @@ fn signal_eintr() {
 }
 
 #[test]
+fn signal_fault() {
+    conform("signal/fault");
+}
+
+#[test]
 fn signal_handler_flags() {
     conform("signal/handler_flags");
 }

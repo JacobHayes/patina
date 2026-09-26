@@ -19,9 +19,7 @@ fatal paths: guest abort must publish a complete trace; each internal fatal
 must leave it incomplete. The internal-context case nests a custom operation.
 `native_containment` owns the libc/raw SIGSYS registration refusals and, under
 the timestamp-counter trap, the SIGSEGV cases: a registration through either
-door leaves the counter read answered and the handler unrun, and a fault in the
-shim's own code (a raw `rt_sigprocmask` with a wild set pointer) is a named
-stop rather than reaching the handler. These inline raw cases require x86_64 Linux SUD;
+door leaves the counter read answered and the handler unrun. These inline raw cases require x86_64 Linux SUD;
 missing capability is reported explicitly and `PATINA_REQUIRE_SUD=1` makes
 missing evidence fatal.
 

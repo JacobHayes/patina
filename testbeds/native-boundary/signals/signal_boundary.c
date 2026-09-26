@@ -1,6 +1,5 @@
 /* Class pairing: real libc/raw doors for reserved-signal containment
- * (SIGSYS refused; a SIGSEGV registration kept off the counter trap and the
- * shim's own faults),
+ * (SIGSYS refused; a SIGSEGV registration kept off the counter trap),
  * single-entry state, and internal-fatal versus guest-abort finalization
  * (glibc's `_FORTIFY_SOURCE` failures are guest aborts too). */
 #define _GNU_SOURCE
@@ -234,14 +233,11 @@ int main(int argc, char **argv) {
         }
         if (reserved == SIGSYS) return 98;
         /* The SIGSEGV registration stays the guest's own: the counter trap
-         * still answers the read, and a fault in the shim's own code (its
-         * entry reading a wild signal-set pointer) is never the handler's. */
+         * still answers the read. */
         uint32_t lo, hi;
         __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
         (void)lo;
         (void)hi;
-        if (strstr(argv[1], "shim-fault"))
-            raw4(SYS_rt_sigprocmask, SIG_BLOCK, 8, 0, sizeof(uint64_t));
         assert(patina_shutdown() == 0);
         return 0;
     }

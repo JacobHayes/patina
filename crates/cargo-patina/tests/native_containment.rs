@@ -437,22 +437,6 @@ mod linux {
             }
         }
 
-        /// A fault in the shim's own code (here a SUD row reading a wild
-        /// signal-set pointer) is a named stop that takes the default action,
-        /// never handed to the guest's SIGSEGV handler to run over shim state.
-        #[test]
-        fn shim_faults_never_reach_a_guest_segv_handler() {
-            use std::os::unix::process::ExitStatusExt;
-            if !kernel_supports(KernelFeature::Tsc) {
-                return;
-            }
-            let Some(c) = sud_c_guest("signals/signal_boundary.c") else {
-                return;
-            };
-            let (output, _) = c.record_standalone(&["reserved-segv-shim-fault"]);
-            assert_eq!(output.status.signal(), Some(11), "{output:?}");
-        }
-
         fn json_contains(
             value: &serde_json::Value,
             key: &str,

@@ -6,6 +6,7 @@ pub mod core_term;
 pub mod default;
 pub mod describe;
 pub mod eintr;
+pub mod fault;
 pub mod handler_flags;
 pub mod mask;
 pub mod one_wake;

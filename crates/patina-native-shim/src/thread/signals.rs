@@ -961,13 +961,25 @@ pub unsafe extern "C" fn patina_signal_action(
     size: usize,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // `rt_sigaction`: the size, then the new action copied in, then the
+    // signal judged; the old action is copied out once the new one took.
+    if size != SIGSET_BYTES {
+        return -i64::from(EINVAL);
+    }
+    let action = if action.is_null() {
+        None
+    } else {
+        match crate::uaccess::read::<Action>(action as usize) {
+            Ok(action) => Some(action),
+            Err(_) => return -i64::from(EFAULT),
+        }
+    };
     if !(1..=SIGNAL_MAX).contains(&sig)
-        || size != SIGSET_BYTES
-        || (!action.is_null() && matches!(sig as u8, SIGKILL | SIGSTOP))
+        || (action.is_some() && matches!(sig as u8, SIGKILL | SIGSTOP))
     {
         return -i64::from(EINVAL);
     }
-    if !action.is_null() && sig == i32::from(SIGSYS) {
+    if action.is_some() && sig == i32::from(SIGSYS) {
         fatal("reserved signal registration would disable deterministic containment");
     }
     // Rust std performs registration before a deferred harness installs Context.
@@ -976,7 +988,7 @@ pub unsafe extern "C" fn patina_signal_action(
     let mut previous = state.signals.actions[sig as usize];
     // Rust std installs stack-overflow handlers only over SIG_DFL. Report the
     // reserved host disposition so it does not try to replace our containment.
-    if action.is_null() && sig == i32::from(SIGSYS) {
+    if action.is_none() && sig == i32::from(SIGSYS) {
         let rc = host(
             SYS_RT_SIGACTION,
             [
@@ -996,8 +1008,7 @@ pub unsafe extern "C" fn patina_signal_action(
             );
         }
     }
-    if !action.is_null() {
-        let action = unsafe { *action };
+    if let Some(action) = action {
         // A trap-routed action stays virtual: the host keeps the trap's
         // handler, which runs this one for each fault it does not answer. A
         // front-routed one too: the host keeps the front handler, with this
@@ -1012,10 +1023,9 @@ pub unsafe extern "C" fn patina_signal_action(
         }
         state.signals.action(sig as u8, action);
     }
-    if !old.is_null() {
-        unsafe {
-            old.write(previous);
-        }
+    drop(state);
+    if !old.is_null() && crate::uaccess::write(old as usize, &previous).is_err() {
+        return -i64::from(EFAULT);
     }
     0
 }
@@ -1030,47 +1040,57 @@ pub unsafe extern "C" fn patina_signal_mask(
     size: usize,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if size != SIGSET_BYTES
-        || (!set.is_null() && !matches!(how, SIG_BLOCK | SIG_UNBLOCK | SIG_SETMASK))
-    {
+    // `rt_sigprocmask`: the size, then the new set copied in, then `how`
+    // judged; the old set is copied out once the new one took.
+    if size != SIGSET_BYTES {
+        return -i64::from(EINVAL);
+    }
+    let set = if set.is_null() {
+        None
+    } else {
+        match crate::uaccess::read::<u64>(set as usize) {
+            Ok(set) => Some(set),
+            Err(_) => return -i64::from(EFAULT),
+        }
+    };
+    if set.is_some() && !matches!(how, SIG_BLOCK | SIG_UNBLOCK | SIG_SETMASK) {
         return -i64::from(EINVAL);
     }
     let me = activate();
     let previous = read_mask();
     let segv = segv_blocked();
-    if !old.is_null() {
-        if segv == SegvBlock::Unknown {
-            crate::trap_fatal(SEGV_UNKNOWN);
-        }
-        unsafe {
-            old.write(previous | segv_bit(segv));
-        }
+    if !old.is_null() && segv == SegvBlock::Unknown {
+        crate::trap_fatal(SEGV_UNKNOWN);
     }
-    let (mask, segv) = if set.is_null() {
-        (previous, segv)
-    } else {
-        let set = unsafe { *set };
-        // SIGSEGV's block is the guest's own under the counter trap.
-        let named = set & bit(SIGSEGV) != 0;
-        let segv = match how {
-            SIG_BLOCK if named => SegvBlock::Yes,
-            SIG_UNBLOCK if named => SegvBlock::No,
-            SIG_SETMASK if named => SegvBlock::Yes,
-            SIG_SETMASK => SegvBlock::No,
-            _ => segv,
-        };
-        if trap_routed(SIGSEGV) && (named || how == SIG_SETMASK) {
-            fault::set(segv);
+    let old_value = previous | segv_bit(segv);
+    let (mask, segv) = match set {
+        None => (previous, segv),
+        Some(set) => {
+            // SIGSEGV's block is the guest's own under the counter trap.
+            let named = set & bit(SIGSEGV) != 0;
+            let segv = match how {
+                SIG_BLOCK if named => SegvBlock::Yes,
+                SIG_UNBLOCK if named => SegvBlock::No,
+                SIG_SETMASK if named => SegvBlock::Yes,
+                SIG_SETMASK => SegvBlock::No,
+                _ => segv,
+            };
+            if trap_routed(SIGSEGV) && (named || how == SIG_SETMASK) {
+                fault::set(segv);
+            }
+            let mask = host_mask(match how {
+                SIG_BLOCK => previous | set,
+                SIG_UNBLOCK => previous & !set,
+                _ => set,
+            });
+            (mask, segv)
         }
-        let mask = host_mask(match how {
-            SIG_BLOCK => previous | set,
-            SIG_UNBLOCK => previous & !set,
-            _ => set,
-        });
-        (mask, segv)
     };
     lock_state().signals.tasks.get_mut(&me).unwrap().mask = mask | segv_bit(segv);
     install_mask(mask);
+    if !old.is_null() && crate::uaccess::write(old as usize, &old_value).is_err() {
+        return -i64::from(EFAULT);
+    }
     0
 }
 
@@ -1081,9 +1101,6 @@ pub unsafe extern "C" fn patina_signal_pending(set: *mut u8, size: usize) -> i64
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if size > SIGSET_BYTES {
         return -i64::from(EINVAL);
-    }
-    if set.is_null() {
-        return -i64::from(EFAULT);
     }
     let me = activate();
     super::timers::fire_due();
@@ -1099,8 +1116,9 @@ pub unsafe extern "C" fn patina_signal_pending(set: *mut u8, size: usize) -> i64
         crate::trap_fatal(SEGV_UNKNOWN);
     }
     let pending = state.signals.pending(me).to_ne_bytes();
-    unsafe {
-        std::ptr::copy_nonoverlapping(pending.as_ptr(), set, size);
+    drop(state);
+    if crate::uaccess::write_bytes(set as usize, &pending[..size]).is_err() {
+        return -i64::from(EFAULT);
     }
     0
 }
@@ -1127,13 +1145,12 @@ pub unsafe extern "C" fn patina_signal_altstack(stack: *const Stack, old: *mut S
             .unwrap_or_else(|| fatal("host signal syscall failed without errno"))
             as i64);
     }
-    if !old.is_null() {
-        unsafe {
-            old.write(previous);
-        }
-    }
+    // The new stack took, whether or not the old one can be copied out.
     if !stack.is_null() {
         FRAME_DIRTY.with(|dirty| dirty.set(dirty.get() | FRAME_STACK));
+    }
+    if !old.is_null() && crate::uaccess::write(old as usize, &previous).is_err() {
+        return -i64::from(EFAULT);
     }
     0
 }
@@ -1201,12 +1218,10 @@ pub(crate) unsafe fn generate_signal(
     let info = match info {
         GenerationInfo::User => Info::new(sig as u8, SI_USER),
         GenerationInfo::Thread => Info::new(sig as u8, SI_TKILL),
-        GenerationInfo::Queued(ptr) => {
-            if ptr.is_null() {
-                return -i64::from(EFAULT);
-            }
-            unsafe { *ptr }
-        }
+        GenerationInfo::Queued(ptr) => match crate::uaccess::read::<Info>(ptr as usize) {
+            Ok(info) => info,
+            Err(_) => return -i64::from(EFAULT),
+        },
     };
     // `do_rt_sigqueueinfo`/`do_rt_tgsigqueueinfo`: a caller may forge a
     // kernel or `tkill` code only to itself, judged by its own thread id.
@@ -1425,12 +1440,31 @@ pub(super) mod tests;
 /// A temporary mask belongs to the entire wait, including handler delivery.
 /// The old mask is restored before either syscall door returns.
 pub(super) unsafe fn with_temporary_mask(mask: *const u64, body: impl FnOnce() -> i64) -> i64 {
-    if mask.is_null() {
-        return body();
+    match temporary_mask(mask) {
+        Ok(mask) => with_mask(mask, body),
+        Err(errno) => errno,
     }
+}
+
+/// The temporary mask a wait names, copied in as `set_user_sigmask` copies
+/// it (`None`: the wait names none): a wait whose own arguments the kernel
+/// judges after it (`ppoll`, `pselect6`) copies it in first.
+pub(super) fn temporary_mask(mask: *const u64) -> Result<Option<u64>, i64> {
+    if mask.is_null() {
+        return Ok(None);
+    }
+    crate::uaccess::read::<u64>(mask as usize)
+        .map(Some)
+        .map_err(|_| -i64::from(EFAULT))
+}
+
+/// [`with_temporary_mask`] with the mask already copied in.
+pub(super) fn with_mask(requested: Option<u64>, body: impl FnOnce() -> i64) -> i64 {
+    let Some(requested) = requested else {
+        return body();
+    };
     let me = activate();
     let old = with_segv(read_mask());
-    let requested = unsafe { *mask };
     let temporary = host_mask(requested);
     // The wait's SIGSEGV block is the temporary mask's, until it returns.
     let mut scope = Scoped::new();

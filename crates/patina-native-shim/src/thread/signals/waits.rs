@@ -167,6 +167,7 @@ pub(in crate::thread) fn resume_with(before_delivery: impl FnOnce(Resumed)) -> R
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct Timespec {
     pub sec: i64,
     pub nsec: i64,
@@ -195,13 +196,26 @@ pub unsafe extern "C" fn patina_signal_wait(
     if size != SIGSET_BYTES {
         return -i64::from(EINVAL);
     }
-    if set.is_null() && mode != WaitMode::Pause {
-        return -i64::from(EFAULT);
-    }
+    // `rt_sigsuspend`/`rt_sigtimedwait` copy the set in, then the timeout.
+    let wanted = if mode == WaitMode::Pause {
+        0
+    } else {
+        match crate::uaccess::read::<u64>(set as usize) {
+            Ok(set) => set,
+            Err(_) => return -i64::from(EFAULT),
+        }
+    };
+    let timeout = if timeout.is_null() {
+        None
+    } else {
+        match crate::uaccess::read::<Timespec>(timeout as usize) {
+            Ok(timeout) => Some(timeout),
+            Err(_) => return -i64::from(EFAULT),
+        }
+    };
     let me = activate();
     let old = with_segv(read_mask());
     lock_state().signals.tasks.get_mut(&me).unwrap().mask = old;
-    let wanted = if set.is_null() { 0 } else { unsafe { *set } };
     // The suspension's SIGSEGV block is its mask's, until it returns.
     let mut scope = Scoped::new();
     if mode == WaitMode::Suspend {
@@ -210,10 +224,7 @@ pub unsafe extern "C" fn patina_signal_wait(
         install_mask(wanted);
         lock_state().signals.tasks.get_mut(&me).unwrap().mask = with_segv(host_mask(wanted));
     }
-    let deadline = if timeout.is_null() {
-        None
-    } else {
-        let timeout = unsafe { &*timeout };
+    let deadline = if let Some(timeout) = timeout {
         if timeout.sec < 0 || !(0..1_000_000_000).contains(&timeout.nsec) {
             return -i64::from(EINVAL);
         }
@@ -223,16 +234,18 @@ pub unsafe extern "C" fn patina_signal_wait(
             now.saturating_add((timeout.sec as u64).saturating_mul(1_000_000_000))
                 .saturating_add(timeout.nsec as u64),
         )
+    } else {
+        None
     };
     loop {
         super::super::timers::fire_due();
         let mut state = lock_state();
         if mode == WaitMode::Dequeue {
             if let Some(instance) = state.dequeue_signal(me, wanted, false) {
-                if !info.is_null() {
-                    unsafe {
-                        info.write(instance.info);
-                    }
+                // Dequeued: a siginfo that cannot be copied out loses it.
+                if !info.is_null() && crate::uaccess::write(info as usize, &instance.info).is_err()
+                {
+                    return -i64::from(EFAULT);
                 }
                 return i64::from(instance.sig);
             }

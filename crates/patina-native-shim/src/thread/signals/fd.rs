@@ -17,14 +17,18 @@ pub unsafe extern "C" fn patina_signalfd(
     flags: i32,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if size != SIGSET_BYTES || flags & !(SFD_NONBLOCK | SFD_CLOEXEC) != 0 {
+    // `signalfd4`: the size, then the mask copied in, then the flags.
+    if size != SIGSET_BYTES {
         return -i64::from(EINVAL);
     }
-    if mask.is_null() {
+    let Ok(mask) = crate::uaccess::read::<u64>(mask as usize) else {
         return -i64::from(EFAULT);
+    };
+    if flags & !(SFD_NONBLOCK | SFD_CLOEXEC) != 0 {
+        return -i64::from(EINVAL);
     }
     activate();
-    let mask = uncatchable(unsafe { *mask });
+    let mask = uncatchable(mask);
     let mut state = lock_state();
     if fd != -1 {
         let Some(entry) = crate::fd_table().lock().resolve(fd) else {

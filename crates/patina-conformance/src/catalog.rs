@@ -605,6 +605,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &signal::default::SCENARIO,
     &signal::describe::SCENARIO,
     &signal::eintr::SCENARIO,
+    &signal::fault::SCENARIO,
     &signal::handler_flags::SCENARIO,
     &signal::mask::SCENARIO,
     &signal::one_wake::SCENARIO,
