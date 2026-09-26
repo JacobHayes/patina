@@ -6,7 +6,7 @@
 
 use super::{Answer, Unmodeled, refuse};
 use crate::FdKind;
-use crate::identity::{Credential, Process, lookup as find_process};
+use crate::identity::{Credential, Process, lookup as find_process, ptrace_may_access};
 use crate::registry::{Capability, KERNEL_CONFIG};
 use linux_raw_sys::errno;
 use linux_raw_sys::general::{
@@ -27,9 +27,9 @@ use std::ffi::c_int;
 /// tracee the caller traces, which it never does (`ESRCH`). Attaching:
 /// `PTRACE_SEIZE`'s address and options (`EIO`), `PTRACE_O_SUSPEND_SECCOMP`
 /// without `CAP_SYS_ADMIN` (`EPERM`), the caller's own thread group
-/// (`EPERM`), then init, which is not dumpable: `CAP_SYS_PTRACE`
-/// (`__ptrace_may_access`), then Yama's scope (`kernel.yama.ptrace_scope`:
-/// init is no descendant, and scope 3 refuses every attach).
+/// (`EPERM`), then init, root's: [`ptrace_may_access`] (`CAP_SYS_PTRACE`),
+/// then Yama's scope (`kernel.yama.ptrace_scope`: init is no descendant, so
+/// `CAP_SYS_PTRACE` again, and scope 3 refuses every attach).
 pub(in crate::sud) fn ptrace(credential: &Credential, a: &[u64; 6]) -> Answer {
     let request = a[0] as i64;
     if request == i64::from(PTRACE_TRACEME) {
@@ -60,7 +60,10 @@ pub(in crate::sud) fn ptrace(credential: &Credential, a: &[u64; 6]) -> Answer {
     if process == Process::Guest {
         return refuse(errno::EPERM);
     }
-    if !credential.capable(Capability::SysPtrace) || KERNEL_CONFIG.yama_ptrace_scope >= 3 {
+    if !ptrace_may_access(credential, process)
+        || !credential.capable(Capability::SysPtrace)
+        || KERNEL_CONFIG.yama_ptrace_scope >= 3
+    {
         return refuse(errno::EPERM);
     }
     Err(Unmodeled::Granted(Capability::SysPtrace))
@@ -192,15 +195,15 @@ pub(in crate::sud) fn setns(credential: &Credential, a: &[u64; 6]) -> Answer {
 }
 
 /// `validate_nsset`: joining the namespaces of the process a pidfd names.
-/// Reading them is `ptrace_may_access(PTRACE_MODE_READ_REALCREDS)`, which
-/// init, not dumpable, allows only with `CAP_SYS_PTRACE` (`EPERM`). Then each
+/// Reading them is [`ptrace_may_access`] (`PTRACE_MODE_READ_REALCREDS`),
+/// which init, root's, allows only with `CAP_SYS_PTRACE` (`EPERM`). Then each
 /// namespace asked for is installed in the kernel's order. The machine has
 /// one of each, so the user namespace is the caller's own (`userns_install`:
 /// `EINVAL`), a time namespace asked alone meets `timens_install`'s
 /// single-thread rule (`EUSERS`) before its capability, and every install
 /// needs `CAP_SYS_ADMIN` (`EPERM`); holding it is where the model ends.
 pub(super) fn join_namespaces(credential: &Credential, nstype: u64, process: Process) -> Answer {
-    if process == Process::Init && !credential.capable(Capability::SysPtrace) {
+    if !ptrace_may_access(credential, process) {
         return refuse(errno::EPERM);
     }
     if nstype & NEWUSER != 0 {
@@ -219,7 +222,7 @@ pub(in crate::sud) fn pidfd_getfd(credential: &Credential, a: &[u64; 6]) -> Answ
 
 /// `pidfd_getfd` with the process the pidfd names found by `target`: a flag
 /// (`EINVAL`), then the descriptor (`EBADF`). Taking a descriptor of init,
-/// which is not dumpable, is `ptrace_may_access(PTRACE_MODE_ATTACH_REALCREDS)`:
+/// root's, is [`ptrace_may_access`] (`PTRACE_MODE_ATTACH_REALCREDS`):
 /// `CAP_SYS_PTRACE` (`EPERM`). One of the guest's own (`O_PATH` included:
 /// `fget_task` takes any) is duplicated in the one table, sharing its open
 /// file, close-on-exec (`receive_fd`): `EBADF` for a number not open, then
@@ -234,23 +237,24 @@ pub(super) fn getfd_from(
     }
     match target() {
         Err(code) => refuse(code),
-        Ok(Process::Init) => super::gate(credential, Capability::SysPtrace, errno::EPERM),
         Ok(Process::Guest) => Ok(match crate::fd_table().lock().dup(a[1] as c_int, 0, true) {
             Ok(fd) => i64::from(fd),
             Err(code) => -i64::from(code),
         }),
+        Ok(process) => other_process(credential, process, errno::EPERM),
     }
 }
 
 /// `get_robust_list(pid, head_ptr, len_ptr)` (kernel/futex/syscalls.c): the
-/// pid is looked up first; init is not dumpable, so reading its head is
-/// `ptrace_may_access(PTRACE_MODE_READ_REALCREDS)`'s `CAP_SYS_PTRACE`
-/// (`EPERM`). Every other pid is the thread model's: the caller's own
-/// threads, or `ESRCH`.
+/// pid is looked up first; reading another process's head is
+/// [`ptrace_may_access`] (`PTRACE_MODE_READ_REALCREDS`): init is root's, so
+/// `CAP_SYS_PTRACE` (`EPERM`). Every other pid is the thread model's: the
+/// caller's own threads, or `ESRCH`.
 pub(in crate::sud) fn get_robust_list(credential: &Credential, a: &[u64; 6]) -> Answer {
     let pid = a[0] as i32;
-    if matches!(find_process(pid), Some((Process::Init, _))) {
-        return super::gate(credential, Capability::SysPtrace, errno::EPERM);
+    if let Some((process, _)) = find_process(pid).filter(|(process, _)| *process != Process::Guest)
+    {
+        return other_process(credential, process, errno::EPERM);
     }
     Ok(crate::thread::registrations::get_robust_list(
         pid,
@@ -337,8 +341,9 @@ fn remote_pages(remote: &[[u64; 2]]) -> bool {
 /// answer, on this process. Any other pid meets the checks made before the
 /// target is looked up, in their order: a flag (`EINVAL`), the local vector
 /// ([`local_bytes`]), nothing to copy (0), the remote vector, no remote page
-/// to copy (0); then no such process (`ESRCH`), or init, whose memory needs
-/// `CAP_SYS_PTRACE` (`mm_access`'s `EACCES`, reported `EPERM`).
+/// to copy (0); then no such process (`ESRCH`), or init, root's, whose
+/// memory is [`ptrace_may_access`]'s (`mm_access`: `CAP_SYS_PTRACE`, else
+/// `EACCES`, reported `EPERM`).
 fn process_vm(credential: &Credential, a: &[u64; 6], write: bool) -> Answer {
     let found = find_process(a[0] as i32);
     if matches!(found, Some((Process::Guest, _))) {
@@ -358,8 +363,20 @@ fn process_vm(credential: &Credential, a: &[u64; 6], write: bool) -> Answer {
         Err(code) => return refuse(code),
     }
     match found {
-        Some((Process::Init, _)) => super::gate(credential, Capability::SysPtrace, errno::EPERM),
-        _ => refuse(errno::ESRCH),
+        Some((process, _)) => other_process(credential, process, errno::EPERM),
+        None => refuse(errno::ESRCH),
+    }
+}
+
+/// Another process's state behind the ptrace-mode check: `refusal` unless
+/// the caller may reach it ([`ptrace_may_access`]). The only other process
+/// is init, root's, which the guest's credential reaches only through
+/// `CAP_SYS_PTRACE`; what follows is where the model ends.
+fn other_process(credential: &Credential, process: Process, refusal: u32) -> Answer {
+    if ptrace_may_access(credential, process) {
+        Err(Unmodeled::Granted(Capability::SysPtrace))
+    } else {
+        refuse(refusal)
     }
 }
 
@@ -388,7 +405,8 @@ pub(in crate::sud) fn process_madvise(credential: &Credential, a: &[u64; 6]) -> 
 /// 6.8's order: a flag (`EINVAL`); the vector (`import_iovec`, as
 /// [`local_bytes`] takes it); the descriptor (`EBADF`); an advice outside
 /// the non-destructive set a pidfd takes (`EINVAL`); init's memory
-/// (`mm_access`: `CAP_SYS_PTRACE`, else `EACCES`); then `CAP_SYS_NICE`, which
+/// (`mm_access`, [`ptrace_may_access`]: init is root's, so `CAP_SYS_PTRACE`,
+/// else `EACCES`); then `CAP_SYS_NICE`, which
 /// 6.8 requires even of a process advising itself (`EPERM`; the exemption
 /// came in 6.13), before any range is looked at. Past it, the advice itself
 /// is where the model ends.
@@ -413,7 +431,7 @@ pub(super) fn madvise_from(
     ) {
         return refuse(errno::EINVAL);
     }
-    if process == Process::Init && !credential.capable(Capability::SysPtrace) {
+    if !ptrace_may_access(credential, process) {
         return refuse(errno::EACCES);
     }
     super::gate(credential, Capability::SysNice, errno::EPERM)
@@ -455,8 +473,10 @@ fn description(index: u64) -> Option<crate::fdtable::DescId> {
 }
 
 /// `kcmp(pid1, pid2, type, idx1, idx2)` (kernel/kcmp.c): both pids are
-/// looked up first (`ESRCH`); init belongs to root, so inspecting it is
-/// `ptrace_may_access`'s `CAP_SYS_PTRACE` (`EPERM`), before the type. Two
+/// looked up first (`ESRCH`), then each must pass [`ptrace_may_access`]
+/// (`PTRACE_MODE_READ_REALCREDS`: `EPERM`), before the type; init, root's,
+/// passes only with `CAP_SYS_PTRACE`, and past the check another process's
+/// objects are where the model ends. Two
 /// tasks of the guest share their address space, descriptor table,
 /// filesystem state, signal handlers and semaphore undo list (0), and each
 /// has its own I/O context once it has one
@@ -468,8 +488,11 @@ pub(in crate::sud) fn kcmp(credential: &Credential, a: &[u64; 6]) -> Answer {
     let (Some((one, _)), Some((other, _))) = (find_process(first), find_process(second)) else {
         return refuse(errno::ESRCH);
     };
-    if one == Process::Init || other == Process::Init {
-        return super::gate(credential, Capability::SysPtrace, errno::EPERM);
+    if !ptrace_may_access(credential, one) || !ptrace_may_access(credential, other) {
+        return refuse(errno::EPERM);
+    }
+    if one != Process::Guest || other != Process::Guest {
+        return Err(Unmodeled::Granted(Capability::SysPtrace));
     }
     match a[2] as i32 {
         KCMP_FILE => match (description(a[3]), description(a[4])) {

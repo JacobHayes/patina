@@ -27,7 +27,7 @@ pub enum Cause {
     /// The process holds a privilege whose checks the scenario asserts.
     Privileged,
     /// The process inherited a state the scenario starts from otherwise (a
-    /// lowered priority, a persona) and cannot restore.
+    /// lowered priority, a persona, a pid namespace) and cannot restore.
     Inherited,
     /// Detection itself failed in a way no missing capability explains (a
     /// vanished run directory, EIO, a wrong argument): a broken probe, which
@@ -184,6 +184,7 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         Need::FileHandles => file_handles(dir),
         Need::Whiteouts => whiteouts(dir),
         Need::Unprivileged => unprivileged(),
+        Need::RootInit => root_init(),
         Need::NoControllingTerminal => no_controlling_terminal(),
         Need::SysvShm => memipc::sysv_shm(),
         Need::SysvSem => memipc::sysv_sem(),
@@ -528,13 +529,7 @@ fn unprivileged() -> Result<(), NotRun> {
         cause: Cause::Unexpected,
         detail: format!("read /proc/self/status: {error}"),
     })?;
-    let field = |key: &str| {
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix(key))
-            .map(str::trim)
-            .map(str::to_string)
-    };
+    let field = |key: &str| status_field(&status, key);
     let euid = field("Uid:").and_then(|uids| uids.split_whitespace().nth(1).map(str::to_string));
     match euid.as_deref() {
         Some("0") => {
@@ -566,6 +561,63 @@ fn unprivileged() -> Result<(), NotRun> {
                     detail: format!("no {set} in /proc/self/status"),
                 });
             }
+        }
+    }
+    Ok(())
+}
+
+/// A `/proc/<pid>/status` field's value, trimmed.
+fn status_field(status: &str, key: &str) -> Option<String> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(key))
+        .map(str::trim)
+        .map(str::to_string)
+}
+
+/// Pid 1's ids and capabilities from `/proc/1/status`: every uid 0, and
+/// every capability up to `/proc/sys/kernel/cap_last_cap` effective and
+/// permitted (the sets `capget` of pid 1 answers).
+fn root_init() -> Result<(), NotRun> {
+    let read = |path: &str| {
+        std::fs::read_to_string(path).map_err(|error| NotRun {
+            cause: Cause::Unexpected,
+            detail: format!("read {path}: {error}"),
+        })
+    };
+    let status = read("/proc/1/status")?;
+    let last: u32 = read("/proc/sys/kernel/cap_last_cap")?
+        .trim()
+        .parse()
+        .map_err(|error| NotRun {
+            cause: Cause::Unexpected,
+            detail: format!("cap_last_cap: {error}"),
+        })?;
+    let full = u64::MAX >> (63 - last);
+    let malformed = |key: &str| NotRun {
+        cause: Cause::Unexpected,
+        detail: format!("no {key} in /proc/1/status"),
+    };
+    let uids = status_field(&status, "Uid:").ok_or_else(|| malformed("Uid:"))?;
+    let uids: Vec<&str> = uids.split_whitespace().collect();
+    if uids.iter().any(|uid| *uid != "0") {
+        return Err(NotRun {
+            cause: Cause::Inherited,
+            detail: format!("pid 1 runs as uids {}, not root", uids.join(" ")),
+        });
+    }
+    for set in ["CapEff:", "CapPrm:"] {
+        let caps = status_field(&status, set)
+            .and_then(|hex| u64::from_str_radix(&hex, 16).ok())
+            .ok_or_else(|| malformed(set))?;
+        if caps != full {
+            return Err(NotRun {
+                cause: Cause::Inherited,
+                detail: format!(
+                    "pid 1's {} is {caps:#x}, not every capability ({full:#x})",
+                    set.trim_end_matches(':')
+                ),
+            });
         }
     }
     Ok(())

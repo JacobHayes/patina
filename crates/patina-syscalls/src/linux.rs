@@ -480,7 +480,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Signal,
         Disposition::Modeled,
-        "Recorded process-directed virtual signal generation, deterministic recipient selection and one registered-wait wake, against the virtual process tree: a pid or thread id names its process, 0 the caller's group, -1 every process but init and the caller (none: `ESRCH`), another negative number the group it negates; init takes nothing (no handlers, and the kernel drops what its namespace sends it by default), so a signal to it answers 0.",
+        "Recorded process-directed virtual signal generation, deterministic recipient selection and one registered-wait wake, against the virtual process tree: a pid or thread id names its process, 0 the caller's group, -1 every process but init and the caller (none: `ESRCH`), another negative number the group it negates; init is root's, so a signal to it is `EPERM` (`check_kill_permission`), but for `SIGCONT` while the caller is in init's session, which init (no handlers) drops.",
         None,
     ),
     Syscall::N_uname => r(
@@ -936,7 +936,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Identity,
         Disposition::Modeled,
-        "Version negotiation as `cap_validate_magic` does it, and the sets of any process of the virtual pid namespace, all empty (`crate::identity`); a negative pid is `EINVAL`, a pid no process has `ESRCH`.",
+        "Version negotiation as `cap_validate_magic` does it, and the sets of any process of the virtual pid namespace from its credential (`crate::identity`): the guest's empty, init's root's (every capability effective and permitted, none inheritable); a negative pid is `EINVAL`, a pid no process has `ESRCH`.",
         None,
     ),
     Syscall::N_capset => r(
@@ -964,7 +964,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Signal,
         Disposition::Modeled,
-        "Recorded process-directed generation into virtual pending queues, preserving caller siginfo; a kernel or `tkill` code is `EPERM` unless the caller's own thread id is the target (`do_rt_sigqueueinfo`); init takes nothing.",
+        "Recorded process-directed generation into virtual pending queues, preserving caller siginfo; a kernel or `tkill` code is `EPERM` unless the caller's own thread id is the target (`do_rt_sigqueueinfo`); init, root's, refuses the rest (`EPERM`) but a `SIGCONT` within its session.",
         None,
     ),
     Syscall::N_rt_sigsuspend => r(
@@ -1495,7 +1495,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Signal,
         Disposition::Modeled,
-        "Recorded thread-directed virtual signal generation and targeted registered-wait wake; init's one thread (tid 1) takes nothing and answers 0.",
+        "Recorded thread-directed virtual signal generation and targeted registered-wait wake; init's one thread (tid 1) is root's: `EPERM` (`check_kill_permission`; a `SIGCONT` within init's session is dropped, 0).",
         None,
     ),
     #[cfg(target_arch = "x86_64")]
@@ -1740,7 +1740,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Signal,
         Disposition::Modeled,
-        "Validated thread-group and task identity, then recorded private-queue generation and targeted registered-wait wake; init's one thread takes nothing and answers 0.",
+        "Validated thread-group and task identity, then recorded private-queue generation and targeted registered-wait wake; init's one thread is root's: `EPERM` (`check_kill_permission`; a `SIGCONT` within init's session is dropped, 0).",
         None,
     ),
     #[cfg(target_arch = "x86_64")]
@@ -1898,7 +1898,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Mem,
         Disposition::Modeled,
-        "Nothing moves on one node: 0 for the guest (pid 0, its pid or a thread), `EPERM` for a target node outside the allowed one, `ESRCH` for a pid no process has, `EPERM` for init (not dumpable, so ptrace-mode access is refused).",
+        "Nothing moves on one node: 0 for the guest (pid 0, its pid or a thread), `EPERM` for a target node outside the allowed one, `ESRCH` for a pid no process has, `EPERM` for init (root's, so ptrace-mode access needs `CAP_SYS_PTRACE`).",
         None,
     ),
     Syscall::N_openat => r(
@@ -2071,7 +2071,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Mem,
         Disposition::Modeled,
-        "Every page is on node 0: a query answers 0, `-ENOENT` for a mapped page not resident, `-EFAULT` for an unmapped one; a move to node 0 succeeds and to any other node is `ENODEV`; a pid no process has is `ESRCH`, init (not dumpable) `EPERM`. Gap: residency is the host's `mincore`, so a page only ever read (the kernel's shared zero page, which `move_pages` answers `-EFAULT`) reads as node 0, and host reclaim can evict a touched page.",
+        "Every page is on node 0: a query answers 0, `-ENOENT` for a mapped page not resident, `-EFAULT` for an unmapped one; a move to node 0 succeeds and to any other node is `ENODEV`; a pid no process has is `ESRCH`, init (root's: ptrace-mode access) `EPERM`. Gap: residency is the host's `mincore`, so a page only ever read (the kernel's shared zero page, which `move_pages` answers `-EFAULT`) reads as node 0, and host reclaim can evict a touched page.",
         None,
     ),
     Syscall::N_utimensat => r(
@@ -2203,7 +2203,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Signal,
         Disposition::Modeled,
-        "Recorded thread-directed generation into the named task's private pending queue, preserving caller siginfo; a kernel or `tkill` code is `EPERM` unless the target is the calling thread; init takes nothing.",
+        "Recorded thread-directed generation into the named task's private pending queue, preserving caller siginfo; a kernel or `tkill` code is `EPERM` unless the target is the calling thread; init, root's, refuses the rest (`EPERM`) but a `SIGCONT` within its session.",
         None,
     ),
     Syscall::N_perf_event_open => r(
@@ -2281,7 +2281,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Privileged,
         Disposition::Modeled,
-        "A descriptor not open (`EBADF`), then no namespace file or pidfd (`EINVAL`; the model holds no namespace file). Through a pidfd, no namespace or an unknown one is `EINVAL`; then `validate_nsset`: init's namespaces need `ptrace_may_access` (not dumpable: `CAP_SYS_PTRACE`, `EPERM`), the one user namespace is the caller's own (`EINVAL`), a time namespace alone with another thread alive is `EUSERS`, and every install needs `CAP_SYS_ADMIN` (`EPERM`).",
+        "A descriptor not open (`EBADF`), then no namespace file or pidfd (`EINVAL`; the model holds no namespace file). Through a pidfd, no namespace or an unknown one is `EINVAL`; then `validate_nsset`: init's namespaces need `ptrace_may_access` (init is root's: `CAP_SYS_PTRACE`, `EPERM`), the one user namespace is the caller's own (`EINVAL`), a time namespace alone with another thread alive is `EUSERS`, and every install needs `CAP_SYS_ADMIN` (`EPERM`).",
         None,
     )
     .capabilities(&[Capability::SysAdmin, Capability::SysPtrace]),
@@ -2312,7 +2312,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Process,
         Disposition::Modeled,
-        "The guest's own tasks (`sud::privileged::kcmp`): they share every object but their I/O contexts (a task has its own once `ioprio_set` gives it one, or it is created by one with a valid priority); descriptors compare by description, an epoll target by the description its interest watches, and distinct objects answer 1 or 2 by a deterministic order. A pid no process has is ESRCH; init is EPERM without CAP_SYS_PTRACE.",
+        "The guest's own tasks (`sud::privileged::kcmp`): they share every object but their I/O contexts (a task has its own once `ioprio_set` gives it one, or it is created by one with a valid priority); descriptors compare by description, an epoll target by the description its interest watches, and distinct objects answer 1 or 2 by a deterministic order. A pid no process has is ESRCH; either pid failing the ptrace-mode check (`identity::ptrace_may_access`: init, root's, without CAP_SYS_PTRACE) is EPERM.",
         None,
     )
     .capabilities(&[Capability::SysPtrace]),
@@ -2498,7 +2498,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Signal,
         Disposition::Modeled,
-        "A flag is `EINVAL` (6.8 defines none), a descriptor that is no pidfd `EBADF` (the virtual machine mounts no procfs, so no directory is a `/proc/<pid>` one); a caller's siginfo is copied (`EFAULT`), must carry `sig` (`EINVAL`) and may forge a kernel or `tkill` code only to its own thread's pid (`EPERM`); the signal is then generated for the process as `kill` generates it (`SI_USER` without a siginfo), init taking nothing.",
+        "A flag is `EINVAL` (6.8 defines none), a descriptor that is no pidfd `EBADF` (the virtual machine mounts no procfs, so no directory is a `/proc/<pid>` one); a caller's siginfo is copied (`EFAULT`), must carry `sig` (`EINVAL`) and may forge a kernel or `tkill` code only to its own thread's pid (`EPERM`); the signal is then generated for the process as `kill` generates it (`SI_USER` without a siginfo), under the same permission check (init is root's: `EPERM`).",
         None,
     ),
     Syscall::N_io_uring_setup => r(

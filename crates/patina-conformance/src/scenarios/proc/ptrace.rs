@@ -10,11 +10,15 @@
 //!   first; `PTRACE_O_SUSPEND_SECCOMP` needs `CAP_SYS_ADMIN`
 //!   (`check_ptrace_options`: `EPERM`);
 //! * attaching to a thread of the caller's own thread group is `EPERM`
-//!   (`ptrace_attach`), for any caller.
+//!   (`ptrace_attach`), for any caller;
+//! * seizing init, root's, is `EPERM`: its ids are not the caller's and the
+//!   caller has no `CAP_SYS_PTRACE` (`__ptrace_may_access`, before Yama or
+//!   dumpability are consulted). `PTRACE_SEIZE` stops no one, so even a
+//!   privileged run past both guards would not stop pid 1.
 //!
-//! Whether an unprivileged caller may attach to another process is the
-//! host's policy (the same user, a dumpable target, Yama's
-//! `kernel.yama.ptrace_scope`, `CAP_SYS_PTRACE`), so no other process is
+//! Whether an unprivileged caller may attach to another process of its own
+//! user is the host's policy (a dumpable target, Yama's
+//! `kernel.yama.ptrace_scope`, `CAP_SYS_PTRACE`), so no such process is
 //! ever named, and `PTRACE_TRACEME` is never asked: it would hand the probe
 //! to the harness as a tracee.
 //!
@@ -71,6 +75,10 @@ pub fn run(p: &Probe) {
         "attaching to it is EPERM",
         ptrace(PTRACE_ATTACH, pid, 0, 0) == neg(EPERM),
     );
+    p.check(
+        "seizing init, root's process, is EPERM",
+        ptrace(PTRACE_SEIZE, 1, 0, 0) == neg(EPERM),
+    );
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -78,6 +86,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[Syscall::N_ptrace, Syscall::N_getpid],
     symbols: &["ptrace", "getpid"],
-    needs: &[Need::Unprivileged],
+    needs: &[Need::Unprivileged, Need::RootInit],
     ..DEFAULTS
 };

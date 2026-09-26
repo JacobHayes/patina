@@ -22,12 +22,14 @@ use patina_dst_syscalls::Syscall;
 use serde_json::Value;
 
 /// A pid argument: the caller (`0`), a pid of this process (recorded by
-/// relation), or one no process has.
+/// relation), init, or one no process has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Who {
     Caller,
     Own(i32),
     Missing,
+    /// Init, pid 1: root's process, natively and in the virtual tree.
+    Init,
     /// A value the row refuses as a pid (a negative one), recorded as it is.
     Raw(i32),
 }
@@ -38,6 +40,7 @@ impl Who {
             Who::Caller => 0,
             Who::Own(pid) | Who::Raw(pid) => i64::from(pid),
             Who::Missing => i64::from(super::timers::MISSING_PID),
+            Who::Init => 1,
         }
     }
 
@@ -48,6 +51,7 @@ impl Who {
                 .arg(key, pid)
                 .norm(&format!("args.{key}"), Norm::Identity(Id::Process)),
             Who::Missing => builder.arg(key, "missing"),
+            Who::Init => builder.arg(key, "init"),
             Who::Raw(value) => builder.arg(key, value),
         }
     }

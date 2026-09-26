@@ -350,8 +350,9 @@ forwards into the same dispatcher instead of its two-number allowlist.
   Status: the clocks decode every clock id once (`src/clocks.rs`), the timers
   run on the virtual clock and CPU time (`src/thread/timers.rs`, timer
   descriptors an `FdKind`), the identity rows answer an unprivileged caller
-  of the one identity in a two-process pid namespace (init pid 1, the guest
-  pid 2; `src/identity.rs`), and per-thread scheduling attributes follow
+  in a two-process pid namespace (init pid 1, root's; the guest pid 2; each
+  with its own credential, which checks against it read;
+  `src/identity.rs`), and per-thread scheduling attributes follow
   `__sched_setscheduler` (`src/thread/sched.rs`), all behind both doors;
   virtual CPU time is a 1 ms modeled startup cost plus the advance-on-spin
   rescues charged to the baton holder, and idle time advances to a timer's

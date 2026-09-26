@@ -6,8 +6,9 @@
 //!   with a NULL data pointer the same probe answers 0 (the version query);
 //!   the current version with NULL data answers 0;
 //! * an unprivileged caller's effective, permitted and inheritable sets are
-//!   empty, for pid 0 and its own pid; a pid no process has is `ESRCH`, a
-//!   negative one `EINVAL`;
+//!   empty, for pid 0 and its own pid; init's, root's, hold every capability
+//!   6.8 knows effective and permitted, none inheritable; a pid no process
+//!   has is `ESRCH`, a negative one `EINVAL`;
 //! * `capset` of the empty sets succeeds (for pid 0 and the own pid); an
 //!   effective set beyond the permitted one, or a permitted set beyond the
 //!   current one, is `EPERM`; any other pid is `EPERM`; an unknown version
@@ -24,6 +25,8 @@ use patina_dst_syscalls::Syscall;
 
 /// `CAP_NET_RAW`'s bit.
 const NET_RAW: u32 = 1 << 13;
+/// Every capability 6.8 knows (`CAP_LAST_CAP` 40), as the two words of a set.
+const FULL: [u32; 2] = [u32::MAX, 0x1ff];
 
 pub fn run(p: &Probe) {
     let pid = p.getpid() as i32;
@@ -50,6 +53,14 @@ pub fn run(p: &Probe) {
     );
     let (r, _, sets) = p.capget(CAPABILITY_V3, Who::Own(pid), true);
     p.check("its own pid answers the same", r == 0 && sets == empty);
+    let (r, _, sets) = p.capget(CAPABILITY_V3, Who::Init, true);
+    p.check(
+        "init's are root's: every capability effective and permitted, none inheritable",
+        r == 0
+            && sets.iter().zip(FULL).all(|(set, full)| {
+                (set.effective, set.permitted, set.inheritable) == (full, full, 0)
+            }),
+    );
     p.check(
         "a pid no process has is ESRCH",
         p.capget(CAPABILITY_V3, Who::Missing, true).0 == neg(ESRCH),
@@ -106,6 +117,6 @@ pub const SCENARIO: Scenario = Scenario {
     // repeat the syscall one.
     vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_capget, Syscall::N_capset],
-    needs: &[Need::Unprivileged],
+    needs: &[Need::Unprivileged, Need::RootInit],
     ..DEFAULTS
 };

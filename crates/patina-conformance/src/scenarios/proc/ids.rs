@@ -1,6 +1,7 @@
 //! proc/ids — process/thread id relations for a single-process guest, its
-//! process group and session, kill(0)/kill(-1) process selection and
-//! kill(1) of init, which is root's (`EPERM`); then
+//! process group and session, kill(0)/kill(-1) process selection, and
+//! `kill(1)` and `tgkill(1, 1)` of init, which is root's (`EPERM`,
+//! `kill_ok_by_cred`); then
 //! the group and session rows of a process that leads its own group but not
 //! its session (the harness starts the native run so; kernel/sys.c):
 //!
@@ -11,7 +12,7 @@
 //!   process of its session leads `EPERM`;
 //! * `setsid` of a group leader is `EPERM`.
 
-use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
+use crate::catalog::{DEFAULTS, Gap, Need, Scenario, Status};
 use crate::compare::{Difference, Failure, Observed};
 use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
@@ -38,15 +39,26 @@ pub fn run(p: &Probe) {
         "kill(-1,0) succeeds when at least one process is signalable",
         p.kill(-1, 0) == 0,
     );
-    let init = p.observed(
-        Syscall::N_kill,
-        [1, 0, 0, 0, 0, 0],
-        &[("pid", "init".into()), ("sig", 0.into())],
-    );
-    p.check(
-        "kill(1,0) of init, root's process, is EPERM",
-        init == neg(EPERM),
-    );
+    for (row, args, named, label) in [
+        (
+            Syscall::N_kill,
+            [1, 0, 0, 0, 0, 0],
+            vec![("pid", "init".into()), ("sig", 0.into())],
+            "kill(1,0) of init, root's process, is EPERM",
+        ),
+        (
+            Syscall::N_tgkill,
+            [1, 1, 0, 0, 0, 0],
+            vec![
+                ("tgid", "init".into()),
+                ("tid", "init".into()),
+                ("sig", 0.into()),
+            ],
+            "tgkill(1,1,0) of init's thread is EPERM",
+        ),
+    ] {
+        p.check(label, p.observed(row, args, &named) == neg(EPERM));
+    }
 
     p.check("the caller leads its process group", pgid == i64::from(pid));
     #[cfg(target_arch = "x86_64")]
@@ -77,13 +89,6 @@ pub fn run(p: &Probe) {
     );
 }
 
-/// Why a signal the guest sends init is not refused: under the credential
-/// model the virtual init runs as the guest's uid (src/identity.rs,
-/// registry::INIT_PID), so `kill_ok_by_cred` passes and init, unkillable
-/// with no handler, drops the signal (0); the pinned oracle's pid 1 is
-/// root's systemd, which uid 1000 may not signal (`EPERM`).
-pub const INIT_SHARES_THE_CREDENTIAL: &str = "under the Credential model the virtual init runs as the guest's uid (src/identity.rs, registry::INIT_PID), so kill_ok_by_cred passes and init, unkillable with no handler, drops the signal: 0; the pinned oracle's pid 1 is root's systemd, which uid 1000 may not signal (EPERM)";
-
 pub const SCENARIO: Scenario = Scenario {
     name: "proc/ids",
     run,
@@ -103,30 +108,19 @@ pub const SCENARIO: Scenario = Scenario {
     symbols: &[
         "getpid", "syscall", "getppid", "gettid", "tgkill", "kill", "setpgid", "setsid",
     ],
-    gaps: &[
-        Gap {
-            status: Status::ByDesign,
-            vehicles: Vehicle::ALL,
-            what: "the virtual pid namespace holds two processes, its init (pid 1) and the guest (pid 2, init's child; registry::INIT_PID/IDENTITY_PID, src/identity.rs): kill(-1, sig) reaches every process but init and the caller, of which there are none, so the kernel's answer for that tree is ESRCH (kill_something_info), where the native oracle's host has other processes of the caller's",
-            failure: Failure::Differs(&[
-                Difference::field(15, "kill", "errno", Observed::Str("ESRCH")),
-                Difference::field(15, "kill", "ret", Observed::Int(-1)),
-                Difference::check(
-                    16,
-                    "kill(-1,0) succeeds when at least one process is signalable",
-                ),
-            ]),
-        },
-        Gap {
-            status: Status::ByDesign,
-            vehicles: Vehicle::ALL,
-            what: INIT_SHARES_THE_CREDENTIAL,
-            failure: Failure::Differs(&[
-                Difference::field(17, "kill", "errno", Observed::Null),
-                Difference::field(17, "kill", "ret", Observed::Int(0)),
-                Difference::check(18, "kill(1,0) of init, root's process, is EPERM"),
-            ]),
-        },
-    ],
+    needs: &[Need::Unprivileged, Need::RootInit],
+    gaps: &[Gap {
+        status: Status::ByDesign,
+        vehicles: Vehicle::ALL,
+        what: "the virtual pid namespace holds two processes, its init (pid 1) and the guest (pid 2, init's child; registry::INIT_PID/IDENTITY_PID, src/identity.rs): kill(-1, sig) reaches every process but init and the caller, of which there are none, so the kernel's answer for that tree is ESRCH (kill_something_info), where the native oracle's host has other processes of the caller's",
+        failure: Failure::Differs(&[
+            Difference::field(15, "kill", "errno", Observed::Str("ESRCH")),
+            Difference::field(15, "kill", "ret", Observed::Int(-1)),
+            Difference::check(
+                16,
+                "kill(-1,0) succeeds when at least one process is signalable",
+            ),
+        ]),
+    }],
     ..DEFAULTS
 };

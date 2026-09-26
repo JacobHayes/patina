@@ -1,32 +1,37 @@
-//! The virtual process's credentials, its place in the process tree, and
+//! The virtual processes' credentials, their place in the process tree, and
 //! the virtual kernel's self-description (`kernel/sys.c`, `kernel/groups.c`,
-//! `kernel/capability.c`): the rows both doors answer from the one identity
-//! the runtime models (`registry::IDENTITY_*`).
+//! `kernel/capability.c`): the rows both doors answer from the identities
+//! the runtime models (`registry::IDENTITY_*`, `registry::INIT_PID`).
 //!
-//! The identity is one virtual credential ([`Credential`], [`credential`]):
-//! an ordinary unprivileged user whose real, effective, saved and filesystem
+//! Each process holds its own credential ([`Credential`], looked up by pid
+//! through [`lookup`] and [`Process::credential`]). The guest's
+//! ([`credential`], the caller's: every caller is a guest thread) is an
+//! ordinary unprivileged user whose real, effective, saved and filesystem
 //! ids are all [`IDENTITY_UID`]/[`IDENTITY_GID`], whose only supplementary
 //! group is its own, and whose capability sets are empty but for the full
-//! bounding set every process starts with. Every Linux reader of the
-//! caller's ids reads that one credential: the id rows of both doors,
-//! `capget`, the owner `stat` reports and `chown` (`crate::caller`), System V
-//! IPC ownership, `SO_PEERCRED`, a signal's `si_uid` and `PRIO_USER`; so do
-//! the capability checks of the privileged rows (`sud::privileged`). The
-//! shim's other capability refusals answer for this credential without
-//! consulting it yet (ARCHITECTURE lists what an identity setting still
-//! needs). So the `set*id` rows succeed exactly when every id they name is
-//! that one id (the kernel's rule for a caller without
-//! `CAP_SETUID`/`CAP_SETGID`), which changes nothing; anything else is
-//! `EPERM`.
+//! bounding set every process starts with. Init's is root's, as a machine's
+//! init runs (`init_cred`): uid and gid 0, every capability effective and
+//! permitted. Every Linux reader of the caller's ids reads the guest's: the
+//! id rows of both doors, the owner `stat` reports and `chown`
+//! (`crate::caller`), System V IPC ownership, `SO_PEERCRED`, a signal's
+//! `si_uid` and `PRIO_USER`; so do the capability checks of the privileged
+//! rows (`sud::privileged`). A check the kernel makes against another
+//! process reads that process's credential: `capget` of a pid, the signal
+//! permission check ([`may_signal`]) and the ptrace-mode check
+//! ([`ptrace_may_access`]). The shim's other capability
+//! refusals answer for the guest's credential without consulting it yet
+//! (ARCHITECTURE lists what an identity setting still needs). So the
+//! `set*id` rows succeed exactly when every id they name is that one id
+//! (the kernel's rule for a caller without `CAP_SETUID`/`CAP_SETGID`),
+//! which changes nothing; anything else is `EPERM`.
 //!
 //! The process tree is a pid namespace of two processes: its init
 //! ([`INIT_PID`], leader of process group 1 and session 1) and the guest
 //! ([`IDENTITY_PID`]), init's child, starting as the leader of its own group
 //! inside init's session, as a program a container's init started. The
 //! guest's group and session are process state its `setpgid`/`setsid` change
-//! under the kernel's rules; init's never change. Init runs as the same user
-//! with no signal handlers, is not dumpable and sleeps (see
-//! `registry::INIT_PID`).
+//! under the kernel's rules; init's never change. Init has no signal
+//! handlers and sleeps (see `registry::INIT_PID`).
 
 use crate::SpinMutex;
 use crate::neg_errno as errno;
@@ -57,7 +62,7 @@ impl Credential {
     }
 }
 
-/// The one credential the virtual kernel runs the guest with: uid/gid
+/// The credential the virtual kernel runs the guest with: uid/gid
 /// [`IDENTITY_UID`]/[`IDENTITY_GID`], its own group, no capability in the
 /// effective, permitted, inheritable or ambient set, and the full bounding
 /// set (no ancestor dropped one). It is fixed for the run.
@@ -72,9 +77,24 @@ const CREDENTIAL: Credential = Credential {
     ambient: 0,
 };
 
-/// The guest's credential; see [`CREDENTIAL`].
+/// Init's credential, root's (`init_cred`): uid/gid 0, no supplementary
+/// group, every capability effective and permitted and in the bounding set,
+/// none inheritable or ambient. It is fixed for the run.
+const ROOT: Credential = Credential {
+    uid: 0,
+    gid: 0,
+    groups: &[],
+    effective: Capability::ALL,
+    permitted: Capability::ALL,
+    inheritable: 0,
+    bounding: Capability::ALL,
+    ambient: 0,
+};
+
+/// The caller's credential (`current_cred`): every caller is a thread of the
+/// guest, so the guest's ([`CREDENTIAL`]).
 pub(crate) const fn credential() -> &'static Credential {
-    &CREDENTIAL
+    Process::Guest.credential()
 }
 
 const GUEST: i32 = IDENTITY_PID as i32;
@@ -85,6 +105,79 @@ const INIT: i32 = INIT_PID as i32;
 pub(crate) enum Process {
     Init,
     Guest,
+}
+
+impl Process {
+    /// The process's credential (`__task_cred`): init's is root's
+    /// ([`ROOT`]), the guest's the unprivileged user's ([`CREDENTIAL`]).
+    pub(crate) const fn credential(self) -> &'static Credential {
+        match self {
+            Process::Init => &ROOT,
+            Process::Guest => &CREDENTIAL,
+        }
+    }
+
+    /// The process's session (`task_session`).
+    fn session(self) -> i32 {
+        match self {
+            Process::Init => INIT,
+            Process::Guest => MEMBERSHIP.lock().sid,
+        }
+    }
+}
+
+/// `SIGCONT`, which `check_kill_permission` lets through within a session.
+const SIGCONT: i32 = linux_raw_sys::general::SIGCONT as i32;
+
+/// `kill_ok_by_cred`: whether a sender holding `sender` may signal a
+/// process holding `target` — the sender's real or effective uid is the
+/// target's real or saved one (each credential holds one uid), or the
+/// sender has `CAP_KILL`.
+fn kill_ok_by_cred(sender: &Credential, target: &Credential) -> bool {
+    sender.uid == target.uid || sender.capable(Capability::Kill)
+}
+
+/// `check_kill_permission` for a signal from user space (`si_fromuser`) the
+/// caller, in session `sender_sid`, sends a process of another thread group
+/// holding `target` in session `target_sid`: [`kill_ok_by_cred`], or else
+/// only `SIGCONT` within the same session. The signal is valid already.
+fn kill_permitted(
+    sender: &Credential,
+    sender_sid: i32,
+    target: &Credential,
+    target_sid: i32,
+    sig: i32,
+) -> bool {
+    kill_ok_by_cred(sender, target) || (sig == SIGCONT && sender_sid == target_sid)
+}
+
+/// Whether the caller may send `sig` (valid, from user space) to `target`
+/// (`check_kill_permission`): always to its own thread group, the guest;
+/// to init, root's, only a `SIGCONT` while the guest is in init's session
+/// (it starts there, and leaves by `setsid`).
+pub(crate) fn may_signal(target: Process, sig: i32) -> bool {
+    target == Process::Guest
+        || kill_permitted(
+            credential(),
+            Process::Guest.session(),
+            target.credential(),
+            target.session(),
+            sig,
+        )
+}
+
+/// `__ptrace_may_access` (kernel/ptrace.c) of a caller holding `caller` to
+/// `target`, in any mode: the caller's own thread group, the guest, always;
+/// another process when its real, effective and saved ids all equal the
+/// caller's (each credential holds one uid and one gid), or with
+/// `CAP_SYS_PTRACE`. Init is root's, so the guest reaches it only through
+/// the capability (the kernel's further refusal of a non-dumpable target
+/// passes with the capability too, so it never decides an answer here).
+pub(crate) fn ptrace_may_access(caller: &Credential, target: Process) -> bool {
+    let theirs = target.credential();
+    target == Process::Guest
+        || (caller.uid == theirs.uid && caller.gid == theirs.gid)
+        || caller.capable(Capability::SysPtrace)
 }
 
 /// The guest's process group and session.
@@ -126,7 +219,8 @@ pub(crate) fn signal_target(pid: i32, groups: bool) -> Option<Process> {
     }
     match pid {
         // The caller's group holds the caller (and init, when the guest
-        // joined group 1, which takes nothing).
+        // joined group 1: a group's signal succeeds when any member takes
+        // it, and the caller always does).
         0 => Some(Process::Guest),
         -1 => None,
         group => (group.checked_neg() == Some(pgid())).then_some(Process::Guest),
@@ -266,9 +360,9 @@ unsafe fn cap_version(header: *mut CapHeader) -> Result<usize, c_int> {
 }
 
 /// `capget`: a NULL data pointer only negotiates the version (an unknown
-/// one answers 0 with the kernel's written back); the sets of any process —
-/// pid 0 is the caller; init runs with the same credential — are the
-/// credential's; a negative pid is `EINVAL`, one no process has `ESRCH`.
+/// one answers 0 with the kernel's written back); any process's sets may be
+/// read, from its credential — pid 0 is the caller, init's are root's; a
+/// negative pid is `EINVAL`, one no process has `ESRCH`.
 ///
 /// # Safety
 /// `header` must be NULL or a readable and writable header, `data` NULL or
@@ -294,11 +388,14 @@ pub(crate) unsafe fn capget(header: *mut CapHeader, data: *mut CapData) -> i64 {
     if pid < 0 {
         return errno(EINVAL);
     }
-    // Any process's (or thread's) sets may be read.
-    if pid != 0 && lookup(pid).is_none() {
-        return errno(ESRCH);
-    }
-    let credential = credential();
+    // Any process's (or thread's) sets may be read (`cap_get_target_pid`).
+    let credential = match pid {
+        0 => credential(),
+        pid => match lookup(pid) {
+            Some((process, _)) => process.credential(),
+            None => return errno(ESRCH),
+        },
+    };
     for index in 0..count {
         let word = |set: u64| (set >> (32 * index)) as u32;
         let sets = CapData {
@@ -724,6 +821,60 @@ mod tests {
                 ..inheriting(0)
             }
         ));
+    }
+
+    /// A check against another process reads that process's credential:
+    /// init's sets are root's, and the guest reaches it (signal, ptrace
+    /// mode) only as the kernel lets an unprivileged user reach root's.
+    #[test]
+    fn another_process_is_judged_by_its_own_credential() {
+        let mut header = CapHeader {
+            version: CAPABILITY_V3,
+            pid: INIT,
+        };
+        let mut data = [CapData::default(); 2];
+        // SAFETY: local buffers.
+        assert_eq!(unsafe { capget(&mut header, data.as_mut_ptr()) }, 0);
+        let word = |set: u64, index: u32| (set >> (32 * index)) as u32;
+        for (index, sets) in data.iter().enumerate() {
+            let full = word(Capability::ALL, index as u32);
+            assert_eq!(
+                (sets.effective, sets.permitted, sets.inheritable),
+                (full, full, 0)
+            );
+        }
+
+        let guest = credential();
+        let root = Process::Init.credential();
+        let with = |capability: Capability| Credential {
+            effective: capability.bit(),
+            permitted: capability.bit(),
+            ..*guest
+        };
+        let usr1 = linux_raw_sys::general::SIGUSR1 as i32;
+        assert!(!kill_permitted(guest, INIT, root, INIT, usr1));
+        assert!(!kill_permitted(guest, INIT, root, INIT, 0));
+        // `SIGCONT` only within the target's session.
+        assert!(kill_permitted(guest, INIT, root, INIT, SIGCONT));
+        assert!(!kill_permitted(guest, GUEST, root, INIT, SIGCONT));
+        assert!(kill_permitted(
+            &with(Capability::Kill),
+            GUEST,
+            root,
+            INIT,
+            usr1
+        ));
+        assert!(kill_permitted(guest, GUEST, guest, INIT, usr1));
+        assert!(may_signal(Process::Guest, usr1));
+
+        assert!(ptrace_may_access(guest, Process::Guest));
+        assert!(!ptrace_may_access(guest, Process::Init));
+        assert!(!ptrace_may_access(&with(Capability::Kill), Process::Init));
+        assert!(ptrace_may_access(
+            &with(Capability::SysPtrace),
+            Process::Init
+        ));
+        assert!(ptrace_may_access(root, Process::Init));
     }
 
     /// The one test that moves the guest's group and session: the tree's

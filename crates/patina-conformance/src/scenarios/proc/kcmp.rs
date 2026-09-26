@@ -26,11 +26,12 @@
 //!   priority gets a context of its own (`set_task_ioprio`), and a thread it
 //!   then creates gets another (`copy_io`, for a valid priority).
 //!
-//! The ptrace-mode check kcmp makes passes for the caller's own process;
-//! another process is never named. glibc wraps no kcmp, so the scenario
+//! The ptrace-mode check kcmp makes on both pids passes for the caller's
+//! own process; init, root's, fails it (`EPERM`, before the type).
+//! No other process is named. glibc wraps no kcmp, so the scenario
 //! runs through the kernel vehicles.
 
-use crate::catalog::{DEFAULTS, Scenario};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::observe::{Id, Norm};
 use crate::probe::{AT_FDCWD, CLOSED_FD, NO_SUCH_PID, Probe, neg};
 use crate::vehicle::Vehicle;
@@ -256,6 +257,10 @@ pub fn run(p: &Probe) {
         "a pid no process has is ESRCH",
         kcmp(p, [NO_SUCH_PID, pid], KCMP_VM, 0, 0, "no-such-pid") == neg(ESRCH),
     );
+    p.check(
+        "comparing with init, root's process, is EPERM (the ptrace-mode check)",
+        kcmp(p, [1, pid], KCMP_VM, 0, 0, "init") == neg(EPERM),
+    );
     threads(p, pid);
     for fd in [
         located,
@@ -340,5 +345,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_kcmp],
+    needs: &[Need::Unprivileged, Need::RootInit],
     ..DEFAULTS
 };

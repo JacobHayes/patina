@@ -35,9 +35,7 @@
 //! The libc vehicle goes through glibc 2.36's `pidfd_open`, `pidfd_getfd`,
 //! `pidfd_send_signal` and `process_mrelease`, and its `setns`.
 
-use super::ids::INIT_SHARES_THE_CREDENTIAL;
-use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::observe::Norm;
 use crate::probe::{AT_FDCWD, CLOSED_FD, NO_SUCH_PID, Probe, SIGSET_BYTES, neg};
 use crate::vehicle::Vehicle;
@@ -342,15 +340,6 @@ pub const SCENARIO: Scenario = Scenario {
         "process_mrelease",
         "setns",
     ],
-    gaps: &[Gap {
-        status: Status::ByDesign,
-        vehicles: Vehicle::ALL,
-        what: INIT_SHARES_THE_CREDENTIAL,
-        failure: Failure::Differs(&[
-            Difference::field(56, "pidfd_send_signal", "errno", Observed::Null),
-            Difference::field(56, "pidfd_send_signal", "ret", Observed::Int(0)),
-            Difference::check(57, "signal 0 through init's pidfd is EPERM: init is root's"),
-        ]),
-    }],
+    needs: &[Need::Unprivileged, Need::RootInit],
     ..DEFAULTS
 };

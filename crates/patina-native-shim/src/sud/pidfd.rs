@@ -72,8 +72,8 @@ type KernelSiginfo = [u64; 6];
 /// signal number other than `sig` (`EINVAL`), and a kernel or `tkill` code
 /// sent anywhere but to the caller's own thread's pid (`EPERM`); then the
 /// signal goes to the process as `kill` sends it (`SI_USER` without `info`),
-/// under the same rules: an invalid signal is `EINVAL`, and init takes
-/// nothing.
+/// under the same rules: an invalid signal is `EINVAL`, and one for init,
+/// root's, `EPERM` (`check_kill_permission`).
 pub(super) fn sys_pidfd_send_signal(a: [u64; 6]) -> i64 {
     if a[3] as u32 != 0 {
         return -EINVAL;

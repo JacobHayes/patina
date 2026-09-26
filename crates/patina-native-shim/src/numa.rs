@@ -348,13 +348,25 @@ pub(crate) unsafe fn mbind(
 
 /// Whose memory a pid names (`find_mm_struct`, `kernel_migrate_pages`): 0,
 /// the guest or one of its threads is the guest's; a pid no process has is
-/// `ESRCH`; init is not dumpable, so ptrace-mode access to it is `EPERM`.
+/// `ESRCH`; another process is behind the ptrace-mode check
+/// (`identity::ptrace_may_access`), which init, root's, refuses the guest
+/// (`EPERM`).
 fn memory_of(pid: i32) -> Result<(), c_int> {
     match pid {
         0 => Ok(()),
         pid => match crate::identity::lookup(pid) {
             Some((crate::identity::Process::Guest, _)) => Ok(()),
-            Some((crate::identity::Process::Init, _)) => Err(EPERM),
+            Some((process, _)) => {
+                if crate::identity::ptrace_may_access(crate::identity::credential(), process) {
+                    crate::trap_fatal(&format!(
+                        "capability {} granted but another process's memory (move_pages, \
+                         migrate_pages) is not modeled: the virtual credential holds it, and what \
+                         the kernel does for such a caller is outside the model; failing closed",
+                        crate::registry::Capability::SysPtrace.name()
+                    ))
+                }
+                Err(EPERM)
+            }
             None => Err(ESRCH),
         },
     }

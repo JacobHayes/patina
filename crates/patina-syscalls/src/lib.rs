@@ -172,9 +172,10 @@ pub const IDENTITY_UID: u32 = 1000;
 /// program a container's init started. Its main thread's id is its pid.
 pub const IDENTITY_PID: u32 = 2;
 /// The pid namespace's init: the guest's parent, leader of process group 1
-/// and session 1, running as [`IDENTITY_UID`] with no signal handlers (so
-/// every signal the guest sends it is dropped), not dumpable (so ptrace-mode
-/// access to it is refused), and asleep (its CPU time is its startup's).
+/// and session 1, running as root (uid and gid 0, every capability) as a
+/// machine's init does, so the guest may not signal it (but for `SIGCONT`
+/// within its session, which init, with no signal handlers, drops) or reach
+/// it in ptrace mode; asleep (its CPU time is its startup's).
 pub const INIT_PID: u32 = 1;
 /// The group of [`IDENTITY_UID`]; see there.
 pub const IDENTITY_GID: u32 = 1000;

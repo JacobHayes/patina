@@ -918,9 +918,15 @@ pub(crate) unsafe fn generate_signal(
                 return -i64::from(EPERM);
             }
             // A queued signal names one process; `kill` also names groups.
+            // Every signal reaching another process here comes from user
+            // space (a kernel code to another pid was refused as forged), so
+            // `check_kill_permission` judges it by the target's credential.
             match crate::identity::signal_target(pid, !queued) {
+                Some(process) if !crate::identity::may_signal(process, sig) => {
+                    return -i64::from(EPERM);
+                }
                 Some(crate::identity::Process::Guest) => SignalTarget::Process,
-                // Init takes no handlers, and the kernel drops what a member
+                // Init has no handlers, and the kernel drops what a member
                 // of its namespace sends it by default.
                 Some(crate::identity::Process::Init) => return 0,
                 None => return -i64::from(ESRCH),
@@ -936,11 +942,14 @@ pub(crate) unsafe fn generate_signal(
             let init = crate::registry::INIT_PID as i32;
             let guest = crate::registry::IDENTITY_PID as i32;
             if tid == init {
-                // Init's one thread, reached by `tkill` or with its own tgid.
-                return if tgid.is_none_or(|pid| pid == init) {
+                // Init's one thread, reached by `tkill` or with its own tgid,
+                // under the permission check; past it init drops the signal.
+                return if tgid.is_some_and(|pid| pid != init) {
+                    -i64::from(ESRCH)
+                } else if crate::identity::may_signal(crate::identity::Process::Init, sig) {
                     0
                 } else {
-                    -i64::from(ESRCH)
+                    -i64::from(EPERM)
                 };
             }
             match task_of(tid) {

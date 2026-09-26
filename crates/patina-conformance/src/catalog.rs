@@ -122,6 +122,12 @@ pub enum Need {
     /// scenario asserts are what capabilities bypass, and its own capability
     /// sets read back empty.
     Unprivileged,
+    /// The run's pid namespace has a root-owned init: pid 1's real,
+    /// effective, saved and filesystem uids are 0 and it holds every
+    /// capability the kernel knows, effective and permitted, as the virtual
+    /// init (and a host's systemd) does. A container's init, or one started
+    /// as another user, answers the rows that name pid 1 otherwise.
+    RootInit,
     /// The native run has no controlling terminal (`/dev/tty` answers
     /// `ENXIO`): a row that acts on the caller's terminal (`vhangup`) then
     /// has nothing to act on, whatever the caller's privilege. A run started
@@ -232,6 +238,7 @@ impl Need {
             | Need::FileHandles
             | Need::Whiteouts
             | Need::Unprivileged
+            | Need::RootInit
             | Need::NoControllingTerminal
             | Need::SysvShm
             | Need::SysvSem

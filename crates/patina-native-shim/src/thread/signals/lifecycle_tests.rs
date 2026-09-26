@@ -483,7 +483,8 @@ fn generation_validates_typed_targets_before_recording() {
             (3, SI_USER, EPERM),
             (3, SI_TKILL, EPERM),
             (INIT, SI_USER, EPERM),
-            (INIT, SI_QUEUE, 0),
+            // Init is root's (`kill_ok_by_cred`).
+            (INIT, SI_QUEUE, EPERM),
         ] {
             info.words[1] = code as u32 as u64;
             for target in [process(pid), thread(Some(pid), pid)] {
@@ -493,21 +494,21 @@ fn generation_validates_typed_targets_before_recording() {
                 );
             }
         }
-        // Existence probes, and a real signal to init, which takes nothing.
-        for (target, sig) in [
-            (process(0), 0),
-            (process(GUEST), 0),
-            (process(-GUEST), 0),
-            (thread(None, GUEST), 0),
-            (thread(Some(GUEST), GUEST), 0),
-            (process(INIT), 0),
-            (process(INIT), SIGUSR1),
-            (thread(None, INIT), SIGUSR1),
-            (thread(Some(INIT), INIT), SIGUSR1),
+        // Existence probes of the guest; init, root's, refuses even those.
+        for (target, sig, expected) in [
+            (process(0), 0, 0),
+            (process(GUEST), 0, 0),
+            (process(-GUEST), 0, 0),
+            (thread(None, GUEST), 0, 0),
+            (thread(Some(GUEST), GUEST), 0, 0),
+            (process(INIT), 0, EPERM),
+            (process(INIT), SIGUSR1, EPERM),
+            (thread(None, INIT), SIGUSR1, EPERM),
+            (thread(Some(INIT), INIT), SIGUSR1, EPERM),
         ] {
             assert_eq!(
                 unsafe { generate_signal(target, sig, GenerationInfo::User) },
-                0
+                -i64::from(expected)
             );
         }
         assert!(signal_ops(&operations()).is_empty());
