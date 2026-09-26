@@ -179,7 +179,8 @@ pub trait FsDriver: Send {
     ) -> DriverResult<Vec<FsDirectoryEntry>> {
         Err(unsupported_filesystem_operation("read directory"))
     }
-    /// List the directory an open DESCRIPTOR names (`getdents`/`readdir`).
+    /// List the directory an open DESCRIPTOR names (`getdents`/`readdir`):
+    /// `.` and `..` first, then the children, each with its inode.
     ///
     /// Iteration is a read of the descriptor, not a fresh lookup of a name: the
     /// `r` it costs was charged when the descriptor was opened, so a `chmod`

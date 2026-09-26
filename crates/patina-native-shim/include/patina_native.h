@@ -658,9 +658,11 @@ int32_t patina_fchmod(int32_t fd, uint32_t mode);
 int32_t patina_read_dir(int32_t fd, void **state);
 /*
  * Return 1 after writing the next entry, 0 at end-of-directory, or -1 with
- * patina_errno set. name_buf receives a NUL-terminated entry name.
+ * patina_errno set. name_buf receives a NUL-terminated entry name, kind its
+ * PATINA_ENTRY_* kind and ino the inode it names.
  */
-int32_t patina_read_dir_next(void *state, char *name_buf, size_t buf_len, uint32_t *kind);
+int32_t patina_read_dir_next(void *state, char *name_buf, size_t buf_len, uint32_t *kind,
+                             uint64_t *ino);
 void patina_read_dir_free(void *state);
 /*
  * The namespace operations, each on a resolved (dirfd, path). A trailing

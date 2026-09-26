@@ -1953,7 +1953,9 @@ impl FsDriver for MemFs {
             .expect("the node has a name")
             .times
             .accessed(clock);
-        self.list_directory(&path)
+        let mut listing = self.dot_entries(&path).to_vec();
+        listing.extend(self.list_directory(&path)?);
+        Ok(listing)
     }
 
     fn remove_directory(&mut self, clock: FsClock, path: &str) -> DriverResult<()> {
@@ -2490,20 +2492,36 @@ impl MemFs {
                 .map(str::to_owned)
         };
         let mut entries = BTreeMap::new();
-        for directory in self.directories.keys() {
+        for (directory, metadata) in &self.directories {
             if let Some(name) = child(directory) {
-                entries.insert(name, FsEntryKind::Directory);
+                entries.insert(name, (FsEntryKind::Directory, metadata.ino));
             }
         }
         for (name, ino) in &self.names {
             if let Some(name) = child(name) {
-                entries.insert(name, self.kind_of(*ino).expect("name references an inode"));
+                let kind = self.kind_of(*ino).expect("name references an inode");
+                entries.insert(name, (kind, *ino));
             }
         }
         Ok(entries
             .into_iter()
-            .map(|(name, kind)| FsDirectoryEntry { name, kind })
+            .map(|(name, (kind, ino))| FsDirectoryEntry { name, kind, ino })
             .collect())
+    }
+
+    /// The `.` and `..` a descriptor listing starts with: the directory's own
+    /// inode and its parent's (the root is its own parent), as `getdents`
+    /// reports them.
+    fn dot_entries(&self, path: &str) -> [FsDirectoryEntry; 2] {
+        let parent = match path.rfind('/') {
+            Some(0) | None => "/",
+            Some(slash) => &path[..slash],
+        };
+        [(".", path), ("..", parent)].map(|(name, directory)| FsDirectoryEntry {
+            name: name.into(),
+            kind: FsEntryKind::Directory,
+            ino: self.directories[directory].ino,
+        })
     }
 
     /// Drop whatever non-directory NAME sits at `path`, releasing its node
@@ -3319,6 +3337,7 @@ mod tests {
             vec![FsDirectoryEntry {
                 name: "pipe".into(),
                 kind: FsEntryKind::Fifo,
+                ino: fs.metadata("/tmp/pipe").unwrap().ino,
             }]
         );
         assert_eq!(
@@ -3772,15 +3791,24 @@ mod tests {
         fs.close(fd).unwrap();
 
         // A plain `O_RDONLY|O_DIRECTORY` open opens the directory for reading
-        // and can iterate it.
+        // and can iterate it: `.` (the directory), `..` (its parent), then the
+        // children, each naming its inode.
         let readable = fs
             .open(FsClock::EPOCH, "/d", OpenFlags::read_only())
             .unwrap();
+        let [dir, root, file] = ["/d", "/", "/d/file"].map(|path| fs.metadata(path).unwrap().ino);
+        let entry = |name: &str, kind, ino| FsDirectoryEntry {
+            name: name.into(),
+            kind,
+            ino,
+        };
         assert_eq!(
-            fs.read_directory_fd(FsClock::EPOCH, readable)
-                .unwrap()
-                .len(),
-            1
+            fs.read_directory_fd(FsClock::EPOCH, readable).unwrap(),
+            [
+                entry(".", FsEntryKind::Directory, dir),
+                entry("..", FsEntryKind::Directory, root),
+                entry("file", FsEntryKind::File, file),
+            ]
         );
 
         // An `O_PATH` open opens nothing: it resolves and answers `fstat`, and
@@ -3832,7 +3860,7 @@ mod tests {
             fs.read_directory_fd(FsClock::EPOCH, readable)
                 .unwrap()
                 .len(),
-            1
+            3
         );
         assert_eq!(
             fs.read_directory(FsClock::EPOCH, "/d").unwrap_err().code,
@@ -4229,6 +4257,7 @@ mod tests {
             vec![FsDirectoryEntry {
                 name: "link".into(),
                 kind: FsEntryKind::Symlink,
+                ino: metadata.ino,
             }]
         );
         assert_eq!(

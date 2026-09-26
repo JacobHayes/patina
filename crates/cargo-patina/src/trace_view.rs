@@ -1047,6 +1047,7 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
             Outcome::DirectoryEntries(vec![FsDirectoryEntry {
                 name: "file".into(),
                 kind: FsEntryKind::File,
+                ino: 2,
             }]),
         ),
         (
@@ -1054,6 +1055,7 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
             Outcome::DirectoryEntries(vec![FsDirectoryEntry {
                 name: "file".into(),
                 kind: FsEntryKind::File,
+                ino: 2,
             }]),
         ),
         (

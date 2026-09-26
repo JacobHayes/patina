@@ -103,7 +103,6 @@ char *realpath(const char *restrict path, char *restrict destination) {
 
 struct patina_dir {
     void *state;
-    uint64_t index;
     /* Every DIR owns a virtual directory descriptor, which closedir releases:
      * opendir mints one (as a real opendir does, which is what makes dirfd()
      * meaningful on it), fdopendir takes ownership of the caller's (POSIX). The
@@ -128,9 +127,8 @@ static unsigned char patina_dirent_type(uint32_t kind) {
     }
 }
 
-static void patina_fill_dirent_common(struct dirent *entry, uint64_t index, uint32_t kind) {
-    /* Deterministic synthetic inode: one-based snapshot index in driver order. */
-    entry->d_ino = (ino_t)(index + 1);
+static void patina_fill_dirent_common(struct dirent *entry, uint64_t ino, uint32_t kind) {
+    entry->d_ino = (ino_t)ino;
     entry->d_reclen = (unsigned short)sizeof *entry;
 #ifdef __APPLE__
     entry->d_namlen = (uint8_t)strlen(entry->d_name);
@@ -201,15 +199,15 @@ DIR *fdopendir(int fd) {
 struct dirent *readdir(DIR *dirp) {
     struct patina_dir *directory = (struct patina_dir *)(void *)dirp;
     uint32_t kind = 0;
+    uint64_t ino = 0;
     int result = patina_read_dir_next(directory->state, directory->entry.d_name,
-                                      sizeof directory->entry.d_name, &kind);
+                                      sizeof directory->entry.d_name, &kind, &ino);
     if (result < 0) {
         errno = patina_errno();
         return NULL;
     }
     if (result == 0) return NULL;
-    patina_fill_dirent_common(&directory->entry, directory->index, kind);
-    directory->index += 1;
+    patina_fill_dirent_common(&directory->entry, ino, kind);
     return &directory->entry;
 }
 
@@ -230,18 +228,17 @@ int readdir_r(DIR *restrict dirp, struct dirent *restrict entry,
 struct dirent64 *readdir64(DIR *dirp) {
     struct patina_dir *directory = (struct patina_dir *)(void *)dirp;
     uint32_t kind = 0;
+    uint64_t ino = 0;
     int result = patina_read_dir_next(directory->state, directory->entry64.d_name,
-                                      sizeof directory->entry64.d_name, &kind);
+                                      sizeof directory->entry64.d_name, &kind, &ino);
     if (result < 0) {
         errno = patina_errno();
         return NULL;
     }
     if (result == 0) return NULL;
-    /* Deterministic synthetic inode: one-based snapshot index in driver order. */
-    directory->entry64.d_ino = (ino64_t)(directory->index + 1);
+    directory->entry64.d_ino = (ino64_t)ino;
     directory->entry64.d_reclen = (unsigned short)sizeof directory->entry64;
     directory->entry64.d_type = patina_dirent_type(kind);
-    directory->index += 1;
     return &directory->entry64;
 }
 
@@ -278,7 +275,6 @@ void rewinddir(DIR *dirp) {
     }
     patina_read_dir_free(directory->state);
     directory->state = state;
-    directory->index = 0;
 }
 
 int dirfd(DIR *dirp) {

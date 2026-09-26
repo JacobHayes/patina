@@ -2460,6 +2460,7 @@ mod tests {
             vec![patina_dst_abi::FsDirectoryEntry {
                 name: "pipe".into(),
                 kind: FsEntryKind::Fifo,
+                ino: metadata.ino,
             }]
         );
     }

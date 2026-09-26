@@ -50,7 +50,9 @@ pub use handoff::{
 ///   peer), `net_mark` (the type of service and source address its sends
 ///   carry), the address a datagram was dialed at and its mark, and the
 ///   `unreachable` send disposition for a datagram nothing is bound to take.
-pub const TRACE_FORMAT_VERSION: u32 = 12;
+/// - 13: the inode of every directory-listing entry, and the `.` and `..` a
+///   descriptor listing starts with.
+pub const TRACE_FORMAT_VERSION: u32 = 13;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 
@@ -2289,7 +2291,7 @@ mod tests {
     fn a_current_bundle_must_state_its_run_facts() {
         // The realtime epoch and the node name are required: a bundle missing
         // either does not parse.
-        let bytes = include_bytes!("../tests/fixtures/format-12.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-13.patina");
         for field in ["realtime_epoch_nanos", "hostname"] {
             let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             assert!(
@@ -2326,7 +2328,7 @@ mod tests {
     fn memory_operations_fixture_decodes_and_replays() {
         // Checked-in feature fixture pins the page cache's and anonymous
         // files' operations and one of the filesystem family's.
-        let bytes = include_bytes!("../tests/fixtures/format-12-memory.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-13-memory.patina");
         let bundle = TraceBundle::from_slice(bytes).unwrap();
         bundle.validate().unwrap();
         assert_eq!(bundle.to_bytes().unwrap(), bytes);
@@ -2376,7 +2378,7 @@ mod tests {
     fn network_operations_fixture_decodes_and_replays() {
         // Checked-in feature fixture pins the network family's operations and
         // a marked datagram's encoding.
-        let bytes = include_bytes!("../tests/fixtures/format-12-network.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-13-network.patina");
         let expected = [
             (
                 Operation::NetBindShared {
@@ -2462,7 +2464,7 @@ mod tests {
         const SIGUSR2: u8 = 12;
         const SI_USER: i32 = 0;
         const SI_TKILL: i32 = -6;
-        let bytes = include_bytes!("../tests/fixtures/format-12-signals.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-13-signals.patina");
         let bundle = TraceBundle::from_slice(bytes).unwrap();
         bundle.validate().unwrap();
         assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
@@ -3370,7 +3372,11 @@ mod tests {
         );
 
         let truncated = directory.path().join("truncated.patina");
-        fs::write(&truncated, b"{\"format_version\":12,").unwrap();
+        fs::write(
+            &truncated,
+            format!("{{\"format_version\":{TRACE_FORMAT_VERSION},"),
+        )
+        .unwrap();
         let error = TraceBundle::load(&truncated).unwrap_err();
         assert!(
             matches!(&error, TraceError::Incomplete { reason, .. } if reason.contains("truncated JSON")),
@@ -3380,7 +3386,9 @@ mod tests {
         let incomplete_metadata = directory.path().join("incomplete-metadata.patina");
         fs::write(
             &incomplete_metadata,
-            br#"{"format_version":12,"metadata":{"root_seed":1,"decision_policy":"splitmix64-v1"},"timelines":[]}"#,
+            format!(
+                r#"{{"format_version":{TRACE_FORMAT_VERSION},"metadata":{{"root_seed":1,"decision_policy":"splitmix64-v1"}},"timelines":[]}}"#
+            ),
         )
         .unwrap();
         let error = TraceBundle::load(&incomplete_metadata).unwrap_err();

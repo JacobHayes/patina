@@ -356,15 +356,6 @@ pub const SCENARIO: Scenario = Scenario {
         Gap {
             status: Status::Pending(Arc::Fs),
             vehicles: &[Vehicle::Libc],
-            what: "readdir and readdir64 fill d_ino with a synthetic one-based snapshot index (c/posix/fs.c patina_fill_dirent_common, readdir64), not the entry's inode",
-            failure: Failure::Differs(&[
-                Difference::check(18, "each d_ino is the entry's inode"),
-                Difference::check(28, "readdir64's d_ino is the entry's inode"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
             what: "the shim's fdopendir (c/posix/fs.c) adopts the descriptor without setting FD_CLOEXEC, which glibc's __alloc_dir sets",
             failure: Failure::Differs(&[
                 Difference::field(45, "fcntl", "ret", Observed::Int(0)),

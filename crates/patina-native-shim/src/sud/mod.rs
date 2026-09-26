@@ -277,6 +277,7 @@ unsafe extern "C" {
         name_buf: *mut c_char,
         buf_len: usize,
         kind: *mut u32,
+        ino: *mut u64,
     ) -> c_int;
     fn patina_read_dir_free(state: *mut c_void);
     // The namespace operations, each on a `(dirfd, path)` the runtime resolves

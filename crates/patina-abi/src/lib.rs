@@ -615,11 +615,15 @@ pub struct FsMetadata {
     pub mode: u32,
 }
 
-/// One immediate child returned by a deterministic directory listing.
+/// One entry of a deterministic directory listing: an immediate child, or the
+/// `.`/`..` a descriptor listing starts with.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FsDirectoryEntry {
     pub name: String,
     pub kind: FsEntryKind,
+    /// The inode the name leads to, the [`FsMetadata::ino`] a metadata query
+    /// on it answers (without following a symlink): `getdents`'s `d_ino`.
+    pub ino: u64,
 }
 
 /// Reference point for changing a virtual file cursor.
@@ -1603,6 +1607,7 @@ mod tests {
         let entry = FsDirectoryEntry {
             name: "pipe".into(),
             kind: FsEntryKind::Fifo,
+            ino: 7,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("\"kind\":\"fifo\""));

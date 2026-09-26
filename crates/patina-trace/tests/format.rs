@@ -16,7 +16,7 @@ fn fixture(name: &str) -> PathBuf {
 
 #[test]
 fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
-    let bundle = TraceBundle::load(fixture("format-12.patina")).unwrap();
+    let bundle = TraceBundle::load(fixture("format-13.patina")).unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
     bundle.validate().unwrap();
     // A run recorded with no fault configuration omits the field from the
@@ -32,7 +32,7 @@ fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
     // on-disk encoding and guards against the fixture drifting from the writer.
     let reencoded = bundle.to_bytes().unwrap();
     assert_eq!(
-        std::fs::read(fixture("format-12.patina")).unwrap(),
+        std::fs::read(fixture("format-13.patina")).unwrap(),
         reencoded
     );
     let text = String::from_utf8(reencoded).unwrap();
@@ -49,14 +49,14 @@ fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
 
 #[test]
 fn current_crash_restart_fixture_parses_validates_and_is_canonical() {
-    let bundle = TraceBundle::load(fixture("format-12-crash-restart.patina")).unwrap();
+    let bundle = TraceBundle::load(fixture("format-13-crash-restart.patina")).unwrap();
     bundle.validate().unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
     assert_eq!(bundle.timelines[0].lifecycle.len(), 5);
     assert_eq!(bundle.timelines[0].decisions[0].order, 1);
     assert_eq!(bundle.timelines[0].decisions[1].incarnation, 1);
     assert_eq!(
-        std::fs::read(fixture("format-12-crash-restart.patina")).unwrap(),
+        std::fs::read(fixture("format-13-crash-restart.patina")).unwrap(),
         bundle.to_bytes().unwrap()
     );
 }
@@ -66,7 +66,7 @@ fn any_other_format_version_is_refused() {
     // The reader decodes only the current format: any other version tag, older
     // or newer, is refused before the body is interpreted, even when the body
     // is otherwise a valid current bundle.
-    let current = std::fs::read(fixture("format-12.patina")).unwrap();
+    let current = std::fs::read(fixture("format-13.patina")).unwrap();
     let mut value: serde_json::Value = serde_json::from_slice(&current).unwrap();
     for version in [0, TRACE_FORMAT_VERSION - 1, TRACE_FORMAT_VERSION + 1, 99] {
         value["format_version"] = serde_json::Value::from(version);

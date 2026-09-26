@@ -36,7 +36,14 @@ pub(super) struct DirIteration {
     /// `getdents64` buffer, held so the next call emits it first (the kernel
     /// never drops an entry it could not return). `patina_read_dir_next` only
     /// advances, so there is no peek — this is the one-slot push-back.
-    pending: Option<(Vec<u8>, u32)>,
+    pending: Option<DirRecord>,
+}
+
+/// One listed entry: its name, `PATINA_ENTRY_*` kind and inode.
+pub(super) struct DirRecord {
+    name: Vec<u8>,
+    kind: u32,
+    ino: u64,
 }
 
 /// Live `getdents64` snapshots, keyed by the runtime directory fd. Only fds the
@@ -1000,6 +1007,7 @@ pub(super) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFormat) -> 
         // Resume at the position: skip the entries before it.
         let mut name = [0u8; 256];
         let mut kind: u32 = 0;
+        let mut ino: u64 = 0;
         for _ in 0..dir.position {
             // SAFETY: `snapshot` is the live box; `name` is writable for its length.
             let rc = unsafe {
@@ -1008,6 +1016,7 @@ pub(super) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFormat) -> 
                     name.as_mut_ptr() as *mut c_char,
                     name.len(),
                     &mut kind,
+                    &mut ino,
                 )
             };
             if rc != 1 {
@@ -1021,14 +1030,20 @@ pub(super) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFormat) -> 
         // Next entry: the pushed-back one first, else consume from the snapshot.
         // `patina_read_dir_next` only advances (no peek), so an entry that does
         // not fit is stashed in `dir.pending` and never dropped.
-        let (name, kind) = if let Some(entry) = dir.pending.take() {
+        let record = if let Some(entry) = dir.pending.take() {
             entry
         } else {
             let mut buf = [0u8; 256];
-            let mut k: u32 = 0;
+            let (mut kind, mut ino) = (0u32, 0u64);
             // SAFETY: `snapshot` is the live box; `buf` is writable for its length.
             let rc = unsafe {
-                patina_read_dir_next(snapshot, buf.as_mut_ptr() as *mut c_char, buf.len(), &mut k)
+                patina_read_dir_next(
+                    snapshot,
+                    buf.as_mut_ptr() as *mut c_char,
+                    buf.len(),
+                    &mut kind,
+                    &mut ino,
+                )
             };
             match rc {
                 1 => {
@@ -1036,7 +1051,11 @@ pub(super) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFormat) -> 
                     let len = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr() as *const c_char) }
                         .to_bytes()
                         .len();
-                    (buf[..len].to_vec(), k)
+                    DirRecord {
+                        name: buf[..len].to_vec(),
+                        kind,
+                        ino,
+                    }
                 }
                 0 => break, // end of directory
                 _ => {
@@ -1048,12 +1067,12 @@ pub(super) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFormat) -> 
                 }
             }
         };
-        let reclen = format.reclen(name.len());
+        let reclen = format.reclen(record.name.len());
         if written + reclen > cap {
             // No room: push the entry back for the next call and stop. If nothing
             // fit at all, the caller's buffer is too small for even one entry.
             let empty = written == 0;
-            dir.pending = Some((name, kind));
+            dir.pending = Some(record);
             if empty {
                 return -EINVAL;
             }
@@ -1065,9 +1084,7 @@ pub(super) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFormat) -> 
         unsafe {
             let rec = (dirp as *mut u8).add(written);
             std::ptr::write_bytes(rec, 0, reclen);
-            // d_ino: the snapshot exposes no inode; the one-based snapshot index
-            // is nonzero and the one the C `readdir` reports.
-            (rec as *mut u64).write_unaligned(dir.position + 1);
+            (rec as *mut u64).write_unaligned(record.ino); // d_ino
             // d_off: the position after this entry, which `lseek` resumes from.
             (rec.add(8) as *mut i64).write_unaligned((dir.position + 1) as i64);
             (rec.add(16) as *mut u16).write_unaligned(reclen as u16); // d_reclen
@@ -1078,9 +1095,9 @@ pub(super) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFormat) -> 
                 #[cfg(target_arch = "x86_64")]
                 DirentFormat::Dirent => reclen - 1,
             };
-            rec.add(type_offset).write(dt_for_kind(kind));
+            rec.add(type_offset).write(dt_for_kind(record.kind));
             let dst = rec.add(format.header());
-            std::ptr::copy_nonoverlapping(name.as_ptr(), dst, name.len());
+            std::ptr::copy_nonoverlapping(record.name.as_ptr(), dst, record.name.len());
         }
         written += reclen;
         dir.position += 1;

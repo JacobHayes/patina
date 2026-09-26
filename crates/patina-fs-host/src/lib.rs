@@ -212,11 +212,14 @@ impl FsDriver for HostCaptureFs {
             }
             let metadata = fs::metadata(&resolved)
                 .map_err(|error| host_error("read captured directory metadata", error))?;
-            entries.insert(name, metadata_from_host(&metadata)?.kind);
+            // `metadata_from_host` normalizes the inode like the rest of the
+            // captured metadata, so the listing and a stat agree.
+            let metadata = metadata_from_host(&metadata)?;
+            entries.insert(name, (metadata.kind, metadata.ino));
         }
         Ok(entries
             .into_iter()
-            .map(|(name, kind)| FsDirectoryEntry { name, kind })
+            .map(|(name, (kind, ino))| FsDirectoryEntry { name, kind, ino })
             .collect())
     }
 }

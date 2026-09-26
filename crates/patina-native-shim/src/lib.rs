@@ -5241,24 +5241,11 @@ pub extern "C" fn patina_set_len(raw_fd: c_int, length: u64) -> c_int {
     }
 }
 
+/// A descriptor's listing as the kernel's `getdents64` reports it: the
+/// driver's descriptor listing already starts with `.` and `..`.
 struct ReadDirState {
     entries: Vec<FsDirectoryEntry>,
     position: usize,
-}
-
-impl ReadDirState {
-    /// A directory's listing as the kernel's `getdents64` reports it: `.` and
-    /// `..` first, then the driver's entries.
-    fn listing(listed: Vec<FsDirectoryEntry>) -> Self {
-        let dots = [".", ".."].map(|name| FsDirectoryEntry {
-            name: name.into(),
-            kind: FsEntryKind::Directory,
-        });
-        ReadDirState {
-            entries: dots.into_iter().chain(listed).collect(),
-            position: 0,
-        }
-    }
 }
 
 /// The `PATINA_ENTRY_*` wire values (`include/patina_native.h`). The C side ORs
@@ -6118,9 +6105,9 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
 /// descriptor first (which is also what makes `dirfd()` on one meaningful), and
 /// `fdopendir` and the raw `getdents64` row already hold one.
 ///
-/// The snapshot lists `.` and `..` first ([`ReadDirState::listing`]): every
-/// directory has both, and the kernel's `getdents64` (so every `readdir`)
-/// reports them.
+/// The snapshot lists `.` and `..` first (the driver's `read_directory_fd`):
+/// every directory has both, and the kernel's `getdents64` (so every
+/// `readdir`) reports them, each entry with its inode.
 ///
 /// # Safety
 /// `state_out` must be writable.
@@ -6136,7 +6123,10 @@ pub unsafe extern "C" fn patina_read_dir(raw_fd: c_int, state_out: *mut *mut c_v
     };
     match with_context(|context| context.fs_read_directory_fd(fd)) {
         Ok(listed) => {
-            let state = Box::new(ReadDirState::listing(listed));
+            let state = Box::new(ReadDirState {
+                entries: listed,
+                position: 0,
+            });
             // SAFETY: `state_out` was checked and is required to be writable.
             unsafe { state_out.write(Box::into_raw(state).cast()) };
             set_errno(0);
@@ -6146,22 +6136,24 @@ pub unsafe extern "C" fn patina_read_dir(raw_fd: c_int, state_out: *mut *mut c_v
     }
 }
 
-/// Copy the next directory-snapshot entry into caller-owned storage.
+/// Copy the next directory-snapshot entry (its name, kind and inode) into
+/// caller-owned storage.
 ///
 /// Returns 1 for an entry, 0 at end-of-directory, and -1 on error.
 ///
 /// # Safety
 /// `state` must be a pointer returned by [`patina_read_dir`], `name_buf` must
-/// be writable for `buf_len` bytes, and `kind` must be writable.
+/// be writable for `buf_len` bytes, and `kind` and `ino` must be writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_read_dir_next(
     state: *mut c_void,
     name_buf: *mut c_char,
     buf_len: usize,
     kind: *mut u32,
+    ino: *mut u64,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if state.is_null() || kind.is_null() || (buf_len != 0 && name_buf.is_null()) {
+    if state.is_null() || kind.is_null() || ino.is_null() || (buf_len != 0 && name_buf.is_null()) {
         return fail(EINVAL);
     }
     // SAFETY: Guaranteed by this function's C ABI contract.
@@ -6184,6 +6176,7 @@ pub unsafe extern "C" fn patina_read_dir_next(
         destination[..bytes.len()].copy_from_slice(bytes);
         destination[bytes.len()] = 0;
         kind.write(metadata_kind(entry.kind));
+        ino.write(entry.ino);
     }
     state.position += 1;
     set_errno(0);
@@ -15645,33 +15638,8 @@ mod posix_source_lints {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod directory_iteration_tests {
-    use super::*;
-
-    #[test]
-    fn a_listing_starts_with_dot_and_dot_dot() {
-        let file = FsDirectoryEntry {
-            name: "a".into(),
-            kind: FsEntryKind::File,
-        };
-        let names = |listed: Vec<FsDirectoryEntry>| {
-            ReadDirState::listing(listed)
-                .entries
-                .into_iter()
-                .map(|entry| (entry.name, entry.kind))
-                .collect::<Vec<_>>()
-        };
-        let dir = |name: &str| (name.to_string(), FsEntryKind::Directory);
-        // An empty directory (the root included) still lists both.
-        assert_eq!(names(Vec::new()), [dir("."), dir("..")]);
-        assert_eq!(
-            names(vec![file]),
-            [dir("."), dir(".."), ("a".into(), FsEntryKind::File)]
-        );
-    }
-
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_directory_seeks_like_tmpfs_and_never_answers_espipe() {
         use crate::sud::{release_dir_iteration, seek_dir_iteration};

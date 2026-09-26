@@ -7840,12 +7840,16 @@ fn native_replay_refuses_incomplete_traces_before_guest_exec() {
         ],
     );
 
+    let incomplete_metadata = format!(
+        r#"{{"format_version":{},"metadata":{{"root_seed":1,"decision_policy":"splitmix64-v1"}},"timelines":[]}}"#,
+        patina_dst_trace::TRACE_FORMAT_VERSION
+    );
     let cases: [(&str, &[u8], &str); 3] = [
         ("empty", b"", "empty trace"),
         ("truncated", b"{\"format_version\":4,", "truncated JSON"),
         (
             "incomplete-metadata",
-            br#"{"format_version":12,"metadata":{"root_seed":1,"decision_policy":"splitmix64-v1"},"timelines":[]}"#,
+            incomplete_metadata.as_bytes(),
             "trace metadata is missing required field `fingerprint`",
         ),
     ];
