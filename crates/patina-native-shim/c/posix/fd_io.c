@@ -539,6 +539,236 @@ int tcgetattr(int fd, struct termios *termios_p) {
            sizeof termios_p->c_cc - sizeof kernel.c_cc);
     return 0;
 }
+
+/*
+ * glibc 2.39's pseudoterminal and terminal-settings functions (Linux), over
+ * the same entries the rows take: `/dev/ptmx` through the open entry, the
+ * tty requests through `patina_ioctl`. The pairs are the virtual machine's
+ * (`src/thread/pty.rs`), so none of this reaches the host's terminals.
+ */
+
+/* glibc's private IBAUD0 input-speed bit in c_iflag (termios/speed.c), which
+ * tcsetattr strips before the kernel sees the flags. */
+#define PATINA_IBAUD0 020000000000u
+
+/* The ioctl's error number, set as errno and answered. */
+static int patina_ioctl_error(void) {
+    int error = patina_errno();
+    errno = error;
+    return error;
+}
+
+/* glibc's tcsetattr (sysdeps/unix/sysv/linux/tcsetattr.c) as Ubuntu builds
+ * 2.39, with Debian's local-tcsetaddr.diff. The settings are read first (a
+ * failure is only remembered, in errno); the action picks
+ * TCSETS/TCSETSW/TCSETSF (EINVAL for any other), and the user struct becomes
+ * the kernel's: the flags less IBAUD0, the line discipline and the first 19
+ * control characters. When both requests succeeded the settings are read
+ * again (a failure answers 0, errno as it was): if the input flags (IBAUD0
+ * aside), the output, control and local flags and the line discipline all
+ * read back as they were, and the driver refused the parity or receiver
+ * asked for, or a character size other than CS5 (a pty keeps CS8|CREAD
+ * without parity), the answer is -1 EINVAL, though the kernel applied the
+ * rest. */
+static int patina_tcsetattr(int fd, int optional_actions, const struct termios *termios_p) {
+    struct patina_kernel_termios old;
+    int old_result = fail_int(patina_ioctl(fd, TCGETS, &old));
+    unsigned long command;
+    switch (optional_actions) {
+        case TCSANOW: command = TCSETS; break;
+        case TCSADRAIN: command = TCSETSW; break;
+        case TCSAFLUSH: command = TCSETSF; break;
+        default: errno = EINVAL; return -1;
+    }
+    struct patina_kernel_termios kernel;
+    kernel.c_iflag = termios_p->c_iflag & ~PATINA_IBAUD0;
+    kernel.c_oflag = termios_p->c_oflag;
+    kernel.c_cflag = termios_p->c_cflag;
+    kernel.c_lflag = termios_p->c_lflag;
+    kernel.c_line = termios_p->c_line;
+    memcpy(kernel.c_cc, termios_p->c_cc, sizeof kernel.c_cc);
+    int result = fail_int(patina_ioctl(fd, command, &kernel));
+    if (result != 0 || old_result != 0) return result;
+    int saved = errno;
+    if (fail_int(patina_ioctl(fd, TCGETS, &kernel)) != 0) {
+        errno = saved;
+        return 0;
+    }
+    int unchanged = old.c_oflag == kernel.c_oflag && old.c_lflag == kernel.c_lflag &&
+                    old.c_line == kernel.c_line && old.c_cflag == kernel.c_cflag &&
+                    (old.c_iflag | PATINA_IBAUD0) == (kernel.c_iflag | PATINA_IBAUD0);
+    tcflag_t asked = termios_p->c_cflag;
+    int refused = (asked & (PARENB | CREAD)) != (kernel.c_cflag & (PARENB | CREAD)) ||
+                  ((asked & CSIZE) != 0 && (asked & CSIZE) != (kernel.c_cflag & CSIZE));
+    if (unchanged && refused) {
+        errno = EINVAL;
+        return -1;
+    }
+    errno = saved;
+    return 0;
+}
+
+int tcsetattr(int fd, int optional_actions, const struct termios *termios_p) {
+    return patina_tcsetattr(fd, optional_actions, termios_p);
+}
+
+/* glibc's tcdrain: TCSBRK with a nonzero argument (wait, send no break), a
+ * cancellation point. */
+int tcdrain(int fd) {
+    PATINA_CANCEL_POINT("tcdrain");
+    return fail_int(patina_ioctl(fd, TCSBRK, (void *)1));
+}
+
+/* glibc's posix_openpt: an open of /dev/ptmx with the caller's flags. */
+int posix_openpt(int flags) {
+    return patina_openat_impl(AT_FDCWD, "/dev/ptmx", flags, 0);
+}
+
+/* A master request (TIOCGPTN, TIOCSPTLCK) that grantpt/unlockpt make: 0, or
+ * -1 with errno, ENOTTY spelled as POSIX's EINVAL. */
+static int patina_master_request(int fd, unsigned long request, void *arg) {
+    if (patina_ioctl(fd, request, arg) == 0) return 0;
+    int error = patina_errno();
+    errno = error == ENOTTY ? EINVAL : error;
+    return -1;
+}
+
+/* glibc's grantpt (sysdeps/unix/sysv/linux/grantpt.c): devpts made the node
+ * with its owner, group and mode already, so it only checks that the
+ * descriptor is a master. */
+int grantpt(int fd) {
+    unsigned int index;
+    return patina_master_request(fd, TIOCGPTN, &index);
+}
+
+/* glibc's unlockpt: TIOCSPTLCK with 0. */
+int unlockpt(int fd) {
+    int unlock = 0;
+    return patina_master_request(fd, TIOCSPTLCK, &unlock);
+}
+
+/* glibc's ptsname_r: the pair's index (TIOCGPTN; its error number answered),
+ * then "/dev/pts/<index>" if the buffer has room for it and its terminator
+ * (ERANGE otherwise), errno left as it was. */
+static int patina_ptsname_into(int fd, char *buf, size_t buflen) {
+    int saved = errno;
+    unsigned int index;
+    if (patina_ioctl(fd, TIOCGPTN, &index) != 0) return patina_ioctl_error();
+    char digits[10];
+    size_t count = 0;
+    do {
+        digits[count++] = (char)('0' + index % 10);
+        index /= 10;
+    } while (index != 0);
+    const size_t prefix = sizeof "/dev/pts/" - 1;
+    if (buflen < prefix + count + 1) {
+        errno = ERANGE;
+        return ERANGE;
+    }
+    memcpy(buf, "/dev/pts/", prefix);
+    for (size_t i = 0; i < count; i++) buf[prefix + i] = digits[count - 1 - i];
+    buf[prefix + count] = '\0';
+    errno = saved;
+    return 0;
+}
+
+int ptsname_r(int fd, char *buf, size_t buflen) {
+    return patina_ptsname_into(fd, buf, buflen);
+}
+
+/* glibc's ptsname: ptsname_r into a static buffer, NULL on failure. */
+char *ptsname(int fd) {
+    static char name[sizeof "/dev/pts/" + 20];
+    return patina_ptsname_into(fd, name, sizeof name) == 0 ? name : NULL;
+}
+
+/* glibc's ttyname_r (sysdeps/unix/sysv/linux/ttyname_r.c): EINVAL for no
+ * buffer, ERANGE for one shorter than "/dev/pts/", the isatty errno for a
+ * descriptor that is no terminal; then the name /proc/self/fd reads for it
+ * (the virtual machine's: /dev/ptmx for a master, /dev/pts/<index> for a
+ * slave). A buffer with room for the name but not its terminator gets it
+ * back truncated, which does not stat to the terminal, and glibc's scan of
+ * the devices finds no room either: ENODEV. */
+static int patina_ttyname_into(int fd, char *buf, size_t buflen) {
+    if (buf == NULL) {
+        errno = EINVAL;
+        return EINVAL;
+    }
+    if (buflen < sizeof "/dev/pts/") {
+        errno = ERANGE;
+        return ERANGE;
+    }
+    struct patina_kernel_termios kernel;
+    if (patina_ioctl(fd, TCGETS, &kernel) != 0) return patina_ioctl_error();
+    char name[sizeof "/dev/pts/" + 20];
+    intptr_t length = patina_pty_name(fd, name, sizeof name);
+    if (length < 0) return patina_ioctl_error();
+    if ((size_t)length >= buflen) {
+        errno = ENODEV;
+        return ENODEV;
+    }
+    memcpy(buf, name, (size_t)length + 1);
+    return 0;
+}
+
+int ttyname_r(int fd, char *buf, size_t buflen) {
+    return patina_ttyname_into(fd, buf, buflen);
+}
+
+/* The fortified forms glibc's _FORTIFY_SOURCE calls when the length is not
+ * a constant (debug/ptsname_r_chk.c, debug/ttyname_r_chk.c): a length past
+ * the buffer's object aborts (`__chk_fail`) before anything else. */
+int __ptsname_r_chk(int fd, char *buf, size_t buflen, size_t nreal) {
+    if (buflen > nreal) patina_chk_fail();
+    return patina_ptsname_into(fd, buf, buflen);
+}
+
+int __ttyname_r_chk(int fd, char *buf, size_t buflen, size_t nreal) {
+    if (buflen > nreal) patina_chk_fail();
+    return patina_ttyname_into(fd, buf, buflen);
+}
+
+/* glibc's ttyname: ttyname_r into a static buffer, NULL on failure. */
+char *ttyname(int fd) {
+    static char name[4096];
+    return patina_ttyname_into(fd, name, sizeof name) == 0 ? name : NULL;
+}
+
+/* glibc's openpty (login/openpty.c): a master (posix_openpt(O_RDWR)), grantpt,
+ * unlockpt, the slave through TIOCGPTPEER (O_RDWR|O_NOCTTY; by name if that
+ * fails), the settings (TCSAFLUSH) and window size when given, errors on those
+ * ignored, and the slave's name when asked. On failure both descriptors are
+ * closed, -1 answered and the out-parameters left as they were. */
+int openpty(int *amaster, int *aslave, char *name, const struct termios *termp,
+            const struct winsize *winp) {
+    char path[sizeof "/dev/pts/" + 20];
+    int master = patina_openat_impl(AT_FDCWD, "/dev/ptmx", O_RDWR, 0);
+    if (master == -1) return -1;
+    int slave = -1;
+    unsigned int index;
+    int unlock = 0;
+    if (patina_master_request(master, TIOCGPTN, &index) != 0) goto fail;
+    if (patina_master_request(master, TIOCSPTLCK, &unlock) != 0) goto fail;
+    slave = fail_int(patina_ioctl(master, TIOCGPTPEER, (void *)(intptr_t)(O_RDWR | O_NOCTTY)));
+    if (slave == -1) {
+        if (patina_ptsname_into(master, path, sizeof path) != 0) goto fail;
+        slave = patina_openat_impl(AT_FDCWD, path, O_RDWR | O_NOCTTY, 0);
+        if (slave == -1) goto fail;
+    }
+    if (termp != NULL) (void)patina_tcsetattr(slave, TCSAFLUSH, termp);
+    if (winp != NULL) (void)patina_ioctl(slave, TIOCSWINSZ, (void *)winp);
+    if (name != NULL) {
+        if (patina_ptsname_into(master, path, sizeof path) != 0) goto fail;
+        memcpy(name, path, strlen(path) + 1);
+    }
+    *amaster = master;
+    *aslave = slave;
+    return 0;
+fail:
+    (void)patina_close(master);
+    if (slave != -1) (void)patina_close(slave);
+    return -1;
+}
 #endif
 
 /*

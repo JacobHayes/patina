@@ -57,6 +57,7 @@
     X(__ppoll_chk) \
     X(__pread64_chk) \
     X(__pread_chk) \
+    X(__ptsname_r_chk) \
     X(__read) \
     X(__read_chk) \
     X(__readlink_chk) \
@@ -64,6 +65,7 @@
     X(__recv_chk) \
     X(__recvfrom_chk) \
     X(__res_init) \
+    X(__ttyname_r_chk) \
     X(__write) \
     X(abort) \
     X(accept) \
@@ -169,6 +171,7 @@
     X(gettimeofday) \
     X(getuid) \
     X(getxattr) \
+    X(grantpt) \
     X(if_nametoindex) \
     X(init_module) \
     X(ioctl) \
@@ -218,6 +221,7 @@
     X(openat) \
     X(openat64) \
     X(opendir) \
+    X(openpty) \
     X(pause) \
     X(pidfd_getfd) \
     X(pidfd_open) \
@@ -230,6 +234,7 @@
     X(posix_fadvise64) \
     X(posix_fallocate) \
     X(posix_fallocate64) \
+    X(posix_openpt) \
     X(ppoll) \
     X(prctl) \
     X(pread) \
@@ -276,6 +281,8 @@
     X(pthread_sigmask) \
     X(pthread_testcancel) \
     X(ptrace) \
+    X(ptsname) \
+    X(ptsname_r) \
     X(putchar) \
     X(putenv) \
     X(puts) \
@@ -365,18 +372,23 @@
     X(symlinkat) \
     X(sysconf) \
     X(sysinfo) \
+    X(tcdrain) \
     X(tcgetattr) \
+    X(tcsetattr) \
     X(telldir) \
     X(tgkill) \
     X(time) \
     X(tkill) \
     X(truncate) \
     X(truncate64) \
+    X(ttyname) \
+    X(ttyname_r) \
     X(umask) \
     X(umount2) \
     X(uname) \
     X(unlink) \
     X(unlinkat) \
+    X(unlockpt) \
     X(unsetenv) \
     X(unshare) \
     X(utime) \

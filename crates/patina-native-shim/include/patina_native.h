@@ -683,6 +683,13 @@ uint32_t patina_gid(void);
  * caller's, but for the nodes the virtual kernel's boot or devpts makes
  * (namespace files, the entropy device, /dev/ptmx, a pseudoterminal's slave). */
 void patina_node_owner(uint32_t fs, uint32_t *uid, uint32_t *gid);
+#ifdef __linux__
+/* The name /proc/self/fd reads for a pseudoterminal descriptor (/dev/ptmx for
+ * a master, /dev/pts/<index> for a slave): its length, written with its
+ * terminator when `len` has room; -1 with patina_errno() (ENOTTY for any
+ * other descriptor, EBADF for none). */
+intptr_t patina_pty_name(int32_t fd, char *buf, size_t len);
+#endif
 #ifdef __APPLE__
 /*
  * uname(3) on Darwin: the virtual Darwin kernel (`Darwin`, the run's node

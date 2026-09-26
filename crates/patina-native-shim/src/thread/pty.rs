@@ -745,3 +745,31 @@ pub(crate) fn inq(side: Side, index: u32) -> Result<i32, c_int> {
     }
     Ok(0)
 }
+
+/// The name `/proc/self/fd` reads for a pseudoterminal descriptor
+/// (`ttyname`'s answer): its length, written with its terminator when `len`
+/// has room; `ENOTTY` for any other descriptor, `EBADF` for none.
+///
+/// # Safety
+/// `buf` must be writable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_pty_name(fd: c_int, buf: *mut c_char, len: usize) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let resolved = match crate::resolve_fd(fd) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno) as isize,
+    };
+    let Some(side) = Side::of(resolved.kind) else {
+        return fail(ENOTTY) as isize;
+    };
+    let name = name(side, resolved.handle as u32);
+    if name.len() < len {
+        // SAFETY: writable for `len` bytes per this function's contract.
+        unsafe {
+            std::ptr::copy_nonoverlapping(name.as_ptr(), buf.cast::<u8>(), name.len());
+            buf.add(name.len()).write(0);
+        }
+    }
+    set_errno(0);
+    name.len() as isize
+}

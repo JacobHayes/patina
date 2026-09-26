@@ -485,6 +485,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &entropy::getrandom::SCENARIO,
     &entropy::urandom::SCENARIO,
     &fd::pipes::SCENARIO,
+    &fd::pty::SCENARIO,
     &fd::stdio::SCENARIO,
     &fd::table::SCENARIO,
     &fd::termios::SCENARIO,

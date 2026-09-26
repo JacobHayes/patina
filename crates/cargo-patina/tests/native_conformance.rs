@@ -1375,6 +1375,11 @@ fn fd_pipes() {
 }
 
 #[test]
+fn fd_pty() {
+    conform("fd/pty");
+}
+
+#[test]
 fn fd_stdio() {
     conform("fd/stdio");
 }
