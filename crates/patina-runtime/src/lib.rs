@@ -5559,6 +5559,30 @@ recording was produced by a guest whose result type no longer matches this one"
             .fd_metadata_unfaulted(fd)?)
     }
 
+    /// How many of pages `first..=last` of `fd`'s file are dirty (written
+    /// since their last durability point), read UNRECORDED and never faulted
+    /// as [`Self::fs_fd_metadata_unrecorded`] is (`cachestat`). A
+    /// host-capture replay executes no driver and has no answer.
+    pub fn fs_dirty_pages_unrecorded(
+        &mut self,
+        fd: Fd,
+        first: u64,
+        last: u64,
+    ) -> Result<u64, RuntimeError> {
+        if self.filesystem_is_capture {
+            return Err(EffectError::new(
+                ErrorCode::Denied,
+                "a host-capture replay does not model dirty pages",
+            )
+            .into());
+        }
+        Ok(self
+            .filesystem
+            .as_mut()
+            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
+            .dirty_pages(fd, first, last)?)
+    }
+
     /// The metadata of the entry at canonical `path`, read UNRECORDED and
     /// never faulted as [`Self::fs_fd_metadata_unrecorded`] is: the directory
     /// an fs notification is reported to, looked up inside the call that

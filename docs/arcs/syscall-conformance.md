@@ -269,7 +269,11 @@ forwards into the same dispatcher instead of its two-number allowlist.
   libc-only holes strong-defined: fopen family, mkstemp/mkdtemp/tmpfile,
   realpath, scandir, statvfs, remove; ustat/sysfs/name_to_handle_at constants;
   cachestat over files the filesystem holds whole in memory (every page up
-  to the end cached, none dirty, under writeback or evicted).
+  to the end cached; dirty the 4096-byte pages written since the crash
+  model last made them durable, less those an `O_TRUNC` open, a truncation
+  or a punched or zeroed range dropped, and those a shared mapping changed
+  that no write-back wrote yet, with no background writeback; none under
+  writeback or evicted; a hugetlbfs memfd EOPNOTSUPP).
 - **memory + ipc**: MAP_SHARED coherence with fs-mem (whole-file flush at read
   boundaries while a writable shared mapping is live); memfd_create + seals;
   shm_open/unlink over `/dev/shm` in fs-mem; SysV shm (host memfd-backed

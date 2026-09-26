@@ -611,6 +611,10 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.fd_metadata_unfaulted(fd)
     }
 
+    fn dirty_pages(&mut self, fd: Fd, first: u64, last: u64) -> DriverResult<u64> {
+        self.inner.dirty_pages(fd, first, last)
+    }
+
     fn crash(&mut self) -> DriverResult<()> {
         self.inner.crash()
     }

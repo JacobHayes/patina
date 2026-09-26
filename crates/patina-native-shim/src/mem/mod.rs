@@ -1357,6 +1357,27 @@ fn write_back(ino: u64, handle: u64) -> Result<(), c_int> {
     Ok(())
 }
 
+/// The pages of the file `handle` is open on that a store through a shared
+/// view changed and no write-back has written yet, by index: dirty on 6.8
+/// from the write fault on (`cachestat`).
+pub(crate) fn view_dirty_pages(handle: u64) -> Vec<u64> {
+    let Some(ino) = cached_ino(handle) else {
+        return Vec::new();
+    };
+    MAPPINGS
+        .lock()
+        .caches
+        .get(&ino)
+        .map(|cache| {
+            cache
+                .dirty_pages()
+                .into_iter()
+                .map(|(offset, _)| offset / PAGE as u64)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The inode `handle` is open on, when a page cache exists for it.
 fn cached_ino(handle: u64) -> Option<u64> {
     if !caching() {

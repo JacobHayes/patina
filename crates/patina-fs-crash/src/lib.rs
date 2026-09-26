@@ -80,6 +80,8 @@ use patina_dst_rng_seeded::SplitMix64;
 /// surviving entry's real mode is written back from the live image or the
 /// durable baseline immediately afterwards.
 const RECONSTRUCTION_FILE_MODE: u32 = 0o666;
+/// The page `cachestat` counts dirty pages in: the virtual machine's.
+const DIRTY_PAGE: u64 = 4096;
 const RECONSTRUCTION_DIRECTORY_MODE: u32 = 0o777;
 
 /// Granularity at which a torn write reverts on crash.
@@ -251,6 +253,10 @@ pub struct CrashFs {
     pending: Vec<PendingOp>,
     /// Live descriptor-to-path map used to attribute `sync` calls.
     open_paths: BTreeMap<Fd, String>,
+    /// The 4096-byte pages of each named file written since its last
+    /// durability point, by inode: `cachestat`'s dirty pages. Anonymous
+    /// files are no part of the durable image and have none.
+    dirty: BTreeMap<u64, BTreeSet<u64>>,
     /// The single most recent unsynced write as `(path, offset, len)`. Under
     /// [`TornGranularity::Byte`] this is the region eligible for a sub-block
     /// partial tear on crash; `None` before any write and after a durability
@@ -384,6 +390,7 @@ impl CrashFs {
             staged_times: BTreeMap::new(),
             pending: Vec::new(),
             open_paths: BTreeMap::new(),
+            dirty: BTreeMap::new(),
             last_write: None,
             policy,
             rng: SplitMix64::new(seed),
@@ -397,6 +404,7 @@ impl CrashFs {
         self.staged_content.clear();
         self.staged_times.clear();
         self.pending.clear();
+        self.dirty.clear();
         self.last_write = None;
     }
 
@@ -458,6 +466,71 @@ impl CrashFs {
 
     pub fn crash_count(&self) -> u64 {
         self.crashes
+    }
+
+    /// `written` bytes at `offset` of named file `fd` are dirty pages until
+    /// its next durability point.
+    fn dirtied(&mut self, fd: Fd, offset: u64, written: usize) {
+        if written == 0 {
+            return;
+        }
+        let Ok(metadata) = self.live.fd_metadata(fd) else {
+            return;
+        };
+        let first = offset / DIRTY_PAGE;
+        let last = (offset + written as u64 - 1) / DIRTY_PAGE;
+        self.dirty
+            .entry(metadata.ino)
+            .or_default()
+            .extend(first..=last);
+    }
+
+    /// `ino` is `len` bytes long now: its pages past the end are gone.
+    fn truncated(&mut self, ino: u64, len: u64) {
+        if let Some(pages) = self.dirty.get_mut(&ino) {
+            pages.retain(|page| *page < len.div_ceil(DIRTY_PAGE));
+        }
+    }
+
+    /// `[offset, offset + len)` of named file `fd` was zeroed or punched out
+    /// (`ext4_zero_range`, `ext4_punch_hole`): the range is written back
+    /// (`filemap_write_and_wait_range`) and its whole pages dropped, and a
+    /// page it covers only in part is zeroed through its block, which dirties
+    /// it again, when that page lies within the file. The volume stores a
+    /// file densely, so every such page has a block; on ext4 a hole there
+    /// would stay clean.
+    fn zeroed(&mut self, fd: Fd, offset: u64, len: u64) -> DriverResult<()> {
+        if len == 0 || !self.open_paths.contains_key(&fd) {
+            return Ok(());
+        }
+        let metadata = self.live.fd_metadata(fd)?;
+        let end = offset.saturating_add(len);
+        let (first, last) = (offset / DIRTY_PAGE, (end - 1) / DIRTY_PAGE);
+        let partial = [
+            (offset % DIRTY_PAGE != 0).then_some(first),
+            (end % DIRTY_PAGE != 0).then_some(last),
+        ];
+        let pages = self.dirty.entry(metadata.ino).or_default();
+        pages.retain(|page| *page < first || *page > last);
+        for page in partial.into_iter().flatten() {
+            if page * DIRTY_PAGE < metadata.len {
+                pages.insert(page);
+            }
+        }
+        if pages.is_empty() {
+            self.dirty.remove(&metadata.ino);
+        }
+        Ok(())
+    }
+
+    /// `ino` may have lost its last name or reference: once it is gone, its
+    /// dirty pages go with it.
+    fn forget_if_gone(&mut self, ino: Option<u64>) {
+        if let Some(ino) = ino.filter(|ino| self.dirty.contains_key(ino)) {
+            if self.live.inode_metadata(ino).is_err() {
+                self.dirty.remove(&ino);
+            }
+        }
     }
 
     pub fn contents(&self, path: &str) -> DriverResult<&[u8]> {
@@ -911,6 +984,7 @@ impl CrashFs {
         self.staged_content.clear();
         self.staged_times.clear();
         self.pending.clear();
+        self.dirty.clear();
         self.last_write = None;
         Ok(())
     }
@@ -1028,6 +1102,12 @@ impl FsDriver for CrashFs {
                 kind: FsEntryKind::File,
             });
         }
+        // An `O_TRUNC` open of an existing file drops its pages, dirty ones
+        // included (`do_truncate`), as a shortening `set_len` does.
+        if flags.truncate && existed {
+            let metadata = self.live.fd_metadata(fd)?;
+            self.truncated(metadata.ino, metadata.len);
+        }
         self.open_paths.insert(fd, normalized);
         Ok(fd)
     }
@@ -1050,6 +1130,7 @@ impl FsDriver for CrashFs {
                 .ok()
                 .and_then(|end| end.checked_sub(written))
             {
+                self.dirtied(fd, start as u64, written);
                 self.last_write = Some((path, start, written));
             }
         }
@@ -1064,10 +1145,11 @@ impl FsDriver for CrashFs {
         bytes: &[u8],
     ) -> DriverResult<usize> {
         let written = self.live.write_at(clock, fd, offset, bytes)?;
-        if let (Ok(offset), Some(path)) =
+        if let (Ok(start), Some(path)) =
             (usize::try_from(offset), self.open_paths.get(&fd).cloned())
         {
-            self.last_write = Some((path, offset, written));
+            self.dirtied(fd, offset, written);
+            self.last_write = Some((path, start, written));
         }
         Ok(written)
     }
@@ -1081,10 +1163,11 @@ impl FsDriver for CrashFs {
         bytes: &[u8],
     ) -> DriverResult<usize> {
         let written = self.live.write_back_at(clock, fd, offset, bytes)?;
-        if let (Ok(offset), Some(path)) =
+        if let (Ok(start), Some(path)) =
             (usize::try_from(offset), self.open_paths.get(&fd).cloned())
         {
-            self.last_write = Some((path, offset, written));
+            self.dirtied(fd, offset, written);
+            self.last_write = Some((path, start, written));
         }
         Ok(written)
     }
@@ -1113,8 +1196,10 @@ impl FsDriver for CrashFs {
     }
 
     fn close(&mut self, fd: Fd) -> DriverResult<()> {
+        let ino = self.live.fd_metadata(fd).ok().map(|metadata| metadata.ino);
         self.live.close(fd)?;
         self.open_paths.remove(&fd);
+        self.forget_if_gone(ino);
         Ok(())
     }
 
@@ -1176,17 +1261,15 @@ impl FsDriver for CrashFs {
     fn remove_file(&mut self, clock: FsClock, path: &str) -> DriverResult<()> {
         // A symlink is removed through this call too, so capture the kind before
         // it disappears to journal the correct survival set.
-        let kind = self
-            .live
-            .metadata(path)
-            .map(|metadata| metadata.kind)
-            .unwrap_or(FsEntryKind::File);
+        let before = self.live.metadata(path).ok();
+        let kind = before.map_or(FsEntryKind::File, |metadata| metadata.kind);
         self.live.remove_file(clock, path)?;
         let normalized = normalize_entry_path(path).expect("remove normalized the path already");
         self.journal(PendingKind::Remove {
             path: normalized,
             kind,
         });
+        self.forget_if_gone(before.map(|metadata| metadata.ino));
         Ok(())
     }
 
@@ -1199,6 +1282,7 @@ impl FsDriver for CrashFs {
             FsEntryKind::File => {
                 let bytes = self.live.fd_contents(fd)?.to_vec();
                 self.staged_content.insert(metadata.ino, bytes);
+                self.dirty.remove(&metadata.ino);
             }
             FsEntryKind::Directory => {
                 if let Some(path) = self.open_paths.get(&fd).cloned() {
@@ -1218,12 +1302,26 @@ impl FsDriver for CrashFs {
 
     /// A length change is unsynced data like a write: the live image takes it
     /// and the durable baseline keeps the old bytes until a `sync`.
+    /// Pages past a shortened end leave the cache, dirty or not.
     fn set_len(&mut self, clock: FsClock, fd: Fd, len: u64) -> DriverResult<()> {
-        self.live.set_len(clock, fd, len)
+        self.live.set_len(clock, fd, len)?;
+        let ino = self.live.fd_metadata(fd)?.ino;
+        self.truncated(ino, len);
+        Ok(())
     }
 
     fn set_len_by_path(&mut self, clock: FsClock, path: &str, len: u64) -> DriverResult<()> {
-        self.live.set_len_by_path(clock, path, len)
+        self.live.set_len_by_path(clock, path, len)?;
+        let ino = self.live.metadata(path)?.ino;
+        self.truncated(ino, len);
+        Ok(())
+    }
+
+    fn dirty_pages(&mut self, fd: Fd, first: u64, last: u64) -> DriverResult<u64> {
+        let ino = self.live.fd_metadata(fd)?.ino;
+        Ok(self.dirty.get(&ino).map_or(0, |pages| {
+            pages.range(first..=last.max(first)).count() as u64
+        }))
     }
 
     fn allocate(
@@ -1235,7 +1333,12 @@ impl FsDriver for CrashFs {
         zero: bool,
         keep_size: bool,
     ) -> DriverResult<()> {
-        self.live.allocate(clock, fd, offset, len, zero, keep_size)
+        self.live
+            .allocate(clock, fd, offset, len, zero, keep_size)?;
+        if zero {
+            self.zeroed(fd, offset, len)?;
+        }
+        Ok(())
     }
 
     fn read_directory(
@@ -1262,8 +1365,11 @@ impl FsDriver for CrashFs {
     }
 
     fn rename(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
+        let replaced = self.live.metadata(to).ok().map(|metadata| metadata.ino);
         self.live.rename(clock, from, to)?;
-        self.record_rename(from, to, false)
+        self.record_rename(from, to, false)?;
+        self.forget_if_gone(replaced);
+        Ok(())
     }
 
     /// One journal entry for the rename and its whiteout, decided together.
@@ -1849,6 +1955,61 @@ mod tests {
         let after = fs.contents("/db").unwrap();
         assert_eq!(after[1], b'Y', "write_at moved the shared cursor");
         assert_eq!(after[OFFSET as usize + 32], b'X');
+    }
+
+    /// A page is dirty from a write until a durability point: an fsync of
+    /// its file, a whole-volume sync or a crash; a truncation (an `O_TRUNC`
+    /// open included) drops the pages past the new end, a punched or zeroed
+    /// range its whole pages, and a positional write dirties its pages. A
+    /// file with no name or descriptor left keeps none.
+    #[test]
+    fn written_pages_are_dirty_until_made_durable() {
+        let page = DIRTY_PAGE as usize;
+        let mut fs = CrashFs::default();
+        let fd = write(&mut fs, "/f", &vec![b'x'; 3 * page]);
+        let dirty = |fs: &mut CrashFs| fs.dirty_pages(fd, 0, u64::MAX).unwrap();
+        assert_eq!(dirty(&mut fs), 3);
+        assert_eq!(fs.dirty_pages(fd, 1, 1).unwrap(), 1);
+        fs.set_len(FsClock::EPOCH, fd, page as u64 + 1).unwrap();
+        assert_eq!(dirty(&mut fs), 2);
+        fs.sync(fd).unwrap();
+        assert_eq!(dirty(&mut fs), 0);
+        fs.write_at(FsClock::EPOCH, fd, page as u64 - 1, b"yz")
+            .unwrap();
+        assert_eq!(dirty(&mut fs), 2);
+        fs.sync_all().unwrap();
+        assert_eq!(dirty(&mut fs), 0);
+        fs.write_at(FsClock::EPOCH, fd, 0, b"w").unwrap();
+        fs.crash().unwrap();
+        assert_eq!(dirty(&mut fs), 0);
+
+        // An O_TRUNC open drops them, however far the file grows back.
+        fs.write_at(FsClock::EPOCH, fd, 0, &vec![b'x'; 2 * page])
+            .unwrap();
+        let again = fs
+            .open(FsClock::EPOCH, "/f", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.set_len(FsClock::EPOCH, again, 2 * page as u64).unwrap();
+        assert_eq!(dirty(&mut fs), 0);
+
+        // A punched or zeroed range is written back and its whole pages
+        // dropped; a page it covers in part is zeroed, so dirty again.
+        fs.write_at(FsClock::EPOCH, fd, 0, &vec![b'x'; 4 * page])
+            .unwrap();
+        fs.allocate(FsClock::EPOCH, fd, page as u64, 2 * page as u64, true, true)
+            .unwrap();
+        assert_eq!(dirty(&mut fs), 2);
+        fs.sync(fd).unwrap();
+        fs.allocate(FsClock::EPOCH, fd, 100, page as u64, true, true)
+            .unwrap();
+        assert_eq!(dirty(&mut fs), 2);
+
+        // A file with no name and no descriptor left has no pages to keep.
+        fs.remove_file(FsClock::EPOCH, "/f").unwrap();
+        assert!(!fs.dirty.is_empty(), "still open");
+        fs.close(again).unwrap();
+        fs.close(fd).unwrap();
+        assert!(fs.dirty.is_empty());
     }
 
     #[test]

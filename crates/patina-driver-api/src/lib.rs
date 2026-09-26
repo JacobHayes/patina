@@ -335,6 +335,14 @@ pub trait FsDriver: Send {
     fn fd_metadata_unfaulted(&mut self, fd: Fd) -> DriverResult<FsMetadata> {
         self.fd_metadata(fd)
     }
+    /// How many of the 4096-byte pages `first..=last` of `fd`'s file hold
+    /// bytes written since they were last made durable (`cachestat`'s dirty
+    /// pages): never faulted bookkeeping, as
+    /// [`FsDriver::fd_metadata_unfaulted`] is. A driver whose writes are
+    /// durable at once has none.
+    fn dirty_pages(&mut self, _fd: Fd, _first: u64, _last: u64) -> DriverResult<u64> {
+        Ok(0)
+    }
     /// Change the permission bits of the entry an INODE names (`fchmod` through
     /// the one descriptor class the filesystem does not hold — a FIFO endpoint).
     /// The mirror of [`FsDriver::inode_metadata`], and it reaches an unlinked

@@ -8,16 +8,20 @@
 //! 6.5, mm/filemap.c): flags must be 0 (EINVAL, after the descriptor), NULL
 //! range or result is EFAULT, O_PATH or a closed number EBADF; the counters
 //! are the host page cache's business except right after a write: the two
-//! pages just written are cached (on ext4, XFS and tmpfs alike), dirty and
-//! writeback pages are cached pages, recently evicted pages are evicted
-//! pages, and a range past EOF (or a pipe) has none.
+//! pages just written are cached (on ext4, XFS and tmpfs alike) and, on the
+//! disk filesystem the run directory is on (ext4, XFS), dirty until an
+//! fsync cleans them, or an O_TRUNC open drops them, and a store through a
+//! shared mapping dirties its page at once; dirty and writeback pages are
+//! cached pages, recently evicted pages are evicted pages, and a range past
+//! EOF (or a pipe) has none. A hugetlbfs file is EOPNOTSUPP, judged after
+//! the range and before the flags.
 
 use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 use crate::vehicle::Vehicle;
 
 use patina_dst_syscalls::Syscall;
 
-use crate::probe::{AT_FDCWD, Cachestat, Probe, neg, page_size};
+use crate::probe::{AT_FDCWD, At, Cachestat, Probe, RW, neg, page_size};
 use libc::*;
 
 /// The pages the scenario's file holds.
@@ -67,6 +71,47 @@ pub fn run(p: &Probe) {
         "the two pages just written are cached",
         stat.nr_cache == PAGES as u64,
     );
+    p.check(
+        "the two pages just written are dirty",
+        stat.nr_dirty == PAGES as u64,
+    );
+    p.check("fsync f", p.fsync(fd) == 0);
+    let (r, stat) = p.cachestat(fd, Some((0, 0)), true, 0);
+    p.check(
+        "an fsync cleans them",
+        r == 0 && stat.nr_cache == PAGES as u64 && stat.nr_dirty == 0,
+    );
+    // An O_TRUNC open drops the file's pages, dirty ones included: sized
+    // back up, it has no dirty page.
+    p.check(
+        "write the two pages again",
+        p.pwrite64(fd, &vec![b'y'; PAGES * page], 0) == (PAGES * page) as i64,
+    );
+    let truncated = p.openat(AT_FDCWD, &file, O_WRONLY | O_TRUNC, 0);
+    p.require("open f O_TRUNC", truncated >= 0);
+    p.check(
+        "ftruncate f back to two pages",
+        p.ftruncate(truncated, (PAGES * page) as i64) == 0,
+    );
+    let (r, stat) = p.cachestat(fd, Some((0, 0)), true, 0);
+    p.check(
+        "an O_TRUNC open drops the dirty pages",
+        r == 0 && stat.nr_dirty == 0,
+    );
+    p.close(truncated);
+    // A store through a shared mapping dirties its page from the store on.
+    let (r, view) = p.mmap("f", &At::null(), PAGES * page, RW, MAP_SHARED, fd, 0);
+    p.require("map f shared", r >= 0);
+    let view = view.unwrap();
+    for index in 0..PAGES {
+        view.fill(index * page, b"z");
+    }
+    let (r, stat) = p.cachestat(fd, Some((0, 0)), true, 0);
+    p.check(
+        "a store through a shared mapping dirties its page",
+        r == 0 && stat.nr_dirty == PAGES as u64,
+    );
+    p.check("unmap f", p.munmap(&view.at(0), PAGES * page) == 0);
 
     // ---- readahead ---------------------------------------------------------
     p.check(
@@ -175,6 +220,17 @@ pub fn run(p: &Probe) {
         "the descriptor is judged before the flags",
         p.cachestat(4000, Some((0, 0)), true, 1).0 == neg(EBADF),
     );
+    let huge = p.memfd_create("huge", MFD_HUGETLB);
+    p.require("a hugetlbfs memfd", huge >= 0);
+    p.check(
+        "a hugetlbfs file is EOPNOTSUPP, judged before the flags",
+        p.cachestat(huge, Some((0, 0)), true, 1).0 == neg(EOPNOTSUPP),
+    );
+    p.check(
+        "the range is judged before hugetlbfs",
+        p.cachestat(huge, None, true, 0).0 == neg(EFAULT),
+    );
+    p.close(huge);
 
     for f in [fd, reader, writer, location, dirfd, pipe[0], pipe[1]] {
         p.close(f);
@@ -194,6 +250,12 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_cachestat,
         Syscall::N_openat,
         Syscall::N_write,
+        Syscall::N_fsync,
+        Syscall::N_pwrite64,
+        Syscall::N_ftruncate,
+        Syscall::N_mmap,
+        Syscall::N_munmap,
+        Syscall::N_memfd_create,
         Syscall::N_pipe2,
         Syscall::N_close,
     ],

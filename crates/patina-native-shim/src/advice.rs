@@ -19,7 +19,7 @@ use std::ffi::c_int;
 use patina_dst_abi::Fd;
 
 use crate::fdtable::{FdKind, Resolved};
-use crate::{EBADF, EINVAL, ESPIPE, O_READ, fail, fdget, set_errno, thread, uaccess};
+use crate::{EBADF, EINVAL, EOPNOTSUPP, ESPIPE, O_READ, fail, fdget, set_errno, thread, uaccess};
 
 /// `POSIX_FADV_NORMAL` .. `POSIX_FADV_NOREUSE` (0..=5 on x86_64 and arm64).
 const POSIX_FADV_NOREUSE: c_int = 5;
@@ -126,8 +126,9 @@ struct Cachestat {
 }
 
 /// The pages of a `size`-byte file within `range` (`filemap_cachestat`
-/// over the pages `range` spans, `first_index` to `last_index`).
-fn cached_pages(size: u64, range: CachestatRange) -> u64 {
+/// over the pages `range` spans, `first_index` to `last_index`): the first
+/// and last, none when the range holds no page of the file.
+fn cached_pages(size: u64, range: CachestatRange) -> Option<(u64, u64)> {
     let page = crate::mem::PAGE as u64;
     let first = range.off / page;
     let last = match range.len {
@@ -136,29 +137,55 @@ fn cached_pages(size: u64, range: CachestatRange) -> u64 {
     };
     let pages = size.div_ceil(page);
     if first >= pages || last < first {
-        return 0;
+        return None;
     }
-    last.min(pages - 1) - first + 1
+    Some((first, last.min(pages - 1)))
 }
 
 /// `cachestat(fd, range, out, flags)` (mm/filemap.c): an empty slot or an
 /// `O_PATH` descriptor is `EBADF` (`fdget`), then the range is copied in
-/// (`EFAULT`), then nonzero flags are `EINVAL`; the counts are copied out
-/// last (`EFAULT`). What they count is the module's answer.
+/// (`EFAULT`), a hugetlbfs file is `EOPNOTSUPP`, then nonzero flags are
+/// `EINVAL`; the counts are copied out last (`EFAULT`). A regular file has
+/// every page to its end cached (the filesystem holds it whole), dirty
+/// those written since their last fsync as the crash model keeps them, and
+/// those a shared view changed and no write-back wrote yet (no background
+/// writeback: 6.8's flusher would clean them after
+/// `dirty_expire_centisecs`), none under writeback or evicted; anything
+/// else has no pages. A view's page counts once its bytes differ from the
+/// file's: a store of the bytes already there dirties it on 6.8, not here.
 pub(crate) fn cachestat(raw_fd: c_int, range: usize, out: usize, flags: u32) -> i64 {
     let answer = (|| {
         let resolved = fdget(raw_fd)?;
         let range = uaccess::read::<CachestatRange>(range)?;
+        if resolved.kind == FdKind::File
+            && crate::mem::anonymous(resolved.handle).is_some_and(|huge_page| huge_page != 0)
+        {
+            return Err(EOPNOTSUPP);
+        }
         if flags != 0 {
             return Err(EINVAL);
         }
         let mut stat = Cachestat::default();
         if resolved.kind == FdKind::File {
-            let size = crate::with_context_raw(|context| {
-                context.fs_fd_metadata_unrecorded(Fd(resolved.handle))
-            })?
-            .len;
-            stat.nr_cache = cached_pages(size, range);
+            let handle = Fd(resolved.handle);
+            let size =
+                crate::with_context_raw(|context| context.fs_fd_metadata_unrecorded(handle))?.len;
+            if let Some((first, last)) = cached_pages(size, range) {
+                stat.nr_cache = last - first + 1;
+                let dirty = |first, last| {
+                    crate::with_context_raw(|context| {
+                        context.fs_dirty_pages_unrecorded(handle, first, last)
+                    })
+                };
+                stat.nr_dirty = dirty(first, last)?;
+                // A page a shared view stored to is dirty from the store on;
+                // the crash model counts it once written back.
+                for page in crate::mem::view_dirty_pages(resolved.handle) {
+                    if (first..=last).contains(&page) && dirty(page, page)? == 0 {
+                        stat.nr_dirty += 1;
+                    }
+                }
+            }
         }
         uaccess::write(out, &stat)
     })();
@@ -245,26 +272,26 @@ mod tests {
     #[test]
     fn a_range_counts_the_file_pages_it_spans() {
         let whole = CachestatRange { off: 0, len: 0 };
-        assert_eq!(cached_pages(2 * PAGE, whole), 2);
-        assert_eq!(cached_pages(2 * PAGE + 1, whole), 3);
-        assert_eq!(cached_pages(0, whole), 0);
+        assert_eq!(cached_pages(2 * PAGE, whole), Some((0, 1)));
+        assert_eq!(cached_pages(2 * PAGE + 1, whole), Some((0, 2)));
+        assert_eq!(cached_pages(0, whole), None);
         // A byte range counts every page it touches.
         let straddle = CachestatRange {
             off: PAGE - 1,
             len: 2,
         };
-        assert_eq!(cached_pages(4 * PAGE, straddle), 2);
+        assert_eq!(cached_pages(4 * PAGE, straddle), Some((0, 1)));
         // Past the end of the file, nothing; a range reaching past it stops
         // at the last page.
         let past = CachestatRange {
             off: 1 << 20,
             len: PAGE,
         };
-        assert_eq!(cached_pages(2 * PAGE, past), 0);
+        assert_eq!(cached_pages(2 * PAGE, past), None);
         let tail = CachestatRange {
             off: PAGE,
             len: 10 * PAGE,
         };
-        assert_eq!(cached_pages(2 * PAGE, tail), 1);
+        assert_eq!(cached_pages(2 * PAGE, tail), Some((1, 1)));
     }
 }

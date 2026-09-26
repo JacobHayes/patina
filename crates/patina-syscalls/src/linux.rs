@@ -2698,7 +2698,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Fs,
         Disposition::Modeled,
-        "Page-cache accounting (`advice::cachestat`): EBADF (O_PATH included), EFAULT for the range, EINVAL for flags, in that order. The filesystem holds every file in memory, so every page of a regular file up to its end is cached and none dirty, under writeback or evicted; anything else has no pages.",
+        "Page-cache accounting (`advice::cachestat`): EBADF (O_PATH included), EFAULT for the range, EOPNOTSUPP for a hugetlbfs memfd, EINVAL for flags, in that order. The filesystem holds every file in memory, so every page of a regular file up to its end is cached, dirty those written since the crash model last made them durable (an O_TRUNC open, a truncation, a punched or zeroed range drop them) and those a shared mapping changed that no write-back wrote yet (no background writeback), none under writeback or evicted; anything else has no pages.",
         None,
     ),
     Syscall::N_fchmodat2 => r(
