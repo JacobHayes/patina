@@ -12,14 +12,8 @@
 //!   the store lands, the loads read what the repaired page holds.
 
 use super::fault::{self, Repair};
-#[cfg(target_arch = "x86_64")]
-use crate::catalog::{Arc, Gap, Status};
 use crate::catalog::{DEFAULTS, Scenario};
-#[cfg(target_arch = "x86_64")]
-use crate::compare::{Ending, Failure};
 use crate::probe::{Probe, RW, neg, page_size};
-#[cfg(target_arch = "x86_64")]
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -110,16 +104,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     covers: &[Syscall::N_mprotect, Syscall::N_mmap, Syscall::N_munmap],
     symbols: &["mprotect", "mmap", "munmap"],
-    #[cfg(target_arch = "x86_64")]
-    gaps: &[Gap {
-        status: Status::Pending(Arc::SignalsThreadsProcess),
-        vehicles: Vehicle::ALL,
-        what: "a guest SIGSEGV handler is refused: with the rdtsc trap armed (PR_TSC_SIGSEGV, tsc.rs) the shim reserves SIGSEGV and patina_signal_action (thread/signals.rs) aborts the registration instead of routing faults outside its own rdtsc sites to the guest's handler",
-        failure: Failure::Stops {
-            events: 19,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina native shim fatal: reserved signal registration would disable deterministic containment",
-        },
-    }],
     ..DEFAULTS
 };
