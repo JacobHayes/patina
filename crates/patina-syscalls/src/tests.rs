@@ -109,8 +109,7 @@ fn rows_are_well_formed() {
                     "{}: unknown trap class {class}",
                     row.name
                 );
-                let final_class =
-                    class == TRAP_PROCESS || class == TRAP_PRIVILEGED || class == TRAP_SIGNAL_ABI;
+                let final_class = class == TRAP_PROCESS || class == TRAP_PRIVILEGED;
                 assert!(
                     final_class || row.closes_in.is_some(),
                     "{}: a trap that is not a final class must name the arc that closes it",

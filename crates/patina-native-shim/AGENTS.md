@@ -262,7 +262,8 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   glibc's real `syscall(2)` with the guest's stack pointer, never replaying a
   frame in the shim. The frame's saved mask loses the containment signals
   first. Anything that re-enters `syscall(2)` must keep that entry's stack
-  pointer contract. A final `signal-abi` trap covers `restart_syscall`.
+  pointer contract. `restart_syscall` answers `EINTR`: no restart block is
+  ever pending (waits a handler interrupts end at their own resumption).
   `pidfd_send_signal` is a final process trap because no virtual pidfd exists;
   this is a declared limitation, not a modeled self-pidfd implementation.
 - `cargo-patina/tests/native_signals.rs` and `native_containment.rs` use the

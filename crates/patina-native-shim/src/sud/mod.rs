@@ -386,6 +386,8 @@ const EINVAL: i64 = errno::EINVAL as i64;
 
 const ENOSYS: i64 = errno::ENOSYS as i64;
 
+const EINTR: i64 = errno::EINTR as i64;
+
 const EOPNOTSUPP: i64 = errno::EOPNOTSUPP as i64;
 
 const EOVERFLOW: i64 = errno::EOVERFLOW as i64;
@@ -1358,6 +1360,8 @@ const BINDINGS: &[(Syscall, Handler)] = &[
             "rt_sigreturn (nr {nr}) reached the dispatcher: both vehicles answer it first"
         ))
     }),
+    // No restart block is ever pending (the registry row says why).
+    (Syscall::N_restart_syscall, |_, _| -EINTR),
     (Syscall::N_rt_sigpending, |_, a| unsafe {
         patina_signal_pending(a[0] as *mut u8, a[1] as usize)
     }),

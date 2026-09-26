@@ -351,21 +351,13 @@ pub const TRAP_PROCESS: &str = "process";
 /// Kernel configuration / privileged: changes kernel state or needs `CAP_*`;
 /// nothing a DST guest legitimately needs (§7).
 pub const TRAP_PRIVILEGED: &str = "privileged";
-/// Final: host-only kernel frame/restart protocols have no guest raw ABI.
-pub const TRAP_SIGNAL_ABI: &str = "signal-abi";
 /// Not modeled yet; `closes_in` names the arc that models it.
 pub const TRAP_UNMODELED: &str = "unmodeled";
 /// A number the kernel lists without an implementation; answers `ENOSYS`
 /// natively. Aborts today, becomes `Absent` in the signals arc.
 pub const TRAP_REMOVED: &str = "removed";
 /// Every trap class a row may name.
-pub const TRAP_CLASSES: &[&str] = &[
-    TRAP_PROCESS,
-    TRAP_PRIVILEGED,
-    TRAP_SIGNAL_ABI,
-    TRAP_UNMODELED,
-    TRAP_REMOVED,
-];
+pub const TRAP_CLASSES: &[&str] = &[TRAP_PROCESS, TRAP_PRIVILEGED, TRAP_UNMODELED, TRAP_REMOVED];
 
 impl Disposition {
     /// The disposition's kind, as printed by `cargo patina syscalls`.

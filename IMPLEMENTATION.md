@@ -828,6 +828,16 @@ restorer (which no trap sees) added them. `signal/restorer` passes with no gap
 on both vehicles on x86_64 and on the `syscall(2)` vehicle on arm64, where the
 raw vehicle does not exist.
 
+A guest's `restart_syscall` answers `EINTR`, as `do_no_restart_syscall` does.
+The kernel leaves a restart block pending only when it interrupts a
+restartable wait without running a handler, after a stop or under a tracer.
+Patina never does: a default Stop is a named trap, an ignored signal is dropped
+at generation and never interrupts a wait, and there is no tracer. A handler
+that interrupts a wait ends it at the wait's own resumption in the shim
+(`Resumed::Restart` under `SA_RESTART`, else `EINTR`), so the virtual kernel
+itself never needs a restart block either. With it the `signal-abi` trap class
+has no rows left and is removed. `signal/restart` passes with no gap.
+
 ## Dependency order
 
 ```text

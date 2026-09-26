@@ -32,8 +32,12 @@ implementation; they do not change the scenarios or the required unit tests.
   `rt_sigreturn` (SUD-trapped, or a tail call into the shim's `syscall(2)`
   entry) resumes at the host's `rt_sigreturn` from glibc text with the guest's
   stack pointer, after the containment signals are taken out of the frame's
-  mask (`signal/restorer`). `restart_syscall` is a final `signal-abi` trap; no
-  guest restart-block protocol is implemented.
+  mask (`signal/restorer`). `restart_syscall` answers `EINTR`
+  (`do_no_restart_syscall`): no restart block is ever pending, because the
+  kernel leaves one only after interrupting a wait without running a handler
+  (a stop or a tracer), and a default Stop is a named trap, an ignored signal
+  never interrupts and no tracer exists. Waits a handler interrupts end at
+  their own resumption, in the shim (`signal/restart`).
 - Explicit Linux guest abort finalizes a healthy trace. Internal fatal paths and
   shim-owned Rust panics use host diagnostics/private abort and cannot finalize
   through that guest interposer. POSIX startup installs the ownership-scoped

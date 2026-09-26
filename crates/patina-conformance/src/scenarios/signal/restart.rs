@@ -11,8 +11,7 @@
 //! glibc wraps no `restart_syscall`, so the scenario runs through the
 //! kernel vehicles.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
 use crate::signals as support;
 use crate::vehicle::Vehicle;
@@ -51,15 +50,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_restart_syscall],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::SignalsThreadsProcess),
-        vehicles: Vehicle::KERNEL,
-        what: "restart_syscall is a Trap(signal-abi) in the registry, so the SUD dispatcher aborts at the row. Patina restarts an interrupted wait where it resumes, so a guest never has a restart pending, and the faithful answer the model owes is do_no_restart_syscall's: EINTR, whatever the arguments",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall restart_syscall (nr",
-        },
-    }],
     ..DEFAULTS
 };

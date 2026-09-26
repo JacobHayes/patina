@@ -202,8 +202,10 @@ runtime installs) returns into the caller's stub, and the stub's `rt_sigreturn`
 the host kernel's own `rt_sigreturn`, issued from glibc text with the guest's
 stack pointer, so the kernel restores the interrupted context and the frame's
 mask, less the containment signals. Handlers installed through glibc return
-through its restorer without a trap. `restart_syscall` is a final `signal-abi`
-trap: no guest restart-block protocol exists.
+through its restorer without a trap. A guest's `restart_syscall` answers
+`EINTR`: a restart block is pending only after a wait the kernel interrupted
+without running a handler (a stop, a tracer), which the virtual kernel never
+does; a handler that interrupts a wait ends it at the wait's own resumption.
 `pidfd_send_signal` remains a process trap because there are no virtual pidfds;
 this does not implement the signals spec's self-pidfd aspiration. Ambient
 host signals are outside the deterministic model and can execute a handler

@@ -2,7 +2,7 @@
 //! generated; adding an upstream identity makes this exhaustive match fail until
 //! its actual runtime disposition is reviewed. Never infer ENOSYS from novelty.
 
-use super::{Capability, TRAP_PRIVILEGED, TRAP_PROCESS, TRAP_SIGNAL_ABI, TRAP_UNMODELED};
+use super::{Capability, TRAP_PRIVILEGED, TRAP_PROCESS, TRAP_UNMODELED};
 use super::{Disposition, Family, IDENTITY_PID, INIT_PID, Syscall, SyscallRow};
 
 const fn r(
@@ -1633,8 +1633,8 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_restart_syscall => r(
         id,
         Family::Signal,
-        Disposition::Trap(TRAP_SIGNAL_ABI),
-        "By-design trap: restart decisions are implemented at managed wait resumption; no guest-visible kernel restart_block exists to restore.",
+        Disposition::Modeled,
+        "`do_no_restart_syscall`'s EINTR, whatever the arguments: a restart block is pending only after a wait the kernel interrupted without running a handler (a stop, a tracer), and the virtual kernel has neither (a default Stop is a named trap, an ignored signal never interrupts); a handler that interrupts a wait ends it by the per-call rules at the wait's own resumption (EINTR, or a restart inside the shim under SA_RESTART).",
         None,
     ),
     Syscall::N_semtimedop => r(
