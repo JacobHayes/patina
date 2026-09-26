@@ -5539,20 +5539,49 @@ recording was produced by a guest whose result type no longer matches this one"
             .seek(fd, 0, SeekWhence::Current)?)
     }
 
-    /// The inode filesystem handle `fd` is open on, read UNRECORDED as
-    /// [`Self::fs_cursor_unrecorded`] is: a handle's inode is fixed at its
-    /// open, which the driver executes again on replay (the native shim's
-    /// page cache asks which file a handle's bytes belong to).
-    pub fn fs_ino_unrecorded(&mut self, fd: Fd) -> Result<u64, RuntimeError> {
+    /// The metadata of the entry filesystem handle `fd` is open on, read
+    /// UNRECORDED as [`Self::fs_cursor_unrecorded`] is: the driver executes
+    /// every operation that shaped it again on replay (the native shim's page
+    /// cache asks which file a handle's bytes belong to; its inotify model
+    /// which inode an event is on, and `cachestat` how many pages it has).
+    pub fn fs_fd_metadata_unrecorded(&mut self, fd: Fd) -> Result<FsMetadata, RuntimeError> {
         if self.filesystem_is_capture {
-            return Ok(self.fs_fd_metadata(fd)?.ino);
+            return self.fs_fd_metadata(fd);
         }
         Ok(self
             .filesystem
             .as_mut()
             .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .fd_metadata(fd)?
-            .ino)
+            .fd_metadata(fd)?)
+    }
+
+    /// The metadata of the entry at canonical `path`, read UNRECORDED as
+    /// [`Self::fs_fd_metadata_unrecorded`] is: the inode an fs notification
+    /// is reported to, looked up inside the call that caused it — no second
+    /// trip to storage, so no latency or fault either.
+    pub fn fs_metadata_unrecorded(&mut self, path: &str) -> Result<FsMetadata, RuntimeError> {
+        if self.filesystem_is_capture {
+            return self.fs_metadata(path);
+        }
+        Ok(self
+            .filesystem
+            .as_mut()
+            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
+            .metadata(path)?)
+    }
+
+    /// Where filesystem handle `fd`'s entry is now, read UNRECORDED as
+    /// [`Self::fs_fd_metadata_unrecorded`] is: the name an fs notification
+    /// on an open file carries.
+    pub fn fs_fd_path_unrecorded(&mut self, fd: Fd) -> Result<String, RuntimeError> {
+        if self.filesystem_is_capture {
+            return self.fs_fd_path(fd);
+        }
+        Ok(self
+            .filesystem
+            .as_mut()
+            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
+            .fd_path(fd)?)
     }
 
     /// The page cache's write-back: what a shared mapping of `fd`'s file
@@ -12115,7 +12144,7 @@ class=crash|0 class=buggify|0"
         ctx.finish().unwrap();
     }
 
-    /// The page cache's cursor and inode queries leave no trace op: a run
+    /// The unrecorded cursor, metadata and path queries leave no trace op: a run
     /// that asks them records the same trace as one that does not, and that
     /// trace replays a run that asks them.
     #[test]
@@ -12127,8 +12156,11 @@ class=crash|0 class=buggify|0"
             ctx.fs_write(fd, b"hello").unwrap();
             if ask {
                 assert_eq!(ctx.fs_cursor_unrecorded(fd).unwrap(), 5);
-                let ino = ctx.fs_ino_unrecorded(fd).unwrap();
-                assert_ne!(ino, 0);
+                let by_fd = ctx.fs_fd_metadata_unrecorded(fd).unwrap();
+                assert_eq!(by_fd.len, 5);
+                let by_path = ctx.fs_metadata_unrecorded("/f").unwrap();
+                assert_eq!(by_path.ino, by_fd.ino);
+                assert_eq!(ctx.fs_fd_path_unrecorded(fd).unwrap(), "/f");
             }
             ctx.fs_close(fd).unwrap();
         }

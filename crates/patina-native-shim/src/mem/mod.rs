@@ -1305,7 +1305,9 @@ fn cached_ino(handle: u64) -> Option<u64> {
         Some(ino) => ino,
         None => {
             let ino =
-                crate::with_context_raw(|context| context.fs_ino_unrecorded(Fd(handle))).ok()?;
+                crate::with_context_raw(|context| context.fs_fd_metadata_unrecorded(Fd(handle)))
+                    .ok()?
+                    .ino;
             MAPPINGS.lock().handles.insert(handle, ino);
             ino
         }
