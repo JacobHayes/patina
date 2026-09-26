@@ -586,6 +586,11 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
         }
         #[cfg(target_os = "linux")]
         FdKind::Pidfd | FdKind::LandlockRuleset => Ok(()),
+        #[cfg(target_os = "linux")]
+        FdKind::Userfaultfd => {
+            mem::userfaultfd::released(release.handle);
+            Ok(())
+        }
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => {
             thread::kqueue_close(release.handle);
@@ -4786,6 +4791,17 @@ unsafe fn read_resolved(
         }
         #[cfg(target_os = "linux")]
         FdKind::Epoll | FdKind::Pidfd | FdKind::LandlockRuleset => fail(EINVAL) as isize,
+        // `vfs_read` judges the buffer's range (`access_ok`) before the
+        // file's own read.
+        #[cfg(target_os = "linux")]
+        FdKind::Userfaultfd if !uaccess::access_ok(destination as usize, length) => {
+            fail(EFAULT) as isize
+        }
+        #[cfg(target_os = "linux")]
+        FdKind::Userfaultfd => match mem::userfaultfd::read(resolved.handle, nonblocking, length) {
+            Ok(read) => read as isize,
+            Err(errno) => fail(errno) as isize,
+        },
         // SAFETY: forwarded from this function's own contract.
         #[cfg(target_os = "linux")]
         FdKind::MessageQueue if resolved.status & O_READ != 0 => unsafe {
@@ -4877,6 +4893,9 @@ unsafe fn write_resolved(
         | FdKind::TimerFd
         | FdKind::Pidfd
         | FdKind::LandlockRuleset => fail(EINVAL) as isize,
+        // Opened read-only: `vfs_write`'s `FMODE_WRITE` check refuses first.
+        #[cfg(target_os = "linux")]
+        FdKind::Userfaultfd => fail(EBADF) as isize,
         // A queue file has no write method: EBADF without write access, EINVAL
         // with it.
         #[cfg(target_os = "linux")]
@@ -4921,7 +4940,8 @@ fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved, u64), c_in
         | FdKind::SignalFd
         | FdKind::TimerFd
         | FdKind::Pidfd
-        | FdKind::LandlockRuleset => Err(ESPIPE),
+        | FdKind::LandlockRuleset
+        | FdKind::Userfaultfd => Err(ESPIPE),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => Err(ESPIPE),
     }
@@ -5455,6 +5475,11 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
             return i64::from(fail(EBADF));
         }
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
+        // `noop_llseek`: the position stays where it is, 0, for any whence
+        // `ksys_lseek` passes on.
+        Ok(resolved) if resolved.kind.seeks_nowhere() => {
+            return i64::from(if whence > SEEK_HOLE { fail(EINVAL) } else { 0 });
+        }
         Ok(_) => return i64::from(fail(no_position(whence))),
         Err(errno) => return i64::from(fail(errno)),
     };
@@ -5951,6 +5976,15 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
         set_errno(0);
         return 0;
     }
+    // A userfaultfd's inode is its own and the caller's
+    // (`anon_inode_create_getfile`), so the change is allowed. Nothing reads
+    // the mode back (`fstat` of an anonymous descriptor is not modeled), so
+    // none is kept.
+    #[cfg(target_os = "linux")]
+    if matches!(resolve_fd(raw_fd), Ok(resolved) if resolved.kind == FdKind::Userfaultfd) {
+        set_errno(0);
+        return 0;
+    }
     let fd = match fs_handle(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
@@ -6405,7 +6439,8 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         | FdKind::SignalFd
         | FdKind::TimerFd
         | FdKind::Pidfd
-        | FdKind::LandlockRuleset => {
+        | FdKind::LandlockRuleset
+        | FdKind::Userfaultfd => {
             return fail(ENODEV);
         }
         // A queue is a regular file (judged after the range, below).
@@ -7920,7 +7955,8 @@ mod thread {
             | FdKind::MessageQueue
             | FdKind::TimerFd
             | FdKind::Pidfd
-            | FdKind::LandlockRuleset => Err(super::ENOTSOCK),
+            | FdKind::LandlockRuleset
+            | FdKind::Userfaultfd => Err(super::ENOTSOCK),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::ENOTSOCK),
         }
@@ -7947,7 +7983,8 @@ mod thread {
             | FdKind::MessageQueue
             | FdKind::TimerFd
             | FdKind::Pidfd
-            | FdKind::LandlockRuleset => Err(super::EBADF),
+            | FdKind::LandlockRuleset
+            | FdKind::Userfaultfd => Err(super::EBADF),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::EBADF),
         }
@@ -12999,22 +13036,29 @@ mod thread {
         fd: c_int,
         desc: Option<DescId>,
     ) -> Option<(u32, (u64, u64))> {
-        let (kind, handle) = match desc {
+        let (kind, handle, status) = match desc {
             Some(desc) => {
                 let table = super::fd_table().lock();
                 let description = table.description(desc)?;
-                (description.kind, description.handle)
+                (description.kind, description.handle, description.status)
             }
             None => {
                 let resolved = super::fd_table().lock().resolve(fd)?;
-                (resolved.kind, resolved.handle)
+                (resolved.kind, resolved.handle, resolved.status)
             }
         };
-        Some(poll_description(state, kind, handle))
+        Some(poll_description(state, kind, handle, status))
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn poll_description(state: &ThreadRuntime, kind: FdKind, handle: u64) -> (u32, (u64, u64)) {
+    fn poll_description(
+        state: &ThreadRuntime,
+        kind: FdKind,
+        handle: u64,
+        // The description's status flags: a userfaultfd's poll reads its
+        // `O_NONBLOCK`.
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] status: u32,
+    ) -> (u32, (u64, u64)) {
         use net::abi::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
         match kind {
             FdKind::Pipe => pipe_poll(state, handle as c_int),
@@ -13076,6 +13120,11 @@ mod thread {
             // at `epoll_ctl`, as for a file.
             #[cfg(target_os = "linux")]
             FdKind::LandlockRuleset => (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM, (0, 0)),
+            #[cfg(target_os = "linux")]
+            FdKind::Userfaultfd => (
+                crate::mem::userfaultfd::poll(handle, status & super::O_NONBLOCK != 0),
+                (0, 0),
+            ),
             #[cfg(target_os = "linux")]
             FdKind::MessageQueue => {
                 let (readable, writable) = ipc::mq_readiness(state, handle);

@@ -211,7 +211,8 @@ fn parent_beneath(parent: c_int) -> Answer {
         | FdKind::MessageQueue
         | FdKind::TimerFd
         | FdKind::Pidfd
-        | FdKind::LandlockRuleset => refuse(errno::EBADFD),
+        | FdKind::LandlockRuleset
+        | FdKind::Userfaultfd => refuse(errno::EBADFD),
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Err(Unmodeled::Path(
             "a captured standard stream as a path rule's parent (the stream has no modeled node)"
                 .into(),

@@ -486,8 +486,9 @@ forwards into the same dispatcher instead of its two-number allowlist.
   `proc/namespaces` stops where it opens `/proc/self/ns/uts`, which the
   virtual filesystem lacks, before `setns`'s namespace checks; named fatals
   where the model ends: unsharing filesystem state, descriptors or the
-  semaphore undo list from other threads, the user-mode `userfaultfd`
-  descriptor (`mem/userfaultfd`), non-array BPF map types, detaching a BPF
+  semaphore undo list from other threads, registering a `userfaultfd`
+  range (the descriptor and its handshake are modeled: `mem/userfaultfd`
+  runs without a gap), non-array BPF map types, detaching a BPF
   program from its attach point; and the rows still `Trap(privileged)`:
   fanotify. `statmount`/`listmount` read the virtual mount table
   (`fs/mount_query` runs without a gap).

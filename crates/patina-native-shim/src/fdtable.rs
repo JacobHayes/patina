@@ -89,6 +89,11 @@ pub(crate) enum FdKind {
     /// above. It has no class object: nothing is freed with it.
     #[cfg(target_os = "linux")]
     LandlockRuleset,
+    /// A userfaultfd descriptor (`userfaultfd`; 6.8's anonymous
+    /// `[userfaultfd]` inode); `handle` keys the context table of
+    /// `mem::userfaultfd`.
+    #[cfg(target_os = "linux")]
+    Userfaultfd,
     /// A virtual kqueue; `handle` is the registry id.
     #[cfg(target_os = "macos")]
     Kqueue,
@@ -122,6 +127,8 @@ impl FdKind {
             FdKind::Pidfd => 15,
             #[cfg(target_os = "linux")]
             FdKind::LandlockRuleset => 16,
+            #[cfg(target_os = "linux")]
+            FdKind::Userfaultfd => 17,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => 11,
         }
@@ -145,7 +152,39 @@ impl FdKind {
             | FdKind::MessageQueue
             | FdKind::TimerFd
             | FdKind::Pidfd
-            | FdKind::LandlockRuleset => false,
+            | FdKind::LandlockRuleset
+            | FdKind::Userfaultfd => false,
+            #[cfg(target_os = "macos")]
+            FdKind::Kqueue => false,
+        }
+    }
+}
+
+impl FdKind {
+    /// Whether the description's `llseek` is `noop_llseek` (Linux): a seek
+    /// leaves the position, always 0, where it is. The entropy device's
+    /// (`random_fops`) and the eventfd, epoll, signalfd, timerfd and
+    /// userfaultfd files' are; a pidfd, a Landlock ruleset and a namespace
+    /// file have none (`ESPIPE`).
+    pub(crate) fn seeks_nowhere(self) -> bool {
+        match self {
+            FdKind::Urandom => cfg!(target_os = "linux"),
+            #[cfg(target_os = "linux")]
+            FdKind::EventFd
+            | FdKind::Epoll
+            | FdKind::SignalFd
+            | FdKind::TimerFd
+            | FdKind::Userfaultfd => true,
+            FdKind::Stdin
+            | FdKind::Stdout
+            | FdKind::Stderr
+            | FdKind::File
+            | FdKind::Dir
+            | FdKind::OPath
+            | FdKind::Socket
+            | FdKind::Pipe => false,
+            #[cfg(target_os = "linux")]
+            FdKind::MessageQueue | FdKind::Pidfd | FdKind::LandlockRuleset => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }

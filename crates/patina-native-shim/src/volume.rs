@@ -284,7 +284,8 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
         | FdKind::SignalFd
         | FdKind::Epoll
         | FdKind::Pidfd
-        | FdKind::LandlockRuleset => Ok(Filesystem::AnonInodefs),
+        | FdKind::LandlockRuleset
+        | FdKind::Userfaultfd => Ok(Filesystem::AnonInodefs),
         FdKind::MessageQueue => Ok(Filesystem::Mqueue),
         FdKind::Urandom => Ok(Filesystem::Devtmpfs),
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Err(EBADF),

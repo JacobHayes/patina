@@ -117,6 +117,14 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
             | FdKind::SignalFd
             | FdKind::Pidfd
             | FdKind::LandlockRuleset => fail(ENOTTY),
+            // Not a regular file: the request goes to the descriptor's own
+            // ioctl, which knows no `FIONREAD`.
+            #[cfg(target_os = "linux")]
+            FdKind::Userfaultfd => uffd_answer(crate::mem::userfaultfd::ioctl(
+                resolved.handle,
+                request,
+                arg as usize,
+            )),
             // An mqueue inode is a regular file: its size less the position.
             #[cfg(target_os = "linux")]
             FdKind::MessageQueue => match thread::ipc::mq_unread(resolved.handle) {
@@ -140,6 +148,25 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
                 None => fail(ENOTTY),
             }
         }
+        // Every other request goes to the userfaultfd's own ioctl.
+        #[cfg(target_os = "linux")]
+        _ if resolved.kind == FdKind::Userfaultfd => uffd_answer(crate::mem::userfaultfd::ioctl(
+            resolved.handle,
+            request,
+            arg as usize,
+        )),
         _ => fail(ENOTTY),
+    }
+}
+
+/// A userfaultfd request's answer as the C door reports it.
+#[cfg(target_os = "linux")]
+fn uffd_answer(answer: Result<c_int, c_int>) -> c_int {
+    match answer {
+        Ok(value) => {
+            set_errno(0);
+            value
+        }
+        Err(errno) => fail(errno),
     }
 }

@@ -46,6 +46,7 @@ mod barrier;
 mod cache;
 mod memfd;
 mod ranges;
+pub(crate) mod userfaultfd;
 
 pub(crate) use barrier::membarrier;
 pub(crate) use memfd::{anonymous, released, secret, secret_resizable, secret_resized};

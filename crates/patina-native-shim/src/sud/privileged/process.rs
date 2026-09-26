@@ -190,7 +190,8 @@ pub(in crate::sud) fn setns(credential: &Credential, a: &[u64; 6]) -> Answer {
             | FdKind::Epoll
             | FdKind::MessageQueue
             | FdKind::TimerFd
-            | FdKind::LandlockRuleset => refuse(errno::EINVAL),
+            | FdKind::LandlockRuleset
+            | FdKind::Userfaultfd => refuse(errno::EINVAL),
         },
     }
 }

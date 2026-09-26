@@ -94,7 +94,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::FdIo,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_seek`); `SEEK_SET 0` on a directory fd rewinds its `getdents64` snapshot. `SEEK_DATA`/`SEEK_HOLE` answer every file as ext4 answers one without holes, since allocation is not modeled (a hole left by an extending write or truncate, `KEEP_SIZE` or `PUNCH_HOLE` reads as data): data at the offset, the hole at the size, `ENXIO` at or past the end.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_seek`); `SEEK_SET 0` on a directory fd rewinds its `getdents64` snapshot; a description whose `llseek` is `noop_llseek` (the entropy device, eventfd, epoll, signalfd, timerfd, userfaultfd) stays at 0, any other without a position is `ESPIPE`. `SEEK_DATA`/`SEEK_HOLE` answer every file as ext4 answers one without holes, since allocation is not modeled (a hole left by an extending write or truncate, `KEEP_SIZE` or `PUNCH_HOLE` reads as data): data at the offset, the hole at the size, `ENXIO` at or past the end.",
         None,
     ),
     Syscall::N_mmap => r(
@@ -2395,7 +2395,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Privileged,
         Disposition::Modeled,
-        "Answered from the virtual credential and the declared `vm.unprivileged_userfaultfd` (0): kernel-fault handling needs `CAP_SYS_PTRACE` before the flags (`EPERM`), then an unknown flag (`EINVAL`); the descriptor (user-mode-only, or granted) is a named fatal until it is modeled.",
+        "Answered from the virtual credential and the declared `vm.unprivileged_userfaultfd` (0): kernel-fault handling needs `CAP_SYS_PTRACE` before the flags (`EPERM`), then an unknown flag (`EINVAL`); then a user-mode-only descriptor (`FdKind::Userfaultfd`, `mem::userfaultfd`: read-only, `O_NONBLOCK`/`O_CLOEXEC` honoured) that answers the `UFFDIO_API` handshake once (the pinned build's features and `REGISTER|UNREGISTER|API`), reads `EINVAL` before it and `EAGAIN` after, and polls `EPOLLERR` until it or while blocking; as a file it refuses a write (`EBADF`, read-only), seeks nowhere (`noop_llseek`: 0) and takes `fchmod` (its inode is the caller's). Registering a range and the range ioctls are named fatals (nothing is ever registered, so no fault is ever pending); a granted kernel-fault descriptor is a named fatal.",
         None,
     )
     .capabilities(&[Capability::SysPtrace]),

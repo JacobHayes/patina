@@ -14,13 +14,18 @@
 //!   features and ioctls: which features is partly the build's (the
 //!   write-protect and minor-fault ones), so only those every configuration
 //!   has are asserted; after it a nonblocking read with no fault pending is
-//!   `EAGAIN`.
+//!   `EAGAIN`, and a second handshake is `EINVAL`;
+//! * poll answers `POLLERR` until the handshake, and after it, for a
+//!   nonblocking descriptor with no fault pending, no event;
+//! * as a file it is read-only (a write `EBADF`), seeks nowhere
+//!   (`noop_llseek`: 0) and has an inode of its own, the caller's (`fchmod`
+//!   succeeds); a read into a buffer outside the user address space is
+//!   `EFAULT` before the descriptor's own read (`vfs_read`'s `access_ok`).
 //!
 //! Neither creating a descriptor nor the handshake registers anything: the
 //! probe never asks it to handle a fault.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::observe::Norm;
 use crate::probe::{Probe, neg};
 use crate::vehicle::Vehicle;
@@ -42,6 +47,8 @@ const UFFD_API: u64 = 0xaa;
 const UFFDIO_API: u64 = 0xc018_aa3f;
 /// `sizeof(struct uffd_msg)`.
 const MESSAGE: usize = 32;
+/// An address past every architecture's user address space.
+const KERNEL_ADDRESS: i64 = 0xffff_8000_0000_0000_u64 as i64;
 /// The features no configuration masks (fs/userfaultfd.c `userfaultfd_api`
 /// drops only the write-protect and minor-fault ones): the events (fork,
 /// remap, remove, unmap), missing faults on hugetlbfs and shmem, SIGBUS,
@@ -92,6 +99,7 @@ pub fn run(p: &Probe) {
         );
         if flags == O_NONBLOCK {
             handshake(p, fd);
+            descriptor(p, fd);
         }
         p.close(fd);
     }
@@ -102,6 +110,10 @@ fn handshake(p: &Probe, fd: i32) {
     p.check(
         "reading before the handshake is EINVAL",
         p.read(fd, MESSAGE).0 == neg(EINVAL),
+    );
+    p.check(
+        "polling before the handshake is POLLERR",
+        p.ppoll(&[(fd, POLLIN)], Some(0)) == (1, vec![POLLERR]),
     );
     let mut api = Api {
         api: UFFD_API,
@@ -134,6 +146,57 @@ fn handshake(p: &Probe, fd: i32) {
         "then a read with no fault pending is EAGAIN",
         p.read(fd, MESSAGE).0 == neg(EAGAIN),
     );
+    p.check(
+        "and a poll finds no event",
+        p.ppoll(&[(fd, POLLIN)], Some(0)) == (0, vec![0]),
+    );
+    let mut again = Api {
+        api: UFFD_API,
+        features: 0,
+        ioctls: 0,
+    };
+    p.check(
+        "a second handshake is EINVAL",
+        p.call_observed(
+            Syscall::N_ioctl,
+            [
+                fd as i64,
+                UFFDIO_API as i64,
+                &mut again as *mut Api as i64,
+                0,
+                0,
+                0,
+            ],
+        ) == neg(EINVAL),
+    );
+}
+
+/// What the descriptor answers as a file: it is read-only, so a write is
+/// `EBADF` (`vfs_write`, even of nothing); its `llseek` is `noop_llseek`, so a
+/// seek leaves the position at 0 for any whence the kernel knows, and a
+/// whence past `SEEK_MAX` is `EINVAL`; and its inode is its own and the
+/// caller's (`anon_inode_create_getfile`), so `fchmod` succeeds.
+fn descriptor(p: &Probe, fd: i32) {
+    p.check("a write is EBADF", p.write(fd, &[0; 8]) == neg(EBADF));
+    p.check("even of nothing", p.write(fd, &[]) == neg(EBADF));
+    for whence in [SEEK_SET, SEEK_CUR, SEEK_END, SEEK_DATA, SEEK_HOLE] {
+        p.check(
+            &format!("a seek with whence {whence} stays at 0"),
+            p.lseek(fd, 5, whence) == 0,
+        );
+    }
+    p.check(
+        "a whence past SEEK_MAX is EINVAL",
+        p.lseek(fd, 0, SEEK_HOLE + 1) == neg(EINVAL),
+    );
+    p.check("fchmod of it succeeds", p.fchmod(fd, 0o600) == 0);
+    p.check(
+        "a read into a buffer past the user address space is EFAULT, before the file's own read",
+        p.call_observed(
+            Syscall::N_read,
+            [fd as i64, KERNEL_ADDRESS, MESSAGE as i64, 0, 0, 0],
+        ) == neg(EFAULT),
+    );
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -148,17 +211,11 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_read,
         Syscall::N_fcntl,
         Syscall::N_close,
+        Syscall::N_ppoll,
+        Syscall::N_write,
+        Syscall::N_lseek,
+        Syscall::N_fchmod,
     ],
     needs: &[Need::Unprivileged, Need::RestrictedUserfaultfd],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: Vehicle::KERNEL,
-        what: "a userfaultfd descriptor is a named fatal (patina-native-shim sud/privileged/kernel.rs userfaultfd) where the kernel hands any caller a user-mode-only descriptor: read-only, EINVAL to a read before the UFFDIO_API handshake",
-        failure: Failure::Stops {
-            events: 6,
-            ending: Ending::Signal(SIGABRT),
-            diagnostic: "patina: userfaultfd: a userfaultfd descriptor is not modeled",
-        },
-    }],
     ..DEFAULTS
 };

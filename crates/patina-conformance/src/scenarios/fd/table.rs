@@ -186,7 +186,26 @@ pub fn run(p: &Probe) {
         ef2 >= 0 && n == 8 && data == 1u64.to_ne_bytes(),
     );
     p.close(ef2);
-    p.close(ef);
+    // The anonymous kinds whose `llseek` is `noop_llseek` stay at 0 (a
+    // pidfd has none: `ESPIPE`, like a pipe).
+    // SAFETY: plain data.
+    let mut none: sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `none` is a sigset.
+    unsafe { sigemptyset(&mut none) };
+    let anonymous = [
+        ("an eventfd", ef),
+        ("an epoll instance", p.epoll_create1(EPOLL_CLOEXEC)),
+        ("a timerfd", p.timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC)),
+        ("a signalfd", p.signalfd4(-1, &none, SFD_CLOEXEC)),
+    ];
+    for (what, fd) in anonymous {
+        p.require(what, fd >= 0);
+        p.check(
+            &format!("lseek on {what} stays at 0"),
+            p.lseek(fd, 5, SEEK_SET) == 0,
+        );
+        p.close(fd);
+    }
 
     // ---- redirecting a standard stream ----
     let saved = p.dup(2) as i32;
@@ -248,6 +267,9 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_lseek,
         Syscall::N_pipe2,
         Syscall::N_eventfd2,
+        Syscall::N_epoll_create1,
+        Syscall::N_timerfd_create,
+        Syscall::N_signalfd4,
     ],
     symbols: &[
         "dup",

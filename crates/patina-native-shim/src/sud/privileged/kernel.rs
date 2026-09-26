@@ -5,6 +5,7 @@
 //! declaration rules out would allow the call, the model ends by name.
 
 use super::{Answer, Unmodeled, gate, lookup_at, refuse};
+use crate::FdKind;
 use crate::identity::Credential;
 use crate::registry::{Capability, KERNEL_CONFIG};
 use linux_raw_sys::errno;
@@ -506,8 +507,10 @@ fn get_next_id(credential: &Credential, attr: &[u8; BPF_ATTR_SIZE]) -> Answer {
 /// `userfaultfd(flags)`: handling kernel faults (no
 /// `UFFD_USER_MODE_ONLY`) needs `CAP_SYS_PTRACE` or
 /// `vm.unprivileged_userfaultfd`, before the flags are checked; then an
-/// unknown flag is `EINVAL`. The descriptor any caller then gets is not
-/// modeled yet.
+/// unknown flag is `EINVAL`; then a user-mode-only descriptor
+/// (`crate::mem::userfaultfd`), read-only with the caller's `O_NONBLOCK`
+/// and `O_CLOEXEC` (`EMFILE` past the limit). A granted kernel-fault one is
+/// not modeled.
 pub(in crate::sud) fn userfaultfd(credential: &Credential, a: &[u64; 6]) -> Answer {
     let flags = a[0] as u32;
     let kernel_faults = flags & UFFD_USER_MODE_ONLY == 0;
@@ -521,7 +524,20 @@ pub(in crate::sud) fn userfaultfd(credential: &Credential, a: &[u64; 6]) -> Answ
     if kernel_faults && privileged {
         return Err(Unmodeled::Granted(Capability::SysPtrace));
     }
-    Err(Unmodeled::Path("a userfaultfd descriptor".into()))
+    let nonblocking = if flags & O_NONBLOCK != 0 {
+        crate::O_NONBLOCK
+    } else {
+        0
+    };
+    let handle = crate::mem::userfaultfd::created();
+    let status = crate::O_READ | nonblocking;
+    match crate::install_fd(FdKind::Userfaultfd, handle, status, flags & O_CLOEXEC != 0) {
+        Ok(fd) => Ok(i64::from(fd)),
+        Err(code) => {
+            crate::mem::userfaultfd::released(handle);
+            refuse(code as u32)
+        }
+    }
 }
 
 #[cfg(test)]
