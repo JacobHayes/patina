@@ -834,8 +834,9 @@ static int patina_fd_metadata_values(int fd, struct patina_metadata *values) {
  */
 static int fill_stat(int result, const struct patina_metadata *values, struct stat *status) {
     if (result < 0) return -1;
+    /* The kernel's copy-out to a NULL buffer faults. */
     if (status == NULL) {
-        errno = EINVAL;
+        errno = EFAULT;
         return -1;
     }
     memset(status, 0, sizeof *status);
@@ -1170,8 +1171,9 @@ int fremovexattr(int fd, const char *name) {
 
 static int fill_stat64(int result, const struct patina_metadata *values, struct stat64 *status) {
     if (result < 0) return -1;
+    /* The kernel's copy-out to a NULL buffer faults. */
     if (status == NULL) {
-        errno = EINVAL;
+        errno = EFAULT;
         return -1;
     }
     memset(status, 0, sizeof *status);

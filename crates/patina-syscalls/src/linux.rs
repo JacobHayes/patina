@@ -94,7 +94,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::FdIo,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_seek`); `SEEK_SET 0` on a directory fd rewinds its `getdents64` snapshot.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_seek`); `SEEK_SET 0` on a directory fd rewinds its `getdents64` snapshot. `SEEK_DATA`/`SEEK_HOLE` answer every file as ext4 answers one without holes, since allocation is not modeled (a hole left by an extending write or truncate, `KEEP_SIZE` or `PUNCH_HOLE` reads as data): data at the offset, the hole at the size, `ENXIO` at or past the end.",
         None,
     ),
     Syscall::N_mmap => r(

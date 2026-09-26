@@ -367,6 +367,10 @@ off_t lseek(int fd, off_t offset, int whence) {
         case SEEK_SET: patina_whence = PATINA_SEEK_START; break;
         case SEEK_CUR: patina_whence = PATINA_SEEK_CURRENT; break;
         case SEEK_END: patina_whence = PATINA_SEEK_END; break;
+#ifdef SEEK_DATA
+        case SEEK_DATA: patina_whence = PATINA_SEEK_DATA; break;
+        case SEEK_HOLE: patina_whence = PATINA_SEEK_HOLE; break;
+#endif
         default: errno = EINVAL; return (off_t)-1;
     }
     int64_t result = patina_seek(fd, (int64_t)offset, patina_whence);

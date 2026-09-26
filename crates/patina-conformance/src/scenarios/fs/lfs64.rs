@@ -11,7 +11,9 @@
 //!   scatters the file back; on a pipe both are ESPIPE, a negative offset
 //!   EINVAL;
 //! * `lseek64` finds the end (EINVAL for a negative position or an unknown
-//!   whence, ESPIPE on a pipe);
+//!   whence, ESPIPE on a pipe); in a file written without gaps `SEEK_DATA`
+//!   answers the offset and `SEEK_HOLE` the end, and at the end both are
+//!   ENXIO;
 //! * offsets past 4 GiB pass whole: `lseek64` there reads back, `preadv64`
 //!   there is past the end (not the file's first bytes), `SEEK_DATA` from
 //!   there is ENXIO, `fallocate64(FALLOC_FL_KEEP_SIZE)` past 8 GiB allocates
@@ -116,6 +118,18 @@ pub fn run(p: &Probe) {
         p.preadv64(rd, &[1], 0).0 == neg(ESPIPE),
     );
     p.check("lseek64 finds the end", p.lseek64(fd, 0, SEEK_END) == 8);
+    p.check(
+        "SEEK_DATA inside the file answers the offset: it is data",
+        p.lseek64(fd, 3, SEEK_DATA) == 3,
+    );
+    p.check(
+        "SEEK_HOLE inside a file written without gaps answers its end",
+        p.lseek64(fd, 1, SEEK_HOLE) == 8,
+    );
+    p.check(
+        "SEEK_HOLE at the end is ENXIO",
+        p.lseek64(fd, 8, SEEK_HOLE) == neg(ENXIO),
+    );
     p.check(
         "lseek64 to a negative position is EINVAL",
         p.lseek64(fd, -1, SEEK_SET) == neg(EINVAL),
@@ -433,61 +447,41 @@ pub const SCENARIO: Scenario = Scenario {
         "close",
         "getpid",
     ],
-    gaps: &[
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim's lseek on a file (native shim lib.rs patina_seek) knows SEEK_SET, SEEK_CUR and SEEK_END alone: SEEK_DATA is EINVAL where the kernel answers ENXIO past the end",
-            failure: Failure::Differs(&[
-                Difference::field(44, "lseek64", "errno", Observed::Str("EINVAL")),
-                Difference::check(45, "SEEK_DATA from past 4 GiB is past the end: ENXIO"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim's stat64 family answers a NULL buffer EINVAL (c/posix/fs.c fill_stat64) where the kernel faults it EFAULT",
-            failure: Failure::Differs(&[
-                Difference::field(109, "stat64", "errno", Observed::Str("EINVAL")),
-                Difference::check(110, "stat64 into a NULL buffer is EFAULT"),
-            ]),
-        },
-        Gap {
-            status: Status::Pending(Arc::Fs),
-            vehicles: &[Vehicle::Libc],
-            what: "the shim records no POSIX record lock (c/posix/fd_io.c patina_fcntl_record_lock: F_SETLK succeeds as a no-op), answers F_OFD_GETLK ENOSYS, and routes a whole-file F_OFD_SETLK to its flock table, which finds no conflicting POSIX lock (0 where the kernel's is EAGAIN)",
-            failure: Failure::Differs(&[
-                Difference::field(136, "fcntl64", "ret", Observed::Int(-1)),
-                Difference::field(136, "fcntl64", "errno", Observed::Str("ENOSYS")),
-                Difference::field(136, "fcntl64", "fields.l_start", Observed::Null),
-                Difference::field(136, "fcntl64", "fields.l_len", Observed::Null),
-                Difference::field(136, "fcntl64", "fields.l_pid", Observed::Null),
-                Difference::check(
-                    137,
-                    "F_OFD_GETLK through the other description finds it, its range whole",
-                ),
-                Difference::field(138, "fcntl64", "ret", Observed::Int(-1)),
-                Difference::field(138, "fcntl64", "errno", Observed::Str("ENOSYS")),
-                Difference::field(138, "fcntl64", "fields.l_type", Observed::Int(1)),
-                Difference::check(139, "and no lock below it"),
-                Difference::field(144, "fcntl64", "ret", Observed::Int(-1)),
-                Difference::field(144, "fcntl64", "errno", Observed::Str("ENOSYS")),
-                Difference::field(144, "fcntl64", "fields.l_type", Observed::Int(0)),
-                Difference::field(144, "fcntl64", "fields.l_start", Observed::Null),
-                Difference::field(144, "fcntl64", "fields.l_len", Observed::Null),
-                Difference::field(144, "fcntl64", "fields.l_pid", Observed::Null),
-                Difference::check(
-                    145,
-                    "F_OFD_GETLK through the other description reports it: the whole file, the caller's pid",
-                ),
-                Difference::field(146, "fcntl64", "ret", Observed::Int(0)),
-                Difference::field(146, "fcntl64", "errno", Observed::Null),
-                Difference::check(
-                    147,
-                    "F_OFD_SETLK a write lock through the other description is EAGAIN",
-                ),
-            ]),
-        },
-    ],
+    gaps: &[Gap {
+        status: Status::Pending(Arc::Fs),
+        vehicles: &[Vehicle::Libc],
+        what: "the shim records no POSIX record lock (c/posix/fd_io.c patina_fcntl_record_lock: F_SETLK succeeds as a no-op), answers F_OFD_GETLK ENOSYS, and routes a whole-file F_OFD_SETLK to its flock table, which finds no conflicting POSIX lock (0 where the kernel's is EAGAIN)",
+        failure: Failure::Differs(&[
+            Difference::field(142, "fcntl64", "ret", Observed::Int(-1)),
+            Difference::field(142, "fcntl64", "errno", Observed::Str("ENOSYS")),
+            Difference::field(142, "fcntl64", "fields.l_start", Observed::Null),
+            Difference::field(142, "fcntl64", "fields.l_len", Observed::Null),
+            Difference::field(142, "fcntl64", "fields.l_pid", Observed::Null),
+            Difference::check(
+                143,
+                "F_OFD_GETLK through the other description finds it, its range whole",
+            ),
+            Difference::field(144, "fcntl64", "ret", Observed::Int(-1)),
+            Difference::field(144, "fcntl64", "errno", Observed::Str("ENOSYS")),
+            Difference::field(144, "fcntl64", "fields.l_type", Observed::Int(1)),
+            Difference::check(145, "and no lock below it"),
+            Difference::field(150, "fcntl64", "ret", Observed::Int(-1)),
+            Difference::field(150, "fcntl64", "errno", Observed::Str("ENOSYS")),
+            Difference::field(150, "fcntl64", "fields.l_type", Observed::Int(0)),
+            Difference::field(150, "fcntl64", "fields.l_start", Observed::Null),
+            Difference::field(150, "fcntl64", "fields.l_len", Observed::Null),
+            Difference::field(150, "fcntl64", "fields.l_pid", Observed::Null),
+            Difference::check(
+                151,
+                "F_OFD_GETLK through the other description reports it: the whole file, the caller's pid",
+            ),
+            Difference::field(152, "fcntl64", "ret", Observed::Int(0)),
+            Difference::field(152, "fcntl64", "errno", Observed::Null),
+            Difference::check(
+                153,
+                "F_OFD_SETLK a write lock through the other description is EAGAIN",
+            ),
+        ]),
+    }],
     ..DEFAULTS
 };

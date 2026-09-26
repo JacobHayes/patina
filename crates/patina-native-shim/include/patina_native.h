@@ -85,6 +85,10 @@ enum {
     PATINA_SEEK_START = 0,
     PATINA_SEEK_CURRENT = 1,
     PATINA_SEEK_END = 2,
+    /* The next data at or after the offset, and the next hole (Linux's
+     * numbering, which the SUD lseek row passes through unchanged). */
+    PATINA_SEEK_DATA = 3,
+    PATINA_SEEK_HOLE = 4,
 };
 
 int32_t patina_init_seed(uint64_t seed);
