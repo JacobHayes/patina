@@ -812,6 +812,22 @@ including the cargo-patina termination/core-envelope e2e tests. The family's
 conformance scenarios and the full landing battery are the whole-family
 acceptance criteria.
 
+## Signals family: the thread ABI and asynchronous I/O rows
+
+A handler installed with the caller's own `SA_RESTORER` returns through it, as
+Go's runtime and any runtime with its own stub expect. The stub's
+`rt_sigreturn` reaches the shim either as a SUD trap (x86_64 raw `syscall`) or
+as a tail call into the shim's `syscall(2)`, whose entry is now assembly so it
+keeps the caller's stack pointer. Both doors resume at glibc's real
+`syscall(2)` with the guest's stack pointer, so the host kernel's own
+`rt_sigreturn` restores the interrupted context and the frame's mask; the
+containment signals are taken out of that mask first, and the delivery point
+reads the restored mask back into the task's virtual mask, taking the
+containment signals out again when a handler returning through glibc's
+restorer (which no trap sees) added them. `signal/restorer` passes with no gap
+on both vehicles on x86_64 and on the `syscall(2)` vehicle on arm64, where the
+raw vehicle does not exist.
+
 ## Dependency order
 
 ```text

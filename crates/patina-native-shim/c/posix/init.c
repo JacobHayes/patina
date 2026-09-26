@@ -36,7 +36,9 @@ static long dispatch_result(long result) {
     return result;
 }
 
-long syscall(long number, ...) {
+/* Reached only from the assembly entry below: `used` keeps an LTO build from
+ * dropping or renaming it. */
+__attribute__((used, visibility("hidden"))) long patina_libc_syscall(long number, ...) {
     va_list ap;
     va_start(ap, number);
     uint64_t args[6];
@@ -45,6 +47,93 @@ long syscall(long number, ...) {
     return dispatch_result(patina_sud_dispatch((long)number, args[0], args[1], args[2],
                                                args[3], args[4], args[5], 0));
 }
+
+/*
+ * A guest's own signal restorer. The kernel builds a handler's frame with the
+ * action's `sa_restorer` as its return address, so a runtime that installs its
+ * own (Go's among them) returns into a stub that issues `rt_sigreturn` from
+ * guest text: a raw instruction on x86_64 (SUD traps it), or on arm64 a tail
+ * call into this `syscall(2)` (a raw `svc` would be refused at audit). Either
+ * way the kernel reads the frame at the caller's stack pointer, so the one
+ * faithful answer is the host kernel's own `rt_sigreturn` issued with that
+ * stack pointer from glibc text. `patina_guest_sigreturn` prepares the frame
+ * and names that vehicle — glibc's real `syscall(2)`, a leaf that leaves the
+ * stack alone — and both doors resume there with the number in its first
+ * argument register: the SIGSYS handler by editing the trapped context, and
+ * the `syscall` entry below by a tail jump with the stack pointer it was
+ * called with. The kernel then restores the interrupted context, mask
+ * included, exactly as it would natively; a frame it cannot read is its
+ * SIGSEGV, as natively.
+ *
+ * The frame's saved mask is where the handler may have edited the mask the
+ * return installs. The containment signals are kept out of it
+ * (`patina_signal_return`), as every other mask the guest installs.
+ */
+__attribute__((visibility("hidden"))) uintptr_t patina_guest_sigreturn(uintptr_t sp) {
+#if defined(__x86_64__)
+    /* The restorer's `ret` popped `pretcode`: the ucontext is at sp. */
+    uintptr_t uc = sp;
+#elif defined(__aarch64__)
+    /* `struct rt_sigframe { siginfo_t info; struct ucontext uc; }` at sp. */
+    uintptr_t uc = sp + sizeof(siginfo_t);
+#else
+#error "guest rt_sigreturn: unsupported architecture"
+#endif
+    /* glibc's ucontext_t keeps the kernel's layout up to uc_sigmask. */
+    return patina_signal_return(uc + offsetof(ucontext_t, uc_sigmask));
+}
+
+/*
+ * The public `syscall(2)`: every number but `rt_sigreturn` goes to
+ * `patina_libc_syscall` untouched (a tail jump keeps the variadic registers
+ * and stack), and `rt_sigreturn` resumes at the host vehicle with the stack
+ * pointer this entry was reached with (see above). The number is compared as
+ * the kernel reads it, 32 bits wide.
+ */
+#if defined(__x86_64__)
+__asm__(".text\n"
+        ".globl syscall\n"
+        ".type syscall,@function\n"
+        ".p2align 4\n"
+        "syscall:\n"
+        "  endbr64\n"
+        "  cmpl $15, %edi\n" /* __NR_rt_sigreturn */
+        "  je 1f\n"
+        "  jmp patina_libc_syscall\n"
+        "1:\n"
+        "  movq %rsp, %rdi\n"
+        "  andq $-16, %rsp\n"
+        "  pushq %rdi\n"
+        "  pushq %rdi\n"
+        "  call patina_guest_sigreturn\n"
+        "  popq %rsp\n"
+        "  movl $15, %edi\n"
+        "  jmpq *%rax\n"
+        ".size syscall, .-syscall\n");
+#elif defined(__aarch64__)
+__asm__(".text\n"
+        ".globl syscall\n"
+        ".type syscall,%function\n"
+        ".p2align 2\n"
+        "syscall:\n"
+        "  bti c\n"
+        "  cmp w0, #139\n" /* __NR_rt_sigreturn */
+        "  b.eq 1f\n"
+        "  b patina_libc_syscall\n"
+        "1:\n"
+        "  mov x0, sp\n"
+        "  sub sp, sp, #16\n"
+        "  str x0, [sp]\n"
+        "  bl patina_guest_sigreturn\n"
+        "  ldr x1, [sp]\n"
+        "  mov sp, x1\n"
+        "  mov x16, x0\n"
+        "  mov x0, #139\n"
+        "  br x16\n"
+        ".size syscall, .-syscall\n");
+#else
+#error "syscall(2) entry: unsupported architecture"
+#endif
 
 /* ==========================================================================
  * Syscall-user-dispatch (SUD).
@@ -401,6 +490,23 @@ static void patina_sud_sigsys(int sig, siginfo_t *info, void *ucontext) {
 
     ucontext_t *uc = (ucontext_t *)ucontext;
     int saved_errno = errno;
+    /* A guest restorer's `rt_sigreturn`: resume at the host vehicle with the
+     * guest's stack pointer (see `patina_guest_sigreturn`). This handler's own
+     * return installs the trapped context with those two registers changed,
+     * and the vehicle then returns through the guest's frame. */
+    if (nr == __NR_rt_sigreturn) {
+#if defined(__x86_64__)
+        uintptr_t vehicle = patina_guest_sigreturn((uintptr_t)uc->uc_mcontext.gregs[REG_RSP]);
+        uc->uc_mcontext.gregs[REG_RIP] = (greg_t)vehicle;
+        uc->uc_mcontext.gregs[REG_RDI] = __NR_rt_sigreturn;
+#elif defined(__aarch64__)
+        uintptr_t vehicle = patina_guest_sigreturn((uintptr_t)uc->uc_mcontext.sp);
+        uc->uc_mcontext.pc = vehicle;
+        uc->uc_mcontext.regs[0] = __NR_rt_sigreturn;
+#endif
+        errno = saved_errno;
+        return;
+    }
     unsigned long a0, a1, a2, a3, a4, a5;
 #if defined(__x86_64__)
     greg_t *r = uc->uc_mcontext.gregs;

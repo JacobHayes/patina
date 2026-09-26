@@ -1349,6 +1349,15 @@ const BINDINGS: &[(Syscall, Handler)] = &[
             a[3] as usize,
         )
     }),
+    // Both vehicles answer a guest's `rt_sigreturn` before dispatch (the
+    // SIGSYS handler and the `syscall(2)` entry resume at the host's own
+    // `rt_sigreturn` with the guest's stack pointer, `c/posix/init.c`): it
+    // changes control flow, which no return value can.
+    (Syscall::N_rt_sigreturn, |nr, _| {
+        crate::trap_fatal(&format!(
+            "rt_sigreturn (nr {nr}) reached the dispatcher: both vehicles answer it first"
+        ))
+    }),
     (Syscall::N_rt_sigpending, |_, a| unsafe {
         patina_signal_pending(a[0] as *mut u8, a[1] as usize)
     }),

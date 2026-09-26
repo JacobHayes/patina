@@ -13,14 +13,13 @@
 //! The action is installed and reported back raw (glibc's `sigaction` would
 //! substitute its own restorer), so the scenario runs through the kernel
 //! vehicles; `rt_sigreturn` itself is always the stub's own. On x86_64 the
-//! stub is the `syscall` instruction (patina's SUD dispatcher traps it). On
+//! stub is the `syscall` instruction. On
 //! arm64 the stub tail-calls glibc's `syscall(2)`, which leaves the stack
 //! (the frame) alone. A raw `svc` anywhere in the probe would make patina
 //! refuse the whole binary on arm64, which has no syscall-user-dispatch; that
 //! is also why the raw vehicle is x86_64-only.
 
-use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{KernelSigaction, Probe, SA_RESTORER, SIGSET_BYTES};
 use crate::signals as support;
 use crate::vehicle::Vehicle;
@@ -145,15 +144,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_tgkill,
         Syscall::N_rt_sigprocmask,
     ],
-    gaps: &[Gap {
-        status: Status::ByDesign,
-        vehicles: Vehicle::KERNEL,
-        what: "rt_sigreturn is a Trap(signal-abi) in the registry: the kernel-built frame returns into the caller's own restorer as it should, but only glibc's restorer in the allowed host region may issue rt_sigreturn, so the SUD dispatcher aborts at the stub's (docs/arcs/syscall-conformance-signals.md)",
-        failure: Failure::Stops {
-            events: 6,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall rt_sigreturn (nr",
-        },
-    }],
     ..DEFAULTS
 };

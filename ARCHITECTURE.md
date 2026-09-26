@@ -196,8 +196,14 @@ its creator's. A join of a detached thread is `EINVAL`, and then one that could
 never end — of the caller itself, or of a thread waiting to join the caller — is
 `EDEADLK`.
 
-Guest raw `rt_sigreturn` and `restart_syscall` are final `signal-abi` traps: handler
-returns use the allowed host restorer, and no guest restart-block protocol exists.
+A handler installed with the caller's own `SA_RESTORER` (a raw action, as Go's
+runtime installs) returns into the caller's stub, and the stub's `rt_sigreturn`
+(trapped by SUD, or a tail call into the shim's `syscall(2)` entry) resumes at
+the host kernel's own `rt_sigreturn`, issued from glibc text with the guest's
+stack pointer, so the kernel restores the interrupted context and the frame's
+mask, less the containment signals. Handlers installed through glibc return
+through its restorer without a trap. `restart_syscall` is a final `signal-abi`
+trap: no guest restart-block protocol exists.
 `pidfd_send_signal` remains a process trap because there are no virtual pidfds;
 this does not implement the signals spec's self-pidfd aspiration. Ambient
 host signals are outside the deterministic model and can execute a handler

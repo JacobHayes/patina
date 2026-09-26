@@ -28,9 +28,12 @@ implementation; they do not change the scenarios or the required unit tests.
   locks, but another blocking pthread wait is refused before queue mutation or
   condvar unlock with `signal handler blocked on a pthread wait while interrupting
   one: not modeled`. There is no nested pthread-wait stack.
-- Guest raw `rt_sigreturn` and `restart_syscall` are final `signal-abi` traps.
-  Actual handler returns use the allowed host restorer; no guest restart-block
-  protocol is implemented.
+- A handler with the caller's own restorer returns through it: its
+  `rt_sigreturn` (SUD-trapped, or a tail call into the shim's `syscall(2)`
+  entry) resumes at the host's `rt_sigreturn` from glibc text with the guest's
+  stack pointer, after the containment signals are taken out of the frame's
+  mask (`signal/restorer`). `restart_syscall` is a final `signal-abi` trap; no
+  guest restart-block protocol is implemented.
 - Explicit Linux guest abort finalizes a healthy trace. Internal fatal paths and
   shim-owned Rust panics use host diagnostics/private abort and cannot finalize
   through that guest interposer. POSIX startup installs the ownership-scoped

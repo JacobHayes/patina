@@ -45,6 +45,39 @@ fn libc_sleep_returns_remaining_seconds_on_signal() {
     assert_interruptible_wait("sleep");
 }
 
+/// A handler that adds the containment signals to its frame's saved mask
+/// gets them blocked natively when it returns, and the guest runs on. Under
+/// patina the return must leave them unblocked (whichever restorer ran), so
+/// the next raw syscall and timestamp-counter read are still answered and the
+/// guest prints what it prints natively.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_handler_frame_cannot_block_the_containment_signals() {
+    let native = assert_build_c_guest("signals/frame_mask.c", CLink::Unlinked);
+    let patina = assert_build_c_guest("signals/frame_mask.c", CLink::PosixShim);
+    let cases: &[&str] = if cfg!(target_arch = "x86_64") {
+        &["libc", "raw", "raw-libc"]
+    } else {
+        &["libc"]
+    };
+    for case in cases {
+        let oracle = assert_standalone_success(&native.binary, &[case], &[]);
+        assert_eq!(oracle.stdout, b"FRAME_MASK_OK\n", "native {case}");
+        let output = standalone_output(
+            &patina.binary,
+            &[case],
+            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+        );
+        assert!(
+            output.status.success(),
+            "{case}: {:?}\n{}",
+            output.status,
+            text(&output.stderr)
+        );
+        assert_eq!(output.stdout, oracle.stdout, "{case}");
+    }
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod raw {
     use super::*;

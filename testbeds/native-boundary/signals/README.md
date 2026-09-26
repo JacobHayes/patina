@@ -21,6 +21,12 @@ refusals, alongside its existing Rust `signal(handler)` guests. These inline
 raw cases require x86_64 Linux SUD; missing capability is reported explicitly
 and `PATINA_REQUIRE_SUD=1` makes missing evidence fatal.
 
+`frame_mask.c` has a handler add SIGSYS and SIGSEGV to its frame's saved mask,
+returning through glibc's restorer and (x86_64) through the guest's own raw
+and `syscall(2)` stubs; a raw syscall and a timestamp-counter read must still
+be answered afterwards. `native_signals` runs it natively as the oracle and
+under the shim, and requires the same output.
+
 Every case uses `cargo-patina/tests/common` for compilation and process-group
 deadlines. `native_raw` separately owns prctl modeled/unsupported/privileged
 options and ppoll timeout writeback plus pipe readiness 0→1/revents.

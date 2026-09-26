@@ -437,6 +437,55 @@ pub unsafe extern "C" fn patina_signal_frame(mask: *mut u64, stack: *mut Stack) 
     }
 }
 
+/// A guest restorer's `rt_sigreturn` (both doors, `c/posix/init.c`): the frame
+/// at `mask` is the guest's own, and the kernel installs its saved mask as the
+/// return's. Keep the containment signals out of it, as every mask the guest
+/// installs ([`host_mask`]); a frame that cannot be read is left to the
+/// kernel's `rt_sigreturn`, which faults it as it would natively. Answers the
+/// vehicle that issues the kernel's `rt_sigreturn`: glibc's real `syscall(2)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_signal_return(mask: usize) -> usize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if let Ok(saved) = crate::uaccess::read::<u64>(mask) {
+        let kept = host_mask(saved);
+        if kept != saved {
+            containment_kept_unblocked(saved & !kept);
+            if crate::uaccess::write(mask, &kept).is_err() {
+                // Natively the kernel would install this mask: a read-only
+                // frame that blocks a containment signal cannot be honoured.
+                crate::trap_fatal(
+                    "a guest rt_sigreturn frame blocks a containment signal (SIGSYS, or \
+                     SIGSEGV under the timestamp-counter trap) and cannot be written to keep \
+                     it unblocked",
+                );
+            }
+        }
+    }
+    crate::hostapi::get().host_syscall as usize
+}
+
+/// A handler asked, through its frame's saved mask, to block a signal
+/// containment runs on (`dropped`): it stays unblocked, where natively the
+/// handler's return would block it. Said once per run on the host's stderr.
+fn containment_kept_unblocked(dropped: u64) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if SAID.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let names = [(SIGSYS, "SIGSYS"), (SIGSEGV, "SIGSEGV")]
+        .into_iter()
+        .filter(|(sig, _)| dropped & bit(*sig) != 0)
+        .map(|(_, name)| name)
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let line = format!(
+        "patina: a signal handler's frame mask blocks {names}, which containment keeps \
+         unblocked: the handler's return leaves it unblocked, where a native run would \
+         block it\n"
+    );
+    let _ = crate::host_write_all(2, line.as_bytes());
+}
+
 /// Called at the boundary return, not at generation. No lock survives a host
 /// unblock: handlers can re-enter either door and acquire the runtime normally.
 #[unsafe(no_mangle)]
@@ -566,8 +615,19 @@ pub(crate) fn deliver() {
         FRAME_DIRTY.with(|dirty| dirty.set(dirty.get() | outer_dirty | FRAME_MASK));
         RELEASING_FRAMES.with(|flag| flag.set(was_releasing));
         // Nested boundary calls observed the handler mask. rt_sigreturn restored
-        // this enclosing mask, even if no pending work remains for another loop.
-        lock_state().signals.tasks.get_mut(&me).unwrap().mask = mask;
+        // the mask each frame saved: this enclosing one, unless a handler edited
+        // its frame's, which the kernel honours. Read it back either way, even
+        // if no pending work remains for another loop. glibc's restorer (and
+        // arm64's kernel trampoline) returns with no trap to strip that mask,
+        // so a containment signal a handler added is taken out again here,
+        // before a later raw syscall or counter read meets it blocked.
+        let restored = read_mask();
+        let kept = host_mask(restored);
+        if kept != restored {
+            containment_kept_unblocked(restored & !kept);
+            install_mask(kept);
+        }
+        lock_state().signals.tasks.get_mut(&me).unwrap().mask = kept;
     }
 }
 

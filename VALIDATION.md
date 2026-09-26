@@ -714,7 +714,9 @@ fault-eligibility parameter, exercised by the linked C refusal guest.
 
 Poll/select/pselect6 remain network+readiness-owned despite being implemented to
 support signal interruption; their dedicated host-conformance oracle has not
-landed. The raw frame/restart protocols are final `signal-abi` traps; pidfd signal
+landed. A guest restorer's `rt_sigreturn` returns through the host kernel's
+(`signal/restorer`, both vehicles and both arches); the restart protocol is a
+final `signal-abi` trap; pidfd signal
 sending remains a process trap (no virtual pidfds), a stated deviation from the
 signals spec's self-pidfd mention. Ambient host signals and siglongjmp escape from
 a handler remain outside verified deterministic behavior.

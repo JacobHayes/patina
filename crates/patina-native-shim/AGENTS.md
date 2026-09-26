@@ -248,11 +248,21 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 - Alternate stacks live in the kernel per host thread, not in a shim shadow.
   Raw actions retain the caller's exact flags/restorer; libc actions use the
   glibc restorer captured at initialization. `SIGSYS`/`SIGSEGV` cannot be replaced
-  or blocked by a guest. Ordinary no-pending syscall returns perform no host
+  by a guest, and every mask a guest installs loses them. A handler can still add
+  them to its frame's saved mask: a guest restorer's frame is stripped before the
+  kernel's `rt_sigreturn`, but glibc's restorer (and arm64's kernel trampoline)
+  returns with no trap, so the delivery point strips the restored mask again once
+  the frames return, naming the change once per run on stderr. Until then a
+  sibling handler of the same batch runs with them blocked, and a raw syscall
+  there dies by `SIGSYS`. Ordinary no-pending syscall returns perform no host
   signal queries; frame fixups read only explicitly dirtied mask/stack fields.
   Frame release preserves both dirty bits across nested SIGSYS fixups.
-- Final `signal-abi` traps cover guest raw `rt_sigreturn`/`restart_syscall`:
-  actual handler return uses the allowed host restorer, not guest frame replay.
+- A guest's own restorer returns through the host kernel's `rt_sigreturn`:
+  the SIGSYS handler and the assembly `syscall(2)` entry both resume at
+  glibc's real `syscall(2)` with the guest's stack pointer, never replaying a
+  frame in the shim. The frame's saved mask loses the containment signals
+  first. Anything that re-enters `syscall(2)` must keep that entry's stack
+  pointer contract. A final `signal-abi` trap covers `restart_syscall`.
   `pidfd_send_signal` is a final process trap because no virtual pidfd exists;
   this is a declared limitation, not a modeled self-pidfd implementation.
 - `cargo-patina/tests/native_signals.rs` and `native_containment.rs` use the

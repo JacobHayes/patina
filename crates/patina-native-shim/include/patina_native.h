@@ -699,6 +699,10 @@ void patina_signal_restorer(uintptr_t restorer);
 int64_t patina_signal_action_libc(int sig, const struct patina_signal_action *action,
                                 struct patina_signal_action *old);
 void patina_signal_frame(uint64_t *mask, void *stack);
+/* A guest restorer's rt_sigreturn: keep the containment signals out of the
+ * frame's saved mask at `mask`, and name the host vehicle (glibc's real
+ * syscall(2)) that issues the kernel's rt_sigreturn. */
+uintptr_t patina_signal_return(uintptr_t mask);
 #endif
 /* Private internal-fatal vehicle: never finalize the guest trace. */
 _Noreturn void patina_host_abort(void);
