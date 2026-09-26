@@ -2486,6 +2486,12 @@ const ROWS: &[SymbolRow] = &[
         SymbolStatus::Modeled,
     ),
     s(
+        "tcflush",
+        Platform::Linux,
+        Serves::Syscalls(&["ioctl"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
         "posix_openpt",
         Platform::Linux,
         Serves::Syscalls(&["openat"]),

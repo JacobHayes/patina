@@ -165,6 +165,23 @@ struct Pair {
     io_error: bool,
     /// The slave node's times, nanoseconds on the filesystem clock.
     node: NodeTimes,
+    /// The slave's line discipline read buffer: what the master wrote, as
+    /// the slave's settings received it.
+    to_slave: VecDeque<Cell>,
+    /// How many of `to_slave`'s cells are complete lines (`canon_head`).
+    canon: usize,
+    /// The master's read buffer: what the slave wrote and echoed, as its
+    /// output processing produced it (the master's own settings are raw).
+    to_master: VecDeque<u8>,
+    /// The slave's output column (`ldata->column`).
+    column: usize,
+    /// Tasks waiting to read each side, or watching it for readiness.
+    waiters: [VecDeque<TaskId>; 2],
+    /// Each side's wakeups as an edge-triggered epoll interest sees them
+    /// (`ep_poll_callback` drops a keyed wakeup whose key the interest does
+    /// not ask for): those that reach an interest in input, and those that
+    /// reach one in output.
+    edges: [(u64, u64); 2],
 }
 
 /// A node's times.
@@ -195,13 +212,27 @@ pub(crate) struct Ptys {
 }
 
 /// Which side of a pair a descriptor is.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Side {
     Master,
     Slave,
 }
 
 impl Side {
+    fn slot(self) -> usize {
+        match self {
+            Side::Master => 0,
+            Side::Slave => 1,
+        }
+    }
+
+    fn other(self) -> Side {
+        match self {
+            Side::Master => Side::Slave,
+            Side::Slave => Side::Master,
+        }
+    }
+
     pub(crate) fn of(kind: FdKind) -> Option<Side> {
         match kind {
             FdKind::PtyMaster => Some(Side::Master),
@@ -347,6 +378,12 @@ pub(crate) fn open_master(flags: u32, cloexec: bool) -> c_int {
                 slave_closed: false,
                 io_error: false,
                 node: NodeTimes::at(now),
+                to_slave: VecDeque::new(),
+                canon: 0,
+                to_master: VecDeque::new(),
+                column: 0,
+                waiters: [VecDeque::new(), VecDeque::new()],
+                edges: [(0, 0); 2],
             },
         );
         index
@@ -505,20 +542,29 @@ pub(crate) fn release(side: Side, index: u32) {
     let Some(pair) = state.ptys.pairs.get_mut(&index) else {
         return;
     };
-    match side {
-        Side::Master => pair.master = false,
+    let woken = match side {
+        // `pty_close` wakes the slave's queues, then hangs it up.
+        Side::Master => {
+            pair.master = false;
+            pair.wake(Side::Slave, true, true)
+        }
         Side::Slave => {
             pair.slaves -= 1;
             // `pty_close` of a slave whose last open failed leaves the
             // master's flag alone.
             if pair.slaves == 0 && !pair.io_error {
                 pair.slave_closed = true;
+                pair.wake(Side::Master, true, true)
+            } else {
+                Vec::new()
             }
         }
-    }
+    };
     if !pair.master && pair.slaves == 0 {
         state.ptys.pairs.remove(&index);
     }
+    drop(state);
+    wake_all(woken);
 }
 
 /// Whether the pair's slave is hung up: its master closed.
@@ -533,6 +579,10 @@ const TCSETS: u64 = 0x5402;
 const TCSETSW: u64 = 0x5403;
 const TCSETSF: u64 = 0x5404;
 const TCSBRK: u64 = 0x5409;
+const TCFLSH: u64 = 0x540B;
+const TCIFLUSH: usize = 0;
+const TCOFLUSH: usize = 1;
+const TCIOFLUSH: usize = 2;
 const TIOCSCTTY: u64 = 0x540E;
 const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
@@ -597,9 +647,40 @@ pub(crate) fn ioctl(side: Side, index: u32, request: u64, arg: usize) -> c_int {
             let Ok(new) = uaccess::read::<Termios>(arg) else {
                 return fail(EFAULT);
             };
+            // `EXTPROC` changes how every read, poll and count judges the
+            // input, which the model does not.
+            if new.lflag & EXTPROC != 0 {
+                drop(state);
+                unmodeled("EXTPROC (input processing left to the other side)");
+            }
+            // `TCSETSF` flushes the slave's input first (`n_tty_flush_buffer`).
+            if request == TCSETSF {
+                pair.flush(Side::Slave);
+            }
             set_termios(pair, new);
+            // `n_tty_set_termios` wakes the slave's queues, and only the
+            // slave's, whichever side asked.
+            let woken = pair.wake(Side::Slave, true, true);
+            drop(state);
+            wake_all(woken);
             done()
         }
+        // `__tty_perform_flush` on the descriptor's own side: its input,
+        // and the other side's unprocessed bytes, of which there are none.
+        // `tty_unthrottle` after an input flush: a pty side is always
+        // marked throttled once open, so `pty_unthrottle` wakes the other
+        // side's writers.
+        TCFLSH => match arg {
+            TCIFLUSH | TCIOFLUSH => {
+                pair.flush(side);
+                let woken = pair.wake(side.other(), false, true);
+                drop(state);
+                wake_all(woken);
+                done()
+            }
+            TCOFLUSH => done(),
+            _ => fail(crate::EINVAL),
+        },
         TIOCGWINSZ => {
             let winsize = pair.winsize;
             drop(state);
@@ -676,17 +757,533 @@ pub(crate) fn ioctl(side: Side, index: u32, request: u64, arg: usize) -> c_int {
 
 /// `set_termios` → `tty_set_termios` → `pty_set_termios` on the pair's
 /// slave: `ADDRB` stays, and the character size and receiver are forced
-/// to 8 bits, no parity.
+/// to 8 bits, no parity; then the line discipline's (`n_tty_set_termios`).
 fn set_termios(pair: &mut Pair, mut new: Termios) {
+    let was_canonical = pair.canonical();
     new.cflag ^= (new.cflag ^ pair.termios.cflag) & ADDRB;
     new.cflag &= !(CSIZE | PARENB);
     new.cflag |= CS8 | CREAD;
     pair.termios = new;
+    pair.recanonicalize(was_canonical);
 }
 
-// ---- transfer and readiness ----------------------------------------------
+// ---- the line discipline -------------------------------------------------
 
-/// `tty_read` on a pair's descriptor.
+/// A byte in the slave's read buffer (n_tty's `read_buf`) and whether it
+/// ends a line (`read_flags`): a newline, `VEOL`/`VEOL2`, or an end of file,
+/// stored as the disabled character 0 and never copied out.
+#[derive(Clone, Copy)]
+struct Cell {
+    byte: u8,
+    delim: bool,
+}
+
+/// `N_TTY_BUF_SIZE` less one: the most a direction holds unread before the
+/// kernel's flow control (a throttled line discipline, a full flip buffer,
+/// canonical-mode discards) decides what happens to more, which the model
+/// does not.
+const ROOM: usize = 4095;
+
+const VDISABLE: u8 = 0;
+const ISTRIP: u32 = 0o40;
+const INLCR: u32 = 0o100;
+const IGNCR: u32 = 0o200;
+const IUCLC: u32 = 0o1000;
+const PARMRK: u32 = 0o10;
+const IUTF8: u32 = 0o40000;
+const OLCUC: u32 = 0o2;
+const OCRNL: u32 = 0o10;
+const ONOCR: u32 = 0o20;
+const ONLRET: u32 = 0o40;
+const TABDLY: u32 = 0o14000;
+const XTABS: u32 = 0o14000;
+const ECHONL: u32 = 0o100;
+const EXTPROC: u32 = 0o200000;
+
+/// The kernel's `iscntrl`: lib/ctype.c's `_C` class is C0 and DEL; its
+/// table marks nothing from 0x80 up as a control character.
+fn iscntrl(byte: u8) -> bool {
+    byte < 0x20 || byte == 0x7f
+}
+
+/// n_tty's `is_continuation`: a UTF-8 continuation byte under `IUTF8`.
+fn is_continuation(byte: u8, t: &Termios) -> bool {
+    t.iflag & IUTF8 != 0 && byte & 0xc0 == 0x80
+}
+
+/// Whether n_tty's `char_map` holds `c` under `t` (`n_tty_set_termios`): the
+/// bytes its receive takes through `n_tty_receive_char_special`. The
+/// disabled character 0 never is.
+fn special(t: &Termios, c: u8) -> bool {
+    let is = |slot: usize| t.cc[slot] == c;
+    let canonical = t.lflag & ICANON != 0;
+    let extended = t.lflag & IEXTEN != 0;
+    c != VDISABLE
+        && ((c == b'\r' && t.iflag & (IGNCR | ICRNL) != 0)
+            || (c == b'\n' && t.iflag & INLCR != 0)
+            || (canonical && (is(VERASE) || is(VKILL) || is(VEOF) || c == b'\n' || is(VEOL)))
+            || (canonical && extended && (is(VWERASE) || is(VLNEXT) || is(VEOL2)))
+            || (canonical && extended && t.lflag & ECHO != 0 && is(VREPRINT))
+            || (t.iflag & IXON != 0 && (is(VSTART) || is(VSTOP)))
+            || (t.lflag & ISIG != 0 && (is(VINTR) || is(VQUIT) || is(VSUSP))))
+}
+
+/// Stop the run: `what` in the line discipline is not modeled.
+fn unmodeled(what: &str) -> ! {
+    crate::trap_fatal(&format!(
+        "a pseudoterminal's line discipline: {what} is not modeled; failing closed"
+    ))
+}
+
+impl Pair {
+    fn canonical(&self) -> bool {
+        self.termios.lflag & ICANON != 0
+    }
+
+    /// n_tty's `do_output_char` for one byte the slave writes or echoes,
+    /// under `OPOST`, onto the master's read buffer; the column it keeps.
+    fn output(&mut self, byte: u8) {
+        let t = self.termios;
+        if t.oflag & OPOST == 0 {
+            self.to_master.push_back(byte);
+            return;
+        }
+        match byte {
+            b'\n' => {
+                if t.oflag & ONLRET != 0 {
+                    self.column = 0;
+                }
+                if t.oflag & ONLCR != 0 {
+                    self.column = 0;
+                    self.to_master.extend(b"\r\n");
+                    return;
+                }
+                self.to_master.push_back(b'\n');
+            }
+            b'\r' => {
+                if t.oflag & ONOCR != 0 && self.column == 0 {
+                    return;
+                }
+                if t.oflag & OCRNL != 0 {
+                    if t.oflag & ONLRET != 0 {
+                        self.column = 0;
+                    }
+                    self.to_master.push_back(b'\n');
+                    return;
+                }
+                self.column = 0;
+                self.to_master.push_back(b'\r');
+            }
+            b'\t' => {
+                let spaces = 8 - (self.column & 7);
+                self.column += spaces;
+                if t.oflag & TABDLY == XTABS {
+                    self.to_master.extend(std::iter::repeat_n(b' ', spaces));
+                } else {
+                    self.to_master.push_back(b'\t');
+                }
+            }
+            8 => {
+                self.column = self.column.saturating_sub(1);
+                self.to_master.push_back(8);
+            }
+            _ => {
+                if !iscntrl(byte) {
+                    if t.oflag & OLCUC != 0 {
+                        unmodeled("OLCUC output");
+                    }
+                    if !is_continuation(byte, &t) {
+                        self.column += 1;
+                    }
+                }
+                self.to_master.push_back(byte);
+            }
+        }
+    }
+
+    /// n_tty's `echo_char`: a control character (not a tab) as `^X` under
+    /// `ECHOCTL`, written as it is; any other byte through the output
+    /// processing. 0377 is written as it is.
+    fn echo(&mut self, byte: u8) {
+        if byte == 0xff {
+            self.column += 1;
+            self.to_master.push_back(byte);
+        } else if self.termios.lflag & ECHOCTL != 0 && iscntrl(byte) && byte != b'\t' {
+            self.column += 2;
+            self.to_master.extend([b'^', byte ^ 0o100]);
+        } else {
+            self.output(byte);
+        }
+    }
+
+    /// A line-ending cell: the readable part of a canonical buffer ends
+    /// after it (`canon_head`).
+    fn end_line(&mut self, byte: u8) {
+        self.to_slave.push_back(Cell { byte, delim: true });
+        self.canon = self.to_slave.len();
+    }
+
+    /// n_tty's receive of one byte the master wrote, under the slave's
+    /// settings (`n_tty_receive_buf_standard`): `ISTRIP`, then a byte in the
+    /// `char_map` takes the special path, any other the plain one. `IUCLC`
+    /// stops by name.
+    fn receive(&mut self, byte: u8) {
+        let t = self.termios;
+        let mut c = byte;
+        if t.iflag & ISTRIP != 0 {
+            c &= 0x7f;
+        }
+        if t.iflag & IUCLC != 0 && t.lflag & IEXTEN != 0 {
+            unmodeled("IUCLC input");
+        }
+        if special(&t, c) {
+            self.receive_special(c);
+        } else {
+            self.receive_plain(c);
+        }
+    }
+
+    /// `n_tty_receive_char`: the echo (`echo_char`), and the byte queued.
+    fn receive_plain(&mut self, c: u8) {
+        if self.termios.lflag & ECHO != 0 {
+            self.echo(c);
+        }
+        self.queue(c);
+    }
+
+    /// `n_tty_receive_char_special`: flow control's start character is
+    /// consumed; the input translations; the canonical line endings; and the
+    /// echo, a translated newline written as it is (`echo_char_raw`). Flow
+    /// control's stop, the signal characters, line editing and literal-next
+    /// stop by name.
+    fn receive_special(&mut self, byte: u8) {
+        let t = self.termios;
+        let mut c = byte;
+        let is = |slot: usize| t.cc[slot] == c;
+        if t.iflag & IXON != 0 {
+            if is(VSTART) {
+                return;
+            }
+            if is(VSTOP) {
+                unmodeled("flow control's stop character (IXON)");
+            }
+        }
+        if t.lflag & ISIG != 0 && (is(VINTR) || is(VQUIT) || is(VSUSP)) {
+            unmodeled("a signal character (ISIG)");
+        }
+        if c == b'\r' {
+            if t.iflag & IGNCR != 0 {
+                return;
+            }
+            if t.iflag & ICRNL != 0 {
+                c = b'\n';
+            }
+        } else if c == b'\n' && t.iflag & INLCR != 0 {
+            c = b'\r';
+        }
+        if self.canonical() && self.receive_canonical(c) {
+            return;
+        }
+        if t.lflag & ECHO != 0 {
+            if c == b'\n' {
+                self.output(b'\n');
+            } else {
+                self.echo(c);
+            }
+        }
+        self.queue(c);
+    }
+
+    /// `n_tty_receive_char_canon`: whether `c` was a canonical line ending
+    /// (or editing, which stops by name).
+    fn receive_canonical(&mut self, c: u8) -> bool {
+        let t = self.termios;
+        let is = |slot: usize| c != VDISABLE && t.cc[slot] == c;
+        let extended = t.lflag & IEXTEN != 0;
+        if is(VERASE) || is(VKILL) || (is(VWERASE) && extended) {
+            unmodeled("canonical line editing (VERASE, VKILL, VWERASE)");
+        }
+        if is(VLNEXT) && extended {
+            unmodeled("the literal-next character (VLNEXT)");
+        }
+        if is(VREPRINT) && t.lflag & ECHO != 0 && extended {
+            unmodeled("the reprint character (VREPRINT)");
+        }
+        if c == b'\n' {
+            if t.lflag & (ECHO | ECHONL) != 0 {
+                self.output(b'\n');
+            }
+            self.end_line(b'\n');
+            return true;
+        }
+        if is(VEOF) {
+            self.end_line(VDISABLE);
+            return true;
+        }
+        if is(VEOL) || (is(VEOL2) && extended) {
+            if t.lflag & ECHO != 0 {
+                self.echo(c);
+            }
+            if c == 0xff && t.iflag & PARMRK != 0 {
+                unmodeled("PARMRK's doubled 0377");
+            }
+            self.end_line(c);
+            return true;
+        }
+        false
+    }
+
+    /// `put_tty_queue` of a byte that ends no line; `PARMRK`'s doubling of
+    /// 0377 stops by name.
+    fn queue(&mut self, c: u8) {
+        if c == 0xff && self.termios.iflag & PARMRK != 0 {
+            unmodeled("PARMRK's doubled 0377");
+        }
+        self.to_slave.push_back(Cell {
+            byte: c,
+            delim: false,
+        });
+    }
+
+    /// `n_tty_set_termios` switching canonical mode: the line endings are
+    /// forgotten; entering canonical mode with bytes waiting makes them one
+    /// line.
+    fn recanonicalize(&mut self, was_canonical: bool) {
+        if was_canonical == self.canonical() {
+            return;
+        }
+        for cell in &mut self.to_slave {
+            cell.delim = false;
+        }
+        self.canon = 0;
+        if self.canonical() {
+            if let Some(last) = self.to_slave.back_mut() {
+                last.delim = true;
+                self.canon = self.to_slave.len();
+            }
+        }
+    }
+
+    /// Whether a read of this side takes something now (`input_available_p`
+    /// with `poll` saying whether the raw minimum counts).
+    fn readable(&self, side: Side, poll: bool) -> bool {
+        match side {
+            Side::Master => !self.to_master.is_empty(),
+            Side::Slave if self.canonical() => self.canon > 0,
+            Side::Slave => {
+                let (min, time) = (self.termios.cc[VMIN], self.termios.cc[VTIME]);
+                let amount = if poll && time == 0 && min != 0 {
+                    usize::from(min)
+                } else {
+                    1
+                };
+                self.to_slave.len() >= amount
+            }
+        }
+    }
+
+    /// `canon_copy_from_read_buf`: one line, or as much of it as `room`
+    /// takes; the line ending is copied unless it is an end of file. A read
+    /// that fills its room exactly before an end of file also takes the end
+    /// of file (`canon_skip_eof`).
+    fn take_line(&mut self, room: usize) -> Vec<u8> {
+        let mut taken = Vec::new();
+        let mut consumed = 0;
+        while consumed < self.canon && taken.len() < room {
+            let cell = self.to_slave[consumed];
+            consumed += 1;
+            if cell.delim {
+                if cell.byte != VDISABLE {
+                    taken.push(cell.byte);
+                }
+                self.drain_slave(consumed);
+                return taken;
+            }
+            taken.push(cell.byte);
+        }
+        if consumed < self.canon {
+            let next = self.to_slave[consumed];
+            if next.delim && next.byte == VDISABLE {
+                consumed += 1;
+            }
+        }
+        self.drain_slave(consumed);
+        taken
+    }
+
+    fn drain_slave(&mut self, count: usize) {
+        self.to_slave.drain(..count);
+        self.canon = self.canon.saturating_sub(count);
+    }
+
+    /// n_tty's `chars_in_buffer`: a canonical slave's complete lines (their
+    /// ends and ends of file included), otherwise everything queued.
+    fn in_buffer(&self, side: Side) -> usize {
+        match side {
+            Side::Master => self.to_master.len(),
+            Side::Slave if self.canonical() => self.canon,
+            Side::Slave => self.to_slave.len(),
+        }
+    }
+
+    /// `inq_canon` / `read_cnt`: what `FIONREAD` reports for a side.
+    fn queued(&self, side: Side) -> usize {
+        match side {
+            Side::Master => self.to_master.len(),
+            Side::Slave if self.canonical() => self
+                .to_slave
+                .iter()
+                .take(self.canon)
+                .filter(|cell| !(cell.delim && cell.byte == VDISABLE))
+                .count(),
+            Side::Slave => self.to_slave.len(),
+        }
+    }
+}
+
+/// `tty_update_time`: a transfer through a side moves its node's access
+/// (a read) or modification (a write) time to the current second, once the
+/// second differs from the recorded one past its low three bits.
+fn touch(times: &mut NodeTimes, write: bool) {
+    let second = now() / 1_000_000_000;
+    let stamp = if write {
+        &mut times.mtime
+    } else {
+        &mut times.atime
+    };
+    if (second ^ (*stamp / 1_000_000_000)) & !7 != 0 {
+        *stamp = second * 1_000_000_000;
+    }
+}
+
+impl Pair {
+    /// A wakeup of a side's queues: `input` when it reaches an epoll
+    /// interest in input (a wakeup keyed `EPOLLIN`, or one with no key),
+    /// `output` when it reaches one in output (keyed `EPOLLOUT`, or no
+    /// key). The tasks waiting on the side wake to look.
+    fn wake(&mut self, side: Side, input: bool, output: bool) -> Vec<TaskId> {
+        let edges = &mut self.edges[side.slot()];
+        if input {
+            edges.0 = edges.0.wrapping_add(1);
+        }
+        if output {
+            edges.1 = edges.1.wrapping_add(1);
+        }
+        self.waiters[side.slot()].drain(..).collect()
+    }
+
+    /// n_tty's `flush_buffer` of a side: its unread input goes.
+    fn flush(&mut self, side: Side) {
+        match side {
+            Side::Master => self.to_master.clear(),
+            Side::Slave => {
+                self.to_slave.clear();
+                self.canon = 0;
+            }
+        }
+    }
+}
+
+/// `tty_update_time` for a transfer through `side` of the pair `index`.
+fn touch_side(ptys: &mut Ptys, side: Side, index: u32, write: bool) {
+    match side {
+        Side::Master => touch(ptys.ptmx.get_or_insert(NodeTimes::at(now())), write),
+        Side::Slave => {
+            if let Some(pair) = ptys.pairs.get_mut(&index) {
+                touch(&mut pair.node, write);
+            }
+        }
+    }
+}
+
+/// `TTY_THRESHOLD_UNTHROTTLE`: a pty's read wakes the other side's writers
+/// once at most this many bytes are left (`n_tty_check_unthrottle`).
+const UNTHROTTLE: usize = 128;
+
+/// What one pass of a read decided.
+enum Pass {
+    /// Answer with what was taken (possibly nothing).
+    Done,
+    /// Answer this error, unless something was taken already.
+    Error(c_int),
+    /// Look again at once: more is wanted, and there may be more.
+    Again,
+    /// Wait for more.
+    Wait,
+}
+
+/// How long `n_tty_read` may wait for input now (`timeout`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Timeout {
+    /// As long as it takes.
+    Unbounded,
+    /// Not at all.
+    Zero,
+    /// `VTIME` tenths of a second, which the model does not keep.
+    Timer,
+}
+
+/// When a read of a side ends, as `n_tty_read` fixes it when the read
+/// starts (a mode switch while it waits changes how it copies, not this): a
+/// canonical read ends with the line it copies; a raw one once it has
+/// `VMIN` bytes, `VTIME` timing the wait between them, or with `VMIN` 0 on
+/// any byte, `VTIME` bounding the wait for it. The master's own settings
+/// are the pts driver's for a master: raw, `VMIN` 1, `VTIME` 0.
+#[derive(Clone, Copy)]
+struct Wanted {
+    /// `minimum`: the bytes that end the read.
+    minimum: usize,
+    /// `time`: `VTIME` starts timing the wait once a pass copied bytes.
+    between: bool,
+    timeout: Timeout,
+}
+
+impl Wanted {
+    fn at_start(pair: &Pair, side: Side) -> Wanted {
+        let (canonical, vmin, vtime) = match side {
+            Side::Master => (false, 1, 0),
+            Side::Slave => (
+                pair.canonical(),
+                pair.termios.cc[VMIN],
+                pair.termios.cc[VTIME],
+            ),
+        };
+        if canonical {
+            Wanted {
+                minimum: 0,
+                between: false,
+                timeout: Timeout::Unbounded,
+            }
+        } else if vmin != 0 {
+            Wanted {
+                minimum: usize::from(vmin),
+                between: vtime != 0,
+                timeout: Timeout::Unbounded,
+            }
+        } else {
+            Wanted {
+                minimum: 1,
+                between: false,
+                timeout: if vtime == 0 {
+                    Timeout::Zero
+                } else {
+                    Timeout::Timer
+                },
+            }
+        }
+    }
+}
+
+/// `tty_read` on a pair's descriptor: a hung-up slave reads nothing
+/// (`hung_up_tty_read`), one whose last open failed is `EIO`; then
+/// `n_tty_read`. Each pass copies what the side's current mode offers, a
+/// canonical slave's line (or as much of it as fits) or whatever is queued,
+/// until the read has what it wants ([`Wanted`]) or its room is full. With
+/// nothing to copy, the side's other end having closed is `EIO` (the
+/// master's slave, or the slave's master while the read waited), a zero
+/// timeout answers what was taken, a non-blocking read `EAGAIN`, and a wait
+/// on `VTIME`'s timer stops by name. A pass that copied wakes the other
+/// side's writers once at most [`UNTHROTTLE`] bytes are left.
 ///
 /// # Safety
 /// `destination` must be writable for `length` bytes when nonzero.
@@ -696,11 +1293,154 @@ pub(crate) unsafe fn read(
     length: usize,
     nonblocking: bool,
 ) -> isize {
-    let _ = (resolved, destination, length, nonblocking);
-    crate::trap_fatal("reading a pseudoterminal is not modeled; failing closed")
+    let side = Side::of(resolved.kind).expect("a pty kind");
+    let index = resolved.handle as u32;
+    if let Err(errno) = sched_point() {
+        return fail(errno) as isize;
+    }
+    let mut wanted = {
+        let state = lock_state();
+        let Some(pair) = state.ptys.pairs.get(&index) else {
+            return fail(crate::EBADF) as isize;
+        };
+        if side == Side::Slave && hung_up(pair) {
+            set_errno(0);
+            return 0;
+        }
+        if side == Side::Slave && pair.io_error {
+            return fail(EIO) as isize;
+        }
+        if length == 0 {
+            set_errno(0);
+            return 0;
+        }
+        Wanted::at_start(pair, side)
+    };
+    let me = current_task();
+    let mut taken: Vec<u8> = Vec::new();
+    loop {
+        let mut state = lock_state();
+        let Some(pair) = state.ptys.pairs.get_mut(&index) else {
+            return fail(crate::EBADF) as isize;
+        };
+        let mut woken = Vec::new();
+        let pass = if !pair.readable(side, false) {
+            let other_closed = match side {
+                Side::Master => pair.slave_closed,
+                Side::Slave => hung_up(pair),
+            };
+            if other_closed {
+                Pass::Error(EIO)
+            } else if wanted.timeout == Timeout::Zero {
+                Pass::Done
+            } else if nonblocking {
+                Pass::Error(crate::EWOULDBLOCK)
+            } else if wanted.timeout == Timeout::Timer {
+                drop(state);
+                unmodeled("a raw read's wait on its timer (VTIME)");
+            } else {
+                Pass::Wait
+            }
+        } else {
+            let room = length - taken.len();
+            match side {
+                Side::Master => {
+                    let count = room.min(pair.to_master.len());
+                    taken.extend(pair.to_master.drain(..count));
+                }
+                Side::Slave if pair.canonical() => taken.extend(pair.take_line(room)),
+                Side::Slave => {
+                    let count = room.min(pair.to_slave.len());
+                    taken.extend(pair.to_slave.drain(..count).map(|cell| cell.byte));
+                }
+            }
+            if pair.in_buffer(side) <= UNTHROTTLE {
+                woken = pair.wake(side.other(), false, true);
+            }
+            if taken.len() == length || taken.len() >= wanted.minimum {
+                Pass::Done
+            } else {
+                if wanted.between {
+                    wanted.timeout = Timeout::Timer;
+                }
+                Pass::Again
+            }
+        };
+        match pass {
+            Pass::Error(errno) if taken.is_empty() => {
+                drop(state);
+                wake_all(woken);
+                return fail(errno) as isize;
+            }
+            Pass::Done | Pass::Error(_) => {
+                if !taken.is_empty() {
+                    touch_side(&mut state.ptys, side, index, false);
+                }
+                drop(state);
+                wake_all(woken);
+                if !taken.is_empty() {
+                    // SAFETY: writable for `length` bytes, and `taken` is no
+                    // longer.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            taken.as_ptr(),
+                            destination.cast::<u8>(),
+                            taken.len(),
+                        );
+                    }
+                }
+                set_errno(0);
+                return taken.len() as isize;
+            }
+            Pass::Again => {
+                drop(state);
+                wake_all(woken);
+                continue;
+            }
+            Pass::Wait => {}
+        }
+        pair.waiters[side.slot()].push_back(me);
+        let step = state.block(
+            me,
+            "pty-read",
+            Wait::new(BlockClass::Io, vec![WaiterLoc::Pty(index, side)]),
+        );
+        match step {
+            Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+            Ok(Step::Continue) => drop(state),
+            Err(error) => return fail(error.into_posix()) as isize,
+        }
+        let mut state = lock_state();
+        state.timed_out.remove(&me);
+        unwatch(&mut state, index, side, me);
+        drop(state);
+        if signals::resume() == signals::Resumed::Eintr {
+            if !taken.is_empty() {
+                // SAFETY: as above.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        taken.as_ptr(),
+                        destination.cast::<u8>(),
+                        taken.len(),
+                    );
+                }
+                return taken.len() as isize;
+            }
+            return fail(crate::EINTR) as isize;
+        }
+    }
 }
 
-/// `tty_write` on a pair's descriptor.
+/// `tty_write` on a pair's descriptor (`n_tty_write`): a hung-up slave, or
+/// one whose last open failed, is `EIO`. The slave's bytes go through its
+/// output processing to the master; the master's are received under the
+/// slave's settings, which may echo them back. A direction that would hold
+/// more than [`ROOM`] unread bytes, and a write to a master whose slave has
+/// closed (6.8 leaves its bytes unprocessed until the slave reopens), stop
+/// by name. Every write, an empty one too, wakes its own side's writers
+/// (`tty_write_unlock`); a receiving side's readers wake as its line
+/// discipline delivers (`__receive_buf`: a canonical slave's on a line end
+/// only, a raw side's whenever it holds input).
 ///
 /// # Safety
 /// `source` must be readable for `length` bytes when nonzero.
@@ -710,13 +1450,78 @@ pub(crate) unsafe fn write(
     length: usize,
     nonblocking: bool,
 ) -> isize {
-    let _ = (resolved, source, length, nonblocking);
-    crate::trap_fatal("writing a pseudoterminal is not modeled; failing closed")
+    let _ = nonblocking;
+    let side = Side::of(resolved.kind).expect("a pty kind");
+    let index = resolved.handle as u32;
+    if let Err(errno) = sched_point() {
+        return fail(errno) as isize;
+    }
+    let bytes = if length == 0 {
+        &[][..]
+    } else {
+        // SAFETY: readable for `length` bytes per this function's contract.
+        unsafe { std::slice::from_raw_parts(source.cast::<u8>(), length) }
+    };
+    let mut state = lock_state();
+    let Some(pair) = state.ptys.pairs.get_mut(&index) else {
+        return fail(crate::EBADF) as isize;
+    };
+    if side == Side::Slave && (hung_up(pair) || pair.io_error) {
+        return fail(EIO) as isize;
+    }
+    let mut woken = pair.wake(side, false, true);
+    if bytes.is_empty() {
+        drop(state);
+        wake_all(woken);
+        set_errno(0);
+        return 0;
+    }
+    let (lines_had, master_had) = (pair.canon, pair.to_master.len());
+    match side {
+        Side::Master => {
+            if pair.slave_closed {
+                drop(state);
+                unmodeled("a write to a master whose slave has closed");
+            }
+            for &byte in bytes {
+                pair.receive(byte);
+            }
+        }
+        Side::Slave => {
+            for &byte in bytes {
+                pair.output(byte);
+            }
+        }
+    }
+    if pair.to_slave.len() > ROOM || pair.to_master.len() > ROOM {
+        drop(state);
+        unmodeled("a direction holding more than 4095 unread bytes (the kernel's flow control)");
+    }
+    if side == Side::Master {
+        let delivered = if pair.canonical() {
+            pair.canon != lines_had
+        } else {
+            !pair.to_slave.is_empty()
+        };
+        if delivered {
+            woken.extend(pair.wake(Side::Slave, true, false));
+        }
+    }
+    if pair.to_master.len() != master_had {
+        woken.extend(pair.wake(Side::Master, true, false));
+    }
+    touch_side(&mut state.ptys, side, index, true);
+    drop(state);
+    wake_all(woken);
+    set_errno(0);
+    length as isize
 }
 
 /// `n_tty_poll`, or `hung_up_tty_poll` for a hung-up slave: every event.
-/// A master polls hung up once its last slave description closed; either
-/// side takes a write while the pair is live.
+/// A side is readable when a read would take something (a canonical slave's
+/// complete line; a raw slave's `VMIN` bytes when `VTIME` is 0); a master
+/// polls hung up once its last slave description closed; either side takes
+/// a write while the pair is live.
 pub(in crate::thread) fn poll(state: &ThreadRuntime, side: Side, index: u32) -> (u32, (u64, u64)) {
     use super::net::abi::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
     let Some(pair) = state.ptys.pairs.get(&index) else {
@@ -725,17 +1530,45 @@ pub(in crate::thread) fn poll(state: &ThreadRuntime, side: Side, index: u32) -> 
     if side == Side::Slave && hung_up(pair) {
         return (
             POLLIN | POLLOUT | POLLERR | POLLHUP | POLLRDNORM | POLLWRNORM,
-            (0, 0),
+            pair.edges[side.slot()],
         );
     }
     let mut mask = POLLOUT | POLLWRNORM;
+    if pair.readable(side, true) {
+        mask |= POLLIN | POLLRDNORM;
+    }
     if side == Side::Master && pair.slave_closed {
         mask |= POLLHUP;
     }
-    (mask, (0, 0))
+    (mask, pair.edges[side.slot()])
 }
 
-/// `TIOCINQ` (`FIONREAD`): the bytes a read would take now; `EIO` on a
+/// Register a readiness reactor's task on a side's queue: it wakes on every
+/// wakeup of the side (a pair's descriptor is writable whenever it is live,
+/// so only an edge-triggered interest in output waits for one).
+pub(in crate::thread) fn watch(
+    state: &mut ThreadRuntime,
+    side: Side,
+    index: u32,
+    me: TaskId,
+) -> Option<WaiterLoc> {
+    let pair = state.ptys.pairs.get_mut(&index)?;
+    let waiters = &mut pair.waiters[side.slot()];
+    if !waiters.contains(&me) {
+        waiters.push_back(me);
+    }
+    Some(WaiterLoc::Pty(index, side))
+}
+
+/// Unlink `me` from a side's queue.
+pub(in crate::thread) fn unwatch(state: &mut ThreadRuntime, index: u32, side: Side, me: TaskId) {
+    if let Some(pair) = state.ptys.pairs.get_mut(&index) {
+        pair.waiters[side.slot()].retain(|task| *task != me);
+    }
+}
+
+/// `TIOCINQ` (`FIONREAD`): the bytes a read would take now (a canonical
+/// slave counts its complete lines less their ends of file); `EIO` on a
 /// hung-up slave.
 pub(crate) fn inq(side: Side, index: u32) -> Result<i32, c_int> {
     let state = lock_state();
@@ -743,7 +1576,7 @@ pub(crate) fn inq(side: Side, index: u32) -> Result<i32, c_int> {
     if side == Side::Slave && hung_up(pair) {
         return Err(EIO);
     }
-    Ok(0)
+    Ok(pair.queued(side) as i32)
 }
 
 /// The name `/proc/self/fd` reads for a pseudoterminal descriptor

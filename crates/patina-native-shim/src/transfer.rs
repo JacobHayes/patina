@@ -120,6 +120,18 @@ fn write_file_at(handle: Fd, offset: i64, bytes: &[u8]) -> Result<usize, c_int> 
     Ok(written)
 }
 
+/// A pseudoterminal end is a tty, whose `splice_read`/`splice_write`
+/// (`copy_splice_read`, `iter_file_splice_write`) move bytes through its line
+/// discipline: not modeled here, so a splice or `sendfile` through one stops
+/// by name.
+fn pty_stop(resolved: &Resolved, call: &str) {
+    if matches!(resolved.kind, FdKind::PtyMaster | FdKind::PtySlave) {
+        crate::trap_fatal(&format!(
+            "{call} through a pseudoterminal is not modeled; failing closed"
+        ));
+    }
+}
+
 /// Whether a descriptor is a secret-memory file, whose only operation is a
 /// shared mapping.
 fn secret(resolved: &Resolved) -> bool {
@@ -255,6 +267,8 @@ pub unsafe extern "C" fn patina_sendfile(
         if output.status & O_WRITE == 0 {
             return Err(EBADF);
         }
+        pty_stop(&input, "sendfile");
+        pty_stop(&output, "sendfile");
         let into_pipe = pipe_of(&output);
         if into_pipe.is_none() && output.status & O_APPEND != 0 {
             return Err(EINVAL);
@@ -377,6 +391,8 @@ pub unsafe extern "C" fn patina_splice(
         if input.status & O_READ == 0 || output.status & O_WRITE == 0 {
             return Err(EBADF);
         }
+        pty_stop(&input, "splice");
+        pty_stop(&output, "splice");
         let (from_pipe, to_pipe) = (pipe_of(&input), pipe_of(&output));
         if (from_pipe.is_some() && !off_in.is_null()) || (to_pipe.is_some() && !off_out.is_null()) {
             return Err(ESPIPE);

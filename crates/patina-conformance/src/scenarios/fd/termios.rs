@@ -101,7 +101,7 @@ pub(super) fn winsize(
 }
 
 /// `tcsetattr(fd, action, t)`.
-fn set(p: &Probe, fd: c_int, action: c_int, t: &termios, what: &str) -> i64 {
+pub(super) fn set(p: &Probe, fd: c_int, action: c_int, t: &termios, what: &str) -> i64 {
     // SAFETY: a live termios for tcsetattr to read.
     let r = fold_errno(i64::from(unsafe { tcsetattr(fd, action, t) }));
     p.rec

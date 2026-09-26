@@ -373,6 +373,7 @@
     X(sysconf) \
     X(sysinfo) \
     X(tcdrain) \
+    X(tcflush) \
     X(tcgetattr) \
     X(tcsetattr) \
     X(telldir) \

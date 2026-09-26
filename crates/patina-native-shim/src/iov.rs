@@ -129,6 +129,29 @@ unsafe fn open_vector(
 /// `vector` must be a readable guest vector of `count` segments, each
 /// writable for its length.
 unsafe fn cursor_readv(resolved: Resolved, segments: &[GuestIovec], nonblocking: bool) -> isize {
+    // A tty reads the whole vector as one read (`iterate_tty_read`): its
+    // line discipline decides how much, a line or `VMIN` bytes, over all of
+    // it, then the bytes are scattered.
+    #[cfg(target_os = "linux")]
+    if matches!(resolved.kind, FdKind::PtyMaster | FdKind::PtySlave) {
+        let total: usize = segments.iter().map(|segment| segment.len).sum();
+        let mut bytes = vec![0u8; total];
+        // SAFETY: a local buffer of `total` bytes.
+        let got = unsafe { read_resolved(resolved, bytes.as_mut_ptr().cast(), total, nonblocking) };
+        if got < 0 {
+            return got;
+        }
+        let mut rest = &bytes[..got as usize];
+        for segment in segments {
+            let count = rest.len().min(segment.len);
+            // SAFETY: the segment is guest memory writable for its length.
+            unsafe {
+                std::ptr::copy_nonoverlapping(rest.as_ptr(), segment.base.cast::<u8>(), count)
+            };
+            rest = &rest[count..];
+        }
+        return got;
+    }
     let mut moved = 0usize;
     for segment in segments.iter().filter(|segment| segment.len != 0) {
         // SAFETY: the segment is guest memory writable for its length.

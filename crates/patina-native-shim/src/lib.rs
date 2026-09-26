@@ -14026,6 +14026,9 @@ mod thread {
         /// Linux: parked on a timer descriptor's readers.
         #[cfg(target_os = "linux")]
         TimerFdRecv(u64),
+        /// Linux: parked on a pseudoterminal side's readers.
+        #[cfg(target_os = "linux")]
+        Pty(u32, pty::Side),
         /// Parked in `F_SETLKW` on a record or OFD lock.
         RecordLock,
         /// Linux: parked on an inotify instance's readers.
@@ -14087,6 +14090,13 @@ mod thread {
                 if dir == ReadyDir::Read {
                     locs.extend(inotify::watch(state, resolved.handle, me));
                 }
+                continue;
+            }
+            #[cfg(target_os = "linux")]
+            // One queue per side: a pair wakes its writers too (an
+            // edge-triggered interest in output waits for that).
+            if let Some(side) = pty::Side::of(resolved.kind) {
+                locs.extend(pty::watch(state, side, resolved.handle as u32, me));
                 continue;
             }
             #[cfg(target_os = "linux")]
@@ -14237,6 +14247,8 @@ mod thread {
                 WaiterLoc::Ipc(wait) => state.ipc.unwait(wait, me),
                 #[cfg(target_os = "linux")]
                 WaiterLoc::TimerFdRecv(handle) => timers::timerfd_unwatch(state, handle, me),
+                #[cfg(target_os = "linux")]
+                WaiterLoc::Pty(index, side) => pty::unwatch(state, index, side, me),
                 WaiterLoc::RecordLock => locks::unwait(state, me),
                 #[cfg(target_os = "linux")]
                 WaiterLoc::InotifyRecv(handle) => inotify::unwatch(state, handle, me),

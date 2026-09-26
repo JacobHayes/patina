@@ -612,6 +612,11 @@ int tcsetattr(int fd, int optional_actions, const struct termios *termios_p) {
     return patina_tcsetattr(fd, optional_actions, termios_p);
 }
 
+/* glibc's tcflush: TCFLSH with the queue selector. */
+int tcflush(int fd, int queue_selector) {
+    return fail_int(patina_ioctl(fd, TCFLSH, (void *)(intptr_t)queue_selector));
+}
+
 /* glibc's tcdrain: TCSBRK with a nonzero argument (wait, send no break), a
  * cancellation point. */
 int tcdrain(int fd) {
