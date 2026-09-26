@@ -8964,13 +8964,7 @@ mod thread {
         /// Rust std on Linux lowers `Mutex`/`Condvar`/thread parking to raw
         /// `SYS_futex` through libc's `syscall` wrapper rather than pthread, so
         /// the interposed `syscall` routes those waits/wakes here.
-        futexes: BTreeMap<usize, VecDeque<TaskId>>,
-        /// The tasks among [`Self::futexes`]' waiters that wait with
-        /// `FUTEX_PRIVATE_FLAG`, set or cleared each time a task parks. Only a
-        /// dead robust owner's wake tells them apart: the kernel wakes those
-        /// futexes by their shared key, which a private waiter's does not
-        /// match.
-        private_futex_waits: std::collections::BTreeSet<TaskId>,
+        futexes: BTreeMap<usize, VecDeque<FutexWaiter>>,
         /// Timed waiters (`cond_timedwait`, timed futex waits) whose deadline
         /// fired: the runtime's deadlock-rescue woke them, and this shim purged
         /// them from their primitive's waiter list. On resume they return
@@ -9003,13 +8997,69 @@ mod thread {
         waiters: VecDeque<TaskId>,
     }
 
+    /// One waiter queued on a futex word (the kernel's `futex_q`).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct FutexWaiter {
+        task: TaskId,
+        /// Whether it waits by the word's private key (`FUTEX_PRIVATE_FLAG`),
+        /// which a wake by the shared key (a dead robust owner's) does not
+        /// match.
+        private: bool,
+    }
+
+    impl FutexWaiter {
+        /// A multiplexed `futex` row's waiter (`FUTEX_WAIT`).
+        fn multiplexed(task: TaskId, private: bool) -> Self {
+            FutexWaiter { task, private }
+        }
+    }
+
     impl ThreadRuntime {
-        /// Note whether `task`, parking on a futex word, waits privately.
-        fn note_futex_wait(&mut self, task: TaskId, private: bool) {
-            if private {
-                self.private_futex_waits.insert(task);
-            } else {
-                self.private_futex_waits.remove(&task);
+        /// Queue a waiter on the futex word at `addr` (`futex_queue`).
+        fn queue_futex_waiter(&mut self, addr: usize, waiter: FutexWaiter) {
+            self.futexes.entry(addr).or_default().push_back(waiter);
+        }
+
+        /// Unqueue, in queue order, up to `limit` of the waiters on `addr`
+        /// that `matches` accepts.
+        fn take_futex_waiters(
+            &mut self,
+            addr: usize,
+            limit: usize,
+            matches: impl Fn(&FutexWaiter) -> bool,
+        ) -> Vec<FutexWaiter> {
+            let mut taken = Vec::new();
+            if let Some(queue) = self.futexes.get_mut(&addr) {
+                queue.retain(|waiter| {
+                    let take = taken.len() < limit && matches(waiter);
+                    if take {
+                        taken.push(*waiter);
+                    }
+                    !take
+                });
+                if queue.is_empty() {
+                    self.futexes.remove(&addr);
+                }
+            }
+            taken
+        }
+
+        /// Wake the tasks of unqueued waiters (`futex_wake_mark`), each
+        /// once; it leaves every other queue it waits on.
+        fn wake_futex_waiters(&mut self, woken: &[FutexWaiter]) {
+            let mut tasks = Vec::new();
+            for waiter in woken {
+                if !tasks.contains(&waiter.task) {
+                    tasks.push(waiter.task);
+                }
+            }
+            let mut scheduler = RealScheduler;
+            for task in tasks {
+                #[cfg(target_os = "linux")]
+                self.remove_signal_wait(task);
+                if let Err(message) = scheduler.wake(task) {
+                    fatal(&message);
+                }
             }
         }
 
@@ -9258,7 +9308,7 @@ mod thread {
                     }
                 }
                 for waiters in self.futexes.values_mut() {
-                    if let Some(index) = waiters.iter().position(|waiter| *waiter == task) {
+                    if let Some(index) = waiters.iter().position(|waiter| waiter.task == task) {
                         waiters.remove(index);
                         self.timed_out.insert(task);
                         return;
@@ -9306,7 +9356,6 @@ mod thread {
                 sems: BTreeMap::new(),
                 net: NetState::new(),
                 futexes: BTreeMap::new(),
-                private_futex_waits: std::collections::BTreeSet::new(),
                 timed_out: std::collections::BTreeSet::new(),
                 #[cfg(target_os = "macos")]
                 dispatch: BTreeMap::new(),
@@ -12514,7 +12563,12 @@ mod thread {
                 }
                 WaiterLoc::Futex(address) => {
                     if let Some(queue) = state.futexes.get_mut(&address) {
-                        remove(queue);
+                        if let Some(index) = queue.iter().position(|waiter| waiter.task == me) {
+                            queue.remove(index);
+                        }
+                        if queue.is_empty() {
+                            state.futexes.remove(&address);
+                        }
                     }
                 }
                 WaiterLoc::Mutex(key) => {
@@ -13998,8 +14052,7 @@ mod thread {
                 return super::fail(EWOULDBLOCK);
             }
 
-            state.futexes.entry(addr).or_default().push_back(me);
-            state.note_futex_wait(me, private);
+            state.queue_futex_waiter(addr, FutexWaiter::multiplexed(me, private));
             match state.block(
                 me,
                 "futex-wait",
@@ -14083,8 +14136,7 @@ mod thread {
                 Err(errno) => return super::fail(errno),
             }
         };
-        state.futexes.entry(addr).or_default().push_back(me);
-        state.note_futex_wait(me, private);
+        state.queue_futex_waiter(addr, FutexWaiter::multiplexed(me, private));
         match state.block_timed(
             me,
             "futex-wait",
@@ -14132,38 +14184,9 @@ mod thread {
     fn futex_wake(addr: usize, count: c_int, private: bool) -> c_int {
         let mut state = lock_state();
         let limit = usize::try_from(count).unwrap_or(usize::MAX);
-        let ThreadRuntime {
-            futexes,
-            private_futex_waits,
-            ..
-        } = &mut *state;
-        let to_wake: Vec<TaskId> = match futexes.get_mut(&addr) {
-            Some(waiters) => {
-                let mut woken = Vec::new();
-                waiters.retain(|task| {
-                    let take =
-                        woken.len() < limit && (private || !private_futex_waits.contains(task));
-                    if take {
-                        woken.push(*task);
-                    }
-                    !take
-                });
-                woken
-            }
-            None => Vec::new(),
-        };
-        if state.futexes.get(&addr).is_some_and(VecDeque::is_empty) {
-            state.futexes.remove(&addr);
-        }
-        let mut scheduler = RealScheduler;
-        for task in &to_wake {
-            #[cfg(target_os = "linux")]
-            state.remove_signal_wait(*task);
-            if let Err(message) = scheduler.wake(*task) {
-                fatal(&message);
-            }
-        }
-        c_int::try_from(to_wake.len()).unwrap_or(c_int::MAX)
+        let woken = state.take_futex_waiters(addr, limit, |waiter| private || !waiter.private);
+        state.wake_futex_waiters(&woken);
+        c_int::try_from(woken.len()).unwrap_or(c_int::MAX)
     }
 
     #[cfg(test)]

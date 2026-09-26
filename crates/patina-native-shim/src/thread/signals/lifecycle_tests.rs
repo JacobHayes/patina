@@ -309,7 +309,11 @@ fn set_tid_address_is_cleared_and_woken_at_thread_finish() {
             let tid = unsafe { patina_set_tid_address(child_word.as_ptr()) };
             assert_eq!(tid, i64::from(tid_of(current_task())));
             delay();
-            assert!(lock_state().futexes[&(child_word.as_ptr() as usize)].contains(&me));
+            assert!(
+                lock_state().futexes[&(child_word.as_ptr() as usize)]
+                    .iter()
+                    .any(|waiter| waiter.task == me)
+            );
         });
         let task = task_of(worker);
         assert_eq!(patina_futex_wait(word.as_ptr() as usize, 123), 0);

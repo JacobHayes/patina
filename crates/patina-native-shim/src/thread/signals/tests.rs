@@ -317,7 +317,10 @@ pub(in crate::thread) fn on_any_waiter_list(task: TaskId) -> bool {
         || state.net.sockets.table.values().any(|socket| {
             socket.recv_waiters.contains(&task) || socket.send_waiters.contains(&task)
         })
-        || state.futexes.values().any(|queue| queue.contains(&task))
+        || state
+            .futexes
+            .values()
+            .any(|queue| queue.iter().any(|waiter| waiter.task == task))
         || state
             .net
             .eventfds
