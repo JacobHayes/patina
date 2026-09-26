@@ -1038,9 +1038,9 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_sysfs => r(
         id,
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
-        Some("fs"),
+        Disposition::Modeled,
+        "The legacy filesystem-type table (`CONFIG_SYSFS_SYSCALL`, which the pinned kernel builds; `volume::sysfs`): the types the virtual kernel registers, those of the filesystems a node can be on (`devtmpfs`, `sockfs`, `pipefs`, `ext4`, `mqueue`, in registration order). Option 1 maps a name to its index (`getname`'s `EFAULT`/`ENAMETOOLONG`/`ENOENT`, then `EINVAL` for no such type), 2 copies the name at an index out (`EINVAL` past the last, then `EFAULT`), 3 counts them; any other option is `EINVAL`.",
+        None,
     ),
     Syscall::N_getpriority => r(
         id,

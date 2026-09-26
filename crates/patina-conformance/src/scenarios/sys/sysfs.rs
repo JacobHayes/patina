@@ -6,11 +6,10 @@
 //!
 //! Which filesystems a kernel registers is the host's (or the virtual
 //! kernel's) business: names are related, never recorded. The row is a
-//! kernel-configuration fact (`CONFIG_SYSFS_SYSCALL`, `Need::SysfsSyscall`);
-//! its registry row closes in the fs arc, which its gap names.
+//! kernel-configuration fact (`CONFIG_SYSFS_SYSCALL`, `Need::SysfsSyscall`),
+//! which the pinned kernel builds.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, neg};
 use crate::vehicle::Vehicle;
 use libc::EINVAL;
@@ -45,15 +44,5 @@ pub const SCENARIO: Scenario = Scenario {
     vehicles: Vehicle::KERNEL,
     covers: &[Syscall::N_sysfs],
     needs: &[Need::SysfsSyscall],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Fs),
-        vehicles: Vehicle::KERNEL,
-        what: "sysfs is Trap(unmodeled) in the registry (patina-syscalls linux.rs), so the SUD dispatcher aborts by name on every door (its libc spelling is syscall(2): the shim defines no sysfs wrapper)",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(libc::SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall sysfs (nr",
-        },
-    }],
     ..DEFAULTS
 };

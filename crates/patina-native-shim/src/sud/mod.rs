@@ -1918,6 +1918,10 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_ustat, |_, a| sys_ustat(a[0], a[1])),
     #[cfg(target_arch = "x86_64")]
+    (Syscall::N_sysfs, |_, a| {
+        crate::volume::sysfs(a[0], a[1], a[2])
+    }),
+    #[cfg(target_arch = "x86_64")]
     (Syscall::N_getdents, |_, a| {
         sys_getdents(arg_fd(a[0]), a[1], a[2])
     }),

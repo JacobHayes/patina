@@ -337,8 +337,8 @@ forwards into the same dispatcher instead of its two-number allowlist.
   time, the refused clock-setting rows), `sched/*`, `cred/*`, `sys/*`
   (uname, sysinfo, personality, rlimits, hostname) and `proc/ids`'s
   group and session rows;
-  `sys/sysfs` exercises the fs family's `sysfs` row, and its gap names that
-  arc.
+  `sys/sysfs` exercises the fs family's `sysfs` row, which lists the
+  filesystem types the virtual kernel registers.
   What is the host's — its wall clock, CPU set, hard limits, supplementary
   groups, kernel release, node name, memory, uptime, CPU-time figures — is
   compared by relation, never by value; a timer is waited on with a bounded
@@ -362,8 +362,8 @@ forwards into the same dispatcher instead of its two-number allowlist.
   rescues charged to the baton holder, and idle time advances to a timer's
   deadline. The node name is the run's `--hostname` (default `patina`,
   recorded in the trace), and `sethostname`/`setdomainname` answer the
-  unprivileged `EPERM`. Every scenario of the family runs without a gap but
-  `sys/sysfs` (its fs-arc gap); `proc/ids` declares `kill(-1, 0)` a
+  unprivileged `EPERM`. Every scenario of the family runs without a gap;
+  `proc/ids` declares `kill(-1, 0)` a
   by-design difference, since the two-process tree has no process for it to
   reach. The `--host-*` knob group beyond the node name and the virtual
   `/proc`/`/sys` tree are not built.

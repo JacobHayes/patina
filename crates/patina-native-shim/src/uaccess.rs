@@ -445,6 +445,34 @@ fn gather(ranges: &[(usize, usize)], into: &mut [u8]) -> Result<(), c_int> {
     Ok(())
 }
 
+/// A name at the guest's `addr`, as `getname` copies one in
+/// (`strncpy_from_user` up to `PATH_MAX`): `EFAULT` where a byte before the
+/// terminator cannot be read, `ENAMETOOLONG` with no terminator within
+/// `PATH_MAX` bytes, `ENOENT` for an empty name. It is read a page at a time,
+/// so a name that ends before an unmapped page reads.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(crate) fn read_name(addr: usize) -> Result<Vec<u8>, c_int> {
+    const PATH_MAX: usize = crate::paths::PATH_MAX;
+    let mut name = Vec::new();
+    while name.len() < PATH_MAX {
+        let at = addr.checked_add(name.len()).ok_or(EFAULT)?;
+        let room = (crate::PAGE_SIZE - at % crate::PAGE_SIZE).min(PATH_MAX - name.len());
+        let chunk = read_bytes(at, room)?;
+        match chunk.iter().position(|byte| *byte == 0) {
+            Some(end) => {
+                name.extend_from_slice(&chunk[..end]);
+                return if name.is_empty() {
+                    Err(crate::ENOENT)
+                } else {
+                    Ok(name)
+                };
+            }
+            None => name.extend_from_slice(&chunk),
+        }
+    }
+    Err(crate::ENAMETOOLONG)
+}
+
 /// The `len` guest bytes at `addr`.
 pub(crate) fn read_bytes(addr: usize, len: usize) -> Result<Vec<u8>, c_int> {
     let mut bytes = vec![0u8; len];

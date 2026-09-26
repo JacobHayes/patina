@@ -85,6 +85,21 @@ impl Filesystem {
         Filesystem::Mqueue,
     ];
 
+    /// The filesystem type as the kernel registers it (`register_filesystem`,
+    /// the name `/proc/filesystems` and `sysfs(2)` list), or `None` for one
+    /// that is only ever mounted internally (anon_inodefs).
+    #[cfg(target_arch = "x86_64")]
+    fn registered_name(self) -> Option<&'static str> {
+        match self {
+            Filesystem::Volume => Some("ext4"),
+            Filesystem::Pipefs => Some("pipefs"),
+            Filesystem::Sockfs => Some("sockfs"),
+            Filesystem::AnonInodefs => None,
+            Filesystem::Devtmpfs => Some("devtmpfs"),
+            Filesystem::Mqueue => Some("mqueue"),
+        }
+    }
+
     fn device(self) -> (u32, u32) {
         match self {
             Filesystem::Volume => fs_device(PATINA_FS_VOLUME),
@@ -232,6 +247,58 @@ pub unsafe extern "C" fn patina_fstatfs(raw_fd: c_int, out: *mut KernelStatfs) -
     }
 }
 
+/// The filesystem types the virtual kernel registers, in the order 6.8
+/// registers them at boot (the order the pinned host's `/proc/filesystems`
+/// lists them in): each filesystem a node can be on that has a registered
+/// type, and nothing else.
+#[cfg(target_arch = "x86_64")]
+const REGISTERED: [Filesystem; 5] = [
+    Filesystem::Devtmpfs,
+    Filesystem::Sockfs,
+    Filesystem::Pipefs,
+    Filesystem::Volume,
+    Filesystem::Mqueue,
+];
+
+/// `sysfs(2)` (fs/filesystems.c, `CONFIG_SYSFS_SYSCALL`, which the pinned
+/// kernel builds; x86_64 only), over [`REGISTERED`]. `option` is an `int`:
+/// 1 maps the type named at `arg1` to its index (`getname`: `EFAULT`,
+/// `ENAMETOOLONG`, `ENOENT` for an empty name; `EINVAL` for one no type
+/// has), 2 copies the name at index `arg1` (an `unsigned int`) to `arg2`
+/// (`EINVAL` past the last, then `EFAULT`), 3 answers how many there are;
+/// any other option is `EINVAL`.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn sysfs(option: u64, arg1: u64, arg2: u64) -> i64 {
+    let einval = -i64::from(EINVAL);
+    let names = REGISTERED.map(|filesystem| {
+        filesystem
+            .registered_name()
+            .expect("a registered filesystem has a type name")
+    });
+    match option as i32 {
+        1 => match crate::uaccess::read_name(arg1 as usize) {
+            Ok(name) => names
+                .iter()
+                .position(|registered| registered.as_bytes() == name)
+                .map_or(einval, |index| index as i64),
+            Err(errno) => -i64::from(errno),
+        },
+        2 => match names.get(arg1 as u32 as usize) {
+            None => einval,
+            Some(name) => {
+                let mut bytes = name.as_bytes().to_vec();
+                bytes.push(0);
+                match crate::uaccess::write_bytes(arg2 as usize, &bytes) {
+                    Ok(()) => 0,
+                    Err(errno) => -i64::from(errno),
+                }
+            }
+        },
+        3 => names.len() as i64,
+        _ => einval,
+    }
+}
+
 /// The kernel's `struct ustat` on x86_64.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -296,6 +363,41 @@ mod tests {
         assert!(volume.f_ffree <= volume.f_files);
         assert!(volume.f_bsize >= 512 && (volume.f_bsize as u64).is_power_of_two());
         assert_eq!(volume.f_frsize, volume.f_bsize);
+    }
+
+    /// Every filesystem a node can be on is registered once, but the
+    /// internal anon_inodefs, and `sysfs(2)` walks exactly that list.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn sysfs_lists_each_registered_filesystem_once() {
+        for filesystem in Filesystem::ALL {
+            let listed = REGISTERED.iter().filter(|r| **r == filesystem).count();
+            let expected = usize::from(filesystem.registered_name().is_some());
+            assert_eq!(listed, expected, "{filesystem:?}");
+        }
+        assert_eq!(sysfs(3, 0, 0), REGISTERED.len() as i64);
+        let einval = -i64::from(EINVAL);
+        for (index, filesystem) in REGISTERED.iter().enumerate() {
+            let mut name = [0xffu8; 16];
+            assert_eq!(sysfs(2, index as u64, name.as_mut_ptr() as u64), 0);
+            let name = std::ffi::CStr::from_bytes_until_nul(&name).unwrap();
+            assert_eq!(name.to_str().ok(), filesystem.registered_name());
+            assert_eq!(sysfs(1, name.as_ptr() as u64, 0), index as i64);
+        }
+        // The index is an `unsigned int`: the upper half of the word is not read.
+        let mut name = [0u8; 16];
+        assert_eq!(sysfs(2, 1 << 32, name.as_mut_ptr() as u64), 0);
+        assert_eq!(
+            sysfs(2, REGISTERED.len() as u64, name.as_mut_ptr() as u64),
+            einval
+        );
+        assert_eq!(sysfs(1, c"anon_inodefs".as_ptr() as u64, 0), einval);
+        assert_eq!(sysfs(1, c"".as_ptr() as u64, 0), -i64::from(ENOENT));
+        assert_eq!(sysfs(1, 0, 0), -i64::from(EFAULT));
+        assert_eq!(sysfs(2, 0, 0), -i64::from(EFAULT));
+        // The option is an `int`: the upper half of the word is not read.
+        assert_eq!(sysfs(3 | 1 << 32, 0, 0), REGISTERED.len() as i64);
+        assert_eq!(sysfs(0, 0, 0), einval);
     }
 
     #[test]
