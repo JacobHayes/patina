@@ -1078,6 +1078,15 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_landlock_restrict_self, |nr, a| {
         privileged::answer(nr, privileged::landlock_restrict_self, a)
     }),
+    (Syscall::N_lsm_list_modules, |nr, a| {
+        privileged::answer(nr, privileged::lsm_list_modules, a)
+    }),
+    (Syscall::N_lsm_get_self_attr, |nr, a| {
+        privileged::answer(nr, privileged::lsm_get_self_attr, a)
+    }),
+    (Syscall::N_lsm_set_self_attr, |nr, a| {
+        privileged::answer(nr, privileged::lsm_set_self_attr, a)
+    }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_iopl, |nr, a| {
         privileged::answer(nr, privileged::iopl, a)

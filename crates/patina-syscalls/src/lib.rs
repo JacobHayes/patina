@@ -125,6 +125,11 @@ pub struct KernelConfig {
     /// of `LANDLOCK_CREATE_RULESET_ERRATA` (6.15's) reports.
     pub landlock_abi: i64,
     pub landlock_errata: i64,
+    /// The Linux Security Modules the kernel runs, as `lsm_list_modules`
+    /// lists their ids, in the order they initialized. None of them keeps
+    /// a process attribute (`LSM_ATTR_*`): no `getselfattr` or
+    /// `setselfattr` hook.
+    pub lsm_modules: &'static [u64],
 }
 
 /// The one configuration the virtual kernel runs with; see [`KernelConfig`].
@@ -158,6 +163,10 @@ pub const KERNEL_CONFIG: KernelConfig = KernelConfig {
     landlock_abi: 4,
     // Errata 1 and 3, as 6.8.0-139 answers.
     landlock_errata: 5,
+    // `capability` (100) first, then `landlock` (110) and `yama` (105):
+    // Ubuntu's `lsm=` order without lockdown, integrity or AppArmor, which
+    // are host policy.
+    lsm_modules: &[100, 110, 105],
 };
 
 /// The Darwin kernel release the virtual machine reports on macOS (`uname`'s

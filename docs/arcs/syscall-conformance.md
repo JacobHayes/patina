@@ -480,15 +480,15 @@ forwards into the same dispatcher instead of its two-number allowlist.
   `sys/perf`, `sys/bpf`, `proc/ptrace`, `proc/seccomp` (its queries,
   and its mode checks up to the named fatal that entering a mode is) and
   `sys/landlock` (rulesets as a descriptor kind; enforcing one is a named
-  fatal) run without a gap. **Open**:
+  fatal) and `sys/lsm` (the declared stack, capability, Landlock and Yama)
+  run without a gap. **Open**:
   `proc/namespaces` stops where it opens `/proc/self/ns/uts`, which the
   virtual filesystem lacks, before `setns`'s namespace checks; named fatals
   where the model ends: unsharing filesystem state, descriptors or the
   semaphore undo list from other threads, the user-mode `userfaultfd`
   descriptor (`mem/userfaultfd`), non-array BPF map types, detaching a BPF
   program from its attach point; and the rows still `Trap(privileged)`:
-  keyrings (`sys/keys`), the LSM attribute calls
-  (`sys/lsm`), `statmount`/`listmount`
+  keyrings (`sys/keys`), `statmount`/`listmount`
   (`fs/mount_query`) and fanotify.
 
 ## 7. Why the exclusions stay excluded

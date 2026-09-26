@@ -25,8 +25,7 @@
 //! No call ever names a module that exists, so the probe's own attributes
 //! (its AppArmor or SELinux label) never change.
 
-use crate::catalog::{Arc, DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -234,15 +233,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_lsm_get_self_attr,
         Syscall::N_lsm_set_self_attr,
     ],
-    gaps: &[Gap {
-        status: Status::Pending(Arc::Privileged),
-        vehicles: Vehicle::KERNEL,
-        what: "lsm_list_modules is a fatal privileged trap (patina-syscalls linux.rs Trap(TRAP_PRIVILEGED)), as are lsm_get_self_attr and lsm_set_self_attr, where the kernel answers any caller about its own attributes and the running modules",
-        failure: Failure::Stops {
-            events: 0,
-            ending: Ending::Signal(SIGABRT),
-            diagnostic: "patina: SUD trapped unsupported syscall lsm_list_modules (nr 461, class privileged",
-        },
-    }],
     ..DEFAULTS
 };

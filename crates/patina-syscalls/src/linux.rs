@@ -2753,22 +2753,22 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_lsm_get_self_attr => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "Over the declared module stack (`KERNEL_CONFIG.lsm_modules`), none of which keeps a process attribute (`sud::privileged::lsm`): `LSM_ATTR_UNDEF` and a NULL size `EINVAL`, the size (a `u32`, Ubuntu's backport of 6.9's fix) unreadable `EFAULT`, a flag other than `LSM_FLAG_SINGLE` or it without a context `EINVAL`, its context unreadable `EFAULT`, naming no module `EINVAL`; then size 0 is written and the answer is `EOPNOTSUPP`.",
         None,
     ),
     Syscall::N_lsm_set_self_attr => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "A flag `EINVAL`, a size (a `u32`, its upper half ignored) short of a context header `EINVAL` or past a page `E2BIG`, the context's copy `EFAULT`, its `len` past the size or short of the header plus `ctx_len` `EINVAL`; then `EOPNOTSUPP`, as no declared module sets an attribute.",
         None,
     ),
     Syscall::N_lsm_list_modules => r(
         id,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Modeled,
+        "The declared module stack (`KERNEL_CONFIG.lsm_modules`: capability, Landlock, Yama, ids 100, 110, 105, in load order): a flag `EINVAL`, the size (a `u32`) unreadable `EFAULT`, then the room needed is written back, too little is `E2BIG`, else the ids and their count.",
         None,
     ),
     Syscall::N_mseal => r(
