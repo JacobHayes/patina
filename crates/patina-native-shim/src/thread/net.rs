@@ -974,7 +974,7 @@ fn close_socket(
 pub(super) fn socket_poll(state: &ThreadRuntime, handle: u64) -> Option<(u32, (u64, u64))> {
     let socket = state.net.sockets.table.get(&(handle as c_int))?;
     let (mask, arrivals) = match &socket.proto {
-        Proto::Inet(inet) => inet::poll(socket, inet),
+        Proto::Inet(inet) => inet::poll(state, handle as c_int, socket, inet),
         Proto::Unix(unix) => unix::poll(state, handle as c_int, socket, unix),
         #[cfg(target_os = "linux")]
         Proto::Netlink(netlink) => netlink::poll(socket, netlink),

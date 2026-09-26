@@ -224,6 +224,7 @@ pub(crate) use platform::*;
 /// A kernel poll mask's bits (`EPOLL*`, which Linux `poll`'s `POLL*` share):
 /// the one readiness vocabulary the reactors read a socket through.
 pub(crate) const POLLIN: u32 = 0x001;
+pub(crate) const POLLPRI: u32 = 0x002;
 pub(crate) const POLLOUT: u32 = 0x004;
 pub(crate) const POLLERR: u32 = 0x008;
 pub(crate) const POLLHUP: u32 = 0x010;
