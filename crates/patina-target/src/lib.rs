@@ -198,8 +198,9 @@ pub struct NativeEscape {
     pub category: &'static str,
     pub provenance: Vec<NativeProvenance>,
     /// For an *instruction* finding, the decoded mnemonic (`rdtsc`, `rdtscp`,
-    /// `rdrand`, `rdseed`, `syscall`, `svc`, `cntvct`, `cpuid`); `None` for a
-    /// symbol, immediate, or undecodable finding.
+    /// `rdrand`, `rdseed`, `syscall`, `svc`, `cntvct`, `cpuid`, `wrfsbase`,
+    /// `mov fs`, `pop fs`, `lfs`, `msr tpidr_el0`); `None` for a symbol,
+    /// immediate, or undecodable finding.
     ///
     /// The category alone cannot decide manageability: `cpu-nondeterminism`
     /// covers both the timestamp counter (trappable via `PR_SET_TSC` on x86-64
@@ -582,6 +583,53 @@ pub fn render_cpu_nondeterminism_note(blocked: &[NativeEscape]) -> Option<String
         ));
     }
     Some(note)
+}
+
+/// The escape category of a *thread-pointer* instruction finding: an inline write
+/// of the register TLS resolves through (x86-64 `wrfsbase`, or an FS selector
+/// load by `mov fs`/`pop fs`/`lfs`; aarch64 `msr tpidr_el0`).
+///
+/// The thread pointer is not guest-only state. The shim is linked into the guest
+/// and resolves its own thread-locals (the current task, the frame flags, the
+/// panic scope) through it, and so does glibc's TCB. A guest that moves it makes
+/// the shim read another block as its task state: it schedules the wrong task or
+/// corrupts its own state. The syscall door is already closed
+/// (`arch_prctl(ARCH_SET_FS)` is refused); these instructions do the same thing
+/// with no syscall, so the audit refuses them, and no trap exists that could
+/// manage them instead.
+///
+/// glibc 2.39 never puts one in a dynamically linked guest: ld.so installs the
+/// main thread's pointer (outside the scanned image) and new threads get theirs
+/// from `clone3(CLONE_SETTLS)`. Static glibc's `__libc_setup_tls` carries one on
+/// aarch64, and it is refused like any other site; such images are refused for
+/// their inline `svc` anyway.
+pub const THREAD_POINTER_CATEGORY: &str = "thread-pointer";
+
+/// The refusal note for blocked thread-pointer instruction findings, naming the
+/// instructions, or `None` when the blocked set has none. Like the
+/// cpu-nondeterminism note it says what the finding is and what fixes it, since
+/// an instruction offset has no symbol for `--allow` to clear.
+pub fn render_thread_pointer_note(blocked: &[NativeEscape]) -> Option<String> {
+    let sites: Vec<&NativeEscape> = blocked
+        .iter()
+        .filter(|escape| {
+            escape.category == THREAD_POINTER_CATEGORY && escape.symbol.starts_with("instruction@")
+        })
+        .collect();
+    if sites.is_empty() {
+        return None;
+    }
+    let mnemonics: BTreeSet<&str> = sites.iter().filter_map(|escape| escape.mnemonic).collect();
+    Some(format!(
+        "note: the thread-pointer finding(s) above are {} instruction(s) that move the thread \
+         pointer. The shim linked into the guest finds its own per-thread state through that \
+         pointer, so a guest that moves it corrupts the runtime (x86-64's syscall door, \
+         arch_prctl(ARCH_SET_FS), is refused for the same reason). No trap intercepts the \
+         write, and an instruction offset has no symbol for --allow to clear. Remove the \
+         instruction: keep glibc's thread-local storage (the pointer glibc installs) rather \
+         than installing your own.",
+        mnemonics.into_iter().collect::<Vec<_>>().join("/")
+    ))
 }
 
 /// The note naming the `rdtsc`/`rdtscp` sites the TSC trap manages for a run that
@@ -1916,12 +1964,24 @@ fn scan_vsyscall_references(
 /// supervisor call) and `mrs Xt, CNTVCT_EL0` (the virtual system counter — the
 /// arm64 analogue of `rdtsc`, and unlike `rdtsc` NOT trappable, so it carries a
 /// mnemonic only for the message, never for a downgrade; see
-/// [`native_escape_is_tsc_manageable`]).
+/// [`native_escape_is_tsc_manageable`]), and `msr TPIDR_EL0, Xt` (a write of the
+/// thread pointer; see [`THREAD_POINTER_CATEGORY`]).
+///
+/// The thread-pointer row is exactly `msr S3_3_C13_C0_2, Xt` (`0xd51bd040 | Rt`).
+/// Its neighbours are deliberately not findings:
+/// - `mrs Xt, TPIDR_EL0` (`0xd53bd040 | Rt`) reads the pointer, which every TLS
+///   access in glibc, std and the shim does.
+/// - `msr TPIDRRO_EL0, Xt` (`op2 = 3`) is UNDEFINED at EL0: it raises SIGILL and
+///   moves nothing.
+/// - `msr TPIDR2_EL0, Xt` (`op2 = 5`) is the SME ABI's lazy-ZA-save block
+///   pointer, not a TLS base; glibc 2.39's own `__libc_arm_za_disable` zeroes it.
 fn aarch64_instruction_category(instruction: u32) -> Option<(&'static str, &'static str)> {
     if instruction & 0xffe0_001f == 0xd400_0001 {
         Some(("direct-syscall", "svc"))
     } else if instruction & !0x1f == 0xd53b_e040 {
         Some(("cpu-nondeterminism", "cntvct"))
+    } else if instruction & !0x1f == 0xd51b_d040 {
+        Some((THREAD_POINTER_CATEGORY, "msr tpidr_el0"))
     } else {
         None
     }
@@ -1991,15 +2051,31 @@ mod x86_scan {
     struct OpAttr {
         modrm: bool,
         imm: Imm,
-        /// A category fixed by the opcode bytes alone (syscall, rdtsc, cpuid).
+        /// A category fixed by the opcode bytes alone (syscall, rdtsc, cpuid,
+        /// pop fs, lfs).
         cat: Option<Forbidden>,
+        /// An opcode whose category is decided by its ModRM byte (and, for group
+        /// 15, the `f3` prefix), resolved after the ModRM byte is read.
+        group: Group,
+    }
+
+    /// The opcode groups whose classification needs the ModRM byte.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Group {
+        None,
+        /// `0f 01` (group 7): rdtscp is `mod=3, reg=7, rm=1`. The rest of the
+        /// group (sgdt/sidt/lgdt/invlpg/swapgs/…) is not forbidden.
+        Seven,
         /// `0f c7` (group 9): rdrand (ModRM.reg 6) / rdseed (ModRM.reg 7) vs
-        /// cmpxchg8b is a reg decision resolved after the ModRM byte is read.
-        group9: bool,
-        /// `0f 01` (group 7): rdtscp is `mod=3, reg=7, rm=1` — the rest of the
-        /// group (sgdt/sidt/lgdt/invlpg/swapgs/…) is not forbidden, so this too
-        /// is a decision resolved after the ModRM byte is read.
-        group7: bool,
+        /// cmpxchg8b.
+        Nine,
+        /// `0f ae` (group 15): with an `f3` prefix and `mod=3`, reg 0..3 are
+        /// rdfsbase/rdgsbase/wrfsbase/wrgsbase. Without the prefix the group is
+        /// the fences and the memory-form state saves, none of them forbidden.
+        Fifteen,
+        /// `8e` (`mov Sreg, r/m16`): ModRM.reg names the segment register
+        /// loaded, and reg 4 is FS.
+        MovSreg,
     }
 
     enum Step {
@@ -2117,13 +2193,18 @@ mod x86_scan {
         let mut o66 = false;
         let mut a67 = false;
         let mut rexw = false;
+        let mut f3 = false;
         // Legacy prefixes, any order. Only `0x66`/`0x67` change a length (via the
-        // effective operand/address size); lock/rep/segment do not.
+        // effective operand/address size); lock/rep/segment do not. `f3` is
+        // recorded because it selects the FSGSBASE forms of group 15. It counts
+        // wherever it sits in the run, even under a later `f2`: the scan fails
+        // toward refusing, never toward passing.
         loop {
             match b.get(p) {
                 Some(0x66) => o66 = true,
                 Some(0x67) => a67 = true,
-                Some(0xF0 | 0xF2 | 0xF3 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65) => {}
+                Some(0xF3) => f3 = true,
+                Some(0xF0 | 0xF2 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65) => {}
                 _ => break,
             }
             p += 1;
@@ -2173,8 +2254,7 @@ mod x86_scan {
                         Imm::None
                     },
                     cat: Option::None,
-                    group9: false,
-                    group7: false,
+                    group: Group::None,
                 }
             } else {
                 match two_byte(op2) {
@@ -2199,8 +2279,7 @@ mod x86_scan {
                     modrm,
                     imm,
                     cat: Option::None,
-                    group9: false,
-                    group7: false,
+                    group: Group::None,
                 },
                 None => return Step::Undecodable,
             }
@@ -2226,8 +2305,7 @@ mod x86_scan {
                     modrm,
                     imm,
                     cat: Option::None,
-                    group9: false,
-                    group7: false,
+                    group: Group::None,
                 },
                 None => return Step::Undecodable,
             }
@@ -2257,7 +2335,7 @@ mod x86_scan {
             // encoding), keeping the historical reg==6 test's shape: the memory
             // forms of this group are privileged VMX instructions that fault in
             // user mode, so the looser test costs nothing and cannot go blind.
-            if attr.group9 {
+            if attr.group == Group::Nine {
                 if reg == 6 {
                     cat = Some(("cpu-nondeterminism", "rdrand"));
                 } else if reg == 7 {
@@ -2268,8 +2346,27 @@ mod x86_scan {
             // counter plus IA32_TSC_AUX. `rm=0` at the same reg is SWAPGS
             // (privileged) and every other encoding is a descriptor-table op, so
             // the exact triple is required.
-            if attr.group7 && md == 3 && reg == 7 && rm == 1 {
+            if attr.group == Group::Seven && md == 3 && reg == 7 && rm == 1 {
                 cat = Some(("cpu-nondeterminism", "rdtscp"));
+            }
+            // group 15 (`f3 [REX.W] 0f ae`, register form): FSGSBASE. Only
+            // WRFSBASE (reg 2) moves the thread pointer. The other three are
+            // deliberately not findings:
+            // - RDFSBASE/RDGSBASE (reg 0/1) read a base, which is what
+            //   `arch_prctl(ARCH_GET_FS)` and a `mov rax, fs:0` already hand
+            //   the guest;
+            // - WRGSBASE (reg 3) moves GS, which neither glibc nor the shim uses
+            //   in user space on x86-64 (the same reason the thread/tls design
+            //   passes `ARCH_SET_GS` through rather than refusing it).
+            if attr.group == Group::Fifteen && f3 && md == 3 && reg == 2 {
+                cat = Some((super::THREAD_POINTER_CATEGORY, "wrfsbase"));
+            }
+            // `mov fs, r/m16` loads FS from a descriptor, and in 64-bit mode a
+            // non-null selector replaces the FS base with that descriptor's base
+            // (0 for the GDT's user data segment): the thread pointer moves with
+            // no FSGSBASE and no syscall. GS (reg 5) is left alone, as above.
+            if attr.group == Group::MovSreg && reg == 4 {
+                cat = Some((super::THREAD_POINTER_CATEGORY, "mov fs"));
             }
             // group 3 (`f6`/`f7`): only TEST (reg 0 or 1) carries an immediate.
             imm = match imm {
@@ -2350,8 +2447,17 @@ mod x86_scan {
             modrm,
             imm,
             cat: None,
-            group9: false,
-            group7: false,
+            group: Group::None,
+        })
+    }
+
+    /// A ModRM opcode with no immediate whose category its ModRM byte decides.
+    fn grouped(group: Group) -> Option<OpAttr> {
+        Some(OpAttr {
+            modrm: true,
+            imm: Imm::None,
+            cat: None,
+            group,
         })
     }
 
@@ -2384,7 +2490,8 @@ mod x86_scan {
             0x81 => attr(true, Z),                // grp1 Ev, Iz
             0x83 => attr(true, Fixed(1)),         // grp1 Ev, Ib (sign-extended)
             0x84..=0x87 => attr(true, None),      // test / xchg
-            0x88..=0x8E => attr(true, None),      // mov / lea
+            0x88..=0x8D => attr(true, None),      // mov / lea
+            0x8E => grouped(Group::MovSreg),      // mov Sreg, r/m16 (reg 4 = FS)
             0x8F => attr(true, None),             // grp1a pop Ev
             0x90..=0x97 => attr(false, None),     // xchg eAX (0x90 nop)
             0x98 | 0x99 | 0x9B | 0x9C | 0x9D | 0x9E | 0x9F => attr(false, None), // cbw..lahf
@@ -2429,7 +2536,9 @@ mod x86_scan {
     /// opcodes are `0f 05` (syscall), `0f 31` (rdtsc), `0f 01 f9` (rdtscp,
     /// resolved from ModRM by the caller) and `0f c7 /6`, `/7` (rdrand, rdseed,
     /// likewise resolved from ModRM.reg); `0f a2` (cpuid) is classified here too,
-    /// as the informational `host-identity` category rather than a refusal.
+    /// as the informational `host-identity` category rather than a refusal. The
+    /// thread-pointer writes are `f3 0f ae /2` (wrfsbase, resolved from the
+    /// prefix and ModRM), `0f a1` (pop fs) and `0f b4` (lfs).
     fn two_byte(op2: u8) -> Option<OpAttr> {
         use Imm::*;
         match op2 {
@@ -2437,15 +2546,13 @@ mod x86_scan {
                 modrm: false,
                 imm: None,
                 cat: Some(("direct-syscall", "syscall")),
-                group9: false,
-                group7: false,
+                group: Group::None,
             }),
             0x31 => Some(OpAttr {
                 modrm: false,
                 imm: None,
                 cat: Some(("cpu-nondeterminism", "rdtsc")),
-                group9: false,
-                group7: false,
+                group: Group::None,
             }),
             // Group 7 (`0f 01`): rdtscp is the `mod=3, reg=7, rm=1` form. The
             // group's length rules are unchanged (ModRM, no immediate) — it was
@@ -2457,15 +2564,13 @@ mod x86_scan {
                 modrm: true,
                 imm: None,
                 cat: Option::None,
-                group9: false,
-                group7: true,
+                group: Group::Seven,
             }),
             0xC7 => Some(OpAttr {
                 modrm: true,
                 imm: None,
                 cat: Option::None,
-                group9: true,
-                group7: false,
+                group: Group::Nine,
             }),
             // CPUID (`0f a2`): the host-identity read. Its length rules were
             // already right (it sat in the no-ModRM/no-immediate row below), so
@@ -2476,12 +2581,36 @@ mod x86_scan {
                 modrm: false,
                 imm: None,
                 cat: Some((super::HOST_IDENTITY_CATEGORY, "cpuid")),
-                group9: false,
-                group7: false,
+                group: Group::None,
+            }),
+            // Group 15 (`0f ae`): the fences, the memory-form state saves and,
+            // under `f3`, FSGSBASE. Same length rules as the ModRM row below;
+            // the group adds the wrfsbase classification.
+            0xAE => Some(OpAttr {
+                modrm: true,
+                imm: None,
+                cat: Option::None,
+                group: Group::Fifteen,
+            }),
+            // `pop fs` (`0f a1`) and `lfs` (`0f b4`, memory operand) load an FS
+            // selector, which replaces the FS base: a thread-pointer write, like
+            // `mov fs` in the one-byte map. Their GS twins (`0f a9`, `0f b5`)
+            // stay unclassified (GS is unused; see the group 15 resolution).
+            0xA1 => Some(OpAttr {
+                modrm: false,
+                imm: None,
+                cat: Some((super::THREAD_POINTER_CATEGORY, "pop fs")),
+                group: Group::None,
+            }),
+            0xB4 => Some(OpAttr {
+                modrm: true,
+                imm: None,
+                cat: Some((super::THREAD_POINTER_CATEGORY, "lfs")),
+                group: Group::None,
             }),
             // No ModRM, no immediate (clts/syscall-family/push-pop-seg/bswap/
-            // rsm/...; `0f a2` cpuid is matched above with the same length rules
-            // and an added classification).
+            // rsm/...; `0f a2` cpuid and `0f a1` pop fs are matched above with
+            // the same length rules and an added classification).
             0x06
             | 0x07
             | 0x08
@@ -2496,7 +2625,6 @@ mod x86_scan {
             | 0x37
             | 0x77
             | 0xA0
-            | 0xA1
             | 0xA8
             | 0xA9
             | 0xAA
@@ -2510,7 +2638,8 @@ mod x86_scan {
             }
             // ModRM, no immediate (the bulk of the 0F map: SSE2/MMX, cmov, setcc,
             // movzx/movsx, bit ops, xadd, cmpxchg, ...).
-            // (`0x01` — group 7, which carries rdtscp — is matched above with the
+            // (`0x01` — group 7, which carries rdtscp — `0xae` — group 15, which
+            // carries wrfsbase — and `0xb4` — lfs — are matched above with the
             // same length rules and an added classification.)
             0x00
             | 0x02
@@ -2530,9 +2659,9 @@ mod x86_scan {
             | 0xA5
             | 0xAB
             | 0xAD
-            | 0xAE
             | 0xAF
-            | 0xB0..=0xB9
+            | 0xB0..=0xB3
+            | 0xB5..=0xB9
             | 0xBB..=0xBF
             | 0xC0
             | 0xC1
@@ -2821,6 +2950,54 @@ mod x86_scan {
             assert_eq!(escapes.len(), 1, "{escapes:?}");
             assert_eq!(escapes[0].category, "direct-syscall");
             assert_eq!(escapes[0].symbol, "instruction@.text+0x7");
+        }
+
+        /// Every x86-64 way to move the FS base without a syscall is a
+        /// thread-pointer finding: `wrfsbase` (32- and 64-bit, any REX.B), and the
+        /// FS selector loads `mov fs`, `pop fs` and `lfs`. The reads and the GS
+        /// writes beside them are not, and neither are the rest of group 15
+        /// (fences, state saves). RED: drop the group 15 resolution or the
+        /// selector rows and the writes decode as `None`.
+        #[test]
+        fn classifies_thread_pointer_writes() {
+            let thread_pointer = super::super::THREAD_POINTER_CATEGORY;
+            let writes: &[(&[u8], usize, &str)] = &[
+                (&[0xf3, 0x48, 0x0f, 0xae, 0xd0], 5, "wrfsbase"), // wrfsbase rax
+                (&[0xf3, 0x0f, 0xae, 0xd0], 4, "wrfsbase"),       // wrfsbase eax
+                (&[0xf3, 0x49, 0x0f, 0xae, 0xd7], 5, "wrfsbase"), // wrfsbase r15
+                (&[0x66, 0xf3, 0x48, 0x0f, 0xae, 0xd0], 6, "wrfsbase"), // extra prefix
+                (&[0x8e, 0xe0], 2, "mov fs"),                     // mov fs, eax
+                (&[0x8e, 0x20], 2, "mov fs"),                     // mov fs, [rax]
+                (&[0x0f, 0xa1], 2, "pop fs"),                     // pop fs
+                (&[0x0f, 0xb4, 0x00], 3, "lfs"),                  // lfs eax, [rax]
+            ];
+            for (bytes, len, mnemonic) in writes {
+                assert_eq!(
+                    decode_full(bytes),
+                    (*len, Some((thread_pointer, *mnemonic))),
+                    "{bytes:02x?}"
+                );
+            }
+            let neighbours: &[(&[u8], usize)] = &[
+                (&[0xf3, 0x48, 0x0f, 0xae, 0xc0], 5), // rdfsbase rax
+                (&[0xf3, 0x48, 0x0f, 0xae, 0xc8], 5), // rdgsbase rax
+                (&[0xf3, 0x48, 0x0f, 0xae, 0xd8], 5), // wrgsbase rax
+                (&[0x0f, 0xae, 0xe8], 3),             // lfence
+                (&[0x0f, 0xae, 0xf0], 3),             // mfence
+                (&[0x0f, 0xae, 0x10], 3),             // ldmxcsr [rax] (reg 2, memory)
+                (&[0xf3, 0x0f, 0xae, 0x10], 4),       // repz ldmxcsr [rax] (f3, but memory)
+                (&[0x0f, 0xae, 0x00], 3),             // fxsave [rax]
+                (&[0x8e, 0xe8], 2),                   // mov gs, eax
+                (&[0x8e, 0xd8], 2),                   // mov ds, eax
+                (&[0x8c, 0xe0], 2),                   // mov eax, fs (a read)
+                (&[0x0f, 0xa0], 2),                   // push fs
+                (&[0x0f, 0xa9], 2),                   // pop gs
+                (&[0x0f, 0xb5, 0x00], 3),             // lgs eax, [rax]
+                (&[0x0f, 0xb6, 0xc0], 3),             // movzx eax, al
+            ];
+            for (bytes, len) in neighbours {
+                assert_eq!(decode_full(bytes), (*len, None), "{bytes:02x?}");
+            }
         }
 
         // Ground-truth corpus check: the length decoder must reproduce objdump's
@@ -4914,6 +5091,82 @@ mod tests {
             "the host-identity site survives a refusing audit, so a refusal can \
              report it too"
         );
+    }
+
+    const AARCH64_NOP: u32 = 0xd503_201f;
+
+    fn aarch64_text(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|word| word.to_le_bytes()).collect()
+    }
+
+    // The aarch64 thread-pointer write is exactly `msr TPIDR_EL0, Xt`, for every
+    // Xt. Its neighbours are not findings: the read (`mrs`), the EL0-UNDEFINED
+    // `msr TPIDRRO_EL0`, and the SME `TPIDR2_EL0` pair. RED: drop the
+    // `0xd51bd040` row and the writes classify as `None`.
+    #[test]
+    fn classifies_aarch64_thread_pointer_writes() {
+        for rt in 0..32u32 {
+            assert_eq!(
+                aarch64_instruction_category(0xd51b_d040 | rt),
+                Some((THREAD_POINTER_CATEGORY, "msr tpidr_el0")),
+                "msr tpidr_el0, x{rt}"
+            );
+            for (neighbour, label) in [
+                (0xd53b_d040 | rt, "mrs tpidr_el0"),
+                (0xd51b_d060 | rt, "msr tpidrro_el0"),
+                (0xd53b_d060 | rt, "mrs tpidrro_el0"),
+                (0xd51b_d0a0 | rt, "msr tpidr2_el0"),
+                (0xd53b_d0a0 | rt, "mrs tpidr2_el0"),
+            ] {
+                assert_eq!(
+                    aarch64_instruction_category(neighbour),
+                    None,
+                    "{label} x{rt}"
+                );
+            }
+        }
+    }
+
+    // The scanner on bytes, end to end through the public gate. glibc 2.39's own
+    // words are used: `msr tpidr_el0, x20` (ld.so's TLS_INIT_TP) and `msr
+    // tpidr2_el0, xzr` (libc's `__libc_arm_za_disable`). An image with no
+    // symbols gives the write no containing function, so no allowance applies:
+    // the audit refuses it by category and mnemonic, and the note names it.
+    #[test]
+    fn aarch64_thread_pointer_write_is_refused_by_name() {
+        const EM_AARCH64: u16 = 183;
+        let text = aarch64_text(&[
+            AARCH64_NOP,
+            0xd51b_d054, // msr tpidr_el0, x20
+            0xd53b_d040, // mrs x0, tpidr_el0
+            0xd51b_d0bf, // msr tpidr2_el0, xzr
+        ]);
+        let elf = minimal_executable_elf64(EM_AARCH64, &text);
+        let Err(TargetError::UnsupportedNativeImports(denied)) =
+            NativeAudit::audit(&elf, &BTreeSet::new())
+        else {
+            panic!("a thread-pointer write must refuse the binary");
+        };
+        let found: Vec<_> = denied
+            .iter()
+            .map(|escape| (escape.symbol.as_str(), escape.category, escape.mnemonic))
+            .collect();
+        assert_eq!(
+            found,
+            vec![(
+                "instruction@.text+0x4",
+                THREAD_POINTER_CATEGORY,
+                Some("msr tpidr_el0")
+            )]
+        );
+        // No downgrade exists for it, and it is not an informational class.
+        assert!(!native_escape_is_sud_manageable(&denied[0]));
+        assert!(!native_escape_is_tsc_manageable(&denied[0]));
+        assert!(!native_escape_is_host_identity(&denied[0]));
+        let note = render_thread_pointer_note(&denied).expect("a thread-pointer note");
+        assert!(note.contains("msr tpidr_el0"), "{note}");
+        assert_eq!(render_thread_pointer_note(&[]), None);
+        assert_eq!(render_cpu_nondeterminism_note(&denied), None);
     }
 
     // Pure-compute host symbols are known-safe with no `--allow`: they read or

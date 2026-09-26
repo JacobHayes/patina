@@ -43,6 +43,33 @@ fn prerun_refuses_shm_open_and_hatch_warns() {
     assert!(text(&hatch.stderr).contains("WARNING"));
 }
 
+// A guest that writes the thread pointer itself is refused before it runs, by
+// class and by instruction, on each architecture's own encodings.
+#[test]
+fn thread_pointer_writes_are_refused_by_name() {
+    let g = Guest::assert_build("thread_pointer_probe.rs");
+    let out = g.assert_run_refused(1, &["thread-pointer"]);
+    assert!(!text(&out.stdout).contains("THREAD_POINTER_PROBE_RAN"));
+    let audit = assert_refused(g.command("audit", &["--format", "json"]), &[]);
+    let envelope: serde_json::Value = serde_json::from_str(text(&audit.stdout).trim())
+        .unwrap_or_else(|error| panic!("audit JSON: {error}: {}", text(&audit.stdout)));
+    assert_eq!(envelope["exit_code"], 2, "{envelope:#}");
+    let mut mnemonics: Vec<_> = envelope["finding_details"]
+        .as_array()
+        .expect("finding_details")
+        .iter()
+        .filter(|detail| detail["category"] == "thread-pointer")
+        .map(|detail| detail["mnemonic"].as_str().unwrap_or_default())
+        .collect();
+    mnemonics.sort();
+    let expected: &[&str] = if cfg!(target_arch = "x86_64") {
+        &["mov fs", "wrfsbase"]
+    } else {
+        &["msr tpidr_el0"]
+    };
+    assert_eq!(mnemonics, expected);
+}
+
 #[test]
 fn original_envp_is_scrubbed() {
     let g = assert_build_c_guest("envp_probe.c", CLink::PosixShim);

@@ -588,7 +588,10 @@ Static, pre-run checks reject a native binary before it executes:
   answers the counter from the virtual clock). Both downgrades require the
   matching shim marker and a live platform probe, and both are reported, never
   silent. The rest of the class (`rdrand`/`rdseed`/`CNTVCT`) has no trap and is
-  refused everywhere;
+  refused everywhere. The scan also refuses thread-pointer writes (x86_64
+  `wrfsbase` and FS selector loads, aarch64 `msr tpidr_el0`): the shim finds its
+  own per-thread state through that pointer, so no guest may move it. glibc
+  installs it from ld.so, outside the scanned image, so no glibc site is allowed;
 - WASI module imports are audited against the host's explicit allowlist before
   instantiation.
 

@@ -37,8 +37,8 @@ use patina_dst_target::{
     native_binary_has_sud_marker, native_binary_has_tsc_marker, native_binary_is_shim_linked,
     native_deny_trap_armed, native_escape_is_sud_manageable, native_escape_is_tsc_manageable,
     native_host_identity_sites, render_cpu_nondeterminism_note, render_host_identity_note,
-    render_inert_weak_imports, render_native_escapes_grouped, render_tsc_managed_note,
-    shim_control_plane_symbols,
+    render_inert_weak_imports, render_native_escapes_grouped, render_thread_pointer_note,
+    render_tsc_managed_note, shim_control_plane_symbols,
 };
 use patina_dst_trace::{
     CrashRestartSegments, HandoffSealKey, IncarnationHandoff, Sha256Digest, TraceBundle,
@@ -4734,6 +4734,9 @@ fn emit_native_audit_violation(
         );
     } else {
         eprintln!("{}", render_native_escapes_grouped(denied));
+        if let Some(note) = render_thread_pointer_note(denied) {
+            eprintln!("{note}");
+        }
     }
 }
 
@@ -4778,6 +4781,9 @@ fn native_escape_details(
             });
             if let Some(disposition) = disposition {
                 detail["disposition"] = serde_json::Value::String(disposition.to_string());
+            }
+            if let Some(mnemonic) = escape.mnemonic {
+                detail["mnemonic"] = serde_json::Value::String(mnemonic.to_string());
             }
             detail
         })
@@ -6757,6 +6763,12 @@ them.",
             // Instruction-class findings have no symbol name, so `--allow` can
             // never clear one; and only the timestamp counter is trappable at
             // all. Say both, rather than leaving the operator to infer them.
+            message.push('\n');
+            message.push_str(&note);
+        }
+        if let Some(note) = render_thread_pointer_note(&blocked) {
+            // A moved thread pointer corrupts the shim itself, so the note names
+            // the instruction and says why no downgrade exists for it.
             message.push('\n');
             message.push_str(&note);
         }
