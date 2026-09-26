@@ -103,12 +103,19 @@ fn write_file_at(handle: Fd, offset: i64, bytes: &[u8]) -> Result<usize, c_int> 
     Ok(written)
 }
 
+/// Whether a descriptor is a secret-memory file, whose only operation is a
+/// shared mapping.
+fn secret(resolved: &Resolved) -> bool {
+    resolved.kind == FdKind::File && crate::mem::secret(resolved.handle)
+}
+
 /// `copy_file_range(2)`: both descriptors first (`EBADF`), the offsets read,
 /// then the flags (`EINVAL` unless 0), then `generic_copy_file_checks`: a
 /// directory on either side `EISDIR`, anything but two regular files `EINVAL`,
 /// a source not open for reading or a destination not open for writing or
-/// open `O_APPEND` `EBADF`, a range past the source's end shortened to it,
-/// and overlapping ranges within one file `EINVAL`.
+/// open `O_APPEND` `EBADF`, a copy between secret memory and another
+/// filesystem `EXDEV`, a range past the source's end shortened to it, and
+/// overlapping ranges within one file `EINVAL`.
 ///
 /// # Safety
 /// `off_in`/`off_out`, when non-null, are the guest's `loff_t`s.
@@ -144,6 +151,13 @@ pub unsafe extern "C" fn patina_copy_file_range(
         // SAFETY: per this function's contract.
         let (source, destination) =
             unsafe { (Position::of(from, off_in)?, Position::of(to, off_out)?) };
+        // Secret memory is its own filesystem with no copy operation: a copy
+        // between it and another is `EXDEV`, right after the modes
+        // (`generic_copy_file_checks`), before any offset or length is judged.
+        let (secret_in, secret_out) = (secret(&input), secret(&output));
+        if secret_in != secret_out {
+            return Err(crate::EXDEV);
+        }
         let len = len.min(MAX_RW_COUNT);
         if source.at.checked_add(len as i64).is_none()
             || destination.at.checked_add(len as i64).is_none()
@@ -166,6 +180,11 @@ pub unsafe extern "C" fn patina_copy_file_range(
         }
         if count == 0 {
             return Ok(0);
+        }
+        // Within secret memory the copy falls back to a splice, which it has
+        // no operation for: `EINVAL`.
+        if secret_in {
+            return Err(EINVAL);
         }
         let bytes = read_file_at(from, source.at, count)?;
         let moved = write_file_at(to, destination.at, &bytes)?;
@@ -197,7 +216,7 @@ pub unsafe extern "C" fn patina_sendfile(
         if input.status & O_READ == 0 {
             return Err(EBADF);
         }
-        let addressable = matches!(input.kind, FdKind::File | FdKind::Dir);
+        let addressable = matches!(input.kind, FdKind::File | FdKind::Dir) && !secret(&input);
         if !offset.is_null() && !addressable {
             return Err(ESPIPE);
         }
@@ -225,6 +244,10 @@ pub unsafe extern "C" fn patina_sendfile(
         let (Some(position), FdKind::File) = (position, input.kind) else {
             return Err(EINVAL);
         };
+        // Secret memory has no splice operation, either way.
+        if secret(&input) || secret(&output) {
+            return Err(EINVAL);
+        }
         let from = Fd(input.handle);
         let moved = match into_pipe {
             Some(pipe) => {
@@ -351,6 +374,8 @@ pub unsafe extern "C" fn patina_splice(
             (Some(from), None) => {
                 let nonblocking = flagged || input.status & O_NONBLOCK != 0;
                 match output.kind {
+                    // Secret memory has no splice operation.
+                    FdKind::File if secret(&output) => Err(EINVAL),
                     FdKind::File => {
                         if output.status & O_APPEND != 0 {
                             return Err(EINVAL);
@@ -390,7 +415,7 @@ pub unsafe extern "C" fn patina_splice(
                 }
             }
             (None, Some(to)) => {
-                if input.kind != FdKind::File {
+                if input.kind != FdKind::File || secret(&input) {
                     return Err(EINVAL);
                 }
                 let from = Fd(input.handle);

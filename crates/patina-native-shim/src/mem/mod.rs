@@ -48,7 +48,7 @@ mod memfd;
 mod ranges;
 
 pub(crate) use barrier::membarrier;
-pub(crate) use memfd::{anonymous, released};
+pub(crate) use memfd::{anonymous, released, secret, secret_resizable, secret_resized};
 
 use crate::fdtable::{DescId, FdKind};
 use crate::numa::Policy;
@@ -138,6 +138,10 @@ enum Object {
         /// stores are its own); a shared one only on a description open for
         /// writing, on a file no write seal forbids it.
         maywrite: bool,
+        /// Secret memory (`memfd_secret`): on a `noexec` mount (never
+        /// executable, `!VM_MAYEXEC`), locked, out of every page walk's reach
+        /// (`get_user_pages` refuses it), with no file to write back.
+        secret: bool,
     },
     /// A System V shared memory attachment of segment `id` (`shmat`); a
     /// segment's attachment count is the number of these, as the kernel's
@@ -179,6 +183,18 @@ impl Object {
         match self {
             Object::File { maywrite, .. } | Object::Segment { maywrite, .. } => !maywrite,
         }
+    }
+
+    /// A secret-memory view.
+    fn is_secret(self) -> bool {
+        matches!(self, Object::File { secret: true, .. })
+    }
+
+    /// `mprotect(prot)` of it is `EACCES`: writing without `VM_MAYWRITE`, or
+    /// executing without `VM_MAYEXEC` (secret memory's `noexec` mount).
+    fn refuses(self, prot: c_int) -> bool {
+        (prot & PROT_WRITE != 0 && self.refuses_write())
+            || (prot & PROT_EXEC != 0 && self.is_secret())
     }
 }
 
@@ -440,6 +456,20 @@ fn lock_range(start: usize, len: usize, onfault: bool) -> Result<(), c_int> {
 /// refused here as a page without access.
 fn populate(start: usize, len: usize) -> Result<(), c_int> {
     require_populate();
+    // `get_user_pages` refuses secret memory: the walk stops there, `EFAULT`.
+    let secret = MAPPINGS
+        .lock()
+        .views
+        .within(start, start + len)
+        .into_iter()
+        .find(|(_, _, object)| object.is_secret())
+        .map(|(from, _, _)| from.max(start));
+    if let Some(from) = secret {
+        if from > start {
+            populate(start, from - start)?;
+        }
+        return Err(crate::EFAULT);
+    }
     let end = start + len;
     let shared: Vec<(usize, usize)> = MAPPINGS
         .lock()
@@ -783,15 +813,42 @@ fn map_file_judged(
         return fail(EOVERFLOW);
     }
     let writable = resolved.status & crate::O_WRITE != 0;
+    let secret = resolved.kind == FdKind::File && secret(resolved.handle);
     let shared = match judge(
         flags,
         prot,
         resolved.status & crate::O_READ != 0,
         writable,
         resolved.kind == FdKind::File,
+        secret,
     ) {
         Ok(shared) => shared,
         Err(errno) => return fail(errno),
+    };
+    // `secretmem_mmap`: a shared mapping only, and its pages are locked
+    // (`mlock_future_ok`: `EAGAIN` past the limit) as they fault in, unless
+    // `MAP_LOCKED` populates them. It runs inside `mmap_region`, after a
+    // `MAP_FIXED` mapping has unmapped what it replaces, so the locked pages
+    // in that range no longer count.
+    let lock = if secret {
+        if !shared {
+            return fail(EINVAL);
+        }
+        let locked = {
+            let mappings = MAPPINGS.lock();
+            let replaced = if flags & MAP_FIXED != 0 {
+                mappings.locks.covered(addr, addr + rounded)
+            } else {
+                0
+            };
+            mappings.locks.total() - replaced
+        };
+        if locked / PAGE + rounded / PAGE > lock_limit_pages() {
+            return fail(crate::EWOULDBLOCK);
+        }
+        Some(lock.unwrap_or(true))
+    } else {
+        lock
     };
     crate::LAST_BOUNDARY_SYMBOL.store(c"mmap".as_ptr().cast_mut(), Ordering::Relaxed);
     let handle = resolved.handle;
@@ -834,6 +891,7 @@ fn map_file_judged(
         desc: resolved.desc,
         shared,
         maywrite,
+        secret,
     };
     let result = alias(
         memfd,
@@ -863,6 +921,7 @@ fn judge(
     readable: bool,
     writable: bool,
     regular: bool,
+    noexec: bool,
 ) -> Result<bool, c_int> {
     let shared = match flags & MAP_TYPE {
         MAP_SHARED | MAP_SHARED_VALIDATE => {
@@ -886,6 +945,10 @@ fn judge(
     };
     if !readable {
         return Err(EACCES);
+    }
+    // A file on a `noexec` mount (secret memory's) never maps executable.
+    if noexec && prot & PROT_EXEC != 0 {
+        return Err(crate::EPERM);
     }
     // Only a regular file has byte-addressable contents: a directory, a pipe,
     // a socket, the streams and the entropy device have no `mmap`.
@@ -1007,14 +1070,14 @@ fn cache_for(ino: u64, handle: u64, size: u64) -> Result<c_int, i64> {
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_mprotect(addr: usize, len: usize, prot: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if prot & PROT_WRITE != 0 && addr % PAGE == 0 && len != 0 && tracking() {
+    if prot & (PROT_WRITE | PROT_EXEC) != 0 && addr % PAGE == 0 && len != 0 && tracking() {
         if let Some(end) = round_up(len).and_then(|len| addr.checked_add(len)) {
             let refused = MAPPINGS
                 .lock()
                 .views
                 .within(addr, end)
                 .into_iter()
-                .find(|(_, _, object)| object.refuses_write())
+                .find(|(_, _, object)| object.refuses(prot))
                 .map(|(start, _, _)| start);
             if let Some(refused) = refused {
                 if refused > addr {
@@ -1476,6 +1539,7 @@ pub(crate) fn crashed() {
                 desc,
                 shared,
                 maywrite,
+                secret,
                 ..
             } = object
             {
@@ -1484,6 +1548,7 @@ pub(crate) fn crashed() {
                     desc,
                     shared,
                     maywrite,
+                    secret,
                 };
                 mappings.views.set(start, end, object);
             }
@@ -1519,7 +1584,7 @@ pub extern "C" fn patina_msync(addr: usize, len: usize, flags: c_int) -> i64 {
                     .map(|(from, _, _)| *from)
             })
             .flatten();
-        let mut files: Vec<(u64, u64)> = if flags & MS_SYNC == 0 {
+        let mut files: Vec<(u64, u64, bool)> = if flags & MS_SYNC == 0 {
             Vec::new()
         } else {
             mappings
@@ -1529,16 +1594,20 @@ pub extern "C" fn patina_msync(addr: usize, len: usize, flags: c_int) -> i64 {
                 .filter(|(_, _, object)| object.is_shared())
                 .filter_map(|(_, _, object)| {
                     let handle = mappings.descs.get(&object.desc()?)?;
-                    Some((object.ino()?, *handle))
+                    Some((object.ino()?, *handle, object.is_secret()))
                 })
                 .collect()
         };
         files.sort_unstable();
-        files.dedup_by_key(|(ino, _)| *ino);
+        files.dedup_by_key(|(ino, _, _)| *ino);
         (files, busy)
     };
     crate::LAST_BOUNDARY_SYMBOL.store(c"msync".as_ptr().cast_mut(), Ordering::Relaxed);
-    for (ino, handle) in files {
+    for (ino, handle, secret) in files {
+        // Secret memory has no `fsync` operation (`vfs_fsync_range`).
+        if secret {
+            return fail(EINVAL);
+        }
         if let Some(writer) = writer_of(ino) {
             if let Err(errno) = write_back(ino, writer) {
                 return fail(errno);
@@ -1738,25 +1807,38 @@ mod tests {
     fn a_private_mapping_is_private_whatever_the_type_bits_share() {
         // MAP_SHARED_VALIDATE (3) contains MAP_PRIVATE's bit: testing the type
         // as flags made every private mapping read as shared-and-private.
-        assert_eq!(judge(MAP_PRIVATE, RW, true, false, true), Ok(false));
+        assert_eq!(judge(MAP_PRIVATE, RW, true, false, true, false), Ok(false));
         assert_eq!(
-            judge(MAP_PRIVATE | UNKNOWN, RW, true, false, true),
+            judge(MAP_PRIVATE | UNKNOWN, RW, true, false, true, false),
             Ok(false)
         );
-        assert_eq!(judge(MAP_SHARED, PROT_READ, true, false, true), Ok(true));
-        assert_eq!(judge(MAP_SHARED_VALIDATE, RW, true, true, true), Ok(true));
-        assert_eq!(judge(0, RW, true, true, true), Err(EINVAL));
-        assert_eq!(judge(MAP_TYPE, RW, true, true, true), Err(EINVAL));
+        assert_eq!(
+            judge(MAP_SHARED, PROT_READ, true, false, true, false),
+            Ok(true)
+        );
+        assert_eq!(
+            judge(MAP_SHARED_VALIDATE, RW, true, true, true, false),
+            Ok(true)
+        );
+        assert_eq!(judge(0, RW, true, true, true, false), Err(EINVAL));
+        assert_eq!(judge(MAP_TYPE, RW, true, true, true, false), Err(EINVAL));
     }
 
     #[test]
     fn unknown_flags_are_ignored_by_map_shared_and_refused_by_validate() {
         assert_eq!(
-            judge(MAP_SHARED | UNKNOWN, PROT_READ, true, false, true),
+            judge(MAP_SHARED | UNKNOWN, PROT_READ, true, false, true, false),
             Ok(true)
         );
         assert_eq!(
-            judge(MAP_SHARED_VALIDATE | UNKNOWN, PROT_READ, true, false, true),
+            judge(
+                MAP_SHARED_VALIDATE | UNKNOWN,
+                PROT_READ,
+                true,
+                false,
+                true,
+                false
+            ),
             Err(EOPNOTSUPP)
         );
         // `MAP_FIXED_NOREPLACE` is not a legacy flag either.
@@ -1766,7 +1848,8 @@ mod tests {
                 PROT_READ,
                 true,
                 false,
-                true
+                true,
+                false
             ),
             Err(EOPNOTSUPP)
         );
@@ -1776,20 +1859,45 @@ mod tests {
     fn access_modes_are_judged_before_the_file_kind() {
         // Shared and writable needs a writable description; any mapping needs
         // a readable one; both before a non-file's ENODEV.
-        assert_eq!(judge(MAP_SHARED, RW, true, false, true), Err(EACCES));
-        assert_eq!(judge(MAP_PRIVATE, RW, true, false, true), Ok(false));
-        assert_eq!(judge(MAP_SHARED, PROT_READ, false, true, true), Err(EACCES));
+        assert_eq!(judge(MAP_SHARED, RW, true, false, true, false), Err(EACCES));
+        assert_eq!(judge(MAP_PRIVATE, RW, true, false, true, false), Ok(false));
         assert_eq!(
-            judge(MAP_PRIVATE, PROT_READ, false, true, false),
+            judge(MAP_SHARED, PROT_READ, false, true, true, false),
             Err(EACCES)
         );
         assert_eq!(
-            judge(MAP_SHARED, PROT_READ, true, false, false),
+            judge(MAP_PRIVATE, PROT_READ, false, true, false, false),
+            Err(EACCES)
+        );
+        assert_eq!(
+            judge(MAP_SHARED, PROT_READ, true, false, false, false),
             Err(ENODEV)
         );
         assert_eq!(
-            judge(MAP_PRIVATE | MAP_GROWSDOWN, PROT_READ, true, false, true),
+            judge(
+                MAP_PRIVATE | MAP_GROWSDOWN,
+                PROT_READ,
+                true,
+                false,
+                true,
+                false
+            ),
             Err(EINVAL)
+        );
+        // A file on a `noexec` mount maps executable `EPERM`, after the
+        // access modes and before the file kind and `MAP_GROWSDOWN`.
+        let exec = PROT_READ | PROT_EXEC;
+        assert_eq!(
+            judge(MAP_SHARED, exec, true, true, true, true),
+            Err(crate::EPERM)
+        );
+        assert_eq!(
+            judge(MAP_SHARED, exec, false, true, true, true),
+            Err(EACCES)
+        );
+        assert_eq!(
+            judge(MAP_PRIVATE | MAP_GROWSDOWN, exec, true, false, false, true),
+            Err(crate::EPERM)
         );
     }
 
@@ -1809,6 +1917,7 @@ mod tests {
             desc: 1,
             shared,
             maywrite,
+            secret: false,
         };
         assert!(view(true, false).refuses_write());
         assert!(!view(true, true).refuses_write());

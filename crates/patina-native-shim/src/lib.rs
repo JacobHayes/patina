@@ -4709,6 +4709,9 @@ unsafe fn read_resolved(
         // The captured streams are write-only, like the pipe a supervisor
         // hands a child.
         FdKind::Stdout | FdKind::Stderr => fail(EBADF) as isize,
+        // Secret memory has no read operation (`FMODE_CAN_READ`).
+        #[cfg(target_os = "linux")]
+        FdKind::File if mem::secret(resolved.handle) => fail(EINVAL) as isize,
         FdKind::File | FdKind::Dir | FdKind::OPath => {
             fs_read(Fd(resolved.handle), destination, length)
         }
@@ -4814,6 +4817,9 @@ unsafe fn write_resolved(
         FdKind::Stdout | FdKind::Stderr => unsafe {
             patina_stdio_write(resolved.handle as c_int, source, length)
         },
+        // Secret memory has no write operation (`FMODE_CAN_WRITE`).
+        #[cfg(target_os = "linux")]
+        FdKind::File if mem::secret(resolved.handle) => fail(EINVAL) as isize,
         FdKind::File | FdKind::Dir | FdKind::OPath => fs_write(Fd(resolved.handle), source, length),
         // SAFETY: forwarded from this function's own contract.
         FdKind::Socket => unsafe {
@@ -4852,6 +4858,9 @@ fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved, u64), c_in
     };
     let resolved = fdget(raw_fd)?;
     match resolved.kind {
+        // Secret memory has no position (`FMODE_PREAD`/`FMODE_PWRITE`).
+        #[cfg(target_os = "linux")]
+        FdKind::File if mem::secret(resolved.handle) => Err(ESPIPE),
         // An mqueue file is positioned (it reads its status line).
         FdKind::File | FdKind::Dir => Ok((resolved, offset)),
         #[cfg(target_os = "linux")]
@@ -5104,6 +5113,19 @@ pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
     0
 }
 
+/// `lseek(2)` of a description without offset addressing: `ESPIPE`. On Linux
+/// `ksys_lseek` refuses a whence past `SEEK_MAX` (`SEEK_HOLE`, 4) first
+/// (`EINVAL`), before the file's missing `llseek` is looked at (Darwin keeps
+/// `ESPIPE`).
+fn no_position(whence: u32) -> c_int {
+    const SEEK_MAX: u32 = 4;
+    if cfg!(target_os = "linux") && whence > SEEK_MAX {
+        EINVAL
+    } else {
+        ESPIPE
+    }
+}
+
 /// `lseek(2)`: a file's cursor; a description without offset addressing is
 /// `ESPIPE`.
 ///
@@ -5133,8 +5155,13 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
                 Err(errno) => i64::from(fail(errno)),
             };
         }
+        // Secret memory has no position (`FMODE_LSEEK`).
+        #[cfg(target_os = "linux")]
+        Ok(resolved) if resolved.kind == FdKind::File && mem::secret(resolved.handle) => {
+            return i64::from(fail(no_position(whence)));
+        }
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
-        Ok(_) => return i64::from(fail(ESPIPE)),
+        Ok(_) => return i64::from(fail(no_position(whence))),
         Err(errno) => return i64::from(fail(errno)),
     };
     let whence = match whence {
@@ -5156,6 +5183,11 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
 pub extern "C" fn patina_fsync(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let handle = match resolve_fd(raw_fd) {
+        // Secret memory has nothing to write back (no `fsync` operation).
+        #[cfg(target_os = "linux")]
+        Ok(resolved) if resolved.kind == FdKind::File && mem::secret(resolved.handle) => {
+            return fail(EINVAL);
+        }
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
         Ok(_) => return fail(EINVAL),
         Err(errno) => return fail(errno),
@@ -5191,10 +5223,18 @@ pub extern "C" fn patina_set_len(raw_fd: c_int, length: u64) -> c_int {
         Ok(_) => return fail(EINVAL),
         Err(errno) => return fail(errno),
     };
+    // `secretmem_setattr`: secret memory is sized once, while it is empty.
+    #[cfg(target_os = "linux")]
+    if !mem::secret_resizable(handle.0) {
+        return fail(EINVAL);
+    }
     match with_context(|context| context.fs_set_len(handle, length)) {
         Ok(()) => {
             #[cfg(target_os = "linux")]
-            mem::resized(handle.0, length);
+            {
+                mem::resized(handle.0, length);
+                mem::secret_resized(handle.0, length);
+            }
             0
         }
         Err(errno) => fail(errno),
@@ -6048,6 +6088,7 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
     // `PUNCH_HOLE`.
     #[cfg(target_os = "linux")]
     if resolved.kind == FdKind::MessageQueue
+        || mem::secret(resolved.handle)
         || (mem::anonymous(resolved.handle).is_some()
             && mode & !(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE) != 0)
     {

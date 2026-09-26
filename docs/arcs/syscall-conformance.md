@@ -298,8 +298,9 @@ forwards into the same dispatcher instead of its two-number allowlist.
   virtual CPU has neither protection keys nor user shadow stacks, so those rows
   answer as 6.8 does on a CPU without them (`ByDesign` against a host that has
   them).
-  Left as named traps: `memfd_secret` (needs a page-cache fill the filesystem
-  does not refuse), and the libc
+  `memfd_secret` is a filesystem file whose bytes only a shared mapping of its
+  page cache reaches, the descriptor funnels refusing the rest. Left as named
+  traps: the libc
   `shm_*`/`sem_*`/`mq_*` and SysV wrappers (still refused by the
   audit). Scenarios for the resource limits other than `RLIMIT_MEMLOCK` come
   with the time + identity family. Locking and populating need

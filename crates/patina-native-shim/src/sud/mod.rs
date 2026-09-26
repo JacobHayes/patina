@@ -161,6 +161,7 @@ unsafe extern "C" {
     // Anonymous files and their seals (`crate::mem`), the C memfd_create and
     // fcntl seal commands' entries.
     fn patina_memfd_create(name: *const c_char, flags: u32) -> c_int;
+    fn patina_memfd_secret(flags: u32) -> c_int;
     fn patina_get_seals(fd: c_int) -> c_int;
     fn patina_add_seals(fd: c_int, seals: u32) -> c_int;
 
@@ -1220,6 +1221,9 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_remap_file_pages, mem_passthrough),
     (Syscall::N_memfd_create, |_, a| unsafe {
         ret_i32(patina_memfd_create(a[0] as *const c_char, a[1] as u32))
+    }),
+    (Syscall::N_memfd_secret, |_, a| unsafe {
+        ret_i32(patina_memfd_secret(a[0] as u32))
     }),
     // ---- System V IPC: the one-process model (`thread::ipc`) ----
     (Syscall::N_shmget, |_, a| {

@@ -2668,9 +2668,9 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
     Syscall::N_memfd_secret => r(
         id,
         Family::Mem,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Secret memory's bytes live only in its page cache, reachable through a shared mapping and never through `read`/`write`: modeling it needs a page-cache fill the filesystem does not refuse where it refuses the guest's reads (the page cache today loads through the guest's own read path). Named trap until the memory arc adds that fill.",
-        Some("memory+ipc"),
+        Disposition::Modeled,
+        "Secret memory is enabled, as 6.8 has it by default: a nameless 0600 file of the filesystem whose bytes live only in its page cache, which a shared mapping reaches (locked as it faults in, never executable); `read`/`write` are `EINVAL`, a position `ESPIPE`, a second size `EINVAL`, `fsync` and `msync(MS_SYNC)` `EINVAL`, `fallocate` `EOPNOTSUPP`, a private or executable mapping `EINVAL`/`EPERM`, and no page walk reaches it.",
+        None,
     ),
     Syscall::N_process_mrelease => r(
         id,

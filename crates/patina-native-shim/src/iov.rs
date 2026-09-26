@@ -113,6 +113,11 @@ unsafe fn open_vector(
     if resolved.status & mode == 0 {
         return Err(EBADF);
     }
+    // Secret memory has no read or write operation (`FMODE_CAN_READ`).
+    #[cfg(target_os = "linux")]
+    if resolved.kind == FdKind::File && crate::mem::secret(resolved.handle) {
+        return Err(EINVAL);
+    }
     // SAFETY: forwarded from the caller's contract.
     unsafe { import(vector, count) }
 }

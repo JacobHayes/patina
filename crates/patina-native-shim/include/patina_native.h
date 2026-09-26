@@ -456,6 +456,7 @@ int64_t patina_prlimit(int32_t pid, uint32_t resource, const struct patina_rlimi
  * F_ADD_SEALS adds them). Each returns -1 with patina_errno() on failure.
  */
 int32_t patina_memfd_create(const char *name, uint32_t flags);
+int32_t patina_memfd_secret(uint32_t flags);
 int32_t patina_get_seals(int32_t fd);
 int32_t patina_add_seals(int32_t fd, uint32_t seals);
 enum {

@@ -1,5 +1,5 @@
 //! Anonymous files: `memfd_create(2)` over the deterministic filesystem and
-//! the `fcntl` seal commands.
+//! the `fcntl` seal commands, and `memfd_secret(2)`'s secret-memory files.
 //!
 //! The virtual kernel runs with `vm.memfd_noexec = 0` and reserves no huge
 //! pages: a memfd is executable (`0o777`, no umask) unless `MFD_NOEXEC_SEAL`
@@ -42,6 +42,62 @@ pub(crate) fn anonymous(handle: u64) -> Option<u64> {
 /// A filesystem description's last reference went.
 pub(crate) fn released(handle: u64) {
     MEMFDS.lock().remove(&handle);
+    SECRETS.lock().remove(&handle);
+}
+
+/// The driver handles of secret-memory files (`memfd_secret(2)`,
+/// mm/secretmem.c) and their sizes. The node is an ordinary file of the
+/// filesystem, which holds its size and permissions; the descriptor funnels
+/// refuse what secretmem's file has no operation for, and its bytes live only
+/// in its page cache, which only a shared mapping reaches.
+static SECRETS: SpinMutex<BTreeMap<u64, u64>> = SpinMutex::new(BTreeMap::new());
+
+/// Whether driver handle `handle` is a secret-memory file.
+pub(crate) fn secret(handle: u64) -> bool {
+    SECRETS.lock().contains_key(&handle)
+}
+
+/// `ftruncate` of secret-memory file `handle` to `length`, whether
+/// `secretmem_setattr` lets it: only while the file is still empty.
+pub(crate) fn secret_resizable(handle: u64) -> bool {
+    SECRETS.lock().get(&handle).is_none_or(|size| *size == 0)
+}
+
+/// Secret-memory file `handle` was sized to `length`.
+pub(crate) fn secret_resized(handle: u64, length: u64) {
+    if let Some(size) = SECRETS.lock().get_mut(&handle) {
+        *size = length;
+    }
+}
+
+/// `memfd_secret(2)`: `O_CLOEXEC` is the only flag (`EINVAL` otherwise), and
+/// the file is a new empty regular one, mode 0600 as `alloc_anon_inode` makes
+/// it, open for reading and writing. The virtual kernel runs with secret
+/// memory enabled, as 6.8 does by default. A new descriptor, or -1 with the
+/// errno.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_memfd_secret(flags: u32) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    /// Linux's `O_CLOEXEC`.
+    const CLOEXEC: u32 = 0o2_000_000;
+    if flags & !CLOEXEC != 0 {
+        return crate::fail(EINVAL);
+    }
+    let created = crate::with_context(|context| {
+        context.fs_create_anonymous("secretmem", 0o600, F_SEAL_SEAL, 0)
+    });
+    match created {
+        Ok(fd) => {
+            SECRETS.lock().insert(fd.0, 0);
+            crate::bind_fs_handle(
+                fd,
+                FdKind::File,
+                crate::O_READ | crate::O_WRITE | crate::O_OPENED,
+                flags & CLOEXEC != 0,
+            )
+        }
+        Err(errno) => crate::fail(errno),
+    }
 }
 
 /// `memfd_create(2)` in its order: the flags, `MFD_EXEC` with
