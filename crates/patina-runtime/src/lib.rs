@@ -5543,9 +5543,11 @@ recording was produced by a guest whose result type no longer matches this one"
 
     /// The metadata of the entry filesystem handle `fd` is open on, read
     /// UNRECORDED as [`Self::fs_cursor_unrecorded`] is: the driver executes
-    /// every operation that shaped it again on replay (the native shim's page
-    /// cache asks which file a handle's bytes belong to; its inotify model
-    /// which inode an event is on, and `cachestat` how many pages it has).
+    /// every operation that shaped it again on replay. It is bookkeeping, not
+    /// a guest operation, so it costs no latency and is never faulted
+    /// ([`FsDriver::fd_metadata_unfaulted`]): the native shim's page cache asks
+    /// which file a handle's bytes belong to, its fs notifications which inode
+    /// a handle is on, and `cachestat` how many pages a file has.
     pub fn fs_fd_metadata_unrecorded(&mut self, fd: Fd) -> Result<FsMetadata, RuntimeError> {
         if self.filesystem_is_capture {
             return self.fs_fd_metadata(fd);
@@ -5554,13 +5556,13 @@ recording was produced by a guest whose result type no longer matches this one"
             .filesystem
             .as_mut()
             .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .fd_metadata(fd)?)
+            .fd_metadata_unfaulted(fd)?)
     }
 
-    /// The metadata of the entry at canonical `path`, read UNRECORDED as
-    /// [`Self::fs_fd_metadata_unrecorded`] is: the inode an fs notification
-    /// is reported to, looked up inside the call that caused it — no second
-    /// trip to storage, so no latency or fault either.
+    /// The metadata of the entry at canonical `path`, read UNRECORDED and
+    /// never faulted as [`Self::fs_fd_metadata_unrecorded`] is: the directory
+    /// an fs notification is reported to, looked up inside the call that
+    /// caused it.
     pub fn fs_metadata_unrecorded(&mut self, path: &str) -> Result<FsMetadata, RuntimeError> {
         if self.filesystem_is_capture {
             return self.fs_metadata(path);
@@ -5569,12 +5571,13 @@ recording was produced by a guest whose result type no longer matches this one"
             .filesystem
             .as_mut()
             .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .metadata(path)?)
+            .metadata_unfaulted(path)?)
     }
 
-    /// Where filesystem handle `fd`'s entry is now, read UNRECORDED as
-    /// [`Self::fs_fd_metadata_unrecorded`] is: the name an fs notification
-    /// on an open file carries.
+    /// Where filesystem handle `fd`'s node is now ([`Self::fs_fd_path`]),
+    /// read UNRECORDED and never faulted as [`Self::fs_fd_metadata_unrecorded`]
+    /// is: after an in-process crash rebuilt the image, the native shim's fs
+    /// notifications look up again the name each descriptor holds.
     pub fn fs_fd_path_unrecorded(&mut self, fd: Fd) -> Result<String, RuntimeError> {
         if self.filesystem_is_capture {
             return self.fs_fd_path(fd);
@@ -12208,6 +12211,28 @@ class=crash|0 class=buggify|0"
         let mut ctx = Context::from_config(RuntimeConfig::replay(&quiet, "queries")).unwrap();
         exercise(&mut ctx, true);
         ctx.finish().unwrap();
+    }
+
+    /// The unrecorded metadata queries are never faulted: under a fault knob
+    /// that fails every eligible operation they answer what the filesystem
+    /// holds, and they draw nothing from the fault stream.
+    #[test]
+    fn unrecorded_filesystem_queries_are_never_faulted() {
+        let mut inner = MemFs::new();
+        let fd = inner
+            .open(FsClock::EPOCH, "/f", OpenFlags::create_truncate_write())
+            .unwrap();
+        let expected = inner.fd_metadata(fd).unwrap();
+        let mut ctx = RuntimeBuilder::new(RuntimeConfig::seeded(1))
+            .with_filesystem(FaultFs::new(inner, 3).error_permille(1000))
+            .build()
+            .unwrap();
+        assert_eq!(ctx.fs_fd_metadata_unrecorded(fd).unwrap(), expected);
+        assert_eq!(ctx.fs_metadata_unrecorded("/f").unwrap(), expected);
+        assert_eq!(ctx.fs_fault_report().unwrap().eligible_ops, 0);
+        // The recorded read is a guest operation, and the knob fails it.
+        assert!(ctx.fs_fd_metadata(fd).is_err());
+        assert_eq!(ctx.fs_fault_report().unwrap().eligible_ops, 1);
     }
 
     #[test]

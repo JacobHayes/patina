@@ -1439,6 +1439,14 @@ impl FsDriver for CrashFs {
         self.live.fd_ino(fd)
     }
 
+    fn metadata_unfaulted(&mut self, path: &str) -> DriverResult<FsMetadata> {
+        self.live.metadata_unfaulted(path)
+    }
+
+    fn fd_metadata_unfaulted(&mut self, fd: Fd) -> DriverResult<FsMetadata> {
+        self.live.fd_metadata_unfaulted(fd)
+    }
+
     fn crash(&mut self) -> DriverResult<()> {
         let crashes = self.crashes.checked_add(1).ok_or_else(|| {
             EffectError::new(

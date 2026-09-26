@@ -324,6 +324,17 @@ pub trait FsDriver: Send {
     fn fd_ino(&mut self, fd: Fd) -> DriverResult<u64> {
         self.fd_metadata(fd).map(|metadata| metadata.ino)
     }
+    /// [`FsDriver::metadata`] as bookkeeping the runtime reads without a trace
+    /// op (the directory an fs notification is reported to): never faulted,
+    /// since no storage access happens that could fail.
+    fn metadata_unfaulted(&mut self, path: &str) -> DriverResult<FsMetadata> {
+        self.metadata(path)
+    }
+    /// [`FsDriver::fd_metadata`] as the same never-faulted bookkeeping (the
+    /// inode and size of a descriptor's file).
+    fn fd_metadata_unfaulted(&mut self, fd: Fd) -> DriverResult<FsMetadata> {
+        self.fd_metadata(fd)
+    }
     /// Change the permission bits of the entry an INODE names (`fchmod` through
     /// the one descriptor class the filesystem does not hold — a FIFO endpoint).
     /// The mirror of [`FsDriver::inode_metadata`], and it reaches an unlinked

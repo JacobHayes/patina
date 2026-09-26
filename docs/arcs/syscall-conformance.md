@@ -445,12 +445,16 @@ forwards into the same dispatcher instead of its two-number allowlist.
   (`thread/inotify.rs`): watches name inodes, and the filesystem entries
   queue events synchronously through `fsnotify.rs` (the kernel's
   `fsnotify.h` hooks: entry events to the directory, file events to the
-  directory then the file, self events to the inode; a deleted inode's
-  `IN_DELETE_SELF` waits for its last holder, and an event on the open
-  file still names its last entry), merged and overflowed as `fs/notify`
-  does. There is no per-user watch limit, a FIFO endpoint's open and
-  close show nothing, and a directory removed while a descriptor holds it
-  ends its watches at once. Trace
+  directory then the file, self events to the inode), merged and
+  overflowed as `fs/notify` does. An event through a descriptor names the
+  entry it was opened through (its dentry), still once that name went,
+  when `IN_EXCL_UNLINK` watches skip it; an inode losing its last name is
+  deleted at once unless that name is held, else when the holder lets go.
+  An in-process crash (`patina_crash`) looks each held name up again
+  through its descriptor in the rebuilt image; a descriptor whose node kept
+  no name makes any later event through it, and a watch existing at the
+  crash makes the crash itself, stop by name. There is no per-user watch
+  limit, and a FIFO endpoint's open and close show nothing. Trace
   format 12 adds `net_bind_shared`, `net_connect`, `net_mark` and the
   unreachable send disposition. Urgent data on a TCP stream is modeled per
   connection direction (`inet.rs`): `MSG_OOB` makes a send's last byte

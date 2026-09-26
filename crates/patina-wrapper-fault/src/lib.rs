@@ -601,6 +601,16 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.fd_ino(fd)
     }
 
+    /// Never faulted, and draws nothing from the fault stream: the runtime's
+    /// unrecorded bookkeeping reads are no guest operation.
+    fn metadata_unfaulted(&mut self, path: &str) -> DriverResult<FsMetadata> {
+        self.inner.metadata_unfaulted(path)
+    }
+
+    fn fd_metadata_unfaulted(&mut self, fd: Fd) -> DriverResult<FsMetadata> {
+        self.inner.fd_metadata_unfaulted(fd)
+    }
+
     fn crash(&mut self) -> DriverResult<()> {
         self.inner.crash()
     }

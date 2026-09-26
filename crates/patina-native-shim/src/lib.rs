@@ -569,7 +569,7 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
             }
             let closed = with_context(|context| context.fs_close(Fd(release.handle)));
             #[cfg(target_os = "linux")]
-            fsnotify::released();
+            fsnotify::unbound(Fd(release.handle));
             closed
         }
         FdKind::Socket => thread::net::socket_close(release.handle),
@@ -4205,9 +4205,21 @@ fn bind_fs_handle(fd: Fd, kind: FdKind, status: u32, cloexec: bool) -> c_int {
         }
         Err(errno) => {
             let _ = with_context(|context| context.fs_close(fd));
+            #[cfg(target_os = "linux")]
+            fsnotify::unbound(fd);
             fail(errno)
         }
     }
+}
+
+/// [`bind_fs_handle`] for a handle the filesystem opened on canonical `path`,
+/// which it holds the name of (`fsnotify::bound`).
+fn bound_fs_handle(fd: Fd, path: &str, kind: FdKind, status: u32, cloexec: bool) -> c_int {
+    #[cfg(target_os = "linux")]
+    fsnotify::bound(fd, path);
+    #[cfg(not(target_os = "linux"))]
+    let _ = path;
+    bind_fs_handle(fd, kind, status, cloexec)
 }
 
 /// The deny an `O_PATH|O_NOFOLLOW` open of a SYMLINK gets — the one spelling
@@ -4482,8 +4494,11 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
             match with_context(|context| context.fs_open(&resolved.path, dir_flags)) {
                 Ok(fd) => {
                     #[cfg(target_os = "linux")]
-                    if !path_only {
-                        fsnotify::opened(fd);
+                    {
+                        fsnotify::bound(fd, &resolved.path);
+                        if !path_only {
+                            fsnotify::opened(fd);
+                        }
                     }
                     bind_fs_handle(fd, FdKind::Dir, dir_status, cloexec)
                 }
@@ -4501,7 +4516,7 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
             // (`EINVAL`), which is the seam where the pipe rendezvous begins.
             // Only an `O_PATH` open of a FIFO is a filesystem descriptor.
             match with_context(|context| context.fs_open(&resolved.path, open_flags)) {
-                Ok(fd) => bind_fs_handle(fd, kind, status, cloexec),
+                Ok(fd) => bound_fs_handle(fd, &resolved.path, kind, status, cloexec),
                 Err(errno) if errno == EINVAL && !path_only => thread::fifo_open(
                     resolved.metadata.expect("a FIFO entry has metadata").ino,
                     open_flags.read,
@@ -4519,7 +4534,7 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
         // inode's `sock_no_open`, a device number no driver serves).
         Some(FsEntryKind::Socket | FsEntryKind::CharDevice) => {
             match with_context(|context| context.fs_open(&resolved.path, open_flags)) {
-                Ok(fd) => bind_fs_handle(fd, kind, status, cloexec),
+                Ok(fd) => bound_fs_handle(fd, &resolved.path, kind, status, cloexec),
                 Err(errno) if errno == EINVAL && !path_only => fail(ENXIO),
                 Err(errno) => fail(errno),
             }
@@ -4537,6 +4552,7 @@ unsafe fn open_at(dirfd: c_int, path: *const c_char, flags: u32, mode: u32, scop
                     // after it (`handle_truncate`).
                     #[cfg(target_os = "linux")]
                     {
+                        fsnotify::bound(fd, &resolved.path);
                         if resolved.metadata.is_none() {
                             fsnotify::created(&resolved.path);
                         }
@@ -6911,14 +6927,14 @@ pub unsafe extern "C" fn patina_read_dir(raw_fd: c_int, state_out: *mut *mut c_v
     }
 }
 
-/// A getdents on directory descriptor `raw_fd` reached the directory
-/// (`iterate_dir`): its watches see `IN_ACCESS`, whatever the call then
-/// answers.
+/// A getdents on directory descriptor `raw_fd` reached `iterate_dir`: the
+/// directory's watches see `IN_ACCESS` unless it is dead, whatever the call
+/// then answers.
 #[cfg(target_os = "linux")]
 pub(crate) fn dir_accessed(raw_fd: c_int) {
     if let Ok(resolved) = resolve_fd(raw_fd) {
         if resolved.kind == FdKind::Dir {
-            fsnotify::on_file(Fd(resolved.handle), fsnotify::IN_ACCESS);
+            fsnotify::dir_read(Fd(resolved.handle));
         }
     }
 }
@@ -7859,10 +7875,23 @@ guaranteed\n",
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_crash() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // An inotify watch names an inode of the image the crash replaces, and
+    // no kernel carries a watch across a crash: a restarted process has
+    // none.
+    #[cfg(target_os = "linux")]
+    if fsnotify::watching() {
+        trap_fatal(
+            "patina_crash: an in-process crash while an inotify watch exists is not modeled; \
+             failing closed",
+        );
+    }
     match with_context(Context::fs_crash) {
         Ok(()) => {
             #[cfg(target_os = "linux")]
-            mem::crashed();
+            {
+                mem::crashed();
+                fsnotify::crashed();
+            }
             0
         }
         Err(errno) => fail(errno),

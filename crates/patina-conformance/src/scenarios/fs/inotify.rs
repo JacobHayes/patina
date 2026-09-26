@@ -20,8 +20,9 @@
 //! queues, after the pair, the replaced file's IN_ATTRIB (its link count),
 //! the moved file's IN_MOVE_SELF and the replaced file's deletion; an open
 //! file outlives its last name, its events still naming it, until its close
-//! deletes it. Needs an inotify instance and watch within the caller's
-//! limits.
+//! deletes it; events through a descriptor name the link it was opened
+//! through, and IN_EXCL_UNLINK skips them once that name went. Needs an
+//! inotify instance and watch within the caller's limits.
 
 use crate::catalog::{DEFAULTS, KernelFloor, Need, Scenario};
 use crate::vehicle::Vehicle;
@@ -223,6 +224,7 @@ pub fn run(p: &Probe) {
         masks == [IN_DELETE, IN_DELETE_SELF, IN_IGNORED] && got.iter().all(|event| event.wd == wd),
     );
     file_events(p, ino, &root);
+    names(p, ino, &root);
     p.close(ino);
 }
 
@@ -358,6 +360,101 @@ fn file_events(p: &Probe, ino: i32, root: &str) {
     p.check("unlinkat e", p.unlinkat(AT_FDCWD, &dir, AT_REMOVEDIR) == 0);
 }
 
+/// The name an event through a descriptor carries is the one it was opened
+/// through: a hard link's, still once that name went (when watches that
+/// asked for IN_EXCL_UNLINK skip it). An inode whose last name goes is
+/// deleted at once when nothing holds that name, even while a descriptor
+/// holds it through another; a directory removed while open is deleted at
+/// its close, and reads as removed until then.
+fn names(p: &Probe, ino: i32, root: &str) {
+    let (a, b) = (format!("{root}/a"), format!("{root}/b"));
+    let (x, y, h) = (format!("{a}/x"), format!("{b}/y"), format!("{a}/h"));
+    // What the directory removed before this left queued.
+    p.inotify_read(ino, 4096);
+    p.check("mkdirat a", p.mkdirat(AT_FDCWD, &a, 0o755) == 0);
+    p.check("mkdirat b", p.mkdirat(AT_FDCWD, &b, 0o755) == 0);
+    let created = p.openat(AT_FDCWD, &x, O_WRONLY | O_CREAT | O_EXCL, 0o644);
+    p.require("create a/x", created >= 0);
+    p.close(created);
+    p.check(
+        "link a/x as b/y",
+        p.linkat(AT_FDCWD, &x, AT_FDCWD, &y, 0) == 0,
+    );
+    let excl = p.inotify_init1(IN_NONBLOCK);
+    p.require("an IN_EXCL_UNLINK instance", excl >= 0);
+    let [wa, wb, wx] = [&a, &b, &x].map(|path| p.inotify_add_watch(ino, path, IN_ALL_EVENTS));
+    let [xa, xb] =
+        [&a, &b].map(|path| p.inotify_add_watch(excl, path, IN_ALL_EVENTS | IN_EXCL_UNLINK));
+    let fd = p.openat(AT_FDCWD, &y, O_WRONLY, 0);
+    p.require("open b/y", fd >= 0);
+    p.check("write b/y", p.write(fd, b"1") == 1);
+    p.check("unlinkat b/y while open", p.unlinkat(AT_FDCWD, &y, 0) == 0);
+    p.check("write through the unlinked b/y", p.write(fd, b"2") == 1);
+    p.check("unlinkat a/x", p.unlinkat(AT_FDCWD, &x, 0) == 0);
+    p.close(fd);
+    p.check(
+        "a hard link's events name the link opened; the last name's removal deletes it at once",
+        described(&p.inotify_read(ino, 4096).1)
+            == [
+                (wb, IN_OPEN, "y"),
+                (wx, IN_OPEN, ""),
+                (wb, IN_MODIFY, "y"),
+                (wx, IN_MODIFY, ""),
+                (wx, IN_ATTRIB, ""),
+                (wb, IN_DELETE, "y"),
+                (wb, IN_MODIFY, "y"),
+                (wx, IN_MODIFY, ""),
+                (wx, IN_ATTRIB, ""),
+                (wx, IN_DELETE_SELF, ""),
+                (wx, IN_IGNORED, ""),
+                (wa, IN_DELETE, "x"),
+                (wb, IN_CLOSE_WRITE, "y"),
+            ],
+    );
+    p.check(
+        "IN_EXCL_UNLINK skips the events through a name that went",
+        described(&p.inotify_read(excl, 4096).1)
+            == [
+                (xb, IN_OPEN, "y"),
+                (xb, IN_MODIFY, "y"),
+                (xb, IN_DELETE, "y"),
+                (xa, IN_DELETE, "x"),
+            ],
+    );
+    p.close(excl);
+
+    p.check("mkdirat a/h", p.mkdirat(AT_FDCWD, &h, 0o755) == 0);
+    let wh = p.inotify_add_watch(ino, &h, IN_ALL_EVENTS);
+    let dir = p.openat(AT_FDCWD, &h, O_RDONLY | O_DIRECTORY, 0);
+    p.require("open a/h", dir >= 0);
+    p.check(
+        "unlinkat a/h while open",
+        p.unlinkat(AT_FDCWD, &h, AT_REMOVEDIR) == 0,
+    );
+    p.check(
+        "a removed directory lists as ENOENT",
+        p.getdents(Syscall::N_getdents64, dir, 4096).0 == neg(ENOENT),
+    );
+    p.close(dir);
+    let isdir = |mask| mask | IN_ISDIR;
+    p.check(
+        "a directory's events carry IN_ISDIR; removed while open, it is deleted at its close",
+        described(&p.inotify_read(ino, 4096).1)
+            == [
+                (wa, isdir(IN_CREATE), "h"),
+                (wa, isdir(IN_OPEN), "h"),
+                (wh, isdir(IN_OPEN), ""),
+                (wa, isdir(IN_DELETE), "h"),
+                (wa, isdir(IN_CLOSE_NOWRITE), "h"),
+                (wh, isdir(IN_CLOSE_NOWRITE), ""),
+                (wh, IN_DELETE_SELF, ""),
+                (wh, IN_IGNORED, ""),
+            ],
+    );
+    p.check("unlinkat a", p.unlinkat(AT_FDCWD, &a, AT_REMOVEDIR) == 0);
+    p.check("unlinkat b", p.unlinkat(AT_FDCWD, &b, AT_REMOVEDIR) == 0);
+}
+
 /// Each event's watch descriptor, mask and name.
 fn described(events: &[InotifyEvent]) -> Vec<(i32, u32, &str)> {
     events
@@ -387,6 +484,8 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_unlinkat,
         Syscall::N_mkdirat,
         Syscall::N_fchmod,
+        Syscall::N_linkat,
+        Syscall::N_getdents64,
         Syscall::N_close,
     ],
     needs: &[Need::Inotify],

@@ -342,17 +342,6 @@ impl GuestFdTable {
         table
     }
 
-    /// The driver handle of every deterministic-filesystem description, a
-    /// hidden retention's included: what holds a node open.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn fs_handles(&self) -> Vec<u64> {
-        self.descriptions
-            .values()
-            .filter(|description| description.kind.is_fs())
-            .map(|description| description.handle)
-            .collect()
-    }
-
     /// The bound no new number reaches (`EMFILE`, `F_DUPFD`'s `EINVAL`).
     pub(crate) fn limit(&self) -> usize {
         self.limit

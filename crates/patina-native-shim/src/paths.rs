@@ -191,13 +191,6 @@ fn cwd_handle() -> Result<Fd, c_int> {
     }
 }
 
-/// The working directory's driver handle, when one is held: a reference on
-/// its node.
-#[cfg(target_os = "linux")]
-pub(crate) fn cwd_held() -> Option<Fd> {
-    *CWD.lock()
-}
-
 /// Where the working directory's node is NOW. `ENOENT` once its last name is
 /// gone, exactly as `getcwd(2)` answers for an unlinked directory.
 pub(crate) fn cwd_path() -> Result<String, c_int> {
@@ -210,7 +203,7 @@ fn replace_cwd(new: Fd) -> Result<(), c_int> {
     if let Some(previous) = previous {
         with_context(|context| context.fs_close(previous))?;
         #[cfg(target_os = "linux")]
-        crate::fsnotify::released();
+        crate::fsnotify::unbound(previous);
     }
     Ok(())
 }
@@ -238,6 +231,8 @@ pub(crate) fn searchable_directory(dirfd: c_int, path: &str) -> Result<Resolved,
 pub(crate) fn chdir(dirfd: c_int, path: &str) -> Result<(), c_int> {
     let resolved = searchable_directory(dirfd, path)?;
     let fd = with_context(|context| context.fs_open(&resolved.path, OpenFlags::path_only()))?;
+    #[cfg(target_os = "linux")]
+    crate::fsnotify::bound(fd, &resolved.path);
     replace_cwd(fd)
 }
 
@@ -255,6 +250,8 @@ pub(crate) fn fchdir(guest_fd: c_int) -> Result<(), c_int> {
         return Err(EACCES);
     }
     let duplicate = with_context(|context| context.fs_dup(handle))?;
+    #[cfg(target_os = "linux")]
+    crate::fsnotify::shared(handle, duplicate);
     replace_cwd(duplicate)
 }
 
@@ -278,6 +275,8 @@ pub(crate) fn install_cwd(context: &mut Context) -> Result<(), RuntimeError> {
         )));
     }
     let fd = context.fs_open(&path, OpenFlags::path_only())?;
+    #[cfg(target_os = "linux")]
+    crate::fsnotify::bind(context, fd, &path)?;
     *CWD.lock() = Some(fd);
     Ok(())
 }
