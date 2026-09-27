@@ -366,6 +366,11 @@ pub struct StatView {
     pub ctime_ns: i128,
     /// `statx` only: the birth time when the mask reports one.
     pub btime_ns: Option<i128>,
+    /// The allocated 512-byte units, for the scenario's own checks; never
+    /// recorded as a field (allocation is the filesystem's business: a
+    /// directory's, or a file's past four extents on ext4, differs by
+    /// filesystem).
+    pub blocks: i64,
 }
 
 fn kind_of(mode: u32) -> &'static str {
@@ -722,6 +727,7 @@ impl Probe {
             mtime_ns: st.st_mtime as i128 * 1_000_000_000 + st.st_mtime_nsec as i128,
             ctime_ns: st.st_ctime as i128 * 1_000_000_000 + st.st_ctime_nsec as i128,
             btime_ns: None,
+            blocks: st.st_blocks as i64,
         }
     }
 
@@ -807,6 +813,7 @@ impl Probe {
             btime_ns: (stx.stx_mask & libc::STATX_BTIME != 0).then(|| {
                 stx.stx_btime.tv_sec as i128 * 1_000_000_000 + stx.stx_btime.tv_nsec as i128
             }),
+            blocks: stx.stx_blocks as i64,
         });
         let builder = self.event(Syscall::N_statx, result);
         let builder = self

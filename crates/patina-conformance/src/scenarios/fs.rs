@@ -48,6 +48,7 @@ pub mod realpath;
 pub mod renameat2;
 pub mod rw;
 pub mod size;
+pub mod sparse;
 pub mod splice;
 pub mod statfs;
 pub mod statvfs;

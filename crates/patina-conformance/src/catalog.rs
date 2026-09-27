@@ -117,6 +117,11 @@ pub enum Need {
     /// Whiteouts (`renameat2(RENAME_WHITEOUT)`) on the run directory's
     /// filesystem; overlayfs refuses them.
     Whiteouts,
+    /// The run directory's filesystem is ext4 or XFS on 4 KiB blocks, whose
+    /// block allocation the volume's answers follow (4 KiB blocks, unwritten extents that
+    /// `SEEK_DATA` passes over, a write or truncate past the end leaving a
+    /// hole). tmpfs, btrfs and others count and seek blocks differently.
+    ExtentAllocation,
     /// An unprivileged caller (euid ≠ 0; empty effective, permitted,
     /// inheritable and ambient capability sets): the EPERM and EACCES a
     /// scenario asserts are what capabilities bypass, and its own capability
@@ -237,6 +242,7 @@ impl Need {
             | Need::Inotify
             | Need::FileHandles
             | Need::Whiteouts
+            | Need::ExtentAllocation
             | Need::Unprivileged
             | Need::RootInit
             | Need::NoControllingTerminal
@@ -518,6 +524,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     &fs::renameat2::SCENARIO,
     &fs::rw::SCENARIO,
     &fs::size::SCENARIO,
+    &fs::sparse::SCENARIO,
     &fs::splice::SCENARIO,
     &fs::statfs::SCENARIO,
     &fs::statvfs::SCENARIO,

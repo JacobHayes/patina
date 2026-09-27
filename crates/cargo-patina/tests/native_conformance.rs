@@ -1620,6 +1620,11 @@ fn fs_size() {
 }
 
 #[test]
+fn fs_sparse() {
+    conform("fs/sparse");
+}
+
+#[test]
 fn fs_splice() {
     conform("fs/splice");
 }

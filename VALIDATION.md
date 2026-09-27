@@ -733,7 +733,8 @@ file's size stops at its filesystem's limit (ext4's `s_maxbytes` on the
 volume, `MAX_LFS_FILESIZE` for a memfd). The fs-mem `sparse_allocation_is_ext4s`
 table pins host-observed shapes and `size_limits_are_the_nodes_filesystems`
 the limits, the `sparse_memory` test that a 100 GiB file with a few KiB
-written holds a few KiB of heap, and the `fs/lfs64`, `fs/size`, `fs/rw` and
+written holds a few KiB of heap, and the `fs/lfs64`, `fs/size`, `fs/sparse`
+(where the run directory is ext4 or XFS on 4 KiB blocks), `fs/rw` and
 `mem/memfd` conformance scenarios check it against the host. Stores through a
 shared mapping are written back before `SEEK_DATA`/`SEEK_HOLE` and a metadata
 query of the file, so they count as allocated there. Not modeled:

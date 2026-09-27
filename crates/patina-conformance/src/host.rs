@@ -183,6 +183,7 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         Need::Inotify => inotify(dir),
         Need::FileHandles => file_handles(dir),
         Need::Whiteouts => whiteouts(dir),
+        Need::ExtentAllocation => extent_allocation(dir),
         Need::Unprivileged => unprivileged(),
         Need::RootInit => root_init(),
         Need::NoControllingTerminal => no_controlling_terminal(),
@@ -454,6 +455,41 @@ fn inotify(dir: &Path) -> Result<(), NotRun> {
     unsafe { libc::close(fd as libc::c_int) };
     if wd < 0 {
         return Err(refusal("inotify_add_watch", errno));
+    }
+    Ok(())
+}
+
+/// `statfs` of the run directory names ext4 or XFS on 4 KiB blocks.
+fn extent_allocation(dir: &Path) -> Result<(), NotRun> {
+    let path = path_of(dir);
+    // SAFETY: an all-zero statfs is a valid value.
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a NUL-terminated path and a statfs buffer of the right size.
+    let result = unsafe { libc::syscall(libc::SYS_statfs, path.as_ptr(), &mut fs) };
+    if result < 0 {
+        let errno = crate::vehicle::errno();
+        return Err(NotRun {
+            cause: refusal("", errno).cause,
+            detail: format!("statfs on the run directory answered {}", errno_name(errno)),
+        });
+    }
+    let magic = fs.f_type;
+    if magic != libc::EXT4_SUPER_MAGIC && magic != libc::XFS_SUPER_MAGIC {
+        return Err(NotRun {
+            cause: Cause::Absent,
+            detail: format!(
+                "the run directory's filesystem (f_type {magic:#x}) is neither ext4 nor XFS"
+            ),
+        });
+    }
+    if fs.f_bsize != 4096 {
+        return Err(NotRun {
+            cause: Cause::Absent,
+            detail: format!(
+                "the run directory's filesystem has {}-byte blocks, not 4 KiB",
+                fs.f_bsize
+            ),
+        });
     }
     Ok(())
 }
@@ -1427,6 +1463,7 @@ mod tests {
             Need::Inotify,
             Need::FileHandles,
             Need::Whiteouts,
+            Need::ExtentAllocation,
         ] {
             let reason = need_unmet(need, &missing).expect_err("a missing directory meets no need");
             assert_eq!(reason.cause, Cause::Unexpected, "{need:?}: {reason}");
