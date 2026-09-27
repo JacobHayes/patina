@@ -1,14 +1,17 @@
 //! thread/main_exit — a raw `exit` (the thread row, not `exit_group`) from
 //! the main thread ends only that thread: the process lives while another
 //! thread runs, that thread records events after the main thread is gone,
-//! and its `exit_group` sets the process exit status (kernel/exit.c do_exit
-//! vs do_group_exit; man 2 exit).
+//! a row it issues copies its pointers as before (the process's memory is
+//! the running thread's), `process_vm_readv` of the process named by that
+//! thread's id copies while the exited leader's pid is `ESRCH` (`mm_access`
+//! finds no memory behind it), and its `exit_group` sets the process exit
+//! status (kernel/exit.c do_exit vs do_group_exit; man 2 exit).
 
 use crate::catalog::{DEFAULTS, Scenario, TraceFacts};
 use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
-use crate::probe::Probe;
+use crate::probe::{Probe, neg};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 pub fn run(p: &Probe) {
@@ -27,6 +30,55 @@ pub fn run(p: &Probe) {
             }
             std::thread::sleep(std::time::Duration::from_millis(40));
             p.check("the worker runs after the main thread's raw exit", true);
+            let mut blocked = u64::MAX;
+            p.check(
+                "and a row copies its pointer out",
+                p.call_observed(
+                    Syscall::N_rt_sigprocmask,
+                    [
+                        libc::SIG_BLOCK as i64,
+                        0,
+                        &mut blocked as *mut u64 as i64,
+                        8,
+                        0,
+                        0,
+                    ],
+                ) == 0
+                    && blocked != u64::MAX,
+            );
+            let source = 0x5au8;
+            let mut target = 0u8;
+            let local = libc::iovec {
+                iov_base: (&raw mut target).cast(),
+                iov_len: 1,
+            };
+            let remote = libc::iovec {
+                iov_base: (&raw const source).cast_mut().cast(),
+                iov_len: 1,
+            };
+            let read_by = |pid: i64| {
+                p.call_observed(
+                    Syscall::N_process_vm_readv,
+                    [
+                        pid,
+                        &raw const local as i64,
+                        1,
+                        &raw const remote as i64,
+                        1,
+                        0,
+                    ],
+                )
+            };
+            let me = p.call_unrecorded(Syscall::N_gettid, [0; 6]);
+            p.check(
+                "process_vm_readv of the process by the running thread's id copies",
+                read_by(me) == 1 && target == source,
+            );
+            let leader = p.call_unrecorded(Syscall::N_getpid, [0; 6]);
+            p.check(
+                "and by the exited leader's pid is ESRCH",
+                read_by(leader) == neg(libc::ESRCH),
+            );
             p.mark("worker_done", &[]);
             p.exit_group(0);
         })
@@ -51,6 +103,8 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_gettid,
         Syscall::N_exit,
         Syscall::N_exit_group,
+        Syscall::N_rt_sigprocmask,
+        Syscall::N_process_vm_readv,
     ],
     trace: Some(TraceFacts {
         generations: &[],

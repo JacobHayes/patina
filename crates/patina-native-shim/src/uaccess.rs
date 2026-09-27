@@ -10,7 +10,10 @@
 //! copy vehicle is `process_vm_readv`/`process_vm_writev` on this process: the
 //! kernel copies the range with the page protections a user access sees (an
 //! unmapped page, a `PROT_NONE` page, or a write to a read-only page is
-//! `EFAULT`), and nothing faults in user space. On Darwin the vehicle is
+//! `EFAULT`), and nothing faults in user space; the copy names this process
+//! by its pid, or by the calling thread's id once the thread group's leader
+//! has exited (its pid then answers `ESRCH`, and every later copy goes
+//! straight to the thread's id). On Darwin the vehicle is
 //! `mach_vm_read_overwrite`/`mach_vm_write` against this task's own port,
 //! which answer `KERN_INVALID_ADDRESS` for the same ranges — a write to a
 //! read-only page included, a private file mapping too (no copy-on-write
@@ -83,6 +86,49 @@ fn host_pid() -> std::ffi::c_long {
         host_munmap(fresh);
     }
     pid
+}
+
+/// The calling thread's host id: the copy vehicle's target once the thread
+/// group's leader has exited. `process_vm_readv`/`writev` name a process by
+/// any of its threads' ids, and the leader's own answers `ESRCH` once it has
+/// exited (`mm_access` finds its `mm` gone), while the threads still
+/// running share the same memory. A thread's own id is never a guest's to
+/// change.
+#[cfg(target_os = "linux")]
+fn host_tid() -> std::ffi::c_long {
+    // SAFETY: `gettid` takes no arguments and cannot fail.
+    unsafe {
+        crate::sud_host_syscall(
+            patina_dst_syscalls::Syscall::N_gettid.number() as std::ffi::c_long,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Whether the thread group's leader has exited: its pid answered a copy
+/// `ESRCH`, which it will answer from then on.
+#[cfg(target_os = "linux")]
+static LEADER_GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Issue a copy against this process: through its pid, and through the
+/// calling thread's id once the pid answers `ESRCH` (its leader has exited,
+/// [`host_tid`]). Raw result: `-errno` on failure.
+#[cfg(target_os = "linux")]
+fn on_self(copy: impl Fn(std::ffi::c_long) -> std::ffi::c_long) -> std::ffi::c_long {
+    use std::sync::atomic::Ordering;
+    if !LEADER_GONE.load(Ordering::Relaxed) {
+        let result = raw_result(copy(host_pid()));
+        if result != -std::ffi::c_long::from(crate::ESRCH) {
+            return result;
+        }
+        LEADER_GONE.store(true, Ordering::Relaxed);
+    }
+    raw_result(copy(host_tid()))
 }
 
 /// [`host_pid`]'s page: 0 before the first, `usize::MAX` when there is none
@@ -172,21 +218,24 @@ fn raw_result(result: std::ffi::c_long) -> std::ffi::c_long {
 }
 
 /// The guest's own `process_vm_readv` (`write` false) or `process_vm_writev`
-/// of its own process: the host kernel's, on this process's host pid, with the
-/// guest's vectors, counts and flags as given, so every refusal, fault and
-/// short count is the kernel's own. Raw result: `-errno` on failure.
+/// of its own process: the host kernel's, on this process, with the guest's
+/// vectors, counts and flags as given, so every refusal, fault and short count
+/// is the kernel's own. A guest that named the thread group's leader (`leader`)
+/// names it on the host too, whose `ESRCH` once it has exited is the answer;
+/// one that named another of its live threads names memory that is there
+/// ([`on_self`]). Raw result: `-errno` on failure.
 #[cfg(target_os = "linux")]
-pub(crate) fn guest_process_vm(write: bool, args: &[u64; 6]) -> i64 {
+pub(crate) fn guest_process_vm(write: bool, leader: bool, args: &[u64; 6]) -> i64 {
     let row = if write {
         patina_dst_syscalls::Syscall::N_process_vm_writev
     } else {
         patina_dst_syscalls::Syscall::N_process_vm_readv
     };
     // SAFETY: the kernel judges every guest pointer; this process is the target.
-    let result = unsafe {
+    let copy = |target| unsafe {
         crate::sud_host_syscall(
             row.number() as std::ffi::c_long,
-            host_pid(),
+            target,
             args[1] as std::ffi::c_long,
             args[2] as std::ffi::c_long,
             args[3] as std::ffi::c_long,
@@ -194,7 +243,11 @@ pub(crate) fn guest_process_vm(write: bool, args: &[u64; 6]) -> i64 {
             args[5] as std::ffi::c_long,
         )
     };
-    raw_result(result)
+    if leader {
+        raw_result(copy(host_pid()))
+    } else {
+        on_self(copy)
+    }
 }
 
 /// What a `process_vm_readv`/`writev` of `len` bytes that returned `copied`
@@ -211,7 +264,7 @@ fn classify(copied: std::ffi::c_long, len: usize) -> Result<(), CopyFailure> {
 
 /// Move `len` bytes between shim memory at `local` and the range at `remote`
 /// of process `pid` through the kernel: `reading` copies the remote range in
-/// (`process_vm_readv`), otherwise out (`process_vm_writev`).
+/// (`process_vm_readv`), otherwise out (`process_vm_writev`). Raw result.
 #[cfg(target_os = "linux")]
 fn copy_with(
     pid: std::ffi::c_long,
@@ -219,7 +272,7 @@ fn copy_with(
     remote: usize,
     len: usize,
     reading: bool,
-) -> Result<(), CopyFailure> {
+) -> std::ffi::c_long {
     use patina_dst_syscalls::Syscall;
     let row = if reading {
         Syscall::N_process_vm_readv
@@ -241,7 +294,7 @@ fn copy_with(
             0,
         )
     };
-    classify(raw_result(copied), len)
+    raw_result(copied)
 }
 
 /// The refusal a copy vehicle the host will not run is reported as, named
@@ -280,7 +333,8 @@ fn kernel_copy(local: usize, remote: usize, len: usize, reading: bool) -> Result
         }
         return Ok(());
     }
-    match copy_with(host_pid(), local, remote, len, reading) {
+    let copied = on_self(|target| copy_with(target, local, remote, len, reading));
+    match classify(copied, len) {
         Ok(()) => Ok(()),
         Err(CopyFailure::Fault) => Err(EFAULT),
         Err(CopyFailure::Unavailable(errno)) => crate::trap_fatal(&unavailable(errno)),
@@ -360,7 +414,7 @@ pub(crate) fn probe() -> Result<(), String> {
         } else {
             (remote, local)
         };
-        match copy_with(host_pid(), local, remote, 1, reading) {
+        match classify(copy_with(host_pid(), local, remote, 1, reading), 1) {
             Ok(()) => {}
             Err(CopyFailure::Unavailable(errno)) => return Err(unavailable(errno)),
             Err(CopyFailure::Fault) => {
@@ -425,18 +479,18 @@ fn gather(ranges: &[(usize, usize)], into: &mut [u8]) -> Result<(), c_int> {
         };
         // SAFETY: the local iovec is `len` bytes of `into`; the remote
         // ranges are the guest's, judged by the kernel.
-        let copied = unsafe {
+        let copied = on_self(|target| unsafe {
             crate::sud_host_syscall(
                 patina_dst_syscalls::Syscall::N_process_vm_readv.number() as std::ffi::c_long,
-                host_pid(),
+                target,
                 &local as *const Range as std::ffi::c_long,
                 1,
                 remote.as_ptr() as std::ffi::c_long,
                 remote.len() as std::ffi::c_long,
                 0,
             )
-        };
-        match classify(raw_result(copied), len) {
+        });
+        match classify(copied, len) {
             Ok(()) => filled += len,
             Err(CopyFailure::Fault) => return Err(EFAULT),
             Err(CopyFailure::Unavailable(errno)) => crate::trap_fatal(&unavailable(errno)),
@@ -641,12 +695,15 @@ mod tests {
     fn a_refused_copy_is_not_efault() {
         let source = [1u8; 4];
         let mut target = [0u8; 4];
-        let refused = copy_with(
-            i32::MAX as std::ffi::c_long,
-            target.as_mut_ptr() as usize,
-            source.as_ptr() as usize,
+        let refused = classify(
+            copy_with(
+                i32::MAX as std::ffi::c_long,
+                target.as_mut_ptr() as usize,
+                source.as_ptr() as usize,
+                4,
+                true,
+            ),
             4,
-            true,
         );
         assert!(
             matches!(refused, Err(CopyFailure::Unavailable(errno)) if errno != EFAULT),

@@ -375,8 +375,8 @@ fn remote_pages(remote: &[[u64; 2]]) -> bool {
 /// `EACCES`, reported `EPERM`).
 fn process_vm(credential: &Credential, a: &[u64; 6], write: bool) -> Answer {
     let found = find_process(a[0] as i32);
-    if matches!(found, Some((Process::Guest, _))) {
-        return Ok(crate::uaccess::guest_process_vm(write, a));
+    if let Some((Process::Guest, leader)) = found {
+        return Ok(crate::uaccess::guest_process_vm(write, leader, a));
     }
     if a[5] != 0 {
         return refuse(errno::EINVAL);
