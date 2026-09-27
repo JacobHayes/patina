@@ -259,7 +259,7 @@ impl Filesystem {
             crate::PATINA_FS_NSFS => Filesystem::Nsfs,
             crate::PATINA_FS_DEVTMPFS | crate::PATINA_FS_PTMX => Filesystem::Devtmpfs,
             crate::PATINA_FS_DEVPTS => Filesystem::Devpts,
-            crate::PATINA_FS_ANON_INODE => Filesystem::AnonInodefs,
+            crate::PATINA_FS_ANON_INODE | crate::PATINA_FS_ANON_OWN => Filesystem::AnonInodefs,
             _ => Filesystem::Volume,
         }
     }

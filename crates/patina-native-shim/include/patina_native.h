@@ -552,6 +552,8 @@ enum {
      * epoll, inotify, pidfd and Landlock ruleset descriptor is a file on: root's,
      * on anon_inodefs */
     PATINA_FS_ANON_INODE = 7,
+    /* A userfaultfd's own anonymous inode (Linux): its creator's, on anon_inodefs */
+    PATINA_FS_ANON_OWN = 8,
 };
 enum {
     PATINA_VOLUME_DEV_MAJOR = 8,

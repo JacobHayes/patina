@@ -4,7 +4,9 @@
 //! ([`FdKind::Userfaultfd`]): 6.8's anonymous `[userfaultfd]` inode, opened
 //! read-only with the caller's `O_CLOEXEC`/`O_NONBLOCK`; its handle keys
 //! [`CONTEXTS`], which holds the features the handshake enabled (0 until
-//! then, as the kernel's `ctx->features`).
+//! then, as the kernel's `ctx->features`) and the descriptor's own inode
+//! (a secure anonymous inode, `anon_inode_create_getfile`: the caller's,
+//! `0600` with no file type until `fchmod` changes it).
 //!
 //! Nothing is ever registered: `UFFDIO_REGISTER` and the range ioctls
 //! (`WAKE`, `COPY`, `ZEROPAGE`, `MOVE`, `WRITEPROTECT`, `CONTINUE`, `POISON`)
@@ -23,10 +25,25 @@ use crate::registry::Capability;
 use crate::{EINVAL, SpinMutex, uaccess};
 use linux_raw_sys::errno;
 
-/// The enabled features of each open descriptor's context, by handle; 0
-/// until `UFFDIO_API`. A description's handle leaves with its last number
-/// ([`released`]).
-static CONTEXTS: SpinMutex<BTreeMap<u64, u32>> = SpinMutex::new(BTreeMap::new());
+/// Each open descriptor's context, by handle. A description's handle
+/// leaves with its last number ([`released`]).
+static CONTEXTS: SpinMutex<BTreeMap<u64, Context>> = SpinMutex::new(BTreeMap::new());
+
+/// A context: its enabled features (0 until `UFFDIO_API`) and its inode.
+#[derive(Clone, Copy)]
+struct Context {
+    features: u32,
+    ino: u64,
+    /// Permission bits; `fchmod` changes them.
+    mode: u32,
+    /// When the inode was made (its access and modification time), and
+    /// when it last changed (`fchmod`), on the filesystem clock.
+    made: u64,
+    changed: u64,
+    /// Its owner: the creator's ids (`alloc_anon_inode` takes the creating
+    /// task's `current_fsuid`/`current_fsgid`).
+    owner: (u32, u32),
+}
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
 /// `UFFD_API`: the one protocol version.
@@ -90,7 +107,17 @@ struct Api {
 /// descriptor's description takes.
 pub(crate) fn created() -> u64 {
     let handle = NEXT.fetch_add(1, Ordering::Relaxed);
-    CONTEXTS.lock().insert(handle, 0);
+    let now = crate::fs_time_unrecorded();
+    let creator = crate::caller();
+    let context = Context {
+        features: 0,
+        ino: crate::thread::next_inode_number(),
+        mode: 0o600,
+        made: now,
+        changed: now,
+        owner: (creator.uid, creator.gid),
+    };
+    CONTEXTS.lock().insert(handle, context);
     handle
 }
 
@@ -100,7 +127,61 @@ pub(crate) fn released(handle: u64) {
 }
 
 fn features(handle: u64) -> u32 {
-    CONTEXTS.lock().get(&handle).copied().unwrap_or(0)
+    CONTEXTS
+        .lock()
+        .get(&handle)
+        .map_or(0, |context| context.features)
+}
+
+/// The context of a live userfaultfd description, whose inode the caller
+/// owns. Every description has a context from [`created`] to [`released`],
+/// so none is an invariant breach, a named stop. The inode's owner is its
+/// creator, and [`crate::PATINA_FS_ANON_OWN`] names the caller: the same
+/// while the guest's credential never changes, and a named stop where they
+/// differ.
+fn owned_context(handle: u64) -> Context {
+    let Some(context) = CONTEXTS.lock().get(&handle).copied() else {
+        crate::trap_fatal("userfaultfd: a live descriptor has no context");
+    };
+    let caller = crate::caller();
+    if context.owner != (caller.uid, caller.gid) {
+        crate::trap_fatal(
+            "userfaultfd: the inode of a descriptor another identity created is not modeled \
+             (its owner is its creator)",
+        );
+    }
+    context
+}
+
+/// The descriptor's own inode as `fstat` reports it: its creator's, no file
+/// type, one link, empty, on anon_inodefs.
+pub(crate) fn metadata(handle: u64) -> crate::PatinaMetadata {
+    let context = owned_context(handle);
+    let made = crate::PatinaTimestamp::from_nanos(i128::from(context.made));
+    crate::PatinaMetadata {
+        kind: crate::PATINA_ENTRY_ANON,
+        mode: context.mode,
+        nlink: 1,
+        fs: crate::PATINA_FS_ANON_OWN,
+        rdev_major: 0,
+        rdev_minor: 0,
+        length: 0,
+        ino: context.ino,
+        atime: made,
+        mtime: made,
+        ctime: crate::PatinaTimestamp::from_nanos(i128::from(context.changed)),
+        btime: crate::PatinaTimestamp::default(),
+    }
+}
+
+/// `fchmod` of the descriptor by its owner: its inode's permission bits
+/// change and its change time moves.
+pub(crate) fn set_mode(handle: u64, mode: u32) {
+    let now = crate::fs_time_unrecorded();
+    let mut context = owned_context(handle);
+    context.mode = mode & 0o7777;
+    context.changed = now;
+    CONTEXTS.lock().insert(handle, context);
 }
 
 /// `userfaultfd_poll`: `EPOLLERR` before the handshake and for a blocking
@@ -188,8 +269,8 @@ fn api(handle: u64, arg: usize) -> Result<i32, i32> {
     }
     let mut contexts = CONTEXTS.lock();
     match contexts.get_mut(&handle) {
-        Some(features) if *features == 0 => {
-            *features = asked as u32 | UFFD_FEATURE_INITIALIZED;
+        Some(context) if context.features == 0 => {
+            context.features = asked as u32 | UFFD_FEATURE_INITIALIZED;
             Ok(0)
         }
         _ => {

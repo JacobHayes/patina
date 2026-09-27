@@ -793,6 +793,7 @@ static void patina_fs_device(uint32_t fs, unsigned *major, unsigned *minor) {
             *minor = PATINA_DEVPTS_DEV_MINOR;
             break;
         case PATINA_FS_ANON_INODE:
+        case PATINA_FS_ANON_OWN:
             *major = 0;
             *minor = PATINA_ANON_INODEFS_DEV_MINOR;
             break;

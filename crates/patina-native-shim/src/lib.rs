@@ -5938,6 +5938,11 @@ const PATINA_FS_PTMX: u32 = 6;
 /// descriptor is a file on: root's, on anon_inodefs (0:15).
 #[cfg(target_os = "linux")]
 const PATINA_FS_ANON_INODE: u32 = 7;
+/// A userfaultfd's own anonymous inode (`mem::userfaultfd`, a secure inode
+/// `anon_inode_create_getfile` makes per descriptor): its creator's, on
+/// anon_inodefs like the shared one.
+#[cfg(target_os = "linux")]
+const PATINA_FS_ANON_OWN: u32 = 8;
 
 /// The `(major, minor)` device a `PATINA_FS_*` filesystem reports through
 /// `st_dev`/`stx_dev_*` (`PATINA_*_DEV_*` in `patina_native.h`): the volume is
@@ -5951,7 +5956,7 @@ pub(crate) fn fs_device(fs: u32) -> (u32, u32) {
         PATINA_FS_NSFS => (0, 4),
         PATINA_FS_DEVTMPFS | PATINA_FS_PTMX => (0, 5),
         PATINA_FS_DEVPTS => (0, 24),
-        PATINA_FS_ANON_INODE => (0, 15),
+        PATINA_FS_ANON_INODE | PATINA_FS_ANON_OWN => (0, 15),
         _ => (8, 1),
     }
 }
@@ -6407,6 +6412,9 @@ pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut Patina
         if volume::on_anon_inode(resolved.kind) {
             return write_patina_metadata(volume::anon_inode_metadata(), out);
         }
+        if resolved.kind == FdKind::Userfaultfd {
+            return write_patina_metadata(mem::userfaultfd::metadata(resolved.handle), out);
+        }
         // A pseudoterminal's master is the multiplexer's node; a slave, its
         // devpts node.
         if let Some(side) = thread::pty::Side::of(resolved.kind) {
@@ -6524,15 +6532,26 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
             }
             return fail(EPERM);
         }
+        // The one anonymous inode is root's too.
+        if volume::on_anon_inode(resolved.kind) {
+            if caller_capable(registry::Capability::Fowner) {
+                trap_fatal(
+                    "fchmod: changing the mode of the anonymous inode every eventfd, timerfd, \
+                     signalfd, epoll, inotify, pidfd and Landlock ruleset shares is not modeled",
+                );
+            }
+            return fail(EPERM);
+        }
     }
     // A userfaultfd's inode is its own and the caller's
-    // (`anon_inode_create_getfile`), so the change is allowed. Nothing reads
-    // the mode back (`fstat` of an anonymous descriptor is not modeled), so
-    // none is kept.
+    // (`anon_inode_create_getfile`), so the change is allowed.
     #[cfg(target_os = "linux")]
-    if matches!(resolve_fd(raw_fd), Ok(resolved) if resolved.kind == FdKind::Userfaultfd) {
-        set_errno(0);
-        return 0;
+    if let Ok(resolved) = resolve_fd(raw_fd) {
+        if resolved.kind == FdKind::Userfaultfd {
+            mem::userfaultfd::set_mode(resolved.handle, mode);
+            set_errno(0);
+            return 0;
+        }
     }
     let fd = match fs_handle(raw_fd) {
         Ok(fd) => fd,
@@ -12525,6 +12544,17 @@ mod thread {
         ctime_nanos: u64,
         /// Endpoints naming this node; it is freed with the last.
         ends: usize,
+    }
+
+    /// The next number of the kernel's one counter of pseudo-filesystem
+    /// inodes (`get_next_ino`), which pipefs and sockfs nodes and a secure
+    /// anonymous inode (a userfaultfd's) all draw from.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn next_inode_number() -> u64 {
+        let mut state = lock_state();
+        let ino = state.net.next_pipe_ino;
+        state.net.next_pipe_ino = ino.wrapping_add(1);
+        ino
     }
 
     /// Mint a pipefs/sockfs node stamped with the filesystem clock's now.
