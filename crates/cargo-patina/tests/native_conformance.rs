@@ -19,7 +19,10 @@
 //! a section of `$GITHUB_STEP_SUMMARY` when set, and fails nothing;
 //! `PATINA_REQUIRE_PINNED_KERNEL=1` judges any host as the pinned one. Native vehicles that disagree, patina's record/replay,
 //! trace and strace checks, and runs that crash or overrun fail on every
-//! host.
+//! host: a patina run that dies of a signal the native run did not and no
+//! gap of the vehicle declares is a crash, whatever the host. Every patina
+//! failure, reported or failed, carries the tail of the recorded run's
+//! stderr.
 //!
 //! A host that cannot be the oracle (a kernel lacking a covered
 //! row or older than the scenario's kernel floor, or a run-directory
@@ -36,7 +39,7 @@
 mod common;
 
 use patina_dst_conformance::catalog::{self, Scenario};
-use patina_dst_conformance::compare::{self, Observation, Termination};
+use patina_dst_conformance::compare::{self, Ending, Failure, Observation, Termination};
 use patina_dst_conformance::host::{self, Cause, NotRun};
 use patina_dst_conformance::leak;
 use patina_dst_conformance::observe::parse_stream;
@@ -849,15 +852,22 @@ impl Leg<'_> {
         let recorded = self
             .patina(Some(&trace))
             .map_err(|error| vec![format!("patina run: {error}")])?;
-        if compared {
-            oracle
-                .judged(
-                    compare::judge(&native, &recorded, &expected)
-                        .map_err(|failures| prefixed("patina: ", failures)),
-                    diverged,
-                )
-                .map_err(|failures| with_stderr(failures, &recorded))?;
+        let judgement = if compared {
+            compare::judge(&native, &recorded, &expected)
+                .map(|_| ())
+                .map_err(|failures| prefixed("patina: ", failures))
+        } else {
+            Ok(())
+        };
+        if let Some(death) = undeclared_death(&native, &recorded, &gaps) {
+            let mut failures = judgement.err().unwrap_or_default();
+            failures.push(death);
+            return Err(with_stderr(failures, &recorded));
         }
+        oracle.judged(
+            judgement.map_err(|failures| with_stderr(failures, &recorded)),
+            diverged,
+        )?;
         if gaps.iter().any(|gap| gap.failure.ends_early()) {
             // A stopped run leaves no complete trace, and the direct run would
             // be the same refusal outside the supervisor.
@@ -867,13 +877,16 @@ impl Leg<'_> {
             .replay(&trace)
             .map_err(|error| vec![format!("replay: {error}")])?;
         if replayed.events != recorded.events || replayed.termination != recorded.termination {
-            return Err(vec![format!(
-                "replay: the replayed stream differs from the recorded one ({} vs {} events; {} vs {})",
-                replayed.events.len(),
-                recorded.events.len(),
-                replayed.termination,
-                recorded.termination
-            )]);
+            return Err(with_stderr(
+                vec![format!(
+                    "replay: the replayed stream differs from the recorded one ({} vs {} events; {} vs {})",
+                    replayed.events.len(),
+                    recorded.events.len(),
+                    replayed.termination,
+                    recorded.termination
+                )],
+                &recorded,
+            ));
         }
         if let Some(facts) = &self.scenario.trace {
             let ops = self.trace_ops(&trace).map_err(|error| vec![error])?;
@@ -945,6 +958,30 @@ fn prefixed(prefix: &str, lines: Vec<String>) -> Vec<String> {
         .into_iter()
         .map(|line| format!("{prefix}{line}"))
         .collect()
+}
+
+/// A patina signal death that neither the native run (dying of the same
+/// signal) nor a stopping gap of the vehicle (declaring that signal)
+/// accounts for: a crash, which fails on every host.
+fn undeclared_death(
+    native: &Observation,
+    recorded: &Observation,
+    gaps: &[&catalog::Gap],
+) -> Option<String> {
+    let Termination::Signaled { signal, .. } = recorded.termination else {
+        return None;
+    };
+    let natively =
+        matches!(native.termination, Termination::Signaled { signal: s, .. } if s == signal);
+    let declared = gaps.iter().any(|gap| {
+        matches!(gap.failure, Failure::Stops { ending: Ending::Signal(s), .. } if s == signal)
+    });
+    (!natively && !declared).then(|| {
+        format!(
+            "patina: the run died ({}) where natively it {}, and no gap declares it",
+            recorded.termination, native.termination
+        )
+    })
 }
 
 fn with_stderr(mut failures: Vec<String>, observation: &Observation) -> Vec<String> {
@@ -1162,6 +1199,49 @@ fn off_the_pinned_kernel_differences_only_report() {
             "{printed}"
         );
         assert!(summarized.contains(line.as_str()), "{summarized}");
+    }
+}
+
+/// A patina signal death is a crash on every host unless the native run
+/// died of the same signal or a stopping gap of the vehicle declares it.
+#[test]
+fn an_undeclared_patina_signal_death_is_a_crash() {
+    let signaled = |signal| Termination::Signaled {
+        signal,
+        core: Some(true),
+    };
+    let stop = |signal| catalog::Gap {
+        status: catalog::Status::ByDesign,
+        vehicles: Vehicle::ALL,
+        what: "planted",
+        failure: Failure::Stops {
+            events: 1,
+            ending: Ending::Signal(signal),
+            diagnostic: "planted",
+        },
+    };
+    let (abort, segv) = (stop(libc::SIGABRT), stop(libc::SIGSEGV));
+    let (exited, failed, died) = (
+        Termination::Exited(0),
+        Termination::Exited(1),
+        signaled(libc::SIGABRT),
+    );
+    for (native, patina, gaps, crash) in [
+        (exited, died, &[][..], true),
+        (exited, died, &[&segv][..], true),
+        (exited, died, &[&abort][..], false),
+        (died, died, &[][..], false),
+        (exited, failed, &[][..], false),
+    ] {
+        let native = planted(&[("check", 1)], native);
+        let patina = planted(&[("check", 1)], patina);
+        assert_eq!(
+            undeclared_death(&native, &patina, gaps).is_some(),
+            crash,
+            "{} vs {}",
+            native.termination,
+            patina.termination
+        );
     }
 }
 
