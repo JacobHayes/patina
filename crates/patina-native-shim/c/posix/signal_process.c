@@ -131,8 +131,10 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *old) {
     set = patina_clear_internal_signals(set, &copy);
     return signal_result(patina_signal_mask(how, (const uint64_t *)set, (uint64_t *)old, sizeof(uint64_t)));
 }
+/* glibc's `sigpending` is the plain row, `rt_sigpending(set, __NSIG_BYTES)`:
+ * the kernel's eight bytes of the set are copied out (an unwritable set is
+ * EFAULT) and the rest of the 128-byte `sigset_t` is left as it was. */
 int sigpending(sigset_t *set) {
-    memset(set, 0, sizeof *set);
     return signal_result(patina_signal_pending((uint8_t *)set, sizeof(uint64_t)));
 }
 int sigaltstack(const stack_t *stack, stack_t *old) {

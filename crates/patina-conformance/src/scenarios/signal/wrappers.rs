@@ -7,7 +7,10 @@
 //!   `__libc_current_sigrtmax` is 64;
 //! * `sigprocmask` blocks with glibc's `sigset_t`, answering the previous
 //!   mask, and an unknown `how` is `EINVAL`; `sigpending` reports what the
-//!   mask holds back;
+//!   mask holds back; it is the plain row, `rt_sigpending(set, 8)`
+//!   (sysdeps/unix/sysv/linux/sigpending.c), so it writes the kernel's eight
+//!   bytes of glibc's 128-byte set and leaves the rest, and an unwritable set
+//!   is `EFAULT`, not a fault in user space;
 //! * the synchronous dequeues: `sigtimedwait` (and `sigwaitinfo` over it)
 //!   folds the kernel's `SI_TKILL` into `SI_USER` (sysdeps/unix/sysv/linux/
 //!   sigtimedwait.c), so a raised signal reads as sent by `kill`; with
@@ -319,6 +322,23 @@ pub fn run(p: &Probe) {
     p.check(
         "sigpending reports it alone",
         support::has(&pending, SIGUSR1) && !support::has(&pending, SIGUSR2),
+    );
+    let mut wide = support::empty_set();
+    let bytes = (&mut wide as *mut sigset_t).cast::<u8>();
+    // SAFETY: the set's own bytes.
+    unsafe { std::ptr::write_bytes(bytes, 0xff, size_of::<sigset_t>()) };
+    // SAFETY: a writable set.
+    let result = unsafe { sigpending(&mut wide) };
+    // SAFETY: the set's own bytes.
+    let tail = unsafe { std::slice::from_raw_parts(bytes.add(8), size_of::<sigset_t>() - 8) };
+    p.check(
+        "sigpending writes the kernel's eight bytes of the set and no more",
+        result == 0 && tail.iter().all(|byte| *byte == 0xff),
+    );
+    p.check(
+        "sigpending into an unwritable set is EFAULT",
+        // SAFETY: the kernel judges the pointer.
+        fold_errno(unsafe { sigpending(std::ptr::dangling_mut()) } as i64) == neg(EFAULT),
     );
     let (got, info) = sigtimedwait_(p, &support::one_set(SIGUSR1));
     p.check(
