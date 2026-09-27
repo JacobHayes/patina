@@ -80,7 +80,7 @@ DOCS=(README.md TUTORIAL.md USAGE-MODES.md ARCHITECTURE.md IMPLEMENTATION.md
       crates/patina-target/ESCAPE-CLASSES.md crates/patina-native-shim/AGENTS.md
       testbeds/AGENTS.md testbeds/README.md testbeds/workq/README.md testbeds/pubsub/README.md
       testbeds/audit-corpus/README.md testbeds/rustix-default/README.md
-      testbeds/cap-std-dirfd/README.md testbeds/fifo-ipc/README.md
+      testbeds/cap-std-dirfd/README.md testbeds/fifo-ipc/README.md testbeds/bench/README.md
       testbeds/native-boundary/README.md
       crates/patina-conformance/README.md
       testbeds/buggify-wasi/README.md testbeds/checkout-retry-idempotency/README.md
@@ -149,6 +149,9 @@ ALLOWED_FLAGS='
 --dir
 --strict
 --apply
+--runs
+--workload
+--baseline
 '
 # -- cargo / rustc / rustup / linker tool flags --
 # --all/--all-targets/--check/--doc/--exclude/--lib/--no-deps/--workspace/
@@ -186,6 +189,9 @@ ALLOWED_FLAGS='
 #   vehicle, the run's owned directory, a failed check panics natively).
 # -- syscall-table refresh (scripts/refresh-syscalls.py) --
 # --apply: its own atomic generated-artifact replacement switch.
+# -- overhead benchmark (scripts/bench.py) --
+# --runs/--workload/--baseline: its own options (timed runs per side, the
+#   workload filter, the Patina build to compare against).
 # (--selftest and --seed are REAL registry flags — not allowlisted here.)
 
 tmpdir=$(mktemp -d)

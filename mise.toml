@@ -57,6 +57,10 @@ run = [
   "scripts/smoke-cross-target.sh",
 ]
 
+[tasks.bench]
+description = "Native-versus-Patina overhead benchmark over halting workloads (measurement, not a gate)"
+run = "python3 -B scripts/bench.py"
+
 [tasks."audit-corpus"]
 description = "Ecosystem symbol-audit corpus: build+audit 20 MREs, strict-xfail vs committed per-platform expectations"
 run = "testbeds/audit-corpus/run.sh"

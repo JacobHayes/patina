@@ -249,6 +249,7 @@ run_full() {
   # Cheap, high-signal failures stay serial and stop before expensive work.
   run_rung 'output contract selftest' output_selftest || return $?
   run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
+  run_rung 'benchmark statistics tests' python3 -B scripts/test-bench.py || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?
@@ -285,6 +286,7 @@ run_full() {
 run_fast() {
   run_rung 'output contract selftest' output_selftest || return $?
   run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
+  run_rung 'benchmark statistics tests' python3 -B scripts/test-bench.py || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?
