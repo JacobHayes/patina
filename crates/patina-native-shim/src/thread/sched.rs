@@ -74,6 +74,8 @@ const IOPRIO_CLASS_RT: i32 = 1;
 const IOPRIO_CLASS_BE: i32 = 2;
 const IOPRIO_CLASS_IDLE: i32 = 3;
 const IOPRIO_CLASS_SHIFT: i32 = 13;
+/// `IOPRIO_DEFAULT`: `IOPRIO_CLASS_NONE` at level 0.
+const IOPRIO_DEFAULT: i32 = 0;
 const IOPRIO_LEVELS: i32 = 8;
 
 /// The persona query (`personality(0xffffffff)`).
@@ -826,10 +828,17 @@ pub(crate) unsafe fn setattr(pid: i32, attr: *mut u8, flags: u32) -> i64 {
     setscheduler(&mut state, tid, request)
 }
 
-/// The I/O priority a thread reads: one it never set (or set to
-/// `IOPRIO_CLASS_NONE`) follows its CPU scheduling (`__get_task_ioprio`).
-fn effective_ioprio(attrs: Attrs) -> i32 {
-    if attrs.ioprio >> IOPRIO_CLASS_SHIFT != IOPRIO_CLASS_NONE {
+/// The I/O priority `ioprio_get` reads of one thread. A thread without an
+/// I/O context reads `IOPRIO_DEFAULT` (`IOPRIO_CLASS_NONE`, level 0) either
+/// way. `IOPRIO_WHO_PROCESS` reads the context's priority as set, class
+/// `NONE` included (`get_task_raw_ioprio`, `raw`); the group and user
+/// selectors read `__get_task_ioprio`, where a context whose class is `NONE`
+/// follows the thread's CPU scheduling instead.
+fn read_ioprio(attrs: Attrs, raw: bool) -> i32 {
+    if attrs.io_context.is_none() {
+        return IOPRIO_DEFAULT;
+    }
+    if raw || attrs.ioprio >> IOPRIO_CLASS_SHIFT != IOPRIO_CLASS_NONE {
         return attrs.ioprio;
     }
     let class = match attrs.policy {
@@ -889,7 +898,12 @@ pub(crate) fn ioprio_get(which: i32, who: i32) -> i64 {
     };
     targets
         .iter()
-        .map(|tid| i64::from(effective_ioprio(state.sched.get(*tid))))
+        .map(|tid| {
+            i64::from(read_ioprio(
+                state.sched.get(*tid),
+                which == IOPRIO_WHO_PROCESS,
+            ))
+        })
         .min()
         .unwrap_or(errno(ESRCH))
 }
@@ -1064,19 +1078,32 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_that_never_set_an_io_priority_follows_its_nice() {
-        assert_eq!(
-            effective_ioprio(Attrs::default()),
-            (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | 4
-        );
-        let idle = Attrs {
-            policy: SCHED_IDLE,
+    fn an_io_priority_of_class_none_reads_raw_by_process_and_by_nice_otherwise() {
+        let best_effort = |level| (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | level;
+        let unset = Attrs::default();
+        assert_eq!(read_ioprio(unset, true), IOPRIO_DEFAULT);
+        assert_eq!(read_ioprio(unset, false), IOPRIO_DEFAULT);
+        let none = Attrs {
+            io_context: Some(1),
+            nice: 10,
             ..Attrs::default()
         };
+        assert_eq!(read_ioprio(none, true), IOPRIO_DEFAULT);
+        assert_eq!(read_ioprio(none, false), best_effort(6));
+        let idle = Attrs {
+            policy: SCHED_IDLE,
+            ..none
+        };
         assert_eq!(
-            effective_ioprio(idle) >> IOPRIO_CLASS_SHIFT,
+            read_ioprio(idle, false) >> IOPRIO_CLASS_SHIFT,
             IOPRIO_CLASS_IDLE
         );
+        let set = Attrs {
+            ioprio: best_effort(2),
+            ..none
+        };
+        assert_eq!(read_ioprio(set, true), best_effort(2));
+        assert_eq!(read_ioprio(set, false), best_effort(2));
     }
 
     #[test]

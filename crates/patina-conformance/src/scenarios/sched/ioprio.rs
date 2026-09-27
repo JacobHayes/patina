@@ -3,7 +3,9 @@
 //! * the best-effort class takes a level 0..7 and reads back (for pid 0 and
 //!   the caller's own pid); the idle class is open to anyone; so is going
 //!   back to best effort, at any level; bits above the 16 the kernel keeps
-//!   are dropped;
+//!   are dropped; `IOPRIO_CLASS_NONE` is accepted and the caller reads it
+//!   back as set, 0, not the priority its nice value maps to
+//!   (`get_task_raw_ioprio`);
 //! * the realtime class needs `CAP_SYS_NICE` or `CAP_SYS_ADMIN` (`EPERM`);
 //!   an unknown class, and an unknown `which` to either row, are `EINVAL`; a
 //!   pid no process has is `ESRCH`;
@@ -27,6 +29,7 @@ use patina_dst_syscalls::Syscall;
 
 const WHO_PROCESS: i32 = 1;
 const WHO_USER: i32 = 3;
+const CLASS_NONE: i64 = 0;
 const CLASS_RT: i64 = 1;
 const CLASS_BE: i64 = 2;
 const CLASS_IDLE: i64 = 3;
@@ -74,6 +77,14 @@ pub fn run(p: &Probe) {
     p.check(
         "and reads back as its low 16 bits",
         p.ioprio_get(WHO_PROCESS, Who::Caller, true) == (CLASS_BE << 13) | 3,
+    );
+    p.check(
+        "no class is accepted",
+        p.ioprio_set(WHO_PROCESS, Who::Caller, CLASS_NONE, 0) == 0,
+    );
+    p.check(
+        "and reads back as set",
+        p.ioprio_get(WHO_PROCESS, Who::Caller, true) == 0,
     );
     p.check(
         "the realtime class is EPERM",
