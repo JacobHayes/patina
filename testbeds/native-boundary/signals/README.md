@@ -27,7 +27,8 @@ missing evidence fatal.
 catches a stack overflow on its alternate stack and an access fault, leaving
 both by `siglongjmp`; an `SA_RESETHAND` one receives a raised SIGSEGV with
 the sender's code; one edits the faulting context to resume past the store;
-one that blocks SIGSEGV faults inside itself or re-raises it; and a pending
+one that blocks SIGSEGV faults inside itself or re-raises it, as does a
+SIGFPE (arm64: SIGTRAP) handler whose `sa_mask` blocks every signal; and a pending
 SIGSEGV meets a pending SIGUSR1 in 6.8's frame order, also when the SIGSEGV
 handler leaves by `siglongjmp` or resets SIGUSR1's action; repeated
 `SA_NODEFER` signals run as often, in the order and under the saved masks
@@ -35,7 +36,9 @@ handler leaves by `siglongjmp` or resets SIGUSR1's action; repeated
 blocked on an `SS_AUTODISARM` alternate stack above the stack it was
 delivered from. `native_signals` runs it
 natively as the oracle and under the shim, and requires the same output and
-deaths (on an ordinary stack the nested fault is a named stop instead). Its
+deaths (on an ordinary stack the nested fault is a named stop instead, as is
+a fault handler on an alternate stack too small for the shim's fault route
+below the kernel's frame). Its
 `alarm` cases, in `native_containment`, fire a timer while counter reads taken
 on the alternate stack are served off it, on an ordinary stack and on one too
 small to leave a nested frame room: natively both run on, and under the shim
@@ -43,7 +46,7 @@ each is a named stop, since no guest code runs during such a read.
 
 `shim_fault.c` calls a fault planted in a shim entry (`patina_planted_fault`,
 in a shim built with the `planted-faults` feature) under a guest handler for
-the signal: a SIGSEGV and a SIGBUS, which `native_containment` requires to be
+the signal: a SIGSEGV, a SIGBUS and a SIGILL, which `native_containment` requires to be
 named stops that take the default action, never the handler, on every Linux
 arch.
 

@@ -287,7 +287,8 @@ are still to run is a named stop: natively the next handler starts under the
 edit. A counter read
 taken on the alternate stack is served back on the interrupted stack, and no
 guest code runs until it is answered: every signal but the containment ones and
-SIGBUS (whose front handler names a fault in the shim's own code) is held
+those an instruction raises (whose front handler names a fault in the shim's
+own code) is held
 blocked meanwhile (one that arrives is delivered once the trap returns,
 after the instruction, as it may be natively), and a delivery that would run a
 handler, a `sigaltstack` call or a nested counter read is a named stop. The
@@ -320,11 +321,25 @@ is still running is a named stop. With the block known, a blocked fault takes
 the default action and a blocked sent SIGSEGV stays pending, as in 6.8. Left
 by `longjmp` (no mask restore) a handler's block is taken as restored, and a
 `setcontext` onto another stack is outside the stack test. On every Linux arch
-SIGBUS, and SIGSEGV where the trap is not armed (arm64), has a front handler
-instead: its host action carries the guest's flags, mask and restorer, so the
+the other signals an instruction raises (SIGBUS, SIGFPE, SIGILL, SIGTRAP), and
+SIGSEGV where the trap is not armed (arm64), have a front handler instead: its
+host action carries the guest's flags, mask and restorer, so the
 kernel builds and blocks as for the guest's handler, and the front handler
 takes the thread for the shim first, so a fault in the shim's own code is a
 named stop there too, then runs the guest's virtual action from the frame.
+Under the counter trap, whose host masks never hold SIGSEGV, a SIGSEGV that
+action's mask names is blocked virtually while its handler runs, as for a
+handler the trap runs, and the handler's return goes through the same hook
+(its frame's saved mask kept free of the containment signals, what that mask
+unblocks delivered). A trace or breakpoint trap while the shim owns the
+thread (single-stepping through an entry) is named as such. The front handler needs stack where a
+native default action needs none: the fault route below its frame peaks at
+about 2.7 KiB (debug x86_64), so on an alternate stack with less than 4 KiB
+left below the kernel's frame the fault is a named stop, and where the kernel
+cannot fit the front frame at all (an exhausted ordinary stack, an alternate
+stack too small for the frame) it forces SIGSEGV, so a fault the guest
+leaves to the default action dies by SIGSEGV, unnamed, where natively it
+dies by its own signal.
 A host-installed handler that interrupted shim code runs with the thread still
 the shim's, and leaves it so by `siglongjmp`: relocking a shim lock it left
 held is the lock's self-deadlock stop, and a later fault is the shim's (a named

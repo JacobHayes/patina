@@ -54,7 +54,8 @@ fn libc_sleep_returns_remaining_seconds_on_signal() {
 /// with when it changes theirs), while the timestamp-counter trap keeps the host
 /// disposition, so the guest prints what it prints natively. A fault or a
 /// raise the handler blocks takes the default action as natively (never a
-/// second run of the handler); on an ordinary stack, where the shim cannot
+/// second run of the handler), as does a fault inside another fault signal's
+/// handler whose `sa_mask` blocks SIGSEGV; on an ordinary stack, where the shim cannot
 /// tell a nested fault from a `siglongjmp`'d handler, it stops by name.
 #[cfg(target_os = "linux")]
 #[test]
@@ -80,12 +81,19 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
         assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");
     }
     // Natively the next frame's handler starts under an upper handler's
-    // edited saved mask; the shim cannot carry that over and stops by name.
-    assert_standalone_success(&native.binary, &["nodefer-edit"], &[]);
-    let output = standalone_output(&patina.binary, &["nodefer-edit"], &env);
-    assert_eq!(output.status.signal(), Some(6), "{output:?}");
-    assert!(text(&output.stderr).contains("saved mask"), "{output:?}");
-    for case in ["nested", "nested-stack", "reraise"] {
+    // edited saved mask, and a handler runs on an alternate stack with
+    // little room below the kernel's frame; the shim cannot carry the mask
+    // over, nor fit its fault handler there, and stops by name.
+    for (case, stop) in [
+        ("nodefer-edit", "saved mask"),
+        ("front-small", "too little"),
+    ] {
+        assert_standalone_success(&native.binary, &[case], &[]);
+        let output = standalone_output(&patina.binary, &[case], &env);
+        assert_eq!(output.status.signal(), Some(6), "{case}: {output:?}");
+        assert!(text(&output.stderr).contains(stop), "{case}: {output:?}");
+    }
+    for case in ["nested", "nested-stack", "reraise", "masked-fault"] {
         let oracle = standalone_output(&native.binary, &[case], &[]);
         let output = standalone_output(&patina.binary, &[case], &env);
         assert_eq!(oracle.status.signal(), Some(11), "{case}: {oracle:?}");

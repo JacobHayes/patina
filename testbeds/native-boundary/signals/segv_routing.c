@@ -19,6 +19,15 @@
  *                 it from a siglongjmp'd handler and stops by name instead;
  *   reraise       a handler that resets SIGSEGV and raises it keeps it
  *                 pending, runs on, and dies as it returns;
+ *   masked-fault  an SA_ONSTACK handler for a genuine SIGFPE (x86_64: idiv by
+ *                 zero; arm64: SIGTRAP, brk) whose sa_mask blocks every
+ *                 signal reads SIGSEGV back blocked, then faults: the default
+ *                 action, never the SIGSEGV handler (which exits 42);
+ *   front-small   the masked-fault signal's SA_ONSTACK handler, which leaves
+ *                 by siglongjmp, on an alternate stack with room for the
+ *                 kernel's frame and 1.5 KiB: natively it runs, under the
+ *                 shim the fault handler's route would not fit below the
+ *                 frame, a named stop;
  *   order-shared  a process-directed SIGSEGV pending with a thread-directed
  *                 SIGUSR1: the private one is dequeued first, so the SIGSEGV
  *                 frame is on top and its handler runs first;
@@ -217,6 +226,62 @@ static void nested(int onstack) {
     wild = no_access();
     wild[0] = 1;
     say("NOT KILLED\n");
+}
+
+static void on_segv_exit(int sig, siginfo_t *info, void *context) {
+    (void)sig;
+    (void)info;
+    (void)context;
+    _exit(42);
+}
+
+static void on_masked(int sig, siginfo_t *info, void *context) {
+    (void)sig;
+    (void)info;
+    (void)context;
+    sigset_t now;
+    assert(sigprocmask(SIG_BLOCK, NULL, &now) == 0);
+    say(sigismember(&now, SIGSEGV) ? "blocked=1\n" : "blocked=0\n");
+    wild[0] = 1;
+    say("HANDLER RETURNED\n");
+}
+
+/* A genuine fault of a signal other than SIGSEGV that runs `handler` on the
+ * alternate stack: SIGFPE (idiv by zero) on x86_64, SIGTRAP (brk) on arm64. */
+static void other_fault(void (*handler)(int, siginfo_t *, void *), int fill) {
+#if defined(__x86_64__)
+    install(SIGFPE, handler, SA_ONSTACK, fill);
+    int low = 1, high = 0, zero = 0;
+    __asm__ volatile("idivl %2" : "+a"(low), "+d"(high) : "r"(zero));
+#else
+    install(SIGTRAP, handler, SA_ONSTACK, fill);
+    __builtin_trap();
+#endif
+}
+
+static void masked_fault(void) {
+    on_alt_stack();
+    install(SIGSEGV, on_segv_exit, 0, 0);
+    wild = no_access();
+    other_fault(on_masked, 1);
+    say("NOT KILLED\n");
+}
+
+static void on_escape(int sig, siginfo_t *info, void *context) {
+    (void)sig;
+    (void)info;
+    (void)context;
+    siglongjmp(escape, 1);
+}
+
+static void front_small(void) {
+    size_t size = getauxval(AT_MINSIGSTKSZ) + 1536;
+    char *stack = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(stack != MAP_FAILED);
+    stack_t registered = {.ss_sp = stack, .ss_size = size, .ss_flags = 0};
+    assert(sigaltstack(&registered, NULL) == 0);
+    if (sigsetjmp(escape, 1) == 0) other_fault(on_escape, 0);
+    say("FRONT SMALL RAN\n");
 }
 
 static void on_reraise(int sig, siginfo_t *info, void *context) {
@@ -433,6 +498,10 @@ int main(int argc, char **argv) {
         nested(0);
     } else if (strcmp(argv[1], "reraise") == 0) {
         reraise();
+    } else if (strcmp(argv[1], "masked-fault") == 0) {
+        masked_fault();
+    } else if (strcmp(argv[1], "front-small") == 0) {
+        front_small();
     } else if (strcmp(argv[1], "order-shared") == 0) {
         ordered_delivery(1, ORDER_RETURN);
     } else if (strcmp(argv[1], "order-mask") == 0) {

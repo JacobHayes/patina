@@ -745,13 +745,32 @@ enum {
 extern int patina_trap_enter(uintptr_t sp);
 extern void patina_trap_leave(void);
 _Noreturn void patina_trap_shim_fault(const siginfo_t *info, uintptr_t pc);
+_Noreturn void patina_trap_take_default(int sig);
+
+/* The frame a fault handler runs a guest handler from: the interrupted stack
+ * pointer, the frame's `uc_stack` and `uc_sigmask` (which `rt_sigreturn`
+ * installs), and a word of the fault handler's own frame, below which every
+ * guest handler it calls runs. The guest handler's return goes through
+ * `patina_signal_fault_return`. */
+struct patina_fault_frame {
+    uintptr_t sp;
+    const stack_t *stack;
+    volatile uint64_t *canary;
+    uint64_t *mask;
+};
+extern void patina_signal_fault_return(const struct patina_fault_frame *frame);
+
+/* The kernel's `on_sig_stack`. */
+static int patina_on_stack(uintptr_t sp, const stack_t *stack) {
+    uintptr_t base = (uintptr_t)stack->ss_sp;
+    return sp > base && sp - base <= stack->ss_size;
+}
 
 #if defined(__x86_64__)
 /* The SIGSEGV disposition the trap displaced, so a fault it does not recognize
  * is taken exactly as it would have been. x86-only, like the handler that reads
  * it — an unused static would not survive -Wall -Wextra -Werror on aarch64. */
 static struct sigaction patina_tsc_prev;
-_Noreturn void patina_trap_take_default(int sig);
 
 /* Take the fault the way it would have been taken had the trap not been armed:
  * hand it to the disposition we displaced, or — when that was the default —
@@ -838,12 +857,6 @@ __asm__(".text\n"
         "  .cfi_endproc\n"
         ".size patina_call_on_stack, .-patina_call_on_stack\n");
 
-/* The kernel's `on_sig_stack`. */
-static int patina_on_stack(uintptr_t sp, const stack_t *stack) {
-    uintptr_t base = (uintptr_t)stack->ss_sp;
-    return sp > base && sp - base <= stack->ss_size;
-}
-
 /* Whether the kernel moved this frame onto the alternate stack: this handler
  * runs on the stack the frame saved while the interrupted code did not. */
 static int patina_tsc_on_switched_stack(const ucontext_t *uc) {
@@ -854,16 +867,9 @@ static int patina_tsc_on_switched_stack(const ucontext_t *uc) {
 
 /* The counter trap's side of the boundary with the Rust signal state (see
  * src/thread/signals/fault.rs). */
-struct patina_fault_frame {
-    uintptr_t sp;
-    const stack_t *stack;
-    volatile uint64_t *canary;
-    uint64_t *mask;
-};
 extern void patina_tsc_declined(uintptr_t rip);
 extern int patina_signal_fault(const siginfo_t *info, const struct patina_fault_frame *frame,
                                struct patina_signal_action *handler);
-extern void patina_signal_fault_return(const struct patina_fault_frame *frame);
 
 static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
     ucontext_t *uc = (ucontext_t *)ucontext;
@@ -937,10 +943,11 @@ static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
 #endif
 
 /* ==========================================================================
- * Fault front handler (Linux, every arch). SIGBUS always, and SIGSEGV where
- * the timestamp-counter trap does not own it (arm64, or an x86-64 kernel
- * without PR_SET_TSC): the host disposition is this handler, and the guest's
- * action is virtual (src/thread/signals/fault.rs). The host action carries the
+ * Fault front handler (Linux, every arch). The signals an instruction raises
+ * (SIGBUS, SIGFPE, SIGILL, SIGTRAP) always, and SIGSEGV where the
+ * timestamp-counter trap does not own it (arm64, or an x86-64 kernel without
+ * PR_SET_TSC): the host disposition is this handler, and the guest's action
+ * is virtual (src/thread/signals/fault.rs). The host action carries the
  * guest action's flags, mask and restorer, so the kernel builds the frame, and
  * blocks, as it would for the guest's handler; this handler takes the thread
  * for the shim first, so a fault in the shim's own code is a named stop, and
@@ -948,8 +955,15 @@ static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
  * as the default action does.
  * ========================================================================== */
 extern int patina_fault_route(int sig, const siginfo_t *info,
+                              const struct patina_fault_frame *frame,
                               struct patina_signal_action *handler);
 extern void patina_fault_front_installed(uintptr_t handler);
+_Noreturn void patina_fault_stack_short(int sig, uintptr_t room);
+
+/* What the fault route (src/thread/signals/fault.rs) needs below this
+ * handler's frame: 2760 bytes measured on an alternate stack in a debug
+ * x86_64 build, through a guest handler's run and return. */
+#define PATINA_FRONT_FLOOR 4096
 
 static void patina_fault_front(int sig, siginfo_t *info, void *ucontext) {
     ucontext_t *uc = (ucontext_t *)ucontext;
@@ -962,15 +976,33 @@ static void patina_fault_front(int sig, siginfo_t *info, void *ucontext) {
 #endif
     int saved_errno = errno;
     if (!patina_trap_enter(sp)) patina_trap_shim_fault(info, pc);
+    /* On an alternate stack, which has no guard page below it, the route
+     * must fit below this frame. */
+    uintptr_t here = (uintptr_t)__builtin_frame_address(0);
+    if ((uc->uc_stack.ss_flags & SS_DISABLE) == 0 && patina_on_stack(here, &uc->uc_stack) &&
+        here - (uintptr_t)uc->uc_stack.ss_sp < PATINA_FRONT_FLOOR) {
+        patina_fault_stack_short(sig, here - (uintptr_t)uc->uc_stack.ss_sp);
+    }
+    volatile uint64_t canary = 0;
+    struct patina_fault_frame frame = {sp, &uc->uc_stack, &canary,
+                                       (uint64_t *)(void *)&uc->uc_sigmask};
     struct patina_signal_action handler;
-    int route = patina_fault_route(sig, info, &handler);
+    int route = patina_fault_route(sig, info, &frame, &handler);
     patina_trap_leave();
     errno = saved_errno;
     if (route == PATINA_FAULT_HANDLER) {
         ((void (*)(int, siginfo_t *, void *))handler.handler)(sig, info, ucontext);
+        saved_errno = errno;
+        (void)patina_trap_enter(sp);
+        patina_signal_fault_return(&frame);
+        patina_trap_leave();
+        errno = saved_errno;
         return;
     }
-    /* The retried instruction takes the fault under the default action. */
+    /* The retried instruction takes the fault under the default action; a
+     * trap (int3 resumes past itself) or a signal the kernel sent itself need
+     * not raise it again, so those are taken now. */
+    if (sig == SIGTRAP || info->si_code == SI_KERNEL) patina_trap_take_default(sig);
     struct sigaction deflt;
     memset(&deflt, 0, sizeof deflt);
     deflt.sa_handler = SIG_DFL;
@@ -980,6 +1012,7 @@ static void patina_fault_front(int sig, siginfo_t *info, void *ucontext) {
 /* Install the front handler for a managed run, BEFORE guest constructors (so
  * Rust std's own handlers register over it, virtually), after the counter trap
  * took SIGSEGV where it arms. */
+static const int patina_fault_front_signals[] = {SIGBUS, SIGFPE, SIGILL, SIGTRAP};
 static void patina_fault_front_init(int argc, char **argv) {
     if (!patina_env_has("PATINA_MODE", argv, argc)) return;
     if (patina_real_sigaction() == NULL) {
@@ -990,9 +1023,14 @@ static void patina_fault_front_init(int argc, char **argv) {
     action.sa_sigaction = patina_fault_front;
     action.sa_flags = SA_SIGINFO;
     sigemptyset(&action.sa_mask);
-    if (patina_host_sigaction(SIGBUS, &action, NULL) != 0 ||
-        (!patina_tsc_armed && patina_host_sigaction(SIGSEGV, &action, NULL) != 0)) {
-        patina_sud_report_fatal("fault handler: failed to install the SIGBUS/SIGSEGV handler");
+    for (size_t i = 0; i < sizeof patina_fault_front_signals / sizeof *patina_fault_front_signals;
+         i++) {
+        if (patina_host_sigaction(patina_fault_front_signals[i], &action, NULL) != 0) {
+            patina_sud_report_fatal("fault handler: failed to install a fault signal's handler");
+        }
+    }
+    if (!patina_tsc_armed && patina_host_sigaction(SIGSEGV, &action, NULL) != 0) {
+        patina_sud_report_fatal("fault handler: failed to install the SIGSEGV handler");
     }
     patina_fault_front_installed((uintptr_t)patina_fault_front);
 }
