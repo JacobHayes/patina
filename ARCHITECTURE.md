@@ -294,12 +294,14 @@ own code) is held
 blocked meanwhile (one that arrives is delivered once the trap returns,
 after the instruction, as it may be natively), and a delivery that would run a
 handler, a `sigaltstack` call or a nested counter read is a named stop. The
-kernel's alternate stack is cut off below the trap's live frames meanwhile, so
-the one frame it can still build there (a fault in the shim's own code, itself
-a named stop) lands below them; the cut must leave room for that frame
-(`AT_MINSIGSTKSZ`), the trap's own frames and the stop's, or the read is a
-named stop, and
-the read's end gives the kernel back the stack it held at the read's entry. A
+kernel uses a separate guarded shim-owned alternate stack meanwhile, so a
+nested fault in shim code cannot overwrite the trap's live frames. The stack
+is lazily host-mapped per thread, with `AT_MINSIGSTKSZ` plus 64 KiB of usable
+space and a guard page, and released at managed thread completion (raw exit
+included). It never enters the guest memory model. The read's end restores
+exactly the kernel registration held at entry, including an autodisarmed
+stack's disabled state. The guest stack need only hold the original frame,
+not two host-sized frames; this matters on CPUs with large xsave state. A
 SIGSEGV the kernel sends itself that the guest's action takes as the default
 is taken at once rather than retried, since retrying need not raise it again;
 a core dump then records a sent SIGSEGV (`SI_TKILL`, no address) where natively
@@ -335,9 +337,12 @@ handler the trap runs, and the handler's return goes through the same hook
 (its frame's saved mask kept free of the containment signals, what that mask
 unblocks delivered). A trace or breakpoint trap while the shim owns the
 thread (single-stepping through an entry) is named as such. The front handler needs stack where a
-native default action needs none: the fault route below its frame peaks at
-about 2.7 KiB (debug x86_64), so on an alternate stack with less than 4 KiB
-left below the kernel's frame the fault is a named stop, and where the kernel
+native default action needs none: the front handler requires 4 KiB below its
+frame, with its route's measured high-water and C frame sizes gated on both
+Linux architectures and stable/MSRV. It checks room before any call, even
+`errno` access. A short stack stops through tiny C-only code: one raw host
+write, then a private SIGABRT through the pre-resolved host syscall alias,
+never Rust formatting, panic scopes, or guest handlers. Where the kernel
 cannot fit the front frame at all (an exhausted ordinary stack, an alternate
 stack too small for the frame) it forces SIGSEGV, so a fault the guest
 leaves to the default action dies by SIGSEGV, unnamed, where natively it

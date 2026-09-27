@@ -704,8 +704,9 @@ static void patina_sud_init(int argc, char **argv) {
  * alternate stack that way is answered back on the interrupted stack: the
  * answer runs the runtime, which a small signal stack cannot hold. No guest
  * code runs until it is answered (a handler that would is a named stop), and
- * the kernel's alternate stack ends below this frame meanwhile, so the one
- * frame it may still build there (a fault in the shim's own code) nests below.
+ * the kernel uses a separate guarded per-thread shim stack meanwhile. A
+ * nested fault in shim code can then stop by name without overwriting this
+ * frame or requiring the guest's small stack to hold two kernel frames.
  * ========================================================================== */
 
 /* prctl TSC op numbers (x86 only; present since 2.6.26). */
@@ -760,13 +761,13 @@ struct patina_fault_frame {
 };
 extern void patina_signal_fault_return(const struct patina_fault_frame *frame);
 
-/* The kernel's `on_sig_stack`. */
+#if defined(__x86_64__)
+/* The kernel's `on_sig_stack`, used by the counter trap only. */
 static int patina_on_stack(uintptr_t sp, const stack_t *stack) {
     uintptr_t base = (uintptr_t)stack->ss_sp;
     return sp > base && sp - base <= stack->ss_size;
 }
 
-#if defined(__x86_64__)
 /* The SIGSEGV disposition the trap displaced, so a fault it does not recognize
  * is taken exactly as it would have been. x86-only, like the handler that reads
  * it — an unused static would not survive -Wall -Wextra -Werror on aarch64. */
@@ -796,13 +797,11 @@ static void patina_tsc_take_real_fault(int sig, siginfo_t *info, void *ucontext)
     (void)patina_host_sigaction(sig, &patina_tsc_prev, NULL);
 }
 
-/* A counter read served off the alternate stack the trap's frame is on: the
- * lowest address of the live frames there, where the kernel's frame for the
- * trap begins, and the alternate stack that frame saved
- * (src/thread/signals/fault.rs, `with_altstack_below`). */
+/* A counter read served off the alternate stack the trap's frame is on:
+ * the lowest live address there and the stack the kernel frame saved
+ * (src/thread/signals/fault.rs, `with_counter_altstack`). */
 struct patina_served {
     uintptr_t live;
-    uintptr_t entry;
     const stack_t *stack;
 };
 
@@ -890,11 +889,8 @@ static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
             size_t available = (size_t)(patina_sud_text_hi - rip);
             if (available > PATINA_TSC_MAX_INSN) available = PATINA_TSC_MAX_INSN;
             struct patina_tsc_read read = {(const unsigned char *)rip, available, 0, 0, 0, 0,
-                                           {0, 0, NULL}};
+                                           {0, NULL}};
             if (patina_tsc_on_switched_stack(uc)) {
-                /* The kernel's frame begins at its return-address slot, just
-                 * below the ucontext. */
-                read.served.entry = (uintptr_t)ucontext - sizeof(void *);
                 read.served.stack = &uc->uc_stack;
                 /* Below the interrupted code's red zone. */
                 uintptr_t top = (sp - 128) & ~(uintptr_t)15;
@@ -958,11 +954,34 @@ extern int patina_fault_route(int sig, const siginfo_t *info,
                               const struct patina_fault_frame *frame,
                               struct patina_signal_action *handler);
 extern void patina_fault_front_installed(uintptr_t handler);
-_Noreturn void patina_fault_stack_short(int sig, uintptr_t room);
+/* Resolved before installing the front handler. The short-stack path must
+ * never enter Rust, resolve a symbol, format, or use an interposed vehicle.
+ * glibc's syscall is a leaf and is inside SUD's allowed text region. */
+static long (*patina_fault_host_syscall)(long, ...);
 
-/* What the fault route (src/thread/signals/fault.rs) needs below this
- * handler's frame: 2760 bytes measured on an alternate stack in a debug
- * x86_64 build, through a guest handler's run and return. */
+static _Noreturn void patina_fault_stack_short(void) {
+    static const char message[] =
+        "patina: a fault's signal frame leaves too little of the alternate stack below it "
+        "for the shim's fault handler: not modeled\n";
+    static const unsigned long default_action[4] = {0, 0, 0, 0};
+    static const uint64_t unblock = UINT64_C(1) << (SIGABRT - 1);
+    (void)patina_fault_host_syscall(SYS_write, 2, message, sizeof message - 1);
+    /* Private abort, not guest abort: reset/unblock SIGABRT and send it to
+     * this thread. No Rust scope, trace finalization or guest handler. */
+    (void)patina_fault_host_syscall(SYS_rt_sigaction, SIGABRT, default_action, NULL, 8);
+    (void)patina_fault_host_syscall(SYS_rt_sigprocmask, SIG_UNBLOCK, &unblock, NULL, 8);
+    long pid = patina_fault_host_syscall(SYS_getpid);
+    long tid = patina_fault_host_syscall(SYS_gettid);
+    (void)patina_fault_host_syscall(SYS_tgkill, pid, tid, SIGABRT);
+    (void)patina_fault_host_syscall(SYS_exit_group, 127);
+    __builtin_unreachable();
+}
+
+/* Room for this frame and the Rust route, including a guest handler's
+ * return. native_signals::fault_front_stack_budgets_cover_the_compiled_paths
+ * gates measured route high-water plus 512 bytes on both arches/stable/MSRV,
+ * and the C entry + short-stop frames at <=768 bytes. Guest handlers' own
+ * arbitrary stack needs are not included in this shim budget. */
 #define PATINA_FRONT_FLOOR 4096
 
 static void patina_fault_front(int sig, siginfo_t *info, void *ucontext) {
@@ -974,15 +993,17 @@ static void patina_fault_front(int sig, siginfo_t *info, void *ucontext) {
     uintptr_t pc = (uintptr_t)uc->uc_mcontext.pc;
     uintptr_t sp = (uintptr_t)uc->uc_mcontext.sp;
 #endif
+    /* Before ANY call (even errno's accessor or an out-of-line stack test):
+     * only the tiny C stop fits on a native-capable but short alternate stack.
+     * The floor includes this C frame as well as the Rust route below it. */
+    uintptr_t here = (uintptr_t)__builtin_frame_address(0);
+    uintptr_t base = (uintptr_t)uc->uc_stack.ss_sp;
+    if ((uc->uc_stack.ss_flags & SS_DISABLE) == 0 && here > base &&
+        here - base <= uc->uc_stack.ss_size && here - base < PATINA_FRONT_FLOOR) {
+        patina_fault_stack_short();
+    }
     int saved_errno = errno;
     if (!patina_trap_enter(sp)) patina_trap_shim_fault(info, pc);
-    /* On an alternate stack, which has no guard page below it, the route
-     * must fit below this frame. */
-    uintptr_t here = (uintptr_t)__builtin_frame_address(0);
-    if ((uc->uc_stack.ss_flags & SS_DISABLE) == 0 && patina_on_stack(here, &uc->uc_stack) &&
-        here - (uintptr_t)uc->uc_stack.ss_sp < PATINA_FRONT_FLOOR) {
-        patina_fault_stack_short(sig, here - (uintptr_t)uc->uc_stack.ss_sp);
-    }
     volatile uint64_t canary = 0;
     struct patina_fault_frame frame = {sp, &uc->uc_stack, &canary,
                                        (uint64_t *)(void *)&uc->uc_sigmask};
@@ -1017,6 +1038,10 @@ static void patina_fault_front_init(int argc, char **argv) {
     if (!patina_env_has("PATINA_MODE", argv, argc)) return;
     if (patina_real_sigaction() == NULL) {
         patina_sud_report_fatal("fault handler: sigaction could not be resolved");
+    }
+    patina_fault_host_syscall = (long (*)(long, ...))__real_dlsym(RTLD_NEXT, "syscall");
+    if (patina_fault_host_syscall == NULL) {
+        patina_sud_report_fatal("fault handler: host syscall could not be resolved");
     }
     struct sigaction action;
     memset(&action, 0, sizeof action);

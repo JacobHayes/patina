@@ -26,7 +26,6 @@ pub(in crate::thread) const SI_TKILL: i32 = -6;
 pub(in crate::thread) const SIG_BLOCK: i32 = 0;
 pub(in crate::thread) const SIG_UNBLOCK: i32 = 1;
 pub(in crate::thread) const SIG_SETMASK: i32 = 2;
-pub(in crate::thread) const SS_ONSTACK: i32 = 1;
 pub(in crate::thread) const SS_DISABLE: i32 = 2;
 pub(in crate::thread) const SA_RESTART: u64 = 0x1000_0000;
 pub(in crate::thread) const SA_RESETHAND: u64 = 0x8000_0000;

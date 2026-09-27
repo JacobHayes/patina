@@ -11227,6 +11227,8 @@ mod thread {
         #[cfg(target_os = "linux")]
         signals::clear_tid(task);
         #[cfg(target_os = "linux")]
+        signals::release_counter_stack();
+        #[cfg(target_os = "linux")]
         crate::sud::task_exited(tid_of(task));
         let mut state = lock_state();
         let mut scheduler = RealScheduler;

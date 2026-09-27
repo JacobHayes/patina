@@ -80,7 +80,7 @@ thread_local! {
 /// Guest code a signal delivery runs inside a counter read (a handler the
 /// read's scheduling point releases) may read the counter itself. None runs
 /// inside a read served off the alternate stack: that is a named stop
-/// (`with_altstack_below`).
+/// (`with_counter_altstack`).
 #[cfg(target_os = "linux")]
 pub(crate) fn with_guest_reads(body: impl FnOnce()) {
     let outer = IN_DISPATCH.with(|cell| cell.replace(false));
@@ -170,8 +170,8 @@ fn counter_now() -> Option<u64> {
 /// executable's text) and out-parameters for the counter value, the `rdtscp`
 /// auxiliary value, and the instruction length. `served` is non-null when the
 /// read is served off the alternate stack the trap's frame is on: it says
-/// where the live frames there are, which the kernel's alternate stack ends
-/// below meanwhile (`with_altstack_below`).
+/// where the live frames there are. The kernel uses a separate guarded shim
+/// stack meanwhile (`with_counter_altstack`), preserving those frames.
 ///
 /// Returns [`PATINA_TSC_NONE`] when the faulting instruction is not a counter
 /// read — the handler must then take the ordinary fault path, because the
@@ -217,7 +217,7 @@ pub unsafe extern "C" fn patina_tsc_dispatch(
     }
     IN_DISPATCH.with(|cell| cell.set(true));
     #[cfg(target_os = "linux")]
-    let value = crate::thread::signals::with_altstack_below(served.cast(), counter_now);
+    let value = crate::thread::signals::with_counter_altstack(served.cast(), counter_now);
     #[cfg(not(target_os = "linux"))]
     let value = {
         let _ = served;

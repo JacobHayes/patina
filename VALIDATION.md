@@ -282,9 +282,23 @@ SIGSEGV handler: it never sees a counter read
 (`sigsegv_handler_cannot_take_over_the_counter_trap`) or a counter read it
 declines, which is a named stop (`a_counter_read_the_trap_declines_is_a_named_stop`,
 a REX-prefixed `rdtsc`; red before: the guest's handler ran), and while a counter read is served off the alternate stack no guest code runs:
-a timer's handler that would run during it, and a cut too small for a nested
-frame, are named stops where the native run goes on
-(`counter_reads_served_off_the_alternate_stack_run_no_guest_code`); `native_signals::a_guest_segv_handler_gets_what_the_kernel_would_give_it`
+a timer's handler that would run during it is a named stop on both large and
+small native-capable stacks where the native run goes on
+(`counter_reads_served_off_the_alternate_stack_run_no_guest_code`).
+`counter_reads_on_a_minimal_altstack_preserve_the_guest_stack` pairs this
+containment detector with a guarded `AT_MINSIGSTKSZ + 1536` stack: a native
+handler fits, repeated `rdtsc`/`rdtscp` reads return exact virtual values,
+stack registration is restored (ordinary and `SS_AUTODISARM`), and a later default fault kills with SIGSEGV
+(red before: the cut-down-stack room check aborted before the first answer).
+`native_signals::fault_front_stack_budgets_cover_the_compiled_paths` measures
+the returning front route's written high-water below the kernel frame and
+compiler-reported C frame sizes on both architectures and stable/MSRV, requiring
+margin under the room floor; the `front-small` case separately requires a
+named C-only stop on a native-capable stack with too little room for Rust.
+The budget detector is red-proven by lowering the front floor to 2 KiB.
+Measurements are retained in CI job summaries and logs. Sentinel high-water
+measures writes, not untouched reserved slots; compiler frame sizes complement it.
+ `native_signals::a_guest_segv_handler_gets_what_the_kernel_would_give_it`
 compares the faults it does get with the native run, including a blocked fault's
 default action, a re-raise kept pending, and 6.8's frame order among pending
 signals (also when the upper handler leaves by `siglongjmp`, losing the frame

@@ -28,6 +28,8 @@
  *                 kernel's frame and 1.5 KiB: natively it runs, under the
  *                 shim the fault handler's route would not fit below the
  *                 frame, a named stop;
+ *   front-room    sentinel high-water measurement of a returning front-routed
+ *                 handler, including its shim return path, below the kernel frame;
  *   order-shared  a process-directed SIGSEGV pending with a thread-directed
  *                 SIGUSR1: the private one is dequeued first, so the SIGSEGV
  *                 frame is on top and its handler runs first;
@@ -57,9 +59,9 @@
  *                 on the alternate stack are served: native, the handlers run
  *                 and the reads go on; under the shim a handler that would run
  *                 during such a read is a named stop;
- *   alarm-small   (x86_64) the alarm case on an alternate stack with room for
- *                 about two signal frames: under the shim the trap's frame
- *                 leaves too little below it for a nested one, a named stop;
+ *   alarm-small   (x86_64) the same on a small native-capable stack: counter
+ *                 reads still reach the handler-delivery stop, never a refusal
+ *                 merely because a second kernel frame would not fit;
  *   prefixed      (x86_64) a REX-prefixed rdtsc, which the CPU executes as a
  *                 counter read and the trap does not answer: never a SIGSEGV
  *                 for the guest's handler (which exits 97).
@@ -284,6 +286,38 @@ static void front_small(void) {
     say("FRONT SMALL RAN\n");
 }
 
+static uintptr_t front_frame;
+static void on_front_room(int sig, siginfo_t *info, void *context) {
+    ucontext_t *uc = context;
+    (void)sig;
+#if defined(__x86_64__)
+    (void)info;
+    front_frame = (uintptr_t)uc - sizeof(void *);
+    uc->uc_mcontext.gregs[REG_RIP] += 2; /* ud2 */
+#else
+    front_frame = (uintptr_t)info;
+    uc->uc_mcontext.pc += 4; /* udf */
+#endif
+}
+
+static void front_room(void) {
+    /* No guest libc calls on this stack: measure the front route and return,
+     * not a guest handler's arbitrary stack needs. Sentinel bytes measure
+     * writes, not untouched reserved slots; pair with C compiler stack usage. */
+    memset(alt, 0xa5, sizeof alt);
+    on_alt_stack();
+    install(SIGILL, on_front_room, SA_ONSTACK, 0);
+#if defined(__x86_64__)
+    __asm__ volatile("ud2");
+#else
+    __asm__ volatile("udf #0");
+#endif
+    size_t low = 0;
+    while (low < sizeof alt && (unsigned char)alt[low] == 0xa5) ++low;
+    assert(front_frame > (uintptr_t)alt + low);
+    printf("FRONT_ROUTE_BYTES %zu\n", front_frame - (uintptr_t)alt - low);
+}
+
 static void on_reraise(int sig, siginfo_t *info, void *context) {
     (void)sig;
     (void)info;
@@ -502,6 +536,8 @@ int main(int argc, char **argv) {
         masked_fault();
     } else if (strcmp(argv[1], "front-small") == 0) {
         front_small();
+    } else if (strcmp(argv[1], "front-room") == 0) {
+        front_room();
     } else if (strcmp(argv[1], "order-shared") == 0) {
         ordered_delivery(1, ORDER_RETURN);
     } else if (strcmp(argv[1], "order-mask") == 0) {

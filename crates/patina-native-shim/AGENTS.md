@@ -227,11 +227,16 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   action's `SA_ONSTACK` so a guard-page fault can reach it at all, which puts
   counter reads on std's 8 KiB signal stack too: the trap answers them back on
   the interrupted stack, since the runtime does not fit there, with the
-  kernel's alternate stack cut off below its live frames meanwhile
-  (`with_altstack_below`), and no guest code runs until the read is answered
-  (a delivery that would run a handler is a named stop); the cut must leave
-  room for a nested frame, the trap's own and a named stop's (std's 8 KiB
-  stack does: 5008 bytes left against a 4632-byte floor on an AVX-512 host).
+  kernel using a separate guarded shim-owned stack meanwhile
+  (`with_counter_altstack`), and no guest code runs until the read is answered
+  (a delivery that would run a handler is a named stop). Never require that
+  small guest stack to fit a second kernel frame: its size depends on the
+  host's xsave features. Restore the actual kernel registration, including
+  autodisarm, before returning to the trap's original frame. The front
+  handler's room check must precede every call (even errno access), and its
+  short-stack stop must stay C-only; stable/MSRV debug Rust frames can exceed
+  the headroom a native handler needs. `fault_front_stack_budgets_cover_the_compiled_paths`
+  measures the route and the tiny C entry/stop on both Linux architectures.
   std's overflow
   report itself (a `write` and an `abort` through the shim) still overflows that
   stack, so a Rust stack overflow dies of SIGSEGV without std's message. Check

@@ -326,27 +326,6 @@ pub unsafe extern "C" fn patina_trap_shim_fault(info: *const Info, pc: usize) ->
     take_default(info.signo())
 }
 
-/// The front handler's frame is on an alternate stack with `room` bytes of it
-/// left below, less than the fault route needs there (`PATINA_FRONT_FLOOR`,
-/// `c/posix/init.c`): the route would run past the stack's end, where
-/// nothing guards it, so it is a named stop instead. Said with one raw write
-/// on this stack, as [`patina_trap_shim_fault`] says its stop.
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_fault_stack_short(sig: i32, room: usize) -> ! {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let mut line = Line::default();
-    line.text(
-        b"patina: a fault's signal frame leaves too little of the alternate stack below it \
-          for the shim's fault handler: not modeled: signal ",
-    );
-    line.number(sig as u64, 10);
-    line.text(b" bytes left ");
-    line.number(room as u64, 10);
-    line.text(b"\n");
-    let _ = crate::host_write_all(2, line.bytes());
-    crate::host_abort()
-}
-
 /// A SIGSEGV the kernel sent itself (`SI_KERNEL`) that the guest's action
 /// takes as the default: now, since retrying the instruction need not raise
 /// it again (a signal frame that did not fit on its stack is not the
@@ -443,8 +422,12 @@ thread_local! {
     static SENT: [Cell<Option<(Action, Info)>>; SENT_SLOTS] =
         const { [const { Cell::new(None) }; SENT_SLOTS] };
     /// While the trap serves a counter read off the alternate stack
-    /// ([`with_altstack_below`]): the guest's host mask the read interrupted.
+    /// ([`with_counter_altstack`]): the guest's host mask the read interrupted.
     static SERVING: Cell<Option<u64>> = const { Cell::new(None) };
+    /// Private to this host thread, reused across counter reads and unmapped
+    /// at managed thread completion (including raw exit, which skips TLS
+    /// destructors). Never registered while guest code can run.
+    static COUNTER_STACK: CounterStack = const { CounterStack(Cell::new(None)) };
     static SEGV: RefCell<SegvMask> = const {
         RefCell::new(SegvMask {
             current: SegvBlock::No,
@@ -491,18 +474,79 @@ const SENT_SLOTS: usize = SIGSEGV as usize + 1;
 pub struct Served {
     /// The lowest address of the trap's live frames on the alternate stack.
     live: usize,
-    /// Where the kernel's frame for the trap begins, below which are the
-    /// trap's own frames.
-    entry: usize,
     /// The alternate stack that frame saved (`uc_stack`), which its
     /// `rt_sigreturn` registers again.
     stack: *const Stack,
 }
 
-const AT_MINSIGSTKSZ: u64 = 51;
-/// The named stop's own frames over a nested trap's: 896 bytes measured in a
-/// debug x86_64 build (`patina_trap_shim_fault` and what it calls).
-const STOP_FRAMES: usize = 1024;
+/// A host mapping, not guest memory: one guard page followed by room for
+/// the host's largest signal frame and 64 KiB for the shim's named stop.
+struct CounterStack(Cell<Option<(Stack, usize)>>);
+
+impl CounterStack {
+    fn get(&self) -> Stack {
+        if let Some((stack, _)) = self.0.get() {
+            return stack;
+        }
+        use patina_dst_syscalls::Syscall;
+        const AT_PAGESZ: u64 = 6;
+        const AT_MINSIGSTKSZ: u64 = 51;
+        let page = crate::sud::auxv_value(AT_PAGESZ).expect("host page size") as usize;
+        let minimum = crate::sud::auxv_value(AT_MINSIGSTKSZ).unwrap_or(0) as usize;
+        let size = minimum
+            .checked_add(64 * 1024 + page - 1)
+            .expect("counter stack size")
+            / page
+            * page;
+        let length = size.checked_add(page).expect("counter stack guard");
+        // PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS. Host aliases only; this
+        // mapping must never enter the guest's mapping or descriptor tables.
+        let base = host(
+            Syscall::N_mmap.number().into(),
+            [0, length as u64, 0, 0x22, u64::MAX, 0],
+        );
+        if base < 0 {
+            fatal("host counter alternate stack allocation failed (mmap)");
+        }
+        let stack = Stack {
+            base: base as usize + page,
+            flags: 0,
+            size,
+        };
+        if host(
+            Syscall::N_mprotect.number().into(),
+            [stack.base as u64, size as u64, 3, 0, 0, 0],
+        ) != 0
+        {
+            fatal("host counter alternate stack protection failed (mprotect)");
+        }
+        self.0.set(Some((stack, page)));
+        stack
+    }
+
+    fn release(&self) {
+        if let Some((stack, page)) = self.0.take() {
+            if host(
+                patina_dst_syscalls::Syscall::N_munmap.number().into(),
+                [
+                    (stack.base - page) as u64,
+                    (stack.size + page) as u64,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            ) != 0
+            {
+                fatal("host counter alternate stack release failed (munmap)");
+            }
+        }
+    }
+}
+
+pub(crate) fn release_counter_stack() {
+    COUNTER_STACK.with(CounterStack::release);
+}
 
 /// Run `body`, a counter read the trap took on the alternate stack and serves
 /// off it (`served`; null: served where the trap's frame is, which needs
@@ -513,13 +557,13 @@ const STOP_FRAMES: usize = 1024;
 /// blocked (the trap frame's `rt_sigreturn` installs the guest's mask again,
 /// and what arrived meanwhile is delivered then, after the instruction, as it
 /// may be natively), and a delivery that would run a handler, a `sigaltstack` or a
-/// nested counter read is a named stop. The kernel's alternate stack ends
-/// below the live frames meanwhile, so the one frame it may still build
-/// there (a fault in the shim's own code, a named stop) lands below them;
-/// the cut must leave room for it (`AT_MINSIGSTKSZ`), the trap's own frames
-/// over it and the stop's ([`STOP_FRAMES`]), or the read stops by name. At the read's end the kernel
-/// holds again the stack it held at its entry.
-pub(crate) fn with_altstack_below<T>(served: *const Served, body: impl FnOnce() -> T) -> T {
+/// nested counter read is a named stop. The kernel uses a separate guarded
+/// shim stack meanwhile, so a nested fault cannot overwrite the trap's live
+/// frames, nor require the guest's stack to fit two host signal frames (Rust
+/// std's 8 KiB stack cannot on hosts with large xsave frames). At the read's
+/// end the kernel holds again exactly the registration it held at entry,
+/// including SS_AUTODISARM's disabled state while its outer frame runs.
+pub(crate) fn with_counter_altstack<T>(served: *const Served, body: impl FnOnce() -> T) -> T {
     // SAFETY: null, or the trap handler's description of its own frame.
     let Some(served) = (unsafe { served.as_ref() }) else {
         return body();
@@ -529,15 +573,6 @@ pub(crate) fn with_altstack_below<T>(served: *const Served, body: impl FnOnce() 
     let live = served.live & !15;
     if frame.flags & SS_DISABLE != 0 || !on(live, (frame.base, frame.size)) {
         return body();
-    }
-    let top = frame.base + frame.size;
-    let minimum = crate::sud::auxv_value(AT_MINSIGSTKSZ).unwrap_or(0) as usize;
-    let floor = minimum.max(top - served.entry) + (served.entry - live) + STOP_FRAMES;
-    if live - frame.base < floor {
-        crate::trap_fatal(
-            "a counter read on the alternate stack leaves too little of it below the trap's \
-             frames for a nested signal frame, the trap's own and a named stop's: not modeled",
-        );
     }
     let mut interrupted = 0u64;
     let held = host_mask(!SYNCHRONOUS);
@@ -561,11 +596,7 @@ pub(crate) fn with_altstack_below<T>(served: *const Served, body: impl FnOnce() 
         );
     }
     let before = kernel_altstack();
-    install_altstack(Stack {
-        flags: frame.flags & !SS_ONSTACK,
-        size: live - frame.base,
-        ..frame
-    });
+    install_altstack(COUNTER_STACK.with(CounterStack::get));
     let value = body();
     install_altstack(before);
     if SERVING.take().is_none() {
@@ -583,7 +614,7 @@ pub(super) fn serving_counter_read() -> Option<u64> {
 }
 
 /// No guest code runs while a counter read is served off the alternate stack
-/// ([`with_altstack_below`]): where some would, the run stops by name.
+/// ([`with_counter_altstack`]): where some would, the run stops by name.
 pub(super) fn stop_while_serving(what: &str) -> ! {
     crate::trap_fatal(&format!(
         "{what} while a counter read is served off the alternate stack: not modeled"

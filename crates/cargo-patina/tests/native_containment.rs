@@ -395,6 +395,26 @@ mod linux {
             }
         }
 
+        /// Class pairing: small native-capable alternate stacks must not need
+        /// room for a second kernel frame below the counter trap's live frames.
+        #[test]
+        fn counter_reads_on_a_minimal_altstack_preserve_the_guest_stack() {
+            use std::os::unix::process::ExitStatusExt;
+            if !kernel_supports(KernelFeature::Tsc) {
+                return;
+            }
+            let native = assert_build_c_guest("signals/counter_small.c", CLink::Unlinked);
+            assert_standalone_success(&native.binary, &["native-frame"], &[]);
+            let patina = assert_build_c_guest("signals/counter_small.c", CLink::PosixShim);
+            let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
+            for case in ["read-fault", "read-fault-autodisarm"] {
+                let output = standalone_output(&patina.binary, &[case], &env);
+                assert_eq!(output.status.signal(), Some(11), "{case}: {output:?}");
+                assert_eq!(output.stdout, b"COUNTERS ANSWERED\n");
+                assert!(output.stderr.is_empty(), "{case}: {output:?}");
+            }
+        }
+
         /// A guest SIGSEGV handler, through either door, is the guest's own
         /// action: the trap keeps the host disposition, so the counter read
         /// after the registration is still answered from the virtual clock
@@ -440,8 +460,8 @@ mod linux {
         /// it while the trap's frames stay live there, and no guest code runs
         /// until it is answered. Each row runs natively and stops by name
         /// under the shim: a timer's handler that would run during such a
-        /// read (`alarm`), and a stack with too little room below the trap's
-        /// frames for a nested frame and the trap's own (`alarm-small`).
+        /// read, on both a large and a small native-capable alternate stack.
+        /// The small stack must reach the same delivery stop, not a room check.
         #[test]
         fn counter_reads_served_off_the_alternate_stack_run_no_guest_code() {
             use std::os::unix::process::ExitStatusExt;
@@ -453,7 +473,7 @@ mod linux {
             let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
             for (case, stop) in [
                 ("alarm", "signal handler would run"),
-                ("alarm-small", "leaves too little"),
+                ("alarm-small", "signal handler would run"),
             ] {
                 assert_standalone_success(&native.binary, &[case], &[]);
                 let output = standalone_output(&patina.binary, &[case], &env);

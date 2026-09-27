@@ -108,6 +108,79 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
     }
 }
 
+/// Class detector for stack-budget drift: measure the returning route's
+/// writes below the kernel frame and the C-only entry/short-stop frames.
+/// `front-small` above separately proves the short path on a bounded stack.
+#[cfg(target_os = "linux")]
+#[test]
+fn fault_front_stack_budgets_cover_the_compiled_paths() {
+    use std::io::Write;
+    let patina = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShim);
+    let output = assert_standalone_success(
+        &patina.binary,
+        &["front-room"],
+        &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+    );
+    let stdout = text(&output.stdout);
+    let route: usize = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("FRONT_ROUTE_BYTES "))
+        .expect("route measurement")
+        .parse()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    common::compile_posix_object(dir.path());
+    let usage = std::fs::read_to_string(dir.path().join("patina_posix.su")).unwrap();
+    let frame = |name: &str| -> usize {
+        usage
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split('\t');
+                let function = fields.next()?;
+                if !function.ends_with(&format!(":{name}")) {
+                    return None;
+                }
+                Some(fields.next().unwrap().parse().unwrap())
+            })
+            .unwrap_or_else(|| panic!("missing {name} stack usage: {usage}"))
+    };
+    let front = frame("patina_fault_front");
+    let stop = frame("patina_fault_stack_short");
+    let measurement = format!(
+        "fault stack ({arch}): route writes={route} B; C front={front} B; C short-stop={stop} B",
+        arch = std::env::consts::ARCH,
+    );
+    eprintln!("{measurement}");
+    // CI suppresses passing test output; retain measurements beside its
+    // conformance evidence, and in the job log that reprints this summary.
+    if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") {
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+            "{measurement}\n"
+        )
+        .unwrap();
+    }
+    let source = patina_dst_native_shim::POSIX_C_FAMILY_SOURCES
+        .iter()
+        .find(|(path, _)| *path == "posix/init.c")
+        .unwrap()
+        .1;
+    let floor: usize = source
+        .lines()
+        .find_map(|line| line.strip_prefix("#define PATINA_FRONT_FLOOR "))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(route > 512, "vacuous route measurement: {measurement}");
+    assert!(
+        route + 512 <= floor,
+        "route needs margin: {measurement}, floor={floor}"
+    );
+    // The short path's only callee is glibc's leaf syscall shuffle. Leave
+    // at least half the front-small guest's 1536-byte headroom unused.
+    assert!(front + stop <= 768, "short stop grew: {measurement}");
+}
+
 /// A synchronous signal an instruction raises (SIGBUS, SIGFPE, SIGILL,
 /// SIGTRAP) meets the action the kernel would give it: after a delivery
 /// batch's handler leaves by `siglongjmp` from a frame that ran the action
