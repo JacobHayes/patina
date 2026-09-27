@@ -1,0 +1,29 @@
+# Standalone package: its own empty [workspace] table keeps it OUT of the root
+# Patina workspace so `cargo` here never touches crates/ or the root manifest.
+#
+# Halting, self-checking microworkloads for the native-versus-Patina overhead
+# benchmark (`mise run bench`, scripts/bench.py). Each workload isolates one
+# cost: pure compute, small-file syscalls, a scheduler hand-off over a condvar,
+# a pipe round trip, and a loopback TCP echo.
+[workspace]
+
+[package]
+name = "bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[dependencies]
+# The verdict ABI: a clean run reports a `Pass` carrying the result digest and a
+# failed self-check a `Violation`. Inert outside a Patina build.
+patina-dst = { path = "../../crates/patina" }
+# Pinned exactly, per testbeds convention. Only for `pipe(2)`, which std does
+# not expose at this crate's toolchain floor.
+libc = "=0.2.189"
+
+[profile.release]
+panic = "unwind"
