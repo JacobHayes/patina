@@ -1261,7 +1261,7 @@ static void patina_statx_time(struct statx_timestamp *out, struct patina_timesta
 }
 
 /*
- * statx: BASIC_STATS (BLOCKS the length-derived count stat reports) plus
+ * statx: BASIC_STATS (BLOCKS the allocated count stat reports) plus
  * what patina_statx_extra adds, the node's mount id (MNT_ID_UNIQUE when asked
  * for, else MNT_ID), as the kernel's vfs_statx fills it whatever was asked,
  * and STATX_BTIME when requested and the node's filesystem records one.

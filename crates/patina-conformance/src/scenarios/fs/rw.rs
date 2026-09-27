@@ -5,7 +5,8 @@
 //! past it; a write past EOF leaves a zero-filled hole; on an O_APPEND
 //! descriptor Linux appends whatever the position (pwrite(2) BUGS); a negative
 //! position is EINVAL even for a zero length (fs/read_write.c ksys_pread64
-//! judges it first); ESPIPE on a pipe, EISDIR on a directory, EBADF for the
+//! judges it first), and so is a write whose end passes the largest offset
+//! (`rw_verify_area`, before any filesystem's size limit); ESPIPE on a pipe, EISDIR on a directory, EBADF for the
 //! wrong access mode or a closed descriptor.
 
 use crate::catalog::{DEFAULTS, Scenario};
@@ -214,6 +215,10 @@ fn at_a_position(p: &Probe, root: &str) {
     p.check(
         "the position is judged before the length",
         p.pwrite64(fd, b"", -1) == neg(EINVAL),
+    );
+    p.check(
+        "pwrite64 whose end passes the largest offset is EINVAL",
+        p.pwrite64(fd, b"0123456789", i64::MAX - 1) == neg(EINVAL),
     );
 
     let append = p.openat(AT_FDCWD, &file, O_WRONLY | O_APPEND, 0);

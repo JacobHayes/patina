@@ -5,10 +5,12 @@
 //! The deterministic filesystem has no page cache, so advice has nothing to
 //! warm, drop or start writing back: each call answers exactly the refusals the
 //! kernel judges (in its order) and is otherwise a no-op. What `cachestat`
-//! counts follows from the same fact: the filesystem holds every file whole in
-//! memory, so every page of a regular file up to its end is cached, none is
-//! dirty or under writeback (there is no writeback to wait for), and none was
-//! ever evicted; anything else has no pages. Durability is the one
+//! counts follows from the same fact: the filesystem holds a file in memory,
+//! so every page of a regular file up to its end is cached, none is dirty or
+//! under writeback (there is no writeback to wait for), and none was ever
+//! evicted; anything else has no pages. A divergence (VALIDATION.md): a page
+//! over a hole or an unwritten block that was never read is uncached
+//! natively, and counted cached here. Durability is the one
 //! effect with a model behind it — `sync` and `syncfs` make every change on the
 //! volume durable, the checkpoint a crash model rolls back to. `sync_file_range`
 //! promises no durability at all (it writes out no metadata and waits on no
@@ -148,7 +150,7 @@ fn cached_pages(size: u64, range: CachestatRange) -> Option<(u64, u64)> {
 /// `O_PATH` descriptor is `EBADF` (`fdget`), then the range is copied in
 /// (`EFAULT`), a hugetlbfs file is `EOPNOTSUPP`, then nonzero flags are
 /// `EINVAL`; the counts are copied out last (`EFAULT`). A regular file has
-/// every page to its end cached (the filesystem holds it whole), dirty
+/// every page to its end cached (the filesystem holds it in memory), dirty
 /// those written since their last fsync as the crash model keeps them, and
 /// those a shared view changed and no write-back wrote yet (no background
 /// writeback: 6.8's flusher would clean them after

@@ -22,6 +22,9 @@
 //!   with NULL, re-registered after; `SIGEV_SIGNAL` with an invalid signal is
 //!   `EINVAL`; a message arriving on an empty queue sends the signal and
 //!   consumes the registration;
+//! * `fallocate` on a queue is `EOPNOTSUPP` (mqueuefs has none) but, past
+//!   the 2 GiB `MAX_NON_LFS` mqueuefs keeps as its size limit, `EFBIG`
+//!   first (`vfs_fallocate`);
 //! * `mq_unlink` removes the name (a second one is `ENOENT`) while an open
 //!   descriptor keeps working.
 //!
@@ -65,6 +68,14 @@ pub fn run(p: &Probe) {
             && attr.mq_msgsize == MSGSIZE
             && attr.mq_curmsgs == 0
             && attr.mq_flags == 0,
+    );
+    p.check(
+        "fallocate within a queue's size limit is EOPNOTSUPP: mqueuefs has none",
+        p.fallocate(fd, 0, 0, 0x7fff_ffff) == neg(EOPNOTSUPP),
+    );
+    p.check(
+        "one past MAX_NON_LFS, which mqueuefs keeps, is EFBIG first",
+        p.fallocate(fd, 0, 0, 0x8000_0000) == neg(EFBIG),
     );
     p.check(
         "O_CREAT|O_EXCL on its name is EEXIST",
@@ -275,6 +286,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mq_timedreceive,
         Syscall::N_mq_notify,
         Syscall::N_mq_getsetattr,
+        Syscall::N_fallocate,
     ],
     vehicles: Vehicle::KERNEL,
     needs: &[Need::PosixMqueue],

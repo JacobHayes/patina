@@ -1339,22 +1339,32 @@ fn settle(inos: &[u64]) {
 /// recorded write per page. A page the filesystem refused stays dirty for
 /// the next write-back.
 fn write_back(ino: u64, handle: u64) -> Result<(), c_int> {
+    write_back_counted(ino, handle).1
+}
+
+/// [`write_back`], also answering whether it wrote to the file at all: a
+/// write-back that fails partway may have written its first pages.
+fn write_back_counted(ino: u64, handle: u64) -> (bool, Result<(), c_int>) {
     let pages = match MAPPINGS.lock().caches.get(&ino) {
         Some(cache) => cache.dirty_pages(),
-        None => return Ok(()),
+        None => return (false, Ok(())),
     };
-    for (offset, bytes) in pages {
-        let written = crate::with_context_raw(|context| {
-            context.fs_write_back_at(Fd(handle), offset, &bytes)
-        })?;
-        if let Some(cache) = MAPPINGS.lock().caches.get_mut(&ino) {
-            cache.accept(offset, &bytes[..written.min(bytes.len())]);
+    let tried = !pages.is_empty();
+    let written_all = || {
+        for (offset, bytes) in pages {
+            let written = crate::with_context_raw(|context| {
+                context.fs_write_back_at(Fd(handle), offset, &bytes)
+            })?;
+            if let Some(cache) = MAPPINGS.lock().caches.get_mut(&ino) {
+                cache.accept(offset, &bytes[..written.min(bytes.len())]);
+            }
+            if written < bytes.len() {
+                return Err(crate::EIO);
+            }
         }
-        if written < bytes.len() {
-            return Err(crate::EIO);
-        }
-    }
-    Ok(())
+        Ok(())
+    };
+    (tried, written_all())
 }
 
 /// The pages of the file `handle` is open on that a store through a shared
@@ -1431,6 +1441,26 @@ pub(crate) fn reading(handle: u64) {
             let _ = write_back(ino, writer);
         }
     }
+}
+
+/// Before `SEEK_DATA`/`SEEK_HOLE` or a metadata query (`fstat`, `statx`) of
+/// `handle`'s file: a store through a shared view allocates its block at the
+/// write fault natively, so what the views stored is written back first and
+/// the answer (`st_blocks`, the data the seek finds) counts it. Not modeled:
+/// a store of the bytes a page already held, and a read fault on tmpfs,
+/// allocate natively and not here.
+pub(crate) fn inspecting(handle: u64) {
+    reading(handle);
+}
+
+/// [`inspecting`] for a query by name that found the node `ino`: whether a
+/// write-back ran (the caller then asks again, since even one that failed
+/// partway may have changed the file).
+pub(crate) fn inspecting_ino(ino: u64) -> bool {
+    if !caching() || !MAPPINGS.lock().caches.contains_key(&ino) {
+        return false;
+    }
+    writer_of(ino).is_some_and(|writer| write_back_counted(ino, writer).0)
 }
 
 /// Before `fsync`/`fdatasync` of `handle`'s file: what the views stored

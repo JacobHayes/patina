@@ -12,7 +12,9 @@ use std::fmt;
 use patina_dst_abi::{EffectError, ErrorCode};
 
 use crate::Times;
-use crate::{EntryMetadata, Inode, InodeId, MODE_MASK, MemFs, normalize_entry_path, parent_path};
+use crate::{
+    EntryMetadata, FileData, Inode, InodeId, MODE_MASK, MemFs, normalize_entry_path, parent_path,
+};
 use patina_dst_abi::FsEntryKind;
 
 /// Magic prefix identifying an encoded [`FsSnapshot`] stream.
@@ -26,8 +28,10 @@ const MAGIC: &[u8; 8] = b"PATFSSNP";
 /// attributes, by the node they belong to. Version 5 kept symlinks as
 /// per-path records and FIFOs as a section of their own. Version 7 stores
 /// every timestamp as signed 128-bit nanoseconds (a time before the epoch, or
-/// past what 64-bit nanoseconds hold).
-const VERSION: u32 = 7;
+/// past what 64-bit nanoseconds hold). Version 8 stores a node's contents
+/// sparsely — its length, the runs of written blocks and the unwritten
+/// extents — so a hole costs nothing in a snapshot.
+const VERSION: u32 = 8;
 
 /// Deliberately conservative structural bounds for a restart handoff. The
 /// decoder checks them before allocating from untrusted bytes, so corrupt
@@ -128,7 +132,7 @@ impl FsSnapshot {
             bytes.extend_from_slice(&(inode.links as u64).to_le_bytes());
             encode_times(&mut bytes, &inode.times);
             bytes.extend_from_slice(&inode.mode.to_le_bytes());
-            encode_field(&mut bytes, &inode.contents);
+            encode_contents(&mut bytes, &inode.contents);
         }
         for (path, inode_id) in &self.filesystem.names {
             encode_path(&mut bytes, path);
@@ -164,7 +168,18 @@ impl FsSnapshot {
         }
         for inode in self.filesystem.inodes.values() {
             add_len(&mut total, 8 + 1 + 8 + TIMES_BYTES + 4)?;
-            add_field_len(&mut total, inode.contents.len(), "field length")?;
+            let runs = inode.contents.run_lengths();
+            preflight_count(runs.len(), "written run count")?;
+            add_len(&mut total, 8 + 8 + 8)?;
+            for (_, len) in &runs {
+                add_len(&mut total, 8)?;
+                let len = usize::try_from(*len)
+                    .map_err(|_| FsSnapshotError::LimitExceeded("field length"))?;
+                add_field_len(&mut total, len, "field length")?;
+            }
+            let unwritten = inode.contents.unwritten().count();
+            preflight_count(unwritten, "unwritten extent count")?;
+            add_len(&mut total, unwritten.saturating_mul(16))?;
         }
         for path in self.filesystem.names.keys() {
             add_path_len(&mut total, path)?;
@@ -228,7 +243,7 @@ impl FsSnapshot {
             }
             let times = reader.take_times()?;
             let mode = reader.take_mode()?;
-            let contents = reader.take_field()?;
+            let contents = reader.take_contents()?;
             inodes.insert(
                 inode_id,
                 Inode {
@@ -340,7 +355,11 @@ fn validate_snapshot_state(
         match inode.kind {
             // A symlink's contents are its target: a path string, never NUL.
             FsEntryKind::Symlink => {
-                if std::str::from_utf8(&inode.contents).is_err() || inode.contents.contains(&0) {
+                let target = inode.contents.to_vec();
+                if std::str::from_utf8(&target).is_err()
+                    || target.contains(&0)
+                    || inode.contents.sectors() != target.len().div_ceil(4096) as u64 * 8
+                {
                     return Err(FsSnapshotError::Malformed(
                         "symlink target is not a NUL-free string",
                     ));
@@ -350,7 +369,7 @@ fn validate_snapshot_state(
             // its inode exists for identity, the link count and the mode.
             // Contents there would be state no reader can ever see.
             FsEntryKind::Fifo | FsEntryKind::Socket | FsEntryKind::CharDevice => {
-                if !inode.contents.is_empty() {
+                if inode.contents != FileData::default() {
                     return Err(FsSnapshotError::Malformed(
                         "a node without bytes carries contents",
                     ));
@@ -545,6 +564,24 @@ fn encode_path(bytes: &mut Vec<u8>, path: &str) {
     encode_field(bytes, path.as_bytes());
 }
 
+/// A node's contents: its length, its runs of written blocks (each its first
+/// block and its bytes, clipped to the length), and its unwritten extents.
+fn encode_contents(bytes: &mut Vec<u8>, contents: &FileData) {
+    bytes.extend_from_slice(&contents.len().to_le_bytes());
+    let runs = contents.run_lengths();
+    bytes.extend_from_slice(&(runs.len() as u64).to_le_bytes());
+    for (first, len) in runs {
+        bytes.extend_from_slice(&first.to_le_bytes());
+        bytes.extend_from_slice(&len.to_le_bytes());
+        contents.append_run(first, len, bytes);
+    }
+    bytes.extend_from_slice(&(contents.unwritten().count() as u64).to_le_bytes());
+    for (first, end) in contents.unwritten() {
+        bytes.extend_from_slice(&first.to_le_bytes());
+        bytes.extend_from_slice(&end.to_le_bytes());
+    }
+}
+
 fn encode_field(bytes: &mut Vec<u8>, field: &[u8]) {
     bytes.extend_from_slice(&(field.len() as u64).to_le_bytes());
     bytes.extend_from_slice(field);
@@ -608,6 +645,19 @@ impl<'a> Reader<'a> {
         let len =
             usize::try_from(len).map_err(|_| FsSnapshotError::LimitExceeded("field length"))?;
         Ok(self.take(len)?.to_vec())
+    }
+
+    fn take_contents(&mut self) -> Result<FileData, FsSnapshotError> {
+        let len = self.take_u64()?;
+        let runs = (0..self.take_count("written run count")?)
+            .map(|_| Ok((self.take_u64()?, self.take_field()?)))
+            .collect::<Result<Vec<_>, FsSnapshotError>>()?;
+        let unwritten = (0..self.take_count("unwritten extent count")?)
+            .map(|_| Ok((self.take_u64()?, self.take_u64()?)))
+            .collect::<Result<Vec<_>, FsSnapshotError>>()?;
+        FileData::from_stored(len, &runs, &unwritten).ok_or(FsSnapshotError::Malformed(
+            "file contents are not in canonical sparse form",
+        ))
     }
 
     fn take_string(&mut self, field: &'static str) -> Result<String, FsSnapshotError> {
@@ -789,13 +839,63 @@ mod tests {
             bytes.extend_from_slice(&i128::from(*mtime).to_le_bytes());
             bytes.extend_from_slice(&[0u8; 32]);
             bytes.extend_from_slice(&crate::FILE_MODE.to_le_bytes());
-            encode_field(&mut bytes, contents);
+            encode_contents(&mut bytes, &FileData::from_bytes(contents));
         }
         for (path, ino) in names {
             encode_path(&mut bytes, path);
             bytes.extend_from_slice(&ino.to_le_bytes());
         }
         bytes
+    }
+
+    #[test]
+    fn a_sparse_file_crosses_a_restart_with_its_holes_and_reservations() {
+        // 1 GiB long, two written blocks, a reservation inside and one past
+        // the end: the snapshot carries the blocks, not the length, and the
+        // restarted file answers its size, blocks and holes as before.
+        let mut fs = MemFs::new();
+        let fd = fs
+            .open(
+                FsClock::EPOCH,
+                "/tmp/sparse",
+                OpenFlags::create_truncate_write(),
+            )
+            .unwrap();
+        fs.write_at(FsClock::EPOCH, fd, 1 << 30, b"end").unwrap();
+        fs.write_at(FsClock::EPOCH, fd, 5000, b"middle").unwrap();
+        for (offset, len) in [(1 << 20, 1 << 16), ((1 << 30) + 4096, 1 << 16)] {
+            fs.allocate(
+                FsClock::EPOCH,
+                fd,
+                offset,
+                len,
+                patina_dst_abi::FsAllocateMode::Reserve,
+                true,
+            )
+            .unwrap();
+        }
+        let before = fs.fd_metadata(fd).unwrap();
+        let encoded = fs.export_snapshot().encode().unwrap();
+        assert!(encoded.len() < 16 * 1024, "{} bytes", encoded.len());
+        let mut restarted = FsSnapshot::decode(&encoded).unwrap().into_memfs();
+        assert_eq!(restarted.export_snapshot().encode().unwrap(), encoded);
+        let fd = restarted
+            .open(FsClock::EPOCH, "/tmp/sparse", read_write())
+            .unwrap();
+        let after = restarted.fd_metadata(fd).unwrap();
+        assert_eq!((after.len, after.blocks), (before.len, before.blocks));
+        assert_eq!(after.blocks, (2 + 32) * 8);
+        let seek = |fs: &mut MemFs, offset: i64, whence| fs.seek(fd, offset, whence).ok();
+        assert_eq!(seek(&mut restarted, 0, SeekWhence::Data), Some(4096));
+        assert_eq!(seek(&mut restarted, 5000, SeekWhence::Hole), Some(8192));
+        assert_eq!(
+            seek(&mut restarted, 1 << 20, SeekWhence::Data),
+            Some(1 << 30)
+        );
+        assert_eq!(
+            restarted.read_at(FsClock::EPOCH, fd, 5000, 6).unwrap(),
+            b"middle"
+        );
     }
 
     #[test]

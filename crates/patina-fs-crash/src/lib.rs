@@ -533,7 +533,7 @@ impl CrashFs {
         }
     }
 
-    pub fn contents(&self, path: &str) -> DriverResult<&[u8]> {
+    pub fn contents(&self, path: &str) -> DriverResult<Vec<u8>> {
         self.live.contents(path)
     }
 
@@ -831,10 +831,7 @@ impl CrashFs {
                 baseline
             } else {
                 match self.live.contents(path) {
-                    Ok(current) => {
-                        let current = current.to_vec();
-                        self.torn_merge(&baseline, &current, partial_region)
-                    }
+                    Ok(current) => self.torn_merge(&baseline, &current, partial_region),
                     Err(_) => baseline,
                 }
             };
@@ -1019,7 +1016,7 @@ impl CrashFs {
             .and_then(|metadata| {
                 self.live
                     .symlink_target(path)
-                    .map(|target| (metadata.ino, target.to_owned()))
+                    .map(|target| (metadata.ino, target))
             });
         live.or_else(|| {
             self.durable
@@ -1280,7 +1277,7 @@ impl FsDriver for CrashFs {
             .insert(metadata.ino, DurableTimes::from(metadata));
         match metadata.kind {
             FsEntryKind::File => {
-                let bytes = self.live.fd_contents(fd)?.to_vec();
+                let bytes = self.live.fd_file_data(fd)?.to_vec();
                 self.staged_content.insert(metadata.ino, bytes);
                 self.dirty.remove(&metadata.ino);
             }
@@ -1763,7 +1760,7 @@ fn enumerate(fs: &MemFs) -> Baseline {
                 baseline.dirs.insert(path);
             }
             FsEntryKind::File => {
-                let contents = fs.contents(&path).map(<[u8]>::to_vec).unwrap_or_default();
+                let contents = fs.contents(&path).unwrap_or_default();
                 baseline.files.insert(
                     path,
                     BaselineFile {
@@ -2263,7 +2260,7 @@ mod tests {
         let fd = fs.open(FsClock::EPOCH, "/f", write_only()).unwrap();
         fs.write(FsClock::EPOCH, fd, b"BBBBBBBB").unwrap();
         fs.crash().unwrap();
-        fs.contents("/f").unwrap().to_vec()
+        fs.contents("/f").unwrap()
     }
 
     #[test]
@@ -2330,7 +2327,7 @@ mod tests {
         let fd = fs.open(FsClock::EPOCH, "/f", write_only()).unwrap();
         fs.write(FsClock::EPOCH, fd, b"BBBBBBBB").unwrap();
         fs.crash().unwrap();
-        fs.contents("/f").unwrap().to_vec()
+        fs.contents("/f").unwrap()
     }
 
     #[test]
@@ -3281,7 +3278,7 @@ mod tests {
     }
 
     fn bytes_at(fs: &mut CrashFs, path: &str) -> Option<Vec<u8>> {
-        fs.contents(path).ok().map(<[u8]>::to_vec)
+        fs.contents(path).ok()
     }
 
     /// Overwrite `path`'s bytes in place and `fsync` them.

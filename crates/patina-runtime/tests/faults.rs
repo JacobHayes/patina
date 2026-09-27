@@ -44,7 +44,7 @@ fn write_wal_and_reopen(seed: u64, crash: Option<CrashOp>) -> usize {
             .snapshot
             .into_memfs()
             .contents("/commit.log")
-            .map_or(0, <[u8]>::len);
+            .map_or(0, |bytes| bytes.len());
     }
 
     let fd = context
@@ -86,7 +86,7 @@ fn automatic_crash_returns_uncatchable_restart_control() {
             .snapshot
             .into_memfs()
             .contents("/commit.log")
-            .unwrap_or(b""),
+            .unwrap_or_default(),
         b""
     );
 }
@@ -128,12 +128,7 @@ fn byte_granularity_crash_exports_a_torn_snapshot() {
     let RuntimeError::InjectedFsCrash(control) = error else {
         panic!("expected injected crash control, got {error}");
     };
-    let recovered = control
-        .snapshot
-        .into_memfs()
-        .contents("/db")
-        .unwrap()
-        .to_vec();
+    let recovered = control.snapshot.into_memfs().contents("/db").unwrap();
     assert!(recovered.contains(&b'B'), "no live prefix survived");
     assert!(recovered.contains(&b'A'), "no durable suffix remained");
     assert_ne!(recovered, vec![b'A'; 4096]);

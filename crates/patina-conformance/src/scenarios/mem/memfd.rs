@@ -2,7 +2,8 @@
 //! fcntl "File Sealing"; mm/memfd.c, mm/shmem.c):
 //!
 //! * a memfd is an empty regular file that reads, writes, seeks and resizes
-//!   like one; `MFD_CLOEXEC` sets `FD_CLOEXEC`; an unknown flag and a name
+//!   like one, and a store through a shared mapping allocates its page
+//!   (`st_blocks`, `SEEK_DATA`) at once; `MFD_CLOEXEC` sets `FD_CLOEXEC`; an unknown flag and a name
 //!   past 249 bytes are `EINVAL`;
 //! * without `MFD_ALLOW_SEALING` it carries `F_SEAL_SEAL` and refuses new
 //!   seals (`EPERM`); with it, seals start empty;
@@ -62,6 +63,30 @@ pub fn run(p: &Probe) {
         "fstat reports the new size",
         r == 0 && st.is_some_and(|st| st.st_size == 2 * page as i64),
     );
+    // Only the written page holds a block; a store through a shared mapping
+    // allocates the second at the fault, before any write-back.
+    let (r, view) = p.mmap(
+        "s",
+        &null,
+        2 * page,
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED,
+        fd,
+        0,
+    );
+    p.require("map it shared and writable", r >= 0);
+    let view = view.unwrap();
+    view.store(page, b'x');
+    let (r, st) = p.fstat_masked(fd, 0o666);
+    p.check(
+        "a store through a shared mapping allocates its page",
+        r == 0 && st.is_some_and(|st| st.st_blocks == 2 * page as i64 / 512),
+    );
+    p.check(
+        "and SEEK_DATA finds it",
+        p.lseek(fd, page as i64, SEEK_DATA) == page as i64,
+    );
+    p.check("unmap it", p.munmap(&view.at(0), 2 * page) == 0);
     p.check(
         "without MFD_ALLOW_SEALING it carries F_SEAL_SEAL",
         p.fcntl(fd, F_GET_SEALS, 0) == i64::from(F_SEAL_SEAL),

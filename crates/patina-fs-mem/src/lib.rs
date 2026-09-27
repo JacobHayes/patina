@@ -1,8 +1,10 @@
 //! A small deterministic in-memory filesystem driver.
 
+pub mod data;
 pub mod image;
 pub mod snapshot;
 
+pub use data::{BLOCK_SIZE, BlockState, FileData};
 pub use image::{FsImage, FsImageEntry, FsImageError};
 pub use snapshot::{FsSnapshot, FsSnapshotError};
 
@@ -31,6 +33,17 @@ pub const DIRECTORY_MODE: u32 = 0o755;
 /// A symlink leaf. Linux ignores a symlink's own mode entirely and reports the
 /// conventional `0o777`; nothing here consults it.
 pub const SYMLINK_MODE: u32 = 0o777;
+
+/// The length below which ext4 stores a symlink's target in the inode
+/// (`EXT4_N_BLOCKS * 4`, `ext4_inode_is_fast_symlink`).
+const FAST_SYMLINK_MAX: u64 = 60;
+
+/// The volume's file size limit: ext4's `s_maxbytes` for an extent-mapped
+/// file on 4 KiB blocks (`ext4_max_size`), 2^32 - 1 blocks.
+pub const VOLUME_MAX_BYTES: u64 = ((1 << 32) - 1) << 12;
+/// tmpfs's and hugetlbfs's `s_maxbytes`, a memfd's: `MAX_LFS_FILESIZE`, the
+/// largest signed offset on a 64-bit kernel.
+const MAX_LFS_FILESIZE: u64 = i64::MAX as u64;
 
 /// The `relatime` refresh window: an access time at least this old is updated
 /// by the next read even when it is newer than `mtime`/`ctime` (Linux's
@@ -217,8 +230,8 @@ struct Inode {
     /// `S_IFREG` with nothing left to look it up by.
     kind: FsEntryKind,
     /// A regular file's bytes, or a symlink's target; empty for every other
-    /// kind.
-    contents: Vec<u8>,
+    /// kind. Stored sparsely ([`FileData`]): a hole costs nothing.
+    contents: FileData,
     /// Names referencing this node — POSIX `st_nlink`.
     links: u32,
     /// Open descriptions (and pipe endpoints) referencing it. A real kernel
@@ -246,11 +259,44 @@ use patina_dst_abi::seals::{
 };
 
 impl Inode {
+    /// The node's filesystem's `s_maxbytes`: a memfd is on tmpfs or
+    /// hugetlbfs, anything else on the ext4 volume.
+    fn max_bytes(&self) -> u64 {
+        if self.seals.is_some() || self.huge_page != 0 {
+            MAX_LFS_FILESIZE
+        } else {
+            VOLUME_MAX_BYTES
+        }
+    }
+
+    /// How much of a write of `len` bytes at `start` the node takes:
+    /// `rw_verify_area` refuses an end past the largest signed offset
+    /// (`EINVAL`), and `generic_write_check_limits` a start at or past the
+    /// size limit (`EFBIG`) and shortens a write that would cross it.
+    fn write_limit(&self, start: u64, len: usize) -> DriverResult<usize> {
+        if start
+            .checked_add(len as u64)
+            .is_none_or(|end| end > MAX_LFS_FILESIZE)
+        {
+            return Err(EffectError::new(
+                ErrorCode::InvalidInput,
+                "virtual write range overflows a file offset",
+            ));
+        }
+        let max = self.max_bytes();
+        if start >= max {
+            return Err(too_big(
+                "virtual write starts at or past the file size limit",
+            ));
+        }
+        Ok(usize::try_from(max - start).map_or(len, |room| len.min(room)))
+    }
+
     /// A write reaching `end`: a hugetlbfs file has no write method
     /// (`vfs_write`'s `FMODE_CAN_WRITE`), then the node's seals
     /// (`shmem_write_begin`): a write seal refuses every write, a grow seal one
     /// past the end.
-    fn check_write_seals(&self, end: usize) -> DriverResult<()> {
+    fn check_write_seals(&self, end: u64) -> DriverResult<()> {
         if self.huge_page != 0 {
             return Err(EffectError::new(
                 ErrorCode::InvalidInput,
@@ -268,8 +314,8 @@ impl Inode {
 
     /// A length change to `len`: a hugetlbfs file sizes in whole huge pages
     /// (`hugetlbfs_setattr`), then the node's seals (`shmem_setattr`).
-    fn check_resize_seals(&self, len: usize) -> DriverResult<()> {
-        if self.huge_page != 0 && len as u64 % self.huge_page != 0 {
+    fn check_resize_seals(&self, len: u64) -> DriverResult<()> {
+        if self.huge_page != 0 && len % self.huge_page != 0 {
             return Err(EffectError::new(
                 ErrorCode::InvalidInput,
                 "a hugetlbfs file sizes in whole huge pages",
@@ -284,6 +330,11 @@ impl Inode {
         }
         Ok(())
     }
+}
+
+/// `EFBIG`: past the node's filesystem's size limit.
+fn too_big(message: &str) -> EffectError {
+    EffectError::new(ErrorCode::FileTooBig, message)
 }
 
 fn sealed() -> EffectError {
@@ -389,39 +440,45 @@ impl MemFs {
 
     /// Seed a file into the initial image. It is stamped at the epoch, like the
     /// image's directories: nothing in the run created it.
-    pub fn with_file(mut self, path: &str, contents: impl Into<Vec<u8>>) -> DriverResult<Self> {
+    pub fn with_file(self, path: &str, contents: impl Into<Vec<u8>>) -> DriverResult<Self> {
+        self.with_file_data(path, FileData::from_bytes(&contents.into()))
+    }
+
+    /// Seed a file with sparse contents, holes and reservations as they are.
+    pub fn with_file_data(mut self, path: &str, contents: FileData) -> DriverResult<Self> {
         let path = normalize_path(path)?;
         self.insert_parent_directories(FsClock::EPOCH, &path);
-        let inode = self.allocate_inode(
-            FsClock::EPOCH,
-            FsEntryKind::File,
-            contents.into(),
-            FILE_MODE,
-        );
+        let inode = self.allocate_inode(FsClock::EPOCH, FsEntryKind::File, contents, FILE_MODE);
         self.names.insert(path, inode);
         Ok(self)
     }
 
-    pub fn contents(&self, path: &str) -> DriverResult<&[u8]> {
+    /// Every byte of the regular file at `path`, its holes read as zeros.
+    pub fn contents(&self, path: &str) -> DriverResult<Vec<u8>> {
+        Ok(self.file_data(path)?.to_vec())
+    }
+
+    /// The stored contents of the regular file at `path`: its written blocks,
+    /// holes and reservations.
+    pub fn file_data(&self, path: &str) -> DriverResult<&FileData> {
         let path = normalize_path(path)?;
         self.ensure_no_intermediate_symlink(&path)?;
         let inode = self.file_inode(&path)?;
-        Ok(self
+        Ok(&self
             .inodes
             .get(&inode)
             .expect("file path references an inode")
-            .contents
-            .as_slice())
+            .contents)
     }
 
-    /// The bytes of the regular file `fd` is open on, whatever names it has
-    /// now (none, once unlinked).
-    pub fn fd_contents(&self, fd: Fd) -> DriverResult<&[u8]> {
+    /// The stored contents of the regular file `fd` is open on, whatever
+    /// names it has now (none, once unlinked).
+    pub fn fd_file_data(&self, fd: Fd) -> DriverResult<&FileData> {
         let node = self.description(fd)?.node;
         self.inodes
             .get(&node)
             .filter(|inode| inode.kind == FsEntryKind::File)
-            .map(|inode| inode.contents.as_slice())
+            .map(|inode| &inode.contents)
             .ok_or_else(|| {
                 EffectError::new(
                     ErrorCode::InvalidInput,
@@ -501,12 +558,12 @@ impl MemFs {
     }
 
     /// A symlink's stored target WITHOUT permission enforcement.
-    pub fn symlink_target(&self, path: &str) -> Option<&str> {
+    pub fn symlink_target(&self, path: &str) -> Option<String> {
         let path = normalize_entry_path(path).ok()?;
         let inode = self
             .leaf(&path)
             .filter(|inode| inode.kind == FsEntryKind::Symlink)?;
-        std::str::from_utf8(&inode.contents).ok()
+        String::from_utf8(inode.contents.to_vec()).ok()
     }
 
     /// The extended attributes of the entry at `path` WITHOUT permission
@@ -728,7 +785,7 @@ impl MemFs {
         &mut self,
         clock: FsClock,
         kind: FsEntryKind,
-        contents: Vec<u8>,
+        contents: FileData,
         mode: u32,
     ) -> InodeId {
         let inode = self.next_inode;
@@ -1022,7 +1079,19 @@ impl MemFs {
             )
         })?;
         let len = match inode.kind {
-            FsEntryKind::File | FsEntryKind::Symlink => inode.contents.len() as u64,
+            FsEntryKind::File | FsEntryKind::Symlink => inode.contents.len(),
+            FsEntryKind::Directory
+            | FsEntryKind::Fifo
+            | FsEntryKind::Socket
+            | FsEntryKind::CharDevice => 0,
+        };
+        let blocks = match inode.kind {
+            FsEntryKind::File => inode.contents.sectors(),
+            // ext4 keeps a target shorter than the inode's 60-byte block map
+            // in the inode itself (a fast symlink, no block); a longer one
+            // takes one block.
+            FsEntryKind::Symlink if len < FAST_SYMLINK_MAX => 0,
+            FsEntryKind::Symlink => BLOCK_SIZE / 512,
             FsEntryKind::Directory
             | FsEntryKind::Fifo
             | FsEntryKind::Socket
@@ -1031,8 +1100,7 @@ impl MemFs {
         Ok(FsMetadata {
             kind: inode.kind,
             len,
-            // The volume holds a file densely: every block up to its length.
-            blocks: len.div_ceil(4096) * 8,
+            blocks,
             ino: node,
             nlink: inode.links,
             atime_nanos: inode.times.atime_nanos,
@@ -1326,7 +1394,8 @@ impl FsDriver for MemFs {
                 // The caller's own creation mode — `open`'s third argument, which
                 // the kernel reads only on the branch that actually creates the
                 // entry, already under the caller's umask.
-                let inode = self.allocate_inode(clock, FsEntryKind::File, Vec::new(), flags.mode);
+                let inode =
+                    self.allocate_inode(clock, FsEntryKind::File, FileData::default(), flags.mode);
                 self.names.insert(path.clone(), inode);
                 self.stamp_directory(clock, parent_path(&path));
             } else {
@@ -1355,18 +1424,20 @@ impl FsDriver for MemFs {
                     .inodes
                     .get_mut(&inode)
                     .expect("file path references an inode");
-                inode.contents.clear();
+                inode.contents.set_len(0);
                 inode.times.data_changed(clock);
             }
         }
 
         let node = self.file_inode(&path)?;
         let cursor = if flags.append {
-            self.inodes
+            let len = self
+                .inodes
                 .get(&node)
                 .expect("file path references an inode")
                 .contents
-                .len()
+                .len();
+            usize::try_from(len).unwrap_or(usize::MAX)
         } else {
             0
         };
@@ -1393,9 +1464,7 @@ impl FsDriver for MemFs {
             .inodes
             .get_mut(&inode)
             .expect("open handle references a file");
-        let file = &inode.contents;
-        let end = start.saturating_add(max_len).min(file.len());
-        let bytes = file[start.min(end)..end].to_vec();
+        let bytes = inode.contents.read(start as u64, max_len);
         if max_len != 0 {
             inode.times.accessed(clock);
         }
@@ -1427,18 +1496,23 @@ impl FsDriver for MemFs {
             .inodes
             .get_mut(&inode)
             .expect("open handle references a file");
-        let start = if append { inode.contents.len() } else { cursor };
-        let end = start.checked_add(bytes.len()).ok_or_else(|| {
-            EffectError::new(ErrorCode::InvalidInput, "virtual file size overflowed")
+        let start = if append {
+            inode.contents.len()
+        } else {
+            cursor as u64
+        };
+        let bytes = &bytes[..inode.write_limit(start, bytes.len())?];
+        let end = start + bytes.len() as u64;
+        let cursor = usize::try_from(end).map_err(|_| {
+            EffectError::new(
+                ErrorCode::InvalidInput,
+                "virtual write end exceeds the addressable range",
+            )
         })?;
         inode.check_write_seals(end)?;
-        let file = &mut inode.contents;
-        if file.len() < end {
-            Self::resize_contents(file, end)?;
-        }
-        file[start..end].copy_from_slice(bytes);
+        inode.contents.write(start, bytes);
         inode.times.data_changed(clock);
-        self.description_mut(fd)?.cursor = end;
+        self.description_mut(fd)?.cursor = cursor;
         Ok(bytes.len())
     }
 
@@ -1515,39 +1589,43 @@ impl FsDriver for MemFs {
         }
         let cursor = description.cursor;
         let inode = self.handle_inode(fd)?;
-        let size = self
+        let inode = self
             .inodes
             .get(&inode)
-            .expect("open handle references a file")
-            .contents
-            .len();
+            .expect("open handle references a file");
+        let (contents, max) = (&inode.contents, inode.max_bytes());
         let base = match whence {
             SeekWhence::Start => 0,
             SeekWhence::Current => cursor,
-            SeekWhence::End => size,
-            // The file holds its bytes densely: every byte below the size is
-            // data and the one hole is the implicit one at the end.
+            SeekWhence::End => usize::try_from(contents.len()).unwrap_or(usize::MAX),
+            // `iomap_seek_data`/`iomap_seek_hole` over the blocks: only a
+            // written block is data (an unwritten one reads as a hole), and
+            // the end is the last hole.
             SeekWhence::Data | SeekWhence::Hole => {
-                let Some(offset) = usize::try_from(offset).ok().filter(|&offset| offset < size)
-                else {
-                    return Err(no_such_position(offset));
-                };
-                let position = if whence == SeekWhence::Data {
-                    offset
-                } else {
-                    size
-                };
-                self.description_mut(fd)?.cursor = position;
-                return Ok(position as u64);
+                let found = u64::try_from(offset).ok().and_then(|offset| {
+                    if whence == SeekWhence::Data {
+                        contents.seek_data(offset)
+                    } else {
+                        contents.seek_hole(offset)
+                    }
+                });
+                let position = found.ok_or_else(|| no_such_position(offset))?;
+                self.description_mut(fd)?.cursor = position as usize;
+                return Ok(position);
             }
         };
         let position = i128::try_from(base).expect("usize fits in i128") + i128::from(offset);
-        let position = usize::try_from(position).map_err(|_| {
-            EffectError::new(
-                ErrorCode::InvalidInput,
-                format!("virtual seek before start or beyond addressable range: {position}"),
-            )
-        })?;
+        // `vfs_setpos`: a position before the start, or past the node's
+        // size limit, is EINVAL.
+        let position = usize::try_from(position)
+            .ok()
+            .filter(|position| *position as u64 <= max)
+            .ok_or_else(|| {
+                EffectError::new(
+                    ErrorCode::InvalidInput,
+                    format!("virtual seek before the start or past the size limit: {position}"),
+                )
+            })?;
         self.description_mut(fd)?.cursor = position;
         u64::try_from(position).map_err(|_| {
             EffectError::new(
@@ -1683,7 +1761,7 @@ impl FsDriver for MemFs {
                 format!("a device node needs CAP_MKNOD: {path}"),
             )
         })?;
-        let inode = self.allocate_inode(clock, kind, Vec::new(), mode);
+        let inode = self.allocate_inode(clock, kind, FileData::default(), mode);
         self.names.insert(path.clone(), inode);
         self.stamp_directory(clock, parent_path(&path));
         Ok(())
@@ -1698,7 +1776,7 @@ impl FsDriver for MemFs {
         if self.path_exists(&from) {
             return Ok(());
         }
-        let inode = self.allocate_inode(clock, FsEntryKind::CharDevice, Vec::new(), 0);
+        let inode = self.allocate_inode(clock, FsEntryKind::CharDevice, FileData::default(), 0);
         self.names.insert(from, inode);
         Ok(())
     }
@@ -1766,11 +1844,10 @@ impl FsDriver for MemFs {
             ));
         }
         let inode = self.handle_inode(fd)?;
-        let target = usize::try_from(len).unwrap_or(usize::MAX);
         self.inodes
             .get(&inode)
             .expect("open handle references a file")
-            .check_resize_seals(target)?;
+            .check_resize_seals(len)?;
         Self::truncate_inode(self.inodes.get_mut(&inode), clock, len)
     }
 
@@ -1839,18 +1916,20 @@ impl FsDriver for MemFs {
                 "virtual allocation range overflowed",
             )
         })?;
-        let (start, end) = (usize::try_from(offset), usize::try_from(end));
-        let (Ok(start), Ok(end)) = (start, end) else {
-            return Err(EffectError::new(
-                ErrorCode::InvalidInput,
-                "virtual allocation range exceeds the addressable range",
-            ));
-        };
         let inode = self.handle_inode(fd)?;
         let inode = self
             .inodes
             .get_mut(&inode)
             .expect("open handle references a file");
+        // `vfs_fallocate`: a range past the size limit, whatever the mode.
+        if end > inode.max_bytes() {
+            return Err(too_big("virtual allocation past the file size limit"));
+        }
+        // The kernel refuses an empty range before this (`EINVAL`); here it
+        // changes nothing.
+        if len == 0 {
+            return Ok(());
+        }
         // `hugetlbfs_fallocate` with no huge page to allocate: a hole punch has
         // nothing to free, an allocation fails.
         if inode.huge_page != 0 {
@@ -1870,14 +1949,23 @@ impl FsDriver for MemFs {
             return Err(sealed());
         }
         let file = &mut inode.contents;
-        if !keep_size && end > file.len() {
-            Self::resize_contents(file, end)?;
-        }
-        if zero {
-            let end = end.min(file.len());
-            if start < end {
-                file[start..end].fill(0);
+        let size = file.len();
+        match mode {
+            FsAllocateMode::Reserve => file.reserve(offset, end),
+            FsAllocateMode::ZeroRange => file.zero_range(offset, end),
+            // tmpfs frees whatever the range covers (`shmem_truncate_range`).
+            FsAllocateMode::PunchHole if inode.seals.is_some() => file.punch(offset, end),
+            // `ext4_punch_hole`: nothing at or past the size, and a range
+            // past it ends with the page that holds the size, so a
+            // reservation further out survives.
+            FsAllocateMode::PunchHole if offset < size => {
+                let past_size = size - size % BLOCK_SIZE + BLOCK_SIZE;
+                file.punch(offset, end.min(past_size));
             }
+            FsAllocateMode::PunchHole => {}
+        }
+        if !keep_size && end > size {
+            file.set_len(end);
         }
         inode.times.data_changed(clock);
         Ok(())
@@ -2217,7 +2305,7 @@ impl FsDriver for MemFs {
         let inode = self.allocate_inode(
             clock,
             FsEntryKind::Symlink,
-            target.as_bytes().to_vec(),
+            FileData::from_bytes(target.as_bytes()),
             SYMLINK_MODE,
         );
         self.names.insert(link_path.clone(), inode);
@@ -2237,7 +2325,7 @@ impl FsDriver for MemFs {
             let inode = self.inodes.get_mut(&ino).expect("name references an inode");
             // Reading a link is a read of the link: `atime`, under the policy.
             inode.times.accessed(clock);
-            return Ok(String::from_utf8_lossy(&inode.contents).into_owned());
+            return Ok(String::from_utf8_lossy(&inode.contents.to_vec()).into_owned());
         }
         // An entry that exists but is not a symlink is `EINVAL` (readlink(2)),
         // distinguishable from a name that is not there at all.
@@ -2411,7 +2499,7 @@ impl FsDriver for MemFs {
             node,
             Inode {
                 kind: FsEntryKind::File,
-                contents: Vec::new(),
+                contents: FileData::default(),
                 links: 0,
                 openers: 0,
                 times: Times::created(clock),
@@ -2515,28 +2603,16 @@ impl MemFs {
         if bytes.is_empty() {
             return Ok(0);
         }
-        let start = usize::try_from(offset).map_err(|_| {
-            EffectError::new(
-                ErrorCode::InvalidInput,
-                "virtual write offset exceeds the addressable range",
-            )
-        })?;
-        let end = start.checked_add(bytes.len()).ok_or_else(|| {
-            EffectError::new(ErrorCode::InvalidInput, "virtual file size overflowed")
-        })?;
         let inode = self.handle_inode(fd)?;
         let inode = self
             .inodes
             .get_mut(&inode)
             .expect("open handle references a file");
+        let bytes = &bytes[..inode.write_limit(offset, bytes.len())?];
         if sealed {
-            inode.check_write_seals(end)?;
+            inode.check_write_seals(offset + bytes.len() as u64)?;
         }
-        let file = &mut inode.contents;
-        if file.len() < end {
-            Self::resize_contents(file, end)?;
-        }
-        file[start..end].copy_from_slice(bytes);
+        inode.contents.write(offset, bytes);
         inode.times.data_changed(clock);
         Ok(bytes.len())
     }
@@ -2693,27 +2769,15 @@ impl MemFs {
         Err(not_found(path))
     }
 
-    /// Resize a file's contents (zero-filling growth) and stamp `mtime`/
-    /// `ctime` — `do_truncate` moves them even when the length is unchanged.
-    fn resize_contents(contents: &mut Vec<u8>, len: usize) -> DriverResult<()> {
-        if len > contents.len() {
-            contents.try_reserve(len - contents.len()).map_err(|_| {
-                EffectError::new(ErrorCode::NoSpace, "virtual filesystem capacity exhausted")
-            })?;
-        }
-        contents.resize(len, 0);
-        Ok(())
-    }
-
+    /// Set a file's length and stamp `mtime`/`ctime` — `do_truncate` moves
+    /// them even when the length is unchanged. Growing past the size limit
+    /// is `EFBIG` (`inode_newsize_ok`).
     fn truncate_inode(inode: Option<&mut Inode>, clock: FsClock, len: u64) -> DriverResult<()> {
-        let len = usize::try_from(len).map_err(|_| {
-            EffectError::new(
-                ErrorCode::InvalidInput,
-                "virtual file length exceeds the addressable range",
-            )
-        })?;
         let inode = inode.expect("a checked handle or name references an inode");
-        Self::resize_contents(&mut inode.contents, len)?;
+        if len > inode.contents.len() && len > inode.max_bytes() {
+            return Err(too_big("virtual truncate past the file size limit"));
+        }
+        inode.contents.set_len(len);
         inode.times.data_changed(clock);
         Ok(())
     }
@@ -4395,6 +4459,426 @@ mod tests {
         }
     }
 
+    /// One step of a [`sparse_allocation_is_ext4s`] row.
+    #[derive(Clone, Copy)]
+    enum Step {
+        /// `pwrite` of that many `x` bytes at the offset.
+        Write(u64, u64),
+        Truncate(u64),
+        /// `fallocate(mode | keep_size, offset, len)`.
+        Allocate(FsAllocateMode, bool, u64, u64),
+    }
+
+    #[test]
+    fn size_limits_are_the_nodes_filesystems() {
+        // Each row is one call on a fresh empty file, on the volume (ext4's
+        // s_maxbytes) or a memfd (tmpfs's MAX_LFS_FILESIZE), and its answer:
+        // the bytes written or the size reached, or the error code.
+        const MAX: u64 = VOLUME_MAX_BYTES;
+        const OFF_MAX: u64 = i64::MAX as u64;
+        #[derive(Clone, Copy)]
+        enum Call {
+            Pwrite(u64, usize),
+            /// A cursor write after seeking to the offset.
+            Write(u64, usize),
+            Truncate(u64),
+            Reserve(u64, u64),
+            /// A seek to the first offset, then one by the whence and
+            /// offset.
+            Seek(u64, SeekWhence, i64),
+        }
+        use Call::{Pwrite, Reserve, Seek, Truncate, Write};
+        use ErrorCode::{FileTooBig, InvalidInput};
+        use SeekWhence::{Current, End, Start};
+        let rows: &[(&str, bool, Call, Result<u64, ErrorCode>)] = &[
+            (
+                "a pwrite at the limit",
+                false,
+                Pwrite(MAX, 10),
+                Err(FileTooBig),
+            ),
+            (
+                "a pwrite across the limit is shortened",
+                false,
+                Pwrite(MAX - 4, 10),
+                Ok(4),
+            ),
+            (
+                "a pwrite below the limit",
+                false,
+                Pwrite(MAX - 10, 10),
+                Ok(10),
+            ),
+            (
+                "a cursor write at the limit",
+                false,
+                Write(MAX, 1),
+                Err(FileTooBig),
+            ),
+            (
+                "a cursor write across the limit is shortened",
+                false,
+                Write(MAX - 1, 3),
+                Ok(1),
+            ),
+            (
+                "a write past the largest offset",
+                false,
+                Pwrite(OFF_MAX - 1, 10),
+                Err(InvalidInput),
+            ),
+            (
+                "a memfd write past the largest offset",
+                true,
+                Pwrite(OFF_MAX - 1, 10),
+                Err(InvalidInput),
+            ),
+            (
+                "a memfd write past the volume's limit",
+                true,
+                Pwrite(MAX, 10),
+                Ok(10),
+            ),
+            ("a truncate to the limit", false, Truncate(MAX), Ok(MAX)),
+            (
+                "a truncate past the limit",
+                false,
+                Truncate(MAX + 1),
+                Err(FileTooBig),
+            ),
+            (
+                "a memfd truncate past the volume's limit",
+                true,
+                Truncate(MAX + 1),
+                Ok(MAX + 1),
+            ),
+            (
+                "an allocation to the limit",
+                false,
+                Reserve(MAX - 4096, 4096),
+                Ok(MAX),
+            ),
+            (
+                "an allocation past the limit",
+                false,
+                Reserve(MAX - 4096, 4097),
+                Err(FileTooBig),
+            ),
+            (
+                "a seek to the limit",
+                false,
+                Seek(0, Start, MAX as i64),
+                Ok(MAX),
+            ),
+            (
+                "a seek past the limit",
+                false,
+                Seek(0, Start, MAX as i64 + 1),
+                Err(InvalidInput),
+            ),
+            (
+                "a relative seek past the limit",
+                false,
+                Seek(MAX, Current, 1),
+                Err(InvalidInput),
+            ),
+            (
+                "a seek from the end past the limit",
+                false,
+                Seek(0, End, MAX as i64 + 1),
+                Err(InvalidInput),
+            ),
+            (
+                "a memfd seek past the volume's limit",
+                true,
+                Seek(0, Start, MAX as i64 + 1),
+                Ok(MAX + 1),
+            ),
+        ];
+        for (what, memfd, call, expected) in rows {
+            let mut fs = MemFs::new();
+            let fd = if *memfd {
+                fs.create_anonymous(FsClock::EPOCH, "m", 0o600, 0, 0)
+                    .unwrap()
+            } else {
+                fs.open(FsClock::EPOCH, "/f", OpenFlags::create_truncate_write())
+                    .unwrap()
+            };
+            let clock = FsClock::EPOCH;
+            let answer = match *call {
+                Pwrite(offset, len) => fs
+                    .write_at(clock, fd, offset, &vec![b'x'; len])
+                    .map(|written| written as u64),
+                Write(offset, len) => {
+                    fs.seek(fd, offset as i64, SeekWhence::Start).unwrap();
+                    fs.write(clock, fd, &vec![b'x'; len])
+                        .map(|written| written as u64)
+                }
+                Truncate(len) => fs
+                    .set_len(clock, fd, len)
+                    .map(|()| fs.fd_metadata(fd).unwrap().len),
+                Reserve(offset, len) => fs
+                    .allocate(clock, fd, offset, len, FsAllocateMode::Reserve, false)
+                    .map(|()| fs.fd_metadata(fd).unwrap().len),
+                Seek(first, whence, offset) => {
+                    fs.seek(fd, first as i64, Start).unwrap();
+                    fs.seek(fd, offset, whence)
+                }
+            };
+            assert_eq!(answer.map_err(|error| error.code), *expected, "{what}");
+        }
+    }
+
+    const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn sparse_allocation_is_ext4s() {
+        // Each row is a file shaped by `steps` and what the host answered for
+        // it (Linux 6.8, ext4; XFS answered the same unless a row says
+        // otherwise): its size, `st_blocks`, and `SEEK_DATA`/`SEEK_HOLE` from
+        // each probe offset (`None` for ENXIO).
+        use FsAllocateMode::{PunchHole, Reserve, ZeroRange};
+        use Step::{Allocate, Truncate, Write};
+        type Row = (
+            &'static str,
+            &'static [Step],
+            u64,
+            u64,
+            &'static [(u64, Option<u64>, Option<u64>)],
+        );
+        let rows: &[Row] = &[
+            (
+                "five bytes 10 GiB into the file hold one block",
+                &[Write(10 * GIB, 5)],
+                10 * GIB + 5,
+                8,
+                &[
+                    (0, Some(10 * GIB), Some(0)),
+                    (10 * GIB + 2, Some(10 * GIB + 2), Some(10 * GIB + 5)),
+                    (10 * GIB - 100, Some(10 * GIB), Some(10 * GIB - 100)),
+                ],
+            ),
+            (
+                "two written ranges with a hole between",
+                &[Write(10 * GIB, 4096), Write(8192, 100)],
+                10 * GIB + 4096,
+                16,
+                &[
+                    (0, Some(8192), Some(0)),
+                    (8392, Some(8392), Some(12288)),
+                    (12288, Some(10 * GIB), Some(12288)),
+                ],
+            ),
+            (
+                "an extending truncate is a hole",
+                &[Truncate(1 << 20)],
+                1 << 20,
+                0,
+                &[(0, None, Some(0))],
+            ),
+            (
+                "a truncate past written bytes leaves the rest a hole",
+                &[Write(0, 100), Truncate(1 << 20)],
+                1 << 20,
+                8,
+                &[(0, Some(0), Some(4096)), (4096, None, Some(4096))],
+            ),
+            (
+                "KEEP_SIZE on an empty file allocates past the end",
+                &[Allocate(Reserve, true, 0, 4096)],
+                0,
+                8,
+                &[(0, None, None)],
+            ),
+            (
+                "a reservation past the size counts; the size is the last hole",
+                &[Write(0, 100), Allocate(Reserve, true, 0, 65536)],
+                100,
+                128,
+                &[(0, Some(0), Some(100)), (50, Some(50), Some(100))],
+            ),
+            (
+                "an unwritten reservation inside the file reads as a hole",
+                &[Truncate(1 << 20), Allocate(Reserve, true, 65536, 65536)],
+                1 << 20,
+                128,
+                &[(0, None, Some(0)), (65536, None, Some(65536))],
+            ),
+            (
+                "mode 0 grows the file with unwritten blocks",
+                &[Allocate(Reserve, false, 0, 65536)],
+                65536,
+                128,
+                &[(0, None, Some(0)), (100, None, Some(100))],
+            ),
+            (
+                "a write into a reservation writes that block alone",
+                &[Allocate(Reserve, false, 0, 65536), Write(8192, 1)],
+                65536,
+                128,
+                &[(0, Some(8192), Some(0)), (9000, Some(9000), Some(12288))],
+            ),
+            (
+                "a punched hole frees its whole blocks",
+                &[Write(0, 65536), Allocate(PunchHole, true, 4096, 8192)],
+                65536,
+                112,
+                &[
+                    (0, Some(0), Some(4096)),
+                    (4096, Some(12288), Some(4096)),
+                    (12288, Some(12288), Some(65536)),
+                ],
+            ),
+            (
+                "an unaligned punch zeroes its partial blocks in place",
+                &[Write(0, 65536), Allocate(PunchHole, true, 100, 8192)],
+                65536,
+                120,
+                &[
+                    (100, Some(100), Some(4096)),
+                    (4096, Some(8192), Some(4096)),
+                    (8292, Some(8292), Some(65536)),
+                ],
+            ),
+            (
+                "punching every block empties the file of blocks",
+                &[
+                    Write(0, 4096),
+                    Write(65536, 4096),
+                    Allocate(PunchHole, true, 0, 1 << 20),
+                ],
+                69632,
+                0,
+                &[(0, None, Some(0))],
+            ),
+            (
+                // XFS frees the reservation (16 blocks).
+                "ext4 punches nothing at or past the size",
+                &[
+                    Write(0, 8192),
+                    Allocate(Reserve, true, 0, 65536),
+                    Allocate(PunchHole, true, 8192, 65536),
+                ],
+                8192,
+                128,
+                &[],
+            ),
+            (
+                // XFS frees the reservation (8 blocks).
+                "ext4 ends a punch past the size with the page holding it",
+                &[
+                    Write(0, 5000),
+                    Allocate(Reserve, true, 0, 65536),
+                    Allocate(PunchHole, true, 4096, 65536),
+                ],
+                5000,
+                120,
+                &[],
+            ),
+            (
+                "a zeroed range over data keeps its blocks, unwritten",
+                &[Write(0, 65536), Allocate(ZeroRange, false, 4096, 8192)],
+                65536,
+                128,
+                &[(0, Some(0), Some(4096)), (4096, Some(12288), Some(4096))],
+            ),
+            (
+                "a zeroed range allocates every block it touches",
+                &[Truncate(65536), Allocate(ZeroRange, false, 100, 8192)],
+                65536,
+                24,
+                &[(0, None, Some(0))],
+            ),
+            (
+                "a zeroed range grows the file",
+                &[Truncate(10000), Allocate(ZeroRange, false, 9000, 4000)],
+                13000,
+                16,
+                &[(0, None, Some(0))],
+            ),
+            (
+                "a zeroed range inside one written block leaves it written",
+                &[Write(0, 8192), Allocate(ZeroRange, true, 100, 50)],
+                8192,
+                16,
+                &[(0, Some(0), Some(8192))],
+            ),
+            (
+                "KEEP_SIZE zeroes and reserves past the end",
+                &[Write(0, 8192), Allocate(ZeroRange, true, 4096, 65536)],
+                8192,
+                136,
+                &[(0, Some(0), Some(4096)), (4096, None, Some(4096))],
+            ),
+            (
+                "a shrink frees the blocks past the end",
+                &[Write(0, 65536), Truncate(5000)],
+                5000,
+                16,
+                &[],
+            ),
+            (
+                "a truncate to the size frees a reservation past it",
+                &[
+                    Write(0, 100),
+                    Allocate(Reserve, true, 0, 65536),
+                    Truncate(100),
+                ],
+                100,
+                8,
+                &[],
+            ),
+            (
+                "a growing truncate keeps it",
+                &[
+                    Write(0, 100),
+                    Allocate(Reserve, true, 0, 65536),
+                    Truncate(8192),
+                ],
+                8192,
+                128,
+                &[(0, Some(0), Some(4096))],
+            ),
+        ];
+        for (name, steps, size, blocks, seeks) in rows {
+            let mut fs = MemFs::new().with_file("/f", Vec::new()).unwrap();
+            let fd = fs.open(FsClock::EPOCH, "/f", read_write()).unwrap();
+            for step in *steps {
+                match *step {
+                    Step::Write(offset, len) => {
+                        let bytes = vec![b'x'; len as usize];
+                        fs.write_at(FsClock::EPOCH, fd, offset, &bytes).unwrap();
+                    }
+                    Step::Truncate(len) => fs.set_len(FsClock::EPOCH, fd, len).unwrap(),
+                    Step::Allocate(mode, keep_size, offset, len) => fs
+                        .allocate(FsClock::EPOCH, fd, offset, len, mode, keep_size)
+                        .unwrap(),
+                }
+            }
+            let metadata = fs.fd_metadata(fd).unwrap();
+            assert_eq!((metadata.len, metadata.blocks), (*size, *blocks), "{name}");
+            for &(offset, data, hole) in *seeks {
+                let answer = |fs: &mut MemFs, whence| {
+                    fs.seek(fd, offset as i64, whence)
+                        .map_err(|error| error.code)
+                };
+                let enxio = Err(ErrorCode::NoSuchPosition);
+                let data_answer = answer(&mut fs, SeekWhence::Data);
+                assert_eq!(
+                    data_answer,
+                    data.ok_or(ErrorCode::NoSuchPosition),
+                    "{name}: SEEK_DATA {offset}"
+                );
+                let hole_answer = answer(&mut fs, SeekWhence::Hole);
+                assert_eq!(
+                    hole_answer,
+                    hole.map_or(enxio, Ok),
+                    "{name}: SEEK_HOLE {offset}"
+                );
+            }
+        }
+    }
+
     fn times(fs: &mut MemFs, path: &str) -> (i128, i128, i128, i128) {
         let metadata = fs.metadata(path).unwrap();
         (
@@ -4403,33 +4887,6 @@ mod tests {
             metadata.ctime_nanos,
             metadata.btime_nanos,
         )
-    }
-
-    #[test]
-    fn impossible_capacity_is_a_storage_error_not_a_process_abort() {
-        // Class pairing: fallible guest-sized growth, also used by writes.
-        let mut fs = MemFs::new().with_file("/f", b"abc".to_vec()).unwrap();
-        let fd = fs.open(FsClock::at(10), "/f", read_write()).unwrap();
-        assert_eq!(
-            fs.set_len(FsClock::at(20), fd, i64::MAX as u64)
-                .unwrap_err()
-                .code,
-            ErrorCode::NoSpace
-        );
-        assert_eq!(
-            fs.allocate(
-                FsClock::at(30),
-                fd,
-                0,
-                i64::MAX as u64,
-                FsAllocateMode::Reserve,
-                false
-            )
-            .unwrap_err()
-            .code,
-            ErrorCode::NoSpace
-        );
-        assert_eq!(fs.metadata("/f").unwrap().len, 3);
     }
 
     #[test]

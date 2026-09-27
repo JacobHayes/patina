@@ -640,7 +640,7 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
         return -EFAULT;
     }
     // The exact mask the C statx interposer reports: BASIC_STATS (BLOCKS the
-    // length-derived count stat reports) plus what `volume::statx_extra`
+    // allocated count stat reports) plus what `volume::statx_extra`
     // adds: the node's mount id, and STATX_BTIME when requested and the
     // node's filesystem records one.
     const STATX_BASIC_STATS: u32 = 0x07ff;

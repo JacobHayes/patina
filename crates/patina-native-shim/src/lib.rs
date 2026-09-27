@@ -5825,6 +5825,10 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
         SEEK_HOLE => SeekWhence::Hole,
         _ => return i64::from(fail(EINVAL)),
     };
+    #[cfg(target_os = "linux")]
+    if matches!(whence, SeekWhence::Data | SeekWhence::Hole) {
+        mem::inspecting(handle.0);
+    }
     match with_context(|context| context.fs_seek(handle, offset, whence)) {
         Ok(position) => i64::try_from(position).unwrap_or_else(|_| i64::from(fail(EOVERFLOW))),
         Err(errno) => i64::from(fail(errno)),
@@ -6223,6 +6227,13 @@ pub unsafe extern "C" fn patina_metadata_at(
     let Some(metadata) = resolved.metadata else {
         return fail(ENOENT);
     };
+    #[cfg(target_os = "linux")]
+    if metadata.kind == FsEntryKind::File && mem::inspecting_ino(metadata.ino) {
+        return match with_context(|context| context.fs_inode_metadata(metadata.ino)) {
+            Ok(metadata) => write_metadata(metadata, out),
+            Err(errno) => fail(errno),
+        };
+    }
     write_metadata(metadata, out)
 }
 
@@ -6463,6 +6474,8 @@ pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut Patina
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
     };
+    #[cfg(target_os = "linux")]
+    mem::inspecting(fd.0);
     match with_context(|context| context.fs_fd_metadata(fd)) {
         Ok(metadata) => write_metadata(metadata, out),
         Err(errno) => fail(errno),
@@ -7031,17 +7044,24 @@ const FALLOC_FL_OPERATIONS: u32 = FALLOC_FL_PUNCH_HOLE
     | FALLOC_FL_INSERT_RANGE
     | FALLOC_FL_UNSHARE_RANGE;
 
+/// `MAX_NON_LFS`: the size limit `alloc_super` gives a filesystem that sets
+/// none of its own (mqueuefs).
+const MAX_NON_LFS: u64 = 0x7fff_ffff;
+
 /// `fallocate(2)`, in the kernel's order of refusals: a bad range is
 /// `EINVAL`; an unknown bit, two operation bits at once, `PUNCH_HOLE` without
 /// `KEEP_SIZE`, or a range-shifting mode with `KEEP_SIZE` is `EOPNOTSUPP`
 /// (host-checked: Linux 6.8 answers `EOPNOTSUPP`, not `EINVAL`, for the
 /// self-contradictory modes); a descriptor not open for writing (or `O_PATH`)
 /// `EBADF`, a pipe `ESPIPE`, a directory `EISDIR`, any other non-file `ENODEV`,
-/// a range past the file size limit `EFBIG`. Mode `0` and `KEEP_SIZE` reserve
-/// (the file grows to `offset + len` unless `KEEP_SIZE`); `PUNCH_HOLE|KEEP_SIZE`
-/// and `ZERO_RANGE` zero the range; the range-shifting modes (`COLLAPSE_RANGE`,
-/// `INSERT_RANGE`) and `UNSHARE_RANGE` are `EOPNOTSUPP`, a real answer on
-/// filesystems without them. One recorded operation whatever the range.
+/// a range past the file's filesystem's size limit `EFBIG` (the volume's
+/// ext4 limit, a memfd's or secret memory's `MAX_LFS_FILESIZE`, a message
+/// queue's `MAX_NON_LFS`). Mode `0` and
+/// `KEEP_SIZE` reserve (the file grows to `offset + len` unless `KEEP_SIZE`);
+/// `PUNCH_HOLE|KEEP_SIZE` and `ZERO_RANGE` zero the range; the range-shifting
+/// modes (`COLLAPSE_RANGE`, `INSERT_RANGE`) and `UNSHARE_RANGE` are
+/// `EOPNOTSUPP` after the size limit, as the file's own `fallocate` answers
+/// on filesystems without them. One recorded operation whatever the range.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length: i64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
@@ -7092,15 +7112,34 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => return fail(ENODEV),
     }
+    // `vfs_fallocate`: a range past the file's filesystem's size limit is
+    // `EFBIG` before any file's own `fallocate` judges the mode: the ext4
+    // volume's `s_maxbytes`; `MAX_LFS_FILESIZE` for a memfd (tmpfs,
+    // hugetlbfs) or secret memory; for a message queue `MAX_NON_LFS`, which
+    // mqueuefs keeps from `alloc_super` (it never sets `s_maxbytes`).
+    let (offset, length) = (offset as u64, length as u64);
+    #[cfg(target_os = "linux")]
+    let volume = resolved.kind == FdKind::File
+        && !mem::secret(resolved.handle)
+        && mem::anonymous(resolved.handle).is_none();
+    #[cfg(not(target_os = "linux"))]
+    let volume = resolved.kind == FdKind::File;
+    #[cfg(target_os = "linux")]
+    let queue = resolved.kind == FdKind::MessageQueue;
+    #[cfg(not(target_os = "linux"))]
+    let queue = false;
+    let limit = if volume {
+        patina_dst_fs_mem::VOLUME_MAX_BYTES
+    } else if queue {
+        MAX_NON_LFS
+    } else {
+        i64::MAX as u64
+    };
+    if offset.checked_add(length).is_none_or(|end| end > limit) {
+        return fail(EFBIG);
+    }
     if mode & (FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_INSERT_RANGE | FALLOC_FL_UNSHARE_RANGE) != 0 {
         return fail(EOPNOTSUPP);
-    }
-    let (offset, length) = (offset as u64, length as u64);
-    if offset
-        .checked_add(length)
-        .is_none_or(|end| end > i64::MAX as u64)
-    {
-        return fail(EFBIG);
     }
     // The file's own `fallocate`: an mqueue file has none, and a memfd
     // (`shmem_fallocate`, `hugetlbfs_fallocate`) takes only `KEEP_SIZE` and

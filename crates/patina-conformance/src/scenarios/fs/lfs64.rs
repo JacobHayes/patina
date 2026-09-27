@@ -18,9 +18,7 @@
 //!   there is past the end (not the file's first bytes), `SEEK_DATA` from
 //!   there is ENXIO, `fallocate64(FALLOC_FL_KEEP_SIZE)` past 8 GiB allocates
 //!   without growing, and a lock past 8 GiB keeps its range. Nothing is
-//!   written that far: the offsets are what the 64-bit spellings carry, and
-//!   a sparse multi-gigabyte file costs its whole size on a volume that holds
-//!   files densely;
+//!   written that far: the offsets are what the 64-bit spellings carry;
 //! * `ftruncate64`/`truncate64` set the size (EINVAL negative or through a
 //!   read-only descriptor, EISDIR for a directory, ENOENT);
 //! * `fallocate64` allocates (`FALLOC_FL_KEEP_SIZE` without growing; EINVAL
@@ -46,8 +44,7 @@
 //!
 //! libc only: the plain names are the libc vehicle of the row scenarios.
 
-use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Difference, Failure, Observed};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{AT_FDCWD, Probe, StatBy, neg};
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -256,7 +253,7 @@ pub fn run(p: &Probe) {
         p.posix_fallocate64(wr, 0, 4096) == neg(ESPIPE),
     );
 
-    // A file that is all hole: the volume tracks no allocation (ByDesign).
+    // A file that is all hole: there is no data to find.
     let sparse = p.open64(&format!("{root}/sparse"), O_RDWR | O_CREAT | O_EXCL, 0o600);
     p.require("open64 creates sparse", sparse >= 0);
     p.check(
@@ -537,15 +534,5 @@ pub const SCENARIO: Scenario = Scenario {
         "close",
         "getpid",
     ],
-    gaps: &[Gap {
-        status: Status::ByDesign,
-        vehicles: &[Vehicle::Libc],
-        what: "allocation is not tracked: the volume holds a regular file's bytes densely (patina-fs-mem Inode.contents) and neither the crash model nor the restart snapshot carries which blocks a file has allocated, so sparse files, FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE and the holes an extending write or truncate leaves are not modeled: SEEK_DATA/SEEK_HOLE answer as for a file without holes, and st_blocks/stx_blocks count the length",
-        failure: Failure::Differs(&[
-            Difference::field(100, "lseek64", "ret", Observed::Int(0)),
-            Difference::field(100, "lseek64", "errno", Observed::Null),
-            Difference::check(101, "SEEK_DATA in a file that is all hole is ENXIO"),
-        ]),
-    }],
     ..DEFAULTS
 };

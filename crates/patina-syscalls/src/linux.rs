@@ -94,7 +94,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::FdIo,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_seek`); `SEEK_SET 0` on a directory fd rewinds its `getdents64` snapshot; a description whose `llseek` is `noop_llseek` (the entropy device, eventfd, epoll, signalfd, timerfd, userfaultfd) stays at 0, any other without a position is `ESPIPE`. `SEEK_DATA`/`SEEK_HOLE` answer every file as ext4 answers one without holes, since allocation is not modeled (a hole left by an extending write or truncate, `KEEP_SIZE` or `PUNCH_HOLE` reads as data): data at the offset, the hole at the size, `ENXIO` at or past the end.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_seek`); `SEEK_SET 0` on a directory fd rewinds its `getdents64` snapshot; a description whose `llseek` is `noop_llseek` (the entropy device, eventfd, epoll, signalfd, timerfd, userfaultfd) stays at 0, any other without a position is `ESPIPE`. `SEEK_DATA`/`SEEK_HOLE` are one driver operation over the file's blocks, as ext4's `iomap_seek_data`/`iomap_seek_hole` answer: only a written block is data (a hole, and an unwritten block `fallocate` reserved, is a hole), the size is the last hole, `ENXIO` at or past the end or with no data after the offset.",
         None,
     ),
     Syscall::N_mmap => r(
@@ -2115,7 +2115,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Fs,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fallocate`): mode 0 and KEEP_SIZE reserve, PUNCH_HOLE|KEEP_SIZE and ZERO_RANGE zero the range, the range-shifting modes are EOPNOTSUPP; EINVAL/EBADF/ESPIPE/EISDIR/ENODEV in the kernel's order; one recorded operation whatever the range. Modeled modes are 0, KEEP_SIZE, PUNCH_HOLE|KEEP_SIZE, ZERO_RANGE and ZERO_RANGE|KEEP_SIZE; Linux itself refuses unknown/self-contradictory combinations, while valid COLLAPSE_RANGE/INSERT_RANGE remain unmodeled EOPNOTSUPP. Allocation is not tracked: a reservation adds no blocks (stat and statx count the length).",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fallocate`): mode 0 and KEEP_SIZE allocate every block the range touches as unwritten (zeros that count in st_blocks and are holes to SEEK_DATA), PUNCH_HOLE|KEEP_SIZE frees its whole blocks and zeroes its partial ones (on the volume, ext4's `ext4_punch_hole`: nothing at or past the size, and no further than the page holding it; on a memfd, tmpfs's, the whole range), ZERO_RANGE allocates every block it touches and turns its whole blocks unwritten, the range-shifting modes are EOPNOTSUPP; EINVAL/EBADF/ESPIPE/EISDIR/ENODEV in the kernel's order; one recorded operation whatever the range. Modeled modes are 0, KEEP_SIZE, PUNCH_HOLE|KEEP_SIZE, ZERO_RANGE and ZERO_RANGE|KEEP_SIZE; Linux itself refuses unknown/self-contradictory combinations, while valid COLLAPSE_RANGE/INSERT_RANGE remain unmodeled EOPNOTSUPP.",
         None,
     ),
     Syscall::N_timerfd_settime => r(
@@ -2459,7 +2459,7 @@ pub const fn disposition(id: Syscall) -> SyscallRow {
         id,
         Family::Fs,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver): a mask of STATX_BASIC_STATS (STATX_BLOCKS the length-derived count stat reports: allocation is not tracked) and the node's mount id always (`volume::statx_extra`: STATX_MNT_ID_UNIQUE when asked for, else STATX_MNT_ID; the mount table's for the volume and the entropy device, the kernel's internal mounts, which `statmount` does not know, for a pipe's or a socket's node), STATX_BTIME when requested of a filesystem that records one — with the owner from the one identity, all four timestamps from the model and the device numbers of the node's filesystem.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver): a mask of STATX_BASIC_STATS (STATX_BLOCKS the file's allocated blocks, as stat reports them: written and unwritten 4 KiB blocks, a hole none, a fast symlink none) and the node's mount id always (`volume::statx_extra`: STATX_MNT_ID_UNIQUE when asked for, else STATX_MNT_ID; the mount table's for the volume and the entropy device, the kernel's internal mounts, which `statmount` does not know, for a pipe's or a socket's node), STATX_BTIME when requested of a filesystem that records one — with the owner from the one identity, all four timestamps from the model and the device numbers of the node's filesystem.",
         Some("fs"),
     )
     .since("4.11"),

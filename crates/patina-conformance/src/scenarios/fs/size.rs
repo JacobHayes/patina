@@ -4,9 +4,7 @@
 //! O_PATH), and fallocate (reserve, KEEP_SIZE, PUNCH_HOLE|KEEP_SIZE, ZERO_RANGE,
 //! the kernel's order of refusals: EINVAL, EOPNOTSUPP, EBADF, ESPIPE).
 
-use crate::catalog::{DEFAULTS, Gap, Need, Scenario, Status};
-use crate::compare::{Difference, Failure};
-use crate::vehicle::Vehicle;
+use crate::catalog::{DEFAULTS, Need, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
@@ -234,6 +232,10 @@ pub fn run(p: &Probe) {
         "fallocate overflow is EFBIG",
         p.fallocate(fd, FALLOC_FL_KEEP_SIZE, i64::MAX, 1) == neg(EFBIG),
     );
+    p.check(
+        "the size limit comes before the file's own refusal of a mode",
+        p.fallocate(fd, FALLOC_FL_UNSHARE_RANGE, i64::MAX, 1) == neg(EFBIG),
+    );
     let reserved = p.openat(
         AT_FDCWD,
         &format!("{root}/reserved"),
@@ -311,14 +313,5 @@ pub const SCENARIO: Scenario = Scenario {
         "nanosleep",
     ],
     needs: &[Need::Unprivileged],
-    gaps: &[Gap {
-        status: Status::ByDesign,
-        vehicles: Vehicle::ALL,
-        what: "allocation is not tracked (the fs/lfs64 ByDesign): a FALLOC_FL_KEEP_SIZE reservation adds no blocks, and stx_blocks, like st_blocks, counts the file's length",
-        failure: Failure::Differs(&[Difference::check(
-            133,
-            "statx either models reservations or omits BLOCKS",
-        )]),
-    }],
     ..DEFAULTS
 };

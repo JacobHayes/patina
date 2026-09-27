@@ -642,10 +642,18 @@ explicit driver-level `FsClock` inputs, not a runtime configuration knob.
 File fsync stages timestamp metadata by inode, and directory fsync stages the
 directory's timestamps; crash reconstruction restores them without manufacturing
 new effects, includes symlinks, and preserves surviving new entries' birth times.
-Zero-count I/O is timestamp- and size-inert. Guest-sized growth reserves storage
-fallibly, and reports ENOSPC on capacity failure. Allocation is not
-tracked: `st_blocks` and `stx_blocks` count a file's length, and
-SEEK_DATA/SEEK_HOLE answer as for a file without holes.
+Zero-count I/O is timestamp- and size-inert. A regular file is stored sparsely
+(`patina-fs-mem` `FileData`): 4 KiB blocks — the volume's `st_blksize`, ext4's
+block and the page size — keyed by index, each written, unwritten (allocated by
+`fallocate`, reading as zeros) or a hole (nothing stored), so a file costs its
+written blocks whatever its length and a clone shares them until one side
+writes. Allocation follows ext4 on Linux 6.8: `st_blocks`/`stx_blocks` count
+written and unwritten blocks (a reservation past the end included, no extent-tree
+blocks), `SEEK_DATA`/`SEEK_HOLE` see only written blocks as data, an extending
+write or truncate leaves a hole, a shrinking or same-size truncate frees every
+block past the end, and `fallocate` reserves unwritten blocks, punches holes
+(freeing whole blocks, zeroing partial ones; ext4 stops at the page holding the
+size, tmpfs does not) or zeroes a range into unwritten blocks.
 Timestamps are signed nanoseconds: a set time of any second is truncated to the
 target filesystem's range (ext4's for the volume, tmpfs's for a memfd) as the
 kernel's `timestamp_truncate` does, never refused and never wrapped.
