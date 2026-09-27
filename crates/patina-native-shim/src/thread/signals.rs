@@ -792,8 +792,9 @@ pub(crate) fn deliver() {
                     fault::set(if i == 0 { segv } else { blocks[i - 1] });
                     install_mask(saved);
                     fault::send(SIGSEGV, action, &instance.info);
-                    mirror_onstack(action.flags);
+                    let swapped = dequeued_action(SIGSEGV, action, seen);
                     queue(&instance);
+                    current_action(swapped);
                 } else if action.handler != SIG_DFL {
                     fault::set(blocks[i]);
                     if fault::front_routed(instance.sig) {
@@ -817,10 +818,6 @@ pub(crate) fn deliver() {
             // The first member's frame saved `mask`: its `rt_sigreturn` left
             // that installed, or what its handler edited it to.
         });
-        if batch.iter().any(routed) {
-            let flags = lock_state().signals.actions[usize::from(SIGSEGV)].flags;
-            mirror_onstack(flags);
-        }
         // Inner SIGSYS fixups may consume these bits while handlers run. The
         // enclosing frame still owns its changes, including the release mask.
         FRAME_DIRTY.with(|dirty| dirty.set(dirty.get() | outer_dirty | FRAME_MASK));
@@ -857,13 +854,15 @@ pub(crate) fn deliver() {
 /// kernel builds the frame natively, where the guest set another since (an
 /// earlier handler of the batch, or another thread meanwhile) or another
 /// frame's dequeued action stands in for it. Answers the signal to give its
-/// current action back once the frame is built ([`current_action`]). That is
-/// after the handler has run, not before: the kernel builds the frame on the
-/// unblock's return and enters the handler at once, with no shim code between
-/// (only a shim trampoline as the host handler could restore it first). A
-/// handler that leaves by `siglongjmp` skips the restore, and the next
-/// delivery point makes it; meanwhile a signal the host raises itself (a
-/// synchronous fault) of that number would still meet the dequeued action.
+/// current action back once the frame is built ([`current_action`]). For a
+/// signal an instruction raises, whose host handler is the shim's, that
+/// handler gives it back as the frame enters, before the guest's handler
+/// runs ([`fault_entered`]), so no genuine fault meets the dequeued action
+/// once the frame ran, `siglongjmp` or not. For any other it is given back
+/// once the handler returned: the kernel enters it on the unblock's return
+/// with no shim code between. A handler that leaves by `siglongjmp` skips
+/// that, and the next delivery point makes it; nothing but a delivery raises
+/// such a signal on the host.
 fn dequeued_action(sig: u8, action: Action, seen: u32) -> u64 {
     {
         let mut state = lock_state();
@@ -878,8 +877,15 @@ fn dequeued_action(sig: u8, action: Action, seen: u32) -> u64 {
 }
 
 /// The frames of `signals` are built: the host holds their current actions
-/// again.
+/// again. Each is read under the state lock and installed after it is
+/// dropped, as `deliver`'s own installs are: that relies on the execution
+/// baton, under which one thread at a time runs guest or shim code, so no
+/// `sigaction` of another thread lands between the read and the install
+/// (one that did would leave the host holding the older action).
 fn current_action(signals: u64) {
+    if signals == 0 {
+        return;
+    }
     for sig in (1..=64u8).filter(|sig| signals & bit(*sig) != 0) {
         let action = {
             let mut state = lock_state();
@@ -903,15 +909,7 @@ fn install_host_action(sig: u8, action: Action) -> i64 {
         mirror_onstack(action.flags);
         return 0;
     }
-    let action = Action {
-        mask: host_mask(action.mask),
-        ..action
-    };
-    let action = if fault::front_routed(sig) {
-        fault::front_action(action)
-    } else {
-        action
-    };
+    let action = host_action(sig, action);
     host(
         SYS_RT_SIGACTION,
         [
@@ -923,6 +921,72 @@ fn install_host_action(sig: u8, action: Action) -> i64 {
             0,
         ],
     )
+}
+
+/// What [`install_host_action`] installs for `sig` (not trap-routed).
+fn host_action(sig: u8, action: Action) -> Action {
+    let action = Action {
+        mask: host_mask(action.mask),
+        ..action
+    };
+    if fault::front_routed(sig) {
+        fault::front_action(action)
+    } else {
+        action
+    }
+}
+
+/// A signal an instruction raises entered its fault handler (`sent`: the
+/// frame [`deliver`] queued for it). Every frame a dequeued action stood in
+/// for on the host is built by now (each is built as its member is queued,
+/// with only shim code between), so the host holds the current actions again
+/// from here: a handler that leaves by `siglongjmp` cannot leave a dequeued
+/// one behind for the next fault. A genuine fault whose own frame the kernel
+/// built under one (a frame of the same signal still below the handler that
+/// faulted) is a named stop where that frame is not the current action's.
+fn fault_entered(sig: u8, sent: bool) {
+    let (swapped, current) = {
+        let state = lock_state();
+        (
+            state.signals.swapped,
+            state.signals.actions[usize::from(sig)],
+        )
+    };
+    if !sent && swapped & bit(sig) != 0 {
+        let mut built = Action::default();
+        if host(
+            SYS_RT_SIGACTION,
+            [
+                u64::from(sig),
+                0,
+                &mut built as *mut _ as u64,
+                SIGSET_BYTES as u64,
+                0,
+                0,
+            ],
+        ) != 0
+        {
+            fatal("host fault action query failed (rt_sigaction)");
+        }
+        let differs = if trap_routed(sig) {
+            (built.flags ^ current.flags) & SA_ONSTACK != 0
+        } else {
+            let expected = host_action(sig, current);
+            (built.flags & UAPI_SA_FLAGS, built.mask, built.restorer)
+                != (
+                    expected.flags & UAPI_SA_FLAGS,
+                    expected.mask,
+                    expected.restorer,
+                )
+        };
+        if differs {
+            crate::trap_fatal(
+                "a fault met the action a delivery batch put on the host for a frame of the \
+                 same signal still to run, which differs from the current one: not modeled",
+            );
+        }
+    }
+    current_action(swapped);
 }
 
 /// Libc-layout marshalling supplies glibc's init-time restorer; raw callers keep
@@ -982,7 +1046,11 @@ pub unsafe extern "C" fn patina_signal_action(
         None
     } else {
         match crate::uaccess::read::<Action>(action as usize) {
-            Ok(action) => Some(action),
+            // Installed and stored with the flag bits 6.8 keeps.
+            Ok(action) => Some(Action {
+                flags: action.flags & UAPI_SA_FLAGS,
+                ..action
+            }),
             Err(_) => return -i64::from(EFAULT),
         }
     };

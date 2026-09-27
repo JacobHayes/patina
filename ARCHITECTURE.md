@@ -280,9 +280,11 @@ first, each under the mask its frame saves natively and with the action its
 dequeue captured, so the handlers run in 6.8's frame order: nothing waits on the
 host meanwhile, so a handler that leaves by `siglongjmp` loses the frames below
 it and a handler that changes a later member's action leaves that frame its
-dequeued one, both as natively (that action stays on the host until the
-member's handler returns, or after a `siglongjmp` until the next delivery
-point). A handler that edits its frame's saved mask while frames of its batch
+dequeued one, both as natively. For a signal an instruction raises the shim's
+fault handler gives the host the current action back as that frame enters, so
+a genuine fault never meets the dequeued one; any other signal's stays on the
+host until the member's handler returns (after a `siglongjmp`, until the next
+delivery point), and nothing but a delivery raises it there. A handler that edits its frame's saved mask while frames of its batch
 are still to run is a named stop: natively the next handler starts under the
 edit. A counter read
 taken on the alternate stack is served back on the interrupted stack, and no

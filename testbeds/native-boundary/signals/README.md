@@ -50,6 +50,14 @@ the signal: a SIGSEGV, a SIGBUS and a SIGILL, which `native_containment` require
 named stops that take the default action, never the handler, on every Linux
 arch.
 
+`fault_routing.c` covers the other signals an instruction raises, whose host
+disposition is the shim's fault front handler: in `swap-escape` a raised trap
+signal's frame runs the action its dequeue captured after an earlier handler of
+its batch installed a new one, and leaves by `siglongjmp`; a genuine trap right
+after must run the new action under the new action's mask. `native_signals`
+runs it natively as the oracle and under the shim and requires the same output
+and exit.
+
 `frame_mask.c` has a handler add SIGSYS and SIGSEGV to its frame's saved mask,
 returning through glibc's restorer and (x86_64) through the guest's own raw
 and `syscall(2)` stubs; a raw syscall and a timestamp-counter read must still

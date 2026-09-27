@@ -114,6 +114,25 @@ fn signal_state_is_per_task() {
     });
 }
 
+/// `rt_sigaction` keeps only the flag bits 6.8 knows (`UAPI_SA_FLAGS`):
+/// the old action reports a probe bit (`SA_UNSUPPORTED`) cleared.
+#[test]
+fn an_action_keeps_only_the_flags_the_kernel_knows() {
+    isolated(|| {
+        const SA_UNSUPPORTED: u64 = 0x400;
+        let ignore = Action {
+            handler: SIG_IGN,
+            flags: SA_UNSUPPORTED | SA_RESTART,
+            ..Action::default()
+        };
+        assert_eq!(
+            unsafe { patina_signal_action(SIGUSR1, &ignore, std::ptr::null_mut(), SIGSET_BYTES) },
+            0
+        );
+        assert_eq!(query_action(SIGUSR1).flags, SA_RESTART);
+    });
+}
+
 #[test]
 fn mask_is_inherited_at_spawn() {
     isolated(|| {

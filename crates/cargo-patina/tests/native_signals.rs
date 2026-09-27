@@ -110,6 +110,23 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
     }
 }
 
+/// A synchronous signal an instruction raises (SIGBUS, SIGFPE, SIGILL,
+/// SIGTRAP) meets the action the kernel would give it: after a delivery
+/// batch's handler leaves by `siglongjmp` from a frame that ran the action
+/// its dequeue captured, the next genuine one runs the guest's current
+/// action, under that action's mask, so the guest prints what it prints
+/// natively.
+#[cfg(target_os = "linux")]
+#[test]
+fn synchronous_signals_meet_the_action_the_kernel_would_give_them() {
+    let native = assert_build_c_guest("signals/fault_routing.c", CLink::Unlinked);
+    let patina = assert_build_c_guest("signals/fault_routing.c", CLink::PosixShim);
+    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
+    let oracle = assert_standalone_success(&native.binary, &["swap-escape"], &[]);
+    let output = assert_standalone_success(&patina.binary, &["swap-escape"], &env);
+    assert_eq!(text(&output.stdout), text(&oracle.stdout));
+}
+
 /// A handler that adds the containment signals to its frame's saved mask
 /// gets them blocked natively when it returns, and the guest runs on; so does
 /// one whose action's `sa_mask` blocks them while it runs. Under patina the

@@ -127,7 +127,9 @@ pub unsafe extern "C" fn patina_fault_route(
     if scoped() {
         blocked();
     }
-    let action = match take_sent(sig, &info) {
+    let sent = take_sent(sig, &info);
+    fault_entered(sig, sent.is_some());
+    let action = match sent {
         Some(action) => action,
         None => {
             if info.code() <= 0 {
@@ -462,12 +464,21 @@ pub(super) fn send(sig: u8, action: Action, info: &Info) {
     SENT.with(|sent| sent[usize::from(sig)].set(Some((action, *info))));
 }
 /// The action captured for the `sig` this thread takes with `info`, if it is
-/// the one [`deliver`] queued: a genuine fault is not, nor is anything once
-/// an upper handler left that frame unrun by `siglongjmp`.
+/// the one [`deliver`] queued, taken by that frame only. The frame's siginfo
+/// is the queued record as the kernel carries it (its `kernel_siginfo`, the
+/// first 48 bytes; the rest it zeroes), which a genuine fault's never is,
+/// whatever code the record has (a guest may queue itself one with a
+/// fault's positive code).
 fn take_sent(sig: u8, info: &Info) -> Option<Action> {
-    SENT.with(|sent| sent[usize::from(sig)].take())
-        .filter(|(_, sent)| info.code() <= 0 && sent.words[..3] == info.words[..3])
-        .map(|(action, _)| action)
+    const CARRIED: usize = 6;
+    SENT.with(|sent| {
+        let slot = &sent[usize::from(sig)];
+        let (action, sent) = slot.get()?;
+        (sent.words[..CARRIED] == info.words[..CARRIED]).then(|| {
+            slot.set(None);
+            action
+        })
+    })
 }
 
 /// One slot per signal number up to SIGSEGV, the highest an instruction
@@ -962,7 +973,9 @@ pub unsafe extern "C" fn patina_signal_fault(
         sp: frame.sp,
         entry: crate::panic_boundary::guest_entry().1,
     };
-    let action = match take_sent(SIGSEGV, &info) {
+    let sent = take_sent(SIGSEGV, &info);
+    fault_entered(SIGSEGV, sent.is_some());
+    let action = match sent {
         Some(action) => action,
         None => {
             // No kernel fault path uses such a code, and patina queued none.

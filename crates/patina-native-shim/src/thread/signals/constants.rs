@@ -48,6 +48,19 @@ pub(in crate::thread) const SA_RESTORER: u64 = 0x0400_0000;
 pub(in crate::thread) const SA_SIGINFO: u64 = 0x4;
 pub(in crate::thread) const SA_NODEFER: u64 = 0x4000_0000;
 pub(in crate::thread) const SA_ONSTACK: u64 = 0x0800_0000;
+/// 6.8's `UAPI_SA_FLAGS` (both arches define `SA_RESTORER`, 0x0400_0000):
+/// `rt_sigaction` clears every other flag bit (the `SA_UNSUPPORTED` probe
+/// bit, say) from the action it installs, so the old action reports only
+/// these.
+pub(in crate::thread) const UAPI_SA_FLAGS: u64 = 0x1 // SA_NOCLDSTOP
+    | 0x2 // SA_NOCLDWAIT
+    | SA_SIGINFO
+    | SA_ONSTACK
+    | SA_RESTART
+    | SA_NODEFER
+    | SA_RESETHAND
+    | 0x800 // SA_EXPOSE_TAGBITS
+    | 0x0400_0000; // SA_RESTORER
 
 pub(in crate::thread) const SIGSET_BYTES: usize = 8;
 #[cfg(target_arch = "x86_64")]
