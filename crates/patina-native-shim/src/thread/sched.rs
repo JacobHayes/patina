@@ -663,11 +663,9 @@ pub(crate) fn priority_bound(policy: i32, max: bool) -> i64 {
 
 /// `sched_rr_get_interval`: a round-robin thread's slice, 0 for FIFO and
 /// deadline, and a fair thread's base slice in whole ticks (on one CPU
-/// under a tick, so 0).
-///
-/// # Safety
-/// `out` must be NULL or writable for a `struct timespec`.
-pub(crate) unsafe fn rr_interval(pid: i32, out: *mut crate::clocks::Timespec) -> i64 {
+/// under a tick, so 0). The pid is judged, then the slice copied out
+/// (`EFAULT`).
+pub(crate) fn rr_interval(pid: i32, out: *mut crate::clocks::Timespec) -> i64 {
     if pid < 0 {
         return errno(EINVAL);
     }
@@ -684,16 +682,11 @@ pub(crate) unsafe fn rr_interval(pid: i32, out: *mut crate::clocks::Timespec) ->
         _ => BASE_SLICE_NS,
     };
     let ticks = slice / crate::clocks::TICK_NSEC;
-    if out.is_null() {
-        return errno(EFAULT);
+    let slice = crate::clocks::Timespec::from_nanos(ticks * crate::clocks::TICK_NSEC);
+    match crate::uaccess::write(out as usize, &slice) {
+        Ok(()) => 0,
+        Err(_) => errno(EFAULT),
     }
-    // SAFETY: per this function's contract.
-    unsafe {
-        out.write_unaligned(crate::clocks::Timespec::from_nanos(
-            ticks * crate::clocks::TICK_NSEC,
-        ))
-    };
-    0
 }
 
 /// `struct sched_attr`, the kernel's size.

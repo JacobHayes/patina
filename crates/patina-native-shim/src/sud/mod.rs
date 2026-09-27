@@ -842,20 +842,20 @@ const BINDINGS: &[(Syscall, Handler)] = &[
         crate::clocks::clock_adjtime(a[0] as c_int, a[1] as *mut crate::clocks::Timex)
     }),
     // ---- the process's timers (`thread::timers`) ----
-    (Syscall::N_getitimer, |_, a| unsafe {
+    (Syscall::N_getitimer, |_, a| {
         crate::thread::timers::getitimer(a[0] as i32, a[1] as *mut _)
     }),
-    (Syscall::N_setitimer, |_, a| unsafe {
+    (Syscall::N_setitimer, |_, a| {
         crate::thread::timers::setitimer(a[0] as i32, a[1] as *const _, a[2] as *mut _)
     }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_alarm, |_, a| {
         crate::thread::timers::alarm(a[0] as u32)
     }),
-    (Syscall::N_timer_create, |_, a| unsafe {
+    (Syscall::N_timer_create, |_, a| {
         crate::thread::timers::timer_create(a[0] as i32, a[1] as *const _, a[2] as *mut i32)
     }),
-    (Syscall::N_timer_settime, |_, a| unsafe {
+    (Syscall::N_timer_settime, |_, a| {
         crate::thread::timers::timer_settime(
             a[0] as i32,
             a[1] as i32,
@@ -863,7 +863,7 @@ const BINDINGS: &[(Syscall, Handler)] = &[
             a[3] as *mut _,
         )
     }),
-    (Syscall::N_timer_gettime, |_, a| unsafe {
+    (Syscall::N_timer_gettime, |_, a| {
         crate::thread::timers::timer_gettime(a[0] as i32, a[1] as *mut _)
     }),
     (Syscall::N_timer_getoverrun, |_, a| {
@@ -1158,7 +1158,7 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_sched_get_priority_min, |_, a| {
         crate::thread::sched::priority_bound(a[0] as i32, false)
     }),
-    (Syscall::N_sched_rr_get_interval, |_, a| unsafe {
+    (Syscall::N_sched_rr_get_interval, |_, a| {
         crate::thread::sched::rr_interval(a[0] as i32, a[1] as *mut Timespec)
     }),
     (Syscall::N_sched_setattr, |_, a| unsafe {
@@ -1278,7 +1278,7 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_semget, |_, a| {
         crate::thread::ipc::semget(a[0] as i32, a[1] as i32, a[2] as i32)
     }),
-    (Syscall::N_semop, |_, a| unsafe {
+    (Syscall::N_semop, |_, a| {
         crate::thread::ipc::semtimedop(
             a[0] as i32,
             a[1] as *const _,
@@ -1286,7 +1286,7 @@ const BINDINGS: &[(Syscall, Handler)] = &[
             std::ptr::null(),
         )
     }),
-    (Syscall::N_semtimedop, |_, a| unsafe {
+    (Syscall::N_semtimedop, |_, a| {
         crate::thread::ipc::semtimedop(
             a[0] as i32,
             a[1] as *const _,

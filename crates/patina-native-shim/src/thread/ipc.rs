@@ -193,7 +193,7 @@ pub(crate) struct MsqidDs {
 
 /// `struct sembuf`.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Sembuf {
     num: u16,
     op: i16,
@@ -993,12 +993,12 @@ fn update_queue(set: &mut SemSet, outcomes: &mut BTreeMap<TaskId, Outcome>) -> V
     woken
 }
 
-/// `semop(2)`/`semtimedop(2)`, `timeout` relative.
-///
-/// # Safety
-/// `sops` must be NULL or readable for `nsops` entries; `timeout` NULL or a
-/// readable timespec.
-pub(crate) unsafe fn semtimedop(
+/// `semop(2)`/`semtimedop(2)`, `timeout` relative, in 6.8's order: the
+/// timeout is copied in (`ksys_semtimedop`: `EFAULT`); then too many
+/// operations are `E2BIG` and none `EINVAL`; the operations are copied in
+/// (`EFAULT`); then a negative id or an invalid timeout is `EINVAL`
+/// (`__do_semtimedop`).
+pub(crate) fn semtimedop(
     id: i32,
     sops: *const Sembuf,
     nsops: usize,
@@ -1007,30 +1007,36 @@ pub(crate) unsafe fn semtimedop(
     if let Err(errno) = boundary() {
         return fail(errno);
     }
-    if nsops < 1 || id < 0 {
-        return fail(EINVAL);
-    }
+    let timeout = if timeout.is_null() {
+        None
+    } else {
+        match crate::uaccess::read::<signals::Timespec>(timeout as usize) {
+            Ok(timeout) => Some(timeout),
+            Err(_) => return fail(EFAULT),
+        }
+    };
     if nsops > SEMOPM {
         return fail(E2BIG);
     }
-    if sops.is_null() {
-        return fail(EFAULT);
+    if nsops < 1 {
+        return fail(EINVAL);
     }
-    // SAFETY: per this function's contract.
-    let ops: Vec<Sembuf> = unsafe { std::slice::from_raw_parts(sops, nsops) }.to_vec();
-    let relative = if timeout.is_null() {
-        None
-    } else {
-        // SAFETY: per this function's contract.
-        let timeout = unsafe { &*timeout };
-        if timeout.sec < 0 || !(0..1_000_000_000).contains(&timeout.nsec) {
+    let Ok(ops) = crate::uaccess::read_vec::<Sembuf>(sops as usize, nsops) else {
+        return fail(EFAULT);
+    };
+    if id < 0 {
+        return fail(EINVAL);
+    }
+    let relative = match timeout {
+        None => None,
+        Some(timeout) if timeout.sec < 0 || !(0..1_000_000_000).contains(&timeout.nsec) => {
             return fail(EINVAL);
         }
-        Some(
+        Some(timeout) => Some(
             (timeout.sec as u64)
                 .saturating_mul(1_000_000_000)
                 .saturating_add(timeout.nsec as u64),
-        )
+        ),
     };
     let max = ops.iter().map(|op| op.num).max().unwrap_or(0) as usize;
     let alter = ops.iter().any(|op| op.op != 0);
@@ -1767,16 +1773,15 @@ fn mq_entry(fd: c_int) -> Result<(u64, u32), c_int> {
     Ok((resolved.handle, resolved.status))
 }
 
-/// A realtime deadline (`prepare_timeout`): `EINVAL` for an invalid one.
-///
-/// # Safety
-/// `timeout` must be NULL or a readable timespec.
-unsafe fn mq_deadline(timeout: *const signals::Timespec) -> Result<Option<u64>, c_int> {
+/// A realtime deadline (`prepare_timeout`): copied in (`EFAULT`), then
+/// `EINVAL` for an invalid one.
+fn mq_deadline(timeout: *const signals::Timespec) -> Result<Option<u64>, c_int> {
     if timeout.is_null() {
         return Ok(None);
     }
-    // SAFETY: per this function's contract.
-    let timeout = unsafe { &*timeout };
+    let Ok(timeout) = crate::uaccess::read::<signals::Timespec>(timeout as usize) else {
+        return Err(EFAULT);
+    };
     if timeout.sec < 0 || !(0..1_000_000_000).contains(&timeout.nsec) {
         return Err(EINVAL);
     }
@@ -1979,8 +1984,7 @@ pub(crate) unsafe fn mq_timedsend(
     if let Err(errno) = boundary() {
         return fail(errno);
     }
-    // SAFETY: per this function's contract.
-    let deadline = match unsafe { mq_deadline(timeout) } {
+    let deadline = match mq_deadline(timeout) {
         Ok(deadline) => deadline,
         Err(errno) => return fail(errno),
     };
@@ -2125,8 +2129,7 @@ pub(crate) unsafe fn mq_timedreceive(
     if let Err(errno) = boundary() {
         return fail(errno);
     }
-    // SAFETY: per this function's contract.
-    let deadline = match unsafe { mq_deadline(timeout) } {
+    let deadline = match mq_deadline(timeout) {
         Ok(deadline) => deadline,
         Err(errno) => return fail(errno),
     };

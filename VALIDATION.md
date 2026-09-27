@@ -759,16 +759,17 @@ pointer it cannot use is `EFAULT` after whatever the call did before the copy
 before: the shim's own read of the pointer ended the run), and in 6.8's order
 where the call judges other arguments too (`ppoll`'s mask before its count,
 `pselect6`'s argpack before its timeout; red before: `EINVAL`). So do the clock,
-sleep and timeout rows (`time/fault`, the raw vehicles; red before: the shim's own
+sleep, timer and timeout rows (`time/fault`, the raw vehicles; red before: the shim's own
 write ended the run): an interrupted sleep whose remaining time cannot be written
 is `EFAULT`, `adjtimex` copies back even a request it refuses, `clock_adjtime`
-copies in before it judges the clock, and a `ppoll` or `pselect6` timeout in
-read-only memory is not written back. glibc's `clock_gettime`, `__clock_gettime`
-and `clock_getres` store a vDSO clock's answer in user space, so a time they
-cannot write is the guest's own `SIGSEGV` at that address, and only the clocks
-the vDSO hands to the system call answer `EFAULT`; glibc's `nanosleep` is the
-`clock_nanosleep` row (`time/libc_fault`; red before: `EFAULT` for the vDSO
-clocks, a `SIGSEGV` for `nanosleep`'s). Ambient host signals
+copies in before it judges the clock, a `ppoll` or `pselect6` timeout in
+read-only memory is not written back, and `timer_create` and `setitimer` copy
+their argument in before they judge the clock or `which`. glibc's
+`clock_gettime`, `__clock_gettime` and `clock_getres` store a vDSO clock's
+answer in user space, so a time they cannot write is the guest's own `SIGSEGV`
+at that address, and only the clocks the vDSO hands to the system call answer
+`EFAULT`; glibc's `nanosleep` is the `clock_nanosleep` row (`time/libc_fault`;
+red before: `EFAULT` for the vDSO clocks, a `SIGSEGV` for `nanosleep`'s). Ambient host signals
 and siglongjmp escape from a handler remain outside verified deterministic
 behavior.
 

@@ -19,14 +19,23 @@
 //! * `FUTEX_WAIT`, `epoll_pwait2` (before its mask's size is judged),
 //!   `ppoll` and `pselect6` from an unreadable timeout; a timeout in
 //!   read-only memory is not written back, and the wait answers as it
-//!   would have (`poll_select_finish`).
+//!   would have (`poll_select_finish`);
+//! * `getitimer`, `timer_gettime` and `sched_rr_get_interval` into an
+//!   unwritable setting (an unknown `which`, timer or a negative pid is
+//!   `EINVAL` first); `setitimer` and `timer_settime` from an unreadable one
+//!   (`setitimer`'s before `which` is judged) and into an unwritable old one,
+//!   after the new one took; `timer_create` from an unreadable `sigevent`
+//!   (before the clock is judged) and into an unwritable id;
+//! * `semtimedop` from an unreadable timeout, and from unreadable operations
+//!   before the id is judged; `mq_timedsend`/`mq_timedreceive` from an
+//!   unreadable timeout before the descriptor is judged.
 //!
 //! Its own scenario, because a door that dereferences the pointer itself
 //! ends the whole run (and a crash loses the captured event stream). Raw
 //! vehicles only: glibc's wrappers of the clock reads are not the rows
 //! (time/libc_fault holds them).
 
-use crate::catalog::{DEFAULTS, Scenario};
+use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{FUTEX_WAIT_PRIVATE, Probe, neg};
 use crate::signals as support;
 use crate::vehicle::Vehicle;
@@ -290,6 +299,187 @@ pub fn run(p: &Probe) {
         "and pselect6",
         raw(Syscall::N_pselect6, [0, 0, 0, 0, read_only(nanosecond), 0]) == 0,
     );
+
+    timers(p);
+    timeouts(p);
+}
+
+/// The interval and POSIX timers, and the round-robin slice.
+fn timers(p: &Probe) {
+    let raw = |call: Syscall, args: [i64; 6]| p.call_observed(call, args);
+    let efault = |call: Syscall, args: [i64; 6]| raw(call, args) == neg(EFAULT);
+    let real = ITIMER_REAL as i64;
+    p.check(
+        "getitimer into an unwritable setting is EFAULT",
+        efault(Syscall::N_getitimer, [real, UNMAPPED, 0, 0, 0, 0]),
+    );
+    p.check(
+        "an unknown which is EINVAL before the copy",
+        raw(Syscall::N_getitimer, [99, UNMAPPED, 0, 0, 0, 0]) == neg(EINVAL),
+    );
+    p.check(
+        "setitimer from an unreadable value is EFAULT",
+        efault(Syscall::N_setitimer, [real, UNMAPPED, 0, 0, 0, 0]),
+    );
+    p.check(
+        "copied in before which is judged",
+        efault(Syscall::N_setitimer, [99, UNMAPPED, 0, 0, 0, 0]),
+    );
+    let later = itimerval {
+        it_interval: timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
+        it_value: timeval {
+            tv_sec: 100,
+            tv_usec: 0,
+        },
+    };
+    p.check(
+        "setitimer into an unwritable old setting is EFAULT",
+        efault(
+            Syscall::N_setitimer,
+            [real, address(&later), UNMAPPED, 0, 0, 0],
+        ),
+    );
+    let mut armed = later;
+    raw(Syscall::N_getitimer, [real, out(&mut armed), 0, 0, 0, 0]);
+    p.check("after the new one took", armed.it_value.tv_sec > 0);
+    let disarm = itimerval {
+        it_value: later.it_interval,
+        ..later
+    };
+    raw(Syscall::N_setitimer, [real, address(&disarm), 0, 0, 0, 0]);
+
+    // A `struct sigevent` of `SIGEV_NONE` (64 bytes, `sigev_notify` the
+    // fourth word).
+    let mut quiet = [0i32; 16];
+    quiet[3] = SIGEV_NONE;
+    let mut id = 0i32;
+    let monotonic = CLOCK_MONOTONIC as i64;
+    p.check(
+        "timer_create from an unreadable sigevent is EFAULT",
+        efault(
+            Syscall::N_timer_create,
+            [monotonic, UNMAPPED, out(&mut id), 0, 0, 0],
+        ),
+    );
+    p.check(
+        "copied in before the clock is judged",
+        efault(
+            Syscall::N_timer_create,
+            [10, UNMAPPED, out(&mut id), 0, 0, 0],
+        ),
+    );
+    p.check(
+        "timer_create into an unwritable id is EFAULT",
+        efault(
+            Syscall::N_timer_create,
+            [monotonic, address(&quiet), UNMAPPED, 0, 0, 0],
+        ),
+    );
+    p.require(
+        "create a SIGEV_NONE timer",
+        raw(
+            Syscall::N_timer_create,
+            [monotonic, address(&quiet), out(&mut id), 0, 0, 0],
+        ) == 0,
+    );
+    let timer = id as i64;
+    let setting = itimerspec {
+        it_interval: timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+        it_value: timespec {
+            tv_sec: 100,
+            tv_nsec: 0,
+        },
+    };
+    p.check(
+        "timer_settime from an unreadable setting is EFAULT",
+        efault(Syscall::N_timer_settime, [timer, 0, UNMAPPED, 0, 0, 0]),
+    );
+    p.check(
+        "timer_settime into an unwritable old setting is EFAULT",
+        efault(
+            Syscall::N_timer_settime,
+            [timer, 0, address(&setting), UNMAPPED, 0, 0],
+        ),
+    );
+    let mut current = setting;
+    current.it_value.tv_sec = 0;
+    raw(
+        Syscall::N_timer_gettime,
+        [timer, out(&mut current), 0, 0, 0, 0],
+    );
+    p.check("after the new one took", current.it_value.tv_sec > 0);
+    p.check(
+        "timer_gettime into an unwritable setting is EFAULT",
+        efault(Syscall::N_timer_gettime, [timer, UNMAPPED, 0, 0, 0, 0]),
+    );
+    p.check(
+        "an unknown timer is EINVAL before the copy",
+        raw(
+            Syscall::N_timer_gettime,
+            [timer + 1000, UNMAPPED, 0, 0, 0, 0],
+        ) == neg(EINVAL),
+    );
+    raw(Syscall::N_timer_delete, [timer, 0, 0, 0, 0, 0]);
+
+    p.check(
+        "sched_rr_get_interval into an unwritable slice is EFAULT",
+        efault(Syscall::N_sched_rr_get_interval, [0, UNMAPPED, 0, 0, 0, 0]),
+    );
+    p.check(
+        "a negative pid is EINVAL before the copy",
+        raw(Syscall::N_sched_rr_get_interval, [-1, UNMAPPED, 0, 0, 0, 0]) == neg(EINVAL),
+    );
+}
+
+/// The System V semaphore and POSIX message queue timeouts, copied in
+/// before anything else is judged.
+fn timeouts(p: &Probe) {
+    let raw = |call: Syscall, args: [i64; 6]| p.call_observed(call, args);
+    let efault = |call: Syscall, args: [i64; 6]| raw(call, args) == neg(EFAULT);
+    // The set's id is the host's business: recorded as success alone.
+    let set = p.call_unrecorded(Syscall::N_semget, [IPC_PRIVATE as i64, 1, 0o600, 0, 0, 0]);
+    p.record_result(Syscall::N_semget, set.min(0));
+    p.require("create a semaphore set", set >= 0);
+    // `struct sembuf`: semaphore 0, +1, no flags.
+    let post: [i16; 3] = [0, 1, 0];
+    p.check(
+        "semtimedop from an unreadable timeout is EFAULT",
+        efault(
+            Syscall::N_semtimedop,
+            [set, address(&post), 1, UNMAPPED, 0, 0],
+        ),
+    );
+    p.check(
+        "semtimedop from unreadable operations is EFAULT",
+        efault(Syscall::N_semtimedop, [set, UNMAPPED, 1, 0, 0, 0]),
+    );
+    p.check(
+        "copied in before the id is judged",
+        efault(Syscall::N_semtimedop, [-1, UNMAPPED, 1, 0, 0, 0]),
+    );
+    raw(Syscall::N_semctl, [set, 0, IPC_RMID as i64, 0, 0, 0]);
+    let byte = 0u8;
+    p.check(
+        "mq_timedsend from an unreadable timeout is EFAULT before its descriptor is judged",
+        efault(
+            Syscall::N_mq_timedsend,
+            [-1, address(&byte), 1, 0, UNMAPPED, 0],
+        ),
+    );
+    let mut buffer = [0u8; 64];
+    p.check(
+        "and mq_timedreceive",
+        efault(
+            Syscall::N_mq_timedreceive,
+            [-1, out(&mut buffer), 64, 0, UNMAPPED, 0],
+        ),
+    );
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -315,8 +505,20 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_epoll_pwait2,
         Syscall::N_ppoll,
         Syscall::N_pselect6,
+        Syscall::N_getitimer,
+        Syscall::N_timer_create,
+        Syscall::N_timer_settime,
+        Syscall::N_timer_gettime,
+        Syscall::N_timer_delete,
+        Syscall::N_sched_rr_get_interval,
+        Syscall::N_semget,
+        Syscall::N_semtimedop,
+        Syscall::N_semctl,
+        Syscall::N_mq_timedsend,
+        Syscall::N_mq_timedreceive,
         Syscall::N_close,
     ],
     vehicles: Vehicle::KERNEL,
+    needs: &[Need::SysvSem, Need::PosixMqueue],
     ..DEFAULTS
 };

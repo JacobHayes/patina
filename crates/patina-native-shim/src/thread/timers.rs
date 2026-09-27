@@ -510,11 +510,18 @@ fn get_itimer(state: &ThreadRuntime, which: i32, now: u64, replacing: bool) -> (
     }
 }
 
-/// `getitimer(which, value)`.
-///
-/// # Safety
-/// `out` must be NULL or writable for a `struct itimerval`.
-pub(crate) unsafe fn getitimer(which: i32, out: *mut Itimerval) -> i64 {
+/// Copy `value` out to the caller's `out` (`EFAULT` where it cannot be
+/// written).
+fn copy_out<T: Copy>(out: usize, value: &T) -> i64 {
+    match uaccess::write(out, value) {
+        Ok(()) => 0,
+        Err(_) => errno(EFAULT),
+    }
+}
+
+/// `getitimer(which, value)`: `which` is judged, then the setting copied
+/// out (`EFAULT`).
+pub(crate) fn getitimer(which: i32, out: *mut Itimerval) -> i64 {
     if !(ITIMER_REAL..=ITIMER_PROF).contains(&which) {
         return errno(EINVAL);
     }
@@ -529,29 +536,24 @@ pub(crate) unsafe fn getitimer(which: i32, out: *mut Itimerval) -> i64 {
         Err(code) => return errno(code),
     };
     let (remaining, interval) = get_itimer(&lock_state(), which, now, false);
-    if out.is_null() {
-        return errno(EFAULT);
-    }
-    // SAFETY: per this function's contract.
-    unsafe { out.write_unaligned(itimerval(interval, remaining)) };
-    0
+    copy_out(out as usize, &itimerval(interval, remaining))
 }
 
 /// `setitimer(which, value, old)` (`do_setitimer`): the new value is
-/// validated first (a NULL one disarms), then `which`; the old setting is
-/// written into a non-NULL `old`. An `ITIMER_REAL` value arms relative to
-/// now; a CPU-time one relative to the process's CPU time, a tick later
+/// copied in (`EFAULT`) and validated first (a NULL one disarms), then
+/// `which`; the old setting is copied out to a non-NULL `old` once the new
+/// one took (`EFAULT`). An `ITIMER_REAL` value arms relative to now; a
+/// CPU-time one relative to the process's CPU time, a tick later
 /// (`set_cpu_itimer`).
-///
-/// # Safety
-/// `new` must be NULL or readable, `old` NULL or writable, each for a
-/// `struct itimerval`.
-pub(crate) unsafe fn setitimer(which: i32, new: *const Itimerval, old: *mut Itimerval) -> i64 {
+pub(crate) fn setitimer(which: i32, new: *const Itimerval, old: *mut Itimerval) -> i64 {
     let (value, interval) = if new.is_null() {
         (0, 0)
     } else {
-        // SAFETY: per this function's contract.
-        let [interval_sec, interval_usec, value_sec, value_usec] = unsafe { new.read_unaligned() };
+        let Ok([interval_sec, interval_usec, value_sec, value_usec]) =
+            uaccess::read::<Itimerval>(new as usize)
+        else {
+            return errno(EFAULT);
+        };
         match (
             timeval_nanos([value_sec, value_usec]),
             timeval_nanos([interval_sec, interval_usec]),
@@ -567,12 +569,11 @@ pub(crate) unsafe fn setitimer(which: i32, new: *const Itimerval, old: *mut Itim
         Ok(previous) => previous,
         Err(code) => return errno(code),
     };
-    if !old.is_null() {
-        let (remaining, interval) = previous;
-        // SAFETY: per this function's contract.
-        unsafe { old.write_unaligned(itimerval(interval, remaining)) };
+    if old.is_null() {
+        return 0;
     }
-    0
+    let (remaining, interval) = previous;
+    copy_out(old as usize, &itimerval(interval, remaining))
 }
 
 /// Arm (or, with a zero value, disarm) interval timer `which`, answering the
@@ -674,11 +675,18 @@ fn timer_line(clock: Clock) -> Result<(Line, bool), c_int> {
 /// does not have is `EINVAL`; an alarm clock needs `CAP_WAKE_ALARM`,
 /// `EPERM`). A NULL `sevp` is `SIGALRM` to the
 /// process carrying the id; `SIGEV_THREAD` is, to the kernel, a signal.
-///
-/// # Safety
-/// `event` must be NULL or readable for a `struct sigevent`, `id` NULL or
-/// writable for an `int`.
-pub(crate) unsafe fn timer_create(clock: i32, event: *const Sigevent, id_out: *mut i32) -> i64 {
+/// The `sigevent` is copied in before anything else (`EFAULT`), the id
+/// copied out where the id is written (`EFAULT`, the id spent and no timer
+/// made).
+pub(crate) fn timer_create(clock: i32, event: *const Sigevent, id_out: *mut i32) -> i64 {
+    let event = if event.is_null() {
+        None
+    } else {
+        match uaccess::read::<Sigevent>(event as usize) {
+            Ok(event) => Some(event),
+            Err(_) => return errno(EFAULT),
+        }
+    };
     let Some(decoded) = Clock::decode(clock) else {
         return errno(EINVAL);
     };
@@ -688,8 +696,6 @@ pub(crate) unsafe fn timer_create(clock: i32, event: *const Sigevent, id_out: *m
     ) {
         return errno(EOPNOTSUPP);
     }
-    // SAFETY: per this function's contract.
-    let event = (!event.is_null()).then(|| unsafe { event.read_unaligned() });
     super::signals::activate();
     let mut state = lock_state();
     let id = state.timers.next_id;
@@ -726,11 +732,9 @@ pub(crate) unsafe fn timer_create(clock: i32, event: *const Sigevent, id_out: *m
             }
         }
     };
-    if id_out.is_null() {
+    if uaccess::write(id_out as usize, &id).is_err() {
         return errno(EFAULT);
     }
-    // SAFETY: per this function's contract.
-    unsafe { id_out.write_unaligned(id) };
     let (line, realtime) = match timer_line(decoded) {
         Ok(line) => line,
         Err(code) => return errno(code),
@@ -786,23 +790,19 @@ fn posix_get(timer: &mut PosixTimer, now: u64, replacing: bool) -> (u64, u64) {
     (remaining, timer.interval)
 }
 
-/// Write a remaining time and a reload as a `struct itimerspec`.
-///
-/// # Safety
-/// `out` must be writable for a `struct itimerspec`.
-unsafe fn write_spec(out: *mut Itimerspec, (value, interval): (u64, u64)) {
-    // SAFETY: per this function's contract.
-    unsafe { out.write_unaligned([Timespec::from_nanos(interval), Timespec::from_nanos(value)]) };
+/// Copy a remaining time and a reload out as a `struct itimerspec`
+/// (`EFAULT` where it cannot be written).
+fn write_spec(out: *mut Itimerspec, (value, interval): (u64, u64)) -> i64 {
+    let spec: Itimerspec = [Timespec::from_nanos(interval), Timespec::from_nanos(value)];
+    copy_out(out as usize, &spec)
 }
 
-/// `timer_settime(id, flags, new, old)`: the new setting is validated
-/// (`EINVAL`) before the id (`EINVAL`); the old setting is answered; a zero
-/// value disarms; `TIMER_ABSTIME` takes an absolute time on the timer's clock.
-///
-/// # Safety
-/// `new` must be NULL or readable, `old` NULL or writable, each for a
-/// `struct itimerspec`.
-pub(crate) unsafe fn timer_settime(
+/// `timer_settime(id, flags, new, old)`: a NULL new setting is `EINVAL`,
+/// an unreadable one `EFAULT`; it is validated (`EINVAL`) before the id
+/// (`EINVAL`); the old setting is copied out once the new one took
+/// (`EFAULT`); a zero value disarms; `TIMER_ABSTIME` takes an absolute time
+/// on the timer's clock.
+pub(crate) fn timer_settime(
     id: i32,
     flags: i32,
     new: *const Itimerspec,
@@ -811,8 +811,9 @@ pub(crate) unsafe fn timer_settime(
     if new.is_null() {
         return errno(EINVAL);
     }
-    // SAFETY: per this function's contract.
-    let [interval, value] = unsafe { new.read_unaligned() };
+    let Ok([interval, value]) = uaccess::read::<Itimerspec>(new as usize) else {
+        return errno(EFAULT);
+    };
     let (Some(interval), Some(value)) = (interval.valid_nanos(), value.valid_nanos()) else {
         return errno(EINVAL);
     };
@@ -869,18 +870,15 @@ pub(crate) unsafe fn timer_settime(
     state.publish_alarm();
     drop(state);
     wake_all(wakes);
-    if !old.is_null() {
-        // SAFETY: per this function's contract.
-        unsafe { write_spec(old, previous) };
+    if old.is_null() {
+        return 0;
     }
-    0
+    write_spec(old, previous)
 }
 
-/// `timer_gettime(id, value)`.
-///
-/// # Safety
-/// `out` must be NULL or writable for a `struct itimerspec`.
-pub(crate) unsafe fn timer_gettime(id: i32, out: *mut Itimerspec) -> i64 {
+/// `timer_gettime(id, value)`: the id is judged (`EINVAL`), then the
+/// setting copied out (`EFAULT`).
+pub(crate) fn timer_gettime(id: i32, out: *mut Itimerspec) -> i64 {
     fire_due();
     let Some(line) = lock_state().timers.posix.get(&id).map(|timer| timer.line) else {
         return errno(EINVAL);
@@ -896,12 +894,7 @@ pub(crate) unsafe fn timer_gettime(id: i32, out: *mut Itimerspec) -> i64 {
         };
         posix_get(timer, now, false)
     };
-    if out.is_null() {
-        return errno(EFAULT);
-    }
-    // SAFETY: per this function's contract.
-    unsafe { write_spec(out, current) };
-    0
+    write_spec(out, current)
 }
 
 /// `timer_getoverrun(id)`: the overruns of the last expiry dequeued.
