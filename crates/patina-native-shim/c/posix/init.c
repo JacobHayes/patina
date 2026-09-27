@@ -856,7 +856,7 @@ static int patina_tsc_on_switched_stack(const ucontext_t *uc) {
  * src/thread/signals/fault.rs). */
 struct patina_fault_frame {
     uintptr_t sp;
-    stack_t stack;
+    const stack_t *stack;
     volatile uint64_t *canary;
     uint64_t *mask;
 };
@@ -914,7 +914,7 @@ static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
         patina_tsc_declined(rip);
     }
     volatile uint64_t canary = 0;
-    struct patina_fault_frame frame = {sp, uc->uc_stack, &canary, (uint64_t *)(void *)&uc->uc_sigmask};
+    struct patina_fault_frame frame = {sp, &uc->uc_stack, &canary, (uint64_t *)(void *)&uc->uc_sigmask};
     struct patina_signal_action handler;
     int route = patina_signal_fault(info, &frame, &handler);
     patina_trap_leave();

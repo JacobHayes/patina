@@ -40,6 +40,10 @@
  *   nodefer-edit  nodefer-std whose first handler edits its frame's saved
  *                 mask, which the second starts under natively: under the
  *                 shim a named stop;
+ *   autodisarm-high  an SA_ONSTACK handler whose sa_mask blocks SIGSEGV runs
+ *                 on an SS_AUTODISARM alternate stack that lies above the
+ *                 stack it was delivered from (a local array of an outer
+ *                 frame), and reads SIGSEGV back blocked there;
  *   alarm         (x86_64) SA_ONSTACK alarms fire while counter reads taken
  *                 on the alternate stack are served: native, the handlers run
  *                 and the reads go on; under the shim a handler that would run
@@ -65,6 +69,10 @@
 #include <sys/time.h>
 #include <ucontext.h>
 #include <unistd.h>
+
+#ifndef SS_AUTODISARM
+#define SS_AUTODISARM (1U << 31) /* <linux/signal.h>, which glibc's headers lack */
+#endif
 
 #define ALT_SIZE (256 * 1024)
 static char alt[ALT_SIZE];
@@ -334,6 +342,35 @@ static void nodefer(int rt) {
     printf("NODEFER %.*s\n", (int)ran, runs);
 }
 
+static volatile sig_atomic_t high_on_alt, high_blocked;
+static char *high_alt;
+static void on_high(int sig) {
+    char here;
+    sigset_t now;
+    (void)sig;
+    high_on_alt = (uintptr_t)&here - (uintptr_t)high_alt < ALT_SIZE;
+    assert(sigprocmask(SIG_BLOCK, NULL, &now) == 0);
+    high_blocked = sigismember(&now, SIGSEGV);
+}
+
+static void autodisarm_high(void) {
+    char above[ALT_SIZE];
+    high_alt = above;
+    stack_t stack = {.ss_sp = above, .ss_size = ALT_SIZE, .ss_flags = (int)SS_AUTODISARM};
+    assert(sigaltstack(&stack, NULL) == 0);
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_handler = on_high;
+    action.sa_flags = SA_ONSTACK;
+    sigemptyset(&action.sa_mask);
+    sigaddset(&action.sa_mask, SIGSEGV);
+    assert(sigaction(SIGUSR1, &action, NULL) == 0);
+    assert(raise(SIGUSR1) == 0);
+    printf("AUTODISARM on_alt=%d blocked=%d\n", (int)high_on_alt, (int)high_blocked);
+    stack_t off = {.ss_flags = SS_DISABLE};
+    assert(sigaltstack(&off, NULL) == 0);
+}
+
 static volatile sig_atomic_t alarms;
 static void on_alarm(int sig) {
     (void)sig;
@@ -411,6 +448,8 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[1], "nodefer-edit") == 0) {
         edit = 1;
         nodefer(0);
+    } else if (strcmp(argv[1], "autodisarm-high") == 0) {
+        autodisarm_high();
     } else if (strcmp(argv[1], "alarm") == 0) {
         alarm_reads(0);
     } else if (strcmp(argv[1], "alarm-small") == 0) {

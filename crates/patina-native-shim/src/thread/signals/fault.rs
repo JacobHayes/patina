@@ -28,7 +28,12 @@
 //! glibc's `siglongjmp` and `setcontext` restore a mask without a system call
 //! the shim sees, so a scope a guest left that way is found by the kernel's
 //! own stack test ([`left`]): off the scope's alternate stack, above its
-//! frame, or with its frame overwritten. On an ordinary stack, below an
+//! frame, or with its frame overwritten. Stack pointers are compared only on
+//! one stack: the alternate stacks the guest registered are known by their
+//! bounds (an `SS_AUTODISARM` one too, which the kernel forgets while a
+//! handler runs on it, and one a handler installs by editing its frame's
+//! `uc_stack`), and a stack pointer on none of them is on the thread's
+//! ordinary stack. On an ordinary stack, below an
 //! intact frame, a handler still running and one left by `siglongjmp` whose
 //! caller went deeper look the same; where the two would answer differently
 //! the answer is [`SegvBlock::Unknown`], which every caller turns into a named
@@ -107,6 +112,11 @@ pub unsafe extern "C" fn patina_fault_route(
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let sig = sig as u8;
     let info = unsafe { *info };
+    // Scopes the guest left before this fault are found left from where it
+    // faulted, before its handler can take it to an alternate stack ([`left`]).
+    if scoped() {
+        blocked();
+    }
     let action = match take_sent(sig, &info) {
         Some(action) => action,
         None => {
@@ -369,6 +379,9 @@ thread_local! {
             scopes: [None; SCOPES],
             depth: 0,
             next: 0x5e67_5c09_e000_0001,
+            registered: None,
+            stacks: [(0, 0); STACKS],
+            known: 0,
         })
     };
 }
@@ -528,11 +541,12 @@ struct Scope {
     /// left.
     entry: u64,
     /// A word of the frame that encloses the scope and everything it runs:
-    /// a stack pointer above it has left the scope.
+    /// a stack pointer above it, on the same stack, has left the scope.
     canary: usize,
     /// What was written there.
     value: u64,
-    /// The alternate stack the frame is on, if it is on one.
+    /// The alternate stack the frame is on, if it is on one: else it is on
+    /// the thread's ordinary stack.
     alt: Option<(usize, usize)>,
     /// Opened by shim code (a delivery batch, a temporary mask), whose own
     /// frames the guest code it runs is below.
@@ -542,20 +556,27 @@ struct Scope {
 }
 
 const SCOPES: usize = 16;
+/// The alternate stacks one thread's open scopes can tell apart.
+const STACKS: usize = 8;
 
 struct SegvMask {
     current: SegvBlock,
     scopes: [Option<Scope>; SCOPES],
     depth: usize,
     next: u64,
+    /// The alternate stack the guest registered last on this thread.
+    registered: Option<(usize, usize)>,
+    /// While a scope is open: every alternate stack guest code may be on,
+    /// the one registered when the outermost opened and each registered
+    /// since.
+    stacks: [(usize, usize); STACKS],
+    known: usize,
 }
 
-/// Where guest code runs: its stack pointer, the alternate stack, and the
-/// shim entry serving it.
+/// Where guest code runs: its stack pointer and the shim entry serving it.
 #[derive(Clone, Copy)]
 struct Position {
     sp: usize,
-    alt: Option<(usize, usize)>,
     entry: u64,
 }
 
@@ -567,29 +588,37 @@ fn on(sp: usize, (base, size): (usize, usize)) -> bool {
 impl Position {
     /// The guest code the running shim entry interrupted.
     fn guest() -> Self {
-        let stack = kernel_altstack();
         let (sp, entry) = crate::panic_boundary::guest_entry();
-        Self {
-            sp,
-            alt: (stack.flags & SS_DISABLE == 0).then_some((stack.base, stack.size)),
-            entry,
-        }
+        Self { sp, entry }
     }
 }
 
-/// Whether guest code at `at` has provably left `scope`.
-fn left(scope: &Scope, at: &Position) -> bool {
+/// The known alternate stack `sp` is on, if any: else it is on the thread's
+/// ordinary stack.
+fn alternate(stacks: &[(usize, usize)], sp: usize) -> Option<(usize, usize)> {
+    stacks.iter().copied().find(|stack| on(sp, *stack))
+}
+
+/// Whether guest code at `at` has provably left `scope`. Stack pointers are
+/// compared on one stack only: guest code the scope runs on another stack is
+/// a handler the kernel moved to an alternate one, and guest code that left
+/// it (by `siglongjmp`) came back through a shim entry or fault that found it
+/// left from where it was.
+fn left(scope: &Scope, at: &Position, stacks: &[(usize, usize)]) -> bool {
     if at.entry == scope.entry {
         return false;
     }
-    let comparable = match scope.alt {
-        // Off the frame's alternate stack, nothing the scope runs is running.
-        Some(alt) if !on(at.sp, alt) => return true,
-        Some(_) => true,
-        // An ordinary stack's frame cannot be compared from an alternate one.
-        None => !at.alt.is_some_and(|alt| on(at.sp, alt)),
+    let here = alternate(stacks, at.sp);
+    let same = match scope.alt {
+        Some(frame) => on(at.sp, frame),
+        None => here.is_none(),
     };
-    if comparable && at.sp > scope.canary {
+    if same && at.sp > scope.canary {
+        return true;
+    }
+    // On the ordinary stack, off the alternate stack the frame is on:
+    // nothing the scope runs is running.
+    if scope.alt.is_some() && here.is_none() {
         return true;
     }
     // Overwritten: what ran there since has left the scope.
@@ -597,13 +626,18 @@ fn left(scope: &Scope, at: &Position) -> bool {
 }
 
 /// The state at `at` under `scopes` (none of whose tops is provably left).
-fn answer(scopes: &[Option<Scope>], current: SegvBlock, at: &Position) -> SegvBlock {
+fn answer(
+    scopes: &[Option<Scope>],
+    current: SegvBlock,
+    at: &Position,
+    stacks: &[(usize, usize)],
+) -> SegvBlock {
     let Some((top, below)) = scopes.split_last() else {
         return current;
     };
     let top = top.expect("live scope");
-    if left(&top, at) {
-        return answer(below, top.saved, at);
+    if left(&top, at, stacks) {
+        return answer(below, top.saved, at, stacks);
     }
     // Asked by the entry that opened it, on its alternate stack, or below
     // the shim's own intact frame: still inside.
@@ -613,7 +647,7 @@ fn answer(scopes: &[Option<Scope>], current: SegvBlock, at: &Position) -> SegvBl
     // On an ordinary stack below the trap's intact frame: still inside the
     // handler, or left by `siglongjmp` and deeper since. Known only where
     // both answer the same.
-    if answer(below, top.saved, at) == current {
+    if answer(below, top.saved, at, stacks) == current {
         current
     } else {
         SegvBlock::Unknown
@@ -622,22 +656,49 @@ fn answer(scopes: &[Option<Scope>], current: SegvBlock, at: &Position) -> SegvBl
 
 impl SegvMask {
     fn at(&mut self, at: &Position) -> SegvBlock {
+        let stacks = &self.stacks[..self.known];
         while let Some(top) = self.depth.checked_sub(1).and_then(|top| self.scopes[top]) {
-            if !left(&top, at) {
+            if !left(&top, at, stacks) {
                 break;
             }
             self.current = top.saved;
             self.depth -= 1;
         }
-        answer(&self.scopes[..self.depth], self.current, at)
+        answer(&self.scopes[..self.depth], self.current, at, stacks)
     }
-    fn open(&mut self, canary: *mut u64, alt: Option<(usize, usize)>, shim: bool) {
+    /// Guest code may run on `stack` while a scope is open.
+    fn note(&mut self, stack: (usize, usize)) {
+        if self.stacks[..self.known].contains(&stack) {
+            return;
+        }
+        if self.known == STACKS {
+            crate::trap_fatal(
+                "more alternate stacks registered inside signal handlers under the counter \
+                 trap than the shim tells apart for SIGSEGV's block: not modeled",
+            );
+        }
+        self.stacks[self.known] = stack;
+        self.known += 1;
+    }
+    /// Open a scope whose frame word is `canary`, with `stack` the
+    /// alternate stack the kernel holds for the thread, if any.
+    fn open(&mut self, canary: *mut u64, stack: Option<(usize, usize)>, shim: bool) {
         if self.depth == SCOPES {
             crate::trap_fatal(
                 "signal handlers under the counter trap nest deeper than the shim tracks \
                  SIGSEGV's block for: not modeled",
             );
         }
+        if self.depth == 0 {
+            self.known = 0;
+            if let Some(registered) = self.registered {
+                self.note(registered);
+            }
+        }
+        if let Some(stack) = stack {
+            self.note(stack);
+        }
+        let alt = alternate(&self.stacks[..self.known], canary as usize);
         let value = self.next;
         self.next = self.next.wrapping_add(2);
         // SAFETY: the caller's own frame word.
@@ -685,6 +746,46 @@ pub(super) fn set(state: SegvBlock) {
     SEGV.with_borrow_mut(|segv| segv.current = state);
 }
 
+/// The guest registered `stack` as this thread's alternate stack (disabled:
+/// it has none). Scopes it already left are found left first, from where it
+/// is, so none of them keeps a stack counted.
+pub(super) fn registered(stack: Stack) {
+    let at = Position::guest();
+    SEGV.with_borrow_mut(|segv| {
+        if stack.flags & SS_DISABLE != 0 {
+            segv.registered = None;
+            return;
+        }
+        segv.registered = Some((stack.base, stack.size));
+        if segv.depth != 0 {
+            let _ = segv.at(&at);
+        }
+        if segv.depth != 0 {
+            segv.note((stack.base, stack.size));
+        }
+    });
+}
+
+/// A frame's return left `stack` the kernel's alternate stack for the thread
+/// (`restore_altstack` installs the frame's `uc_stack`, which its handler may
+/// have edited): an enabled one the guest did not register is registered
+/// now. A disabled one is not taken as the guest's: the kernel also reports
+/// an `SS_AUTODISARM` stack disabled while a handler runs on it.
+pub(super) fn restored(stack: Stack) {
+    let known = SEGV.with_borrow(|segv| segv.registered);
+    if stack.flags & SS_DISABLE == 0 && known != Some((stack.base, stack.size)) {
+        registered(stack);
+    }
+}
+
+/// After a delivery batch: the kernel's alternate stack is what the last
+/// frame's return restored ([`restored`]).
+pub(super) fn batch_returned() {
+    if trap_routed(SIGSEGV) {
+        restored(kernel_altstack());
+    }
+}
+
 /// A scope opened in the frame that holds this guard, closed in place by
 /// [`Scoped::close`] (or its drop). The scope is found by the address its
 /// word had when it opened, so moving the guard can never lose it.
@@ -708,10 +809,8 @@ impl Scoped {
         }
         let canary = &mut self.canary as *mut u64;
         let stack = kernel_altstack();
-        let alt = (stack.flags & SS_DISABLE == 0)
-            .then_some((stack.base, stack.size))
-            .filter(|alt| on(canary as usize, *alt));
-        SEGV.with_borrow_mut(|segv| segv.open(canary, alt, true));
+        let stack = (stack.flags & SS_DISABLE == 0).then_some((stack.base, stack.size));
+        SEGV.with_borrow_mut(|segv| segv.open(canary, stack, true));
         self.at = canary as usize;
     }
     /// The scope returned: the block is again what it opened under.
@@ -738,8 +837,9 @@ pub(super) fn open_scopes() -> (usize, SegvBlock) {
 pub struct Frame {
     /// The interrupted stack pointer.
     sp: usize,
-    /// The alternate stack the kernel saved in the frame (`uc_stack`).
-    stack: Stack,
+    /// The alternate stack the kernel saved in the frame (`uc_stack`), which
+    /// `rt_sigreturn` installs again (as the handler left it).
+    stack: *const Stack,
     /// A word of the C handler's own frame: every guest handler it calls runs
     /// below it.
     canary: *mut u64,
@@ -751,9 +851,14 @@ pub struct Frame {
 impl Frame {
     /// A frame on no alternate stack for a fault at `sp`.
     pub(super) fn below(sp: usize, canary: *mut u64, mask: *mut u64) -> Self {
+        static NONE: Stack = Stack {
+            base: 0,
+            flags: SS_DISABLE,
+            size: 0,
+        };
         Self {
             sp,
-            stack: Stack::default(),
+            stack: &NONE,
             canary,
             mask,
         }
@@ -776,10 +881,11 @@ pub unsafe extern "C" fn patina_signal_fault(
 ) -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let (info, frame) = unsafe { (*info, &*frame) };
-    let alt = (frame.stack.flags & SS_DISABLE == 0).then_some((frame.stack.base, frame.stack.size));
+    // SAFETY: the frame's `uc_stack`.
+    let stack = unsafe { *frame.stack };
+    let alt = (stack.flags & SS_DISABLE == 0).then_some((stack.base, stack.size));
     let at = Position {
         sp: frame.sp,
-        alt,
         entry: crate::panic_boundary::guest_entry().1,
     };
     let action = match take_sent(SIGSEGV, &info) {
@@ -824,9 +930,8 @@ pub unsafe extern "C" fn patina_signal_fault(
              the counter trap: its return is not modeled",
         );
     }
-    let canary_alt = alt.filter(|alt| on(frame.canary as usize, *alt));
     SEGV.with_borrow_mut(|segv| {
-        segv.open(frame.canary, canary_alt, false);
+        segv.open(frame.canary, alt, false);
         if action.flags & SA_NODEFER == 0 || action.mask & bit(SIGSEGV) != 0 {
             segv.current = SegvBlock::Yes;
         }
@@ -868,6 +973,10 @@ pub unsafe extern "C" fn patina_signal_fault_return(frame: *const Frame) {
             segv.current = SegvBlock::Yes;
         }
     });
+    if trap_routed(SIGSEGV) {
+        // SAFETY: the frame's `uc_stack`, as the handler left it.
+        restored(unsafe { *frame.stack });
+    }
     let me = current_task();
     let deliverable = {
         let mut state = lock_state();
@@ -880,5 +989,87 @@ pub unsafe extern "C" fn patina_signal_fault_return(frame: *const Frame) {
     if deliverable {
         install_mask(kept);
         deliver();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The registration a thread's scopes start from: a `sigaltstack` that
+    /// disables it leaves none, and a frame's return registers the enabled
+    /// stack it restores (a handler's edited `uc_stack`), never a disabled
+    /// one (an `SS_AUTODISARM` stack a handler still runs on).
+    #[test]
+    fn the_registration_follows_sigaltstack_and_frame_returns() {
+        let stack = |base, flags| Stack {
+            base,
+            flags,
+            size: 0x4000,
+        };
+        let (a, b, off) = (stack(0x10_000, 0), stack(0x20_000, 0), stack(0, SS_DISABLE));
+        let set = |stack: Stack| (true, stack);
+        let back = |stack: Stack| (false, stack);
+        for (steps, expected) in [
+            (&[set(a)][..], Some(a)),
+            (&[set(a), set(off)][..], None),
+            (&[set(a), back(off)][..], Some(a)),
+            (&[set(a), back(b)][..], Some(b)),
+        ] {
+            SEGV.with_borrow_mut(|segv| segv.registered = None);
+            for &(call, stack) in steps {
+                if call {
+                    registered(stack);
+                } else {
+                    restored(stack);
+                }
+            }
+            let expected = expected.map(|stack| (stack.base, stack.size));
+            assert_eq!(
+                SEGV.with_borrow(|segv| segv.registered),
+                expected,
+                "{steps:x?}"
+            );
+        }
+    }
+
+    /// A stack pointer above a scope's frame has left it only on the frame's
+    /// own stack: one on another stack is a handler the kernel moved there,
+    /// and one on the ordinary stack has left a frame on an alternate stack.
+    #[test]
+    fn stack_pointers_are_compared_on_one_stack() {
+        let mut word = 0u64;
+        let canary = &mut word as *mut u64 as usize;
+        let scope = |alt| Scope {
+            entry: 1,
+            canary,
+            value: 0,
+            alt,
+            shim: true,
+            saved: SegvBlock::No,
+        };
+        // An alternate stack above the frame's, another below it, and one
+        // the frame is on.
+        let above = (canary + 0x10_000, 0x10_000);
+        let below = (canary - 0x20_000, 0x10_000);
+        let around = (canary - 0x1000, 0x2000);
+        for (frame, sp, stacks, expected) in [
+            (None, above.0 + 0x8000, &[above][..], false),
+            (None, canary + 0x100, &[above][..], true),
+            (None, canary - 0x100, &[above][..], false),
+            (Some(around), around.0 + 0x1800, &[around, above][..], true),
+            (Some(around), canary - 0x100, &[around, above][..], false),
+            (Some(around), above.0 + 0x8000, &[around, above][..], false),
+            (Some(around), below.0 + 0x8000, &[around, below][..], false),
+            (Some(around), canary + 0x4000, &[around][..], true),
+        ] {
+            let at = Position { sp, entry: 2 };
+            assert_eq!(
+                left(&scope(frame), &at, stacks),
+                expected,
+                "frame {frame:x?} sp {:#x}",
+                sp - canary
+            );
+        }
     }
 }

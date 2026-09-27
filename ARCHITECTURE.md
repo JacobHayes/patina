@@ -311,7 +311,10 @@ is blocked), so the guest's block is kept per thread (`src/thread/signals/fault.
 visible mask changes set it, and a handler, delivery batch or temporary mask
 restores it on return. A scope the guest left by `siglongjmp` is found by the
 kernel's own stack test (off its alternate stack, above its frame, or its frame
-overwritten); below a trap-run handler's intact frame on an ordinary stack, a
+overwritten), which compares stack pointers on one stack only: the alternate
+stacks the guest registered are known by their bounds (an `SS_AUTODISARM` one
+too, which the kernel forgets while a handler runs on it), and more of them
+registered inside handlers than the shim tells apart is a named stop; below a trap-run handler's intact frame on an ordinary stack, a
 fault, pending SIGSEGV or mask read whose answer depends on whether the handler
 is still running is a named stop. With the block known, a blocked fault takes
 the default action and a blocked sent SIGSEGV stays pending, as in 6.8. Left

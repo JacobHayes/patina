@@ -840,6 +840,7 @@ pub(crate) fn deliver() {
             install_mask(kept);
         }
         scope.close();
+        fault::batch_returned();
         if trap_routed(SIGSEGV) && (RESTORED_SEGV.take() || restored & bit(SIGSEGV) != 0) {
             fault::set(SegvBlock::Yes);
         }
@@ -1145,10 +1146,27 @@ pub unsafe extern "C" fn patina_signal_altstack(stack: *const Stack, old: *mut S
     if fault::serving_counter_read().is_some() {
         fault::stop_while_serving("a sigaltstack call");
     }
+    // `sigaltstack`: the new stack copied in first, once, so the kernel
+    // installs the very stack the fault model registers.
+    let stack = if stack.is_null() {
+        None
+    } else {
+        match crate::uaccess::read::<Stack>(stack as usize) {
+            Ok(stack) => Some(stack),
+            Err(_) => return -i64::from(EFAULT),
+        }
+    };
     let mut previous = Stack::default();
     let rc = host(
         SYS_SIGALTSTACK,
-        [stack as u64, &mut previous as *mut _ as u64, 0, 0, 0, 0],
+        [
+            stack.as_ref().map_or(0, |stack| stack as *const _ as u64),
+            &mut previous as *mut _ as u64,
+            0,
+            0,
+            0,
+            0,
+        ],
     );
     if rc != 0 {
         return -(std::io::Error::last_os_error()
@@ -1157,8 +1175,11 @@ pub unsafe extern "C" fn patina_signal_altstack(stack: *const Stack, old: *mut S
             as i64);
     }
     // The new stack took, whether or not the old one can be copied out.
-    if !stack.is_null() {
+    if let Some(stack) = stack {
         FRAME_DIRTY.with(|dirty| dirty.set(dirty.get() | FRAME_STACK));
+        if trap_routed(SIGSEGV) {
+            fault::registered(stack);
+        }
     }
     if !old.is_null() && crate::uaccess::write(old as usize, &previous).is_err() {
         return -i64::from(EFAULT);

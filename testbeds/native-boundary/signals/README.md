@@ -31,7 +31,9 @@ one that blocks SIGSEGV faults inside itself or re-raises it; and a pending
 SIGSEGV meets a pending SIGUSR1 in 6.8's frame order, also when the SIGSEGV
 handler leaves by `siglongjmp` or resets SIGUSR1's action; repeated
 `SA_NODEFER` signals run as often, in the order and under the saved masks
-6.8 gives them. `native_signals` runs it
+6.8 gives them; and a handler whose `sa_mask` blocks SIGSEGV reads it back
+blocked on an `SS_AUTODISARM` alternate stack above the stack it was
+delivered from. `native_signals` runs it
 natively as the oracle and under the shim, and requires the same output and
 deaths (on an ordinary stack the nested fault is a named stop instead). Its
 `alarm` cases, in `native_containment`, fire a timer while counter reads taken

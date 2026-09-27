@@ -73,6 +73,7 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
         "order-reset",
         "nodefer-std",
         "nodefer-rt",
+        "autodisarm-high",
     ] {
         let oracle = assert_standalone_success(&native.binary, &[case], &[]);
         let output = assert_standalone_success(&patina.binary, &[case], &env);
