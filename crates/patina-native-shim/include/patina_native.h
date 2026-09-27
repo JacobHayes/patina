@@ -255,13 +255,16 @@ int32_t patina_cpu_time_nanos(uint64_t *nanos);
 /*
  * The clocks (Linux): every clock id decoded once, in Rust (`src/clocks.rs`),
  * for both doors. Each answers 0 or -errno; a NULL `time` is EFAULT to
- * clock_gettime, a NULL `rem` is not written. `patina_clock_nanosleep` takes
- * the kernel's flags (TIMER_ABSTIME) and writes the time left of an
+ * clock_gettime, a NULL `rem` is not written. `patina_clock_in_vdso` answers
+ * whether glibc's reads of the clock are the vDSO's, which store their answer
+ * in user space (the C door then stores it itself). `patina_clock_nanosleep`
+ * takes the kernel's flags (TIMER_ABSTIME) and writes the time left of an
  * interrupted relative sleep.
  */
 struct timespec;
 int64_t patina_clock_gettime(int clock, struct timespec *time);
 int64_t patina_clock_getres(int clock, struct timespec *res);
+int patina_clock_in_vdso(int clock);
 int64_t patina_clock_nanosleep(int clock, int flags, const struct timespec *request,
                                struct timespec *remain);
 #endif

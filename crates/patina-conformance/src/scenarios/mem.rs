@@ -1,5 +1,5 @@
 pub mod brk;
-mod fault;
+pub(crate) mod fault;
 pub mod membarrier;
 pub mod memfd;
 pub mod mincore;

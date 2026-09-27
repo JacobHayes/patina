@@ -828,17 +828,17 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_time, |_, a| sys_time(a[0] as *mut i64)),
-    // SAFETY: guest pointers, NULL-checked by the entries.
-    (Syscall::N_settimeofday, |_, a| unsafe {
-        crate::clocks::settimeofday(a[0] as *const [i64; 2])
+    // Guest pointers, copied through `uaccess` by the entries.
+    (Syscall::N_settimeofday, |_, a| {
+        crate::clocks::settimeofday(a[0] as *const [i64; 2], a[1] as *const [i32; 2])
     }),
-    (Syscall::N_clock_settime, |_, a| unsafe {
+    (Syscall::N_clock_settime, |_, a| {
         crate::clocks::clock_settime(a[0] as c_int, a[1] as *const Timespec)
     }),
-    (Syscall::N_adjtimex, |_, a| unsafe {
+    (Syscall::N_adjtimex, |_, a| {
         crate::clocks::adjtimex(a[0] as *mut crate::clocks::Timex)
     }),
-    (Syscall::N_clock_adjtime, |_, a| unsafe {
+    (Syscall::N_clock_adjtime, |_, a| {
         crate::clocks::clock_adjtime(a[0] as c_int, a[1] as *mut crate::clocks::Timex)
     }),
     // ---- the process's timers (`thread::timers`) ----
@@ -897,10 +897,10 @@ const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_timerfd_gettime, |_, a| {
         crate::thread::timers::timerfd_gettime(arg_fd(a[0]) as c_int, a[1] as usize)
     }),
-    (Syscall::N_times, |_, a| unsafe {
+    (Syscall::N_times, |_, a| {
         crate::clocks::times(a[0] as *mut [i64; 4])
     }),
-    (Syscall::N_getrusage, |_, a| unsafe {
+    (Syscall::N_getrusage, |_, a| {
         crate::clocks::getrusage(a[0] as i32, a[1] as *mut crate::clocks::Rusage)
     }),
     // ---- identity: the one unprivileged identity (`crate::identity`) ----

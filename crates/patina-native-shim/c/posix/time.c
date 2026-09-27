@@ -9,14 +9,30 @@
  * serves; a new interposer needs a symbol row (the object scan fails otherwise).
  */
 
+#ifdef __linux__
+/* glibc asks the vDSO, which answers the clocks the kernel keeps in user
+ * space (patina_clock_in_vdso) and stores the answer there itself: so does
+ * this store, outside every shim entry, so a time it cannot write faults here,
+ * in the caller, as the guest's own SIGSEGV with the kernel's siginfo. The
+ * vDSO hands every other clock to the system call, which answers EFAULT. */
+static void patina_vdso_store(struct timespec *out, struct timespec value) {
+    volatile struct timespec *target = out;
+    target->tv_sec = value.tv_sec;
+    target->tv_nsec = value.tv_nsec;
+}
+#endif
+
 static int patina_clock_gettime_libc(clockid_t clock_id, struct timespec *time) {
 #ifdef __linux__
     /* Every Linux clock id is decoded once, in Rust, for both doors. */
-    int64_t result = patina_clock_gettime((int)clock_id, time);
+    struct timespec now;
+    int vdso = patina_clock_in_vdso((int)clock_id);
+    int64_t result = patina_clock_gettime((int)clock_id, vdso ? &now : time);
     if (result < 0) {
         errno = (int)-result;
         return -1;
     }
+    if (vdso) patina_vdso_store(time, now);
     return 0;
 #else
     uint32_t patina_clock;
@@ -55,14 +71,18 @@ int __clock_gettime(clockid_t clock_id, struct timespec *time) {
 }
 
 /* The clock_getres row: the high-resolution clocks resolve to 1 ns, a NULL
- * `res` is not written, an unknown clock is EINVAL. */
+ * `res` is not written, an unknown clock is EINVAL; the vDSO's clocks store
+ * their resolution in user space, as clock_gettime's do. */
 int clock_getres(clockid_t clock_id, struct timespec *res) {
     patina_note_boundary_symbol("clock_getres");
-    int64_t result = patina_clock_getres((int)clock_id, res);
+    struct timespec resolution;
+    int vdso = patina_clock_in_vdso((int)clock_id);
+    int64_t result = patina_clock_getres((int)clock_id, vdso ? &resolution : res);
     if (result < 0) {
         errno = (int)-result;
         return -1;
     }
+    if (vdso && res != NULL) patina_vdso_store(res, resolution);
     return 0;
 }
 #endif
@@ -114,7 +134,18 @@ int __gettimeofday(struct timeval *restrict time, void *restrict zone) {
 }
 #endif
 
+/* glibc 2.39's nanosleep is clock_nanosleep(CLOCK_REALTIME, 0, ...) with the
+ * answer moved to errno: the row's own copies, so an unreadable request (NULL
+ * too) is EFAULT and `remaining` is written only by an interrupted sleep. */
 static int patina_nanosleep(const struct timespec *duration, struct timespec *remaining) {
+#ifdef __linux__
+    int64_t result = patina_clock_nanosleep(CLOCK_REALTIME, 0, duration, remaining);
+    if (result < 0) {
+        errno = (int)-result;
+        return -1;
+    }
+    return 0;
+#else
     if (duration == NULL || duration->tv_sec < 0 || duration->tv_nsec < 0 ||
         duration->tv_nsec >= 1000000000L) {
         errno = EINVAL;
@@ -141,6 +172,7 @@ static int patina_nanosleep(const struct timespec *duration, struct timespec *re
     }
     if (remaining != NULL) memset(remaining, 0, sizeof *remaining);
     return 0;
+#endif
 }
 
 int nanosleep(const struct timespec *duration, struct timespec *remaining) {

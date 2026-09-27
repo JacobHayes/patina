@@ -9,6 +9,10 @@ use libc::*;
 use patina_dst_syscalls::Syscall;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
+/// The `si_code`s of a SIGSEGV (asm-generic/siginfo.h).
+pub const SEGV_MAPERR: i32 = 1;
+pub const SEGV_ACCERR: i32 = 2;
+
 static FAULTS: AtomicUsize = AtomicUsize::new(0);
 static CODE: AtomicI32 = AtomicI32::new(0);
 static ADDRESS: AtomicUsize = AtomicUsize::new(0);

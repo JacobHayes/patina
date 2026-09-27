@@ -2215,6 +2215,11 @@ fn time_cputime() {
 }
 
 #[test]
+fn time_fault() {
+    conform("time/fault");
+}
+
+#[test]
 fn time_itimer() {
     conform("time/itimer");
 }
@@ -2222,6 +2227,11 @@ fn time_itimer() {
 #[test]
 fn time_libc_clocks() {
     conform("time/libc_clocks");
+}
+
+#[test]
+fn time_libc_fault() {
+    conform("time/libc_fault");
 }
 
 #[test]

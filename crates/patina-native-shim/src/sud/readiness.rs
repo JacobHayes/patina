@@ -54,16 +54,16 @@ pub(super) fn sys_epoll_pwait2(
     sigmask: u64,
     sigsetsize: u64,
 ) -> i64 {
-    if sigmask != 0 && sigsetsize != 8 {
-        return -EINVAL;
-    }
     // epoll_pwait2 takes a relative `struct timespec *timeout` (NULL == block
-    // forever). Convert to the millisecond timeout the reactor entry takes.
+    // forever), copied in and judged before the mask's size
+    // (`do_epoll_pwait`'s `set_user_sigmask`). Convert to the millisecond
+    // timeout the reactor entry takes.
     let timeout_ms: i64 = if timeout == 0 {
         -1
     } else {
-        // SAFETY: `timeout` is a guest `struct timespec`.
-        let ts = unsafe { (timeout as *const Timespec).read() };
+        let Ok(ts) = crate::uaccess::read::<Timespec>(timeout as usize) else {
+            return -EFAULT;
+        };
         if ts.tv_sec < 0 || !(0..NANOS_PER_SEC as i64).contains(&ts.tv_nsec) {
             return -EINVAL;
         }
@@ -73,6 +73,9 @@ pub(super) fn sys_epoll_pwait2(
             .saturating_add((ts.tv_nsec + 999_999) / 1_000_000);
         ms.min(c_int::MAX as i64)
     };
+    if sigmask != 0 && sigsetsize != 8 {
+        return -EINVAL;
+    }
     sys_epoll_pwait(epfd, events, maxevents, timeout_ms, sigmask, sigsetsize)
 }
 
@@ -81,17 +84,34 @@ pub(super) fn sys_eventfd2(initval: u64, flags: i64) -> i64 {
     ret_i32(unsafe { patina_eventfd(initval as u32, flags as c_int) })
 }
 
+/// The unslept time a `ppoll`/`pselect6` writes back to its non-NULL
+/// timeout once the wait answered (or was interrupted): none for a zero
+/// timeout, and a copy that fails is ignored, the answer standing
+/// (`poll_select_finish`: a timeout in read-only memory must not turn a
+/// completed wait into a fault).
+fn write_back_timeout(timeout: u64, requested: Option<u64>, remaining: u64, rc: i64) {
+    if timeout == 0 || requested == Some(0) || !(rc >= 0 || rc == -EINTR) {
+        return;
+    }
+    let left = Timespec {
+        tv_sec: (remaining / NANOS_PER_SEC) as i64,
+        tv_nsec: (remaining % NANOS_PER_SEC) as i64,
+    };
+    let _ = crate::uaccess::write(timeout as usize, &left);
+}
+
 /// `ppoll(2)` uses a temporary task mask and a relative timespec. Unlike
 /// libc's wrapper, the raw row writes the unslept timeout back to the guest.
 pub(super) fn sys_ppoll(fds: u64, nfds: u64, timeout: u64, sigmask: u64, sigsetsize: u64) -> i64 {
     // 6.8's order: the timeout, then the mask's size (`set_user_sigmask`,
     // whose copy-in `patina_poll` does before the descriptors).
-    let timeout_ptr = timeout as *mut Timespec;
+    let timeout_ptr = timeout;
     let timeout = if timeout == 0 {
         None
     } else {
-        // SAFETY: `timeout` is a guest `struct timespec`.
-        let ts = unsafe { (timeout as *const Timespec).read() };
+        let Ok(ts) = crate::uaccess::read::<Timespec>(timeout as usize) else {
+            return -EFAULT;
+        };
         if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= NANOS_PER_SEC as i64 {
             return -EINVAL;
         }
@@ -114,14 +134,7 @@ pub(super) fn sys_ppoll(fds: u64, nfds: u64, timeout: u64, sigmask: u64, sigsets
             &mut remaining,
         )
     };
-    if !timeout_ptr.is_null() && (rc >= 0 || rc == -4) {
-        unsafe {
-            timeout_ptr.write(Timespec {
-                tv_sec: (remaining / NANOS_PER_SEC) as i64,
-                tv_nsec: (remaining % NANOS_PER_SEC) as i64,
-            });
-        }
-    }
+    write_back_timeout(timeout_ptr, timeout, remaining, rc);
     rc
 }
 
@@ -185,13 +198,6 @@ pub(super) fn sys_select(
             &mut remaining,
         )
     };
-    if timeout != 0 && (rc >= 0 || rc == -4) {
-        unsafe {
-            (timeout as *mut Timespec).write(Timespec {
-                tv_sec: (remaining / 1_000_000_000) as i64,
-                tv_nsec: (remaining % 1_000_000_000) as i64,
-            });
-        }
-    }
+    write_back_timeout(timeout, (nanos >= 0).then_some(nanos as u64), remaining, rc);
     rc
 }

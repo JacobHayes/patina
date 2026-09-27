@@ -4170,7 +4170,8 @@ pub extern "C" fn patina_sleep_until(clock_id: u32, deadline_nanos: u64) -> c_in
 /// Sleep with an optional two-i64 kernel timespec remaining-time output.
 /// Absolute sleeps pass null, so their caller's rem buffer is untouched.
 /// # Safety
-/// Non-null `remaining` must be writable for two i64 values.
+/// None beyond the ABI: a non-null `remaining` is copied to through
+/// `uaccess` (`EFAULT` where it cannot be).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_sleep_until_remaining(
     clock_id: u32,
@@ -10728,8 +10729,11 @@ mod thread {
     /// managed threads yet), so the caller performs a plain clock jump identical
     /// to the historical single-threaded behavior; otherwise `Some(0)` once the
     /// deadline is reached (a timed sleep has no distinct timeout return).
+    /// An interrupted sleep copies the time it had left out to a non-null
+    /// `remaining` (`nanosleep_copyout`): `EFAULT` where it cannot, instead
+    /// of `EINTR`.
     /// # Safety
-    /// Non-null `remaining` must name a writable pair of i64 timespec fields.
+    /// None beyond the ABI: `remaining` is copied to through `uaccess`.
     pub(crate) unsafe fn managed_sleep(
         clock: ClockKind,
         deadline: u64,
@@ -10761,21 +10765,36 @@ mod thread {
         // A bare sleep is on no waiter list; clear a defensive timer flag anyway.
         lock_state().timed_out.remove(&me);
         #[cfg(target_os = "linux")]
-        if signals::resume_with(|resumed| {
-            if resumed != signals::Resumed::Normal && !remaining.is_null() {
-                // Snapshot at interruption, not after a handler that may itself
-                // advance virtual time. A clock failure must never invent rem=0.
-                let now = with_context_raw(|context| context.now(clock))
-                    .unwrap_or_else(|_| fatal("reading interrupted sleep clock failed"));
-                let rem = deadline.saturating_sub(now);
-                unsafe {
-                    remaining.write((rem / 1_000_000_000) as i64);
-                    remaining.add(1).write((rem % 1_000_000_000) as i64);
-                }
-            }
-        }) == signals::Resumed::Eintr
         {
-            return Some(super::EINTR);
+            let mut unwritable = false;
+            let mut finished = false;
+            let resumed = signals::resume_with(|resumed| {
+                if resumed != signals::Resumed::Normal && !remaining.is_null() {
+                    // Snapshot at interruption, not after a handler that may
+                    // itself advance virtual time. A clock failure must never
+                    // invent rem=0.
+                    let now = with_context_raw(|context| context.now(clock))
+                        .unwrap_or_else(|_| fatal("reading interrupted sleep clock failed"));
+                    let rem = deadline.saturating_sub(now);
+                    // `do_nanosleep`: a sleep with no time left finished,
+                    // whatever interrupted it, and copies nothing out.
+                    if rem == 0 {
+                        finished = true;
+                        return;
+                    }
+                    let left = [(rem / 1_000_000_000) as i64, (rem % 1_000_000_000) as i64];
+                    unwritable = crate::uaccess::write(remaining as usize, &left).is_err();
+                }
+            });
+            if unwritable {
+                return Some(super::EFAULT);
+            }
+            if finished {
+                return Some(0);
+            }
+            if resumed == signals::Resumed::Eintr {
+                return Some(super::EINTR);
+            }
         }
         #[cfg(not(target_os = "linux"))]
         let _ = remaining;

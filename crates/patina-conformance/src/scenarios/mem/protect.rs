@@ -11,7 +11,7 @@
 //!   repairs the page and returns, so the access retries and completes —
 //!   the store lands, the loads read what the repaired page holds.
 
-use super::fault::{self, Repair};
+use super::fault::{self, Repair, SEGV_ACCERR, SEGV_MAPERR};
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, RW, neg, page_size};
 use libc::*;
@@ -20,9 +20,6 @@ use patina_dst_syscalls::Syscall;
 /// A protection bit no architecture defines (arm64's `PROT_BTI`/`PROT_MTE`
 /// are 0x10/0x20; `PROT_SEM` is 0x8).
 const UNKNOWN_PROT: i32 = 0x40;
-/// The `si_code`s of a SIGSEGV (asm-generic/siginfo.h).
-const SEGV_MAPERR: i32 = 1;
-const SEGV_ACCERR: i32 = 2;
 
 pub fn run(p: &Probe) {
     let page = page_size();

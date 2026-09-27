@@ -23,9 +23,17 @@
 //! The clock-setting rows answer as they answer an unprivileged caller:
 //! validation first, then `EPERM` (no `CAP_SYS_TIME`); `adjtimex` reads the
 //! virtual kernel's NTP state, which no daemon ever synchronized.
+//!
+//! Every row copies the caller's structures through [`crate::uaccess`], in
+//! the kernel's order, so a pointer it cannot use is `EFAULT`. glibc's
+//! `clock_gettime` and `clock_getres` are not the rows for the clocks the
+//! vDSO answers ([`Clock::in_vdso`]): the vDSO stores the answer in user
+//! space, so the C door stores it there too, outside every shim entry, and
+//! a pointer it cannot write faults in the caller as the guest's own
+//! `SIGSEGV`.
 
 use crate::thread;
-use crate::{EFAULT, EINVAL, EOPNOTSUPP, EPERM, with_context};
+use crate::{EFAULT, EINVAL, EOPNOTSUPP, EPERM, uaccess, with_context};
 use patina_dst_abi::ClockKind;
 use patina_dst_abi::TaskId;
 use std::ffi::c_int;
@@ -181,6 +189,32 @@ impl Clock {
     fn coarse(self) -> bool {
         matches!(self, Clock::RealtimeCoarse | Clock::MonotonicCoarse)
     }
+
+    /// Whether the vDSO answers the clock in user space
+    /// (`lib/vdso/gettimeofday.c`: `VDSO_HRES`, `VDSO_COARSE`, `VDSO_RAW`),
+    /// for `clock_gettime` and `clock_getres` alike; it hands every other
+    /// clock to the system call.
+    fn in_vdso(self) -> bool {
+        matches!(
+            self,
+            Clock::Realtime
+                | Clock::Monotonic
+                | Clock::Boottime
+                | Clock::Tai
+                | Clock::MonotonicRaw
+                | Clock::RealtimeCoarse
+                | Clock::MonotonicCoarse
+        )
+    }
+}
+
+/// Whether glibc's `clock_gettime`/`clock_getres` of `id` are the vDSO's
+/// ([`Clock::in_vdso`]): the C door then stores the answer in user space
+/// itself.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_clock_in_vdso(id: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    c_int::from(Clock::decode(id).is_some_and(Clock::in_vdso))
 }
 
 fn cpu_target(
@@ -293,10 +327,23 @@ pub(crate) fn resolution(clock: Clock) -> Result<u64, c_int> {
     Err(EINVAL)
 }
 
-/// `clock_gettime(2)`: 0 or `-errno`.
+/// Copy `value` out to the caller's `out`: `EFAULT` where it cannot be
+/// written (`put_user`/`copy_to_user`).
+fn copy_out<T: Copy>(out: usize, value: &T) -> Result<(), i64> {
+    uaccess::write(out, value).map_err(|_| -i64::from(EFAULT))
+}
+
+/// Copy a `T` in from the caller's `from`: `EFAULT` where it cannot be
+/// read (`get_user`/`copy_from_user`).
+fn copy_in<T: Copy>(from: usize) -> Result<T, i64> {
+    uaccess::read(from).map_err(|_| -i64::from(EFAULT))
+}
+
+/// `clock_gettime(2)`: 0 or `-errno`; the clock is judged before the time
+/// is copied out.
 ///
 /// # Safety
-/// `out` must be NULL or writable for a `struct timespec`.
+/// None beyond the ABI: `out` is copied to as the kernel copies.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_clock_gettime(id: c_int, out: *mut Timespec) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
@@ -307,18 +354,16 @@ pub unsafe extern "C" fn patina_clock_gettime(id: c_int, out: *mut Timespec) -> 
         Ok(nanos) => nanos,
         Err(errno) => return -i64::from(errno),
     };
-    if out.is_null() {
-        return -i64::from(EFAULT);
+    match copy_out(out as usize, &Timespec::from_nanos(nanos)) {
+        Ok(()) => 0,
+        Err(errno) => errno,
     }
-    // SAFETY: per this function's contract.
-    unsafe { out.write_unaligned(Timespec::from_nanos(nanos)) };
-    0
 }
 
 /// `clock_getres(2)`: 0 or `-errno`; a NULL `res` is not written.
 ///
 /// # Safety
-/// `res` must be NULL or writable for a `struct timespec`.
+/// None beyond the ABI: `res` is copied to as the kernel copies.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_clock_getres(id: c_int, res: *mut Timespec) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
@@ -326,11 +371,13 @@ pub unsafe extern "C" fn patina_clock_getres(id: c_int, res: *mut Timespec) -> i
         Ok(resolution) => resolution,
         Err(errno) => return -i64::from(errno),
     };
-    if !res.is_null() {
-        // SAFETY: per this function's contract.
-        unsafe { res.write_unaligned(Timespec::from_nanos(resolution)) };
+    if res.is_null() {
+        return 0;
     }
-    0
+    match copy_out(res as usize, &Timespec::from_nanos(resolution)) {
+        Ok(()) => 0,
+        Err(errno) => errno,
+    }
 }
 
 /// What `clock_nanosleep` does on a clock, once the request is valid.
@@ -388,11 +435,10 @@ fn sleep_on(clock: Clock, flags: c_int) -> Sleep {
 /// (`EFAULT`, then `EINVAL`), then the clock's own rules ([`sleep_on`]); a
 /// flag other than `TIMER_ABSTIME` is ignored on the lines that sleep, as the
 /// kernel ignores it. A relative sleep interrupted by a handler writes
-/// the time it had left into a non-NULL `rem`.
+/// the time it had left into a non-NULL `rem` (`EFAULT` where it cannot).
 ///
 /// # Safety
-/// `request` must be NULL or readable for a `struct timespec`, `rem` NULL or
-/// writable for one.
+/// None beyond the ABI: `request` and `rem` are copied as the kernel copies.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_clock_nanosleep(
     id: c_int,
@@ -405,11 +451,11 @@ pub unsafe extern "C" fn patina_clock_nanosleep(
         Ok(clock) => clock,
         Err(errno) => return -i64::from(errno),
     };
-    if request.is_null() {
-        return -i64::from(EFAULT);
-    }
-    // SAFETY: per this function's contract.
-    let Some(requested) = (unsafe { request.read_unaligned() }).valid_nanos() else {
+    let request = match copy_in::<Timespec>(request as usize) {
+        Ok(request) => request,
+        Err(errno) => return errno,
+    };
+    let Some(requested) = request.valid_nanos() else {
         return -i64::from(EINVAL);
     };
     let domain = match sleep_on(clock, flags) {
@@ -430,7 +476,7 @@ pub unsafe extern "C" fn patina_clock_nanosleep(
         ClockKind::Monotonic => 1,
     };
     let rem = if absolute { std::ptr::null_mut() } else { rem };
-    // SAFETY: `rem` is NULL or writable for a timespec, per this contract.
+    // SAFETY: `rem` is copied to through `uaccess`.
     if unsafe { crate::patina_sleep_until_remaining(clock, deadline, rem.cast()) } != 0 {
         return -i64::from(crate::patina_errno());
     }
@@ -475,11 +521,9 @@ const RUSAGE_THREAD: i32 = 1;
 /// `getrusage(2)`: an unknown `who` is `EINVAL`; the process's (or the
 /// calling thread's) CPU time is all user time; the process has waited for
 /// no child, so `RUSAGE_CHILDREN` is all zero, and it models no memory
-/// high-water mark, faults, I/O blocks or context switches (zero).
-///
-/// # Safety
-/// `out` must be NULL or writable for a `struct rusage`.
-pub(crate) unsafe fn getrusage(who: i32, out: *mut Rusage) -> i64 {
+/// high-water mark, faults, I/O blocks or context switches (zero). The
+/// usage is copied out last (`EFAULT`).
+pub(crate) fn getrusage(who: i32, out: *mut Rusage) -> i64 {
     let of = match who {
         RUSAGE_SELF => Some(CpuOf::Process),
         RUSAGE_THREAD => thread::task_of(thread::current_tid()).map(CpuOf::Thread),
@@ -493,12 +537,10 @@ pub(crate) unsafe fn getrusage(who: i32, out: *mut Rusage) -> i64 {
             Err(errno) => return -i64::from(errno),
         }
     }
-    if out.is_null() {
-        return -i64::from(EFAULT);
+    match copy_out(out as usize, &usage) {
+        Ok(()) => 0,
+        Err(errno) => errno,
     }
-    // SAFETY: per this function's contract.
-    unsafe { out.write_unaligned(usage) };
-    0
 }
 
 /// `INITIAL_JIFFIES`: the kernel starts `jiffies` five minutes short of its
@@ -508,11 +550,9 @@ const INITIAL_JIFFIES: u64 = (-300i64 * HZ as i64) as u32 as u64;
 
 /// `times(2)`: the process's CPU time in `USER_HZ` ticks (all user time; no
 /// child ever waited for) into a non-NULL buffer, and the tick count since
-/// an arbitrary point (`jiffies_64_to_clock_t(get_jiffies_64())`).
-///
-/// # Safety
-/// `out` must be NULL or writable for a `struct tms` (four longs).
-pub(crate) unsafe fn times(out: *mut [i64; 4]) -> i64 {
+/// an arbitrary point (`jiffies_64_to_clock_t(get_jiffies_64())`); a
+/// buffer that cannot be written is `EFAULT`.
+pub(crate) fn times(out: *mut [i64; 4]) -> i64 {
     let (uptime, cpu) = match with_context(|context| {
         let uptime = context.now(ClockKind::Monotonic)?;
         Ok((uptime, cpu_nanos_unrecorded(context, CpuOf::Process)))
@@ -522,33 +562,42 @@ pub(crate) unsafe fn times(out: *mut [i64; 4]) -> i64 {
     };
     if !out.is_null() {
         let ticks = (cpu / (NANOS / USER_HZ)) as i64;
-        // SAFETY: per this function's contract.
-        unsafe { out.write_unaligned([ticks, 0, 0, 0]) };
+        if let Err(errno) = copy_out(out as usize, &[ticks, 0, 0, 0]) {
+            return errno;
+        }
     }
     let jiffies = INITIAL_JIFFIES + uptime / TICK_NSEC;
     (jiffies / (HZ / USER_HZ)) as i64
 }
 
-/// `settimeofday(2)` of an unprivileged caller: a `tv_usec` past a second
-/// (`EINVAL` here, or as a nanosecond count of a second) or a negative
-/// second is `EINVAL`, then setting anything — a NULL time too — is `EPERM`.
-///
-/// # Safety
-/// `tv` must be NULL or readable for a `struct timeval`.
-pub(crate) unsafe fn settimeofday(tv: *const [i64; 2]) -> i64 {
-    if !tv.is_null() {
-        // SAFETY: per this function's contract.
-        let [seconds, micros] = unsafe { tv.read_unaligned() };
+/// `settimeofday(2)` of an unprivileged caller, in the kernel's order: the
+/// time is copied in (`EFAULT`) and a `tv_usec` past a second is `EINVAL`;
+/// the time zone is copied in (`EFAULT`); then a negative second (or a
+/// microsecond count of a whole second) is `EINVAL`, and setting anything —
+/// a NULL time too — is `EPERM`.
+pub(crate) fn settimeofday(tv: *const [i64; 2], tz: *const [i32; 2]) -> i64 {
+    let time = if tv.is_null() {
+        None
+    } else {
+        let [seconds, micros] = match copy_in::<[i64; 2]>(tv as usize) {
+            Ok(time) => time,
+            Err(errno) => return errno,
+        };
         if !(0..=1_000_000).contains(&micros) {
             return -i64::from(EINVAL);
         }
-        let ts = Timespec {
+        Some(Timespec {
             tv_sec: seconds,
             tv_nsec: micros * 1000,
-        };
-        if ts.valid_nanos().is_none() {
-            return -i64::from(EINVAL);
+        })
+    };
+    if !tz.is_null() {
+        if let Err(errno) = copy_in::<[i32; 2]>(tz as usize) {
+            return errno;
         }
+    }
+    if time.is_some_and(|ts| ts.valid_nanos().is_none()) {
+        return -i64::from(EINVAL);
     }
     -i64::from(EPERM)
 }
@@ -556,20 +605,17 @@ pub(crate) unsafe fn settimeofday(tv: *const [i64; 2]) -> i64 {
 /// `clock_settime(2)` of an unprivileged caller: a clock with no setter
 /// (every one but `CLOCK_REALTIME` and the CPU clocks by id) or an unknown
 /// one is `EINVAL`; `CLOCK_REALTIME` validates the time, then `EPERM`; a CPU
-/// clock validates its pid, then `EPERM` even to root.
-///
-/// # Safety
-/// `ts` must be NULL or readable for a `struct timespec`.
-pub(crate) unsafe fn clock_settime(id: c_int, ts: *const Timespec) -> i64 {
+/// clock validates its pid, then `EPERM` even to root. The time is copied
+/// in (`EFAULT`) once the clock has a setter.
+pub(crate) fn clock_settime(id: c_int, ts: *const Timespec) -> i64 {
     let clock = match Clock::decode(id) {
         Some(clock @ (Clock::Realtime | Clock::Cpu { .. })) => clock,
         _ => return -i64::from(EINVAL),
     };
-    if ts.is_null() {
-        return -i64::from(EFAULT);
-    }
-    // SAFETY: per this function's contract.
-    let ts = unsafe { ts.read_unaligned() };
+    let ts = match copy_in::<Timespec>(ts as usize) {
+        Ok(ts) => ts,
+        Err(errno) => return errno,
+    };
     if let Some(target) = clock.cpu(false) {
         return match target {
             Ok(_) => -i64::from(EPERM),
@@ -627,20 +673,28 @@ const NTP_TOLERANCE: i64 = 500 << 16;
 /// `PPM_SCALE`, for the `ADJ_FREQUENCY` overflow check.
 const PPM_SCALE: i64 = 1000 << 16;
 
+/// `adjtimex(2)`: the structure is copied in (`EFAULT`), [`do_adjtimex`]
+/// answers, and the structure is copied back whatever it answered, a
+/// refused request unchanged (`EFAULT` where it cannot be).
+pub(crate) fn adjtimex(buf: *mut Timex) -> i64 {
+    let mut txc = match copy_in::<Timex>(buf as usize) {
+        Ok(txc) => txc,
+        Err(errno) => return errno,
+    };
+    let answer = do_adjtimex(&mut txc);
+    match copy_out(buf as usize, &txc) {
+        Ok(()) => answer,
+        Err(errno) => errno,
+    }
+}
+
 /// `do_adjtimex` for an unprivileged caller (`timekeeping_validate_timex`,
 /// then `__do_adjtimex` reading the NTP state): `ADJ_ADJTIME` needs the
 /// single-shot offset bit (`EINVAL`) and, unless read-only, the privilege
 /// (`EPERM`); any other mode that changes something is `EPERM`; a read
-/// answers `TIME_ERROR` with the state of a clock no daemon synchronized.
-///
-/// # Safety
-/// `buf` must be NULL or readable and writable for a `struct timex`.
-pub(crate) unsafe fn adjtimex(buf: *mut Timex) -> i64 {
-    if buf.is_null() {
-        return -i64::from(EFAULT);
-    }
-    // SAFETY: per this function's contract.
-    let mut txc = unsafe { buf.read_unaligned() };
+/// answers `TIME_ERROR` with the state of a clock no daemon synchronized,
+/// written into `txc`. A refusal leaves `txc` as it was.
+fn do_adjtimex(txc: &mut Timex) -> i64 {
     let modes = txc.modes;
     if modes & ADJ_ADJTIME != 0 {
         if modes & ADJ_OFFSET_SINGLESHOT == 0 {
@@ -683,23 +737,31 @@ pub(crate) unsafe fn adjtimex(buf: *mut Timex) -> i64 {
     txc.errcnt = 0;
     txc.stbcnt = 0;
     txc.tai = 0;
-    // SAFETY: per this function's contract.
-    unsafe { buf.write_unaligned(txc) };
     TIME_ERROR
 }
 
-/// `clock_adjtime(2)`: `CLOCK_REALTIME` is `adjtimex`; a clock with no
-/// adjuster is `EOPNOTSUPP`, an unknown one (or a clock device, of which the
-/// virtual machine has none) `EINVAL`.
-///
-/// # Safety
-/// As [`adjtimex`].
-pub(crate) unsafe fn clock_adjtime(id: c_int, buf: *mut Timex) -> i64 {
+/// `clock_adjtime(2)`: the structure is copied in first (`EFAULT`), then
+/// the clock is judged (`do_clock_adjtime`): an unknown one (or a clock
+/// device, of which the virtual machine has none) is `EINVAL`, one with no
+/// adjuster `EOPNOTSUPP`. `CLOCK_REALTIME` is `adjtimex`, except that the
+/// structure is copied back only when the clock took the request.
+pub(crate) fn clock_adjtime(id: c_int, buf: *mut Timex) -> i64 {
+    let mut txc = match copy_in::<Timex>(buf as usize) {
+        Ok(txc) => txc,
+        Err(errno) => return errno,
+    };
     match Clock::decode(id) {
-        None | Some(Clock::Device) => -i64::from(EINVAL),
-        // SAFETY: per this function's contract.
-        Some(Clock::Realtime) => unsafe { adjtimex(buf) },
-        Some(_) => -i64::from(EOPNOTSUPP),
+        None | Some(Clock::Device) => return -i64::from(EINVAL),
+        Some(Clock::Realtime) => {}
+        Some(_) => return -i64::from(EOPNOTSUPP),
+    }
+    let answer = do_adjtimex(&mut txc);
+    if answer < 0 {
+        return answer;
+    }
+    match copy_out(buf as usize, &txc) {
+        Ok(()) => answer,
+        Err(errno) => errno,
     }
 }
 
@@ -761,21 +823,28 @@ mod tests {
 
     #[test]
     fn setting_the_time_validates_before_the_privilege() {
-        // SAFETY: local buffers.
-        unsafe {
-            assert_eq!(settimeofday(&[0, 1_000_000]), -i64::from(EINVAL));
-            assert_eq!(settimeofday(&[-1, 0]), -i64::from(EINVAL));
-            assert_eq!(settimeofday(&[0, 999_999]), -i64::from(EPERM));
-            assert_eq!(settimeofday(std::ptr::null()), -i64::from(EPERM));
-            let second = Timespec {
-                tv_sec: 0,
-                tv_nsec: NANOS as i64,
-            };
-            assert_eq!(clock_settime(0, &second), -i64::from(EINVAL));
-            assert_eq!(clock_settime(0, &Timespec::default()), -i64::from(EPERM));
-            assert_eq!(clock_settime(1, &Timespec::default()), -i64::from(EINVAL));
-            assert_eq!(clock_settime(2, &Timespec::default()), -i64::from(EINVAL));
-        }
+        let none = std::ptr::null();
+        assert_eq!(settimeofday(&[0, 1_000_001], none), -i64::from(EINVAL));
+        assert_eq!(settimeofday(&[-1, 0], none), -i64::from(EINVAL));
+        assert_eq!(settimeofday(&[0, 999_999], none), -i64::from(EPERM));
+        assert_eq!(settimeofday(std::ptr::null(), none), -i64::from(EPERM));
+        // The zone is copied in between the two time checks.
+        // An address in the zero page, which nothing maps.
+        let unreadable = std::ptr::dangling::<[i32; 2]>();
+        assert_eq!(
+            settimeofday(&[0, 1_000_001], unreadable),
+            -i64::from(EINVAL)
+        );
+        assert_eq!(settimeofday(&[-1, 0], unreadable), -i64::from(EFAULT));
+        assert_eq!(settimeofday(std::ptr::null(), &[0, 0]), -i64::from(EPERM));
+        let second = Timespec {
+            tv_sec: 0,
+            tv_nsec: NANOS as i64,
+        };
+        assert_eq!(clock_settime(0, &second), -i64::from(EINVAL));
+        assert_eq!(clock_settime(0, &Timespec::default()), -i64::from(EPERM));
+        assert_eq!(clock_settime(1, &Timespec::default()), -i64::from(EINVAL));
+        assert_eq!(clock_settime(2, &Timespec::default()), -i64::from(EINVAL));
     }
 
     #[test]
@@ -786,16 +855,13 @@ mod tests {
             txc.modes = modes;
             txc
         };
-        // SAFETY: local buffers.
-        unsafe {
-            assert_eq!(adjtimex(&mut timex(ADJ_ADJTIME)), -i64::from(EINVAL));
-            assert_eq!(
-                adjtimex(&mut timex(ADJ_ADJTIME | ADJ_OFFSET_SINGLESHOT)),
-                -i64::from(EPERM)
-            );
-            assert_eq!(adjtimex(&mut timex(ADJ_FREQUENCY)), -i64::from(EPERM));
-            assert_eq!(clock_adjtime(1, &mut timex(0)), -i64::from(EOPNOTSUPP));
-            assert_eq!(clock_adjtime(1234, &mut timex(0)), -i64::from(EINVAL));
-        }
+        assert_eq!(adjtimex(&mut timex(ADJ_ADJTIME)), -i64::from(EINVAL));
+        assert_eq!(
+            adjtimex(&mut timex(ADJ_ADJTIME | ADJ_OFFSET_SINGLESHOT)),
+            -i64::from(EPERM)
+        );
+        assert_eq!(adjtimex(&mut timex(ADJ_FREQUENCY)), -i64::from(EPERM));
+        assert_eq!(clock_adjtime(1, &mut timex(0)), -i64::from(EOPNOTSUPP));
+        assert_eq!(clock_adjtime(1234, &mut timex(0)), -i64::from(EINVAL));
     }
 }

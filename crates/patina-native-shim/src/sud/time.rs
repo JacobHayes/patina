@@ -7,30 +7,32 @@
 use super::*;
 
 pub(super) fn sys_clock_gettime(clock: u64, out: *mut Timespec) -> i64 {
-    // SAFETY: `out` is the guest's `struct timespec` pointer (NULL: EFAULT).
+    // SAFETY: `out` is copied to through `uaccess`.
     unsafe { crate::clocks::patina_clock_gettime(clock as c_int, out) }
 }
 
 pub(super) fn sys_clock_getres(clock: u64, out: *mut Timespec) -> i64 {
-    // SAFETY: `out` is NULL or the guest's `struct timespec`.
+    // SAFETY: `out` is copied to through `uaccess`.
     unsafe { crate::clocks::patina_clock_getres(clock as c_int, out) }
 }
 
 /// `gettimeofday(2)`: the realtime clock into a non-NULL `tv`; a non-NULL
 /// `tz` gets the kernel's time zone, which nobody set (0 minutes west, no
-/// DST correction).
+/// DST correction). Each is copied out in turn (`EFAULT`, the time
+/// already written when only the zone cannot be).
 pub(super) fn sys_gettimeofday(out: *mut Timeval, zone: *mut [i32; 2]) -> i64 {
     if !out.is_null() {
         let nanos = match crate::clocks::read(crate::clocks::Clock::Realtime) {
             Ok(nanos) => nanos,
             Err(errno) => return crate::neg_errno(errno),
         };
-        // SAFETY: `out` is a guest `struct timeval` pointer.
-        unsafe { out.write(crate::clocks::Timeval::from_nanos(nanos)) };
+        let time = crate::clocks::Timeval::from_nanos(nanos);
+        if crate::uaccess::write(out as usize, &time).is_err() {
+            return -EFAULT;
+        }
     }
-    if !zone.is_null() {
-        // SAFETY: `zone` is a guest `struct timezone` pointer.
-        unsafe { zone.write_unaligned([0, 0]) };
+    if !zone.is_null() && crate::uaccess::write(zone as usize, &[0i32, 0]).is_err() {
+        return -EFAULT;
     }
     0
 }
@@ -46,21 +48,21 @@ pub(super) fn sys_time(out: *mut i64) -> i64 {
         Err(errno) => return crate::neg_errno(errno),
     };
     let seconds = (nanos / NANOS_PER_SEC) as i64;
-    if !out.is_null() {
-        // SAFETY: `out` is the guest's `time_t`.
-        unsafe { out.write_unaligned(seconds) };
+    if !out.is_null() && crate::uaccess::write(out as usize, &seconds).is_err() {
+        return -EFAULT;
     }
     seconds
 }
 
-/// Read a `struct timespec` from guest memory and validate it, returning its
-/// value in nanoseconds or an `-errno`.
+/// Copy a `struct timespec` in from guest memory (`get_timespec64`: `EFAULT`
+/// where it cannot be read, NULL included) and validate it
+/// (`timespec64_valid`: `EINVAL`), returning its value in nanoseconds or an
+/// `-errno`.
 pub(super) fn read_timespec_nanos(ptr: *const Timespec) -> Result<u64, i64> {
-    if ptr.is_null() {
-        return Err(-EINVAL);
-    }
-    // SAFETY: `ptr` is a guest `struct timespec` pointer.
-    unsafe { ptr.read() }.valid_nanos().ok_or(-EINVAL)
+    crate::uaccess::read::<Timespec>(ptr as usize)
+        .map_err(|_| -EFAULT)?
+        .valid_nanos()
+        .ok_or(-EINVAL)
 }
 
 pub(super) fn sys_nanosleep(req: *const Timespec, rem: *mut Timespec) -> i64 {
@@ -86,6 +88,6 @@ pub(super) fn sys_clock_nanosleep(
     req: *const Timespec,
     rem: *mut Timespec,
 ) -> i64 {
-    // SAFETY: guest pointers, NULL-checked by the entry.
+    // SAFETY: guest pointers, copied through `uaccess` by the entry.
     unsafe { crate::clocks::patina_clock_nanosleep(clock as c_int, flags as c_int, req, rem) }
 }
