@@ -838,10 +838,42 @@ fn in_shim_critical() -> bool {
     SPIN_DEPTH.with(Cell::get) > 0
 }
 
+/// The captured streams, stdout (0) and stderr (1). On Linux each write is
+/// written through to the host's descriptor as it is made, so whatever ends
+/// the run (a fault the kernel kills with no handler, a supervisor's kill)
+/// finds it there already, as natively; on macOS it is held until the run
+/// ends. Either way the bytes each stream took are counted against the
+/// capture bound, so what a write answers the guest is the same.
 #[derive(Default)]
 struct StdioCapture {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+    /// What each stream holds for the host (macOS only: empty on Linux).
+    pending: [Vec<u8>; 2],
+    /// The bytes each stream took.
+    taken: [usize; 2],
+    /// A host stream whose reader went away (`EPIPE`): written no more.
+    #[cfg(target_os = "linux")]
+    gone: [bool; 2],
+}
+
+impl StdioCapture {
+    /// Take `parts` onto `stream` (0 stdout, 1 stderr), all or, past the
+    /// capture bound, nothing (answering false).
+    fn put(&mut self, stream: usize, parts: &[&[u8]]) -> bool {
+        let length = parts.iter().map(|part| part.len()).sum::<usize>();
+        if self.taken[stream].saturating_add(length) > MAX_CAPTURED_STDIO_BYTES {
+            return false;
+        }
+        self.taken[stream] += length;
+        for part in parts {
+            #[cfg(target_os = "linux")]
+            if !self.gone[stream] && !part.is_empty() {
+                self.gone[stream] = !thread::signals::write_through(stream as c_int + 1, part);
+            }
+            #[cfg(not(target_os = "linux"))]
+            self.pending[stream].extend_from_slice(part);
+        }
+        true
+    }
 }
 
 // Host-alias doctrine (see ARCHITECTURE.md, "Host-alias doctrine").
@@ -3774,7 +3806,8 @@ pub extern "C" fn patina_flush_captured_stdio() -> c_int {
     }
 }
 
-/// Write what the capture holds to the host, as the end of a run does. The
+/// Write what the capture holds to the host (on Linux nothing: it writes
+/// through, [`StdioCapture`]), as the end of a run does. The
 /// guest's own stdio buffers are not touched: [`shutdown_run`] and the
 /// crash-restart `_exit` end the run the way glibc's abort, fatal signal and
 /// `_exit` do, and those lose them.
@@ -3794,8 +3827,7 @@ fn flush_before_refusal() -> io::Result<()> {
 
 fn flush_capture(salvage: bool) -> io::Result<()> {
     let mut capture = stdio_slot().lock();
-    let stdout = std::mem::take(&mut capture.stdout);
-    let stderr = std::mem::take(&mut capture.stderr);
+    let [stdout, stderr] = std::mem::take(&mut capture.pending);
     drop(capture);
     host_write_all(1, &stdout)?;
     if salvage {
@@ -3841,8 +3873,9 @@ fn stdio_slot() -> &'static SpinMutex<StdioCapture> {
     STDIO.get_or_init(|| SpinMutex::new(StdioCapture::default()))
 }
 
-/// Capture deterministic stdout (1) or stderr (2) bytes for flushing to the
-/// host at `patina_shutdown`, mirroring the WASI host's captured stdio.
+/// Capture deterministic stdout (1) or stderr (2) bytes, mirroring the WASI
+/// host's captured stdio: written through to the host on Linux, flushed at
+/// `patina_shutdown` on macOS ([`StdioCapture`]).
 ///
 /// # Safety
 /// `source` must be readable for `length` bytes when nonzero.
@@ -3882,16 +3915,9 @@ pub unsafe extern "C" fn patina_stdio_write(
         // SAFETY: Guaranteed by this function's C ABI contract.
         unsafe { slice::from_raw_parts(source.cast::<u8>(), length) }
     };
-    let mut capture = stdio_slot().lock();
-    let sink = if fd == 1 {
-        &mut capture.stdout
-    } else {
-        &mut capture.stderr
-    };
-    if sink.len().saturating_add(bytes.len()) > MAX_CAPTURED_STDIO_BYTES {
+    if !stdio_slot().lock().put(fd as usize - 1, &[bytes]) {
         return fail(EFBIG) as isize;
     }
-    sink.extend_from_slice(bytes);
     set_errno(0);
     isize::try_from(length).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
 }
@@ -8217,12 +8243,7 @@ fn drain_runtime_diagnostics() {
 /// Append a diagnostic line to the captured stderr buffer so it interleaves with
 /// guest output and flushes at exit (lifecycle markers). Bounded like guest I/O.
 fn capture_stderr_line(line: &str) {
-    let mut capture = stdio_slot().lock();
-    if capture.stderr.len().saturating_add(line.len() + 1) > MAX_CAPTURED_STDIO_BYTES {
-        return;
-    }
-    capture.stderr.extend_from_slice(line.as_bytes());
-    capture.stderr.push(b'\n');
+    stdio_slot().lock().put(1, &[line.as_bytes(), b"\n"]);
 }
 
 /// Shared body for the site-evaluating buggify entry points: read the label and

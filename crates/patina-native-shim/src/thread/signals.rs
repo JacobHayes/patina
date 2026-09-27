@@ -563,6 +563,74 @@ fn containment_kept_unblocked(dropped: u64) {
     );
 }
 
+/// Write `bytes`, captured from the guest, through to the host's descriptor
+/// `fd` with SIGPIPE held back: a host reader that went away is the host's
+/// business, never the guest's, so the SIGPIPE the kernel sends this thread
+/// for it is taken back before the mask is (a guest handler would otherwise
+/// run inside shim code, or the default action end the run). Answers whether
+/// the host reader is still there. Any other failure of the host write (a
+/// descriptor the supervisor closed) is dropped, as the end-of-run flush
+/// drops it.
+pub(crate) fn write_through(fd: c_int, bytes: &[u8]) -> bool {
+    // Called holding the capture's lock, which `fatal`'s flush would take.
+    let refuse = || -> ! {
+        let _ = crate::host_write_all(
+            2,
+            b"patina native shim fatal: host signal mask change around a captured write \
+              failed (rt_sigprocmask)\n",
+        );
+        crate::host_abort()
+    };
+    let pipe = bit(SIGPIPE);
+    let mut held = 0u64;
+    if host(
+        SYS_RT_SIGPROCMASK,
+        [
+            SIG_BLOCK as u64,
+            &pipe as *const _ as u64,
+            &mut held as *mut _ as u64,
+            SIGSET_BYTES as u64,
+            0,
+            0,
+        ],
+    ) != 0
+    {
+        refuse();
+    }
+    let written = crate::host_write_all(fd, bytes);
+    let gone = written.is_err_and(|error| error.raw_os_error() == Some(crate::EPIPE));
+    if gone {
+        let now = [0i64; 2];
+        host(
+            SYS_RT_SIGTIMEDWAIT,
+            [
+                &pipe as *const _ as u64,
+                0,
+                &now as *const _ as u64,
+                SIGSET_BYTES as u64,
+                0,
+                0,
+            ],
+        );
+    }
+    if held & pipe == 0
+        && host(
+            SYS_RT_SIGPROCMASK,
+            [
+                SIG_SETMASK as u64,
+                &held as *const _ as u64,
+                0,
+                SIGSET_BYTES as u64,
+                0,
+                0,
+            ],
+        ) != 0
+    {
+        refuse();
+    }
+    !gone
+}
+
 /// Called at the boundary return, not at generation. No lock survives a host
 /// unblock: handlers can re-enter either door and acquire the runtime normally.
 #[unsafe(no_mangle)]

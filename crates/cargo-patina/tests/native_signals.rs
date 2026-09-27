@@ -93,20 +93,18 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
         assert_eq!(output.status.signal(), Some(6), "{case}: {output:?}");
         assert!(text(&output.stderr).contains(stop), "{case}: {output:?}");
     }
+    let trap = cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Tsc);
     for case in ["nested", "nested-stack", "reraise", "masked-fault"] {
         let oracle = standalone_output(&native.binary, &[case], &[]);
         let output = standalone_output(&patina.binary, &[case], &env);
         assert_eq!(oracle.status.signal(), Some(11), "{case}: {oracle:?}");
-        let stopped = case == "nested-stack"
-            && cfg!(target_arch = "x86_64")
-            && kernel_supports(KernelFeature::Tsc);
+        let stopped = case == "nested-stack" && trap;
         let expected = if stopped { 6 } else { 11 };
         assert_eq!(output.status.signal(), Some(expected), "{case}: {output:?}");
-        // A fault's default action does not flush the captured output; a
-        // raised signal's and a named stop do.
-        if case == "reraise" || stopped {
-            assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");
-        }
+        // Without the counter trap the host blocks SIGSEGV inside the
+        // handler and the kernel kills the nested fault with no handler at
+        // all; the captured output is on the host already.
+        assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");
     }
 }
 
@@ -125,6 +123,43 @@ fn synchronous_signals_meet_the_action_the_kernel_would_give_them() {
     let oracle = assert_standalone_success(&native.binary, &["swap-escape"], &[]);
     let output = assert_standalone_success(&patina.binary, &["swap-escape"], &env);
     assert_eq!(text(&output.stdout), text(&oracle.stdout));
+}
+
+/// A genuine fault that takes the default action (SIGBUS, SIGFPE, SIGILL,
+/// SIGTRAP) ends the run by that signal with what the guest wrote to its
+/// descriptors before it on the host, and what C `stdout` still buffered
+/// lost, exactly as natively: also on a thread that blocks every signal,
+/// whose fault the kernel takes with no handler, so no shim code runs.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fault_death_keeps_what_the_guest_wrote_before_it() {
+    use std::os::unix::process::ExitStatusExt;
+    let native = assert_build_c_guest("signals/fault_routing.c", CLink::Unlinked);
+    let patina = assert_build_c_guest("signals/fault_routing.c", CLink::PosixShim);
+    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
+    let cases: &[&str] = if cfg!(target_arch = "x86_64") {
+        &["die-bus", "die-trap", "die-fpe", "die-int3", "die-blocked"]
+    } else {
+        &["die-bus", "die-trap", "die-blocked"]
+    };
+    for case in cases {
+        let oracle = standalone_output(&native.binary, &[case], &[]);
+        let output = standalone_output(&patina.binary, &[case], &env);
+        assert!(
+            oracle.status.signal().is_some(),
+            "native {case}: {oracle:?}"
+        );
+        assert_eq!(
+            output.status.signal(),
+            oracle.status.signal(),
+            "{case}: {output:?}"
+        );
+        assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");
+        assert!(
+            text(&output.stderr).contains(text(&oracle.stderr)),
+            "{case}: {output:?}"
+        );
+    }
 }
 
 /// A handler that adds the containment signals to its frame's saved mask

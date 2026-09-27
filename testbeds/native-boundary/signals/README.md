@@ -54,9 +54,14 @@ arch.
 disposition is the shim's fault front handler: in `swap-escape` a raised trap
 signal's frame runs the action its dequeue captured after an earlier handler of
 its batch installed a new one, and leaves by `siglongjmp`; a genuine trap right
-after must run the new action under the new action's mask. `native_signals`
-runs it natively as the oracle and under the shim and requires the same output
-and exit.
+after must run the new action under the new action's mask. Its `die-*` cases
+take a fault under the default action (SIGBUS, `__builtin_trap`, and on x86_64
+SIGFPE and `int3`) after writing a line to descriptors 1 and 2 and leaving one
+in C `stdout`'s buffer, and `die-blocked` takes the SIGBUS on a thread that
+blocks every signal, so the kernel takes it with no handler at all.
+`native_signals` runs it natively as the oracle and under the shim and
+requires the same output and exit: the written lines kept, the buffered one
+lost.
 
 `frame_mask.c` has a handler add SIGSYS and SIGSEGV to its frame's saved mask,
 returning through glibc's restorer and (x86_64) through the guest's own raw

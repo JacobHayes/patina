@@ -183,6 +183,31 @@ fn dlsym_routes_the_shim_definitions_and_no_host_name() {
 /// every Linux arch, for SIGSEGV, SIGBUS and SIGILL alike: a named stop that takes the
 /// signal's default action, never the guest's handler for it. The planted
 /// entry says so on stderr before it faults, so an earlier death cannot pass.
+/// The captured streams are written through to the host as the guest
+/// writes them: a host reader that went away is the host's, never the
+/// guest's, so the SIGPIPE it raises neither runs the guest's handler (which
+/// would run inside shim code) nor ends the run.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_host_reader_that_went_away_raises_no_guest_sigpipe() {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    let g = assert_build_c_guest("signals/fault_routing.c", CLink::PosixShim);
+    let mut ends = [0; 2];
+    assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+    let (reader, writer) =
+        unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+    drop(reader);
+    let output = std::process::Command::new(&g.binary)
+        .env_clear()
+        .arg("host-pipe")
+        .envs([("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")])
+        .stdout(writer)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(text(&output.stderr).contains("SURVIVED"), "{output:?}");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn shim_faults_are_named_stops_never_the_guests() {
