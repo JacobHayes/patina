@@ -152,6 +152,7 @@ ALLOWED_FLAGS='
 --runs
 --workload
 --baseline
+--depth
 '
 # -- cargo / rustc / rustup / linker tool flags --
 # --all/--all-targets/--check/--doc/--exclude/--lib/--no-deps/--workspace/
@@ -192,6 +193,8 @@ ALLOWED_FLAGS='
 # -- overhead benchmark (scripts/bench.py) --
 # --runs/--workload/--baseline: its own options (timed runs per side, the
 #   workload filter, the Patina build to compare against).
+# --depth: git fetch's flag (scripts/bench-publish.sh's shallow fetch of the
+#   bench-data branch).
 # (--selftest and --seed are REAL registry flags — not allowlisted here.)
 
 tmpdir=$(mktemp -d)

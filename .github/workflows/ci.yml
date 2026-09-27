@@ -13,12 +13,21 @@ on:
   schedule:
     - cron: "17 7 * * *"
   workflow_dispatch:
+    inputs:
+      bench_only:
+        description: Run only the overhead benchmark (the bench job)
+        type: boolean
+        default: false
 
 # Per event as well as per ref: the scheduled run and a push to main run
 # different jobs, so neither may cancel the other.
 concurrency:
   group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
+
+# Read-only unless a job asks for more (only bench-publish does).
+permissions:
+  contents: read
 
 jobs:
   # Each push/PR/dispatch row (stable and MSRV on both Linux architectures) is
@@ -27,7 +36,7 @@ jobs:
   # `gates` runs every other check of the row. Together they run exactly the
   # battery the single per-row job ran before.
   tests:
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && !inputs.bench_only
     name: ${{ matrix.toolchain }} / ${{ matrix.runner }} / tests ${{ matrix.shard }}/2
     strategy:
       fail-fast: false
@@ -105,7 +114,7 @@ jobs:
         run: cargo test -p patina-dst --features macros --locked
 
   gates:
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && !inputs.bench_only
     name: ${{ matrix.toolchain }} / ${{ matrix.runner }} / gates
     strategy:
       fail-fast: false
@@ -181,7 +190,7 @@ jobs:
   # locally validated push. Run the stable macOS gates daily and on explicit
   # manual dispatch; MSRV remains covered on both Linux architectures.
   macos:
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 7 * * *'
+    if: (github.event_name == 'workflow_dispatch' && !inputs.bench_only) || github.event.schedule == '17 7 * * *'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -210,7 +219,7 @@ jobs:
   # separate workspaces with their own locks; every one is strict.
   audit:
     # Lockfiles cannot change between pushes, so scheduled reruns add no signal.
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && !inputs.bench_only
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -235,7 +244,7 @@ jobs:
   # where it covers the same deterministic model without duplicating hosted
   # macOS minutes; the daily macOS job runs the full deterministic gate suite.
   nightly:
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 7 * * *'
+    if: (github.event_name == 'workflow_dispatch' && !inputs.bench_only) || github.event.schedule == '17 7 * * *'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -252,3 +261,75 @@ jobs:
       # A 200-generation randomized fault-combination campaign over the flagship
       # workq testbed, including its schedule-fuzz tier.
       - run: testbeds/workq/fuzz-sweep.sh 1 200
+
+  # The native-versus-Patina overhead benchmark (VALIDATION.md, "Overhead
+  # benchmark"): measurement tracked over time, not a gate. Each Linux
+  # architecture writes its table to the job summary and uploads its records;
+  # it builds and runs repository code, so it holds a read-only token that is
+  # not persisted. From main only, bench-publish (write token, no build) then
+  # appends one JSON record per workload to data/<os>-<arch>.jsonl on the
+  # `bench-data` branch. A dispatch with bench_only runs just these jobs.
+  bench:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 7 * * *'
+    name: bench / ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          cache-directories: |
+            ~/.cache/patina
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The records file is named for the data file it is appended to.
+      - run: |
+          platform="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
+          mkdir -p "$RUNNER_TEMP/bench"
+          python3 scripts/bench.py --runs 10 --output "$RUNNER_TEMP/bench/$platform.jsonl" --summary-md "$RUNNER_TEMP/bench/$platform.md"
+      # A failed benchmark still writes its completed records and table.
+      - if: always()
+        run: cat "$RUNNER_TEMP"/bench/*.md >> "$GITHUB_STEP_SUMMARY" || true
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-${{ matrix.runner }}
+          path: ${{ runner.temp }}/bench/
+          if-no-files-found: warn
+      - if: github.ref != 'refs/heads/main'
+        run: echo "Not main ($GITHUB_REF); computed $(cat "$RUNNER_TEMP"/bench/*.jsonl | wc -l) records; bench-publish is skipped."
+
+  # Runs only when every bench job succeeded, so a failed night publishes
+  # nothing (its records stay in the run's artifacts).
+  bench-publish:
+    needs: bench
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bench-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/bench
+      - env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          for records in "$RUNNER_TEMP"/bench/*.jsonl; do
+            scripts/bench-publish.sh "$records" "data/$(basename "$records")"
+          done
