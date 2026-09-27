@@ -72,7 +72,7 @@ use patina_dst_abi::{
     FsNode, OpenFlags, SeekWhence, XattrTarget,
 };
 use patina_dst_driver_api::{DriverResult, FsDriver};
-use patina_dst_fs_mem::{FsSnapshot, MemFs};
+use patina_dst_fs_mem::{BLOCK_SIZE, BlockState, FileData, FsSnapshot, MemFs, data::same_block};
 use patina_dst_rng_seeded::SplitMix64;
 
 /// The creation modes crash reconstruction rebuilds entries at before restoring
@@ -171,7 +171,9 @@ struct PendingOp {
 #[derive(Clone, Debug)]
 struct BaselineFile {
     inode: u64,
-    contents: Vec<u8>,
+    /// Shares its blocks with the image it was taken from: a durability
+    /// point costs the file's block map, never a copy of its bytes.
+    contents: FileData,
 }
 
 /// A symlink name captured in the durable baseline: the node it names (two
@@ -246,7 +248,7 @@ pub struct CrashFs {
     durable: Baseline,
     /// File content made durable by an explicit file `sync`, by inode: the
     /// bytes belong to the node, whatever later happens to any of its names.
-    staged_content: BTreeMap<u64, Vec<u8>>,
+    staged_content: BTreeMap<u64, FileData>,
     /// Fsynced timestamps belong to the inode, not any one hard-link name.
     staged_times: BTreeMap<u64, DurableTimes>,
     /// Namespace operations since the baseline, in observation order.
@@ -496,20 +498,28 @@ impl CrashFs {
     /// (`ext4_zero_range`, `ext4_punch_hole`): the range is written back
     /// (`filemap_write_and_wait_range`) and its whole pages dropped, and a
     /// page it covers only in part is zeroed through its block, which dirties
-    /// it again, when that page lies within the file. The volume stores a
-    /// file densely, so every such page has a block; on ext4 a hole there
-    /// would stay clean.
+    /// it again, when that page lies within the file and its block holds
+    /// written data; over a hole or an unwritten block there is nothing to
+    /// zero and the page stays clean (host-checked with `cachestat` on ext4
+    /// and XFS).
     fn zeroed(&mut self, fd: Fd, offset: u64, len: u64) -> DriverResult<()> {
         if len == 0 || !self.open_paths.contains_key(&fd) {
             return Ok(());
         }
         let metadata = self.live.fd_metadata(fd)?;
+        let written = |page: u64| {
+            self.live
+                .fd_file_data(fd)
+                .is_ok_and(|data| data.is_written(page * DIRTY_PAGE / BLOCK_SIZE))
+        };
+        let partial = [
+            (offset % DIRTY_PAGE != 0).then_some(offset / DIRTY_PAGE),
+            (offset.saturating_add(len) % DIRTY_PAGE != 0)
+                .then_some((offset.saturating_add(len) - 1) / DIRTY_PAGE),
+        ]
+        .map(|page| page.filter(|page| written(*page)));
         let end = offset.saturating_add(len);
         let (first, last) = (offset / DIRTY_PAGE, (end - 1) / DIRTY_PAGE);
-        let partial = [
-            (offset % DIRTY_PAGE != 0).then_some(first),
-            (end % DIRTY_PAGE != 0).then_some(last),
-        ];
         let pages = self.dirty.entry(metadata.ino).or_default();
         pages.retain(|page| *page < first || *page > last);
         for page in partial.into_iter().flatten() {
@@ -554,6 +564,13 @@ impl CrashFs {
     /// Merge durable `baseline` and live `current` at block granularity,
     /// tearing modified blocks back to the baseline per the seeded policy.
     ///
+    /// A block is modified when its BYTES differ; a change of allocation alone
+    /// (a reservation, a punched hole over zeros) is metadata the live image
+    /// keeps, so it draws no decision. Only blocks that hold written data on
+    /// either side can differ, so the merge visits those and nothing else: a
+    /// sparse file costs its written blocks, whatever its length. Unchanged
+    /// blocks are shared storage and compare by identity.
+    ///
     /// `partial_region`, when set, is the `[start, end)` byte range of the final
     /// unsynced write to this file under [`TornGranularity::Byte`]. A torn block
     /// overlapping that region keeps a seeded prefix of the live bytes and
@@ -562,55 +579,46 @@ impl CrashFs {
     /// in the whole-block model.
     fn torn_merge(
         &mut self,
-        baseline: &[u8],
-        current: &[u8],
-        partial_region: Option<(usize, usize)>,
-    ) -> Vec<u8> {
-        let granularity = self.policy.torn_write_granularity;
+        baseline: &FileData,
+        current: &FileData,
+        partial_region: Option<(u64, u64)>,
+    ) -> FileData {
+        let granularity = self.policy.torn_write_granularity as u64;
         let max_len = baseline.len().max(current.len());
-        if max_len == 0 {
-            return Vec::new();
-        }
         let blocks = max_len.div_ceil(granularity);
-        let mut result = vec![0u8; max_len];
+        let mut result = current.clone();
         // The tail block dictates the reconstructed length: a persisted or
         // partially-torn tail keeps the live length (a partial tear models an
         // in-place page whose size already reached disk), a wholly-reverted tail
         // falls back to the durable length.
         let mut tail_reverted = false;
-        for block in 0..blocks {
+        for block in candidate_blocks(baseline, current, granularity, blocks) {
             let start = block * granularity;
             let end = ((block + 1) * granularity).min(max_len);
-            let same =
-                (start..end).all(|index| byte_at(baseline, index) == byte_at(current, index));
-            let persist = if same {
-                true
-            } else {
-                !self.decide(self.policy.torn_write_probability)
-            };
+            if bytes_of(baseline, start, end) == bytes_of(current, start, end) {
+                continue;
+            }
             let mut reverted = false;
-            if persist {
-                copy_range(&mut result, current, start, end);
+            if !self.decide(self.policy.torn_write_probability) {
+                // Persisted: the live bytes are already there.
             } else if let Some(cut) = partial_region
                 .and_then(|(rs, re)| self.partial_cut(start, end, rs, re, baseline, current))
             {
                 // Sub-block tear: keep the live prefix, revert the suffix.
-                copy_range(&mut result, current, start, cut);
-                copy_range(&mut result, baseline, cut, end);
+                result.overlay(baseline, cut, end);
             } else {
-                copy_range(&mut result, baseline, start, end);
+                result.overlay(baseline, start, end);
                 reverted = true;
             }
             if block + 1 == blocks {
                 tail_reverted = reverted;
             }
         }
-        let final_len = if tail_reverted {
+        result.clip(if tail_reverted {
             baseline.len()
         } else {
             current.len()
-        };
-        result.truncate(final_len);
+        });
         result
     }
 
@@ -623,36 +631,30 @@ impl CrashFs {
     /// than two differing bytes and no partial split is possible.
     fn partial_cut(
         &mut self,
-        start: usize,
-        end: usize,
-        region_start: usize,
-        region_end: usize,
-        baseline: &[u8],
-        current: &[u8],
-    ) -> Option<usize> {
+        start: u64,
+        end: u64,
+        region_start: u64,
+        region_end: u64,
+        baseline: &FileData,
+        current: &FileData,
+    ) -> Option<u64> {
         let lo = start.max(region_start);
         let hi = end.min(region_end);
         if lo >= hi {
             return None;
         }
-        let mut first_diff = None;
-        let mut last_diff = None;
-        for index in lo..hi {
-            if byte_at(baseline, index) != byte_at(current, index) {
-                first_diff.get_or_insert(index);
-                last_diff = Some(index);
-            }
-        }
-        let (first_diff, last_diff) = (first_diff?, last_diff?);
+        let (durable, live) = (bytes_of(baseline, lo, hi), bytes_of(current, lo, hi));
+        let differs = |index: &usize| durable[*index] != live[*index];
+        let first_diff = (0..durable.len()).find(differs)? as u64 + lo;
+        let last_diff = (0..durable.len()).rev().find(differs)? as u64 + lo;
         if last_diff <= first_diff {
             return None;
         }
         // Cut lands in `[first_diff + 1, last_diff]`: the live prefix keeps
         // `first_diff` (differs from durable) and the durable suffix keeps
         // `last_diff` (differs from live).
-        let span = (last_diff - first_diff) as u64;
-        let cut = first_diff + 1 + (self.rng.next_u64() % span) as usize;
-        Some(cut)
+        let span = last_diff - first_diff;
+        Some(first_diff + 1 + self.rng.next_u64() % span)
     }
 
     fn recompute_after_crash(&mut self) -> DriverResult<()> {
@@ -784,7 +786,7 @@ impl CrashFs {
             specials,
         } = sets;
 
-        let mut durable_content_by_inode: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        let mut durable_content_by_inode: BTreeMap<u64, FileData> = BTreeMap::new();
         for file in self.durable.files.values() {
             durable_content_by_inode
                 .entry(file.inode)
@@ -797,12 +799,14 @@ impl CrashFs {
         let last_write = self.last_write.clone();
         let final_write = match self.policy.torn_granularity {
             TornGranularity::Byte => last_write.as_ref().and_then(|(path, offset, len)| {
-                self.file_source_inode(path, &reverted)
-                    .map(|inode| (inode, *offset, offset.saturating_add(*len)))
+                self.file_source_inode(path, &reverted).map(|inode| {
+                    let (offset, len) = (*offset as u64, *len as u64);
+                    (inode, offset, offset.saturating_add(len))
+                })
             }),
             TornGranularity::Block => None,
         };
-        let mut file_contents_by_inode: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        let mut file_contents_by_inode: BTreeMap<u64, FileData> = BTreeMap::new();
         let mut file_paths_by_inode: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
         for path in &files {
             let source_inode = self.file_source_inode(path, &reverted).ok_or_else(|| {
@@ -830,8 +834,11 @@ impl CrashFs {
                 // entry, whatever the live image holds there now.
                 baseline
             } else {
-                match self.live.contents(path) {
-                    Ok(current) => self.torn_merge(&baseline, &current, partial_region),
+                match self.live.file_data(path) {
+                    Ok(current) => {
+                        let current = current.clone();
+                        self.torn_merge(&baseline, &current, partial_region)
+                    }
                     Err(_) => baseline,
                 }
             };
@@ -869,11 +876,11 @@ impl CrashFs {
         }
         for (source_inode, paths) in &file_paths_by_inode {
             let first = paths.iter().next().expect("file group is non-empty");
-            let bytes = file_contents_by_inode
+            let contents = file_contents_by_inode
                 .get(source_inode)
                 .expect("file group has content")
                 .clone();
-            next = next.with_file(first, bytes)?;
+            next = next.with_file_data(first, contents)?;
             for path in paths.iter().skip(1) {
                 next.link(FsClock::EPOCH, first, path)?;
             }
@@ -1277,7 +1284,7 @@ impl FsDriver for CrashFs {
             .insert(metadata.ino, DurableTimes::from(metadata));
         match metadata.kind {
             FsEntryKind::File => {
-                let bytes = self.live.fd_file_data(fd)?.to_vec();
+                let bytes = self.live.fd_file_data(fd)?.clone();
                 self.staged_content.insert(metadata.ino, bytes);
                 self.dirty.remove(&metadata.ino);
             }
@@ -1567,15 +1574,47 @@ impl FsDriver for CrashFs {
     }
 }
 
-fn byte_at(bytes: &[u8], index: usize) -> u8 {
-    bytes.get(index).copied().unwrap_or(0)
+/// The bytes of `start..end`, zeros past the file's end: what a crash merge
+/// compares.
+fn bytes_of(data: &FileData, start: u64, end: u64) -> Vec<u8> {
+    let mut bytes = data.read(start, (end - start) as usize);
+    bytes.resize((end - start) as usize, 0);
+    bytes
 }
 
-/// Copy `source[start..end]` (zero-filled past its end) into `result[start..end]`.
-fn copy_range(result: &mut [u8], source: &[u8], start: usize, end: usize) {
-    for (offset, slot) in result[start..end].iter_mut().enumerate() {
-        *slot = byte_at(source, start + offset);
+/// The torn blocks (of `granularity` bytes, below `blocks`) that can differ
+/// between `baseline` and `current`, in order: those overlapping a 4 KiB block
+/// where either holds written bytes that the other does not hold alike. A
+/// hole and an unwritten block both read as zeros, so nothing else can.
+fn candidate_blocks(
+    baseline: &FileData,
+    current: &FileData,
+    granularity: u64,
+    blocks: u64,
+) -> Vec<u64> {
+    let mut changed: BTreeSet<u64> = BTreeSet::new();
+    let mut differs = |one: &FileData, other: &FileData| {
+        for (index, block) in one.written() {
+            let same = match other.block(index) {
+                BlockState::Written(theirs) => same_block(block, theirs),
+                BlockState::Hole | BlockState::Unwritten => block.iter().all(|byte| *byte == 0),
+            };
+            if !same {
+                changed.insert(index);
+            }
+        }
+    };
+    differs(baseline, current);
+    differs(current, baseline);
+    let mut torn: Vec<u64> = Vec::new();
+    for index in changed {
+        let first = index * BLOCK_SIZE / granularity;
+        let last = ((index + 1) * BLOCK_SIZE).div_ceil(granularity).min(blocks);
+        for block in first.max(torn.last().map_or(0, |last| last + 1))..last {
+            torn.push(block);
+        }
     }
+    torn
 }
 
 /// Whether a kind is a special node: a FIFO, a socket node or a whiteout —
@@ -1760,7 +1799,7 @@ fn enumerate(fs: &MemFs) -> Baseline {
                 baseline.dirs.insert(path);
             }
             FsEntryKind::File => {
-                let contents = fs.contents(&path).unwrap_or_default();
+                let contents = fs.file_data(&path).cloned().unwrap_or_default();
                 baseline.files.insert(
                     path,
                     BaselineFile {
@@ -1990,7 +2029,9 @@ mod tests {
         assert_eq!(dirty(&mut fs), 0);
 
         // A punched or zeroed range is written back and its whole pages
-        // dropped; a page it covers in part is zeroed, so dirty again.
+        // dropped; a page it covers in part is zeroed, so dirty again, when
+        // its block holds data. The second punch's end falls in the first
+        // one's hole, which stays clean.
         fs.write_at(FsClock::EPOCH, fd, 0, &vec![b'x'; 4 * page])
             .unwrap();
         fs.allocate(
@@ -2013,7 +2054,7 @@ mod tests {
             true,
         )
         .unwrap();
-        assert_eq!(dirty(&mut fs), 2);
+        assert_eq!(dirty(&mut fs), 1);
 
         // A file with no name and no descriptor left has no pages to keep.
         fs.remove_file(FsClock::EPOCH, "/f").unwrap();
@@ -2261,6 +2302,145 @@ mod tests {
         fs.write(FsClock::EPOCH, fd, b"BBBBBBBB").unwrap();
         fs.crash().unwrap();
         fs.contents("/f").unwrap()
+    }
+
+    #[test]
+    fn a_crash_merges_a_sparse_file_block_by_block_without_its_holes() {
+        // A 1 TiB file: 4 KiB of `a` at 0, a reservation at 1 GiB, 4 KiB of
+        // `z` just below the end, all durable. After the checkpoint one step
+        // changes it and the crash keeps (probability 0) or reverts
+        // (probability 1) every modified block; each row expects `st_blocks`,
+        // `SEEK_DATA` from 4096 and the first byte. A hole never becomes data
+        // and nothing is materialized: a merge over the hole would not finish.
+        const TIB: u64 = 1 << 40;
+        const GIB: u64 = 1 << 30;
+        type Change = fn(&mut CrashFs, Fd);
+        type Expected = (u64, u64, u8);
+        let rows: &[(&str, Change, Expected, Expected)] = &[
+            (
+                "a write into a hole far out",
+                |fs, fd| {
+                    fs.write_at(FsClock::EPOCH, fd, 512 * GIB, b"new").unwrap();
+                },
+                (4 * 8, 512 * GIB, b'a'),
+                (3 * 8, TIB - 4096, b'a'),
+            ),
+            (
+                "a punched data block (its bytes changed)",
+                |fs, fd| {
+                    fs.allocate(FsClock::EPOCH, fd, 0, 4096, FsAllocateMode::PunchHole, true)
+                        .unwrap();
+                },
+                (2 * 8, TIB - 4096, 0),
+                (3 * 8, TIB - 4096, b'a'),
+            ),
+            (
+                "a reservation alone (metadata, no bytes changed)",
+                |fs, fd| {
+                    fs.allocate(
+                        FsClock::EPOCH,
+                        fd,
+                        2 * GIB,
+                        8192,
+                        FsAllocateMode::Reserve,
+                        true,
+                    )
+                    .unwrap();
+                },
+                (5 * 8, TIB - 4096, b'a'),
+                (5 * 8, TIB - 4096, b'a'),
+            ),
+        ];
+        for (name, change, kept, reverted) in rows {
+            for (probability, expected) in [(0.0, kept), (1.0, reverted)] {
+                let mut fs = CrashFs::builder()
+                    .torn_write_probability(probability)
+                    .build()
+                    .unwrap();
+                let fd = write(&mut fs, "/f", &[b'a'; 4096]);
+                fs.write_at(FsClock::EPOCH, fd, TIB - 4096, &[b'z'; 4096])
+                    .unwrap();
+                fs.allocate(FsClock::EPOCH, fd, GIB, 4096, FsAllocateMode::Reserve, true)
+                    .unwrap();
+                fs.checkpoint();
+                change(&mut fs, fd);
+                fs.crash().unwrap();
+                let metadata = fs.fd_metadata(fd).unwrap();
+                let data = fs.seek(fd, 4096, SeekWhence::Data).unwrap();
+                let reader = fs
+                    .open(FsClock::EPOCH, "/f", OpenFlags::read_only())
+                    .unwrap();
+                let first = fs.read_at(FsClock::EPOCH, reader, 0, 1).unwrap()[0];
+                assert_eq!(metadata.len, TIB, "{name}");
+                assert_eq!(
+                    (metadata.blocks, data, first),
+                    *expected,
+                    "{name} at probability {probability}"
+                );
+                assert_eq!(
+                    fs.read_at(FsClock::EPOCH, reader, TIB - 2, 8).unwrap(),
+                    b"zz"
+                );
+            }
+        }
+    }
+
+    /// A seeded tear over a multi-block file: 12388 durable bytes, then
+    /// unsynced writes across blocks, into a hole past the end, and last
+    /// inside the first write (the region a byte-granularity tear cuts).
+    fn golden_tear(seed: u64, granularity: TornGranularity) -> Vec<u8> {
+        let clock = FsClock::EPOCH;
+        let mut fs = CrashFs::builder()
+            .seed(seed)
+            .torn_write_granularity(512)
+            .torn_write_probability(0.5)
+            .torn_granularity(granularity)
+            .build()
+            .unwrap();
+        let durable: Vec<u8> = (0..12_388u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let fd = write(&mut fs, "/f", &durable);
+        fs.checkpoint();
+        fs.write_at(clock, fd, 1000, &[b'B'; 6000]).unwrap();
+        fs.write_at(clock, fd, 20_000, b"CCCCCCCCCC").unwrap();
+        fs.write_at(clock, fd, 3000, &[b'D'; 700]).unwrap();
+        fs.crash().unwrap();
+        fs.contents("/f").unwrap()
+    }
+
+    #[test]
+    fn a_seeded_tear_is_the_dense_models_byte_for_byte() {
+        // Digests (FNV-1a 64) of the dense byte-vector merge's result on main
+        // before the block map, per seed: the block-map merge visits fewer
+        // blocks but draws the same decisions in the same order, so each
+        // seed's torn image is unchanged.
+        fn fnv(bytes: &[u8]) -> u64 {
+            bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+            })
+        }
+        use TornGranularity::{Block, Byte};
+        let rows: &[(TornGranularity, u64, usize, u64)] = &[
+            (Block, 0, 20010, 0xdead_e3b0_8f80_ced7),
+            (Block, 1, 20010, 0x12ff_b786_e153_1d57),
+            (Block, 2, 12388, 0x59d8_b2a7_56dd_9995),
+            (Block, 3, 12388, 0xbc4f_c4ab_01cc_c1ad),
+            (Block, 4, 20010, 0xa4a2_83cf_a23b_01c3),
+            (Block, 5, 12388, 0x6c67_df6c_1454_70c5),
+            (Byte, 0, 12388, 0x0311_5781_b715_dd03),
+            (Byte, 1, 12388, 0xff19_cb6e_d9c3_1637),
+            (Byte, 2, 20010, 0xd8cd_022a_ee65_9837),
+            (Byte, 3, 12388, 0xd0c0_21f7_52e2_f51c),
+            (Byte, 4, 20010, 0x508d_63a5_332e_0fab),
+            (Byte, 5, 20010, 0xd617_6246_f07e_e754),
+        ];
+        for &(granularity, seed, len, digest) in rows {
+            let torn = golden_tear(seed, granularity);
+            assert_eq!(
+                (torn.len(), fnv(&torn)),
+                (len, digest),
+                "{granularity:?} seed {seed}"
+            );
+        }
     }
 
     #[test]

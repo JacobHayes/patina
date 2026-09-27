@@ -746,6 +746,10 @@ query of the file, so they count as allocated there. Not modeled:
   a cached page over it, after a read, is data);
 - a store through a shared mapping of the bytes a page already held, and a
   read fault on a memfd, allocate natively and not here;
+- a crash never reverts a change of allocation alone: an un-fsynced
+  `KEEP_SIZE` reservation, or a punch over bytes that were already zero,
+  survives it as the live image has it (the crash model tears and reverts
+  bytes, block by block);
 - the mapped-file page cache scales with the file's length, not its data: the
   first mapping loads the whole file (`cache_for`), a resize resizes the dirty
   shadow (`Cache::resize`), and every write-back check compares the whole

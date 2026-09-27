@@ -390,29 +390,53 @@ impl FileData {
         Some(offset.max(index.saturating_mul(BLOCK_SIZE)).min(self.len))
     }
 
-    /// Replace block `index` with `state`, as a crash merge rebuilds a file
-    /// block by block. The length is untouched.
-    pub fn set_block(&mut self, index: u64, state: BlockState<'_>) {
-        self.remove_unwritten(index, index + 1);
-        match state {
-            BlockState::Hole => {
-                self.written.remove(index);
+    /// Take `source`'s bytes over `offset..end`, as a crash merge reverts a
+    /// range to its durable image. A block the range covers whole takes
+    /// `source`'s block as it is (written, unwritten or a hole, its storage
+    /// shared); a block it covers in part takes `source`'s bytes there and is
+    /// written if either side's block is. The length is untouched: see
+    /// [`FileData::clip`].
+    pub fn overlay(&mut self, source: &FileData, offset: u64, end: u64) {
+        if offset >= end {
+            return;
+        }
+        for index in block_of(offset)..blocks_to(end) {
+            let start = index * BLOCK_SIZE;
+            if offset <= start && start + BLOCK_SIZE <= end {
+                self.remove_unwritten(index, index + 1);
+                match source.block(index) {
+                    BlockState::Hole => {
+                        self.written.remove(index);
+                    }
+                    BlockState::Unwritten => {
+                        self.written.remove(index);
+                        self.insert_unwritten(index, index + 1);
+                    }
+                    BlockState::Written(block) => {
+                        self.written.insert(index, Arc::clone(block));
+                    }
+                }
+                continue;
             }
-            BlockState::Unwritten => {
-                self.written.remove(index);
-                self.insert_unwritten(index, index + 1);
+            if !self.is_written(index) && !source.is_written(index) {
+                continue;
             }
-            BlockState::Written(block) => {
-                self.written.insert(index, Arc::clone(block));
-            }
+            let (from, to) = (offset.max(start), end.min(start + BLOCK_SIZE));
+            let mut bytes = source.read(from, (to - from) as usize);
+            bytes.resize((to - from) as usize, 0);
+            let length = self.len;
+            self.write(from, &bytes);
+            self.len = length;
         }
     }
 
-    /// Set the length without freeing or zeroing anything, for a crash merge
-    /// whose blocks already agree with it.
-    pub fn with_len(mut self, len: u64) -> Self {
+    /// Set the length to `len` as a crash merge settles it: the written
+    /// blocks past it go and the bytes past it are zeroed, a reservation
+    /// stays.
+    pub fn clip(&mut self, len: u64) {
         self.len = len;
-        self
+        self.written.remove_range(blocks_to(len), u64::MAX);
+        self.zero_tail(len);
     }
 
     fn remove_written(&mut self, first: u64, end: u64) {
