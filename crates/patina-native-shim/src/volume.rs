@@ -61,8 +61,7 @@ const ST_RELATIME: i64 = 0x1000;
 /// `NAME_MAX`.
 const NAME_MAX: i64 = 255;
 
-/// The anonymous devices anon_inodefs and devtmpfs are on.
-const ANON_INODEFS_DEVICE: (u32, u32) = (0, 15);
+/// The anonymous device devtmpfs is on.
 const DEVTMPFS_DEVICE: (u32, u32) = (0, 5);
 /// The IPC namespace's internal mqueue mount, where `mq_open` descriptors live.
 const MQUEUE_DEVICE: (u32, u32) = (0, 26);
@@ -112,7 +111,7 @@ impl Filesystem {
             Filesystem::Volume => fs_device(PATINA_FS_VOLUME),
             Filesystem::Pipefs => fs_device(PATINA_FS_PIPEFS),
             Filesystem::Sockfs => fs_device(PATINA_FS_SOCKFS),
-            Filesystem::AnonInodefs => ANON_INODEFS_DEVICE,
+            Filesystem::AnonInodefs => fs_device(crate::PATINA_FS_ANON_INODE),
             Filesystem::Devtmpfs => DEVTMPFS_DEVICE,
             Filesystem::Mqueue => MQUEUE_DEVICE,
             Filesystem::Nsfs => fs_device(crate::PATINA_FS_NSFS),
@@ -260,6 +259,7 @@ impl Filesystem {
             crate::PATINA_FS_NSFS => Filesystem::Nsfs,
             crate::PATINA_FS_DEVTMPFS | crate::PATINA_FS_PTMX => Filesystem::Devtmpfs,
             crate::PATINA_FS_DEVPTS => Filesystem::Devpts,
+            crate::PATINA_FS_ANON_INODE => Filesystem::AnonInodefs,
             _ => Filesystem::Volume,
         }
     }
@@ -445,6 +445,64 @@ pub(crate) fn urandom_metadata() -> crate::PatinaMetadata {
         mtime: made,
         ctime: made,
         btime: made,
+    }
+}
+
+/// The anonymous inode's number on anon_inodefs: a virtual constant. Boot
+/// allocates it (`anon_inode_init`, from `get_next_ino`'s per-CPU batches),
+/// so the number depends on boot order, CPU count and configuration; this is
+/// the pinned host's reading when it was written, and any number would do
+/// (the conformance events compare inode numbers relatively).
+const ANON_INODE_INO: u64 = 69;
+
+/// The virtual machine's boot instant on the realtime clock, in
+/// nanoseconds: its monotonic clock counts from boot and nothing sets its
+/// realtime clock, so it is their difference at any instant (0 before the
+/// runtime is installed).
+fn boot_instant() -> u64 {
+    crate::with_context_raw(|context| {
+        let realtime = context.fs_time_unrecorded()?;
+        let monotonic = context.monotonic_now_unrecorded()?;
+        Ok(realtime.saturating_sub(monotonic))
+    })
+    .unwrap_or(0)
+}
+
+/// Whether a descriptor of `kind` is a file on 6.8's one anonymous inode
+/// (`anon_inode_getfile`/`anon_inode_getfd`: `[eventfd]`, `[timerfd]`,
+/// `[signalfd]`, `[eventpoll]`, `inotify`, `[pidfd]` — pidfs came in 6.9 —
+/// and `[landlock-ruleset]`), every one of them the same inode.
+pub(crate) fn on_anon_inode(kind: FdKind) -> bool {
+    matches!(
+        kind,
+        FdKind::EventFd
+            | FdKind::TimerFd
+            | FdKind::SignalFd
+            | FdKind::Epoll
+            | FdKind::Inotify
+            | FdKind::Pidfd
+            | FdKind::LandlockRuleset
+    )
+}
+
+/// The anonymous inode (`alloc_anon_inode`): root's `0600` with no file
+/// type, one link, empty, on anon_inodefs; every time the instant boot made
+/// it.
+pub(crate) fn anon_inode_metadata() -> crate::PatinaMetadata {
+    let made = crate::PatinaTimestamp::from_nanos(i128::from(boot_instant()));
+    crate::PatinaMetadata {
+        kind: crate::PATINA_ENTRY_ANON,
+        mode: 0o600,
+        nlink: 1,
+        fs: crate::PATINA_FS_ANON_INODE,
+        rdev_major: 0,
+        rdev_minor: 0,
+        length: 0,
+        ino: ANON_INODE_INO,
+        atime: made,
+        mtime: made,
+        ctime: made,
+        btime: crate::PatinaTimestamp::default(),
     }
 }
 

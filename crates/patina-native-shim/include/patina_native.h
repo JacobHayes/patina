@@ -528,6 +528,9 @@ enum {
     /* A character device: the whiteout (0:0) mknod(S_IFCHR, 0) and
      * renameat2(RENAME_WHITEOUT) leave. */
     PATINA_ENTRY_CHAR = 6,
+    /* The anonymous inode (Linux, alloc_anon_inode): permission bits and no
+     * file-type bits. */
+    PATINA_ENTRY_ANON = 7,
 };
 
 /*
@@ -545,6 +548,10 @@ enum {
     PATINA_FS_DEVTMPFS = 4, /* the entropy device (Linux): root's, on devtmpfs */
     PATINA_FS_DEVPTS = 5, /* a pseudoterminal slave (Linux): the opener's, group tty, on devpts */
     PATINA_FS_PTMX = 6, /* /dev/ptmx (Linux): root's, group tty, on devtmpfs */
+    /* 6.8's one anonymous inode (Linux), which every eventfd, timerfd, signalfd,
+     * epoll, inotify, pidfd and Landlock ruleset descriptor is a file on: root's,
+     * on anon_inodefs */
+    PATINA_FS_ANON_INODE = 7,
 };
 enum {
     PATINA_VOLUME_DEV_MAJOR = 8,
@@ -554,6 +561,7 @@ enum {
     PATINA_NSFS_DEV_MINOR = 4,
     PATINA_DEVTMPFS_DEV_MINOR = 5,
     PATINA_DEVPTS_DEV_MINOR = 24,
+    PATINA_ANON_INODEFS_DEV_MINOR = 15,
 };
 
 /*

@@ -1,3 +1,4 @@
+pub mod anon_inode;
 pub mod pipes;
 pub mod pty;
 pub mod stdio;

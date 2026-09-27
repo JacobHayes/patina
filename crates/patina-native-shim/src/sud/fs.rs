@@ -405,9 +405,10 @@ fn stat_blksize(values: &StatValues) -> u64 {
 const STATX_MNT_ID_VALUE: u64 = crate::volume::ROOT_MOUNT.id as u64;
 
 /// `st_mode`: the entry's file-type bits ORed with its permission bits, byte
-/// for byte with the C `patina_stat_mode`.
+/// for byte with the C `patina_stat_mode` (the anonymous inode has none).
 pub(super) fn stat_mode(values: &StatValues) -> u32 {
     let kind = match values.kind {
+        PATINA_ENTRY_ANON => 0,
         PATINA_ENTRY_DIRECTORY => S_IFDIR,
         PATINA_ENTRY_SYMLINK => S_IFLNK,
         PATINA_ENTRY_FIFO => S_IFIFO,

@@ -137,6 +137,19 @@ pub fn run(p: &Probe) {
         "a ruleset descriptor is read-write",
         p.fcntl(ruleset, F_GETFL, 0) == O_RDWR as i64,
     );
+    // fd/anon_inode holds the anonymous inode itself.
+    let event = p.eventfd2(0, EFD_CLOEXEC);
+    let (r, rules) = p.fstat(ruleset);
+    let (r2, events) = p.fstat(event);
+    p.check(
+        "a ruleset is a file on the one anonymous inode, an eventfd's",
+        r == 0
+            && r2 == 0
+            && rules
+                .zip(events)
+                .is_some_and(|(a, b)| (a.ino, a.dev) == (b.ino, b.dev)),
+    );
+    p.close(event);
     p.check(
         "and close-on-exec",
         p.fcntl(ruleset, F_GETFD, 0) == FD_CLOEXEC as i64,
@@ -271,6 +284,8 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_openat,
         Syscall::N_pipe2,
         Syscall::N_memfd_create,
+        Syscall::N_eventfd2,
+        Syscall::N_fstat,
         Syscall::N_close,
     ],
     needs: &[Need::Unprivileged, Need::Landlock],

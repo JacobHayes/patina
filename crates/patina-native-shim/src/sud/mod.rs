@@ -533,6 +533,8 @@ const PATINA_ENTRY_SOCKET: u32 = 5;
 
 const PATINA_ENTRY_CHAR: u32 = 6;
 
+const PATINA_ENTRY_ANON: u32 = 7;
+
 // getdents64 `d_type` values (linux_dirent64).
 const DT_FIFO: u8 = uapi::DT_FIFO as u8;
 

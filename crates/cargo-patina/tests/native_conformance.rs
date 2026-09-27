@@ -1370,6 +1370,11 @@ fn entropy_urandom() {
 }
 
 #[test]
+fn fd_anon_inode() {
+    conform("fd/anon_inode");
+}
+
+#[test]
 fn fd_pipes() {
     conform("fd/pipes");
 }

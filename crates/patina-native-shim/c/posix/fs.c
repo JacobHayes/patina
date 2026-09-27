@@ -761,6 +761,7 @@ static mode_t patina_stat_mode(const struct patina_metadata *values) {
         case PATINA_ENTRY_FIFO: type = S_IFIFO; break;
         case PATINA_ENTRY_SOCKET: type = S_IFSOCK; break;
         case PATINA_ENTRY_CHAR: type = S_IFCHR; break;
+        case PATINA_ENTRY_ANON: type = 0; break;
         case PATINA_ENTRY_FILE:
         default: type = S_IFREG; break;
     }
@@ -790,6 +791,10 @@ static void patina_fs_device(uint32_t fs, unsigned *major, unsigned *minor) {
         case PATINA_FS_DEVPTS:
             *major = 0;
             *minor = PATINA_DEVPTS_DEV_MINOR;
+            break;
+        case PATINA_FS_ANON_INODE:
+            *major = 0;
+            *minor = PATINA_ANON_INODEFS_DEV_MINOR;
             break;
         case PATINA_FS_VOLUME:
         default:

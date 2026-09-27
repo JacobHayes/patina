@@ -5895,6 +5895,10 @@ const PATINA_ENTRY_SYMLINK: u32 = 3;
 const PATINA_ENTRY_FIFO: u32 = 4;
 const PATINA_ENTRY_SOCKET: u32 = 5;
 const PATINA_ENTRY_CHAR: u32 = 6;
+/// The anonymous inode's kind (`alloc_anon_inode`: permission bits alone,
+/// no file-type bits).
+#[cfg(target_os = "linux")]
+const PATINA_ENTRY_ANON: u32 = 7;
 
 fn metadata_kind(kind: FsEntryKind) -> u32 {
     match kind {
@@ -5929,6 +5933,11 @@ const PATINA_FS_DEVPTS: u32 = 5;
 /// path.
 #[cfg(target_os = "linux")]
 const PATINA_FS_PTMX: u32 = 6;
+/// 6.8's one anonymous inode (`volume::anon_inode_metadata`), which every
+/// eventfd, timerfd, signalfd, epoll, inotify, pidfd and Landlock ruleset
+/// descriptor is a file on: root's, on anon_inodefs (0:15).
+#[cfg(target_os = "linux")]
+const PATINA_FS_ANON_INODE: u32 = 7;
 
 /// The `(major, minor)` device a `PATINA_FS_*` filesystem reports through
 /// `st_dev`/`stx_dev_*` (`PATINA_*_DEV_*` in `patina_native.h`): the volume is
@@ -5942,6 +5951,7 @@ pub(crate) fn fs_device(fs: u32) -> (u32, u32) {
         PATINA_FS_NSFS => (0, 4),
         PATINA_FS_DEVTMPFS | PATINA_FS_PTMX => (0, 5),
         PATINA_FS_DEVPTS => (0, 24),
+        PATINA_FS_ANON_INODE => (0, 15),
         _ => (8, 1),
     }
 }
@@ -6229,14 +6239,15 @@ pub unsafe extern "C" fn patina_access_answer(values: *const PatinaMetadata, mod
 
 /// The owner `stat` reports for a node on the `PATINA_FS_*` filesystem
 /// `fs`, both doors: the caller's ([`caller`]), but for a namespace file's
-/// nsfs inode and the entropy device, which are root's, the pseudoterminal
+/// nsfs inode, the entropy device and the anonymous inode, which are root's
+/// (boot made them), the pseudoterminal
 /// multiplexer, root's and the tty group's, and a pseudoterminal's slave
 /// node, its opener's (the caller's) and the tty group's.
 pub(crate) fn node_owner(fs: u32) -> (u32, u32) {
     let caller = caller();
     match fs {
         #[cfg(target_os = "linux")]
-        PATINA_FS_NSFS | PATINA_FS_DEVTMPFS => (0, 0),
+        PATINA_FS_NSFS | PATINA_FS_DEVTMPFS | PATINA_FS_ANON_INODE => (0, 0),
         #[cfg(target_os = "linux")]
         PATINA_FS_PTMX => (0, thread::pty::TTY_GID),
         #[cfg(target_os = "linux")]
@@ -6392,6 +6403,9 @@ pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut Patina
         }
         if resolved.kind == FdKind::Urandom {
             return write_patina_metadata(volume::urandom_metadata(), out);
+        }
+        if volume::on_anon_inode(resolved.kind) {
+            return write_patina_metadata(volume::anon_inode_metadata(), out);
         }
         // A pseudoterminal's master is the multiplexer's node; a slave, its
         // devpts node.
