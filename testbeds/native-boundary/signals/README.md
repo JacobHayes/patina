@@ -48,7 +48,9 @@ arch.
 `frame_mask.c` has a handler add SIGSYS and SIGSEGV to its frame's saved mask,
 returning through glibc's restorer and (x86_64) through the guest's own raw
 and `syscall(2)` stubs; a raw syscall and a timestamp-counter read must still
-be answered afterwards. `native_signals` runs it natively as the oracle and
+be answered afterwards. Its `sa-mask` case installs a handler whose `sa_mask`
+blocks every signal, and the handler's own first counter read and raw syscall
+must be answered while it runs. `native_signals` runs it natively as the oracle and
 under the shim, and requires the same output.
 
 `thread_registrations.c` holds the per-thread kernel registration cases:

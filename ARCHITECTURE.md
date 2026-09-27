@@ -303,7 +303,11 @@ a core dump then records a sent SIGSEGV (`SI_TKILL`, no address) where natively
 it records the kernel's, with the same wait status. A SIGSEGV while shim code owns
 the thread (an entry, a shim lock, the trap's own glue) is a named stop, never
 the guest's. The host never blocks
-SIGSEGV, so the guest's block is kept per thread (`src/thread/signals/fault.rs`):
+SIGSEGV (nor SIGSYS: an action's `sa_mask`, which the kernel blocks while its
+handler runs, is installed without them, as every host mask is; a SIGSYS it
+names is dropped as from any mask the guest installs, so the handler runs and
+reads its mask back with SIGSYS unblocked, with no notice, where natively it
+is blocked), so the guest's block is kept per thread (`src/thread/signals/fault.rs`):
 visible mask changes set it, and a handler, delivery batch or temporary mask
 restores it on return. A scope the guest left by `siglongjmp` is found by the
 kernel's own stack test (off its alternate stack, above its frame, or its frame

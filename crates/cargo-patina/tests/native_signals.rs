@@ -102,19 +102,20 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
 }
 
 /// A handler that adds the containment signals to its frame's saved mask
-/// gets them blocked natively when it returns, and the guest runs on. Under
-/// patina the return must leave them unblocked (whichever restorer ran), so
-/// the next raw syscall and timestamp-counter read are still answered and the
-/// guest prints what it prints natively.
+/// gets them blocked natively when it returns, and the guest runs on; so does
+/// one whose action's `sa_mask` blocks them while it runs. Under patina the
+/// return must leave them unblocked (whichever restorer ran), and so must the
+/// handler's own run, so the next raw syscall and timestamp-counter read are
+/// still answered and the guest prints what it prints natively.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_handler_frame_cannot_block_the_containment_signals() {
     let native = assert_build_c_guest("signals/frame_mask.c", CLink::Unlinked);
     let patina = assert_build_c_guest("signals/frame_mask.c", CLink::PosixShim);
     let cases: &[&str] = if cfg!(target_arch = "x86_64") {
-        &["libc", "raw", "raw-libc"]
+        &["libc", "sa-mask", "raw", "raw-libc"]
     } else {
-        &["libc"]
+        &["libc", "sa-mask"]
     };
     for case in cases {
         let oracle = assert_standalone_success(&native.binary, &[case], &[]);

@@ -889,12 +889,23 @@ fn current_action(signals: u64) {
     }
 }
 
-/// The host action that stands for the guest's `action` of `sig`.
+/// The host action that stands for the guest's `action` of `sig`. Its mask
+/// keeps the containment signals out, as every mask the host runs guest code
+/// under ([`host_mask`]): the kernel blocks an action's mask while its
+/// handler runs, and a counter read or raw syscall there would otherwise be
+/// forced to the default action. A SIGSEGV the mask names is blocked
+/// virtually for the handler instead (`deliver`, [`fault`]); a SIGSYS it
+/// names is dropped silently, as from a mask the guest installs itself, so
+/// the handler reads SIGSYS back unblocked.
 fn install_host_action(sig: u8, action: Action) -> i64 {
     if trap_routed(sig) {
         mirror_onstack(action.flags);
         return 0;
     }
+    let action = Action {
+        mask: host_mask(action.mask),
+        ..action
+    };
     let action = if fault::front_routed(sig) {
         fault::front_action(action)
     } else {

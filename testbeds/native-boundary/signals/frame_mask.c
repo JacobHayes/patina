@@ -9,7 +9,10 @@
  *             glibc's restorer;
  *   raw       (x86_64) a raw rt_sigaction with the guest's own SA_RESTORER
  *             stub issuing a raw rt_sigreturn;
- *   raw-libc  (x86_64) the same, with a stub that tail-calls syscall(2).
+ *   raw-libc  (x86_64) the same, with a stub that tail-calls syscall(2);
+ *   sa-mask   an action whose sa_mask blocks every signal, which the kernel
+ *             blocks while its handler runs: the handler's first `rdtsc` and
+ *             raw syscall, before it calls anything else, are answered.
  */
 #define _GNU_SOURCE
 #include <assert.h>
@@ -44,15 +47,27 @@ static long raw_getpid(void) {
 #endif
 }
 
-static void after_return(void) {
-    assert(handled == 1);
-    assert(raw_getpid() == getpid());
+static void counter_read(void) {
 #if defined(__x86_64__)
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     (void)lo;
     (void)hi;
 #endif
+}
+
+static long inside_pid;
+static void full_mask(int sig) {
+    (void)sig;
+    counter_read();
+    inside_pid = raw_getpid();
+    handled++;
+}
+
+static void after_return(void) {
+    assert(handled == 1);
+    assert(raw_getpid() == getpid());
+    counter_read();
     puts("FRAME_MASK_OK");
 }
 
@@ -92,6 +107,16 @@ int main(int argc, char **argv) {
         action.sa_sigaction = block_containment;
         action.sa_flags = SA_SIGINFO;
         assert(sigaction(SIGUSR1, &action, NULL) == 0);
+    } else if (strcmp(argv[1], "sa-mask") == 0) {
+        struct sigaction action;
+        memset(&action, 0, sizeof action);
+        action.sa_handler = full_mask;
+        sigfillset(&action.sa_mask);
+        assert(sigaction(SIGUSR1, &action, NULL) == 0);
+        assert(raise(SIGUSR1) == 0);
+        assert(inside_pid == getpid());
+        after_return();
+        return 0;
 #if defined(__x86_64__)
     } else if (strcmp(argv[1], "raw") == 0) {
         raw_action(stub_raw);
