@@ -1,8 +1,9 @@
 //! Deterministic fault injection around data-plane drivers.
 
 use patina_dst_abi::{
-    Datagram, EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsMetadata, FsNode, OpenFlags,
-    SeekWhence, SendDisposition, SendReport, ShutdownHow, SocketId, TcpAccepted, XattrTarget,
+    Datagram, EffectError, ErrorCode, Fd, FsAllocateMode, FsClock, FsDirectoryEntry, FsMetadata,
+    FsNode, OpenFlags, SeekWhence, SendDisposition, SendReport, ShutdownHow, SocketId, TcpAccepted,
+    XattrTarget,
 };
 use patina_dst_driver_api::{
     DriverResult, FsDriver, FsFaultOpKind, FsFaultReport, NetDriver, NetFaultReport, NetReadiness,
@@ -358,13 +359,13 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         fd: Fd,
         offset: u64,
         len: u64,
-        zero: bool,
+        mode: FsAllocateMode,
         keep_size: bool,
     ) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::SetLen) {
             return Err(error);
         }
-        self.inner.allocate(clock, fd, offset, len, zero, keep_size)
+        self.inner.allocate(clock, fd, offset, len, mode, keep_size)
     }
 
     fn set_times(

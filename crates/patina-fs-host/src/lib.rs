@@ -158,6 +158,29 @@ impl FsDriver for HostCaptureFs {
             }
             SeekWhence::Current => SeekFrom::Current(offset),
             SeekWhence::End => SeekFrom::End(offset),
+            // Normalized like the metadata's allocation: a captured file reads
+            // as one without holes, whatever the host's extents are, so every
+            // byte below the size is data and the one hole is the end.
+            SeekWhence::Data | SeekWhence::Hole => {
+                let size = file
+                    .metadata()
+                    .map_err(|error| host_error("read captured metadata", error))?
+                    .len();
+                let offset = u64::try_from(offset)
+                    .ok()
+                    .filter(|&offset| offset < size)
+                    .ok_or_else(|| {
+                        EffectError::new(
+                            ErrorCode::NoSuchPosition,
+                            "no data or hole at or past the offset before the end",
+                        )
+                    })?;
+                SeekFrom::Start(if whence == SeekWhence::Data {
+                    offset
+                } else {
+                    size
+                })
+            }
         };
         file.seek(position)
             .map_err(|error| host_error("seek captured file", error))
@@ -238,6 +261,9 @@ fn metadata_from_host(metadata: &fs::Metadata) -> DriverResult<FsMetadata> {
     Ok(FsMetadata {
         kind,
         len: metadata.len(),
+        // Normalized: the host's allocation depends on its filesystem, so a
+        // captured file reports the blocks a file without holes would hold.
+        blocks: metadata.len().div_ceil(4096) * 8,
         ino: 0,
         nlink: 1,
         atime_nanos: 0,

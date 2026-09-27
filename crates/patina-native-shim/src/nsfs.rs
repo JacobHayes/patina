@@ -144,6 +144,7 @@ pub(crate) fn metadata(index: usize) -> PatinaMetadata {
         rdev_major: 0,
         rdev_minor: 0,
         length: 0,
+        blocks: 0,
         ino: ENTRIES[index].inum,
         atime: made,
         mtime: made,

@@ -68,8 +68,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use patina_dst_abi::{
-    EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsEntryKind, FsMetadata, FsNode,
-    OpenFlags, SeekWhence, XattrTarget,
+    EffectError, ErrorCode, Fd, FsAllocateMode, FsClock, FsDirectoryEntry, FsEntryKind, FsMetadata,
+    FsNode, OpenFlags, SeekWhence, XattrTarget,
 };
 use patina_dst_driver_api::{DriverResult, FsDriver};
 use patina_dst_fs_mem::{FsSnapshot, MemFs};
@@ -1330,12 +1330,12 @@ impl FsDriver for CrashFs {
         fd: Fd,
         offset: u64,
         len: u64,
-        zero: bool,
+        mode: FsAllocateMode,
         keep_size: bool,
     ) -> DriverResult<()> {
         self.live
-            .allocate(clock, fd, offset, len, zero, keep_size)?;
-        if zero {
+            .allocate(clock, fd, offset, len, mode, keep_size)?;
+        if mode != FsAllocateMode::Reserve {
             self.zeroed(fd, offset, len)?;
         }
         Ok(())
@@ -1996,12 +1996,26 @@ mod tests {
         // dropped; a page it covers in part is zeroed, so dirty again.
         fs.write_at(FsClock::EPOCH, fd, 0, &vec![b'x'; 4 * page])
             .unwrap();
-        fs.allocate(FsClock::EPOCH, fd, page as u64, 2 * page as u64, true, true)
-            .unwrap();
+        fs.allocate(
+            FsClock::EPOCH,
+            fd,
+            page as u64,
+            2 * page as u64,
+            FsAllocateMode::PunchHole,
+            true,
+        )
+        .unwrap();
         assert_eq!(dirty(&mut fs), 2);
         fs.sync(fd).unwrap();
-        fs.allocate(FsClock::EPOCH, fd, 100, page as u64, true, true)
-            .unwrap();
+        fs.allocate(
+            FsClock::EPOCH,
+            fd,
+            100,
+            page as u64,
+            FsAllocateMode::PunchHole,
+            true,
+        )
+        .unwrap();
         assert_eq!(dirty(&mut fs), 2);
 
         // A file with no name and no descriptor left has no pages to keep.

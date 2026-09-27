@@ -55,7 +55,11 @@ pub use handoff::{
 ///   names, which record and `flock` locks key on; signed timestamps: every
 ///   metadata outcome's and set-times operation's nanoseconds may be negative
 ///   (before the epoch) or past what 64 bits hold (up to the volume's range).
-pub const TRACE_FORMAT_VERSION: u32 = 13;
+/// - 14: the allocated `blocks` on every metadata outcome; `fs_seek`'s `data`
+///   and `hole` whences (`SEEK_DATA`/`SEEK_HOLE`) and the `no_such_position`
+///   error; `fs_allocate`'s `mode` (`reserve`, `punch_hole`, `zero_range`) in
+///   place of its `zero` flag.
+pub const TRACE_FORMAT_VERSION: u32 = 14;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 
@@ -2294,7 +2298,7 @@ mod tests {
     fn a_current_bundle_must_state_its_run_facts() {
         // The realtime epoch and the node name are required: a bundle missing
         // either does not parse.
-        let bytes = include_bytes!("../tests/fixtures/format-13.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-14.patina");
         for field in ["realtime_epoch_nanos", "hostname"] {
             let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             assert!(
@@ -2331,7 +2335,7 @@ mod tests {
     fn memory_operations_fixture_decodes_and_replays() {
         // Checked-in feature fixture pins the page cache's and anonymous
         // files' operations and one of the filesystem family's.
-        let bytes = include_bytes!("../tests/fixtures/format-13-memory.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-14-memory.patina");
         let bundle = TraceBundle::from_slice(bytes).unwrap();
         bundle.validate().unwrap();
         assert_eq!(bundle.to_bytes().unwrap(), bytes);
@@ -2378,10 +2382,72 @@ mod tests {
     }
 
     #[test]
+    fn sparse_file_operations_fixture_decodes_and_replays() {
+        // Checked-in feature fixture pins a file's allocation at the boundary:
+        // `fs_allocate`'s mode, `fs_seek`'s data and hole whences and their
+        // `ENXIO` answer, and the allocated blocks a metadata outcome carries.
+        use patina_dst_abi::{
+            EffectError, ErrorCode, FsAllocateMode, FsEntryKind, FsMetadata, SeekWhence,
+        };
+        let bytes = include_bytes!("../tests/fixtures/format-14-sparse.patina");
+        let bundle = TraceBundle::from_slice(bytes).unwrap();
+        bundle.validate().unwrap();
+        assert_eq!(bundle.to_bytes().unwrap(), bytes);
+        let expected = [
+            (
+                Operation::FsAllocate {
+                    fd: Fd(3),
+                    offset: 4096,
+                    len: 8192,
+                    mode: FsAllocateMode::PunchHole,
+                    keep_size: true,
+                },
+                Outcome::Unit,
+            ),
+            (
+                Operation::FsSeek {
+                    fd: Fd(3),
+                    offset: 0,
+                    whence: SeekWhence::Data,
+                },
+                Outcome::U64(12288),
+            ),
+            (
+                Operation::FsSeek {
+                    fd: Fd(3),
+                    offset: 1 << 40,
+                    whence: SeekWhence::Hole,
+                },
+                Outcome::Error(EffectError::new(ErrorCode::NoSuchPosition, "past the end")),
+            ),
+            (
+                Operation::FsFdMetadata { fd: Fd(3) },
+                Outcome::Metadata(FsMetadata {
+                    kind: FsEntryKind::File,
+                    len: 10_737_418_245,
+                    blocks: 16,
+                    ino: 5,
+                    nlink: 1,
+                    atime_nanos: 0,
+                    mtime_nanos: 0,
+                    ctime_nanos: 0,
+                    btime_nanos: 0,
+                    mode: 0o644,
+                }),
+            ),
+        ];
+        let mut replay = Replayer::from_bundle(bundle, "fixture-fingerprint", "main").unwrap();
+        for (operation, outcome) in expected {
+            assert_eq!(replay.expect(&operation).unwrap(), outcome);
+        }
+        replay.finish().unwrap();
+    }
+
+    #[test]
     fn network_operations_fixture_decodes_and_replays() {
         // Checked-in feature fixture pins the network family's operations and
         // a marked datagram's encoding.
-        let bytes = include_bytes!("../tests/fixtures/format-13-network.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-14-network.patina");
         let expected = [
             (
                 Operation::NetBindShared {
@@ -2467,7 +2533,7 @@ mod tests {
         const SIGUSR2: u8 = 12;
         const SI_USER: i32 = 0;
         const SI_TKILL: i32 = -6;
-        let bytes = include_bytes!("../tests/fixtures/format-13-signals.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-14-signals.patina");
         let bundle = TraceBundle::from_slice(bytes).unwrap();
         bundle.validate().unwrap();
         assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);

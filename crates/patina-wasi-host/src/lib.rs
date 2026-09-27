@@ -964,6 +964,7 @@ impl Preview1Host {
                             FsMetadata {
                                 kind: FsEntryKind::Directory,
                                 len: 0,
+                                blocks: 0,
                                 ino: 0,
                                 nlink: 1,
                                 atime_nanos: 0,
@@ -1194,12 +1195,14 @@ const WASI_ERRNO_NOTCAPABLE: i32 = 76;
 const WASI_ERRNO_NAMETOOLONG: i32 = 37;
 const WASI_ERRNO_ROFS: i32 = 69;
 const WASI_ERRNO_2BIG: i32 = 1;
+const WASI_ERRNO_FBIG: i32 = 22;
 const WASI_ERRNO_BUSY: i32 = 10;
 const WASI_ERRNO_NOTSUP: i32 = 58;
 const WASI_ERRNO_PERM: i32 = 63;
 const WASI_ERRNO_RANGE: i32 = 68;
 const WASI_ERRNO_SPIPE: i32 = 70;
 const WASI_ERRNO_XDEV: i32 = 75;
+const WASI_ERRNO_NXIO: i32 = 60;
 
 /// `filetype::unknown` — the Preview 1 value for a kind its enumeration does
 /// not name (there is no FIFO filetype).
@@ -2000,6 +2003,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
                     FsMetadata {
                         kind: FsEntryKind::File,
                         len: 0,
+                        blocks: 0,
                         ino: SYNTHETIC_STDIO_INO_BASE + u64::from(fd),
                         nlink: 1,
                         atime_nanos: 0,
@@ -2019,6 +2023,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
                         FsMetadata {
                             kind: FsEntryKind::File,
                             len: 0,
+                            blocks: 0,
                             ino: SYNTHETIC_DATAGRAM_INO_BASE + u64::from(fd),
                             nlink: 1,
                             atime_nanos: 0,
@@ -3424,6 +3429,8 @@ fn effect_errno(code: ErrorCode) -> i32 {
         ErrorCode::Busy => WASI_ERRNO_BUSY,
         ErrorCode::IllegalSeek => WASI_ERRNO_SPIPE,
         ErrorCode::CrossDevice => WASI_ERRNO_XDEV,
+        ErrorCode::NoSuchPosition => WASI_ERRNO_NXIO,
+        ErrorCode::FileTooBig => WASI_ERRNO_FBIG,
     }
 }
 

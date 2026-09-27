@@ -436,6 +436,12 @@ pub enum ErrorCode {
     IllegalSeek,
     /// A link or rename across filesystems (`EXDEV`).
     CrossDevice,
+    /// No such position (`ENXIO`): a `SEEK_DATA` with no data at or past the
+    /// offset, or a `SEEK_DATA`/`SEEK_HOLE` at or past the end of the file.
+    NoSuchPosition,
+    /// A file would pass its filesystem's size limit (`EFBIG`): a write that
+    /// starts at or past it, a truncate or allocation that reaches past it.
+    FileTooBig,
 }
 
 /// A typed effect failure suitable for traces and user-facing diagnostics.
@@ -504,6 +510,8 @@ impl fmt::Display for ErrorCodeDisplay {
             ErrorCode::Busy => "busy",
             ErrorCode::IllegalSeek => "illegal_seek",
             ErrorCode::CrossDevice => "cross_device",
+            ErrorCode::NoSuchPosition => "no_such_position",
+            ErrorCode::FileTooBig => "file_too_big",
         };
         f.write_str(value)
     }
@@ -656,6 +664,10 @@ pub mod nanos {
 pub struct FsMetadata {
     pub kind: FsEntryKind,
     pub len: u64,
+    /// The storage the entry holds, in the 512-byte units `st_blocks` counts:
+    /// a regular file's allocated blocks (written or unwritten; a hole holds
+    /// none), not its length.
+    pub blocks: u64,
     /// Deterministic filesystem object identity.
     pub ino: u64,
     /// Number of directory entries linked to this filesystem object. A
@@ -710,6 +722,33 @@ pub enum SeekWhence {
     Start,
     Current,
     End,
+    /// `SEEK_DATA`: the first byte at or past the offset that holds data (a
+    /// written block; an unwritten, preallocated one reads as a hole).
+    /// [`ErrorCode::NoSuchPosition`] when there is none before the end.
+    Data,
+    /// `SEEK_HOLE`: the first byte at or past the offset in a hole, the end
+    /// of the file counting as one. [`ErrorCode::NoSuchPosition`] at or past
+    /// the end.
+    Hole,
+}
+
+/// What `fallocate(2)` does to its range (the operation bit of its mode;
+/// `FALLOC_FL_KEEP_SIZE` travels alongside).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FsAllocateMode {
+    /// Mode 0 or `FALLOC_FL_KEEP_SIZE`: every block the range touches is
+    /// allocated; a block that was a hole becomes an unwritten extent, which
+    /// counts as allocated and reads as zeros.
+    Reserve,
+    /// `FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE`: the whole blocks inside the
+    /// range are freed (a hole again); the partial blocks at its edges are
+    /// zeroed in place.
+    PunchHole,
+    /// `FALLOC_FL_ZERO_RANGE`: the range reads as zeros; its whole blocks
+    /// become unwritten extents, its partial edge blocks are zeroed in place,
+    /// and every block it touches is allocated.
+    ZeroRange,
 }
 
 /// A datagram delivered by a virtual network.
@@ -1084,15 +1123,14 @@ pub enum Operation {
         path: String,
         len: u64,
     },
-    /// `fallocate(2)` over a regular file: `zero` writes zeros over the range
-    /// (`FALLOC_FL_PUNCH_HOLE`/`FALLOC_FL_ZERO_RANGE`), `keep_size` leaves the
-    /// length alone (`FALLOC_FL_KEEP_SIZE`); without it the file grows to
-    /// `offset + len` when that is past its end.
+    /// `fallocate(2)` over a regular file: `mode` is what happens to the
+    /// range, `keep_size` leaves the length alone (`FALLOC_FL_KEEP_SIZE`);
+    /// without it the file grows to `offset + len` when that is past its end.
     FsAllocate {
         fd: Fd,
         offset: u64,
         len: u64,
-        zero: bool,
+        mode: FsAllocateMode,
         keep_size: bool,
     },
     FsSetTimes {
@@ -1668,6 +1706,7 @@ mod tests {
         let metadata = FsMetadata {
             kind: FsEntryKind::Symlink,
             len: 9,
+            blocks: 0,
             ino: 42,
             nlink: 1,
             atime_nanos: 1,
@@ -1683,6 +1722,7 @@ mod tests {
         let fifo = FsMetadata {
             kind: FsEntryKind::Fifo,
             len: 0,
+            blocks: 0,
             ino: 43,
             nlink: 1,
             atime_nanos: 0,

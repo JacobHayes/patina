@@ -9,8 +9,8 @@ pub use snapshot::{FsSnapshot, FsSnapshotError};
 use std::collections::{BTreeMap, BTreeSet};
 
 use patina_dst_abi::{
-    AtimePolicy, EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsEntryKind, FsMetadata,
-    FsNode, OpenFlags, SeekWhence, XattrTarget,
+    AtimePolicy, EffectError, ErrorCode, Fd, FsAllocateMode, FsClock, FsDirectoryEntry,
+    FsEntryKind, FsMetadata, FsNode, OpenFlags, SeekWhence, XattrTarget,
 };
 use patina_dst_driver_api::{DriverResult, FsDriver, XattrNamespace, xattr_permission};
 
@@ -1021,15 +1021,18 @@ impl MemFs {
                 format!("no virtual filesystem node {node}"),
             )
         })?;
+        let len = match inode.kind {
+            FsEntryKind::File | FsEntryKind::Symlink => inode.contents.len() as u64,
+            FsEntryKind::Directory
+            | FsEntryKind::Fifo
+            | FsEntryKind::Socket
+            | FsEntryKind::CharDevice => 0,
+        };
         Ok(FsMetadata {
             kind: inode.kind,
-            len: match inode.kind {
-                FsEntryKind::File | FsEntryKind::Symlink => inode.contents.len() as u64,
-                FsEntryKind::Directory
-                | FsEntryKind::Fifo
-                | FsEntryKind::Socket
-                | FsEntryKind::CharDevice => 0,
-            },
+            len,
+            // The volume holds a file densely: every block up to its length.
+            blocks: len.div_ceil(4096) * 8,
             ino: node,
             nlink: inode.links,
             atime_nanos: inode.times.atime_nanos,
@@ -1512,15 +1515,31 @@ impl FsDriver for MemFs {
         }
         let cursor = description.cursor;
         let inode = self.handle_inode(fd)?;
+        let size = self
+            .inodes
+            .get(&inode)
+            .expect("open handle references a file")
+            .contents
+            .len();
         let base = match whence {
             SeekWhence::Start => 0,
             SeekWhence::Current => cursor,
-            SeekWhence::End => self
-                .inodes
-                .get(&inode)
-                .expect("open handle references a file")
-                .contents
-                .len(),
+            SeekWhence::End => size,
+            // The file holds its bytes densely: every byte below the size is
+            // data and the one hole is the implicit one at the end.
+            SeekWhence::Data | SeekWhence::Hole => {
+                let Some(offset) = usize::try_from(offset).ok().filter(|&offset| offset < size)
+                else {
+                    return Err(no_such_position(offset));
+                };
+                let position = if whence == SeekWhence::Data {
+                    offset
+                } else {
+                    size
+                };
+                self.description_mut(fd)?.cursor = position;
+                return Ok(position as u64);
+            }
         };
         let position = i128::try_from(base).expect("usize fits in i128") + i128::from(offset);
         let position = usize::try_from(position).map_err(|_| {
@@ -1797,9 +1816,10 @@ impl FsDriver for MemFs {
         fd: Fd,
         offset: u64,
         len: u64,
-        zero: bool,
+        mode: FsAllocateMode,
         keep_size: bool,
     ) -> DriverResult<()> {
+        let zero = mode != FsAllocateMode::Reserve;
         let description = self.description(fd)?;
         if description.path_only || !description.writable {
             return Err(EffectError::new(
@@ -2706,6 +2726,7 @@ impl MemFs {
             return Ok(FsMetadata {
                 kind: FsEntryKind::Directory,
                 len: 0,
+                blocks: 0,
                 ino: metadata.ino,
                 nlink: self.directory_links(path),
                 atime_nanos: metadata.times.atime_nanos,
@@ -2778,6 +2799,15 @@ fn invalid_fd(fd: Fd) -> EffectError {
     EffectError::new(
         ErrorCode::InvalidHandle,
         format!("virtual file handle {} is not open", fd.0),
+    )
+}
+
+/// A `SEEK_DATA`/`SEEK_HOLE` that finds nothing (`ENXIO`): no data at or past
+/// the offset, or an offset at or past the end.
+fn no_such_position(offset: i64) -> EffectError {
+    EffectError::new(
+        ErrorCode::NoSuchPosition,
+        format!("no data or hole at or past offset {offset} before the end of the file"),
     )
 }
 
@@ -4186,10 +4216,10 @@ mod tests {
         );
         fs.set_len(FsClock::EPOCH, fd, HUGE).unwrap();
         assert_eq!(fs.fd_metadata(fd).unwrap().len, HUGE);
-        fs.allocate(FsClock::EPOCH, fd, 0, HUGE, true, true)
+        fs.allocate(FsClock::EPOCH, fd, 0, HUGE, FsAllocateMode::PunchHole, true)
             .unwrap();
         assert_eq!(
-            fs.allocate(FsClock::EPOCH, fd, 0, HUGE, false, false)
+            fs.allocate(FsClock::EPOCH, fd, 0, HUGE, FsAllocateMode::Reserve, false)
                 .unwrap_err()
                 .code,
             ErrorCode::NoSpace
@@ -4387,9 +4417,16 @@ mod tests {
             ErrorCode::NoSpace
         );
         assert_eq!(
-            fs.allocate(FsClock::at(30), fd, 0, i64::MAX as u64, false, false)
-                .unwrap_err()
-                .code,
+            fs.allocate(
+                FsClock::at(30),
+                fd,
+                0,
+                i64::MAX as u64,
+                FsAllocateMode::Reserve,
+                false
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::NoSpace
         );
         assert_eq!(fs.metadata("/f").unwrap().len, 3);
@@ -4464,7 +4501,7 @@ mod tests {
         // A truncation to the SAME length still moves the times (do_truncate).
         fs.set_len(FsClock::at(40), fd, 3).unwrap();
         assert_eq!(times(&mut fs, "/f"), (10, 40, 40, 10));
-        fs.allocate(FsClock::at(50), fd, 0, 8, false, false)
+        fs.allocate(FsClock::at(50), fd, 0, 8, FsAllocateMode::Reserve, false)
             .unwrap();
         assert_eq!(times(&mut fs, "/f"), (10, 50, 50, 10));
         fs.close(fd).unwrap();
@@ -4757,28 +4794,33 @@ mod tests {
             .unwrap();
         fs.write(FsClock::EPOCH, fd, b"abcdef").unwrap();
         // mode 0 past the end grows, zero-filled; within the end changes nothing.
-        fs.allocate(FsClock::EPOCH, fd, 4, 4, false, false).unwrap();
+        fs.allocate(FsClock::EPOCH, fd, 4, 4, FsAllocateMode::Reserve, false)
+            .unwrap();
         assert_eq!(fs.contents("/f").unwrap(), b"abcdef\0\0");
-        fs.allocate(FsClock::EPOCH, fd, 0, 2, false, false).unwrap();
+        fs.allocate(FsClock::EPOCH, fd, 0, 2, FsAllocateMode::Reserve, false)
+            .unwrap();
         assert_eq!(fs.contents("/f").unwrap(), b"abcdef\0\0");
         // KEEP_SIZE reserves without changing the visible length.
-        fs.allocate(FsClock::EPOCH, fd, 0, 100, false, true)
+        fs.allocate(FsClock::EPOCH, fd, 0, 100, FsAllocateMode::Reserve, true)
             .unwrap();
         assert_eq!(fs.metadata("/f").unwrap().len, 8);
         // PUNCH_HOLE|KEEP_SIZE zeroes inside the file and never grows it.
-        fs.allocate(FsClock::EPOCH, fd, 1, 2, true, true).unwrap();
+        fs.allocate(FsClock::EPOCH, fd, 1, 2, FsAllocateMode::PunchHole, true)
+            .unwrap();
         assert_eq!(fs.contents("/f").unwrap(), b"a\0\0def\0\0");
-        fs.allocate(FsClock::EPOCH, fd, 6, 100, true, true).unwrap();
+        fs.allocate(FsClock::EPOCH, fd, 6, 100, FsAllocateMode::PunchHole, true)
+            .unwrap();
         assert_eq!(fs.metadata("/f").unwrap().len, 8);
         // ZERO_RANGE without KEEP_SIZE grows to cover the range.
-        fs.allocate(FsClock::EPOCH, fd, 7, 3, true, false).unwrap();
+        fs.allocate(FsClock::EPOCH, fd, 7, 3, FsAllocateMode::ZeroRange, false)
+            .unwrap();
         assert_eq!(fs.contents("/f").unwrap(), b"a\0\0def\0\0\0\0");
         fs.close(fd).unwrap();
         let reader = fs
             .open(FsClock::EPOCH, "/f", OpenFlags::read_only())
             .unwrap();
         assert_eq!(
-            fs.allocate(FsClock::EPOCH, reader, 0, 1, false, false)
+            fs.allocate(FsClock::EPOCH, reader, 0, 1, FsAllocateMode::Reserve, false)
                 .unwrap_err()
                 .code,
             ErrorCode::NotWritable
@@ -4787,16 +4829,23 @@ mod tests {
             .open(FsClock::EPOCH, "/f", OpenFlags::path_only())
             .unwrap();
         assert_eq!(
-            fs.allocate(FsClock::EPOCH, location, 0, 1, false, false)
-                .unwrap_err()
-                .code,
+            fs.allocate(
+                FsClock::EPOCH,
+                location,
+                0,
+                1,
+                FsAllocateMode::Reserve,
+                false
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::NotWritable
         );
         let dir = fs
             .open(FsClock::EPOCH, "/d", OpenFlags::read_only())
             .unwrap();
         assert_eq!(
-            fs.allocate(FsClock::EPOCH, dir, 0, 1, false, false)
+            fs.allocate(FsClock::EPOCH, dir, 0, 1, FsAllocateMode::Reserve, false)
                 .unwrap_err()
                 .code,
             ErrorCode::NotWritable,

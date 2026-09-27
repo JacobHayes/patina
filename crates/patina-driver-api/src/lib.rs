@@ -4,8 +4,9 @@
 //! describe effects required by the runtime boundary.
 
 use patina_dst_abi::{
-    ClockKind, Datagram, EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsMetadata, FsNode,
-    OpenFlags, SeekWhence, SendReport, ShutdownHow, SocketId, TaskId, TcpAccepted, XattrTarget,
+    ClockKind, Datagram, EffectError, ErrorCode, Fd, FsAllocateMode, FsClock, FsDirectoryEntry,
+    FsMetadata, FsNode, OpenFlags, SeekWhence, SendReport, ShutdownHow, SocketId, TaskId,
+    TcpAccepted, XattrTarget,
 };
 
 pub type DriverResult<T> = Result<T, EffectError>;
@@ -72,6 +73,9 @@ pub trait FsDriver: Send {
     fn close(&mut self, _fd: Fd) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("close"))
     }
+    /// `lseek`: the cursor moves to `offset` from `whence`, or, for
+    /// [`SeekWhence::Data`]/[`SeekWhence::Hole`], to the first data or hole
+    /// at or past `offset` as the file's allocation answers.
     fn seek(&mut self, _fd: Fd, _offset: i64, _whence: SeekWhence) -> DriverResult<u64> {
         Err(unsupported_filesystem_operation("seek"))
     }
@@ -121,20 +125,19 @@ pub trait FsDriver: Send {
     fn set_len_by_path(&mut self, _clock: FsClock, _path: &str, _len: u64) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("set length by path"))
     }
-    /// `fallocate(2)` over a writable regular-file descriptor. With `zero`, the
-    /// bytes in `offset..offset+len` that lie inside the file become zeros
-    /// (`FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE`, `FALLOC_FL_ZERO_RANGE`);
-    /// without `keep_size` the file grows (zero-filled) to `offset + len` when
-    /// that is past its end. Stamps `mtime`/`ctime`. A non-writable
-    /// descriptor is `NotWritable`, a directory `IsDirectory`, a path-only
-    /// descriptor `InvalidHandle`.
+    /// `fallocate(2)` over a writable regular-file descriptor: `mode` says what
+    /// becomes of the blocks in `offset..offset+len` ([`FsAllocateMode`]);
+    /// without `keep_size` the file grows to `offset + len` when that is past
+    /// its end. Stamps `mtime`/`ctime`. A non-writable descriptor is
+    /// `NotWritable`, a directory `IsDirectory`, a path-only descriptor
+    /// `InvalidHandle`.
     fn allocate(
         &mut self,
         _clock: FsClock,
         _fd: Fd,
         _offset: u64,
         _len: u64,
-        _zero: bool,
+        _mode: FsAllocateMode,
         _keep_size: bool,
     ) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("allocate"))

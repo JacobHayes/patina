@@ -457,8 +457,7 @@ mod vfs {
             return Err(crate::patina_errno());
         }
         // SAFETY: a 0 answer wrote the record.
-        let length = unsafe { metadata.assume_init() }.length;
-        Ok(length.div_ceil(4096) as i64 * 4096)
+        Ok(unsafe { metadata.assume_init() }.blocks as i64 * 512)
     }
 }
 

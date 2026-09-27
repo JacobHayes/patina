@@ -857,14 +857,15 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
 #[cfg(test)]
 pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcome)> {
     use patina_dst_abi::{
-        ClockKind, Datagram, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata,
-        FsNode, OpenFlags, SeekWhence, SendDisposition, SendReport, ShutdownHow, SignalTarget,
-        SocketId, TaskId, TcpAccepted, VerdictKind, XattrTarget,
+        ClockKind, Datagram, EffectError, ErrorCode, Fd, FsAllocateMode, FsDirectoryEntry,
+        FsEntryKind, FsMetadata, FsNode, OpenFlags, SeekWhence, SendDisposition, SendReport,
+        ShutdownHow, SignalTarget, SocketId, TaskId, TcpAccepted, VerdictKind, XattrTarget,
     };
 
     let metadata = FsMetadata {
         kind: FsEntryKind::File,
         len: 12,
+        blocks: 8,
         ino: 1,
         nlink: 1,
         atime_nanos: 0,
@@ -1023,7 +1024,7 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
                 fd: Fd(3),
                 offset: 0,
                 len: 4096,
-                zero: false,
+                mode: FsAllocateMode::Reserve,
                 keep_size: true,
             },
             Outcome::Unit,

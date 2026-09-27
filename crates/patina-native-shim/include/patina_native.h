@@ -595,6 +595,7 @@ struct patina_metadata {
     uint32_t rdev_major; /* a device node's device (st_rdev); 0 for any other */
     uint32_t rdev_minor;
     uint64_t length;
+    uint64_t blocks; /* the 512-byte units the node has allocated (st_blocks) */
     uint64_t ino;
     struct patina_timestamp atime;
     struct patina_timestamp mtime;

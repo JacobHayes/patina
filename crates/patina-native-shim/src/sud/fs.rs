@@ -373,6 +373,7 @@ const fn empty_metadata() -> PatinaMetadata {
         rdev_major: 0,
         rdev_minor: 0,
         length: 0,
+        blocks: 0,
         ino: 0,
         atime: PatinaTimestamp { sec: 0, nsec: 0 },
         mtime: PatinaTimestamp { sec: 0, nsec: 0 },
@@ -381,13 +382,9 @@ const fn empty_metadata() -> PatinaMetadata {
     }
 }
 
-/// The virtual volume's block geometry, the same 4 KiB the statfs profile
-/// reports: `st_blksize`, and `st_blocks` in the 512-byte units `stat(2)`
-/// counts. Byte for byte with the C `patina_stat_blocks`.
+/// The virtual volume's block size, the same 4 KiB the statfs profile
+/// reports (`st_blksize`); `st_blocks` is the record's own allocation.
 const STAT_BLOCK_SIZE: u64 = 4096;
-fn stat_blocks(length: u64) -> u64 {
-    length.div_ceil(STAT_BLOCK_SIZE) * (STAT_BLOCK_SIZE / 512)
-}
 
 /// `st_blksize`: the volume's block, but for a devpts node, whose inode
 /// takes its superblock's 1 KiB (`devpts_fill_super`). Byte for byte with
@@ -496,7 +493,7 @@ impl KernelStat {
             st_uid: stat_owner(values).0,
             st_gid: stat_owner(values).1,
             st_blksize: stat_blksize(values) as _,
-            st_blocks: stat_blocks(values.length) as i64,
+            st_blocks: values.blocks as i64,
             st_atime: values.atime.sec,
             st_atime_nsec: values.atime.nsec as _,
             st_mtime: values.mtime.sec,
@@ -663,7 +660,7 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
         stx_gid: stat_owner(&values).1,
         stx_ino: values.ino,
         stx_size: values.length,
-        stx_blocks: stat_blocks(values.length),
+        stx_blocks: values.blocks,
         stx_atime: timestamp(values.atime),
         stx_mtime: timestamp(values.mtime),
         stx_ctime: timestamp(values.ctime),

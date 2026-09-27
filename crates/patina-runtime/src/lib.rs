@@ -108,9 +108,9 @@ use std::path::{Path, PathBuf};
 
 pub use patina_dst_abi::VerdictKind;
 use patina_dst_abi::{
-    AtimePolicy, ClockKind, Datagram, EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry,
-    FsMetadata, FsNode, OpenFlags, Operation, Outcome, SeekWhence, SendReport, ShutdownHow,
-    SocketId, TaskId, TcpAccepted, XattrTarget, verdict_line,
+    AtimePolicy, ClockKind, Datagram, EffectError, ErrorCode, Fd, FsAllocateMode, FsClock,
+    FsDirectoryEntry, FsMetadata, FsNode, OpenFlags, Operation, Outcome, SeekWhence, SendReport,
+    ShutdownHow, SocketId, TaskId, TcpAccepted, XattrTarget, verdict_line,
 };
 use patina_dst_driver_api::{
     ClockDriver, EntropyDriver, FsDriver, NetDriver, NetReadiness, SchedulerDriver,
@@ -5952,7 +5952,7 @@ recording was produced by a guest whose result type no longer matches this one"
         fd: Fd,
         offset: u64,
         len: u64,
-        zero: bool,
+        mode: FsAllocateMode,
         keep_size: bool,
     ) -> Result<(), RuntimeError> {
         self.filesystem_unit_clocked(
@@ -5960,10 +5960,10 @@ recording was produced by a guest whose result type no longer matches this one"
                 fd,
                 offset,
                 len,
-                zero,
+                mode,
                 keep_size,
             },
-            |filesystem, clock| filesystem.allocate(clock, fd, offset, len, zero, keep_size),
+            |filesystem, clock| filesystem.allocate(clock, fd, offset, len, mode, keep_size),
         )
     }
 

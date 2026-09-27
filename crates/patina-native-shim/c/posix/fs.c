@@ -839,13 +839,9 @@ static void patina_split_time(struct patina_timestamp time, time_t *seconds, lon
     *subseconds = (long)time.nsec;
 }
 
-/* The virtual volume's block geometry, the same 4 KiB the statfs profile
- * reports: st_blksize, and st_blocks in the 512-byte units stat(2) counts. */
+/* The virtual volume's block size, the same 4 KiB the statfs profile reports
+ * (st_blksize); st_blocks is the record's own allocation. */
 #define PATINA_STAT_BLOCK_SIZE UINT64_C(4096)
-static uint64_t patina_stat_blocks(uint64_t length) {
-    return ((length + PATINA_STAT_BLOCK_SIZE - 1) / PATINA_STAT_BLOCK_SIZE) *
-           (PATINA_STAT_BLOCK_SIZE / 512);
-}
 /* st_blksize: the volume's block, but for a devpts node, whose inode takes its
  * superblock's 1 KiB (devpts_fill_super). */
 static uint64_t patina_stat_blksize(const struct patina_metadata *values) {
@@ -893,7 +889,7 @@ static int fill_stat(int result, const struct patina_metadata *values, struct st
     status->st_uid = patina_stat_uid(values);
     status->st_gid = patina_stat_gid(values);
     status->st_blksize = (blksize_t)patina_stat_blksize(values);
-    status->st_blocks = (blkcnt_t)patina_stat_blocks(values->length);
+    status->st_blocks = (blkcnt_t)values->blocks;
 #ifdef __APPLE__
     patina_split_time(values->atime, &status->st_atimespec.tv_sec,
                        &status->st_atimespec.tv_nsec);
@@ -1228,7 +1224,7 @@ static int fill_stat64(int result, const struct patina_metadata *values, struct 
     status->st_uid = patina_stat_uid(values);
     status->st_gid = patina_stat_gid(values);
     status->st_blksize = (blksize_t)patina_stat_blksize(values);
-    status->st_blocks = (blkcnt64_t)patina_stat_blocks(values->length);
+    status->st_blocks = (blkcnt64_t)values->blocks;
     patina_split_time(values->atime, &status->st_atim.tv_sec, &status->st_atim.tv_nsec);
     patina_split_time(values->mtime, &status->st_mtim.tv_sec, &status->st_mtim.tv_nsec);
     patina_split_time(values->ctime, &status->st_ctim.tv_sec, &status->st_ctim.tv_nsec);
@@ -1290,7 +1286,7 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
     status->stx_gid = (uint32_t)patina_stat_gid(&values);
     status->stx_ino = values.ino;
     status->stx_size = values.length;
-    status->stx_blocks = patina_stat_blocks(values.length);
+    status->stx_blocks = values.blocks;
     patina_statx_time(&status->stx_atime, values.atime);
     patina_statx_time(&status->stx_mtime, values.mtime);
     patina_statx_time(&status->stx_ctime, values.ctime);

@@ -1496,15 +1496,22 @@ pub(crate) fn resized_ino(ino: u64, len: u64) {
     }
 }
 
-/// After `fallocate` of `[offset, offset + len)` on `handle`'s file: a zeroing
-/// mode cleared the range, and without `keep_size` the file reaches its end.
-pub(crate) fn allocated(handle: u64, offset: u64, len: u64, zero: bool, keep_size: bool) {
+/// After `fallocate` of `[offset, offset + len)` on `handle`'s file: a hole
+/// punch or a zeroed range cleared it, and without `keep_size` the file
+/// reaches its end.
+pub(crate) fn allocated(
+    handle: u64,
+    offset: u64,
+    len: u64,
+    mode: patina_dst_abi::FsAllocateMode,
+    keep_size: bool,
+) {
     let Some(ino) = cached_ino(handle) else {
         return;
     };
     if let Some(cache) = MAPPINGS.lock().caches.get_mut(&ino) {
         let end = offset.saturating_add(len);
-        if zero {
+        if mode != patina_dst_abi::FsAllocateMode::Reserve {
             cache.zero(offset, end);
         }
         if !keep_size && end > cache.size() {

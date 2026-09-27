@@ -172,8 +172,8 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use fdtable::{DescId, FdKind, GuestFdTable, Release, Resolved};
 
 use patina_dst_abi::{
-    ClockKind, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsNode, OpenFlags,
-    SeekWhence, TaskId,
+    ClockKind, EffectError, ErrorCode, Fd, FsAllocateMode, FsDirectoryEntry, FsEntryKind, FsNode,
+    OpenFlags, SeekWhence, TaskId,
 };
 
 use patina_dst_fs_crash::CrashFs;
@@ -260,7 +260,8 @@ const ENOTCONN: c_int = 57;
 const ENOTCONN: c_int = 107;
 const EPIPE: c_int = 32;
 /// `ENXIO` — the answer a non-blocking `open(fifo, O_WRONLY)` gets with no
-/// reader. Same value on macOS and Linux.
+/// reader, and a `SEEK_DATA`/`SEEK_HOLE` that finds nothing. Same value on
+/// macOS and Linux.
 const ENXIO: c_int = 6;
 #[cfg(target_os = "macos")]
 const ECONNRESET: c_int = 54;
@@ -2538,6 +2539,8 @@ fn effect_errno(error: &EffectError) -> c_int {
         ErrorCode::Busy => EBUSY,
         ErrorCode::IllegalSeek => ESPIPE,
         ErrorCode::CrossDevice => EXDEV,
+        ErrorCode::NoSuchPosition => ENXIO,
+        ErrorCode::FileTooBig => EFBIG,
     }
 }
 
@@ -5818,7 +5821,8 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
         0 => SeekWhence::Start,
         1 => SeekWhence::Current,
         2 => SeekWhence::End,
-        SEEK_DATA | SEEK_HOLE => return seek_data_or_hole(handle, offset, whence == SEEK_DATA),
+        SEEK_DATA => SeekWhence::Data,
+        SEEK_HOLE => SeekWhence::Hole,
         _ => return i64::from(fail(EINVAL)),
     };
     match with_context(|context| context.fs_seek(handle, offset, whence)) {
@@ -5830,27 +5834,6 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
 /// `PATINA_SEEK_DATA`/`PATINA_SEEK_HOLE`: Linux's `SEEK_DATA`/`SEEK_HOLE` numbers.
 const SEEK_DATA: u32 = 3;
 const SEEK_HOLE: u32 = 4;
-
-/// `lseek(SEEK_DATA)`/`lseek(SEEK_HOLE)` as ext4's `iomap_seek_data`/
-/// `iomap_seek_hole` answer for a file without holes: the volume stores a
-/// file's bytes densely and models no allocation, so every byte below the
-/// size is data and the one hole is the implicit one at the end. An offset
-/// that is negative or at or past the end is `ENXIO`; otherwise the cursor
-/// moves to the offset (data) or to the size (hole).
-fn seek_data_or_hole(handle: Fd, offset: i64, data: bool) -> i64 {
-    let size = match with_context(|context| context.fs_fd_metadata(handle)) {
-        Ok(metadata) => metadata.len,
-        Err(errno) => return i64::from(fail(errno)),
-    };
-    let Some(offset) = u64::try_from(offset).ok().filter(|&offset| offset < size) else {
-        return i64::from(fail(ENXIO));
-    };
-    let target = if data { offset } else { size };
-    match with_context(|context| context.fs_seek(handle, target as i64, SeekWhence::Start)) {
-        Ok(position) => i64::try_from(position).unwrap_or_else(|_| i64::from(fail(EOVERFLOW))),
-        Err(errno) => i64::from(fail(errno)),
-    }
-}
 
 /// `fsync(2)`: durability for a file (or a directory: the crash model's
 /// namespace barrier); every other kind is `EINVAL`, as the kernel answers for
@@ -6018,6 +6001,8 @@ pub struct PatinaMetadata {
     pub rdev_major: u32,
     pub rdev_minor: u32,
     pub length: u64,
+    /// The 512-byte units the node has allocated (`st_blocks`).
+    pub blocks: u64,
     pub ino: u64,
     pub atime: PatinaTimestamp,
     pub mtime: PatinaTimestamp,
@@ -6068,6 +6053,7 @@ fn write_metadata(metadata: patina_dst_abi::FsMetadata, out: *mut PatinaMetadata
             rdev_major: 0,
             rdev_minor: 0,
             length: metadata.len,
+            blocks: metadata.blocks,
             ino: metadata.ino,
             atime: PatinaTimestamp::from_nanos(metadata.atime_nanos),
             mtime: PatinaTimestamp::from_nanos(metadata.mtime_nanos),
@@ -7127,13 +7113,19 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
     {
         return fail(EOPNOTSUPP);
     }
-    let zero = mode & (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_ZERO_RANGE) != 0;
+    let operation = if mode & FALLOC_FL_PUNCH_HOLE != 0 {
+        FsAllocateMode::PunchHole
+    } else if mode & FALLOC_FL_ZERO_RANGE != 0 {
+        FsAllocateMode::ZeroRange
+    } else {
+        FsAllocateMode::Reserve
+    };
     let keep_size = mode & FALLOC_FL_KEEP_SIZE != 0;
     let fd = Fd(resolved.handle);
-    match with_context(|context| context.fs_allocate(fd, offset, length, zero, keep_size)) {
+    match with_context(|context| context.fs_allocate(fd, offset, length, operation, keep_size)) {
         Ok(()) => {
             #[cfg(target_os = "linux")]
-            mem::allocated(fd.0, offset, length, zero, keep_size);
+            mem::allocated(fd.0, offset, length, operation, keep_size);
             #[cfg(target_os = "linux")]
             fsnotify::on_file(fd, fsnotify::IN_MODIFY);
             set_errno(0);
@@ -12674,6 +12666,7 @@ mod thread {
             rdev_major: 0,
             rdev_minor: 0,
             length: 0,
+            blocks: 0,
             ino,
             atime: super::PatinaTimestamp::from_nanos(i128::from(inode.atime_nanos)),
             mtime: super::PatinaTimestamp::from_nanos(i128::from(inode.mtime_nanos)),

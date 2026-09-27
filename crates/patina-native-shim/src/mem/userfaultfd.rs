@@ -166,6 +166,7 @@ pub(crate) fn metadata(handle: u64) -> crate::PatinaMetadata {
         rdev_major: 0,
         rdev_minor: 0,
         length: 0,
+        blocks: 0,
         ino: context.ino,
         atime: made,
         mtime: made,
