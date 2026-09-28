@@ -619,19 +619,34 @@ mod tests {
     fn key_cases() -> Vec<Case> {
         const KEYCTL_CHOWN: u64 = 4;
         const KEY_SPEC_PROCESS_KEYRING: i64 = -2;
-        vec![Case {
-            row: Syscall::N_keyctl,
-            check: keyctl,
-            args: [
-                KEYCTL_CHOWN,
-                KEY_SPEC_PROCESS_KEYRING as u64,
-                0,
-                u64::from(u32::MAX),
-                0,
-                0,
-            ],
-            refusal: errno::EACCES,
-        }]
+        vec![
+            Case {
+                row: Syscall::N_keyctl,
+                check: keyctl,
+                args: [
+                    KEYCTL_CHOWN,
+                    KEY_SPEC_PROCESS_KEYRING as u64,
+                    0,
+                    u64::from(u32::MAX),
+                    0,
+                    0,
+                ],
+                refusal: errno::EACCES,
+            },
+            Case {
+                row: Syscall::N_keyctl,
+                check: keyctl,
+                args: [22, 0, (-3i64) as u64, 0, 0, 0],
+                refusal: errno::EPERM,
+            },
+            // INVALIDATE's failed lookup reaches the SysAdmin override.
+            Case {
+                row: Syscall::N_keyctl,
+                check: keyctl,
+                args: [21, 0, 0, 0, 0, 0],
+                refusal: errno::EINVAL,
+            },
+        ]
     }
 
     /// `PTRACE_O_SUSPEND_SECCOMP` needs `CAP_SYS_ADMIN`; past it, seizing

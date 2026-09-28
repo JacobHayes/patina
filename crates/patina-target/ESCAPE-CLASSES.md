@@ -363,6 +363,20 @@ is stated plainly:
    definition — so the pre-run gate's blind spot is at least enumerated and
    cannot grow silently.
 
+   Linux key retention is similarly bounded, not host passthrough: the run has
+   an empty session and an initially empty per-run persistent ring, supporting
+   the Rust keyutils password lifecycle. Invalidation removes every link and
+   frees the key and quota immediately, choosing 6.8's immediate-collection
+   interleaving. User/user-session/thread rings, all joins, UNLINK, SEARCH with a
+   destination, arbitrary nested rings, unsupported keyctl operations (SETPERM
+   and SET_TIMEOUT included), persistent expiry, last-process-holder collection
+   and revoked-key collection after gc_delay stop by name. `sys/keys_session` supplies the live oracle and strace check;
+   `native_workloads::keyutils_password_lifecycle_is_isolated_and_replayable`
+   plants host-session canaries, proves the native guest fails on them, and
+   checks virtual fresh-run absence and repeat/replay.
+   No host key or serial is read. See the
+   [source evidence](../../testbeds/native-boundary/keyring-keyutils/README.md).
+
 6. **Host-identity reads on aarch64.** The x86-64 half is covered — `cpuid` is
    decoded and reported under the host-identity row above — but the arm64
    analogues (`mrs Xt, MIDR_EL1`, `REVIDR_EL1`, and the `ID_AA64ISAR*` feature

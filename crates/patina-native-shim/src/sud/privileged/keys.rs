@@ -2,16 +2,21 @@
 //! keeping its own keys: `add_key`, `request_key` and the `keyctl`
 //! operations on them.
 //!
-//! The model is the guest's process keyrings and the `user` keys in them.
-//! The guest starts with a session keyring, as a process Ubuntu starts has
-//! one (`pam_keyinit`, systemd's `KeyringMode=`), but outside the model:
-//! naming it, or the user keyrings, stops by name, and nothing the guest can
-//! find is in it. Its search is still made, so a search that misses the
-//! process keyring misses there too: `request_key` of a revoked key's
-//! description is `ENOKEY` (the session keyring's miss outranks the revoked
-//! key's `EKEYREVOKED` in `search_cred_keyrings_rcu`), and `ENOKEY` is what
-//! it answers without callout information. There is no thread keyring, and
-//! the pinned configuration registers no upcall.
+//! The guest starts with one empty session keyring: `_ses`, the virtual
+//! credential's uid/gid, `KEY_POS_ALL | KEY_USR_VIEW | KEY_USR_READ`. This
+//! matches the shape, not the contents, of an Ubuntu login/service session:
+//! pam_keyinit links the user keyring and systemd adds an invocation_id key.
+//! Patina deliberately starts empty and shares one ring across the run.
+//! Session joins are unmodeled. No host keyring or serial is ever consulted.
+//!
+//! Workload: Rust keyring's Linux keyutils backend gets the session and
+//! persistent rings, adds `user` keys, searches, links, reads and invalidates
+//! them (source/versions in testbeds/native-boundary/keyring-keyutils/README.md).
+//! `GET_PERSISTENT` creates an initially empty per-run `_persistent.<uid>`
+//! ring and links it to the destination. It has INVALID_GID and permission
+//! `1f030000`; describe maps its gid to 65534. Its three-day expiry is reset
+//! on each successful get; reaching expiry stops by name. This one subtree
+//! is supported, not an arbitrary nested key service.
 //!
 //! A process keyring belongs to credentials, which are per thread: the
 //! thread that makes one (`_pid`, the caller's ids, `KEY_POS_ALL |
@@ -28,20 +33,30 @@
 //! Serials are the kernel's random ones in shape (31 bits, from 3), but
 //! handed out in sequence from [`FIRST_SERIAL`], so a run is reproducible.
 //! The user's quota (`kernel.keys.maxkeys`/`maxbytes`) counts the keys the
-//! guest owns and their bytes (description, payload, 4 a link); the session
-//! keyring and anything in it are not counted. A revoked key stays until
+//! guest owns and their bytes (description, payload, 4 a link), including
+//! the session ring and its user keys. The persistent ring and its links are
+//! not charged (KEY_ALLOC_NOT_IN_QUOTA); its user keys still are. Invalidation
+//! removes the key from every ring and frees its quota before the next call:
+//! the permitted 6.8 interleaving where key_schedule_gc_links' worker runs
+//! immediately. Revocation is different: a revoked key stays until
 //! the collector would remove it (`kernel.keys.gc_delay` past its
 //! revocation); the removal is not modeled, so any key call from then on,
 //! however much later, stops by name. A key displaced by a new one of the
 //! same description is gone at once (the kernel frees it once its last
-//! reference drops).
+//! reference drops); displacement from one ring never frees another ring's key.
 //!
-//! Where the model ends by name: key types other than `user` and `keyring`,
-//! a keyring inside a keyring, the thread, session and user keyrings,
-//! `request_key`'s upcall, revoking a keyring, reading a keyring of more
-//! than one key (its order is its associative array's), the collector, and
-//! the `keyctl` operations besides `GET_KEYRING_ID`, `UPDATE`, `REVOKE`,
-//! `CHOWN`, `DESCRIBE`, `READ` and `CAPABILITIES`.
+//! Where the model ends by name: other key types, arbitrary nested keyrings,
+//! all session joins, UNLINK, SEARCH with a destination, thread/user/user-session
+//! keyrings, request-key upcalls, revoking or invalidating a keyring, reading
+//! multiple links (kernel hash order), collection after the last process-ring
+//! holder exits, revoked-key collection and persistent expiry. The modeled
+//! keyctl set is GET_KEYRING_ID, GET_PERSISTENT, SEARCH without a destination,
+//! LINK, INVALIDATE, UPDATE, REVOKE, CHOWN, DESCRIBE, READ, CAPABILITIES.
+//! SETPERM and SET_TIMEOUT are not called by the backend and remain named stops.
+//! State is bounded by the user quota except for the exempt persistent links;
+//! key operations scan only this run's keys. The session adds no thread lifecycle
+//! bookkeeping. Other syscall paths are untouched. No trace events are added;
+//! the state reconstructs identically on replay.
 
 use super::{Answer, Unmodeled, refuse};
 use crate::identity::Credential;
@@ -49,7 +64,7 @@ use crate::registry::{Capability, KERNEL_CONFIG};
 use linux_raw_sys::errno;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_int;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 /// The first serial the model hands out.
 const FIRST_SERIAL: i32 = 0x1000_0000;
@@ -73,7 +88,11 @@ const NEED_VIEW: u32 = 0x01;
 const NEED_READ: u32 = 0x02;
 const NEED_WRITE: u32 = 0x04;
 const NEED_SEARCH: u32 = 0x08;
+const NEED_LINK: u32 = 0x10;
 const NEED_SETATTR: u32 = 0x20;
+const SESSION_PERM: u32 = 0x3f03_0000;
+const PERSISTENT_PERM: u32 = 0x1f03_0000;
+const PERSISTENT_EXPIRY: u64 = 3 * 24 * 3600;
 
 /// `add_key`'s payload ceiling, `KEY_MAX_DESC_SIZE`, and the type name's
 /// buffer.
@@ -93,9 +112,47 @@ const KEYCTL_UPDATE: i32 = 2;
 const KEYCTL_REVOKE: i32 = 3;
 const KEYCTL_CHOWN: i32 = 4;
 const KEYCTL_DESCRIBE: i32 = 6;
+const KEYCTL_LINK: i32 = 8;
+const KEYCTL_SEARCH: i32 = 10;
 const KEYCTL_READ: i32 = 11;
+const KEYCTL_INVALIDATE: i32 = 21;
+const KEYCTL_GET_PERSISTENT: i32 = 22;
 const KEYCTL_CAPABILITIES: i32 = 31;
-const KEYCTL_LAST: i32 = 32;
+const KEYCTL_NAMES: [&str; 33] = [
+    "KEYCTL_GET_KEYRING_ID",
+    "KEYCTL_JOIN_SESSION_KEYRING",
+    "KEYCTL_UPDATE",
+    "KEYCTL_REVOKE",
+    "KEYCTL_CHOWN",
+    "KEYCTL_SETPERM",
+    "KEYCTL_DESCRIBE",
+    "KEYCTL_CLEAR",
+    "KEYCTL_LINK",
+    "KEYCTL_UNLINK",
+    "KEYCTL_SEARCH",
+    "KEYCTL_READ",
+    "KEYCTL_INSTANTIATE",
+    "KEYCTL_NEGATE",
+    "KEYCTL_SET_REQKEY_KEYRING",
+    "KEYCTL_SET_TIMEOUT",
+    "KEYCTL_ASSUME_AUTHORITY",
+    "KEYCTL_GET_SECURITY",
+    "KEYCTL_SESSION_TO_PARENT",
+    "KEYCTL_REJECT",
+    "KEYCTL_INSTANTIATE_IOV",
+    "KEYCTL_INVALIDATE",
+    "KEYCTL_GET_PERSISTENT",
+    "KEYCTL_DH_COMPUTE",
+    "KEYCTL_PKEY_QUERY",
+    "KEYCTL_PKEY_ENCRYPT",
+    "KEYCTL_PKEY_DECRYPT",
+    "KEYCTL_PKEY_SIGN",
+    "KEYCTL_PKEY_VERIFY",
+    "KEYCTL_RESTRICT_KEYRING",
+    "KEYCTL_MOVE",
+    "KEYCTL_CAPABILITIES",
+    "KEYCTL_WATCH_KEY",
+];
 
 /// The key options of the pinned configuration that `KEYCTL_CAPABILITIES`
 /// reports: `CONFIG_PERSISTENT_KEYRINGS`, `CONFIG_KEY_DH_OPERATIONS`,
@@ -161,6 +218,8 @@ struct Key {
     perm: u32,
     /// When it was revoked, in virtual seconds.
     revoked_at: Option<u64>,
+    /// Persistent keyrings and their links are KEY_ALLOC_NOT_IN_QUOTA.
+    in_quota: bool,
 }
 
 impl Key {
@@ -184,6 +243,7 @@ impl Key {
 }
 
 /// Where an operation stops short of its answer.
+#[derive(Debug)]
 enum Stop {
     Refuse(u32),
     End(Unmodeled),
@@ -236,13 +296,13 @@ struct Keys {
     /// the collector's, freed at a time the model does not know.
     collecting: BTreeSet<i32>,
     next_serial: i32,
+    persistent: Option<(i32, u64)>,
 }
 
 /// Where the model ends at a keyring its last thread left.
-const COLLECTING: &str = "a process keyring whose last thread exited, or a key in it (the collector frees them at a \
-     time the model does not know)";
+const COLLECTING: &str = "key collection after the last process-keyring credential reference (the collector frees keys and links at a time the model does not know)";
 
-static KEYS: Mutex<Keys> = Mutex::new(Keys::new());
+static KEYS: LazyLock<Mutex<Keys>> = LazyLock::new(|| Mutex::new(Keys::new()));
 
 /// The guest's string at `address` as `strncpy_from_user` into `max` bytes
 /// reads it: `EFAULT` for a byte before its NUL that cannot be read, `None`
@@ -308,17 +368,38 @@ fn now_seconds() -> u64 {
 }
 
 impl Keys {
-    const fn new() -> Self {
-        Keys {
+    fn new() -> Self {
+        let credential = crate::identity::credential();
+        let mut keys = Self {
             keys: BTreeMap::new(),
             holders: BTreeMap::new(),
             collecting: BTreeSet::new(),
             next_serial: FIRST_SERIAL,
+            persistent: None,
+        };
+        // Materialized on first use, but reserved before any guest allocation:
+        // the initial session exists even for GET_KEYRING_ID(create=false).
+        keys.allocate(Self::ring(credential, b"_ses".to_vec(), SESSION_PERM, true));
+        keys
+    }
+
+    fn ring(credential: &Credential, description: Vec<u8>, perm: u32, in_quota: bool) -> Key {
+        Key {
+            payload: Payload::Keyring(Vec::new()),
+            description,
+            uid: credential.uid,
+            gid: credential.gid,
+            perm,
+            revoked_at: None,
+            in_quota,
         }
     }
 
     /// The model ends where the collector would remove a revoked key.
     fn collect(&self, now: u64) -> Result<(), Stop> {
+        if self.persistent.is_some_and(|(_, expires)| now >= expires) {
+            return Err(unmodeled("persistent keyring expiry and collection"));
+        }
         let collectable = self.keys.values().any(|key| {
             key.revoked_at
                 .is_some_and(|revoked| now >= revoked.saturating_add(KERNEL_CONFIG.keys_gc_delay))
@@ -339,7 +420,9 @@ impl Keys {
             let (count, used) = self
                 .keys
                 .iter()
-                .filter(|(serial, _)| !collected || !self.collecting.contains(serial))
+                .filter(|(serial, key)| {
+                    key.in_quota && (!collected || !self.collecting.contains(serial))
+                })
                 .fold((0, 0), |(count, used), (_, key)| {
                     (count + 1, used + key.quota_bytes())
                 });
@@ -363,25 +446,172 @@ impl Keys {
     /// Thread `tid` exited, giving up its keyring; the last holder's going
     /// leaves it, and the keys linked in it, to the collector.
     fn exited(&mut self, tid: c_int) {
-        let Some(ring) = self.holders.remove(&tid) else {
-            return;
-        };
-        if self.holders.values().any(|&held| held == ring) {
+        if let Some(ring) = self.holders.remove(&tid) {
+            self.release_ring(ring);
+        }
+    }
+
+    fn release_ring(&mut self, ring: i32) {
+        if self.holders.values().any(|&id| id == ring) {
             return;
         }
         self.collecting.insert(ring);
         if let Payload::Keyring(links) = &self.keys[&ring].payload {
-            self.collecting.extend(links.iter().copied());
+            let uncertain: Vec<_> = links.iter().copied().filter(|&id| {
+                self.persistent.map(|p| p.0) != Some(id) && !self.keys.iter().any(|(&other, key)| {
+                    other != ring && !self.collecting.contains(&other)
+                        && matches!(&key.payload, Payload::Keyring(links) if links.contains(&id))
+                })
+            }).collect();
+            self.collecting.extend(uncertain);
         }
     }
 
     /// Whether thread `tid` possesses `serial`: its keyring, or a key
     /// linked there.
     fn possessed(&self, tid: c_int, serial: i32) -> bool {
-        self.holders.get(&tid).is_some_and(|&ring| {
-            ring == serial
-                || matches!(&self.keys[&ring].payload, Payload::Keyring(links) if links.contains(&serial))
-        })
+        self.holders
+            .get(&tid)
+            .copied()
+            .into_iter()
+            .chain([FIRST_SERIAL])
+            .any(|ring| self.reaches(ring, serial))
+    }
+
+    fn reaches(&self, ring: i32, serial: i32) -> bool {
+        ring == serial
+            || matches!(&self.keys[&ring].payload, Payload::Keyring(links)
+            if links.iter().any(|&id| id == serial || self.reaches(id, serial)))
+    }
+
+    /// Drop an unreferenced user key; never delete a key still linked elsewhere.
+    fn release_key(&mut self, serial: i32) {
+        if matches!(self.keys[&serial].payload, Payload::User(_))
+            && !self.keys.values().any(
+                |key| matches!(&key.payload, Payload::Keyring(links) if links.contains(&serial)),
+            )
+        {
+            self.keys.remove(&serial);
+            self.collecting.remove(&serial);
+        }
+    }
+
+    fn link(&mut self, serial: i32, ring: i32) -> Result<(), Stop> {
+        let Payload::Keyring(links) = &self.keys[&ring].payload else {
+            return Err(errno::ENOTDIR.into());
+        };
+        let key = &self.keys[&serial];
+        let displaced = links.iter().copied().find(|id| {
+            self.keys[id].type_name() == key.type_name()
+                && self.keys[id].description == key.description
+        });
+        // __key_link_begin reserves quota before __key_link_check_live_key
+        // checks cycles (and our boundary for unsupported nested rings).
+        if displaced.is_none() && self.keys[&ring].in_quota {
+            self.charge(false, LINK_BYTES)?;
+        }
+        if matches!(key.payload, Payload::Keyring(_)) {
+            if serial == ring {
+                return Err(errno::EDEADLK.into());
+            }
+            if self.persistent.map(|p| p.0) != Some(serial) {
+                return Err(unmodeled(
+                    "nested keyrings other than the persistent keyring",
+                ));
+            }
+        }
+        if displaced == Some(serial) {
+            return Ok(());
+        }
+        let Payload::Keyring(links) = &mut self.keys.get_mut(&ring).unwrap().payload else {
+            unreachable!()
+        };
+        links.retain(|id| Some(*id) != displaced);
+        links.push(serial);
+        if let Some(old) = displaced {
+            self.release_key(old);
+        }
+        Ok(())
+    }
+
+    /// Choose immediate invalidation collection: remove every link before
+    /// freeing the key and its quota. Revocation keeps its separate gc_delay.
+    fn invalidate(&mut self, serial: i32) -> Result<(), Stop> {
+        if matches!(self.keys[&serial].payload, Payload::Keyring(_)) {
+            return Err(unmodeled("invalidating a keyring"));
+        }
+        for key in self.keys.values_mut() {
+            if let Payload::Keyring(links) = &mut key.payload {
+                links.retain(|&id| id != serial);
+            }
+        }
+        self.release_key(serial);
+        Ok(())
+    }
+
+    /// Breadth first at each ring, then its only modeled subtree (persistent).
+    fn search(
+        &self,
+        credential: &Credential,
+        ring: i32,
+        description: &[u8],
+        possessed: bool,
+    ) -> Result<i32, Stop> {
+        let Payload::Keyring(links) = &self.keys[&ring].payload else {
+            return Err(errno::ENOTDIR.into());
+        };
+        if !permitted(&self.keys[&ring], credential, possessed, NEED_SEARCH) {
+            return Err(errno::EACCES.into());
+        }
+        let mut error = errno::ENOKEY;
+        if let Some(serial) = self.linked_user_key(ring, description, true) {
+            let key = &self.keys[&serial];
+            if key.revoked_at.is_some() {
+                error = errno::EKEYREVOKED;
+            } else if !permitted(key, credential, possessed, NEED_SEARCH) {
+                error = errno::EACCES;
+            } else {
+                return Ok(serial);
+            }
+        }
+        for &id in links {
+            if matches!(self.keys[&id].payload, Payload::Keyring(_))
+                && permitted(&self.keys[&id], credential, possessed, NEED_SEARCH)
+            {
+                match self.search(credential, id, description, possessed) {
+                    Ok(serial) => return Ok(serial),
+                    Err(Stop::Refuse(code)) if code != errno::ENOKEY => error = code,
+                    Err(Stop::End(end)) => return Err(Stop::End(end)),
+                    _ => {}
+                }
+            }
+        }
+        Err(error.into())
+    }
+
+    fn persistent(&mut self, credential: &Credential, ring: i32, now: u64) -> Result<i64, Stop> {
+        if !matches!(self.keys[&ring].payload, Payload::Keyring(_)) {
+            return Err(errno::ENOTDIR.into());
+        }
+        let serial = if let Some((id, _)) = self.persistent {
+            id
+        } else {
+            let mut key = Self::ring(
+                credential,
+                format!("_persistent.{}", credential.uid).into_bytes(),
+                PERSISTENT_PERM,
+                false,
+            );
+            key.gid = u32::MAX; // INVALID_GID; DESCRIBE maps it to overflowgid.
+            let id = self.allocate(key);
+            // A failed link leaves the newly allocated register entry alive,
+            // but only a successful GET_PERSISTENT sets its timeout.
+            self.persistent = Some((id, u64::MAX));
+            id
+        };
+        self.link(serial, ring)?;
+        self.persistent = Some((serial, now.saturating_add(PERSISTENT_EXPIRY)));
+        Ok(i64::from(serial))
     }
 
     fn allocate(&mut self, key: Key) -> i32 {
@@ -418,14 +648,16 @@ impl Keys {
                         gid: credential.gid,
                         perm: DEFAULT_PERM,
                         revoked_at: None,
+                        in_quota: true,
                     });
                     self.holders.insert(tid, serial);
                     (serial, true)
                 }
                 None => return Err(errno::ENOKEY.into()),
             },
-            KEY_SPEC_SESSION_KEYRING | KEY_SPEC_USER_KEYRING | KEY_SPEC_USER_SESSION_KEYRING => {
-                return Err(unmodeled("the session and user keyrings"));
+            KEY_SPEC_SESSION_KEYRING => (FIRST_SERIAL, true),
+            KEY_SPEC_USER_KEYRING | KEY_SPEC_USER_SESSION_KEYRING => {
+                return Err(unmodeled("the user and user-session keyrings"));
             }
             KEY_SPEC_GROUP_KEYRING => return Err(errno::EINVAL.into()),
             // No request-key authorisation is ever assumed.
@@ -480,11 +712,12 @@ impl Keys {
         // A revoked key of the description gives up its link, not its quota:
         // that goes when the collector frees it, after this charge.
         let displaced = self.linked_user_key(ring, &description, true);
-        let link = if displaced.is_some() { 0 } else { LINK_BYTES };
+        let link = if displaced.is_some() || !self.keys[&ring].in_quota {
+            0
+        } else {
+            LINK_BYTES
+        };
         self.charge(true, link + description.len() + 1 + data.len())?;
-        if let Some(old) = displaced {
-            self.keys.remove(&old);
-        }
         let serial = self.allocate(Key {
             payload: Payload::User(data),
             description,
@@ -492,12 +725,16 @@ impl Keys {
             gid: credential.gid,
             perm: DEFAULT_PERM,
             revoked_at: None,
+            in_quota: true,
         });
         let Payload::Keyring(links) = &mut self.keys.get_mut(&ring).unwrap().payload else {
             unreachable!("the ring is a keyring");
         };
         links.retain(|&linked| Some(linked) != displaced);
         links.push(serial);
+        if let Some(old) = displaced {
+            self.release_key(old);
+        }
         Ok(i64::from(serial))
     }
 
@@ -587,7 +824,7 @@ fn add_key_at(credential: &Credential, tid: c_int, a: &[u64; 6], now: u64) -> Re
 /// `request_key(type, description, callout_info, dest_keyringid)`: the
 /// strings, the destination (made on demand), the type (`ENOKEY` for one no
 /// module registers), then a search of the calling thread's process
-/// keyring for a live key, and of the session keyring, which holds none; a
+/// keyring, then the session (including its persistent subtree); a
 /// miss without callout information is `ENOKEY`.
 pub(in crate::sud) fn request_key(credential: &Credential, a: &[u64; 6]) -> Answer {
     let now = now_seconds();
@@ -619,25 +856,39 @@ fn request_key_at(
         KeyType::Unmodeled => return Err(unmodeled_type(&type_name)),
         KeyType::Unknown => return Err(errno::ENOKEY.into()),
     }
-    let found = keys
+    let rings: Vec<_> = keys
         .holders
         .get(&tid)
-        .and_then(|&ring| keys.linked_user_key(ring, &description, false));
-    match (found, callout) {
-        (Some(serial), _) => {
-            // Linking it where it already is changes nothing; a destination
-            // that is no keyring is `ENOTDIR`.
-            let keyring = |serial: i32| matches!(keys.keys[&serial].payload, Payload::Keyring(_));
-            if destination.is_some_and(|destination| !keyring(destination)) {
-                return Err(errno::ENOTDIR.into());
+        .copied()
+        .into_iter()
+        .chain([FIRST_SERIAL])
+        .collect();
+    let mut error = errno::EACCES;
+    for ring in rings {
+        match keys.search(credential, ring, &description, true) {
+            Ok(serial) => {
+                if let Some(dest) = destination {
+                    if !permitted(&keys.keys[&serial], credential, true, NEED_LINK) {
+                        return Err(errno::EACCES.into());
+                    }
+                    keys.link(serial, dest)?;
+                }
+                return Ok(i64::from(serial));
             }
-            Ok(i64::from(serial))
+            Err(Stop::Refuse(code)) => {
+                if code == errno::ENOKEY || error != errno::ENOKEY {
+                    error = code;
+                }
+            }
+            Err(end) => return Err(end),
         }
-        (None, None) => Err(errno::ENOKEY.into()),
-        (None, Some(_)) => Err(unmodeled(
-            "request_key's upcall to /sbin/request-key (it would run outside the simulation)",
-        )),
     }
+    if error == errno::ENOKEY && callout.is_some() {
+        return Err(unmodeled(
+            "request_key's upcall to /sbin/request-key (it would run outside the simulation)",
+        ));
+    }
+    Err(error.into())
 }
 
 /// `keyctl(option, arg2, arg3, arg4, arg5)`, the operation an `int`.
@@ -650,6 +901,56 @@ fn keyctl_at(credential: &Credential, tid: c_int, a: &[u64; 6], now: u64) -> Res
     let option = a[0] as i32;
     let id = a[1] as i32;
     match option {
+        KEYCTL_GET_PERSISTENT => {
+            let uid = a[1] as u32;
+            if uid != u32::MAX && uid != credential.uid {
+                return Err(if credential.capable(Capability::Setuid) {
+                    Stop::End(Unmodeled::Granted(Capability::Setuid))
+                } else {
+                    errno::EPERM.into()
+                });
+            }
+            let mut keys = KEYS.lock().unwrap();
+            keys.collect(now)?;
+            let (ring, _) = keys.lookup(credential, tid, a[2] as i32, true, Some(NEED_WRITE))?;
+            keys.persistent(credential, ring, now)
+        }
+        KEYCTL_LINK => {
+            let mut keys = KEYS.lock().unwrap();
+            keys.collect(now)?;
+            let (ring, _) = keys.lookup(credential, tid, a[2] as i32, true, Some(NEED_WRITE))?;
+            let (serial, _) = keys.lookup(credential, tid, id, true, Some(NEED_LINK))?;
+            keys.link(serial, ring)?;
+            Ok(0)
+        }
+        KEYCTL_SEARCH => {
+            let kind = type_from_user(a[2])?;
+            let description = guest_strndup(a[3], KEY_MAX_DESC_SIZE)?;
+            let mut keys = KEYS.lock().unwrap();
+            keys.collect(now)?;
+            let (ring, possessed) = keys.lookup(credential, tid, id, false, Some(NEED_SEARCH))?;
+            if a[4] as i32 != 0 {
+                return Err(unmodeled("KEYCTL_SEARCH with a destination"));
+            }
+            match key_type(&kind) {
+                KeyType::User => {}
+                KeyType::Unknown => return Err(errno::ENOKEY.into()),
+                _ => return Err(unmodeled("KEYCTL_SEARCH for a type other than user")),
+            }
+            keys.search(credential, ring, &description, possessed)
+                .map(i64::from)
+        }
+        KEYCTL_INVALIDATE => {
+            let mut keys = KEYS.lock().unwrap();
+            keys.collect(now)?;
+            let (serial, _) = match keys.lookup(credential, tid, id, false, Some(NEED_SEARCH)) {
+                Err(Stop::Refuse(_)) if credential.capable(Capability::SysAdmin) => {
+                    return Err(Stop::End(Unmodeled::Granted(Capability::SysAdmin)));
+                }
+                found => found?,
+            };
+            keys.invalidate(serial).map(|()| 0)
+        }
         KEYCTL_GET_KEYRING_ID => {
             let mut keys = KEYS.lock().unwrap();
             keys.collect(now)?;
@@ -705,7 +1006,11 @@ fn keyctl_at(credential: &Credential, tid: c_int, a: &[u64; 6], now: u64) -> Res
                 "{};{};{};{:08x};",
                 key.type_name(),
                 key.uid as i32,
-                key.gid as i32,
+                if key.gid == u32::MAX {
+                    65534
+                } else {
+                    key.gid as i32
+                },
                 key.perm
             )
             .into_bytes();
@@ -722,10 +1027,10 @@ fn keyctl_at(credential: &Credential, tid: c_int, a: &[u64; 6], now: u64) -> Res
         }
         KEYCTL_READ => read(credential, tid, id, a[2] as usize, a[3] as usize, now),
         KEYCTL_CAPABILITIES => capabilities(a[1] as usize, a[2] as usize),
-        _ if (0..=KEYCTL_LAST).contains(&option) => {
-            Err(unmodeled(format!("keyctl operation {option}")))
-        }
-        _ => Err(errno::EOPNOTSUPP.into()),
+        _ => match KEYCTL_NAMES.get(option as usize) {
+            Some(name) => Err(unmodeled(*name)),
+            None => Err(errno::EOPNOTSUPP.into()),
+        },
     }
 }
 
@@ -868,6 +1173,91 @@ mod tests {
         }
     }
 
+    /// SEARCH's unsupported destination form stops after valid arguments.
+    /// Class pairing: argument-order checks below and the live key oracle.
+    #[test]
+    fn search_with_destination_stops_by_name() {
+        assert!(matches!(
+            keyctl_at(credential(), MAIN, &[10, KEY_SPEC_SESSION_KEYRING as u64, c"user".as_ptr() as u64, c"missing".as_ptr() as u64, KEY_SPEC_PROCESS_KEYRING as u64, 0], 0),
+            Err(Stop::End(Unmodeled::Path(reason))) if reason.contains("KEYCTL_SEARCH")
+        ));
+    }
+
+    /// Class pairing: the live oracle's SEARCH argument refusals.
+    #[test]
+    fn search_destination_checks_arguments_before_stopping() {
+        let kind = c"user".as_ptr() as u64;
+        let description = c"missing".as_ptr() as u64;
+        for (kind, description, expected) in [
+            (0, description, errno::EFAULT),
+            (kind, 0, errno::EFAULT),
+            (kind, description, errno::EINVAL),
+        ] {
+            assert!(
+                matches!(
+                    keyctl_at(credential(), MAIN, &[10, 0, kind, description, KEY_SPEC_PROCESS_KEYRING as u64, 0], 0),
+                    Err(Stop::Refuse(code)) if code == expected
+                ),
+                "expected errno {expected} before the destination stop"
+            );
+        }
+    }
+
+    #[test]
+    fn search_unknown_type_is_enokey() {
+        assert!(matches!(
+            keyctl_at(
+                credential(),
+                MAIN,
+                &[
+                    10,
+                    KEY_SPEC_SESSION_KEYRING as u64,
+                    c"unregistered-type".as_ptr() as u64,
+                    c"missing".as_ptr() as u64,
+                    0,
+                    0
+                ],
+                0
+            ),
+            Err(Stop::Refuse(errno::ENOKEY))
+        ));
+    }
+
+    #[test]
+    fn nested_search_skips_unsearchable_rings() {
+        let mut keys = Keys::new();
+        let persistent = keys.persistent(credential(), FIRST_SERIAL, 0).unwrap() as i32;
+        add(&mut keys, persistent, b"nested", b"v").unwrap();
+        keys.keys.get_mut(&persistent).unwrap().perm = 0;
+        assert!(matches!(
+            keys.search(credential(), FIRST_SERIAL, b"nested", true),
+            Err(Stop::Refuse(errno::ENOKEY))
+        ));
+        assert!(matches!(
+            keys.search(credential(), persistent, b"nested", true),
+            Err(Stop::Refuse(errno::EACCES))
+        ));
+    }
+
+    #[test]
+    fn link_quota_precedes_cycle_and_nested_checks() {
+        let (mut keys, process) = with_process_keyring();
+        let used: usize = keys
+            .keys
+            .values()
+            .filter(|k| k.in_quota)
+            .map(Key::quota_bytes)
+            .sum();
+        let room = KERNEL_CONFIG.keys_maxbytes as usize - used - LINK_BYTES - b"full\0".len();
+        add(&mut keys, FIRST_SERIAL, b"full", &vec![0; room]).unwrap();
+        for serial in [FIRST_SERIAL, process] {
+            assert!(matches!(
+                keys.link(serial, FIRST_SERIAL),
+                Err(Stop::Refuse(errno::EDQUOT))
+            ));
+        }
+    }
+
     /// The quota holds `kernel.keys.maxkeys` keys (the process keyring
     /// among them) and `kernel.keys.maxbytes` bytes: the keyring's
     /// description and NUL, and each key's link, description, NUL and
@@ -875,8 +1265,11 @@ mod tests {
     #[test]
     fn the_quota_counts_keys_links_and_bytes() {
         let (mut keys, ring) = with_process_keyring();
-        let fits =
-            KERNEL_CONFIG.keys_maxbytes as usize - b"_pid\0".len() - LINK_BYTES - b"d\0".len();
+        let fits = KERNEL_CONFIG.keys_maxbytes as usize
+            - b"_ses\0".len()
+            - b"_pid\0".len()
+            - LINK_BYTES
+            - b"d\0".len();
         assert_eq!(
             add(&mut keys, ring, b"d", &vec![0; fits + 1]),
             Err(errno::EDQUOT)
@@ -884,13 +1277,176 @@ mod tests {
         assert!(add(&mut keys, ring, b"d", &vec![0; fits]).is_ok());
 
         let (mut keys, ring) = with_process_keyring();
-        for index in 1..KERNEL_CONFIG.keys_maxkeys {
+        for index in 2..KERNEL_CONFIG.keys_maxkeys {
             assert!(add(&mut keys, ring, index.to_string().as_bytes(), b"v").is_ok());
         }
         assert_eq!(
             add(&mut keys, ring, b"one too many", b"v"),
             Err(errno::EDQUOT)
         );
+    }
+
+    /// Class pairing: quota bounds and graph ownership, independent of serials.
+    #[test]
+    fn session_and_persistent_links_charge_the_owner_not_each_reference() {
+        let mut keys = Keys::new();
+        let ring = FIRST_SERIAL;
+        assert_eq!(keys.keys[&ring].perm, SESSION_PERM);
+        assert_eq!(keys.keys[&ring].description, b"_ses");
+        assert_eq!(
+            keys.search(credential(), ring, b"d", true)
+                .err()
+                .map(|e| matches!(e, Stop::Refuse(errno::ENOKEY))),
+            Some(true)
+        );
+        let persistent = keys.persistent(credential(), ring, 0).unwrap() as i32;
+        let serial = add(&mut keys, ring, b"d", b"v").unwrap();
+        keys.link(serial, persistent).unwrap();
+        keys.link(serial, persistent).unwrap();
+        assert_eq!(
+            keys.keys[&persistent].payload,
+            Payload::Keyring(vec![serial])
+        );
+        let charged: usize = keys
+            .keys
+            .values()
+            .filter(|k| k.in_quota)
+            .map(Key::quota_bytes)
+            .sum();
+        assert_eq!(charged, b"_ses\0".len() + 2 * LINK_BYTES + b"d\0v".len());
+        let nested = add(&mut keys, persistent, b"nested", b"v").unwrap();
+        assert!(keys.possessed(MAIN, nested));
+        assert_eq!(
+            keys.search(credential(), ring, b"nested", true).unwrap(),
+            nested
+        );
+        keys.persistent(credential(), ring, 10).unwrap();
+        assert!(keys.possessed(MAIN, serial));
+        assert!(keys.collect(10 + PERSISTENT_EXPIRY - 1).is_ok());
+        assert!(matches!(
+            keys.collect(10 + PERSISTENT_EXPIRY),
+            Err(Stop::End(_))
+        ));
+    }
+
+    /// The session is global; only process rings need thread lifecycle state.
+    #[test]
+    fn session_is_shared_without_lifecycle_bookkeeping() {
+        let mut keys = Keys::new();
+        let serial = add(&mut keys, FIRST_SERIAL, b"d", b"v").unwrap();
+        keys.spawned(MAIN, MAIN + 1);
+        keys.exited(MAIN);
+        keys.exited(MAIN + 1);
+        assert!(keys.holders.is_empty());
+        assert!(keys.collecting.is_empty());
+        assert!(keys.possessed(MAIN + 2, serial));
+        assert_eq!(
+            keys.lookup(
+                credential(),
+                MAIN + 2,
+                KEY_SPEC_SESSION_KEYRING,
+                false,
+                Some(NEED_SEARCH)
+            )
+            .unwrap()
+            .0,
+            FIRST_SERIAL
+        );
+        assert_eq!(Keys::new().next_serial, FIRST_SERIAL + 1);
+        assert_eq!(Keys::new().keys.len(), 1);
+    }
+
+    /// Class pairing: quota accounting and graph ownership, plus the live oracle.
+    #[test]
+    fn invalidation_collects_every_link_and_reclaims_quota_immediately() {
+        let (mut keys, process) = with_process_keyring();
+        let persistent = keys.persistent(credential(), FIRST_SERIAL, 0).unwrap() as i32;
+        let key = add(&mut keys, FIRST_SERIAL, b"d", b"v").unwrap();
+        keys.link(key, process).unwrap();
+        keys.link(key, persistent).unwrap();
+        let used: usize = keys
+            .keys
+            .values()
+            .filter(|k| k.in_quota)
+            .map(Key::quota_bytes)
+            .sum();
+        let full_payload = KERNEL_CONFIG.keys_maxbytes as usize - used + 1;
+        keys.update(key, vec![0; full_payload]).unwrap();
+        assert!(matches!(
+            keys.charge(false, 1),
+            Err(Stop::Refuse(errno::EDQUOT))
+        ));
+        keys.invalidate(key).unwrap();
+        assert!(!keys.keys.contains_key(&key));
+        assert!(!keys.collecting.contains(&key));
+        assert!(matches!(
+            keys.lookup(credential(), MAIN, key, false, None),
+            Err(Stop::Refuse(errno::ENOKEY))
+        ));
+        for ring in [FIRST_SERIAL, process, persistent] {
+            assert!(matches!(
+                keys.search(credential(), ring, b"d", true),
+                Err(Stop::Refuse(errno::ENOKEY))
+            ));
+        }
+        assert_eq!(
+            keys.keys[&FIRST_SERIAL].payload,
+            Payload::Keyring(vec![persistent])
+        );
+        assert_eq!(keys.keys[&process].payload, Payload::Keyring(vec![]));
+        assert_eq!(keys.keys[&persistent].payload, Payload::Keyring(vec![]));
+        let remaining: usize = keys
+            .keys
+            .values()
+            .filter(|k| k.in_quota)
+            .map(Key::quota_bytes)
+            .sum();
+        assert_eq!(remaining, b"_ses\0_pid\0".len() + LINK_BYTES);
+        assert!(
+            keys.charge(true, KERNEL_CONFIG.keys_maxbytes as usize - remaining)
+                .is_ok()
+        );
+        let replacement = add(&mut keys, FIRST_SERIAL, b"d", &vec![0; full_payload]).unwrap();
+        assert!(replacement > key);
+    }
+
+    #[test]
+    fn displacement_preserves_other_links() {
+        let mut keys = Keys::new();
+        let ring = FIRST_SERIAL;
+        let persistent = keys.persistent(credential(), ring, 0).unwrap() as i32;
+        let first = add(&mut keys, ring, b"d", b"v").unwrap();
+        keys.link(first, persistent).unwrap();
+        keys.keys.get_mut(&first).unwrap().revoked_at = Some(0);
+        let second = add(&mut keys, ring, b"d", b"w").unwrap();
+        assert_ne!(first, second);
+        assert!(keys.keys.contains_key(&first));
+        keys.link(second, persistent).unwrap();
+        assert!(!keys.keys.contains_key(&first));
+        assert_eq!(keys.search(credential(), ring, b"d", true).unwrap(), second);
+    }
+
+    #[test]
+    fn unsupported_key_service_surface_still_stops_by_name() {
+        for op in [
+            1, 5, 7, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 23, 24, 25, 26, 27, 28, 29, 30, 32,
+        ] {
+            assert!(matches!(
+                keyctl_at(credential(), MAIN, &[op, 0, 0, 0, 0, 0], 0),
+                Err(Stop::End(Unmodeled::Path(reason))) if reason == KEYCTL_NAMES[op as usize]
+            ));
+        }
+        let mut keys = Keys::new();
+        for ring in [
+            KEY_SPEC_THREAD_KEYRING,
+            KEY_SPEC_USER_KEYRING,
+            KEY_SPEC_USER_SESSION_KEYRING,
+        ] {
+            assert!(matches!(
+                keys.lookup(credential(), MAIN, ring, true, Some(NEED_SEARCH)),
+                Err(Stop::End(_))
+            ));
+        }
     }
 
     /// A revoked key's description is free again: a new key displaces it
