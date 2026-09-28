@@ -7,7 +7,7 @@ Each guest's internal assertions and its harness assertions form the proof.
 |---|---|---|
 | `native_abi` | Prefixed C crash/checkpoint and env protocol; POSIX fd/env/path ABI; C stdio at the edges of a run (teardown, a refusal, the first write, a failed `assert`) and its buffering modes against the host; pipe/socketpair wakeups; reactor fields and exact virtual deadlines | Linux x86_64 + arm64, macOS; epoll/eventfd Linux-only, kqueue/nsec Darwin-only |
 | `native_containment` | Import/instruction refusals (thread-pointer writes included, and their `arch_prctl`/`modify_ldt` doors, x86_64), host env/envp isolation, dlsym routing, SUD arming/refusal, auxv, SIGSYS, TSC, real faults and handler protection | Both OSes; SUD/auxv Linux; TSC/vsyscall x86_64 Linux |
-| `native_workloads` | std, the virtual realtime epoch and node name (defaults, `--realtime-epoch`, `--hostname`), independent entropy sources, locks/timers (a timer and a wait ending at one instant: interval timer vs `nanosleep`, timer descriptor vs `poll`, Linux; a mutex relocked before the first thread is a deadlock, Linux), thread names independent of the binary's file name (Linux), UDP/TCP, tokio signal driver + parking_lot + product-selected rustix backend | Linux x86_64 + arm64, macOS |
+| `native_workloads` | std, the virtual realtime epoch and node name (defaults, `--realtime-epoch`, `--hostname`), independent entropy sources, locks/timers (a timer and a wait ending at one instant: interval timer vs `nanosleep`, timer descriptor vs `poll`, Linux; a mutex relocked before the first thread is a deadlock, Linux), thread names independent of the binary's file name (Linux), UDP/TCP, tokio signal driver + parking_lot + product-selected rustix backend; Linux keyutils credentials (empty per-run rings, host canaries, password lifecycle) | Linux x86_64 + arm64, macOS |
 | `native_raw` | Mixed raw/libc descriptor parity, legacy syscall aliases, exact virtual identity, soft refusals, prctl state/refusals, raw ppoll timeout writeback and pipe readiness | x86_64 Linux; unsupported SUD executes refusal assertions |
 | `native_signals` | Linux C readiness EINTR/mask/timeout contracts, libc/raw signal state, sigwait retry and guest-abort finalization; Linux/macOS internal-panic ownership, catchable guest panics and process/sleep repeat/replay | Linux + macOS shared cases; interruption Linux-only; inline raw cases x86_64 Linux with SUD |
 | `native_trace` | Whole-run std syscall containment and a planted host open through the same filter; explicit unsupported-ktrace policy | strace on both Linux architectures; static containment evidence on macOS |
@@ -37,7 +37,7 @@ two complete traces, flag-free replay, and a mismatched-fingerprint refusal.
 Entropy sources vary independently. POSIX startup sees host canaries so an
 empty guest `environ` demonstrates isolation, not an empty input environment.
 
-`rand-rng/`, `tokio/`, and `raw/` are locked standalone packages. The build
+`rand-rng/`, `tokio/`, `raw/`, and [`keyring-keyutils/`](keyring-keyutils/README.md) are locked standalone packages. The build
 helper explicitly places their Cargo artifacts under the integration test's
 target base, beside the profile (`native-guests/<package>/`), including plain
 `cargo test` runs without an inherited `CARGO_TARGET_DIR`. No package-local

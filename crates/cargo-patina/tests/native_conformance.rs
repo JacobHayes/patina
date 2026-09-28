@@ -38,7 +38,7 @@
 #![cfg(target_os = "linux")]
 mod common;
 
-use patina_dst_conformance::catalog::{self, Scenario};
+use patina_dst_conformance::catalog::{self, Need, Scenario};
 use patina_dst_conformance::compare::{self, Ending, Failure, Observation, Termination};
 use patina_dst_conformance::host::{self, Cause, NotRun};
 use patina_dst_conformance::leak;
@@ -220,10 +220,11 @@ const FIRST_UNSTANDARD_FD: libc::c_uint = 3;
 
 /// Pin the native process state the virtual kernel starts from: every
 /// descriptor the test process inherited past the standard three closes at
-/// exec, and the descriptor limit and umask are the virtual kernel's.
+/// exec, and the descriptor limit and umask are the virtual kernel's. Scenarios
+/// declaring Need::Keys get a fresh anonymous session in this forked child only.
 /// `CLOSE_RANGE_CLOEXEC` needs Linux 5.11; an older host fails every native
 /// run here instead of reporting it not run.
-fn pin_process_state() -> std::io::Result<()> {
+fn pin_process_state(needs_keys: bool) -> std::io::Result<()> {
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -246,6 +247,11 @@ fn pin_process_state() -> std::io::Result<()> {
             return Err(std::io::Error::last_os_error());
         }
         libc::umask(UMASK);
+        // Raw keyctl is async-signal-safe; no allocation or credential change
+        // in the harness thread. KEYCTL_JOIN_SESSION_KEYRING with NULL name.
+        if needs_keys && libc::syscall(libc::SYS_keyctl, 1, 0, 0, 0, 0) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
     }
     Ok(())
 }
@@ -665,8 +671,9 @@ impl Leg<'_> {
         if self.declared_absent {
             command.arg("--declared-absent");
         }
+        let needs_keys = self.scenario.needs.contains(&Need::Keys);
         // SAFETY: the hook only calls async-signal-safe libc functions.
-        unsafe { command.pre_exec(pin_process_state) };
+        unsafe { command.pre_exec(move || pin_process_state(needs_keys)) };
         let output = run(&mut command);
         // IPC objects outlive a run killed outright (the deadline); the next
         // leg recreates this directory, likely on the same inode and keys.
@@ -1305,8 +1312,9 @@ fn a_killed_native_ipc_run_is_swept() {
             .args([name, "--vehicle", "syscall", "--dir"])
             .arg(&dir)
             .arg("--strict");
+        let needs_keys = scenario.needs.contains(&Need::Keys);
         // SAFETY: the hook only calls async-signal-safe libc functions.
-        unsafe { command.pre_exec(pin_process_state) };
+        unsafe { command.pre_exec(move || pin_process_state(needs_keys)) };
         let output = run(&mut command).unwrap_or_else(|error| panic!("{name}: {error}"));
         assert!(
             output.status.signal() == Some(libc::SIGKILL)
@@ -2144,6 +2152,11 @@ fn sys_ioport() {
 #[test]
 fn sys_keys() {
     conform("sys/keys");
+}
+
+#[test]
+fn sys_keys_session() {
+    conform("sys/keys_session");
 }
 
 #[test]

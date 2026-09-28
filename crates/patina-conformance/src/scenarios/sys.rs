@@ -4,6 +4,7 @@ pub mod hostname;
 #[cfg(target_arch = "x86_64")]
 pub mod ioport;
 pub mod keys;
+pub mod keys_session;
 pub mod landlock;
 pub mod lsm;
 pub mod nss;

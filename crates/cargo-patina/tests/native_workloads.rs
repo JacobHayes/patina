@@ -3,6 +3,106 @@
 mod common;
 use common::native::*;
 
+/// Class pairing: live sys/keys_session differential + full trace identity.
+#[cfg(target_os = "linux")]
+#[test]
+fn keyutils_password_lifecycle_is_isolated_and_replayable() {
+    let g = Guest::assert_build("keyring-keyutils");
+    g.assert_audit_clean();
+    // This test thread alone joins an anonymous HOST ring. Child supervisors
+    // inherit these exact credential names; the guest must still start empty.
+    // The native red leg's backend can cache a canary in the host persistent
+    // ring. Invalidate our keys on success or panic, removing every such link.
+    struct Canaries(Vec<libc::c_long>);
+    impl Drop for Canaries {
+        fn drop(&mut self) {
+            for &serial in &self.0 {
+                // SAFETY: INVALIDATE of a key created and owned by this test.
+                let result = unsafe { libc::syscall(libc::SYS_keyctl, 21, serial, 0, 0, 0) };
+                if result != 0 {
+                    let error = std::io::Error::last_os_error();
+                    eprintln!("host canary cleanup failed: {error}");
+                    assert!(std::thread::panicking(), "host canary cleanup: {error}");
+                }
+            }
+        }
+    }
+    let mut canaries = Canaries(Vec::new());
+    // SAFETY: integer arguments to anonymous JOIN_SESSION_KEYRING.
+    let host_ring = unsafe { libc::syscall(libc::SYS_keyctl, 1, 0, 0, 0, 0) };
+    if host_ring < 0 {
+        let error = std::io::Error::last_os_error();
+        assert!(
+            matches!(
+                error.raw_os_error(),
+                Some(libc::EPERM | libc::EACCES | libc::ENOSYS)
+            ),
+            "{error}"
+        );
+        assert_ne!(
+            std::env::var("PATINA_REQUIRE_HOST_ORACLE").as_deref(),
+            Ok("1"),
+            "host key canary unavailable: {error}"
+        );
+        eprintln!("NOT RUN: host keyring canary ({error}); virtual lifecycle still runs");
+    } else {
+        for name in [
+            c"keyring-rs:password-user@patina-testbed",
+            c"keyring:password-user@patina-testbed",
+        ] {
+            // SAFETY: valid type/description strings and a one-byte payload.
+            let serial = unsafe {
+                libc::syscall(
+                    libc::SYS_add_key,
+                    c"user".as_ptr(),
+                    name.as_ptr(),
+                    b"H".as_ptr(),
+                    1,
+                    host_ring,
+                )
+            };
+            assert!(
+                serial > 0,
+                "host canary: {}",
+                std::io::Error::last_os_error()
+            );
+            canaries.0.push(serial);
+        }
+        // A stock build is required: the shim-linked binary refuses standalone
+        // startup, which would not prove that the canary detector can fail.
+        let target = common::guest_target_dir("keyring-keyutils-native");
+        let built =
+            std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+                .args(["build", "--quiet", "--locked", "--manifest-path"])
+                .arg(guest_source("keyring-keyutils").join("Cargo.toml"))
+                .arg("--target-dir")
+                .arg(&target)
+                .status()
+                .expect("native keyutils build runs");
+        assert!(built.success(), "native keyutils build failed");
+        let native = common::output_with_deadline(
+            &mut std::process::Command::new(target.join("debug/keyring-keyutils")),
+            std::time::Duration::from_secs(60),
+        )
+        .expect("native canary run exceeded deadline");
+        assert_eq!(
+            native.status.code(),
+            Some(101),
+            "native canary must fail the absence assertion: {native:?}"
+        );
+        assert_exact_line(&native.stdout, "KEYRING_RESULT initial=present");
+        eprintln!("host-canary RED: native guest reported initial=present and exited 101");
+    }
+    let out = g.assert_seeded_record_replay_identity(7, &[]);
+    assert_exact_line(
+        &out,
+        "KEYRING_RESULT empty,set,read,update,thread,delete,no-entry,recreate,current-backend",
+    );
+    for seed in [0, 1, 42, u64::MAX] {
+        assert_eq!(g.assert_run_success(seed, &[]).stdout, out);
+    }
+}
+
 #[test]
 fn std_runs_seeded_and_replayable_but_not_standalone() {
     let g = Guest::assert_build("std_probe.rs");

@@ -212,7 +212,26 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         Need::Aio => asyncio::aio(),
         Need::IoUring => asyncio::io_uring(),
         Need::RseqRegistered => rseq_registered(),
+        Need::Keys => keys(),
     }
+}
+
+/// Non-mutating query: never joins or reads the host's ambient keyrings.
+fn keys() -> Result<(), NotRun> {
+    // SAFETY: CAPABILITIES with a zero-length output buffer.
+    let result = unsafe { libc::syscall(libc::SYS_keyctl, 31, 0, 0, 0, 0) };
+    if result >= 0 {
+        return Ok(());
+    }
+    let error = crate::vehicle::errno();
+    Err(NotRun {
+        cause: match error {
+            libc::ENOSYS => Cause::Absent,
+            libc::EPERM | libc::EACCES => Cause::PermissionDenied,
+            _ => Cause::Unexpected,
+        },
+        detail: format!("keyctl CAPABILITIES: {}", errno_name(error)),
+    })
 }
 
 /// An AF_INET6 datagram socket bound to `[::1]:0`, through `syscall(2)`.

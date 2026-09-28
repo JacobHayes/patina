@@ -349,6 +349,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_getuid,
         Syscall::N_getgid,
     ],
-    needs: &[Need::Unprivileged],
+    needs: &[Need::Unprivileged, Need::Keys],
     ..DEFAULTS
 };

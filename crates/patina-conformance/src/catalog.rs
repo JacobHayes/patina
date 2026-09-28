@@ -215,6 +215,8 @@ pub enum Need {
     /// unless `GLIBC_TUNABLES=glibc.pthread.rseq=0` (a second registration
     /// is `EINVAL`; a kernel without `CONFIG_RSEQ` answers `ENOSYS`).
     RseqRegistered,
+    /// The key retention service is enabled and keyctl is not sandbox-denied.
+    Keys,
 }
 
 impl Need {
@@ -260,7 +262,8 @@ impl Need {
             | Need::RestrictedBpf
             | Need::RestrictedPerf
             | Need::RestrictedUserfaultfd
-            | Need::RseqRegistered => false,
+            | Need::RseqRegistered
+            | Need::Keys => false,
         }
     }
 }
@@ -631,6 +634,7 @@ pub const SCENARIOS: &[&Scenario] = &[
     #[cfg(target_arch = "x86_64")]
     &sys::ioport::SCENARIO,
     &sys::keys::SCENARIO,
+    &sys::keys_session::SCENARIO,
     &sys::landlock::SCENARIO,
     &sys::lsm::SCENARIO,
     &sys::nss::SCENARIO,
