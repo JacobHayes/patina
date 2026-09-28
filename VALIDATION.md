@@ -281,8 +281,9 @@ seeded jitter (`tsc_sleep_jitter_moves_counter`), genuine faults
 SIGSEGV handler: it never sees a counter read
 (`sigsegv_handler_cannot_take_over_the_counter_trap`) or a counter read it
 declines, which is a named stop (`a_counter_read_the_trap_declines_is_a_named_stop`,
-a REX-prefixed `rdtsc`; red before: the guest's handler ran), and while a counter read is served off the alternate stack no guest code runs:
-a timer's handler that would run during it is a named stop on both large and
+a REX-prefixed `rdtsc`; red before: the guest's handler ran), and for an
+admitted counter read served off the alternate stack no guest code runs: a
+timer's handler that would run during it is a named stop on both large and
 small native-capable stacks where the native run goes on
 (`counter_reads_served_off_the_alternate_stack_run_no_guest_code`).
 `counter_reads_on_a_minimal_altstack_preserve_the_guest_stack` pairs this
@@ -301,7 +302,19 @@ assert the actual registration is still disabled inside an autodisarmed handler,
 then restored after return. These pins pair with the containment detector above
 and `private_counter_execution_has_stack_margin`, which sentinel-measures the
 first and repeated reads against the independent 64 KiB execution budget
-(red-proven with a 4 KiB acceptance cap).
+(red-proven with a 4 KiB acceptance cap). This is not stack-free like native
+`rdtsc`: an admitted counter fault on the guest alternate stack still needs one
+kernel signal frame plus about 400 B of C entry there; a read inside an
+already-running handler needs two kernel frames. Smaller guest stacks can die
+by SIGSEGV. Each managed thread eagerly maps the private stacks at TSC arm
+(about 136 KiB of address space and four VMAs per thread), bringing
+`vm.max_map_count` closer for guests with many thousands of threads. The
+`patina_fault_stack_changed` bounds are admission hints, not kernel state, and
+can go stale if a handler disables its stack by editing `uc_stack`, or if
+`sigaltstack` is called from a coroutine stack while an autodisarmed handler is
+live. A scheduling point inside an alternate-stack handler that would deliver
+another handled signal is a named stop by design: no guest code runs during
+private execution.
 `native_signals::fault_front_stack_budgets_cover_the_compiled_paths` measures
 both returning fault routes' written high-water below the kernel frame and
 compiler-reported C frame sizes (including the x86 counter entry and both C

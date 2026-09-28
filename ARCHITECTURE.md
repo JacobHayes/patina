@@ -286,32 +286,44 @@ a genuine fault never meets the dequeued one; any other signal's stays on the
 host until the member's handler returns (after a `siglongjmp`, until the next
 delivery point), and nothing but a delivery raises it there. A handler that edits its frame's saved mask while frames of its batch
 are still to run is a named stop: natively the next handler starts under the
-edit. The counter trap serves every alternate-stack-resident read on a private
-execution stack, including reads inside handlers whose `SS_AUTODISARM`
-registration is currently disabled. Ordinary-stack reads retain their normal
-delivery behavior. While private execution is active, no guest code runs until
-the read is answered: every signal but the containment ones and
-those an instruction raises (whose front handler names a fault in the shim's
-own code) is held
-blocked meanwhile (one that arrives is delivered once the trap returns,
-after the instruction, as it may be natively), and a delivery that would run a
-handler, a `sigaltstack` call or a nested counter read is a named stop. The
-kernel uses a separate guarded shim-owned alternate stack meanwhile, so a
-nested fault in shim code cannot overwrite either the trap's live frames or
-its runtime execution. Before TSC arming, each thread host-maps two disjoint
-regions: 64 KiB for execution, and `AT_MINSIGSTKSZ` plus 64 KiB for nested
-signals, each guarded below. The startup auxv is available independently of
-SUD support; kernels without `AT_MINSIGSTKSZ` use zero for that additive minimum.
-The mapping is released at managed thread completion (raw exit included) and
-never enters the guest memory model. A C transition guard and held asynchronous
-signals protect the switch before Rust takes ownership. Admission-only C
-bounds remember stacks that can still be executing after autodisarm; successful
-guest registrations and frame/batch returns maintain them. Both genuine-fault
-entries check these bounds before errno or Rust, and a short stack stops in C
-with the signal number and remaining-byte count. The read's end restores
-exactly the kernel registration held at entry, including an autodisarmed
-stack's disabled state. The guest stack need only hold the original frame,
-not two host-sized frames; this matters on CPUs with large xsave state. A
+edit. A counter fault takes the private execution path when the C admission check
+recognizes its interrupted stack pointer as one of the guest's alternate
+stacks, including a handler whose `SS_AUTODISARM` registration is currently
+disabled. Ordinary-stack reads retain their normal delivery behavior. While
+private execution is active, no guest code runs until the read is answered:
+every signal but the containment ones and those an instruction raises (whose
+front handler names a fault in the shim's own code) is held blocked meanwhile
+(one that arrives is delivered once the trap returns, after the instruction,
+as it may be natively). A scheduling point inside an alternate-stack handler
+that would deliver another handled signal is a named stop, as are a
+`sigaltstack` call and a nested counter read: no guest code runs during private
+execution. The kernel uses a separate guarded shim-owned alternate stack
+meanwhile, so a nested fault in shim code cannot overwrite either the trap's
+live frames or its runtime execution.
+
+When TSC is armed, each managed thread eagerly maps two disjoint regions:
+64 KiB for execution, and `AT_MINSIGSTKSZ` plus 64 KiB for nested signals,
+with guard pages, about 136 KiB of address space in four VMAs per thread. The
+startup auxv is available independently of SUD support; kernels without
+`AT_MINSIGSTKSZ` use zero for that additive minimum. The mapping is released at
+managed thread completion (raw exit included) and never enters the guest memory
+model. Thousands of managed threads therefore bring `vm.max_map_count` closer.
+A C transition guard and held asynchronous signals protect the switch before
+Rust takes ownership.
+
+Private execution does not make the guest stack cost-free: taking the counter
+fault still needs one kernel signal frame and about 400 B of C entry on the
+guest's stack; a read inside an already-running handler needs two kernel
+frames. Native `rdtsc` needs none, and a smaller stack can die by SIGSEGV (the
+frame size depends on host xsave features). Admission-only C bounds remember
+stacks that can still be executing after autodisarm; `patina_fault_stack_changed`
+and frame/batch returns maintain them, but they can go stale if a handler
+disables its stack by editing `uc_stack`, or if `sigaltstack` is called from a
+coroutine stack while an autodisarmed handler is live. These are hints,
+not shadow kernel registrations. Both genuine-fault entries check the bounds
+before errno or Rust, and a short stack stops in C with the signal number and
+remaining-byte count. The read's end restores exactly the kernel registration
+held at entry, including an autodisarmed stack's disabled state. A
 SIGSEGV the kernel sends itself that the guest's action takes as the default
 is taken at once rather than retried, since retrying need not raise it again;
 a core dump then records a sent SIGSEGV (`SI_TKILL`, no address) where natively

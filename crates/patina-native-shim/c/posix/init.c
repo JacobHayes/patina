@@ -228,12 +228,13 @@ _Noreturn void patina_sud_report_fatal_addr(const char *message, long nr,
  * without the C→Rust link direction that left the lib's own test binary with an
  * undefined symbol. C is only ever linked where the Rust lib is present. */
 extern unsigned char PATINA_SUD_ARMED;
-/* The scrubbed auxv region (base pointer + byte length through AT_NULL,
- * inclusive), captured during the init scrub below and OWNED by the Rust lib
- * (exported AtomicUsize, same C→Rust direction and rationale as
- * PATINA_SUD_ARMED). The Rust PR_GET_AUXV dispatch row copies from here so a raw
- * prctl(PR_GET_AUXV) serves the shim's determinized auxv, never the kernel's
- * pristine saved_auxv. */
+/* The auxv region (base pointer + byte length through AT_NULL, inclusive),
+ * published by patina_sud_determinize_at_random before the SUD probe and OWNED by
+ * the Rust lib (exported AtomicUsize, same C→Rust direction and rationale as
+ * PATINA_SUD_ARMED). The later vDSO scrub mutates this array in place before
+ * SUD arms. The Rust PR_GET_AUXV dispatch row copies from here so a raw
+ * prctl(PR_GET_AUXV) serves the shim's determinized, scrubbed auxv, never the
+ * kernel's pristine saved_auxv. */
 extern uintptr_t PATINA_SUD_AUXV_BASE;
 extern uintptr_t PATINA_SUD_AUXV_LEN;
 
@@ -698,14 +699,15 @@ static void patina_sud_init(int argc, char **argv) {
  * still trap. It carries SA_ONSTACK exactly
  * when the guest's action does, so the kernel builds the frame on the stack
  * the guest's handler expects — which is also what lets a stack-overflow
- * handler (Rust std's among them) run at all. A counter read taken on the
- * alternate stack is answered on private execution storage, including a read
- * inside a handler already running there. The runtime cannot fit on a small
- * signal stack, and an autodisarmed handler's uc_stack alone cannot identify it. No guest
- * code runs until it is answered (a handler that would is a named stop), and
- * the kernel uses a separate guarded per-thread shim stack meanwhile. A
- * nested fault in shim code can then stop by name without overwriting this
- * frame or requiring the guest's small stack to hold two kernel frames.
+ * handler (Rust std's among them) run at all. A counter read admitted as
+ * running on the alternate stack is answered on private execution storage,
+ * including a read inside a handler already running there. The runtime cannot
+ * fit on a small signal stack, and an autodisarmed handler's uc_stack alone
+ * cannot identify it. The read still needs its kernel frame and C entry on the
+ * guest stack. No guest code runs until it is answered (a handler that would
+ * is a named stop), and the kernel uses a separate guarded per-thread shim
+ * stack meanwhile. A nested fault in shim code can then stop by name without
+ * overwriting this frame.
  * ========================================================================== */
 
 /* prctl TSC op numbers (x86 only; present since 2.6.26). */
@@ -850,6 +852,7 @@ struct patina_served {
 struct patina_counter_stacks {
     stack_t signal;
     uintptr_t top;
+    uint64_t held_mask;
 };
 static _Thread_local struct patina_counter_stacks patina_counter_stacks;
 static _Thread_local int patina_counter_busy;
@@ -964,17 +967,16 @@ static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
                     static const char message[] = "patina: private counter stack was not prepared\n";
                     patina_fault_stop(message, sizeof message - 1);
                 }
-                patina_counter_busy = 1;
-                static const uint64_t held = ~(UINT64_C(1) << (SIGSYS - 1) |
-                    UINT64_C(1) << (SIGSEGV - 1) | UINT64_C(1) << (SIGBUS - 1) |
-                    UINT64_C(1) << (SIGILL - 1) | UINT64_C(1) << (SIGTRAP - 1) |
-                    UINT64_C(1) << (SIGFPE - 1) | UINT64_C(1) << (SIGKILL - 1) |
-                    UINT64_C(1) << (SIGSTOP - 1));
-                if (patina_fault_host_syscall(SYS_rt_sigprocmask, SIG_SETMASK, &held,
+                if (patina_fault_host_syscall(SYS_rt_sigprocmask, SIG_SETMASK,
+                                              &patina_counter_stacks.held_mask,
                                               &read.served.interrupted, 8) != 0) {
                     static const char message[] = "patina: host counter signal mask install failed\n";
                     patina_fault_stop(message, sizeof message - 1);
                 }
+                /* Async signals are now held across the stack switch. Mark the
+                 * transition only after the mask is installed, so a signal in
+                 * the gap cannot misclassify this C entry as an owned fault. */
+                patina_counter_busy = 1;
                 patina_call_on_stack(patina_tsc_read_counter, &read, patina_counter_stacks.top);
             } else {
                 patina_tsc_read_counter(&read);
@@ -988,6 +990,8 @@ static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
                     r[REG_RCX] = (greg_t)read.aux;
                 }
                 r[REG_RIP] = (greg_t)(rip + read.length);
+                /* Keep async signals held through the complete reply. The
+                 * kernel restores the interrupted mask on rt_sigreturn. */
                 patina_counter_busy = 0;
                 return;
             }

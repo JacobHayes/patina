@@ -497,6 +497,7 @@ pub struct Served {
 pub struct CounterStacks {
     signal: Stack,
     top: usize,
+    held_mask: u64,
 }
 
 /// One host mapping: guard, nested-signal region, guard, execution region.
@@ -555,6 +556,7 @@ impl CounterStack {
         let stacks = CounterStacks {
             signal: stack,
             top: execution + COUNTER_EXECUTION,
+            held_mask: host_mask(!SYNCHRONOUS),
         };
         self.0.set(Some((stacks, page, publication)));
         stacks

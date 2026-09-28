@@ -225,23 +225,30 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   (`sys::pal::unix::stack_overflow::init`), so `sigaction` reports the guest's
   virtual `SIGSEGV` action, not the trap's. The trap's host action carries that
   action's `SA_ONSTACK` so a guard-page fault can reach it at all, which puts
-  counter reads on std's 8 KiB signal stack too. The trap answers every
-  alternate-stack-resident read on a private execution stack, including reads inside an alternate-stack
-  handler (whose autodisarmed `uc_stack` may be disabled), with the kernel
-  using a disjoint guarded shim-owned signal stack meanwhile
-  (`with_counter_altstack`), and no guest code runs until the read is answered
-  (a delivery that would run a handler is a named stop). Never require that
-  small guest stack to fit a second kernel frame: its size depends on the
-  host's xsave features. Restore the actual kernel registration, including
-  autodisarm, before returning to the trap's original frame. Prepare both
-  regions before arming main/child threads, never from a constrained trap;
+  counter reads on std's 8 KiB signal stack too. C uses private execution
+  storage for a counter fault only when its admission bounds recognize the
+  interrupted SP as a guest alternate stack, including an autodisarmed handler
+  whose `uc_stack` is disabled. The bounds are hints, not shadow kernel state,
+  and can go stale if a handler disables its stack by editing `uc_stack`, or
+  if `sigaltstack` is called from a coroutine stack while an autodisarmed
+  handler is live. No guest code runs until the read is answered; a scheduling
+  point that would deliver another handled signal, a `sigaltstack` call, or a
+  nested counter read is a named stop. The kernel uses a disjoint guarded
+  shim-owned signal stack meanwhile (`with_counter_altstack`). Each TSC-armed
+  managed thread eagerly maps the two private regions (~136 KiB of address
+  space and four VMAs per thread), bringing `vm.max_map_count` closer for
+  guests with many thousands of threads. The guest stack still needs one kernel
+  signal frame and about 400 B of C entry for a counter read; a read inside a
+  handler needs two kernel frames, unlike native `rdtsc`, which needs none.
+  Smaller stacks can die by SIGSEGV. Restore the actual kernel registration,
+  including autodisarm, before returning to the trap's original frame. Prepare
+  both regions before arming main/child threads, never from a constrained trap;
   auxv publication must not depend on SUD support. Keep a C transition guard
   until the reply is complete, hold asynchronous signals before switching,
   and retain their original mask for SERVING. Both the front handler and the
-  counter handler's genuine-fault route check room before errno or Rust;
-  remembered bounds must cover autodisarmed handlers too. These are admission
-  hints, not shadow kernel registrations; update them on guest registration and
-  frame/batch restoration, never for temporary private stacks. Only exact counter
+  counter handler's genuine-fault route check room before errno or Rust; update
+  admission bounds on guest registration and frame/batch restoration, never for
+  temporary private stacks. Only exact counter
   encodings may change private-dispatch state: an unrelated in-text SI_KERNEL
   #GP (e.g. hlt) still routes normally. The short-stack stop, including numeric
   diagnostics, must stay C-only; stable/MSRV debug Rust frames can exceed
