@@ -38,7 +38,7 @@ Patina exists to make these workflows normal:
 
 ## Non-goals
 
-Patina does not try to be a general deterministic hypervisor. It is for programs written primarily in Rust and compiled into Patina's world.
+Patina does not try to be a general deterministic hypervisor. It is for programs compiled into Patina's world: Rust first, then Python and Go through their own integration paths. [docs/SCOPE.md](./docs/SCOPE.md) sets the current priorities and the rules for new surface.
 
 Patina does not promise to make arbitrary native code deterministic. Native libraries, dynamic loading, inline assembly, direct syscalls, CPU entropy instructions, GPUs, and OS-specific behavior are supported only when they pass through an explicit Patina shim or are allowed by policy.
 
@@ -137,7 +137,7 @@ Patina chooses pluggable drivers over one canonical simulation model. This keeps
 4. **Topology is code.** Rich service and environment behavior is expressed in Rust, not sprawling config.
 5. **Experiments are externally controlled.** Seeds, traces, replay policies, and budgets are CLI/runtime concerns.
 6. **Unsupported effects fail loudly.** Patina does not silently fall back to the host OS.
-7. **Rust comes first.** Native ABI compatibility extends the system but does not define it.
+7. **Rust comes first.** Native ABI compatibility extends the system but does not define it. Other languages arrive through their own integration paths, never by weakening the boundary.
 8. **The shim's own host access is invisible to the guest.** The interposition layer reaches real host primitives by private, resolved-at-runtime aliases, never by naming a symbol the guest could import; allowing the shim its vehicle must never grant the guest an escape. A guest is judged on what it can reach, not on a name the shim happens to share.
 9. **Output is progressively disclosed.** Every output surface — human or machine — leads with an index (counts, classes, summaries) and offers detail on demand (a flag, a per-item command, a named on-disk artifact). Aggregation is lossless: the summary always says where the full detail lives, and nothing becomes unreachable. Firehoses are opt-in, never the default; consumers (especially agents) should be able to triage from the index alone.
 10. **Exposed information serves humans and agents alike.** Everything Patina chooses to expose — help, reports, coverage, traces, diagnostics — is visible, inspectable, and usable by both humans and agents. The medium may differ (terminal text, JSON, HTML), but every medium is a view over the same underlying data; neither audience gets information the other cannot reach.

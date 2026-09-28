@@ -115,6 +115,32 @@ dispositions; Darwin ARM64 rows describe source entries and raw-interposition
 gaps, separately from C symbol models. Ask this surface rather than guessing
 support from a syscall name or treating inventory coverage as runtime support.
 
+## Onboarding a project: a clean baseline first
+
+Before hunting bugs in an existing project, establish that Patina runs its own
+test suite faithfully. A fault campaign on top of an unexamined baseline mixes
+Patina's limits with the project's bugs.
+
+1. **Natively.** Run the project's test suite normally and keep the results. A
+   test that fails or flakes natively is not Patina's to explain.
+2. **Under Patina, with no faults.** Run the same tests shim-linked with fault
+   injection off, across a few seeds.
+3. **Classify every difference** as one of:
+   - **a known limit:** a named stop or audit refusal that is documented, such as
+     an unsupported call or a program class Patina doesn't serve yet;
+   - **a Patina bug:** a divergence with no named reason, where Patina answered
+     differently from the kernel or library;
+   - **the project's own nondeterminism:** a test that depends on host timing or
+     ordering, and that Patina's seeded schedule exposes. That is often a real
+     finding.
+
+   Reduce each Patina bug to a minimal reproducer, and confirm it natively
+   before reporting it.
+4. **Then add faults,** starting from the tests that pass cleanly under Patina.
+
+The tallies from step 3 (which stops fired, what diverged) are the evidence that
+drives what Patina models next.
+
 ## Which loop are you in
 
 **Point solution — one algorithm, one test, seconds per iteration.** Write the

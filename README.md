@@ -396,6 +396,8 @@ silently:
   wrappers, traces, the native shim, and the WASI host.
 - [INTENTS.md](./INTENTS.md) — goals, non-goals, trade-offs, and the niche
   Patina occupies.
+- [docs/SCOPE.md](./docs/SCOPE.md) — who Patina serves first and the rules new
+  surface must meet.
 - [VALIDATION.md](./VALIDATION.md) — claim-by-claim acceptance gates and the
   honest boundary of confidence.
 - [IMPLEMENTATION.md](./IMPLEMENTATION.md) — completed and planned slices.

@@ -9,6 +9,7 @@ anything; it tells you where truth lives and which gates must stay green.
 | Document | Read it for |
 |---|---|
 | [INTENTS.md](./INTENTS.md) | goals, non-goals, trade-offs, design principles |
+| [docs/SCOPE.md](./docs/SCOPE.md) | who Patina serves first, the rules new surface must meet, where evidence comes from, the platform policy; cite it when proposing new surface |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | crate boundaries, targets, drivers, traces, the native shim, the WASI host — the source of truth for system shape |
 | [VALIDATION.md](./VALIDATION.md) | capability acceptance gates (V0–V7), required evidence, the gate taxonomy |
 | [IMPLEMENTATION.md](./IMPLEMENTATION.md) | completed and planned implementation slices |
