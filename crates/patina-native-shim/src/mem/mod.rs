@@ -1401,12 +1401,23 @@ fn cached_ino(handle: u64) -> Option<u64> {
 /// A handle a write-back of `ino` can go through: a view that may write.
 fn writer_of(ino: u64) -> Option<u64> {
     let mappings = MAPPINGS.lock();
+    writer_among(&mappings, ino)
+}
+
+/// The driver handle of the writable shared views of `ino` that was opened
+/// first (the lowest handle), whatever address each view sits at. The
+/// write-back is a recorded operation that names its handle, and view
+/// addresses come from the host (ASLR), so choosing by address would let
+/// two runs of one seed, or a record and its replay, write back through
+/// different descriptions.
+fn writer_among(mappings: &Mappings, ino: u64) -> Option<u64> {
     mappings
         .views
         .all()
-        .find(|(_, _, object)| object.writes_back(ino))
-        .and_then(|(_, _, object)| object.desc())
-        .and_then(|desc| mappings.descs.get(&desc).copied())
+        .filter(|(_, _, object)| object.writes_back(ino))
+        .filter_map(|(_, _, object)| object.desc())
+        .filter_map(|desc| mappings.descs.get(&desc).copied())
+        .min()
 }
 
 // ---------------------------------------------------------------- the funnels' hooks
@@ -1824,6 +1835,42 @@ mod tests {
     const RW: c_int = PROT_READ | PROT_WRITE;
     /// A bit no architecture defines as a mapping flag.
     const UNKNOWN: c_int = 0x0020_0000;
+
+    #[test]
+    fn a_write_back_goes_through_the_first_opened_writer_wherever_it_is_mapped() {
+        // Two writable shared views of inode 7 through two descriptions
+        // (driver handles 40 and 41), a read-only one through handle 39, and a
+        // writable view of another inode through handle 38; the host puts
+        // views at either address order, and the choice must not follow it.
+        let view = |desc: DescId, ino: u64, maywrite: bool| Object::File {
+            ino,
+            desc,
+            shared: true,
+            maywrite,
+            secret: false,
+        };
+        for swapped in [false, true] {
+            let mut mappings = Mappings {
+                views: Ranges::new(),
+                caches: BTreeMap::new(),
+                handles: BTreeMap::new(),
+                descs: BTreeMap::from([(1, 41), (2, 40), (3, 39), (4, 38)]),
+                policies: Ranges::new(),
+                locks: Ranges::new(),
+                future: None,
+            };
+            let (low, high) = if swapped {
+                (0x9000, 0x1000)
+            } else {
+                (0x1000, 0x9000)
+            };
+            mappings.views.set(low, low + 0x1000, view(1, 7, true));
+            mappings.views.set(high, high + 0x1000, view(2, 7, true));
+            mappings.views.set(0x20000, 0x21000, view(3, 7, false));
+            mappings.views.set(0x30000, 0x31000, view(4, 8, true));
+            assert_eq!(writer_among(&mappings, 7), Some(40), "swapped {swapped}");
+        }
+    }
 
     #[test]
     fn a_private_mapping_is_private_whatever_the_type_bits_share() {
