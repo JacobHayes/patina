@@ -415,6 +415,85 @@ mod linux {
             }
         }
 
+        /// Class detector for the private execution budget. Instrument only
+        /// its unused storage before dispatch, then scan it after returning;
+        /// the measured Rust body and C thunk are the shipped ones.
+        #[test]
+        fn private_counter_execution_has_stack_margin() {
+            use std::io::Write;
+            if !kernel_supports(KernelFeature::Tsc) {
+                return;
+            }
+            let g =
+                assert_build_c_guest("signals/counter_small.c", CLink::PosixShimMeasuredCounter);
+            let output = assert_standalone_success(
+                &g.binary,
+                &["read-measure"],
+                &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+            );
+            let stdout = text(&output.stdout);
+            let used: usize = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("COUNTER_EXEC_BYTES "))
+                .expect("counter execution measurement")
+                .parse()
+                .unwrap();
+            let measurement =
+                format!("private counter execution (x86_64): writes={used} B, budget=65536 B");
+            eprintln!("{measurement}");
+            if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") {
+                writeln!(
+                    std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+                    "{measurement}\n"
+                )
+                .unwrap();
+            }
+            assert!(used > 1024 && used + 8192 <= 65536, "{measurement}");
+        }
+
+        /// The TSC mechanism predates SUD; its stack setup must not depend
+        /// on the SUD probe having published the auxiliary vector.
+        #[test]
+        fn counter_stacks_are_available_without_sud() {
+            use std::os::unix::process::ExitStatusExt;
+            if !kernel_supports(KernelFeature::Tsc) {
+                return;
+            }
+            let g = assert_build_c_guest("signals/counter_small.c", CLink::PosixShimWithoutSud);
+            let output = standalone_output(
+                &g.binary,
+                &["read-fault-nosud"],
+                &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+            );
+            assert_eq!(output.status.signal(), Some(11), "{output:?}");
+            assert_eq!(output.stdout, b"COUNTERS ANSWERED\n");
+            assert!(output.stderr.is_empty(), "{output:?}");
+        }
+
+        /// A second kernel frame must not make the runtime run below a
+        /// handler on a small alternate stack, including an autodisarmed one.
+        #[test]
+        fn counter_reads_inside_small_altstack_handlers_use_private_storage() {
+            if !kernel_supports(KernelFeature::Tsc) {
+                return;
+            }
+            let native = assert_build_c_guest("signals/counter_small.c", CLink::Unlinked);
+            let patina = assert_build_c_guest("signals/counter_small.c", CLink::PosixShim);
+            for suffix in ["", "-autodisarm", "-check", "-autodisarm-check"] {
+                assert_standalone_success(
+                    &native.binary,
+                    &[&format!("handler-counter-native{suffix}")],
+                    &[],
+                );
+                let output = assert_standalone_success(
+                    &patina.binary,
+                    &[&format!("handler-counter{suffix}")],
+                    &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+                );
+                assert_eq!(output.stdout, b"HANDLER COUNTERS ANSWERED\n");
+            }
+        }
+
         /// A guest SIGSEGV handler, through either door, is the guest's own
         /// action: the trap keeps the host disposition, so the counter read
         /// after the registration is still answered from the virtual clock

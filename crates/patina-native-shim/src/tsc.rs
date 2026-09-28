@@ -170,12 +170,14 @@ fn counter_now() -> Option<u64> {
 /// executable's text) and out-parameters for the counter value, the `rdtscp`
 /// auxiliary value, and the instruction length. `served` is non-null when the
 /// read is served off the alternate stack the trap's frame is on: it says
-/// where the live frames there are. The kernel uses a separate guarded shim
-/// stack meanwhile (`with_counter_altstack`), preserving those frames.
+/// the actual kernel registration and host mask captured before private
+/// execution. C installs a disjoint guarded signal stack before calling Rust;
+/// `with_counter_altstack` restores that registration after serving the read.
 ///
 /// Returns [`PATINA_TSC_NONE`] when the faulting instruction is not a counter
-/// read — the handler must then take the ordinary fault path, because the
-/// SIGSEGV is a genuine one. On a counter read it returns the kind and fills the
+/// read. The C entry admits only exact counter encodings here, before changing
+/// private-dispatch state; a disagreement is a named invariant failure, not a
+/// partially restored fallthrough. On a counter read it returns the kind and fills the
 /// out-parameters; the handler writes the registers and steps `RIP` by `length`.
 ///
 /// The exported name doubles as the audit's trap marker: a binary whose symbol

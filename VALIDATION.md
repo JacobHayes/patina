@@ -290,11 +290,29 @@ containment detector with a guarded `AT_MINSIGSTKSZ + 1536` stack: a native
 handler fits, repeated `rdtsc`/`rdtscp` reads return exact virtual values,
 stack registration is restored (ordinary and `SS_AUTODISARM`), and a later default fault kills with SIGSEGV
 (red before: the cut-down-stack room check aborted before the first answer).
+`counter_stacks_are_available_without_sud` forces the C SUD-unavailable branch
+while keeping TSC enabled (red: moving auxv publication back behind SUD makes
+stack preparation panic on the missing page size).
+`counter_reads_inside_small_altstack_handlers_use_private_storage` reads both
+counter forms inside native-capable small handlers, with and without autodisarm
+(red: excluding an interrupted SP already on the alternate stack dies with
+SIGSEGV). Separate larger-handler rows budget a sigaltstack ABI query too and
+assert the actual registration is still disabled inside an autodisarmed handler,
+then restored after return. These pins pair with the containment detector above
+and `private_counter_execution_has_stack_margin`, which sentinel-measures the
+first and repeated reads against the independent 64 KiB execution budget
+(red-proven with a 4 KiB acceptance cap).
 `native_signals::fault_front_stack_budgets_cover_the_compiled_paths` measures
-the returning front route's written high-water below the kernel frame and
-compiler-reported C frame sizes on both architectures and stable/MSRV, requiring
-margin under the room floor; the `front-small` case separately requires a
-named C-only stop on a native-capable stack with too little room for Rust.
+both returning fault routes' written high-water below the kernel frame and
+compiler-reported C frame sizes (including the x86 counter entry and both C
+stop callees) on both architectures and stable/MSRV, using the shipped
+`POSIX_C_FLAGS`. It requires margin under the room floor; `front-small` and
+`front-segv-small` separately require numeric C-only stops on guarded,
+native-capable `AT_MINSIGSTKSZ + 768` stacks (red: the unguarded SIGSEGV route
+hung). Their nested autodisarm counterparts exercise remembered bounds (red:
+disabling those bounds kills with SIGSEGV instead of the named stop). `kernel-gp`
+on x86 pairs the counter decoder checks with a genuine in-text SI_KERNEL fault:
+its handler sees the original stack/mask and subsequent counter reads still work.
 The budget detector is red-proven by lowering the front floor to 2 KiB.
 Measurements are retained in CI job summaries and logs. Sentinel high-water
 measures writes, not untouched reserved slots; compiler frame sizes complement it.

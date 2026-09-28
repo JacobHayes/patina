@@ -225,18 +225,32 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   (`sys::pal::unix::stack_overflow::init`), so `sigaction` reports the guest's
   virtual `SIGSEGV` action, not the trap's. The trap's host action carries that
   action's `SA_ONSTACK` so a guard-page fault can reach it at all, which puts
-  counter reads on std's 8 KiB signal stack too: the trap answers them back on
-  the interrupted stack, since the runtime does not fit there, with the
-  kernel using a separate guarded shim-owned stack meanwhile
+  counter reads on std's 8 KiB signal stack too. The trap answers every
+  alternate-stack-resident read on a private execution stack, including reads inside an alternate-stack
+  handler (whose autodisarmed `uc_stack` may be disabled), with the kernel
+  using a disjoint guarded shim-owned signal stack meanwhile
   (`with_counter_altstack`), and no guest code runs until the read is answered
   (a delivery that would run a handler is a named stop). Never require that
   small guest stack to fit a second kernel frame: its size depends on the
   host's xsave features. Restore the actual kernel registration, including
-  autodisarm, before returning to the trap's original frame. The front
-  handler's room check must precede every call (even errno access), and its
-  short-stack stop must stay C-only; stable/MSRV debug Rust frames can exceed
+  autodisarm, before returning to the trap's original frame. Prepare both
+  regions before arming main/child threads, never from a constrained trap;
+  auxv publication must not depend on SUD support. Keep a C transition guard
+  until the reply is complete, hold asynchronous signals before switching,
+  and retain their original mask for SERVING. Both the front handler and the
+  counter handler's genuine-fault route check room before errno or Rust;
+  remembered bounds must cover autodisarmed handlers too. These are admission
+  hints, not shadow kernel registrations; update them on guest registration and
+  frame/batch restoration, never for temporary private stacks. Only exact counter
+  encodings may change private-dispatch state: an unrelated in-text SI_KERNEL
+  #GP (e.g. hlt) still routes normally. The short-stack stop, including numeric
+  diagnostics, must stay C-only; stable/MSRV debug Rust frames can exceed
   the headroom a native handler needs. `fault_front_stack_budgets_cover_the_compiled_paths`
-  measures the route and the tiny C entry/stop on both Linux architectures.
+  measures both routes and every C entry/stop frame on both Linux architectures,
+  using the shipped `POSIX_C_FLAGS`. The guarded small-stack probes leave
+  only `AT_MINSIGSTKSZ + 768` bytes. `private_counter_execution_has_stack_margin`
+  independently sentinel-measures the private execution region against its
+  64 KiB budget; do not infer runtime room from the nested-signal stack's size.
   std's overflow
   report itself (a `write` and an `abort` through the shim) still overflows that
   stack, so a Rust stack overflow dies of SIGSEGV without std's message. Check

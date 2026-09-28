@@ -61,13 +61,25 @@ pub(super) fn trap_routed(sig: u8) -> bool {
 
 /// The front handler's address, once the C layer installed it.
 static FRONT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static STACK_CHANGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Publish admission-only bounds, never the shim's temporary registration.
+pub(super) fn stack_changed(stack: &Stack) {
+    let callback = STACK_CHANGED.load(Ordering::Relaxed);
+    if callback != 0 {
+        // SAFETY: the C front installs this process-lifetime callback at init.
+        let callback: unsafe extern "C" fn(*const Stack) = unsafe { std::mem::transmute(callback) };
+        unsafe { callback(stack) };
+    }
+}
 
 /// The C layer put the fault front handler at `handler` before the signals
 /// an instruction raises, SIGSEGV where the counter trap does not own it.
 #[unsafe(no_mangle)]
-pub extern "C" fn patina_fault_front_installed(handler: usize) {
+pub extern "C" fn patina_fault_front_installed(handler: usize, stack_changed: usize) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     FRONT.store(handler, Ordering::Relaxed);
+    STACK_CHANGED.store(stack_changed, Ordering::Relaxed);
 }
 
 /// Whether the fault front handler owns `sig`'s host disposition: a signal
@@ -472,21 +484,31 @@ const SENT_SLOTS: usize = SIGSEGV as usize + 1;
 /// (`c/posix/init.c`).
 #[repr(C)]
 pub struct Served {
-    /// The lowest address of the trap's live frames on the alternate stack.
-    live: usize,
-    /// The alternate stack that frame saved (`uc_stack`), which its
-    /// `rt_sigreturn` registers again.
-    stack: *const Stack,
+    /// Actual kernel registration before the C entry installed the stop stack.
+    before: Stack,
+    /// Host mask before the C entry held asynchronous signals.
+    interrupted: u64,
 }
 
-/// A host mapping, not guest memory: one guard page followed by room for
-/// the host's largest signal frame and 64 KiB for the shim's named stop.
-struct CounterStack(Cell<Option<(Stack, usize)>>);
+/// Published to the C entry before arming: no Rust call or allocation is
+/// needed on a small guest signal stack to find the private execution stack.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CounterStacks {
+    signal: Stack,
+    top: usize,
+}
+
+/// One host mapping: guard, nested-signal region, guard, execution region.
+/// They are disjoint so installing the signal stack cannot overwrite live
+/// runtime frames, and restoring the guest registration never gets EPERM.
+struct CounterStack(Cell<Option<(CounterStacks, usize, usize)>>);
+const COUNTER_EXECUTION: usize = 64 * 1024;
 
 impl CounterStack {
-    fn get(&self) -> Stack {
-        if let Some((stack, _)) = self.0.get() {
-            return stack;
+    fn prepare(&self, publication: usize) -> CounterStacks {
+        if let Some((stacks, _, _)) = self.0.get() {
+            return stacks;
         }
         use patina_dst_syscalls::Syscall;
         const AT_PAGESZ: u64 = 6;
@@ -498,7 +520,9 @@ impl CounterStack {
             .expect("counter stack size")
             / page
             * page;
-        let length = size.checked_add(page).expect("counter stack guard");
+        let length = size
+            .checked_add(2 * page + COUNTER_EXECUTION)
+            .expect("counter stack guards");
         // PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS. Host aliases only; this
         // mapping must never enter the guest's mapping or descriptor tables.
         let base = host(
@@ -520,17 +544,32 @@ impl CounterStack {
         {
             fatal("host counter alternate stack protection failed (mprotect)");
         }
-        self.0.set(Some((stack, page)));
-        stack
+        let execution = stack.base + size + page;
+        if host(
+            Syscall::N_mprotect.number().into(),
+            [execution as u64, COUNTER_EXECUTION as u64, 3, 0, 0, 0],
+        ) != 0
+        {
+            fatal("host counter execution stack protection failed (mprotect)");
+        }
+        let stacks = CounterStacks {
+            signal: stack,
+            top: execution + COUNTER_EXECUTION,
+        };
+        self.0.set(Some((stacks, page, publication)));
+        stacks
     }
 
     fn release(&self) {
-        if let Some((stack, page)) = self.0.take() {
+        if let Some((stacks, page, publication)) = self.0.take() {
+            // SAFETY: C's thread-local publication lives until this host thread exits.
+            unsafe { (publication as *mut CounterStacks).write(CounterStacks::default()) };
+            let stack = stacks.signal;
             if host(
                 patina_dst_syscalls::Syscall::N_munmap.number().into(),
                 [
                     (stack.base - page) as u64,
-                    (stack.size + page) as u64,
+                    (stack.size + 2 * page + COUNTER_EXECUTION) as u64,
                     0,
                     0,
                     0,
@@ -542,6 +581,16 @@ impl CounterStack {
             }
         }
     }
+}
+
+/// Prepare while still on the ordinary thread stack, before PR_SET_TSC.
+/// # Safety
+/// `out` is C thread-local storage that lives until the host thread exits.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_counter_stacks_prepare(out: *mut CounterStacks) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let stacks = COUNTER_STACK.with(|stack| stack.prepare(out as usize));
+    unsafe { out.write(stacks) };
 }
 
 pub(crate) fn release_counter_stack() {
@@ -562,43 +611,21 @@ pub(crate) fn release_counter_stack() {
 /// frames, nor require the guest's stack to fit two host signal frames (Rust
 /// std's 8 KiB stack cannot on hosts with large xsave frames). At the read's
 /// end the kernel holds again exactly the registration it held at entry,
-/// including SS_AUTODISARM's disabled state while its outer frame runs.
+/// including SS_AUTODISARM's disabled state while its outer frame runs. C has
+/// already held asynchronous signals, switched execution stacks, and installed
+/// the disjoint signal region before entering Rust; no allocation happens here.
 pub(crate) fn with_counter_altstack<T>(served: *const Served, body: impl FnOnce() -> T) -> T {
-    // SAFETY: null, or the trap handler's description of its own frame.
+    // SAFETY: null, or the C entry's captured kernel registration and mask.
     let Some(served) = (unsafe { served.as_ref() }) else {
         return body();
     };
-    // SAFETY: the trap frame's `uc_stack`.
-    let frame = unsafe { *served.stack };
-    let live = served.live & !15;
-    if frame.flags & SS_DISABLE != 0 || !on(live, (frame.base, frame.size)) {
-        return body();
-    }
-    let mut interrupted = 0u64;
-    let held = host_mask(!SYNCHRONOUS);
-    if host(
-        SYS_RT_SIGPROCMASK,
-        [
-            SIG_SETMASK as u64,
-            &held as *const _ as u64,
-            &mut interrupted as *mut _ as u64,
-            SIGSET_BYTES as u64,
-            0,
-            0,
-        ],
-    ) != 0
-    {
-        fatal("host signal mask install failed (rt_sigprocmask)");
-    }
-    if SERVING.replace(Some(interrupted)).is_some() {
+    if SERVING.replace(Some(served.interrupted)).is_some() {
         crate::trap_fatal(
             "a counter read nested in one the trap serves off the alternate stack: not modeled",
         );
     }
-    let before = kernel_altstack();
-    install_altstack(COUNTER_STACK.with(CounterStack::get));
     let value = body();
-    install_altstack(before);
+    install_altstack(served.before);
     if SERVING.take().is_none() {
         crate::trap_fatal(
             "a counter read served off the alternate stack ended twice: shim state is corrupt",
@@ -888,16 +915,19 @@ pub(super) fn registered(stack: Stack) {
 /// now. A disabled one is not taken as the guest's: the kernel also reports
 /// an `SS_AUTODISARM` stack disabled while a handler runs on it.
 pub(super) fn restored(stack: Stack) {
-    let known = SEGV.with_borrow(|segv| segv.registered);
-    if stack.flags & SS_DISABLE == 0 && known != Some((stack.base, stack.size)) {
-        registered(stack);
+    if stack.flags & SS_DISABLE == 0 {
+        stack_changed(&stack);
+        let known = SEGV.with_borrow(|segv| segv.registered);
+        if known != Some((stack.base, stack.size)) {
+            registered(stack);
+        }
     }
 }
 
 /// After a delivery batch: the kernel's alternate stack is what the last
 /// frame's return restored ([`restored`]).
 pub(super) fn batch_returned() {
-    if trap_routed(SIGSEGV) {
+    if trap_routed(SIGSEGV) || FRONT.load(Ordering::Relaxed) != 0 {
         restored(kernel_altstack());
     }
 }
@@ -1093,10 +1123,8 @@ pub unsafe extern "C" fn patina_signal_fault_return(frame: *const Frame) {
             segv.current = SegvBlock::Yes;
         }
     });
-    if trap_routed(SIGSEGV) {
-        // SAFETY: the frame's `uc_stack`, as the handler left it.
-        restored(unsafe { *frame.stack });
-    }
+    // SAFETY: the frame's `uc_stack`, as the handler left it.
+    restored(unsafe { *frame.stack });
     let me = current_task();
     let deliverable = {
         let mut state = lock_state();

@@ -25,6 +25,17 @@
 /// [`POSIX_C_FAMILY_SOURCES`], which must be staged beside it (at their
 /// relative paths) before it is compiled.
 pub const POSIX_C_SOURCE: &str = include_str!("../c/patina_posix.c");
+/// Code-generation flags shared by the shipped POSIX object and its tests.
+/// Unwind tables let glibc's forced pthread unwind cross C shim frames.
+pub const POSIX_C_FLAGS: &[&str] = &[
+    "-std=c11",
+    "-D_POSIX_C_SOURCE=200809L",
+    "-fno-stack-protector",
+    "-fasynchronous-unwind-tables",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+];
 /// The per-family slices `c/patina_posix.c` includes, as `(path relative to the
 /// umbrella, source)`. One entry per file under `c/posix/`; the umbrella names
 /// each by that relative path, so a slice added there must be added here (the

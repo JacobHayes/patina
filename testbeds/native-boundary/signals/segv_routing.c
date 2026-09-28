@@ -25,10 +25,13 @@
  *                 action, never the SIGSEGV handler (which exits 42);
  *   front-small   the masked-fault signal's SA_ONSTACK handler, which leaves
  *                 by siglongjmp, on an alternate stack with room for the
- *                 kernel's frame and 1.5 KiB: natively it runs, under the
+ *                 kernel's frame and 768 bytes: natively it runs, under the
  *                 shim the fault handler's route would not fit below the
  *                 frame, a named stop;
- *   front-room    sentinel high-water measurement of a returning front-routed
+ *   front-segv-small  the same admission check through the x86 counter entry;
+ *   front[-segv]-autodisarm-small  nested faults while uc_stack is disabled;
+ *   kernel-gp     (x86_64) hlt's SI_KERNEL fault preserves registration/mask;
+ *   front-room / front-segv-room  sentinel high-water measurement of a returning
  *                 handler, including its shim return path, below the kernel frame;
  *   order-shared  a process-directed SIGSEGV pending with a thread-directed
  *                 SIGUSR1: the private one is dequeued first, so the SIGSEGV
@@ -276,15 +279,69 @@ static void on_escape(int sig, siginfo_t *info, void *context) {
     siglongjmp(escape, 1);
 }
 
-static void front_small(void) {
-    size_t size = getauxval(AT_MINSIGSTKSZ) + 1536;
-    char *stack = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    assert(stack != MAP_FAILED);
-    stack_t registered = {.ss_sp = stack, .ss_size = size, .ss_flags = 0};
+static volatile char *nested_page;
+static int nested_segv;
+static void on_small_nested(int sig, siginfo_t *info, void *context) {
+    (void)sig; (void)info; (void)context;
+    if (nested_segv) store(nested_page);
+    else {
+#if defined(__x86_64__)
+        __asm__ volatile("ud2");
+#else
+        __asm__ volatile("udf #0");
+#endif
+    }
+}
+
+static void front_small(int segv, int nested) {
+    size_t size = nested ? 2 * getauxval(AT_MINSIGSTKSZ) + 1536 :
+                           getauxval(AT_MINSIGSTKSZ) + 768;
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    size_t rounded = (size + page - 1) / page * page;
+    char *mapping = mmap(NULL, rounded + page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(mapping != MAP_FAILED);
+    assert(mprotect(mapping + page, rounded, PROT_READ | PROT_WRITE) == 0);
+    stack_t registered = {.ss_sp = mapping + page, .ss_size = size,
+                          .ss_flags = nested ? (int)SS_AUTODISARM : 0};
     assert(sigaltstack(&registered, NULL) == 0);
-    if (sigsetjmp(escape, 1) == 0) other_fault(on_escape, 0);
+    if (sigsetjmp(escape, 1) == 0) {
+        if (nested) {
+            nested_page = mapping;
+            nested_segv = segv;
+            install(segv ? SIGSEGV : SIGILL, on_escape, SA_ONSTACK, 0);
+            install(SIGUSR1, on_small_nested, SA_ONSTACK, 0);
+            assert(raise(SIGUSR1) == 0);
+        } else if (segv) {
+            install(SIGSEGV, on_escape, SA_ONSTACK, 0);
+            store(mapping);
+        } else {
+            other_fault(on_escape, 0);
+        }
+    }
     say("FRONT SMALL RAN\n");
 }
+
+#if defined(__x86_64__)
+static void on_gp(int sig, siginfo_t *info, void *context) {
+    assert(sig == SIGSEGV && info->si_code == SI_KERNEL);
+    stack_t current;
+    sigset_t mask;
+    assert(sigaltstack(NULL, &current) == 0);
+    assert(current.ss_sp == alt && current.ss_size == sizeof alt && current.ss_flags == SS_ONSTACK);
+    assert(sigprocmask(SIG_SETMASK, NULL, &mask) == 0);
+    assert(sigismember(&mask, SIGUSR1) == 0);
+    ((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP]++;
+}
+static void kernel_gp(void) {
+    on_alt_stack();
+    install(SIGSEGV, on_gp, SA_ONSTACK, 0);
+    __asm__ volatile("hlt");
+    /* A genuine #GP must leave subsequent counter dispatch usable. */
+    unsigned int lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    say("KERNEL GP RAN\n");
+}
+#endif
 
 static uintptr_t front_frame;
 static void on_front_room(int sig, siginfo_t *info, void *context) {
@@ -293,25 +350,30 @@ static void on_front_room(int sig, siginfo_t *info, void *context) {
 #if defined(__x86_64__)
     (void)info;
     front_frame = (uintptr_t)uc - sizeof(void *);
-    uc->uc_mcontext.gregs[REG_RIP] += 2; /* ud2 */
+    uc->uc_mcontext.gregs[REG_RIP] += sig == SIGSEGV ? 3 : 2; /* store / ud2 */
 #else
     front_frame = (uintptr_t)info;
     uc->uc_mcontext.pc += 4; /* udf */
 #endif
 }
 
-static void front_room(void) {
+static void front_room(int segv) {
     /* No guest libc calls on this stack: measure the front route and return,
      * not a guest handler's arbitrary stack needs. Sentinel bytes measure
      * writes, not untouched reserved slots; pair with C compiler stack usage. */
+    volatile char *page = no_access();
     memset(alt, 0xa5, sizeof alt);
     on_alt_stack();
-    install(SIGILL, on_front_room, SA_ONSTACK, 0);
+    install(segv ? SIGSEGV : SIGILL, on_front_room, SA_ONSTACK, 0);
+    if (segv) {
+        store(page);
+    } else {
 #if defined(__x86_64__)
-    __asm__ volatile("ud2");
+        __asm__ volatile("ud2");
 #else
-    __asm__ volatile("udf #0");
+        __asm__ volatile("udf #0");
 #endif
+    }
     size_t low = 0;
     while (low < sizeof alt && (unsigned char)alt[low] == 0xa5) ++low;
     assert(front_frame > (uintptr_t)alt + low);
@@ -535,9 +597,21 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[1], "masked-fault") == 0) {
         masked_fault();
     } else if (strcmp(argv[1], "front-small") == 0) {
-        front_small();
+        front_small(0, 0);
+    } else if (strcmp(argv[1], "front-segv-small") == 0) {
+        front_small(1, 0);
+    } else if (strcmp(argv[1], "front-autodisarm-small") == 0) {
+        front_small(0, 1);
+    } else if (strcmp(argv[1], "front-segv-autodisarm-small") == 0) {
+        front_small(1, 1);
+#if defined(__x86_64__)
+    } else if (strcmp(argv[1], "kernel-gp") == 0) {
+        kernel_gp();
+#endif
     } else if (strcmp(argv[1], "front-room") == 0) {
-        front_room();
+        front_room(0);
+    } else if (strcmp(argv[1], "front-segv-room") == 0) {
+        front_room(1);
     } else if (strcmp(argv[1], "order-shared") == 0) {
         ordered_delivery(1, ORDER_RETURN);
     } else if (strcmp(argv[1], "order-mask") == 0) {

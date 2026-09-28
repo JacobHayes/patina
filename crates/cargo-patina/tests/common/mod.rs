@@ -140,18 +140,17 @@ pub fn compile_posix_object(dir: &Path) -> PathBuf {
     .unwrap();
     let source = dir.join("patina_posix.c");
     std::fs::write(&source, patina_dst_native_shim::POSIX_C_SOURCE).unwrap();
+    compile_staged_posix_object(dir)
+}
+
+/// Recompile staged sources, also used by branch-mutation detectors.
+pub fn compile_staged_posix_object(dir: &Path) -> PathBuf {
+    let source = dir.join("patina_posix.c");
     let object = dir.join("patina_posix.o");
     let status = c_compiler()
-        .args([
-            "-std=c11",
-            "-D_POSIX_C_SOURCE=200809L",
-            "-fno-stack-protector",
-            "-fasynchronous-unwind-tables",
-            "-fstack-usage",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-        ])
+        .args(patina_dst_native_shim::POSIX_C_FLAGS)
+        // Metadata only: the code-generation flags are the shipped object's.
+        .arg("-fstack-usage")
         .arg("-I")
         .arg(dir)
         .arg("-c")

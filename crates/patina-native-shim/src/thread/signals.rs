@@ -1313,6 +1313,7 @@ pub unsafe extern "C" fn patina_signal_altstack(stack: *const Stack, old: *mut S
     }
     // The new stack took, whether or not the old one can be copied out.
     if let Some(stack) = stack {
+        fault::stack_changed(&stack);
         FRAME_DIRTY.with(|dirty| dirty.set(dirty.get() | FRAME_STACK));
         if trap_routed(SIGSEGV) {
             fault::registered(stack);

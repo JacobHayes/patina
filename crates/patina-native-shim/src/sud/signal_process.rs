@@ -11,8 +11,9 @@ use super::*;
 /// [`prctl_option`].
 pub(super) const PR_GET_AUXV: u32 = 0x4155_5856;
 
-/// The shim's own **scrubbed** auxv region, captured once at init by the C
-/// arming path (`patina_sud_scrub_auxv`): the base pointer of the initial-stack
+/// The shim's own auxv region, published by C after AT_RANDOM determinization
+/// independently of SUD support, then scrubbed in place before SUD arming:
+/// the base pointer of the initial-stack
 /// aux array and its byte length through the terminating `AT_NULL` pair
 /// (inclusive). OWNED by Rust and written by C — the same C→Rust ownership
 /// direction as [`crate::PATINA_SUD_ARMED`], so the lib's own test binary (which

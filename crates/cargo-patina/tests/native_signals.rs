@@ -75,6 +75,8 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
         "nodefer-std",
         "nodefer-rt",
         "autodisarm-high",
+        #[cfg(target_arch = "x86_64")]
+        "kernel-gp",
     ] {
         let oracle = assert_standalone_success(&native.binary, &[case], &[]);
         let output = assert_standalone_success(&patina.binary, &[case], &env);
@@ -87,11 +89,31 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
     for (case, stop) in [
         ("nodefer-edit", "saved mask"),
         ("front-small", "too little"),
+        ("front-segv-small", "too little"),
+        ("front-autodisarm-small", "too little"),
+        ("front-segv-autodisarm-small", "too little"),
     ] {
         assert_standalone_success(&native.binary, &[case], &[]);
         let output = standalone_output(&patina.binary, &[case], &env);
         assert_eq!(output.status.signal(), Some(6), "{case}: {output:?}");
         assert!(text(&output.stderr).contains(stop), "{case}: {output:?}");
+        if stop == "too little" {
+            let stderr = text(&output.stderr);
+            let (signal, room) = stderr
+                .rsplit_once("signal ")
+                .unwrap()
+                .1
+                .split_once(" bytes left ")
+                .unwrap();
+            assert!(
+                (1..=64).contains(&signal.parse::<u32>().unwrap()),
+                "{stderr}"
+            );
+            assert!(
+                (1..4096).contains(&room.trim().parse::<usize>().unwrap()),
+                "{stderr}"
+            );
+        }
     }
     let trap = cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Tsc);
     for case in ["nested", "nested-stack", "reraise", "masked-fault"] {
@@ -116,18 +138,21 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
 fn fault_front_stack_budgets_cover_the_compiled_paths() {
     use std::io::Write;
     let patina = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShim);
-    let output = assert_standalone_success(
-        &patina.binary,
-        &["front-room"],
-        &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
-    );
-    let stdout = text(&output.stdout);
-    let route: usize = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("FRONT_ROUTE_BYTES "))
-        .expect("route measurement")
-        .parse()
-        .unwrap();
+    let measure = |case: &str| -> usize {
+        let output = assert_standalone_success(
+            &patina.binary,
+            &[case],
+            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+        );
+        text(&output.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix("FRONT_ROUTE_BYTES "))
+            .expect("route measurement")
+            .parse()
+            .unwrap()
+    };
+    let route = measure("front-room");
+    let segv_route = measure("front-segv-room");
     let dir = tempfile::tempdir().unwrap();
     common::compile_posix_object(dir.path());
     let usage = std::fs::read_to_string(dir.path().join("patina_posix.su")).unwrap();
@@ -145,9 +170,14 @@ fn fault_front_stack_budgets_cover_the_compiled_paths() {
             .unwrap_or_else(|| panic!("missing {name} stack usage: {usage}"))
     };
     let front = frame("patina_fault_front");
-    let stop = frame("patina_fault_stack_short");
+    let stop = frame("patina_fault_stack_short") + frame("patina_fault_stop");
+    let tsc = if cfg!(target_arch = "x86_64") {
+        frame("patina_tsc_sigsegv")
+    } else {
+        0
+    };
     let measurement = format!(
-        "fault stack ({arch}): route writes={route} B; C front={front} B; C short-stop={stop} B",
+        "fault stack ({arch}): front/segv route writes={route}/{segv_route} B; C front/tsc={front}/{tsc} B; C short-stop+abort={stop} B",
         arch = std::env::consts::ARCH,
     );
     eprintln!("{measurement}");
@@ -171,14 +201,21 @@ fn fault_front_stack_budgets_cover_the_compiled_paths() {
         .unwrap()
         .parse()
         .unwrap();
-    assert!(route > 512, "vacuous route measurement: {measurement}");
     assert!(
-        route + 512 <= floor,
+        route > 512 && segv_route > 512,
+        "vacuous route measurement: {measurement}"
+    );
+    assert!(
+        route.max(segv_route) + 512 <= floor,
         "route needs margin: {measurement}, floor={floor}"
     );
-    // The short path's only callee is glibc's leaf syscall shuffle. Leave
-    // at least half the front-small guest's 1536-byte headroom unused.
-    assert!(front + stop <= 768, "short stop grew: {measurement}");
+    // Include both C stop frames, not just the formatter. Their host vehicle
+    // is glibc's leaf syscall shuffle; the guarded small-stack rows prove the
+    // complete path fits the actual kernel frame plus 768 bytes.
+    assert!(
+        front.max(tsc) + stop <= 768,
+        "short stop grew: {measurement}"
+    );
 }
 
 /// A synchronous signal an instruction raises (SIGBUS, SIGFPE, SIGILL,
