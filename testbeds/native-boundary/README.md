@@ -55,6 +55,24 @@ requires live SUD in both Rust tests and the wrapper, and is set on x86_64 Linux
 CI rows; a filtered capability probe is a failure, not a green refusal. The wrapper's selftest
 plants a false-negative probe, a duplicate receipt and a failed child.
 
+### Small signal stacks
+
+`signals/frame_size.h` measures a delivered kernel frame on a large, aligned
+alternate stack and restores the previous action, mask, and registration.
+`segv_routing.c` and `counter_small.c` add their intended headroom to that
+measurement, aligning the final top down (never adding slack). Calibration is
+repeated in each process; these guests do not change extended-state permissions
+afterward. `AT_MINSIGSTKSZ` can include unrequested AMX tile state and is only a
+diagnostic, not a sizing oracle. The `frame-size` cases and CI test summary
+report the measured/advertised sizes and CPU flags.
+
+The native runs still prove the small handlers fit. Shim runs require the same
+named stops and exact counter/restoration results as before. A test-only C
+mutation moves the Rust route ahead of admission; the short-stack detector
+rejects it on both Linux architectures. The compiler-frame/route-write budget
+check also self-tests a structural ban on pre-admission Rust calls, including
+leaves that might otherwise happen to fit in the remaining space.
+
 ## Coverage boundaries
 
 Syscall conformance owns host-equivalent fd/fs/readiness semantics, including

@@ -77,7 +77,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/auxv.h>
+#include "frame_size.h"
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
@@ -294,8 +294,10 @@ static void on_small_nested(int sig, siginfo_t *info, void *context) {
 }
 
 static void front_small(int segv, int nested) {
-    size_t size = nested ? 2 * getauxval(AT_MINSIGSTKSZ) + 1536 :
-                           getauxval(AT_MINSIGSTKSZ) + 768;
+    size_t frame = kernel_frame_size();
+    size_t size = nested ? 2 * frame + 1536 : frame + 768;
+    /* Match the probe's aligned top, never round up the intended headroom. */
+    size &= ~(size_t)63;
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
     size_t rounded = (size + page - 1) / page * page;
     char *mapping = mmap(NULL, rounded + page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -347,12 +349,10 @@ static uintptr_t front_frame;
 static void on_front_room(int sig, siginfo_t *info, void *context) {
     ucontext_t *uc = context;
     (void)sig;
+    front_frame = kernel_frame_base(info, context);
 #if defined(__x86_64__)
-    (void)info;
-    front_frame = (uintptr_t)uc - sizeof(void *);
     uc->uc_mcontext.gregs[REG_RIP] += sig == SIGSEGV ? 3 : 2; /* store / ud2 */
 #else
-    front_frame = (uintptr_t)info;
     uc->uc_mcontext.pc += 4; /* udf */
 #endif
 }
@@ -540,7 +540,7 @@ static void on_alarm(int sig) {
 
 static void alarm_reads(int small) {
     if (small) {
-        size_t size = 2 * getauxval(AT_MINSIGSTKSZ) - 512;
+        size_t size = (2 * kernel_frame_size() - 512) & ~(size_t)63;
         void *stack = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         assert(stack != MAP_FAILED);
         stack_t registered = {.ss_sp = stack, .ss_size = size, .ss_flags = 0};
@@ -582,7 +582,9 @@ static void prefixed(void) {
 
 int main(int argc, char **argv) {
     assert(argc == 2);
-    if (strcmp(argv[1], "overflow") == 0) {
+    if (strcmp(argv[1], "frame-size") == 0) {
+        report_kernel_frame_size();
+    } else if (strcmp(argv[1], "overflow") == 0) {
         overflow();
     } else if (strcmp(argv[1], "raise") == 0) {
         raised();

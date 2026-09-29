@@ -330,6 +330,8 @@ pub enum CLink {
     PosixShimWithoutSud,
     /// Sentinel-instrument the private execution region without changing its body.
     PosixShimMeasuredCounter,
+    /// Test-only mutation: cross a Rust boundary before fault-stack admission.
+    PosixShimEarlyRust,
     /// The POSIX layer over a shim built with `planted-faults`.
     PosixShimPlanted,
 }
@@ -359,6 +361,7 @@ pub fn assert_build_c_guest(name: &str, link: CLink) -> Guest {
         CLink::PosixShim
         | CLink::PosixShimWithoutSud
         | CLink::PosixShimMeasuredCounter
+        | CLink::PosixShimEarlyRust
         | CLink::PosixShimPlanted => {
             static PLANTED: OnceLock<PathBuf> = OnceLock::new();
             let (_, object) = POSIX.get_or_init(|| {
@@ -373,7 +376,9 @@ pub fn assert_build_c_guest(name: &str, link: CLink) -> Guest {
             };
             if matches!(
                 link,
-                CLink::PosixShimWithoutSud | CLink::PosixShimMeasuredCounter
+                CLink::PosixShimWithoutSud
+                    | CLink::PosixShimMeasuredCounter
+                    | CLink::PosixShimEarlyRust
             ) {
                 super::compile_posix_object(dir.path());
                 let source = dir.path().join("posix/init.c");
@@ -394,6 +399,22 @@ pub fn assert_build_c_guest(name: &str, link: CLink) -> Guest {
                         if (65536 - first > patina_test_counter_written)
                             patina_test_counter_written = 65536 - first;
                     "#));
+                    std::fs::write(&source, code).unwrap();
+                } else if matches!(link, CLink::PosixShimEarlyRust) {
+                    let admission = "uintptr_t room = patina_fault_room(uc, (uintptr_t)__builtin_frame_address(0));\n    if (room < PATINA_FRONT_FLOOR) patina_fault_stack_short(sig, room);";
+                    assert_eq!(
+                        code.matches(admission).count(),
+                        2,
+                        "both fault admission sites"
+                    );
+                    code = code.replace(admission, "");
+                    for call in [
+                        "int route = patina_signal_fault(info, &frame, &handler);",
+                        "int route = patina_fault_route(sig, info, &frame, &handler);",
+                    ] {
+                        assert_eq!(code.matches(call).count(), 1, "Rust route mutation site");
+                        code = code.replace(call, &format!("{call}\n    {admission}"));
+                    }
                     std::fs::write(&source, code).unwrap();
                 } else {
                     let probe =

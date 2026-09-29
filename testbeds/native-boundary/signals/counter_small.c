@@ -10,7 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/auxv.h>
+#include "frame_size.h"
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
@@ -43,13 +43,19 @@ static void handler(int sig) {
 
 int main(int argc, char **argv) {
     assert(argc == 2);
+    if (strcmp(argv[1], "frame-size") == 0) {
+        report_kernel_frame_size();
+        return 0;
+    }
+    size_t frame = kernel_frame_size();
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
     int in_handler = strncmp(argv[1], "handler-counter", 15) == 0;
     check_in_handler = strstr(argv[1], "check") != NULL;
     /* The tight case makes no shim ABI calls on the handler's stack. The
      * separate query case also budgets the sigaltstack ABI's Rust frames. */
-    size_t size = in_handler ? 2 * getauxval(AT_MINSIGSTKSZ) + (check_in_handler ? 8192 : 768) :
-                               getauxval(AT_MINSIGSTKSZ) + 1536;
+    size_t size = in_handler ? 2 * frame + (check_in_handler ? 8192 : 768) : frame + 1536;
+    /* Match the probe's aligned top, without adding any unbudgeted slack. */
+    size &= ~(size_t)63;
     size_t rounded = (size + page - 1) / page * page;
     char *mapping = mmap(NULL, rounded + page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(mapping != MAP_FAILED);

@@ -255,7 +255,10 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   the headroom a native handler needs. `fault_front_stack_budgets_cover_the_compiled_paths`
   measures both routes and every C entry/stop frame on both Linux architectures,
   using the shipped `POSIX_C_FLAGS`. The guarded small-stack probes leave
-  only `AT_MINSIGSTKSZ + 768` bytes. `private_counter_execution_has_stack_margin`
+  only a measured kernel frame plus at most 768 bytes. Never size these
+  deliberately short test stacks from `AT_MINSIGSTKSZ`: on AMX hosts it
+  budgets tile state the process may not have permission to use. The shared
+  testbed frame probe measures native kernel storage, excluding shim frames. `private_counter_execution_has_stack_margin`
   independently sentinel-measures the private execution region against its
   64 KiB budget; do not infer runtime room from the nested-signal stack's size.
   std's overflow

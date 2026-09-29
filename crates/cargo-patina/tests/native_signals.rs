@@ -130,6 +130,95 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
     }
 }
 
+/// The sizing oracle is a delivered frame, not the host's maximum possible
+/// extended-state allocation. Compare native/shim calibration, retain CPU
+/// evidence in CI, and prevent the small-stack fixtures from using auxv again.
+#[cfg(target_os = "linux")]
+#[test]
+fn small_signal_stacks_use_measured_kernel_frames() {
+    use std::io::Write;
+    let mut measurements = Vec::new();
+    for source in ["signals/segv_routing.c", "signals/counter_small.c"] {
+        if source.ends_with("counter_small.c") && !cfg!(target_arch = "x86_64") {
+            continue;
+        }
+        let fixture = std::fs::read_to_string(guest_source(source)).unwrap();
+        assert!(
+            !fixture.contains("getauxval("),
+            "auxv must not size {source}"
+        );
+        let native = assert_build_c_guest(source, CLink::Unlinked);
+        let patina = assert_build_c_guest(source, CLink::PosixShim);
+        let parse = |output: &std::process::Output| -> String {
+            text(&output.stdout)
+                .lines()
+                .find(|line| line.starts_with("KERNEL_FRAME_BYTES "))
+                .expect("kernel frame measurement")
+                .to_owned()
+        };
+        let native = parse(&assert_standalone_success(
+            &native.binary,
+            &["frame-size"],
+            &[],
+        ));
+        let patina = parse(&assert_standalone_success(
+            &patina.binary,
+            &["frame-size"],
+            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+        ));
+        assert_eq!(native, patina, "calibration included shim frames: {source}");
+        let frame: usize = native.split_whitespace().nth(1).unwrap().parse().unwrap();
+        assert!(
+            (512..128 * 1024).contains(&frame),
+            "vacuous calibration: {native}"
+        );
+        measurements.push(format!("kernel frame ({source}): {native}"));
+    }
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap();
+    let flags = cpuinfo
+        .lines()
+        .find(|line| {
+            line.split_once(':')
+                .is_some_and(|(key, _)| matches!(key.trim(), "flags" | "Features"))
+        })
+        .expect("CPU feature flags");
+    measurements.push(format!("signal calibration CPU {flags}"));
+    let measurement = measurements.join("\n");
+    eprintln!("{measurement}");
+    if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") {
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+            "{measurement}\n"
+        )
+        .unwrap();
+    }
+}
+
+/// Non-vacuity: a Rust call before admission must not look like the expected
+/// C-only short-stack stop. The normal stop rows above are the positive control.
+#[cfg(target_os = "linux")]
+#[test]
+fn small_signal_stacks_detect_rust_before_admission() {
+    use std::os::unix::process::ExitStatusExt;
+    let planted = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShimEarlyRust);
+    // The shared front exercises this mutation on both architectures. An
+    // early SIGSEGV route can recursively exhaust its stack instead of dying
+    // promptly; its ordering is covered by the structural selftest below.
+    let output = standalone_output(
+        &planted.binary,
+        &["front-small"],
+        &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+    );
+    assert!(
+        output.status.signal().is_some(),
+        "mutation ran the handler: {output:?}"
+    );
+    assert!(
+        !text(&output.stderr).contains("too little"),
+        "calibrated stack admitted Rust before the check: {output:?}"
+    );
+}
+
 /// Class detector for stack-budget drift: measure the returning route's
 /// writes below the kernel frame and the C-only entry/short-stop frames.
 /// `front-small` above separately proves the short path on a bounded stack.
@@ -195,6 +284,56 @@ fn fault_front_stack_budgets_cover_the_compiled_paths() {
         .find(|(path, _)| *path == "posix/init.c")
         .unwrap()
         .1;
+    // A tiny Rust leaf may happen to fit today. Reject Rust entry before
+    // admission structurally as well as exercising the full-route overflow
+    // mutation, so optimization/toolchain changes cannot make that rule vacuous.
+    let early_calls = |source: &str| {
+        let mut calls = Vec::new();
+        for (start, end) in [
+            (
+                "static void patina_fault_front(",
+                "if (room < PATINA_FRONT_FLOOR)",
+            ),
+            (
+                "static void patina_tsc_sigsegv(",
+                "if (info->si_code == SI_KERNEL)",
+            ),
+            ("non_counter:;", "if (room < PATINA_FRONT_FLOOR)"),
+        ] {
+            let prelude = source
+                .split_once(start)
+                .unwrap()
+                .1
+                .split_once(end)
+                .unwrap()
+                .0;
+            for tail in prelude.split("patina_").skip(1) {
+                let end = tail
+                    .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .unwrap_or(tail.len());
+                let name = &tail[..end];
+                if tail[end..].trim_start().starts_with('(')
+                    && !matches!(name, "fault_room" | "fault_stop")
+                {
+                    calls.push(name.to_owned());
+                }
+            }
+        }
+        calls
+    };
+    assert!(
+        early_calls(source).is_empty(),
+        "Rust/unbudgeted calls before admission: {:?}",
+        early_calls(source)
+    );
+    let admission =
+        "uintptr_t room = patina_fault_room(uc, (uintptr_t)__builtin_frame_address(0));";
+    let planted = source.replace(admission, &format!("patina_trap_enter(sp); {admission}"));
+    assert_eq!(
+        early_calls(&planted),
+        ["trap_enter", "trap_enter"],
+        "admission-order detector must fire"
+    );
     let floor: usize = source
         .lines()
         .find_map(|line| line.strip_prefix("#define PATINA_FRONT_FLOOR "))

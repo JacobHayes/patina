@@ -287,7 +287,7 @@ timer's handler that would run during it is a named stop on both large and
 small native-capable stacks where the native run goes on
 (`counter_reads_served_off_the_alternate_stack_run_no_guest_code`).
 `counter_reads_on_a_minimal_altstack_preserve_the_guest_stack` pairs this
-containment detector with a guarded `AT_MINSIGSTKSZ + 1536` stack: a native
+containment detector with a guarded measured-kernel-frame + 1536-byte stack: a native
 handler fits, repeated `rdtsc`/`rdtscp` reads return exact virtual values,
 stack registration is restored (ordinary and `SS_AUTODISARM`), and a later default fault kills with SIGSEGV
 (red before: the cut-down-stack room check aborted before the first answer).
@@ -321,11 +321,25 @@ compiler-reported C frame sizes (including the x86 counter entry and both C
 stop callees) on both architectures and stable/MSRV, using the shipped
 `POSIX_C_FLAGS`. It requires margin under the room floor; `front-small` and
 `front-segv-small` separately require numeric C-only stops on guarded,
-native-capable `AT_MINSIGSTKSZ + 768` stacks (red: the unguarded SIGSEGV route
+native-capable measured-kernel-frame + 768-byte stacks (red: the unguarded SIGSEGV route
 hung). Their nested autodisarm counterparts exercise remembered bounds (red:
 disabling those bounds kills with SIGSEGV instead of the named stop). `kernel-gp`
 on x86 pairs the counter decoder checks with a genuine in-text SI_KERNEL fault:
 its handler sees the original stack/mask and subsequent counter reads still work.
+`signals/frame_size.h` calibrates a real SIGUSR2 frame on a large aligned
+alternate stack; x86 uses the frame's ucontext minus its restorer slot, arm64
+its siginfo. No handler or shim frames enter that allowance. Small stacks
+(including nested counters and `alarm-small`) use the measured size, with the
+final top aligned down so rounding cannot add headroom. `AT_MINSIGSTKSZ` is
+reported only as diagnostic evidence: AMX hosts may advertise unused tile
+state, making it unsuitable for these deliberately short-stack tests.
+`small_signal_stacks_use_measured_kernel_frames` compares native/shim probes
+and records CPU flags in CI. `small_signal_stacks_detect_rust_before_admission`
+plants the Rust route ahead of admission on both architectures; the stack-budget
+test also rejects any Rust entry in the pre-admission C prefixes and self-tests
+that check with a planted early `patina_trap_enter`. This catches tiny Rust
+leaves even when their current compiled frames happen to fit. The existing
+sentinel and `.su` checks measure actual writes/compiler frames, not auxv.
 The budget detector is red-proven by lowering the front floor to 2 KiB.
 Measurements are retained in CI job summaries and logs. Sentinel high-water
 measures writes, not untouched reserved slots; compiler frame sizes complement it.
