@@ -245,6 +245,21 @@ mod linux {
     }
 
     #[test]
+    fn non_shim_raw_syscall_refusal_does_not_blame_a_sud_capable_kernel() {
+        let planted = assert_build_c_guest("planted_raw.c", CLink::Unlinked);
+        let sud = kernel_supports(KernelFeature::Sud);
+        let output = assert_refused(planted.command("run", &[]), &["direct-syscall"]);
+        assert_eq!(output.status.code(), Some(2));
+        if sud {
+            let diagnostic = format!("{}{}", text(&output.stdout), text(&output.stderr));
+            assert!(
+                !diagnostic.contains("kernel lacks syscall-user-dispatch"),
+                "SUD-capable host was blamed for a non-shim binary:\n{diagnostic}"
+            );
+        }
+    }
+
+    #[test]
     fn raw_syscalls_are_virtualized_or_refused_before_execution() {
         let g = Guest::assert_build("raw_syscall_probe.rs");
         if kernel_supports(KernelFeature::Sud) {

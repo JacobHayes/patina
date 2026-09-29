@@ -6680,7 +6680,10 @@ fn native_prerun_gate(
     // together: an old-shim binary (no marker) or a no-SUD kernel keeps today's
     // refusal. cpu-nondeterminism findings are never SUD-manageable (register
     // reads SUD cannot trap), so they never enter this split.
-    let sud_ok = native_binary_has_sud_marker(&bytes).unwrap_or(false) && kernel_supports_sud();
+    let shim_linked =
+        native_binary_is_shim_linked(&bytes).map_err(|error| CliError(error.to_string()))?;
+    let sud_marker = native_binary_has_sud_marker(&bytes).unwrap_or(false);
+    let sud_ok = sud_marker && kernel_supports_sud();
     // The timestamp-counter trap downgrade, on the same two conditions: the
     // binary carries the trap dispatcher AND this platform can arm PR_SET_TSC.
     // Only rdtsc/rdtscp enter this split — rdrand/rdseed/CNTVCT share the
@@ -6742,17 +6745,31 @@ pass --allow-unsupported-symbols <all|name,name,...> to run anyway with a warnin
             message.push_str(&format!("\n  {}", native_escape_summary(escape)));
             push_native_escape_provenance_lines(&mut message, escape, "    ");
         }
-        if has_raw_syscall {
-            // Raw inline syscall instructions present but not SUD-manageable here:
-            // either this kernel lacks syscall-user-dispatch (notably arm64, which
-            // needs the generic-entry kernels) or the shim linked carries no SUD
-            // dispatcher. Point at the two real fixes.
+        if has_raw_syscall && !kernel_supports_sud() {
+            // A genuine kernel capability gap; preserve today's explanation.
             message.push_str(
                 "\nnote: the direct-syscall instruction site(s) above are raw inline syscalls. This \
 kernel lacks syscall-user-dispatch (arm64 needs the generic-entry kernels; x86_64 has it since \
 5.11), so they cannot be trapped here. Rebuild with `--cfg rustix_use_libc` (rustix's libc \
 backend emits interposable imports instead), or run on an x86_64 SUD kernel where the shim traps \
 them.",
+            );
+        }
+        if has_raw_syscall && kernel_supports_sud() && !shim_linked {
+            message.push_str(
+                "\nnote: the direct-syscall instruction site(s) above are raw inline syscalls. This \
+binary is not linked with Patina's shim (for example, it is static, stock, or built without \
+Patina), so it has no SUD dispatcher marker and the syscalls cannot be trapped in-process. Build \
+from source with `cargo patina build <SOURCE.rs|DIR|Cargo.toml>`, or pass the source/package to \
+`cargo patina run` to build and run it with the shim.",
+            );
+        }
+        if has_raw_syscall && kernel_supports_sud() && shim_linked && !sud_marker {
+            message.push_str(
+                "\nnote: this binary is linked with Patina, but its shim has no SUD dispatcher marker \
+(for example, it may have been built with an older shim); raw inline syscalls cannot be trapped \
+in-process. Rebuild from source with `cargo patina build <SOURCE.rs|DIR|Cargo.toml>`, or pass the \
+source/package to `cargo patina run` to link the current shim.",
             );
         }
         if let Some(note) = render_cpu_nondeterminism_note(&blocked) {

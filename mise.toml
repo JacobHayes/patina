@@ -1,8 +1,8 @@
 # Local root-workspace setup for Patina.
 #
 # This intentionally covers only the main workspace and core validation scripts.
-# Heavy standalone testbeds (raft/redb/etc.) keep their own setup and are not
-# required for ordinary local development.
+# Heavy standalone testbeds keep their own setup and are not required for
+# ordinary local development.
 
 [tools]
 # Select a stable Rust toolchain for the default local shell. Rust components,
