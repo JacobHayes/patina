@@ -29,6 +29,15 @@ members = [
 ]
 resolver = "2"
 
+# Line tables are all the debug info this workspace uses: panic backtraces
+# resolve file:line from them, and patina's own symbolization (coverage, stop
+# diagnostics) reads the symbol table. Full debug info (types and variables,
+# for an interactive debugger) made up most of every test binary: 230 MB of a
+# 272 MB integration suite. Override locally with
+# `CARGO_PROFILE_DEV_DEBUG=true` for a debugger session.
+[profile.dev]
+debug = "line-tables-only"
+
 # `cargo test` builds the cargo-patina binary that the integration suites drive
 # with the test profile, and the suites invoke it about a thousand times. Each
 # call pushes the whole guest binary (tens of MB for a debug guest) through
