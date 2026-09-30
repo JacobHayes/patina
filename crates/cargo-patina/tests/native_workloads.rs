@@ -46,8 +46,11 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
         use std::os::unix::process::ExitStatusExt;
         let (stop, direct_elapsed) = direct(mode, "25");
         assert_eq!(stop.status.signal(), Some(libc::SIGABRT));
+        // The 25 ms bound, not the 10 s default, must be what fired. Startup and
+        // trace work on a loaded runner take seconds, so compare against the
+        // default rather than a tight wall-clock figure.
         assert!(
-            direct_elapsed < Duration::from_secs(3),
+            direct_elapsed < Duration::from_secs(8),
             "direct stop took {direct_elapsed:?}"
         );
         eprintln!("compute watchdog {mode}: direct stop={direct_elapsed:?} bound=25ms");
@@ -67,7 +70,7 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
             "25",
         );
         assert!(!record.status.success());
-        assert!(elapsed < Duration::from_secs(3), "stop took {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(8), "stop took {elapsed:?}");
         eprintln!("compute watchdog {mode}: record elapsed={elapsed:?} bound=25ms");
         let record: serde_json::Value = serde_json::from_slice(&record.stdout).unwrap();
         assert_eq!(record["result"], "liveness", "{record:#}");
