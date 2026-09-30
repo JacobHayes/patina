@@ -101,6 +101,8 @@ linux-raw-sys = { version = "0.12.1", default-features = false, features = ["err
 # Substring search for the instrumentation markers in guest binaries.
 memchr = "2.8.3"
 object = { version = "0.39.1", default-features = false, features = ["read", "std"] }
+# Read ELF unwind ranges without implementing another DWARF pointer decoder.
+gimli = { version = "0.32.3", default-features = false, features = ["read", "std"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 rustc-demangle = "0.1.26"

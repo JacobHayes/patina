@@ -8,6 +8,7 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+gimli.workspace = true
 object.workspace = true
 rustc-demangle.workspace = true
 wasmparser.workspace = true

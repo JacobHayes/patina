@@ -776,6 +776,18 @@ Static, pre-run checks reject a native binary before it executes:
 - WASI module imports are audited against the host's explicit allowlist before
   instantiation.
 
+The x86-64 ELF scan is bounded by compiler/linker-declared code: every function
+symbol extent and `.eh_frame` FDE is decoded independently from its own start.
+Undecodable bytes inside any declared range refuse. Uncovered gaps may contain
+assembly metadata and are not decoded as instructions; this trusts the metadata,
+not a proof of reachability. Stripped ELF uses remaining FDEs; sections with no
+boundaries retain the whole-section fail-closed walk. Malformed range metadata
+refuses. Mach-O keeps the whole-section walk; aarch64 keeps its aligned-word
+sweep, including possible data-word false positives. Undeclared executable code
+is a residual, especially for untrappable entropy, TLS-base writes and far
+transfers. The separate vsyscall-address scan still covers whole sections.
+See the escape taxonomy for the per-class runtime backstops and their limits.
+
 Runtime checks catch effects that cannot be rejected statically:
 
 - missing drivers and denied capabilities;

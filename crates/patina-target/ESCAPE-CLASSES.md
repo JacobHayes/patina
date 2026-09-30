@@ -284,6 +284,50 @@ The net effect on the audited CLI guest is the allow list emptying to nothing
 while the gate stays fail-closed for any *new* unsupported import — strictly better than the
 named downgrade on both axes (unqualified audit **and** a runtime spawn guard).
 
+## Executable sections containing code and data
+
+The x86-64 ELF instruction scan trusts **declared code extents**, not that every
+byte in an executable section is an instruction. It scans each defined function
+symbol's sized range and each `.eh_frame` FDE range from its own start. Both
+sources contribute; neither can shrink the other's coverage. Overlapping ranges
+are scanned independently and duplicate findings are coalesced. A zero-sized
+function uses a same-start sized range if available, otherwise extends through
+the next declared entry or section end. A truncated/undecodable instruction
+inside any range refuses, even after a `ret`; a later function is still scanned
+from its own start. Invalid range metadata, unresolved function section indices,
+indirect FDE addresses and relocations targeting `.eh_frame` refuse rather than
+falling back to a narrower source or mistaking pointer storage for code. REL/RELA
+tables are read fallibly, including dynamic targets; malformed tables and packed
+relocation formats (RELR/CREL/Android) refuse because their effect on unwind
+storage is not established here. There are no dependency names, recognized strings or
+skip-on-decode-error rules in this policy.
+
+Uncovered gaps are outside the declared-code scan. That admits compiler-generated
+alignment and assembly metadata, but **is not a proof that gaps are unreachable**.
+Fallthrough, direct/indirect branches into gaps, incomplete/forged function sizes
+and code without function/unwind metadata can escape the static scan. Stripped
+ELF uses remaining FDEs; functions without unwind records may then be omitted.
+A section with neither function nor FDE boundaries gets the old whole-section,
+fail-closed scan, not a zero-byte scan. Mach-O keeps that whole-section policy.
+This is a bounded audit for compiler/linker output, not an adversarial native-code
+validator. It also trusts ELF section metadata to agree with the loaded image;
+contradictory program-header/dynamic-loader tables are not reconciled here.
+Runtime backstops do not make the metadata assumption sound:
+
+| Instruction class | Residual outside scanned code |
+|---|---|
+| x86 raw `syscall` | Active SUD in a supported x86-64 Linux shim intercepts it regardless of static discovery. The i386 `int 0x80`/`sysenter` ABI aborts rather than being modeled. Startup before traps, other platforms and unshimmed raw audits do not have this guarantee. |
+| x86 `rdtsc`/`rdtscp` | Active `PR_SET_TSC` in the x86-64 Linux shim answers from the virtual clock; no protection before arming or on other platforms. |
+| x86 `rdrand`/`rdseed` | No runtime trap. An executed unscanned instruction can read host entropy. |
+| TLS-base writes and x86 far transfers | No runtime trap. Unscanned code can change the shim's TLS base or enter a mode the decoder does not describe. |
+| `cpuid`/PKRU | Visible-not-refused where discovered, unmanaged at runtime; unscanned sites also lose that diagnostic. |
+| x86 vsyscall address | The separate address-pattern detector still examines the entire text section, including gaps. SUD cannot trap vsyscall; computed addresses remain outside this static pattern detector. |
+| aarch64 `svc`, counter/entropy reads and TLS writes | Unchanged: every aligned word in text is scanned, ignoring function metadata. Data words can falsely match opcodes, but cannot desynchronize the next word. Counter/entropy/TLS accesses have no trap; raw `svc` is not SUD-managed on arm64. |
+
+These limits complement the existing jump-into-operands, shared-library and
+runtime-generated-code limits below. A clean instruction audit never proves
+arbitrary code is deterministic.
+
 ## Residual gaps (honest, symbol audit cannot see these)
 
 Symbol reachability cannot observe behavior that never resolves a symbol. These
@@ -314,7 +358,8 @@ is stated plainly:
    `cpuid` is reported visible-not-refused (host-identity). Thread-pointer writes
    (`wrfsbase`, FS selector loads, `msr tpidr_el0`) are refused in the same scan.
    The i386 syscall entries (`int 0x80`, `sysenter`) and the far transfers
-   that could switch to 32-bit code are refused too. The residual is encodings
+   that could switch to 32-bit code are refused when discovered too. The
+   declared-code policy above bounds x86-64 ELF coverage. Other residuals are encodings
    the decoder does not know, which refuse only when they sit at a decode
    boundary the scan reaches; a switch to 32-bit code with no far-transfer
    instruction (a signal handler that rewrites the saved CS in its `ucontext`

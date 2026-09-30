@@ -19,6 +19,8 @@ use object::{
 };
 use wasmparser::{Parser, Payload};
 
+mod code_ranges;
+
 pub const WASI_PREVIEW1_TARGET: &str = "wasm32-wasip1";
 pub const WASI_PREVIEW1_MODULE: &str = "wasi_snapshot_preview1";
 
@@ -374,7 +376,8 @@ impl NativeAudit {
         imports.sort();
         imports.dedup();
         let provenance = NativeProvenanceIndex::new(&file);
-        let import_provenance = collect_import_provenance(&file, bytes, &provenance);
+        let code_ranges = code_ranges::CodeRanges::new(&file)?;
+        let import_provenance = collect_import_provenance(&file, bytes, &provenance, &code_ranges);
         let inert_weak = inert_weak_symbols(&file);
         let mut inert_weak_imports = Vec::new();
         let mut denied = Vec::new();
@@ -405,7 +408,7 @@ impl NativeAudit {
         // The scan still classifies them in one place; only the disposition
         // differs.
         denied.extend(
-            scan_instruction_classes(&file, &provenance)?
+            scan_instruction_ranges(&file, &provenance, &code_ranges)?
                 .into_iter()
                 .filter(|escape| !native_escape_is_host_identity(escape)),
         );
@@ -660,8 +663,9 @@ pub fn render_thread_pointer_note(blocked: &[NativeEscape]) -> Option<String> {
 /// compatibility mode. From then on the instructions run as 32-bit code, which
 /// the audit's 64-bit decoder does not describe: a thread-pointer write or an
 /// entropy read there can sit where the 64-bit walk sees something else. The
-/// transfer is refused so that every instruction the scan approves runs in the
-/// mode it was decoded in. Compilers do not emit these instructions for
+/// transfer is refused where discovered to defend the decoder's 64-bit-mode
+/// assumption. Unscanned transfers or signal-context CS rewrites remain outside
+/// that static guarantee (see `ESCAPE-CLASSES.md`). Compilers do not emit these instructions for
 /// user-space 64-bit code; the direct far forms (`9a`/`ea`) are invalid in 64-bit mode and already
 /// fail closed as undecodable.
 pub const FAR_TRANSFER_CATEGORY: &str = "far-transfer";
@@ -1467,13 +1471,14 @@ fn collect_import_provenance(
     file: &object::File<'_>,
     bytes: &[u8],
     provenance: &NativeProvenanceIndex,
+    code_ranges: &code_ranges::CodeRanges,
 ) -> BTreeMap<String, Vec<NativeProvenance>> {
     let mut origins: BTreeMap<String, BTreeSet<NativeProvenance>> = BTreeMap::new();
     collect_section_relocation_provenance(file, provenance, &mut origins);
 
     let targets = collect_import_targets(file, bytes);
     if !targets.is_empty() {
-        collect_import_xref_provenance(file, provenance, &targets, &mut origins);
+        collect_import_xref_provenance(file, provenance, code_ranges, &targets, &mut origins);
     }
 
     origins
@@ -1775,6 +1780,7 @@ fn collect_macho_import_targets_for<Mach>(
 fn collect_import_xref_provenance(
     file: &object::File<'_>,
     provenance: &NativeProvenanceIndex,
+    code_ranges: &code_ranges::CodeRanges,
     targets: &BTreeMap<u64, String>,
     origins: &mut BTreeMap<String, BTreeSet<NativeProvenance>>,
 ) {
@@ -1795,14 +1801,22 @@ fn collect_import_xref_provenance(
                 provenance,
                 origins,
             ),
-            Architecture::X86_64 => scan_x86_64_import_xrefs(
-                data,
-                section.address(),
-                section_name,
-                targets,
-                provenance,
-                origins,
-            ),
+            Architecture::X86_64 => {
+                let whole_section = 0..data.len();
+                for range in code_ranges
+                    .get(section.index())
+                    .unwrap_or(std::slice::from_ref(&whole_section))
+                {
+                    scan_x86_64_import_xrefs(
+                        &data[range.clone()],
+                        section.address() + range.start as u64,
+                        section_name,
+                        targets,
+                        provenance,
+                        origins,
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -1882,10 +1896,9 @@ fn scan_x86_64_import_xrefs(
 ) {
     let mut offset = 0usize;
     while offset < data.len() {
-        // Undecodable bytes end the walk. That costs attribution for the rest of
-        // the section, never a refusal: the forbidden-instruction scan runs the
-        // same decoder over the same bytes and reports the undecodable site as a
-        // finding in its own right, so the audit still fails closed there.
+        // Undecodable bytes end this range's walk, costing attribution for its
+        // tail. The containment scan independently refuses the same declared
+        // range; both walks restart at each metadata entry point, not in data.
         let Some((len, reference)) = x86_scan::decode_reference(&data[offset..]) else {
             break;
         };
@@ -1932,6 +1945,15 @@ fn scan_instruction_classes(
     file: &object::File<'_>,
     provenance: &NativeProvenanceIndex,
 ) -> Result<Vec<NativeEscape>, TargetError> {
+    let code_ranges = code_ranges::CodeRanges::new(file)?;
+    scan_instruction_ranges(file, provenance, &code_ranges)
+}
+
+fn scan_instruction_ranges(
+    file: &object::File<'_>,
+    provenance: &NativeProvenanceIndex,
+    code_ranges: &code_ranges::CodeRanges,
+) -> Result<Vec<NativeEscape>, TargetError> {
     // Fail closed on any architecture whose ISA this containment scan cannot
     // decode. A `_ => {}` default arm on the per-section match below silently
     // PASSED unsupported-arch binaries — every instruction unexamined — which is
@@ -1975,7 +1997,22 @@ fn scan_instruction_classes(
                 }
             }
             Architecture::X86_64 => {
-                x86_scan::scan(data, name, section.address(), provenance, &mut escapes);
+                let whole_section = 0..data.len();
+                let ranges = code_ranges
+                    .get(section.index())
+                    .unwrap_or(std::slice::from_ref(&whole_section));
+                for range in ranges {
+                    x86_scan::scan(
+                        data,
+                        range.clone(),
+                        name,
+                        section.address(),
+                        provenance,
+                        &mut escapes,
+                    );
+                }
+                // This deliberately remains a byte-pattern check over the full
+                // section, including gaps: vsyscall has no SUD/TSC backstop.
                 scan_vsyscall_references(data, name, section.address(), provenance, &mut escapes);
             }
             // Unreachable: the guard above refuses every other architecture. Kept
@@ -1984,6 +2021,10 @@ fn scan_instruction_classes(
             _ => unreachable!("unsupported architectures are refused before the section scan"),
         }
     }
+    // Overlapping symbol/FDE ranges are scanned independently. Report a site
+    // once even when multiple ranges name it, retaining section/walk order.
+    let mut seen = BTreeSet::new();
+    escapes.retain(|e| seen.insert((e.symbol.clone(), e.category, e.mnemonic)));
     Ok(escapes)
 }
 
@@ -2091,10 +2132,51 @@ fn aarch64_instruction_category(instruction: u32) -> Option<(&'static str, &'sta
 /// and only tests the opcode at a genuine boundary, matching the aarch64 scan's
 /// precision.
 ///
-/// Soundness (this is a containment gate, so a *false negative* — a real
-/// `syscall` slipping past — is the dangerous direction): the decoder fails
-/// CLOSED. Any byte sequence it cannot confidently measure — an unmapped/invalid
-/// opcode, a truncated tail, or an unsupported vector map — yields an
+/// Scan policy: x86-64 ELF uses the declared function extents from defined
+/// STT_FUNC symbols (including dynamic symbols) AND `.eh_frame` FDEs. Each range
+/// is decoded independently from its own start to its own end; overlaps are not
+/// merged or intersected. Exact duplicates share findings. Zero-sized function
+/// symbols use a same-start sized extent if present, otherwise conservatively
+/// extend to the next entry point or section end. Malformed/overflowing/out-of-
+/// section ranges, unresolved function section indices, indirect FDE addresses
+/// and relocations targeting `.eh_frame` refuse: none establishes a code address
+/// we can trust, even when another metadata source is valid. REL/RELA tables are
+/// read fallibly, including dynamic targets; malformed tables and packed
+/// relocation formats (RELR/CREL/Android) refuse rather than guessing their effect
+/// on unwind storage. With no
+/// ranges for a section, the whole section is decoded as before; stripped ELF
+/// normally retains FDEs. Mach-O retains the whole-section policy.
+///
+/// Bytes outside all declared extents are NOT scanned as x86 instructions. This
+/// handles assembly attribution strings/alignment without recognizing any tag,
+/// dependency, or byte pattern, and without skipping undecodable bytes inside a
+/// range. It assumes compiler/linker metadata describes every executable entry
+/// and extent, and that ELF section metadata agrees with the loader's image
+/// (contradictory program-header/dynamic tables are not reconciled here).
+/// Metadata is NOT a reachability proof: fallthrough/branches into
+/// gaps, omitted functions (including unwind-less code in stripped images),
+/// forged sizes, or entry into an instruction's operands can escape this scan.
+/// A successful scan is a bounded compiler-output check, not certification of
+/// arbitrary/adversarial native code. Undecodable bytes inside ANY declared
+/// range still refuse the binary, even after a return, with a later range still
+/// scanned independently. Import-reference attribution uses the same ranges.
+///
+/// Runtime backstops are class/platform-specific, not justification for ignoring
+/// code: on x86-64 Linux, an active shim SUD trap intercepts raw syscalls (i386
+/// entries abort), and PR_SET_TSC intercepts rdtsc/rdtscp. Neither protects the
+/// pre-trap startup window or execution on other platforms. Rdrand/rdseed, TLS-
+/// base writes and far transfers have no such backstop: an executed site outside
+/// the scan's coverage can escape. Cpuid/PKRU sites are informational only.
+/// The vsyscall-address pattern scan still covers the ENTIRE section, including
+/// gaps; SUD cannot trap that entry. Aarch64 still scans every aligned word in
+/// every text section: no desync, but data can match an opcode and falsely refuse;
+/// its entropy/counter/TLS instructions have no runtime trap either. See
+/// `ESCAPE-CLASSES.md` for the remaining static-scan boundaries.
+///
+/// Within this coverage contract, a *false negative* — a real forbidden opcode
+/// slipping past — is the dangerous direction. The length decoder fails CLOSED.
+/// Any byte sequence it cannot confidently measure — an unmapped/invalid opcode,
+/// a truncated tail, or an unsupported vector map — yields an
 /// `undecodable-instruction` finding naming the offset and stops the walk, so the
 /// binary is refused rather than silently scanned past a length guess. The legacy
 /// three-byte maps (`0f 38`/`0f 3a`) *are* length-decoded: default codegen emits
@@ -2126,14 +2208,15 @@ fn aarch64_instruction_category(instruction: u32) -> Option<(&'static str, &'sta
 ///   instruction can be measured. As with VEX, this is a length decoder, not an
 ///   opcode-by-opcode validator of all operand, mask or feature constraints.
 ///
-/// Because every real instruction advances the cursor to its true successor, a
-/// forbidden opcode embedded in another instruction's operand is never at a tested
-/// boundary. The decoder assumes 64-bit mode throughout, so the instructions
+/// Within each range's linear walk, operand bytes are not tested as opcodes;
+/// declared alternate entries are scanned separately. The decoder assumes
+/// 64-bit mode throughout, so the instructions
 /// that could leave it are refused as `far-transfer` (`lcall`/`ljmp` through
 /// memory, `lret`, `iret`); the direct far forms (`9a`/`ea`) are invalid in
-/// 64-bit mode and fail closed as undecodable. The length decoder is proven
-/// against `objdump -d` boundaries over real probe binaries (see
-/// `x86_decoder_matches_objdump_corpus`).
+/// 64-bit mode and fail closed as undecodable. The length decoder is compared
+/// with objdump boundaries over Patina-authored assembly in
+/// `x86_decoder_matches_objdump_corpus`, and over optional real binaries in
+/// `x86_decoder_matches_objdump_external_corpus`.
 mod x86_scan {
     /// Immediate-operand width classes. Widths that depend on the effective
     /// operand/address size are resolved from the `0x66`/`0x67`/REX.W prefixes.
@@ -2203,20 +2286,21 @@ mod x86_scan {
         Undecodable,
     }
 
-    /// Walk `data` (a `.text` section) instruction by instruction, pushing a
-    /// finding for each classified opcode at a real boundary and one
+    /// Walk one declared code range in `data` (or the whole section when no
+    /// metadata exists), pushing a finding at each classified boundary and one
     /// `undecodable-instruction` finding (then stopping) if the decoder cannot
     /// measure an instruction.
     pub(super) fn scan(
         data: &[u8],
+        range: std::ops::Range<usize>,
         name: &str,
         section_address: u64,
         provenance: &super::NativeProvenanceIndex,
         escapes: &mut Vec<super::NativeEscape>,
     ) {
-        let mut offset = 0usize;
-        while offset < data.len() {
-            match decode_one(&data[offset..]) {
+        let mut offset = range.start;
+        while offset < range.end {
+            match decode_one(&data[offset..range.end]) {
                 Step::Insn { len, cat } => {
                     if let Some((category, mnemonic)) = cat {
                         escapes.push(
@@ -2917,7 +3001,7 @@ mod x86_scan {
 
         fn scan_test(data: &[u8], escapes: &mut Vec<super::super::NativeEscape>) {
             let provenance = super::super::NativeProvenanceIndex::from_sorted(Vec::new());
-            scan(data, ".text", 0, &provenance, escapes);
+            scan(data, 0..data.len(), ".text", 0, &provenance, escapes);
         }
 
         #[test]
@@ -3163,9 +3247,9 @@ mod x86_scan {
             }
         }
 
-        /// The class pairing is the objdump corpus below; these rows exercise
-        /// length determinants missing from that real-binary sample. GNU as/objdump
-        /// verify the encodings, including rounding's L'L=3 and compressed disp8.
+        /// The class pairing is the independent objdump corpus below. These rows
+        /// check truncation and sentinel placement for its length determinants,
+        /// including rounding's L'L=3 and compressed disp8.
         #[test]
         fn measures_evex_lengths_and_reaches_following_forbidden_opcodes() {
             let cases: &[&[u8]] = &[
@@ -3361,11 +3445,11 @@ mod x86_scan {
             }
         }
 
-        /// Checked-in bytes and boundaries from a real AVX-512 binary (fixture
-        /// provenance and regeneration in tests/fixtures/README.md). This class
-        /// detector pairs with the EVEX length/truncation/sentinel tests: the
-        /// oracle is objdump, not a second copy of our length rules. No Go toolchain,
-        /// x86 host, AVX-512 CPU, or external binary is needed to run it.
+        /// Checked-in bytes and boundaries assembled from Patina's own EVEX
+        /// source (regeneration in tests/fixtures/README.md). This class detector
+        /// pairs with the EVEX length/truncation/sentinel tests: the oracle is
+        /// objdump, not a second copy of our length rules. No x86 host, AVX-512
+        /// CPU, assembler, or external binary is needed to run it.
         #[test]
         fn x86_decoder_matches_objdump_corpus() {
             let corpus = include_str!("../tests/fixtures/x86-avx512.objdump");
@@ -3387,14 +3471,18 @@ mod x86_scan {
                 assert!(!bytes.is_empty());
                 assert_eq!(address, *base.get_or_insert(address) + data.len() as u64);
                 boundaries.push((data.len(), bytes.len()));
-                if bytes[0] == 0x62 {
+                let prefix_len = bytes
+                    .iter()
+                    .take_while(|b| matches!(b, 0x64 | 0x67))
+                    .count();
+                if bytes[prefix_len] == 0x62 {
                     evex_count += 1;
-                    maps.insert(bytes[1] & 0x0f);
+                    maps.insert(bytes[prefix_len + 1] & 0x0f);
                 }
                 data.extend(bytes);
             }
-            assert_eq!(data.len(), 246);
-            assert_eq!(evex_count, 28);
+            assert_eq!(data.len(), 143);
+            assert_eq!(evex_count, 19);
             assert_eq!(maps, [1, 2, 3].into_iter().collect());
             let mut offset = 0;
             for &(start, length) in &boundaries {
@@ -4572,6 +4660,8 @@ pub fn render_native_escapes_grouped(escapes: &[NativeEscape]) -> String {
 pub enum TargetError {
     Parse(wasmparser::BinaryReaderError),
     NativeParse(object::Error),
+    NativeUnwind(gimli::Error),
+    InvalidNativeCodeRanges(String),
     UnsupportedImports(Vec<WasmImport>),
     UnsupportedNativeFormat(BinaryFormat),
     UnsupportedNativeArchitecture(Architecture),
@@ -4583,6 +4673,10 @@ impl fmt::Display for TargetError {
         match self {
             Self::Parse(error) => write!(f, "failed to parse WebAssembly module: {error}"),
             Self::NativeParse(error) => write!(f, "failed to parse native object: {error}"),
+            Self::NativeUnwind(error) => write!(f, "failed to parse native unwind ranges: {error}"),
+            Self::InvalidNativeCodeRanges(reason) => {
+                write!(f, "invalid native code ranges: {reason}")
+            }
             Self::UnsupportedImports(imports) => {
                 write!(f, "unsupported WebAssembly imports:")?;
                 for import in imports {
@@ -4617,7 +4711,9 @@ impl std::error::Error for TargetError {
         match self {
             Self::Parse(error) => Some(error),
             Self::NativeParse(error) => Some(error),
-            Self::UnsupportedImports(_)
+            Self::NativeUnwind(error) => Some(error),
+            Self::InvalidNativeCodeRanges(_)
+            | Self::UnsupportedImports(_)
             | Self::UnsupportedNativeFormat(_)
             | Self::UnsupportedNativeArchitecture(_)
             | Self::UnsupportedNativeImports(_) => None,
