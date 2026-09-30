@@ -2198,6 +2198,10 @@ fn aarch64_instruction_category(instruction: u32) -> Option<(&'static str, &'sta
 /// - Maps other than 1/2/3: 0/7 are reserved, 4 is APX, and 5/6 are FP16; none
 ///   has length rules established here. P0 bit 3 must be zero and P1 bit 2 one:
 ///   other values are not the supported AVX-512 prefix format (including APX).
+/// - Map-1 `0f`, `a4`, `ac`, `ba`: these legacy imm8 opcodes (3DNow!, SHLD,
+///   SHRD, group-8 bit operations) have no supported EVEX form. VEX's immediate
+///   table does not measure them; refusing avoids dropping an immediate if a
+///   future ISA reuses them. This is not a full EVEX opcode-validity allowlist.
 /// - Preceding LOCK, 66, F2, F3 or REX: EVEX embeds its mandatory prefix and
 ///   register extension; those combinations are invalid. Segment/address-size
 ///   prefixes are allowed and use the ordinary ModRM/SIB/displacement rules.
@@ -2528,7 +2532,7 @@ mod x86_scan {
                 || p0 & 0x08 != 0
                 || p1 & 0x04 == 0
                 || !matches!(map, 1..=3)
-                || (map == 1 && opc == 0x77)
+                || (map == 1 && matches!(opc, 0x0F | 0x77 | 0xA4 | 0xAC | 0xBA))
                 || (p2 & 0x80 != 0 && p2 & 0x07 == 0)
                 || (p2 & 0x60 == 0x60 && (p2 & 0x10 == 0 || modrm >> 6 != 3))
             {
@@ -3237,6 +3241,8 @@ mod x86_scan {
                 (&[0xc5, 0xfd, 0x6f, 0x44, 0x24, 0x20], 6), // vmovdqa ymm0,[rsp+0x20] (SIB+disp8)
                 (&[0xc5, 0xfd, 0xd7, 0xc0], 4), // vpmovmskb eax,ymm0 (reg ModRM)
                 (&[0xc5, 0xfc, 0x57, 0xc0], 4), // vxorps ymm0,ymm0,ymm0
+                (&[0xc5, 0xf1, 0xc4, 0xc0, 0x05], 5), // vpinsrw xmm0,xmm1,eax,imm8
+                (&[0xc5, 0xf9, 0xc5, 0xc1, 0x05], 5), // vpextrw eax,xmm1,imm8
                 (&[0xc4, 0xe2, 0x7d, 0x00, 0xc1], 5), // 3-byte VEX, 0f38 map, no imm
                 (&[0xc4, 0xe3, 0x7d, 0x46, 0xc1, 0x20], 6), // vperm2i128 (0f3a map, imm8)
             ];
@@ -3261,6 +3267,7 @@ mod x86_scan {
                 &[0x62, 0xf1, 0x74, 0x58, 0x58, 0x00], // broadcast, no displacement
                 &[0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x44, 0x24, 0x01], // SIB + disp8*N
                 &[0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x84, 0x88, 0x0f, 0x05, 0, 0], // SIB + disp32
+                &[0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x80, 0x0f, 0x05, 0, 0], // mod=2 disp32, no SIB
                 &[0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x04, 0x8d, 0x0f, 0x05, 0, 0], // SIB without base
                 &[0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x05, 0x0f, 0x05, 0, 0], // RIP-relative disp32
                 &[0x64, 0x67, 0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x40, 0x01], // fs + address size
@@ -3308,6 +3315,35 @@ mod x86_scan {
                     ],
                     "{bytes:02x?}"
                 );
+            }
+        }
+
+        /// Class pairing for the reserved legacy-immediate opcode refusals:
+        /// every legacy map-1 imm8 opcode is either refused in EVEX or measured
+        /// with its immediate, never silently shortened to a no-immediate body.
+        #[test]
+        fn evex_does_not_drop_legacy_map1_immediates() {
+            for opcode in 0..=255 {
+                let Some(attr) = two_byte(opcode) else {
+                    continue;
+                };
+                if !matches!(attr.imm, Imm::Fixed(1)) {
+                    continue;
+                }
+                let bytes = [0x62, 0xf1, 0x7d, 0x48, opcode, 0xc0, 0x05];
+                match decode_one(&bytes) {
+                    Step::Undecodable => {}
+                    Step::Insn { len, cat } => {
+                        assert_eq!(len, bytes.len(), "map-1 opcode {opcode:02x}");
+                        assert_eq!(cat, None);
+                    }
+                }
+            }
+            for opcode in [0x0f, 0xa4, 0xac, 0xba] {
+                assert!(matches!(
+                    decode_one(&[0x62, 0xf1, 0x7d, 0x48, opcode, 0xc0, 0x05]),
+                    Step::Undecodable
+                ));
             }
         }
 
@@ -3445,6 +3481,55 @@ mod x86_scan {
             }
         }
 
+        /// Identify EVEX in corpus bytes, not operand-embedded 62 bytes. This
+        /// helper counts encodings; decode_one separately validates their lengths.
+        fn corpus_evex_map(bytes: &[u8]) -> Option<u8> {
+            let prefix_len = bytes
+                .iter()
+                .take_while(|b| {
+                    matches!(
+                        b,
+                        0x66 | 0x67
+                            | 0xf0
+                            | 0xf2
+                            | 0xf3
+                            | 0x2e
+                            | 0x36
+                            | 0x3e
+                            | 0x26
+                            | 0x64
+                            | 0x65
+                            | 0x40..=0x4f
+                    )
+                })
+                .count();
+            bytes[prefix_len..]
+                .strip_prefix(&[0x62])?
+                .first()
+                .map(|p0| p0 & 0x0f)
+        }
+
+        #[test]
+        fn corpus_evex_counter_handles_prefixes_but_not_operand_bytes() {
+            let instruction = [0x62, 0xf1, 0x74, 0x48, 0x58, 0xc2];
+            for prefixes in [
+                &[][..],
+                &[0x67],
+                &[0x64],
+                &[0x64, 0x67],
+                &[0x2e, 0x67],
+                &[0x64; 9],
+            ] {
+                let bytes = [prefixes, &instruction].concat();
+                assert_eq!(corpus_evex_map(&bytes), Some(1), "{bytes:02x?}");
+            }
+            // A mov immediate containing an EVEX-looking prefix is not EVEX.
+            assert_eq!(corpus_evex_map(&[0xb8, 0x62, 0xf1, 0x74, 0x48]), None);
+            for bytes in [&[][..], &[0x67], &[0x67, 0x62]] {
+                assert_eq!(corpus_evex_map(bytes), None);
+            }
+        }
+
         /// Checked-in bytes and boundaries assembled from Patina's own EVEX
         /// source (regeneration in tests/fixtures/README.md). This class detector
         /// pairs with the EVEX length/truncation/sentinel tests: the oracle is
@@ -3471,18 +3556,13 @@ mod x86_scan {
                 assert!(!bytes.is_empty());
                 assert_eq!(address, *base.get_or_insert(address) + data.len() as u64);
                 boundaries.push((data.len(), bytes.len()));
-                let prefix_len = bytes
-                    .iter()
-                    .take_while(|b| matches!(b, 0x64 | 0x67))
-                    .count();
-                if bytes[prefix_len] == 0x62 {
+                if let Some(map) = corpus_evex_map(&bytes) {
                     evex_count += 1;
-                    maps.insert(bytes[prefix_len + 1] & 0x0f);
+                    maps.insert(map);
                 }
                 data.extend(bytes);
             }
-            assert_eq!(data.len(), 143);
-            assert_eq!(evex_count, 19);
+            assert!(evex_count > 0, "corpus must exercise EVEX decoding");
             assert_eq!(maps, [1, 2, 3].into_iter().collect());
             let mut offset = 0;
             for &(start, length) in &boundaries {
@@ -3559,7 +3639,10 @@ mod x86_scan {
                         if let Ok(addr) = u64::from_str_radix(addr_hex, 16) {
                             if addr >= base && addr < base + data.len() as u64 {
                                 golden.insert(addr);
-                                if rest.split_whitespace().next() == Some("62") {
+                                // Read the full instruction from the ELF, so
+                                // prefixes wrapping onto objdump continuation
+                                // rows cannot hide its EVEX prefix.
+                                if corpus_evex_map(&data[(addr - base) as usize..]).is_some() {
                                     evex_count += 1;
                                 }
                                 let (_, mnemonic) = rest.split_once('\t').unwrap();

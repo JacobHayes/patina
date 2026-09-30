@@ -11,9 +11,12 @@ patina_evex_corpus:
     vaddps (%rax){1to16}, %zmm1, %zmm0
     vmovdqu64 64(%rsp), %zmm0
     vmovdqu64 0x050f(%rax,%rcx,4), %zmm0
+    vmovdqu64 0x050f(%rax), %zmm0
     vmovdqu64 0x050f(,%rcx,4), %zmm0
     vmovdqu64 0x050f(%rip), %zmm0
     vmovdqu64 %fs:64(%eax), %zmm0
+    vpinsrw $5, %eax, %xmm1, %xmm0
+    vpextrw $5, %xmm1, %eax
     vpshufd $5, %zmm1, %zmm0
     vpsrlw $5, %zmm1, %zmm0
     vpsrld $5, %zmm1, %zmm0

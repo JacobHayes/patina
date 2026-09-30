@@ -10,15 +10,18 @@ Disassembly of section .text:
   1e:	62 f1 74 58 58 00                               	vaddps (%rax){1to16},%zmm1,%zmm0
   24:	62 f1 fe 48 6f 44 24 01                         	vmovdqu64 0x40(%rsp),%zmm0
   2c:	62 f1 fe 48 6f 84 88 0f 05 00 00                	vmovdqu64 0x50f(%rax,%rcx,4),%zmm0
-  37:	62 f1 fe 48 6f 04 8d 0f 05 00 00                	vmovdqu64 0x50f(,%rcx,4),%zmm0
-  42:	62 f1 fe 48 6f 05 0f 05 00 00                   	vmovdqu64 0x50f(%rip),%zmm0        # 55b <patina_evex_corpus+0x55b>
-  4c:	64 67 62 f1 fe 48 6f 40 01                      	vmovdqu64 %fs:0x40(%eax),%zmm0
-  55:	62 f1 7d 48 70 c1 05                            	vpshufd $0x5,%zmm1,%zmm0
-  5c:	62 f1 7d 48 71 d1 05                            	vpsrlw $0x5,%zmm1,%zmm0
-  63:	62 f1 7d 48 72 d1 05                            	vpsrld $0x5,%zmm1,%zmm0
-  6a:	62 f1 fd 48 73 d1 05                            	vpsrlq $0x5,%zmm1,%zmm0
-  71:	62 f1 74 48 c2 ca 05                            	vcmpnltps %zmm2,%zmm1,%k1
-  78:	62 f1 74 48 c6 c2 05                            	vshufps $0x5,%zmm2,%zmm1,%zmm0
-  7f:	62 f2 75 48 8d c2                               	vpermb %zmm2,%zmm1,%zmm0
-  85:	62 f3 75 48 0f 44 24 01 05                      	vpalignr $0x5,0x40(%rsp),%zmm1,%zmm0
-  8e:	c3                                              	ret
+  37:	62 f1 fe 48 6f 80 0f 05 00 00                   	vmovdqu64 0x50f(%rax),%zmm0
+  41:	62 f1 fe 48 6f 04 8d 0f 05 00 00                	vmovdqu64 0x50f(,%rcx,4),%zmm0
+  4c:	62 f1 fe 48 6f 05 0f 05 00 00                   	vmovdqu64 0x50f(%rip),%zmm0        # 565 <patina_evex_corpus+0x565>
+  56:	64 67 62 f1 fe 48 6f 40 01                      	vmovdqu64 %fs:0x40(%eax),%zmm0
+  5f:	c5 f1 c4 c0 05                                  	vpinsrw $0x5,%eax,%xmm1,%xmm0
+  64:	c5 f9 c5 c1 05                                  	vpextrw $0x5,%xmm1,%eax
+  69:	62 f1 7d 48 70 c1 05                            	vpshufd $0x5,%zmm1,%zmm0
+  70:	62 f1 7d 48 71 d1 05                            	vpsrlw $0x5,%zmm1,%zmm0
+  77:	62 f1 7d 48 72 d1 05                            	vpsrld $0x5,%zmm1,%zmm0
+  7e:	62 f1 fd 48 73 d1 05                            	vpsrlq $0x5,%zmm1,%zmm0
+  85:	62 f1 74 48 c2 ca 05                            	vcmpnltps %zmm2,%zmm1,%k1
+  8c:	62 f1 74 48 c6 c2 05                            	vshufps $0x5,%zmm2,%zmm1,%zmm0
+  93:	62 f2 75 48 8d c2                               	vpermb %zmm2,%zmm1,%zmm0
+  99:	62 f3 75 48 0f 44 24 01 05                      	vpalignr $0x5,0x40(%rsp),%zmm1,%zmm0
+  a2:	c3                                              	ret
