@@ -562,7 +562,8 @@ F0 ∥ F1 → F2 → F3 → {fs, memory+ipc, time+identity, signals, network} in
 parallel (≤4 builders, one battery lane) → io_uring arc doc → arm64 table
 rows (numbers already in `mod nr`; probes gain the `svc` vehicle) → macOS
 table parse. One targeted jj commit per builder, pushed in batches, CI as the
-confirmation layer; shim/runtime diffs also run the macOS ladder on jrh-mini.
+confirmation layer; shim/runtime diffs also run the macOS ladder on a macOS
+arm64 host.
 Doc updates ride each commit: ARCHITECTURE native-shim list, ESCAPE-CLASSES
 residual 5, VALIDATION gate taxonomy, testbeds/README row, `llms.txt` verb map.
 
