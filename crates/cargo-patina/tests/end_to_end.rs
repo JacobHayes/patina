@@ -6337,6 +6337,248 @@ fn audit_imports(output: &Output) -> Vec<String> {
     imports
 }
 
+// Real toolchain shapes paired with code_ranges::tests' synthetic class
+// detectors. The control main actually calls the untyped/CFI-less entry.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn native_audit_refuses_untyped_and_fdeless_entries() {
+    use object::{Object, ObjectSymbol};
+    let directory = tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("main.c"), "extern unsigned long sized(void); extern unsigned long hidden(void);\nint main(void) { sized(); hidden(); return 0; }\n").unwrap();
+    // ET_REL must be a named input refusal, not merely an incidental unwind
+    // relocation failure. Exercise both ordinary and no-unwind object files.
+    for unwind in [
+        "-fasynchronous-unwind-tables",
+        "-fno-asynchronous-unwind-tables",
+    ] {
+        let object = root.join("guest.o");
+        let compiled = Command::new("cc")
+            .args(["-c", unwind])
+            .arg(root.join("main.c"))
+            .arg("-o")
+            .arg(&object)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let audit = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            root,
+            &["audit", object.to_str().unwrap(), "--raw"],
+        );
+        assert_eq!(audit.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&audit.stderr).contains("relocatable ELF (ET_REL)"),
+            "{}",
+            String::from_utf8_lossy(&audit.stderr)
+        );
+    }
+    let sized = ".text\n.globl sized\n.type sized,@function\nsized:\nxor %eax,%eax\nret\n.size sized,.-sized\n";
+    let cases = [
+        (
+            "gap",
+            ".globl hidden\nhidden:\nrdrand %rax\nret\n",
+            false,
+            true,
+        ),
+        (
+            "operand",
+            ".globl carrier\n.type carrier,@function\ncarrier:\n.byte 0x48,0xb8\n.globl hidden\nhidden:\n.byte 0x48,0x0f,0xc7,0xf0,0xc3,0x90,0x90,0x90\nret\n.size carrier,.-carrier\n",
+            false,
+            true,
+        ),
+        (
+            "fdeless",
+            ".globl hidden\n.type hidden,@function\nhidden:\nrdrand %rax\nret\n.size hidden,.-hidden\n",
+            true,
+            true,
+        ),
+        (
+            "bounded",
+            ".globl carrier\n.type carrier,@function\ncarrier:\nxor %eax,%eax\n.globl hidden\nhidden:\nret\n.size carrier,.-carrier\n.asciz \"OGAMS\"\n",
+            false,
+            false,
+        ),
+    ];
+    for (name, body, stripped, denied) in cases {
+        let asm = root.join(format!("{name}.s"));
+        fs::write(
+            &asm,
+            format!("{sized}{body}\n.section .note.GNU-stack,\"\",@progbits\n"),
+        )
+        .unwrap();
+        let binary = root.join(name);
+        let compiled = Command::new("cc")
+            .arg("-fno-asynchronous-unwind-tables")
+            .arg(root.join("main.c"))
+            .arg(&asm)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        if stripped {
+            let bytes = fs::read(&binary).unwrap();
+            let file = object::File::parse(&*bytes).unwrap();
+            assert!(
+                file.symbols()
+                    .any(|s| s.name() == Ok("hidden") && s.size() > 0)
+            );
+            let status = Command::new("strip")
+                .arg("--strip-all")
+                .arg(&binary)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let bytes = fs::read(&binary).unwrap();
+            let file = object::File::parse(&*bytes).unwrap();
+            assert!(file.symbols().next().is_none());
+            assert!(
+                file.section_by_name(".eh_frame").is_some(),
+                "must retain crt FDEs"
+            );
+        }
+        // Prove the planted entry is executed in the native control, when this
+        // host implements RDRAND. Static refusal remains unconditional.
+        if !denied || std::is_x86_feature_detected!("rdrand") {
+            assert!(
+                Command::new(&binary).status().unwrap().success(),
+                "native control {name}"
+            );
+        }
+        let audit = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            root,
+            &[
+                "audit",
+                binary.to_str().unwrap(),
+                "--raw",
+                "--format",
+                "json",
+            ],
+        );
+        assert_eq!(
+            audit.status.code(),
+            Some(if denied { 2 } else { 0 }),
+            "{name}: {}",
+            String::from_utf8_lossy(&audit.stderr)
+        );
+        if denied {
+            let result: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+            assert!(
+                result["finding_details"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|f| f["mnemonic"] == "rdrand"),
+                "{name}: {result}"
+            );
+        }
+    }
+}
+
+// Class-level detector for source-first audit metadata loss: exercise each
+// final-link path with stripping requested, not just command-line flag spelling.
+// The untyped ret label must not make its containing function absorb the data.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn native_source_builds_preserve_auditable_code_boundaries() {
+    use object::{Object, ObjectSymbol, SymbolKind};
+    fn assert_boundaries(path: &Path) {
+        let bytes = fs::read(path).unwrap();
+        let file = object::File::parse(&*bytes).unwrap();
+        assert!(
+            file.symbols().any(|s| s.kind() == SymbolKind::Text
+                && s.size() > 0
+                && s.name() == Ok("audit_probe")),
+            "missing sized audit symbol in {}",
+            path.display()
+        );
+    }
+    let directory = tempdir().unwrap();
+    let root = directory.path();
+    let source = r##"
+core::arch::global_asm!(r#"
+.pushsection .text.audit_probe,"ax",@progbits
+.globl audit_probe
+.type audit_probe,@function
+audit_probe:
+    mov $42, %eax
+.globl audit_probe_ret
+audit_probe_ret:
+    ret
+.size audit_probe, .-audit_probe
+.asciz "OGAMS"
+.popsection
+"#, options(att_syntax));
+unsafe extern "C" { fn audit_probe() -> u32; }
+fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK"); }
+#[test] fn boundaries() { main(); }
+"##;
+    // Keep the fixture source independent of the checkout and its build outputs.
+    let single = root.join("single.rs");
+    fs::write(&single, source).unwrap();
+    let binary = root.join("single");
+    invoke(
+        root,
+        &[
+            "build",
+            single.to_str().unwrap(),
+            "--output",
+            binary.to_str().unwrap(),
+            "--",
+            "-C",
+            "strip=symbols",
+        ],
+    );
+    assert_boundaries(&binary);
+    invoke(root, &["audit", binary.to_str().unwrap()]);
+    invoke(root, &["run", binary.to_str().unwrap(), "--seed", "1"]);
+
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/main.rs"), source).unwrap();
+    fs::write(root.join("Cargo.toml"), "[package]\nname = \"audit_boundaries\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[profile.dev]\nstrip = true\n[profile.release]\nstrip = \"symbols\"\n").unwrap();
+    for release in [false, true] {
+        let profile: &[&str] = if release { &["--release"] } else { &[] };
+        let binary = root.join("package-guest");
+        let mut build = vec!["build", ".", "--output", binary.to_str().unwrap()];
+        build.extend(profile);
+        invoke(root, &build);
+        assert_boundaries(&binary);
+        invoke(root, &["audit", binary.to_str().unwrap()]);
+        if !release {
+            invoke(root, &["audit", "."]);
+        }
+        let mut run = vec!["run", "."];
+        run.extend(profile);
+        invoke(root, &run);
+        let mut test = vec![
+            "test",
+            ".",
+            "--harness-target",
+            "audit_boundaries",
+            "--exact",
+            "boundaries",
+            "--seed",
+            "1",
+        ];
+        test.extend(profile);
+        invoke(root, &test);
+        let guest = fixture_target_directory(root)
+            .join("patina/dst/audit_boundaries/bin/audit_boundaries/boundaries/guest");
+        assert_boundaries(&guest);
+        invoke(root, &["audit", guest.to_str().unwrap()]);
+    }
+}
+
 // `run <SOURCE.rs>` builds native on the fly (no prior `build`) and runs the
 // product; its output matches an explicit `build` + `run` of the same source,
 // and the one-line identity note is printed so an implicit build is never silent.

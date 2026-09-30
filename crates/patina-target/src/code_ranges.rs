@@ -1,17 +1,30 @@
 //! Declared x86-64 ELF code extents, not a control-flow/reachability proof.
+//! Relocatable ELF (ET_REL) is refused on every architecture: object files are
+//! not runnable guests, even when they have no unresolved unwind relocations.
 //!
 //! Each symbol/FDE retains its own start and end: unioning overlapping ranges
 //! into one linear walk could discard a real entry point, while intersecting
 //! them could hide bytes one source declares to be code. Exact duplicates alone
-//! are removed. Missing metadata uses the original whole-section scan; malformed
-//! metadata is an error, never a reason to silently use a narrower source.
+//! are removed. Only a sized STT_FUNC in a section's ordinary .symtab licenses
+//! omitting gaps. Otherwise the whole-section scan is added, even with FDEs or
+//! dynamic exports. NOTYPE labels and unsized functions add entry walks bounded
+//! by every containing declaration, or the next entry/section end in a gap.
+//! Malformed metadata is an error, never a reason to use a narrower source.
+//!
+//! Residuals: lying/short sizes, undeclared entries into gaps or operands, and
+//! runtime-generated code can evade static discovery. Active Linux x86 SUD/TSC
+//! traps backstop syscall/counter reads, not pre-trap startup. Entropy reads,
+//! TLS writes and far transfers have no equivalent runtime trap; CPUID/PKRU
+//! remain unmanaged. The full-section vsyscall pattern check cannot cover
+//! computed addresses or generated code. See ESCAPE-CLASSES.md per class.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use gimli::{BaseAddresses, CieOrFde, EhFrame, RunTimeEndian, UnwindSection};
 use object::{
-    Architecture, BinaryFormat, Object, ObjectSection, ObjectSymbol, SectionKind, SymbolKind,
+    Architecture, BinaryFormat, Object, ObjectSection, ObjectSymbol, SectionKind, SymbolFlags,
+    SymbolSection,
 };
 
 use super::TargetError;
@@ -29,6 +42,11 @@ struct TextSection {
 
 impl CodeRanges {
     pub(super) fn new(file: &object::File<'_>) -> Result<Self, TargetError> {
+        // Reject object files before any architecture-specific range policy:
+        // even no-CFI objects without .rela.eh_frame are not runnable guests.
+        if file.format() == BinaryFormat::Elf && file.kind() == object::ObjectKind::Relocatable {
+            return Err(TargetError::RelocatableNativeElf);
+        }
         let mut result = Self::default();
         if file.format() != BinaryFormat::Elf || file.architecture() != Architecture::X86_64 {
             return Ok(result);
@@ -47,15 +65,32 @@ impl CodeRanges {
             });
         }
         let mut unsized_starts = BTreeSet::new();
-        for symbol in file.symbols().chain(file.dynamic_symbols()) {
-            if symbol.kind() != SymbolKind::Text || !symbol.is_definition() {
+        let mut sized_symtab_sections = BTreeSet::new();
+        for (symbol, symtab) in file
+            .symbols()
+            .map(|s| (s, true))
+            .chain(file.dynamic_symbols().map(|s| (s, false)))
+        {
+            let SymbolFlags::Elf { st_info, .. } = symbol.flags() else {
+                continue;
+            };
+            let kind = st_info & 0x0f;
+            if !matches!(
+                kind,
+                object::elf::STT_FUNC | object::elf::STT_GNU_IFUNC | object::elf::STT_NOTYPE
+            ) || matches!(
+                symbol.section(),
+                SymbolSection::Undefined | SymbolSection::Absolute | SymbolSection::Common
+            ) {
                 continue;
             }
+            // Do not use ObjectSymbol::is_definition: it also excludes local
+            // NOTYPE names beginning with '$', which can be real x86 entries.
             // A missing/invalid ordinary or extended section index is not a
             // non-text function. Validate it before selecting text coverage.
             let index = symbol
                 .section_index()
-                .ok_or_else(|| invalid("defined function has no resolved section index"))?;
+                .ok_or_else(|| invalid("defined code entry has no resolved section index"))?;
             let declared_section = file
                 .section_by_index(index)
                 .map_err(TargetError::NativeParse)?;
@@ -73,12 +108,15 @@ impl CodeRanges {
             if start < section.address || end > section.end {
                 return Err(invalid("function symbol extends outside its text section"));
             }
-            if symbol.size() == 0 {
+            if symbol.size() == 0 || kind == object::elf::STT_NOTYPE {
                 if start < section.end {
                     unsized_starts.insert((section.index, (start - section.address) as usize));
                 }
             } else {
                 result.insert(section, start, end);
+                if symtab && kind == object::elf::STT_FUNC {
+                    sized_symtab_sections.insert(section.index);
+                }
             }
         }
         if let Some(section) = file.section_by_name(".eh_frame") {
@@ -132,11 +170,16 @@ impl CodeRanges {
                 result.insert(section, start, end);
             }
         }
-        // A zero-sized STT_FUNC still establishes an entry point. If a sized
-        // symbol/FDE shares it, use that extent. Otherwise conservatively scan
-        // through the next entry point (or section end), not just zero bytes.
+        // Untyped labels and zero-sized functions establish independent entries.
+        // Preserve every containing declaration's endpoint, even when a shorter
+        // declaration shares the start. In gaps, stop at the next known entry.
+        // Only original declarations bound these suffixes, never inferred ranges
+        // or the whole-section fallback added below.
         for section in &sections {
             let ranges = result.sections.entry(section.index).or_default();
+            ranges.sort_unstable_by_key(|r| (r.start, r.end));
+            ranges.dedup();
+            let declared = ranges.clone();
             let starts: BTreeSet<_> = ranges
                 .iter()
                 .map(|r| r.start)
@@ -151,15 +194,27 @@ impl CodeRanges {
                 .iter()
                 .filter(|(index, _)| *index == section.index)
             {
-                if ranges.iter().any(|r| r.start == start) {
-                    continue;
+                let ends: BTreeSet<_> = declared
+                    .iter()
+                    .filter(|r| r.contains(&start))
+                    .map(|r| r.end)
+                    .collect();
+                if ends.is_empty() {
+                    let end = starts
+                        .range((start + 1)..)
+                        .next()
+                        .copied()
+                        .unwrap_or((section.end - section.address) as usize);
+                    ranges.push(start..end);
+                } else {
+                    ranges.extend(ends.into_iter().map(|end| start..end));
                 }
-                let end = starts
-                    .range((start + 1)..)
-                    .next()
-                    .copied()
-                    .unwrap_or((section.end - section.address) as usize);
-                ranges.push(start..end);
+            }
+            // FDEs, dynsym functions and labels alone cannot justify omitting
+            // gaps: ordinary toolchains leave real functions without unwind
+            // records. Keep independent entry walks alongside the full scan.
+            if !sized_symtab_sections.contains(&section.index) {
+                ranges.push(0..(section.end - section.address) as usize);
             }
             ranges.sort_unstable_by_key(|r| (r.start, r.end));
             ranges.dedup();
@@ -174,8 +229,9 @@ impl CodeRanges {
             .push((start - section.address) as usize..(end - section.address) as usize);
     }
 
-    /// None means no boundaries for this section: scan the entire section, not
-    /// zero bytes. Empty sections naturally have an empty whole-section range.
+    /// None means no range policy for this section (e.g. Mach-O): scan it whole.
+    /// ELF sections lacking sized .symtab functions explicitly include that
+    /// whole-section range alongside independent entry walks.
     pub(super) fn get(&self, index: object::SectionIndex) -> Option<&[Range<usize>]> {
         self.sections
             .get(&index.0)
@@ -255,7 +311,7 @@ fn invalid(reason: &str) -> TargetError {
 mod tests {
     use super::*;
     use object::write::{Object as WriteObject, Symbol, SymbolSection};
-    use object::{Endianness, SymbolFlags, SymbolScope};
+    use object::{Endianness, SymbolFlags, SymbolKind, SymbolScope};
 
     // An anonymous compiler-output shape: a function, non-code attribution
     // bytes, then a second function. The marker is deliberately not decoded.
@@ -287,19 +343,39 @@ mod tests {
         symbols: &[(u64, u64)],
         unwind: Option<&[u8]>,
     ) -> Vec<u8> {
+        let symbols: Vec<_> = symbols
+            .iter()
+            .map(|&(start, size)| (start, size, SymbolKind::Text))
+            .collect();
+        elf_with_symbols(architecture, text, &symbols, unwind)
+    }
+
+    fn elf_with_symbols(
+        architecture: Architecture,
+        text: &[u8],
+        symbols: &[(u64, u64, SymbolKind)],
+        unwind: Option<&[u8]>,
+    ) -> Vec<u8> {
         let mut object = WriteObject::new(BinaryFormat::Elf, architecture, Endianness::Little);
         let section = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
         object.append_section_data(section, text, 4);
-        for (i, &(start, size)) in symbols.iter().enumerate() {
+        for (i, &(start, size, kind)) in symbols.iter().enumerate() {
             object.add_symbol(Symbol {
                 name: format!("function_{i}").into_bytes(),
                 value: start,
                 size,
-                kind: SymbolKind::Text,
+                kind,
                 scope: SymbolScope::Linkage,
                 weak: false,
                 section: SymbolSection::Section(section),
-                flags: SymbolFlags::None,
+                flags: if kind == SymbolKind::Unknown {
+                    SymbolFlags::Elf {
+                        st_info: object::elf::STB_GLOBAL << 4 | object::elf::STT_NOTYPE,
+                        st_other: 0,
+                    }
+                } else {
+                    SymbolFlags::None
+                },
             });
         }
         if let Some(unwind) = unwind {
@@ -307,7 +383,16 @@ mod tests {
                 object.add_section(Vec::new(), b".eh_frame".to_vec(), SectionKind::ReadOnlyData);
             object.append_section_data(section, unwind, 8);
         }
-        object.write().unwrap()
+        linked_elf(object)
+    }
+
+    // The writer emits ET_REL. These fixtures model linked address ranges, not
+    // runnable programs; mark ET_EXEC so range tests exercise metadata policy
+    // rather than the independent object-file refusal.
+    fn linked_elf(object: WriteObject<'_>) -> Vec<u8> {
+        let mut bytes = object.write().unwrap();
+        bytes[16..18].copy_from_slice(&object::elf::ET_EXEC.to_le_bytes());
+        bytes
     }
 
     fn scan(bytes: &[u8]) -> Result<Vec<crate::NativeEscape>, TargetError> {
@@ -316,16 +401,34 @@ mod tests {
         crate::scan_instruction_classes(&file, &provenance)
     }
 
+    // Object files are not runnable guests, independently of whether they have
+    // unwind records/relocations (handwritten no-CFI assembly often has neither).
+    #[test]
+    fn relocatable_elf_is_refused_with_or_without_unwind_metadata() {
+        for architecture in [Architecture::X86_64, Architecture::Aarch64] {
+            for unwind in [None, Some(&[0xff, 0xff, 0xff][..])] {
+                let mut bytes = elf(architecture, RETURN_42, &[(0, 6)], unwind);
+                bytes[16..18].copy_from_slice(&object::elf::ET_REL.to_le_bytes());
+                let parsed = object::File::parse(&*bytes).unwrap();
+                assert_eq!(parsed.kind(), object::ObjectKind::Relocatable);
+                let error = crate::NativeAudit::audit(&bytes, &BTreeSet::new())
+                    .expect_err("a relocatable object is not a runnable guest");
+                assert!(
+                    matches!(error, TargetError::RelocatableNativeElf),
+                    "{error}"
+                );
+                assert!(error.to_string().contains("ET_REL"), "{error}");
+                assert!(scan(&bytes).unwrap_err().to_string().contains("ET_REL"));
+            }
+        }
+    }
+
     #[test]
     fn inter_function_data_does_not_desynchronize_declared_code() {
         let text = text_with_tail(RETURN_42);
         let ranges = [(0, 6), (12, 6)];
         let unwind = eh_frame(&ranges);
-        for (symbols, fdes) in [
-            (&ranges[..], None),
-            (&[][..], Some(&unwind[..])),
-            (&ranges[..], Some(&unwind[..])),
-        ] {
+        for (symbols, fdes) in [(&ranges[..], None), (&ranges[..], Some(&unwind[..]))] {
             let bytes = elf(Architecture::X86_64, &text, symbols, fdes);
             assert!(scan(&bytes).unwrap().is_empty());
             assert!(crate::NativeAudit::audit(&bytes, &BTreeSet::new()).is_ok());
@@ -351,9 +454,18 @@ mod tests {
             for (symbols, fdes) in [(&ranges[..], None), (&[][..], Some(&unwind[..]))] {
                 let bytes = elf(Architecture::X86_64, &text, symbols, fdes);
                 let found = scan(&bytes).unwrap();
-                assert_eq!(found.len(), 1, "{found:?}");
-                assert_eq!(found[0].category, category);
-                assert_eq!(found[0].symbol, "instruction@.text+0xc");
+                assert!(
+                    found
+                        .iter()
+                        .any(|e| e.category == category && e.symbol == "instruction@.text+0xc"),
+                    "{found:?}"
+                );
+                assert_eq!(
+                    found
+                        .iter()
+                        .any(|e| e.category == "undecodable-instruction"),
+                    symbols.is_empty()
+                );
                 assert!(matches!(
                     crate::NativeAudit::audit(&bytes, &BTreeSet::new()),
                     Err(TargetError::UnsupportedNativeImports(_))
@@ -406,12 +518,184 @@ mod tests {
     }
 
     #[test]
-    fn gap_bytes_are_outside_the_declared_code_contract() {
+    fn residual_undeclared_gap_escape_is_not_yet_detected() {
         // Explicit residual, not a reachability claim: even a forbidden opcode
         // in an uncovered gap is not scanned when function metadata exists.
         let text = [RETURN_42, &[0x0f, 0xc7, 0xf0], RETURN_42].concat();
         let bytes = elf(Architecture::X86_64, &text, &[(0, 6), (9, 6)], None);
         assert!(scan(&bytes).unwrap().is_empty());
+    }
+
+    // Class detector: declarations lacking sized .symtab functions must never
+    // narrow the section walk, but still preserve independently declared starts.
+    #[test]
+    fn fde_only_and_unsized_only_sections_cannot_hide_code_in_gaps() {
+        let text = [RETURN_42, &[0x0f, 0xc7, 0xf0, 0xc3]].concat();
+        for symbols in [
+            vec![],
+            vec![(0, 0, SymbolKind::Text)],
+            vec![(0, 0, SymbolKind::Unknown)],
+        ] {
+            let bytes = elf_with_symbols(
+                Architecture::X86_64,
+                &text,
+                &symbols,
+                Some(&eh_frame(&[(0, 6)])),
+            );
+            let found = scan(&bytes).unwrap();
+            assert!(
+                found.iter().any(|e| e.mnemonic == Some("rdrand")),
+                "{found:?}"
+            );
+            assert!(crate::NativeAudit::audit(&bytes, &BTreeSet::new()).is_err());
+        }
+    }
+
+    #[test]
+    fn dynamic_function_symbols_do_not_license_omitting_gaps() {
+        let text = [RETURN_42, &[0x0f, 0xc7, 0xf0]].concat();
+        let mut bytes = elf(Architecture::X86_64, &text, &[(0, 6)], None);
+        let file = object::File::parse(&*bytes).unwrap();
+        let index = file.section_by_name(".symtab").unwrap().index().0;
+        let shoff = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
+        // Move the same sized declaration to SHT_DYNSYM (sh_link still names
+        // its string table). Dynamic exports are not a full code inventory.
+        bytes[shoff + index * 64 + 4..shoff + index * 64 + 8]
+            .copy_from_slice(&object::elf::SHT_DYNSYM.to_le_bytes());
+        let file = object::File::parse(&*bytes).unwrap();
+        assert!(file.symbols().next().is_none());
+        assert!(file.dynamic_symbols().any(|s| s.size() > 0));
+        assert!(
+            scan(&bytes)
+                .unwrap()
+                .iter()
+                .any(|e| e.mnemonic == Some("rdrand"))
+        );
+    }
+
+    #[test]
+    fn sized_symbol_coverage_is_per_section_not_per_file() {
+        let mut object =
+            WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        for (name, text, value, size) in [
+            (".text", &[0xc3][..], 0, 1),
+            (".text.more", &[0x0f, 0xc7, 0xf0, 0xc3, 0xc3][..], 4, 0),
+        ] {
+            let section =
+                object.add_section(Vec::new(), name.as_bytes().to_vec(), SectionKind::Text);
+            object.append_section_data(section, text, 1);
+            object.add_symbol(Symbol {
+                name: name.as_bytes().to_vec(),
+                value,
+                size,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Linkage,
+                weak: false,
+                section: SymbolSection::Section(section),
+                flags: SymbolFlags::None,
+            });
+        }
+        assert!(
+            scan(&linked_elf(object))
+                .unwrap()
+                .iter()
+                .any(|e| e.mnemonic == Some("rdrand"))
+        );
+    }
+
+    #[test]
+    fn whole_section_fallback_preserves_alternate_entries() {
+        let text = [
+            0x48, 0xb8, 0x0f, 0xc7, 0xf0, 0x90, 0x90, 0x90, 0x90, 0x90, 0xc3,
+        ];
+        for kind in [SymbolKind::Text, SymbolKind::Unknown] {
+            let bytes = elf_with_symbols(
+                Architecture::X86_64,
+                &text,
+                &[(2, 0, kind)],
+                Some(&eh_frame(&[(2, 3)])),
+            );
+            assert!(
+                scan(&bytes)
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.mnemonic == Some("rdrand"))
+            );
+        }
+    }
+
+    // The NOTYPE gap/interior pins pair with this class-level variation over
+    // instruction classes and declaration positions, not just one byte string.
+    #[test]
+    fn untyped_entries_in_gaps_and_operands_are_scanned() {
+        for opcode in [
+            &[0x0f, 0xc7, 0xf0][..],
+            &[0x0f, 0x05],
+            &[0xf3, 0x0f, 0xae, 0xd0],
+            &[0xcb],
+        ] {
+            let mut operand = vec![0x48, 0xb8]; // movabs, with an alternate entry in its immediate
+            operand.extend(opcode);
+            operand.resize(10, 0x90);
+            operand.push(0xc3);
+            for (text, start, size) in [([RETURN_42, opcode].concat(), 6, 6), (operand, 2, 11)] {
+                let bytes = elf_with_symbols(
+                    Architecture::X86_64,
+                    &text,
+                    &[(0, size, SymbolKind::Text), (start, 0, SymbolKind::Unknown)],
+                    None,
+                );
+                let found = scan(&bytes).unwrap();
+                assert!(
+                    found
+                        .iter()
+                        .any(|e| e.symbol == format!("instruction@.text+0x{start:x}")
+                            && e.category != "undecodable-instruction"),
+                    "{found:?}"
+                );
+                assert!(crate::NativeAudit::audit(&bytes, &BTreeSet::new()).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn untyped_entry_inside_a_sized_function_does_not_extend_into_data() {
+        // Entry is the ret inside a function, followed by undecodable data.
+        let bytes = elf_with_symbols(
+            Architecture::X86_64,
+            &text_with_tail(RETURN_42),
+            &[
+                (0, 6, SymbolKind::Text),
+                (5, 0, SymbolKind::Unknown),
+                (12, 6, SymbolKind::Text),
+            ],
+            None,
+        );
+        assert!(scan(&bytes).unwrap().is_empty());
+        assert!(crate::NativeAudit::audit(&bytes, &BTreeSet::new()).is_ok());
+        let file = object::File::parse(&*bytes).unwrap();
+        let ranges = CodeRanges::new(&file).unwrap();
+        assert!(
+            ranges
+                .get(file.section_by_name(".text").unwrap().index())
+                .unwrap()
+                .contains(&(5..6))
+        );
+        // Even a shorter FDE sharing the label cannot truncate its enclosing
+        // function suffix. Both endpoints remain independent scan limits.
+        let text = [0x48, 0xb8, 0x90, 0x0f, 0xc7, 0xf0, 0x90, 0x90, 0x90, 0x90];
+        let bytes = elf_with_symbols(
+            Architecture::X86_64,
+            &text,
+            &[(0, 10, SymbolKind::Text), (2, 0, SymbolKind::Unknown)],
+            Some(&eh_frame(&[(2, 1)])),
+        );
+        assert!(
+            scan(&bytes)
+                .unwrap()
+                .iter()
+                .any(|e| e.mnemonic == Some("rdrand"))
+        );
     }
 
     #[test]
@@ -527,8 +811,20 @@ mod tests {
     #[test]
     fn invalid_symbol_section_indices_cannot_remove_declared_functions() {
         let text = [0xc3, 0x0f, 0xc7, 0xf0];
-        for index in [100u16, object::elf::SHN_XINDEX] {
-            let mut bytes = elf(Architecture::X86_64, &text, &[(0, 1), (1, 3)], None);
+        for (index, kind) in [100u16, object::elf::SHN_XINDEX]
+            .into_iter()
+            .flat_map(|index| {
+                [SymbolKind::Text, SymbolKind::Unknown]
+                    .into_iter()
+                    .map(move |kind| (index, kind))
+            })
+        {
+            let mut bytes = elf_with_symbols(
+                Architecture::X86_64,
+                &text,
+                &[(0, 1, SymbolKind::Text), (1, 0, kind)],
+                None,
+            );
             let file = object::File::parse(&*bytes).unwrap();
             let symbol = file
                 .symbols()
@@ -572,7 +868,7 @@ mod tests {
                 },
             )
             .unwrap();
-        object.write().unwrap()
+        linked_elf(object)
     }
 
     fn relocation_header(bytes: &[u8]) -> usize {

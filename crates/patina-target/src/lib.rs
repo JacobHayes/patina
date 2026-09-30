@@ -2135,27 +2135,32 @@ fn aarch64_instruction_category(instruction: u32) -> Option<(&'static str, &'sta
 /// Scan policy: x86-64 ELF uses the declared function extents from defined
 /// STT_FUNC symbols (including dynamic symbols) AND `.eh_frame` FDEs. Each range
 /// is decoded independently from its own start to its own end; overlaps are not
-/// merged or intersected. Exact duplicates share findings. Zero-sized function
-/// symbols use a same-start sized extent if present, otherwise conservatively
-/// extend to the next entry point or section end. Malformed/overflowing/out-of-
-/// section ranges, unresolved function section indices, indirect FDE addresses
+/// merged or intersected. Exact duplicates share findings. Defined NOTYPE labels
+/// and zero-sized functions establish independent entries, ending at each
+/// containing declaration's end, or the next entry/section end in a gap.
+/// Malformed/overflowing/out-of-section ranges, unresolved code-entry section
+/// indices, indirect FDE addresses
 /// and relocations targeting `.eh_frame` refuse: none establishes a code address
 /// we can trust, even when another metadata source is valid. REL/RELA tables are
 /// read fallibly, including dynamic targets; malformed tables and packed
 /// relocation formats (RELR/CREL/Android) refuse rather than guessing their effect
-/// on unwind storage. With no
-/// ranges for a section, the whole section is decoded as before; stripped ELF
-/// normally retains FDEs. Mach-O retains the whole-section policy.
+/// on unwind storage. A section without a sized STT_FUNC in .symtab additionally
+/// gets a whole-section walk: FDEs and dynamic exports alone cannot justify
+/// omitting code, because ordinary toolchains omit unwind records. Stripped
+/// code/data mixtures may therefore refuse again. Mach-O retains its whole-
+/// section policy. Source builds preserve symbols in the audited/run artifact.
 ///
-/// Bytes outside all declared extents are NOT scanned as x86 instructions. This
+/// Where sized .symtab functions exist, bytes outside all declared extents and
+/// inferred entry ranges are NOT scanned as x86 instructions. This
 /// handles assembly attribution strings/alignment without recognizing any tag,
 /// dependency, or byte pattern, and without skipping undecodable bytes inside a
 /// range. It assumes compiler/linker metadata describes every executable entry
 /// and extent, and that ELF section metadata agrees with the loader's image
 /// (contradictory program-header/dynamic tables are not reconciled here).
-/// Metadata is NOT a reachability proof: fallthrough/branches into
-/// gaps, omitted functions (including unwind-less code in stripped images),
-/// forged sizes, or entry into an instruction's operands can escape this scan.
+/// Metadata is NOT a reachability proof: lying or too-short sizes, fallthrough
+/// or branches into gaps or operands at undeclared entries, omitted functions
+/// in otherwise symbol-bearing sections, and runtime-generated code can evade
+/// static discovery. These are residuals, not a contract that such code is safe.
 /// A successful scan is a bounded compiler-output check, not certification of
 /// arbitrary/adversarial native code. Undecodable bytes inside ANY declared
 /// range still refuse the binary, even after a return, with a later range still
@@ -2163,7 +2168,8 @@ fn aarch64_instruction_category(instruction: u32) -> Option<(&'static str, &'sta
 ///
 /// Runtime backstops are class/platform-specific, not justification for ignoring
 /// code: on x86-64 Linux, an active shim SUD trap intercepts raw syscalls (i386
-/// entries abort), and PR_SET_TSC intercepts rdtsc/rdtscp. Neither protects the
+/// entries abort), and PR_SET_TSC traps rdtsc/rdtscp (supported main-image reads
+/// are virtualized; out-of-image/generated counter sites stop by name). Neither protects the
 /// pre-trap startup window or execution on other platforms. Rdrand/rdseed, TLS-
 /// base writes and far transfers have no such backstop: an executed site outside
 /// the scan's coverage can escape. Cpuid/PKRU sites are informational only.
@@ -4747,6 +4753,7 @@ pub enum TargetError {
     InvalidNativeCodeRanges(String),
     UnsupportedImports(Vec<WasmImport>),
     UnsupportedNativeFormat(BinaryFormat),
+    RelocatableNativeElf,
     UnsupportedNativeArchitecture(Architecture),
     UnsupportedNativeImports(Vec<NativeEscape>),
 }
@@ -4773,6 +4780,9 @@ impl fmt::Display for TargetError {
                     "unsupported native binary format {format:?}; expected Mach-O or ELF"
                 )
             }
+            Self::RelocatableNativeElf => f.write_str(
+                "refusing relocatable ELF (ET_REL): an object file is not a runnable guest; link an executable before audit/run",
+            ),
             Self::UnsupportedNativeArchitecture(architecture) => {
                 write!(
                     f,
@@ -4798,6 +4808,7 @@ impl std::error::Error for TargetError {
             Self::InvalidNativeCodeRanges(_)
             | Self::UnsupportedImports(_)
             | Self::UnsupportedNativeFormat(_)
+            | Self::RelocatableNativeElf
             | Self::UnsupportedNativeArchitecture(_)
             | Self::UnsupportedNativeImports(_) => None,
         }

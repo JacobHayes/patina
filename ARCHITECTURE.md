@@ -62,6 +62,14 @@ The shim is built on the user's machine, from source that travels inside the `ca
 
 Both halves of that link use the guest's verified concrete compiler. The shim's Cargo build runs in the unpacked bundle so `-p patina-dst-native-shim` always resolves, while the guest builds in the caller's working directory. Directory-scoped selectors (rustup, mise, or other proxies) can select different compilers there; linking their two standard libraries causes `duplicate symbol: rust_eh_personality` on Linux and can silently succeed on macOS. Instead of requiring an ambient toolchain override, the build queries the guest compiler's sysroot and verifies that its absolute `bin/rustc` reports the guest's full `rustc -vV` identity from both directories. Native compiler probes, metadata, shim builds, and guest builds then use that invocation, with `RUSTC` set explicitly for Cargo children. Cargo comes from the same sysroot unless explicitly supplied through `CARGO`; explicit `RUSTC` selects the guest identity to materialize, and relative tool paths are anchored to the guest directory. Missing sysroot binaries, failed queries, or identity mismatches refuse before compilation with a concrete-binary remedy, never an ambient fallback. No toolchain file or version-manager configuration is written into the shared bundle. The shim build directory is keyed by the source bundle and the verified guest's complete identity, so concurrent stable/MSRV supervisors and different installed Patina builds cannot publish same-named archives into one path. Cargo rewrites its own copy of the staticlib on every build, fresh or not, wherever it copies rather than hard-links (always on macOS), so the guest never links that path: under a lock held from the shim's Cargo build until publication, cargo-patina copies the archive to a sibling named by its content hash and publishes it by rename, and concurrent guest links read only those immutable copies. That lock is the one every cargo-patina Cargo build takes: the shim, a native package or harness, and a WASI module each hold an exclusive `.patina-build.lock` in their Cargo target directory from before the Cargo invocation until they have read back what they consume, so a concurrent build's Cargo can never rewrite a guest executable while it is copied out.
 
+Native source, package and libtest builds retain the final artifact's symbol
+table by overriding Rust/Cargo stripping with `-C strip=none` at the final link.
+The source-first audit/run paths consume that same symbol-bearing executable;
+Cargo exposes no separate pre-strip artifact to audit. Optimization is unchanged
+and dependency codegen is not altered. Explicit linker stripping or a post-link
+tool can still remove metadata; such inputs get the conservative whole-section
+scan rather than an inferred pre-strip sibling or an audit bypass.
+
 Before a native guest runs, a default-deny audit over its imports (plus an instruction scan for raw syscall/clock/entropy opcodes) refuses anything the shim does not model — see [Enforcement](#enforcement).
 
 #### Linux signals and thread lifecycle
@@ -776,16 +784,21 @@ Static, pre-run checks reject a native binary before it executes:
 - WASI module imports are audited against the host's explicit allowlist before
   instantiation.
 
+Relocatable ELF objects (`ET_REL`) are refused by name, with or without unwind
+relocations: audit/run requires a linked guest, not a `.o` file.
+
 The x86-64 ELF scan is bounded by compiler/linker-declared code: every function
 symbol extent and `.eh_frame` FDE is decoded independently from its own start.
 Undecodable bytes inside any declared range refuse. Uncovered gaps may contain
 assembly metadata and are not decoded as instructions; this trusts the metadata,
-not a proof of reachability. Stripped ELF uses remaining FDEs; sections with no
-boundaries retain the whole-section fail-closed walk. Malformed range metadata
-refuses. Mach-O keeps the whole-section walk; aarch64 keeps its aligned-word
-sweep, including possible data-word false positives. Undeclared executable code
-is a residual, especially for untrappable entropy, TLS-base writes and far
-transfers. The separate vsyscall-address scan still covers whole sections.
+not a proof of reachability. A section without a sized STT_FUNC in `.symtab`
+also gets the whole-section fail-closed walk: FDEs/dynamic exports alone never
+justify omitting gaps. NOTYPE labels and zero-sized functions add independent
+entries bounded by containing declarations, or the next entry/section end in a
+gap. Malformed range metadata refuses. Mach-O keeps the whole-section walk; aarch64 keeps its aligned-word
+sweep, including possible data-word false positives. Lying/short sizes,
+undeclared entries into gaps or operands, and generated code remain residuals,
+especially for untrappable entropy, TLS-base writes and far transfers. The separate vsyscall-address scan still covers whole sections.
 See the escape taxonomy for the per-class runtime backstops and their limits.
 
 Runtime checks catch effects that cannot be rejected statically:

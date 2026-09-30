@@ -3877,11 +3877,14 @@ fn build_native_harness(
     command
         .arg("--profile")
         .arg(if invocation.release { "bench" } else { "test" });
-    command.arg("--").args(native_package_link_args(
-        &object,
-        &staticlib,
-        yield_object.as_deref(),
-    ));
+    command
+        .arg("--")
+        .args(native_package_link_args(
+            &object,
+            &staticlib,
+            yield_object.as_deref(),
+        ))
+        .args(NATIVE_AUDIT_METADATA_ARGS);
     let _lock = lock_target_dir(&target_dir)?;
     let built = command.output().map_err(|error| {
         CliError(format!(
@@ -5756,6 +5759,11 @@ fn push_platform_link_args(mut configure: impl FnMut(&str)) {
     }
 }
 
+// Audit and execute the same symbol-bearing artifact. Cargo does not expose a
+// separate pre-strip executable; preserve its boundaries at the final link,
+// after profile/user strip settings, without changing dependency codegen.
+const NATIVE_AUDIT_METADATA_ARGS: [&str; 2] = ["-C", "strip=none"];
+
 /// Compile a single Rust source, injecting cfg(patina)/cfg(dst) and linking the
 /// POSIX object and shim staticlib below it. Built native for the host, so the
 /// host OS selects the link recipe.
@@ -5814,7 +5822,12 @@ fn build_native_source(
             "overflow-checks=off",
         ]);
     }
-    command.arg(source).arg("-o").arg(output).args(rustc_args);
+    command
+        .arg(source)
+        .arg("-o")
+        .arg(output)
+        .args(rustc_args)
+        .args(NATIVE_AUDIT_METADATA_ARGS);
     let status = command
         .status()
         .map_err(|error| CliError(format!("failed to run rustc {:?}: {error}", rustc.command)))?;
@@ -5887,7 +5900,8 @@ fn build_native_package(
     }
     command
         .arg("--")
-        .args(native_package_link_args(object, staticlib, yield_object));
+        .args(native_package_link_args(object, staticlib, yield_object))
+        .args(NATIVE_AUDIT_METADATA_ARGS);
     let _lock = lock_target_dir(&selected.target_dir)?;
     let built = command
         .output()

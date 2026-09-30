@@ -87,16 +87,20 @@ leaves that might otherwise happen to fit in the remaining space.
 
 ## Executable-section metadata refusal
 
-`text_metadata_probe.rs` reduces native crypto assembly that places metadata
-in executable text after a function's return, using neutral REX-prefix-range bytes.
-Its native test calls `probe()` and asserts the function returns 42; the Linux
-x86-64 linear instruction audit refuses the unreachable data as
-`undecodable-instruction`. The `end_to_end` target's
-`native_harness_audit_refusal_does_not_advertise_a_trace` test owns this declared
-limit and asserts the result has no trace facts, even with an older file present.
+`text_metadata_probe.rs` places neutral REX-prefix-range bytes after a return
+but **inside the function's declared `.size`**. Its native test calls `probe()`
+and asserts the function returns 42; the Linux x86-64 instruction audit refuses
+the unreachable data as `undecodable-instruction`. The `end_to_end` target's
+`native_harness_audit_refusal_does_not_advertise_a_trace` test owns this limit
+and asserts the result has no trace facts, even with an older file present.
 Its portable class pairing is `native_harness_import_refusal_has_no_trace`.
-This is not a runtime bug or permission to bypass the audit. Supporting
-mixed code/data text needs an explicit containment decision; see the escape taxonomy.
+
+Data outside declared functions is a different case: symbol-bearing ELF
+sections may omit inter-function gaps. The positive counterpart is
+`native_source_builds_preserve_auditable_code_boundaries`, which audits and runs
+that layout, including an internal NOTYPE label bounded by its function's end.
+Neither case justifies skipping undecodable bytes inside a range; see the
+escape taxonomy for the metadata policy and residuals.
 
 ## Coverage boundaries
 

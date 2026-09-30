@@ -1,6 +1,6 @@
-//! Executable-section metadata, as emitted by native crypto assembly.
-//! Natively this returns 42. The linear instruction audit deliberately refuses
-//! the unreachable metadata; it has no code/data reachability proof.
+//! Metadata inside a declared function extent (not an inter-function gap).
+//! Natively this returns 42. The instruction audit deliberately refuses the
+//! unreachable metadata inside the sized range; it has no reachability proof.
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 std::arch::global_asm!(
@@ -10,10 +10,10 @@ std::arch::global_asm!(
     "metadata_probe:",
     "mov eax, 42",
     "ret",
-    ".size metadata_probe, .-metadata_probe",
-    // Neutral metadata outside the function but inside the executable section:
-    // consecutive REX-prefix bytes make the linear length decoder refuse.
+    // Keep the bytes inside .size: inter-function metadata now passes, but
+    // undecodable bytes inside a declared range must remain a refusal.
     ".byte 0x41,0x42,0x43,0x44,0x45,0",
+    ".size metadata_probe, .-metadata_probe",
     ".popsection",
 );
 
