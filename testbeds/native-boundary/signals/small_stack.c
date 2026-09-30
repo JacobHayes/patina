@@ -30,7 +30,19 @@
  *              raises a signal whose handler returns (s); T: on the main
  *              thread (-) or a second one (t);
  *   exit-escape  a second thread's handler leaves by siglongjmp, the thread
- *              ends, and a thread-local destructor then makes a syscall.
+ *              ends, and a thread-local destructor then makes a syscall;
+ *   interleave[-alt]  one handler suspends into a coroutine whose own
+ *              handler suspends into another, which resumes the first: the
+ *              handlers return in the other order, with traps and a delivery
+ *              between (-alt: on an SS_AUTODISARM alternate stack);
+ *   outer[-alt]  a nested handler leaves by siglongjmp into the outer one,
+ *              which returns, 500 times;
+ *   chain-N    N handlers suspended at once, each in a coroutine of its own,
+ *              then unwound in reverse: the shim stops by name past 64;
+ *   shallower-N  N handlers left by siglongjmp, each from a strictly
+ *              shallower depth of the thread's stack whose slot nothing
+ *              writes again: the shim cannot prove them left (the file
+ *              frames.rs documents why) and stops by name past 64.
  */
 #define _GNU_SOURCE
 #include <assert.h>
@@ -40,6 +52,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -368,6 +381,171 @@ static void exit_escape_case(void) {
     assert(escaped == 1 && destructor_pid_ok);
 }
 
+/* Handlers that return out of order, suspended at depth, or left by
+ * siglongjmp in shapes the shim cannot prove (see the file comment). */
+static void traps(int n) {
+    for (int i = 0; i < n; i++) assert(raw(SYS_getpid, 0, 0, 0) == getpid());
+}
+#define GRAPH_STACK (128 * 1024)
+static void make(ucontext_t *uc, void (*fn)(void)) {
+    assert(getcontext(uc) == 0);
+    uc->uc_stack.ss_sp =
+        mmap(NULL, GRAPH_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(uc->uc_stack.ss_sp != MAP_FAILED);
+    uc->uc_stack.ss_size = GRAPH_STACK;
+    uc->uc_link = NULL;
+    makecontext(uc, fn, 0);
+}
+static int graph_onstack;
+
+/* interleave: H1 suspends into C1; C1's H2 suspends into C2; C2 resumes H1,
+ * which returns first; main takes traps and a delivery, then resumes H2,
+ * which returns last. */
+static ucontext_t main_context, h1_context, h2_context, c1_context, c2_context;
+static volatile sig_atomic_t h1_done, h2_done, hup_runs;
+static void c2(void) {
+    traps(8);
+    swapcontext(&c2_context, &h1_context);
+    abort();
+}
+static void h2(int sig, siginfo_t *info, void *context) {
+    (void)sig;
+    (void)info;
+    (void)context;
+    make(&c2_context, c2);
+    swapcontext(&h2_context, &c2_context);
+    traps(8);
+    h2_done = 1;
+}
+static void c1(void) {
+    send(SIGUSR2);
+    traps(8);
+    swapcontext(&c1_context, &main_context);
+    abort();
+}
+static void h1(int sig, siginfo_t *info, void *context) {
+    (void)sig;
+    (void)info;
+    (void)context;
+    make(&c1_context, c1);
+    swapcontext(&h1_context, &c1_context);
+    traps(8);
+    h1_done = 1;
+}
+static void on_hup(int sig, siginfo_t *info, void *context) {
+    (void)sig;
+    (void)info;
+    (void)context;
+    traps(8);
+    hup_runs++;
+}
+static void interleave_case(void) {
+    install(SIGUSR1, h1, graph_onstack);
+    install(SIGUSR2, h2, graph_onstack);
+    install(SIGHUP, on_hup, graph_onstack);
+    send(SIGUSR1);
+    assert(h1_done && !h2_done);
+    traps(16);
+    send(SIGHUP);
+    traps(16);
+    swapcontext(&main_context, &h2_context);
+    assert(h2_done && hup_runs == 1);
+    traps(4);
+    printf("interleave: h1=%d h2=%d hup=%d\n", (int)h1_done, (int)h2_done, (int)hup_runs);
+}
+
+/* chain-N: N handlers suspended at once, each in a coroutine of its own,
+ * then unwound in reverse. */
+static int chain_n, chain_depth;
+static ucontext_t chain_handler_context[128], chain_coroutine_context[128];
+static void chain_coroutine(void) {
+    if (chain_depth < chain_n) send(SIGUSR1);
+    else swapcontext(&chain_coroutine_context[chain_depth - 1],
+                     &chain_handler_context[chain_depth - 1]);
+    abort();
+}
+static void chain_handler(int sig, siginfo_t *info, void *context) {
+    (void)sig;
+    (void)info;
+    (void)context;
+    int me = chain_depth++;
+    make(&chain_coroutine_context[me], chain_coroutine);
+    swapcontext(&chain_handler_context[me], &chain_coroutine_context[me]);
+    traps(2);
+    if (me > 0) swapcontext(&chain_coroutine_context[me], &chain_handler_context[me - 1]);
+}
+static void chain_case(int n) {
+    assert(n <= 128);
+    chain_n = n;
+    install(SIGUSR1, chain_handler, SA_NODEFER);
+    send(SIGUSR1);
+    traps(2);
+    printf("chain: depth=%d\n", chain_depth);
+}
+
+/* shallower-N: N handlers left by siglongjmp, each from a strictly shallower
+ * depth of the thread's stack than the last, whose slots nothing writes
+ * again. */
+static sigjmp_buf graph_escape;
+static void graph_leaves(int sig) {
+    (void)sig;
+    siglongjmp(graph_escape, 1);
+}
+static void __attribute__((noinline)) recurse(int depth, int target) {
+    volatile char pad[64 * 1024];
+    pad[0] = (char)depth;
+    if (depth == target) {
+        if (sigsetjmp(graph_escape, 1) == 0) send(SIGUSR1);
+    } else {
+        recurse(depth + 1, target);
+    }
+    (void)pad[0];
+}
+static void shallower_case(int n) {
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_handler = graph_leaves;
+    sigemptyset(&action.sa_mask);
+    assert(sigaction(SIGUSR1, &action, NULL) == 0);
+    for (int target = n; target >= 1; target--) recurse(1, target);
+    traps(2);
+    printf("shallower: rounds=%d\n", n);
+}
+
+/* outer: a nested handler leaves by siglongjmp into the outer one, which
+ * returns; repeated. */
+static sigjmp_buf outer_escape;
+static volatile sig_atomic_t outer_returns;
+static void inner_leaves(int sig) {
+    (void)sig;
+    siglongjmp(outer_escape, 1);
+}
+static void outer_handler(int sig) {
+    (void)sig;
+    if (sigsetjmp(outer_escape, 1) == 0) {
+        send(SIGUSR2);
+        abort();
+    }
+    traps(2);
+    outer_returns++;
+}
+static void outer_case(void) {
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = graph_onstack;
+    action.sa_handler = outer_handler;
+    assert(sigaction(SIGUSR1, &action, NULL) == 0);
+    action.sa_handler = inner_leaves;
+    assert(sigaction(SIGUSR2, &action, NULL) == 0);
+    for (int i = 0; i < 500; i++) {
+        send(SIGUSR1);
+        traps(1);
+    }
+    printf("outer: returns=%d\n", (int)outer_returns);
+    assert(outer_returns == 500);
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     char name[64];
@@ -387,6 +565,20 @@ int main(int argc, char **argv) {
         escape_case();
     } else if (strcmp(name, "exit-escape") == 0) {
         exit_escape_case();
+    } else if (strncmp(name, "interleave", 10) == 0 || strncmp(name, "outer", 5) == 0) {
+        if (strstr(name, "-alt") != NULL) {
+            stack_t alt = {.ss_sp = mmap(NULL, GRAPH_STACK, PROT_READ | PROT_WRITE,
+                                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0),
+                           .ss_size = GRAPH_STACK, .ss_flags = (int)SS_AUTODISARM};
+            assert(alt.ss_sp != MAP_FAILED && sigaltstack(&alt, NULL) == 0);
+            graph_onstack = SA_ONSTACK;
+        }
+        if (name[0] == 'i') interleave_case();
+        else outer_case();
+    } else if (strncmp(name, "chain-", 6) == 0) {
+        chain_case(atoi(name + 6));
+    } else if (strncmp(name, "shallower-", 10) == 0) {
+        shallower_case(atoi(name + 10));
     } else if (strncmp(name, "swap-", 5) == 0) {
         swap_case(name + 5);
     } else {

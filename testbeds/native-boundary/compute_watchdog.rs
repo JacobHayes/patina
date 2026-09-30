@@ -33,6 +33,33 @@ fn compute() {
     assert_ne!(value, 1);
 }
 
+/// Spin, call-free, with the stack pointer at the top of a 2 KiB stack just
+/// above an inaccessible page (a runtime's small thread stack): the
+/// watchdog's program-counter sample must not need room on it.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn spin_on_a_small_stack() -> ! {
+    unsafe extern "C" {
+        fn mmap(address: *mut u8, length: usize, protection: i32, flags: i32, fd: i32, offset: i64)
+        -> *mut u8;
+        fn mprotect(address: *mut u8, length: usize, protection: i32) -> i32;
+    }
+    // PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS.
+    let base = unsafe { mmap(std::ptr::null_mut(), 8192, 3, 0x22, -1, 0) };
+    assert_ne!(base as isize, -1);
+    assert_eq!(unsafe { mprotect(base, 4096, 0) }, 0);
+    let top = unsafe { base.add(4096 + 2048) };
+    unsafe {
+        std::arch::asm!(
+            "mov rsp, {top}",
+            "2:",
+            "pause",
+            "jmp 2b",
+            top = in(reg) top,
+            options(noreturn)
+        )
+    }
+}
+
 fn main() {
     let mode = std::env::args().nth(1).unwrap();
     match mode.as_str() {
@@ -93,6 +120,17 @@ fn main() {
             worker.join().unwrap();
         }
         "single" => compute(),
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        "small-stack" => {
+            // A runnable peer the spin starves.
+            let _peer = std::thread::spawn(|| {
+                loop {
+                    std::thread::yield_now();
+                }
+            });
+            std::thread::yield_now();
+            spin_on_a_small_stack();
+        }
         "parked" => {
             let state = Arc::new((Mutex::new((false, false)), Condvar::new()));
             let worker = {

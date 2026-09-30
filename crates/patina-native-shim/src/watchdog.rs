@@ -392,7 +392,11 @@ mod platform {
         let host = super::super::hostapi::get();
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
         action.sa_sigaction = capture as *const () as usize;
-        action.sa_flags = libc::SA_SIGINFO;
+        // On the sampled thread's private signal stack (Linux), like every
+        // shim handler's frame: the guest's own stack may be a few KiB with no
+        // room for a kernel frame. Where none is registered (macOS), the
+        // frame is on the stack it interrupted, as natively.
+        action.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
         if unsafe { (host.host_sigaction)(libc::SIGSYS, &action, std::ptr::null_mut()) } != 0 {
             return None;
         }

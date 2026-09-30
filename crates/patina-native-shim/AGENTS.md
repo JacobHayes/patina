@@ -241,7 +241,10 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   the highest free one. Free a level only on proof that cannot be faked (the
   slot word overwritten, or a later delivery overlapping the slot): never on a
   stack pointer, since a handler may be suspended in a coroutine on any stack.
-  `release` clears the records with the mapping. The level budget, checked by
+  `release` clears the records with the mapping. The page above each owned
+  level is a guard (`sync_guards`) whenever the record set changes. Any
+  handler the shim installs later (the watchdog's sampler) is `SA_ONSTACK`
+  too. The level budget, checked by
   `private_signal_stack_levels_fit_their_budget`, keeps the handler cap, not
   the host, deciding the depth stop. A frame built over another not yet entered is resolved
   to what that one interrupted (`patina_interrupted_sp`). The guest's handler

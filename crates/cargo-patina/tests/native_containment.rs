@@ -517,7 +517,8 @@ mod linux {
     /// use fits. The guest (over a shim built with `planted-faults`) fills
     /// three levels with a sentinel and, recording, makes syscalls, takes a
     /// signal whose handler makes them, and a nested one inside it: each
-    /// level must use at most half its budget. x86_64 makes them as raw
+    /// level must use at most half its budget, and the page above the nested
+    /// handler's level is a guard exactly while it runs. x86_64 makes them as raw
     /// instructions the syscall trap serves; every other arch through
     /// glibc's `syscall(2)`, so there a level holds a delivery's frames.
     #[test]
@@ -557,6 +558,9 @@ mod linux {
             used.iter().all(|used| 2 * used <= level),
             "a level needs margin: {measurement}"
         );
+        // The level above a running handler's is guarded, and only while it
+        // runs.
+        assert_exact_line(&output.stdout, "PRIVATE_GUARD inside=EFAULT after=readable");
     }
 
     #[test]

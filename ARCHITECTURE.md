@@ -164,7 +164,18 @@ libc door delivers, or a later delivery whose slot overlaps it. Until then the
 level stays reserved; at worst the 65th running handler is a named stop, the
 same on every host, recording or not. A handler left over and over from the
 same place frees the last one's level each time, so the levels alternate and
-nothing accumulates. After a managed thread's teardown nothing of its handlers
+nothing accumulates. The divergence this leaves: handlers left by `siglongjmp`
+from ever shallower points of a stack, whose slots nothing writes again, each
+keep a level, and the 65th stops by name where natively the run goes on. A
+jump's target above a slot is no proof (a coroutine stack carved from a frame
+above the handler is above its slot, and a handler on an alternate stack left
+for an older context can still be resumed from its coroutine and return), nor
+is the guest's `siglongjmp` the shim's to see. While a running handler owns a
+level, the bottom page of the level directly above it is inaccessible, so shim
+code that overran its own level faults there instead of writing over a
+suspended handler's frames; the fault ends the run by SIGSEGV, not a named
+stop (the kernel has no room left to build its frame), and the level budget
+keeps it from happening. After a managed thread's teardown nothing of its handlers
 survives: a thread-local destructor's trap finds no private stack and no
 records. The mapping is unmapped at managed thread completion, except after a
 raw `exit` the syscall trap serves on it, which leaves it mapped with the dead
@@ -517,7 +528,9 @@ metadata agreement check, not silently replayed without its stop.
 
 Only after committing and exporting the stop does the observer borrow SIGSYS
 for a bounded, best-effort interrupted-PC sample (native ucontext on Linux
-x86_64/arm64 and macOS). No live guest disposition or mask is reserved for the
+x86_64/arm64 and macOS). On Linux its frame, like every shim handler's, is on
+the sampled thread's private signal stack, so a thread spinning on a stack of a
+few KiB is still sampled. No live guest disposition or mask is reserved for the
 watchdog. A blocked signal yields `sampled_pc=unavailable`; replay likewise has
 no sampled instruction. The diagnostic includes the raw PC and a delta from
 `patina_yield_point`; the delta supports offline symbolization when the PC is

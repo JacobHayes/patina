@@ -199,7 +199,9 @@ fn a_delivery_costs_the_guest_stack_a_fixed_few_bytes() {
 /// own (a mapping, or a local array of a frame above the handler), from a
 /// plain or `SS_AUTODISARM` alternate stack or a thread's own stack, nested in
 /// another handler or taking one inside the coroutine, returns intact; and a thread-local destructor's syscall after its
-/// thread's handler left by `siglongjmp` is answered. The guest prints what
+/// thread's handler left by `siglongjmp` is answered; handlers return out of
+/// order across coroutines, nest by `siglongjmp` into an outer handler, and
+/// suspend eight deep. The guest prints what
 /// it prints natively, through the raw syscall trap (x86_64) and through
 /// libc's `syscall(2)` (every arch).
 #[cfg(target_os = "linux")]
@@ -228,6 +230,14 @@ fn handlers_run_on_the_stacks_they_ask_for() {
         "swap-lo-t",
         "swap-lont",
         "swap-lost",
+        // Handlers that return out of order, suspended at once, or left by
+        // `siglongjmp` into an outer handler or from shallower points.
+        "interleave",
+        "interleave-alt",
+        "outer",
+        "outer-alt",
+        "chain-8",
+        "shallower-60",
     ];
     // The raw door needs syscall-user-dispatch; libc's is every arch's.
     let raw = cfg!(target_arch = "x86_64")
@@ -242,6 +252,19 @@ fn handlers_run_on_the_stacks_they_ask_for() {
         let oracle = assert_standalone_success(&native.binary, &[&case], &[]);
         let output = assert_standalone_success(binary, &[&case], &env);
         assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");
+    }
+    // Past what the shim tracks the run stops by name where natively it runs
+    // on: 70 handlers suspended at once, and 70 left by `siglongjmp` from
+    // ever shallower points, which nothing proves left (`frames.rs`).
+    for case in ["chain-70", "shallower-70"] {
+        use std::os::unix::process::ExitStatusExt;
+        assert_standalone_success(&native.binary, &[case], &[]);
+        let output = standalone_output(&libc.binary, &[&format!("{case}-libc")], &env);
+        assert_eq!(output.status.signal(), Some(6), "{case}: {output:?}");
+        assert!(
+            text(&output.stderr).contains("not modeled"),
+            "{case}: {output:?}"
+        );
     }
 }
 

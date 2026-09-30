@@ -42,7 +42,18 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
     };
     // finite is the record-short / replay-long case: unlike an infinite loop,
     // it would reach another operation and complete if replay forgot the stop.
-    for mode in ["starved", "worker-starved", "allocator-held", "finite"] {
+    // `small-stack` spins on a 2 KiB stack above an inaccessible page: the
+    // terminal sample's frame goes on the private signal stack.
+    let small_stack: &[&str] = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        &["small-stack"]
+    } else {
+        &[]
+    };
+    for mode in ["starved", "worker-starved", "allocator-held", "finite"]
+        .iter()
+        .chain(small_stack)
+        .copied()
+    {
         use std::os::unix::process::ExitStatusExt;
         let (stop, direct_elapsed) = direct(mode, "25");
         assert_eq!(stop.status.signal(), Some(libc::SIGABRT));

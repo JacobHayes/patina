@@ -51,11 +51,13 @@ the alternate stacks they registered: `native_signals` requires them to run
 inside those bounds, told so by `sigaltstack` and `uc_stack`, to nest, to
 leave by `siglongjmp` thousands of times, to swapcontext to coroutines (on a
 mapping, or on a local array of a frame above the handler) that make syscalls
-and come back, and a dead thread's destructor to make one,
+and come back, to return out of order, to nest by `siglongjmp` into an outer
+handler, and a dead thread's destructor to make one (past what the shim
+tracks, 70 suspended or left handlers stop by name),
 printing what they print natively, through the raw trap and (`-libc`, every
 arch) glibc's `syscall(2)`. `private_budget.c` (over a `planted-faults` shim)
 measures each recording level of the shim's private signal stack against its
-budget.
+budget, and checks the guard above a running handler's level.
 `../small_stack_probe.rs` (in `native_containment`) records and replays raw
 syscalls made on a 2 KiB stack and requires nothing written below it.
 

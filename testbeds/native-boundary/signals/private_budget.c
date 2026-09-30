@@ -10,9 +10,14 @@
  * on the private stack; glibc's `syscall(2)` elsewhere), takes a signal
  * whose handler makes them, and inside it a second one whose handler does,
  * and prints how much of each level was used:
- * `PRIVATE_BUDGET level=N used=A,B,C`. Run it recording. */
+ * `PRIVATE_BUDGET level=N used=A,B,C`. While the nested handler runs it owns
+ * the second level, so the page just above it is a guard: sigaltstack, which
+ * copies its argument in as the kernel does, answers EFAULT for it there, and
+ * reads it (sentinel bytes, an invalid mode: EINVAL) once the handlers returned
+ * (`PRIVATE_GUARD inside=... after=...`). Run it recording. */
 #define _GNU_SOURCE
 #include <assert.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
@@ -60,9 +65,18 @@ static void send(int sig) {
 }
 
 static volatile sig_atomic_t inner_ran, outer_ran;
+static const char *guard_page;
+static volatile int guard_inside;
+/* EFAULT when the page cannot be read; else the sentinel's EINVAL. */
+static int probe(const char *page) {
+    int rc = sigaltstack((const stack_t *)page, NULL);
+    assert(rc == -1);
+    return errno;
+}
 static void inner(int sig) {
     (void)sig;
     calls();
+    guard_inside = probe(guard_page);
     inner_ran++;
 }
 static void outer(int sig) {
@@ -79,6 +93,8 @@ int main(void) {
     assert(LEVELS * level < size);
     unsigned char *top = (unsigned char *)(base + size);
     memset(top - LEVELS * level, SENTINEL, LEVELS * level);
+    /* The bottom page of the first level: the guard above the second. */
+    guard_page = (const char *)(top - level);
 
     struct sigaction action;
     memset(&action, 0, sizeof action);
@@ -99,5 +115,8 @@ int main(void) {
         printf("%s%zu", index ? "," : "", (size_t)(level - first));
     }
     puts("");
+    int after = probe(guard_page);
+    printf("PRIVATE_GUARD inside=%s after=%s\n", guard_inside == EFAULT ? "EFAULT" : "readable",
+           after == EINVAL ? "readable" : "EFAULT");
     return 0;
 }

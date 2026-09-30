@@ -40,6 +40,24 @@
 //! same on every host, recording or not. A handler left over and over from
 //! the same place frees the level of the last one each time, so the levels
 //! alternate and nothing accumulates.
+//!
+//! A handler left in shapes that give no such proof keeps its level: leaving
+//! by `siglongjmp` from ever shallower points of one stack, whose slots
+//! nothing writes again, stops by name after [`RECORDS`] such handlers where
+//! natively it runs on. A jump's target above a slot is no proof either (the
+//! guest's `siglongjmp` is glibc's, not the shim's, and even seen, it would
+//! prove nothing): a coroutine stack carved from a frame above the handler
+//! is above its slot, and a handler on an alternate stack left for an older
+//! context can still be resumed from its coroutine and return.
+//!
+//! **Guards.** While a running handler owns a level, the bottom page of the
+//! level directly above it is inaccessible, so shim code overrunning its own
+//! level faults there instead of writing over the suspended handler's
+//! frames. The fault cannot be a named stop: it happens with the stack
+//! pointer at the guard, where the kernel cannot build the SIGSEGV's frame,
+//! so the kernel kills the run with SIGSEGV. The level budget
+//! (`native_containment::private_signal_stack_levels_fit_their_budget`) keeps
+//! that from happening.
 use super::*;
 use std::cell::RefCell;
 
@@ -105,6 +123,9 @@ thread_local! {
     static GUEST: Cell<Stack> = const {
         Cell::new(Stack { base: 0, flags: SS_DISABLE, size: 0 })
     };
+    /// Bit `m`: the bottom page of level `m - 1` is a guard, because a
+    /// running handler owns level `m`.
+    static GUARDED: Cell<u128> = const { Cell::new(0) };
     static LIVE: RefCell<Records> = const {
         RefCell::new(Records { live: [None; RECORDS], depth: 0, next: 0x7e5c_a1ab_1e00_0001 })
     };
@@ -151,6 +172,38 @@ fn registration() -> Option<Stack> {
         flags: SS_AUTODISARM,
         size: private.level,
     })
+}
+
+/// Raise the guard above each level a running handler owns, and lower the
+/// rest ([`GUARDED`]).
+fn sync_guards() {
+    let Some(private) = PRIVATE.get() else {
+        return;
+    };
+    let owned = LIVE.with_borrow(|live| {
+        live.live[..live.depth]
+            .iter()
+            .flatten()
+            .fold(0u128, |owned, record| owned | 1 << record.level)
+    }) & !1;
+    let changed = owned ^ GUARDED.get();
+    if changed == 0 {
+        return;
+    }
+    let end = private.base + private.size;
+    for level in (1..=RECORDS).filter(|level| changed & 1 << level != 0) {
+        // The bottom page of the level above: PROT_NONE, or read-write again.
+        let page = end - level * private.level;
+        let protection = if owned & 1 << level != 0 { 0 } else { 3 };
+        if host(
+            patina_dst_syscalls::Syscall::N_mprotect.number().into(),
+            [page as u64, private.page as u64, protection, 0, 0, 0],
+        ) != 0
+        {
+            fatal("host private signal stack guard failed (mprotect)");
+        }
+    }
+    GUARDED.set(owned);
 }
 
 fn install(stack: &Stack) {
@@ -219,6 +272,7 @@ pub(crate) fn release() {
         live.depth = 0;
     });
     GUEST.set(Stack::default());
+    GUARDED.set(0);
     install(&Stack::default());
     if host(
         patina_dst_syscalls::Syscall::N_munmap.number().into(),
@@ -370,6 +424,7 @@ pub(super) fn resync(stack: *mut Stack) {
         return;
     }
     if drop_left() {
+        sync_guards();
         // SAFETY: the trap frame's `uc_stack`.
         unsafe { stack.write(registration().expect("armed")) };
     }
@@ -389,6 +444,7 @@ pub(super) fn resync_on_guest_stack() {
         return;
     }
     if drop_left() {
+        sync_guards();
         install(&registration().expect("armed"));
     }
 }
@@ -489,6 +545,7 @@ pub(super) fn enter(flags: u64, sp: usize, floor: usize) -> Option<Entered> {
         live.live[kept] = Some(Record { slot, value, level });
         live.depth += 1;
     });
+    sync_guards();
     Some(Entered {
         slot,
         nested: registration().expect("armed"),
@@ -513,6 +570,7 @@ pub(super) fn leave(slot: usize, restored: Stack, sp: usize) {
             live.live[depth] = None;
         }
     });
+    sync_guards();
     let mut stack = GUEST.get();
     let _ = altstack(&mut stack, Some(restored), sp);
     GUEST.set(stack);
