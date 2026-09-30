@@ -135,8 +135,11 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
             "86400000",
         );
         assert!(!replay.status.success());
+        // A replay that waited for the one-day bound would hit the 15 s command
+        // deadline; anything under it proves the stop came from the trace. A
+        // tighter figure only measures how loaded the CI runner is.
         assert!(
-            elapsed < Duration::from_secs(3),
+            elapsed < Duration::from_secs(12),
             "replay waited for host bound: {elapsed:?}"
         );
         let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
