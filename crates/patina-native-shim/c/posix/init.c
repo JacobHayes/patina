@@ -1322,6 +1322,7 @@ static int patina_main_wrapper(int argc, char **argv, char **envp) {
 
 int __libc_start_main(patina_main_fn main_fn, int argc, char **argv, void *init,
                       void *fini, void *rtld_fini, void *stack_end) {
+    patina_host_environ = argv + argc + 1;
     /* The POSIX link supplies host aliases; install panic containment before
      * any guest constructors, independently of whether Context is deferred. */
     patina_init_panic_policy();
@@ -1456,7 +1457,7 @@ __attribute__((constructor(101))) static void patina_native_start(void) {
     if (patina_control_getenv("PATINA_MODE") != NULL && !deferred) {
         patina_init_from_env();
     }
-    patina_scrub_environ();
     patina_publish_environ();
+    patina_scrub_environ();
     patina_note_startup_constructor_finished();
 }

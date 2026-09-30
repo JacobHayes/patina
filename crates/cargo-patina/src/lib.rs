@@ -27,10 +27,11 @@ use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_COVERAGE_FD,
     ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_IMAGE_FD, ENV_GUEST_ARGV, ENV_GUEST_CWD, ENV_GUEST_ENV,
-    ENV_GUEST_HOSTNAME, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_PARAMS_JSON,
-    ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
-    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_STEP_BUDGET,
-    ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, FaultKnob, Plumbing, RuntimeConfig,
+    ENV_GUEST_HOSTNAME, ENV_HEAL_AFTER, ENV_INITIAL_STACK, ENV_LIVENESS_WATCHDOG, ENV_MODE,
+    ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS, ENV_SCHED_PCT,
+    ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW,
+    ENV_SEED, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, FaultKnob,
+    NATIVE_INITIAL_STACK_TRAILER_SLOTS, Plumbing, RuntimeConfig,
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -8034,6 +8035,19 @@ liveness-safe."
         }
     };
 
+    // The shim publishes the deterministic map into the ORIGINAL stack envp.
+    // Reserve room for its entries plus a disjoint copy of the platform trailer
+    // (ELF auxv / Darwin apple vector); libc/dyld keep the original trailer.
+    // Replay restores its map from metadata, not the normally empty CLI map.
+    // A deferred harness starts empty and later replaces environ at installation.
+    let startup_env_entries = if invocation.harness {
+        0
+    } else if let Some(bundle) = &replay_trace {
+        bundle.metadata.guest_env.as_ref().map_or(0, BTreeMap::len)
+    } else {
+        invocation.environment.len()
+    };
+
     let crash_restart_plan = crash_restart_plan(&invocation, replay_trace)?;
     if crash_restart_plan.is_some() && invocation.schedule.starve.is_some() {
         return Err(CliError::usage(
@@ -8060,6 +8074,15 @@ liveness-safe."
             .args(&program_args)
             .arg0(NATIVE_GUEST_ARGV0)
             .env_clear();
+        // These inert entries cannot configure the loader (unlike baking the
+        // guest's real names, e.g. LD_PRELOAD, into exec's environment). The
+        // shim checks actual trailer size before writing, failing closed if a
+        // future platform needs more than this reservation. Padding is not
+        // control-plane state and is never snapshotted or exposed to the guest.
+        command.env(ENV_INITIAL_STACK, "1");
+        for slot in 0..startup_env_entries + NATIVE_INITIAL_STACK_TRAILER_SLOTS {
+            command.env(format!("_PATINA_ENVP_SLOT_{slot}"), "");
+        }
         // A `patina-dst-harness` binary (usage mode 2) defers runtime
         // installation to its `run`/`run_with` call: tell the packaged
         // constructor to capture/scrub the control plane and register

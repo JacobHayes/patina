@@ -199,6 +199,15 @@ pub const ENV_FINGERPRINT: &str = "PATINA_FINGERPRINT";
 /// Set by `cargo patina run --harness` (and the matching `replay`). Off when
 /// unset (the ordinary constructor-installs-at-startup path).
 pub const ENV_DEFER_INIT: &str = "PATINA_DEFER_INIT";
+/// Native supervisor reservation marker (`=1`): the initial environment has
+/// room for the deterministic map and a disjoint copy of the platform trailer.
+/// The shim checks actual capacity before publishing into the initial stack.
+/// Unreserved direct launches may only start with an empty guest map.
+pub const ENV_INITIAL_STACK: &str = "PATINA_INITIAL_STACK";
+/// Extra pointer-sized environment slots the native supervisor reserves for
+/// the platform startup trailer. The shim fails closed if the trailer does not
+/// fit; this is reservation policy, not a claim about a platform's auxv size.
+pub const NATIVE_INITIAL_STACK_TRAILER_SLOTS: usize = 256;
 pub const ENV_BRANCH_FROM: &str = "PATINA_BRANCH_FROM";
 pub const ENV_BRANCH_SEED: &str = "PATINA_BRANCH_SEED";
 pub const ENV_BRANCH_ID: &str = "PATINA_BRANCH_ID";

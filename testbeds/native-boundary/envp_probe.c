@@ -1,15 +1,14 @@
-/* `main`'s third parameter keeps pointing at the ORIGINAL host environ array
- * after startup repoints the environ global at the deterministic one, so the
- * ambient host environment must be scrubbed in that original array IN PLACE.
- * The caller supplies the PATINA_* protocol through the host environment,
- * because that is the ordering that matters: a supervised startup installs the
- * runtime -- publishing the deterministic array -- BEFORE the scrub runs, so a
- * scrub that resolves the array through the environ global would wipe the guest
- * environment and leave the host's fully readable here. */
+/* Direct PATINA_* protocol startup has no supervisor stack reservation.
+ * Its empty map must still hide every host/control entry through both the
+ * original argv-adjacent array and main's envp, sharing environ at entry. */
+#include <assert.h>
 #include <stdio.h>
 
+extern char **environ;
+
 int main(int argc, char **argv, char **envp) {
-    (void)argc; (void)argv;
+    assert(envp == environ);
+    assert((argv + argc + 1)[0] == NULL);
     int count = 0;
     if (envp != NULL) {
         for (char **entry = envp; *entry != NULL; ++entry) count += 1;

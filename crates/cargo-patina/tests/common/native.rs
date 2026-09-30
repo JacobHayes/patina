@@ -338,6 +338,11 @@ pub enum CLink {
 
 /// Compile a C guest with an explicit linkage contract.
 pub fn assert_build_c_guest(name: &str, link: CLink) -> Guest {
+    assert_build_c_guest_with_flags(name, link, &[])
+}
+
+/// Supply linker/compiler flags for a C guest without changing other probes.
+pub fn assert_build_c_guest_with_flags(name: &str, link: CLink, flags: &[&str]) -> Guest {
     static ARCHIVE: OnceLock<PathBuf> = OnceLock::new();
     static POSIX: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
     let dir = tempfile::tempdir().unwrap();
@@ -433,7 +438,7 @@ pub fn assert_build_c_guest(name: &str, link: CLink) -> Guest {
             }
         }
     }
-    assert_success(cc.arg("-o").arg(&binary).output().unwrap());
+    assert_success(cc.args(flags).arg("-o").arg(&binary).output().unwrap());
     Guest { dir, binary }
 }
 

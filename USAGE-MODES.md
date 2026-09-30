@@ -41,6 +41,23 @@ environment for the whole run). Gate such constructors out of DST builds (for ex
 `#[cfg(not(patina))]` / `#[cfg(not(dst))]`) and move environment/logging/filesystem
 setup into `main` or the harness closure.
 
+### Native startup environment
+
+Use `cargo patina run --env KEY=VALUE` to supply a native guest's startup map.
+The supervisor reserves initial-stack space before exec; the shim publishes the
+map there so an argv-based environment walk, `main`'s envp and `environ` agree.
+Replay restores the map and its reservation from the trace without resupplying
+flags. The platform trailer remains available after envp's NULL (ELF auxv on
+Linux, the apple-string vector on Darwin).
+
+A direct native `PATINA_*` protocol launch without the supervisor's reservation
+may only start with an empty deterministic map. A nonempty map aborts at startup
+with the named `unreserved initial-stack environment` refusal; use the supervisor
+rather than publishing a map only through `environ`. Direct empty-map launches
+still scrub the host environment but do not support argv → envp → trailer
+traversal. A deferred harness starts empty, and its later runtime installation
+replaces `environ` normally without rebuilding the initial stack.
+
 ## 2. Shim-backed harness for normal application code — `patina-dst-harness`
 
 A harness binary configures the run in code, then executes ordinary application

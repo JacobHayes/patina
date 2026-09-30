@@ -37,6 +37,17 @@ provides explicit assertion helpers. Record/replay checks compare full stdout,
 two complete traces, flag-free replay, and a mismatched-fingerprint refusal.
 Entropy sources vary independently. POSIX startup sees host canaries so an
 empty guest `environ` demonstrates isolation, not an empty input environment.
+`initial_stack_env.c` is the startup-layout class detector: it walks from argv
+rather than trusting `environ`, compares the exact requested map and pointer
+identity, then checks Linux auxv against libc or Darwin's apple-string vector.
+The launcher tests cover empty, single-entry and many-entry maps, repeats and
+flag-free replay. Direct reserved launches measure this binary's actual trailer
+and exercise zero, one and many surplus slots. Short-capacity and invalid-marker
+refusals have sufficient-capacity and valid-marker positive twins that exit 42.
+An unreserved nonempty map refuses; the same map with a reservation succeeds.
+`envp_probe.c` separately retains the unreserved direct protocol's empty-envp
+contract (no initial-trailer guarantee). These tests are enabled on macOS;
+macOS arm64 execution is pending landing verification.
 
 `rand-rng/`, `tokio/`, `raw/`, and [`keyring-keyutils/`](keyring-keyutils/README.md) are locked standalone packages. The build
 helper explicitly places their Cargo artifacts under the integration test's

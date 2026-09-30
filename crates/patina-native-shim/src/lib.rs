@@ -4077,10 +4077,10 @@ fn publish_environ(env: &BTreeMap<String, String>) {
 }
 
 /// Publish `environ` from the installed context's startup map, or an empty
-/// array when no runtime is installed. Called by the POSIX constructor after
-/// the ambient host environment is scrubbed, so `environ` holds the
-/// deterministic startup environment (the `--env` set, or nothing) from the
-/// guest's first instruction.
+/// array when no runtime is installed. The POSIX constructor then commits
+/// this map to the launcher's reserved initial-stack environment and scrubs
+/// the old entries before admitting guest environment reads. A deferred
+/// harness installation later replaces `environ` without rebaking the stack.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_publish_environ() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();

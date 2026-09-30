@@ -21,11 +21,10 @@ static char **patina_control_plane = NULL;
  * patina_environ_base() no longer sees the ambient host entries, so a second
  * capture would snapshot the guest's own PATINA_-prefixed values instead. */
 static int patina_control_plane_captured = 0;
-/* The AMBIENT host array, remembered at capture time. Everything after startup
- * must scrub through this rather than through patina_environ_base(): publishing
- * repoints the environ global at the deterministic array, and `main`'s third
- * `envp` parameter keeps pointing at the original. */
+/* The original stack array, not a later replacement of environ. Linux saves
+ * it at __libc_start_main; Darwin obtains it through the CRT accessors. */
 static char **patina_host_environ = NULL;
+static size_t patina_host_environ_count = 0;
 
 static char **patina_environ_base(void) {
 #ifdef __APPLE__
@@ -38,11 +37,15 @@ static char **patina_environ_base(void) {
 static void patina_capture_control_plane(void) {
     if (patina_control_plane_captured) return;
     patina_control_plane_captured = 1;
-    char **base = patina_environ_base();
-    patina_host_environ = base;
+#ifdef __APPLE__
+    patina_host_environ = *_NSGetArgv() + *_NSGetArgc() + 1;
+#endif
+    if (patina_host_environ == NULL) patina_host_environ = patina_environ_base();
+    char **base = patina_host_environ;
     if (base == NULL) return;
     size_t kept = 0;
     for (char **entry = base; *entry != NULL; ++entry) {
+        patina_host_environ_count += 1;
         if (strncmp(*entry, "PATINA_", 7) == 0) kept += 1;
     }
     char **snapshot = calloc(kept + 1, sizeof *snapshot);
@@ -61,19 +64,6 @@ static void patina_capture_control_plane(void) {
     }
     snapshot[index] = NULL;
     patina_control_plane = snapshot;
-}
-
-/* Empty the AMBIENT host array in place, so nothing holding a pointer to it can
- * still read the host environment — notably `main`'s third `envp` parameter,
- * which keeps pointing at the original array after publishing repoints environ.
- * This must go through patina_host_environ, NOT patina_environ_base(): by the
- * time this runs, a supervised startup has already installed the runtime and
- * published the deterministic array, so environ_base() would return that one and
- * this would wipe the guest's own environment while leaving the host's intact.
- * The entry strings stay alive; the control-plane snapshot borrows them. */
-static void patina_scrub_environ(void) {
-    if (patina_host_environ == NULL) return;
-    patina_host_environ[0] = NULL;
 }
 
 /* Point `environ` at `next`: the startup array the Rust layer built from the
@@ -98,6 +88,59 @@ const char *patina_control_getenv(const char *name) {
         }
     }
     return NULL;
+}
+
+/* Publish once, at constructor completion, after Rust has installed its map
+ * and Linux has scrubbed the real auxv. The launcher reserves inert env slots
+ * so both the map AND a disjoint trailer copy fit BEFORE the original trailer.
+ * Moving/overlapping the original would corrupt libc/dyld's retained pointers.
+ * The strings stay alive: the private control snapshot borrows them. */
+static void patina_scrub_environ(void) {
+    if (patina_host_environ == NULL) return;
+    char **guest = patina_environ_base();
+    size_t count = 0;
+    while (guest != NULL && guest[count] != NULL) count++;
+    const char *reserved = patina_control_getenv("PATINA_INITIAL_STACK");
+    if (reserved == NULL) {
+        /* Direct PATINA_* launches may retain an empty initial envp, but must
+         * never give argv walkers a different map from environ. Full trailer
+         * traversal still requires a supervised reservation. */
+        if (count != 0) {
+            static const char message[] =
+                "patina: unreserved initial-stack environment: nonempty map requires cargo patina run\n";
+            (void)patina_stdio_write(2, message, sizeof message - 1);
+            patina_host_abort();
+        }
+        memset(patina_host_environ, 0,
+               (patina_host_environ_count + 1) * sizeof(char *));
+        patina_environ_install(patina_host_environ);
+        return;
+    }
+    char **trailer = patina_host_environ + patina_host_environ_count + 1;
+    size_t trailer_bytes;
+#ifdef __linux__
+    ElfW(auxv_t) *end = (ElfW(auxv_t) *)trailer;
+    while (end->a_type != AT_NULL) end++;
+    trailer_bytes = (size_t)((char *)(end + 1) - (char *)trailer);
+#elif defined(__APPLE__)
+    char **end = trailer;
+    while (*end != NULL) end++;
+    trailer_bytes = (size_t)((char *)(end + 1) - (char *)trailer);
+#endif
+    size_t capacity = patina_host_environ_count;
+    if (strcmp(reserved, "1") != 0 || count > capacity ||
+        trailer_bytes > (capacity - count) * sizeof(char *)) {
+        static const char message[] =
+            "patina: insufficient initial-stack environment reservation\n";
+        (void)patina_stdio_write(2, message, sizeof message - 1);
+        patina_host_abort();
+    }
+    /* Erase every old pointer, not just the first, without touching the original
+     * trailer. No host/control entry survives in either public environment. */
+    memset(patina_host_environ, 0, (capacity + 1) * sizeof(char *));
+    if (count != 0) memcpy(patina_host_environ, guest, count * sizeof(char *));
+    memcpy(patina_host_environ + count + 1, trailer, trailer_bytes);
+    patina_environ_install(patina_host_environ);
 }
 
 /*

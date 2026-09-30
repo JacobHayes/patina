@@ -217,7 +217,30 @@ declared gap, does not substitute for native acceptance on that platform.
 package/path-dependency/build-script/ambiguous-bin proof, including full stdout
 identity. Native builds inject `cfg(patina)`/`cfg(dst)` and link the shim below
 stock host std; this is not a custom target with recompiled deterministic std.
-Startup snapshots its private control plane before scrubbing host environment;
+Startup snapshots its private control plane before scrubbing host environment.
+The class detectors in `native_containment` walk argv → envp → platform trailer
+in a C guest: exact sorted environment entries, no ambient/control entries, and
+pointer identity with `main`'s envp and `environ`. The supervised tests
+`supervised_initial_stack_environment_{empty_map,single_entry,many_entries}`
+exercise CLI publication, repeats, record and flag-free replay. These map cases
+failed against the old scrub (SIGABRT on initial-envp pointer identity); they do
+not vary exec-time host capacity, since the supervisor clears its environment.
+`initial_stack_environment_zero_one_and_many_surplus_slots` controls the actual
+exec array: it measures the original trailer in the same guest binary, then
+checks exact-fit, one-spare-slot and ample-spare-slot layouts with two map sizes.
+`initial_stack_reservation_refuses_short_or_invalid_layouts` pairs each short
+layout with the same map at sufficient capacity, including one-slot-below versus
+exact-fit transitions; a sentinel exit 42 proves startup reached main rather
+than a guest assertion producing the expected SIGABRT. The malformed marker
+also has a valid-marker positive twin. `direct_initial_stack_nonempty_map_requires_reservation`
+failed before its guard (unreserved nonempty map reached main); it pairs the
+refusal with reserved-nonempty and unreserved-empty successes.
+`original_envp_is_scrubbed` retains the direct empty-map contract, with no
+initial-trailer traversal guarantee. The host-canary repeat/replay test remains
+separate. Linux checks AT_PAGESZ and every uncached auxv entry against
+`getauxval`, including AT_RANDOM. All these tests are enabled on macOS too,
+where the C guest checks the apple-string vector instead of ELF auxv.
+They pass on macOS arm64 as well as Linux x86-64.
 `native_abi::posix_descriptors_and_environment_are_virtualized` pins coherent C getters and
 `environ` under supplied host canaries, insertion order, in-place overwrite,
 invalid names, putenv aliasing and platform clearenv (`environ` NULL).

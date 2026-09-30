@@ -107,6 +107,210 @@ fn original_envp_is_scrubbed() {
     );
 }
 
+// Class pairing: every startup environment reader must agree, and removing
+// entries must preserve the platform trailer, not just hide host getenv.
+fn check_supervised_initial_stack_environment(guest_entries: usize) {
+    // Match the product link's dead-section removal: otherwise the C link
+    // retains unused std archive sections and their unrelated host imports.
+    let flags = if cfg!(target_os = "linux") {
+        &["-Wl,--gc-sections"][..]
+    } else {
+        &["-Wl,-dead_strip"][..]
+    };
+    let g = assert_build_c_guest_with_flags("initial_stack_env.c", CLink::PosixShim, flags);
+    let expected: Vec<_> = (0..guest_entries)
+        .map(|i| format!("STACK_{i:04}=value={i}"))
+        .collect();
+    let run = |trace: Option<&std::path::Path>, replay: bool| {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+        command
+            .env_clear()
+            .arg(if replay { "replay" } else { "run" })
+            .arg(&g.binary);
+        if replay {
+            command.arg(trace.unwrap());
+        } else {
+            command.args(["--seed", "9"]);
+            for entry in &expected {
+                command.arg("--env").arg(entry);
+            }
+            if let Some(trace) = trace {
+                command.arg("--record").arg(trace);
+            }
+        }
+        if trace.is_some() {
+            command.args(["--fingerprint", "initial-stack-env"]);
+        }
+        if !replay {
+            command.arg("--").args(&expected);
+        }
+        assert_success(
+            common::output_with_deadline(&mut command, std::time::Duration::from_secs(60))
+                .expect("initial-stack guest exceeded 60s"),
+        )
+    };
+    let first = run(None, false);
+    assert_eq!(first.stdout, run(None, false).stdout);
+    let trace = g.dir.path().join("stack.patina");
+    assert_eq!(first.stdout, run(Some(&trace), false).stdout);
+    assert_eq!(first.stdout, run(Some(&trace), true).stdout);
+}
+
+#[test]
+fn supervised_initial_stack_environment_empty_map() {
+    check_supervised_initial_stack_environment(0);
+}
+
+#[test]
+fn supervised_initial_stack_environment_single_entry() {
+    check_supervised_initial_stack_environment(1);
+}
+
+#[test]
+fn supervised_initial_stack_environment_many_entries() {
+    check_supervised_initial_stack_environment(128);
+}
+
+fn initial_stack_map(entries: usize) -> std::collections::BTreeMap<String, String> {
+    (0..entries)
+        .map(|i| (format!("STACK_{i:04}"), format!("value={i}")))
+        .collect()
+}
+
+// Unlike the CLI tests above, this controls the guest's actual exec-time array
+// size. The three controls plus a reservation marker take four slots; padding
+// fills the remainder. The sentinel receives that original count via argv.
+fn direct_initial_stack(
+    guest: &Guest,
+    capacity: usize,
+    marker: Option<&str>,
+    map: &std::collections::BTreeMap<String, String>,
+    sentinel: bool,
+) -> std::process::Output {
+    use patina_dst_runtime::{ENV_GUEST_ENV, ENV_INITIAL_STACK, ENV_MODE, ENV_SEED};
+    let mut env = vec![
+        (ENV_MODE.to_owned(), "seeded".to_owned()),
+        (ENV_SEED.to_owned(), "9".to_owned()),
+        (
+            ENV_GUEST_ENV.to_owned(),
+            serde_json::to_string(map).unwrap(),
+        ),
+    ];
+    if let Some(marker) = marker {
+        env.push((ENV_INITIAL_STACK.to_owned(), marker.to_owned()));
+    }
+    assert!(capacity >= env.len(), "capacity must include the controls");
+    for slot in env.len()..capacity {
+        env.push((format!("_PATINA_ENVP_SLOT_{slot}"), String::new()));
+    }
+    let args: Vec<_> = if sentinel {
+        vec!["sentinel".to_owned(), env.len().to_string()]
+    } else {
+        map.iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect()
+    };
+    let args: Vec<_> = args.iter().map(String::as_str).collect();
+    let env: Vec<_> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    standalone_output(&guest.binary, &args, &env)
+}
+
+fn initial_stack_sentinel() -> (Guest, usize) {
+    let guest = assert_build_c_guest("initial_stack_env.c", CLink::PosixShim);
+    let measured = direct_initial_stack(&guest, 4, None, &initial_stack_map(0), true);
+    assert_eq!(measured.status.code(), Some(42), "{measured:?}");
+    let slots: usize = assert_unique_line_payload(&measured.stdout, "INITIAL_STACK_TRAILER slots=")
+        .parse()
+        .expect("positive trailer slot count");
+    assert!(slots > 0);
+    (guest, slots)
+}
+
+fn assert_initial_stack_sentinel(output: std::process::Output, trailer_slots: usize) {
+    assert_eq!(output.status.code(), Some(42), "{output:?}");
+    assert_eq!(
+        text(&output.stdout),
+        format!("INITIAL_STACK_TRAILER slots={trailer_slots}\n")
+    );
+}
+
+#[test]
+fn initial_stack_environment_zero_one_and_many_surplus_slots() {
+    let (guest, trailer_slots) = initial_stack_sentinel();
+    for entries in [4, 128] {
+        let map = initial_stack_map(entries);
+        for surplus in [0, 1, patina_dst_runtime::NATIVE_INITIAL_STACK_TRAILER_SLOTS] {
+            let capacity = entries + trailer_slots + surplus;
+            let out = assert_success(direct_initial_stack(
+                &guest,
+                capacity,
+                Some("1"),
+                &map,
+                false,
+            ));
+            assert_eq!(
+                text(&out.stdout),
+                format!("INITIAL_STACK_ENV entries={entries}\n")
+            );
+        }
+    }
+}
+
+#[test]
+fn initial_stack_reservation_refuses_short_or_invalid_layouts() {
+    use std::os::unix::process::ExitStatusExt;
+    let (guest, trailer_slots) = initial_stack_sentinel();
+    for entries in [4, 128] {
+        let map = initial_stack_map(entries);
+        // Map exactly fills the original array, or exceeds it; neither leaves
+        // room for the trailer. Both have positive twins with the SAME map.
+        let too_small = direct_initial_stack(&guest, 4, Some("1"), &map, true);
+        assert_eq!(
+            too_small.status.signal(),
+            Some(libc::SIGABRT),
+            "{too_small:?}"
+        );
+        let required = entries + trailer_slots;
+        let one_short = direct_initial_stack(&guest, required - 1, Some("1"), &map, true);
+        assert_eq!(
+            one_short.status.signal(),
+            Some(libc::SIGABRT),
+            "{one_short:?}"
+        );
+        // Changing only the capacity by one slot crosses the refusal boundary.
+        assert_initial_stack_sentinel(
+            direct_initial_stack(&guest, required, Some("1"), &map, true),
+            trailer_slots,
+        );
+        let invalid = direct_initial_stack(&guest, required, Some("invalid"), &map, true);
+        assert_eq!(invalid.status.signal(), Some(libc::SIGABRT), "{invalid:?}");
+    }
+}
+
+#[test]
+fn direct_initial_stack_nonempty_map_requires_reservation() {
+    use std::os::unix::process::ExitStatusExt;
+    let (guest, trailer_slots) = initial_stack_sentinel();
+    let map = initial_stack_map(4);
+    let capacity = map.len() + trailer_slots;
+    // Plenty of space alone is not a reservation: an unmarked nonempty map
+    // must refuse rather than publish inconsistent argv/envp/environ views.
+    let unreserved = direct_initial_stack(&guest, capacity, None, &map, true);
+    assert_eq!(
+        unreserved.status.signal(),
+        Some(libc::SIGABRT),
+        "{unreserved:?}"
+    );
+    assert_initial_stack_sentinel(
+        direct_initial_stack(&guest, capacity, Some("1"), &map, true),
+        trailer_slots,
+    );
+    assert_initial_stack_sentinel(
+        direct_initial_stack(&guest, capacity, None, &initial_stack_map(0), true),
+        trailer_slots,
+    );
+}
+
 #[test]
 fn host_environment_canaries_never_enter_guest_or_replay() {
     let g = Guest::assert_build("env_probe.rs");
