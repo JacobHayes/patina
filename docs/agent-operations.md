@@ -206,6 +206,14 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
 ## Native/shim-specific operating rules
 
 - Read `crates/patina-native-shim/AGENTS.md` before changing the native shim.
+- An off-baton liveness observer must not allocate, deallocate, or invoke guest
+  callbacks while exporting a stop: the running guest can own its allocator or
+  stdio locks even before the observer suspends it. Use borrowed serialization,
+  fixed storage, private host I/O, and nonblocking capture inspection. Pair any
+  asynchronous-stop change with `compute_watchdog.rs`'s allocator-held leg; a
+  plain atomic spin does not detect this second hang class. Host-time observations
+  may commit a terminal refusal, never choose a task or change virtual time;
+  record the terminal boundary so replay does not re-decide it from host time.
 - The host-alias doctrine is structural: shim internals reach real host
   primitives through private resolved aliases, never by calling public symbols
   that guest code can import.

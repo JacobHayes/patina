@@ -269,6 +269,8 @@ pub struct CampaignSpec {
     /// Generic liveness-watchdog budget (virtual nanoseconds), applied every
     /// generation when set.
     pub watchdog_nanos: Option<u64>,
+    /// Native host-time limit, forwarded unchanged to run and replay.
+    pub compute_watchdog_ms: Option<u64>,
     /// Heal-then-converge budget (virtual nanoseconds), applied every generation
     /// when set.
     pub converge_nanos: Option<u64>,
@@ -312,6 +314,7 @@ impl Default for CampaignSpec {
             allow_symbols: Vec::new(),
             allow_unsupported_symbols: None,
             watchdog_nanos: None,
+            compute_watchdog_ms: None,
             converge_nanos: None,
             heal_after_nanos: None,
             report: false,
@@ -434,6 +437,16 @@ impl CampaignSpec {
                     .map_err(|error| CliError(format!("campaign spec {error}")))?;
                     self.allow_unsupported_symbols = Some(value.to_string());
                 }
+                "compute_watchdog_ms" => {
+                    let bound = json_u64(key, val)?;
+                    crate::values::validate(
+                        help::Kind::WatchdogMillis,
+                        "compute_watchdog_ms",
+                        &bound.to_string(),
+                    )
+                    .map_err(CliError)?;
+                    self.compute_watchdog_ms = Some(bound);
+                }
                 "watchdog_nanos" => self.watchdog_nanos = Some(json_u64(key, val)?),
                 "converge_nanos" => self.converge_nanos = Some(json_u64(key, val)?),
                 "heal_after_nanos" => self.heal_after_nanos = Some(json_u64(key, val)?),
@@ -450,7 +463,7 @@ impl CampaignSpec {
                          timeout_secs, guest_args, buggify, swarm, pct, faults, custom_op_faults, \
                          fault_scale_permille, starve, starve_scale_permille, dns_entries, \
                          harness, allow_symbols, allow_unsupported_symbols, watchdog_nanos, \
-                         converge_nanos, heal_after_nanos, report, plateau_after, guided, \
+                         compute_watchdog_ms, converge_nanos, heal_after_nanos, report, plateau_after, guided, \
                          allow_unmet_sometimes, or classify"
                     )));
                 }
@@ -761,6 +774,9 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     }
     if let Some(value) = args.text("--allow-unsupported-symbols") {
         spec.allow_unsupported_symbols = Some(value.to_string());
+    }
+    if let Some(value) = args.u64("--compute-watchdog-ms") {
+        spec.compute_watchdog_ms = Some(value);
     }
     if let Some(value) = args.u64("--liveness-watchdog") {
         spec.watchdog_nanos = Some(value);
@@ -1222,6 +1238,8 @@ pub struct FindingFacts {
     /// diagnostics).
     pub source: String,
     pub kind: String,
+    /// A simulator limitation is not a novel guest bug.
+    pub known_limit: bool,
 }
 
 /// The **structured** outcome facts of one generation: the child run's
@@ -1419,10 +1437,21 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
     if !facts.envelope {
         return CampaignClass::Infra;
     }
+    // A runtime limitation is infrastructure evidence, not a guest bug. Do not
+    // erase an independently reported safety verdict that preceded the stop.
+    if facts.findings.iter().any(|finding| finding.known_limit)
+        && facts.has_verdict("violation").is_none()
+    {
+        return CampaignClass::Infra;
+    }
     // 5. A liveness/converge watchdog finding is its own class (a "never
     //    converges" wedge), reported by the runtime as a `runtime_findings[]`
     //    entry with `source=liveness`.
-    if facts.has_finding("liveness").is_some() {
+    if facts
+        .findings
+        .iter()
+        .any(|finding| finding.source == "liveness" && !finding.known_limit)
+    {
         return CampaignClass::Liveness;
     }
     // 6. A system-under-test safety violation: a `violation` verdict. Fires even
@@ -2372,6 +2401,9 @@ fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     if let Some(value) = spec.converge_nanos {
         map.insert("converge_nanos".into(), value.into());
     }
+    if let Some(value) = spec.compute_watchdog_ms {
+        map.insert("compute_watchdog_ms".into(), value.into());
+    }
     if let Some(value) = spec.heal_after_nanos {
         map.insert("heal_after_nanos".into(), value.into());
     }
@@ -2815,7 +2847,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         if let Some(flag) = non_native_invocation_flag(&state.spec) {
             return Err(CliError::usage(format!(
                 "{flag} is a native `run` option, but this campaign's artifact is a {} module: \
-                 the harness and pre-run gate surface belong to the native supervisor; sweep a \
+                 the native invocation controls belong to the native supervisor; sweep a \
                  native artifact to use it",
                 state.artifact.family
             )));
@@ -3294,6 +3326,10 @@ fn facts_from_envelope(envelope: &serde_json::Value) -> RunFacts {
                 .map(|row| FindingFacts {
                     source: string(row.get("source")),
                     kind: string(row.get("kind")),
+                    known_limit: row
+                        .get("known_limit")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
                 })
                 .collect()
         })
@@ -3966,6 +4002,9 @@ fn vacuity_class(knob: FaultKnob) -> Option<CampaignClass> {
 /// The first native-only invocation flag this spec carries, if any — the name a
 /// non-native campaign's refusal quotes.
 fn non_native_invocation_flag(spec: &CampaignSpec) -> Option<&'static str> {
+    if spec.compute_watchdog_ms.is_some() {
+        return Some("--compute-watchdog-ms");
+    }
     if spec.harness {
         return Some("--harness");
     }
@@ -3984,7 +4023,7 @@ fn non_native_invocation_flag(spec: &CampaignSpec) -> Option<&'static str> {
 ///
 /// Their own function because the reproduce commands need exactly this set and
 /// nothing else. Native replay restores every semantic input from the trace, but
-/// these three are host/build facts a trace cannot carry (see
+/// these controls (including the host-time compute bound) are host/build facts a trace cannot carry (see
 /// `parse_native_replay`), so a `cargo patina replay` line that dropped them would
 /// hand the operator a command that fails closed on the guest the campaign just
 /// swept.
@@ -3997,6 +4036,9 @@ fn invocation_flags(spec: &CampaignSpec, family: &'static str) -> Vec<String> {
     let mut flags = Vec::new();
     if family != "native" {
         return flags;
+    }
+    if let Some(bound) = spec.compute_watchdog_ms {
+        push_run_flag(&mut flags, "--compute-watchdog-ms", RunValue::Int(bound));
     }
     if spec.harness {
         push_run_flag(&mut flags, "--harness", RunValue::Switch);
@@ -5658,6 +5700,7 @@ impl RunFacts {
         self.findings.push(FindingFacts {
             source: source.to_string(),
             kind: kind.to_string(),
+            known_limit: false,
         });
         self
     }
@@ -5711,6 +5754,23 @@ fn selftest() -> Result<i32, CliError> {
         CampaignClass::Ok,
         classify(&planted(RunFacts::ok(), ""), &no_rules),
     );
+
+    // A typed runtime limit must survive envelope reduction and must never
+    // spend the campaign's novel-guest-finding budget. Removing the bit is RED.
+    for (known_limit, expected) in [
+        (true, CampaignClass::Infra),
+        (false, CampaignClass::Liveness),
+    ] {
+        let facts = facts_from_envelope(&serde_json::json!({
+            "exit_code": 134,
+            "runtime_findings": [{"source": "liveness", "kind": "liveness", "known_limit": known_limit}]
+        }));
+        check(
+            "runtime-limit-bit-is-load-bearing",
+            expected,
+            classify(&planted(facts, ""), &no_rules),
+        );
+    }
 
     // -- liveness: a runtime finding attributed to the watchdog ---------------
     check(
@@ -8945,7 +9005,12 @@ mod tests {
     fn the_forwarded_flags_match_the_run_registry_rows() {
         let campaign = help::verb("campaign").expect("`campaign` is registered");
         let run = help::verb("run").expect("`run` is registered");
-        for name in ["--harness", "--allow", "--allow-unsupported-symbols"] {
+        for name in [
+            "--harness",
+            "--allow",
+            "--allow-unsupported-symbols",
+            "--compute-watchdog-ms",
+        ] {
             let ours = campaign
                 .family_flags(help::Family::Sole)
                 .find(|flag| flag.name == name)
@@ -9057,6 +9122,56 @@ mod tests {
             assert!(
                 error.to_string().contains(expected),
                 "expected a loud grammar error for {source}, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn compute_watchdog_configuration_survives_campaign_reproduction() {
+        let args = ["art", "--compute-watchdog-ms", "5000"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let spec = parse(args).unwrap().spec;
+        assert_eq!(spec.compute_watchdog_ms, Some(5000));
+        assert_eq!(spec_from_state_json(&spec_to_json(&spec)).unwrap(), spec);
+        assert_eq!(
+            non_native_invocation_flag(&spec),
+            Some("--compute-watchdog-ms")
+        );
+        let flags = invocation_flags(&spec, "native");
+        assert_eq!(flags, ["--compute-watchdog-ms", "5000"]);
+        assert!(invocation_flags(&spec, "wasi").is_empty());
+        let derived = derive_flags(&spec, &generation_hash(0, 0), "native");
+        assert_eq!(
+            derived
+                .iter()
+                .filter(|flag| *flag == "--compute-watchdog-ms")
+                .count(),
+            1
+        );
+        for trace in [None, Some("stop.patina")] {
+            let command = reproduce_command(
+                Path::new("guest"),
+                7,
+                &derived,
+                &flags,
+                &[],
+                trace,
+                "stop.patina",
+            );
+            assert!(command.contains("--compute-watchdog-ms 5000"), "{command}");
+        }
+        assert!(
+            spec_to_json(&CampaignSpec::default())
+                .get("compute_watchdog_ms")
+                .is_none()
+        );
+        for bound in [0, 86_400_001] {
+            assert!(
+                CampaignSpec::default()
+                    .apply_json(&serde_json::json!({"compute_watchdog_ms": bound}))
+                    .is_err()
             );
         }
     }

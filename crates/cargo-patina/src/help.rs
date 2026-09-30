@@ -37,6 +37,8 @@ pub enum Kind {
     Usize,
     /// An unsigned integer required to be `>= 1` (a positive count).
     PositiveU64,
+    /// Native host-time watchdog, in milliseconds: 1..=86400000.
+    WatchdogMillis,
     /// A per-mille in `[0, 1000]`.
     Permille,
     /// An inclusive `MIN..MAX` nanosecond range with `MIN <= MAX`.
@@ -90,6 +92,7 @@ impl Kind {
             Kind::U32 => "u32",
             Kind::Usize => "usize",
             Kind::PositiveU64 => "positive-u64",
+            Kind::WatchdogMillis => "watchdog-millis",
             Kind::Permille => "permille",
             Kind::NanosRange => "nanos-range",
             Kind::U64Range => "u64-range",
@@ -709,6 +712,14 @@ const BUGGIFY_FLAGS: &[Flag] = &[
     ),
 ];
 
+const COMPUTE_WATCHDOG_FLAG: Flag = f(
+    "--compute-watchdog-ms",
+    None,
+    Value::Required("MS", Kind::WatchdogMillis),
+    "Native call-free starvation bound in host milliseconds (1..=86400000; default 10000). Overrides PATINA_COMPUTE_WATCHDOG_MS; replay follows the recorded stop, not host time.",
+    false,
+);
+
 const LIVENESS_FLAGS_OPTIONAL: &[Flag] = &[
     f(
         "--liveness-watchdog",
@@ -1044,6 +1055,11 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
             flags: BUGGIFY_FLAGS,
         },
         Group {
+            title: "Native compute liveness (host-time terminal bound)",
+            families: &[Family::Native],
+            flags: &[COMPUTE_WATCHDOG_FLAG],
+        },
+        Group {
             title: "Liveness options (run <MODULE.wasm> & run <BINARY>)",
             families: &[Family::Wasi, Family::Native],
             flags: LIVENESS_FLAGS_OPTIONAL,
@@ -1236,6 +1252,11 @@ child's readable-trace receipt.",
             title: "Native scheduling options (native harness mode)",
             families: &[Family::Harness],
             flags: NATIVE_SCHEDULE_FLAGS,
+        },
+        Group {
+            title: "Native compute liveness (host-time terminal bound)",
+            families: &[Family::Harness],
+            flags: &[COMPUTE_WATCHDOG_FLAG],
         },
         Group {
             title: "Liveness options (native harness mode)",
@@ -1435,7 +1456,7 @@ families carry the timeline/branch controls (--timeline, and --branch --from \
 (--fuel/--env/--socket/--preopen and resource limits). Native traces restore \
 `run --env` values from metadata and reject re-supplied native `--env`; native \
 traces are single-timeline (native runs cannot branch), so native replay accepts \
-only --fingerprint, --mount, --coverage-out, --harness, and the \
+only --fingerprint, --mount, --coverage-out, --harness, --compute-watchdog-ms, and the \
 --allow/--allow-unsupported-symbols audit surface.",
     families: &[
         fam(Family::Cargo, "`replay` of a Cargo package", None),
@@ -1447,6 +1468,7 @@ only --fingerprint, --mount, --coverage-out, --harness, and the \
             title: "Native replay options (host/build facts the trace cannot carry)",
             families: &[Family::Native],
             flags: &[
+                COMPUTE_WATCHDOG_FLAG,
                 f(
                     "--fingerprint",
                     None,
@@ -1782,6 +1804,7 @@ refused by name.",
                     "Also write a --report HTML for each failing generation.",
                     false,
                 ),
+                COMPUTE_WATCHDOG_FLAG,
                 f(
                     "--liveness-watchdog",
                     None,
@@ -2482,6 +2505,11 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         name: "PATINA_LIVENESS_WATCHDOG_NANOS / PATINA_CONVERGE_WITHIN_NANOS / PATINA_HEAL_AFTER_NANOS",
         scope: "protocol",
         doc: "Liveness watchdog / convergence budgets (mirror --liveness-watchdog/--converge-within/--heal-after).",
+    },
+    EnvVar {
+        name: "PATINA_COMPUTE_WATCHDOG_MS",
+        scope: "protocol",
+        doc: "Native compute-only starvation stop: host milliseconds without boundary progress while another managed task is runnable (default 10000; 1..=86400000). Forwarded by native run/replay; --compute-watchdog-ms takes precedence. Replay follows the recorded terminal boundary, not this timeout. This is a known runtime limit, not a guest bug.",
     },
     EnvVar {
         name: "CARGO / RUSTC / CC",

@@ -521,6 +521,10 @@ pub struct RunMetadata {
     /// [`WatchdogConfigRecord`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watchdog: Option<WatchdogConfigRecord>,
+    /// Native host-time refusal, after exactly this recorded prefix. This is a
+    /// terminal control-plane fact, never a scheduling decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_stop: Option<ComputeStop>,
     /// Whether syscall-user-dispatch (SUD) was armed for this run — recorded only
     /// when it was (`Some(true)`); absent (`None`) on every other run (macOS,
     /// a non-SUD kernel, a standalone binary, and all pre-SUD traces). Additive
@@ -559,6 +563,14 @@ pub struct RunMetadata {
     pub hostname: String,
 }
 
+/// A native compute-bound refusal at a boundary-operation prefix. PCs and host
+/// elapsed time are deliberately absent: neither is replayable run state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputeStop {
+    pub steps: u64,
+    pub task: TaskId,
+}
+
 impl RunMetadata {
     /// The metadata every recording carries. The realtime epoch and the node
     /// name are required run facts, so the caller states them rather than
@@ -582,6 +594,7 @@ impl RunMetadata {
             schedule_policy: None,
             swarm: None,
             watchdog: None,
+            compute_stop: None,
             sud: None,
             tsc: None,
             realtime_epoch_nanos,
@@ -1608,10 +1621,12 @@ impl Recorder {
         }
     }
 
-    /// Overwrite the recorded buggify configuration at finalization. The run's
-    /// realized active-site set and knob picks are only known after execution, so
-    /// the runtime records the static config at build time and calls this to fold
-    /// in the accrued detail before the bundle is written.
+    /// Set the terminal native refusal before exporting its prefix.
+    pub fn set_compute_stop(&mut self, stop: ComputeStop) {
+        self.metadata.compute_stop = Some(stop);
+    }
+
+    /// Overwrite the recorded buggify configuration at finalization.
     pub fn set_buggify(&mut self, buggify: Option<BuggifyConfigRecord>) {
         self.metadata.buggify = buggify;
     }
@@ -1644,6 +1659,69 @@ impl Recorder {
                 self.decisions,
             )),
         }
+    }
+
+    /// Serialize a borrowed linear prefix without allocating or cloning events.
+    /// Native asynchronous stops cannot call the guest's allocator: its owner
+    /// may be the very thread that stopped making progress. The initial buggify
+    /// configuration is retained; end-of-run site-report enrichment is omitted.
+    pub fn write_prefix(&self, writer: impl std::io::Write) -> Result<(), serde_json::Error> {
+        #[derive(Serialize)]
+        struct Prefix<'a> {
+            format_version: u32,
+            metadata: &'a RunMetadata,
+            timelines: [PrefixTimeline<'a>; 1],
+        }
+        #[derive(Serialize)]
+        struct PrefixTimeline<'a> {
+            id: &'static str,
+            parent: Option<&'static str>,
+            from_sequence: Option<u64>,
+            branch_seed: Option<u64>,
+            lifecycle: [LifecycleEvent; 2],
+            decisions: &'a [TraceEvent],
+        }
+        if self.ledger.overflowed() {
+            return Err(serde_json::Error::io(std::io::Error::from(
+                std::io::ErrorKind::OutOfMemory,
+            )));
+        }
+        let start = self
+            .decisions
+            .first()
+            .map_or(0, |event| event.order.saturating_sub(1));
+        let end = self
+            .decisions
+            .last()
+            .map_or(start + 1, |event| event.order.saturating_add(1));
+        serde_json::to_writer(
+            writer,
+            &Prefix {
+                format_version: TRACE_FORMAT_VERSION,
+                metadata: &self.metadata,
+                timelines: [PrefixTimeline {
+                    id: MAIN_TIMELINE,
+                    parent: None,
+                    from_sequence: None,
+                    branch_seed: None,
+                    lifecycle: [
+                        LifecycleEvent {
+                            order: start,
+                            kind: LifecycleEventKind::Start {
+                                incarnation: self.incarnation,
+                            },
+                        },
+                        LifecycleEvent {
+                            order: end,
+                            kind: LifecycleEventKind::End {
+                                incarnation: self.incarnation,
+                            },
+                        },
+                    ],
+                    decisions: &self.decisions,
+                }],
+            },
+        )
     }
 
     /// A bundle of the decisions recorded SO FAR, leaving the recorder usable.
@@ -1696,6 +1774,13 @@ impl Replayer {
             });
         }
         let decisions = bundle.resolved_timeline(timeline)?;
+        if let Some(stop) = bundle.metadata.compute_stop {
+            if stop.steps != decisions.len() as u64 || stop.task.0 == 0 {
+                return Err(TraceError::Invalid(
+                    "compute stop must name a task at the end of its exact prefix".into(),
+                ));
+            }
+        }
         let execution_seed = bundle
             .timelines
             .iter()
@@ -1764,6 +1849,10 @@ impl Replayer {
 
     /// Whether the trace was recorded under syscall-user-dispatch. `Some(true)`
     /// when it was; `None` otherwise (see [`RunMetadata::sud`]).
+    pub const fn compute_stop(&self) -> Option<ComputeStop> {
+        self.metadata.compute_stop
+    }
+
     pub const fn sud(&self) -> Option<bool> {
         self.metadata.sud
     }
@@ -1881,6 +1970,11 @@ impl BranchSession {
     ) -> Result<Self, TraceError> {
         let path = path.as_ref().to_path_buf();
         let bundle = TraceBundle::load(&path)?;
+        if bundle.metadata.compute_stop.is_some() {
+            return Err(TraceError::Invalid(
+                "branching a compute-stop trace is not supported".into(),
+            ));
+        }
         if bundle.metadata.fingerprint != expected_fingerprint {
             return Err(TraceError::FingerprintMismatch {
                 expected: expected_fingerprint.into(),
@@ -3180,6 +3274,41 @@ mod tests {
         assert!(!text.contains("guest_env"), "{text}");
         let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
         assert_eq!(reloaded_plain.metadata.guest_env, None);
+    }
+
+    #[test]
+    fn borrowed_prefix_matches_the_ordinary_bundle() {
+        for incarnation in [0, 1] {
+            for count in [0, 1, 9] {
+                let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"))
+                    .with_incarnation(incarnation);
+                for _ in 0..count {
+                    recorder.observe(operation(), Outcome::U64(0));
+                }
+                recorder.set_compute_stop(ComputeStop {
+                    steps: count,
+                    task: TaskId(1),
+                });
+                let mut bytes = Vec::new();
+                recorder.write_prefix(&mut bytes).unwrap();
+                assert_eq!(
+                    TraceBundle::from_slice(&bytes).unwrap(),
+                    recorder.to_bundle().unwrap()
+                );
+            }
+        }
+        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
+        recorder.observe(operation(), Outcome::U64(0));
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(recorder.write_prefix(Broken).is_err());
     }
 
     #[test]

@@ -646,6 +646,15 @@ pub trait TraceTransport: Send {
     fn read_bundle(&mut self) -> std::io::Result<Vec<u8>>;
     /// Deliver the complete serialized trace bundle at record finalization.
     fn write_bundle(&mut self, bytes: &[u8]) -> std::io::Result<()>;
+    /// Export a borrowed prefix at an asynchronous native stop. Embedders that
+    /// share a guest allocator must override this with allocation-free I/O.
+    fn write_prefix(&mut self, recorder: &Recorder) -> std::io::Result<()> {
+        let mut bytes = Vec::new();
+        recorder
+            .write_prefix(&mut bytes)
+            .map_err(std::io::Error::other)?;
+        self.write_bundle(&bytes)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2869,7 +2878,21 @@ impl RuntimeBuilder {
             }
         };
 
+        let compute_stop = match &execution {
+            Execution::Replay(replayer) => replayer.compute_stop(),
+            _ => None,
+        };
+        // Reuse the existing boundary-budget check: healthy scheduling points
+        // gain no watchdog counter, clock read, atomic, or additional branch.
+        if let Some(stop) = compute_stop {
+            self.config.step_budget = Some(
+                self.config
+                    .step_budget
+                    .map_or(stop.steps, |budget| budget.min(stop.steps)),
+            );
+        }
         Ok(Context {
+            compute_stop,
             root_seed,
             compatibility_fingerprint: self.config.fingerprint.clone(),
             step_budget: self.config.step_budget,
@@ -4183,6 +4206,7 @@ impl Buggify {
 /// written. A `Context` controls only effects performed through its own
 /// methods — it does not interpose the rest of the process.
 pub struct Context {
+    compute_stop: Option<patina_dst_trace::ComputeStop>,
     root_seed: u64,
     compatibility_fingerprint: String,
     step_budget: Option<u64>,
@@ -4369,6 +4393,85 @@ impl Context {
     /// step budget is enforced against).
     pub const fn steps(&self) -> u64 {
         self.steps
+    }
+
+    /// Read-only native watchdog observation. The embedder must hold its
+    /// context AND thread-transition locks. Existing scheduler bookkeeping is
+    /// the authority; parked peers and a lone running task never qualify.
+    /// Host-time detection is disabled on replay: its recorded stop is final.
+    pub fn compute_watchdog_candidate(&self) -> Option<(u64, TaskId)> {
+        if !matches!(self.execution, Execution::Seeded | Execution::Record { .. }) {
+            return None;
+        }
+        let running = self.cpu.running?;
+        self.compute_starves_peer(running)
+            .then_some((self.steps, running))
+    }
+
+    fn compute_starves_peer(&self, running: TaskId) -> bool {
+        self.cpu.running == Some(running)
+            && self.scheduler_tasks.contains(&running)
+            && !self.parked_tasks.contains(&running)
+            && self
+                .scheduler_tasks
+                .iter()
+                .any(|task| *task != running && !self.parked_tasks.contains(task))
+    }
+
+    /// A replay terminal boundary already reached, without asking the guest for
+    /// another operation (it may be in call-free code forever).
+    pub fn replay_compute_stop_due(&self) -> Option<patina_dst_trace::ComputeStop> {
+        self.compute_stop.filter(|stop| stop.steps == self.steps)
+    }
+
+    /// Commit a native host-time stop. This changes no driver or scheduler
+    /// answer. The valid recorded prefix and its terminal fact are flushed once.
+    pub fn stop_compute_bound(&mut self, task: TaskId) -> RuntimeError {
+        if !self.compute_starves_peer(task) {
+            return RuntimeError::ComputeStopState;
+        }
+        let stop = patina_dst_trace::ComputeStop {
+            steps: self.steps,
+            task,
+        };
+        if let Execution::Record { recorder, .. } = &mut self.execution {
+            recorder.set_compute_stop(stop);
+        }
+        self.compute_stop = Some(stop);
+        // An asynchronous observer may interrupt an allocator critical section.
+        // Export borrowed data only, without ordinary finish-time enrichment.
+        if !self.facts_emitted {
+            self.facts_emitted = true;
+            if let Some(output) = self.facts.as_mut() {
+                let mut bytes = [0u8; 512];
+                let mut cursor = std::io::Cursor::new(&mut bytes[..]);
+                use std::io::Write;
+                let encoded = facts::write_compute_bound_facts(stop, &mut cursor);
+                let newline = cursor.write_all(b"\n");
+                let length = cursor.position() as usize;
+                if encoded.is_err() || newline.is_err() || output.write(&bytes[..length]).is_err() {
+                    return RuntimeError::ComputeStopExport;
+                }
+            }
+        }
+        if !self.recording_flushed {
+            if let Execution::Record { recorder, sink } = &mut self.execution {
+                self.recording_flushed = true;
+                let result = match sink {
+                    RecordSink::Transport(transport) => transport.write_prefix(recorder),
+                    RecordSink::Path { path, .. } => std::fs::File::create(path).and_then(|file| {
+                        recorder.write_prefix(file).map_err(std::io::Error::other)
+                    }),
+                };
+                if result.is_err() {
+                    return RuntimeError::ComputeStopExport;
+                }
+            }
+        }
+        RuntimeError::ComputeBound {
+            task,
+            steps: self.steps,
+        }
     }
 
     /// End-of-run schedule-exploration diagnostics. See [`ScheduleDiagnostics`].
@@ -7473,6 +7576,9 @@ recording was produced by a guest whose result type no longer matches this one"
     /// write the trace. Consumes the context; [`run`]/[`run_with`] call this
     /// automatically, on error paths too.
     pub fn finish(mut self) -> Result<(), RuntimeError> {
+        if let Some(stop) = self.replay_compute_stop_due() {
+            return Err(self.stop_compute_bound(stop.task));
+        }
         // A custom operation still open at the end of the run means its `begin`
         // was never closed out — on the record pass the trace is missing an event
         // the guest logically performed, and on replay a recorded result was
@@ -7932,6 +8038,9 @@ publish. Give the loop a wait the runtime can see (sleep/yield/park), or bound t
         operation: &Operation,
     ) -> Result<Option<(u64, Outcome)>, RuntimeError> {
         if self.step_budget.is_some_and(|budget| self.steps >= budget) {
+            if let Some(stop) = self.replay_compute_stop_due() {
+                return Err(self.stop_compute_bound(stop.task));
+            }
             // Preserve the artifacts before the stop: the interposed families
             // abort without reaching `finish`, and a budget abort is precisely
             // the case where the partial trace is the evidence (see
@@ -8201,6 +8310,16 @@ pub enum RuntimeError {
     FrozenClockChurn {
         detail: String,
     },
+    /// Native compute-only starvation: a runtime limit, never a guest verdict.
+    ComputeBound {
+        task: TaskId,
+        steps: u64,
+    },
+    /// The asynchronous stop could not export its evidence. No heap-owned
+    /// diagnostic: an interrupted allocator may be unavailable.
+    ComputeStopExport,
+    /// Terminal metadata disagrees with the strictly replayed scheduler state.
+    ComputeStopState,
 }
 
 impl fmt::Display for RuntimeError {
@@ -8246,6 +8365,15 @@ impl fmt::Display for RuntimeError {
             Self::FrozenClockChurn { detail } => {
                 write!(f, "Patina frozen-clock churn: {detail}")
             }
+            Self::ComputeStopExport => f.write_str("PATINA_INFRA compute_stop_export_failed"),
+            Self::ComputeStopState => {
+                f.write_str("PATINA_INFRA compute_stop_invalid_scheduler_state")
+            }
+            Self::ComputeBound { task, steps } => write!(
+                f,
+                "PATINA_VIOLATION liveness detail=compute-bound task={} steps={} known_limit=true: compute-bound without scheduling points while another managed thread is runnable; this is a known Patina limit, not a guest bug",
+                task.0, steps
+            ),
         }
     }
 }
@@ -12974,6 +13102,87 @@ class=crash|0 class=buggify|0"
         let mut replay = Context::from_config(RuntimeConfig::replay(&first, "spin-v1")).unwrap();
         assert_eq!(calibration_spin(&mut replay, 100_000).unwrap(), recorded[0]);
         replay.finish().unwrap();
+    }
+
+    #[test]
+    fn compute_watchdog_uses_runnable_peers_not_live_tasks() {
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        assert_eq!(context.compute_watchdog_candidate(), None);
+        let main = context.task_spawn("main").unwrap();
+        assert_eq!(context.scheduler_next().unwrap(), Some(main));
+        assert_eq!(context.compute_watchdog_candidate(), None);
+        let peer = context.task_spawn("peer").unwrap();
+        assert_eq!(
+            context.compute_watchdog_candidate(),
+            Some((context.steps(), main))
+        );
+        context.task_park(main, "condition").unwrap();
+        assert_eq!(context.scheduler_next().unwrap(), Some(peer));
+        assert_eq!(context.compute_watchdog_candidate(), None);
+        context.task_wake(main).unwrap();
+        assert_eq!(
+            context.compute_watchdog_candidate(),
+            Some((context.steps(), peer))
+        );
+        context.task_complete(peer).unwrap();
+        assert_eq!(context.scheduler_next().unwrap(), Some(main));
+        assert_eq!(context.compute_watchdog_candidate(), None);
+    }
+
+    #[test]
+    fn compute_stop_replay_cannot_cross_the_recorded_prefix_or_finish_successfully() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("compute.patina");
+        let setup = |context: &mut Context| {
+            let main = context.task_spawn("main").unwrap();
+            assert_eq!(context.scheduler_next().unwrap(), Some(main));
+            context.task_spawn("peer").unwrap();
+            main
+        };
+        let mut record =
+            Context::from_config(RuntimeConfig::record(1, &path, "compute-v1")).unwrap();
+        let task = setup(&mut record);
+        let steps = record.steps();
+        assert!(
+            matches!(record.stop_compute_bound(task), RuntimeError::ComputeBound { task: stopped, steps: at } if stopped == task && at == steps)
+        );
+        let original = fs::read(&path).unwrap();
+        // The append-only native sink relies on exactly one flush.
+        record.stop_compute_bound(task);
+        assert_eq!(original, fs::read(&path).unwrap());
+        for finish in [false, true] {
+            let mut replay =
+                Context::from_config(RuntimeConfig::replay(&path, "compute-v1")).unwrap();
+            assert_eq!(replay.compute_watchdog_candidate(), None);
+            assert_eq!(setup(&mut replay), task);
+            assert_eq!(
+                replay.replay_compute_stop_due(),
+                Some(patina_dst_trace::ComputeStop { task, steps })
+            );
+            let error = if finish {
+                replay.finish().unwrap_err()
+            } else {
+                replay.task_yield(task).unwrap_err()
+            };
+            assert!(
+                matches!(error, RuntimeError::ComputeBound { task: stopped, steps: at } if stopped == task && at == steps)
+            );
+        }
+        let mut wrong_task = TraceBundle::load(&path).unwrap();
+        wrong_task.metadata.compute_stop.as_mut().unwrap().task = TaskId(99);
+        let wrong_path = directory.path().join("wrong-task.patina");
+        wrong_task.write_atomic(&wrong_path).unwrap();
+        let mut replay =
+            Context::from_config(RuntimeConfig::replay(&wrong_path, "compute-v1")).unwrap();
+        setup(&mut replay);
+        assert!(matches!(
+            replay.finish(),
+            Err(RuntimeError::ComputeStopState)
+        ));
+        let mut bundle = TraceBundle::load(&path).unwrap();
+        bundle.metadata.compute_stop.as_mut().unwrap().steps += 1;
+        assert!(Replayer::from_bundle(bundle, "compute-v1", "main").is_err());
+        assert!(BranchSession::open(&path, "compute-v1", "main", 1, "branch", 2).is_err());
     }
 
     #[test]

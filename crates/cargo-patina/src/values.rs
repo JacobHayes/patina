@@ -31,6 +31,10 @@ pub(crate) fn validate(kind: Kind, name: &str, value: &str) -> Result<(), String
             0 => Err(format!("{name} must be >= 1")),
             _ => Ok(()),
         },
+        Kind::WatchdogMillis => match u64_of(name, value)? {
+            1..=86_400_000 => Ok(()),
+            _ => Err(format!("{name} must be within [1, 86400000] milliseconds")),
+        },
         Kind::Permille => match u64_of(name, value)? {
             0..=1000 => Ok(()),
             _ => Err(format!("{name} must be within [0, 1000]")),

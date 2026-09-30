@@ -143,6 +143,7 @@ mod nsfs;
 mod numa;
 mod panic_boundary;
 mod paths;
+mod watchdog;
 // Guest memory copied the way the kernel's `copy_from_user`/`copy_to_user` do:
 // whole or `EFAULT`, never a fault in shim code. See `uaccess.rs`.
 mod uaccess;
@@ -432,6 +433,15 @@ impl<T> SpinMutex<T> {
             );
             host_abort()
         })
+    }
+
+    /// Attempt the lock without waiting, even if this thread already holds it.
+    fn try_lock(&self) -> Option<SpinGuard<'_, T>> {
+        self.owner
+            .compare_exchange(0, thread_token(), Ordering::Acquire, Ordering::Relaxed)
+            .ok()?;
+        spin_depth_inc();
+        Some(SpinGuard { mutex: self })
     }
 
     /// Take the lock, or report that this thread already holds it.
@@ -927,6 +937,15 @@ impl StdioCapture {
 // `sem_*`/`pthread_create` leave the guest import table on Linux too (each
 // interposed by a strong def, its real vehicle resolved through the table), and
 // its `shim_control_plane` residue is the single `dlsym` primitive, as on macOS.
+type HostClock = unsafe extern "C" fn(libc::clockid_t, *mut libc::timespec) -> c_int;
+type HostSignalAction =
+    unsafe extern "C" fn(c_int, *const libc::sigaction, *mut libc::sigaction) -> c_int;
+type HostThreadSignal = unsafe extern "C" fn(libc::pthread_t, c_int) -> c_int;
+type HostDlAddr = unsafe extern "C" fn(*const c_void, *mut libc::Dl_info) -> c_int;
+#[cfg(target_os = "linux")]
+type HostDlAddr1 =
+    unsafe extern "C" fn(*const c_void, *mut libc::Dl_info, *mut *mut c_void, c_int) -> c_int;
+
 #[cfg(target_os = "macos")]
 mod hostapi {
     use std::ffi::{CStr, c_char, c_int, c_void};
@@ -1001,6 +1020,12 @@ mod hostapi {
         pub dispatch_semaphore_wait: DispatchSemaphoreWait,
         pub dispatch_semaphore_signal: DispatchSemaphoreSignal,
         pub dispatch_release: DispatchRelease,
+        pub host_dispatch_time: unsafe extern "C" fn(u64, i64) -> u64,
+        pub host_clock_gettime: super::HostClock,
+        pub host_sigaction: super::HostSignalAction,
+        pub host_pthread_kill: super::HostThreadSignal,
+        pub host_pthread_self: unsafe extern "C" fn() -> usize,
+        pub host_dladdr: super::HostDlAddr,
         pub pthread_create_suspended_np: PthreadCreateSuspended,
         /// The real host `pthread_join`, used by `patina_thread_join` to reap
         /// the worker's host thread so its teardown makes the joiner's
@@ -1068,6 +1093,26 @@ mod hostapi {
         // route guest calls through the scheduler), so the baton never recurses.
         unsafe {
             HostApi {
+                host_dispatch_time: std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "C" fn(u64, i64) -> u64,
+                >(resolve(c"dispatch_time")),
+                host_clock_gettime: std::mem::transmute::<*mut c_void, super::HostClock>(resolve(
+                    c"clock_gettime",
+                )),
+                host_sigaction: std::mem::transmute::<*mut c_void, super::HostSignalAction>(
+                    resolve(c"sigaction"),
+                ),
+                host_pthread_kill: std::mem::transmute::<*mut c_void, super::HostThreadSignal>(
+                    resolve(c"pthread_kill"),
+                ),
+                host_pthread_self: std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "C" fn() -> usize,
+                >(resolve(c"pthread_self")),
+                host_dladdr: std::mem::transmute::<*mut c_void, super::HostDlAddr>(resolve(
+                    c"dladdr",
+                )),
                 dispatch_semaphore_create: std::mem::transmute::<
                     *mut c_void,
                     DispatchSemaphoreCreate,
@@ -1252,6 +1297,11 @@ mod hostapi {
         pub host_exit: HostExit,
         pub host_abort: unsafe extern "C" fn() -> !,
         pub host_pthread_self: unsafe extern "C" fn() -> usize,
+        pub host_clock_gettime: super::HostClock,
+        pub host_sigaction: super::HostSignalAction,
+        pub host_pthread_kill: super::HostThreadSignal,
+        pub host_dladdr: super::HostDlAddr,
+        pub host_dladdr1: super::HostDlAddr1,
         /// The execution-baton POSIX semaphore vehicle.
         pub sem_init: SemInit,
         pub sem_wait: SemOp,
@@ -1325,6 +1375,21 @@ mod hostapi {
         // of the glibc symbol it names.
         unsafe {
             HostApi {
+                host_clock_gettime: std::mem::transmute::<*mut c_void, super::HostClock>(resolve(
+                    c"clock_gettime",
+                )),
+                host_sigaction: std::mem::transmute::<*mut c_void, super::HostSignalAction>(
+                    resolve(c"sigaction"),
+                ),
+                host_pthread_kill: std::mem::transmute::<*mut c_void, super::HostThreadSignal>(
+                    resolve(c"pthread_kill"),
+                ),
+                host_dladdr: std::mem::transmute::<*mut c_void, super::HostDlAddr>(resolve(
+                    c"dladdr",
+                )),
+                host_dladdr1: std::mem::transmute::<*mut c_void, super::HostDlAddr1>(resolve(
+                    c"dladdr1",
+                )),
                 host_read: std::mem::transmute::<*mut c_void, HostRead>(resolve(c"read")),
                 host_write: std::mem::transmute::<*mut c_void, HostWrite>(resolve(c"write")),
                 host_exit: std::mem::transmute::<*mut c_void, HostExit>(resolve(c"exit")),
@@ -1802,6 +1867,55 @@ struct FdTraceTransport {
 }
 
 impl TraceTransport for FdTraceTransport {
+    fn write_prefix(&mut self, recorder: &patina_dst_trace::Recorder) -> io::Result<()> {
+        // Fixed storage: an asynchronous stop must not call the guest allocator
+        // or clone the trace while the baton holder may own allocator locks.
+        struct Writer {
+            fd: c_int,
+            buffer: [u8; 16 * 1024],
+            used: usize,
+            total: u64,
+        }
+        impl io::Write for Writer {
+            fn write(&mut self, mut bytes: &[u8]) -> io::Result<usize> {
+                let length = bytes.len();
+                self.total = self.total.saturating_add(length as u64);
+                if self.total > MAX_TRACE_BYTES {
+                    watchdog::report_and_abort(&RuntimeError::ComputeStopExport, None);
+                }
+                while !bytes.is_empty() {
+                    let n = bytes.len().min(self.buffer.len() - self.used);
+                    self.buffer[self.used..self.used + n].copy_from_slice(&bytes[..n]);
+                    self.used += n;
+                    bytes = &bytes[n..];
+                    if self.used == self.buffer.len() {
+                        self.flush()?;
+                    }
+                }
+                Ok(length)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                // serde_json boxes I/O errors. Terminate here instead of
+                // returning one into its allocating error-construction path.
+                if host_write_all(self.fd, &self.buffer[..self.used]).is_err() {
+                    watchdog::report_and_abort(&RuntimeError::ComputeStopExport, None);
+                }
+                self.used = 0;
+                Ok(())
+            }
+        }
+        let mut writer = Writer {
+            fd: self.fd,
+            buffer: [0; 16 * 1024],
+            used: 0,
+            total: 0,
+        };
+        recorder
+            .write_prefix(&mut writer)
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        io::Write::flush(&mut writer)
+    }
+
     fn read_bundle(&mut self) -> io::Result<Vec<u8>> {
         let mut bytes = Vec::new();
         let mut chunk = vec![0_u8; HOST_IO_CHUNK];
@@ -2490,6 +2604,9 @@ fn runtime_errno(error: &RuntimeError) -> c_int {
         // runtime has already emitted the classifiable marker and flushed the
         // truncated trace.
         RuntimeError::FrozenClockChurn { .. } => abort_after_flushing_output(),
+        RuntimeError::ComputeBound { .. }
+        | RuntimeError::ComputeStopExport
+        | RuntimeError::ComputeStopState => watchdog::report_and_abort(error, None),
         RuntimeError::InjectedFsCrash(_) => abort_after_flushing_output(),
         RuntimeError::CrashSelectorUnreached { .. } => EIO,
         RuntimeError::Config(_)
@@ -2842,6 +2959,9 @@ fn with_context_msg<T>(
         RuntimeError::ScheduleDivergence { .. } => {
             format!("{error}{}", thread::yield_site_context())
         }
+        RuntimeError::ComputeBound { .. }
+        | RuntimeError::ComputeStopExport
+        | RuntimeError::ComputeStopState => watchdog::report_and_abort(&error, None),
         _ => error.to_string(),
     })
 }
@@ -3465,6 +3585,7 @@ pub extern "C" fn patina_init_crash(seed: u64) -> c_int {
 
 fn init_from_env() -> c_int {
     let context = runtime_config_from_control_plane().and_then(|(config, trace_fd)| {
+        watchdog::configure()?;
         let mut builder = RuntimeBuilder::new(config)
             .with_default_drivers()
             .with_fs_image(fs_image_base()?);
@@ -3827,6 +3948,18 @@ pub extern "C" fn patina_flush_captured_stdio() -> c_int {
 /// `_exit` do, and those lose them.
 fn flush_captured_stdio() -> io::Result<()> {
     flush_capture(false)
+}
+
+/// An off-baton terminal stop cannot deallocate captured buffers, wait for a
+/// guest-held stdio lock, or call the guest's C-stream salvage callback. Emit
+/// only the already captured prefix if available; leave all storage in place.
+fn flush_observed_stdio() {
+    if let Some(slot) = STDIO.get() {
+        if let Some(capture) = slot.try_lock() {
+            let _ = host_write_all(1, &capture.pending[0]);
+            let _ = host_write_all(2, &capture.pending[1]);
+        }
+    }
 }
 
 /// The flush every path on which PATINA ends the run makes before it aborts:
@@ -8878,7 +9011,7 @@ mod thread {
     /// # Safety
     /// `handle` must be writable and `start`/`arg` a valid thread entry point.
     #[cfg(target_os = "macos")]
-    unsafe fn spawn_host_thread(
+    pub(super) unsafe fn spawn_host_thread(
         handle: *mut *mut c_void,
         attr: *const c_void,
         start: StartRoutine,
@@ -8901,7 +9034,7 @@ mod thread {
     /// # Safety
     /// `handle` must be writable and `start`/`arg` a valid thread entry point.
     #[cfg(target_os = "linux")]
-    unsafe fn spawn_host_thread(
+    pub(super) unsafe fn spawn_host_thread(
         handle: *mut *mut c_void,
         attr: *const c_void,
         start: StartRoutine,
@@ -10423,9 +10556,8 @@ mod thread {
             self.table.register(main);
             #[cfg(target_os = "linux")]
             self.signals.spawn(main, None);
-            #[cfg(target_os = "linux")]
             self.handles
-                .insert(unsafe { (crate::hostapi::get().host_pthread_self)() }, main);
+                .insert(crate::watchdog::host_thread_self(), main);
             self.sems.insert(main, Arc::new(baton::Semaphore::new()));
             self.active = true;
             set_current_task(main);
@@ -10712,6 +10844,25 @@ mod thread {
 
     fn lock_state() -> SpinGuard<'static, ThreadRuntime> {
         thread_runtime().lock()
+    }
+
+    /// Observer lock order is the ordinary ThreadRuntime -> Context order.
+    /// Never wait for the guest: a busy shim is not compute-only starvation.
+    pub(super) fn watchdog_observe(
+        observe: impl FnOnce(&mut super::Context, &BTreeMap<usize, TaskId>),
+    ) {
+        let Some(state) = thread_runtime().try_lock() else {
+            return;
+        };
+        if !state.active || main_returned() {
+            return;
+        }
+        let Some(mut slot) = super::slot().try_lock() else {
+            return;
+        };
+        if let Some(context) = slot.as_mut() {
+            observe(context, &state.handles);
+        }
     }
 
     /// Take a guard-driven scheduling point, remembering the instrumented call
@@ -11377,6 +11528,7 @@ mod thread {
             fatal(&format!("host thread creation failed with code {rc}"));
         }
         state.handles.insert(handle as usize, task);
+        crate::watchdog::start();
         drop(state);
         // The new thread takes over its host registrations off the baton;
         // wait for that before the guest can ask about them.

@@ -289,6 +289,44 @@ pub(crate) fn liveness_finding(violation: &LivenessViolation) -> Value {
     ])
 }
 
+/// A terminal native runtime limitation, explicitly not a guest bug verdict.
+#[derive(serde::Serialize)]
+struct ComputeBoundFinding {
+    source: &'static str,
+    kind: &'static str,
+    detail: &'static str,
+    known_limit: bool,
+    task: u64,
+    steps: u64,
+}
+
+/// The sole wire shape, serialized into the caller's fixed storage. No Value,
+/// String, Vec, or finish-time enrichment on the asynchronous stop path.
+pub(crate) fn write_compute_bound_facts(
+    stop: patina_dst_trace::ComputeStop,
+    writer: impl io::Write,
+) -> serde_json::Result<()> {
+    #[derive(serde::Serialize)]
+    struct Envelope {
+        schema: &'static str,
+        runtime_findings: [ComputeBoundFinding; 1],
+    }
+    serde_json::to_writer(
+        writer,
+        &Envelope {
+            schema: FACTS_SCHEMA,
+            runtime_findings: [ComputeBoundFinding {
+                source: "liveness",
+                kind: "liveness",
+                detail: "compute-bound",
+                known_limit: true,
+                task: stop.task.0,
+                steps: stop.steps,
+            }],
+        },
+    )
+}
+
 /// The frozen-clock-churn finding: advance-on-spin fed a spinning guest
 /// `rescues` token advances totalling `advanced_ns` of virtual time and it still
 /// made no genuine progress. Carries the same fields as the
@@ -340,6 +378,30 @@ pub(crate) fn vacuous_starvation_finding(starve_vacuous: u64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compute_facts_fit_fixed_storage_even_at_maximum_integers() {
+        let mut bytes = [0u8; 512];
+        let mut cursor = io::Cursor::new(bytes.as_mut_slice());
+        write_compute_bound_facts(
+            patina_dst_trace::ComputeStop {
+                task: patina_dst_abi::TaskId(u64::MAX),
+                steps: u64::MAX,
+            },
+            &mut cursor,
+        )
+        .unwrap();
+        let length = cursor.position() as usize;
+        let value: Value = serde_json::from_slice(&bytes[..length]).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"schema": FACTS_SCHEMA, "runtime_findings": [{
+                "source": "liveness", "kind": "liveness", "detail": "compute-bound",
+                "known_limit": true, "task": u64::MAX, "steps": u64::MAX,
+            }]})
+        );
+        assert!(length < bytes.len()); // leaves space for the line terminator
+    }
 
     #[test]
     fn empty_document_carries_only_the_schema() {

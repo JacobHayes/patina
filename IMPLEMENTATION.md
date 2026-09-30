@@ -556,6 +556,26 @@ vacuous-starvation detection.
 
 ## Slice 8: liveness watchdog + campaign — Partial (wave 13)
 
+Native call-free starvation also has an independent host-time terminal watchdog
+(`patina-native-shim/src/watchdog.rs`). It observes existing scheduler state,
+exempts lone compute and parked peers, and exports a `compute-bound` known-limit
+stop without using the guest allocator. The default is 10 seconds;
+`--compute-watchdog-ms MS` overrides `PATINA_COMPUTE_WATCHDOG_MS` and the default.
+The registry covers native run/replay/harness and campaign forwarding. Terminal trace metadata makes replay
+stop at the exact recorded boundary rather than re-evaluate host time. The
+native-workloads class detector covers main/worker/allocator-held spins, both
+negative controls, finite compute below a raised bound with a runnable peer,
+finite record-short/replay-long, PC capture, partial-stderr framing, repeat
+identity and replay. Unit detectors pin signed offsets, loader symbol ranges,
+and timer retention across missed locks. HostApi owns all host symbols; Linux
+uses a private futex timeout rather than version-dependent `sem_clockwait`. Campaign classification
+preserves the typed `known_limit` distinction as INFRA rather than spending the
+novel-guest-finding budget; its classifier selftest plants both sides of the bit. See
+[the design and limits](ARCHITECTURE.md#native-compute-only-starvation).
+Platform follow-up: run this detector on Linux arm64 and macOS arm64 runners
+before claiming execution parity. Both paths are cross-clippy checked; this
+implementation workspace only has a Linux x86_64 execution host.
+
 A deterministic, virtual-time-only liveness detector and a first-class product
 surface (`cargo patina campaign`) generalizing the shell campaign machinery.
 
@@ -642,9 +662,9 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    accumulated into `signatures.json` in the output dir: repeats dedup, novel
    signatures are flagged with their first-seen generation and a reproduce command
    (`cargo patina replay <trace>` when a valid trace exists, else a deterministic
-   re-run — a liveness/always abort writes no trace). A per-generation wall-clock
-   `--timeout-secs` backstop kills a generation that hangs in a way the virtual-time
-   watchdog cannot see (an uninterposed atomics-only busy loop), classifying it
+   re-run). A per-generation wall-clock
+   `--timeout-secs` backstop kills a generation that neither liveness detector
+   can stop (for example a lone call-free infinite loop), classifying it
    INFRA so one hung generation cannot wedge the whole campaign. The kill takes
    the generation's whole process group, and the campaign waits for its last
    process to exit (the guest holds the trace scratch lock through an inherited

@@ -404,6 +404,78 @@ host signals are outside the deterministic model and can execute a handler
 off-baton. Nonlocal `siglongjmp` escape from a handler is unverified, including
 mask/frame restoration; neither case carries a reproducibility claim.
 
+### Native compute-only starvation
+
+A call-free loop cannot hand over the native execution baton. When another
+managed task is runnable, a private host observer stops the run with
+`PATINA_VIOLATION liveness detail=compute-bound`, the task id, boundary count,
+and `known_limit=true`. This is a limitation of cooperative execution, not a
+verdict that the guest is buggy. Campaigns retain the finding but classify its
+`known_limit` bit as infrastructure, not a novel guest bug (an independent
+safety verdict still counts). It never preempts, wakes a task, advances
+virtual time, or supplies a host-derived answer to the guest. The anonymous
+spin/setter MRE in `testbeds/native-boundary/compute_watchdog.rs` supplies the
+workload evidence required by [the scope rules](docs/SCOPE.md#rules-for-new-surface).
+
+`--compute-watchdog-ms MS` sets the host monotonic no-boundary-progress window:
+10,000 ms by default, positive values up to one day. It overrides
+`PATINA_COMPUTE_WATCHDOG_MS`; native `run`, `replay`, and harness `test` forward it
+through the scrubbed control plane. Campaigns persist the explicit flag as
+`compute_watchdog_ms` and carry it into both reproduction forms. An env-only
+setting remains inherited host configuration, not a portable campaign input. Ten seconds tolerates ordinary
+compute bursts and host contention while bounding an otherwise infinite wedge;
+raise it for deliberately longer compute with runnable peers. This is wall time,
+not a CPU-time claim: host descheduling counts. Polling adds up to two sampling
+periods (each at most 100 ms), plus host dispatch/export time; it is not a
+real-time deadline. A lone compute task and compute with every peer parked are
+exempt regardless of duration.
+
+The observer starts on first managed thread creation, uses the single HostApi
+alias table (Linux private futex waits; Darwin dispatch semaphore waits), and
+adds no clock read, atomic, or counter to scheduling points. No `sem_clockwait`
+or recent-glibc symbol is required. It try-locks ThreadRuntime then Context,
+observes existing boundary counts and scheduler bookkeeping, and resets its
+window only on confirmed progress or ineligibility. A failed try-lock retains
+the previous observation; contention cannot continually restart the timer. It is not a detector for a shim stuck
+holding its own locks. At commitment these locks prevent further modeled
+effects. The native trace transport serializes a borrowed prefix through fixed
+storage; diagnostic and finding emission also avoid the guest allocator, which
+the stopped thread may own. Already-captured output is salvaged only if its lock
+is free; C stream callbacks and finish-time report enrichment are skipped.
+
+The additive trace metadata `compute_stop` records the terminal boundary count
+and task. Replay disables host-time detection, strictly consumes that prefix,
+and stops either from the observer or the existing boundary-budget guard before
+any further operation; finalization cannot turn it into success. A faster replay
+therefore cannot continue past the recorded refusal. The guarantee is the same
+**boundary prefix and named stop**, not an exact instruction or elapsed time.
+Seed-only repetitions of finite compute near the threshold need not stop at the
+same prefix. Branching terminal traces is explicitly refused; combining a
+terminal segment into a crash-restart lifecycle trace is also refused by the
+metadata agreement check, not silently replayed without its stop.
+
+Only after committing and exporting the stop does the observer borrow SIGSYS
+for a bounded, best-effort interrupted-PC sample (native ucontext on Linux
+x86_64/arm64 and macOS). No live guest disposition or mask is reserved for the
+watchdog. A blocked signal yields `sampled_pc=unavailable`; replay likewise has
+no sampled instruction. The diagnostic includes the raw PC and a delta from
+`patina_yield_point`; the delta supports offline symbolization when the PC is
+in the executable, but is not ASLR-independent for a different loaded image.
+Offsets print an explicit sign and unsigned magnitude, including negative PCs
+relative to the anchor. A prestarted private helper asks the loader (`dladdr`,
+plus Linux `dladdr1` symbol-size validation) for a name and offset. The observer
+waits at most 200 one-millisecond polls for that result: a guest-held loader lock
+must not prevent the stop. Missing/oversized names, unconfirmed ranges, or a
+lookup that cannot finish are explicitly PC-only. Darwin exposes no symbol size,
+so its name is labeled loader-nearest, not a confirmed containing range.
+The sampler allocates nothing, takes no shim lock, and never resumes the stopped
+thread. The violation marker begins on a fresh stderr line even after a partial
+guest line. Cross-compilation does not establish execution on another OS or
+architecture. The host-handle table now includes Darwin's main thread for PC
+sampling; this also makes main-thread join/detach use managed handling rather
+than the former unknown-handle path. macOS execution verification remains a
+landing requirement.
+
 ### WASI
 
 The WASI target is a clean Patina target because WASI already represents host effects as explicit imports. Rust code uses the stock `wasm32-wasip1` `std`; `patina-dst-wasi-host` supplies deterministic implementations of the entire audited Preview 1 import surface (clocks, entropy, filesystem, configured datagram sockets, process state) over the same drivers.

@@ -785,6 +785,7 @@ fn kind_tag(kind: Kind) -> &'static str {
         Kind::U32 => "u32",
         Kind::Usize => "usize",
         Kind::PositiveU64 => "positive-u64",
+        Kind::WatchdogMillis => "watchdog-millis",
         Kind::Permille => "permille",
         Kind::NanosRange => "nanos-range",
         Kind::U64Range => "u64-range",

@@ -67,6 +67,20 @@ requires live SUD in both Rust tests and the wrapper, and is set on x86_64 Linux
 CI rows; a filtered capability probe is a failure, not a green refusal. The wrapper's selftest
 plants a false-negative probe, a duplicate receipt and a failed child.
 
+### Call-free compute
+
+`compute_watchdog.rs` plants main- and worker-thread atomic spins with a runnable
+peer, plus a spin that holds the guest allocator. The latter detects allocating
+or deallocating on the asynchronous stop path. `single` and `parked` run the same
+long compute with no runnable peer (the latter uses a mutex/condvar handshake,
+never a synchronization sleep). `finite` keeps a peer runnable while doing
+finite call-free work: it must complete below a raised bound, but recording with
+a short bound and replaying with a long bound must both stop. A partial stderr
+line before the spin pins fresh-line diagnostic framing. `native_workloads` requires named known-limit
+findings, an interrupted PC, valid and identical repeated terminal traces, and
+replay with the same task/prefix despite a much larger host bound. These are
+runtime-limit tests, not host-equivalence claims.
+
 ### Small signal stacks
 
 `signals/frame_size.h` measures a delivered kernel frame on a large, aligned

@@ -749,12 +749,15 @@ struct NativeSchedule {
 
 /// Liveness-watchdog knobs, forwarded to the guest/runtime as validated raw
 /// strings through the `PATINA_LIVENESS_*`/`PATINA_CONVERGE_*`/`PATINA_HEAL_*`
-/// control plane. Default-off. Deliberately kept SEPARATE from [`NativeSchedule`]
+/// control plane. Virtual-time controls default off; the native compute bound
+/// defaults to the shim's 10 seconds. Kept SEPARATE from [`NativeSchedule`]
 /// because the watchdog is schedule-invariant: enabling it folds NO fingerprint
 /// component (it only adds a possible violation report), so a watchdog trace
 /// replays against any build.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct NativeLiveness {
+    /// Native-only host-time terminal bound; never a schedule input.
+    compute_watchdog_ms: Option<String>,
     /// `--liveness-watchdog[=NANOS]`: generic no-progress budget. `Some("")` = bare
     /// (runtime default budget); `Some("N")` = explicit budget. `None` = off.
     watchdog: Option<String>,
@@ -1743,7 +1746,10 @@ fn parse_native_harness_from(
         knobs: knobs_of(&args)?,
         buggify: buggify_of(&args),
         schedule: schedule_of(&args),
-        liveness: liveness_of(&args),
+        liveness: NativeLiveness {
+            compute_watchdog_ms: args.string("--compute-watchdog-ms"),
+            ..liveness_of(&args)
+        },
     })
 }
 
@@ -2406,6 +2412,7 @@ fn schedule_of(args: &cli::Args) -> NativeSchedule {
 /// The liveness-watchdog knobs.
 fn liveness_of(args: &cli::Args) -> NativeLiveness {
     NativeLiveness {
+        compute_watchdog_ms: None,
         watchdog: args.string("--liveness-watchdog"),
         converge: args.string("--converge-within"),
         heal_after: args.string("--heal-after"),
@@ -2619,6 +2626,9 @@ fn schedule_env_pairs(schedule: &NativeSchedule) -> Vec<(&'static str, String)> 
 /// to the in-process runtime through the same `apply_liveness_env` protocol.
 fn liveness_env_pairs(liveness: &NativeLiveness) -> Vec<(&'static str, String)> {
     let mut pairs = Vec::new();
+    if let Some(bound) = &liveness.compute_watchdog_ms {
+        pairs.push(("PATINA_COMPUTE_WATCHDOG_MS", bound.clone()));
+    }
     if let Some(budget) = &liveness.watchdog {
         pairs.push((ENV_LIVENESS_WATCHDOG, budget.clone()));
     }
@@ -2693,7 +2703,10 @@ fn parse_native_run_from(
         knobs: knobs_of(&args)?,
         buggify: buggify_of(&args),
         schedule: schedule_of(&args),
-        liveness: liveness_of(&args),
+        liveness: NativeLiveness {
+            compute_watchdog_ms: args.string("--compute-watchdog-ms"),
+            ..liveness_of(&args)
+        },
         allow: allow_of(&args),
         allow_unsupported: unsupported_policy_of(&args),
         coverage_out: args.path("--coverage-out"),
@@ -2830,7 +2843,10 @@ fn parse_native_replay(
         schedule: NativeSchedule::default(),
         // Liveness is schedule-invariant and informational-only in the trace, so a
         // replay does not re-supply or reconcile it.
-        liveness: NativeLiveness::default(),
+        liveness: NativeLiveness {
+            compute_watchdog_ms: args.string("--compute-watchdog-ms"),
+            ..NativeLiveness::default()
+        },
         allow: allow_of(&args),
         allow_unsupported: unsupported_policy_of(&args),
         coverage_out: args.path("--coverage-out"),
@@ -4362,6 +4378,11 @@ fn append_native_harness_run_flags(args: &mut Vec<OsString>, invocation: &Native
     if invocation.schedule.swarm {
         args.push(OsString::from("--swarm"));
     }
+    push_optional_arg(
+        args,
+        "--compute-watchdog-ms",
+        invocation.liveness.compute_watchdog_ms.as_deref(),
+    );
     push_optional_value_flag(
         args,
         "--liveness-watchdog",
@@ -8122,6 +8143,9 @@ liveness-safe."
         // reaches the guest at all. Driven by `Report::ALL` rather than a
         // hand-kept list, so a report added to the runtime is silenceable on
         // native the day it exists.
+        if let Some(value) = env::var_os("PATINA_COMPUTE_WATCHDOG_MS") {
+            command.env("PATINA_COMPUTE_WATCHDOG_MS", value);
+        }
         for report in patina_dst_runtime::Report::ALL {
             if let Some(value) = env::var_os(report.env()) {
                 command.env(report.env(), value);
@@ -11183,6 +11207,10 @@ mod tests {
             ),
             Kind::Usize => (vec!["0", "1", "65536"], vec!["-1", "abc", ""]),
             Kind::PositiveU64 => (vec!["1", "5", "100"], vec!["0", "-1", "abc", ""]),
+            Kind::WatchdogMillis => (
+                vec!["1", "10000", "86400000"],
+                vec!["0", "86400001", "-1", "abc", ""],
+            ),
             Kind::Permille => (
                 vec!["0", "1", "250", "1000"],
                 vec!["1001", "2000", "-1", "abc", ""],
@@ -12031,6 +12059,10 @@ mod tests {
         tokens.push(OsString::from("2001-09-09T01:46:40Z"));
         tokens.push(OsString::from("--hostname"));
         tokens.push(OsString::from("db-1"));
+        tokens.extend([
+            OsString::from("--compute-watchdog-ms"),
+            OsString::from("5000"),
+        ]);
 
         let args = cli::parse("test", help::Family::Harness, tokens).expect("harness parse");
         let invocation = NativeHarnessInvocation {
@@ -12049,7 +12081,10 @@ mod tests {
             knobs: knobs_of(&args).expect("harness knob parse"),
             buggify: None,
             schedule: NativeSchedule::default(),
-            liveness: NativeLiveness::default(),
+            liveness: NativeLiveness {
+                compute_watchdog_ms: args.string("--compute-watchdog-ms"),
+                ..NativeLiveness::default()
+            },
         };
         let mut emitted: Vec<OsString> = Vec::new();
         append_native_harness_run_flags(&mut emitted, &invocation);
@@ -12072,6 +12107,7 @@ mod tests {
         for (flag, value) in [
             ("--realtime-epoch", "2001-09-09T01:46:40Z"),
             ("--hostname", "db-1"),
+            ("--compute-watchdog-ms", "5000"),
         ] {
             let at = emitted
                 .iter()
