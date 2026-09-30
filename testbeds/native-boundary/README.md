@@ -83,21 +83,21 @@ runtime-limit tests, not host-equivalence claims.
 
 ### Small signal stacks
 
-`signals/frame_size.h` measures a delivered kernel frame on a large, aligned
-alternate stack and restores the previous action, mask, and registration.
-`segv_routing.c` and `counter_small.c` add their intended headroom to that
-measurement, aligning the final top down (never adding slack). Calibration is
-repeated in each process; these guests do not change extended-state permissions
-afterward. `AT_MINSIGSTKSZ` can include unrequested AMX tile state and is only a
-diagnostic, not a sizing oracle. The `frame-size` cases and CI test summary
-report the measured/advertised sizes and CPU flags.
-
-The native runs still prove the small handlers fit. Shim runs require the same
-named stops and exact counter/restoration results as before. A test-only C
-mutation moves the Rust route ahead of admission; the short-stack detector
-rejects it on both Linux architectures. The compiler-frame/route-write budget
-check also self-tests a structural ban on pre-admission Rust calls, including
-leaves that might otherwise happen to fit in the remaining space.
+The shim's signal frames are private (ARCHITECTURE, Private signal frames): a
+delivery takes a fixed few bytes of the stack its handler runs on (x86_64: a
+16-byte slot and a return address), and a trapped raw syscall none. `small_stack_probe.rs` makes raw syscalls with the
+stack pointer at the top of a 2 KiB stack, on two threads, under `--record` and
+replay, and reports every byte written below it. `signals/small_stack.c` runs
+handlers sent from a 2 KiB stack on the alternate stacks they registered.
+`signals/frame_size.h` measures what a delivery takes of a large, aligned
+alternate stack (natively the kernel's frame) and restores the previous action,
+mask, and registration; `segv_routing.c` and `counter_small.c` add their
+intended headroom to that measurement, clamped to the kernel's `MINSIGSTKSZ`,
+aligning the final top down. `AT_MINSIGSTKSZ` can include unrequested AMX tile
+state and is only a diagnostic, not a sizing oracle. The `frame-size` and
+`route-cost` cases and the CI test summary report the native and shim
+measurements and CPU flags. The native runs prove the small handlers fit; the
+shim runs must print the same.
 
 ## Executable-section metadata refusal
 

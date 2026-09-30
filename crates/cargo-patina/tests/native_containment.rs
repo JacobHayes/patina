@@ -2,9 +2,6 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 mod common;
 use common::native::*;
-#[cfg(target_os = "linux")]
-const RESERVED_SIGNAL_DIAGNOSTIC: &str =
-    "reserved signal registration would disable deterministic containment";
 
 #[test]
 fn audit_rejects_unlinked_raw_syscall_or_thread_escape() {
@@ -484,6 +481,84 @@ mod linux {
         }
     }
 
+    /// A runtime with small thread stacks makes raw syscalls on stacks of a
+    /// few KiB. The syscall trap's frame and dispatch take none of the
+    /// guest's stack, recording included: on the main thread and a second
+    /// one, raw syscalls with the stack pointer at the top of a 2 KiB stack
+    /// write nothing below it, and record and replay print the same.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn trapped_raw_syscalls_leave_a_small_stack_untouched() {
+        let g = Guest::assert_build("small_stack_probe.rs");
+        if !kernel_supports(KernelFeature::Sud) {
+            g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);
+            return;
+        }
+        let out = g.assert_seeded_record_replay_identity(1, &[]);
+        for who in ["main", "thread"] {
+            let fields = assert_fields(
+                &out,
+                &format!("{who}: "),
+                &["pid", "tid", "entropy", "clock", "written", "overrun"],
+            );
+            assert_eq!((fields["written"], fields["overrun"]), ("0", "0"), "{who}");
+        }
+        assert!(
+            text(&out).ends_with("SMALL_STACK_PROBE_OK\n"),
+            "{}",
+            text(&out)
+        );
+    }
+
+    /// Class detector for the private signal stack's per-level budget
+    /// (`thread/signals/frames.rs`): a trap lands at the top of a level and
+    /// everything the shim runs for it stays there, so the depth stop is the
+    /// handler count on every host, recording or not, only while a level's
+    /// use fits. The guest (over a shim built with `planted-faults`) fills
+    /// three levels with a sentinel and, recording, makes syscalls, takes a
+    /// signal whose handler makes them, and a nested one inside it: each
+    /// level must use at most half its budget. x86_64 makes them as raw
+    /// instructions the syscall trap serves; every other arch through
+    /// glibc's `syscall(2)`, so there a level holds a delivery's frames.
+    #[test]
+    fn private_signal_stack_levels_fit_their_budget() {
+        use std::io::Write;
+        if cfg!(target_arch = "x86_64") && !kernel_supports(KernelFeature::Sud) {
+            return;
+        }
+        let g = assert_build_c_guest("signals/private_budget.c", CLink::PosixShimPlanted);
+        let (output, _) = g.record_standalone(&[]);
+        assert!(output.status.success(), "{output:?}");
+        let fields = assert_fields(&output.stdout, "PRIVATE_BUDGET ", &["level", "used"]);
+        let level: usize = fields["level"].parse().unwrap();
+        let used: Vec<usize> = fields["used"]
+            .split(',')
+            .map(|used| used.parse().unwrap())
+            .collect();
+        let measurement = format!(
+            "private signal stack ({}, recording): levels used {used:?} B of {level} B each",
+            std::env::consts::ARCH
+        );
+        eprintln!("{measurement}");
+        if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") {
+            writeln!(
+                std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+                "{measurement}\n"
+            )
+            .unwrap();
+        }
+        // The outer and nested deliveries each land in a level of their own
+        // (and, on x86_64, the inner handler's trapped syscalls in a third).
+        assert!(
+            used.len() == 3 && used.iter().filter(|used| **used > 1024).count() >= 2,
+            "vacuous measurement: {measurement}"
+        );
+        assert!(
+            used.iter().all(|used| 2 * used <= level),
+            "a level needs margin: {measurement}"
+        );
+    }
+
     #[test]
     fn unmapped_raw_syscall_aborts_with_named_diagnostic() {
         let g = Guest::assert_build("raw_unmapped_probe.rs");
@@ -513,21 +588,39 @@ mod linux {
     }
 
     #[test]
-    fn sigsys_registration_is_refused_on_every_kernel() {
+    fn sigsys_registration_is_virtual_on_every_kernel() {
         let g = Guest::assert_build("sigsys_probe.rs");
-        g.assert_run_refused(1, &[RESERVED_SIGNAL_DIAGNOSTIC]);
+        assert_eq!(
+            g.assert_seeded_record_replay_identity(1, &[]),
+            b"SIGSYS guest action roundtrip\n"
+        );
         #[cfg(target_arch = "x86_64")]
         if let Some(c) = sud_c_guest("signals/signal_boundary.c") {
             for door in ["reserved-sys-libc", "reserved-sys-raw"] {
-                c.assert_internal_fatal(&[door], &[RESERVED_SIGNAL_DIAGNOSTIC]);
+                assert_standalone_success(
+                    &c.binary,
+                    &[door],
+                    &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")],
+                );
             }
+            use std::os::unix::process::ExitStatusExt;
+            let output = standalone_output(
+                &c.binary,
+                &["guest-sigsys"],
+                &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")],
+            );
+            assert_eq!(output.status.signal(), Some(6), "{output:?}");
+            assert!(
+                output.stderr.starts_with(b"SIGSYS registered\n"),
+                "{output:?}"
+            );
         }
     }
 
     #[test]
     fn at_random_is_seeded_on_every_kernel() {
         let g = Guest::assert_build("at_random_probe.rs");
-        let out = g.assert_seed_repeatability(1, 2, &[]);
+        let out = g.assert_seeded_record_replay_identity(1, &[]);
         assert_lower_hex(assert_unique_line_payload(&out, "AT_RANDOM="), 32);
         g.assert_seed_variation(&[1, 2], &[]);
     }
@@ -615,7 +708,7 @@ mod linux {
         }
 
         /// Class pairing: small native-capable alternate stacks must not need
-        /// room for a second kernel frame below the counter trap's live frames.
+        /// room for a second kernel frame: the counter trap's are private.
         #[test]
         fn counter_reads_on_a_minimal_altstack_preserve_the_guest_stack() {
             use std::os::unix::process::ExitStatusExt;
@@ -634,46 +727,10 @@ mod linux {
             }
         }
 
-        /// Class detector for the private execution budget. Instrument only
-        /// its unused storage before dispatch, then scan it after returning;
-        /// the measured Rust body and C thunk are the shipped ones.
-        #[test]
-        fn private_counter_execution_has_stack_margin() {
-            use std::io::Write;
-            if !kernel_supports(KernelFeature::Tsc) {
-                return;
-            }
-            let g =
-                assert_build_c_guest("signals/counter_small.c", CLink::PosixShimMeasuredCounter);
-            let output = assert_standalone_success(
-                &g.binary,
-                &["read-measure"],
-                &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
-            );
-            let stdout = text(&output.stdout);
-            let used: usize = stdout
-                .lines()
-                .find_map(|line| line.strip_prefix("COUNTER_EXEC_BYTES "))
-                .expect("counter execution measurement")
-                .parse()
-                .unwrap();
-            let measurement =
-                format!("private counter execution (x86_64): writes={used} B, budget=65536 B");
-            eprintln!("{measurement}");
-            if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") {
-                writeln!(
-                    std::fs::OpenOptions::new().append(true).open(path).unwrap(),
-                    "{measurement}\n"
-                )
-                .unwrap();
-            }
-            assert!(used > 1024 && used + 8192 <= 65536, "{measurement}");
-        }
-
         /// The TSC mechanism predates SUD; its stack setup must not depend
         /// on the SUD probe having published the auxiliary vector.
         #[test]
-        fn counter_stacks_are_available_without_sud() {
+        fn private_signal_stacks_are_available_without_sud() {
             use std::os::unix::process::ExitStatusExt;
             if !kernel_supports(KernelFeature::Tsc) {
                 return;
@@ -689,8 +746,9 @@ mod linux {
             assert!(output.stderr.is_empty(), "{output:?}");
         }
 
-        /// A second kernel frame must not make the runtime run below a
-        /// handler on a small alternate stack, including an autodisarmed one.
+        /// A counter read inside a handler on a small alternate stack
+        /// (an autodisarmed one too) takes none of that stack: the trap's
+        /// frame and the runtime are on the private stack.
         #[test]
         fn counter_reads_inside_small_altstack_handlers_use_private_storage() {
             if !kernel_supports(KernelFeature::Tsc) {
@@ -752,32 +810,6 @@ mod linux {
             let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
             let output = standalone_output(&patina.binary, &["prefixed"], &env);
             assert_eq!(output.status.signal(), Some(6), "{output:?}");
-        }
-
-        /// A counter read the trap took on the alternate stack is served off
-        /// it while the trap's frames stay live there, and no guest code runs
-        /// until it is answered. Each row runs natively and stops by name
-        /// under the shim: a timer's handler that would run during such a
-        /// read, on both a large and a small native-capable alternate stack.
-        /// The small stack must reach the same delivery stop, not a room check.
-        #[test]
-        fn counter_reads_served_off_the_alternate_stack_run_no_guest_code() {
-            use std::os::unix::process::ExitStatusExt;
-            if !kernel_supports(KernelFeature::Tsc) {
-                return;
-            }
-            let native = assert_build_c_guest("signals/segv_routing.c", CLink::Unlinked);
-            let patina = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShim);
-            let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
-            for (case, stop) in [
-                ("alarm", "signal handler would run"),
-                ("alarm-small", "signal handler would run"),
-            ] {
-                assert_standalone_success(&native.binary, &[case], &[]);
-                let output = standalone_output(&patina.binary, &[case], &env);
-                assert_eq!(output.status.signal(), Some(6), "{case}: {output:?}");
-                assert!(text(&output.stderr).contains(stop), "{case}: {output:?}");
-            }
         }
 
         fn json_contains(

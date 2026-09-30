@@ -42,7 +42,7 @@
 //! `native_escape_is_tsc_manageable` in `patina-target`.
 
 use std::cell::Cell;
-use std::ffi::{c_int, c_uint, c_void};
+use std::ffi::{c_int, c_uint};
 
 unsafe extern "C" {
     fn patina_clock_now(clock: u32, nanos: *mut u64) -> c_int;
@@ -78,9 +78,7 @@ thread_local! {
 }
 
 /// Guest code a signal delivery runs inside a counter read (a handler the
-/// read's scheduling point releases) may read the counter itself. None runs
-/// inside a read served off the alternate stack: that is a named stop
-/// (`with_counter_altstack`).
+/// read's scheduling point releases) may read the counter itself.
 #[cfg(target_os = "linux")]
 pub(crate) fn with_guest_reads(body: impl FnOnce()) {
     let outer = IN_DISPATCH.with(|cell| cell.replace(false));
@@ -168,11 +166,9 @@ fn counter_now() -> Option<u64> {
 /// The SIGSEGV timestamp-counter dispatch entry point. The C handler passes the
 /// bytes at the faulting `RIP` (already validated to lie in the main
 /// executable's text) and out-parameters for the counter value, the `rdtscp`
-/// auxiliary value, and the instruction length. `served` is non-null when the
-/// read is served off the alternate stack the trap's frame is on: it says
-/// the actual kernel registration and host mask captured before private
-/// execution. C installs a disjoint guarded signal stack before calling Rust;
-/// `with_counter_altstack` restores that registration after serving the read.
+/// auxiliary value, and the instruction length. The trap's frame, and this
+/// call, are on the thread's private signal stack, whatever stack the guest
+/// read the counter on.
 ///
 /// Returns [`PATINA_TSC_NONE`] when the faulting instruction is not a counter
 /// read. The C entry admits only exact counter encodings here, before changing
@@ -195,7 +191,6 @@ pub unsafe extern "C" fn patina_tsc_dispatch(
     tsc_out: *mut u64,
     aux_out: *mut c_uint,
     length_out: *mut usize,
-    served: *const c_void,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if bytes.is_null() || available == 0 {
@@ -218,13 +213,7 @@ pub unsafe extern "C" fn patina_tsc_dispatch(
         );
     }
     IN_DISPATCH.with(|cell| cell.set(true));
-    #[cfg(target_os = "linux")]
-    let value = crate::thread::signals::with_counter_altstack(served.cast(), counter_now);
-    #[cfg(not(target_os = "linux"))]
-    let value = {
-        let _ = served;
-        counter_now()
-    };
+    let value = counter_now();
     IN_DISPATCH.with(|cell| cell.set(false));
     let Some(value) = value else {
         crate::trap_fatal(
@@ -311,29 +300,13 @@ mod tests {
         let mut aux = 0u32;
         let mut length = 0usize;
         // SAFETY: valid pointers into local storage.
-        let kind = unsafe {
-            patina_tsc_dispatch(
-                bytes.as_ptr(),
-                2,
-                &mut tsc,
-                &mut aux,
-                &mut length,
-                std::ptr::null(),
-            )
-        };
+        let kind =
+            unsafe { patina_tsc_dispatch(bytes.as_ptr(), 2, &mut tsc, &mut aux, &mut length) };
         assert_eq!(kind, PATINA_TSC_NONE);
         // A null/empty window likewise.
         // SAFETY: as above.
-        let kind = unsafe {
-            patina_tsc_dispatch(
-                std::ptr::null(),
-                3,
-                &mut tsc,
-                &mut aux,
-                &mut length,
-                std::ptr::null(),
-            )
-        };
+        let kind =
+            unsafe { patina_tsc_dispatch(std::ptr::null(), 3, &mut tsc, &mut aux, &mut length) };
         assert_eq!(kind, PATINA_TSC_NONE);
     }
 }

@@ -8056,6 +8056,9 @@ liveness-safe."
             let policy = native_policy_from_trace(bundle);
             vec![
                 (ENV_MODE, "replay".into()),
+                // Startup effects (notably AT_RANDOM) happen before the shim
+                // can read the trace. They need the same seed as the runtime.
+                (ENV_SEED, bundle.metadata.root_seed.to_string()),
                 (
                     ENV_FINGERPRINT,
                     native_run_fingerprint(

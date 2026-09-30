@@ -52,10 +52,12 @@ fn libc_sleep_returns_remaining_seconds_on_signal() {
 /// other pending signals (whose frames, built beneath its own, are lost with
 /// it when it leaves by `siglongjmp`, and run the action they were dequeued
 /// with when it changes theirs), while the timestamp-counter trap keeps the host
-/// disposition, so the guest prints what it prints natively. A fault or a
-/// raise the handler blocks takes the default action as natively (never a
-/// second run of the handler), as does a fault inside another fault signal's
-/// handler whose `sa_mask` blocks SIGSEGV; on an ordinary stack, where the shim cannot
+/// disposition, so the guest prints what it prints natively; so do handlers
+/// on alternate stacks with room for one delivery and little more, and
+/// alarms whose handlers run between counter reads. A fault or a raise the
+/// handler blocks takes the default action as natively (never a second run
+/// of the handler), as does a fault inside another fault signal's handler
+/// whose `sa_mask` blocks SIGSEGV; on an ordinary stack, where the shim cannot
 /// tell a nested fault from a `siglongjmp`'d handler, it stops by name.
 #[cfg(target_os = "linux")]
 #[test]
@@ -75,6 +77,12 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
         "nodefer-std",
         "nodefer-rt",
         "autodisarm-high",
+        "front-small",
+        "front-segv-small",
+        "front-autodisarm-small",
+        "front-segv-autodisarm-small",
+        "alarm",
+        "alarm-small",
         #[cfg(target_arch = "x86_64")]
         "kernel-gp",
     ] {
@@ -83,38 +91,12 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
         assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");
     }
     // Natively the next frame's handler starts under an upper handler's
-    // edited saved mask, and a handler runs on an alternate stack with
-    // little room below the kernel's frame; the shim cannot carry the mask
-    // over, nor fit its fault handler there, and stops by name.
-    for (case, stop) in [
-        ("nodefer-edit", "saved mask"),
-        ("front-small", "too little"),
-        ("front-segv-small", "too little"),
-        ("front-autodisarm-small", "too little"),
-        ("front-segv-autodisarm-small", "too little"),
-    ] {
-        assert_standalone_success(&native.binary, &[case], &[]);
-        let output = standalone_output(&patina.binary, &[case], &env);
-        assert_eq!(output.status.signal(), Some(6), "{case}: {output:?}");
-        assert!(text(&output.stderr).contains(stop), "{case}: {output:?}");
-        if stop == "too little" {
-            let stderr = text(&output.stderr);
-            let (signal, room) = stderr
-                .rsplit_once("signal ")
-                .unwrap()
-                .1
-                .split_once(" bytes left ")
-                .unwrap();
-            assert!(
-                (1..=64).contains(&signal.parse::<u32>().unwrap()),
-                "{stderr}"
-            );
-            assert!(
-                (1..4096).contains(&room.trim().parse::<usize>().unwrap()),
-                "{stderr}"
-            );
-        }
-    }
+    // edited saved mask; the shim cannot carry the mask over and stops by
+    // name.
+    assert_standalone_success(&native.binary, &["nodefer-edit"], &[]);
+    let output = standalone_output(&patina.binary, &["nodefer-edit"], &env);
+    assert_eq!(output.status.signal(), Some(6), "{output:?}");
+    assert!(text(&output.stderr).contains("saved mask"), "{output:?}");
     let trap = cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Tsc);
     for case in ["nested", "nested-stack", "reraise", "masked-fault"] {
         let oracle = standalone_output(&native.binary, &[case], &[]);
@@ -130,50 +112,58 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
     }
 }
 
-/// The sizing oracle is a delivered frame, not the host's maximum possible
-/// extended-state allocation. Compare native/shim calibration, retain CPU
-/// evidence in CI, and prevent the small-stack fixtures from using auxv again.
+/// A delivery's cost to the stack its handler runs on. Natively that is the
+/// kernel's signal frame, whose size is the host CPU's (its extended state);
+/// under the shim the kernel's frame is private, and a delivery takes the
+/// same few bytes on every host and every route: a raised signal, a fault
+/// the front handler routes, a SIGSEGV (the counter trap's route on x86_64).
+/// The small-stack fixtures size their stacks from this measurement, never
+/// from auxv. CI keeps the native measurement and the CPU's flags.
 #[cfg(target_os = "linux")]
 #[test]
-fn small_signal_stacks_use_measured_kernel_frames() {
+fn a_delivery_costs_the_guest_stack_a_fixed_few_bytes() {
     use std::io::Write;
-    let mut measurements = Vec::new();
     for source in ["signals/segv_routing.c", "signals/counter_small.c"] {
-        if source.ends_with("counter_small.c") && !cfg!(target_arch = "x86_64") {
-            continue;
-        }
         let fixture = std::fs::read_to_string(guest_source(source)).unwrap();
         assert!(
             !fixture.contains("getauxval("),
             "auxv must not size {source}"
         );
-        let native = assert_build_c_guest(source, CLink::Unlinked);
-        let patina = assert_build_c_guest(source, CLink::PosixShim);
-        let parse = |output: &std::process::Output| -> String {
-            text(&output.stdout)
-                .lines()
-                .find(|line| line.starts_with("KERNEL_FRAME_BYTES "))
-                .expect("kernel frame measurement")
-                .to_owned()
-        };
-        let native = parse(&assert_standalone_success(
-            &native.binary,
-            &["frame-size"],
-            &[],
-        ));
-        let patina = parse(&assert_standalone_success(
-            &patina.binary,
-            &["frame-size"],
-            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
-        ));
-        assert_eq!(native, patina, "calibration included shim frames: {source}");
-        let frame: usize = native.split_whitespace().nth(1).unwrap().parse().unwrap();
-        assert!(
-            (512..128 * 1024).contains(&frame),
-            "vacuous calibration: {native}"
-        );
-        measurements.push(format!("kernel frame ({source}): {native}"));
     }
+    let native = assert_build_c_guest("signals/segv_routing.c", CLink::Unlinked);
+    let patina = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShim);
+    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
+    let costs = |binary: &std::path::Path, env: &[(&str, &str)]| -> Vec<usize> {
+        let output = assert_standalone_success(binary, &["route-cost"], env);
+        let line = text(&output.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix("ROUTE_COST "))
+            .expect("route cost measurement")
+            .to_owned();
+        let delivery = assert_standalone_success(binary, &["frame-size"], env);
+        let calibrated = text(&delivery.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix("DELIVERY_STACK_BYTES "))
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("delivery calibration")
+            .parse()
+            .unwrap();
+        line.split_whitespace()
+            .map(|field| field.split_once('=').unwrap().1.parse().unwrap())
+            .chain([calibrated])
+            .collect()
+    };
+    let oracle = costs(&native.binary, &[]);
+    let shim = costs(&patina.binary, &env);
+    assert!(
+        oracle.iter().all(|cost| (512..128 * 1024).contains(cost)),
+        "vacuous native measurement: {oracle:?}"
+    );
+    assert!(
+        shim.windows(2).all(|pair| pair[0] == pair[1]) && shim[0] <= 64,
+        "a delivery under the shim takes more than its slot and return address, or not the \
+         same on every route: {shim:?} (native {oracle:?})"
+    );
     let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap();
     let flags = cpuinfo
         .lines()
@@ -182,96 +172,11 @@ fn small_signal_stacks_use_measured_kernel_frames() {
                 .is_some_and(|(key, _)| matches!(key.trim(), "flags" | "Features"))
         })
         .expect("CPU feature flags");
-    measurements.push(format!("signal calibration CPU {flags}"));
-    let measurement = measurements.join("\n");
-    eprintln!("{measurement}");
-    if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") {
-        writeln!(
-            std::fs::OpenOptions::new().append(true).open(path).unwrap(),
-            "{measurement}\n"
-        )
-        .unwrap();
-    }
-}
-
-/// Non-vacuity: a Rust call before admission must not look like the expected
-/// C-only short-stack stop. The normal stop rows above are the positive control.
-#[cfg(target_os = "linux")]
-#[test]
-fn small_signal_stacks_detect_rust_before_admission() {
-    use std::os::unix::process::ExitStatusExt;
-    let planted = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShimEarlyRust);
-    // The shared front exercises this mutation on both architectures. An
-    // early SIGSEGV route can recursively exhaust its stack instead of dying
-    // promptly; its ordering is covered by the structural selftest below.
-    let output = standalone_output(
-        &planted.binary,
-        &["front-small"],
-        &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
-    );
-    assert!(
-        output.status.signal().is_some(),
-        "mutation ran the handler: {output:?}"
-    );
-    assert!(
-        !text(&output.stderr).contains("too little"),
-        "calibrated stack admitted Rust before the check: {output:?}"
-    );
-}
-
-/// Class detector for stack-budget drift: measure the returning route's
-/// writes below the kernel frame and the C-only entry/short-stop frames.
-/// `front-small` above separately proves the short path on a bounded stack.
-#[cfg(target_os = "linux")]
-#[test]
-fn fault_front_stack_budgets_cover_the_compiled_paths() {
-    use std::io::Write;
-    let patina = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShim);
-    let measure = |case: &str| -> usize {
-        let output = assert_standalone_success(
-            &patina.binary,
-            &[case],
-            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
-        );
-        text(&output.stdout)
-            .lines()
-            .find_map(|line| line.strip_prefix("FRONT_ROUTE_BYTES "))
-            .expect("route measurement")
-            .parse()
-            .unwrap()
-    };
-    let route = measure("front-room");
-    let segv_route = measure("front-segv-room");
-    let dir = tempfile::tempdir().unwrap();
-    common::compile_posix_object(dir.path());
-    let usage = std::fs::read_to_string(dir.path().join("patina_posix.su")).unwrap();
-    let frame = |name: &str| -> usize {
-        usage
-            .lines()
-            .find_map(|line| {
-                let mut fields = line.split('\t');
-                let function = fields.next()?;
-                if !function.ends_with(&format!(":{name}")) {
-                    return None;
-                }
-                Some(fields.next().unwrap().parse().unwrap())
-            })
-            .unwrap_or_else(|| panic!("missing {name} stack usage: {usage}"))
-    };
-    let front = frame("patina_fault_front");
-    let stop = frame("patina_fault_stack_short") + frame("patina_fault_stop");
-    let tsc = if cfg!(target_arch = "x86_64") {
-        frame("patina_tsc_sigsegv")
-    } else {
-        0
-    };
     let measurement = format!(
-        "fault stack ({arch}): front/segv route writes={route}/{segv_route} B; C front/tsc={front}/{tsc} B; C short-stop+abort={stop} B",
+        "delivery stack bytes ({arch}): native {oracle:?}, shim {shim:?}\nsignal calibration CPU {flags}",
         arch = std::env::consts::ARCH,
     );
     eprintln!("{measurement}");
-    // CI suppresses passing test output; retain measurements beside its
-    // conformance evidence, and in the job log that reprints this summary.
     if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") {
         writeln!(
             std::fs::OpenOptions::new().append(true).open(path).unwrap(),
@@ -279,82 +184,65 @@ fn fault_front_stack_budgets_cover_the_compiled_paths() {
         )
         .unwrap();
     }
-    let source = patina_dst_native_shim::POSIX_C_FAMILY_SOURCES
+}
+
+/// A runtime with small thread stacks runs its code on stacks of a few KiB,
+/// makes raw syscalls there, and runs its handlers on alternate stacks whose
+/// bounds it checks; a coroutine runtime switches stacks inside handlers. A
+/// handler that code on a 2 KiB stack sends itself a signal for runs inside
+/// the alternate stack it registered, is told so by `sigaltstack` and its
+/// `uc_stack` (an `SS_AUTODISARM` one disabled, and registered again at its
+/// return), nests a second handler there, and makes syscalls and libc calls
+/// from both, writing nothing to the small stack; handlers that leave by
+/// `siglongjmp`, thousands of times, leave the shim's private stack usable; a
+/// handler that swapcontexts to a coroutine making syscalls on a stack of its
+/// own (a mapping, or a local array of a frame above the handler), from a
+/// plain or `SS_AUTODISARM` alternate stack or a thread's own stack, nested in
+/// another handler or taking one inside the coroutine, returns intact; and a thread-local destructor's syscall after its
+/// thread's handler left by `siglongjmp` is answered. The guest prints what
+/// it prints natively, through the raw syscall trap (x86_64) and through
+/// libc's `syscall(2)` (every arch).
+#[cfg(target_os = "linux")]
+#[test]
+fn handlers_run_on_the_stacks_they_ask_for() {
+    let native = assert_build_c_guest("signals/small_stack.c", CLink::Unlinked);
+    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "3")];
+    let cases = [
+        "altstack",
+        "autodisarm",
+        "escape",
+        "exit-escape",
+        // Coroutine stacks mapped, and carved from a frame above the handler.
+        "swap-ma--",
+        "swap-md--",
+        "swap-mdn-",
+        "swap-mo-t",
+        "swap-la--",
+        "swap-ld--",
+        "swap-lds-",
+        "swap-lo--",
+        "swap-lon-",
+        "swap-los-",
+        "swap-la-t",
+        "swap-ldst",
+        "swap-lo-t",
+        "swap-lont",
+        "swap-lost",
+    ];
+    // The raw door needs syscall-user-dispatch; libc's is every arch's.
+    let raw = cfg!(target_arch = "x86_64")
+        .then(|| sud_c_guest("signals/small_stack.c"))
+        .flatten();
+    let libc = assert_build_c_guest("signals/small_stack.c", CLink::PosixShim);
+    let runs = raw
         .iter()
-        .find(|(path, _)| *path == "posix/init.c")
-        .unwrap()
-        .1;
-    // A tiny Rust leaf may happen to fit today. Reject Rust entry before
-    // admission structurally as well as exercising the full-route overflow
-    // mutation, so optimization/toolchain changes cannot make that rule vacuous.
-    let early_calls = |source: &str| {
-        let mut calls = Vec::new();
-        for (start, end) in [
-            (
-                "static void patina_fault_front(",
-                "if (room < PATINA_FRONT_FLOOR)",
-            ),
-            (
-                "static void patina_tsc_sigsegv(",
-                "if (info->si_code == SI_KERNEL)",
-            ),
-            ("non_counter:;", "if (room < PATINA_FRONT_FLOOR)"),
-        ] {
-            let prelude = source
-                .split_once(start)
-                .unwrap()
-                .1
-                .split_once(end)
-                .unwrap()
-                .0;
-            for tail in prelude.split("patina_").skip(1) {
-                let end = tail
-                    .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                    .unwrap_or(tail.len());
-                let name = &tail[..end];
-                if tail[end..].trim_start().starts_with('(')
-                    && !matches!(name, "fault_room" | "fault_stop")
-                {
-                    calls.push(name.to_owned());
-                }
-            }
-        }
-        calls
-    };
-    assert!(
-        early_calls(source).is_empty(),
-        "Rust/unbudgeted calls before admission: {:?}",
-        early_calls(source)
-    );
-    let admission =
-        "uintptr_t room = patina_fault_room(uc, (uintptr_t)__builtin_frame_address(0));";
-    let planted = source.replace(admission, &format!("patina_trap_enter(sp); {admission}"));
-    assert_eq!(
-        early_calls(&planted),
-        ["trap_enter", "trap_enter"],
-        "admission-order detector must fire"
-    );
-    let floor: usize = source
-        .lines()
-        .find_map(|line| line.strip_prefix("#define PATINA_FRONT_FLOOR "))
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert!(
-        route > 512 && segv_route > 512,
-        "vacuous route measurement: {measurement}"
-    );
-    assert!(
-        route.max(segv_route) + 512 <= floor,
-        "route needs margin: {measurement}, floor={floor}"
-    );
-    // Include both C stop frames, not just the formatter. Their host vehicle
-    // is glibc's leaf syscall shuffle; the guarded small-stack rows prove the
-    // complete path fits the actual kernel frame plus 768 bytes.
-    assert!(
-        front.max(tsc) + stop <= 768,
-        "short stop grew: {measurement}"
-    );
+        .flat_map(|g| cases.map(|case| (&g.binary, case.to_owned())))
+        .chain(cases.map(|case| (&libc.binary, format!("{case}-libc"))));
+    for (binary, case) in runs {
+        let oracle = assert_standalone_success(&native.binary, &[&case], &[]);
+        let output = assert_standalone_success(binary, &[&case], &env);
+        assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");
+    }
 }
 
 /// A synchronous signal an instruction raises (SIGBUS, SIGFPE, SIGILL,
@@ -673,6 +561,26 @@ mod raw {
     #[test]
     fn internal_raw_trap_leaves_trace_incomplete() {
         assert_internal_fatal("internal-rust", "SUD trapped syscall number 999999");
+    }
+    /// An internal stop is the shim's own abort, never a delivery: a
+    /// guest's SIGABRT handler (a runtime's, whose raw syscalls would trap
+    /// back into the stopping shim) does not run, and the run ends by
+    /// SIGABRT with the named stop.
+    #[test]
+    fn an_internal_stop_never_runs_a_guest_abort_handler() {
+        let Some(g) = sud_c_guest("signals/signal_boundary.c") else {
+            return;
+        };
+        let (output, _) = g.record_standalone(&["internal-guest-abort-handler"]);
+        g.assert_internal_fatal(
+            &["internal-guest-abort-handler"],
+            &["SUD trapped syscall number 999999"],
+        );
+        assert!(
+            !text(&output.stderr).contains("handler ran"),
+            "{}",
+            text(&output.stderr)
+        );
     }
     #[test]
     fn context_locked_refusal_never_reenters_the_scheduler() {

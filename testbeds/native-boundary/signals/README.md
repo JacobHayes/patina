@@ -16,8 +16,12 @@ SIGSEGV's block kept virtually while counter reads still trap, including
 handler-time temporary masks), and sigwait retry after an unrelated handler.
 The `native_signals` target also records guest abort and C/raw/internal-context
 fatal paths: guest abort must publish a complete trace; each internal fatal
-must leave it incomplete. The internal-context case nests a custom operation.
-`native_containment` owns the libc/raw SIGSYS registration refusals and, under
+must leave it incomplete, and an internal fatal never runs the guest's SIGABRT
+handler. The internal-context case nests a custom operation.
+`native_containment` owns libc/raw SIGSYS registration/query round trips: the
+guest action stays virtual, a raw syscall still returns the virtual pid without
+calling it, and explicit guest SIGSYS generation aborts after registration. The
+unit detector also verifies the host action is unchanged. It also owns, under
 the timestamp-counter trap, the SIGSEGV cases: a registration through either
 door leaves the counter read answered and the handler unrun. These inline raw cases require x86_64 Linux SUD;
 missing capability is reported explicitly and `PATINA_REQUIRE_SUD=1` makes
@@ -34,15 +38,26 @@ handler leaves by `siglongjmp` or resets SIGUSR1's action; repeated
 `SA_NODEFER` signals run as often, in the order and under the saved masks
 6.8 gives them; and a handler whose `sa_mask` blocks SIGSEGV reads it back
 blocked on an `SS_AUTODISARM` alternate stack above the stack it was
-delivered from. `native_signals` runs it
-natively as the oracle and under the shim, and requires the same output and
-deaths (on an ordinary stack the nested fault is a named stop instead, as is
-a fault handler on an alternate stack too small for the shim's fault route
-below the kernel's frame). Its
-`alarm` cases, in `native_containment`, fire a timer while counter reads taken
-on the alternate stack are served off it, on an ordinary stack and on one too
-small to leave a nested frame room: natively both run on, and under the shim
-each is a named stop, since no guest code runs during such a read.
+delivered from; handlers on alternate stacks with room for one delivery and
+little more run, and so do timer handlers between counter reads. `native_signals`
+runs it natively as the oracle and under the shim, and requires the same output
+and deaths (on an ordinary stack the nested fault is a named stop instead). Its
+`route-cost` case measures what a delivery takes of the handler's stack above
+its frame, for a raised signal, a fault and a SIGSEGV: natively the kernel's
+frame, under the shim the same few bytes on every route.
+
+`small_stack.c` sends signals by tgkill from a 2 KiB stack to handlers on
+the alternate stacks they registered: `native_signals` requires them to run
+inside those bounds, told so by `sigaltstack` and `uc_stack`, to nest, to
+leave by `siglongjmp` thousands of times, to swapcontext to coroutines (on a
+mapping, or on a local array of a frame above the handler) that make syscalls
+and come back, and a dead thread's destructor to make one,
+printing what they print natively, through the raw trap and (`-libc`, every
+arch) glibc's `syscall(2)`. `private_budget.c` (over a `planted-faults` shim)
+measures each recording level of the shim's private signal stack against its
+budget.
+`../small_stack_probe.rs` (in `native_containment`) records and replays raw
+syscalls made on a 2 KiB stack and requires nothing written below it.
 
 `shim_fault.c` calls a fault planted in a shim entry (`patina_planted_fault`,
 in a shim built with the `planted-faults` feature) under a guest handler for

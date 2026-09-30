@@ -75,19 +75,111 @@ Before a native guest runs, a default-deny audit over its imports (plus an instr
 #### Linux signals and thread lifecycle
 
 Signal dispositions and shared pending instances belong to the process; masks,
-private pending instances belong to managed tasks. Alternate stacks live in the
-kernel state of each task's one host thread, which also validates stack updates;
-there is no shadow stack table. Generation
+private pending instances belong to managed tasks. SIGSYS has a guest disposition
+stored and queried through the ordinary action table, but it never replaces the
+host containment handler. No modeled kernel effect raises guest SIGSYS; explicit
+sends and timer notifications of it stop by name, irrespective of disposition.
+Its existing always-unblocked host-mask policy is unchanged. A guest's alternate
+stack is per-thread state kept by the shim with 6.8's rules (see Private signal
+frames below). Generation
 records `SignalGenerated` and selects the leader when eligible, otherwise the
 lowest eligible live task (the leader has the first TaskId). Delivery runs on that
-task under the baton, using kernel-built handler frames, never on the generating
+task under the baton, from kernel-built frames, never on the generating
 helper's behalf. Instances blocked by an earlier handler's mask remain virtual
 and visible to pending queries and signalfd until eligible.
+
+##### Private signal frames
+
+Every host signal handler the shim owns is installed `SA_ONSTACK`: the syscall
+trap (SIGSYS), the counter trap (SIGSEGV on x86_64), and the front handler,
+which is the host action of every signal the guest has a handler for and of
+every signal an instruction raises. Each managed thread registers a guarded
+shim-owned mapping (65 nesting levels of 128 KiB plus `AT_MINSIGSTKSZ` each,
+about 8.4 MiB reserved but not committed) as
+its host alternate stack, `SS_AUTODISARM`, before any guest code runs on it
+(`src/thread/signals/frames.rs`). So the kernel builds every signal frame —
+siginfo, ucontext and the CPU's extended state — in shim memory, never on a
+guest stack. A native frame's size is the host CPU's xsave area (AVX-512 hosts
+write much larger frames); a frame on the guest's stack would make the
+guest's stack use, and so its behavior near a stack's end, differ from host to
+host, which is a determinism leak. With private frames a trapped raw syscall
+or counter read uses none of the guest's stack, recording included (a
+dispatch takes tens of KiB), which a runtime with 2 KiB thread stacks needs.
+
+The contract a guest handler sees:
+
+- It runs on the stack its action asks for, chosen as 6.8's `get_sigframe`
+  chooses: the top of its alternate stack under `SA_ONSTACK` when that stack is
+  registered and not already in use, else below the interrupted stack pointer
+  (x86_64: below its 128-byte red zone). A runtime that checks that its handler
+  runs inside the alternate stack it registered finds it there. The handler's
+  frames are below a 16-byte slot of the shim's and, on x86_64, its return
+  address; that is all a delivery takes of the guest's stack, the same on
+  every host and route.
+- `siginfo` and `ucontext` are the kernel's frame and valid for the handler's
+  duration. Edits the handler makes to the ucontext — registers, program
+  counter, stack pointer (as a runtime's asynchronous preemption injects a
+  call), the saved mask, `uc_stack` — are honoured at its return exactly as
+  `rt_sigreturn` honours them, since it is that frame the kernel's
+  `rt_sigreturn` restores (the containment signals stay out of the mask, as
+  from every mask).
+- `uc_stack` shows the guest's own registration as the kernel saved it, and an
+  `SS_AUTODISARM` registration is disabled for the handler and registered again
+  from `uc_stack` at its return, as 6.8 does; `sigaltstack` inside the handler
+  answers `SS_ONSTACK`/`EPERM` by where the guest's stack pointer is.
+- Observable divergences from 6.8: the `siginfo`/`ucontext` addresses are not
+  on the guest's stack (a handler that locates its frame from its own stack
+  pointer, or walks from the ucontext to the stack, sees shim memory); the
+  handler returns into the shim, not into its action's `sa_restorer`, which does
+  not run (a restorer that is `rt_sigreturn` and nothing else, as runtimes'
+  are, is indistinguishable); a delivery takes from its stack's top (or the
+  red zone's bottom) to the handler's frame 24 to 39 bytes on x86_64 (the
+  slot and the return address, 24 or 32 below the red zone as the stack
+  pointer falls modulo 16, up to 39 at an unaligned alternate stack's top) and
+  16 to 31 on arm64 (no return address is pushed), not a kernel frame, so a stack too small for a native frame still
+  runs the handler; and the interrupted context of a delivery the shim makes at
+  a boundary is shim code (as before), on the private stack for the syscall
+  trap's boundaries.
+
+Nesting. The private stack is 65 levels of one fixed budget each (128 KiB
+plus `AT_MINSIGSTKSZ`, sized for a recording dispatch with margin, which a
+containment test measures). A trap from guest code lands at the top of the
+level the host registration names, and everything the shim runs for it stays
+in that level. While a guest handler runs, its record owns the level its frame
+is in, and the registration names the highest level no running handler owns,
+where every trap the handler takes lands; at the handler's return the kernel's
+`rt_sigreturn` installs the registration its frame names. So a running
+handler's frames are never built over, whatever its guest code does meanwhile:
+it may swapcontext to a coroutine on any stack (a mapping, a local array of a
+caller's frame, an `alloca`), make syscalls there, and come back, which is what
+`SS_AUTODISARM` exists for. A handler that leaves by `siglongjmp`, `longjmp` or
+`setcontext` skips its return, so its level is freed only on proof it was left,
+which no stack pointer gives (a coroutine may run anywhere): the word the shim
+wrote to its slot overwritten, found at each trap from guest code and before a
+libc door delivers, or a later delivery whose slot overlaps it. Until then the
+level stays reserved; at worst the 65th running handler is a named stop, the
+same on every host, recording or not. A handler left over and over from the
+same place frees the last one's level each time, so the levels alternate and
+nothing accumulates. After a managed thread's teardown nothing of its handlers
+survives: a thread-local destructor's trap finds no private stack and no
+records. The mapping is unmapped at managed thread completion, except after a
+raw `exit` the syscall trap serves on it, which leaves it mapped with the dead
+thread.
+
+An internal stop is the host's default SIGABRT, never a delivery: the front
+handler would otherwise run a guest SIGABRT handler (a runtime's, whose raw
+syscalls re-enter the stopping shim) inside it. A signal from outside the run
+reaching a guest handler is a named stop.
+
+macOS has no syscall-user-dispatch or counter trap and keeps host-owned guest
+handlers and kernel frames; this is a Linux mechanism behind the same signal
+seam. Linux arm64 (no SUD there) runs the same front handler and private stack,
+with its own stack-switch call.
 
 Lock order is ThreadRuntime → context slot. Generation records and selects under
 ThreadRuntime, then releases it before scheduler wake; host frame release never
 holds either lock. Host masks describe nested handlers, so no in-delivery flag
-suppresses legitimate re-entry. Dirty mask/stack flags gate SIGSYS-frame fixup;
+suppresses legitimate re-entry. A dirty mask flag gates SIGSYS-frame fixup;
 frame release saves and restores the enclosing frame's dirty bits so an inner
 SIGSYS return cannot consume them. A no-pending syscall return needs no host
 signal syscall. Startup registration
@@ -275,10 +367,10 @@ stop, since natively it reads the counter and runs on. It sends every other
 SIGSEGV where the kernel would under the guest's action: the guest handler runs
 from the trap's own kernel-built frame (the kernel's siginfo and the faulting
 context, so a return retries the instruction, an edited context resumes and
-`siglongjmp` leaves), `SA_RESETHAND` resets the virtual handler, the host action
-carries the guest's `SA_ONSTACK`, and a default or ignored action takes the
-fault as the default action does. A handler with a restorer of its own, or a
-SIGSEGV sent from outside the run, is a named stop. A SIGSEGV patina delivers
+`siglongjmp` leaves), `SA_RESETHAND` resets the virtual handler, the handler
+runs on the stack its action asks for (Private signal frames, above), and a
+default or ignored action takes the fault as the default action does. A
+SIGSEGV sent from outside the run is a named stop. A SIGSEGV patina delivers
 itself (`kill`, `raise`) is dequeued as 6.8 dequeues it (synchronous signals
 first, a thread's own before the process's) and runs the action its dequeue
 captured. A delivery batch whose re-queued frames the host would build in
@@ -294,44 +386,9 @@ a genuine fault never meets the dequeued one; any other signal's stays on the
 host until the member's handler returns (after a `siglongjmp`, until the next
 delivery point), and nothing but a delivery raises it there. A handler that edits its frame's saved mask while frames of its batch
 are still to run is a named stop: natively the next handler starts under the
-edit. A counter fault takes the private execution path when the C admission check
-recognizes its interrupted stack pointer as one of the guest's alternate
-stacks, including a handler whose `SS_AUTODISARM` registration is currently
-disabled. Ordinary-stack reads retain their normal delivery behavior. While
-private execution is active, no guest code runs until the read is answered:
-every signal but the containment ones and those an instruction raises (whose
-front handler names a fault in the shim's own code) is held blocked meanwhile
-(one that arrives is delivered once the trap returns, after the instruction,
-as it may be natively). A scheduling point inside an alternate-stack handler
-that would deliver another handled signal is a named stop, as are a
-`sigaltstack` call and a nested counter read: no guest code runs during private
-execution. The kernel uses a separate guarded shim-owned alternate stack
-meanwhile, so a nested fault in shim code cannot overwrite either the trap's
-live frames or its runtime execution.
-
-When TSC is armed, each managed thread eagerly maps two disjoint regions:
-64 KiB for execution, and `AT_MINSIGSTKSZ` plus 64 KiB for nested signals,
-with guard pages, about 136 KiB of address space in four VMAs per thread. The
-startup auxv is available independently of SUD support; kernels without
-`AT_MINSIGSTKSZ` use zero for that additive minimum. The mapping is released at
-managed thread completion (raw exit included) and never enters the guest memory
-model. Thousands of managed threads therefore bring `vm.max_map_count` closer.
-A C transition guard and held asynchronous signals protect the switch before
-Rust takes ownership.
-
-Private execution does not make the guest stack cost-free: taking the counter
-fault still needs one kernel signal frame and about 400 B of C entry on the
-guest's stack; a read inside an already-running handler needs two kernel
-frames. Native `rdtsc` needs none, and a smaller stack can die by SIGSEGV (the
-frame size depends on host xsave features). Admission-only C bounds remember
-stacks that can still be executing after autodisarm; `patina_fault_stack_changed`
-and frame/batch returns maintain them, but they can go stale if a handler
-disables its stack by editing `uc_stack`, or if `sigaltstack` is called from a
-coroutine stack while an autodisarmed handler is live. These are hints,
-not shadow kernel registrations. Both genuine-fault entries check the bounds
-before errno or Rust, and a short stack stops in C with the signal number and
-remaining-byte count. The read's end restores exactly the kernel registration
-held at entry, including an autodisarmed stack's disabled state. A
+edit. A counter read is answered on the private stack wherever the guest
+read it, a handler's own stack included, and a handler a delivery point inside
+the read runs goes to the stack it asks for, as any other. A
 SIGSEGV the kernel sends itself that the guest's action takes as the default
 is taken at once rather than retried, since retrying need not raise it again;
 a core dump then records a sent SIGSEGV (`SI_TKILL`, no address) where natively
@@ -799,6 +856,10 @@ The trace format gives lifecycle markers and operation events one logical order 
 Strict replay expects matching fingerprints and the same sequence of boundary events. Fingerprint mismatches and boundary-event mismatches are errors by default.
 
 A fingerprint describes the run that happened, not the one that was requested. Seed-derived exploration can retract a capability the supervisor declared from the command line: `--swarm` masks the enabled fault classes down to a per-generation subset, and when it drops a class whose capability is a fingerprint component (`+buggify`), the runtime strips that component and resets the class's configuration before anything derives the fingerprint or the trace metadata. So a masked generation records the effective state — and a flag-free replay, which reconstructs the component set from the metadata, recomputes the identical fingerprint. The trace's swarm record keeps the requested-but-dropped fact machine-readable: the class appears among the candidates but not among the selections, which is what distinguishes it from a class that was never asked for. A swarm draw with an empty candidate set is a different case: `--swarm` over a run that enabled no fault class selects nothing and explores the plain configuration, so the run reports the draw as vacuous and warns, and the campaign and sweep classifiers treat such a generation as a coverage failure rather than a clean run.
+
+Native replay supplies the recorded root seed before process startup, not only
+when the runtime reads the trace. Pre-runtime effects such as Linux `AT_RANDOM`
+therefore use the same seed in record and replay.
 
 A fingerprint belongs to a recorded artifact. A seeded run writes no trace, so it carries no fingerprint and accepts no fingerprint label: `--fingerprint` names the label a recording writes, and requires `--record`.
 

@@ -13,7 +13,8 @@ crate-type = ["rlib", "staticlib"]
 
 [features]
 # A shim export that faults in shim code on demand, for the containment tests
-# (`patina_planted_fault`); never in a guest's build.
+# (`patina_planted_fault`), and the private signal stack's bounds for its
+# budget detector (`patina_planted_private_stack`); never in a guest's build.
 planted-faults = []
 
 [dependencies]

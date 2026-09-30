@@ -220,7 +220,7 @@ extern long patina_sud_dispatch(long nr, unsigned long a0, unsigned long a1,
                                 uintptr_t call_addr);
 _Noreturn void patina_sud_report_fatal(const char *message);
 /* The interrupted stack pointer of the guest code the next entry serves. */
-void patina_note_guest_sp(uintptr_t sp);
+void patina_note_guest_sp(uintptr_t sp, stack_t *stack);
 _Noreturn void patina_sud_report_fatal_addr(const char *message, long nr,
                                             uintptr_t addr);
 /* The arming flag is OWNED by the Rust lib (an exported AtomicU8 in a writable
@@ -567,9 +567,9 @@ static void patina_sud_sigsys(int sig, siginfo_t *info, void *ucontext) {
 #error "SUD SIGSYS handler: unsupported architecture"
 #endif
 #if defined(__x86_64__)
-    patina_note_guest_sp((uintptr_t)r[REG_RSP]);
+    patina_note_guest_sp((uintptr_t)r[REG_RSP], &uc->uc_stack);
 #elif defined(__aarch64__)
-    patina_note_guest_sp((uintptr_t)uc->uc_mcontext.sp);
+    patina_note_guest_sp((uintptr_t)uc->uc_mcontext.sp, &uc->uc_stack);
 #endif
     long ret = patina_sud_dispatch(nr, a0, a1, a2, a3, a4, a5, call_addr);
     patina_signal_frame((uint64_t *)&uc->uc_sigmask, &uc->uc_stack);
@@ -628,7 +628,9 @@ static void patina_sud_init(int argc, char **argv) {
     struct sigaction action;
     memset(&action, 0, sizeof action);
     action.sa_sigaction = patina_sud_sigsys;
-    action.sa_flags = SA_SIGINFO | SA_NODEFER;
+    /* The kernel builds the frame on the thread's private signal stack: a
+     * trapped syscall uses none of the guest's (src/thread/signals/frames.rs). */
+    action.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
     sigemptyset(&action.sa_mask);
     if (patina_host_sigaction(SIGSYS, &action, NULL) != 0) {
         patina_sud_report_fatal("SUD: failed to install the SIGSYS dispatch handler");
@@ -696,18 +698,11 @@ static void patina_sud_init(int argc, char **argv) {
  *
  * The host action is SA_NODEFER: a routed handler runs with SIGSEGV
  * unblocked on the host (its block is kept virtually), so its counter reads
- * still trap. It carries SA_ONSTACK exactly
- * when the guest's action does, so the kernel builds the frame on the stack
- * the guest's handler expects — which is also what lets a stack-overflow
- * handler (Rust std's among them) run at all. A counter read admitted as
- * running on the alternate stack is answered on private execution storage,
- * including a read inside a handler already running there. The runtime cannot
- * fit on a small signal stack, and an autodisarmed handler's uc_stack alone
- * cannot identify it. The read still needs its kernel frame and C entry on the
- * guest stack. No guest code runs until it is answered (a handler that would
- * is a named stop), and the kernel uses a separate guarded per-thread shim
- * stack meanwhile. A nested fault in shim code can then stop by name without
- * overwriting this frame.
+ * still trap. Like every shim handler it is SA_ONSTACK: the kernel builds its
+ * frame on the thread's private signal stack (src/thread/signals/frames.rs),
+ * so a counter read costs the guest's stack nothing, whatever stack it is
+ * read on, and a guest handler the trap runs goes to the stack its action
+ * asks for.
  * ========================================================================== */
 
 /* prctl TSC op numbers (x86 only; present since 2.6.26). */
@@ -723,10 +718,9 @@ static void patina_sud_init(int argc, char **argv) {
 
 /* Rust side of the boundary (see src/tsc.rs). The dispatch symbol is also the
  * audit's trap marker: a binary that DEFINES it carries a trap-capable shim. */
-struct patina_served;
 extern int patina_tsc_dispatch(const unsigned char *bytes, size_t available,
                                unsigned long long *tsc_out, unsigned int *aux_out,
-                               size_t *length_out, const struct patina_served *served);
+                               size_t *length_out);
 /* The armed flag is OWNED by the Rust lib (an exported AtomicU8), the same C→Rust
  * ownership direction and rationale as PATINA_SUD_ARMED. */
 extern unsigned char PATINA_TSC_ARMED;
@@ -737,79 +731,221 @@ extern unsigned char PATINA_TSC_ARMED;
 #endif
 
 #ifdef __linux__
-/* Every fault handler's side of the boundary with the Rust signal state (see
+/* Every shim handler's side of the boundary with the Rust signal state (see
  * src/thread/signals/fault.rs): it takes the thread for the shim first, and a
  * fault while the shim already owned it is a named stop. */
 enum {
     PATINA_FAULT_DEFAULT = 0,
     PATINA_FAULT_HANDLER = 1,
 };
-extern int patina_trap_enter(uintptr_t sp);
+extern int patina_trap_enter(uintptr_t sp, stack_t *stack);
 extern void patina_trap_leave(void);
 _Noreturn void patina_trap_shim_fault(const siginfo_t *info, uintptr_t pc);
 _Noreturn void patina_trap_take_default(int sig);
 
-/* The frame a fault handler runs a guest handler from: the interrupted stack
- * pointer, the frame's `uc_stack` and `uc_sigmask` (which `rt_sigreturn`
- * installs), and a word of the fault handler's own frame, below which every
- * guest handler it calls runs. The guest handler's return goes through
- * `patina_signal_fault_return`. */
+/* The private frame a shim handler runs a guest handler from, and where the
+ * guest handler runs (src/thread/signals/fault.rs `Frame`, frames.rs). The
+ * guest handler's return goes through `patina_signal_fault_return`. */
 struct patina_fault_frame {
-    uintptr_t sp;
-    const stack_t *stack;
-    volatile uint64_t *canary;
-    uint64_t *mask;
+    uintptr_t sp;               /* the interrupted stack pointer */
+    stack_t *stack;             /* the frame's uc_stack */
+    volatile uint64_t *canary;  /* every guest frame of the handler is below it */
+    uint64_t *mask;             /* the frame's uc_sigmask */
+    uintptr_t floor;            /* the lowest private stack this frame's shim code reaches */
+    uintptr_t target;           /* the guest stack pointer to call at; 0: in place */
+    stack_t nested;             /* the host registration while the handler runs */
+    stack_t host;               /* uc_stack as the kernel saved it */
+    uintptr_t resume;           /* the stack pointer the frame resumes at */
+    uintptr_t position;         /* where the handler runs, for SIGSEGV's scope */
 };
 extern void patina_signal_fault_return(const struct patina_fault_frame *frame);
 
-/* Admission budgets and the tiny stop are shared by both fault entries. */
-#define PATINA_FRONT_FLOOR 4096
+/* Room below this handler's frame for its own locals, the call below, and the
+ * return path: its level of the private stack must hold them (frames.rs). */
+#define PATINA_FRAME_MARGIN 4096
 static long (*patina_fault_host_syscall)(long, ...);
-static _Noreturn void patina_fault_stack_short(int sig, uintptr_t room);
 static _Noreturn void patina_fault_stop(const char *message, size_t length);
 
-/* Admission hints, never the guest-visible/kernel registration. Remember
- * stacks still executing after SS_AUTODISARM, including registrations made
- * inside them. Leaving all remembered bounds starts a fresh set. Rust calls
- * this for successful sigaltstack changes and enabled frame/batch restores. */
-#define PATINA_FAULT_STACKS 8
-static _Thread_local volatile stack_t patina_fault_stacks[PATINA_FAULT_STACKS];
-static _Thread_local volatile sig_atomic_t patina_fault_stacks_count;
-static void patina_fault_stack_changed(const stack_t *stack) {
-    uintptr_t here = (uintptr_t)__builtin_frame_address(0);
-    int inside = 0;
-    for (sig_atomic_t i = 0; i < patina_fault_stacks_count; i++) {
-        uintptr_t base = (uintptr_t)patina_fault_stacks[i].ss_sp;
-        inside |= here > base && here - base <= patina_fault_stacks[i].ss_size;
-    }
-    if (!inside) patina_fault_stacks_count = 0;
-    if ((stack->ss_flags & SS_DISABLE) != 0) return;
-    for (sig_atomic_t i = 0; i < patina_fault_stacks_count; i++) {
-        if (stack->ss_sp == patina_fault_stacks[i].ss_sp &&
-            stack->ss_size == patina_fault_stacks[i].ss_size) return;
-    }
-    if (patina_fault_stacks_count == PATINA_FAULT_STACKS) {
-        static const char message[] =
-            "patina: more alternate stacks active than fault admission tracks: not modeled\n";
-        patina_fault_stop(message, sizeof message - 1);
-    }
-    patina_fault_stacks[patina_fault_stacks_count] = *stack;
-    patina_fault_stacks_count++;
+/* Call `handler(sig, info, uc)` with the stack pointer at `target` (16-byte
+ * aligned; the call pushes the return address below it), and return on the
+ * caller's stack. The frame pointer, which the ABI makes the handler keep,
+ * holds the way back. */
+__attribute__((visibility("hidden"))) void patina_call_guest_handler(uintptr_t handler, long sig,
+                                                                     siginfo_t *info, void *uc,
+                                                                     uintptr_t target);
+#if defined(__x86_64__)
+__asm__(".text\n"
+        ".globl patina_call_guest_handler\n"
+        ".hidden patina_call_guest_handler\n"
+        ".type patina_call_guest_handler,@function\n"
+        ".p2align 4\n"
+        "patina_call_guest_handler:\n"
+        "  .cfi_startproc\n"
+        "  endbr64\n"
+        "  pushq %rbp\n"
+        "  .cfi_def_cfa_offset 16\n"
+        "  .cfi_offset %rbp, -16\n"
+        "  movq %rsp, %rbp\n"
+        "  .cfi_def_cfa_register %rbp\n"
+        "  movq %rdi, %r11\n"
+        "  movl %esi, %edi\n"
+        "  movq %rdx, %rsi\n"
+        "  movq %rcx, %rdx\n"
+        "  movq %r8, %rsp\n"
+        /* As the kernel enters a handler: %al (a variadic callee's vector
+         * register count) is 0. */
+        "  xorl %eax, %eax\n"
+        "  callq *%r11\n"
+        "  movq %rbp, %rsp\n"
+        "  popq %rbp\n"
+        "  .cfi_def_cfa %rsp, 8\n"
+        "  retq\n"
+        "  .cfi_endproc\n"
+        ".size patina_call_guest_handler, .-patina_call_guest_handler\n");
+#elif defined(__aarch64__)
+__asm__(".text\n"
+        ".globl patina_call_guest_handler\n"
+        ".hidden patina_call_guest_handler\n"
+        ".type patina_call_guest_handler,%function\n"
+        ".p2align 2\n"
+        "patina_call_guest_handler:\n"
+        "  .cfi_startproc\n"
+        "  bti c\n"
+        "  stp x29, x30, [sp, #-16]!\n"
+        "  .cfi_def_cfa_offset 16\n"
+        "  .cfi_offset x29, -16\n"
+        "  .cfi_offset x30, -8\n"
+        "  mov x29, sp\n"
+        "  .cfi_def_cfa_register x29\n"
+        "  mov x16, x0\n"
+        "  mov w0, w1\n"
+        "  mov x1, x2\n"
+        "  mov x2, x3\n"
+        "  mov sp, x4\n"
+        "  blr x16\n"
+        "  mov sp, x29\n"
+        "  .cfi_def_cfa sp, 16\n"
+        "  ldp x29, x30, [sp], #16\n"
+        "  .cfi_def_cfa_offset 0\n"
+        "  .cfi_restore x29\n"
+        "  .cfi_restore x30\n"
+        "  ret\n"
+        "  .cfi_endproc\n"
+        ".size patina_call_guest_handler, .-patina_call_guest_handler\n");
+#else
+#error "guest handler call: unsupported architecture"
+#endif
+
+static uintptr_t patina_frame_pc(const ucontext_t *uc) {
+#if defined(__x86_64__)
+    return (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+#elif defined(__aarch64__)
+    return (uintptr_t)uc->uc_mcontext.pc;
+#endif
+}
+static uintptr_t patina_frame_sp(const ucontext_t *uc) {
+#if defined(__x86_64__)
+    return (uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
+#elif defined(__aarch64__)
+    return (uintptr_t)uc->uc_mcontext.sp;
+#endif
 }
 
-/* Must inline: admission cannot itself consume a guest-stack call frame. */
-static __attribute__((always_inline)) inline uintptr_t
-patina_fault_room(const ucontext_t *uc, uintptr_t here) {
-    uintptr_t room = UINTPTR_MAX;
-    uintptr_t base = (uintptr_t)uc->uc_stack.ss_sp;
-    if ((uc->uc_stack.ss_flags & SS_DISABLE) == 0 && here > base &&
-        here - base <= uc->uc_stack.ss_size) room = here - base;
-    for (sig_atomic_t i = 0; i < patina_fault_stacks_count; i++) {
-        base = (uintptr_t)patina_fault_stacks[i].ss_sp;
-        if (here > base && here - base <= patina_fault_stacks[i].ss_size && here - base < room)
-            room = here - base;
+/* The shim handlers a frame can be interrupted at the entry of: the kernel
+ * builds several frames on one return to user space, each over the last. */
+static void patina_fault_front(int sig, siginfo_t *info, void *ucontext);
+#if defined(__x86_64__)
+static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext);
+#endif
+
+/* The stack pointer the code a frame interrupted was at. A frame built over
+ * another the kernel has not entered yet interrupted that one's shim handler
+ * at its first instruction, with the stack pointer at that frame: what it
+ * stands for is what that one interrupted. */
+static uintptr_t patina_interrupted_sp(const ucontext_t *uc) {
+    uintptr_t sp = patina_frame_sp(uc);
+    for (;;) {
+        uintptr_t pc = patina_frame_pc(uc);
+        int entry = pc == (uintptr_t)(void *)patina_fault_front;
+#if defined(__x86_64__)
+        entry |= pc == (uintptr_t)(void *)patina_tsc_sigsegv;
+        /* `rt_sigframe`: the restorer's return address, then the ucontext. */
+        const ucontext_t *below = (const ucontext_t *)(sp + sizeof(void *));
+#elif defined(__aarch64__)
+        /* `rt_sigframe`: siginfo, then the ucontext. */
+        const ucontext_t *below = (const ucontext_t *)(sp + sizeof(siginfo_t));
+#endif
+        if (!entry) return sp;
+        uc = below;
+        sp = patina_frame_sp(uc);
     }
-    return room;
+}
+
+static void patina_host_altstack(const stack_t *stack) {
+    if (patina_fault_host_syscall(SYS_sigaltstack, stack, NULL) != 0) {
+        static const char message[] = "patina: host private signal stack switch failed\n";
+        patina_fault_stop(message, sizeof message - 1);
+    }
+}
+
+/* Run the guest handler a route chose, from the private frame `uc`, where the
+ * route put it: on the guest stack it asked for, with the host registration
+ * naming a level of the private stack no running handler owns while it runs
+ * (a trap it takes builds its frame there), or in place on a thread without a
+ * private stack. */
+static void patina_run_guest_handler(int sig, siginfo_t *info, ucontext_t *uc,
+                                     struct patina_fault_frame *frame,
+                                     const struct patina_signal_action *handler) {
+    if (frame->target == 0) {
+        /* The kernel passes siginfo and ucontext to every handler, whether it
+         * asked for SA_SIGINFO or not. */
+        ((void (*)(int, siginfo_t *, void *))handler->handler)(sig, info, uc);
+        return;
+    }
+    patina_host_altstack(&frame->nested);
+    patina_call_guest_handler(handler->handler, sig, info, uc, frame->target);
+    /* Back in the shim: nested frames go below this one, in its level, until
+     * the frame's rt_sigreturn installs the registration it names. */
+    static const stack_t off = {.ss_flags = SS_DISABLE};
+    patina_host_altstack(&off);
+}
+
+/* A signal for a guest handler reached a shim handler (`route` chose it: the
+ * counter trap's SIGSEGV route or the front route), or a fault the guest's
+ * action takes as the default (FAULT_DEFAULT is answered). */
+static int patina_guest_signal(int sig, siginfo_t *info, ucontext_t *uc,
+                               int (*route)(int, siginfo_t *, const ucontext_t *,
+                                            struct patina_fault_frame *,
+                                            struct patina_signal_action *)) {
+    uintptr_t sp = patina_interrupted_sp(uc);
+    int saved_errno = errno;
+    if (!patina_trap_enter(sp, &uc->uc_stack)) patina_trap_shim_fault(info, patina_frame_pc(uc));
+    volatile uint64_t canary = 0;
+    struct patina_fault_frame frame = {
+        .sp = sp,
+        .stack = &uc->uc_stack,
+        .canary = &canary,
+        .mask = (uint64_t *)(void *)&uc->uc_sigmask,
+        .floor = (uintptr_t)__builtin_frame_address(0) - PATINA_FRAME_MARGIN,
+        .host = uc->uc_stack,
+        .resume = sp,
+    };
+    struct patina_signal_action handler;
+    int routed = route(sig, info, uc, &frame, &handler);
+    patina_trap_leave();
+    errno = saved_errno;
+    if (routed != PATINA_FAULT_HANDLER) return routed;
+    patina_run_guest_handler(sig, info, uc, &frame, &handler);
+    /* errno is the thread's, as natively: the handler's value stands. */
+    saved_errno = errno;
+    /* As it stands: a frame built over another resumes into that one's
+     * shim handler, and restores the registration the kernel saved. */
+    frame.resume = patina_frame_sp(uc);
+    (void)patina_trap_enter(frame.resume, NULL);
+    patina_signal_fault_return(&frame);
+    patina_trap_leave();
+    errno = saved_errno;
+    return routed;
 }
 
 #if defined(__x86_64__)
@@ -842,211 +978,98 @@ static void patina_tsc_take_real_fault(int sig, siginfo_t *info, void *ucontext)
     (void)patina_host_sigaction(sig, &patina_tsc_prev, NULL);
 }
 
-/* A counter read served on private execution storage: the actual kernel
- * registration to restore and the mask held before switching stacks
- * (src/thread/signals/fault.rs, `with_counter_altstack`). */
-struct patina_served {
-    stack_t before;
-    uint64_t interrupted;
-};
-struct patina_counter_stacks {
-    stack_t signal;
-    uintptr_t top;
-    uint64_t held_mask;
-};
-static _Thread_local struct patina_counter_stacks patina_counter_stacks;
-static _Thread_local int patina_counter_busy;
-static const char patina_counter_fault_message[] =
-    "patina: fault inside the shim's own code during private counter dispatch\n";
-extern void patina_counter_stacks_prepare(struct patina_counter_stacks *out);
 extern void patina_tsc_declined(uintptr_t rip);
-
-/* One counter read, answered by `patina_tsc_dispatch`. */
-struct patina_tsc_read {
-    const unsigned char *rip;
-    size_t available;
-    unsigned long long tsc;
-    unsigned int aux;
-    size_t length;
-    int kind;
-    int private_stack;
-    uintptr_t sp;
-    const siginfo_t *info;
-    struct patina_served served;
-};
-
-/* For an alternate-stack read, private execution storage is disjoint from
- * the private kernel stack. Only C/assembly runs before installing that
- * protection; errno and every Rust call follow it. The trap's return restores
- * the interrupted mask. Ordinary-stack reads keep their original delivery rules. */
-static void patina_tsc_read_counter(void *argument) {
-    struct patina_tsc_read *read = argument;
-    if (read->private_stack &&
-        patina_fault_host_syscall(SYS_sigaltstack, &patina_counter_stacks.signal,
-                                  &read->served.before) != 0) {
-        static const char message[] = "patina: host counter alternate stack install failed\n";
-        patina_fault_stop(message, sizeof message - 1);
-    }
-    int saved_errno = errno;
-    if (!patina_trap_enter(read->sp)) patina_trap_shim_fault(read->info, (uintptr_t)read->rip);
-    read->kind = patina_tsc_dispatch(read->rip, read->available, &read->tsc, &read->aux,
-                                     &read->length, read->private_stack ? &read->served : NULL);
-    if (read->kind == PATINA_TSC_NONE) {
-        static const char message[] = "patina: C and Rust counter classifiers disagree\n";
-        patina_fault_stop(message, sizeof message - 1);
-    }
-    patina_trap_leave();
-    errno = saved_errno;
-}
-
-/* Call `body(argument)` at the 16-byte aligned `top`, then return on the
- * caller's stack. No guest code runs while the private stack is in use. */
-__attribute__((visibility("hidden"))) void patina_call_on_stack(void (*body)(void *),
-                                                                void *argument,
-                                                                uintptr_t top);
-__asm__(".text\n"
-        ".globl patina_call_on_stack\n"
-        ".hidden patina_call_on_stack\n"
-        ".type patina_call_on_stack,@function\n"
-        ".p2align 4\n"
-        "patina_call_on_stack:\n"
-        "  .cfi_startproc\n"
-        "  endbr64\n"
-        "  pushq %rbp\n"
-        "  .cfi_def_cfa_offset 16\n"
-        "  .cfi_offset %rbp, -16\n"
-        "  movq %rsp, %rbp\n"
-        "  .cfi_def_cfa_register %rbp\n"
-        "  movq %rdx, %rsp\n"
-        "  movq %rdi, %rax\n"
-        "  movq %rsi, %rdi\n"
-        "  callq *%rax\n"
-        "  movq %rbp, %rsp\n"
-        "  popq %rbp\n"
-        "  .cfi_def_cfa %rsp, 8\n"
-        "  retq\n"
-        "  .cfi_endproc\n"
-        ".size patina_call_on_stack, .-patina_call_on_stack\n");
 
 /* The counter trap's side of the boundary with the Rust signal state (see
  * src/thread/signals/fault.rs). */
-extern int patina_signal_fault(const siginfo_t *info, const struct patina_fault_frame *frame,
+extern int patina_signal_fault(const siginfo_t *info, struct patina_fault_frame *frame,
                                struct patina_signal_action *handler);
+static int patina_tsc_route(int sig, siginfo_t *info, const ucontext_t *uc,
+                            struct patina_fault_frame *frame,
+                            struct patina_signal_action *handler) {
+    (void)sig;
+    /* A counter read the trap declined is a named stop, before any route. */
+    if (info->si_code == SI_KERNEL) patina_tsc_declined(patina_frame_pc(uc));
+    return patina_signal_fault(info, frame, handler);
+}
 
 static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
     ucontext_t *uc = (ucontext_t *)ucontext;
     greg_t *r = uc->uc_mcontext.gregs;
     uintptr_t rip = (uintptr_t)r[REG_RIP];
     uintptr_t sp = (uintptr_t)r[REG_RSP];
-    if (patina_counter_busy) {
-        patina_fault_stop(patina_counter_fault_message, sizeof patina_counter_fault_message - 1);
-    }
     /* Provenance, exactly as the SIGSYS handler requires it: the kernel's own
      * #GP, at an instruction in the main executable's text. A counter read from
      * ld.so, another DSO, or the vDSO is not guest code — reading three bytes at
      * an arbitrary faulting address would itself fault, and answering it would
      * emulate a path the runtime does not model. */
-    if (info->si_code == SI_KERNEL) {
-        if (rip >= patina_sud_text_lo && rip < patina_sud_text_hi) {
-            size_t available = (size_t)(patina_sud_text_hi - rip);
-            if (available > PATINA_TSC_MAX_INSN) available = PATINA_TSC_MAX_INSN;
-            const unsigned char *bytes = (const unsigned char *)rip;
-            /* Exact encodings only, paired with tsc::classify and the
-             * rdtsc/rdtscp/prefixed-counter containment probes. Other #GPs
-             * (hlt, for example) must not enter private-dispatch state. */
-            int counter = available >= 2 && bytes[0] == 0x0f &&
-                (bytes[1] == 0x31 || (available >= 3 && bytes[1] == 0x01 && bytes[2] == 0xf9));
-            if (!counter) goto non_counter;
-            struct patina_tsc_read read = {.rip = (const unsigned char *)rip,
-                                           .available = available, .sp = sp, .info = info};
-            read.private_stack =
-                patina_fault_room(uc, (uintptr_t)__builtin_frame_address(0)) != UINTPTR_MAX;
-            if (read.private_stack) {
-                /* A C guard protects the transition before Rust claims ownership. */
-                if (patina_counter_stacks.top == 0) {
-                    static const char message[] = "patina: private counter stack was not prepared\n";
-                    patina_fault_stop(message, sizeof message - 1);
-                }
-                if (patina_fault_host_syscall(SYS_rt_sigprocmask, SIG_SETMASK,
-                                              &patina_counter_stacks.held_mask,
-                                              &read.served.interrupted, 8) != 0) {
-                    static const char message[] = "patina: host counter signal mask install failed\n";
-                    patina_fault_stop(message, sizeof message - 1);
-                }
-                /* Async signals are now held across the stack switch. Mark the
-                 * transition only after the mask is installed, so a signal in
-                 * the gap cannot misclassify this C entry as an owned fault. */
-                patina_counter_busy = 1;
-                patina_call_on_stack(patina_tsc_read_counter, &read, patina_counter_stacks.top);
-            } else {
-                patina_tsc_read_counter(&read);
+    if (info->si_code == SI_KERNEL && rip >= patina_sud_text_lo && rip < patina_sud_text_hi) {
+        size_t available = (size_t)(patina_sud_text_hi - rip);
+        if (available > PATINA_TSC_MAX_INSN) available = PATINA_TSC_MAX_INSN;
+        const unsigned char *bytes = (const unsigned char *)rip;
+        /* Exact encodings only, paired with tsc::classify and the
+         * rdtsc/rdtscp/prefixed-counter containment probes. */
+        int counter = available >= 2 && bytes[0] == 0x0f &&
+            (bytes[1] == 0x31 || (available >= 3 && bytes[1] == 0x01 && bytes[2] == 0xf9));
+        if (counter) {
+            unsigned long long tsc = 0;
+            unsigned int aux = 0;
+            size_t length = 0;
+            int saved_errno = errno;
+            if (!patina_trap_enter(sp, &uc->uc_stack)) patina_trap_shim_fault(info, rip);
+            int kind = patina_tsc_dispatch(bytes, available, &tsc, &aux, &length);
+            if (kind == PATINA_TSC_NONE) {
+                static const char message[] = "patina: C and Rust counter classifiers disagree\n";
+                patina_fault_stop(message, sizeof message - 1);
             }
-            if (read.kind != PATINA_TSC_NONE) {
-                /* Both instructions write 32-bit halves, which zero-extend into
-                 * the full 64-bit registers exactly as the hardware's do. */
-                r[REG_RAX] = (greg_t)(read.tsc & 0xffffffffULL);
-                r[REG_RDX] = (greg_t)((read.tsc >> 32) & 0xffffffffULL);
-                if (read.kind == PATINA_TSC_RDTSCP) { /* rdtscp also reports IA32_TSC_AUX */
-                    r[REG_RCX] = (greg_t)read.aux;
-                }
-                r[REG_RIP] = (greg_t)(rip + read.length);
-                /* Keep async signals held through the complete reply. The
-                 * kernel restores the interrupted mask on rt_sigreturn. */
-                patina_counter_busy = 0;
-                return;
+            patina_trap_leave();
+            errno = saved_errno;
+            /* Both instructions write 32-bit halves, which zero-extend into
+             * the full 64-bit registers exactly as the hardware's do. */
+            r[REG_RAX] = (greg_t)(tsc & 0xffffffffULL);
+            r[REG_RDX] = (greg_t)((tsc >> 32) & 0xffffffffULL);
+            if (kind == PATINA_TSC_RDTSCP) { /* rdtscp also reports IA32_TSC_AUX */
+                r[REG_RCX] = (greg_t)aux;
             }
+            r[REG_RIP] = (greg_t)(rip + length);
+            return;
         }
     }
-non_counter:;
-    /* A non-counter fault cannot move the guest's handler off the stack it
-     * requested. Check admission before errno or any Rust call. */
-    uintptr_t room = patina_fault_room(uc, (uintptr_t)__builtin_frame_address(0));
-    if (room < PATINA_FRONT_FLOOR) patina_fault_stack_short(sig, room);
-    int saved_errno = errno;
-    if (!patina_trap_enter(sp)) patina_trap_shim_fault(info, rip);
-    if (info->si_code == SI_KERNEL) patina_tsc_declined(rip);
-    volatile uint64_t canary = 0;
-    struct patina_fault_frame frame = {sp, &uc->uc_stack, &canary, (uint64_t *)(void *)&uc->uc_sigmask};
-    struct patina_signal_action handler;
-    int route = patina_signal_fault(info, &frame, &handler);
-    patina_trap_leave();
-    errno = saved_errno;
-    if (route == PATINA_FAULT_HANDLER) {
-        /* The kernel passes siginfo and ucontext to every handler, whether it
-         * asked for SA_SIGINFO or not. */
-        ((void (*)(int, siginfo_t *, void *))handler.handler)(sig, info, ucontext);
-        /* errno is the thread's, as natively: the handler's value stands. */
-        saved_errno = errno;
-        (void)patina_trap_enter(sp);
-        patina_signal_fault_return(&frame);
-        patina_trap_leave();
-        errno = saved_errno;
-        return;
+    if (patina_guest_signal(sig, info, uc, patina_tsc_route) == PATINA_FAULT_DEFAULT) {
+        patina_tsc_take_real_fault(sig, info, ucontext);
     }
-    patina_tsc_take_real_fault(sig, info, ucontext);
 }
 
 #endif
 
 /* ==========================================================================
- * Fault front handler (Linux, every arch). The signals an instruction raises
- * (SIGBUS, SIGFPE, SIGILL, SIGTRAP) always, and SIGSEGV where the
- * timestamp-counter trap does not own it (arm64, or an x86-64 kernel without
- * PR_SET_TSC): the host disposition is this handler, and the guest's action
- * is virtual (src/thread/signals/fault.rs). The host action carries the
- * guest action's flags, mask and restorer, so the kernel builds the frame, and
- * blocks, as it would for the guest's handler; this handler takes the thread
+ * Front handler (Linux, every arch). The host disposition of every signal a
+ * guest handler runs for, and of the signals an instruction raises (SIGBUS,
+ * SIGFPE, SIGILL, SIGTRAP) always, and SIGSEGV where the timestamp-counter
+ * trap does not own it (arm64, or an x86-64 kernel without PR_SET_TSC),
+ * whatever the guest's action: the guest's action is virtual
+ * (src/thread/signals/fault.rs). The host action carries the guest action's
+ * flags and mask, so the kernel blocks as it would for the guest's handler,
+ * and SA_ONSTACK, so the kernel builds the frame on the thread's private
+ * signal stack (src/thread/signals/frames.rs). This handler takes the thread
  * for the shim first, so a fault in the shim's own code is a named stop, and
- * otherwise runs the guest's handler from the same frame, or takes the fault
- * as the default action does.
+ * otherwise runs the guest's handler from the frame, on the stack the
+ * guest's action asks for, or takes the fault as the default action does.
  * ========================================================================== */
 extern int patina_fault_route(int sig, const siginfo_t *info,
-                              const struct patina_fault_frame *frame,
+                              struct patina_fault_frame *frame,
                               struct patina_signal_action *handler);
-extern void patina_fault_front_installed(uintptr_t handler, uintptr_t stack_changed);
-/* Resolved before installing the front handler. The short-stack path must
- * never enter Rust, resolve a symbol, format, or use an interposed vehicle.
- * glibc's syscall is a leaf and is inside SUD's allowed text region. */
+extern void patina_fault_front_installed(uintptr_t handler);
+static int patina_front_route(int sig, siginfo_t *info, const ucontext_t *uc,
+                              struct patina_fault_frame *frame,
+                              struct patina_signal_action *handler) {
+    (void)uc;
+    return patina_fault_route(sig, info, frame, handler);
+}
+
+/* Resolved before installing the front handler. The stop must never enter
+ * Rust, resolve a symbol, format, or use an interposed vehicle. glibc's
+ * syscall is a leaf and is inside SUD's allowed text region. */
 static _Noreturn void patina_fault_stop(const char *message, size_t length) {
     static const unsigned long default_action[4] = {0, 0, 0, 0};
     static const uint64_t unblock = UINT64_C(1) << (SIGABRT - 1);
@@ -1062,73 +1085,9 @@ static _Noreturn void patina_fault_stop(const char *message, size_t length) {
     __builtin_unreachable();
 }
 
-/* Room for this frame and the Rust route, including a guest handler's
- * return. native_signals::fault_front_stack_budgets_cover_the_compiled_paths
- * gates measured route high-water plus 512 bytes on both arches/stable/MSRV,
- * and the C entry + short-stop frames at <=768 bytes. Guest handlers' own
- * arbitrary stack needs are not included in this shim budget. */
-static _Noreturn void patina_fault_stack_short(int sig, uintptr_t room) {
-    static _Thread_local char message[256] =
-        "patina: a fault's signal frame leaves too little of the alternate stack below it "
-        "for the shim's fault handler: not modeled: signal ";
-    static const char prefix[] =
-        "patina: a fault's signal frame leaves too little of the alternate stack below it "
-        "for the shim's fault handler: not modeled: signal ";
-    char *end = message + sizeof prefix - 1;
-    const uintptr_t values[] = {(uintptr_t)sig, room};
-    for (unsigned int i = 0; i < 2; i++) {
-        uintptr_t divisor = 1;
-        while (values[i] / divisor >= 10) divisor *= 10;
-        do {
-            *end++ = (char)('0' + values[i] / divisor % 10);
-            divisor /= 10;
-        } while (divisor != 0);
-        if (i == 0) {
-            static const char separator[] = " bytes left ";
-            for (size_t j = 0; j < sizeof separator - 1; j++) *end++ = separator[j];
-        }
-    }
-    *end++ = '\n';
-    patina_fault_stop(message, (size_t)(end - message));
-}
-
 static void patina_fault_front(int sig, siginfo_t *info, void *ucontext) {
-#if defined(__x86_64__)
-    if (patina_counter_busy) {
-        patina_fault_stop(patina_counter_fault_message, sizeof patina_counter_fault_message - 1);
-    }
-#endif
     ucontext_t *uc = (ucontext_t *)ucontext;
-#if defined(__x86_64__)
-    uintptr_t pc = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
-    uintptr_t sp = (uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
-#elif defined(__aarch64__)
-    uintptr_t pc = (uintptr_t)uc->uc_mcontext.pc;
-    uintptr_t sp = (uintptr_t)uc->uc_mcontext.sp;
-#endif
-    /* Before ANY call (even errno's accessor or an out-of-line stack test):
-     * only the tiny C stop fits on a native-capable but short alternate stack.
-     * The floor includes this C frame as well as the Rust route below it. */
-    uintptr_t room = patina_fault_room(uc, (uintptr_t)__builtin_frame_address(0));
-    if (room < PATINA_FRONT_FLOOR) patina_fault_stack_short(sig, room);
-    int saved_errno = errno;
-    if (!patina_trap_enter(sp)) patina_trap_shim_fault(info, pc);
-    volatile uint64_t canary = 0;
-    struct patina_fault_frame frame = {sp, &uc->uc_stack, &canary,
-                                       (uint64_t *)(void *)&uc->uc_sigmask};
-    struct patina_signal_action handler;
-    int route = patina_fault_route(sig, info, &frame, &handler);
-    patina_trap_leave();
-    errno = saved_errno;
-    if (route == PATINA_FAULT_HANDLER) {
-        ((void (*)(int, siginfo_t *, void *))handler.handler)(sig, info, ucontext);
-        saved_errno = errno;
-        (void)patina_trap_enter(sp);
-        patina_signal_fault_return(&frame);
-        patina_trap_leave();
-        errno = saved_errno;
-        return;
-    }
+    if (patina_guest_signal(sig, info, uc, patina_front_route) == PATINA_FAULT_HANDLER) return;
     /* The retried instruction takes the fault under the default action; a
      * trap (int3 resumes past itself) or a signal the kernel sent itself need
      * not raise it again, so those are taken now. */
@@ -1141,7 +1100,7 @@ static void patina_fault_front(int sig, siginfo_t *info, void *ucontext) {
 
 /* Install the front handler for a managed run, BEFORE guest constructors (so
  * Rust std's own handlers register over it, virtually), after the counter trap
- * took SIGSEGV where it arms. */
+ * took SIGSEGV where it arms, and arm the main thread's private signal stack. */
 static const int patina_fault_front_signals[] = {SIGBUS, SIGFPE, SIGILL, SIGTRAP};
 static void patina_fault_front_init(int argc, char **argv) {
     if (!patina_env_has("PATINA_MODE", argv, argc)) return;
@@ -1155,7 +1114,7 @@ static void patina_fault_front_init(int argc, char **argv) {
     struct sigaction action;
     memset(&action, 0, sizeof action);
     action.sa_sigaction = patina_fault_front;
-    action.sa_flags = SA_SIGINFO;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&action.sa_mask);
     for (size_t i = 0; i < sizeof patina_fault_front_signals / sizeof *patina_fault_front_signals;
          i++) {
@@ -1166,7 +1125,7 @@ static void patina_fault_front_init(int argc, char **argv) {
     if (!patina_tsc_armed && patina_host_sigaction(SIGSEGV, &action, NULL) != 0) {
         patina_sud_report_fatal("fault handler: failed to install the SIGSEGV handler");
     }
-    patina_fault_front_installed((uintptr_t)patina_fault_front, (uintptr_t)patina_fault_stack_changed);
+    patina_fault_front_installed((uintptr_t)patina_fault_front);
 }
 #endif
 
@@ -1178,9 +1137,6 @@ static void patina_fault_front_init(int argc, char **argv) {
  * for this run (non-x86, no PR_SET_TSC, or a standalone binary). */
 void patina_tsc_arm_thread(void) {
     if (!patina_tsc_armed) return;
-#if defined(__x86_64__)
-    patina_counter_stacks_prepare(&patina_counter_stacks);
-#endif
     if (patina_host_prctl(PR_SET_TSC, PR_TSC_SIGSEGV, 0, 0, NULL) != 0) {
         patina_sud_report_fatal(
             "TSC: failed to arm the timestamp-counter trap on a managed thread");
@@ -1223,15 +1179,10 @@ static void patina_tsc_init(int argc, char **argv) {
             "guessed region");
     }
 
-    patina_fault_host_syscall = (long (*)(long, ...))__real_dlsym(RTLD_NEXT, "syscall");
-    if (patina_fault_host_syscall == NULL) {
-        patina_sud_report_fatal("counter handler: host syscall could not be resolved");
-    }
-    patina_counter_stacks_prepare(&patina_counter_stacks);
     struct sigaction action;
     memset(&action, 0, sizeof action);
     action.sa_sigaction = patina_tsc_sigsegv;
-    action.sa_flags = SA_SIGINFO | SA_NODEFER;
+    action.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
     sigemptyset(&action.sa_mask);
     if (patina_host_sigaction(SIGSEGV, &action, &patina_tsc_prev) != 0) {
         patina_sud_report_fatal("TSC: failed to install the SIGSEGV trap handler");

@@ -223,48 +223,37 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 - Installing a signal handler at init changes what Rust std does later. std
   installs its stack-overflow `SIGSEGV`/`SIGBUS` handlers only over `SIG_DFL`
   (`sys::pal::unix::stack_overflow::init`), so `sigaction` reports the guest's
-  virtual `SIGSEGV` action, not the trap's. The trap's host action carries that
-  action's `SA_ONSTACK` so a guard-page fault can reach it at all, which puts
-  counter reads on std's 8 KiB signal stack too. C uses private execution
-  storage for a counter fault only when its admission bounds recognize the
-  interrupted SP as a guest alternate stack, including an autodisarmed handler
-  whose `uc_stack` is disabled. The bounds are hints, not shadow kernel state,
-  and can go stale if a handler disables its stack by editing `uc_stack`, or
-  if `sigaltstack` is called from a coroutine stack while an autodisarmed
-  handler is live. No guest code runs until the read is answered; a scheduling
-  point that would deliver another handled signal, a `sigaltstack` call, or a
-  nested counter read is a named stop. The kernel uses a disjoint guarded
-  shim-owned signal stack meanwhile (`with_counter_altstack`). Each TSC-armed
-  managed thread eagerly maps the two private regions (~136 KiB of address
-  space and four VMAs per thread), bringing `vm.max_map_count` closer for
-  guests with many thousands of threads. The guest stack still needs one kernel
-  signal frame and about 400 B of C entry for a counter read; a read inside a
-  handler needs two kernel frames, unlike native `rdtsc`, which needs none.
-  Smaller stacks can die by SIGSEGV. Restore the actual kernel registration,
-  including autodisarm, before returning to the trap's original frame. Prepare
-  both regions before arming main/child threads, never from a constrained trap;
-  auxv publication must not depend on SUD support. Keep a C transition guard
-  until the reply is complete, hold asynchronous signals before switching,
-  and retain their original mask for SERVING. Both the front handler and the
-  counter handler's genuine-fault route check room before errno or Rust; update
-  admission bounds on guest registration and frame/batch restoration, never for
-  temporary private stacks. Only exact counter
-  encodings may change private-dispatch state: an unrelated in-text SI_KERNEL
-  #GP (e.g. hlt) still routes normally. The short-stack stop, including numeric
-  diagnostics, must stay C-only; stable/MSRV debug Rust frames can exceed
-  the headroom a native handler needs. `fault_front_stack_budgets_cover_the_compiled_paths`
-  measures both routes and every C entry/stop frame on both Linux architectures,
-  using the shipped `POSIX_C_FLAGS`. The guarded small-stack probes leave
-  only a measured kernel frame plus at most 768 bytes. Never size these
-  deliberately short test stacks from `AT_MINSIGSTKSZ`: on AMX hosts it
-  budgets tile state the process may not have permission to use. The shared
-  testbed frame probe measures native kernel storage, excluding shim frames. `private_counter_execution_has_stack_margin`
-  independently sentinel-measures the private execution region against its
-  64 KiB budget; do not infer runtime room from the nested-signal stack's size.
-  std's overflow
-  report itself (a `write` and an `abort` through the shim) still overflows that
-  stack, so a Rust stack overflow dies of SIGSEGV without std's message. Check
-  this interaction before adding any new handler.
+  virtual `SIGSEGV` action, not the trap's.
+- Every shim-owned host handler (SIGSYS, the counter trap, the front handler)
+  is `SA_ONSTACK`, and each managed thread registers a guarded private stack
+  (`src/thread/signals/frames.rs`, armed from `patina_fault_front_installed`
+  on the main thread and from `thread_prelude` on the others, before guest
+  code) `SS_AUTODISARM` as its host alternate stack: kernel frames are never
+  on a guest stack. The guest's alternate stack is virtual. The front handler
+  is the host action of every signal the guest has a handler for, and runs
+  it through `patina_call_guest_handler` on the stack its action asks for,
+  with the host registration naming a free level of the private stack while
+  it runs (its own frames fit its level, `PATINA_FRAME_MARGIN` included).
+  Running handlers are re-derived at each trap from guest code and before a
+  libc door delivers (`resync`), never counted: a `siglongjmp` skips every
+  return path. The private stack is
+  fixed levels; a running handler owns its level and the registration names
+  the highest free one. Free a level only on proof that cannot be faked (the
+  slot word overwritten, or a later delivery overlapping the slot): never on a
+  stack pointer, since a handler may be suspended in a coroutine on any stack.
+  `release` clears the records with the mapping. The level budget, checked by
+  `private_signal_stack_levels_fit_their_budget`, keeps the handler cap, not
+  the host, deciding the depth stop. A frame built over another not yet entered is resolved
+  to what that one interrupted (`patina_interrupted_sp`). The guest's handler
+  returns into the shim, never into its `sa_restorer`. Internal stops reset
+  SIGABRT to its default first (`host_abort`): a front-routed guest SIGABRT
+  handler must never run inside a stopping shim. Unmapping skips a private
+  stack the thread is running on (raw `exit` served by the syscall trap).
+  A handler's libc-door calls still run shim code on the handler's own stack;
+  only trap-door entries are private. So a Rust stack overflow prints std's
+  report, but std's `abort` through the shim then overflows std's 8 KiB signal
+  stack: the run dies of SIGSEGV (a named shim fault) where natively SIGABRT.
+  Check this interaction before adding any new handler.
 - A trap that the audit cleared a binary against must fail CLOSED at arming
   time. The gate decides "this binary is trap-managed here" from a marker plus a
   live platform probe; if arming then quietly did not happen, a contained escape
@@ -294,10 +283,13 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   EINTR or a second wake if an ordinary grant arrived meanwhile. A handler that
   would itself park on a pthread wait while interrupting one is a named fatal
   refusal, before enqueue or notification changes (also after an outer grant).
-- Alternate stacks live in the kernel per host thread, not in a shim shadow.
-  Raw actions retain the caller's exact flags/restorer; libc actions use the
-  glibc restorer captured at initialization. `SIGSYS` cannot be replaced by a
-  guest, a `SIGSEGV` action under the counter trap stays virtual, and every mask
+- A guest's alternate stack is shim state per host thread with 6.8's rules
+  (`frames.rs`); the host's is the private stack. Raw actions report the
+  caller's exact flags/restorer; libc actions use the glibc restorer captured
+  at initialization. A guest's `SIGSYS` action is stored
+  and queried virtually, never installed on the host; guest SIGSYS generation
+  stops by name (seccomp enforcement is not modeled). A `SIGSEGV` action under
+  the counter trap stays virtual, and every mask
   a guest installs loses both on the host; SIGSEGV's block is kept virtually
   instead (`src/thread/signals/fault.rs`). A handler can still add
   them to its frame's saved mask: a guest restorer's frame is stripped before the

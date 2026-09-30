@@ -8,9 +8,9 @@
 //! siginfo is the kernel's (`si_code`, `si_addr`, `si_pkey`) and its
 //! ucontext is the faulting context: a return retries the instruction, an
 //! edited context is what resumes, and `siglongjmp` leaves as it would. The
-//! trap's host action carries the guest's `SA_ONSTACK` ([`mirror_onstack`]),
-//! so the kernel puts that frame on the stack the guest asked for (a
-//! guard-page fault included).
+//! kernel builds that frame on the thread's private stack ([`frames`]), a
+//! guard-page fault's included, and the guest's handler runs on the stack
+//! its action asks for.
 //!
 //! **The shim's own faults.** The trap takes the thread for the shim before
 //! anything else ([`patina_trap_enter`]); a SIGSEGV that arrives while shim
@@ -61,65 +61,65 @@ pub(super) fn trap_routed(sig: u8) -> bool {
 
 /// The front handler's address, once the C layer installed it.
 static FRONT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static STACK_CHANGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Publish admission-only bounds, never the shim's temporary registration.
-pub(super) fn stack_changed(stack: &Stack) {
-    let callback = STACK_CHANGED.load(Ordering::Relaxed);
-    if callback != 0 {
-        // SAFETY: the C front installs this process-lifetime callback at init.
-        let callback: unsafe extern "C" fn(*const Stack) = unsafe { std::mem::transmute(callback) };
-        unsafe { callback(stack) };
-    }
-}
-
-/// The C layer put the fault front handler at `handler` before the signals
-/// an instruction raises, SIGSEGV where the counter trap does not own it.
+/// The C layer put the front handler at `handler` before the signals an
+/// instruction raises, SIGSEGV where the counter trap does not own it: from
+/// now on it is also the host handler of every guest handler, and each
+/// managed thread builds the frames of the shim's handlers on its private
+/// stack ([`frames`]). The calling thread's is armed now.
 #[unsafe(no_mangle)]
-pub extern "C" fn patina_fault_front_installed(handler: usize, stack_changed: usize) {
+pub extern "C" fn patina_fault_front_installed(handler: usize) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     FRONT.store(handler, Ordering::Relaxed);
-    STACK_CHANGED.store(stack_changed, Ordering::Relaxed);
+    frames::arm();
 }
 
-/// Whether the fault front handler owns `sig`'s host disposition: a signal
-/// an instruction raises, other than containment's own.
+/// Whether the managed run's front handler is installed: every managed
+/// thread then arms a private stack before its guest code runs.
+pub(crate) fn front_installed() -> bool {
+    FRONT.load(Ordering::Relaxed) != 0
+}
+
+/// Whether the front handler owns `sig`'s host disposition when the guest's
+/// action is a handler: every catchable signal but containment's own.
 pub(super) fn front_routed(sig: u8) -> bool {
-    SYNCHRONOUS & !bit(SIGSYS) & bit(sig) != 0
-        && !trap_routed(sig)
-        && FRONT.load(Ordering::Relaxed) != 0
+    !matches!(sig, SIGSYS | SIGKILL | SIGSTOP) && !trap_routed(sig) && front_installed()
 }
 
 /// The host action that stands for a guest's `action` on a front-routed
-/// signal: the front handler, with the guest action's flags, mask and
-/// restorer, so the kernel builds and blocks as for the guest's handler.
+/// signal: the front handler, with the guest action's flags and mask, so the
+/// kernel blocks as for the guest's handler, on the private stack
+/// (`SA_ONSTACK`), returning through glibc's restorer (the guest's handler
+/// returns into the front handler, never into a restorer of its own).
 /// `SA_RESETHAND` resets the virtual action only: the front handler stays.
 pub(super) fn front_action(action: Action) -> Action {
-    let mut front = Action {
-        handler: FRONT.load(Ordering::Relaxed),
-        flags: action.flags & !SA_RESETHAND | SA_SIGINFO,
-        ..action
-    };
-    // A default or ignored action returns from the front handler too.
     #[cfg(target_arch = "x86_64")]
-    if matches!(action.handler, SIG_DFL | SIG_IGN) && action.flags & SA_RESTORER == 0 {
-        front.flags |= SA_RESTORER;
-        front.restorer = RESTORER.load(Ordering::Relaxed);
-    }
+    let (restorer_flag, restorer) = (SA_RESTORER, RESTORER.load(Ordering::Relaxed));
+    // arm64's kernel returns through the vDSO trampoline.
     #[cfg(not(target_arch = "x86_64"))]
-    let _ = &mut front;
-    front
+    let (restorer_flag, restorer) = (0, 0);
+    Action {
+        handler: FRONT.load(Ordering::Relaxed),
+        // `SA_RESTORER` (0x0400_0000) is the shim's to set, never the guest's.
+        flags: action.flags & !(SA_RESETHAND | 0x0400_0000)
+            | SA_SIGINFO
+            | SA_ONSTACK
+            | restorer_flag,
+        restorer,
+        mask: action.mask,
+    }
 }
 
-/// A signal an instruction raises (SIGSEGV where the counter trap does not
-/// own it) reached the front handler from guest code. On [`FAULT_HANDLER`]
-/// the guest handler to run from the frame is written to `handler`, and its
-/// return goes through [`patina_signal_fault_return`]; on [`FAULT_DEFAULT`]
-/// the retried instruction takes the fault under the default action. The
-/// kernel blocks the handler's mask as it built the frame (the host action
-/// carries it), all but a SIGSEGV under the counter trap, which the host
-/// never blocks: that one is blocked virtually while the handler runs, as
-/// for a handler the trap runs.
+/// A signal reached the front handler: one [`deliver`] queued for a guest
+/// handler, or one an instruction raised (SIGSEGV where the counter trap
+/// does not own it) in guest code. On [`FAULT_HANDLER`] the guest handler to
+/// run is written to `handler` and where it runs to `frame` ([`enter`]), and
+/// its return goes through [`patina_signal_fault_return`]; on
+/// [`FAULT_DEFAULT`] the retried instruction takes the fault under the
+/// default action. The kernel blocks the handler's mask as it built the
+/// frame (the host action carries it), all but a SIGSEGV under the counter
+/// trap, which the host never blocks: that one is blocked virtually while the
+/// handler runs, as for a handler the trap runs.
 ///
 /// # Safety
 /// `info` names the frame's siginfo, `frame` describes the front handler's
@@ -128,18 +128,24 @@ pub(super) fn front_action(action: Action) -> Action {
 pub unsafe extern "C" fn patina_fault_route(
     sig: i32,
     info: *const Info,
-    frame: *const Frame,
+    frame: *mut Frame,
     handler: *mut Action,
 ) -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let sig = sig as u8;
-    let (info, frame) = unsafe { (*info, &*frame) };
+    let (info, frame) = unsafe { (*info, &mut *frame) };
     // Scopes the guest left before this fault are found left from where it
     // faulted, before its handler can take it to an alternate stack ([`left`]).
     if scoped() {
         blocked();
     }
     let sent = take_sent(sig, &info);
+    if sent.is_none() && SYNCHRONOUS & bit(sig) == 0 {
+        crate::trap_fatal(
+            "a signal sent from outside the run (another process's kill) reached a guest \
+             handler: not modeled",
+        );
+    }
     fault_entered(sig, sent.is_some());
     let action = match sent {
         Some(action) => action,
@@ -163,12 +169,10 @@ pub unsafe extern "C" fn patina_fault_route(
             action
         }
     };
+    let alt = enter(frame, action.flags);
     if trap_routed(SIGSEGV) {
-        // SAFETY: the frame's `uc_stack`.
-        let stack = unsafe { *frame.stack };
-        let alt = (stack.flags & SS_DISABLE == 0).then_some((stack.base, stack.size));
         SEGV.with_borrow_mut(|segv| {
-            segv.open(frame.canary, alt, false);
+            segv.open(frame.canary, frame.position, alt, false);
             if action.mask & bit(SIGSEGV) != 0 {
                 segv.current = SegvBlock::Yes;
             }
@@ -176,6 +180,26 @@ pub unsafe extern "C" fn patina_fault_route(
     }
     unsafe { handler.write(action) };
     FAULT_HANDLER
+}
+
+/// A guest handler with `flags` runs from `frame`: where ([`frames::enter`]),
+/// and the frame's `uc_stack` as the handler sees it. Answers the guest
+/// alternate stack the registration names, as the fault's scope needs it.
+fn enter(frame: &mut Frame, flags: u64) -> Option<(usize, usize)> {
+    let sp = frames::guest_position(frame.sp);
+    frame.position = frame.canary as usize;
+    let Some(entered) = frames::enter(flags, sp, frame.floor) else {
+        // SAFETY: the frame's `uc_stack`.
+        let stack = unsafe { *frame.stack };
+        return (stack.flags & SS_DISABLE == 0).then_some((stack.base, stack.size));
+    };
+    frame.target = entered.slot;
+    frame.position = entered.slot;
+    frame.canary = (entered.slot + 8) as *mut u64;
+    frame.nested = entered.nested;
+    // SAFETY: the frame's `uc_stack`.
+    unsafe { frame.stack.write(entered.saved) };
+    (entered.saved.flags & SS_DISABLE == 0).then_some((entered.saved.base, entered.saved.size))
 }
 
 /// A planted fault in shim code, for the containment tests: inside a shim
@@ -228,46 +252,23 @@ pub extern "C" fn patina_planted_fault(kind: i32) -> u8 {
     unsafe { std::ptr::read_volatile(address as *const u8) }
 }
 
-/// Give the trap's host action the guest action's `SA_ONSTACK`: the kernel
-/// then builds the fault's frame on the alternate stack exactly when it would
-/// have built the guest handler's there.
-pub(super) fn mirror_onstack(flags: u64) {
-    let mut trap = Action::default();
-    let query = [
-        u64::from(SIGSEGV),
-        0,
-        &mut trap as *mut _ as u64,
-        SIGSET_BYTES as u64,
-        0,
-        0,
-    ];
-    if host(SYS_RT_SIGACTION, query) != 0 {
-        fatal("host SIGSEGV trap action query failed (rt_sigaction)");
-    }
-    if (trap.flags ^ flags) & SA_ONSTACK == 0 {
-        return;
-    }
-    trap.flags ^= SA_ONSTACK;
-    let install = [
-        u64::from(SIGSEGV),
-        &trap as *const _ as u64,
-        0,
-        SIGSET_BYTES as u64,
-        0,
-        0,
-    ];
-    if host(SYS_RT_SIGACTION, install) != 0 {
-        fatal("host SIGSEGV trap action install failed (rt_sigaction)");
-    }
-}
-
 /// The trap handler's first act: take the thread for the shim, with the
 /// interrupted stack pointer. Answers 1 when guest code was interrupted, 0
 /// when shim code already owned the thread (an entry, a shim lock held, or
-/// the trap's own glue), whose fault is [`patina_trap_shim_fault`].
+/// the trap's own glue), whose fault is [`patina_trap_shim_fault`]. An
+/// interrupted stack pointer on the private stack is shim code that let a
+/// delivery in (its unblock): the guest code it stands for is its entry's.
+/// Where `stack` names the frame's `uc_stack`, the handlers guest code has
+/// provably left are dropped ([`frames::resync`]).
 #[unsafe(no_mangle)]
-pub extern "C" fn patina_trap_enter(sp: usize) -> i32 {
+pub extern "C" fn patina_trap_enter(sp: usize, stack: *mut Stack) -> i32 {
+    let (entry_sp, _) = crate::panic_boundary::guest_entry();
+    let private = frames::private_contains(sp);
+    let sp = if private { entry_sp } else { sp };
     let owned = crate::panic_boundary::claim(sp) || crate::in_shim_critical();
+    if !owned && !private {
+        frames::resync(stack);
+    }
     i32::from(!owned)
 }
 
@@ -277,10 +278,13 @@ pub extern "C" fn patina_trap_leave() {
     crate::panic_boundary::release();
 }
 
-/// The SIGSYS door's interrupted stack pointer, for the entry it calls next.
+/// The SIGSYS door's interrupted stack pointer, for the entry it calls next,
+/// and its frame's `uc_stack`: the handlers guest code has provably left
+/// are dropped ([`frames::resync`]).
 #[unsafe(no_mangle)]
-pub extern "C" fn patina_note_guest_sp(sp: usize) {
+pub extern "C" fn patina_note_guest_sp(sp: usize, stack: *mut Stack) {
     crate::panic_boundary::note_guest_sp(sp);
+    frames::resync(stack);
 }
 
 /// A fault while shim code owned the thread: a named stop, never the guest's
@@ -352,7 +356,7 @@ pub extern "C" fn patina_trap_take_default(sig: i32) -> ! {
 /// unblocked and sent to this thread. Sent, not raised again by the
 /// instruction, so a core dump's siginfo is `SI_TKILL` with no address where
 /// natively it is the kernel's; the wait status is the same.
-fn take_default(sig: u8) -> ! {
+pub(super) fn take_default(sig: u8) -> ! {
     let default = Action::default();
     host(
         SYS_RT_SIGACTION,
@@ -433,13 +437,6 @@ thread_local! {
     /// handler of the same batch installs meanwhile.
     static SENT: [Cell<Option<(Action, Info)>>; SENT_SLOTS] =
         const { [const { Cell::new(None) }; SENT_SLOTS] };
-    /// While the trap serves a counter read off the alternate stack
-    /// ([`with_counter_altstack`]): the guest's host mask the read interrupted.
-    static SERVING: Cell<Option<u64>> = const { Cell::new(None) };
-    /// Private to this host thread, reused across counter reads and unmapped
-    /// at managed thread completion (including raw exit, which skips TLS
-    /// destructors). Never registered while guest code can run.
-    static COUNTER_STACK: CounterStack = const { CounterStack(Cell::new(None)) };
     static SEGV: RefCell<SegvMask> = const {
         RefCell::new(SegvMask {
             current: SegvBlock::No,
@@ -476,181 +473,16 @@ fn take_sent(sig: u8, info: &Info) -> Option<Action> {
     })
 }
 
-/// One slot per signal number up to SIGSEGV, the highest an instruction
-/// raises.
-const SENT_SLOTS: usize = SIGSEGV as usize + 1;
+/// One slot per signal number: every signal a guest handler runs for is
+/// queued through the front handler.
+const SENT_SLOTS: usize = SIGNAL_MAX as usize + 1;
 
-/// A counter read the trap took on the alternate stack, to be served off it
-/// (`c/posix/init.c`).
-#[repr(C)]
-pub struct Served {
-    /// Actual kernel registration before the C entry installed the stop stack.
-    before: Stack,
-    /// Host mask before the C entry held asynchronous signals.
-    interrupted: u64,
-}
-
-/// Published to the C entry before arming: no Rust call or allocation is
-/// needed on a small guest signal stack to find the private execution stack.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct CounterStacks {
-    signal: Stack,
-    top: usize,
-    held_mask: u64,
-}
-
-/// One host mapping: guard, nested-signal region, guard, execution region.
-/// They are disjoint so installing the signal stack cannot overwrite live
-/// runtime frames, and restoring the guest registration never gets EPERM.
-struct CounterStack(Cell<Option<(CounterStacks, usize, usize)>>);
-const COUNTER_EXECUTION: usize = 64 * 1024;
-
-impl CounterStack {
-    fn prepare(&self, publication: usize) -> CounterStacks {
-        if let Some((stacks, _, _)) = self.0.get() {
-            return stacks;
-        }
-        use patina_dst_syscalls::Syscall;
-        const AT_PAGESZ: u64 = 6;
-        const AT_MINSIGSTKSZ: u64 = 51;
-        let page = crate::sud::auxv_value(AT_PAGESZ).expect("host page size") as usize;
-        let minimum = crate::sud::auxv_value(AT_MINSIGSTKSZ).unwrap_or(0) as usize;
-        let size = minimum
-            .checked_add(64 * 1024 + page - 1)
-            .expect("counter stack size")
-            / page
-            * page;
-        let length = size
-            .checked_add(2 * page + COUNTER_EXECUTION)
-            .expect("counter stack guards");
-        // PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS. Host aliases only; this
-        // mapping must never enter the guest's mapping or descriptor tables.
-        let base = host(
-            Syscall::N_mmap.number().into(),
-            [0, length as u64, 0, 0x22, u64::MAX, 0],
-        );
-        if base < 0 {
-            fatal("host counter alternate stack allocation failed (mmap)");
-        }
-        let stack = Stack {
-            base: base as usize + page,
-            flags: 0,
-            size,
-        };
-        if host(
-            Syscall::N_mprotect.number().into(),
-            [stack.base as u64, size as u64, 3, 0, 0, 0],
-        ) != 0
-        {
-            fatal("host counter alternate stack protection failed (mprotect)");
-        }
-        let execution = stack.base + size + page;
-        if host(
-            Syscall::N_mprotect.number().into(),
-            [execution as u64, COUNTER_EXECUTION as u64, 3, 0, 0, 0],
-        ) != 0
-        {
-            fatal("host counter execution stack protection failed (mprotect)");
-        }
-        let stacks = CounterStacks {
-            signal: stack,
-            top: execution + COUNTER_EXECUTION,
-            held_mask: host_mask(!SYNCHRONOUS),
-        };
-        self.0.set(Some((stacks, page, publication)));
-        stacks
+/// The guest's alternate stack registration: virtual where the thread's
+/// shim handlers build their frames privately, else the kernel's.
+pub(super) fn current_altstack() -> Stack {
+    if frames::armed() {
+        return frames::guest_stack();
     }
-
-    fn release(&self) {
-        if let Some((stacks, page, publication)) = self.0.take() {
-            // SAFETY: C's thread-local publication lives until this host thread exits.
-            unsafe { (publication as *mut CounterStacks).write(CounterStacks::default()) };
-            let stack = stacks.signal;
-            if host(
-                patina_dst_syscalls::Syscall::N_munmap.number().into(),
-                [
-                    (stack.base - page) as u64,
-                    (stack.size + 2 * page + COUNTER_EXECUTION) as u64,
-                    0,
-                    0,
-                    0,
-                    0,
-                ],
-            ) != 0
-            {
-                fatal("host counter alternate stack release failed (munmap)");
-            }
-        }
-    }
-}
-
-/// Prepare while still on the ordinary thread stack, before PR_SET_TSC.
-/// # Safety
-/// `out` is C thread-local storage that lives until the host thread exits.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_counter_stacks_prepare(out: *mut CounterStacks) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let stacks = COUNTER_STACK.with(|stack| stack.prepare(out as usize));
-    unsafe { out.write(stacks) };
-}
-
-pub(crate) fn release_counter_stack() {
-    COUNTER_STACK.with(CounterStack::release);
-}
-
-/// Run `body`, a counter read the trap took on the alternate stack and serves
-/// off it (`served`; null: served where the trap's frame is, which needs
-/// nothing). No guest code runs until the read is done, so none can build a
-/// frame over the trap's live frames there or register a stack meanwhile:
-/// every signal but the containment ones and those an instruction raises
-/// (whose front handler names a fault in the shim's own code) is held
-/// blocked (the trap frame's `rt_sigreturn` installs the guest's mask again,
-/// and what arrived meanwhile is delivered then, after the instruction, as it
-/// may be natively), and a delivery that would run a handler, a `sigaltstack` or a
-/// nested counter read is a named stop. The kernel uses a separate guarded
-/// shim stack meanwhile, so a nested fault cannot overwrite the trap's live
-/// frames, nor require the guest's stack to fit two host signal frames (Rust
-/// std's 8 KiB stack cannot on hosts with large xsave frames). At the read's
-/// end the kernel holds again exactly the registration it held at entry,
-/// including SS_AUTODISARM's disabled state while its outer frame runs. C has
-/// already held asynchronous signals, switched execution stacks, and installed
-/// the disjoint signal region before entering Rust; no allocation happens here.
-pub(crate) fn with_counter_altstack<T>(served: *const Served, body: impl FnOnce() -> T) -> T {
-    // SAFETY: null, or the C entry's captured kernel registration and mask.
-    let Some(served) = (unsafe { served.as_ref() }) else {
-        return body();
-    };
-    if SERVING.replace(Some(served.interrupted)).is_some() {
-        crate::trap_fatal(
-            "a counter read nested in one the trap serves off the alternate stack: not modeled",
-        );
-    }
-    let value = body();
-    install_altstack(served.before);
-    if SERVING.take().is_none() {
-        crate::trap_fatal(
-            "a counter read served off the alternate stack ended twice: shim state is corrupt",
-        );
-    }
-    value
-}
-
-/// While the trap serves a counter read off the alternate stack, the guest's
-/// mask the read interrupted (the host's holds every signal back meanwhile).
-pub(super) fn serving_counter_read() -> Option<u64> {
-    SERVING.get()
-}
-
-/// No guest code runs while a counter read is served off the alternate stack
-/// ([`with_counter_altstack`]): where some would, the run stops by name.
-pub(super) fn stop_while_serving(what: &str) -> ! {
-    crate::trap_fatal(&format!(
-        "{what} while a counter read is served off the alternate stack: not modeled"
-    ))
-}
-
-fn kernel_altstack() -> Stack {
     let mut stack = Stack::default();
     if host(
         SYS_SIGALTSTACK,
@@ -660,12 +492,6 @@ fn kernel_altstack() -> Stack {
         fatal("host alternate stack query failed (sigaltstack)");
     }
     stack
-}
-
-fn install_altstack(stack: Stack) {
-    if host(SYS_SIGALTSTACK, [&stack as *const _ as u64, 0, 0, 0, 0, 0]) != 0 {
-        fatal("host alternate stack install failed (sigaltstack)");
-    }
 }
 
 /// Whether SIGSEGV is blocked for this thread's guest code.
@@ -685,13 +511,18 @@ struct Scope {
     /// The shim entry that opened it: while that entry runs, it has not been
     /// left.
     entry: u64,
-    /// A word of the frame that encloses the scope and everything it runs:
-    /// a stack pointer above it, on the same stack, has left the scope.
+    /// A word of the frame that encloses the scope and everything it runs,
+    /// overwritten once guest code left the scope and ran there.
     canary: usize,
     /// What was written there.
     value: u64,
-    /// The alternate stack the frame is on, if it is on one: else it is on
-    /// the thread's ordinary stack.
+    /// Where on the guest's stacks the scope's guest code runs below: a
+    /// stack pointer above it, on the same stack, has left the scope. The
+    /// canary's own address, unless that is on the private stack (shim code
+    /// serving a trap), where it is the trapped guest code's.
+    sp: usize,
+    /// The alternate stack `sp` is on, if it is on one: else it is on the
+    /// thread's ordinary stack.
     alt: Option<(usize, usize)>,
     /// Opened by shim code (a delivery batch, a temporary mask), whose own
     /// frames the guest code it runs is below.
@@ -758,7 +589,9 @@ fn left(scope: &Scope, at: &Position, stacks: &[(usize, usize)]) -> bool {
         Some(frame) => on(at.sp, frame),
         None => here.is_none(),
     };
-    if same && at.sp > scope.canary {
+    // Everything the scope runs is strictly below `sp`: guest code at `sp`
+    // itself (the code a trap interrupted, say) has left it.
+    if same && at.sp >= scope.sp {
         return true;
     }
     // On the ordinary stack, off the alternate stack the frame is on:
@@ -825,9 +658,9 @@ impl SegvMask {
         self.stacks[self.known] = stack;
         self.known += 1;
     }
-    /// Open a scope whose frame word is `canary`, with `stack` the
-    /// alternate stack the kernel holds for the thread, if any.
-    fn open(&mut self, canary: *mut u64, stack: Option<(usize, usize)>, shim: bool) {
+    /// Open a scope whose frame word is `canary`, whose guest code runs
+    /// below `sp`, with `stack` the guest's alternate stack, if any.
+    fn open(&mut self, canary: *mut u64, sp: usize, stack: Option<(usize, usize)>, shim: bool) {
         if self.depth == SCOPES {
             crate::trap_fatal(
                 "signal handlers under the counter trap nest deeper than the shim tracks \
@@ -843,7 +676,7 @@ impl SegvMask {
         if let Some(stack) = stack {
             self.note(stack);
         }
-        let alt = alternate(&self.stacks[..self.known], canary as usize);
+        let alt = alternate(&self.stacks[..self.known], sp);
         let value = self.next;
         self.next = self.next.wrapping_add(2);
         // SAFETY: the caller's own frame word.
@@ -852,6 +685,7 @@ impl SegvMask {
             entry: crate::panic_boundary::guest_entry().1,
             canary: canary as usize,
             value,
+            sp,
             alt,
             shim,
             saved: self.current,
@@ -918,7 +752,6 @@ pub(super) fn registered(stack: Stack) {
 /// an `SS_AUTODISARM` stack disabled while a handler runs on it.
 pub(super) fn restored(stack: Stack) {
     if stack.flags & SS_DISABLE == 0 {
-        stack_changed(&stack);
         let known = SEGV.with_borrow(|segv| segv.registered);
         if known != Some((stack.base, stack.size)) {
             registered(stack);
@@ -929,8 +762,8 @@ pub(super) fn restored(stack: Stack) {
 /// After a delivery batch: the kernel's alternate stack is what the last
 /// frame's return restored ([`restored`]).
 pub(super) fn batch_returned() {
-    if trap_routed(SIGSEGV) || FRONT.load(Ordering::Relaxed) != 0 {
-        restored(kernel_altstack());
+    if trap_routed(SIGSEGV) || front_installed() {
+        restored(current_altstack());
     }
 }
 
@@ -956,9 +789,10 @@ impl Scoped {
             return;
         }
         let canary = &mut self.canary as *mut u64;
-        let stack = kernel_altstack();
+        let stack = current_altstack();
         let stack = (stack.flags & SS_DISABLE == 0).then_some((stack.base, stack.size));
-        SEGV.with_borrow_mut(|segv| segv.open(canary, stack, true));
+        let sp = frames::guest_position(canary as usize);
+        SEGV.with_borrow_mut(|segv| segv.open(canary, sp, stack, true));
         self.at = canary as usize;
     }
     /// The scope returned: the block is again what it opened under.
@@ -980,35 +814,56 @@ pub(super) fn open_scopes() -> (usize, SegvBlock) {
     SEGV.with_borrow(|segv| (segv.depth, segv.current))
 }
 
-/// The frame a fault arrived on, as the C fault handler describes it.
+/// The frame a signal arrived on, as the C front or trap handler describes
+/// it, and where the guest handler it runs goes.
 #[repr(C)]
 pub struct Frame {
     /// The interrupted stack pointer.
     sp: usize,
-    /// The alternate stack the kernel saved in the frame (`uc_stack`), which
-    /// `rt_sigreturn` installs again (as the handler left it).
-    stack: *const Stack,
-    /// A word of the C handler's own frame: every guest handler it calls runs
-    /// below it.
+    /// The frame's `uc_stack`, which `rt_sigreturn` installs as the host
+    /// registration; the guest handler sees its own registration there.
+    stack: *mut Stack,
+    /// A word every guest frame the handler runs is below: the C handler's
+    /// own (in place), or the second word of the shim's slot on the guest's
+    /// stack.
     canary: *mut u64,
     /// The frame's saved mask (`uc_sigmask`), which `rt_sigreturn` installs.
     mask: *mut u64,
+    /// The private stack the C handler's frame stands above: nested frames
+    /// go below it while the guest handler runs.
+    floor: usize,
+    /// Where the guest handler is called (its slot), or 0: in place.
+    target: usize,
+    /// The host registration while the guest handler runs.
+    nested: Stack,
+    /// The frame's `uc_stack` as the kernel saved it.
+    host: Stack,
+    /// The stack pointer the frame resumes at, once the handler returned.
+    resume: usize,
+    /// Where the guest handler runs, as the SIGSEGV scope compares it.
+    position: usize,
 }
 
 #[cfg(test)]
 impl Frame {
     /// A frame on no alternate stack for a fault at `sp`.
     pub(super) fn below(sp: usize, canary: *mut u64, mask: *mut u64) -> Self {
-        static NONE: Stack = Stack {
+        static mut NONE: Stack = Stack {
             base: 0,
             flags: SS_DISABLE,
             size: 0,
         };
         Self {
             sp,
-            stack: &NONE,
+            stack: &raw mut NONE,
             canary,
             mask,
+            floor: 0,
+            target: 0,
+            nested: Stack::default(),
+            host: Stack::default(),
+            resume: sp,
+            position: canary as usize,
         }
     }
 }
@@ -1024,16 +879,13 @@ impl Frame {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_signal_fault(
     info: *const Info,
-    frame: *const Frame,
+    frame: *mut Frame,
     handler: *mut Action,
 ) -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let (info, frame) = unsafe { (*info, &*frame) };
-    // SAFETY: the frame's `uc_stack`.
-    let stack = unsafe { *frame.stack };
-    let alt = (stack.flags & SS_DISABLE == 0).then_some((stack.base, stack.size));
+    let (info, frame) = unsafe { (*info, &mut *frame) };
     let at = Position {
-        sp: frame.sp,
+        sp: frames::guest_position(frame.sp),
         entry: crate::panic_boundary::guest_entry().1,
     };
     let sent = take_sent(SIGSEGV, &info);
@@ -1073,15 +925,9 @@ pub unsafe extern "C" fn patina_signal_fault(
         }
     };
     // The handler returns into the trap's handler, never into a restorer.
-    #[cfg(target_arch = "x86_64")]
-    if action.flags & SA_RESTORER == 0 || action.restorer != RESTORER.load(Ordering::Relaxed) {
-        crate::trap_fatal(
-            "a SIGSEGV handler registered with a restorer of its own (a raw sigaction) under \
-             the counter trap: its return is not modeled",
-        );
-    }
+    let alt = enter(frame, action.flags);
     SEGV.with_borrow_mut(|segv| {
-        segv.open(frame.canary, alt, false);
+        segv.open(frame.canary, frame.position, alt, false);
         if action.flags & SA_NODEFER == 0 || action.mask & bit(SIGSEGV) != 0 {
             segv.current = SegvBlock::Yes;
         }
@@ -1126,7 +972,14 @@ pub unsafe extern "C" fn patina_signal_fault_return(frame: *const Frame) {
         }
     });
     // SAFETY: the frame's `uc_stack`, as the handler left it.
-    restored(unsafe { *frame.stack });
+    let left_as = unsafe { *frame.stack };
+    if frame.target != 0 {
+        frames::leave(frame.target, left_as, frames::guest_position(frame.resume));
+        // The host registration the frame's return installs.
+        let host = frames::frame_return(frame.resume, frame.host);
+        unsafe { frame.stack.write(host) };
+    }
+    restored(left_as);
     let me = current_task();
     let deliverable = {
         let mut state = lock_state();
@@ -1194,6 +1047,7 @@ mod tests {
             entry: 1,
             canary,
             value: 0,
+            sp: canary,
             alt,
             shim: true,
             saved: SegvBlock::No,

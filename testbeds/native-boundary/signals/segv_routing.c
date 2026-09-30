@@ -24,15 +24,15 @@
  *                 signal reads SIGSEGV back blocked, then faults: the default
  *                 action, never the SIGSEGV handler (which exits 42);
  *   front-small   the masked-fault signal's SA_ONSTACK handler, which leaves
- *                 by siglongjmp, on an alternate stack with room for the
- *                 kernel's frame and 768 bytes: natively it runs, under the
- *                 shim the fault handler's route would not fit below the
- *                 frame, a named stop;
- *   front-segv-small  the same admission check through the x86 counter entry;
+ *                 by siglongjmp, on an alternate stack with room for a
+ *                 delivery and 768 bytes: it runs (under the shim the
+ *                 kernel's frame, and the shim's route, are off that stack);
+ *   front-segv-small  the same through the x86 counter entry;
  *   front[-segv]-autodisarm-small  nested faults while uc_stack is disabled;
  *   kernel-gp     (x86_64) hlt's SI_KERNEL fault preserves registration/mask;
- *   front-room / front-segv-room  sentinel high-water measurement of a returning
- *                 handler, including its shim return path, below the kernel frame;
+ *   route-cost    how much of a large alternate stack a delivery takes above
+ *                 its handler's frame, for a raised SIGUSR2, a SIGILL and a
+ *                 SIGSEGV (the counter trap's route on x86_64);
  *   order-shared  a process-directed SIGSEGV pending with a thread-directed
  *                 SIGUSR1: the private one is dequeued first, so the SIGSEGV
  *                 frame is on top and its handler runs first;
@@ -58,13 +58,11 @@
  *                 on an SS_AUTODISARM alternate stack that lies above the
  *                 stack it was delivered from (a local array of an outer
  *                 frame), and reads SIGSEGV back blocked there;
- *   alarm         (x86_64) SA_ONSTACK alarms fire while counter reads taken
- *                 on the alternate stack are served: native, the handlers run
- *                 and the reads go on; under the shim a handler that would run
- *                 during such a read is a named stop;
- *   alarm-small   (x86_64) the same on a small native-capable stack: counter
- *                 reads still reach the handler-delivery stop, never a refusal
- *                 merely because a second kernel frame would not fit;
+ *   alarm         SA_ONSTACK alarms fire while counter reads (x86_64; clock
+ *                 reads elsewhere) are taken: the handlers run and the reads
+ *                 go on;
+ *   alarm-small   the same on an alternate stack too small for two of the
+ *                 kernel's frames, which natively never nest there;
  *   prefixed      (x86_64) a REX-prefixed rdtsc, which the CPU executes as a
  *                 counter read and the trap does not answer: never a SIGSEGV
  *                 for the guest's handler (which exits 97).
@@ -81,6 +79,7 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
+#include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
 
@@ -89,7 +88,7 @@
 #endif
 
 #define ALT_SIZE (256 * 1024)
-static char alt[ALT_SIZE];
+_Alignas(64) static char alt[ALT_SIZE];
 static sigjmp_buf escape;
 static volatile sig_atomic_t on_alt, code, calls;
 static volatile int never = -1;
@@ -111,12 +110,18 @@ static int descend(int depth) {
     return descend(depth + 1) + frame[0];
 }
 
+/* A timestamp-counter read (x86_64); elsewhere a clock read, the boundary
+ * the runtime answers the same way, so a loop of them advances virtual time
+ * and reaches the timers everywhere. */
 static void counter_read(void) {
 #if defined(__x86_64__)
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     (void)lo;
     (void)hi;
+#else
+    struct timespec now;
+    assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
 #endif
 }
 
@@ -294,10 +299,9 @@ static void on_small_nested(int sig, siginfo_t *info, void *context) {
 }
 
 static void front_small(int segv, int nested) {
-    size_t frame = kernel_frame_size();
-    size_t size = nested ? 2 * frame + 1536 : frame + 768;
+    size_t frame = delivery_stack_bytes();
     /* Match the probe's aligned top, never round up the intended headroom. */
-    size &= ~(size_t)63;
+    size_t size = small_stack_bytes((nested ? 2 * frame + 1536 : frame + 768) & ~(size_t)63);
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
     size_t rounded = (size + page - 1) / page * page;
     char *mapping = mmap(NULL, rounded + page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -345,27 +349,30 @@ static void kernel_gp(void) {
 }
 #endif
 
-static uintptr_t front_frame;
-static void on_front_room(int sig, siginfo_t *info, void *context) {
+void on_route_body(int sig, siginfo_t *info, void *context);
+void on_route_body(int sig, siginfo_t *info, void *context) {
     ucontext_t *uc = context;
-    (void)sig;
-    front_frame = kernel_frame_base(info, context);
+    (void)info;
+    if (sig == SIGUSR2) return;
 #if defined(__x86_64__)
     uc->uc_mcontext.gregs[REG_RIP] += sig == SIGSEGV ? 3 : 2; /* store / ud2 */
 #else
-    uc->uc_mcontext.pc += 4; /* udf */
+    uc->uc_mcontext.pc += 4; /* strb / udf */
 #endif
 }
 
-static void front_room(int segv) {
-    /* No guest libc calls on this stack: measure the front route and return,
-     * not a guest handler's arbitrary stack needs. Sentinel bytes measure
-     * writes, not untouched reserved slots; pair with C compiler stack usage. */
+ENTRY_SP_HANDLER(on_route, on_route_body);
+
+/* A delivery of `sig` whose SA_ONSTACK handler runs on a fresh stack: the
+ * bytes it takes above the handler's entry stack pointer. */
+static size_t route_cost(int sig) {
     volatile char *page = no_access();
-    memset(alt, 0xa5, sizeof alt);
     on_alt_stack();
-    install(segv ? SIGSEGV : SIGILL, on_front_room, SA_ONSTACK, 0);
-    if (segv) {
+    install(sig, on_route, SA_ONSTACK, 0);
+    on_route_sp = 0;
+    if (sig == SIGUSR2) {
+        assert(raise(SIGUSR2) == 0);
+    } else if (sig == SIGSEGV) {
         store(page);
     } else {
 #if defined(__x86_64__)
@@ -374,10 +381,14 @@ static void front_room(int segv) {
         __asm__ volatile("udf #0");
 #endif
     }
-    size_t low = 0;
-    while (low < sizeof alt && (unsigned char)alt[low] == 0xa5) ++low;
-    assert(front_frame > (uintptr_t)alt + low);
-    printf("FRONT_ROUTE_BYTES %zu\n", front_frame - (uintptr_t)alt - low);
+    uintptr_t top = (uintptr_t)alt + sizeof alt;
+    assert(on_route_sp > (uintptr_t)alt && on_route_sp < top);
+    return top - on_route_sp;
+}
+
+static void route_costs(void) {
+    size_t usr2 = route_cost(SIGUSR2), ill = route_cost(SIGILL), segv = route_cost(SIGSEGV);
+    printf("ROUTE_COST async=%zu fault=%zu segv=%zu\n", usr2, ill, segv);
 }
 
 static void on_reraise(int sig, siginfo_t *info, void *context) {
@@ -540,7 +551,9 @@ static void on_alarm(int sig) {
 
 static void alarm_reads(int small) {
     if (small) {
-        size_t size = (2 * kernel_frame_size() - 512) & ~(size_t)63;
+        /* Short of two deliveries by 512 bytes. */
+        size_t twice = 2 * delivery_stack_bytes();
+        size_t size = small_stack_bytes((twice > 512 ? twice - 512 : 0) & ~(size_t)63);
         void *stack = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         assert(stack != MAP_FAILED);
         stack_t registered = {.ss_sp = stack, .ss_size = size, .ss_flags = 0};
@@ -583,7 +596,7 @@ static void prefixed(void) {
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (strcmp(argv[1], "frame-size") == 0) {
-        report_kernel_frame_size();
+        report_delivery_stack_bytes();
     } else if (strcmp(argv[1], "overflow") == 0) {
         overflow();
     } else if (strcmp(argv[1], "raise") == 0) {
@@ -610,10 +623,8 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[1], "kernel-gp") == 0) {
         kernel_gp();
 #endif
-    } else if (strcmp(argv[1], "front-room") == 0) {
-        front_room(0);
-    } else if (strcmp(argv[1], "front-segv-room") == 0) {
-        front_room(1);
+    } else if (strcmp(argv[1], "route-cost") == 0) {
+        route_costs();
     } else if (strcmp(argv[1], "order-shared") == 0) {
         ordered_delivery(1, ORDER_RETURN);
     } else if (strcmp(argv[1], "order-mask") == 0) {

@@ -149,8 +149,6 @@ pub fn compile_staged_posix_object(dir: &Path) -> PathBuf {
     let object = dir.join("patina_posix.o");
     let status = c_compiler()
         .args(patina_dst_native_shim::POSIX_C_FLAGS)
-        // Metadata only: the code-generation flags are the shipped object's.
-        .arg("-fstack-usage")
         .arg("-I")
         .arg(dir)
         .arg("-c")

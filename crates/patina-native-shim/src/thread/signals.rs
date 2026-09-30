@@ -4,10 +4,11 @@ use super::*;
 use crate::EINTR;
 mod fault;
 pub(crate) mod fd;
+mod frames;
 mod waits;
-pub(super) use fault::release_counter_stack;
-pub(crate) use fault::with_counter_altstack;
-use fault::{Scoped, SegvBlock, mirror_onstack, trap_routed};
+pub(super) use fault::front_installed;
+use fault::{Scoped, SegvBlock, trap_routed};
+pub(super) use frames::{arm as arm_signal_stack, release as release_signal_stack};
 use patina_dst_abi::SignalTarget;
 use std::sync::atomic::Ordering;
 use waits::Blocked;
@@ -23,11 +24,10 @@ thread_local! {
     static RELEASING_FRAMES: Cell<bool> = const { Cell::new(false) };
     // A guest restorer's frame blocked SIGSEGV for the mask its return installs.
     static RESTORED_SEGV: Cell<bool> = const { Cell::new(false) };
-    // Only mask/stack-changing entries need to rewrite a SIGSYS return frame.
+    // Only mask-changing entries need to rewrite a SIGSYS return frame.
     static FRAME_DIRTY: Cell<u8> = const { Cell::new(0) };
 }
 const FRAME_MASK: u8 = 1;
-const FRAME_STACK: u8 = 2;
 
 static RESTORER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -453,9 +453,6 @@ const SEGV_UNKNOWN: &str = "SIGSEGV's block is read below a SIGSEGV handler that
                             apart there";
 
 pub(super) fn read_mask() -> u64 {
-    if let Some(mask) = fault::serving_counter_read() {
-        return mask;
-    }
     let mut mask = 0u64;
     if host(
         SYS_RT_SIGPROCMASK,
@@ -500,6 +497,8 @@ pub(super) fn activate() -> TaskId {
     current_task()
 }
 
+/// A SIGSYS frame's return: the mask a guest syscall installed, and the
+/// private registration guest code runs under ([`frames`]).
 /// # Safety
 /// Pointers name the signal frame's mask and alternate-stack fields.
 #[unsafe(no_mangle)]
@@ -511,9 +510,7 @@ pub unsafe extern "C" fn patina_signal_frame(mask: *mut u64, stack: *mut Stack) 
             mask.write(read_mask());
         }
     }
-    if dirty & FRAME_STACK != 0 && host(SYS_SIGALTSTACK, [0, stack as u64, 0, 0, 0, 0]) != 0 {
-        fatal("host signal stack query failed (sigaltstack)");
-    }
+    frames::trap_return(stack);
 }
 
 /// A guest restorer's `rt_sigreturn` (both doors, `c/posix/init.c`): the frame
@@ -561,6 +558,24 @@ fn containment_kept_unblocked(dropped: u64) {
         b"patina: a signal handler's frame mask blocks SIGSYS, which containment keeps \
           unblocked: the handler's return leaves it unblocked, where a native run would \
           block it\n",
+    );
+}
+
+/// The host's SIGABRT disposition is the default again, for a stop that
+/// must end the process by it: never through a guest handler.
+pub(crate) fn default_host_abort() {
+    const SIGABRT: u64 = 6;
+    let default = Action::default();
+    host(
+        SYS_RT_SIGACTION,
+        [
+            SIGABRT,
+            &default as *const _ as u64,
+            0,
+            SIGSET_BYTES as u64,
+            0,
+            0,
+        ],
     );
 }
 
@@ -665,6 +680,7 @@ pub(crate) fn deliver() {
     }
     super::timers::fire_due();
     refresh_handler_mask();
+    frames::resync_on_guest_stack();
     loop {
         let me = current_task();
         // Explicit C-ABI embedders may have a Context but no managed task or
@@ -725,12 +741,6 @@ pub(crate) fn deliver() {
                         "a signal handler would run inside a sleep whose thread a pending \
                          cancellation has ended under glibc: not modeled",
                     );
-                }
-                if fault::serving_counter_read().is_some()
-                    && batch.iter().any(|(_, action, _)| action.handler != SIG_DFL)
-                {
-                    drop(state);
-                    fault::stop_while_serving("a signal handler would run");
                 }
                 state.signals.tasks.get_mut(&me).unwrap().delivering += 1;
             }
@@ -974,8 +984,12 @@ fn current_action(signals: u64) {
 /// names is dropped silently, as from a mask the guest installs itself, so
 /// the handler reads SIGSYS back unblocked.
 fn install_host_action(sig: u8, action: Action) -> i64 {
+    // SIGSYS belongs to SUD even on kernels where arming is unavailable.
+    // The guest's disposition is observable process state, never a host action.
+    if sig == SIGSYS {
+        return 0;
+    }
     if trap_routed(sig) {
-        mirror_onstack(action.flags);
         return 0;
     }
     let action = host_action(sig, action);
@@ -992,13 +1006,16 @@ fn install_host_action(sig: u8, action: Action) -> i64 {
     )
 }
 
-/// What [`install_host_action`] installs for `sig` (not trap-routed).
+/// What [`install_host_action`] installs for `sig` (not trap-routed): the
+/// front handler for a guest handler, and for every action of a signal an
+/// instruction raises.
 fn host_action(sig: u8, action: Action) -> Action {
     let action = Action {
         mask: host_mask(action.mask),
         ..action
     };
-    if fault::front_routed(sig) {
+    let handler = !matches!(action.handler, SIG_DFL | SIG_IGN);
+    if fault::front_routed(sig) && (handler || SYNCHRONOUS & bit(sig) != 0) {
         fault::front_action(action)
     } else {
         action
@@ -1037,8 +1054,9 @@ fn fault_entered(sig: u8, sent: bool) {
         {
             fatal("host fault action query failed (rt_sigaction)");
         }
+        // The trap's frame is the same for every action.
         let differs = if trap_routed(sig) {
-            (built.flags ^ current.flags) & SA_ONSTACK != 0
+            false
         } else {
             let expected = host_action(sig, current);
             (built.flags & UAPI_SA_FLAGS, built.mask, built.restorer)
@@ -1128,35 +1146,10 @@ pub unsafe extern "C" fn patina_signal_action(
     {
         return -i64::from(EINVAL);
     }
-    if action.is_some() && sig == i32::from(SIGSYS) {
-        fatal("reserved signal registration would disable deterministic containment");
-    }
     // Rust std performs registration before a deferred harness installs Context.
     // Dispositions are unrecorded process state; do not activate the scheduler.
     let mut state = lock_state();
-    let mut previous = state.signals.actions[sig as usize];
-    // Rust std installs stack-overflow handlers only over SIG_DFL. Report the
-    // reserved host disposition so it does not try to replace our containment.
-    if action.is_none() && sig == i32::from(SIGSYS) {
-        let rc = host(
-            SYS_RT_SIGACTION,
-            [
-                sig as u64,
-                0,
-                &mut previous as *mut _ as u64,
-                SIGSET_BYTES as u64,
-                0,
-                0,
-            ],
-        );
-        if rc != 0 {
-            return -i64::from(
-                std::io::Error::last_os_error()
-                    .raw_os_error()
-                    .unwrap_or_else(|| fatal("host signal syscall failed without errno")),
-            );
-        }
-    }
+    let previous = state.signals.actions[sig as usize];
     if let Some(action) = action {
         // A trap-routed action stays virtual: the host keeps the trap's
         // handler, which runs this one for each fault it does not answer. A
@@ -1277,14 +1270,12 @@ pub unsafe extern "C" fn patina_signal_pending(set: *mut u8, size: usize) -> i64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_signal_altstack(stack: *const Stack, old: *mut Stack) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // One managed task per host thread: the kernel is the sole altstack store
-    // and validator, and builds frames on that very stack (no shadow state).
-    // Startup stack registration likewise requires no Context/scheduler.
-    if fault::serving_counter_read().is_some() {
-        fault::stop_while_serving("a sigaltstack call");
-    }
-    // `sigaltstack`: the new stack copied in first, once, so the kernel
-    // installs the very stack the fault model registers.
+    // One managed task per host thread. Where the thread's shim handlers
+    // build their frames privately the registration is virtual
+    // ([`frames`]), judged at the guest code's stack pointer; elsewhere (no
+    // C layer) the kernel is the store and validator. Startup stack
+    // registration requires no Context/scheduler either way.
+    // `sigaltstack`: the new stack copied in first, once.
     let stack = if stack.is_null() {
         None
     } else {
@@ -1293,28 +1284,34 @@ pub unsafe extern "C" fn patina_signal_altstack(stack: *const Stack, old: *mut S
             Err(_) => return -i64::from(EFAULT),
         }
     };
-    let mut previous = Stack::default();
-    let rc = host(
-        SYS_SIGALTSTACK,
-        [
-            stack.as_ref().map_or(0, |stack| stack as *const _ as u64),
-            &mut previous as *mut _ as u64,
-            0,
-            0,
-            0,
-            0,
-        ],
-    );
-    if rc != 0 {
-        return -(std::io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or_else(|| fatal("host signal syscall failed without errno"))
-            as i64);
-    }
+    let previous = if frames::armed() {
+        match frames::sigaltstack(stack, crate::panic_boundary::guest_entry().0) {
+            Ok(previous) => previous,
+            Err(errno) => return -i64::from(errno),
+        }
+    } else {
+        let mut previous = Stack::default();
+        let rc = host(
+            SYS_SIGALTSTACK,
+            [
+                stack.as_ref().map_or(0, |stack| stack as *const _ as u64),
+                &mut previous as *mut _ as u64,
+                0,
+                0,
+                0,
+                0,
+            ],
+        );
+        if rc != 0 {
+            return -(std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or_else(|| fatal("host signal syscall failed without errno"))
+                as i64);
+        }
+        previous
+    };
     // The new stack took, whether or not the old one can be copied out.
     if let Some(stack) = stack {
-        fault::stack_changed(&stack);
-        FRAME_DIRTY.with(|dirty| dirty.set(dirty.get() | FRAME_STACK));
         if trap_routed(SIGSEGV) {
             fault::registered(stack);
         }
@@ -1477,6 +1474,13 @@ impl ThreadRuntime {
         target: SignalTarget,
         info: Info,
     ) -> Vec<TaskId> {
+        // No modeled kernel operation raises SIGSYS (seccomp enforcement is
+        // refused). Explicit sends and timer notifications must not reach the
+        // host containment handler or silently disappear, regardless of the
+        // guest disposition. Keep this check at the shared generation funnel.
+        if info.signo() == SIGSYS {
+            fatal("guest SIGSYS generation is not modeled; SIGSYS is reserved for containment");
+        }
         let (instance, wake) = self.signals.enqueue(info.signo(), target, info);
         with_context_raw(|context| {
             context.signal_generated(

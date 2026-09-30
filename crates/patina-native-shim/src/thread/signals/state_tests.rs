@@ -341,9 +341,9 @@ fn shim_scopes_close_where_they_opened() {
         info.words[0] = u64::from(SIGSEGV);
         info.words[1] = 1;
         let (mut canary, mut mask) = (0u64, 0u64);
-        let frame = fault::Frame::below(1, &mut canary, &mut mask);
+        let mut frame = fault::Frame::below(1, &mut canary, &mut mask);
         let mut routed = Action::default();
-        let route = unsafe { fault::patina_signal_fault(&info, &frame, &mut routed) };
+        let route = unsafe { fault::patina_signal_fault(&info, &mut frame, &mut routed) };
         if route == 1 {
             unsafe { fault::patina_signal_fault_return(&frame) };
         }
@@ -562,29 +562,6 @@ fn generation_never_takes_the_runtime_lock_twice() {
 
 #[test]
 fn reserved_signals_are_stripped_from_every_host_mask() {
-    if std::env::var_os("PATINA_SIGNAL_REFUSAL").is_some() {
-        isolated(|| {
-            crate::PATINA_TSC_ARMED.store(1, Ordering::Relaxed);
-            let action = Action {
-                handler: handler as *const () as usize,
-                ..Action::default()
-            };
-            unsafe {
-                patina_signal_action(
-                    i32::from(SIGSYS),
-                    &action,
-                    std::ptr::null_mut(),
-                    SIGSET_BYTES,
-                );
-            }
-        });
-        return;
-    }
-    if std::env::var("PATINA_SIGNAL_UNIT_CHILD").as_deref() != Ok(test_name().as_str()) {
-        let output = reexec(&test_name(), &[("PATINA_SIGNAL_REFUSAL", "sys")]);
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("reserved signal registration"));
-    }
     isolated(|| {
         crate::PATINA_TSC_ARMED.store(1, Ordering::Relaxed);
         let reserved = bit(SIGSYS) | bit(SIGSEGV);
@@ -630,9 +607,66 @@ fn reserved_signals_are_stripped_from_every_host_mask() {
     });
 }
 
+/// Registration/query is process state, not permission to change containment.
+/// Both null queries and replacements must leave the actual host action intact.
+#[test]
+fn sigsys_action_is_virtual_and_never_changes_the_host() {
+    isolated(|| {
+        let host_action = || {
+            let mut action = Action::default();
+            assert_eq!(
+                host(
+                    SYS_RT_SIGACTION,
+                    [
+                        u64::from(SIGSYS),
+                        0,
+                        &mut action as *mut _ as u64,
+                        SIGSET_BYTES as u64,
+                        0,
+                        0
+                    ]
+                ),
+                0
+            );
+            action
+        };
+        let before = host_action();
+        let mut previous = Action::default();
+        for handler in [handler as *const () as usize, SIG_IGN, SIG_DFL] {
+            let action = Action {
+                handler,
+                flags: SA_ONSTACK | SA_SIGINFO,
+                mask: bit(SIGUSR1),
+                restorer: 1234,
+            };
+            let mut old = Action::default();
+            assert_eq!(
+                unsafe { patina_signal_action(i32::from(SIGSYS), &action, &mut old, SIGSET_BYTES) },
+                0
+            );
+            assert_eq!(old, previous);
+            assert_eq!(
+                unsafe {
+                    patina_signal_action(
+                        i32::from(SIGSYS),
+                        std::ptr::null(),
+                        &mut old,
+                        SIGSET_BYTES,
+                    )
+                },
+                0
+            );
+            assert_eq!(old, action);
+            assert_eq!(host_action(), before);
+            previous = action;
+        }
+    });
+}
+
 /// Under the timestamp-counter trap a guest SIGSEGV action is virtual: the
-/// host keeps the trap's handler, which only takes the guest action's
-/// `SA_ONSTACK`, and `sigaction` reports the guest's own action back.
+/// host keeps the trap's action as it is (its frames are private whatever
+/// stack the guest's handler asks for), and `sigaction` reports the guest's
+/// own action back.
 #[test]
 fn trap_routed_sigsegv_action_stays_virtual() {
     isolated(|| {
@@ -668,10 +702,7 @@ fn trap_routed_sigsegv_action_stays_virtual() {
                 unsafe { patina_signal_action(i32::from(SIGSEGV), &guest, &mut old, SIGSET_BYTES) },
                 0
             );
-            let installed = host_action();
-            assert_eq!(installed.handler, trap.handler);
-            assert_eq!(installed.mask, trap.mask);
-            assert_eq!(installed.flags & SA_ONSTACK, flags);
+            assert_eq!(host_action(), trap);
             let mut reported = Action::default();
             assert_eq!(
                 unsafe {
@@ -722,7 +753,7 @@ fn no_pending_syscall_tail_and_unchanged_frame_issue_no_host_calls() {
 
 // Class pairing: dirty-frame ownership across nested kernel handler boundaries.
 #[test]
-fn nested_signal_frame_preserves_outer_mask_and_stack_fixups() {
+fn nested_signal_frame_preserves_outer_mask_fixup() {
     extern "C" fn nested_frame(_: i32) {
         let mut mask = u64::MAX;
         let mut stack = Stack::default();
@@ -734,16 +765,6 @@ fn nested_signal_frame_preserves_outer_mask_and_stack_fixups() {
     }
     isolated(|| {
         install_handler(SIGUSR1, nested_frame, 0, 0);
-        let mut storage = vec![0u8; 65536];
-        let stack = Stack {
-            base: storage.as_mut_ptr() as usize,
-            flags: 0,
-            size: storage.len(),
-        };
-        assert_eq!(
-            unsafe { patina_signal_altstack(&stack, std::ptr::null_mut()) },
-            0
-        );
         set_mask(SIG_BLOCK, bit(SIGUSR1));
         generate(SIGUSR1);
         set_mask(SIG_UNBLOCK, bit(SIGUSR1));
@@ -755,13 +776,9 @@ fn nested_signal_frame_preserves_outer_mask_and_stack_fixups() {
             patina_signal_frame(&mut outer_mask, &mut outer_stack);
         }
         assert_eq!(
-            (outer_mask, outer_stack),
-            (read_mask(), stack),
-            "outer mask and stack dirty bits survived inner fixup"
-        );
-        assert_eq!(
-            unsafe { patina_signal_altstack(&Stack::default(), std::ptr::null_mut()) },
-            0
+            outer_mask,
+            read_mask(),
+            "outer mask dirty bit survived inner fixup"
         );
     });
 }

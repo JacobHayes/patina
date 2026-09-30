@@ -321,75 +321,96 @@ checks: `audit_reports_sud_marker_and_kernel_requirement`,
 `raw_syscalls_are_virtualized_or_refused_before_execution`,
 `unmapped_raw_syscall_aborts_with_named_diagnostic`, and `sud_scrubs_vdso_auxv`.
 No-SUD execution is refused before opening an invalid replay trace. SIGSYS
-protection and AT_RANDOM seeding are kernel-independent. TSC checks separately
+protection and AT_RANDOM seeding are kernel-independent.
+`sigsys_action_is_virtual_and_never_changes_the_host` checks handler, ignore and
+default registrations plus null queries against the actual host disposition;
+`sigsys_registration_is_virtual_on_every_kernel` pairs it with libc/raw action
+visibility and a raw syscall that must still be contained. Explicit guest SIGSYS
+generation must abort after successful registration. The registration probe was
+red before virtualization. `at_random_is_seeded_on_every_kernel` compares seeded,
+recorded and replayed bytes and checks seed variation; the replay leg was red
+before the supervisor forwarded the recorded seed to pre-runtime startup. TSC checks separately
 cover exact clock values and trace metadata (`tsc_reads_answer_from_virtual_clock`),
 seeded jitter (`tsc_sleep_jitter_moves_counter`), genuine faults
 (`genuine_segv_is_not_swallowed`) and the trap's ownership against a guest
 SIGSEGV handler: it never sees a counter read
 (`sigsegv_handler_cannot_take_over_the_counter_trap`) or a counter read it
 declines, which is a named stop (`a_counter_read_the_trap_declines_is_a_named_stop`,
-a REX-prefixed `rdtsc`; red before: the guest's handler ran), and for an
-admitted counter read served off the alternate stack no guest code runs: a
-timer's handler that would run during it is a named stop on both large and
-small native-capable stacks where the native run goes on
-(`counter_reads_served_off_the_alternate_stack_run_no_guest_code`).
-`counter_reads_on_a_minimal_altstack_preserve_the_guest_stack` pairs this
-containment detector with a guarded measured-kernel-frame + 1536-byte stack: a native
-handler fits, repeated `rdtsc`/`rdtscp` reads return exact virtual values,
-stack registration is restored (ordinary and `SS_AUTODISARM`), and a later default fault kills with SIGSEGV
-(red before: the cut-down-stack room check aborted before the first answer).
-`counter_stacks_are_available_without_sud` forces the C SUD-unavailable branch
-while keeping TSC enabled (red: moving auxv publication back behind SUD makes
-stack preparation panic on the missing page size).
+a REX-prefixed `rdtsc`; red before: the guest's handler ran).
+
+Private signal frames (ARCHITECTURE, Linux signals). The reproducer is
+`native_containment::trapped_raw_syscalls_leave_a_small_stack_untouched`
+(`small_stack_probe.rs`): on the main thread and a second thread, raw syscalls
+with the stack pointer at the top of a 2 KiB stack, under `--record` and on
+replay; the probe reports every byte written below that stack pointer (natively
+none). Red on the previous design: the trap's kernel frame and dispatch wrote
+13.7 KB below it in a seeded run and 32.9 KB recording, so a runtime with
+small goroutine stacks corrupted memory only under `--record` (a TCP probe
+of such a runtime failed with a broken pipe and a garbage address, and its
+replay diverged). `native_signals::handlers_run_on_the_stacks_they_ask_for`
+(`signals/small_stack.c`, against the native run) sends signals by raw tgkill
+from a 2 KiB stack: the `SA_ONSTACK` handler runs inside the alternate stack it
+registered, `sigaltstack` and `uc_stack` say so (an `SS_AUTODISARM` one disabled
+inside and registered again after), a second handler nests on the same stack,
+both make raw and libc calls, and nothing is written to the small stack (red
+before: the trap's frames overran it, and the autodisarm case's checks
+failed); and
+handlers that leave by `siglongjmp` 5000 times, on the alternate and the
+ordinary stack, leave the private stack usable (red with the per-trap
+re-derivation removed: the abandoned handlers fill the shim's records and the
+run stops by name); handlers that swapcontext to a coroutine making syscalls
+on a stack of its own — a mapping, or a local array of a frame above the
+handler on the thread's own stack — from a plain or `SS_AUTODISARM` alternate
+stack or a thread's own stack, nested in another handler or taking one inside
+the coroutine, on the main thread and a second one, return intact (red while a
+stack pointer counted as proof a handler was left: being off its alternate
+stack, or above its slot or its interrupted point on the thread's stack, which
+a coroutine stack carved from a caller's frame is; the coroutine's second
+syscall built its frame over the live handler's, and its return died by
+SIGSEGV); and a
+thread-local destructor's raw syscall after its thread's handler left by
+`siglongjmp` is answered (red: the dead thread's stale record panicked the
+trap). Every row also runs through libc's `syscall(2)` door, on every arch
+(red without the libc door's own re-derivation: 5000 escapes exhausted the
+private stack).
+`private_signal_stack_levels_fit_their_budget` (a shim built with
+`planted-faults` exposes the calling thread's private stack) fills three
+levels with a sentinel and, recording, makes syscalls, takes a signal whose
+handler makes them and a nested one inside it: on x86_64 the levels use 46.7,
+48.2 and 48.2 KB of their 132 KiB budget, and each must use at most half; on
+arm64 (syscalls through glibc's door) a level holds a delivery's frames (9.6 KB
+of 136 KiB, the 4.7 KB kernel frame included). `a_delivery_costs_the_guest_stack_a_fixed_few_bytes`
+measures, natively and under the shim, how much of a large alternate stack a
+delivery takes above its handler's frame for a raised SIGUSR2, a SIGILL and a
+SIGSEGV: natively the kernel's frame (2960 B on an AVX-512 host), under the
+shim the same few bytes on every route and host (measured to the handler's
+entry stack pointer: 24 B on x86_64 at this aligned top, the slot and the
+return address; 16 B on arm64, the slot). CI keeps both and the
+CPU's flags. `frame_size.h` sizes the small-stack fixtures from that
+measurement, never from `AT_MINSIGSTKSZ` (AMX hosts advertise unrequested tile
+state), clamped to the kernel's `MINSIGSTKSZ`. So the rows that were named
+stops because a second kernel frame or the shim's route would not fit below a
+handler (`front-small`, `front-segv-small`, their autodisarm variants,
+`alarm-small`), and timer handlers that run between counter reads on an
+alternate stack (`alarm`), now match the native run. The frames' 6.8 rules
+(`do_sigaltstack`, and when guest code has left a handler) have unit
+detectors in `thread/signals/frames.rs`.
+`an_internal_stop_never_runs_a_guest_abort_handler` registers a guest SIGABRT
+handler that makes a raw syscall, then hits an internal stop: the run ends by
+SIGABRT with the named stop and the handler never runs (red before: glibc's
+abort ran the handler inside the stopping dispatch, whose raw syscall stopped
+again, forever — the runaway that grew a runtime's replay to 16 GB).
+`counter_reads_on_a_minimal_altstack_preserve_the_guest_stack` reads both
+counter forms repeatedly with a measured-delivery + 1536-byte alternate stack
+registered: exact virtual values, the registration intact (ordinary and
+`SS_AUTODISARM`), and a later default fault kills with SIGSEGV.
+`private_signal_stacks_are_available_without_sud` forces the C SUD-unavailable
+branch while keeping TSC enabled (red: moving auxv publication back behind SUD
+makes private stack preparation panic on the missing page size).
 `counter_reads_inside_small_altstack_handlers_use_private_storage` reads both
-counter forms inside native-capable small handlers, with and without autodisarm
-(red: excluding an interrupted SP already on the alternate stack dies with
-SIGSEGV). Separate larger-handler rows budget a sigaltstack ABI query too and
-assert the actual registration is still disabled inside an autodisarmed handler,
-then restored after return. These pins pair with the containment detector above
-and `private_counter_execution_has_stack_margin`, which sentinel-measures the
-first and repeated reads against the independent 64 KiB execution budget
-(red-proven with a 4 KiB acceptance cap). This is not stack-free like native
-`rdtsc`: an admitted counter fault on the guest alternate stack still needs one
-kernel signal frame plus about 400 B of C entry there; a read inside an
-already-running handler needs two kernel frames. Smaller guest stacks can die
-by SIGSEGV. Each managed thread eagerly maps the private stacks at TSC arm
-(about 136 KiB of address space and four VMAs per thread), bringing
-`vm.max_map_count` closer for guests with many thousands of threads. The
-`patina_fault_stack_changed` bounds are admission hints, not kernel state, and
-can go stale if a handler disables its stack by editing `uc_stack`, or if
-`sigaltstack` is called from a coroutine stack while an autodisarmed handler is
-live. A scheduling point inside an alternate-stack handler that would deliver
-another handled signal is a named stop by design: no guest code runs during
-private execution.
-`native_signals::fault_front_stack_budgets_cover_the_compiled_paths` measures
-both returning fault routes' written high-water below the kernel frame and
-compiler-reported C frame sizes (including the x86 counter entry and both C
-stop callees) on both architectures and stable/MSRV, using the shipped
-`POSIX_C_FLAGS`. It requires margin under the room floor; `front-small` and
-`front-segv-small` separately require numeric C-only stops on guarded,
-native-capable measured-kernel-frame + 768-byte stacks (red: the unguarded SIGSEGV route
-hung). Their nested autodisarm counterparts exercise remembered bounds (red:
-disabling those bounds kills with SIGSEGV instead of the named stop). `kernel-gp`
-on x86 pairs the counter decoder checks with a genuine in-text SI_KERNEL fault:
-its handler sees the original stack/mask and subsequent counter reads still work.
-`signals/frame_size.h` calibrates a real SIGUSR2 frame on a large aligned
-alternate stack; x86 uses the frame's ucontext minus its restorer slot, arm64
-its siginfo. No handler or shim frames enter that allowance. Small stacks
-(including nested counters and `alarm-small`) use the measured size, with the
-final top aligned down so rounding cannot add headroom. `AT_MINSIGSTKSZ` is
-reported only as diagnostic evidence: AMX hosts may advertise unused tile
-state, making it unsuitable for these deliberately short-stack tests.
-`small_signal_stacks_use_measured_kernel_frames` compares native/shim probes
-and records CPU flags in CI. `small_signal_stacks_detect_rust_before_admission`
-plants the Rust route ahead of admission on both architectures; the stack-budget
-test also rejects any Rust entry in the pre-admission C prefixes and self-tests
-that check with a planted early `patina_trap_enter`. This catches tiny Rust
-leaves even when their current compiled frames happen to fit. The existing
-sentinel and `.su` checks measure actual writes/compiler frames, not auxv.
-The budget detector is red-proven by lowering the front floor to 2 KiB.
-Measurements are retained in CI job summaries and logs. Sentinel high-water
-measures writes, not untouched reserved slots; compiler frame sizes complement it.
+counter forms inside handlers on small alternate stacks, with and without
+autodisarm, and a `sigaltstack` query there answers `SS_ONSTACK` or
+`SS_DISABLE` as natively, the registration restored after the return.
  `native_signals::a_guest_segv_handler_gets_what_the_kernel_would_give_it`
 compares the faults it does get with the native run, including a blocked fault's
 default action, a re-raise kept pending, and 6.8's frame order among pending

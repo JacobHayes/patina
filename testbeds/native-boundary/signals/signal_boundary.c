@@ -1,5 +1,5 @@
 /* Class pairing: real libc/raw doors for reserved-signal containment
- * (SIGSYS refused; a SIGSEGV registration kept off the counter trap),
+ * (SIGSYS and SIGSEGV registrations kept off the containment traps),
  * single-entry state, and internal-fatal versus guest-abort finalization
  * (glibc's `_FORTIFY_SOURCE` failures are guest aborts too). */
 #define _GNU_SOURCE
@@ -57,6 +57,15 @@ static void handler(int sig) {
     assert(sig == SIGUSR1);
     assert_safe_mask();
     handled++;
+}
+/* A guest SIGABRT handler an internal stop must never run. */
+static long raw4(long nr, long a, long b, long c, long d);
+static void abort_handler(int sig) {
+    static const char line[] = "guest SIGABRT handler ran\n";
+    (void)sig;
+    (void)!write(2, line, sizeof line - 1);
+    raw4(SYS_getpid, 0, 0, 0, 0);
+    _exit(97);
 }
 /* A guest SIGSEGV handler that must never see what the shim owns. */
 static void hijacked(int sig) {
@@ -205,9 +214,26 @@ int main(int argc, char **argv) {
     assert(argc == 2);
     assert(PATINA_SUD_ARMED); /* no unsupported-kernel false green */
     if (strcmp(argv[1], "guest-abort") == 0) abort();
+    if (strcmp(argv[1], "guest-sigsys") == 0) {
+        assert(signal(SIGSYS, handler) != SIG_ERR);
+        assert(write(2, "SIGSYS registered\n", 18) == 18);
+        raise(SIGSYS);
+        _Exit(98); /* generation must not silently disappear or run the handler */
+    }
     if (strncmp(argv[1], "fortify-", 8) == 0) fortify_failure(argv[1] + 8);
     if (strcmp(argv[1], "internal-c") == 0) fork();
     if (strcmp(argv[1], "internal-rust") == 0) raw4(999999, 0, 0, 0, 0);
+    if (strcmp(argv[1], "internal-guest-abort-handler") == 0) {
+        /* An internal stop is the host's own abort: the guest's SIGABRT
+         * handler (a runtime's, which makes raw syscalls) never runs. */
+        struct sigaction action;
+        memset(&action, 0, sizeof action);
+        action.sa_handler = abort_handler;
+        action.sa_flags = SA_ONSTACK;
+        sigemptyset(&action.sa_mask);
+        assert(sigaction(SIGABRT, &action, NULL) == 0);
+        raw4(999999, 0, 0, 0, 0);
+    }
     if (strcmp(argv[1], "internal-context-active") == 0) {
         pthread_t worker;
         assert(pthread_create(&worker, NULL, empty_task, NULL) == 0);
@@ -226,12 +252,23 @@ int main(int argc, char **argv) {
     if (strncmp(argv[1], "reserved-", 9) == 0) {
         void (*action)(int) = reserved == SIGSEGV ? hijacked : handler;
         if (reserved == SIGSEGV) assert(PATINA_TSC_ARMED);
-        if (strstr(argv[1], "libc")) signal(reserved, action);
+        if (strstr(argv[1], "libc")) assert(signal(reserved, action) != SIG_ERR);
         else {
             struct patina_signal_action act = {.handler = (uintptr_t)action};
-            raw4(SYS_rt_sigaction, reserved, (long)&act, 0, sizeof(uint64_t));
+            assert(raw4(SYS_rt_sigaction, reserved, (long)&act, 0, sizeof(uint64_t)) == 0);
         }
-        if (reserved == SIGSYS) return 98;
+        if (reserved == SIGSYS) {
+            struct sigaction libc_action;
+            struct patina_signal_action raw_action;
+            assert(sigaction(SIGSYS, NULL, &libc_action) == 0);
+            assert(raw4(SYS_rt_sigaction, SIGSYS, 0, (long)&raw_action, sizeof(uint64_t)) == 0);
+            assert(libc_action.sa_handler == action);
+            assert(raw_action.handler == (uintptr_t)action);
+            assert(raw4(SYS_getpid, 0, 0, 0, 0) == 2);
+            assert(handled == 0);
+            assert(patina_shutdown() == 0);
+            return 0;
+        }
         /* The SIGSEGV registration stays the guest's own: the counter trap
          * still answers the read. */
         uint32_t lo, hi;

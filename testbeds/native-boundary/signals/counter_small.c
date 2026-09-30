@@ -1,6 +1,7 @@
 /* Class pairing: counter containment must not depend on the host's xsave
- * frame size. One kernel frame plus 1536 bytes fits a native handler, but
- * cannot also hold a nested kernel frame below the counter trap's frames.
+ * frame size. One delivery plus 1536 bytes fits a native handler, but could
+ * not also hold a nested kernel frame below it: the counter trap's frames are
+ * private, so a read on such a stack, or in a handler on it, never needs one.
  * The native leg proves the registered stack actually takes a signal.
  * The shim leg checks both counter instructions and exact stack restoration,
  * then restores the default action and takes a genuine access fault. */
@@ -22,7 +23,6 @@ static volatile uint32_t handler_aux;
 static volatile int handler_stack_flags;
 extern unsigned char PATINA_SUD_ARMED __attribute__((weak));
 extern unsigned char PATINA_TSC_ARMED __attribute__((weak));
-extern unsigned long patina_test_counter_written __attribute__((weak));
 static void handler(int sig) {
     char here;
     (void)sig;
@@ -44,18 +44,18 @@ static void handler(int sig) {
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (strcmp(argv[1], "frame-size") == 0) {
-        report_kernel_frame_size();
+        report_delivery_stack_bytes();
         return 0;
     }
-    size_t frame = kernel_frame_size();
+    size_t frame = delivery_stack_bytes();
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
     int in_handler = strncmp(argv[1], "handler-counter", 15) == 0;
     check_in_handler = strstr(argv[1], "check") != NULL;
     /* The tight case makes no shim ABI calls on the handler's stack. The
      * separate query case also budgets the sigaltstack ABI's Rust frames. */
-    size_t size = in_handler ? 2 * frame + (check_in_handler ? 8192 : 768) : frame + 1536;
     /* Match the probe's aligned top, without adding any unbudgeted slack. */
-    size &= ~(size_t)63;
+    size_t size = small_stack_bytes(
+        (in_handler ? 2 * frame + (check_in_handler ? 8192 : 768) : frame + 1536) & ~(size_t)63);
     size_t rounded = (size + page - 1) / page * page;
     char *mapping = mmap(NULL, rounded + page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(mapping != MAP_FAILED);
@@ -96,7 +96,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     assert(autodisarm || strcmp(argv[1], "read-fault") == 0 ||
-           strcmp(argv[1], "read-fault-nosud") == 0 || strcmp(argv[1], "read-measure") == 0);
+           strcmp(argv[1], "read-fault-nosud") == 0);
     for (int i = 0; i < 3; ++i) {
         uint32_t lo, hi, aux;
         __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
@@ -110,11 +110,6 @@ int main(int argc, char **argv) {
         assert(!on_stack);
     }
     assert(write(1, "COUNTERS ANSWERED\n", 18) == 18);
-    if (strcmp(argv[1], "read-measure") == 0) {
-        assert(&patina_test_counter_written && patina_test_counter_written > 0);
-        printf("COUNTER_EXEC_BYTES %lu\n", patina_test_counter_written);
-        return 0;
-    }
     action.sa_handler = SIG_DFL;
     action.sa_flags = 0;
     assert(sigaction(SIGSEGV, &action, NULL) == 0);

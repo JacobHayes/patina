@@ -8231,7 +8231,12 @@ pub extern "C" fn patina_exit(status: c_int) -> ! {
 }
 
 /// Private fatal vehicle: never finalize an invalid run through the guest abort interposer.
+/// The stop is the host's default SIGABRT, never a delivery: a guest's
+/// SIGABRT handler (whose host action is the shim's front handler) does not
+/// run inside the stopping shim.
 fn host_abort() -> ! {
+    #[cfg(target_os = "linux")]
+    thread::signals::default_host_abort();
     unsafe { (hostapi::get().host_abort)() }
 }
 
@@ -11056,6 +11061,12 @@ mod thread {
         let start = unsafe { Box::from_raw(raw.cast::<ThreadStart>()) };
         let ThreadStart { task, routine, arg } = *start;
         set_current_task(task);
+        // The shim's signal handlers build their frames on a private stack
+        // of each managed thread's, armed before any trap can be taken on it.
+        #[cfg(target_os = "linux")]
+        if signals::front_installed() {
+            signals::arm_signal_stack();
+        }
         // Arm syscall-user-dispatch on this managed thread. The SUD config does
         // not survive clone(2), so every thread must re-arm; this is the second
         // (and only other) arming site besides the main thread in
@@ -11420,7 +11431,7 @@ mod thread {
         #[cfg(target_os = "linux")]
         signals::clear_tid(task);
         #[cfg(target_os = "linux")]
-        signals::release_counter_stack();
+        signals::release_signal_stack();
         #[cfg(target_os = "linux")]
         crate::sud::task_exited(tid_of(task));
         let mut state = lock_state();

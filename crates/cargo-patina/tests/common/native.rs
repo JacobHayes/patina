@@ -328,10 +328,6 @@ pub enum CLink {
     PosixShim,
     /// Force the SUD-unavailable startup branch, without changing TSC support.
     PosixShimWithoutSud,
-    /// Sentinel-instrument the private execution region without changing its body.
-    PosixShimMeasuredCounter,
-    /// Test-only mutation: cross a Rust boundary before fault-stack admission.
-    PosixShimEarlyRust,
     /// The POSIX layer over a shim built with `planted-faults`.
     PosixShimPlanted,
 }
@@ -363,11 +359,7 @@ pub fn assert_build_c_guest_with_flags(name: &str, link: CLink, flags: &[&str]) 
         CLink::Shim => {
             cc.arg(ARCHIVE.get_or_init(super::shim_archive));
         }
-        CLink::PosixShim
-        | CLink::PosixShimWithoutSud
-        | CLink::PosixShimMeasuredCounter
-        | CLink::PosixShimEarlyRust
-        | CLink::PosixShimPlanted => {
+        CLink::PosixShim | CLink::PosixShimWithoutSud | CLink::PosixShimPlanted => {
             static PLANTED: OnceLock<PathBuf> = OnceLock::new();
             let (_, object) = POSIX.get_or_init(|| {
                 let dir = tempfile::tempdir().unwrap();
@@ -379,55 +371,15 @@ pub fn assert_build_c_guest_with_flags(name: &str, link: CLink, flags: &[&str]) 
             } else {
                 ARCHIVE.get_or_init(super::shim_archive)
             };
-            if matches!(
-                link,
-                CLink::PosixShimWithoutSud
-                    | CLink::PosixShimMeasuredCounter
-                    | CLink::PosixShimEarlyRust
-            ) {
+            if matches!(link, CLink::PosixShimWithoutSud) {
                 super::compile_posix_object(dir.path());
                 let source = dir.path().join("posix/init.c");
-                let mut code = std::fs::read_to_string(&source).unwrap();
-                if matches!(link, CLink::PosixShimMeasuredCounter) {
-                    let call = "patina_call_on_stack(patina_tsc_read_counter, &read, patina_counter_stacks.top);";
-                    assert_eq!(
-                        code.matches(call).count(),
-                        1,
-                        "counter instrumentation site"
-                    );
-                    code = format!("unsigned long patina_test_counter_written;\n{code}").replace(call, &format!(r#"
-                        unsigned char *measure = (unsigned char *)(patina_counter_stacks.top - 65536);
-                        memset(measure, 0xa5, 65536);
-                        {call}
-                        size_t first = 0;
-                        while (first < 65536 && measure[first] == 0xa5) first++;
-                        if (65536 - first > patina_test_counter_written)
-                            patina_test_counter_written = 65536 - first;
-                    "#));
-                    std::fs::write(&source, code).unwrap();
-                } else if matches!(link, CLink::PosixShimEarlyRust) {
-                    let admission = "uintptr_t room = patina_fault_room(uc, (uintptr_t)__builtin_frame_address(0));\n    if (room < PATINA_FRONT_FLOOR) patina_fault_stack_short(sig, room);";
-                    assert_eq!(
-                        code.matches(admission).count(),
-                        2,
-                        "both fault admission sites"
-                    );
-                    code = code.replace(admission, "");
-                    for call in [
-                        "int route = patina_signal_fault(info, &frame, &handler);",
-                        "int route = patina_fault_route(sig, info, &frame, &handler);",
-                    ] {
-                        assert_eq!(code.matches(call).count(), 1, "Rust route mutation site");
-                        code = code.replace(call, &format!("{call}\n    {admission}"));
-                    }
-                    std::fs::write(&source, code).unwrap();
-                } else {
-                    let probe =
-                        "if (patina_host_prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_OFF";
-                    assert_eq!(code.matches(probe).count(), 1, "SUD probe mutation site");
-                    std::fs::write(&source, code.replace(probe,
-                    "if (1 || patina_host_prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_OFF")).unwrap();
-                }
+                let code = std::fs::read_to_string(&source).unwrap();
+                let probe =
+                    "if (patina_host_prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_OFF";
+                assert_eq!(code.matches(probe).count(), 1, "SUD probe mutation site");
+                std::fs::write(&source, code.replace(probe,
+                "if (1 || patina_host_prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_OFF")).unwrap();
                 cc.arg(super::compile_staged_posix_object(dir.path()));
             } else {
                 cc.arg(object);
