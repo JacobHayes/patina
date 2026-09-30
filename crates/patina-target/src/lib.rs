@@ -2094,7 +2094,7 @@ fn aarch64_instruction_category(instruction: u32) -> Option<(&'static str, &'sta
 /// Soundness (this is a containment gate, so a *false negative* — a real
 /// `syscall` slipping past — is the dangerous direction): the decoder fails
 /// CLOSED. Any byte sequence it cannot confidently measure — an unmapped/invalid
-/// opcode, a truncated tail, or an EVEX (AVX-512) prefix — yields an
+/// opcode, a truncated tail, or an unsupported vector map — yields an
 /// `undecodable-instruction` finding naming the offset and stops the walk, so the
 /// binary is refused rather than silently scanned past a length guess. The legacy
 /// three-byte maps (`0f 38`/`0f 3a`) *are* length-decoded: default codegen emits
@@ -2105,9 +2105,29 @@ fn aarch64_instruction_category(instruction: u32) -> Option<(&'static str, &'sta
 /// forbidden instruction. VEX (AVX/AVX2, both the two-byte `c5` and three-byte
 /// `c4` forms) is length-decoded for the same reason — default codegen emits it
 /// (`vmovdqa`/`vzeroupper`/...) and its opcodes are never forbidden, so it is
-/// measured only to reach the next real boundary. Because
-/// every real instruction advances the cursor to its true successor, a forbidden
-/// opcode embedded in another instruction's operand is never at a tested
+/// measured only to reach the next real boundary. EVEX (AVX-512, `62 P0 P1 P2`)
+/// is measured for maps 1/2/3 (`0f`/`0f 38`/`0f 3a`) by the same rules, except
+/// that EVERY EVEX instruction has a ModRM: VEX's map-1 `77` (vzero*) has no EVEX
+/// form and is refused. `62` cannot be BOUND in 64-bit mode. Compressed disp8*N
+/// is still one encoded byte; masking, vector width and broadcast/rounding do not
+/// change the operand lengths. No forbidden instruction lives in these EVEX maps.
+///
+/// EVEX fails closed on the following rather than extending VEX's length guess:
+/// - Maps other than 1/2/3: 0/7 are reserved, 4 is APX, and 5/6 are FP16; none
+///   has length rules established here. P0 bit 3 must be zero and P1 bit 2 one:
+///   other values are not the supported AVX-512 prefix format (including APX).
+/// - Preceding LOCK, 66, F2, F3 or REX: EVEX embeds its mandatory prefix and
+///   register extension; those combinations are invalid. Segment/address-size
+///   prefixes are allowed and use the ordinary ModRM/SIB/displacement rules.
+/// - P2.z with aaa=0: zero-masking requires a mask register. L'L=3 is reserved
+///   as a vector length; it is accepted only with b=1 and a register operand,
+///   where these bits can instead encode embedded rounding (round toward zero).
+/// - Missing prefix/opcode/operand bytes or a length over 15: no complete x86
+///   instruction can be measured. As with VEX, this is a length decoder, not an
+///   opcode-by-opcode validator of all operand, mask or feature constraints.
+///
+/// Because every real instruction advances the cursor to its true successor, a
+/// forbidden opcode embedded in another instruction's operand is never at a tested
 /// boundary. The decoder assumes 64-bit mode throughout, so the instructions
 /// that could leave it are refused as `far-transfer` (`lcall`/`ljmp` through
 /// memory, `lret`, `iret`); the direct far forms (`9a`/`ea`) are invalid in
@@ -2294,6 +2314,7 @@ mod x86_scan {
         let mut a67 = false;
         let mut rexw = false;
         let mut f3 = false;
+        let mut evex_incompatible_prefix = false;
         // Legacy prefixes, any order. Only `0x66`/`0x67` change a length (via the
         // effective operand/address size); lock/rep/segment do not. `f3` is
         // recorded because it selects the FSGSBASE forms of group 15. It counts
@@ -2307,6 +2328,7 @@ mod x86_scan {
                 Some(0xF0 | 0xF2 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65) => {}
                 _ => break,
             }
+            evex_incompatible_prefix |= matches!(b[p], 0x66 | 0xF0 | 0xF2 | 0xF3);
             p += 1;
             if p > 14 {
                 return Step::Undecodable; // absurd prefix run
@@ -2316,6 +2338,7 @@ mod x86_scan {
         if let Some(&r) = b.get(p) {
             if (0x40..=0x4F).contains(&r) {
                 rexw = r & 0x08 != 0;
+                evex_incompatible_prefix = true;
                 p += 1;
             }
         }
@@ -2410,7 +2433,33 @@ mod x86_scan {
                 None => return Step::Undecodable,
             }
         } else if op == 0x62 {
-            return Step::Undecodable; // EVEX (AVX-512): non-default, fail closed
+            // EVEX P0/P1/P2, opcode, then a mandatory ModRM. The module comment
+            // explains the format-level refusals; operand lengths below are the
+            // same as VEX, including compressed displacement's one-byte disp8.
+            let Some(&[p0, p1, p2, opc, modrm]) = b.get(p..p + 5) else {
+                return Step::Undecodable;
+            };
+            let map = p0 & 0x0f;
+            if evex_incompatible_prefix
+                || p0 & 0x08 != 0
+                || p1 & 0x04 == 0
+                || !matches!(map, 1..=3)
+                || (map == 1 && opc == 0x77)
+                || (p2 & 0x80 != 0 && p2 & 0x07 == 0)
+                || (p2 & 0x60 == 0x60 && (p2 & 0x10 == 0 || modrm >> 6 != 3))
+            {
+                return Step::Undecodable;
+            }
+            p += 4; // ModRM is consumed by the common operand decoder.
+            match vex_body(map, opc) {
+                Some((modrm, imm)) => OpAttr {
+                    modrm,
+                    imm,
+                    cat: Option::None,
+                    group: Group::None,
+                },
+                None => return Step::Undecodable,
+            }
         } else {
             match one_byte(op) {
                 Some(a) => a,
@@ -2523,8 +2572,8 @@ mod x86_scan {
             }
         }
         p += imm_len(imm, o66, rexw, a67);
-        if p > b.len() {
-            return Step::Undecodable; // instruction runs past the section end
+        if p > b.len() || p > 15 {
+            return Step::Undecodable; // truncated or exceeds x86's maximum length
         }
         Step::Insn { len: p, cat }
     }
@@ -3084,10 +3133,9 @@ mod x86_scan {
 
         #[test]
         fn fails_closed_on_undecodable_bytes() {
-            // An EVEX prefix (0x62) and a reserved 0F opcode (0f 04) are both
-            // declined; the scan emits an `undecodable-instruction` finding naming
-            // the offset rather than skipping past a length guess.
-            for bytes in [&[0x62, 0xf1, 0x7c, 0x48][..], &[0x0f, 0x04][..]] {
+            // A reserved EVEX map and a reserved 0F opcode are both declined;
+            // the scan reports the offset rather than skipping a length guess.
+            for bytes in [&[0x62, 0xf0, 0x7c, 0x48, 0x58, 0xc0][..], &[0x0f, 0x04][..]] {
                 let mut escapes = Vec::new();
                 scan_test(bytes, &mut escapes);
                 assert_eq!(escapes.len(), 1, "should fail closed on {bytes:02x?}");
@@ -3113,6 +3161,114 @@ mod x86_scan {
                 assert_eq!(len, *expected, "length for {bytes:02x?}");
                 assert_eq!(cat, None, "VEX opcodes are never forbidden: {bytes:02x?}");
             }
+        }
+
+        /// The class pairing is the objdump corpus below; these rows exercise
+        /// length determinants missing from that real-binary sample. GNU as/objdump
+        /// verify the encodings, including rounding's L'L=3 and compressed disp8.
+        #[test]
+        fn measures_evex_lengths_and_reaches_following_forbidden_opcodes() {
+            let cases: &[&[u8]] = &[
+                &[0x62, 0xf1, 0x74, 0x48, 0x58, 0xc2], // vaddps zmm (register)
+                &[0x62, 0xf1, 0x74, 0x09, 0x58, 0xc2], // vaddps xmm {k1}
+                &[0x62, 0xf1, 0x74, 0x29, 0x58, 0xc2], // vaddps ymm {k1}
+                &[0x62, 0xf1, 0x74, 0xc9, 0x58, 0xc2], // vaddps {k1}{z}
+                &[0x62, 0xf1, 0x74, 0x78, 0x58, 0xc2], // vaddps {rz-sae}
+                &[0x62, 0xf1, 0x74, 0x58, 0x58, 0x00], // broadcast, no displacement
+                &[0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x44, 0x24, 0x01], // SIB + disp8*N
+                &[0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x84, 0x88, 0x0f, 0x05, 0, 0], // SIB + disp32
+                &[0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x04, 0x8d, 0x0f, 0x05, 0, 0], // SIB without base
+                &[0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x05, 0x0f, 0x05, 0, 0], // RIP-relative disp32
+                &[0x64, 0x67, 0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x40, 0x01], // fs + address size
+                &[0x62, 0xf1, 0x7d, 0x48, 0x70, 0xc1, 0x05], // vpshufd imm8
+                &[0x62, 0xf1, 0x7d, 0x48, 0x71, 0xd1, 0x05], // vpsrlw imm8
+                &[0x62, 0xf1, 0x7d, 0x48, 0x72, 0xd1, 0x05], // vpsrld imm8
+                &[0x62, 0xf1, 0xfd, 0x48, 0x73, 0xd1, 0x05], // vpsrlq imm8
+                &[0x62, 0xf1, 0x74, 0x48, 0xc2, 0xca, 0x05], // vcmpps imm8
+                &[0x62, 0xf1, 0x74, 0x48, 0xc6, 0xc2, 0x05], // vshufps imm8
+                &[0x62, 0xf2, 0x75, 0x48, 0x8d, 0xc2], // vpermb (map 2)
+                &[0x62, 0xf3, 0x75, 0x48, 0x0f, 0x44, 0x24, 0x01, 0x05], // vpalignr (map 3)
+            ];
+            for &bytes in cases {
+                assert_eq!(decode_full(bytes), (bytes.len(), None), "{bytes:02x?}");
+                for end in 0..bytes.len() {
+                    assert!(
+                        matches!(decode_one(&bytes[..end]), Step::Undecodable),
+                        "accepted truncated EVEX: {:02x?}",
+                        &bytes[..end]
+                    );
+                }
+                // Several displacements contain 0f 05. Only the appended real
+                // syscall and rdtsc must be flagged, at their exact boundaries.
+                let mut text = bytes.to_vec();
+                text.extend([0x0f, 0x05, 0x0f, 0x31]);
+                let mut escapes = Vec::new();
+                scan_test(&text, &mut escapes);
+                let found: Vec<_> = escapes
+                    .iter()
+                    .map(|e| (e.symbol.clone(), e.category, e.mnemonic))
+                    .collect();
+                assert_eq!(
+                    found,
+                    vec![
+                        (
+                            format!("instruction@.text+0x{:x}", bytes.len()),
+                            "direct-syscall",
+                            Some("syscall")
+                        ),
+                        (
+                            format!("instruction@.text+0x{:x}", bytes.len() + 2),
+                            "cpu-nondeterminism",
+                            Some("rdtsc")
+                        ),
+                    ],
+                    "{bytes:02x?}"
+                );
+            }
+        }
+
+        #[test]
+        fn evex_rejects_unsupported_maps_and_invalid_prefix_fields() {
+            let valid = [0x62, 0xf1, 0x74, 0x48, 0x58, 0xc2]; // vaddps
+            for map in (0..=15).filter(|map| !matches!(map, 1..=3)) {
+                let mut bytes = valid;
+                bytes[1] = 0xf0 | map;
+                assert!(matches!(decode_one(&bytes), Step::Undecodable));
+            }
+            for (index, value) in [
+                (1, 0xf9), // P0 bit 3 reserved
+                (2, 0x70), // P1 bit 2 must be one
+                (3, 0xc8), // z=1 with aaa=0
+                (3, 0x68), // L'L=3 without embedded rounding
+                (4, 0x77), // VEX-only vzero*: no EVEX form
+            ] {
+                let mut bytes = valid;
+                bytes[index] = value;
+                assert!(
+                    matches!(decode_one(&bytes), Step::Undecodable),
+                    "{bytes:02x?}"
+                );
+            }
+            // With a memory operand, b means broadcast, not embedded rounding;
+            // it cannot rescue the reserved vector length L'L=3.
+            assert!(matches!(
+                decode_one(&[0x62, 0xf1, 0x74, 0x78, 0x58, 0x00]),
+                Step::Undecodable
+            ));
+            for prefix in [0x66, 0xf0, 0xf2, 0xf3, 0x40, 0x48, 0x4f] {
+                let mut bytes = vec![prefix];
+                bytes.extend(valid);
+                assert!(
+                    matches!(decode_one(&bytes), Step::Undecodable),
+                    "{bytes:02x?}"
+                );
+            }
+            // Legal segment prefixes cannot make an instruction exceed 15 bytes.
+            let mut bytes = vec![0x64; 9];
+            bytes.extend(valid);
+            assert_eq!(decode_full(&bytes), (15, None));
+            bytes.insert(0, 0x64);
+            assert!(matches!(decode_one(&bytes), Step::Undecodable));
         }
 
         #[test]
@@ -3205,25 +3361,81 @@ mod x86_scan {
             }
         }
 
+        /// Checked-in bytes and boundaries from a real AVX-512 binary (fixture
+        /// provenance and regeneration in tests/fixtures/README.md). This class
+        /// detector pairs with the EVEX length/truncation/sentinel tests: the
+        /// oracle is objdump, not a second copy of our length rules. No Go toolchain,
+        /// x86 host, AVX-512 CPU, or external binary is needed to run it.
+        #[test]
+        fn x86_decoder_matches_objdump_corpus() {
+            let corpus = include_str!("../tests/fixtures/x86-avx512.objdump");
+            let mut data = Vec::new();
+            let mut boundaries = Vec::new();
+            let mut base = None;
+            let mut evex_count = 0;
+            let mut maps = std::collections::BTreeSet::new();
+            for line in corpus.lines() {
+                let Some((address, rest)) = line.trim_start().split_once(":\t") else {
+                    continue; // headings and labels, not instruction rows
+                };
+                let address = u64::from_str_radix(address, 16).expect("instruction address");
+                let (hex, _) = rest.split_once('\t').expect("unwrapped objdump row");
+                let bytes: Vec<_> = hex
+                    .split_whitespace()
+                    .map(|byte| u8::from_str_radix(byte, 16).expect("instruction byte"))
+                    .collect();
+                assert!(!bytes.is_empty());
+                assert_eq!(address, *base.get_or_insert(address) + data.len() as u64);
+                boundaries.push((data.len(), bytes.len()));
+                if bytes[0] == 0x62 {
+                    evex_count += 1;
+                    maps.insert(bytes[1] & 0x0f);
+                }
+                data.extend(bytes);
+            }
+            assert_eq!(data.len(), 246);
+            assert_eq!(evex_count, 28);
+            assert_eq!(maps, [1, 2, 3].into_iter().collect());
+            let mut offset = 0;
+            for &(start, length) in &boundaries {
+                assert_eq!(offset, start);
+                assert_eq!(decode_full(&data[offset..]), (length, None));
+                offset += length;
+            }
+            assert_eq!(offset, data.len());
+            // Exercise the whole scanner too: the real opcode after the corpus
+            // must be reached, with no phantom findings from operand bytes.
+            data.extend([0x0f, 0x05]);
+            let mut escapes = Vec::new();
+            scan_test(&data, &mut escapes);
+            assert_eq!(escapes.len(), 1, "{escapes:?}");
+            assert_eq!(escapes[0].category, "direct-syscall");
+            assert_eq!(escapes[0].symbol, format!("instruction@.text+0x{offset:x}"));
+            eprintln!(
+                "x86 decoder matched objdump on {} instruction boundaries ({evex_count} EVEX)",
+                boundaries.len()
+            );
+        }
+
         // Ground-truth corpus check: the length decoder must reproduce objdump's
         // instruction boundaries exactly over a real `.text`, or it could desync
         // (a wrong length silently steps over a real instruction — the same
         // false-negative failure the byte-slide had). Ignored by default because
-        // it needs an x86-64 ELF and its `objdump -d -j .text` output; run in the
+        // it needs an x86-64 ELF and its `objdump -d -z -j .text` output; run in the
         // amd64 container over the real std/glibc probe binaries:
         //   PATINA_X86_CORPUS_ELF=/path/guest \
         //   PATINA_X86_CORPUS_OBJDUMP=/path/guest.objdump \
         //   cargo test -p patina-dst-target -- --ignored x86_decoder_matches_objdump
         #[test]
         #[ignore = "requires an x86-64 ELF + objdump corpus; run in the amd64 container"]
-        fn x86_decoder_matches_objdump_corpus() {
+        fn x86_decoder_matches_objdump_external_corpus() {
             use object::{Object, ObjectSection};
             use std::collections::BTreeSet;
 
             let elf_path = std::env::var("PATINA_X86_CORPUS_ELF")
                 .expect("set PATINA_X86_CORPUS_ELF to an x86-64 ELF");
             let objdump_path = std::env::var("PATINA_X86_CORPUS_OBJDUMP")
-                .expect("set PATINA_X86_CORPUS_OBJDUMP to its `objdump -d -j .text` output");
+                .expect("set PATINA_X86_CORPUS_OBJDUMP to its `objdump -d -z -j .text` output");
             let bytes = std::fs::read(&elf_path).expect("read ELF");
             let file = object::File::parse(&*bytes).expect("parse ELF");
             let text = file
@@ -3249,6 +3461,8 @@ mod x86_scan {
             // continuation line has only bytes, so require `rest` to contain a tab.
             let objdump = std::fs::read_to_string(&objdump_path).expect("read objdump");
             let mut golden = BTreeSet::new();
+            let mut syscalls = BTreeSet::new();
+            let mut evex_count = 0;
             for line in objdump.lines() {
                 let trimmed = line.trim_start();
                 if let Some((addr_hex, rest)) = trimmed.split_once(":\t") {
@@ -3257,6 +3471,14 @@ mod x86_scan {
                         if let Ok(addr) = u64::from_str_radix(addr_hex, 16) {
                             if addr >= base && addr < base + data.len() as u64 {
                                 golden.insert(addr);
+                                if rest.split_whitespace().next() == Some("62") {
+                                    evex_count += 1;
+                                }
+                                let (_, mnemonic) = rest.split_once('\t').unwrap();
+                                if mnemonic.split_whitespace().next() == Some("syscall") {
+                                    syscalls
+                                        .insert(format!("instruction@.text+0x{:x}", addr - base));
+                                }
                             }
                         }
                     }
@@ -3305,9 +3527,23 @@ mod x86_scan {
                 golden.difference(&decoded).count(),
                 missing,
             );
+            let mut escapes = Vec::new();
+            scan_test(data, &mut escapes);
+            assert!(
+                escapes
+                    .iter()
+                    .all(|e| e.category != "undecodable-instruction")
+            );
+            let scanned_syscalls: BTreeSet<_> = escapes
+                .iter()
+                .filter(|e| e.mnemonic == Some("syscall"))
+                .map(|e| e.symbol.clone())
+                .collect();
+            assert_eq!(scanned_syscalls, syscalls);
             eprintln!(
-                "x86 decoder matched objdump on {} instruction boundaries [{:#x}..={:#x}]",
+                "x86 decoder matched objdump on {} instruction boundaries ({evex_count} EVEX, {} syscalls) [{:#x}..={:#x}]",
                 golden.len(),
+                syscalls.len(),
                 first,
                 last
             );
