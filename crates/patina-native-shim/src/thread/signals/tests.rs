@@ -630,7 +630,11 @@ fn absolute_clock_nanosleep_leaves_rem_untouched() {
             assert_eq!(after_others_park(me), BlockClass::Sleep);
             generate(SIGUSR1);
         });
-        let req = Timespec { sec: 0, nsec: 100 };
+        let deadline = with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap() + 100;
+        let req = Timespec {
+            sec: (deadline / 1_000_000_000) as i64,
+            nsec: (deadline % 1_000_000_000) as i64,
+        };
         let mut rem = [123i64, 456];
         let rc = unsafe {
             crate::sud::patina_sud_dispatch(

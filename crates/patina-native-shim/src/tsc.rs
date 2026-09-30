@@ -27,15 +27,15 @@
 //! invariant TSC. That choice makes the counter *self-consistent with the clock
 //! a guest calibrates it against*: a guest that measures `rdtsc` deltas across a
 //! `clock_gettime` interval derives exactly 1 GHz, every time, on every host.
-//! The counter starts at 0 (the virtual clock's origin) rather than at a host
-//! boot value.
+//! The counter starts at the configured virtual boot origin rather than a
+//! host-derived boot value.
 //!
 //! **Monotonicity.** Exactly the virtual clock's: non-decreasing, and advancing
 //! only when the runtime advances time (a sleep, a modeled latency). Two reads
 //! with nothing between them return the SAME tick, precisely as two
 //! `clock_gettime` calls do. This is parity, not an approximation of it — a
-//! guest spin-waiting on `rdtsc` deltas without yielding hangs exactly as one
-//! spinning on `Instant::now` deltas does.
+//! guest spin-waiting on `rdtsc` deltas is carried by advance-on-spin exactly
+//! as one spinning on `Instant::now` deltas is.
 //!
 //! This module is x86-64-only (`PR_SET_TSC` is an x86 facility). arm64's
 //! `mrs CNTVCT_EL0` has no equivalent trap and stays a refusal — see

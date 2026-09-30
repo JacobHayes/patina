@@ -4,8 +4,8 @@
 
 use patina_dst_abi::ClockKind;
 use patina_dst_runtime::{
-    Context, DEFAULT_REALTIME_EPOCH_NANOS, ENV_REALTIME_EPOCH_NANOS, RuntimeBuilder, RuntimeConfig,
-    RuntimeError,
+    Context, DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS, ENV_REALTIME_EPOCH_NANOS,
+    RuntimeBuilder, RuntimeConfig, RuntimeError,
 };
 use patina_dst_time_virtual::VirtualClock;
 use patina_dst_trace::TraceBundle;
@@ -18,7 +18,7 @@ const STEP: u64 = 5_000;
 /// The record/replay workload: advance, read realtime (recorded), create a
 /// directory (stamped from realtime WITHOUT a recorded read).
 fn workload(context: &mut Context) -> u64 {
-    context.sleep_until(ClockKind::Monotonic, STEP).unwrap();
+    context.sleep_for(STEP).unwrap();
     let realtime = context.now(ClockKind::Realtime).unwrap();
     context.fs_create_directory("/d", 0o755).unwrap();
     realtime
@@ -40,18 +40,21 @@ fn assert_config_refusal(result: Result<Context, RuntimeError>) {
 }
 
 #[test]
-fn a_default_runtime_reads_the_default_epoch_at_monotonic_zero() {
+fn a_default_runtime_reads_epoch_plus_uptime_at_guest_start() {
     let mut context = Context::from_config(RuntimeConfig::seeded(0)).unwrap();
-    assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 0);
+    assert_eq!(
+        context.now(ClockKind::Monotonic).unwrap(),
+        DEFAULT_BOOT_ORIGIN_NANOS
+    );
     assert_eq!(
         context.now(ClockKind::Realtime).unwrap(),
-        DEFAULT_REALTIME_EPOCH_NANOS
+        DEFAULT_REALTIME_EPOCH_NANOS + DEFAULT_BOOT_ORIGIN_NANOS
     );
     // The filesystem stamps from the same clock.
     context.fs_create_directory("/d", 0o755).unwrap();
     assert_eq!(
         context.fs_metadata("/d").unwrap().btime_nanos,
-        i128::from(DEFAULT_REALTIME_EPOCH_NANOS)
+        i128::from(DEFAULT_REALTIME_EPOCH_NANOS + DEFAULT_BOOT_ORIGIN_NANOS)
     );
     assert_eq!(
         RuntimeConfig::seeded(0).realtime_epoch_nanos(),
@@ -64,7 +67,10 @@ fn a_default_runtime_reads_the_default_epoch_at_monotonic_zero() {
 fn a_configured_epoch_overrides_the_default_directly_and_through_the_control_plane() {
     let mut direct =
         Context::from_config(RuntimeConfig::seeded(0).with_realtime_epoch_nanos(EPOCH)).unwrap();
-    assert_eq!(direct.now(ClockKind::Realtime).unwrap(), EPOCH);
+    assert_eq!(
+        direct.now(ClockKind::Realtime).unwrap(),
+        EPOCH + DEFAULT_BOOT_ORIGIN_NANOS
+    );
     direct.finish().unwrap();
 
     let value = EPOCH.to_string();
@@ -73,8 +79,11 @@ fn a_configured_epoch_overrides_the_default_directly_and_through_the_control_pla
         .unwrap();
     assert_eq!(config.realtime_epoch_nanos(), EPOCH);
     let mut via_env = Context::from_config(config).unwrap();
-    via_env.sleep_until(ClockKind::Monotonic, STEP).unwrap();
-    assert_eq!(via_env.now(ClockKind::Realtime).unwrap(), EPOCH + STEP);
+    via_env.sleep_for(STEP).unwrap();
+    assert_eq!(
+        via_env.now(ClockKind::Realtime).unwrap(),
+        EPOCH + DEFAULT_BOOT_ORIGIN_NANOS + STEP
+    );
     via_env.finish().unwrap();
 
     // Absent leaves the default; malformed fails closed.
@@ -96,7 +105,7 @@ fn replay_reproduces_a_recorded_non_default_epoch_without_resupplying_it() {
     let path = directory.path().join("epoch.patina");
     let recorded =
         record(RuntimeConfig::record(3, &path, "epoch-v1").with_realtime_epoch_nanos(EPOCH));
-    assert_eq!(recorded, EPOCH + STEP);
+    assert_eq!(recorded, EPOCH + DEFAULT_BOOT_ORIGIN_NANOS + STEP);
     let bundle = TraceBundle::load(&path).unwrap();
     assert_eq!(bundle.metadata.realtime_epoch_nanos, EPOCH);
 
@@ -105,13 +114,19 @@ fn replay_reproduces_a_recorded_non_default_epoch_without_resupplying_it() {
     // unrecorded read, so only the adopted epoch can make it match.
     let mut replay = Context::from_config(RuntimeConfig::replay(&path, "epoch-v1")).unwrap();
     assert_eq!(workload(&mut replay), recorded);
-    assert_eq!(replay.fs_time_unrecorded().unwrap(), EPOCH + STEP);
+    assert_eq!(
+        replay.fs_time_unrecorded().unwrap(),
+        EPOCH + DEFAULT_BOOT_ORIGIN_NANOS + STEP
+    );
     replay.finish().unwrap();
 
     // A branch inherits the parent's epoch the same way.
     let mut branch =
         Context::from_config(RuntimeConfig::branch(&path, "main", 1, "b1", 9, "epoch-v1")).unwrap();
-    assert_eq!(branch.fs_time_unrecorded().unwrap(), EPOCH);
+    assert_eq!(
+        branch.fs_time_unrecorded().unwrap(),
+        EPOCH + DEFAULT_BOOT_ORIGIN_NANOS
+    );
     drop(branch);
 
     // A matching explicit epoch is accepted; a conflicting one is refused.
@@ -129,7 +144,10 @@ fn a_default_epoch_run_records_the_default_epoch() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("default.patina");
     let recorded = record(RuntimeConfig::record(3, &path, "epoch-v1"));
-    assert_eq!(recorded, DEFAULT_REALTIME_EPOCH_NANOS + STEP);
+    assert_eq!(
+        recorded,
+        DEFAULT_REALTIME_EPOCH_NANOS + DEFAULT_BOOT_ORIGIN_NANOS + STEP
+    );
     let bundle = TraceBundle::load(&path).unwrap();
     assert_eq!(
         bundle.metadata.realtime_epoch_nanos,

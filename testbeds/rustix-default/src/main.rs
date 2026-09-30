@@ -19,9 +19,8 @@ use rustix::net::{
 };
 use rustix::time::{clock_gettime, ClockId};
 
-/// The virtual monotonic clock starts near zero and only advances via sleeps; a
-/// host monotonic clock reads the host's uptime. Anything under this bound
-/// proves the read was virtual.
+/// A sanity bound on the short run's virtual uptime, not proof of containment.
+/// The realtime-minus-monotonic relation below distinguishes the modeled clock.
 const VIRTUAL_BOUND: u64 = 1_000_000_000_000_000;
 
 /// Patina's default virtual realtime epoch (2026-07-22T23:00:09Z): virtual

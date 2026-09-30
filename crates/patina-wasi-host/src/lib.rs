@@ -1099,15 +1099,7 @@ impl Preview1Host {
                 let deadline = if absolute {
                     deadline
                 } else {
-                    now.checked_add(deadline).ok_or_else(|| {
-                        WasiHostError::Runtime(
-                            EffectError::new(
-                                ErrorCode::InvalidInput,
-                                "WASI poll clock deadline overflowed",
-                            )
-                            .into(),
-                        )
-                    })?
+                    now.saturating_add(deadline)
                 };
                 let wait = deadline.saturating_sub(now);
                 if earliest.is_none_or(|(_, _, shortest)| wait < shortest) {
@@ -3802,8 +3794,9 @@ mod tests {
     fn exercise(host: &mut Preview1Host) -> Result<Vec<u8>, WasiHostError> {
         let mut random = vec![0; 16];
         host.random_get(&mut random)?;
-        host.sleep_until(WasiClock::Monotonic, 25)?;
-        assert_eq!(host.clock_time_get(WasiClock::Monotonic)?, 25);
+        let start = host.clock_time_get(WasiClock::Monotonic)?;
+        host.sleep_until(WasiClock::Monotonic, start + 25)?;
+        assert_eq!(host.clock_time_get(WasiClock::Monotonic)? - start, 25);
         assert_eq!(host.fd_write(1, &[b"hello", b" wasi"])?, 10);
         Ok(random)
     }
@@ -4034,8 +4027,8 @@ mod tests {
         host.fd_filestat_set_times(fd, Some(11), Some(22)).unwrap();
         assert_eq!(host.fd_metadata(fd).unwrap().0.atime_nanos, 11);
         assert_eq!(host.fd_metadata(fd).unwrap().0.mtime_nanos, 22);
-        // A realtime deadline 77ns past the (default) epoch: NOW resolves to it.
-        let wake = patina_dst_runtime::DEFAULT_REALTIME_EPOCH_NANOS + 77;
+        // A realtime deadline 77ns past the current reading: NOW resolves to it.
+        let wake = host.clock_time_get(WasiClock::Realtime).unwrap() + 77;
         host.sleep_until(WasiClock::Realtime, wake).unwrap();
         let (atime, mtime) = host
             .filestat_set_times_values(0, 0, WASI_FSTFLAG_ATIM_NOW | WASI_FSTFLAG_MTIM_NOW)
@@ -4549,6 +4542,35 @@ mod tests {
         assert_ne!(bits & 0x000f_ffff_ffff_ffff, 0);
     }
 
+    // Class pairing: runtime boot_origin::relative_sleep_saturates_at_the_deadline_limit.
+    #[test]
+    fn relative_poll_saturates_without_hiding_an_earlier_timer() {
+        for clock in [WasiClock::Monotonic, WasiClock::Realtime] {
+            let mut host =
+                Preview1Host::new(Context::from_config(RuntimeConfig::seeded(1)).unwrap());
+            let start = host.clock_time_get(clock).unwrap();
+            let ready = host
+                .poll(&[
+                    WasiSubscription::Clock {
+                        userdata: 1,
+                        clock,
+                        deadline: u64::MAX,
+                        absolute: false,
+                    },
+                    WasiSubscription::Clock {
+                        userdata: 2,
+                        clock,
+                        deadline: 10,
+                        absolute: false,
+                    },
+                ])
+                .unwrap();
+            assert_eq!(ready, vec![(2, 0, 0)]);
+            assert_eq!(host.clock_time_get(clock).unwrap(), start + 10);
+            host.finish().unwrap();
+        }
+    }
+
     #[test]
     fn random_and_clock_calls_record_and_replay() {
         let directory = tempdir().unwrap();
@@ -4581,8 +4603,10 @@ mod tests {
                     .unwrap();
             }
             let mut host = Preview1Host::new(Context::from_config(config).unwrap());
-            host.sleep_until(WasiClock::Monotonic, 1_000).unwrap();
-            host.clock_time_get(WasiClock::Monotonic).unwrap()
+            let start = host.clock_time_get(WasiClock::Monotonic).unwrap();
+            host.sleep_until(WasiClock::Monotonic, start + 1_000)
+                .unwrap();
+            host.clock_time_get(WasiClock::Monotonic).unwrap() - start
         }
 
         // No jitter: the clock advances exactly to the requested deadline.
@@ -4606,14 +4630,18 @@ mod tests {
                 })
                 .unwrap();
             let mut host = Preview1Host::new(Context::from_config(config).unwrap());
-            host.sleep_until(WasiClock::Monotonic, 1_000).unwrap();
+            let start = host.clock_time_get(WasiClock::Monotonic).unwrap();
+            host.sleep_until(WasiClock::Monotonic, start + 1_000)
+                .unwrap();
             let now = host.clock_time_get(WasiClock::Monotonic).unwrap();
             host.finish().unwrap();
             now
         };
         let config = RuntimeConfig::replay(&trace, "jitter-v1");
         let mut host = Preview1Host::new(Context::from_config(config).unwrap());
-        host.sleep_until(WasiClock::Monotonic, 1_000).unwrap();
+        let start = host.clock_time_get(WasiClock::Monotonic).unwrap();
+        host.sleep_until(WasiClock::Monotonic, start + 1_000)
+            .unwrap();
         assert_eq!(host.clock_time_get(WasiClock::Monotonic).unwrap(), recorded);
         host.finish().unwrap();
     }

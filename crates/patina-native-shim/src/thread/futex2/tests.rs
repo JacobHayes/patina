@@ -21,6 +21,13 @@ fn queued(word: usize) -> usize {
     lock_state().futexes.get(&word).map_or(0, VecDeque::len)
 }
 
+fn timespec(nanos: u64) -> [i64; 2] {
+    [
+        (nanos / 1_000_000_000) as i64,
+        (nanos % 1_000_000_000) as i64,
+    ]
+}
+
 fn waitv(word: usize) -> Waitv {
     Waitv {
         val: 0,
@@ -44,7 +51,7 @@ fn a_parked_futex2_wait_ends_by_its_deadline_or_its_handler() {
             store(word, 1);
         });
         let now = with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap();
-        let deadline = [0, (now + 1_000) as i64];
+        let deadline = timespec(now + 1_000);
         let timed = [
             word as u64,
             0,
@@ -117,7 +124,7 @@ fn a_woken_futex2_wait_keeps_its_outcome_across_a_handler() {
     static INNER: AtomicI64 = AtomicI64::new(0);
     extern "C" fn waiting_handler(_: i32) {
         let now = with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap();
-        let deadline = [0, (now + 1_000) as i64];
+        let deadline = timespec(now + 1_000);
         let timed = [
             word() as u64,
             0,
@@ -138,7 +145,7 @@ fn a_woken_futex2_wait_keeps_its_outcome_across_a_handler() {
             generate(SIGUSR1);
         });
         let now = with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap();
-        let deadline = [0, (now + 1_000_000) as i64];
+        let deadline = timespec(now + 1_000_000);
         let words = [waitv(first), waitv(second)];
         let outer = [words.as_ptr() as u64, 2, 0, deadline.as_ptr() as u64, 1, 0];
         assert_eq!(futex_waitv(outer), 1);

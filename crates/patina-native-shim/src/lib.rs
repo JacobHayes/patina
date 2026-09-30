@@ -4303,25 +4303,29 @@ pub unsafe extern "C" fn patina_clock_now(clock_id: u32, nanos: *mut u64) -> c_i
     if nanos.is_null() {
         return fail(EINVAL);
     }
-    // Bootstrap window (see `SHIM_BOOTSTRAP`): a custom global allocator's own
-    // constructor reads the clock for internal timing (tikv-jemallocator's
-    // `arena_new` calls `nstime_update` -> `mach_absolute_time`) BEFORE the shim
-    // has installed the runtime. That value is allocator-internal, never
-    // guest-observable, so answer a fixed zero without touching the runtime —
-    // for the realtime clock too, which then reads 1970 rather than the run's
-    // epoch: an allocator timing itself there is not a clock bug — going
-    // through `with_context`/`ensure_runtime` here would try to auto-install the
-    // runtime in the middle of the allocator's own initialization and re-enter it.
-    if in_shim_bootstrap() {
-        // SAFETY: `nanos` was checked non-null and is writable per the C ABI.
-        unsafe { nanos.write(0) };
-        set_errno(0);
-        return 0;
-    }
     let clock = match clock(clock_id) {
         Ok(clock) => clock,
         Err(errno) => return fail(errno),
     };
+    // Bootstrap window (see `SHIM_BOOTSTRAP`): an allocator's constructor may
+    // read time before runtime installation. Use the default clock origins so
+    // default installation does not jump from zero to hours of uptime.
+    // Do not enter `with_context`/`ensure_runtime`: that could re-enter the
+    // allocator during its own initialization. Configured origins apply only
+    // after installation; bootstrap must remain allocation- and lock-free.
+    if in_shim_bootstrap() {
+        let value = match clock {
+            ClockKind::Monotonic => patina_dst_abi::DEFAULT_BOOT_ORIGIN_NANOS,
+            ClockKind::Realtime => {
+                patina_dst_abi::DEFAULT_REALTIME_EPOCH_NANOS
+                    + patina_dst_abi::DEFAULT_BOOT_ORIGIN_NANOS
+            }
+        };
+        // SAFETY: `nanos` was checked non-null and is writable per the C ABI.
+        unsafe { nanos.write(value) };
+        set_errno(0);
+        return 0;
+    }
     match with_context(|context| context.now(clock)) {
         Ok(value) => {
             // SAFETY: The pointer was checked and is required to be writable.
@@ -4412,8 +4416,8 @@ pub unsafe extern "C" fn patina_cpu_time_nanos(nanos: *mut u64) -> c_int {
     if nanos.is_null() {
         return fail(EINVAL);
     }
-    // Bootstrap window / no runtime installed: a deterministic zero (see
-    // `patina_clock_now`). Never routes through `ensure_runtime`, so an
+    // Bootstrap window / no runtime installed: CPU time is zero, independent
+    // of the uptime origin. Never routes through `ensure_runtime`, so an
     // accounting probe cannot trip an auto-install or abort.
     let value = if in_shim_bootstrap() {
         0

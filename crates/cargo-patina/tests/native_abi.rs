@@ -4,6 +4,26 @@
 mod common;
 use common::native::*;
 
+/// Class pairing: runtime boot-origin translation invariance; exercises the
+/// public ABI clocks, uptime, coarse truncation and absolute timer deadlines.
+#[test]
+fn guest_clock_origins_and_uptime_are_coherent() {
+    let g = assert_build_c_guest("boot_origin.c", CLink::PosixShim);
+    let out = assert_standalone_success(&g.binary, &[], &[]).stdout;
+    assert_eq!(out, assert_standalone_success(&g.binary, &[], &[]).stdout);
+    let fields = assert_fields(&out, "BOOT_ORIGIN ", &["start", "realtime", "cpu"]);
+    let start: u64 = fields["start"].parse().unwrap();
+    assert_eq!(start, patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS);
+    assert_eq!(
+        fields["realtime"].parse::<u64>().unwrap() - start,
+        patina_dst_runtime::DEFAULT_REALTIME_EPOCH_NANOS
+    );
+    assert_eq!(
+        fields["cpu"].parse::<u64>().unwrap(),
+        patina_dst_abi::STARTUP_CPU_NANOS
+    );
+}
+
 #[test]
 fn prefixed_c_abi_preserves_crash_checkpoint() {
     let g = assert_build_c_guest("probe.c", CLink::Shim);
@@ -19,8 +39,9 @@ fn prefixed_c_abi_preserves_crash_checkpoint() {
     );
     assert_eq!(fields["seed"], "123");
     assert_lower_hex(fields["random"], 32);
-    assert_eq!(fields["before"], "0");
-    assert_eq!(fields["after"], "5000000");
+    let before: u64 = fields["before"].parse().unwrap();
+    assert_eq!(before, patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS);
+    assert_eq!(fields["after"].parse::<u64>().unwrap() - before, 5_000_000);
     assert_eq!(fields["contents"], "stable");
     let other = assert_standalone_success(&g.binary, &["124"], &[]).stdout;
     let other = assert_fields(

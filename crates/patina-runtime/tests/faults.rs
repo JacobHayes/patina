@@ -138,8 +138,9 @@ fn byte_granularity_crash_exports_a_torn_snapshot() {
 /// Sleep for `duration`, returning the virtual monotonic time afterward.
 fn elapsed_after_sleep(config: RuntimeConfig, duration: u64) -> u64 {
     let mut context = Context::from_config(config).unwrap();
+    let start = context.now(ClockKind::Monotonic).unwrap();
     context.sleep_for(duration).unwrap();
-    let elapsed = context.now(ClockKind::Monotonic).unwrap();
+    let elapsed = context.now(ClockKind::Monotonic).unwrap() - start;
     context.finish().unwrap();
     elapsed
 }
@@ -310,6 +311,7 @@ fn net_faults_delay_the_tcp_stream_without_losing_data() {
 /// afterwards and the run's filesystem fault report.
 fn fs_ops_elapsed_and_report(config: RuntimeConfig) -> (u64, Option<FsFaultReport>) {
     let mut context = Context::from_config(config).unwrap();
+    let start = context.now(ClockKind::Monotonic).unwrap();
     let fd = context
         .fs_open("/latency.log", OpenFlags::create_truncate_write())
         .unwrap();
@@ -318,7 +320,7 @@ fn fs_ops_elapsed_and_report(config: RuntimeConfig) -> (u64, Option<FsFaultRepor
     context.fs_set_len(fd, 6).unwrap();
     context.fs_metadata("/latency.log").unwrap();
     context.fs_close(fd).unwrap();
-    let elapsed = context.now(ClockKind::Monotonic).unwrap();
+    let elapsed = context.now(ClockKind::Monotonic).unwrap() - start;
     let report = context.fs_fault_report();
     context.finish().unwrap();
     (elapsed, report)
@@ -408,8 +410,9 @@ fn resolve_once(
     name: &str,
 ) -> (Result<String, String>, u64, Option<DnsFaultReport>) {
     let mut context = Context::from_config(config).unwrap();
+    let start = context.now(ClockKind::Monotonic).unwrap();
     let outcome = context.dns_resolve(name).map_err(|error| error.to_string());
-    let elapsed = context.now(ClockKind::Monotonic).unwrap();
+    let elapsed = context.now(ClockKind::Monotonic).unwrap() - start;
     let report = context.dns_fault_report();
     context.finish().unwrap();
     (outcome, elapsed, report)
@@ -695,17 +698,15 @@ fn entropy_failure_replays_self_contained_without_re_supplying_the_flag() {
 // Realtime-epoch jump injection
 // ---------------------------------------------------------------------------
 
-/// The true realtime value at monotonic 1ms on the default epoch.
-const TRUE_REALTIME_AT_1MS: u64 = DEFAULT_REALTIME_EPOCH_NANOS + 1_000_000;
+/// The true realtime value after 1ms of execution on the default clock.
+const TRUE_REALTIME_AT_1MS: u64 =
+    DEFAULT_REALTIME_EPOCH_NANOS + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS + 1_000_000;
 
-/// Read `ClockKind::Realtime` once, after advancing the monotonic clock to
-/// `advance_to` (so the true realtime value is the run's epoch plus that).
+/// Read realtime once, after advancing by `advance_to` nanoseconds.
 fn realtime_once(config: RuntimeConfig, advance_to: u64) -> (u64, Option<ClockFaultReport>) {
     let mut context = Context::from_config(config).unwrap();
     if advance_to > 0 {
-        context
-            .sleep_until(ClockKind::Monotonic, advance_to)
-            .unwrap();
+        context.sleep_for(advance_to).unwrap();
     }
     let value = context.now(ClockKind::Realtime).unwrap();
     let report = context.clock_fault_report();
@@ -783,15 +784,13 @@ fn arming_the_epoch_jump_knob_does_not_perturb_monotonic_reads() {
     // `ClockKind::Realtime`. Monotonic drives timers and the liveness
     // watchdog, so it must read identically whether or not the knob is armed.
     let mut baseline = Context::from_config(RuntimeConfig::seeded(7)).unwrap();
-    baseline
-        .sleep_until(ClockKind::Monotonic, 1_000_000)
-        .unwrap();
+    baseline.sleep_for(1_000_000).unwrap();
     let baseline_monotonic = baseline.now(ClockKind::Monotonic).unwrap();
     baseline.finish().unwrap();
 
     let mut armed =
         Context::from_config(RuntimeConfig::seeded(7).with_epoch_jump_nanos(u64::MAX)).unwrap();
-    armed.sleep_until(ClockKind::Monotonic, 1_000_000).unwrap();
+    armed.sleep_for(1_000_000).unwrap();
     let armed_monotonic = armed.now(ClockKind::Monotonic).unwrap();
     let report = armed.clock_fault_report();
     armed.finish().unwrap();
@@ -811,18 +810,14 @@ fn epoch_jump_replays_self_contained_without_re_supplying_the_flag() {
         RuntimeConfig::record(4, &path, "patina-test").with_epoch_jump_nanos(1_000_000),
     )
     .unwrap();
-    recorded
-        .sleep_until(ClockKind::Monotonic, 10_000_000)
-        .unwrap();
+    recorded.sleep_for(10_000_000).unwrap();
     let recorded_value = recorded.now(ClockKind::Realtime).unwrap();
     recorded.finish().unwrap();
 
     // Flag-free: no --epoch-jump-nanos. The trace restores it, and replay
     // reproduces the SAME recorded (already-perturbed) value with no redraw.
     let mut replayed = Context::from_config(RuntimeConfig::replay(&path, "patina-test")).unwrap();
-    replayed
-        .sleep_until(ClockKind::Monotonic, 10_000_000)
-        .unwrap();
+    replayed.sleep_for(10_000_000).unwrap();
     let replayed_value = replayed.now(ClockKind::Realtime).unwrap();
     replayed.finish().unwrap();
     assert_eq!(replayed_value, recorded_value);
@@ -844,9 +839,7 @@ fn epoch_jump_can_regress_a_read_below_an_earlier_one_at_the_same_true_time() {
             let mut context =
                 Context::from_config(RuntimeConfig::seeded(seed).with_epoch_jump_nanos(1_000_000))
                     .unwrap();
-            context
-                .sleep_until(ClockKind::Monotonic, 10_000_000)
-                .unwrap();
+            context.sleep_for(10_000_000).unwrap();
             let first = context.now(ClockKind::Realtime).unwrap();
             let second = context.now(ClockKind::Realtime).unwrap();
             context.finish().unwrap();
@@ -856,9 +849,7 @@ fn epoch_jump_can_regress_a_read_below_an_earlier_one_at_the_same_true_time() {
 
     let mut context =
         Context::from_config(RuntimeConfig::seeded(seed).with_epoch_jump_nanos(1_000_000)).unwrap();
-    context
-        .sleep_until(ClockKind::Monotonic, 10_000_000)
-        .unwrap();
+    context.sleep_for(10_000_000).unwrap();
     let first = context.now(ClockKind::Realtime).unwrap();
     let second = context.now(ClockKind::Realtime).unwrap();
     assert!(
@@ -875,7 +866,7 @@ fn epoch_jump_can_regress_a_read_below_an_earlier_one_at_the_same_true_time() {
 fn epoch_jump_saturates_at_zero_rather_than_wrapping_negative() {
     // Find a seed whose draw, at a healthy true epoch, is negative (the
     // perturbed read is strictly below the true value) — then, for that SAME
-    // seed, at true epoch 0, the negative draw would go below zero, and the
+    // seed, at realtime 1, the negative draw would go below zero, and the
     // knob must clamp there rather than wrap a `u64`.
     let hi = 1_000;
     let seed = (0..64)
@@ -888,21 +879,22 @@ fn epoch_jump_saturates_at_zero_rather_than_wrapping_negative() {
         })
         .expect("some seed in range must draw a negative offset");
 
-    // True epoch 0 needs a run configured onto the Unix epoch itself.
+    // Small nonzero uptime on the Unix epoch puts realtime below the draw.
     let (at_zero, report) = realtime_once(
         RuntimeConfig::seeded(seed)
             .with_epoch_jump_nanos(hi)
-            .with_realtime_epoch_nanos(0),
+            .with_realtime_epoch_nanos(0)
+            .with_boot_origin_nanos(1),
         0,
     );
     assert_eq!(
         at_zero, 0,
-        "a negative draw at true epoch 0 must saturate, not wrap"
+        "a negative draw past realtime must saturate, not wrap"
     );
     assert_eq!(
         report.expect("live knob").jumps_applied,
-        0,
-        "clamped-to-unchanged is not a counted application"
+        1,
+        "clamping from nonzero realtime to zero changes the reading"
     );
 }
 

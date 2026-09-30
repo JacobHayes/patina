@@ -141,9 +141,9 @@ fn run_accepts_options_before_the_wasi_artifact() {
 fn wasi_realtime_epoch_defaults_overrides_and_replays_flag_free() {
     let directory = tempdir().unwrap();
     let cwd = directory.path();
-    // `_start` reads the realtime clock and exits 9 on the default epoch's
-    // second (2026-07-22T23:00:09Z), 7 on 2001-09-09T01:46:40Z, 1 otherwise —
-    // an exit code that is a pure function of the wall clock the guest saw.
+    // `_start` subtracts monotonic from realtime, then selects by epoch:
+    // default -> 9, configured -> 7, anything else -> 1. This checks the
+    // clock-domain relationship independently of the boot origin.
     let module = directory.path().join("epoch.wasm");
     fs::write(
         &module,
@@ -156,8 +156,9 @@ fn wasi_realtime_epoch_defaults_overrides_and_replays_flag_free() {
                 (func (export "_start")
                     (local $secs i64)
                     (drop (call $clock_time_get (i32.const 0) (i64.const 1) (i32.const 0)))
+                    (drop (call $clock_time_get (i32.const 1) (i64.const 1) (i32.const 8)))
                     (local.set $secs
-                        (i64.div_u (i64.load (i32.const 0)) (i64.const 1000000000)))
+                        (i64.div_u (i64.sub (i64.load (i32.const 0)) (i64.load (i32.const 8))) (i64.const 1000000000)))
                     (call $proc_exit
                         (select
                             (i32.const 7)
@@ -698,11 +699,12 @@ fn separate_processes_repeat_record_and_replay() {
     let first_result = result_line(&first);
     assert_eq!(result_line(&repeated), first_result);
     assert!(first_result.contains("cfg=true"));
-    // The wall clock starts on the default realtime epoch (Patina's first
-    // commit, 2026-07-22T23:00:09Z) and has advanced by the 10ns slept.
-    // The node name is the virtual kernel's default.
+    // Wall time is epoch + uptime; both clocks advance by the 10ns slept.
+    let uptime = patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS + 10;
+    let default_wall = patina_dst_runtime::DEFAULT_REALTIME_EPOCH_NANOS + uptime;
+    let configured_wall = 1_000_000_000_000_000_000 + uptime;
     assert!(
-        first_result.contains(" time=10 wall=1784761209000000010 host=patina "),
+        first_result.contains(&format!(" time={uptime} wall={default_wall} host=patina ")),
         "{first_result}"
     );
     assert_ne!(result_line(&different), first_result);
@@ -722,13 +724,13 @@ fn separate_processes_repeat_record_and_replay() {
     ];
     let shifted = result_line(&invoke(&fixture, &facts_args)).to_string();
     assert!(
-        shifted.contains(" wall=1000000000000000010 host=db-1 "),
+        shifted.contains(&format!(" wall={configured_wall} host=db-1 ")),
         "{shifted}"
     );
     assert_eq!(
         shifted.replace(
-            " wall=1000000000000000010 host=db-1 ",
-            " wall=1784761209000000010 host=patina "
+            &format!(" wall={configured_wall} host=db-1 "),
+            &format!(" wall={default_wall} host=patina ")
         ),
         first_result
     );
@@ -7627,8 +7629,12 @@ fn main() {
         // moves. A healthy run converges through advance-on-spin; a swallowed
         // init error freezes the clock at zero and this spins at 100% CPU.
         "clock-until" => {
-            let mut nanos = 0u64;
-            while nanos <= 10_000_000 {
+            let mut start = 0u64;
+            if unsafe { patina_clock_now(MONOTONIC, &mut start) } != 0 {
+                std::process::abort();
+            }
+            let mut nanos = start;
+            while nanos - start <= 10_000_000 {
                 if unsafe { patina_clock_now(MONOTONIC, &mut nanos) } != 0 {
                     std::process::abort();
                 }
@@ -7662,7 +7668,7 @@ fn main() {
             println!("BOOTSTRAP_WINDOW_PROBE stdout");
         }
         // Control: an entry point that already consults the stored init error,
-        // through `ensure_runtime`. It must keep aborting exactly as before.
+        // through `ensure_runtime`. Even a past deadline must still consult it.
         "sleep" => {
             if unsafe { patina_sleep_until(MONOTONIC, 5_000_000) } != 0 {
                 std::process::abort();
@@ -15242,8 +15248,8 @@ mod tests {
             .unwrap()
             .as_secs();
         println!("HARNESS_PASS epoch={epoch}");
-        // Patina's default virtual realtime epoch, 2026-07-22T23:00:09Z.
-        assert_eq!(epoch, 1_784_761_209);
+        // Default epoch plus the fixed boot origin, in whole seconds.
+        assert_eq!(epoch, DEFAULT_START_SECONDS);
     }
 
 
@@ -15255,7 +15261,14 @@ mod tests {
         }
     }
 }
-"#,
+"#
+        .replace(
+            "DEFAULT_START_SECONDS",
+            &((patina_dst_runtime::DEFAULT_REALTIME_EPOCH_NANOS
+                + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS)
+                / 1_000_000_000)
+                .to_string(),
+        ),
     )
     .unwrap();
 }

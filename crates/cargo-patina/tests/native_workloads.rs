@@ -321,7 +321,9 @@ fn std_runs_seeded_and_replayable_but_not_standalone() {
     );
     assert_eq!(
         fields["epoch_ns"],
-        patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS.to_string()
+        (patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS
+            + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS)
+            .to_string()
     );
     assert_lower_hex(fields["first_hash"], 16);
     assert_lower_hex(fields["second_hash"], 16);
@@ -342,7 +344,9 @@ fn realtime_epoch_defaults_overrides_and_replays_flag_free() {
     );
     assert_eq!(
         fields["epoch_ns"],
-        patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS.to_string()
+        (patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS
+            + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS)
+            .to_string()
     );
 
     // The flag moves the guest's wall clock, is recorded into the trace, and a
@@ -354,7 +358,10 @@ fn realtime_epoch_defaults_overrides_and_replays_flag_free() {
         "NATIVE_REALTIME_EPOCH_RESULT ",
         &["epoch_ns", "mtime_ns"],
     );
-    assert_eq!(fields["epoch_ns"], "1000000000000000000");
+    assert_eq!(
+        fields["epoch_ns"].parse::<u64>().unwrap(),
+        1_000_000_000_000_000_000 + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS
+    );
     let trace = g.assert_record_replay_identity(3, &flags, &baseline);
     assert_eq!(
         patina_dst_trace::TraceBundle::load(&trace)

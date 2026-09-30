@@ -43,8 +43,8 @@ const CLOCK_MONOTONIC: i64 = 1;
 const AT_FDCWD: i64 = -100;
 const O_CREAT: i64 = 0o100;
 const O_RDWR: i64 = 2;
-// The virtual clock starts near zero and only advances via sleeps; a wall clock
-// would read ~1.7e18 ns. Anything under this bound proves the read was virtual.
+// Sanity bound on the short run's virtual uptime, not proof of containment.
+// Exact sleep deltas and the acceptance suite's repeat/replay checks test the model.
 const VIRTUAL_BOUND: u64 = 1_000_000_000_000_000;
 
 unsafe fn clock_mono() -> u64 {

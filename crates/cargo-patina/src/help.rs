@@ -700,7 +700,7 @@ const BUGGIFY_FLAGS: &[Flag] = &[
         "--buggify-cutoff-nanos",
         None,
         Value::Required("N", Kind::U64),
-        "Virtual-time cutoff after which buggify stops firing (default 300000000000). Implies --buggify.",
+        "Elapsed virtual nanoseconds since guest start after which buggify stops firing (default 300000000000). Implies --buggify.",
         false,
     ),
     f(
@@ -740,7 +740,7 @@ const LIVENESS_FLAGS_OPTIONAL: &[Flag] = &[
             "--heal-after",
             None,
             Value::Required("NANOS", Kind::U64),
-            "Fault-free convergence arm-time override; requires --converge-within.",
+            "Fault-free convergence arm-time in elapsed virtual nanoseconds since guest start; requires --converge-within.",
             false,
         ),
         "--converge-within",
@@ -915,7 +915,7 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     "--realtime-epoch",
                     None,
                     Value::Required("RFC3339", Kind::UtcTimestamp),
-                    "Virtual wall-clock time at the start of the run, as an RFC 3339 UTC timestamp (default 2026-07-22T23:00:09Z; recorded and restored on replay).",
+                    "Realtime at monotonic zero, as an RFC 3339 UTC timestamp (default 2026-07-22T23:00:09Z). Guest-start realtime adds the boot origin (default uptime 12345.678901234s); recorded and restored on replay.",
                     false,
                 ),
                 // wasip1 has no hostname surface at all, so the WASI family is
@@ -1135,7 +1135,7 @@ child's readable-trace receipt.",
                     "--realtime-epoch",
                     None,
                     Value::Required("RFC3339", Kind::UtcTimestamp),
-                    "Virtual wall-clock time at the start of the run, as an RFC 3339 UTC timestamp (default 2026-07-22T23:00:09Z; recorded and restored on replay).",
+                    "Realtime at monotonic zero, as an RFC 3339 UTC timestamp (default 2026-07-22T23:00:09Z). Guest-start realtime adds the boot origin (default uptime 12345.678901234s); recorded and restored on replay.",
                     false,
                 ),
                 f(
@@ -1446,7 +1446,7 @@ const REPLAY: Verb = Verb {
 families: a wasm module replays under WASI, a native binary under the native \
 supervisor, and a directory/Cargo.toml (no --target) under the Cargo package \
 family. Each restores every recorded semantic input (seed, fault knobs, buggify, \
-realtime epoch, hostname, guest argv, and native `--env` values) from the trace — the trace is authoritative \
+realtime epoch, boot origin, hostname, guest argv, and native `--env` values) from the trace — the trace is authoritative \
 — so replay exposes no semantic flags; any re-supplied value must match the \
 recording or the replay is refused.\n\
 \n\

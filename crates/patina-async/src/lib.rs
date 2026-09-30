@@ -690,10 +690,6 @@ fn invalid_state(message: impl Into<String>) -> RuntimeError {
     EffectError::new(ErrorCode::InvalidState, message).into()
 }
 
-fn invalid_input(message: impl Into<String>) -> RuntimeError {
-    EffectError::new(ErrorCode::InvalidInput, message).into()
-}
-
 /// Future returned by [`yield_now`].
 pub struct YieldNow {
     yielded: bool,
@@ -737,8 +733,7 @@ impl Sleep {
                 let resolved = match this.kind {
                     SleepKind::For(duration) => {
                         let now = context.now(ClockKind::Monotonic)?;
-                        now.checked_add(duration)
-                            .ok_or_else(|| invalid_input("monotonic sleep deadline overflowed"))?
+                        now.saturating_add(duration)
                     }
                     SleepKind::Until(ClockKind::Monotonic, deadline) => deadline,
                     SleepKind::Until(ClockKind::Realtime, deadline) => {
@@ -1419,9 +1414,25 @@ mod tests {
         assert!(seen.len() >= 2);
     }
 
+    // Class pairing: runtime boot_origin::relative_sleep_saturates_at_the_deadline_limit.
+    #[test]
+    fn relative_sleep_saturates_and_can_be_timed_out() {
+        let mut ctx = context(7);
+        let start = ctx.now(ClockKind::Monotonic).unwrap();
+        block_on(&mut ctx, async {
+            assert!(timeout(10, sleep_for(u64::MAX)).await?.is_none());
+            Ok::<_, RuntimeError>(())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(ctx.now(ClockKind::Monotonic).unwrap(), start + 10);
+        ctx.finish().unwrap();
+    }
+
     #[test]
     fn timers_rescue_at_exact_deadlines_and_timeout_ties() {
         let mut ctx = context(7);
+        let start = ctx.now(ClockKind::Monotonic).unwrap();
         let log = Rc::new(RefCell::new(Vec::new()));
         block_on(&mut ctx, {
             let log = Rc::clone(&log);
@@ -1442,19 +1453,19 @@ mod tests {
                 assert_eq!(
                     with_scope(|scope| unsafe { scope.context_mut() }.now(ClockKind::Monotonic))
                         .unwrap(),
-                    200
+                    start + 200
                 );
                 b.await??;
                 assert_eq!(
                     with_scope(|scope| unsafe { scope.context_mut() }.now(ClockKind::Monotonic))
                         .unwrap(),
-                    500
+                    start + 500
                 );
                 assert!(timeout(100, sleep_for(300)).await?.is_none());
                 assert_eq!(
                     with_scope(|scope| unsafe { scope.context_mut() }.now(ClockKind::Monotonic))
                         .unwrap(),
-                    600
+                    start + 600
                 );
                 assert_eq!(timeout(100, async { 9 }).await?, Some(9));
                 Ok::<_, RuntimeError>(())
@@ -1542,7 +1553,7 @@ mod tests {
             client.write_all(b"x").await?;
             assert_eq!(server.read(8).await?, b"x");
             let now = with_scope(|scope| unsafe { scope.context_mut() }.now(ClockKind::Monotonic))?;
-            assert_eq!(now, 75);
+            assert_eq!(now, patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS + 75);
             Ok::<_, RuntimeError>(())
         })
         .unwrap()
@@ -1564,8 +1575,8 @@ mod tests {
                 let datagram = server.recv().await?;
                 let now =
                     with_scope(|scope| unsafe { scope.context_mut() }.now(ClockKind::Monotonic))?;
-                assert_eq!(now, 50);
-                assert_eq!(datagram.delivery_nanos, 50);
+                assert_eq!(now, patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS + 50);
+                assert_eq!(datagram.delivery_nanos, now);
                 Ok::<_, RuntimeError>(datagram.bytes)
             })?;
             yield_now().await;
@@ -1607,8 +1618,8 @@ mod tests {
                         let now = with_scope(|scope| {
                             unsafe { scope.context_mut() }.now(ClockKind::Monotonic)
                         })?;
-                        assert_eq!(now, 50);
-                        assert_eq!(datagram.delivery_nanos, 50);
+                        assert_eq!(now, patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS + 50);
+                        assert_eq!(datagram.delivery_nanos, now);
                         // Peer-wake the other receiver's address; it is the task
                         // that was rescued at the same deadline.
                         s1.send_to("s2", b"a").await?;
@@ -1623,8 +1634,8 @@ mod tests {
                         let now = with_scope(|scope| {
                             unsafe { scope.context_mut() }.now(ClockKind::Monotonic)
                         })?;
-                        assert_eq!(now, 50);
-                        assert_eq!(datagram.delivery_nanos, 50);
+                        assert_eq!(now, patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS + 50);
+                        assert_eq!(datagram.delivery_nanos, now);
                         s2.send_to("s1", b"b").await?;
                         order.borrow_mut().push("b");
                         Ok::<_, RuntimeError>(datagram.bytes)

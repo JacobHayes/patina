@@ -23,7 +23,7 @@ int main(int argc, char **argv) {
     if (!check((use_env ? patina_init_from_env() : patina_init_crash(seed)) == 0, "init") ||
         !check(patina_entropy(random, sizeof random) == 0, "entropy") ||
         !check(patina_clock_now(PATINA_CLOCK_MONOTONIC, &before) == 0, "clock before") ||
-        !check(patina_sleep_until(PATINA_CLOCK_MONOTONIC, 5000000) == 0, "sleep") ||
+        !check(patina_sleep_until(PATINA_CLOCK_MONOTONIC, before + 5000000) == 0, "sleep") ||
         !check(patina_clock_now(PATINA_CLOCK_MONOTONIC, &after) == 0, "clock after") ||
         !check(patina_mkdir(PATINA_AT_FDCWD, "/state", 0777) == 0, "mkdir")) return 1;
 

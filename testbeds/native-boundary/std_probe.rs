@@ -14,16 +14,12 @@ fn main() {
     if first_hash == second_hash {
         std::process::exit(32);
     }
+    // Read after entropy: a run without a runtime is refused there rather
+    // than answering a clock from the shim's bootstrap window. The acceptance
+    // test checks the reported value against epoch + configured boot origin.
     let Ok(system) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
         std::process::exit(21);
     };
-    // Patina's default virtual realtime epoch, 2026-07-22T23:00:09Z, read at
-    // monotonic zero. Read after the entropy draws: a run with no runtime
-    // installed is refused at its first entropy request, while a clock read
-    // there answers from the shim's bootstrap window.
-    if system.as_nanos() != 1_784_761_209_000_000_000 {
-        std::process::exit(30);
-    }
     let started = std::time::Instant::now();
     std::thread::sleep(std::time::Duration::from_millis(2));
     if started.elapsed() != std::time::Duration::from_millis(2) {

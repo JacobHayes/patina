@@ -59,7 +59,8 @@ pub use handoff::{
 ///   and `hole` whences (`SEEK_DATA`/`SEEK_HOLE`) and the `no_such_position`
 ///   error; `fs_allocate`'s `mode` (`reserve`, `punch_hole`, `zero_range`) in
 ///   place of its `zero` flag.
-pub const TRACE_FORMAT_VERSION: u32 = 14;
+/// - 15: required boot origin (machine uptime at guest start).
+pub const TRACE_FORMAT_VERSION: u32 = 15;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 
@@ -248,7 +249,7 @@ pub struct BuggifyConfigRecord {
     /// Per-run site activation probability in per-mille (0..=1000): the fraction
     /// of sites made active for this run. FoundationDB's default is 25% (250).
     pub activation_permille: u16,
-    /// Virtual-time monotonic-nanoseconds cutoff after which buggify stops firing
+    /// Elapsed virtual nanoseconds since guest start after which buggify stops firing
     /// (FoundationDB's damage-control window), so late-run steady state is not
     /// perturbed forever. Default 300 virtual seconds.
     pub cutoff_nanos: u64,
@@ -555,6 +556,9 @@ pub struct RunMetadata {
     /// are stamped from the realtime clock without a recorded read. Not a
     /// fingerprint input: a replay already reconciles it field-for-field.
     pub realtime_epoch_nanos: u64,
+    /// Machine uptime at guest start. Required and authoritative on replay,
+    /// including for unrecorded clock reads and run-relative fault windows.
+    pub boot_origin_nanos: u64,
     /// The node name the guest's virtual kernel reports (`uname`,
     /// `gethostname`; `--hostname`, default `patina`). Required exactly like
     /// [`realtime_epoch_nanos`](RunMetadata::realtime_epoch_nanos).
@@ -573,8 +577,9 @@ pub struct ComputeStop {
 
 impl RunMetadata {
     /// The metadata every recording carries. The realtime epoch and the node
-    /// name are required run facts, so the caller states them rather than
-    /// inheriting a default the trace crate would have to guess.
+    /// name are required run facts. The origin defaults to the ABI constant;
+    /// runtime builders set the actual initial reading with `with_boot_origin_nanos`.
+    /// Deserialization requires all three fields; it never fills in defaults.
     pub fn new(
         root_seed: u64,
         fingerprint: impl Into<String>,
@@ -598,8 +603,16 @@ impl RunMetadata {
             sud: None,
             tsc: None,
             realtime_epoch_nanos,
+            boot_origin_nanos: patina_dst_abi::DEFAULT_BOOT_ORIGIN_NANOS,
             hostname: hostname.into(),
         }
+    }
+
+    /// Record an explicit clock's or runtime's initial monotonic reading.
+    #[must_use]
+    pub fn with_boot_origin_nanos(mut self, nanos: u64) -> Self {
+        self.boot_origin_nanos = nanos;
+        self
     }
 
     /// Attach the run's fault-injection configuration recorded into the trace.
@@ -1869,6 +1882,10 @@ impl Replayer {
         self.metadata.realtime_epoch_nanos
     }
 
+    pub const fn boot_origin_nanos(&self) -> u64 {
+        self.metadata.boot_origin_nanos
+    }
+
     /// The node name the trace was recorded under (see
     /// [`RunMetadata::hostname`]).
     pub fn hostname(&self) -> &str {
@@ -2066,6 +2083,10 @@ impl BranchSession {
     /// The virtual realtime epoch inherited from the parent trace.
     pub const fn realtime_epoch_nanos(&self) -> u64 {
         self.bundle.metadata.realtime_epoch_nanos
+    }
+
+    pub const fn boot_origin_nanos(&self) -> u64 {
+        self.bundle.metadata.boot_origin_nanos
     }
 
     /// The node name inherited from the parent trace.
@@ -2390,10 +2411,10 @@ mod tests {
 
     #[test]
     fn a_current_bundle_must_state_its_run_facts() {
-        // The realtime epoch and the node name are required: a bundle missing
+        // Epoch, boot origin and node name are required: a bundle missing
         // either does not parse.
-        let bytes = include_bytes!("../tests/fixtures/format-14.patina");
-        for field in ["realtime_epoch_nanos", "hostname"] {
+        let bytes = include_bytes!("../tests/fixtures/format-15.patina");
+        for field in ["realtime_epoch_nanos", "boot_origin_nanos", "hostname"] {
             let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             assert!(
                 value["metadata"]
@@ -2429,7 +2450,7 @@ mod tests {
     fn memory_operations_fixture_decodes_and_replays() {
         // Checked-in feature fixture pins the page cache's and anonymous
         // files' operations and one of the filesystem family's.
-        let bytes = include_bytes!("../tests/fixtures/format-14-memory.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-15-memory.patina");
         let bundle = TraceBundle::from_slice(bytes).unwrap();
         bundle.validate().unwrap();
         assert_eq!(bundle.to_bytes().unwrap(), bytes);
@@ -2483,7 +2504,7 @@ mod tests {
         use patina_dst_abi::{
             EffectError, ErrorCode, FsAllocateMode, FsEntryKind, FsMetadata, SeekWhence,
         };
-        let bytes = include_bytes!("../tests/fixtures/format-14-sparse.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-15-sparse.patina");
         let bundle = TraceBundle::from_slice(bytes).unwrap();
         bundle.validate().unwrap();
         assert_eq!(bundle.to_bytes().unwrap(), bytes);
@@ -2541,7 +2562,7 @@ mod tests {
     fn network_operations_fixture_decodes_and_replays() {
         // Checked-in feature fixture pins the network family's operations and
         // a marked datagram's encoding.
-        let bytes = include_bytes!("../tests/fixtures/format-14-network.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-15-network.patina");
         let expected = [
             (
                 Operation::NetBindShared {
@@ -2597,7 +2618,7 @@ mod tests {
         ];
         // The fixture is exactly what a recording of these decisions writes.
         let recorded = TraceBundle::new(
-            RunMetadata::new(42, "fixture-fingerprint", 0, "patina"),
+            RunMetadata::new(42, "fixture-fingerprint", 0, "patina").with_boot_origin_nanos(1000),
             expected
                 .iter()
                 .enumerate()
@@ -2627,7 +2648,7 @@ mod tests {
         const SIGUSR2: u8 = 12;
         const SI_USER: i32 = 0;
         const SI_TKILL: i32 = -6;
-        let bytes = include_bytes!("../tests/fixtures/format-14-signals.patina");
+        let bytes = include_bytes!("../tests/fixtures/format-15-signals.patina");
         let bundle = TraceBundle::from_slice(bytes).unwrap();
         bundle.validate().unwrap();
         assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
@@ -3004,6 +3025,7 @@ mod tests {
                 "decision_policy": "splitmix64-v1",
                 "fingerprint": "fingerprint+buggify",
                 "realtime_epoch_nanos": 0,
+                "boot_origin_nanos": 1000,
                 "hostname": "patina"
             },
             "timelines": [{

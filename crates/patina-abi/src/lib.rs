@@ -226,6 +226,12 @@ pub enum ClockKind {
 /// constant.
 pub const DEFAULT_REALTIME_EPOCH_NANOS: u64 = 1_784_761_209_000_000_000;
 
+/// Default machine uptime at guest start: 3h 25m 45.678901234s.
+/// Fixed across seeds and platforms. The non-round fractional value exercises
+/// unit conversion and absolute-deadline arithmetic instead of hiding errors
+/// behind a zero or whole-second origin. CPU clocks do not use this origin.
+pub const DEFAULT_BOOT_ORIGIN_NANOS: u64 = 12_345_678_901_234;
+
 /// The modeled CPU time, in nanoseconds, a Linux process has already used when
 /// `main` starts. A real process reaches `main` only after `exec`, the dynamic
 /// loader and libc's own setup have run on its CPU clock; the model runs none

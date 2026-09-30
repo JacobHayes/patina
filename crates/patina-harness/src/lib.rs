@@ -280,7 +280,8 @@ impl HarnessBuilder {
         self.set(rt::ENV_CONVERGE_WITHIN, nanos.to_string())
     }
 
-    /// Override the heal-then-converge arm-time (virtual nanoseconds). Inert
+    /// Override the heal-then-converge arm-time (elapsed virtual nanoseconds
+    /// since guest start). Inert
     /// without [`HarnessBuilder::converge_within_nanos`].
     #[must_use]
     pub fn heal_after_nanos(self, nanos: u64) -> Self {
@@ -341,7 +342,8 @@ impl HarnessBuilder {
             .set(rt::ENV_BUGGIFY_ACTIVATION, permille.to_string())
     }
 
-    /// Set the damage-control cutoff in virtual nanoseconds. Enables buggify.
+    /// Set the damage-control cutoff in elapsed virtual nanoseconds since
+    /// guest start. Enables buggify.
     #[must_use]
     pub fn buggify_cutoff_nanos(self, nanos: u64) -> Self {
         self.enable_buggify()

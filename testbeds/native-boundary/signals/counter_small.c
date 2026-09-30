@@ -78,6 +78,9 @@ int main(int argc, char **argv) {
     }
     struct timespec delay = {.tv_nsec = 5000000};
     assert(nanosleep(&delay, NULL) == 0);
+    struct timespec mono;
+    assert(clock_gettime(CLOCK_MONOTONIC, &mono) == 0);
+    const uint64_t expected = (uint64_t)mono.tv_sec * 1000000000 + (uint64_t)mono.tv_nsec;
     if (in_handler) {
         read_in_handler = 1;
         assert(sigaction(SIGUSR1, &action, NULL) == 0);
@@ -86,7 +89,7 @@ int main(int argc, char **argv) {
         if (check_in_handler)
             assert(handler_stack_flags == (autodisarm ? SS_DISABLE : SS_ONSTACK));
         if (strstr(argv[1], "native") == NULL) {
-            assert(handler_tsc == 5000000 && handler_tscp == 5000000 && handler_aux == 0);
+            assert(handler_tsc == expected && handler_tscp == expected && handler_aux == 0);
         }
         stack_t now;
         assert(sigaltstack(NULL, &now) == 0);
@@ -100,9 +103,9 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 3; ++i) {
         uint32_t lo, hi, aux;
         __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-        assert((((uint64_t)hi << 32) | lo) == 5000000);
+        assert((((uint64_t)hi << 32) | lo) == expected);
         __asm__ volatile("rdtscp" : "=a"(lo), "=d"(hi), "=c"(aux));
-        assert((((uint64_t)hi << 32) | lo) == 5000000 && aux == 0);
+        assert((((uint64_t)hi << 32) | lo) == expected && aux == 0);
         stack_t now;
         assert(sigaltstack(NULL, &now) == 0);
         assert(now.ss_sp == registered.ss_sp && now.ss_size == registered.ss_size &&

@@ -121,8 +121,8 @@ use patina_dst_fs_mem::{FsSnapshot, MemFs};
 use patina_dst_net_sim::SimNet;
 use patina_dst_rng_seeded::{SeededEntropy, SplitMix64, domain_seed, fault_domain};
 use patina_dst_sched_det::{DetScheduler, PctConfig, SchedulePolicy, StarvationConfig};
-pub use patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS;
 use patina_dst_time_virtual::VirtualClock;
+pub use patina_dst_time_virtual::{DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS};
 pub use patina_dst_trace::MAX_TRACE_BYTES;
 use patina_dst_trace::{
     BranchSession, HandoffConsumedState, Recorder, Replayer, RunMetadata, TraceBundle, TraceError,
@@ -359,7 +359,7 @@ pub const ENV_BUGGIFY: &str = "PATINA_BUGGIFY";
 /// buggify sites made active for the run. Default 25% (250). Inert without
 /// [`ENV_BUGGIFY`].
 pub const ENV_BUGGIFY_ACTIVATION: &str = "PATINA_BUGGIFY_ACTIVATION_PERMILLE";
-/// Virtual-time monotonic-nanoseconds cutoff after which buggify stops firing
+/// Elapsed virtual nanoseconds since guest start after which buggify stops firing
 /// (the FoundationDB damage-control window). Default 300 virtual seconds. Inert
 /// without [`ENV_BUGGIFY`].
 pub const ENV_BUGGIFY_CUTOFF: &str = "PATINA_BUGGIFY_CUTOFF_NANOS";
@@ -989,7 +989,7 @@ pub struct BuggifyConfig {
     pub fire_permille: u16,
     /// Per-run site activation probability (per-mille).
     pub activation_permille: u16,
-    /// Virtual monotonic-time cutoff (nanoseconds) after which firing stops.
+    /// Elapsed virtual nanoseconds since guest start after which firing stops.
     pub cutoff_nanos: u64,
     /// When set, the runner has declared that the guest calls
     /// `patina_dst::lifecycle::setup_complete()`, so buggify stays inert until that
@@ -1023,7 +1023,7 @@ pub struct LivenessConfig {
     /// end (the buggify cutoff when buggify is enabled, else 0, unless
     /// [`heal_after_nanos`](Self::heal_after_nanos) overrides). `None` disables it.
     pub converge_budget_nanos: Option<u64>,
-    /// Explicit override for the converge arm's arm-time (virtual nanoseconds).
+    /// Explicit converge arm-time: virtual nanoseconds elapsed since guest start.
     /// `None` derives it from the buggify cutoff / run start.
     pub heal_after_nanos: Option<u64>,
 }
@@ -1081,6 +1081,9 @@ pub struct RuntimeConfig {
     /// metadata on every run and authoritative on replay. Not a fingerprint
     /// input.
     realtime_epoch_nanos: Option<u64>,
+    /// Machine uptime at guest start; recorded and authoritative on replay.
+    /// None selects [`DEFAULT_BOOT_ORIGIN_NANOS`].
+    boot_origin_nanos: Option<u64>,
     /// The node name the guest's virtual kernel reports, or `None` for
     /// `patina_dst_syscalls::IDENTITY_HOSTNAME`. `Some` only when supplied
     /// explicitly (or adopted from a replayed trace), exactly like
@@ -1131,6 +1134,7 @@ impl RuntimeConfig {
         Self {
             seed,
             mode: ExecutionMode::Seeded,
+            boot_origin_nanos: None,
             fingerprint: DEFAULT_FINGERPRINT.into(),
             step_budget: None,
             params: BTreeMap::new(),
@@ -1158,6 +1162,7 @@ impl RuntimeConfig {
         Self {
             seed,
             mode: ExecutionMode::Record { path: path.into() },
+            boot_origin_nanos: None,
             fingerprint: fingerprint.into(),
             step_budget: None,
             params: BTreeMap::new(),
@@ -1190,6 +1195,7 @@ impl RuntimeConfig {
         Self {
             seed,
             mode: ExecutionMode::RecordTransport,
+            boot_origin_nanos: None,
             fingerprint: fingerprint.into(),
             step_budget: None,
             params: BTreeMap::new(),
@@ -1223,6 +1229,7 @@ impl RuntimeConfig {
             mode: ExecutionMode::ReplayTransport {
                 timeline: timeline.into(),
             },
+            boot_origin_nanos: None,
             fingerprint: fingerprint.into(),
             step_budget: None,
             params: BTreeMap::new(),
@@ -1257,6 +1264,7 @@ impl RuntimeConfig {
                 path: path.into(),
                 timeline: timeline.into(),
             },
+            boot_origin_nanos: None,
             fingerprint: fingerprint.into(),
             step_budget: None,
             params: BTreeMap::new(),
@@ -1290,6 +1298,7 @@ impl RuntimeConfig {
     ) -> Self {
         Self {
             seed: branch_seed,
+            boot_origin_nanos: None,
             mode: ExecutionMode::Branch {
                 path: path.into(),
                 parent: parent.into(),
@@ -1744,11 +1753,24 @@ impl RuntimeConfig {
     }
 
     /// Set the run's virtual realtime epoch explicitly (tests and embedders).
-    /// The default clock starts on it, the trace records it, and a replay whose
-    /// trace recorded a different one is refused.
+    /// The default clock adds uptime to it, the trace records it, and a replay
+    /// whose trace recorded a different one is refused.
     #[must_use]
     pub fn with_realtime_epoch_nanos(mut self, realtime_epoch_nanos: u64) -> Self {
         self.realtime_epoch_nanos = Some(realtime_epoch_nanos);
+        self
+    }
+
+    /// Initial monotonic/boottime reading, not elapsed execution or CPU time.
+    pub fn boot_origin_nanos(&self) -> u64 {
+        self.boot_origin_nanos.unwrap_or(DEFAULT_BOOT_ORIGIN_NANOS)
+    }
+
+    /// Configure machine uptime at guest start. Replayed traces supply their
+    /// own origin; a conflicting explicit value is refused. The origin must be
+    /// nonzero, and both it and epoch + origin must fit signed 64-bit nanoseconds.
+    pub fn with_boot_origin_nanos(mut self, nanos: u64) -> Self {
+        self.boot_origin_nanos = Some(nanos);
         self
     }
 
@@ -2453,6 +2475,27 @@ impl RuntimeBuilder {
         }
         let recorded_realtime_epoch =
             installed_clock_epoch.unwrap_or_else(|| self.config.realtime_epoch_nanos());
+        let installed_boot_origin = self
+            .clock
+            .as_mut()
+            .map(|clock| clock.now(ClockKind::Monotonic))
+            .transpose()?;
+        if let (Some(installed), Some(configured)) =
+            (installed_boot_origin, self.config.boot_origin_nanos)
+        {
+            if installed != configured {
+                return Err(RuntimeError::Config(
+                    "installed clock conflicts with configured boot origin".into(),
+                ));
+            }
+        }
+        let recorded_boot_origin =
+            installed_boot_origin.unwrap_or_else(|| self.config.boot_origin_nanos());
+        if recorded_boot_origin == 0 || recorded_boot_origin > i64::MAX as u64 {
+            return Err(RuntimeError::Config(
+                "boot origin must be nonzero and fit signed 64-bit nanoseconds".into(),
+            ));
+        }
 
         match self.config.mode {
             ExecutionMode::RecordTransport | ExecutionMode::ReplayTransport { .. } => {
@@ -2507,8 +2550,9 @@ impl RuntimeBuilder {
         let mut replay_guest_env_override: Option<BTreeMap<String, String>> = None;
         // Same contract for the guest's initial working directory.
         let mut replay_guest_cwd_override: Option<String> = None;
-        // Same contract for the virtual realtime epoch and the node name.
+        // Same contract for clock origins and the node name.
         let mut replay_realtime_epoch_override: Option<u64> = None;
+        let mut replay_boot_origin_override = None;
         let mut replay_hostname_override: Option<String> = None;
         let mut replay_dns_override: Option<BTreeMap<String, String>> = None;
         // Same contract for the exploration scheduling policy.
@@ -2524,6 +2568,7 @@ impl RuntimeBuilder {
                             recorded_realtime_epoch,
                             self.config.hostname(),
                         )
+                        .with_boot_origin_nanos(recorded_boot_origin)
                         .with_faults(Some(fault_record(&self.config)))
                         .with_buggify(buggify_record(&self.config))
                         .with_schedule_policy(schedule_policy_record(&self.config))
@@ -2553,6 +2598,7 @@ impl RuntimeBuilder {
                             recorded_realtime_epoch,
                             self.config.hostname(),
                         )
+                        .with_boot_origin_nanos(recorded_boot_origin)
                         .with_faults(Some(fault_record(&self.config)))
                         .with_buggify(buggify_record(&self.config))
                         .with_schedule_policy(schedule_policy_record(&self.config))
@@ -2575,6 +2621,11 @@ impl RuntimeBuilder {
             ExecutionMode::Replay { path, timeline } => {
                 let replayer = Replayer::open_timeline(path, &self.config.fingerprint, timeline)?;
                 let root_seed = replayer.root_seed();
+                replay_boot_origin_override = Some(reconcile_replay_boot_origin(
+                    &self.config,
+                    installed_boot_origin,
+                    replayer.boot_origin_nanos(),
+                )?);
                 // The trace's fault configuration is authoritative on replay.
                 replay_fault_override =
                     reconcile_replay_faults(&self.config, replayer.fault_config())?;
@@ -2614,6 +2665,11 @@ impl RuntimeBuilder {
                 let bundle = TraceBundle::from_slice(&bytes)?;
                 let replayer = Replayer::from_bundle(bundle, &self.config.fingerprint, timeline)?;
                 let root_seed = replayer.root_seed();
+                replay_boot_origin_override = Some(reconcile_replay_boot_origin(
+                    &self.config,
+                    installed_boot_origin,
+                    replayer.boot_origin_nanos(),
+                )?);
                 replay_fault_override =
                     reconcile_replay_faults(&self.config, replayer.fault_config())?;
                 replay_buggify_override =
@@ -2655,6 +2711,11 @@ impl RuntimeBuilder {
                     branch_id.clone(),
                     *branch_seed,
                 )?;
+                replay_boot_origin_override = Some(reconcile_replay_boot_origin(
+                    &self.config,
+                    installed_boot_origin,
+                    session.boot_origin_nanos(),
+                )?);
                 // A branch replays the parent prefix, so it inherits the parent
                 // trace's fault configuration for the replayed drivers.
                 replay_fault_override =
@@ -2709,9 +2770,20 @@ impl RuntimeBuilder {
         if let Some(guest_cwd) = replay_guest_cwd_override {
             self.config.guest_cwd = Some(guest_cwd);
         }
-        // Likewise the realtime epoch, so the default clock below reads the
-        // recording's wall-clock times — the filesystem stamps its times from it
-        // without a recorded read, so a different epoch would change them.
+        // Adopt both clock origins, including for unrecorded filesystem stamps
+        // and elapsed-run fault windows. An installed clock owns its epoch, so
+        // validate the actual pair rather than an unused configured default.
+        if let Some(origin) = replay_boot_origin_override {
+            self.config.boot_origin_nanos = Some(origin);
+        }
+        let boot_origin_nanos = replay_boot_origin_override.unwrap_or(recorded_boot_origin);
+        let realtime_epoch = replay_realtime_epoch_override.unwrap_or(recorded_realtime_epoch);
+        realtime_epoch
+            .checked_add(boot_origin_nanos)
+            .filter(|nanos| *nanos <= i64::MAX as u64)
+            .ok_or_else(|| {
+                RuntimeError::Config("initial realtime must fit signed 64-bit nanoseconds".into())
+            })?;
         if let Some(epoch) = replay_realtime_epoch_override {
             self.config.realtime_epoch_nanos = Some(epoch);
         }
@@ -2801,9 +2873,9 @@ impl RuntimeBuilder {
                         .latency_live(self.config.faults.fs.latency_nanos.is_some()),
                 ));
             }
-            let realtime_epoch = self.config.realtime_epoch_nanos();
-            self.clock
-                .get_or_insert_with(|| Box::new(VirtualClock::new(realtime_epoch)));
+            self.clock.get_or_insert_with(|| {
+                Box::new(VirtualClock::at(boot_origin_nanos, realtime_epoch))
+            });
             self.entropy.get_or_insert_with(|| {
                 Box::new(SeededEntropy::new(domain_seed(
                     root_seed,
@@ -2857,6 +2929,7 @@ impl RuntimeBuilder {
         let liveness = LivenessWatchdog::new(
             self.config.liveness,
             resolve_heal_after(&self.config),
+            boot_origin_nanos,
             matches!(
                 self.config.mode,
                 ExecutionMode::Seeded
@@ -2893,6 +2966,7 @@ impl RuntimeBuilder {
         }
         Ok(Context {
             compute_stop,
+            boot_origin_nanos,
             root_seed,
             compatibility_fingerprint: self.config.fingerprint.clone(),
             step_budget: self.config.step_budget,
@@ -2958,7 +3032,10 @@ impl RuntimeBuilder {
             reports: self.config.reports,
             facts,
             facts_emitted: false,
-            spin: SpinRescue::default(),
+            spin: SpinRescue {
+                baseline_nanos: boot_origin_nanos,
+                ..SpinRescue::default()
+            },
             cpu: CpuTime::default(),
             alarm: None,
             cpu_alarm: None,
@@ -3130,7 +3207,7 @@ impl LivenessViolation {
 struct WatchdogArm {
     kind: LivenessKind,
     /// Virtual time (nanoseconds) at which this arm becomes active. The generic
-    /// arm arms at 0; the converge arm arms at the fault-window end.
+    /// arm arms at run start; the converge arm arms at the fault-window end.
     arm_time_nanos: u64,
     budget_nanos: u64,
     /// Whether virtual time has reached `arm_time_nanos` yet.
@@ -3204,15 +3281,16 @@ impl LivenessWatchdog {
     /// Build the watchdog from the resolved config. `heal_after_nanos` is the
     /// converge arm's arm-time already resolved by the caller (buggify cutoff or
     /// override). `active` gates whether detection actually runs.
-    fn new(config: LivenessConfig, heal_after_nanos: u64, active: bool) -> Self {
+    fn new(config: LivenessConfig, heal_after_nanos: u64, origin: u64, active: bool) -> Self {
+        let heal_after_nanos = origin.saturating_add(heal_after_nanos);
         let mut arms = Vec::new();
         if let Some(budget) = config.no_progress_budget_nanos {
             arms.push(WatchdogArm {
                 kind: LivenessKind::NoProgress,
-                arm_time_nanos: 0,
+                arm_time_nanos: origin,
                 budget_nanos: budget,
                 armed: false,
-                baseline_nanos: 0,
+                baseline_nanos: origin,
                 stall_ops: 0,
             });
         }
@@ -4206,6 +4284,8 @@ impl Buggify {
 /// written. A `Context` controls only effects performed through its own
 /// methods — it does not interpose the rest of the process.
 pub struct Context {
+    /// Actual initial monotonic reading, including explicitly installed drivers.
+    boot_origin_nanos: u64,
     compute_stop: Option<patina_dst_trace::ComputeStop>,
     root_seed: u64,
     compatibility_fingerprint: String,
@@ -4579,7 +4659,9 @@ impl Context {
         if !enabled || !active || !self.buggify.armed() {
             return Ok(SiteOutcome::Ok);
         }
-        if now.is_some_and(|now| now >= self.buggify.config.cutoff_nanos) {
+        if now.is_some_and(|now| {
+            now.saturating_sub(self.boot_origin_nanos) >= self.buggify.config.cutoff_nanos
+        }) {
             self.buggify.cutoff_reached = true;
             self.buggify.cutoff_suppressed += 1;
             return Ok(SiteOutcome::Ok);
@@ -4623,7 +4705,7 @@ impl Context {
             return Ok(SiteOutcome::Ok);
         }
         let now = now.expect("time read when enabled");
-        if now >= self.buggify.config.cutoff_nanos {
+        if now.saturating_sub(self.boot_origin_nanos) >= self.buggify.config.cutoff_nanos {
             self.buggify.cutoff_reached = true;
             self.buggify.cutoff_suppressed += 1;
             return Ok(SiteOutcome::Ok);
@@ -5171,9 +5253,9 @@ recording was produced by a guest whose result type no longer matches this one"
     /// emitted to stderr by [`Context::finish`] via `PATINA_SDK_REPORT`.
     pub fn buggify_diagnostics(&mut self) -> BuggifyDiagnostics {
         let cutoff_reached_now = self.buggify.config.enabled
-            && self
-                .current_monotonic()
-                .is_ok_and(|now| now >= self.buggify.config.cutoff_nanos);
+            && self.current_monotonic().is_ok_and(|now| {
+                now.saturating_sub(self.boot_origin_nanos) >= self.buggify.config.cutoff_nanos
+            });
         // Whether buggify is off because THIS generation's swarm draw dropped it,
         // as opposed to never having been requested. Both report `enabled=0`, and
         // conflating them is what turned a working `--buggify=N` into a phantom
@@ -5439,9 +5521,7 @@ recording was produced by a guest whose result type no longer matches this one"
 
     pub fn sleep_for(&mut self, duration_nanos: u64) -> Result<(), RuntimeError> {
         let now = self.now(ClockKind::Monotonic)?;
-        let deadline = now.checked_add(duration_nanos).ok_or_else(|| {
-            EffectError::new(ErrorCode::InvalidInput, "virtual sleep deadline overflowed")
-        })?;
+        let deadline = now.saturating_add(duration_nanos);
         // Direct-API sleeps jitter here (the native embedder jitters at its own
         // sleep entry instead); either way a guest sleep is jittered exactly once.
         let deadline = self.apply_sleep_jitter(deadline);
@@ -7815,6 +7895,8 @@ a recorded result or a replay fetch",
         if !self.liveness.active || self.clock.is_none() {
             return Ok(());
         }
+        // Arm offsets were anchored to run start at construction; observations
+        // and diagnostic timestamps stay in the trace's monotonic domain.
         let now = self.current_monotonic()?;
         let progress = operation_is_progress(operation);
         let deferring = self
@@ -8743,6 +8825,25 @@ fn reconcile_replay_realtime_epoch(
                  let the runtime build it"
             )));
         }
+    }
+    Ok(recorded)
+}
+
+fn reconcile_replay_boot_origin(
+    config: &RuntimeConfig,
+    installed: Option<u64>,
+    recorded: u64,
+) -> Result<u64, RuntimeError> {
+    if recorded == 0
+        || recorded > i64::MAX as u64
+        || [config.boot_origin_nanos, installed]
+            .into_iter()
+            .flatten()
+            .any(|nanos| nanos != recorded)
+    {
+        return Err(RuntimeError::Config(format!(
+            "boot origin conflicts with the trace's recorded origin ({recorded} ns); the trace is authoritative and the origin must be nonzero and fit signed 64-bit nanoseconds"
+        )));
     }
     Ok(recorded)
 }
@@ -11521,8 +11622,9 @@ class=crash|0 class=buggify|0"
                 RuntimeConfig::seeded(seed).with_sleep_jitter_nanos(500, 1_500),
             )
             .unwrap();
+            let start = context.now(ClockKind::Monotonic).unwrap();
             context.sleep_for(1_000).unwrap();
-            let elapsed = context.now(ClockKind::Monotonic).unwrap();
+            let elapsed = context.now(ClockKind::Monotonic).unwrap() - start;
             context.finish().unwrap();
             elapsed
         };
@@ -11668,8 +11770,9 @@ class=crash|0 class=buggify|0"
         let entropy = context.entropy_bytes(12)?;
         context.write_file("/state/value", &entropy)?;
         assert_eq!(context.read_file("/state/value")?, entropy);
+        let start = context.now(ClockKind::Monotonic)?;
         context.sleep_for(250)?;
-        assert_eq!(context.now(ClockKind::Monotonic)?, 250);
+        assert_eq!(context.now(ClockKind::Monotonic)? - start, 250);
         Ok(entropy)
     }
 
@@ -11842,14 +11945,44 @@ class=crash|0 class=buggify|0"
         }
     }
 
+    // Class pairing: tests/boot_origin.rs signed startup bounds.
     #[test]
-    fn trace_transport_records_and_replays_without_paths() {
+    fn trace_transport_rejects_out_of_range_startup_clocks() {
         let transport = SharedTransport::default();
-        let mut record = RuntimeBuilder::new(RuntimeConfig::record_transport(99, "fixture-v1"))
+        RuntimeBuilder::new(RuntimeConfig::record_transport(1, "bounds"))
             .with_default_drivers()
             .with_trace_transport(transport.clone())
             .build()
+            .unwrap()
+            .finish()
             .unwrap();
+        let mut bundle: TraceBundle = serde_json::from_slice(&transport.stored()).unwrap();
+        for (origin, epoch) in [(i64::MAX as u64 + 1, 0), (1, i64::MAX as u64)] {
+            bundle.metadata.boot_origin_nanos = origin;
+            bundle.metadata.realtime_epoch_nanos = epoch;
+            let mut invalid = SharedTransport::default();
+            invalid.write_bundle(&bundle.to_bytes().unwrap()).unwrap();
+            assert!(matches!(
+                RuntimeBuilder::new(RuntimeConfig::replay_transport_timeline("main", "bounds"))
+                    .with_default_drivers()
+                    .with_trace_transport(invalid)
+                    .build(),
+                Err(RuntimeError::Config(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn trace_transport_records_and_replays_without_paths() {
+        let transport = SharedTransport::default();
+        let origin = DEFAULT_BOOT_ORIGIN_NANOS + 321;
+        let mut record = RuntimeBuilder::new(
+            RuntimeConfig::record_transport(99, "fixture-v1").with_boot_origin_nanos(origin),
+        )
+        .with_default_drivers()
+        .with_trace_transport(transport.clone())
+        .build()
+        .unwrap();
         let expected = exercise(&mut record).unwrap();
         record.finish().unwrap();
         assert!(!transport.stored().is_empty());
@@ -11863,6 +11996,7 @@ class=crash|0 class=buggify|0"
         .build()
         .unwrap();
         assert_eq!(replay.root_seed(), 99);
+        assert_eq!(replay.monotonic_now_unrecorded().unwrap(), origin);
         assert_eq!(exercise(&mut replay).unwrap(), expected);
         replay.finish().unwrap();
 
@@ -12414,10 +12548,10 @@ class=crash|0 class=buggify|0"
         let mut context =
             Context::from_config(RuntimeConfig::seeded(1).with_fs_latency_nanos(10, 10)).unwrap();
         context.fs_create_directory("/d", 0o755).unwrap();
-        // Realtime stamps: the default epoch plus the 10ns of modeled latency.
+        // Realtime stamps: epoch + boot origin + the modeled latency.
         assert_eq!(
             context.fs_metadata("/d").unwrap().btime_nanos,
-            i128::from(DEFAULT_REALTIME_EPOCH_NANOS + 10)
+            i128::from(DEFAULT_REALTIME_EPOCH_NANOS + DEFAULT_BOOT_ORIGIN_NANOS + 10)
         );
         let fd = context
             .fs_open("/d/f", OpenFlags::create_truncate_write())
@@ -12847,19 +12981,20 @@ class=crash|0 class=buggify|0"
     /// advancing time and waking the earliest-due task. Returns the observed wake
     /// order and the virtual time at each wake.
     fn timed_rescue(context: &mut Context) -> Result<Vec<(TaskId, u64)>, RuntimeError> {
+        let start = context.now(ClockKind::Monotonic)?;
         let a = context.task_spawn("a")?;
         let b = context.task_spawn("b")?;
         // Park the first-selected task at 200 and the other at 100 so the wake
         // order is determined by deadline, not by spawn or selection order.
         let first = context.scheduler_next()?.expect("a task is runnable");
-        context.task_park_timed(first, "wait", ClockKind::Monotonic, 200)?;
+        context.task_park_timed(first, "wait", ClockKind::Monotonic, start + 200)?;
         let second = context.scheduler_next()?.expect("a task is runnable");
-        context.task_park_timed(second, "wait", ClockKind::Monotonic, 100)?;
+        context.task_park_timed(second, "wait", ClockKind::Monotonic, start + 100)?;
         let mut wakes = Vec::new();
         // Both tasks are parked; each `scheduler_next` now rescues in turn.
         for _ in 0..2 {
             let woken = context.scheduler_next()?.expect("a timer wakes a task");
-            wakes.push((woken, context.now(ClockKind::Monotonic)?));
+            wakes.push((woken, context.now(ClockKind::Monotonic)? - start));
             context.task_complete(woken)?;
         }
         assert!(context.scheduler_next()?.is_none());
@@ -12947,13 +13082,16 @@ class=crash|0 class=buggify|0"
         // existing recorded artifact byte-identical.
         let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
         for _ in 0..SPIN_RESCUE_CLOCK_OPS {
-            assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 0);
+            assert_eq!(
+                context.now(ClockKind::Monotonic).unwrap(),
+                DEFAULT_BOOT_ORIGIN_NANOS
+            );
         }
         assert_eq!(context.spin.rescues, 0);
         // One more read crosses the streak and rescues.
         assert_eq!(
             context.now(ClockKind::Monotonic).unwrap(),
-            SPIN_RESCUE_TOKEN_MIN_NANOS
+            DEFAULT_BOOT_ORIGIN_NANOS + SPIN_RESCUE_TOKEN_MIN_NANOS
         );
         assert_eq!(context.spin.rescues, 1);
         context.finish().unwrap();
@@ -12967,12 +13105,18 @@ class=crash|0 class=buggify|0"
         let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
         for _ in 0..8 {
             for _ in 0..SPIN_RESCUE_CLOCK_OPS {
-                assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 0);
+                assert_eq!(
+                    context.now(ClockKind::Monotonic).unwrap(),
+                    DEFAULT_BOOT_ORIGIN_NANOS
+                );
             }
             context.write_file("/work", b"x").unwrap();
         }
         assert_eq!(context.spin.rescues, 0);
-        assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 0);
+        assert_eq!(
+            context.now(ClockKind::Monotonic).unwrap(),
+            DEFAULT_BOOT_ORIGIN_NANOS
+        );
         context.finish().unwrap();
     }
 
@@ -12993,7 +13137,10 @@ class=crash|0 class=buggify|0"
         }
         assert_eq!(context.spin.rescues, 0);
         // Exactly the four nanoseconds the guest itself slept.
-        assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 4);
+        assert_eq!(
+            context.now(ClockKind::Monotonic).unwrap(),
+            DEFAULT_BOOT_ORIGIN_NANOS + 4
+        );
         context.finish().unwrap();
     }
 
@@ -13023,7 +13170,7 @@ class=crash|0 class=buggify|0"
     #[test]
     fn the_spin_rescue_stops_at_an_alarm() {
         let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
-        context.set_alarm(Some(1_500));
+        context.set_alarm(Some(DEFAULT_BOOT_ORIGIN_NANOS + 1_500));
         // 1 µs, then the doubled 2 µs token is clamped to the alarm at 1.5 µs.
         let (_, elapsed) = calibration_spin(&mut context, 1_000).unwrap();
         assert_eq!(elapsed, 1_500);
@@ -13064,18 +13211,19 @@ class=crash|0 class=buggify|0"
         let task = context.task_spawn("main").unwrap();
         assert_eq!(context.scheduler_next().unwrap(), Some(task));
         // A runnable task: nothing is idle.
-        assert!(!context.advance_idle_to(100).unwrap());
+        let start = context.now(ClockKind::Monotonic).unwrap();
+        assert!(!context.advance_idle_to(start + 100).unwrap());
         context
-            .task_park_timed(task, "wait", ClockKind::Monotonic, 300)
+            .task_park_timed(task, "wait", ClockKind::Monotonic, start + 300)
             .unwrap();
-        assert!(context.advance_idle_to(100).unwrap());
-        assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 100);
+        assert!(context.advance_idle_to(start + 100).unwrap());
+        assert_eq!(context.now(ClockKind::Monotonic).unwrap() - start, 100);
         // Not behind the clock, not at or past a parked task's own deadline.
-        assert!(!context.advance_idle_to(100).unwrap());
-        assert!(!context.advance_idle_to(300).unwrap());
+        assert!(!context.advance_idle_to(start + 100).unwrap());
+        assert!(!context.advance_idle_to(start + 300).unwrap());
         // The parked task's deadline stays the deadlock rescue's.
         assert_eq!(context.scheduler_next().unwrap(), Some(task));
-        assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 300);
+        assert_eq!(context.now(ClockKind::Monotonic).unwrap() - start, 300);
         context.finish().unwrap();
     }
 
@@ -13299,7 +13447,7 @@ class=crash|0 class=buggify|0"
     #[test]
     fn realtime_deadlines_convert_through_the_clock_epoch() {
         // A clock whose realtime epoch is 1_000ns ahead of monotonic: a realtime
-        // deadline of 1_150 must register (and rescue-advance) at monotonic 150.
+        // deadline of origin + 1_150 must rescue at monotonic origin + 150.
         let mut context = RuntimeBuilder::new(RuntimeConfig::seeded(1))
             .with_default_drivers()
             .with_clock(VirtualClock::new(1_000))
@@ -13309,12 +13457,23 @@ class=crash|0 class=buggify|0"
         let running = context.scheduler_next().unwrap().unwrap();
         assert_eq!(running, task);
         context
-            .task_park_timed(task, "sleep", ClockKind::Realtime, 1_150)
+            .task_park_timed(
+                task,
+                "sleep",
+                ClockKind::Realtime,
+                DEFAULT_BOOT_ORIGIN_NANOS + 1_150,
+            )
             .unwrap();
         let woken = context.scheduler_next().unwrap().unwrap();
         assert_eq!(woken, task);
-        assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 150);
-        assert_eq!(context.now(ClockKind::Realtime).unwrap(), 1_150);
+        assert_eq!(
+            context.now(ClockKind::Monotonic).unwrap(),
+            DEFAULT_BOOT_ORIGIN_NANOS + 150
+        );
+        assert_eq!(
+            context.now(ClockKind::Realtime).unwrap(),
+            DEFAULT_BOOT_ORIGIN_NANOS + 1_150
+        );
         context.task_complete(task).unwrap();
         context.finish().unwrap();
     }
@@ -13358,11 +13517,21 @@ class=crash|0 class=buggify|0"
         // fires; only `b`'s later timer should drive a rescue.
         let first = context.scheduler_next().unwrap().unwrap();
         context
-            .task_park_timed(first, "wait", ClockKind::Monotonic, 50)
+            .task_park_timed(
+                first,
+                "wait",
+                ClockKind::Monotonic,
+                DEFAULT_BOOT_ORIGIN_NANOS + 50,
+            )
             .unwrap();
         let second = context.scheduler_next().unwrap().unwrap();
         context
-            .task_park_timed(second, "wait", ClockKind::Monotonic, 500)
+            .task_park_timed(
+                second,
+                "wait",
+                ClockKind::Monotonic,
+                DEFAULT_BOOT_ORIGIN_NANOS + 500,
+            )
             .unwrap();
         // Signal-wake `first` (deregisters its 50ns timer). It must not be woken
         // again by the rescue, which should advance straight to 500 for `second`.
@@ -13372,11 +13541,17 @@ class=crash|0 class=buggify|0"
             resumed, first,
             "the signalled task runs without advancing time"
         );
-        assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 0);
+        assert_eq!(
+            context.now(ClockKind::Monotonic).unwrap(),
+            DEFAULT_BOOT_ORIGIN_NANOS
+        );
         context.task_park(first, "again").unwrap();
         let rescued = context.scheduler_next().unwrap().unwrap();
         assert_eq!(rescued, second);
-        assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 500);
+        assert_eq!(
+            context.now(ClockKind::Monotonic).unwrap(),
+            DEFAULT_BOOT_ORIGIN_NANOS + 500
+        );
         let _ = (a, b);
     }
 
@@ -13388,10 +13563,18 @@ class=crash|0 class=buggify|0"
         let task = context.task_spawn("only").unwrap();
         assert_eq!(context.scheduler_next().unwrap(), Some(task));
         context
-            .task_park_timed(task, "sleep", ClockKind::Monotonic, 4_096)
+            .task_park_timed(
+                task,
+                "sleep",
+                ClockKind::Monotonic,
+                DEFAULT_BOOT_ORIGIN_NANOS + 4_096,
+            )
             .unwrap();
         assert_eq!(context.scheduler_next().unwrap(), Some(task));
-        assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 4_096);
+        assert_eq!(
+            context.now(ClockKind::Monotonic).unwrap(),
+            DEFAULT_BOOT_ORIGIN_NANOS + 4_096
+        );
         assert!(context.take_rescued_timeouts().contains(&task));
         context.task_complete(task).unwrap();
     }

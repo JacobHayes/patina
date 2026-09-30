@@ -48,9 +48,12 @@ unknown option.
   starting environment) and `--cwd PATH` (its starting working directory, an
   absolute path that must exist in the deterministic image; default `/`); both
   are recorded into the trace and restored flag-free on replay.
-  `--realtime-epoch 2001-09-09T01:46:40Z` (every family) sets the virtual wall
-  clock's start, an RFC 3339 UTC timestamp (default 2026-07-22T23:00:09Z,
-  Patina's first commit); `--hostname NAME` (native and Cargo; wasip1 has no
+  `--realtime-epoch 2001-09-09T01:46:40Z` (every family) sets realtime at
+  monotonic zero (default 2026-07-22T23:00:09Z, Patina's first commit), not
+  guest-start wall time. The default boot origin is 12345.678901234s of uptime;
+  realtime = epoch + uptime, so default guest start is 2026-07-23T02:25:54.678901234Z.
+  RuntimeConfig can override the nonzero origin; traces record and restore it.
+  `--hostname NAME` (native and Cargo; wasip1 has no
   hostname) sets the node name `uname`/`gethostname` report (default
   `patina`, at most 64 bytes); both are recorded and restored flag-free on
   replay.

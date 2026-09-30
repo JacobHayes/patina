@@ -654,12 +654,14 @@ mod linux {
                 assert!(text(&ran.stderr).contains("timestamp-counter instruction site(s)"));
                 assert_eq!(
                     text(&ran.stdout),
-                    concat!(
-                        "TSC step=0 rdtsc=0 rdtscp=0 aux=0\n",
-                        "TSC step=1 rdtsc=5000000 rdtscp=5000000 aux=0\n",
-                        "TSC step=2 rdtsc=10000000 rdtscp=10000000 aux=0\n",
-                        "TSC total_ticks=15000000\n",
-                    )
+                    (0..3)
+                        .map(|step| {
+                            let ticks =
+                                patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS + step * 5_000_000;
+                            format!("TSC step={step} rdtsc={ticks} rdtscp={ticks} aux=0\n")
+                        })
+                        .collect::<String>()
+                        + "TSC total_ticks=15000000\n"
                 );
                 assert_eq!(ran.stdout, g.assert_run_success(7, &[]).stdout);
                 let trace = g.assert_record_replay_identity(7, &[], &ran.stdout);
