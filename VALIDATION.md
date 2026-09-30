@@ -716,6 +716,36 @@ disables the patina run's comparison where the native oracle ran. Raw
 observations are retained run artifacts. Cross-compilation checks active-target
 type boundaries; runtime claims require execution on that OS/architecture.
 
+### Native libtest onboarding detectors
+
+`cargo-patina`'s `native_harness_selection_disambiguates_target_kinds_and_packages`
+unit matrix covers the Cartesian ambiguity of target kind and workspace member;
+`end_to_end::native_harness_selects_same_named_library_binary_and_integration_test`
+confirms an ordinary same-named lib/bin/integration package natively, then selects
+and executes each harness under Patina. Restoring the old name-only selector
+makes both detectors fail. `native_harness_staging_uses_resolved_kind_and_name`
+requires bare/qualified selectors to share a directory and distinguishes a real
+prefixed target name from a kind-qualified selector.
+
+`HarnessSeedRun::trace` is the trace-provenance choke point: only the child's
+receipt can supply facts, never a requested path or an old file. The portable
+`end_to_end::native_harness_import_refusal_has_no_trace` requires an absent JSON
+`trace` after a pre-run import refusal, even with a stale recording planted.
+Its Linux x86-64 point pin,
+`native_harness_audit_refusal_does_not_advertise_a_trace`, confirms
+`testbeds/native-boundary/text_metadata_probe.rs` natively, then requires the
+named `undecodable-instruction` audit refusal and the same absent-trace invariant.
+The existing `native_harness_mode_filters_records_replays_and_refuses_missing_target`
+is the positive control: an actual guest assertion failure must return trace
+facts, and replay uses the returned path. Omitting those facts fails the control.
+
+`native_harness_records_failures_but_never_retries_a_prerun_refusal` counts calls
+to the recording runner: zero after the audit gate's structured pre-run refusal,
+one for other errors (including exit 2), assertion failures and guest aborts.
+The e2e refusal cases also require the old file to remain untouched because no
+recording was attempted. The metadata probe documents a conservative audit limit,
+not runtime acceptance or a reason to skip undecodable bytes (see the taxonomy).
+
 ### Maintenance rule
 
 **Every new point-level regression pin must name its class-level pairing in a

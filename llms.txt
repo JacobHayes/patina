@@ -63,8 +63,13 @@ unknown option.
   The Cargo package family under Patina.
 - `cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--yield-points] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
   Native libtest harness mode: rebuilds the named Cargo test target shim-linked,
-  stages it under `target/patina/dst/...`, runs the exact libtest filter with one
-  libtest thread, and records the first failing seed with test/replay repros.
+  stages it under `target/patina/dst/PACKAGE/KIND/NAME/TEST`, runs the exact libtest
+  filter with one libtest thread, and records the first failing seed unless it is
+  a pre-run audit/import refusal (nothing ran, so no recorded retry is attempted).
+  NAME can be qualified as lib:NAME, bin:NAME, or test:NAME; --package selects the
+  workspace member. Staging uses the resolved kind/name, not selector spelling.
+  A test repro is always printed on failure; `trace` facts in the JSON envelope
+  and a replay repro come only from that recorded child's receipt, never old files.
 - `cargo patina replay <ARTIFACT|SOURCE> <TRACE> [--coverage-out PATH] [host inputs]`
   Reproduce a recording. Flag-free: seed, fault knobs, buggify, and guest argv
   are restored from the trace (the trace is authoritative; a re-supplied semantic
@@ -284,7 +289,10 @@ ABSENT means "did not fire", never zero.
   `no_runtime_installed`, `buggify_duplicate_label`,
   `buggify_setup_never_called`, `harness_before_install`,
   `preinit_interposed_call`, `shim_fatal`, `unsupported_import`,
-  `unknown_import`, `starvation_stall`, `incomplete_trace`). Constructed by the
+  `unknown_import`, `starvation_stall`, `incomplete_trace`, `native_prerun_audit`).
+  `native_prerun_audit` is emitted directly by the native audit gate before any
+  guest launch, with no `guest_exit`; it lets harnesses skip futile recording retries.
+  Other classes are constructed by the
   supervising process from what the dying child printed and exited with. Its
   ABSENCE is meaningful: an abort with no `refusal` is the guest's own doing.
 - `guest_exit` = `{code, signal?, signal_name?, core?}` — how the guest process ended.

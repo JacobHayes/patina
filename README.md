@@ -136,9 +136,17 @@ source-first native libtest harness mode for one exact test target.
 Native harness mode is the tight point-solution loop: `cargo patina test
 <DIR|Cargo.toml> --harness-target NAME --exact MOD::test --seeds N` runs the
 same Cargo libtest target under the native shim with a single libtest thread.
-The first failing seed is immediately re-run with `--record`; artifacts land under
-`target/patina/dst/...`, and the failure block includes both `cargo patina test`
-and `cargo patina replay` repro commands.
+Use a bare harness target name when unique, or `lib:NAME`, `bin:NAME`, or
+`test:NAME` when target kinds share a name (as a library and binary commonly do).
+`--package` disambiguates workspace members, not target kinds.
+Artifacts land under `target/patina/dst/PACKAGE/KIND/NAME/TEST`, keyed on the
+resolved target, not the selector's spelling. A failing seed is re-run with
+`--record`, except a pre-run audit/import refusal: no guest executed and a retry
+cannot record anything. Before an actual retry the older per-seed trace is removed.
+The failure block always includes a `cargo patina test` repro; the JSON result's
+`trace` field and a `cargo patina replay` repro are included only when the recorded
+child's receipt supplies readable trace facts. A pre-run refusal leaves old files
+untouched but never reports them as this run's trace.
 
 For an adopter-shaped guardrail, enable `patina-dst`'s default-off `macros`
 feature in dev-dependencies and write `#[patina_dst::test]` on a zero-argument

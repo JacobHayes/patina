@@ -14671,8 +14671,9 @@ fn native_harness_mode_filters_records_replays_and_refuses_missing_target() {
         "filtered harness JSON stdout should be byte-identical across repeats"
     );
 
-    let pass_guest = fixture_target_directory(directory.path())
-        .join("patina/dst/dst_harness_fixture/dst_harness_fixture/tests__epoch_is_seeded/guest");
+    let pass_guest = fixture_target_directory(directory.path()).join(
+        "patina/dst/dst_harness_fixture/lib/dst_harness_fixture/tests__epoch_is_seeded/guest",
+    );
     assert!(
         pass_guest.exists(),
         "staged pass harness missing: {pass_guest:?}"
@@ -14704,27 +14705,23 @@ fn native_harness_mode_filters_records_replays_and_refuses_missing_target() {
             "--buggify=1000",
             "--buggify-activation-permille",
             "1000",
+            "--format",
+            "json",
         ],
     );
     assert_eq!(failing.status.code(), Some(101));
-    let fail_stderr = String::from_utf8_lossy(&failing.stderr);
-    assert!(
-        fail_stderr.contains(
-            "patina dst test failed: dst_harness_fixture::tests::buggify_failure_records"
-        ),
-        "failure block missing test name:\n{fail_stderr}"
+    let result: serde_json::Value = serde_json::from_slice(&failing.stdout).unwrap();
+    // Positive control for the refusal detector: the receipt must contain real
+    // trace facts, and the path it advertises must actually replay the failure.
+    assert!(result["trace"].is_object(), "{result}");
+    assert!(result["trace"]["event_count"].as_u64().unwrap() > 0);
+    let trace = PathBuf::from(result["trace"]["path"].as_str().unwrap());
+    let failure_dir = fixture_target_directory(directory.path()).join(
+        "patina/dst/dst_harness_fixture/lib/dst_harness_fixture/tests__buggify_failure_records",
     );
-    assert!(
-        fail_stderr.contains("seed 0 of 0..3")
-            && fail_stderr.contains("cargo patina test")
-            && fail_stderr.contains("cargo patina replay"),
-        "failure block missing seed/repro commands:\n{fail_stderr}"
-    );
-    let failure_dir = fixture_target_directory(directory.path())
-        .join("patina/dst/dst_harness_fixture/dst_harness_fixture/tests__buggify_failure_records");
     let fail_guest = failure_dir.join("guest");
-    let trace = failure_dir.join("seed-0.patina");
-    assert!(trace.exists(), "record-on-failure trace missing: {trace:?}");
+    assert_eq!(trace, failure_dir.join("seed-0.patina"));
+    assert!(trace.is_file());
     let replay = invoke_unchecked(
         patina,
         directory.path(),
@@ -14762,6 +14759,219 @@ fn native_harness_mode_filters_records_replays_and_refuses_missing_target() {
         "missing harness target should refuse loudly:\n{}",
         String::from_utf8_lossy(&missing.stderr)
     );
+}
+
+/// Declared audit limit. Class pairing: the portable import-refusal detector
+/// below and HarnessSeedRun::trace's receipt-only provenance choke point.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn native_harness_audit_refusal_does_not_advertise_a_trace() {
+    assert_native_harness_prerun_refusal(
+        "text_metadata",
+        "executable_metadata_is_not_executed",
+        include_str!("../../../testbeds/native-boundary/text_metadata_probe.rs"),
+        "undecodable-instruction",
+    );
+}
+
+/// Portable class pairing for the executable-metadata pin. An import refusal
+/// happens before guest launch on every native platform, not just x86-64 Linux.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_harness_import_refusal_has_no_trace() {
+    assert_native_harness_prerun_refusal(
+        "import_refusal",
+        "import_is_linked",
+        r#"
+unsafe extern "C" { fn system(command: *const u8) -> i32; }
+#[test]
+fn import_is_linked() {
+    // Retain the import without invoking a shell, natively or under Patina.
+    assert_ne!(std::hint::black_box(system as *const () as usize), 0);
+}
+"#,
+        "process",
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_native_harness_prerun_refusal(name: &str, exact: &str, source: &str, category: &str) {
+    let directory = tempdir().unwrap();
+    let root = directory.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        format!("[package]\nname = {name:?}\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+    )
+    .unwrap();
+    fs::write(root.join("src/lib.rs"), source).unwrap();
+    let native = Command::new("cargo")
+        .args(["test", "--quiet"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(native.status.success(), "{native:?}");
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let staged =
+        fixture_target_directory(root).join(format!("patina/dst/{name}/lib/{name}/{exact}"));
+    fs::create_dir_all(&staged).unwrap();
+    let trace = staged.join("seed-0.patina");
+    // File existence is not evidence that THIS run produced a trace.
+    fs::write(&trace, b"stale trace canary").unwrap();
+    let run = invoke_unchecked(
+        patina,
+        root,
+        &[
+            "test",
+            ".",
+            "--harness-target",
+            name,
+            "--exact",
+            exact,
+            "--seed",
+            "0",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(run.status.code(), Some(2), "{run:?}");
+    let result: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert_eq!(result["verb"], "test");
+    assert!(result["trace"].is_null(), "{result}");
+    // Skipping the recording attempt must not touch a previous attempt's file;
+    // and that file must not masquerade as facts in this attempt's receipt.
+    assert_eq!(fs::read(&trace).unwrap(), b"stale trace canary");
+    let refused = invoke_unchecked(
+        patina,
+        root,
+        &[
+            "run",
+            staged.join("guest").to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(refused.status.code(), Some(2));
+    let receipt: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(receipt["refusal"]["class"], "native_prerun_audit");
+    assert!(receipt["guest_exit"].is_null());
+    assert!(receipt["trace"].is_null());
+    let audit = invoke_unchecked(
+        patina,
+        root,
+        &[
+            "audit",
+            staged.join("guest").to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(audit.status.code(), Some(2), "{audit:?}");
+    let result: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+    assert!(
+        result["finding_details"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["category"] == category),
+        "{result}"
+    );
+}
+
+/// Same-name targets are Cargo's default for a package with lib.rs + main.rs.
+/// Class pairing: the target-kind/package selection matrix in lib.rs.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_harness_selects_same_named_library_binary_and_integration_test() {
+    let directory = tempdir().unwrap();
+    let root = directory.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("tests")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"same_name\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    // Native and simulated oracles are the same; no sleep or host input.
+    let case = r#"
+#[test]
+fn roundtrip() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || tx.send(42).unwrap());
+    assert_eq!(rx.recv().unwrap(), 42);
+    thread.join().unwrap();
+}
+"#;
+    for (kind, path, entry) in [
+        ("lib", "src/lib.rs", ""),
+        ("bin", "src/main.rs", "fn main() {}"),
+        ("test", "tests/same_name.rs", ""),
+    ] {
+        // Each harness also has a distinct failing selection canary under
+        // Patina. A wrong target or an empty filter must not look like success.
+        fs::write(
+            root.join(path),
+            format!(
+                "{entry}\n{case}\n#[test]\n#[allow(unexpected_cfgs)]\nfn selected_{kind}() {{ assert!(!cfg!(patina)); }}\n"
+            ),
+        )
+        .unwrap();
+    }
+    let native = Command::new("cargo")
+        .args(["test", "--quiet"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(native.status.success(), "{native:?}");
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let ambiguous = invoke_unchecked(
+        patina,
+        root,
+        &[
+            "test",
+            ".",
+            "--harness-target",
+            "same_name",
+            "--exact",
+            "roundtrip",
+            "--seed",
+            "0",
+        ],
+    );
+    assert_eq!(ambiguous.status.code(), Some(2));
+    for kind in ["lib", "bin", "test"] {
+        let selector = format!("{kind}:same_name");
+        let run = invoke_unchecked(
+            patina,
+            root,
+            &[
+                "test",
+                ".",
+                "--harness-target",
+                &selector,
+                "--exact",
+                "roundtrip",
+                "--seed",
+                "0",
+            ],
+        );
+        assert!(run.status.success(), "{selector}: {run:?}");
+        let canary = invoke_unchecked(
+            patina,
+            root,
+            &[
+                "test",
+                ".",
+                "--harness-target",
+                &selector,
+                "--exact",
+                &format!("selected_{kind}"),
+                "--seed",
+                "0",
+            ],
+        );
+        assert_eq!(canary.status.code(), Some(101), "{selector}: {canary:?}");
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

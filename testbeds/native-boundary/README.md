@@ -11,8 +11,9 @@ Each guest's internal assertions and its harness assertions form the proof.
 | `native_raw` | Mixed raw/libc descriptor parity, legacy syscall aliases, exact virtual identity, soft refusals, prctl state/refusals, raw ppoll timeout writeback and pipe readiness | x86_64 Linux; unsupported SUD executes refusal assertions |
 | `native_signals` | Linux C readiness EINTR/mask/timeout contracts, libc/raw signal state, sigwait retry and guest-abort finalization; Linux/macOS internal-panic ownership, catchable guest panics and process/sleep repeat/replay | Linux + macOS shared cases; interruption Linux-only; inline raw cases x86_64 Linux with SUD |
 | `native_trace` | Whole-run std syscall containment and a planted host open through the same filter; explicit unsupported-ktrace policy | strace on both Linux architectures; static containment evidence on macOS |
+| `end_to_end` | `text_metadata_probe.rs`: native-return assertion, declared executable-text metadata refusal, and absent trace facts in the libtest result; portable import-refusal companion | Metadata Linux x86_64; import refusal Linux + macOS |
 
-All six targets run in `mise run check` and the workspace-test CI jobs:
+All seven targets run in `mise run check` and the workspace-test CI jobs:
 Linux stable/MSRV on both architectures, macOS stable. They are **not** in
 `check:fast`. That tier retains `shim_host_alias`'s compiled-object scan and
 planted leak, and `test_support`'s parsing/deadline checks.
@@ -72,6 +73,19 @@ mutation moves the Rust route ahead of admission; the short-stack detector
 rejects it on both Linux architectures. The compiler-frame/route-write budget
 check also self-tests a structural ban on pre-admission Rust calls, including
 leaves that might otherwise happen to fit in the remaining space.
+
+## Executable-section metadata refusal
+
+`text_metadata_probe.rs` reduces native crypto assembly that places metadata
+in executable text after a function's return, using neutral REX-prefix-range bytes.
+Its native test calls `probe()` and asserts the function returns 42; the Linux
+x86-64 linear instruction audit refuses the unreachable data as
+`undecodable-instruction`. The `end_to_end` target's
+`native_harness_audit_refusal_does_not_advertise_a_trace` test owns this declared
+limit and asserts the result has no trace facts, even with an older file present.
+Its portable class pairing is `native_harness_import_refusal_has_no_trace`.
+This is not a runtime bug or permission to bypass the audit. Supporting
+mixed code/data text needs an explicit containment decision; see the escape taxonomy.
 
 ## Coverage boundaries
 

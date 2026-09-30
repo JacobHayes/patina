@@ -3739,6 +3739,32 @@ struct HarnessSeedRun {
     stdout: String,
     stderr: String,
     message: Option<String>,
+    // Choke point: HarnessSeedRun::trace is taken only from the child's receipt,
+    // never inferred from a requested path or a file left by an earlier run.
+    trace: Option<output::TraceFacts>,
+    pre_run_refusal: bool,
+}
+
+fn record_harness_failure(
+    first: &HarnessSeedRun,
+    trace: &Path,
+    record: impl FnOnce() -> Result<HarnessSeedRun, CliError>,
+) -> Result<Option<HarnessSeedRun>, CliError> {
+    if first.pre_run_refusal {
+        // Nothing executed, so a recorded retry would only repeat the audit.
+        return Ok(None);
+    }
+    match fs::remove_file(trace) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(CliError(format!(
+                "failed to remove previous harness trace {}: {error}",
+                trace.display()
+            )));
+        }
+    }
+    record().map(Some)
 }
 
 fn execute_native_harness(invocation: NativeHarnessInvocation) -> Result<i32, CliError> {
@@ -3748,28 +3774,36 @@ fn execute_native_harness(invocation: NativeHarnessInvocation) -> Result<i32, Cl
         let run = run_native_harness_seed(&invocation, &built.guest, seed, None)?;
         if run.exit_code != 0 {
             let trace = built.directory.join(format!("seed-{seed}.patina"));
-            let recorded = run_native_harness_seed(&invocation, &built.guest, seed, Some(&trace))?;
-            let reproduced = recorded.exit_code == run.exit_code && recorded.exit_code != 0;
+            let recorded = record_harness_failure(&run, &trace, || {
+                run_native_harness_seed(&invocation, &built.guest, seed, Some(&trace))
+            })?;
+            let reproduced = recorded
+                .as_ref()
+                .map(|recorded| recorded.exit_code == run.exit_code);
+            let latest = recorded.as_ref().unwrap_or(&run);
             let block = native_harness_failure_block(NativeHarnessFailure {
                 invocation: &invocation,
                 built: &built,
                 test_name: &test_name,
                 seed,
-                trace: &trace,
                 first: &run,
-                recorded: &recorded,
+                latest,
                 reproduced,
             });
             if !output::options().is_json() {
                 eprintln!("{block}");
             }
-            let exit = if reproduced { run.exit_code } else { 2 };
-            let result = if reproduced {
-                recorded.result.as_str()
+            let exit = if reproduced == Some(false) {
+                2
             } else {
-                "error"
+                run.exit_code
             };
-            output::emit_simple("test", result, exit, Some(block));
+            let result = if reproduced == Some(false) {
+                "error"
+            } else {
+                latest.result.as_str()
+            };
+            output::emit_harness_result(result, exit, block, latest.trace.clone());
             return Ok(exit);
         }
     }
@@ -3832,7 +3866,7 @@ fn build_native_harness(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     apply_rustc_env(&mut command, &rustc);
-    command.args(selected.kind.select_args(&invocation.harness_target));
+    command.args(selected.kind.select_args(&selected.name));
     command.args(invocation.features.cargo_args());
     // `cargo rustc` builds a lib/bin target in test mode only under the `test` or
     // `bench` profile, and `--release` is rejected alongside `--profile`. `bench`
@@ -3859,15 +3893,10 @@ fn build_native_harness(
             invocation.harness_target
         )));
     }
-    let artifact = native_harness_executable(&built.stdout, &invocation.harness_target)?;
+    let artifact = native_harness_executable(&built.stdout, &selected.name)?;
     let package_name = metadata_package_name(&metadata, &artifact.package_id)
         .unwrap_or_else(|| artifact.package_id.clone());
-    let directory = target_dir
-        .join("patina")
-        .join("dst")
-        .join(safe_path_segment(&package_name))
-        .join(safe_path_segment(&invocation.harness_target))
-        .join(safe_path_segment(&invocation.exact));
+    let directory = selected.staging_directory(&target_dir, &package_name, &invocation.exact);
     fs::create_dir_all(&directory).map_err(|error| {
         CliError(format!(
             "failed to create native harness staging dir {}: {error}",
@@ -3962,6 +3991,14 @@ enum HarnessTargetKind {
 }
 
 impl HarnessTargetKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Lib => "lib",
+            Self::Bin => "bin",
+            Self::Test => "test",
+        }
+    }
+
     fn select_args(self, name: &str) -> Vec<String> {
         match self {
             HarnessTargetKind::Lib => vec!["--lib".to_string()],
@@ -3974,7 +4011,19 @@ impl HarnessTargetKind {
 /// The package and target kind a `--harness-target` name resolves to.
 struct SelectedNativeHarness {
     package: String,
+    name: String,
     kind: HarnessTargetKind,
+}
+
+impl SelectedNativeHarness {
+    fn staging_directory(&self, target_dir: &Path, package_name: &str, exact: &str) -> PathBuf {
+        target_dir
+            .join("patina/dst")
+            .join(safe_path_segment(package_name))
+            .join(self.kind.name())
+            .join(safe_path_segment(&self.name))
+            .join(safe_path_segment(exact))
+    }
 }
 
 /// Resolve `--harness-target` to exactly one package and target *before*
@@ -3990,6 +4039,17 @@ fn select_native_harness_target(
         .get("packages")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| CliError("cargo metadata reported no packages".into()))?;
+    let (kind_filter, target_name) = match harness_target.split_once(':') {
+        Some(("lib", name)) => (Some(HarnessTargetKind::Lib), name),
+        Some(("bin", name)) => (Some(HarnessTargetKind::Bin), name),
+        Some(("test", name)) => (Some(HarnessTargetKind::Test), name),
+        Some(_) => {
+            return Err(CliError(format!(
+                "invalid harness target {harness_target:?}; use NAME, lib:NAME, bin:NAME, or test:NAME"
+            )));
+        }
+        None => (None, harness_target),
+    };
     let mut matches: Vec<SelectedNativeHarness> = Vec::new();
     let mut available = BTreeSet::new();
     for entry in packages {
@@ -4030,10 +4090,12 @@ fn select_native_harness_target(
             } else {
                 continue;
             };
-            available.insert(name.to_string());
-            if name == harness_target {
+            let prefix = kind.name();
+            available.insert(format!("{prefix}:{name} (package {package_name})"));
+            if name == target_name && kind_filter.is_none_or(|wanted| wanted == kind) {
                 matches.push(SelectedNativeHarness {
                     package: package_name.to_string(),
+                    name: name.to_string(),
                     kind,
                 });
             }
@@ -4050,7 +4112,8 @@ fn select_native_harness_target(
             }
         ))),
         _ => Err(CliError(format!(
-            "multiple targets named {harness_target:?} were found; select one workspace member with --package"
+            "multiple targets named {harness_target:?} were found; qualify the name with lib:, bin:, or test: and select a workspace member with --package if needed; available harness targets: {}",
+            available.into_iter().collect::<Vec<_>>().join(", ")
         ))),
     }
 }
@@ -4106,7 +4169,7 @@ fn native_harness_executable(
     match matches.len() {
         1 => Ok(matches.remove(0)),
         0 => Err(CliError(format!(
-            "no libtest harness target named {harness_target:?} was reported by cargo test --no-run; available harness targets: {}",
+            "no libtest harness target named {harness_target:?} was reported by cargo rustc; available harness targets: {}",
             if available.is_empty() {
                 "<none>".to_string()
             } else {
@@ -4114,7 +4177,7 @@ fn native_harness_executable(
             }
         ))),
         _ => Err(CliError(format!(
-            "multiple libtest harness targets named {harness_target:?} were reported; select one workspace member with --package"
+            "internal error: cargo rustc reported multiple libtest executables for the single selected target {harness_target:?}"
         ))),
     }
 }
@@ -4222,6 +4285,14 @@ fn run_native_harness_seed(
         stdout: guest_stdout,
         stderr,
         message,
+        trace: envelope
+            .get("trace")
+            .filter(|trace| !trace.is_null())
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| CliError(format!("invalid harness trace receipt: {error}")))?,
+        pre_run_refusal: envelope["refusal"]["class"] == output::NATIVE_PRERUN_REFUSAL,
     })
 }
 
@@ -4326,40 +4397,46 @@ struct NativeHarnessFailure<'a> {
     built: &'a BuiltNativeHarness,
     test_name: &'a str,
     seed: u64,
-    trace: &'a Path,
     first: &'a HarnessSeedRun,
-    recorded: &'a HarnessSeedRun,
-    reproduced: bool,
+    latest: &'a HarnessSeedRun,
+    // None means the pre-run gate refused: no recorded retry was attempted.
+    reproduced: Option<bool>,
 }
 
 fn native_harness_failure_block(failure: NativeHarnessFailure<'_>) -> String {
     let repro = native_harness_repro(failure.invocation, failure.seed);
-    let replay = format!(
-        "cargo patina replay {} {}",
-        shell_quote(failure.built.guest.as_os_str()),
-        shell_quote(failure.trace.as_os_str())
-    );
+    let (trace_note, replay) = match &failure.latest.trace {
+        Some(trace) => (
+            trace.path.clone(),
+            format!(
+                "\n    cargo patina replay {} {}",
+                shell_quote(failure.built.guest.as_os_str()),
+                shell_quote(OsStr::new(&trace.path))
+            ),
+        ),
+        None => ("not produced".to_string(), String::new()),
+    };
     let mut block = format!(
-        "patina dst test failed: {}\n  {}  exit={}  class={}\n  trace: {}\n  stderr tail:\n{}\n  reproduce:\n    {repro}\n    {replay}",
+        "patina dst test failed: {}\n  {}  exit={}  class={}\n  trace: {}\n  stderr tail:\n{}\n  reproduce:\n    {repro}{replay}",
         failure.test_name,
         failure.invocation.seeds.contains(failure.seed),
         failure.first.exit_code,
-        failure.recorded.result,
-        failure.trace.display(),
-        indent_tail(&failure.recorded.stderr, 20),
+        failure.latest.result,
+        trace_note,
+        indent_tail(&failure.latest.stderr, 20),
     );
-    if !failure.reproduced {
+    if failure.reproduced == Some(false) {
         block.push_str(&format!(
             "\n  record-on-failure mismatch: first exit={} recorded exit={}; refusing to call this deterministic",
-            failure.first.exit_code, failure.recorded.exit_code
+            failure.first.exit_code, failure.latest.exit_code
         ));
     }
     if !failure.first.stdout.trim().is_empty() {
         block.push_str("\n  stdout tail:\n");
         block.push_str(&indent_tail(&failure.first.stdout, 10));
     }
-    if let Some(message) = &failure.recorded.message {
-        if !message.trim().is_empty() && !failure.recorded.stderr.contains(message) {
+    if let Some(message) = &failure.latest.message {
+        if !message.trim().is_empty() && !failure.latest.stderr.contains(message) {
             block.push_str(&format!("\n  message: {message}"));
         }
     }
@@ -7800,7 +7877,15 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
     // a host thread outside the scheduler. `--allow-unsupported-symbols`
     // downgrades matching denials to a loud warning for programs that carry
     // unsupported surface the scenario never reaches.
-    let downgraded = native_prerun_gate(&binary, &invocation.allow, &invocation.allow_unsupported)?;
+    let downgraded =
+        match native_prerun_gate(&binary, &invocation.allow, &invocation.allow_unsupported) {
+            Ok(downgraded) => downgraded,
+            Err(error) if output::facts_active() => {
+                output::emit_native_prerun_refusal(&binary, error.to_string());
+                return Ok(2);
+            }
+            Err(error) => return Err(error),
+        };
 
     // A binary built with `--yield-points` schedules under a different (denser)
     // policy, so its recorded traces must not cross-replay with a plain binary.
@@ -11804,6 +11889,90 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn native_harness_selection_disambiguates_target_kinds_and_packages() {
+        let targets = serde_json::json!([
+            {"name": "app", "kind": ["lib"]},
+            {"name": "app", "kind": ["bin"]},
+            {"name": "app", "kind": ["test"]}
+        ]);
+        let metadata = serde_json::json!({"packages": [
+            {"name": "first", "targets": targets},
+            {"name": "second", "targets": targets}
+        ]});
+        assert!(select_native_harness_target(&metadata, "app", Some("first")).is_err());
+        for (prefix, kind) in [
+            ("lib", HarnessTargetKind::Lib),
+            ("bin", HarnessTargetKind::Bin),
+            ("test", HarnessTargetKind::Test),
+        ] {
+            let selector = format!("{prefix}:app");
+            assert!(select_native_harness_target(&metadata, &selector, None).is_err());
+            let selected = select_native_harness_target(&metadata, &selector, Some("first"))
+                .unwrap_or_else(|error| panic!("{selector}: {error}"));
+            assert_eq!(selected.kind, kind);
+            assert_eq!(selected.name, "app");
+            assert_eq!(selected.package, "first");
+        }
+        for selector in ["example:app", "lib:missing", "lib:"] {
+            assert!(select_native_harness_target(&metadata, selector, Some("first")).is_err());
+        }
+    }
+
+    #[test]
+    fn native_harness_records_failures_but_never_retries_a_prerun_refusal() {
+        fn outcome(exit_code: i32, pre_run_refusal: bool) -> HarnessSeedRun {
+            HarnessSeedRun {
+                exit_code,
+                result: "error".into(),
+                stdout: String::new(),
+                stderr: String::new(),
+                message: None,
+                trace: None,
+                pre_run_refusal,
+            }
+        }
+        // Exit 2 alone is not a pre-run refusal: other errors still get their
+        // recording attempt, as do assertion failures and guest aborts.
+        for (code, pre_run) in [(2, true), (2, false), (101, false), (134, false)] {
+            let directory = tempfile::tempdir().unwrap();
+            let trace = directory.path().join("seed-0.patina");
+            fs::write(&trace, b"previous recording").unwrap();
+            let mut calls = 0;
+            let recorded = record_harness_failure(&outcome(code, pre_run), &trace, || {
+                calls += 1;
+                assert!(!trace.exists());
+                Ok(outcome(code, false))
+            })
+            .unwrap();
+            assert_eq!(calls, usize::from(!pre_run));
+            assert_eq!(recorded.is_some(), !pre_run);
+            if pre_run {
+                assert_eq!(fs::read(trace).unwrap(), b"previous recording");
+            }
+        }
+    }
+
+    #[test]
+    fn native_harness_staging_uses_resolved_kind_and_name() {
+        let metadata = serde_json::json!({"packages": [{"name": "pkg", "targets": [
+            {"name": "app", "kind": ["lib"]},
+            {"name": "lib_app", "kind": ["test"]}
+        ]}]});
+        let directory = |selector| {
+            select_native_harness_target(&metadata, selector, None)
+                .unwrap()
+                .staging_directory(Path::new("target"), "pkg", "tests::case")
+        };
+        assert_eq!(directory("app"), directory("lib:app"));
+        assert_eq!(directory("lib_app"), directory("test:lib_app"));
+        assert_ne!(directory("lib:app"), directory("lib_app"));
+        assert_eq!(
+            directory("app"),
+            Path::new("target/patina/dst/pkg/lib/app/tests__case")
+        );
     }
 
     #[test]

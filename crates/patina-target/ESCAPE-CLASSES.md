@@ -323,7 +323,16 @@ is stated plainly:
    to hide an instruction can do this; ordinary compiler output does not); code
    outside the scanned image: the scan reads the guest executable, not the shared libraries it links
    against (normally only glibc's own); and code created at run time (JIT output,
-   pages made executable after load), which no static scan sees. For the classes
+   pages made executable after load), which no static scan sees.
+   The conservative counterpart is executable-section data: native crypto
+   assembly can put an attribution string after a function's return, outside
+   its symbol extent but inside `.text`. The linear sweep decodes that data and
+   may stop with `undecodable-instruction`, refusing otherwise ordinary HTTP/TLS
+   test harnesses before any test runs. `text_metadata_probe.rs` in the native
+   boundary testbed is a native-passing, audit-refused reduction. This is a
+   known limit: do not skip symbol gaps, unknown bytes, or named dependency
+   functions without a containment design that accounts for reachable code.
+   For the classes
    no trap backs (thread-pointer writes, far transfers, `rdrand`/`rdseed`/
    `CNTVCT`/`CNTVCTSS`/`RNDR`) that last case has no run-time backstop either.
 4. **Flag-dependent behavior of an allowlisted symbol (macOS).** `mmap` is

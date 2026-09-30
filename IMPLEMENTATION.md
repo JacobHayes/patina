@@ -393,6 +393,12 @@ Completed foundations (point-solution DST arc, Wave B):
     proves a passing sweep, a seeded failure panic carrying the seed plus
     `cargo patina test`/`cargo patina replay` repro commands, a PATH-scrubbed
     refusal, double-run identical failure blocks, and the no-new-deps cargo tree.
+    Native harness selection also accepts kind-qualified names (`lib:NAME`,
+    `bin:NAME`, `test:NAME`) for same-named targets within one package. Failure
+    reports and the JSON `trace` field use only the recorded child's trace
+    receipt. Pre-run audit/import refusals skip the recorded retry and cannot
+    reuse an older trace. Staging is keyed on resolved target kind/name, so bare
+    and qualified selectors share artifacts without colliding with other targets.
 
 Completed foundations (outcome-channel arc, Wave A — the verdict ABI):
 

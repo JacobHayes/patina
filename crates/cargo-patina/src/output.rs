@@ -808,8 +808,9 @@ fn trace_facts(path: &Path, timeline: &str) -> Option<TraceFacts> {
 // visible in one place and stable regardless of internal type churn.
 // ---------------------------------------------------------------------------
 
-struct TraceFacts {
-    path: String,
+#[derive(Clone, serde::Deserialize)]
+pub(crate) struct TraceFacts {
+    pub(crate) path: String,
     format_version: u32,
     timelines: Vec<String>,
     event_count: usize,
@@ -1096,6 +1097,37 @@ pub fn emit_simple(verb: &str, result: &str, exit_code: i32, message: Option<Str
     }
     let mut env = Envelope::new(verb, result, exit_code);
     env.message = message;
+    env.emit();
+}
+
+/// This class is emitted only by the native audit gate, before guest launch.
+pub(crate) const NATIVE_PRERUN_REFUSAL: &str = "native_prerun_audit";
+
+pub(crate) fn emit_native_prerun_refusal(artifact: &Path, message: String) {
+    let mut env = Envelope::new("run", "error", 2);
+    env.family = Some("native".into());
+    env.artifact = Some(artifact.to_string_lossy().into_owned());
+    env.refusal = Some(Refusal {
+        class: NATIVE_PRERUN_REFUSAL.into(),
+        message: message.clone(),
+        guest_exit_code: None,
+    });
+    env.message = Some(message);
+    env.emit();
+}
+
+pub(crate) fn emit_harness_result(
+    result: &str,
+    exit_code: i32,
+    message: String,
+    trace: Option<TraceFacts>,
+) {
+    if !options().is_json() {
+        return;
+    }
+    let mut env = Envelope::new("test", result, exit_code);
+    env.message = Some(message);
+    env.trace = trace;
     env.emit();
 }
 

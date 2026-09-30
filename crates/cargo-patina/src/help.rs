@@ -1073,11 +1073,15 @@ verb's job, so the Cargo-family form carries no replay/branch/timeline flags. A 
 `replay` restores them.\n\
 \n\
 A directory or Cargo.toml positional selects native harness mode: Patina rebuilds \
-the requested Cargo libtest target shim-linked with `cargo test --no-run`, stages \
+the requested Cargo libtest target shim-linked with `cargo rustc`, stages \
 the harness under target/patina/dst, and runs only the `--exact` test with \
 `--test-threads=1`. `--seeds N` sweeps 0..N (default 20); `--seed N` runs one \
-seed. On the first failure Patina re-runs that seed with --record and prints \
-copy-paste `test` and `replay` repro commands.",
+seed. Qualify a shared target name as lib:NAME, bin:NAME, or test:NAME; \
+--package selects a workspace member. Staging is keyed on the resolved kind/name. \
+On the first failure Patina re-runs that seed with --record, except pre-run \
+audit/import refusals (nothing executed). A `test` repro is always printed; \
+the JSON `trace` field and a `replay` command come only from the recorded \
+child's readable-trace receipt.",
     families: &[
         fam(Family::Cargo, "`test`", None),
         fam(Family::Harness, "`test` native harness mode", None),
@@ -1145,7 +1149,7 @@ copy-paste `test` and `replay` repro commands.",
                     "--harness-target",
                     None,
                     Value::Required("NAME", Kind::Symbol),
-                    "Cargo libtest target name to rebuild shim-linked (library, integration test, or bin harness). Required in native harness mode.",
+                    "Cargo libtest target to rebuild shim-linked. Use NAME when unique, or lib:NAME, bin:NAME, test:NAME to disambiguate target kinds; --package selects the workspace member. Required in native harness mode.",
                     false,
                 ),
                 f(
