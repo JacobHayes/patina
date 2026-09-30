@@ -23,7 +23,7 @@ mod crash_restart;
 mod file_lock;
 mod handoff;
 pub use crash_restart::CrashRestartSegments;
-pub use file_lock::{create_scratch, lock_exclusive, path_names, remove_dead_scratch};
+pub use file_lock::{create_scratch, lock_exclusive, lock_shared, path_names, remove_dead_scratch};
 pub use handoff::{
     HandoffConsumedState, HandoffError, HandoffSealKey, IncarnationHandoff,
     MAX_HANDOFF_PAYLOAD_BYTES, VerifiedIncarnationHandoff,

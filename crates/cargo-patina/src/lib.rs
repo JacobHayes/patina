@@ -68,6 +68,7 @@ mod output;
 mod render;
 mod rollup;
 mod sdk_report;
+mod shim_cache;
 mod sites;
 mod syscalls;
 mod trace_cmd;
@@ -3849,16 +3850,18 @@ fn build_native_harness(
     }
     let shim = prepare_shim_sources()?;
     let rustc = check_native_toolchain_agreement(&shim.dir)?;
-    let staticlib = build_native_shim(invocation.release, &rustc, &shim)?;
+    let built_shim = build_native_shim(
+        invocation.release,
+        &rustc,
+        &shim,
+        invocation.instrumentation,
+    )?;
+    let staticlib = &built_shim.staticlib;
     let host_target = host_target_triple(&rustc)?;
-    let objects_base = staticlib
-        .parent()
-        .expect("shim staticlib path has a profile directory parent")
-        .join(NATIVE_SHIM_OBJECTS_DIR);
-    let object = stage_shim_object(&objects_base, &PATINA_POSIX_OBJECT, &host_target, &[])?;
+    let object = stage_shim_object(&built_shim, &PATINA_POSIX_OBJECT, &host_target, &[])?;
     let yield_object =
-        stage_instrumentation_object(&objects_base, invocation.instrumentation, &host_target)?;
-    let sancov_stub = stage_sancov_stub(&objects_base, yield_object.is_some(), &host_target)?;
+        stage_instrumentation_object(&built_shim, invocation.instrumentation, &host_target)?;
+    let sancov_stub = stage_sancov_stub(&built_shim, yield_object.is_some(), &host_target)?;
     let rustflags = native_package_rustflags(sancov_stub.as_deref(), &host_target);
     let metadata = cargo_metadata(&invocation.manifest, Some(&rustc))?;
     let target_dir = metadata_target_dir(&metadata)?;
@@ -3897,11 +3900,12 @@ fn build_native_harness(
         .arg("--")
         .args(native_package_link_args(
             &object,
-            &staticlib,
+            staticlib,
             yield_object.as_deref(),
         ))
         .args(NATIVE_AUDIT_METADATA_ARGS);
     let _lock = lock_target_dir(&target_dir)?;
+    shim_cache::inherit(&mut command, &built_shim._lease)?;
     let built = command.output().map_err(|error| {
         CliError(format!(
             "failed to run cargo rustc for native harness: {error}"
@@ -4942,6 +4946,14 @@ struct ShimSources {
     dir: PathBuf,
     /// The content address of the embedded source bundle that produced `dir`.
     bundle_hash: &'static str,
+    // Pins sources from before toolchain probing through the last guest link.
+    _lease: shim_cache::Lease,
+}
+
+struct BuiltNativeShim {
+    staticlib: PathBuf,
+    // Guest builders must retain this, not just the path, until linking ends.
+    _lease: shim_cache::Lease,
 }
 
 /// Unpack the embedded shim source bundle into the per-user cache (a no-op when
@@ -4952,42 +4964,51 @@ struct ShimSources {
 /// happens on the user's machine, from a directory this binary owns. That is
 /// what lets `build`/`run`/`audit`/`replay` of a source or package succeed from
 /// any working directory and from an installed binary alike — `cargo build -p
-/// patina-dst-native-shim` runs in the unpacked workspace, never in the
+/// patina-dst-native-shim` runs in a private copy of the unpacked workspace, never in the
 /// caller's CWD (where the shim crate would not resolve) and never in a source
 /// checkout (which an installed binary does not have).
 fn prepare_shim_sources() -> Result<ShimSources, CliError> {
     let cache_root = patina_cache_root()?;
-    let dir = unpack_embedded_shim_sources(&cache_root)?;
+    let lease = shim_cache::acquire_initialized(
+        &cache_root.join("shim-src"),
+        shim_bundle::EMBEDDED_SHIM_BUNDLE_SHA256,
+        shim_cache::KEEP_SOURCES,
+        || unpack_embedded_shim_sources(&cache_root).map(|_| ()),
+    )?;
     Ok(ShimSources {
         cache_root,
-        dir,
+        dir: lease.dir.clone(),
         bundle_hash: shim_bundle::EMBEDDED_SHIM_BUNDLE_SHA256,
+        _lease: lease,
     })
 }
 
 /// Write the bundle to `<cache_root>/shim-src/<sha256>` atomically: stage into
-/// a temporary sibling and rename into place. A bundle directory that already
-/// exists is used as-is and never rewritten — it is content-addressed, so it is
-/// the same bytes — which also makes a concurrent unpack of the same bundle
-/// harmless (the loser discards its stage).
+/// a temporary sibling and rename into place, with a completion marker written
+/// last. The caller holds the source catalog lock. Incomplete/old directories
+/// are retired before repair; directory existence alone is never a cache hit.
 fn unpack_embedded_shim_sources(cache_root: &Path) -> Result<PathBuf, CliError> {
     let bundles = cache_root.join("shim-src");
     let bundle_dir = bundles.join(shim_bundle::EMBEDDED_SHIM_BUNDLE_SHA256);
-    if bundle_dir.is_dir() {
+    if shim_cache::complete(&bundle_dir, shim_bundle::EMBEDDED_SHIM_BUNDLE_SHA256)? {
         return Ok(bundle_dir);
+    }
+    if bundle_dir.exists() {
+        shim_cache::retire(&bundle_dir)?;
     }
     let io = |what: String, error: io::Error| CliError(format!("{what}: {error}"));
     fs::create_dir_all(&bundles)
         .map_err(|error| io(format!("creating {}", bundles.display()), error))?;
-    let staging = bundles.join(format!(
-        ".{}.staging-{}",
-        shim_bundle::EMBEDDED_SHIM_BUNDLE_SHA256,
-        std::process::id()
-    ));
-    if staging.exists() {
-        fs::remove_dir_all(&staging)
-            .map_err(|error| io(format!("clearing stale stage {}", staging.display()), error))?;
-    }
+    let stage = tempfile::Builder::new()
+        .prefix(".staging-")
+        .tempdir_in(&bundles)
+        .map_err(|error| {
+            io(
+                format!("staging shim sources in {}", bundles.display()),
+                error,
+            )
+        })?;
+    let staging = stage.path();
     let write = |relative: &Path, bytes: &[u8]| -> Result<(), CliError> {
         let path = staging.join(relative);
         if let Some(parent) = path.parent() {
@@ -5018,108 +5039,178 @@ fn unpack_embedded_shim_sources(cache_root: &Path) -> Result<PathBuf, CliError> 
         Path::new("Cargo.lock"),
         shim_bundle::EMBEDDED_SHIM_CARGO_LOCK,
     )?;
-    match fs::rename(&staging, &bundle_dir) {
-        Ok(()) => Ok(bundle_dir),
-        Err(_) if bundle_dir.is_dir() => {
-            // Another cargo-patina of the same build won the race; its bundle is
-            // byte-identical to the one staged here.
-            let _ = fs::remove_dir_all(&staging);
-            Ok(bundle_dir)
-        }
-        Err(error) => Err(io(
-            format!(
-                "moving the unpacked shim sources from {} to {}",
-                staging.display(),
-                bundle_dir.display()
-            ),
+    write(
+        Path::new(shim_cache::COMPLETE),
+        shim_bundle::EMBEDDED_SHIM_BUNDLE_SHA256.as_bytes(),
+    )?;
+    fs::rename(staging, &bundle_dir).map_err(|error| {
+        io(
+            format!("publishing shim sources at {}", bundle_dir.display()),
             error,
-        )),
-    }
+        )
+    })?;
+    Ok(bundle_dir)
 }
 
-/// Build the `patina-dst-native-shim` staticlib and return its path. The shim's
-/// Rust boundary is produced by Cargo; the C POSIX layer and header are packaged
-/// into this binary and compiled at link time by [`execute_native_build`].
+/// Build in reusable scratch state; publish and pin only immutable link inputs.
 fn build_native_shim(
     release: bool,
     rustc: &RustcInvocation,
     shim: &ShimSources,
-) -> Result<PathBuf, CliError> {
-    // The shim crate lives in the unpacked source bundle, so `cargo build -p
-    // patina-dst-native-shim` runs THERE, not in the caller's CWD: otherwise cargo
-    // resolves `-p patina-dst-native-shim` against the caller's workspace and
-    // fails with "package ID specification `patina-dst-native-shim` did not match
-    // any packages" — the observed `build .` regression.
-    let explicit_target = env::var_os("CARGO_TARGET_DIR");
-    let target_dir = native_shim_target_dir(
-        &shim.cache_root,
-        explicit_target.as_deref(),
-        shim.bundle_hash,
-        &rustc.identity,
-    );
-    // Held until the staticlib is published: every Cargo run that can rewrite
-    // Cargo's copy happens under this lock, so the copy is never read mid-write.
-    let _lock = lock_target_dir(&target_dir)?;
-    let mut command = Command::new(&rustc.cargo_command);
-    command
-        .current_dir(&shim.dir)
-        .env("CARGO_TARGET_DIR", &target_dir)
-        .arg("build")
-        .arg("-p")
-        .arg("patina-dst-native-shim");
-    apply_rustc_env(&mut command, rustc);
-    if release {
-        command.arg("--release");
+    instrumentation: GuestInstrumentation,
+) -> Result<BuiltNativeShim, CliError> {
+    let explicit = env::var_os("CARGO_TARGET_DIR");
+    build_native_shim_at(release, rustc, shim, explicit.as_deref(), instrumentation)
+}
+
+fn build_native_shim_at(
+    release: bool,
+    rustc: &RustcInvocation,
+    shim: &ShimSources,
+    explicit: Option<&OsStr>,
+    instrumentation: GuestInstrumentation,
+) -> Result<BuiltNativeShim, CliError> {
+    let base = native_shim_cache_base(&shim.cache_root, explicit)?;
+    shim_cache::prune_legacy(&base);
+    let profile = if release { "release" } else { "debug" };
+    let mut hasher = Sha256::new();
+    // One Cargo target already separates debug/release. Keep two toolchains
+    // warm, not merely two toolchain/profile combinations.
+    hash_bytes(&mut hasher, rustc.identity.verbose.as_bytes());
+    let work = shim_cache::acquire(
+        &base.join("builds"),
+        &hex(&hasher.finalize()),
+        shim_cache::KEEP_BUILDS,
+    )?;
+    // Pin before waiting: the pruner must not unlink this lock's inode while a
+    // second builder is queued. Only the Cargo build is serialized, not links.
+    let _lock = lock_target_dir(&work.dir)?;
+    let target_dir = work.dir.join("target");
+    let source_dir = work.dir.join("source");
+    let marker = work.dir.join("bundle");
+    let previous = match fs::read_to_string(&marker) {
+        Ok(value) => Some(value),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(CliError(format!("reading {}: {e}", marker.display()))),
+    };
+    let needs_switch = previous.as_deref() != Some(shim.bundle_hash)
+        || !shim_cache::complete(&source_dir, shim.bundle_hash)?;
+    // Size is a high-water mark, not a mid-build quota. A single build may be
+    // larger; its next use resets scratch state without touching pinned links.
+    shim_cache::trim_build_target(&work.dir);
+    if needs_switch {
+        // Invalidate BEFORE changing sources. A crash halfway through a switch
+        // must not let the previous bundle mistake this workspace for its own.
+        if previous.is_some() {
+            fs::remove_file(&marker)
+                .map_err(|e| CliError(format!("invalidating shim bundle marker: {e}")))?;
+        }
+        if source_dir.exists() {
+            fs::remove_dir_all(&source_dir)
+                .map_err(|e| CliError(format!("resetting shim build sources: {e}")))?;
+        }
+        shim_cache::copy_sources(&shim.dir, &source_dir)?;
     }
-    let status = command
+    let command = || {
+        let mut command = Command::new(&rustc.cargo_command);
+        command
+            .current_dir(&source_dir)
+            .env("CARGO_TARGET_DIR", &target_dir)
+            // Cargo >=1.91 can redirect intermediate state independently. Keep
+            // it in our bounded scratch too; older Cargo ignores this variable.
+            .env("CARGO_BUILD_BUILD_DIR", &target_dir)
+            // Private scratch state needs neither incremental history nor full
+            // type debug info. Level 1 retains backtraces and source locations.
+            .env("CARGO_INCREMENTAL", "0")
+            .env("CARGO_PROFILE_DEV_DEBUG", "1");
+        apply_rustc_env(&mut command, rustc);
+        command
+    };
+    if needs_switch {
+        // Never trust Cargo's freshness of an older restored bundle. Clean only
+        // local closure packages: registry dependencies stay reusable. This also
+        // bounds obsolete local artifacts as source versions change.
+        let mut clean = command();
+        shim_cache::inherit(&mut clean, &work)?;
+        clean.arg("clean");
+        for (package, _) in shim_bundle::EMBEDDED_SHIM_SOURCES {
+            clean.arg("-p").arg(package);
+        }
+        let status = clean
+            .status()
+            .map_err(|e| CliError(format!("cleaning shim packages: {e}")))?;
+        if !status.success() {
+            return Err(CliError("cleaning shim packages failed".into()));
+        }
+        // Write only after successful invalidation. A crash or failed build
+        // leaves Cargo's own incomplete-build fingerprint to force a retry.
+        fs::write(source_dir.join(shim_cache::COMPLETE), shim.bundle_hash)
+            .map_err(|e| CliError(format!("completing shim build sources: {e}")))?;
+        fs::write(&marker, shim.bundle_hash)
+            .map_err(|e| CliError(format!("writing shim bundle marker: {e}")))?;
+    }
+    let mut build = command();
+    shim_cache::inherit(&mut build, &work)?;
+    build.args(["build", "--locked", "-p", "patina-dst-native-shim"]);
+    if release {
+        build.arg("--release");
+    }
+    let status = build
         .status()
-        .map_err(|error| CliError(format!("failed to build patina-dst-native-shim: {error}")))?;
+        .map_err(|e| CliError(format!("building shim: {e}")))?;
     if !status.success() {
         return Err(CliError(
             "building the patina-dst-native-shim staticlib failed".into(),
         ));
     }
-    let profile = if release { "release" } else { "debug" };
     let staticlib = target_dir.join(profile).join(NATIVE_SHIM_STATICLIB);
-    if !staticlib.exists() {
-        return Err(CliError(format!(
-            "expected the shim staticlib at {} after building it",
-            staticlib.display()
-        )));
-    }
-    publish_native_shim(&staticlib)
+    // C compiler and instrumentation variants get independently evictable
+    // entries, rather than accumulating objects inside one eternally hot entry.
+    let cc = env::var_os("CC").unwrap_or_else(|| "cc".into());
+    let c_identity = shim_object_hash(&cc, &PATINA_POSIX_OBJECT, &host_target_triple(rustc)?, &[])?;
+    let recipe = format!("{profile}:{c_identity}:{instrumentation:?}");
+    publish_native_shim(
+        &staticlib,
+        &base,
+        shim.bundle_hash,
+        &rustc.identity,
+        &recipe,
+    )
 }
 
-/// Copy Cargo's shim staticlib to an immutable sibling named by its content and
-/// return that path, which is what a guest links.
-///
-/// Cargo owns `<profile>/libpatina_dst_native_shim.a` and writes a fresh copy of
-/// it on every `cargo build`, up to date or not, wherever it copies instead of
-/// hard-linking its outputs (always on macOS; elsewhere when the build directory
-/// is on another filesystem). A guest linking that path while another
-/// cargo-patina builds the same shim reads a half-written archive. The caller
-/// holds [`lock_target_dir`], so no Cargo is writing the source while it is copied,
-/// and the copy is published by rename, so its path always holds the complete
-/// archive whose bytes name it.
-fn publish_native_shim(staticlib: &Path) -> Result<PathBuf, CliError> {
+/// The archive digest also distinguishes ambient Cargo configuration changes.
+/// Publication is an atomic file rename; helper objects are likewise published
+/// atomically below the pinned entry and are never read from Cargo scratch.
+fn publish_native_shim(
+    staticlib: &Path,
+    base: &Path,
+    bundle: &str,
+    toolchain: &RustcIdentity,
+    profile: &str,
+) -> Result<BuiltNativeShim, CliError> {
     let mut hasher = Sha256::new();
     hash_file_contents(&mut hasher, staticlib)?;
-    let published = staticlib.with_file_name(format!(
-        "libpatina_dst_native_shim-{}.a",
-        hex(&hasher.finalize())
-    ));
-    if published.exists() {
-        return Ok(published);
+    hash_bytes(&mut hasher, bundle.as_bytes());
+    hash_bytes(&mut hasher, toolchain.verbose.as_bytes());
+    hash_bytes(&mut hasher, profile.as_bytes());
+    let lease = shim_cache::acquire(
+        &base.join("artifacts"),
+        &hex(&hasher.finalize()),
+        shim_cache::KEEP_ARTIFACTS,
+    )?;
+    let _lock = lock_target_dir(&lease.dir)?;
+    let published = lease.dir.join(NATIVE_SHIM_STATICLIB);
+    let partial = lease.dir.join("archive.partial");
+    shim_cache::clear_partial(&partial)?;
+    if !published.exists() {
+        shim_cache::copy(staticlib, &partial)?;
+        fs::rename(&partial, &published)
+            .map_err(|e| CliError(format!("publishing shim archive: {e}")))?;
     }
-    let io = |what: &str, path: &Path, error: io::Error| {
-        CliError(format!("failed to {what} {}: {error}", path.display()))
-    };
-    let partial = published.with_extension("a.partial");
-    fs::copy(staticlib, &partial)
-        .map_err(|error| io("copy the shim staticlib to", &partial, error))?;
-    fs::rename(&partial, &published)
-        .map_err(|error| io("publish the shim staticlib at", &published, error))?;
-    Ok(published)
+    Ok(BuiltNativeShim {
+        staticlib: published,
+        _lease: lease,
+    })
 }
 
 /// Hold `target_dir`'s build lock until the returned file is dropped; the
@@ -5131,7 +5222,9 @@ fn publish_native_shim(staticlib: &Path) -> Result<PathBuf, CliError> {
 /// Cargo exits. A caller that reads an output back after Cargo returns — the
 /// shim archive it publishes, the guest executable it copies out — therefore
 /// holds this from before its Cargo invocation until that read is done, or a
-/// concurrent build's Cargo can rewrite the file mid-read.
+/// concurrent build's Cargo can rewrite the file mid-read. OpenOptions creates
+/// CLOEXEC descriptors on Unix; keep that flag set for build and catalog locks
+/// so a compiler wrapper's daemon cannot retain an exclusive lock after exec.
 fn lock_target_dir(target_dir: &Path) -> Result<fs::File, CliError> {
     fs::create_dir_all(target_dir).map_err(|error| {
         CliError(format!(
@@ -5151,31 +5244,17 @@ fn lock_target_dir(target_dir: &Path) -> Result<fs::File, CliError> {
     Ok(file)
 }
 
-/// Select the shim's Cargo target directory.
-///
-/// The caller's explicit `CARGO_TARGET_DIR`, when present, is the base directory;
-/// the default base is `<cache root>/shim-target`. Under either base, namespace
-/// the shim target by the embedded source bundle and the complete compiler
-/// identity. Stable/MSRV builds, and two `cargo-patina` binaries carrying
-/// different shim sources, otherwise publish the same-named staticlib in one
-/// `debug/`, and a nested guest build can consume whichever archive won last (or
-/// whichever archive Cargo incorrectly considered fresh). Cargo's file locks
-/// serialize writes but cannot make this out-of-band path handoff type-safe.
-fn native_shim_target_dir(
+/// Explicit CARGO_TARGET_DIR remains the base, never a replacement for Patina's
+/// namespace. Anchor relative paths before Cargo changes into the source cache.
+fn native_shim_cache_base(
     cache_root: &Path,
     explicit: Option<&OsStr>,
-    bundle_hash: &str,
-    toolchain: &RustcIdentity,
-) -> PathBuf {
+) -> Result<PathBuf, CliError> {
     let base = explicit
         .map(PathBuf::from)
         .unwrap_or_else(|| cache_root.join("shim-target"));
-    let mut hasher = Sha256::new();
-    hash_bytes(&mut hasher, b"patina-native-shim-target/v1");
-    hash_bytes(&mut hasher, bundle_hash.as_bytes());
-    hash_bytes(&mut hasher, toolchain.verbose.as_bytes());
-    base.join("patina-native-shim")
-        .join(hex(&hasher.finalize()))
+    std::path::absolute(base.join("patina-native-shim"))
+        .map_err(|e| CliError(format!("resolving shim cache base: {e}")))
 }
 
 /// A resolved rustc, as `rustc -vV` reports it.
@@ -5404,25 +5483,22 @@ fn execute_native_build(invocation: NativeBuildInvocation) -> Result<i32, CliErr
 fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliError> {
     let shim = prepare_shim_sources()?;
     let rustc = check_native_toolchain_agreement(&shim.dir)?;
-    let staticlib = build_native_shim(invocation.release, &rustc, &shim)?;
+    let built_shim = build_native_shim(
+        invocation.release,
+        &rustc,
+        &shim,
+        invocation.instrumentation,
+    )?;
     let host_target = host_target_triple(&rustc)?;
 
-    // Stage the embedded POSIX shim layer at a stable content-addressed path in
-    // the shim's own profile target dir (beside the staticlib), compiled below
-    // the user program with the flags the deterministic linked target requires.
-    // The object lives in the persistent target dir — not a per-invocation
-    // tempdir — so its `-Clink-arg` path is byte-identical across builds and
-    // Cargo's crate fingerprints stay warm; it outlives every child cargo/rustc.
-    let objects_base = staticlib
-        .parent()
-        .expect("shim staticlib path has a profile directory parent")
-        .join(NATIVE_SHIM_OBJECTS_DIR);
-    let object = stage_shim_object(&objects_base, &PATINA_POSIX_OBJECT, &host_target, &[])?;
+    // Stable immutable paths keep Cargo's link fingerprints warm. The owning
+    // handle pins every input through compilation and the guest's final link.
+    let object = stage_shim_object(&built_shim, &PATINA_POSIX_OBJECT, &host_target, &[])?;
     // The SanitizerCoverage hook object is compiled and linked only under
     // `--yield-points`/`--coverage-points`; a plain build never references
     // SanitizerCoverage symbols.
     let yield_object =
-        stage_instrumentation_object(&objects_base, invocation.instrumentation, &host_target)?;
+        stage_instrumentation_object(&built_shim, invocation.instrumentation, &host_target)?;
 
     match invocation.target {
         NativeBuildTarget::Source {
@@ -5438,7 +5514,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
             &edition,
             invocation.release,
             &object,
-            &staticlib,
+            &built_shim,
             yield_object.as_deref(),
             &rustc_args,
             &rustc,
@@ -5455,7 +5531,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
             invocation.release,
             &host_target,
             &object,
-            &staticlib,
+            &built_shim,
             yield_object.as_deref(),
             &rustc,
         ),
@@ -5609,7 +5685,7 @@ fn shim_object_hash(
 /// flags and no hook object, so a plain native build is byte-for-byte the build
 /// it was before any instrumentation existed.
 fn stage_instrumentation_object(
-    objects_base: &Path,
+    shim: &BuiltNativeShim,
     instrumentation: GuestInstrumentation,
     host_target: &str,
 ) -> Result<Option<PathBuf>, CliError> {
@@ -5646,26 +5722,26 @@ mode={} scheduler-hook={scheduler_hook} fingerprint-suffix={} -- {}",
     } else {
         println!("{note}");
     }
-    stage_shim_object(objects_base, object, host_target, &defines).map(Some)
+    stage_shim_object(shim, object, host_target, &defines).map(Some)
 }
 
 /// Compile `object` to a stable, content-addressed path under `base` and return
 /// it, reusing an already-staged object without recompiling. Staging is
-/// race-safe: the object is compiled in a private sandbox to a unique temp file
-/// in the destination dir, then atomically renamed into place — concurrent
-/// invocations produce byte-identical content, so a late writer only re-stamps
-/// the same object. The staged object lives in the persistent target dir with no
-/// RAII cleanup; the cache is bounded because the hash changes only when Patina's
-/// embedded C, the cc flags, the target, or the compiler itself changes.
+/// race-safe: under its build lock the object is compiled in a private sandbox
+/// to a fixed partial file, then atomically renamed into place. A retry clears
+/// any interrupted partial. Production callers keep the artifact entry leased
+/// until the guest link completes; eviction reclaims its helper objects together
+/// with the archive.
 fn stage_shim_object(
-    base: &Path,
+    shim: &BuiltNativeShim,
     object: &ShimObject,
     target: &str,
     defines: &[String],
 ) -> Result<PathBuf, CliError> {
     let cc = env::var_os("CC").unwrap_or_else(|| OsString::from("cc"));
     let hash = shim_object_hash(&cc, object, target, defines)?;
-    let dir = base.join(hash);
+    let dir = shim._lease.dir.join(NATIVE_SHIM_OBJECTS_DIR).join(hash);
+    let _lock = lock_target_dir(&dir)?;
     let staged = dir.join(object.object_name);
     if staged.exists() {
         return Ok(staged);
@@ -5701,12 +5777,9 @@ fn stage_shim_object(
     let source_path = sandbox.path().join(object.source_name);
     fs::write(&source_path, object.source)
         .map_err(|error| CliError(format!("failed to stage {}: {error}", object.what)))?;
-    let temp_object = tempfile::Builder::new()
-        .prefix(object.object_name)
-        .suffix(".tmp")
-        .tempfile_in(&dir)
-        .map_err(|error| CliError(format!("failed to stage {}: {error}", object.what)))?
-        .into_temp_path();
+    let temp_object = dir.join("object.partial");
+    shim_cache::clear_partial(&temp_object)?;
+    shim_cache::inherit(&mut command, &shim._lease)?;
     command
         .arg("-c")
         .arg(&source_path)
@@ -5718,7 +5791,7 @@ fn stage_shim_object(
     if !cc_status.success() {
         return Err(CliError(format!("compiling {} failed", object.what)));
     }
-    temp_object.persist(&staged).map_err(|error| {
+    fs::rename(&temp_object, &staged).map_err(|error| {
         CliError(format!(
             "failed to stage {} at {}: {error}",
             object.what,
@@ -5795,12 +5868,14 @@ fn build_native_source(
     edition: &str,
     release: bool,
     object: &Path,
-    staticlib: &Path,
+    shim: &BuiltNativeShim,
     yield_object: Option<&Path>,
     rustc_args: &[OsString],
     rustc: &RustcInvocation,
 ) -> Result<PathBuf, CliError> {
+    let staticlib = &shim.staticlib;
     let mut command = Command::new(&rustc.command);
+    shim_cache::inherit(&mut command, &shim._lease)?;
     command
         .arg("--edition")
         .arg(edition)
@@ -5876,10 +5951,11 @@ fn build_native_package(
     release: bool,
     host_target: &str,
     object: &Path,
-    staticlib: &Path,
+    shim: &BuiltNativeShim,
     yield_object: Option<&Path>,
     rustc: &RustcInvocation,
 ) -> Result<PathBuf, CliError> {
+    let staticlib = &shim.staticlib;
     if !manifest.is_file() {
         return Err(CliError(format!(
             "no Cargo manifest at {}",
@@ -5887,11 +5963,7 @@ fn build_native_package(
         )));
     }
     let selected = select_native_package_bin(manifest, package, bin, Some(rustc))?;
-    let objects_base = staticlib
-        .parent()
-        .expect("shim staticlib path has a profile directory parent")
-        .join(NATIVE_SHIM_OBJECTS_DIR);
-    let sancov_stub = stage_sancov_stub(&objects_base, yield_object.is_some(), host_target)?;
+    let sancov_stub = stage_sancov_stub(shim, yield_object.is_some(), host_target)?;
     let rustflags = native_package_rustflags(sancov_stub.as_deref(), host_target);
 
     let mut command = Command::new(&rustc.cargo_command);
@@ -5924,6 +5996,7 @@ fn build_native_package(
         .args(native_package_link_args(object, staticlib, yield_object))
         .args(NATIVE_AUDIT_METADATA_ARGS);
     let _lock = lock_target_dir(&selected.target_dir)?;
+    shim_cache::inherit(&mut command, &shim._lease)?;
     let built = command
         .output()
         .map_err(|error| CliError(format!("failed to run cargo rustc: {error}")))?;
@@ -6201,14 +6274,14 @@ fn hash_file_contents(hasher: &mut Sha256, path: &Path) -> Result<(), CliError> 
 /// exist only to answer the instrumentation, so a build without `--yield-points`
 /// stages nothing and no Patina object reaches a dependency's link at all.
 fn stage_sancov_stub(
-    base: &Path,
+    shim: &BuiltNativeShim,
     yield_points: bool,
     target: &str,
 ) -> Result<Option<PathBuf>, CliError> {
     if !yield_points {
         return Ok(None);
     }
-    stage_shim_object(base, &PATINA_SANCOV_STUB_OBJECT, target, &[]).map(Some)
+    stage_shim_object(shim, &PATINA_SANCOV_STUB_OBJECT, target, &[]).map(Some)
 }
 
 /// The shim's link arguments for a package build, as the trailing arguments of
@@ -9228,7 +9301,10 @@ mod tests {
 
     #[test]
     fn shim_caches_are_separated_by_source_bundle_and_complete_toolchain_identity() {
-        let workspace = Path::new("/home/someone/.cache/patina");
+        let cache = tempfile::tempdir().unwrap();
+        let workspace = cache.path();
+        let archive = workspace.join("cargo.a");
+        fs::write(&archive, b"stable archive").unwrap();
         let stable = RustcIdentity {
             banner: "rustc 1.98.0 (stable)".into(),
             verbose: "rustc 1.98.0 (stable)\ncommit-hash: stable".into(),
@@ -9237,29 +9313,310 @@ mod tests {
             banner: "rustc 1.86.0 (msrv)".into(),
             verbose: "rustc 1.86.0 (msrv)\ncommit-hash: msrv".into(),
         };
-        let stable_dir = native_shim_target_dir(workspace, None, "bundle-a", &stable);
-        let msrv_dir = native_shim_target_dir(workspace, None, "bundle-a", &msrv);
-        let changed_source_dir = native_shim_target_dir(workspace, None, "bundle-b", &stable);
-        assert_ne!(stable_dir, msrv_dir);
-        assert_ne!(stable_dir, changed_source_dir);
+        let base = native_shim_cache_base(workspace, None).unwrap();
+        let stable_artifact =
+            publish_native_shim(&archive, &base, "bundle-a", &stable, "debug").unwrap();
+        fs::write(&archive, b"msrv archive").unwrap();
+        let msrv_artifact =
+            publish_native_shim(&archive, &base, "bundle-a", &msrv, "debug").unwrap();
+        let changed = publish_native_shim(&archive, &base, "bundle-b", &stable, "debug").unwrap();
+        assert_ne!(stable_artifact.staticlib, msrv_artifact.staticlib);
+        assert_ne!(stable_artifact.staticlib, changed.staticlib);
+        let same_bytes_other_bundle =
+            publish_native_shim(&archive, &base, "bundle-a", &stable, "debug").unwrap();
+        assert_ne!(same_bytes_other_bundle.staticlib, changed.staticlib);
         assert_eq!(
-            stable_dir,
-            native_shim_target_dir(workspace, None, "bundle-a", &stable)
+            fs::read(&stable_artifact.staticlib).unwrap(),
+            b"stable archive"
+        );
+        assert_eq!(fs::read(&msrv_artifact.staticlib).unwrap(), b"msrv archive");
+        // Equal banners and bytes still cannot alias different complete identities.
+        let mut rebuilt_toolchain = stable.clone();
+        rebuilt_toolchain
+            .verbose
+            .push_str("\nLLVM version: different");
+        let rebuilt =
+            publish_native_shim(&archive, &base, "bundle-b", &rebuilt_toolchain, "debug").unwrap();
+        assert_ne!(rebuilt.staticlib, changed.staticlib);
+        let release = publish_native_shim(&archive, &base, "bundle-b", &stable, "release").unwrap();
+        assert_ne!(release.staticlib, changed.staticlib);
+
+        assert_eq!(
+            native_shim_cache_base(workspace, Some(OsStr::new("/custom-target"))).unwrap(),
+            PathBuf::from("/custom-target/patina-native-shim")
+        );
+        assert_eq!(
+            native_shim_cache_base(workspace, Some(OsStr::new("relative"))).unwrap(),
+            env::current_dir()
+                .unwrap()
+                .join("relative/patina-native-shim")
+        );
+    }
+
+    #[test]
+    fn incomplete_shim_source_bundle_is_repaired() {
+        let cache = tempfile::tempdir().unwrap();
+        let bundles = cache.path().join("shim-src");
+        let key = shim_bundle::EMBEDDED_SHIM_BUNDLE_SHA256;
+        let partial = bundles.join(key);
+        fs::create_dir_all(&partial).unwrap();
+        fs::write(partial.join("Cargo.toml"), b"interrupted old extraction").unwrap();
+        let lease = shim_cache::acquire_initialized(&bundles, key, 1, || {
+            unpack_embedded_shim_sources(cache.path()).map(|_| ())
+        })
+        .unwrap();
+        assert!(shim_cache::complete(&lease.dir, key).unwrap());
+        for (package, files) in shim_bundle::EMBEDDED_SHIM_SOURCES {
+            for (path, bytes) in *files {
+                assert_eq!(
+                    fs::read(lease.dir.join(package).join(path)).unwrap(),
+                    *bytes
+                );
+            }
+        }
+    }
+
+    /// Build real archives with deliberately different link-time answers. This
+    /// is the class-level detector for restored-bundle Cargo freshness, mutable
+    /// output handoff, and cross-bundle concurrent builds (not just key strings).
+    #[test]
+    #[cfg(unix)]
+    fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
+        if shim_cache::isolated_test(
+            "tests::concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore",
+        ) {
+            return;
+        }
+        let cache = tempfile::tempdir().unwrap();
+        let make_bundle = |key: &'static str, answer: u32| {
+            let lease = shim_cache::acquire(&cache.path().join("shim-src"), key, 4).unwrap();
+            // Even an ambient/configured Cargo intermediate directory must not
+            // escape the leased, size-bounded scratch target.
+            fs::create_dir_all(lease.dir.join(".cargo")).unwrap();
+            fs::write(
+                lease.dir.join(".cargo/config.toml"),
+                format!(
+                    "[build]\nbuild-dir = {:?}\n",
+                    cache.path().join("escaped-build-dir")
+                ),
+            )
+            .unwrap();
+            let mut members = Vec::new();
+            let mut lock = String::from("version = 3\n");
+            for (package, _) in shim_bundle::EMBEDDED_SHIM_SOURCES {
+                members.push(format!("{package:?}"));
+                let dir = lease.dir.join(package);
+                fs::create_dir_all(dir.join("src")).unwrap();
+                let is_shim = *package == "patina-dst-native-shim";
+                fs::write(dir.join("Cargo.toml"), format!(
+                    "[package]\nname = {package:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n{}",
+                    if is_shim { "[lib]\ncrate-type = [\"staticlib\"]\n" } else { "" }
+                )).unwrap();
+                fs::write(dir.join("src/lib.rs"), if is_shim {
+                    format!("#[no_mangle] pub extern \"C\" fn shim_cache_sentinel() -> u32 {{ {answer} }}\n")
+                } else { String::new() }).unwrap();
+                lock.push_str(&format!(
+                    "\n[[package]]\nname = {package:?}\nversion = \"0.0.0\"\n"
+                ));
+            }
+            fs::write(
+                lease.dir.join("Cargo.toml"),
+                format!(
+                    "[workspace]\nresolver = \"2\"\nmembers = [{}]\n",
+                    members.join(",")
+                ),
+            )
+            .unwrap();
+            fs::write(lease.dir.join("Cargo.lock"), lock).unwrap();
+            ShimSources {
+                cache_root: cache.path().into(),
+                dir: lease.dir.clone(),
+                bundle_hash: key,
+                _lease: lease,
+            }
+        };
+        let a = make_bundle("a", 17);
+        let b = make_bundle("b", 29);
+        let mut rustc = check_native_toolchain_agreement(&a.dir).unwrap();
+        let quote = |path: &OsStr| format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"));
+        // Reproduce clonefile-preserved timestamps on every platform. Without
+        // clean -p, Cargo sees the old dep-info as fresh despite different bytes.
+        let backdate = cache.path().join("cargo-backdate");
+        fs::write(&backdate, format!(
+            "#!/bin/sh\nset -eu\nfind . -type f -exec touch -t 200001010000 {{}} +\nexec {} \"$@\"\n",
+            quote(&rustc.cargo_command)
+        )).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&backdate, fs::Permissions::from_mode(0o755)).unwrap();
+        rustc.cargo_command = backdate.as_os_str().into();
+        let link = |built: &BuiltNativeShim, expected: u32| {
+            let dir = tempfile::tempdir().unwrap();
+            let source = dir.path().join("guest.c");
+            let guest = dir.path().join("guest");
+            fs::write(&source, format!("extern unsigned shim_cache_sentinel(void); int main(void) {{ return shim_cache_sentinel() != {expected}; }}")).unwrap();
+            let mut cc = Command::new("cc");
+            cc.arg(source).arg(&built.staticlib).arg("-o").arg(&guest);
+            if cfg!(target_os = "linux") {
+                cc.args(["-ldl", "-lpthread", "-lm"]);
+            }
+            assert!(cc.status().unwrap().success());
+            assert!(Command::new(guest).status().unwrap().success());
+        };
+        // Both archive handles survive while another bundle overwrites Cargo's
+        // same-named output. Rendezvous AFTER build, BEFORE either guest links.
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = [(&a, 17), (&b, 29)]
+                .into_iter()
+                .map(|(bundle, expected)| {
+                    let rustc = &rustc;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        (
+                            build_native_shim_at(
+                                false,
+                                rustc,
+                                bundle,
+                                None,
+                                GuestInstrumentation::None,
+                            )
+                            .unwrap(),
+                            expected,
+                        )
+                    })
+                })
+                .collect();
+            let built: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            for (artifact, expected) in built {
+                link(&artifact, expected);
+            }
+        });
+        // Force A -> B -> A even if the concurrent scheduling chose B -> A.
+        for (bundle, expected) in [(&a, 17), (&b, 29), (&a, 17)] {
+            let built =
+                build_native_shim_at(false, &rustc, bundle, None, GuestInstrumentation::None)
+                    .unwrap();
+            link(&built, expected);
+        }
+        assert!(!cache.path().join("escaped-build-dir").exists());
+
+        // A compiler-wrapper server can outlive the command that started it.
+        // It may pin shared state, but the next real build must acquire the
+        // exclusive build lock without waiting for that server to exit.
+        let fifo = cache.path().join("daemon-control");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        struct ResumeDaemon(fs::File);
+        impl Drop for ResumeDaemon {
+            fn drop(&mut self) {
+                use std::io::Write;
+                let _ = self.0.write_all(b"finish\n");
+            }
+        }
+        let resume = ResumeDaemon(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&fifo)
+                .unwrap(),
+        );
+        let ready = cache.path().join("daemon-ready");
+        let claim = cache.path().join("daemon-started");
+        let wrapper = cache.path().join("cargo-daemon-wrapper");
+        fs::write(&wrapper, format!(
+            "#!/bin/sh\nset -eu\nif [ \"$1\" = build ] && mkdir {} 2>/dev/null; then\n  (exec 3< {}; : > {}; read reply <&3) </dev/null >/dev/null 2>&1 &\nfi\nexec {} \"$@\"\n",
+            quote(claim.as_os_str()), quote(fifo.as_os_str()), quote(ready.as_os_str()), quote(backdate.as_os_str())
+        )).unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut daemon_rustc = rustc.clone();
+        daemon_rustc.cargo_command = wrapper.into();
+        let first =
+            build_native_shim_at(false, &daemon_rustc, &a, None, GuestInstrumentation::None)
+                .unwrap();
+        link(&first, 17);
+        for _ in 0..100 {
+            if ready.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            ready.exists(),
+            "wrapper's long-lived child never became ready"
+        );
+        std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let next = scope.spawn(move || {
+                let built = build_native_shim_at(
+                    false,
+                    &daemon_rustc,
+                    &b,
+                    None,
+                    GuestInstrumentation::None,
+                );
+                tx.send(()).unwrap();
+                built
+            });
+            let unblocked = rx.recv_timeout(std::time::Duration::from_secs(30)).is_ok();
+            drop(resume); // release the server even when detecting the regression
+            let built = next.join().unwrap().unwrap();
+            assert!(
+                unblocked,
+                "a wrapper daemon retained the exclusive build lock"
+            );
+            link(&built, 29);
+        });
+
+        let builds = native_shim_cache_base(cache.path(), None)
+            .unwrap()
+            .join("builds");
+        let work = fs::read_dir(builds)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.is_dir())
+            .unwrap();
+        let release =
+            build_native_shim_at(true, &rustc, &a, None, GuestInstrumentation::None).unwrap();
+        link(&release, 17);
+        let debug =
+            build_native_shim_at(false, &rustc, &a, None, GuestInstrumentation::None).unwrap();
+        link(&debug, 17);
+        assert!(
+            work.join("target/debug")
+                .join(NATIVE_SHIM_STATICLIB)
+                .exists()
         );
         assert!(
-            stable_dir.starts_with("/home/someone/.cache/patina/shim-target/patina-native-shim")
+            work.join("target/release")
+                .join(NATIVE_SHIM_STATICLIB)
+                .exists()
         );
-
-        // An explicit Cargo target remains the user's authoritative staging base,
-        // but the shim still gets its own source/compiler namespace below it.
-        let explicit = native_shim_target_dir(
-            workspace,
-            Some(OsStr::new("/custom-target")),
-            "bundle-a",
-            &stable,
-        );
-        assert!(explicit.starts_with("/custom-target/patina-native-shim"));
-        assert_ne!(explicit, PathBuf::from("/custom-target"));
+        assert_ne!(release.staticlib, debug.staticlib);
+        let growth = work.join("target/oversized-scratch");
+        fs::File::create(&growth)
+            .unwrap()
+            .set_len(shim_cache::BUILD_BYTES + 1)
+            .unwrap();
+        // Model an old torn entry: the completion marker is missing but the
+        // bundle marker survived alongside a broken private copy. Retrying A must
+        // replace it, and oversized scratch must actually be removed.
+        fs::remove_file(work.join("source").join(shim_cache::COMPLETE)).unwrap();
+        // Keep the old bundle marker: it alone is not proof of source integrity.
+        fs::write(
+            work.join("source/patina-dst-native-shim/src/lib.rs"),
+            "compile_error!(\"incomplete source switch\");",
+        )
+        .unwrap();
+        let restored =
+            build_native_shim_at(false, &rustc, &a, None, GuestInstrumentation::None).unwrap();
+        link(&restored, 17);
+        assert!(!growth.exists());
     }
 
     #[test]
@@ -9412,29 +9769,34 @@ mod tests {
     fn published_shim_staticlib_is_named_by_its_bytes() {
         let directory = tempfile::tempdir().unwrap();
         let staticlib = directory.path().join(NATIVE_SHIM_STATICLIB);
+        let identity = RustcIdentity {
+            banner: "test".into(),
+            verbose: "test complete identity".into(),
+        };
+        let publish = || {
+            publish_native_shim(&staticlib, directory.path(), "bundle", &identity, "debug").unwrap()
+        };
         fs::write(&staticlib, b"shim bytes").unwrap();
-        let first = publish_native_shim(&staticlib).unwrap();
-        assert_eq!(publish_native_shim(&staticlib).unwrap(), first);
+        let first = publish();
+        let abandoned = first._lease.dir.join("archive.partial");
+        fs::write(&abandoned, b"interrupted publication").unwrap();
+        assert_eq!(publish().staticlib, first.staticlib);
+        assert!(!abandoned.exists());
 
         fs::write(&staticlib, b"shim bytez").unwrap();
-        let flipped = publish_native_shim(&staticlib).unwrap();
+        let flipped = publish();
         fs::write(&staticlib, b"rebuilt shim bytes").unwrap();
-        let rebuilt = publish_native_shim(&staticlib).unwrap();
-        assert_ne!(first, flipped, "a same-length edit must publish a new name");
+        let rebuilt = publish();
         assert_ne!(
-            first, rebuilt,
-            "a rebuilt staticlib must publish a new name"
+            first.staticlib, flipped.staticlib,
+            "a same-length edit must publish a new name"
         );
-        assert_ne!(flipped, rebuilt);
+        assert_ne!(first.staticlib, rebuilt.staticlib);
+        assert_ne!(flipped.staticlib, rebuilt.staticlib);
 
-        assert_eq!(fs::read(&first).unwrap(), b"shim bytes");
-        assert_eq!(fs::read(&flipped).unwrap(), b"shim bytez");
-        assert_eq!(fs::read(&rebuilt).unwrap(), b"rebuilt shim bytes");
-        assert_eq!(
-            fs::read_dir(directory.path()).unwrap().count(),
-            4,
-            "Cargo's copy plus one published copy per distinct content, nothing partial"
-        );
+        assert_eq!(fs::read(&first.staticlib).unwrap(), b"shim bytes");
+        assert_eq!(fs::read(&flipped.staticlib).unwrap(), b"shim bytez");
+        assert_eq!(fs::read(&rebuilt.staticlib).unwrap(), b"rebuilt shim bytes");
     }
 
     fn strings(values: &[&str]) -> Vec<OsString> {

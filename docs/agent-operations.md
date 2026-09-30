@@ -234,14 +234,16 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
 - The `cargo-patina` binary embeds native C shim sources at build time. After
   changing the C layer, rebuild `cargo-patina` before trusting native validation.
 - After a source-mutation detector restores an older embedded shim bundle,
-  verify the linked artifact, not just the restored checkout. Distinct bundles
-  share a toolchain-keyed shim target directory; Cargo can report it fresh while
-  its staticlib still contains the planted mutation. If observed, clean that
-  package's release artifacts using Cargo with the actual bundled manifest and
-  shim target directory, then rerun the detector GREEN. Cleaning the checkout's
-  target does not clean this separate artifact. This cache-invalidation class
-  needs a dedicated build-layer detector; filesystem conformance caught it in
-  the fs-fixup battery.
+  verify the linked artifact, not just the restored checkout. The shim cache
+  shares toolchain-keyed build scratch across profiles, but switches bundles by replacing its
+  stable source workspace and cleaning the bundled packages (not registry deps).
+  Immutable published archives and kernel leases separate Cargo writes from
+  guest links and pruning. The build-layer detector
+  `concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore`
+  links distinct sentinel archives concurrently and after A→B→A restoration
+  with backdated copied sources, so Cargo's mtime freshness cannot mask a missing clean;
+  treat a wrong linked answer as a cache-invalidation failure, never a reason
+  to clean the checkout's unrelated target and call the run green.
 - A native build has two halves — the shim staticlib, built in the unpacked shim
   workspace, and the guest, built in the caller's working directory — and a build
   tool that resolves its compiler per directory (rustup's `rustc` proxy reads the

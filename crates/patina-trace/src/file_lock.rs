@@ -18,15 +18,25 @@ use std::path::{Path, PathBuf};
 /// Take an exclusive `flock(2)` on `file`, held until it is closed. Two opens of
 /// one file contend even inside one process. With `wait` false a lock held
 /// elsewhere is [`io::ErrorKind::WouldBlock`].
-#[cfg(unix)]
 pub fn lock_exclusive(file: &File, wait: bool) -> io::Result<()> {
+    lock(file, wait, 2)
+}
+
+/// Take a shared `flock(2)` on `file`. Other shared holders may coexist;
+/// exclusive holders contend. As with [`lock_exclusive`], correctness requires
+/// a filesystem with working advisory flock semantics (not all NFS mounts do).
+pub fn lock_shared(file: &File, wait: bool) -> io::Result<()> {
+    lock(file, wait, 1)
+}
+
+#[cfg(unix)]
+fn lock(file: &File, wait: bool, mode: i32) -> io::Result<()> {
     use std::os::fd::AsRawFd;
-    const LOCK_EX: i32 = 2;
     const LOCK_NB: i32 = 4;
     unsafe extern "C" {
         fn flock(fd: i32, operation: i32) -> i32;
     }
-    let operation = if wait { LOCK_EX } else { LOCK_EX | LOCK_NB };
+    let operation = if wait { mode } else { mode | LOCK_NB };
     loop {
         // SAFETY: `flock` only reads the descriptor, which `file` keeps open.
         if unsafe { flock(file.as_raw_fd(), operation) } == 0 {
@@ -40,7 +50,7 @@ pub fn lock_exclusive(file: &File, wait: bool) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-pub fn lock_exclusive(_file: &File, _wait: bool) -> io::Result<()> {
+fn lock(_file: &File, _wait: bool, _mode: i32) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "file locking is unsupported on this platform",
@@ -133,6 +143,35 @@ pub fn remove_dead_scratch(path: &Path) {
         if lock_exclusive(&file, false).is_ok() && path_names(&scratch, &file).unwrap_or(false) {
             let _ = fs::remove_file(&scratch);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_holders_coexist_and_exclusive_holders_contend() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("shared");
+        let first = File::create(&path).unwrap();
+        let second = OpenOptions::new().write(true).open(&path).unwrap();
+        lock_shared(&first, false).unwrap();
+        lock_shared(&second, false).unwrap();
+        let contender = OpenOptions::new().write(true).open(&path).unwrap();
+        assert_eq!(
+            lock_exclusive(&contender, false).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        let path = temp.path().join("exclusive");
+        let writer = File::create(&path).unwrap();
+        lock_exclusive(&writer, false).unwrap();
+        let reader = OpenOptions::new().write(true).open(&path).unwrap();
+        assert_eq!(
+            lock_shared(&reader, false).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
     }
 }
 

@@ -1397,7 +1397,7 @@ fn guest_link_is_immune_to_cargo_rewriting_its_shim_copy() {
              libpatina_dst_native_shim.a); do\n  head -c 4096 \"$archive\" > \"$archive.torn\"\n  \
              mv -f \"$archive.torn\" \"$archive\"\n  echo \"$archive\" >> {rewrites}\ndone\nexec \
              {cargo} \"$@\"\n",
-            target = shim_target.display(),
+            target = shim_target.join("patina-native-shim/builds").display(),
             rewrites = rewrites.display(),
         ),
     )
@@ -1452,7 +1452,8 @@ fn guest_link_is_immune_to_cargo_rewriting_its_shim_copy() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn find_private_shim_staticlib(target_base: &Path) -> PathBuf {
     let mut files = Vec::new();
-    collect_files(target_base, &mut files);
+    // Mutate only Cargo scratch, never the immutable published link inputs.
+    collect_files(&target_base.join("patina-native-shim/builds"), &mut files);
     let mut staticlibs: Vec<_> = files
         .into_iter()
         .filter(|path| {

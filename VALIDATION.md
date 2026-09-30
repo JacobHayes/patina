@@ -834,6 +834,38 @@ what it is calibrated against and how a drift would surface. When a class-level
 detector exists but does not run in CI, that gap is itself a tracked item — a
 detector that "would fire" is only evidence if it actually executes.
 
+### Native shim cache isolation and eviction
+
+`cargo-patina`'s `concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore`
+builds two miniature source bundles concurrently through the production cache
+pipeline, waits for both archives, and links/runs guests with distinct expected
+answers. A→B→A restoration backdates copied sources before Cargo runs, reproducing
+preserved mtimes even on Linux: removing the package clean must make the linked
+answer fail. This is the class-level pairing for immutable publication and
+bundle-switch invalidation. `shim_caches_are_separated_by_source_bundle_and_complete_toolchain_identity`
+checks published bytes across toolchains, including equal banners with different
+full identities, profiles, source changes and explicit target bases. The real-build
+detector also plants an incomplete source switch and oversized scratch, and checks
+recovery, containment of a redirected Cargo intermediate directory, and debug/release
+reuse in one toolchain workspace. A wrapper leaves a server blocked on a FIFO while
+the next real build must finish; only then does the test release that server.
+
+`shim_cache` tests hold multiple leases while forcing eviction, verify that a
+waiting builder's pin survives another reader's release, then verify actual
+reclamation after the last pin drops. A consuming subprocess keeps its shared lease
+but not its exclusive build lock after every parent handle closes. Tests inject a
+failed delete after retirement, leave a partially deleted tombstone and staging
+directory, and verify fresh acquisition and later cleanup. Incomplete source bundles
+are repaired and their bytes checked against the embedded sources. Other tests
+overwrite mutable copies to detect hard-link aliasing, reclaim publication staging,
+and check legacy collection's one-hour grace and held build lock (not uncoordinated
+old-version waiters; migration requires quiescence).
+
+Immediate lock-release assertions run in isolated single-test subprocesses: unrelated
+libtest threads may fork and temporarily retain any open descriptor until exec, even
+with CLOEXEC. The surrounding library suite remains concurrent. These tests run in
+the ordinary cargo-patina library suite.
+
 ### Linux keyring confidence boundary
 
 The [keyutils guest](testbeds/native-boundary/keyring-keyutils/README.md) pins
