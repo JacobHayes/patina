@@ -31,28 +31,48 @@ mod bytes_base64 {
 
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-    pub(crate) fn encode(bytes: &[u8]) -> String {
-        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-        for chunk in bytes.chunks(3) {
-            let second = chunk.get(1).copied();
-            let third = chunk.get(2).copied();
-            let packed = (u32::from(chunk[0]) << 16)
-                | (u32::from(second.unwrap_or(0)) << 8)
-                | u32::from(third.unwrap_or(0));
-            out.push(ALPHABET[(packed >> 18 & 0x3f) as usize] as char);
-            out.push(ALPHABET[(packed >> 12 & 0x3f) as usize] as char);
-            out.push(if second.is_some() {
-                ALPHABET[(packed >> 6 & 0x3f) as usize] as char
-            } else {
-                '='
-            });
-            out.push(if third.is_some() {
-                ALPHABET[(packed & 0x3f) as usize] as char
-            } else {
-                '='
-            });
+    // serde_json streams collect_str directly to its writer. In particular,
+    // native terminal prefix export must not allocate a base64 String while a
+    // stopped guest may own its allocator. Full blocks are divisible by three,
+    // so only the final block can contain padding; wire bytes are unchanged.
+    pub(super) struct Encoded<'a>(pub &'a [u8]);
+    impl fmt::Display for Encoded<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            let mut out = [0u8; 1024];
+            for block in self.0.chunks(768) {
+                let mut written = 0;
+                for chunk in block.chunks(3) {
+                    let second = chunk.get(1).copied();
+                    let third = chunk.get(2).copied();
+                    let packed = (u32::from(chunk[0]) << 16)
+                        | (u32::from(second.unwrap_or(0)) << 8)
+                        | u32::from(third.unwrap_or(0));
+                    let quartet = [
+                        ALPHABET[(packed >> 18 & 0x3f) as usize],
+                        ALPHABET[(packed >> 12 & 0x3f) as usize],
+                        if second.is_some() {
+                            ALPHABET[(packed >> 6 & 0x3f) as usize]
+                        } else {
+                            b'='
+                        },
+                        if third.is_some() {
+                            ALPHABET[(packed & 0x3f) as usize]
+                        } else {
+                            b'='
+                        },
+                    ];
+                    out[written..written + 4].copy_from_slice(&quartet);
+                    written += 4;
+                }
+                f.write_str(std::str::from_utf8(&out[..written]).expect("base64 is ASCII"))?;
+            }
+            Ok(())
         }
-        out
+    }
+    impl serde::Serialize for Encoded<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.collect_str(self)
+        }
     }
 
     fn sextet(symbol: u8) -> Option<u32> {
@@ -105,7 +125,7 @@ mod bytes_base64 {
     }
 
     pub(crate) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&encode(bytes))
+        serializer.collect_str(&Encoded(bytes))
     }
 
     pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
@@ -146,7 +166,7 @@ mod option_bytes_base64 {
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         match bytes {
-            Some(bytes) => serializer.serialize_some(&super::bytes_base64::encode(bytes)),
+            Some(bytes) => serializer.serialize_some(&super::bytes_base64::Encoded(bytes)),
             None => serializer.serialize_none(),
         }
     }
@@ -1808,16 +1828,41 @@ mod tests {
     fn base64_round_trips_all_lengths_and_rejects_malformed_input() {
         for len in 0..=32usize {
             let bytes: Vec<u8> = (0..len).map(|i| (i * 7 + 1) as u8).collect();
-            let encoded = bytes_base64::encode(&bytes);
+            let encoded = bytes_base64::Encoded(&bytes).to_string();
             assert_eq!(encoded.len() % 4, 0);
             assert_eq!(bytes_base64::decode(&encoded).unwrap(), bytes);
         }
         // Known vectors and fail-closed rejection of malformed strings.
-        assert_eq!(bytes_base64::encode(b"Man"), "TWFu");
-        assert_eq!(bytes_base64::encode(b"Ma"), "TWE=");
+        assert_eq!(bytes_base64::Encoded(b"Man").to_string(), "TWFu");
+        assert_eq!(bytes_base64::Encoded(b"Ma").to_string(), "TWE=");
         assert!(bytes_base64::decode("TWFu=").is_err()); // not a multiple of 4
         assert!(bytes_base64::decode("T=Fu").is_err()); // mid-chunk padding
         assert!(bytes_base64::decode("T@Fu").is_err()); // invalid character
+    }
+
+    #[test]
+    fn streamed_base64_preserves_bytes_at_buffer_and_padding_boundaries() {
+        for len in [0, 1, 2, 3, 767, 768, 769, 1535, 1536, 1537, 4097] {
+            let bytes = vec![255; len];
+            let mut expected = "/".repeat(len / 3 * 4);
+            expected.push_str(match len % 3 {
+                1 => "/w==",
+                2 => "//8=",
+                _ => "",
+            });
+            for outcome in [
+                Outcome::Bytes(bytes.clone()),
+                Outcome::OptionalBytes(Some(bytes.clone())),
+            ] {
+                let mut json = Vec::new();
+                serde_json::to_writer(&mut json, &outcome).unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&json).unwrap()["value"],
+                    expected
+                );
+                assert_eq!(serde_json::from_slice::<Outcome>(&json).unwrap(), outcome);
+            }
+        }
     }
 
     #[test]

@@ -940,6 +940,8 @@ impl StdioCapture {
 type HostClock = unsafe extern "C" fn(libc::clockid_t, *mut libc::timespec) -> c_int;
 type HostSignalAction =
     unsafe extern "C" fn(c_int, *const libc::sigaction, *mut libc::sigaction) -> c_int;
+type HostSignalMask =
+    unsafe extern "C" fn(c_int, *const libc::sigset_t, *mut libc::sigset_t) -> c_int;
 type HostThreadSignal = unsafe extern "C" fn(libc::pthread_t, c_int) -> c_int;
 type HostDlAddr = unsafe extern "C" fn(*const c_void, *mut libc::Dl_info) -> c_int;
 #[cfg(target_os = "linux")]
@@ -1023,6 +1025,7 @@ mod hostapi {
         pub host_dispatch_time: unsafe extern "C" fn(u64, i64) -> u64,
         pub host_clock_gettime: super::HostClock,
         pub host_sigaction: super::HostSignalAction,
+        pub host_pthread_sigmask: super::HostSignalMask,
         pub host_pthread_kill: super::HostThreadSignal,
         pub host_pthread_self: unsafe extern "C" fn() -> usize,
         pub host_dladdr: super::HostDlAddr,
@@ -1045,6 +1048,8 @@ mod hostapi {
         /// marks post-`main` teardown; resolving it here keeps the interposer from
         /// naming (and recursing into) the public `exit` it defines.
         pub host_exit: HostExit,
+        /// Fail-closed fatal fallback if the host refuses to reset SIGABRT.
+        pub host_immediate_exit: HostExit,
         /// The real `os_unfair_lock` primitive, used to run an allocator's
         /// pre-activation init locks natively. See [`OsUnfairLockOp`].
         pub host_os_unfair_lock_lock: OsUnfairLockOp,
@@ -1103,6 +1108,9 @@ mod hostapi {
                 host_sigaction: std::mem::transmute::<*mut c_void, super::HostSignalAction>(
                     resolve(c"sigaction"),
                 ),
+                host_pthread_sigmask: std::mem::transmute::<*mut c_void, super::HostSignalMask>(
+                    resolve(c"pthread_sigmask"),
+                ),
                 host_pthread_kill: std::mem::transmute::<*mut c_void, super::HostThreadSignal>(
                     resolve(c"pthread_kill"),
                 ),
@@ -1154,6 +1162,9 @@ mod hostapi {
                     c"write$NOCANCEL",
                 )),
                 host_exit: std::mem::transmute::<*mut c_void, HostExit>(resolve(c"exit")),
+                host_immediate_exit: std::mem::transmute::<*mut c_void, HostExit>(resolve(
+                    c"_exit",
+                )),
                 host_os_unfair_lock_lock: std::mem::transmute::<*mut c_void, OsUnfairLockOp>(
                     resolve(c"os_unfair_lock_lock"),
                 ),
@@ -1295,10 +1306,13 @@ mod hostapi {
         /// post-`main` teardown; resolving it here keeps the interposer from
         /// naming (and recursing into) the public `exit` it defines.
         pub host_exit: HostExit,
+        /// Fail-closed fatal fallback if the host refuses to reset SIGABRT.
+        pub host_immediate_exit: HostExit,
         pub host_abort: unsafe extern "C" fn() -> !,
         pub host_pthread_self: unsafe extern "C" fn() -> usize,
         pub host_clock_gettime: super::HostClock,
         pub host_sigaction: super::HostSignalAction,
+        pub host_pthread_sigmask: super::HostSignalMask,
         pub host_pthread_kill: super::HostThreadSignal,
         pub host_dladdr: super::HostDlAddr,
         pub host_dladdr1: super::HostDlAddr1,
@@ -1381,6 +1395,9 @@ mod hostapi {
                 host_sigaction: std::mem::transmute::<*mut c_void, super::HostSignalAction>(
                     resolve(c"sigaction"),
                 ),
+                host_pthread_sigmask: std::mem::transmute::<*mut c_void, super::HostSignalMask>(
+                    resolve(c"pthread_sigmask"),
+                ),
                 host_pthread_kill: std::mem::transmute::<*mut c_void, super::HostThreadSignal>(
                     resolve(c"pthread_kill"),
                 ),
@@ -1393,6 +1410,9 @@ mod hostapi {
                 host_read: std::mem::transmute::<*mut c_void, HostRead>(resolve(c"read")),
                 host_write: std::mem::transmute::<*mut c_void, HostWrite>(resolve(c"write")),
                 host_exit: std::mem::transmute::<*mut c_void, HostExit>(resolve(c"exit")),
+                host_immediate_exit: std::mem::transmute::<*mut c_void, HostExit>(resolve(
+                    c"_exit",
+                )),
                 host_abort: std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> !>(
                     resolve(c"abort"),
                 ),
@@ -1837,10 +1857,9 @@ fn host_write_all(fd: c_int, bytes: &[u8]) -> io::Result<()> {
             return Err(error);
         }
         if written == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "host descriptor accepted no bytes",
-            ));
+            // Also used by terminal export: keep even a zero-write error
+            // inline, rather than allocating a boxed custom I/O error.
+            return Err(io::ErrorKind::WriteZero.into());
         }
         offset += written as usize;
     }
@@ -1881,7 +1900,7 @@ impl TraceTransport for FdTraceTransport {
                 let length = bytes.len();
                 self.total = self.total.saturating_add(length as u64);
                 if self.total > MAX_TRACE_BYTES {
-                    watchdog::report_and_abort(&RuntimeError::ComputeStopExport, None);
+                    watchdog::report_and_abort(&RuntimeError::ComputeStopExport, None, None);
                 }
                 while !bytes.is_empty() {
                     let n = bytes.len().min(self.buffer.len() - self.used);
@@ -1898,7 +1917,7 @@ impl TraceTransport for FdTraceTransport {
                 // serde_json boxes I/O errors. Terminate here instead of
                 // returning one into its allocating error-construction path.
                 if host_write_all(self.fd, &self.buffer[..self.used]).is_err() {
-                    watchdog::report_and_abort(&RuntimeError::ComputeStopExport, None);
+                    watchdog::report_and_abort(&RuntimeError::ComputeStopExport, None, None);
                 }
                 self.used = 0;
                 Ok(())
@@ -2604,9 +2623,13 @@ fn runtime_errno(error: &RuntimeError) -> c_int {
         // runtime has already emitted the classifiable marker and flushed the
         // truncated trace.
         RuntimeError::FrozenClockChurn { .. } => abort_after_flushing_output(),
-        RuntimeError::ComputeBound { .. }
-        | RuntimeError::ComputeStopExport
-        | RuntimeError::ComputeStopState => watchdog::report_and_abort(error, None),
+        RuntimeError::ComputeBound { .. } => {
+            watchdog::report(error);
+            abort_after_flushing_output()
+        }
+        RuntimeError::ComputeStopExport
+        | RuntimeError::ComputeStopOverflow
+        | RuntimeError::ComputeStopState => watchdog::report_and_abort(error, None, None),
         RuntimeError::InjectedFsCrash(_) => abort_after_flushing_output(),
         RuntimeError::CrashSelectorUnreached { .. } => EIO,
         RuntimeError::Config(_)
@@ -2959,9 +2982,16 @@ fn with_context_msg<T>(
         RuntimeError::ScheduleDivergence { .. } => {
             format!("{error}{}", thread::yield_site_context())
         }
-        RuntimeError::ComputeBound { .. }
-        | RuntimeError::ComputeStopExport
-        | RuntimeError::ComputeStopState => watchdog::report_and_abort(&error, None),
+        RuntimeError::ComputeBound { .. } => {
+            // Baton-held refusal, unlike the observer. The registered salvage
+            // only lends C stdout bytes; it takes no scheduling point/Context
+            // lock (see salvage_buffered_stdout). Keep stop ownership here.
+            watchdog::report(&error);
+            abort_after_flushing_output()
+        }
+        RuntimeError::ComputeStopExport
+        | RuntimeError::ComputeStopOverflow
+        | RuntimeError::ComputeStopState => watchdog::report_and_abort(&error, None, None),
         _ => error.to_string(),
     })
 }
@@ -8236,12 +8266,110 @@ pub extern "C" fn patina_exit(status: c_int) -> ! {
 
 /// Private fatal vehicle: never finalize an invalid run through the guest abort interposer.
 /// The stop is the host's default SIGABRT, never a delivery: a guest's
-/// SIGABRT handler (whose host action is the shim's front handler) does not
-/// run inside the stopping shim.
+/// SIGABRT handler (including Linux's modeled front) does not run inside the
+/// stopping shim.
 fn host_abort() -> ! {
-    #[cfg(target_os = "linux")]
-    thread::signals::default_host_abort();
-    unsafe { (hostapi::get().host_abort)() }
+    let host = hostapi::get();
+    let mut default: libc::sigaction = unsafe { std::mem::zeroed() };
+    default.sa_sigaction = libc::SIG_DFL;
+    // Use the one private host seam on BOTH platforms. Reset before abort
+    // unblocks/raises SIGABRT: neither a native guest handler nor Linux's front
+    // handler may run while the stopping shim holds its locks/guest allocator.
+    if unsafe { (host.host_sigaction)(libc::SIGABRT, &default, std::ptr::null_mut()) } != 0 {
+        let _ = host_write_all(2, b"\nPATINA_INFRA host_abort_reset_failed\n");
+        // Calling abort after a failed reset would re-enter guest code. A
+        // refused host action instead loses signal status, never containment.
+        unsafe { (host.host_immediate_exit)(128 + libc::SIGABRT) }
+    }
+    // libc abort supplies the unblock + raise even for an inherited host mask.
+    unsafe { (host.host_abort)() }
+}
+
+#[cfg(test)]
+mod private_abort_tests {
+    use super::*;
+
+    extern "C" fn looping_handler(_: c_int) {
+        loop {
+            std::hint::spin_loop();
+        }
+    }
+    extern "C" fn allocating_handler(_: c_int) {
+        std::hint::black_box(unsafe { std::alloc::alloc(std::alloc::Layout::new::<u64>()) });
+        looping_handler(0);
+    }
+
+    fn check(name: &str, handler: extern "C" fn(c_int)) {
+        if std::env::var("PATINA_TEST_PRIVATE_ABORT").as_deref() == Ok(name) {
+            // Install a REAL host disposition, not Linux's modeled front. That
+            // front is a second defense and must not mask a broken fatal seam.
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            action.sa_sigaction = handler as *const () as usize;
+            unsafe {
+                // Test only the fatal signal, not host core-dump I/O latency.
+                assert_eq!(
+                    libc::setrlimit(
+                        libc::RLIMIT_CORE,
+                        &libc::rlimit {
+                            rlim_cur: 0,
+                            rlim_max: 0
+                        }
+                    ),
+                    0
+                );
+                assert_eq!(
+                    (hostapi::get().host_sigaction)(libc::SIGABRT, &action, std::ptr::null_mut()),
+                    0
+                );
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                assert_eq!(libc::sigemptyset(&mut set), 0);
+                assert_eq!(libc::sigaddset(&mut set, libc::SIGABRT), 0);
+                assert_eq!(
+                    libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()),
+                    0
+                );
+            }
+            host_abort();
+        }
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("PATINA_TEST_PRIVATE_ABORT", name)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("private abort ran a nonreturning host handler: {name}");
+            }
+            std::thread::yield_now();
+        };
+        assert_eq!(status.signal(), Some(libc::SIGABRT), "{status}");
+    }
+
+    #[test]
+    fn looping_host_handler_cannot_run() {
+        check(
+            "private_abort_tests::looping_host_handler_cannot_run",
+            looping_handler,
+        );
+    }
+    #[test]
+    fn allocating_host_handler_cannot_run() {
+        check(
+            "private_abort_tests::allocating_host_handler_cannot_run",
+            allocating_handler,
+        );
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -8892,6 +9020,9 @@ mod thread {
     #[cfg(target_os = "linux")]
     pub(crate) mod sched;
     #[cfg(target_os = "linux")]
+    pub(crate) mod signals;
+    #[cfg(target_os = "macos")]
+    #[path = "signals_darwin.rs"]
     pub(crate) mod signals;
     #[cfg(target_os = "linux")]
     pub(crate) mod timers;

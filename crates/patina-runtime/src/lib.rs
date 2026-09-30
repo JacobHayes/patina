@@ -4501,7 +4501,7 @@ impl Context {
     /// A replay terminal boundary already reached, without asking the guest for
     /// another operation (it may be in call-free code forever).
     pub fn replay_compute_stop_due(&self) -> Option<patina_dst_trace::ComputeStop> {
-        self.compute_stop.filter(|stop| stop.steps == self.steps)
+        self.compute_stop.filter(|stop| stop.steps <= self.steps)
     }
 
     /// Commit a native host-time stop. This changes no driver or scheduler
@@ -4510,10 +4510,17 @@ impl Context {
         if !self.compute_starves_peer(task) {
             return RuntimeError::ComputeStopState;
         }
-        let stop = patina_dst_trace::ComputeStop {
-            steps: self.steps,
-            task,
+        // steps counts an operation at begin, before custom perform has an
+        // outcome. Only recorder decisions form a replayable prefix. Refuse an
+        // overflowed recorder BEFORE any serializer or boxed I/O error path.
+        let steps = match &self.execution {
+            Execution::Record { recorder, .. } => match recorder.committed_prefix_len() {
+                Some(steps) => steps,
+                None => return RuntimeError::ComputeStopOverflow,
+            },
+            _ => self.compute_stop.map_or(self.steps, |stop| stop.steps),
         };
+        let stop = patina_dst_trace::ComputeStop { steps, task };
         if let Execution::Record { recorder, .. } = &mut self.execution {
             recorder.set_compute_stop(stop);
         }
@@ -4548,10 +4555,7 @@ impl Context {
                 }
             }
         }
-        RuntimeError::ComputeBound {
-            task,
-            steps: self.steps,
-        }
+        RuntimeError::ComputeBound { task, steps }
     }
 
     /// End-of-run schedule-exploration diagnostics. See [`ScheduleDiagnostics`].
@@ -8400,6 +8404,8 @@ pub enum RuntimeError {
     /// The asynchronous stop could not export its evidence. No heap-owned
     /// diagnostic: an interrupted allocator may be unavailable.
     ComputeStopExport,
+    /// Recording was already abandoned; no terminal prefix may be fabricated.
+    ComputeStopOverflow,
     /// Terminal metadata disagrees with the strictly replayed scheduler state.
     ComputeStopState,
 }
@@ -8448,12 +8454,15 @@ impl fmt::Display for RuntimeError {
                 write!(f, "Patina frozen-clock churn: {detail}")
             }
             Self::ComputeStopExport => f.write_str("PATINA_INFRA compute_stop_export_failed"),
+            Self::ComputeStopOverflow => {
+                f.write_str("PATINA_INFRA compute_stop_export_failed reason=trace-overflow")
+            }
             Self::ComputeStopState => {
                 f.write_str("PATINA_INFRA compute_stop_invalid_scheduler_state")
             }
             Self::ComputeBound { task, steps } => write!(
                 f,
-                "PATINA_VIOLATION liveness detail=compute-bound task={} steps={} known_limit=true: compute-bound without scheduling points while another managed thread is runnable; this is a known Patina limit, not a guest bug",
+                "PATINA_VIOLATION liveness detail=compute-bound task={} steps={} known_limit=true: no scheduling point within the host-time bound while another managed thread is runnable; host blocking and descheduling are not distinguished from computation; this is a known Patina limit, not a guest bug",
                 task.0, steps
             ),
         }
@@ -13275,6 +13284,114 @@ class=crash|0 class=buggify|0"
         context.task_complete(peer).unwrap();
         assert_eq!(context.scheduler_next().unwrap(), Some(main));
         assert_eq!(context.compute_watchdog_candidate(), None);
+    }
+
+    #[test]
+    fn compute_stop_emits_a_structured_runtime_limit() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("compute-facts.json");
+        let mut context =
+            Context::from_config(RuntimeConfig::seeded(1).with_facts_path(&path)).unwrap();
+        let task = context.task_spawn("main").unwrap();
+        assert_eq!(context.scheduler_next().unwrap(), Some(task));
+        context.task_spawn("runnable peer").unwrap();
+        let steps = context.steps();
+        assert_eq!(context.compute_watchdog_candidate(), Some((steps, task)));
+        // No claim about what the baton holder is doing outside the boundary:
+        // computation and untracked host blocking have the same runtime state.
+        assert!(matches!(
+            context.stop_compute_bound(task),
+            RuntimeError::ComputeBound { task: stopped, steps: at }
+                if stopped == task && at == steps
+        ));
+        let facts: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            facts,
+            serde_json::json!({
+                "schema": FACTS_SCHEMA,
+                "runtime_findings": [{
+                    "source": "liveness", "kind": "liveness", "detail": "compute-bound",
+                    "known_limit": true, "task": task.0, "steps": steps,
+                }],
+            })
+        );
+        assert_eq!(context.steps(), steps);
+    }
+
+    #[test]
+    fn branch_sessions_do_not_arm_the_host_compute_detector() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("branch-compute.patina");
+        let setup = |ctx: &mut Context| {
+            let main = ctx.task_spawn("main").unwrap();
+            assert_eq!(ctx.scheduler_next().unwrap(), Some(main));
+            ctx.task_spawn("peer").unwrap();
+        };
+        let mut record =
+            Context::from_config(RuntimeConfig::record(1, &path, "branch-compute-v1")).unwrap();
+        setup(&mut record);
+        assert!(record.compute_watchdog_candidate().is_some());
+        record.finish().unwrap();
+        let mut branch = Context::from_config(RuntimeConfig::branch(
+            &path,
+            "main",
+            0,
+            "branch",
+            2,
+            "branch-compute-v1",
+        ))
+        .unwrap();
+        setup(&mut branch);
+        assert!(branch.compute_watchdog_candidate().is_none());
+    }
+
+    #[test]
+    fn compute_stop_inside_an_open_custom_op_replays_only_the_committed_prefix() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("custom-compute.patina");
+        let setup = |context: &mut Context| {
+            let main = context.task_spawn("main").unwrap();
+            assert_eq!(context.scheduler_next().unwrap(), Some(main));
+            context.task_spawn("peer").unwrap();
+            main
+        };
+        let mut record =
+            Context::from_config(RuntimeConfig::record(1, &path, "custom-compute-v1")).unwrap();
+        let main = setup(&mut record);
+        let committed = record.steps();
+        assert_eq!(
+            record.custom_op_begin("perform", b"key", false).unwrap(),
+            CustomOpMode::Record
+        );
+        assert_eq!(record.steps(), committed + 1);
+        let stop = record.stop_compute_bound(main);
+        let bundle = TraceBundle::load(&path).unwrap();
+        assert_eq!(bundle.metadata.compute_stop.unwrap().steps, committed);
+        assert_eq!(
+            bundle.resolved_timeline("main").unwrap().len() as u64,
+            committed
+        );
+        assert!(matches!(stop, RuntimeError::ComputeBound { steps, .. } if steps == committed));
+        assert!(
+            matches!(record.finish(), Err(RuntimeError::ComputeBound { steps, .. }) if steps == committed)
+        );
+        for finish in [false, true] {
+            let mut replay =
+                Context::from_config(RuntimeConfig::replay(&path, "custom-compute-v1")).unwrap();
+            assert_eq!(setup(&mut replay), main);
+            let error = if finish {
+                replay.finish().unwrap_err()
+            } else {
+                // No outcome exists for this begin. The terminal fact must win
+                // before Replayer::expect can request it (or perform can run).
+                replay
+                    .custom_op_begin("perform", b"key", false)
+                    .unwrap_err()
+            };
+            assert!(
+                matches!(error, RuntimeError::ComputeBound { task, steps } if task == main && steps == committed)
+            );
+        }
     }
 
     #[test]

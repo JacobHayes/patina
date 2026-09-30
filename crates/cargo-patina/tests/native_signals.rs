@@ -824,6 +824,87 @@ fn guest_panics_remain_catchable_in_main_and_callbacks() {
     }
 }
 
+/// Self-signal libc doors must bind to the platform model, record generation,
+/// deliver to the caller (including workers), and permit modeled handler work.
+#[test]
+fn self_raise_is_modeled_and_replayable() {
+    // Paired audit detector: the Rust compute-watchdog guest retains raise and
+    // must pass the source-first CLI audit without allowances. C ABI fixtures
+    // intentionally link a whole std staticlib, so run their behavior directly.
+    let guest = assert_build_c_guest("signals/self_raise.c", CLink::PosixShim);
+    guest.assert_no_imports(&["raise"]);
+    let (first, path) = guest.record_standalone(&[]);
+    let first = assert_success(first);
+    assert_exact_line(&first.stdout, "SELF_RAISE_OK");
+    let bytes = std::fs::read(&path).unwrap();
+    let (second, _) = guest.record_standalone(&[]);
+    assert_eq!(first.stdout, assert_success(second).stdout);
+    assert_eq!(bytes, std::fs::read(&path).unwrap(), "record identity");
+    let mut command = std::process::Command::new("/bin/sh");
+    command
+        .env_clear()
+        .args(["-c", "exec 3<\"$1\"; shift; exec \"$@\"", "native-boundary"])
+        .arg(&path)
+        .arg(&guest.binary)
+        .envs([
+            ("PATINA_MODE", "replay"),
+            ("PATINA_TRACE_FD", "3"),
+            ("PATINA_FINGERPRINT", "native-boundary"),
+        ]);
+    let replay = common::output_with_deadline(&mut command, std::time::Duration::from_secs(20))
+        .expect("self-signal replay exceeded 20s");
+    assert_eq!(first.stdout, assert_success(replay).stdout);
+    let trace = patina_dst_trace::TraceBundle::load(&path).unwrap();
+    let generated: Vec<_> = trace.timelines[0]
+        .decisions
+        .iter()
+        .filter_map(|event| {
+            if let patina_dst_abi::Operation::SignalGenerated { sig, target, .. } = event.operation
+            {
+                Some((sig, target))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        generated.len(),
+        8,
+        "record every delivered and ignored generation"
+    );
+    assert!(generated.iter().any(
+        |(_, target)| *target == patina_dst_abi::SignalTarget::Task(patina_dst_abi::TaskId(2))
+    ));
+    use std::os::unix::process::ExitStatusExt;
+    let (output, trace) = guest.record_standalone(&["default"]);
+    assert_eq!(output.status.signal(), Some(libc::SIGTERM), "{output:?}");
+    assert_exact_line(&output.stdout, "default");
+    patina_dst_trace::TraceBundle::load(trace)
+        .unwrap()
+        .validate()
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn self_raise_refuses_unmodeled_delivery_before_calling_a_handler() {
+    let guest = assert_build_c_guest("signals/self_raise.c", CLink::PosixShim);
+    for (mode, message) in [
+        ("reserved", "SIGSYS is reserved for containment"),
+        ("stop", "Darwin default signal stop is not modeled"),
+        (
+            "info",
+            "Darwin self-signal SA_SIGINFO delivery is not modeled",
+        ),
+        (
+            "deferred",
+            "Darwin deferred self-signal delivery is not modeled",
+        ),
+    ] {
+        guest.assert_internal_fatal(&[mode], &[message]);
+    }
+}
+
 // Class pairing: Linux interruption cases above plus the shared process/time
 // adapters. This deliberately requires no raw-syscall or signal-delivery support.
 #[test]

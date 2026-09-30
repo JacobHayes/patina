@@ -566,15 +566,28 @@ stop at the exact recorded boundary rather than re-evaluate host time. The
 native-workloads class detector covers main/worker/allocator-held spins, both
 negative controls, finite compute below a raised bound with a runnable peer,
 finite record-short/replay-long, PC capture, partial-stderr framing, repeat
-identity and replay. Unit detectors pin signed offsets, loader symbol ranges,
-and timer retention across missed locks. HostApi owns all host symbols; Linux
+identity and replay. Follow-up detectors cover open-custom-op committed prefixes,
+real/guest hostile SIGABRT handlers, byte-bearing and overflowed records with a
+held allocator, and comparative 25/4,000 ms bounds. Prefix byte encoding streams
+through fixed storage; recorder overflow returns a plain status before export.
+Both platforms reset the host abort disposition before private termination.
+Unit detectors pin signed offsets, loader symbol ranges, and timer retention
+across missed locks, helper signal masks, authenticated PC publication and the
+last-wait acknowledgement race. Observer replay samples its recorded task;
+synchronous replay salvages buffered C stdout. The lone-task control arms the
+observer first. Diagnostics explicitly include untracked host blocking in the
+no-scheduling-point limit; branch sessions and post-fork rearming are excluded.
+HostApi owns all host symbols; Linux
 uses a private futex timeout rather than version-dependent `sem_clockwait`. Campaign classification
 preserves the typed `known_limit` distinction as INFRA rather than spending the
 novel-guest-finding budget; its classifier selftest plants both sides of the bit. See
 [the design and limits](ARCHITECTURE.md#native-compute-only-starvation).
-Platform follow-up: run this detector on Linux arm64 and macOS arm64 runners
-before claiming execution parity. Both paths are cross-clippy checked; this
-implementation workspace only has a Linux x86_64 execution host.
+Focused watchdog detectors execute on Linux x86_64, Linux arm64 and macOS arm64.
+The Darwin `raise` seam records synchronous self-signal generation and uses the
+private current-thread delivery vehicle; unsupported deferred/siginfo/stop
+semantics are explicit refusals, not host escapes. The original watchdog guest
+keeps its SIGABRT delivery probe. Cross-platform self-signal tests cover handler
+callbacks, worker targeting, ignored/reset/nodefer behavior and trace identity.
 
 A deterministic, virtual-time-only liveness detector and a first-class product
 surface (`cargo patina campaign`) generalizing the shell campaign machinery.

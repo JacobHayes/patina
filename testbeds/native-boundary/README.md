@@ -70,16 +70,40 @@ plants a false-negative probe, a duplicate receipt and a failed child.
 ### Call-free compute
 
 `compute_watchdog.rs` plants main- and worker-thread atomic spins with a runnable
-peer, plus a spin that holds the guest allocator. The latter detects allocating
-or deallocating on the asynchronous stop path. `single` and `parked` run the same
+peer, plus spins that hold the guest allocator with scalar-only, byte-bearing,
+and overflowed recordings. They detect allocating or deallocating during stop
+export, including base64 helpers and overflow-error construction. `overflow-held`
+uses 25 eight-MiB results to exceed the real base64-encoded trace budget and must
+report a named infrastructure refusal without inventing a replayable prefix.
+`custom-spin` stops inside an open custom perform; replay must stop at the
+committed prefix before requesting its missing outcome. `handler-loop` and
+`handler-alloc` prove SIGABRT registration, then install hostile behavior which
+private termination must never call. `sync-buffer` leaves C stdout buffered
+before the custom begin that stops synchronously on replay; the refusal must
+salvage it without enabling callback salvage on the asynchronous path. `single`
+first spawns and joins a trivial peer to arm the observer. It and `parked` run
 long compute with no runnable peer (the latter uses a mutex/condvar handshake,
 never a synchronization sleep). `finite` keeps a peer runnable while doing
 finite call-free work: it must complete below a raised bound, but recording with
 a short bound and replaying with a long bound must both stop. A partial stderr
 line before the spin pins fresh-line diagnostic framing. `native_workloads` requires named known-limit
 findings, an interrupted PC, valid and identical repeated terminal traces, and
-replay with the same task/prefix despite a much larger host bound. These are
-runtime-limit tests, not host-equivalence claims.
+replay with the same task/prefix despite a much larger host bound. A comparative
+25/4,000 ms detector rejects fixed-timeout implementations without relying on a
+generous absolute ceiling; replay retains a generous 12-second ceiling. The
+Linux x86_64 `small-stack` mode exercises sampling on a guarded 2 KiB stack.
+These are runtime-limit tests, not host-equivalence claims or proof that every
+no-boundary interval is CPU computation.
+
+### Self-signal delivery
+
+`signals/self_raise.c` checks main/worker self targeting, ignored generations,
+reset/nodefer handlers, modeled writes from handlers, default termination and
+record/replay identity. `native_signals` pairs it with the Rust watchdog guest's
+clean audit: an unrecorded host-only raise fails the generation-event assertion,
+and a missing interposer leaves an import. Darwin additionally refuses deferred,
+siginfo and reserved delivery; no host sender information is admitted. The
+watchdog's `raise(6)` registration probe remains unchanged on both platforms.
 
 ### Small signal stacks
 

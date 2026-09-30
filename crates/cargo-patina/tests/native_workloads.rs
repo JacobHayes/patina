@@ -7,6 +7,119 @@ use common::native::*;
 /// limit, while identical compute with no runnable peer must complete.
 #[test]
 fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
+    assert_compute_watchdog_cases(
+        &["starved", "worker-starved", "allocator-held", "finite"],
+        true,
+    );
+}
+
+#[test]
+fn compute_watchdog_custom_perform_replays_the_committed_prefix() {
+    assert_compute_watchdog_cases(&["custom-spin"], false);
+}
+
+#[test]
+fn compute_watchdog_never_calls_looping_or_allocating_abort_handlers() {
+    assert_compute_watchdog_cases(&["handler-loop", "handler-alloc"], false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn compute_watchdog_synchronous_replay_salvages_buffered_c_stdout() {
+    assert_compute_watchdog_cases(&["sync-buffer"], false);
+}
+
+#[test]
+fn compute_watchdog_byte_prefix_export_does_not_enter_the_held_allocator() {
+    assert_compute_watchdog_cases(&["payload-held"], false);
+}
+
+#[test]
+fn compute_watchdog_overflowed_recorder_does_not_enter_the_held_allocator() {
+    use std::process::Command;
+    use std::time::Duration;
+    let g = Guest::assert_build("compute_watchdog.rs");
+    g.assert_audit_clean();
+    let trace = g.dir.path().join("overflow.patina");
+    let output = common::output_by_deadline(
+        Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+            .arg("run")
+            .arg(&g.binary)
+            .args(["--seed", "7", "--compute-watchdog-ms", "25", "--record"])
+            .arg(&trace)
+            .args(["--format", "json", "--", "overflow-held"]),
+        Duration::from_secs(60),
+    );
+    let common::Deadlined::Finished(output) = output else {
+        panic!("overflowed terminal export hung with the guest allocator held");
+    };
+    assert!(!output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["result"], "infra", "{result:#}");
+    assert_eq!(result["guest_exit"]["signal_name"], "SIGABRT", "{result:#}");
+    assert!(
+        result["stderr"]
+            .as_str()
+            .unwrap()
+            .contains("reason=trace-overflow"),
+        "{result:#}"
+    );
+    assert!(
+        patina_dst_trace::TraceBundle::load(&trace).is_err(),
+        "an abandoned recorder must not manufacture a replayable empty prefix"
+    );
+}
+
+#[test]
+fn compute_watchdog_host_bound_is_not_a_fixed_one_second_timeout() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+    let g = Guest::assert_build("compute_watchdog.rs");
+    let mut short = Vec::new();
+    let mut long = Vec::new();
+    // Interleave bounds and use minimums to avoid making a descheduled short
+    // run into a false regression. No synchronization sleeps or tight upper
+    // wall-clock ceilings; both legs must reach the same named terminal stop.
+    for bound in [25, 4000, 4000, 25] {
+        let started = Instant::now();
+        let output = common::output_with_deadline(
+            Command::new(&g.binary)
+                .env_clear()
+                .env("PATINA_MODE", "seeded")
+                .env("PATINA_SEED", "7")
+                .env("PATINA_COMPUTE_WATCHDOG_MS", bound.to_string())
+                .arg("starved"),
+            Duration::from_secs(30),
+        )
+        .expect("watchdog must terminate without an outer kill");
+        let elapsed = started.elapsed();
+        assert_eq!(output.status.signal(), Some(libc::SIGABRT));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .any(|line| line.starts_with("PATINA_VIOLATION liveness "))
+        );
+        eprintln!("compute watchdog bound={bound}ms elapsed={elapsed:?}");
+        if bound == 25 {
+            short.push(elapsed);
+        } else {
+            assert!(
+                elapsed >= Duration::from_millis(bound),
+                "long bound fired early: {elapsed:?}"
+            );
+            long.push(elapsed);
+        }
+    }
+    // Require a substantial shift, not jitter-sized ordering that could let
+    // even a fixed four-second implementation pass by chance.
+    assert!(
+        *long.iter().min().unwrap() >= *short.iter().min().unwrap() + Duration::from_secs(2),
+        "changing the bound must move the stop by seconds: short={short:?} long={long:?}"
+    );
+}
+
+fn assert_compute_watchdog_cases(modes: &[&str], negative_controls: bool) {
     use std::process::Command;
     use std::time::{Duration, Instant};
     let g = Guest::assert_build("compute_watchdog.rs");
@@ -42,28 +155,19 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
     };
     // finite is the record-short / replay-long case: unlike an infinite loop,
     // it would reach another operation and complete if replay forgot the stop.
-    // `small-stack` spins on a 2 KiB stack above an inaccessible page: the
-    // terminal sample's frame goes on the private signal stack.
-    let small_stack: &[&str] = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        &["small-stack"]
-    } else {
-        &[]
-    };
-    for mode in ["starved", "worker-starved", "allocator-held", "finite"]
-        .iter()
-        .chain(small_stack)
-        .copied()
-    {
+    // The private signal stack must also work above a guarded 2 KiB stack.
+    let small_stack: &[&str] =
+        if negative_controls && cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            &["small-stack"]
+        } else {
+            &[]
+        };
+    for mode in modes.iter().chain(small_stack).copied() {
         use std::os::unix::process::ExitStatusExt;
         let (stop, direct_elapsed) = direct(mode, "25");
         assert_eq!(stop.status.signal(), Some(libc::SIGABRT));
-        // The 25 ms bound, not the 10 s default, must be what fired. Startup and
-        // trace work on a loaded runner take seconds, so compare against the
-        // default rather than a tight wall-clock figure.
-        assert!(
-            direct_elapsed < Duration::from_secs(8),
-            "direct stop took {direct_elapsed:?}"
-        );
+        // The outer deadline detects hangs, not timeout accuracy. A separate
+        // paired-bound detector proves that the configured bound is load-bearing.
         eprintln!("compute watchdog {mode}: direct stop={direct_elapsed:?} bound=25ms");
         let trace = g.dir.path().join(format!("{mode}.patina"));
         let (record, elapsed) = run(
@@ -81,11 +185,16 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
             "25",
         );
         assert!(!record.status.success());
-        assert!(elapsed < Duration::from_secs(8), "stop took {elapsed:?}");
         eprintln!("compute watchdog {mode}: record elapsed={elapsed:?} bound=25ms");
         let record: serde_json::Value = serde_json::from_slice(&record.stdout).unwrap();
-        assert_eq!(record["result"], "liveness", "{record:#}");
-        assert_eq!(record["guest_exit"]["signal_name"], "SIGABRT", "{record:#}");
+        assert_eq!(
+            record["result"], "liveness",
+            "finding mode={mode}: {record}"
+        );
+        assert_eq!(
+            record["guest_exit"]["signal_name"], "SIGABRT",
+            "finding mode={mode}: {record}"
+        );
         let finding = record["runtime_findings"]
             .as_array()
             .unwrap()
@@ -111,7 +220,7 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
             .unwrap()
             .split_whitespace()
             .find_map(|field| field.strip_prefix("sampled_pc=0x"))
-            .expect("the unblocked terminal sampler must capture a PC");
+            .unwrap_or_else(|| panic!("the unblocked terminal sampler must capture a PC: mode={mode} elapsed={elapsed:?}\n{stderr}"));
         assert_ne!(usize::from_str_radix(pc, 16).unwrap(), 0);
         let bundle = patina_dst_trace::TraceBundle::load(&trace).unwrap();
         let terminal = bundle
@@ -135,16 +244,33 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
             "86400000",
         );
         assert!(!replay.status.success());
-        // A replay that waited for the one-day bound would hit the 15 s command
-        // deadline; anything under it proves the stop came from the trace. A
-        // tighter figure only measures how loaded the CI runner is.
+        // Replay must finish well before its one-day bound, allowing loaded CI.
         assert!(
             elapsed < Duration::from_secs(12),
             "replay waited for host bound: {elapsed:?}"
         );
+        eprintln!("compute watchdog {mode}: replay with one-day bound elapsed={elapsed:?}");
         let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
         assert_eq!(replay["result"], "liveness", "{replay:#}");
         assert_eq!(replay["guest_exit"]["signal_name"], "SIGABRT");
+        if matches!(
+            mode,
+            "starved" | "worker-starved" | "allocator-held" | "payload-held"
+        ) {
+            assert!(
+                replay["stderr"].as_str().unwrap().contains("sampled_pc=0x"),
+                "observer replay must sample its recorded task: {replay:#}"
+            );
+        }
+        if mode == "sync-buffer" {
+            assert!(
+                replay["stdout"]
+                    .as_str()
+                    .unwrap()
+                    .contains("WATCHDOG_BUFFERED_C_STDOUT"),
+                "synchronous stop lost C stdout: {replay:#}"
+            );
+        }
         let replay_finding = replay["runtime_findings"]
             .as_array()
             .unwrap()
@@ -175,6 +301,9 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
             terminal.task.0, terminal.steps
         );
     }
+    if !negative_controls {
+        return;
+    }
     for mode in ["single", "parked", "finite"] {
         let bound = if mode == "finite" { "5000" } else { "25" };
         // Time the identical executable without the supervisor/audit startup;
@@ -191,8 +320,38 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
             assert!(direct_elapsed > Duration::from_millis(250));
             assert!(direct_elapsed < Duration::from_millis(5000));
         }
-        let (output, elapsed) = run("run", &["--seed", "7", "--", mode], bound);
+        let negative_trace = g.dir.path().join(format!("negative-{mode}.patina"));
+        let (output, elapsed) = run(
+            "run",
+            &[
+                "--seed",
+                "7",
+                "--record",
+                negative_trace.to_str().unwrap(),
+                "--",
+                mode,
+            ],
+            bound,
+        );
         let output = assert_success(output);
+        if mode == "single" {
+            let bundle = patina_dst_trace::TraceBundle::load(&negative_trace).unwrap();
+            let events = bundle.resolved_timeline("main").unwrap();
+            assert!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e.operation, patina_dst_abi::Operation::TaskSpawn { .. }))
+                    .count()
+                    >= 2,
+                "single must arm the observer by creating a peer first"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e.operation, patina_dst_abi::Operation::TaskComplete { .. })),
+                "single must join its peer before computing"
+            );
+        }
         eprintln!("compute watchdog negative {mode}: elapsed={elapsed:?} bound={bound}ms");
         assert_exact_line(&output.stdout, "COMPUTE_RESULT completed=true");
         assert!(

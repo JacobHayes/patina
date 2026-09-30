@@ -199,10 +199,11 @@ pub fn invoke_in_with_env(directory: &Path, arguments: &[&str], envs: &[(&str, &
 }
 
 /// Require a successful exit, displaying both captured streams on failure.
+/// Keep the payload on one error line so filtered remote test logs retain it.
 pub fn assert_success(output: Output) -> Output {
     assert!(
         output.status.success(),
-        "command failed with {}\nstdout:\n{}\nstderr:\n{}",
+        "error: command failed with {}; stdout={:?}; stderr={:?}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)

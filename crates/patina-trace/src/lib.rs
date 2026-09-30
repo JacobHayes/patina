@@ -1579,6 +1579,30 @@ impl EventLedger {
     }
 }
 
+/// Borrowed-prefix export status. An abandoned recorder is a plain enum value,
+/// not a boxed serde I/O error: the terminal caller may hold its allocator.
+#[derive(Debug)]
+pub enum PrefixWriteError {
+    Overflow,
+    Serialization(serde_json::Error),
+}
+impl fmt::Display for PrefixWriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Overflow => f.write_str("recorded prefix was abandoned after trace overflow"),
+            Self::Serialization(error) => error.fmt(f),
+        }
+    }
+}
+impl std::error::Error for PrefixWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Overflow => None,
+            Self::Serialization(error) => Some(error),
+        }
+    }
+}
+
 pub struct Recorder {
     metadata: RunMetadata,
     incarnation: u64,
@@ -1634,6 +1658,13 @@ impl Recorder {
         }
     }
 
+    /// Number of fully committed decisions, excluding an announced custom op
+    /// whose outcome is not recorded yet. None means the recorder abandoned its
+    /// storage on overflow, NOT that it has a valid empty prefix. Allocation-free.
+    pub fn committed_prefix_len(&self) -> Option<u64> {
+        (!self.ledger.overflowed()).then_some(self.decisions.len() as u64)
+    }
+
     /// Set the terminal native refusal before exporting its prefix.
     pub fn set_compute_stop(&mut self, stop: ComputeStop) {
         self.metadata.compute_stop = Some(stop);
@@ -1678,7 +1709,7 @@ impl Recorder {
     /// Native asynchronous stops cannot call the guest's allocator: its owner
     /// may be the very thread that stopped making progress. The initial buggify
     /// configuration is retained; end-of-run site-report enrichment is omitted.
-    pub fn write_prefix(&self, writer: impl std::io::Write) -> Result<(), serde_json::Error> {
+    pub fn write_prefix(&self, writer: impl std::io::Write) -> Result<(), PrefixWriteError> {
         #[derive(Serialize)]
         struct Prefix<'a> {
             format_version: u32,
@@ -1695,9 +1726,7 @@ impl Recorder {
             decisions: &'a [TraceEvent],
         }
         if self.ledger.overflowed() {
-            return Err(serde_json::Error::io(std::io::Error::from(
-                std::io::ErrorKind::OutOfMemory,
-            )));
+            return Err(PrefixWriteError::Overflow);
         }
         let start = self
             .decisions
@@ -1735,6 +1764,7 @@ impl Recorder {
                 }],
             },
         )
+        .map_err(PrefixWriteError::Serialization)
     }
 
     /// A bundle of the decisions recorded SO FAR, leaving the recorder usable.
@@ -3331,6 +3361,34 @@ mod tests {
             }
         }
         assert!(recorder.write_prefix(Broken).is_err());
+    }
+
+    #[test]
+    fn abandoned_prefix_returns_a_plain_status_before_serialization() {
+        struct MustNotWrite;
+        impl std::io::Write for MustNotWrite {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                panic!("abandoned prefix entered serialization");
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                panic!("abandoned prefix flushed");
+            }
+        }
+        for (bytes, events) in [(0, 10), (4096, 0)] {
+            let mut recorder = Recorder::with_limits(
+                RunMetadata::new(7, "fingerprint", 0, "patina"),
+                bytes,
+                events,
+            );
+            assert_eq!(recorder.committed_prefix_len(), Some(0));
+            recorder.observe(operation(), Outcome::U64(0));
+            assert_eq!(recorder.committed_prefix_len(), None);
+            assert!(matches!(
+                recorder.write_prefix(MustNotWrite),
+                Err(PrefixWriteError::Overflow)
+            ));
+            assert!(recorder.decisions.is_empty());
+        }
     }
 
     #[test]

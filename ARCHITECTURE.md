@@ -191,6 +191,19 @@ handlers and kernel frames; this is a Linux mechanism behind the same signal
 seam. Linux arm64 (no SUD there) runs the same front handler and private stack,
 with its own stack-switch call.
 
+`raise` is interposed on both platforms. Linux uses the virtual thread-directed
+signal queue. Darwin's `thread/signals_darwin.rs` records `SignalGenerated` for
+the calling managed task, then uses the private current-thread delivery vehicle
+with no shim locks held and callback ownership suspended. It supports unblocked
+self delivery to ordinary handlers (including reset, nodefer and alternate-stack
+flags), ignored signals, and default termination with trace finalization. It
+refuses deferred delivery, `SA_SIGINFO` (whose host sender/context would leak),
+reserved SIGSYS and default process-stop actions before generation. The registry
+therefore marks the cross-platform entry partial. This is not an allowance for
+host `raise`, process-directed signals or ambient delivery. The unchanged
+watchdog guest's SIGABRT probe exercises this admitted path; the self-signal
+fixture supplies the broader class evidence required by [scope](docs/SCOPE.md#rules-for-new-surface).
+
 Lock order is ThreadRuntime → context slot. Generation records and selects under
 ThreadRuntime, then releases it before scheduler wake; host frame release never
 holds either lock. Host masks describe nested handlers, so no in-delivery flag
@@ -497,26 +510,42 @@ through the scrubbed control plane. Campaigns persist the explicit flag as
 setting remains inherited host configuration, not a portable campaign input. Ten seconds tolerates ordinary
 compute bursts and host contention while bounding an otherwise infinite wedge;
 raise it for deliberately longer compute with runnable peers. This is wall time,
-not a CPU-time claim: host descheduling counts. Polling adds up to two sampling
+not a CPU-time claim: host descheduling counts. A baton holder blocked in an
+untracked host call with the shim locks released can also exceed this window;
+the diagnostic means **no scheduling point**, not proven CPU computation. Such
+host blocking is not currently excluded. Polling adds up to two sampling
 periods (each at most 100 ms), plus host dispatch/export time; it is not a
 real-time deadline. A lone compute task and compute with every peer parked are
 exempt regardless of duration.
 
 The observer starts on first managed thread creation, uses the single HostApi
 alias table (Linux private futex waits; Darwin dispatch semaphore waits), and
-adds no clock read, atomic, or counter to scheduling points. No `sem_clockwait`
+adds no clock read, atomic, or counter to scheduling points. Both private helpers
+block all blockable signals through the host pthread mask at entry, before taking
+runtime locks. No initialized POSIX semaphore is moved by these waits. No `sem_clockwait`
 or recent-glibc symbol is required. It try-locks ThreadRuntime then Context,
 observes existing boundary counts and scheduler bookkeeping, and resets its
 window only on confirmed progress or ineligibility. A failed try-lock retains
 the previous observation; contention cannot continually restart the timer. It is not a detector for a shim stuck
 holding its own locks. At commitment these locks prevent further modeled
 effects. The native trace transport serializes a borrowed prefix through fixed
-storage; diagnostic and finding emission also avoid the guest allocator, which
-the stopped thread may own. Already-captured output is salvaged only if its lock
-is free; C stream callbacks and finish-time report enrichment are skipped.
+storage, including streamed base64 byte fields; diagnostic and finding emission
+also avoid the guest allocator, which the stopped thread may own. An already
+abandoned recorder returns an allocation-free `trace-overflow` infrastructure
+refusal, not a fabricated empty prefix or a boxed serialization error.
+On the off-baton path, already-captured output is salvaged only if its lock is
+free; C stream callbacks and finish-time report enrichment are skipped. A
+synchronous, baton-held compute refusal instead uses the ordinary refusal flush,
+including buffered C stdout salvage, before private abort. Shared internal fatal termination
+resets SIGABRT to default through HostApi on both OS families before private libc
+abort unblocks and raises it; no guest abort handler is called. If that reset
+fails, a named infrastructure diagnostic and private immediate exit replace the
+signal termination, never a callback-capable abort or guest finalization.
 
-The additive trace metadata `compute_stop` records the terminal boundary count
-and task. Replay disables host-time detection, strictly consumes that prefix,
+The additive trace metadata `compute_stop` records the committed decision count
+and task, not the admitted-operation count: an open custom operation has no
+recorded outcome and is excluded. Replay stops before requesting that missing
+outcome. Replay disables host-time detection, strictly consumes that prefix,
 and stops either from the observer or the existing boundary-budget guard before
 any further operation; finalization cannot turn it into success. A faster replay
 therefore cannot continue past the recorded refusal. The guarantee is the same
@@ -524,15 +553,27 @@ therefore cannot continue past the recorded refusal. The guarantee is the same
 Seed-only repetitions of finite compute near the threshold need not stop at the
 same prefix. Branching terminal traces is explicitly refused; combining a
 terminal segment into a crash-restart lifecycle trace is also refused by the
-metadata agreement check, not silently replayed without its stop.
+metadata agreement check, not silently replayed without its stop. Host-time
+detection is also disabled for branch sessions created from ordinary traces;
+branch-prefix export is not implemented. A fork child would inherit the once-only
+startup state but not the observer threads, so there is no post-fork watchdog
+rearm. Guest process creation is deny-trapped; fork is not a supported way to
+carry this runtime into a child.
 
 Only after committing and exporting the stop does the observer borrow SIGSYS
 for a bounded, best-effort interrupted-PC sample (native ucontext on Linux
 x86_64/arm64 and macOS). On Linux its frame, like every shim handler's, is on
 the sampled thread's private signal stack, so a thread spinning on a stack of a
 few KiB is still sampled. No live guest disposition or mask is reserved for the
-watchdog. A blocked signal yields `sampled_pc=unavailable`; replay likewise has
-no sampled instruction. The diagnostic includes the raw PC and a delta from
+watchdog. Capture checks the current host thread against the published target,
+and only its first acknowledgement may publish a PC and pin that thread; another
+thread's SIGSYS (including a SUD trap) cannot supply the sample. The observer
+checks again after its final wait so a just-delivered acknowledgement is not
+lost. A sample still has a bounded, best-effort delivery window: blocked signals
+or host descheduling can exhaust it. Missing handles, installation/send failures,
+and expiry have distinct `sampled_pc=unavailable` reasons. Observer-driven replay
+samples the recorded task too; synchronous replay refusals do not sample a PC.
+Neither path promises instruction identity. The diagnostic includes the raw PC and a delta from
 `patina_yield_point`; the delta supports offline symbolization when the PC is
 in the executable, but is not ASLR-independent for a different loaded image.
 Offsets print an explicit sign and unsigned magnitude, including negative PCs

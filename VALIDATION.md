@@ -220,7 +220,10 @@ parseable terminal trace and a structured `compute-bound` known-limit finding.
 PC samples must be nonzero on these unblocked-signal fixtures. Independent
 records match, and replay with a one-day host bound reproduces the terminal
 boundary without waiting for that bound. Single-thread compute and compute with
-a condvar-parked peer run well beyond the 25 ms test bound and complete. Finite
+a condvar-parked peer run well beyond the 25 ms test bound and complete. The
+single-task control first spawns and joins a peer to arm the observer; its trace
+must show both spawn and completion (the old unarmed control fails that pin).
+The Linux x86_64 `small-stack` mode retains its guarded 2 KiB stack probe. Finite
 compute with a runnable peer must complete under a raised 5,000 ms bound (not
 fire at the second poll), yet record-short/replay-long must preserve its stop.
 The CLI bound overrides even an invalid inherited env bound. A partial guest
@@ -236,6 +239,67 @@ is compared against ordinary bundles, including empty and nonzero-incarnation
 prefixes, and must propagate a planted writer failure. These cases run on both
 OS families in the normal native-workloads target; cross-clippy alone is not
 execution evidence for macOS or Linux arm64.
+
+Follow-up pins belong to that same `native_workloads::compute_watchdog_*` class:
+- `custom_perform_replays_the_committed_prefix` stops inside an open custom
+  perform. Its runtime pairing starts with three committed decisions and four
+  admitted operations (RED: terminal metadata advertised four), then proves
+  replay stops before requesting the absent outcome, including at finish.
+- `never_calls_looping_or_allocating_abort_handlers` first proves handler
+  registration by delivery, then requires both hostile-handler cases to end by
+  SIGABRT. Shim `private_abort_tests` install real host handlers and block SIGABRT
+  in isolated children: bypassing the reset hangs both tests. This direct-host
+  pairing matters because Linux's modeled signal front can mask a broken reset;
+  it does not substitute for the cross-platform shared fatal seam.
+- `overflowed_recorder_does_not_enter_the_held_allocator` records 25 eight-MiB
+  byte results, exceeding the actual base64-encoded trace budget, then locks the
+  allocator and spins. Restoring the unchecked, boxed overflow error requires
+  an outer kill; the fixed path reports `reason=trace-overflow` and cannot yield
+  a replayable empty prefix. Trace unit tests cover byte and event budgets.
+- `byte_prefix_export_does_not_enter_the_held_allocator` pins valid byte-bearing
+  prefixes too (RED: allocating base64 strings hangs). ABI tests check streamed
+  required/optional bytes at buffer and padding boundaries without wire drift.
+- `host_bound_is_not_a_fixed_one_second_timeout` interleaves 25 and 4,000 ms
+  direct runs, requires every long leg not to fire early and its minimum to
+  exceed the short minimum by at least two seconds. A planted one-second timeout fails this detector;
+  generous outer kill deadlines alone do not prove the configured bound.
+- `synchronous_replay_salvages_buffered_c_stdout` (Linux) leaves C stdout buffered
+  before an open custom operation. Replay stops synchronously at admission and
+  must retain those bytes (RED: empty stdout); asynchronous allocator-held cases
+  remain paired to prevent unsafe callback salvage on the observer.
+- Shim `terminal_sample_observes_acknowledgement_during_the_last_wait` places the
+  acknowledgement exactly in the final wait: RED returns unavailable despite
+  delivery, GREEN consumes it without a retry or timeout increase. It parameterizes
+  the wait budget and injects during the actual last wait for several budgets,
+  including 1, 50 and 51; it also checks zero-budget, immediate-ack and no-ack
+  exhaustion. Removing the final read fails even if the loop is changed to 51
+  polls. This detector
+  executes on Linux x86_64 and arm64. The original intermittent arm64 CI failure
+  did not recur in the standalone contention run, so that run alone does not
+  establish its exact cause.
+- Shim `terminal_sample_only_pins_its_target_and_first_acknowledgement` rejects a
+  foreign thread and duplicate publication (RED accepted the foreign sample).
+  `observer_blocks_guest_signals` queries the actual host mask on a helper thread
+  (RED left SIGINT unblocked). Observer replay must include its task's sampled PC
+  on the unblocked infinite-spin cases (RED passed no target handle).
+- Runtime `branch_sessions_do_not_arm_the_host_compute_detector` pins the stated
+  branch exclusion against an eligible recording control.
+  `compute_stop_emits_a_structured_runtime_limit` drives a real eligible context
+  and asserts the complete facts document: source/kind/detail, known-limit bit,
+  task and committed steps, not human wording (RED: flipping known_limit fails).
+  Untracked host blocking can still trigger the same stop.
+
+`native_signals::self_raise_is_modeled_and_replayable` pairs with the watchdog
+fixture's clean CLI audit: both platforms define `raise`, generate for main and
+worker callers, permit modeled work in handlers, and record/replay identical
+traces and output, including alternate-stack delivery. It asserts all eight
+delivered/ignored generation events and
+a worker target, plus default termination and a valid final trace. Bypassing
+Darwin generation recording while retaining host delivery fails the event count.
+Darwin-specific legs prove deferred, siginfo, reserved and default-stop deliveries refuse
+before invoking an unsupported handler. The C ABI fixture intentionally links a
+whole std staticlib and tests behavior directly; the Rust watchdog fixture is
+the source-first audited binary. No unsupported-import allowance is used.
 
 `native_build_package_audits_records_and_fails_closed` in `end_to_end` owns the
 package/path-dependency/build-script/ambiguous-bin proof, including full stdout

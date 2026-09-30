@@ -3899,7 +3899,8 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
     const UNWIND_AND_PERSONALITY: &[&str] = &["gxx_personality_v0", "rust_eh_personality"];
     // Signal registration is used by Rust's panic/stack-overflow diagnostics;
     // Patina does not deliver ambient host signals into guest execution, so
-    // installation is deterministic and delivery happens only on faults.
+    // installation is deterministic; admitted delivery comes from faults or
+    // the platform's modeled self-signal entry, never an allowed host raise.
     const SIGNAL_DIAGNOSTICS: &[&str] = &["sigaction", "sigaltstack", "signal"];
     // The environment pointer itself is startup glue referenced by libc/std
     // runtime setup. The native shim scrubs the ambient host storage at startup
@@ -3914,8 +3915,8 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
     // Pure signal-set construction: these read or write only a caller-owned
     // `sigset_t`, performing bit manipulation with no host effect. They pair
     // with the already-allowlisted `sigaction`/`signal` registration — a guest
-    // builds a mask to hand to a registration call, and Patina delivers no
-    // ambient signals, so the mask is inert. The thread-mask *mutators*
+    // builds a mask to hand to a registration call. Construction itself has
+    // no delivery effect. The thread-mask *mutators*
     // (`sigprocmask`/`pthread_sigmask`) and blocking waits (`sigwait`,
     // `sigsuspend`, on the `signals-timers` deny list) are deliberately NOT
     // here: they change delivery state or block, unlike these pure set ops.

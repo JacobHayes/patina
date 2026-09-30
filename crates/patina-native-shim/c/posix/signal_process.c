@@ -318,17 +318,23 @@ int tkill(pid_t tid, int sig) {
     return signal_result(patina_sud_dispatch(SYS_tkill, (uint64_t)tid,
         (uint64_t)sig, 0, 0, 0, 0, 0));
 }
-/* glibc's `raise` is `__pthread_kill` of the caller, which refuses the
- * reserved signals. */
+#endif
+
+/* Thread-directed self generation, through each platform's signal model. */
 int raise(int sig) {
+#ifdef __linux__
     if (patina_signal_reserved(sig)) {
         errno = EINVAL;
         return -1;
     }
     return signal_result(patina_sud_dispatch(SYS_tgkill, (uint64_t)patina_pid(),
         (uint64_t)patina_thread_id(), (uint64_t)sig, 0, 0, 0, 0));
-}
+#else
+    int rc = patina_raise(sig);
+    if (rc < 0) errno = patina_errno();
+    return rc;
 #endif
+}
 
 /*
  * Process-class deny-traps. The fork/exec/spawn/reap surface is a

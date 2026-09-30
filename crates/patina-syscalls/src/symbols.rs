@@ -2415,9 +2415,10 @@ const ROWS: &[SymbolRow] = &[
     ),
     s(
         "raise",
-        Platform::Linux,
+        Platform::Both,
         Serves::Syscalls(&["tgkill"]),
-        SymbolStatus::Modeled,
+        // Darwin models synchronous self delivery, not deferred queues or siginfo.
+        SymbolStatus::Partial,
     ),
     s(
         "abort",

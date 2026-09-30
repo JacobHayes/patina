@@ -822,6 +822,10 @@ int32_t patina_link(int32_t fromfd, const char *from, int32_t tofd, const char *
                     int32_t follow);
 intptr_t patina_read_link(int32_t dirfd, const char *path, char *buf, size_t len);
 int32_t patina_thread_id(void);
+#ifdef __APPLE__
+/* Synchronous self-signal generation through the Darwin signal model. */
+int patina_raise(int sig);
+#endif
 
 #ifdef __linux__
 struct patina_signal_action {

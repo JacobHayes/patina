@@ -210,10 +210,24 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   callbacks while exporting a stop: the running guest can own its allocator or
   stdio locks even before the observer suspends it. Use borrowed serialization,
   fixed storage, private host I/O, and nonblocking capture inspection. Pair any
-  asynchronous-stop change with `compute_watchdog.rs`'s allocator-held leg; a
-  plain atomic spin does not detect this second hang class. Host-time observations
+  asynchronous-stop change with `compute_watchdog.rs`'s allocator-held,
+  byte-prefix, and actual-overflow legs; a plain atomic spin does not detect
+  this second hang class. Check the current wire encoding when sizing an
+  overflow fixture: payload bytes are base64, not integer arrays. Serialization
+  helpers and error construction must be allocation-free too. A fatal-signal
+  test must exercise real host handlers as well as guest registration: Linux's
+  front handler can otherwise mask a missing reset at the shared fatal seam.
+  Terminal trace counts come from committed decisions, not an admitted custom
+  operation awaiting its outcome. Compare distinct configured bounds; an outer
+  timeout alone cannot detect a hardcoded shorter timeout. Host-time observations
   may commit a terminal refusal, never choose a task or change virtual time;
   record the terminal boundary so replay does not re-decide it from host time.
+  Treat sample delivery as a handshake: inspect the acknowledgement after the
+  final wait, authenticate its thread, and distinguish expiry from setup/send
+  errors. Bounded sampling cannot promise delivery under arbitrary host stalls.
+  Keep synchronous C-stdio salvage separate from asynchronous observation, and
+  arm the watchdog before testing a lone-task exemption. A missing scheduling
+  point does not distinguish computation from untracked host blocking.
 - The host-alias doctrine is structural: shim internals reach real host
   primitives through private resolved aliases, never by calling public symbols
   that guest code can import.

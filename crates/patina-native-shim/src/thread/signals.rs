@@ -561,24 +561,6 @@ fn containment_kept_unblocked(dropped: u64) {
     );
 }
 
-/// The host's SIGABRT disposition is the default again, for a stop that
-/// must end the process by it: never through a guest handler.
-pub(crate) fn default_host_abort() {
-    const SIGABRT: u64 = 6;
-    let default = Action::default();
-    host(
-        SYS_RT_SIGACTION,
-        [
-            SIGABRT,
-            &default as *const _ as u64,
-            0,
-            SIGSET_BYTES as u64,
-            0,
-            0,
-        ],
-    );
-}
-
 /// Write `bytes`, captured from the guest, through to the host's descriptor
 /// `fd` with SIGPIPE held back: a host reader that went away is the host's
 /// business, never the guest's, so the SIGPIPE the kernel sends this thread

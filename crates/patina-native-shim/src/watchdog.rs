@@ -1,4 +1,5 @@
-//! Native compute-only starvation is a terminal refusal, never a preemption.
+//! Native no-boundary-progress is a terminal refusal, never a preemption.
+//! Wall time cannot distinguish computation from untracked host blocking.
 //! The observer reads existing state under the normal lock order. No host clock,
 //! atomic publication, or new counter is added to a scheduling point.
 
@@ -99,8 +100,11 @@ extern "C" fn monitor(_: *mut c_void) -> *mut c_void {
         super::thread::watchdog_observe(|context, handles| {
             observed = true;
             if let Some(stop) = context.replay_compute_stop_due() {
+                let handle = handles
+                    .iter()
+                    .find_map(|(handle, owner)| (*owner == stop.task).then_some(*handle));
                 let error = context.stop_compute_bound(stop.task);
-                report_and_abort(&error, None);
+                report_and_abort(&error, handle, None);
             }
             let Some(task) = window.observe(Some(context.compute_watchdog_candidate()), now, bound)
             else {
@@ -112,7 +116,7 @@ extern "C" fn monitor(_: *mut c_void) -> *mut c_void {
                 .iter()
                 .find_map(|(handle, owner)| (*owner == task).then_some(*handle));
             let error = context.stop_compute_bound(task);
-            report_and_abort(&error, handle);
+            report_and_abort(&error, handle, Some(bound));
         });
         if !observed {
             window.observe(None, now, bound);
@@ -145,9 +149,7 @@ fn signed_hex(out: &mut impl std::fmt::Write, delta: isize) -> std::fmt::Result 
     )
 }
 
-pub(crate) fn report_and_abort(error: &RuntimeError, handle: Option<usize>) -> ! {
-    // No guest callback, deallocation, or stdio lock wait, even before sampling.
-    super::flush_observed_stdio();
+pub(crate) fn report(error: &RuntimeError) {
     use std::fmt::Write;
     let mut text = Text {
         bytes: [0; 1024],
@@ -156,8 +158,33 @@ pub(crate) fn report_and_abort(error: &RuntimeError, handle: Option<usize>) -> !
     // The guest may have left a partial stderr line (including while locked).
     let _ = writeln!(text, "\n{error}");
     let _ = super::host_write_all(2, &text.bytes[..text.len]);
-    text.len = 0;
-    if let Some(pc) = handle.and_then(platform::sample_terminal_pc) {
+}
+
+pub(crate) fn report_and_abort(
+    error: &RuntimeError,
+    handle: Option<usize>,
+    observed_bound_ms: Option<u64>,
+) -> ! {
+    // Off baton: never call C stream salvage or wait for guest-owned storage.
+    super::flush_observed_stdio();
+    report(error);
+    use std::fmt::Write;
+    let mut text = Text {
+        bytes: [0; 1024],
+        len: 0,
+    };
+    if let Some(bound) = observed_bound_ms {
+        let _ = writeln!(
+            text,
+            "patina: no scheduling point for at least {bound} ms of host wall time (includes descheduling and untracked host blocking)"
+        );
+        let _ = super::host_write_all(2, &text.bytes[..text.len]);
+        text.len = 0;
+    }
+    let sample = handle
+        .ok_or(SampleFailure::NoTarget)
+        .and_then(platform::sample_terminal_pc);
+    if let Ok(pc) = sample {
         let anchor = super::patina_yield_point as *const () as usize;
         let _ = write!(
             text,
@@ -197,14 +224,32 @@ pub(crate) fn report_and_abort(error: &RuntimeError, handle: Option<usize>) -> !
                 "patina: sampled_symbol=unavailable location=PC-only (loader has no confirmed symbol or lookup could not finish)"
             );
         }
-    } else {
+    } else if let Err(reason) = sample {
         let _ = writeln!(
             text,
-            "patina: compute-bound sampled_pc=unavailable (replay boundary, blocked signal, or unavailable host sample)"
+            "patina: compute-bound sampled_pc=unavailable reason={reason}"
         );
     }
     let _ = super::host_write_all(2, &text.bytes[..text.len]);
     super::host_abort()
+}
+
+#[derive(Clone, Copy)]
+enum SampleFailure {
+    NoTarget,
+    Install(i32),
+    Send(i32),
+    Deadline,
+}
+impl std::fmt::Display for SampleFailure {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoTarget => out.write_str("no-target-handle"),
+            Self::Install(code) => write!(out, "sigaction-error-{code}"),
+            Self::Send(code) => write!(out, "pthread-kill-error-{code}"),
+            Self::Deadline => out.write_str("sample-deadline"),
+        }
+    }
 }
 
 struct Symbol {
@@ -213,7 +258,27 @@ struct Symbol {
     offset: usize,
     size: Option<usize>,
 }
-static PC: AtomicUsize = AtomicUsize::new(0);
+struct Sample {
+    target: AtomicUsize,
+    pc: AtomicUsize,
+}
+impl Sample {
+    const fn new() -> Self {
+        Self {
+            target: AtomicUsize::new(0),
+            pc: AtomicUsize::new(0),
+        }
+    }
+    fn capture(&self, thread: usize, pc: usize) -> bool {
+        if self.target.load(Ordering::Acquire) != thread || pc == 0 {
+            return false;
+        }
+        self.pc
+            .compare_exchange(0, pc, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+    }
+}
+static SAMPLE: Sample = Sample::new();
 static SYMBOL: super::SpinMutex<Option<Symbol>> = super::SpinMutex::new(None);
 
 #[cfg(any(target_os = "linux", test))]
@@ -271,7 +336,7 @@ fn lookup_symbol(pc: usize) -> Option<Symbol> {
 extern "C" fn symbolize(_: *mut c_void) -> *mut c_void {
     platform::enter_observer();
     while !super::thread::main_returned() {
-        let pc = PC.load(Ordering::Acquire);
+        let pc = SAMPLE.pc.load(Ordering::Acquire);
         if pc != 0 {
             let symbol = lookup_symbol(pc).unwrap_or(Symbol {
                 name: [0; 256],
@@ -292,6 +357,24 @@ extern "C" fn symbolize(_: *mut c_void) -> *mut c_void {
 mod platform {
     use super::*;
     pub(super) fn enter_observer() {
+        // Helpers never deliver guest handlers, in particular while holding
+        // ThreadRuntime/Context. pthread_sigmask leaves libc's internal and
+        // unmaskable signals alone. sigset_t contains only integer bit storage.
+        let all = unsafe {
+            let mut set = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+            set.as_mut_ptr().write_bytes(0xff, 1);
+            set.assume_init()
+        };
+        if unsafe {
+            (super::super::hostapi::get().host_pthread_sigmask)(
+                libc::SIG_BLOCK,
+                &all,
+                std::ptr::null_mut(),
+            )
+        } != 0
+        {
+            super::super::trap_fatal("compute watchdog could not block helper signals");
+        }
         // PR_SET_TSC is inherited. Private observers execute no guest code.
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if unsafe {
@@ -383,12 +466,15 @@ mod platform {
         let pc = unsafe { (*context.uc_mcontext).__ss.__pc as usize };
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
         let pc = unsafe { (*context.uc_mcontext).__ss.__rip as usize };
-        PC.store(pc, Ordering::Release);
+        if !SAMPLE.capture(host_thread_self(), pc) {
+            return;
+        }
         loop {
             std::hint::spin_loop();
         }
     }
-    pub(super) fn sample_terminal_pc(handle: usize) -> Option<usize> {
+    pub(super) fn sample_terminal_pc(handle: usize) -> Result<usize, SampleFailure> {
+        SAMPLE.target.store(handle, Ordering::Release);
         let host = super::super::hostapi::get();
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
         action.sa_sigaction = capture as *const () as usize;
@@ -398,25 +484,109 @@ mod platform {
         // frame is on the stack it interrupted, as natively.
         action.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
         if unsafe { (host.host_sigaction)(libc::SIGSYS, &action, std::ptr::null_mut()) } != 0 {
-            return None;
+            return Err(SampleFailure::Install(
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+            ));
         }
-        if unsafe { (host.host_pthread_kill)(handle as libc::pthread_t, libc::SIGSYS) } != 0 {
-            return None;
+        let rc = unsafe { (host.host_pthread_kill)(handle as libc::pthread_t, libc::SIGSYS) };
+        if rc != 0 {
+            return Err(SampleFailure::Send(rc));
         }
-        for _ in 0..50 {
-            let pc = PC.load(Ordering::Acquire);
-            if pc != 0 {
-                return Some(pc);
-            }
-            wait_ms(1);
-        }
-        None
+        await_pc(50, || SAMPLE.pc.load(Ordering::Acquire), || wait_ms(1))
+            .ok_or(SampleFailure::Deadline)
     }
+}
+
+fn await_pc(
+    wait_budget: usize,
+    mut read: impl FnMut() -> usize,
+    mut wait: impl FnMut(),
+) -> Option<usize> {
+    for _ in 0..wait_budget {
+        let pc = read();
+        if pc != 0 {
+            return Some(pc);
+        }
+        wait();
+    }
+    // The target can acknowledge during the FINAL wait. Returning None here
+    // without this acquire discards a delivered sample and aborts its owner.
+    let pc = read();
+    (pc != 0).then_some(pc)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_sample_only_pins_its_target_and_first_acknowledgement() {
+        let sample = Sample::new();
+        sample.target.store(42, Ordering::Release);
+        assert!(!sample.capture(7, 0x777));
+        assert_eq!(sample.pc.load(Ordering::Acquire), 0);
+        assert!(sample.capture(42, 0x123));
+        assert!(!sample.capture(42, 0x456));
+        assert_eq!(sample.pc.load(Ordering::Acquire), 0x123);
+    }
+
+    #[test]
+    fn observer_blocks_guest_signals() {
+        std::thread::spawn(|| unsafe {
+            let empty: libc::sigset_t = std::mem::zeroed();
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()),
+                0
+            );
+            platform::enter_observer();
+            let mut mask: libc::sigset_t = std::mem::zeroed();
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut mask),
+                0
+            );
+            for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGSYS] {
+                assert_eq!(
+                    libc::sigismember(&mask, signal),
+                    1,
+                    "observer left signal {signal} unblocked"
+                );
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn terminal_sample_observes_acknowledgement_during_the_last_wait() {
+        for budget in [1, 2, 7, 50, 51, 127] {
+            let waits = std::cell::Cell::new(0);
+            let published = std::cell::Cell::new(0);
+            assert_eq!(
+                await_pc(
+                    budget,
+                    || published.get(),
+                    || {
+                        waits.set(waits.get() + 1);
+                        if waits.get() == budget {
+                            published.set(0x1234);
+                        }
+                    }
+                ),
+                Some(0x1234),
+                "acknowledgement in final wait, budget={budget}"
+            );
+            assert_eq!(waits.get(), budget);
+        }
+        for budget in [0, 1, 2, 7, 50, 51, 127] {
+            let waits = std::cell::Cell::new(0);
+            assert_eq!(await_pc(budget, || 0, || waits.set(waits.get() + 1)), None);
+            assert_eq!(waits.get(), budget, "must not exceed the wait budget");
+            assert_eq!(
+                await_pc(budget, || 0x1234, || panic!("already acknowledged")),
+                Some(0x1234)
+            );
+        }
+    }
+
     #[test]
     fn signed_offsets_and_loader_ranges_are_not_guesses() {
         for (delta, expected) in [(-0x5c6e36, "-0x5c6e36"), (42, "+0x2a"), (0, "+0x0")] {

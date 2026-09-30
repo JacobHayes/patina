@@ -265,6 +265,15 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 
 ## Signal boundaries
 
+- `raise` is a modeled entry on both platforms, not an audit allowance. Darwin's
+  `thread/signals_darwin.rs` records generation for the baton holder before the
+  private current-thread vehicle delivers an unblocked ordinary handler. It
+  releases locks and suspends panic ownership first. Deferred/siginfo delivery,
+  reserved SIGSYS and default process stops remain named refusals. Do not replace
+  this with host `raise` (which may fall back to process-directed delivery), or
+  admit host siginfo fields. Pair changes with `native_signals::self_raise_*`
+  and the audited compute-watchdog guest, retaining the actual raise probe.
+
 - `host_abort` / `patina_host_abort` are private internal-fatal vehicles. They
   never finalize a trace. Guest `abort` raises SIGABRT through the virtual
   kernel (the handler runs, then the default disposition); fatal default
