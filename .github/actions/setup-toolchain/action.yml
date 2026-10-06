@@ -4,12 +4,12 @@ runs:
   using: composite
   steps:
     # Rust's normal mise installs are symlinks to rustup. Put its real homes
-    # inside the cache too, isolated from Homebrew and the self-hosted user.
+    # inside the cache too, isolated from any preinstalled toolchain.
     - name: Set isolated tool homes
       shell: bash
       run: |
         mkdir -p "$RUNNER_TEMP/patina-mise"
-        # Ignore the self-hosted user's global tools/config; lock repo tools only.
+        # Ignore the runner image's global tools/config; lock repo tools only.
         : > "$RUNNER_TEMP/patina-mise/global.toml"
         {
           echo "MISE_GLOBAL_CONFIG_FILE=$RUNNER_TEMP/patina-mise/global.toml"

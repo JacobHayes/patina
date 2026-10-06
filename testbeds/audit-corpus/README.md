@@ -159,7 +159,7 @@ table + `src/main.rs`), `cargo generate-lockfile` in it, add `<name>` to the
 ## CI
 
 `run.sh` runs on the routine **Linux x86_64** job and the
-daily/manual **macOS** job on `jrh-mini`. Linux arm is skipped to bound cost
+daily/manual **macOS** job. Linux arm is skipped to bound cost
 (the audited symbol surface is toolchain-independent, and Linux arm shares the
 x86_64 expectation once recorded). On Linux the gate self-SKIPs (exit 0, loud
 notice) until the coordinator records `expected/*.linux.txt`.

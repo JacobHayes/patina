@@ -164,12 +164,13 @@ jobs:
       - if: matrix.runner == 'ubuntu-latest'
         run: testbeds/audit-corpus/run.sh
 
-  # The self-hosted macOS runner is a platform safety net, not a duplicate of every
-  # locally validated push. Run the pinned macOS gates daily and on explicit
-  # manual dispatch on the jrh-mini self-hosted Mac.
+  # The macOS job is a platform safety net, not a duplicate of every locally
+  # validated push. Run the pinned macOS gates daily and on explicit manual
+  # dispatch. This repo is public and takes outside pull requests, so CI never
+  # runs on a self-hosted machine.
   macos:
     if: (github.event_name == 'workflow_dispatch' && !inputs.bench_only) || github.event.schedule == '17 7 * * *'
-    runs-on: [self-hosted, jrh-mini]
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-toolchain

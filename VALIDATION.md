@@ -63,7 +63,7 @@ cross-target smoke. It is intentionally not landing evidence.
 
 Every CI job installs the toolchain through mise using the committed lock.
 The Rust toolchain, components and targets live inside a cached mise directory,
-with isolated Rust homes on hosted and self-hosted runners. Cargo build caches
+with isolated Rust homes on every runner. Cargo build caches
 include the pin files in their keys and only main writes caches.
 
 These checks must run without network access after dependencies have been
@@ -736,7 +736,7 @@ Before a release, run the V2 end-to-end fixture for:
 
 The routine push/pull-request matrix in `.github/workflows/ci.yml` runs pinned Rust 1.99.0 across Linux x86_64 and aarch64. Every row executes the workspace tests (including all native acceptance tests) plus the WASI/cross-target checks and FIFO/rustix-default/cap-std testbeds; each row's workspace suite runs as two parallel `cargo nextest` partitions (plus its doctests) beside one job for the row's other gates, and every test job installs `strace` and sets `PATINA_REQUIRE_STRACE=1` so the syscall-containment pass cannot silently skip. Both Linux rows additionally run the `workq` and `pubsub` testbeds, while Linux runs formatting, clippy, docs, the flag-drift gate, the audit corpus, and the fuzz-sweep and campaign classifier selftests. A strict `audit` job checks RustSec advisories over the root and every testbed lockfile with no ignores.
 
-The self-hosted `jrh-mini` macOS runner runs as a platform safety net daily and on manual dispatch, not on every locally validated push. It executes the workspace tests (including the Darwin native legs), WASI/cross-target probes, FIFO/workq/pubsub testbeds, and the macOS audit corpus; the macros feature test runs in each Linux test row and the local full gate. The 200-generation randomized `workq` campaign runs nightly on Linux and on manual dispatch, without a duplicate macOS campaign. (`cargo package --workspace --locked` is included in the local landing gate and is also the pre-publish packaging check.)
+The GitHub-hosted macOS job runs as a platform safety net daily and on manual dispatch, not on every locally validated push. It executes the workspace tests (including the Darwin native legs), WASI/cross-target probes, FIFO/workq/pubsub testbeds, and the macOS audit corpus; the macros feature test runs in each Linux test row and the local full gate. The 200-generation randomized `workq` campaign runs nightly on Linux and on manual dispatch, without a duplicate macOS campaign. (`cargo package --workspace --locked` is included in the local landing gate and is also the pre-publish packaging check.)
 
 A failure report must retain the command, seed, trace bundle when one exists, Patina version, Rust version, target triple, and compatibility fingerprint.
 
