@@ -101,49 +101,6 @@ mod tests {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     use super::assert_native_harness_prerun_refusal;
 
-    // Regression: `--mount` + `--record`/`replay` hands the child two inherited
-    // descriptors — the trace channel and the filesystem image. The image temp file
-    // can be allocated on the same low fd the old fixed-fd installer wanted for the
-    // trace, so installing fixed targets in the wrong order used to clobber the
-    // still-unread image source and crash the guest by signal (a guest carrying only
-    // the single trace fd never tripped it). The supervisor now passes the
-    // already-open fd numbers through `PATINA_TRACE_FD` / `PATINA_FS_IMAGE_FD` and
-    // clears close-on-exec only for those descriptors. Asserts a clean record AND
-    // replay that see the mounted content.
-    // A hand-declared libc binding with the wrong arity is an ABI break the compiler
-    // cannot see: Darwin arm64 passes anonymous varargs on the STACK, so calling the
-    // variadic `fcntl` through a non-variadic declaration leaves the argument in a
-    // register the callee never reads, and `F_SETFD` writes whatever the stack slot
-    // holds. Whether that misbehaves depends on stack contents (argv/env size), so
-    // no runtime test reproduces it reliably — the guard has to be static. Every
-    // extern declaration of a known-variadic libc function must declare the `...`
-    // tail (the crate deliberately hand-declares instead of depending on `libc`).
-    #[test]
-    fn extern_declarations_of_variadic_libc_functions_declare_the_variadic_tail() {
-        const VARIADIC_LIBC: &[&str] = &["fcntl", "ioctl", "open", "openat", "syscall"];
-        let source = include_str!("../src/lib.rs");
-        for name in VARIADIC_LIBC {
-            for (index, line) in source.lines().enumerate() {
-                let Some(rest) = line.trim_start().strip_prefix("fn ") else {
-                    continue;
-                };
-                let Some(rest) = rest.strip_prefix(name) else {
-                    continue;
-                };
-                if !rest.starts_with('(') {
-                    continue; // longer identifier sharing the prefix
-                }
-                assert!(
-                    rest.contains("..."),
-                    "src/lib.rs:{}: extern declaration of variadic libc `{name}` lacks the `...` \
-                 tail; non-variadic arity is an ABI break on Darwin arm64, where varargs are \
-                 read from the stack",
-                    index + 1
-                );
-            }
-        }
-    }
-
     /// Declared audit limit. Class pairing: the portable import-refusal detector
     /// below and HarnessSeedRun::trace's receipt-only provenance choke point.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

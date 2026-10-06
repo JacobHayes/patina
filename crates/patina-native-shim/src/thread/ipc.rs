@@ -573,7 +573,7 @@ fn wait_on(
     match step {
         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
         Ok(Step::Continue) => drop(state),
-        Err(error) => return Err(fail(error.into_posix())),
+        Err(error) => return Err(fail(c_int::from(error.into_posix()))),
     }
     let resumed = signals::resume();
     let mut state = lock_state();

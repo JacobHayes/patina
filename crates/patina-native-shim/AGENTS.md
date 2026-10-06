@@ -15,8 +15,8 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 - Dynamic resolution (`dlsym` on Linux) is a second, non-static path into libc:
   the guest never imports the name, so the pre-run audit cannot see it. It
   answers every name the shim defines as a libc contract (the registry's
-  `Modeled`/`Partial` rows; `posix_source_lints::dlsym_routes_are_the_registry_definitions`
-  holds `c/posix/dlsym.c`'s lists to them) and NULL otherwise — never a
+  `Modeled`/`Partial` rows; `build_support.rs` generates the routing header
+  from the symbol inventory) and NULL otherwise — never a
   deny-trapped name, a control-plane entry or a host entry. The table returns
   the code the static linker would have bound the caller to, and never a
   public interposable symbol: the pointers handed out are hidden aliases of the
@@ -191,10 +191,9 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   the stored init-error state. Otherwise a failed initialization is a refusal the
   guest never sees: it runs on fabricated values and exits 0, or spins. Two such
   paths exist. The shim-bootstrap window is the larger one, and it does not close
-  when initialization fails — `SHIM_BOOTSTRAP` is cleared only by a successful
+  when initialization fails — the private bootstrap flag is cleared only by a successful
   install — so enter it only through `in_shim_bootstrap`, which makes the check
-  for you; do not read the flag directly (a source lint enforces both, and pins
-  the window's call sites to a named list). Captured stdio is the other: it
+  for you; the flag is private to that predicate's module. Captured stdio is the other: it
   accepts bytes with no context installed, and shutdown then drops them. When
   adding an entry point, ask what it answers with no runtime installed; if it
   answers at all, call `abort_if_init_failed` and give it a leg in the
@@ -334,16 +333,30 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 
 ## Layout: families, the registry, and the vendored tables
 
-- `c/patina_posix.c` is ONE translation unit assembled from per-family slices
-  under `c/posix/` (`core`, `env`, `init`, `time`, `sched_identity`,
-  `entropy`, `fs`, `fd_io`, `mem`, `thread_sync`, `signal_process`,
-  `privileged`, `net`, `readiness`, `stdio`, `darwin`, `dlsym`), `#include`d
-  in a fixed order so the slices
-  share one set of headers and static helpers and produce one object. A slice
-  is not compiled on its own; system headers go in `posix/core.c`; a new slice
-  is added to the umbrella AND to `POSIX_C_FAMILY_SOURCES` in `src/bundle.rs`
-  (the installed `cargo-patina` stages only the exported slices — a lint pins
-  the three lists together).
+- The staged `patina_posix.c` is ONE translation unit assembled from the
+  ordered family inventory in `build_support.rs`. The build script generates
+  both its includes and `POSIX_C_FAMILY_SOURCES` from that inventory, so every
+  included slice is exported for installed builds. Slices share headers and
+  static helpers and are not compiled separately. System headers belong in
+  `posix/core.c`, enforced by `scripts/structure/shim-system-headers.yml`.
+  The same build script generates the Linux dlsym routes from the complete
+  symbol inventory, including architecture metadata. Its versioned metadata
+  comes from the normal syscalls dependency's build output; the shim does not
+  compile the full syscalls crate again as a host build dependency.
+- Every ordinary exported Rust function starts with
+  `let _panic_scope = crate::panic_boundary::PanicScope::enter();`. The AST lint
+  skips attribute comments and forbids exports inside macro definitions or
+  invocations, with no macro allowlist. It reserves `_panic_scope`: no other
+  reference to that binding may drop, move, capture, or expose the guard.
+  The gate tests every rule against valid and invalid syntax fixtures before
+  scanning all Rust files in the crate; external module paths are refused.
+  Abort and the three stack/trap ownership
+  primitives implement ownership themselves; a normal guard would change their
+  behavior. The unit-test-only fake host resolver is also exempt.
+  The `test-panic` feature adds an armed clock-panic failpoint and its control
+  export for the unwind/abort acceptance test. Production builds omit both.
+  `ThreadError::into_posix` returns an opaque errno; convert it explicitly to
+  `c_int` for pthread/error plumbing, and use `fail` for transfer-count errors.
 - The time and identity models are Rust modules both doors call:
   `src/clocks.rs` (every clock id decoded once, CPU time, the clock-setting
   rows, `times`/`getrusage`), `src/identity.rs` (credentials, groups,
@@ -451,7 +464,7 @@ ARCHITECTURE.md "Native (linked shim)" and `crates/cargo-patina/build.rs`).
   — the Rust definition, `include/patina_native.h`, and the SUD dispatcher's
   `extern` block — and changing an argument list means changing all three; the
   compiler catches two of them and the third is a link-time surprise.
-- After editing `c/patina_posix.c`, a slice under `c/posix/`, or related
+- After editing `build_support.rs`, a slice under `c/posix/`, or related
   embedded C sources, rebuild `cargo-patina`; validating with a stale runner is
   an accidental false green.
 - Guest binaries pick a shim change up on their own: the flags `cargo patina

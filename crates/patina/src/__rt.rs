@@ -1,5 +1,7 @@
 //! Runtime bridges called by the exported SDK macros.
 
+pub use core::convert::identity;
+
 pub use crate::static_sites::{
     STATIC_SITE_KIND_ALWAYS, STATIC_SITE_KIND_DELAY, STATIC_SITE_KIND_FAULT, STATIC_SITE_KIND_KNOB,
     STATIC_SITE_KIND_REACHABLE, STATIC_SITE_KIND_SOMETIMES, StaticSiteDescriptor,

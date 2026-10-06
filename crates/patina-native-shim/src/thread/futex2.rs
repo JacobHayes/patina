@@ -166,7 +166,7 @@ fn wait_on(
     loop {
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
-            return -i64::from(error.into_posix());
+            return -i64::from(c_int::from(error.into_posix()));
         }
         for word in words {
             match crate::uaccess::read::<u32>(word.addr) {
@@ -205,7 +205,7 @@ fn wait_on(
             Ok(Step::Continue) => drop(state),
             Err(error) => {
                 state.remove_signal_wait(me);
-                return -i64::from(error.into_posix());
+                return -i64::from(c_int::from(error.into_posix()));
             }
         }
         // The outcome is read before a pending handler runs: the kernel

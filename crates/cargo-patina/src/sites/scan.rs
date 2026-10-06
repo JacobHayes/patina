@@ -81,7 +81,27 @@ impl CacheState {
 struct SitesCache {
     schema: String,
     recognizer_version: String,
+    #[serde(default)]
+    sdk_signature: String,
     files: BTreeMap<String, CachedFile>,
+}
+
+fn sdk_signature() -> String {
+    let mut hasher = Sha256::new();
+    for site in patina_dst::SDK_SITE_MACROS {
+        // Length framing prevents separate fields or adjacent rows from sharing
+        // a byte sequence. Fixture spellings do not affect recognition.
+        for value in [site.name, site.kind, site.runtime] {
+            hasher.update((value.len() as u64).to_le_bytes());
+            hasher.update(value.as_bytes());
+        }
+        hasher.update((site.label_index as u64).to_le_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -283,6 +303,7 @@ fn empty_cache() -> SitesCache {
     SitesCache {
         schema: CACHE_SCHEMA.to_string(),
         recognizer_version: RECOGNIZER_TABLE_VERSION.to_string(),
+        sdk_signature: sdk_signature(),
         files: BTreeMap::new(),
     }
 }
@@ -290,7 +311,10 @@ fn empty_cache() -> SitesCache {
 fn read_cache(path: &Path) -> Option<SitesCache> {
     let bytes = fs::read(path).ok()?;
     let cache: SitesCache = serde_json::from_slice(&bytes).ok()?;
-    if cache.schema == CACHE_SCHEMA && cache.recognizer_version == RECOGNIZER_TABLE_VERSION {
+    if cache.schema == CACHE_SCHEMA
+        && cache.recognizer_version == RECOGNIZER_TABLE_VERSION
+        && cache.sdk_signature == sdk_signature()
+    {
         Some(cache)
     } else {
         None

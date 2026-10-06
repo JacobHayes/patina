@@ -119,11 +119,11 @@ pub(crate) fn counter_read_at(pc: usize) -> bool {
     prefixed_counter_read(&bytes[..readable])
 }
 
+#[unsafe(no_mangle)]
 /// A kernel #GP the trap did not answer, at `rip`. A counter read (outside the
 /// main executable's text, or in a prefixed encoding) is a named stop; any
 /// other returns, to be sent where the kernel would send it.
 #[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_tsc_declined(rip: usize) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if counter_read_at(rip) {
@@ -163,6 +163,7 @@ fn counter_now() -> Option<u64> {
     (rc == 0).then_some(nanos)
 }
 
+#[unsafe(no_mangle)]
 /// The SIGSEGV timestamp-counter dispatch entry point. The C handler passes the
 /// bytes at the faulting `RIP` (already validated to lie in the main
 /// executable's text) and out-parameters for the counter value, the `rdtscp`
@@ -184,7 +185,6 @@ fn counter_now() -> Option<u64> {
 /// Called only from the C `SIGSEGV` handler on the faulting thread, with
 /// `bytes`/`available` describing readable executable memory and the three
 /// out-pointers pointing at the handler's own stack storage.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_tsc_dispatch(
     bytes: *const u8,
     available: usize,

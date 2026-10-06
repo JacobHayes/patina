@@ -203,13 +203,13 @@ fn node(raw_fd: c_int, path: *const c_char, by: c_int) -> Result<Node, c_int> {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `getxattr`/`lgetxattr` (`path`, `by` choosing) and `fgetxattr` (`fd`,
 /// `by` [`XATTR_BY_FD`]).
 ///
 /// # Safety
 /// `path` and `name`, when non-null, must be NUL-terminated strings; `value`
 /// must be writable for `size` bytes when `size` is nonzero and it is non-null.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_getxattr(
     raw_fd: c_int,
     path: *const c_char,
@@ -243,11 +243,11 @@ pub unsafe extern "C" fn patina_getxattr(
     }
 }
 
+#[unsafe(no_mangle)]
 /// `listxattr`/`llistxattr`/`flistxattr`: the names, each NUL-terminated.
 ///
 /// # Safety
 /// As [`patina_getxattr`], `list` writable for `size` bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_listxattr(
     raw_fd: c_int,
     path: *const c_char,
@@ -267,13 +267,13 @@ pub unsafe extern "C" fn patina_listxattr(
     }
 }
 
+#[unsafe(no_mangle)]
 /// `setxattr`/`lsetxattr` (path) and `fsetxattr` (descriptor). The path rows
 /// judge the flags, the name and the value before the path; the descriptor
 /// row after the descriptor.
 ///
 /// # Safety
 /// As [`patina_getxattr`], `value` readable for `size` bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_setxattr(
     raw_fd: c_int,
     path: *const c_char,
@@ -337,11 +337,11 @@ pub unsafe extern "C" fn patina_setxattr(
     }
 }
 
+#[unsafe(no_mangle)]
 /// `removexattr`/`lremovexattr` (path) and `fremovexattr` (descriptor).
 ///
 /// # Safety
 /// As [`patina_getxattr`].
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_removexattr(
     raw_fd: c_int,
     path: *const c_char,

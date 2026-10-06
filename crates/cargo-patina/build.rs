@@ -86,8 +86,9 @@ fn main() {
 
     for &pkg in SHIM_PACKAGES {
         let dir = &src_dirs[pkg];
-        // Cargo rescans a watched directory recursively, so a content edit under
-        // the crate retriggers this script (include_bytes! also pins each file).
+        // Watch the whole source directory: additions and deletions must rebuild
+        // the file inventory as well as content edits. include_bytes! alone only
+        // tracks the files present when this script last ran.
         println!("cargo:rerun-if-changed={}", dir.display());
 
         let mut files: Vec<(String, PathBuf)> = Vec::new();

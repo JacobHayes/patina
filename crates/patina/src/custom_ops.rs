@@ -2,10 +2,10 @@
 
 #[cfg(patina_shim)]
 use crate::ffi;
+#[cfg(doc)]
+use crate::verdict;
 #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
 use crate::wasm_ffi;
-#[cfg(doc)]
-use crate::{buggify, sometimes, verdict};
 
 /// Perform one **custom operation**: an effect Patina does not model, wrapped at
 /// a boundary the guest controls so Patina can mediate it — raw bytes in, raw
@@ -17,7 +17,7 @@ use crate::{buggify, sometimes, verdict};
 /// decide which pass it is on, the runtime does.
 ///
 /// - `label` names the operation *class* (`"s3.get_object"`), not the call. It
-///   shares the site-label namespace of [`sometimes!`]/[`buggify!`] and
+///   shares the site-label namespace of [`crate::sometimes!`]/[`crate::buggify!`] and
 ///   aggregates like a [`verdict`] label, but a custom op registers no fault
 ///   site, so the duplicate-label rule does not apply and one label naming many
 ///   calls in a run is exactly the point.

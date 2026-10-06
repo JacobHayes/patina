@@ -74,11 +74,11 @@ fn has_mapping(resolved: &Resolved) -> bool {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `posix_fadvise(2)`: every `POSIX_FADV_*` advice is accepted and changes
 /// nothing. The refusals are `generic_fadvise`'s, in its order: an empty slot
 /// or an `O_PATH` descriptor `EBADF`, a FIFO `ESPIPE` (before the advice is
 /// looked at), a negative length or an unknown advice `EINVAL`.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_fadvise(raw_fd: c_int, _offset: i64, length: i64, advice: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     answered(fdget(raw_fd).and_then(|resolved| {
@@ -92,10 +92,10 @@ pub extern "C" fn patina_fadvise(raw_fd: c_int, _offset: i64, length: i64, advic
     }))
 }
 
+#[unsafe(no_mangle)]
 /// `readahead(2)`: `fadvise(WILLNEED)` on a descriptor open for reading
 /// (`EBADF` otherwise, `O_PATH` included) whose node is a regular file
 /// (`EINVAL` otherwise). Past the end of the file it is the same no-op.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_readahead(raw_fd: c_int, _offset: i64, count: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     answered(fdget(raw_fd).and_then(|resolved| {
@@ -199,11 +199,11 @@ pub(crate) fn cachestat(raw_fd: c_int, range: usize, out: usize, flags: u32) -> 
     }
 }
 
+#[unsafe(no_mangle)]
 /// `sync_file_range(2)`: no durability to promise, so a no-op once the kernel's
 /// refusals pass — the descriptor first (`EBADF`), then the flags and the range
 /// (`EINVAL` for an unknown flag, a negative offset or end, or a range that
 /// wraps), then the node's kind (`ESPIPE` for anything without a mapping).
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_sync_file_range(
     raw_fd: c_int,
     offset: i64,
@@ -223,18 +223,18 @@ pub extern "C" fn patina_sync_file_range(
     }))
 }
 
-/// `sync(2)`: every change on the volume becomes durable. Never fails.
 #[unsafe(no_mangle)]
+/// `sync(2)`: every change on the volume becomes durable. Never fails.
 pub extern "C" fn patina_sync() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     answered(crate::fs_sync_volume())
 }
 
+#[unsafe(no_mangle)]
 /// `syncfs(2)`: the filesystem a descriptor is on made durable. An empty slot
 /// or an `O_PATH` descriptor is `EBADF` (`fdget`); a descriptor on the volume
 /// syncs it; one on a pseudo-filesystem (a pipe, a socket, an eventfd) has
 /// nothing to write back.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_syncfs(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     answered(fdget(raw_fd).and_then(|resolved| {

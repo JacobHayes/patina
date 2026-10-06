@@ -1149,7 +1149,7 @@ pub(crate) fn timerfd_read(handle: u64, nonblocking: bool, buf: usize, len: usiz
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
-            Err(error) => return crate::fail(error.into_posix()) as isize,
+            Err(error) => return crate::fail(c_int::from(error.into_posix())) as isize,
         }
         lock_state().timed_out.remove(&me);
         if signals::resume() == signals::Resumed::Eintr {

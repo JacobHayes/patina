@@ -101,6 +101,7 @@ pub(crate) fn wake_all(waiters: Vec<TaskId>) {
     }
 }
 
+#[unsafe(no_mangle)]
 /// Resolve a host name through the run's deterministic DNS host table.
 ///
 /// Writes the resolved address as a host-byte-order `u32` and returns 0; on
@@ -110,7 +111,6 @@ pub(crate) fn wake_all(waiters: Vec<TaskId>) {
 /// # Safety
 /// C ABI entry point: `name` must be a NUL-terminated string and `ip` must
 /// point at a writable `uint32_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_dns_resolve(name: *const c_char, ip: *mut u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if let Err(errno) = sched_point() {

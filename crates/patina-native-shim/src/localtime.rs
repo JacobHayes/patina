@@ -505,13 +505,13 @@ fn offtime(t: i64, offset: i64) -> Result<PatinaTm, c_int> {
 /// The zone the first `localtime_r` chose.
 static ZONE: OnceLock<Zone> = OnceLock::new();
 
+#[unsafe(no_mangle)]
 /// Convert `t` to local time in the zone `TZ` named at the first call (see
 /// the module doc). 0 with `out` filled, or -1 with patina_errno `EOVERFLOW`.
 /// A zoneinfo file where glibc would read one is a named fatal.
 ///
 /// # Safety
 /// `tz` and `tzdir` must be NULL or NUL-terminated; `out` must be writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_localtime(
     t: i64,
     tz: *const c_char,

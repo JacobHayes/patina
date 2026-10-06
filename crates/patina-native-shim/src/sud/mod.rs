@@ -702,6 +702,7 @@ fn ret_isize(result: isize) -> i64 {
     }
 }
 
+#[unsafe(no_mangle)]
 /// The SIGSYS dispatch entry point. The C handler passes the decoded syscall
 /// number, its six argument registers, and the faulting instruction address
 /// (already validated by the C handler to lie within the main executable's
@@ -718,7 +719,6 @@ fn ret_isize(result: isize) -> i64 {
 /// Called only from the C `SIGSYS` handler on the faulting managed thread, with
 /// argument registers that are the guest's own — pointers are valid guest
 /// addresses for the lifetime of the (synchronous) dispatch.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_sud_dispatch(
     nr: c_long,
     a0: u64,

@@ -61,7 +61,6 @@ use crate::CliError;
 use driver::run_campaign;
 use patina_dst_runtime::FaultKnob;
 use selftest::selftest;
-use sha2::{Digest, Sha256};
 
 /// The `--fault-scale-permille` value that leaves every seed-drawn fault band
 /// exactly as it was before the flag existed: 1000 per-mille = 1.0 = full
@@ -159,95 +158,10 @@ fn push_run_flag(flags: &mut Vec<String>, name: &str, value: RunValue) {
 /// the 32-byte extension block [`generation_bands`] appends after it.
 const GEN_BAND_BYTES: usize = 64;
 
-/// Which byte of the generation's band material each seed-derived band draws
-/// from.
-///
-/// Every band must claim a byte here and read it through the claim, never by
-/// writing a literal index. Two bands sharing a byte would silently *correlate*
-/// their knobs — the campaign would never explore that pair independently, so a
-/// bug reachable only at some combination of the two could be unreachable at
-/// every generation — and nothing about the run would look wrong. One table makes
-/// a collision a testable fact instead of a reviewer's job:
-/// [`generation_byte_claims_are_disjoint`] rejects a duplicate or out-of-range
-/// claim, and [`every_generation_hash_read_goes_through_a_claim`] rejects a raw
-/// literal index that bypassed the table.
-///
-/// Every byte of the 32-byte generation hash is claimed, so the namespace GREW,
-/// exactly as this comment used to prescribe: [`generation_bands`] appends a
-/// second, domain-separated SHA-256 after byte 31. Bytes 0..32 are the
-/// generation hash itself and are byte-for-byte what they always were — every
-/// campaign recorded before the extension existed still derives the same flags —
-/// and bytes 32..64 are the new draws. A band claims an index in either half and
-/// reads it the same way. Indices 33..64 are unclaimed and are where the next
-/// band should draw from; a band that belongs to an existing policy's
-/// configuration should still be bit-sliced out of that policy's byte instead
-/// (see [`gen_byte::SCHED_STARVE`]).
-mod gen_byte {
-    use std::ops::Range;
-
-    /// The child run's `--seed`, little-endian. A slice, not a single byte, so it
-    /// claims eight of them.
-    pub(super) const SEED: Range<usize> = 0..8;
-
-    pub(super) const BUGGIFY_ACTIVATION: usize = 8;
-    pub(super) const BUGGIFY_FIRE: usize = 9;
-    pub(super) const SCHED_PCT_DEPTH: usize = 11;
-    pub(super) const NET_DROP: usize = 12;
-    pub(super) const SLEEP_JITTER_HI: usize = 13;
-    pub(super) const FS_ERROR: usize = 14;
-    pub(super) const FS_SHORT: usize = 15;
-    pub(super) const FS_LATENCY_HI: usize = 16;
-    pub(super) const NET_LATENCY: usize = 20;
-    pub(super) const DNS_FAIL: usize = 21;
-    pub(super) const DNS_LATENCY_HI: usize = 22;
-    pub(super) const NET_JITTER_HI: usize = 23;
-    pub(super) const NET_DUPLICATE: usize = 24;
-    pub(super) const NET_CONNECT_REFUSE: usize = 25;
-    pub(super) const NET_RESET: usize = 26;
-    pub(super) const NET_TCP_BUFFER: usize = 27;
-    pub(super) const ENTROPY_FAIL: usize = 28;
-    pub(super) const EPOCH_JUMP: usize = 29;
-    pub(super) const CUSTOM_OP_FAIL: usize = 30;
-    /// The whole starvation policy configuration — interval count, start window,
-    /// and maximum interval length — bit-sliced out of ONE byte.
-    ///
-    /// The three sub-knobs are deliberately correlated with each other and with
-    /// nothing else. They are not three independent faults; they are one policy's
-    /// shape ("how many holds, how deep, how long"), and the campaign's
-    /// disjointness rule exists to stop two UNRELATED knobs from sweeping a
-    /// diagonal of their joint space. Slicing one byte gives 256 distinct
-    /// starvation configurations — every generation of a thousand-generation
-    /// sweep sees several — while leaving every other band's draw untouched.
-    pub(super) const SCHED_STARVE: usize = 31;
-
-    /// Whether this generation starves at all. The first claim in the extension
-    /// block (see [`super::generation_bands`]), and it had to be: the three
-    /// starvation sub-knobs consume all eight bits of [`SCHED_STARVE`], and a
-    /// gate sliced out of that same byte would decide "does this generation
-    /// starve" from the very bits that decide "how", so a dampened campaign
-    /// would starve only at one corner of the policy space instead of rarely
-    /// across all of it.
-    ///
-    /// Only ever consulted below full `--starve-scale-permille`: at full scale
-    /// the gate is unconditionally open, which is what keeps the default sweep
-    /// unchanged.
-    pub(super) const STARVE_FIRE: usize = 32;
-
-    /// The bands no fault knob owns, for the disjointness gate. The fault knobs'
-    /// own claims come from [`super::campaign_band`], so this list is only the
-    /// exploration bands — a `FaultKnob` cannot be missing from it, because it
-    /// was never in it. The raw-index scan is the other half of the pairing:
-    /// between them, a band is either claimed here or through the knob table, or
-    /// it fails a gate.
-    #[cfg(test)]
-    pub(super) const EXPLORATION_CLAIMS: &[(&str, usize)] = &[
-        ("buggify activation", BUGGIFY_ACTIVATION),
-        ("buggify fire", BUGGIFY_FIRE),
-        ("sched-pct depth", SCHED_PCT_DEPTH),
-        ("starvation policy", SCHED_STARVE),
-        ("starvation fire", STARVE_FIRE),
-    ];
-}
+/// Claimed generation bytes and their opaque storage. Callers cannot index band
+/// material or manufacture a claim; the compiler rejects duplicate offsets.
+#[path = "campaign/hash.rs"]
+pub(crate) mod gen_byte;
 
 /// The generation-hash bytes a knob's campaign band draws from, or `None` for a
 /// knob the campaign does not band.
@@ -260,9 +174,8 @@ mod gen_byte {
 /// not an oversight, and writing it out is what makes it visible.
 ///
 /// `generation_byte_claims_are_disjoint` reads this to prove no two bands share a
-/// byte, and `every_generation_hash_read_goes_through_a_claim` proves no band
-/// bypassed the table with a literal index.
-fn campaign_band(knob: FaultKnob) -> Option<&'static [usize]> {
+/// byte. Opaque `gen_byte::Bands` accepts only a declared claim.
+fn campaign_band(knob: FaultKnob) -> Option<&'static [gen_byte::Claim]> {
     match knob {
         // Not drawn: crash placement is native-only (WASI/Cargo refuse
         // --fs-crash-at by name), and a native crash band still needs a
@@ -356,15 +269,8 @@ const BAND_WAIVERS: &[(FaultKnob, &str)] = &[
 /// extension from that hash keeps [`derive_flags`] a pure function of the hash
 /// alone — a second keying would have handed a mutated generation the unmutated
 /// generation's extension draws.
-fn generation_bands(hash: &[u8; 32]) -> [u8; GEN_BAND_BYTES] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"patina-campaign-bands/v1");
-    hasher.update(hash);
-    let extension: [u8; 32] = hasher.finalize().into();
-    let mut bands = [0u8; GEN_BAND_BYTES];
-    bands[..32].copy_from_slice(hash);
-    bands[32..].copy_from_slice(&extension);
-    bands
+fn generation_bands(hash: &gen_byte::Hash) -> gen_byte::Bands {
+    gen_byte::Bands::new(hash)
 }
 
 /// One band's `nth` claimed byte of the generation's band material.
@@ -372,10 +278,10 @@ fn generation_bands(hash: &[u8; 32]) -> [u8; GEN_BAND_BYTES] {
 /// Reading through the claim is what makes [`campaign_band`] the single source
 /// rather than a parallel description: a band cannot draw from a byte the table
 /// did not give it, and a knob the table bands `None` cannot draw at all.
-fn band_byte(hash: &[u8; GEN_BAND_BYTES], knob: FaultKnob, nth: usize) -> u8 {
+fn band_byte(hash: &gen_byte::Bands, knob: FaultKnob, nth: usize) -> u8 {
     let band = campaign_band(knob)
         .unwrap_or_else(|| panic!("{knob:?} draws a band the knob table does not claim"));
-    hash[band[nth]]
+    hash.read(band[nth])
 }
 
 /// The outcome class a knob's vacuity — its fault plane reporting that a rate
@@ -521,20 +427,15 @@ fn scale_intensity(value: u64, scale_permille: u64) -> u64 {
 /// sweep is byte-for-byte the sweep it always was. Its own claimed band byte, so
 /// the decision is independent of the policy's own shape rather than correlated
 /// with it.
-fn starve_band_fires(hash: &[u8; GEN_BAND_BYTES], scale_permille: u64) -> bool {
-    u64::from(hash[gen_byte::STARVE_FIRE]) * STARVE_SCALE_FULL < scale_permille * 256
+fn starve_band_fires(hash: &gen_byte::Bands, scale_permille: u64) -> bool {
+    u64::from(hash.read(gen_byte::STARVE_FIRE)) * STARVE_SCALE_FULL < scale_permille * 256
 }
 
 /// Derive the per-generation `run` flags from the generation hash. Native-only
 /// exploration knobs (`--swarm`, `--sched-pct`) are skipped for a WASI module
 /// (single-threaded; the WASI `run` does not accept them). Every draw indexes
 /// through a [`gen_byte`] claim so no two bands can share a byte unnoticed.
-fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> Vec<String> {
-    // From here down `hash` is the generation's full BAND MATERIAL: the hash
-    // itself in bytes 0..32, then the extension block. Shadowing rather than a
-    // new name on purpose — every band read below stays spelled `hash[...]`,
-    // which is the one form `every_generation_hash_read_goes_through_a_claim`
-    // scans for, so widening the namespace did not quietly narrow the gate.
+fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str) -> Vec<String> {
     let hash = &generation_bands(hash);
     let native = family == "native";
     let mut flags = invocation_flags(spec, family);
@@ -548,8 +449,8 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         // seed-varying band that both activates and fires cooperative-SUT sites
         // often enough to exercise a planted bug across a modest campaign, while
         // still leaving clean generations (neither always nor never firing).
-        let activation = 300 + (u32::from(hash[gen_byte::BUGGIFY_ACTIVATION]) * 600 / 255);
-        let fire = 300 + (u32::from(hash[gen_byte::BUGGIFY_FIRE]) * 600 / 255);
+        let activation = 300 + (u32::from(hash.read(gen_byte::BUGGIFY_ACTIVATION)) * 600 / 255);
+        let fire = 300 + (u32::from(hash.read(gen_byte::BUGGIFY_FIRE)) * 600 / 255);
         push_run_flag(&mut flags, "--buggify", RunValue::Int(u64::from(fire)));
         push_run_flag(
             &mut flags,
@@ -730,7 +631,7 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         push_run_flag(&mut flags, "--swarm", RunValue::Switch);
     }
     if spec.pct && native {
-        let depth = 1 + u32::from(hash[gen_byte::SCHED_PCT_DEPTH] % 5); // [1, 5]
+        let depth = 1 + u32::from(hash.read(gen_byte::SCHED_PCT_DEPTH) % 5); // [1, 5]
         push_run_flag(&mut flags, "--sched-pct", RunValue::Int(u64::from(depth)));
     }
     if spec.starve && native {
@@ -762,7 +663,7 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         // for which way each axis points and why.
         let starve_scale = spec.starve_scale_permille;
         if starve_band_fires(hash, starve_scale) {
-            let policy = hash[gen_byte::SCHED_STARVE];
+            let policy = hash.read(gen_byte::SCHED_STARVE);
             // Dampened around the [1, 8] band's FLOOR, not its raw value: a
             // gated generation starves, so it has at least one interval, and
             // scaling `count - 1` makes 1000 the exact arithmetic identity.
@@ -802,83 +703,10 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
 
 /// `SHA-256("patina-campaign-<seed_base>-<generation>")` — the deterministic per-generation
 /// derivation, mirroring the fuzz-sweep scheme (no wall clock / `$RANDOM`).
-fn generation_hash(seed_base: u64, generation: u64) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(format!("patina-campaign-{seed_base}-{generation}").as_bytes());
-    hasher.finalize().into()
+fn generation_hash(seed_base: u64, generation: u64) -> gen_byte::Hash {
+    gen_byte::Hash::derive(seed_base, generation)
 }
 
 #[cfg(test)]
 #[path = "campaign/tests.rs"]
 mod derivation_tests;
-
-#[cfg(test)]
-mod tests {
-
-    // The other half of the pairing: a band that writes `hash[15]` directly would
-    // satisfy the disjointness test above (it never appears in the table) while
-    // still colliding. Scanning the source for a literal index is what makes the
-    // table load-bearing rather than advisory.
-    #[test]
-    fn every_generation_hash_read_goes_through_a_claim() {
-        // Only the non-test half is scanned: this module's own diagnostics spell
-        // the pattern out, and a gate that trips on its own error messages is
-        // useless. The bound is the test MODULE header, not a bare `#[cfg(test)]`
-        // — `gen_byte::EXPLORATION_CLAIMS` carries one of those too, and cutting
-        // there would stop the scan above `derive_flags` and silently cover none
-        // of the bands. The original files also name anchors that must fall
-        // inside the scanned region, so a future edit that moves the bound fails
-        // loudly instead of quietly shrinking the gate to nothing. Additional
-        // campaign modules are discovered at test time and scanned up to their
-        // own test-module marker, or through the whole file when it has none.
-        const TEST_MARKER: &str = "#[cfg(test)]\nmod tests {";
-        let needle = format!("hash{}", '[');
-        for (file, source) in crate::test_source::rust_sources("src") {
-            if file != "campaign.rs" && file != "guided.rs" && !file.starts_with("campaign/") {
-                continue;
-            }
-            if file.rsplit('/').next() == Some("tests.rs") {
-                continue;
-            }
-            let anchor = match file.as_str() {
-                "campaign.rs" => Some("fn derive_flags"),
-                "guided.rs" => Some("fn base_generation_hash"),
-                _ => None,
-            };
-            let end = source.find(TEST_MARKER).unwrap_or_else(|| {
-                if anchor.is_some() {
-                    panic!("{file} has no `{TEST_MARKER}`; the scan bound is stale")
-                }
-                source.len()
-            });
-            let scanned = &source[..end];
-            if let Some(anchor) = anchor {
-                assert!(
-                    scanned.contains(anchor),
-                    "the scan of {file} stops before `{anchor}`, so it does not cover the derivation \
-                     it is meant to gate"
-                );
-                assert!(
-                    scanned.contains(&needle),
-                    "the scan of {file} found no generation-hash reads at all, so it proves nothing"
-                );
-            }
-            for (offset, line) in scanned.lines().enumerate() {
-                let mut from = 0;
-                while let Some(at) = line[from..].find(&needle) {
-                    let after = from + at + needle.len();
-                    if line[after..].starts_with(|c: char| c.is_ascii_digit()) {
-                        panic!(
-                            "{file}:{} reads the generation hash by literal index:\n  {}\nClaim a \
-                             byte in `gen_byte` and index through the claim, so a collision with \
-                             another band fails `generation_byte_claims_are_disjoint`.",
-                            offset + 1,
-                            line.trim()
-                        );
-                    }
-                    from = after;
-                }
-            }
-        }
-    }
-}

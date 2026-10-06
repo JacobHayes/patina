@@ -2,6 +2,73 @@
 
 use super::*;
 
+// Class pairing: the SDK declaration generates every literal descriptor and
+// sdk-site-macros.yml rejects exports that bypass it. Exercise all declared
+// macros through the linked product, including a newly added registry row.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn every_declared_sdk_macro_emits_an_unreached_linked_descriptor() {
+    let directory = tempdir().unwrap();
+    let pkg = directory.path().join("registry");
+    let calls = patina_dst::SDK_SITE_MACROS
+        .iter()
+        .map(|site| format!("let _ = patina_dst::{};\n", site.fixture))
+        .collect::<String>();
+    let guest = format!(
+        "fn main() {{ patina_dst::lifecycle::setup_complete();\nif std::hint::black_box(false) {{\n{calls}}}\n}}\n"
+    );
+    write_sdk_fixture(&pkg, &guest);
+    let bin = directory.path().join("sdk-registry");
+    invoke(
+        native_workspace(),
+        &[
+            "build",
+            pkg.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let out = directory.path().join("campaign");
+    let campaign = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &[
+            "campaign",
+            bin.to_str().unwrap(),
+            "--gens",
+            "1",
+            "--out-dir",
+            out.to_str().unwrap(),
+        ],
+    );
+    let sites: serde_json::Value =
+        serde_json::from_slice(&fs::read(out.join("sites.json")).unwrap()).unwrap();
+    for metadata in patina_dst::SDK_SITE_MACROS {
+        let label = format!("registry-{}", metadata.name);
+        let call = format!("let _ = patina_dst::{}!(", metadata.name);
+        let source_line = guest
+            .lines()
+            .position(|line| line.starts_with(&call))
+            .unwrap()
+            + 1;
+        let row = sites["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|site| site["label"].as_str() == Some(&label))
+            .unwrap_or_else(|| panic!("missing descriptor for {}: {sites:#}", metadata.name));
+        assert_eq!(row["kind"], metadata.kind);
+        assert_eq!(row["site"], format!("src/main.rs:{source_line}"));
+        assert_eq!(row["registered_gens"], 0);
+        assert_eq!(row["first_registered_gen"], serde_json::Value::Null);
+    }
+    assert_eq!(
+        campaign.status.code(),
+        Some(1),
+        "unreached reachable site must fail coverage: {campaign:?}"
+    );
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn sdk_fixtures_with_shared_cargo_target_dir_do_not_reuse_stale_binary() {
@@ -192,18 +259,6 @@ fn native_static_site_table_surfaces_never_called_reachable_in_campaign() {
             && campaign_stdout.contains("registered_gens=0"),
         "campaign did not surface the never-called reachable site:\n{campaign_stdout}"
     );
-    let sites_path = out_dir.join("sites.json");
-    let sites_json: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&sites_path).unwrap()).unwrap();
-    let row = sites_json["sites"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|site| site["label"].as_str() == Some("never-called-reachable"))
-        .unwrap_or_else(|| panic!("missing never-called reachable in sites.json: {sites_json:#}"));
-    assert_eq!(row["kind"], "reachable");
-    assert_eq!(row["registered_gens"], 0);
-    assert_eq!(row["first_registered_gen"], serde_json::Value::Null);
 
     let joined = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),

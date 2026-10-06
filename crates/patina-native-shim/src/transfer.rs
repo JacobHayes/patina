@@ -138,6 +138,7 @@ fn secret(resolved: &Resolved) -> bool {
     resolved.kind == FdKind::File && crate::mem::secret(resolved.handle)
 }
 
+#[unsafe(no_mangle)]
 /// `copy_file_range(2)`: both descriptors first (`EBADF`), the offsets read,
 /// then the flags (`EINVAL` unless 0), then `generic_copy_file_checks`: a
 /// directory on either side `EISDIR`, anything but two regular files `EINVAL`,
@@ -148,7 +149,6 @@ fn secret(resolved: &Resolved) -> bool {
 ///
 /// # Safety
 /// `off_in`/`off_out`, when non-null, are the guest's `loff_t`s.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_copy_file_range(
     fd_in: c_int,
     off_in: *mut i64,
@@ -224,6 +224,7 @@ pub unsafe extern "C" fn patina_copy_file_range(
     notified(fd_in, fd_out, moved, false)
 }
 
+#[unsafe(no_mangle)]
 /// `sendfile(2)`: the input first — open for reading (`EBADF`), addressable
 /// when an offset is given (`ESPIPE`), a non-negative position (`EINVAL`) —
 /// then the output, open for writing (`EBADF`). Into a pipe it is a splice of
@@ -233,7 +234,6 @@ pub unsafe extern "C" fn patina_copy_file_range(
 ///
 /// # Safety
 /// `offset`, when non-null, is the guest's `loff_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_sendfile(
     out_fd: c_int,
     in_fd: c_int,
@@ -359,6 +359,7 @@ fn pipe_to_sink(
     }
 }
 
+#[unsafe(no_mangle)]
 /// `splice(2)`, in `do_splice`'s order: a zero length is 0, an unknown flag
 /// `EINVAL`, both descriptors (`EBADF`, as is a side not open for its
 /// direction), an offset for a pipe side `ESPIPE`; then pipe to pipe (one pipe
@@ -369,7 +370,6 @@ fn pipe_to_sink(
 ///
 /// # Safety
 /// `off_in`/`off_out`, when non-null, are the guest's `loff_t`s.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_splice(
     fd_in: c_int,
     off_in: *mut i64,
@@ -470,11 +470,11 @@ pub unsafe extern "C" fn patina_splice(
     notified(fd_in, fd_out, moved, true)
 }
 
+#[unsafe(no_mangle)]
 /// `tee(2)`: an unknown flag `EINVAL` first, then a zero length is 0, both
 /// descriptors (`EBADF`), and then two distinct pipes (`EINVAL` otherwise):
 /// up to `len` of the input's bytes copied into the output without consuming
 /// them.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_tee(fd_in: c_int, fd_out: c_int, len: usize, flags: u32) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let moved = answered((|| {
@@ -501,6 +501,7 @@ pub extern "C" fn patina_tee(fd_in: c_int, fd_out: c_int, len: usize, flags: u32
     notified(fd_in, fd_out, moved, false)
 }
 
+#[unsafe(no_mangle)]
 /// `vmsplice(2)`: an unknown flag `EINVAL`; the descriptor (`EBADF`) and its
 /// direction — open for writing, the segments are gathered INTO the pipe;
 /// open only for reading, the pipe's bytes are scattered OUT; then the vector
@@ -511,7 +512,6 @@ pub extern "C" fn patina_tee(fd_in: c_int, fd_out: c_int, len: usize, flags: u32
 /// # Safety
 /// `vector` must be a readable guest vector of `count` segments, each segment
 /// readable (into a pipe) or writable (out of one) for its length.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_vmsplice(
     raw_fd: c_int,
     vector: *const GuestIovec,

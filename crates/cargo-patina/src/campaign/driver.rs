@@ -21,7 +21,7 @@ use super::state::{
     load_coverage_tally, verify_artifact_identity, write_campaign_checkpoint,
 };
 use super::{
-    CampaignInvocation, classify, derive_flags, gen_byte, generation_hash, invocation_flags,
+    CampaignInvocation, classify, derive_flags, generation_hash, invocation_flags,
     non_native_invocation_flag, signature,
 };
 use crate::CliError;
@@ -227,7 +227,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
         if state.spec.guided {
             guidance.record(decision);
         }
-        let seed = u64::from_le_bytes(hash[gen_byte::SEED].try_into().expect("32-byte hash"));
+        let seed = hash.seed();
         let flags = derive_flags(&state.spec, &hash, state.artifact.family);
         let trace_path = traces_dir.join(format!("generation-{generation}.patina"));
         let _ = fs::remove_file(&trace_path);

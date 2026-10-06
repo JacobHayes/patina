@@ -200,10 +200,10 @@ impl ThreadRuntime {
     }
 }
 
+#[unsafe(no_mangle)]
 /// Register the guest word without replacing glibc's host clear-child-tid.
 /// # Safety
 /// A non-null address must remain writable until the calling task exits.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_set_tid_address(address: *mut i32) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let me = activate();
@@ -254,10 +254,10 @@ pub extern "C" fn patina_raw_exit(status: i32) -> ! {
     fatal("host exit returned")
 }
 
+#[unsafe(no_mangle)]
 /// Whether `sig` is one of glibc's reserved signals, SIGCANCEL and
 /// SIGSETXID (`internal-signals.h`), which its libc face refuses to act on:
 /// the one predicate the Rust and C wrappers share.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_signal_reserved(sig: i32) -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     i32::from(matches!(sig, GLIBC_SIGCANCEL | GLIBC_SIGSETXID))

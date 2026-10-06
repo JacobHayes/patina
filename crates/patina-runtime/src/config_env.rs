@@ -1,4 +1,6 @@
 //! Control-plane environment parsing and runtime configuration overlays.
+// Process-environment reads are confined to configuration, before installation.
+#![allow(clippy::disallowed_methods)]
 use crate::config::{
     RuntimeConfig, validate_dns_entry, validate_guest_cwd, validate_guest_env, validate_hostname,
     validate_partition,

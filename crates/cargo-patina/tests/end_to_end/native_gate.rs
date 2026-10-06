@@ -735,7 +735,7 @@ fn main() {
 }
 "#;
 
-    // `fork` is now shim-defined (a deny-trap in `c/patina_posix.c`), so the pre-run
+    // `fork` is now shim-defined (a deny-trap in the staged `patina_posix.c`), so the pre-run
     // gate passes this binary (fork is no longer an import) and the runtime deny-trap
     // is what fires when the guest reaches fork — the distinct guarantee this proves.
     #[cfg(target_os = "macos")]

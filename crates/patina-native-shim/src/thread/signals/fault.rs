@@ -62,12 +62,12 @@ pub(super) fn trap_routed(sig: u8) -> bool {
 /// The front handler's address, once the C layer installed it.
 static FRONT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+#[unsafe(no_mangle)]
 /// The C layer put the front handler at `handler` before the signals an
 /// instruction raises, SIGSEGV where the counter trap does not own it: from
 /// now on it is also the host handler of every guest handler, and each
 /// managed thread builds the frames of the shim's handlers on its private
 /// stack ([`frames`]). The calling thread's is armed now.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_fault_front_installed(handler: usize) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     FRONT.store(handler, Ordering::Relaxed);
@@ -110,6 +110,7 @@ pub(super) fn front_action(action: Action) -> Action {
     }
 }
 
+#[unsafe(no_mangle)]
 /// A signal reached the front handler: one [`deliver`] queued for a guest
 /// handler, or one an instruction raised (SIGSEGV where the counter trap
 /// does not own it) in guest code. On [`FAULT_HANDLER`] the guest handler to
@@ -124,7 +125,6 @@ pub(super) fn front_action(action: Action) -> Action {
 /// # Safety
 /// `info` names the frame's siginfo, `frame` describes the front handler's
 /// frame and `handler` is writable storage for one action.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_fault_route(
     sig: i32,
     info: *const Info,
@@ -202,13 +202,13 @@ fn enter(frame: &mut Frame, flags: u64) -> Option<(usize, usize)> {
     (entered.saved.flags & SS_DISABLE == 0).then_some((entered.saved.base, entered.saved.size))
 }
 
+#[unsafe(no_mangle)]
 /// A planted fault in shim code, for the containment tests: inside a shim
 /// entry, a read of an unmapped address (`kind` 0, SIGSEGV) or of a file
 /// mapping past the file's end (`kind` 1, SIGBUS), or an illegal instruction
 /// (`kind` 2, SIGILL). Said on the host's stderr first, so the stop it ends
 /// in is known to be this one.
 #[cfg(feature = "planted-faults")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_planted_fault(kind: i32) -> u8 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     use patina_dst_syscalls::Syscall;
@@ -287,6 +287,7 @@ pub extern "C" fn patina_note_guest_sp(sp: usize, stack: *mut Stack) {
     frames::resync(stack);
 }
 
+#[unsafe(no_mangle)]
 /// A fault while shim code owned the thread: a named stop, never the guest's
 /// handler, which would run over half-done shim state. It is said with one
 /// raw write (the shim state the fault interrupted may hold its allocator or
@@ -294,7 +295,6 @@ pub extern "C" fn patina_note_guest_sp(sp: usize, stack: *mut Stack) {
 ///
 /// # Safety
 /// `info` names the fault's siginfo.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_trap_shim_fault(info: *const Info, pc: usize) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let info = unsafe { *info };
@@ -342,11 +342,11 @@ pub unsafe extern "C" fn patina_trap_shim_fault(info: *const Info, pc: usize) ->
     take_default(info.signo())
 }
 
+#[unsafe(no_mangle)]
 /// A SIGSEGV the kernel sent itself (`SI_KERNEL`) that the guest's action
 /// takes as the default: now, since retrying the instruction need not raise
 /// it again (a signal frame that did not fit on its stack is not the
 /// instruction's).
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_trap_take_default(sig: i32) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     take_default(sig as u8)
@@ -868,6 +868,7 @@ impl Frame {
     }
 }
 
+#[unsafe(no_mangle)]
 /// A SIGSEGV the trap's handler did not answer as a counter read, with the
 /// frame's siginfo. On [`FAULT_HANDLER`] the guest handler to run is written
 /// to `handler` and the mask it runs under is installed; its return goes
@@ -876,7 +877,6 @@ impl Frame {
 /// # Safety
 /// `info` names the trap frame's siginfo, `frame` describes that frame and
 /// `handler` is writable storage for one action.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_signal_fault(
     info: *const Info,
     frame: *mut Frame,
@@ -944,6 +944,7 @@ pub unsafe extern "C" fn patina_signal_fault(
     FAULT_HANDLER
 }
 
+#[unsafe(no_mangle)]
 /// A guest handler [`patina_signal_fault`] or [`patina_fault_route`] named
 /// returned to its fault handler's frame, whose saved mask the kernel
 /// installs next. The containment signals
@@ -955,7 +956,6 @@ pub unsafe extern "C" fn patina_signal_fault(
 /// # Safety
 /// `frame` describes the frame [`patina_signal_fault`] or
 /// [`patina_fault_route`] was given.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_signal_fault_return(frame: *const Frame) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let frame = unsafe { &*frame };

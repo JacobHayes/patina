@@ -329,7 +329,7 @@ pub(super) fn park(
     match step {
         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
         Ok(Step::Continue) => drop(state),
-        Err(error) => return Err(error.into_posix()),
+        Err(error) => return Err(c_int::from(error.into_posix())),
     }
     {
         let mut state = lock_state();
@@ -458,7 +458,9 @@ fn create(state: &mut ThreadRuntime, family: i32, ty: i32, protocol: i32) -> Res
         AF_PACKET => return Err(crate::EPERM),
         _ => return Err(EAFNOSUPPORT),
     };
-    state.ensure_active().map_err(ThreadError::into_posix)?;
+    state
+        .ensure_active()
+        .map_err(|error| c_int::from(error.into_posix()))?;
     let handle = next_handle(state);
     let inode = mint_inode(state);
     state
@@ -469,8 +471,8 @@ fn create(state: &mut ThreadRuntime, family: i32, ty: i32, protocol: i32) -> Res
     Ok(handle)
 }
 
-/// `socket(2)`.
 #[unsafe(no_mangle)]
+/// `socket(2)`.
 pub extern "C" fn patina_sock_socket(family: c_int, ty: c_int, protocol: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     errno_result((|| {
@@ -481,9 +483,9 @@ pub extern "C" fn patina_sock_socket(family: c_int, ty: c_int, protocol: c_int) 
     })())
 }
 
+#[unsafe(no_mangle)]
 /// `socketpair(2)`: the numbers are written to `sv` before the pair exists,
 /// as `__sys_socketpair` does (a bad `sv` is `EFAULT` whatever the family).
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_sock_socketpair(
     family: c_int,
     ty: c_int,
@@ -567,8 +569,8 @@ enum Family {
     Netlink,
 }
 
-/// `bind(2)`.
 #[unsafe(no_mangle)]
+/// `bind(2)`.
 pub extern "C" fn patina_sock_bind(fd: c_int, addr: usize, len: i64) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     errno_result((|| {
@@ -585,8 +587,8 @@ pub extern "C" fn patina_sock_bind(fd: c_int, addr: usize, len: i64) -> i64 {
     })())
 }
 
-/// `connect(2)`.
 #[unsafe(no_mangle)]
+/// `connect(2)`.
 pub extern "C" fn patina_sock_connect(fd: c_int, addr: usize, len: i64) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     errno_result((|| {
@@ -607,8 +609,8 @@ pub extern "C" fn patina_sock_connect(fd: c_int, addr: usize, len: i64) -> i64 {
 /// `kern.ipc.somaxconn` is not declared; its backlog is capped the same.
 const SOMAXCONN: i32 = crate::registry::KERNEL_CONFIG.somaxconn;
 
-/// `listen(2)`.
 #[unsafe(no_mangle)]
+/// `listen(2)`.
 pub extern "C" fn patina_sock_listen(fd: c_int, backlog: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     errno_result((|| {
@@ -630,8 +632,8 @@ pub extern "C" fn patina_sock_listen(fd: c_int, backlog: c_int) -> i64 {
     })())
 }
 
-/// `accept4(2)` (`accept` is flags 0).
 #[unsafe(no_mangle)]
+/// `accept4(2)` (`accept` is flags 0).
 pub extern "C" fn patina_sock_accept(fd: c_int, addr: usize, len_ptr: usize, flags: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     errno_result((|| {
@@ -659,8 +661,8 @@ pub extern "C" fn patina_sock_accept(fd: c_int, addr: usize, len_ptr: usize, fla
     })())
 }
 
-/// `getsockname(2)` (`peer` 0) and `getpeername(2)` (`peer` 1).
 #[unsafe(no_mangle)]
+/// `getsockname(2)` (`peer` 0) and `getpeername(2)` (`peer` 1).
 pub extern "C" fn patina_sock_name(fd: c_int, addr: usize, len_ptr: usize, peer: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     errno_result((|| {
@@ -679,8 +681,8 @@ pub extern "C" fn patina_sock_name(fd: c_int, addr: usize, len_ptr: usize, peer:
     })())
 }
 
-/// `shutdown(2)`: `SHUT_RD`/`SHUT_WR`/`SHUT_RDWR` as `sk_shutdown` bits.
 #[unsafe(no_mangle)]
+/// `shutdown(2)`: `SHUT_RD`/`SHUT_WR`/`SHUT_RDWR` as `sk_shutdown` bits.
 pub extern "C" fn patina_sock_shutdown(fd: c_int, how: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     errno_result((|| {
@@ -736,8 +738,8 @@ fn with_nonblock(flags: c_int, nonblocking: bool) -> c_int {
     }
 }
 
-/// `sendto(2)` (`send` is no address).
 #[unsafe(no_mangle)]
+/// `sendto(2)` (`send` is no address).
 pub extern "C" fn patina_sock_sendto(
     fd: c_int,
     buf: usize,
@@ -764,8 +766,8 @@ pub extern "C" fn patina_sock_sendto(
     })())
 }
 
-/// `recvfrom(2)` (`recv` is no address).
 #[unsafe(no_mangle)]
+/// `recvfrom(2)` (`recv` is no address).
 pub extern "C" fn patina_sock_recvfrom(
     fd: c_int,
     buf: usize,
@@ -865,8 +867,8 @@ pub(crate) fn pipe_signal(flags: c_int, nosigpipe: bool) {
     }
 }
 
-/// `setsockopt(2)`.
 #[unsafe(no_mangle)]
+/// `setsockopt(2)`.
 pub extern "C" fn patina_sock_setsockopt(
     fd: c_int,
     level: c_int,
@@ -891,8 +893,8 @@ pub extern "C" fn patina_sock_setsockopt(
     })())
 }
 
-/// `getsockopt(2)`.
 #[unsafe(no_mangle)]
+/// `getsockopt(2)`.
 pub extern "C" fn patina_sock_getsockopt(
     fd: c_int,
     level: c_int,

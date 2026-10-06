@@ -28,6 +28,7 @@ pub(crate) struct EventFd {
     pub(crate) read_waiters: VecDeque<TaskId>,
 }
 
+#[unsafe(no_mangle)]
 /// eventfd(2) / eventfd2. Syscall-shaped (`eventfd2(initval, flags)`) so a
 /// future syscall-user-dispatch SIGSYS dispatcher can call it with raw
 /// register arguments; the C interposer is thin marshaling over this.
@@ -35,7 +36,6 @@ pub(crate) struct EventFd {
 /// flags are `EINVAL`. Activates the thread subsystem so a later blocking
 /// read or epoll park can reach the baton.
 #[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_eventfd(initval: u32, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     const EFD_SEMAPHORE: c_int = 0o1;
@@ -46,7 +46,7 @@ pub extern "C" fn patina_eventfd(initval: u32, flags: c_int) -> c_int {
     }
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
-        return super::fail(error.into_posix());
+        return super::fail(c_int::from(error.into_posix()));
     }
     let handle = next_handle(&mut state);
     state.net.eventfds.insert(
@@ -134,7 +134,7 @@ pub(crate) unsafe fn eventfd_read(
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
-            Err(error) => return super::fail(error.into_posix()) as isize,
+            Err(error) => return super::fail(c_int::from(error.into_posix())) as isize,
         }
         lock_state().timed_out.remove(&me);
         #[cfg(target_os = "linux")]

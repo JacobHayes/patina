@@ -283,9 +283,9 @@ fn set_rseq(task: TaskId, rseq: Option<Rseq>) {
         .rseq = rseq;
 }
 
+#[unsafe(no_mangle)]
 /// The main thread's adoption, from the C `__libc_start_main` wrapper of a
 /// managed run, before guest constructors.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_thread_registrations_adopt_main() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     adopt(MAIN_TASK);

@@ -179,7 +179,7 @@ pub(crate) fn semtimedop(
     loop {
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
-            return fail(error.into_posix());
+            return fail(c_int::from(error.into_posix()));
         }
         let Ipc { sem, outcomes, .. } = &mut state.ipc;
         let (perm, set) = match sem.get_mut(id) {

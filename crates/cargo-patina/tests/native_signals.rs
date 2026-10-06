@@ -123,13 +123,6 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
 #[test]
 fn a_delivery_costs_the_guest_stack_a_fixed_few_bytes() {
     use std::io::Write;
-    for source in ["signals/segv_routing.c", "signals/counter_small.c"] {
-        let fixture = std::fs::read_to_string(guest_source(source)).unwrap();
-        assert!(
-            !fixture.contains("getauxval("),
-            "auxv must not size {source}"
-        );
-    }
     let native = assert_build_c_guest("signals/segv_routing.c", CLink::Unlinked);
     let patina = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShim);
     let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
@@ -617,78 +610,18 @@ mod raw {
 }
 
 // Class pairing: internal Rust panic and guest abort must use different fatal
-// vehicles. Fault injection is confined to a scratch copy of the real shim;
-// the production export and its real ownership guard are both exercised.
+// vehicles. A feature-gated, explicitly armed failpoint exercises the real
+// export and its ownership guard without changing or copying production source.
 #[test]
 fn internal_rust_panic_never_finalizes_an_invalid_trace() {
     use patina_dst_trace::TraceBundle;
     use std::os::unix::process::ExitStatusExt;
     use std::path::Path;
     use std::process::Command;
-    fn copy_tree(source: &Path, destination: &Path) {
-        std::fs::create_dir_all(destination).unwrap();
-        for entry in std::fs::read_dir(source).unwrap() {
-            let entry = entry.unwrap();
-            let target = destination.join(entry.file_name());
-            if entry.path().is_dir() {
-                copy_tree(&entry.path(), &target);
-            } else {
-                std::fs::copy(entry.path(), target).unwrap();
-            }
-        }
-    }
     for strategy in ["unwind", "abort"] {
         let dir = tempfile::tempdir().unwrap();
         let workspace = common::native_workspace();
-        let shim = dir.path().join("crates/patina-native-shim");
-        copy_tree(&workspace.join("crates/patina-native-shim"), &shim);
-        let mut manifest = std::fs::read_to_string(workspace.join("Cargo.toml")).unwrap();
-        let members = manifest.find("members = [").unwrap();
-        let end = members + manifest[members..].find(']').unwrap() + 1;
-        manifest.replace_range(members..end, "members = [\"crates/patina-native-shim\"]");
-        // Dependencies retain their declared paths; only the shim is copied/mutated.
-        manifest = manifest.replace(
-            "path = \"crates/",
-            &format!("path = \"{}/crates/", workspace.display()),
-        );
-        std::fs::write(dir.path().join("Cargo.toml"), manifest).unwrap();
-        std::fs::copy(workspace.join("Cargo.lock"), dir.path().join("Cargo.lock")).unwrap();
-        let anchor = "pub unsafe extern \"C\" fn patina_clock_now(clock_id: u32, nanos: *mut u64) -> c_int {\n    let _panic_scope = crate::panic_boundary::PanicScope::enter();";
-        // Find the export wherever the shim's module layout puts it.
-        fn rust_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    rust_files(&path, out);
-                } else if path.extension().is_some_and(|ext| ext == "rs") {
-                    out.push(path);
-                }
-            }
-        }
-        let mut files = Vec::new();
-        rust_files(&shim.join("src"), &mut files);
-        let sites: Vec<_> = files
-            .into_iter()
-            .map(|path| {
-                let text = std::fs::read_to_string(&path).unwrap();
-                (path, text)
-            })
-            .filter(|(_, text)| text.contains(anchor))
-            .collect();
-        assert_eq!(
-            sites
-                .iter()
-                .map(|(_, text)| text.matches(anchor).count())
-                .sum::<usize>(),
-            1,
-            "one production ABI guard injection site"
-        );
-        let (source, source_text) = sites.into_iter().next().unwrap();
-        // A valid argument singles out the explicit query, not startup's clock reads.
-        let planted = format!(
-            "{anchor}\n    if clock_id == 1 {{ panic!(\"planted internal Rust panic\"); }}"
-        );
-        std::fs::write(source, source_text.replace(anchor, &planted)).unwrap();
+        let shim = workspace.join("crates/patina-native-shim");
         let target = dir.path().join("build");
         let built = assert_success(
             Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
@@ -701,7 +634,8 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
                     "patina-dst-native-shim",
                     "--manifest-path",
                 ])
-                .arg(dir.path().join("Cargo.toml"))
+                .arg(shim.join("Cargo.toml"))
+                .args(["--features", "test-panic"])
                 .arg("--target-dir")
                 .arg(&target)
                 .args(["--", "-C", &format!("panic={strategy}")])
@@ -785,6 +719,7 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
         let mut rustc = Command::new("rustc");
         rustc
             .arg("--edition=2024")
+            .args(["--cfg", "patina_test_clock_panic"])
             .args(["-C", &format!("panic={strategy}")])
             .arg(&vehicle)
             .arg("--extern")

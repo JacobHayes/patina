@@ -10,7 +10,7 @@ pub(super) fn run_selftest() -> Result<i32, CliError> {
         result.sites.len(),
         result.files_scanned,
         result.files_unparsed,
-        RECOGNIZER_NAMES.len()
+        recognizer_count()
     );
     for kind in KIND_ORDER {
         let count = result

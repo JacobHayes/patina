@@ -115,6 +115,7 @@ fn exchange(
     Ok(old)
 }
 
+#[unsafe(no_mangle)]
 /// `prlimit64(2)`: the process (`ESRCH`), then `check_prlimit_permission`:
 /// another process's limits, read or written, need its ids to be the
 /// caller's or `CAP_SYS_RESOURCE` (init, root's: `EPERM`, before the
@@ -123,7 +124,6 @@ fn exchange(
 ///
 /// # Safety
 /// `new` must be NULL or readable, `old` NULL or writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_prlimit(
     pid: c_int,
     resource: u32,

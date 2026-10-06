@@ -87,12 +87,12 @@ fn file_fionread(handle: Fd, arg: *mut c_void) -> c_int {
     put_int(arg, size.wrapping_sub(position) as i32)
 }
 
+#[unsafe(no_mangle)]
 /// `ioctl(fd, request, arg)`.
 ///
 /// # Safety
 /// `arg`, when the request reads or writes through it and it is non-null,
 /// must point to the guest's `int`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // The kernel reads the request as an `unsigned int`: the C `ioctl`'s

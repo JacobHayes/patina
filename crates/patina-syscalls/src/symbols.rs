@@ -16,27 +16,14 @@
 
 use super::{Platform, Serves, SymbolRow, SymbolStatus};
 
-const fn s(
-    name: &'static str,
-    platform: Platform,
-    serves: Serves,
-    status: SymbolStatus,
-) -> SymbolRow {
-    SymbolRow {
-        name,
-        platform,
-        serves,
-        status,
-    }
-}
+#[macro_use]
+#[path = "symbol_inventory.rs"]
+mod inventory;
+use inventory::s;
 
-pub const SYMBOLS: &[SymbolRow] = {
-    #[cfg(target_os = "macos")]
-    crate::darwin::validate_associations(ROWS, crate::ENTRIES);
-    ROWS
-};
+pub const SYMBOLS: &[SymbolRow] = ROWS;
 
-const ROWS: &[SymbolRow] = &[
+symbol_rows! {
     s(
         "clock_gettime",
         Platform::Both,
@@ -2814,4 +2801,4 @@ const ROWS: &[SymbolRow] = &[
         Serves::Syscalls(&["ptrace"]),
         SymbolStatus::Modeled,
     ),
-];
+}

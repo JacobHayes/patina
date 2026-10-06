@@ -149,6 +149,7 @@ fn host_start_routine() -> StartRoutine {
     thread_trampoline
 }
 
+#[unsafe(no_mangle)]
 /// The C body's prelude: [`thread_prelude`], answering the guest routine
 /// and writing its argument.
 ///
@@ -156,7 +157,6 @@ fn host_start_routine() -> StartRoutine {
 /// `raw` must be the payload `patina_thread_create` handed the host
 /// thread, and `arg` writable.
 #[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_thread_prelude(
     raw: *mut c_void,
     arg: *mut *mut c_void,
@@ -187,15 +187,16 @@ fn thread_returned(value: *mut c_void) {
     unsafe { (*record).retval = value as usize };
 }
 
+#[unsafe(no_mangle)]
 /// The C body's epilogue once the guest routine returned: its value is
 /// the thread's.
 #[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_thread_returned(value: *mut c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     thread_returned(value);
 }
 
+#[unsafe(no_mangle)]
 /// `pthread_exit(value)` on the calling thread, the model's half: the
 /// value becomes the thread's, which its completion hands a joiner. It
 /// returns glibc's `pthread_exit` for the C interposer to call: glibc's
@@ -212,7 +213,6 @@ pub extern "C" fn patina_thread_returned(value: *mut c_void) {
 /// shim's Rust delivery frames beneath the handler (a Rust frame cannot
 /// be unwound: the process would abort where glibc ends the thread).
 #[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_thread_exiting(
     value: *mut c_void,
 ) -> unsafe extern "C" fn(*mut c_void) -> ! {
@@ -322,6 +322,7 @@ fn thread_returns(task: TaskId, retval: usize) {
     thread_finish(task, retval, 0);
 }
 
+#[unsafe(no_mangle)]
 /// The main thread's `pthread_exit`, once the guest's cleanup handlers
 /// ran on it (the C `__libc_start_main` wrapper's cleanup record, the
 /// outermost of the main thread's, calls this). With another thread
@@ -330,7 +331,6 @@ fn thread_returns(task: TaskId, retval: usize) {
 /// and retires the host thread. Alone, it is the last thread, and glibc's
 /// `exit(0)` follows on it.
 #[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_main_thread_exited() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     MAIN_EXITED.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -439,7 +439,7 @@ pub(crate) fn thread_finish(task: TaskId, retval: usize, exit_status: i32) {
         Ok(next) => next,
         Err(error) => fatal(&format!(
             "picking the next task after completion failed ({})",
-            error.into_posix()
+            c_int::from(error.into_posix())
         )),
     };
     #[cfg(target_os = "linux")]
@@ -457,6 +457,7 @@ pub(crate) fn thread_finish(task: TaskId, retval: usize, exit_status: i32) {
     }
 }
 
+#[unsafe(no_mangle)]
 /// Create a managed thread. `pthread_create` semantics: register a task,
 /// spawn a real host thread that parks until it receives the baton, and hand
 /// the caller the real `pthread_t`.
@@ -464,7 +465,6 @@ pub(crate) fn thread_finish(task: TaskId, retval: usize, exit_status: i32) {
 /// # Safety
 /// `thread_out` must be writable, and `start`/`arg` must form a valid
 /// thread entry point per the C ABI.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_thread_create(
     thread_out: *mut *mut c_void,
     attr: *const c_void,
@@ -480,7 +480,7 @@ pub unsafe extern "C" fn patina_thread_create(
     }
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
-        return error.into_posix();
+        return c_int::from(error.into_posix());
     }
     let task = match RealScheduler.spawn("thread") {
         Ok(task) => task,
@@ -530,12 +530,12 @@ pub unsafe extern "C" fn patina_thread_create(
     0
 }
 
+#[unsafe(no_mangle)]
 /// Join a managed thread, blocking the caller until the target completes.
 ///
 /// # Safety
 /// `handle` must be a `pthread_t` from [`patina_thread_create`] and
 /// `retval_out` must be null or writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_thread_join(
     handle: *mut c_void,
     retval_out: *mut *mut c_void,
@@ -585,7 +585,7 @@ pub unsafe extern "C" fn patina_thread_join(
             fatal("join parked without transferring the baton")
         }
         Err(error) => {
-            let error = error.into_posix();
+            let error = c_int::from(error.into_posix());
             #[cfg(target_os = "linux")]
             if error == EDEADLK {
                 state.refuse_deadlocked_join(me);
@@ -619,11 +619,11 @@ pub unsafe extern "C" fn patina_thread_join(
     0
 }
 
+#[unsafe(no_mangle)]
 /// Detach a managed thread so it is never joined.
 ///
 /// # Safety
 /// `handle` must be a `pthread_t` from [`patina_thread_create`].
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_thread_detach(handle: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let key = handle as usize;
@@ -645,10 +645,11 @@ pub unsafe extern "C" fn patina_thread_detach(handle: *mut c_void) -> c_int {
             }
             0
         }
-        Err(error) => error.into_posix(),
+        Err(error) => c_int::from(error.into_posix()),
     }
 }
 
+#[unsafe(no_mangle)]
 /// `pthread_exit` where the model does not reach it, fail-closed: on macOS
 /// (whose libsystem ends a thread without an unwind the model could
 /// follow) and through the prefixed C ABI. On Linux the C interposer goes
@@ -656,7 +657,6 @@ pub unsafe extern "C" fn patina_thread_detach(handle: *mut c_void) -> c_int {
 ///
 /// # Safety
 /// C ABI entry point; the argument is an opaque pointer.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_thread_exit(_retval: *mut c_void) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     fatal(

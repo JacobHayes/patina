@@ -64,10 +64,10 @@ fn register_coverage_range(ranges: &mut Vec<CoverageRange>, start: usize, len: u
     ranges.push(CoverageRange { start, len });
 }
 
+#[unsafe(no_mangle)]
 /// Register one SanitizerCoverage guard-counter range. Called by the C hook's
 /// `__sanitizer_cov_trace_pc_guard_init` once per codegen unit. The guard words
 /// are the counters themselves, so registration records only the live range.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_coverage_register(start: *mut u32, stop: *mut u32) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let len = coverage_len(start.cast_const(), stop.cast_const());
@@ -75,11 +75,11 @@ pub extern "C" fn patina_coverage_register(start: *mut u32, stop: *mut u32) {
     register_coverage_range(&mut state.guard_ranges, start as usize, len);
 }
 
+#[unsafe(no_mangle)]
 /// Register one SanitizerCoverage pc-table range. LLVM gives a flat uintptr_t
 /// array of `(pc, flags)` pairs; the coverage map persists one anchor-relative
 /// pc delta per guard. The flags are intentionally not serialized in wave A's
 /// `patina.covmap/v1` format (12 bytes per edge: u32 count + i64 delta).
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_coverage_register_pcs(start: *const usize, stop: *const usize) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let words = coverage_len(start, stop);

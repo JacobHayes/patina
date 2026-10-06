@@ -2,13 +2,13 @@
 
 use super::*;
 
+#[unsafe(no_mangle)]
 /// Capture deterministic stdout (1) or stderr (2) bytes, mirroring the WASI
 /// host's captured stdio: written through to the host on Linux, flushed at
 /// `patina_shutdown` on macOS ([`StdioCapture`]).
 ///
 /// # Safety
 /// `source` must be readable for `length` bytes when nonzero.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_stdio_write(
     fd: c_int,
     source: *const c_void,
@@ -95,12 +95,12 @@ pub extern "C" fn patina_env_read_gate() -> c_int {
     1
 }
 
+#[unsafe(no_mangle)]
 /// May the C layer mutate `environ`? 0 to go ahead, -1 (`ENOSYS`, with a
 /// diagnostic) when no runtime is installed. Unlike a lookup, a pre-startup
 /// WRITE would change the ambient host array the constructor is about to
 /// scrub, and the guest and the run would then disagree about the
 /// environment: a constructor beat Patina's, so name it and fail closed.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_env_write_gate() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if let Some(message) = init_error().lock().clone() {
@@ -136,12 +136,12 @@ static ENVIRON_INSTALLER: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut(
 
 type EnvironInstaller = unsafe extern "C" fn(*mut *mut c_char);
 
+#[unsafe(no_mangle)]
 /// Register the callback that publishes the startup `environ` array. Called
 /// once from the POSIX constructor before the runtime is installed.
 ///
 /// # Safety
 /// `installer` must be a valid `void (*)(char **)` for the life of the process.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_register_environ_installer(installer: Option<EnvironInstaller>) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // A function pointer and a data pointer are the same width on every platform
@@ -191,12 +191,12 @@ pub(crate) fn publish_environ(env: &BTreeMap<String, String>) {
     unsafe { installer(array) };
 }
 
+#[unsafe(no_mangle)]
 /// Publish `environ` from the installed context's startup map, or an empty
 /// array when no runtime is installed. The POSIX constructor then commits
 /// this map to the launcher's reserved initial-stack environment and scrubs
 /// the old entries before admitting guest environment reads. A deferred
 /// harness installation later replaces `environ` without rebaking the stack.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_publish_environ() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let guard = slot().lock();

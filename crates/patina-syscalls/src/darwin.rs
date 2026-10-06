@@ -68,8 +68,8 @@ mod tests {
         validate_associations(SYMBOLS, ENTRIES);
     }
 
-    // Class pairing: the compile-contract mutation tests the same exhaustive
-    // validator against a typo in the real symbol table.
+    // Class pairing: the const validator checks the real symbol inventory
+    // during compilation; this test exercises its rejection diagnostic.
     #[test]
     fn association_validator_rejects_unknown_names() {
         let mut symbol = *SYMBOLS

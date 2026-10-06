@@ -346,6 +346,7 @@ fn drain_channel_send_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<Ta
         .unwrap_or_default()
 }
 
+#[unsafe(no_mangle)]
 /// Create a simplex pipe: `read_fd_out` is the read end, `write_fd_out` the
 /// write end, both non-blocking when `nonblocking != 0` and close-on-exec
 /// when `cloexec != 0`. The ends and the backing channel come from the class
@@ -355,7 +356,6 @@ fn drain_channel_send_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<Ta
 ///
 /// # Safety
 /// `read_fd_out`/`write_fd_out` must be writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_pipe(
     read_fd_out: *mut c_int,
     write_fd_out: *mut c_int,
@@ -369,7 +369,7 @@ pub unsafe extern "C" fn patina_pipe(
     let now = pipe_inode_time();
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
-        return super::fail(error.into_posix());
+        return super::fail(c_int::from(error.into_posix()));
     }
     let inode = mint_pipe_inode(&mut state, false, now, 2);
     let channel = state.net.next_channel;
@@ -503,7 +503,7 @@ pub(crate) fn fifo_open(
     let me = current_task();
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
-        return super::fail(error.into_posix());
+        return super::fail(c_int::from(error.into_posix()));
     }
     let existing = state.net.fifo_channels.get(&ino).copied();
     // `O_WRONLY|O_NONBLOCK` with no reader is `ENXIO`, and it is decided
@@ -633,7 +633,7 @@ pub(crate) fn fifo_open(
                 Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                 Ok(Step::Continue) => drop(state),
                 Err(error) => {
-                    let errno = error.into_posix();
+                    let errno = c_int::from(error.into_posix());
                     drop(state);
                     // The descriptor never came into existence, so release
                     // the number and the end this open registered — through
@@ -749,7 +749,7 @@ pub(crate) unsafe fn pipe_read(
                 match step {
                     Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                     Ok(Step::Continue) => drop(state),
-                    Err(error) => return super::fail(error.into_posix()) as isize,
+                    Err(error) => return super::fail(c_int::from(error.into_posix())) as isize,
                 }
                 lock_state().timed_out.remove(&me);
                 #[cfg(target_os = "linux")]
@@ -837,7 +837,7 @@ pub(crate) unsafe fn pipe_write(
                 match step {
                     Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                     Ok(Step::Continue) => drop(state),
-                    Err(error) => return super::fail(error.into_posix()) as isize,
+                    Err(error) => return super::fail(c_int::from(error.into_posix())) as isize,
                 }
                 lock_state().timed_out.remove(&me);
                 #[cfg(target_os = "linux")]
@@ -963,7 +963,7 @@ fn pipe_await(wants: &[PipeWant], nonblocking: bool) -> Result<bool, c_int> {
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
-            Err(error) => return Err(error.into_posix()),
+            Err(error) => return Err(c_int::from(error.into_posix())),
         }
         let mut state = lock_state();
         state.timed_out.remove(&me);
@@ -1222,9 +1222,9 @@ fn pipe_size_channel(state: &ThreadRuntime, fd: c_int) -> Option<u64> {
     end.write_channel.or(end.read_channel)
 }
 
+#[unsafe(no_mangle)]
 /// `fcntl(F_GETPIPE_SZ)`: the endpoint's buffer capacity; `EINVAL` for a
 /// description that is not a pipe end.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_pipe_size(guest_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let end = match class_entry(guest_fd) {
@@ -1245,11 +1245,11 @@ pub extern "C" fn patina_pipe_size(guest_fd: c_int) -> c_int {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `fcntl(F_SETPIPE_SZ)`: resize the buffer the way `fs/pipe.c:round_pipe_size`
 /// does — at least one page, rounded up to a power of two, at most the
 /// unprivileged maximum (`EPERM` above it) — and refuse (`EBUSY`) to shrink
 /// below the bytes currently buffered. Returns the new capacity.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_pipe_set_size(guest_fd: c_int, size: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let end = match class_entry(guest_fd) {

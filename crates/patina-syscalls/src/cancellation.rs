@@ -3,8 +3,8 @@
 //! either acts at ([`ACTS_AT`]) or checks at its entry (`PATINA_CANCEL_POINT`,
 //! a named stop when the caller has a cancel to act on), or an import the
 //! pre-run audit refuses (a few act only where they wait:
-//! [`ONLY_WHERE_IT_WAITS`]). `cargo-patina/tests/syscall_registry.rs` holds the
-//! shim's C and the audit to this list.
+//! [`ONLY_WHERE_IT_WAITS`]). `scripts/check-structure.sh` derives C AST lints from this inventory;
+//! `cargo-patina/tests/syscall_registry.rs` checks the compiled symbol surface.
 //!
 //! The list is glibc's own, read from its 2.39 source rather than from the
 //! manual: the public symbols (fortified entries included) whose Linux

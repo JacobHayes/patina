@@ -200,6 +200,7 @@ pub(crate) fn crashed() {
     mappings.publish();
 }
 
+#[unsafe(no_mangle)]
 /// `msync(2)`: 0, or `-errno`. The host judges the flags and the alignment
 /// (`EINVAL`) and finds the holes (`ENOMEM`, every view being host memory);
 /// then the walk of mm/msync.c: `MS_INVALIDATE` over a locked page is `EBUSY`
@@ -207,7 +208,6 @@ pub(crate) fn crashed() {
 /// `MS_SYNC` writes back and syncs the file of each SHARED view before that
 /// point (`vfs_fsync_range` only `if (vma->vm_flags & VM_SHARED)`), a hole
 /// answering `ENOMEM` only after the views past it are synced.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_msync(addr: usize, len: usize, flags: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let result = host(Syscall::N_msync, [addr, len, flags as usize, 0, 0, 0]);

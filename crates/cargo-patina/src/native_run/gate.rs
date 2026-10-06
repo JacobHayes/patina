@@ -41,13 +41,10 @@ fn kernel_supports_sud() -> bool {
     // the values the design verified against the v6.8 kernel source.
     const PR_SET_SYSCALL_USER_DISPATCH: std::ffi::c_int = 59;
     const PR_SYS_DISPATCH_OFF: std::ffi::c_ulong = 0;
-    unsafe extern "C" {
-        fn prctl(option: std::ffi::c_int, ...) -> std::ffi::c_int;
-    }
     // SAFETY: the OFF form with all-zero args is a pure feature probe — it turns
     // dispatch off (a no-op when it was never on) and mutates no process state.
     let rc = unsafe {
-        prctl(
+        crate::prctl(
             PR_SET_SYSCALL_USER_DISPATCH,
             PR_SYS_DISPATCH_OFF,
             0usize,
@@ -72,13 +69,10 @@ fn kernel_supports_sud() -> bool {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn platform_supports_tsc_trap() -> bool {
     const PR_GET_TSC: std::ffi::c_int = 25;
-    unsafe extern "C" {
-        fn prctl(option: std::ffi::c_int, ...) -> std::ffi::c_int;
-    }
     let mut mode: std::ffi::c_int = 0;
     // SAFETY: PR_GET_TSC only reads the current per-thread setting into `mode`.
     let rc = unsafe {
-        prctl(
+        crate::prctl(
             PR_GET_TSC,
             &mut mode as *mut std::ffi::c_int,
             0usize,

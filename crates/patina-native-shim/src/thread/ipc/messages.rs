@@ -60,7 +60,7 @@ pub(crate) unsafe fn msgsnd(id: i32, msgp: *const u8, size: usize, flags: i32) -
     loop {
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
-            return fail(error.into_posix());
+            return fail(c_int::from(error.into_posix()));
         }
         let Ipc { msg, outcomes, .. } = &mut state.ipc;
         let (perm, queue) = match msg.get_mut(id) {
@@ -163,7 +163,7 @@ pub(crate) unsafe fn msgrcv(id: i32, msgp: *mut u8, size: usize, mtype: i64, fla
     let message = loop {
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
-            return fail(error.into_posix());
+            return fail(c_int::from(error.into_posix()));
         }
         let (perm, queue) = match state.ipc.msg.get_mut(id) {
             Ok(found) => found,

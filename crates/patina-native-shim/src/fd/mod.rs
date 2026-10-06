@@ -32,9 +32,9 @@ pub extern "C" fn patina_fd_kind(raw_fd: c_int) -> c_int {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `RLIMIT_NOFILE` as the table enforces it — the one number `getrlimit`,
 /// `sysconf(_SC_OPEN_MAX)` and the `EMFILE` bound must agree on.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_fd_limit() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     c_int::try_from(fd_limit()).expect("the descriptor limit fits an int")
@@ -54,8 +54,8 @@ pub(crate) fn set_fd_limit(limit: u64) {
         .set_limit(usize::try_from(limit).unwrap_or(usize::MAX));
 }
 
-/// `F_GETFD`: 1 when the number carries `FD_CLOEXEC`, 0 when not, -1/`EBADF`.
 #[unsafe(no_mangle)]
+/// `F_GETFD`: 1 when the number carries `FD_CLOEXEC`, 0 when not, -1/`EBADF`.
 pub extern "C" fn patina_fd_getfd(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match fd_table().lock().cloexec(raw_fd) {
@@ -67,8 +67,8 @@ pub extern "C" fn patina_fd_getfd(raw_fd: c_int) -> c_int {
     }
 }
 
-/// `F_SETFD`: set (nonzero) or clear the number's `FD_CLOEXEC` bit.
 #[unsafe(no_mangle)]
+/// `F_SETFD`: set (nonzero) or clear the number's `FD_CLOEXEC` bit.
 pub extern "C" fn patina_fd_setfd(raw_fd: c_int, cloexec: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match fd_table().lock().set_cloexec(raw_fd, cloexec != 0) {
@@ -80,9 +80,9 @@ pub extern "C" fn patina_fd_setfd(raw_fd: c_int, cloexec: c_int) -> c_int {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `F_GETFL`: the description's status flags in the `PATINA_O_*` vocabulary
 /// (access mode, `O_APPEND`, `O_NONBLOCK`, `O_PATH`), or -1/`EBADF`.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_fd_getfl(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match resolve_fd(raw_fd) {
@@ -94,10 +94,10 @@ pub extern "C" fn patina_fd_getfl(raw_fd: c_int) -> c_int {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `F_SETFL`: replace the description's `O_APPEND`/`O_NONBLOCK` with the bits
 /// in `flags` (`PATINA_O_*`); every other bit is ignored, as the kernel ignores
 /// the access mode and creation flags in an `F_SETFL` argument.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_fd_setfl(raw_fd: c_int, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match fd_table().lock().set_status(raw_fd, O_SETFL_MASK, flags) {
@@ -109,9 +109,9 @@ pub extern "C" fn patina_fd_setfl(raw_fd: c_int, flags: u32) -> c_int {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `ioctl(FIONBIO)` / `SOCK_NONBLOCK` on accept: set or clear `O_NONBLOCK`
 /// alone, leaving the other status flags as they are.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_fd_set_nonblocking(raw_fd: c_int, nonblocking: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let bits = if nonblocking != 0 { O_NONBLOCK } else { 0 };
@@ -124,18 +124,18 @@ pub extern "C" fn patina_fd_set_nonblocking(raw_fd: c_int, nonblocking: c_int) -
     }
 }
 
+#[unsafe(no_mangle)]
 /// `dup(2)`: the lowest free number, sharing `fd`'s description, without
 /// `FD_CLOEXEC`.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_dup(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     patina_dupfd(raw_fd, 0, 0)
 }
 
+#[unsafe(no_mangle)]
 /// `fcntl(F_DUPFD)` / `F_DUPFD_CLOEXEC`: the lowest free number at or above
 /// `minimum`. `EINVAL` for a minimum outside the table, `EMFILE` when nothing
 /// at or above it is free.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_dupfd(raw_fd: c_int, minimum: c_int, cloexec: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match fd_table().lock().dup(raw_fd, minimum, cloexec != 0) {
@@ -147,9 +147,9 @@ pub extern "C" fn patina_dupfd(raw_fd: c_int, minimum: c_int, cloexec: c_int) ->
     }
 }
 
+#[unsafe(no_mangle)]
 /// `dup2(2)`: `dup3(old, new, 0)`, except that equal numbers validate `old`
 /// and return it unchanged (where `dup3` is `EINVAL`).
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_dup2(oldfd: c_int, newfd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if oldfd == newfd {
@@ -164,11 +164,11 @@ pub extern "C" fn patina_dup2(oldfd: c_int, newfd: c_int) -> c_int {
     patina_dup3(oldfd, newfd, 0)
 }
 
+#[unsafe(no_mangle)]
 /// `dup3(2)`: bind `newfd` to `oldfd`'s description, closing whatever `newfd`
 /// named first. Equal numbers are `EINVAL`; a target outside the table is
 /// `EBADF`. An error from closing the old target is not reported, as the kernel
 /// does not report it.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_dup3(oldfd: c_int, newfd: c_int, cloexec: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // Binding over an open `newfd` closes it, which releases POSIX locks.
@@ -201,9 +201,9 @@ fn retire_number(raw_fd: c_int) {
     let _ = raw_fd;
 }
 
+#[unsafe(no_mangle)]
 /// `close(2)`: free the number; the description is freed with its last number.
 /// `EBADF` for a number that names nothing.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_close(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     release_posix_locks(raw_fd);
@@ -225,10 +225,10 @@ pub extern "C" fn patina_close(raw_fd: c_int) -> c_int {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `close_range(2)`: close every number in `[first, last]`, or with
 /// `CLOSE_RANGE_CLOEXEC` mark them close-on-exec instead. `first > last` or an
 /// unknown flag is `EINVAL`; the range is clamped to the table.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_close_range(first: u32, last: u32, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let closes = first <= last

@@ -214,7 +214,7 @@ pub(crate) unsafe fn read(
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
-            Err(error) => return fail(error.into_posix()) as isize,
+            Err(error) => return fail(c_int::from(error.into_posix())) as isize,
         }
         let mut state = lock_state();
         state.timed_out.remove(&me);
@@ -385,13 +385,13 @@ pub(crate) fn inq(side: Side, index: u32) -> Result<i32, c_int> {
     Ok(pair.queued(side) as i32)
 }
 
+#[unsafe(no_mangle)]
 /// The name `/proc/self/fd` reads for a pseudoterminal descriptor
 /// (`ttyname`'s answer): its length, written with its terminator when `len`
 /// has room; `ENOTTY` for any other descriptor, `EBADF` for none.
 ///
 /// # Safety
 /// `buf` must be writable for `len` bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_pty_name(fd: c_int, buf: *mut c_char, len: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let resolved = match crate::resolve_fd(fd) {

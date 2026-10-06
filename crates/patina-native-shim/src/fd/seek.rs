@@ -11,12 +11,12 @@ fn no_position(whence: u32) -> c_int {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `lseek(2)`: a file's cursor; a description without offset addressing is
 /// `ESPIPE`.
 ///
 /// On Linux a directory's position is its `getdents64` iteration, which both
 /// doors read and move (`crate::sud::seek_dir_iteration`).
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let handle = match resolve_fd(raw_fd) {
@@ -86,10 +86,10 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
 const SEEK_DATA: u32 = 3;
 const SEEK_HOLE: u32 = 4;
 
+#[unsafe(no_mangle)]
 /// `fsync(2)`: durability for a file (or a directory: the crash model's
 /// namespace barrier); every other kind is `EINVAL`, as the kernel answers for
 /// a pipe or a socket.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_fsync(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let handle = match fdget(raw_fd) {
@@ -124,8 +124,8 @@ pub(crate) fn fs_sync_volume() -> Result<(), c_int> {
     with_context(|context| context.fs_sync_all())
 }
 
-/// `ftruncate(2)`: a file's length; every other kind is `EINVAL`.
 #[unsafe(no_mangle)]
+/// `ftruncate(2)`: a file's length; every other kind is `EINVAL`.
 pub extern "C" fn patina_set_len(raw_fd: c_int, length: u64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let handle = match fdget(raw_fd) {

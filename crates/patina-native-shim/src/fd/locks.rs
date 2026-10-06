@@ -7,7 +7,8 @@ const LOCK_EX: c_int = 2;
 const LOCK_NB: c_int = 4;
 const LOCK_UN: c_int = 8;
 
-/// Advisory whole-file lock — the interposed `flock` in `c/patina_posix.c` and
+#[unsafe(no_mangle)]
+/// Advisory whole-file lock — the interposed `flock` in the staged `patina_posix.c` and
 /// the SUD `flock` row. A single-opener database (via std `File::try_lock`)
 /// takes one `LOCK_EX | LOCK_NB` on open; a lone opener always acquires it.
 ///
@@ -31,7 +32,6 @@ const LOCK_UN: c_int = 8;
 /// carrying `LOCK_MAND` answers 0 and is ignored before anything else is looked
 /// at (Linux 5.19+), an unknown operation is `EINVAL` before the descriptor,
 /// and an empty slot or an `O_PATH` descriptor is `EBADF` (`fdget`).
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
@@ -153,6 +153,7 @@ fn lock_range(resolved: &Resolved, lock: &PatinaFlock) -> Result<(u64, u64), c_i
     Ok((start as u64, end as u64))
 }
 
+#[unsafe(no_mangle)]
 /// `fcntl(2)`'s record locks, both doors: `F_GETLK`/`F_SETLK`/`F_SETLKW`
 /// (POSIX locks, owned by the process) and `F_OFD_GETLK`/`F_OFD_SETLK`/
 /// `F_OFD_SETLKW` (owned by the open file description), in `fs/locks.c`'s
@@ -168,7 +169,6 @@ fn lock_range(resolved: &Resolved, lock: &PatinaFlock) -> Result<(u64, u64), c_i
 /// # Safety
 /// `lock` must be null or point to a writable `struct patina_flock`, at any
 /// alignment.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_record_lock(
     raw_fd: c_int,
     command: u32,

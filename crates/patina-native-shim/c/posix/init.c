@@ -651,6 +651,11 @@ static void patina_sud_init(int argc, char **argv) {
     /* Kernel support probe: PR_SYS_DISPATCH_OFF with all-zero args returns 0 on a
      * SUD kernel and -EINVAL where the feature is absent (arm64 <= 6.18, pre-5.11
      * x86). Same process, same kernel as the guest. */
+#ifdef PATINA_TEST_NO_SUD
+    /* Acceptance-only object build: exercise the unavailable-kernel branch.
+     * Production compiler flags do not define this hook. */
+    return;
+#endif
     if (patina_host_prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_OFF, 0, 0,
                           NULL) != 0) {
         return; /* no kernel SUD: do not arm (pre-run gate handles refusal) */

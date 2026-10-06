@@ -1,0 +1,92 @@
+id: sdk-site-macros
+language: Rust
+severity: error
+message: Declare exported SDK site macros through declare_site_macros so recognition and literal descriptors are generated together.
+files:
+  - crates/patina/**/*.rs
+ignores:
+  - '**/target/**'
+# These two helpers do not register runtime sites: one emits the shared linker
+# record and the other reports lifecycle markers. All site macros use the table.
+rule:
+  all:
+    - kind: attribute_item
+    - has:
+        kind: identifier
+        regex: '^(r#)?macro_export$'
+        stopBy: end
+    - precedes:
+        kind: macro_definition
+        stopBy:
+          not:
+            any:
+              - kind: attribute_item
+              - kind: line_comment
+              - kind: block_comment
+    - not:
+        precedes:
+          all:
+            - kind: macro_definition
+            - has:
+                field: name
+                regex: '^(__patina_static_site|lifecycle_event)$'
+          stopBy:
+            not:
+              any:
+                - kind: attribute_item
+                - kind: line_comment
+                - kind: block_comment
+---
+id: sdk-site-export-generators
+language: Rust
+severity: error
+message: Only the SDK site declaration generator may contain macro_export tokens.
+files:
+  - crates/patina/**/*.rs
+ignores:
+  - crates/patina/src/site_macros.rs
+  - '**/target/**'
+# Rust macro token trees are opaque syntax: also reject a second generator.
+rule:
+  all:
+    - kind: macro_definition
+    - has:
+        kind: identifier
+        regex: '^(r#)?macro_export$'
+        stopBy: end
+---
+id: sdk-site-owning-generator
+language: Rust
+severity: error
+message: Only declare_site_macros may generate exported SDK site macros.
+files:
+  - crates/patina/src/site_macros.rs
+ignores:
+  - '**/target/**'
+rule:
+  all:
+    - kind: macro_definition
+    - has:
+        kind: identifier
+        regex: '^(r#)?macro_export$'
+        stopBy: end
+    - not:
+        has:
+          field: name
+          regex: '^declare_site_macros$'
+---
+id: sdk-site-export-invocations
+language: Rust
+severity: error
+message: SDK exports must come from the site declaration generator, never invocation tokens.
+files:
+  - crates/patina/**/*.rs
+ignores:
+  - '**/target/**'
+rule:
+  all:
+    - kind: macro_invocation
+    - has:
+        kind: identifier
+        regex: '^(r#)?macro_export$'
+        stopBy: end

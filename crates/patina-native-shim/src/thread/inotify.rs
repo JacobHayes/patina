@@ -380,7 +380,7 @@ pub(crate) fn init1(flags: i32) -> i64 {
     let handle = {
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
-            return errno(error.into_posix());
+            return errno(c_int::from(error.into_posix()));
         }
         if state.inotify.instances.len() >= MAX_USER_INSTANCES {
             return errno(EMFILE);
@@ -591,7 +591,7 @@ pub(crate) fn read(handle: u64, nonblocking: bool, buf: usize, len: usize) -> is
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
-            Err(error) => return crate::fail(error.into_posix()) as isize,
+            Err(error) => return crate::fail(c_int::from(error.into_posix())) as isize,
         }
         lock_state().timed_out.remove(&me);
         if signals::resume() == signals::Resumed::Eintr {

@@ -7,8 +7,9 @@
 // registry checkout, and from a git checkout alike.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!(
-        "cargo:src_dir={}",
-        std::env::var("CARGO_MANIFEST_DIR").unwrap()
-    );
+    // Build configuration is read by Cargo before any runtime exists.
+    #[allow(clippy::disallowed_methods)]
+    let source_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    println!("cargo:src_dir={source_dir}");
+    println!("cargo:rerun-if-changed=clippy.toml");
 }

@@ -341,8 +341,8 @@ fn send_one(handle: c_int, nonblocking: bool, msg: usize, flags: c_int) -> Resul
     send_message(handle, message)
 }
 
-/// `sendmsg(2)`.
 #[unsafe(no_mangle)]
+/// `sendmsg(2)`.
 pub extern "C" fn patina_sock_sendmsg(fd: c_int, msg: usize, flags: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     errno_result((|| {
@@ -531,8 +531,8 @@ fn cmsg_flags(_flags: c_int) -> c_int {
     0
 }
 
-/// `recvmsg(2)`.
 #[unsafe(no_mangle)]
+/// `recvmsg(2)`.
 pub extern "C" fn patina_sock_recvmsg(fd: c_int, msg: usize, flags: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     errno_result((|| {
@@ -542,10 +542,10 @@ pub extern "C" fn patina_sock_recvmsg(fd: c_int, msg: usize, flags: c_int) -> i6
     })())
 }
 
+#[unsafe(no_mangle)]
 /// `sendmmsg(2)`: up to `UIO_MAXIOV` messages, each's sent length written
 /// back; the count sent, or the first message's error when none was.
 #[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_sock_sendmmsg(fd: c_int, vec: usize, vlen: u32, flags: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     errno_result((|| {
@@ -581,12 +581,12 @@ pub extern "C" fn patina_sock_sendmmsg(fd: c_int, vec: usize, vlen: u32, flags: 
 #[cfg(target_os = "linux")]
 const MSG_WAITFORONE_FLAG: c_int = MSG_WAITFORONE;
 
+#[unsafe(no_mangle)]
 /// `recvmmsg(2)` (`do_recvmmsg`): the messages received, each's length
 /// written back. An invalid timeout is refused before anything; the
 /// timeout is checked after each message; an error after the first is left
 /// pending on the socket (unless it is `EAGAIN`).
 #[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_sock_recvmmsg(
     fd: c_int,
     vec: usize,

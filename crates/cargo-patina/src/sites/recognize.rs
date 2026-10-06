@@ -1,25 +1,9 @@
 //! Rust source and macro site recognition.
 
 use super::*;
+use patina_dst::SDK_SITE_MACROS;
 
-const SDK_SITE_MACROS: &[&str] = &[
-    "buggify",
-    "buggify_with_prob",
-    "buggify_delay",
-    "buggify_knob",
-    "always",
-    "sometimes",
-    "reachable",
-];
-
-pub(super) const RECOGNIZER_NAMES: &[&str] = &[
-    "buggify",
-    "buggify_with_prob",
-    "buggify_delay",
-    "buggify_knob",
-    "always",
-    "sometimes",
-    "reachable",
+const EXTERNAL_RECOGNIZER_NAMES: &[&str] = &[
     "assert",
     "assert_eq",
     "assert_ne",
@@ -40,6 +24,10 @@ pub(super) const RECOGNIZER_NAMES: &[&str] = &[
     "assert_reachable",
     "assert_unreachable",
 ];
+
+pub(super) fn recognizer_count() -> usize {
+    SDK_SITE_MACROS.len() + EXTERNAL_RECOGNIZER_NAMES.len()
+}
 
 pub(super) fn scan_file(file: &SourceFile, bytes: &[u8]) -> CachedFile {
     let text = String::from_utf8_lossy(bytes);
@@ -254,7 +242,7 @@ fn collect_use_aliases(
 }
 
 fn recognized_import_path(prefix: &[String], ident: &str) -> bool {
-    SDK_SITE_MACROS.contains(&ident)
+    SDK_SITE_MACROS.iter().any(|site| site.name == ident)
         || matches!(
             ident,
             "assert_always"
@@ -299,13 +287,10 @@ enum MacroSite {
 
 fn classify_macro(macro_path: &str, canonical: &str, tokens: &TokenStream) -> Option<MacroSite> {
     let args = split_args(tokens);
+    if let Some(site) = SDK_SITE_MACROS.iter().find(|site| site.name == canonical) {
+        return sdk_label_site(site.kind, site.runtime, site.label_index, &args);
+    }
     match canonical {
-        "buggify" | "buggify_with_prob" => sdk_label_site("fault", "driven", 0, &args),
-        "buggify_delay" => sdk_label_site("delay", "driven", 0, &args),
-        "buggify_knob" => sdk_label_site("knob", "driven", 0, &args),
-        "always" => sdk_label_site("always", "observed", 1, &args),
-        "sometimes" => sdk_label_site("sometimes", "observed", 1, &args),
-        "reachable" => sdk_label_site("reachable", "observed", 0, &args),
         "assert" | "assert_eq" | "assert_ne" => Some(MacroSite::Single {
             kind: "assert",
             runtime: "invisible",
@@ -439,11 +424,6 @@ fn path_to_string(path: &syn::Path) -> String {
         .map(|segment| segment.ident.to_string())
         .collect::<Vec<_>>()
         .join("::")
-}
-
-#[cfg(test)]
-fn recognized_sdk_site_macros() -> BTreeSet<&'static str> {
-    SDK_SITE_MACROS.iter().copied().collect()
 }
 
 #[cfg(test)]

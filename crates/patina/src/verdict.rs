@@ -4,8 +4,6 @@
 use crate::ffi;
 #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
 use crate::wasm_ffi;
-#[cfg(doc)]
-use crate::{buggify, sometimes};
 
 /// What a guest asserts about its own run, for [`verdict`].
 ///
@@ -53,7 +51,7 @@ impl VerdictKind {
 /// about to perform itself, so the resulting SIGABRT is not mistaken for a Patina
 /// fail-closed refusal.
 ///
-/// `label` shares the site-label namespace of [`sometimes!`]/[`buggify!`], but a
+/// `label` shares the site-label namespace of [`crate::sometimes!`]/[`crate::buggify!`], but a
 /// verdict is not a fault site: it registers nothing, the duplicate-label rule
 /// does not apply, and reporting the same label many times in one run is the
 /// point (that is what aggregation means).
@@ -65,7 +63,7 @@ impl VerdictKind {
 ///
 /// In the cargo family (a package that links `patina-dst-runtime` and drives its
 /// own `Context`) this function has no runtime handle to call, exactly like
-/// [`buggify!`]; report through `patina_dst_runtime::Context::verdict` there.
+/// [`crate::buggify!`]; report through `patina_dst_runtime::Context::verdict` there.
 #[inline]
 pub fn verdict(kind: VerdictKind, label: &str, detail: &str) {
     #[cfg(patina_shim)]

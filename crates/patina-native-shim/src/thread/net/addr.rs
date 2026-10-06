@@ -321,6 +321,7 @@ fn inet_aton(text: &str) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::from(value))
 }
 
+#[unsafe(no_mangle)]
 /// `getaddrinfo`'s numeric-host parse ([`numeric_host`]): the family with
 /// the address in `out` (4 or 16 bytes, network order) and the IPv6 scope in
 /// `scope`, or 0 when `node` is no numeric host.
@@ -328,7 +329,6 @@ fn inet_aton(text: &str) -> Option<Ipv4Addr> {
 /// # Safety
 /// `node` is a NUL-terminated string; `out` names 16 writable bytes and
 /// `scope` a writable `u32`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_net_numeric_host(
     node: *const std::ffi::c_char,
     out: *mut u8,

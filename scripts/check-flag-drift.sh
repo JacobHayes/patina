@@ -95,6 +95,8 @@ SOURCES=("${DOCS[@]}" ${SCRIPTS[@]+"${SCRIPTS[@]}"})
 # Allowlist: non-patina flags the docs/scripts legitimately mention. Keep this
 # minimal — every entry says whose flag it is. A patina flag NEVER belongs here;
 # if the gate flags one, fix the doc/script or the registry, don't allowlist it.
+# --rule, --config, --skip-snapshot-tests, --no-ignore and --globs belong to
+# ast-grep; --fixture-dir belongs to the registry-derived structural rule emitter.
 ALLOWED_FLAGS='
 --all
 --all-targets
@@ -106,6 +108,12 @@ ALLOWED_FLAGS='
 --no-deps
 --workspace
 --example
+--rule
+--config
+--fixture-dir
+--skip-snapshot-tests
+--no-ignore
+--globs
 --manifest-path
 --quiet
 --test

@@ -2,13 +2,28 @@
 
 use super::*;
 
+#[cfg(feature = "test-panic")]
+static CLOCK_PANIC_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[unsafe(no_mangle)]
+/// Arm the next clock boundary's internal panic in acceptance builds only.
+#[cfg(feature = "test-panic")]
+pub extern "C" fn patina_test_arm_clock_panic() {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    CLOCK_PANIC_ARMED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+#[unsafe(no_mangle)]
 /// Write a deterministic clock value to caller-owned memory.
 ///
 /// # Safety
 /// `nanos` must point to writable `uint64_t` storage.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_clock_now(clock_id: u32, nanos: *mut u64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    #[cfg(feature = "test-panic")]
+    if CLOCK_PANIC_ARMED.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        panic!("planted internal Rust panic");
+    }
     if nanos.is_null() {
         return fail(EINVAL);
     }
@@ -16,7 +31,7 @@ pub unsafe extern "C" fn patina_clock_now(clock_id: u32, nanos: *mut u64) -> c_i
         Ok(clock) => clock,
         Err(errno) => return fail(errno),
     };
-    // Bootstrap window (see `SHIM_BOOTSTRAP`): an allocator's constructor may
+    // Bootstrap window (see `in_shim_bootstrap`): an allocator's constructor may
     // read time before runtime installation. Use the default clock origins so
     // default installation does not jump from zero to hours of uptime.
     // Do not enter `with_context`/`ensure_runtime`: that could re-enter the
@@ -53,12 +68,12 @@ pub extern "C" fn patina_sleep_until(clock_id: u32, deadline_nanos: u64) -> c_in
     unsafe { patina_sleep_until_remaining(clock_id, deadline_nanos, std::ptr::null_mut()) }
 }
 
+#[unsafe(no_mangle)]
 /// Sleep with an optional two-i64 kernel timespec remaining-time output.
 /// Absolute sleeps pass null, so their caller's rem buffer is untouched.
 /// # Safety
 /// None beyond the ABI: a non-null `remaining` is copied to through
 /// `uaccess` (`EFAULT` where it cannot be).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_sleep_until_remaining(
     clock_id: u32,
     deadline_nanos: u64,
@@ -102,6 +117,7 @@ pub unsafe extern "C" fn patina_sleep_until_remaining(
     }
 }
 
+#[unsafe(no_mangle)]
 /// The process's virtual CPU time in nanoseconds, backing the Darwin resource
 /// accounting interposers (`getrusage`/`task_info`): the modeled startup cost
 /// plus what the advance-on-spin rescue charged its tasks
@@ -119,7 +135,6 @@ pub unsafe extern "C" fn patina_sleep_until_remaining(
 ///
 /// # Safety
 /// `nanos` must be non-null and writable for one `u64`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_cpu_time_nanos(nanos: *mut u64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if nanos.is_null() {

@@ -373,14 +373,10 @@ pub fn assert_build_c_guest_with_flags(name: &str, link: CLink, flags: &[&str]) 
             };
             if matches!(link, CLink::PosixShimWithoutSud) {
                 super::compile_posix_object(dir.path());
-                let source = dir.path().join("posix/init.c");
-                let code = std::fs::read_to_string(&source).unwrap();
-                let probe =
-                    "if (patina_host_prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_OFF";
-                assert_eq!(code.matches(probe).count(), 1, "SUD probe mutation site");
-                std::fs::write(&source, code.replace(probe,
-                "if (1 || patina_host_prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_OFF")).unwrap();
-                cc.arg(super::compile_staged_posix_object(dir.path()));
+                cc.arg(super::compile_staged_posix_object(
+                    dir.path(),
+                    &["-DPATINA_TEST_NO_SUD"],
+                ));
             } else {
                 cc.arg(object);
             }

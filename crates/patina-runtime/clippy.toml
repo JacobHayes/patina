@@ -1,0 +1,8 @@
+# Read host configuration before installing the runtime; finalization must use
+# the captured RuntimeConfig. config_env is the sanctioned boundary.
+disallowed-methods = [
+  { path = "std::env::var", reason = "resolve control-plane values in config_env before installation" },
+  { path = "std::env::var_os", reason = "resolve control-plane values in config_env before installation" },
+  { path = "std::env::vars", reason = "resolve control-plane values in config_env before installation" },
+  { path = "std::env::vars_os", reason = "resolve control-plane values in config_env before installation" },
+]

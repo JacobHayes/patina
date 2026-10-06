@@ -225,12 +225,12 @@ fn sync_written(resolved: Resolved, moved: usize, flags: i32, stopped: Option<c_
     finish(moved, stopped)
 }
 
+#[unsafe(no_mangle)]
 /// `readv(2)`, and `preadv2` at position -1 with its `RWF_*` flags.
 ///
 /// # Safety
 /// `vector` must be a readable guest vector of `count` segments, each segment
 /// writable for its length.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_readv(
     raw_fd: c_int,
     vector: *const GuestIovec,
@@ -260,12 +260,12 @@ pub unsafe extern "C" fn patina_readv(
     transferred(&resolved, moved, false)
 }
 
+#[unsafe(no_mangle)]
 /// `writev(2)`, and `pwritev2` at position -1 with its `RWF_*` flags.
 ///
 /// # Safety
 /// `vector` must be a readable guest vector of `count` segments, each segment
 /// readable for its length.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_writev(
     raw_fd: c_int,
     vector: *const GuestIovec,
@@ -295,13 +295,13 @@ pub unsafe extern "C" fn patina_writev(
     transferred(&resolved, moved, true)
 }
 
+#[unsafe(no_mangle)]
 /// `preadv(2)`/`preadv2` at a position: scatter reads at `offset` that leave
 /// the cursor alone. A negative position is `EINVAL` before the descriptor, a
 /// description without offset addressing `ESPIPE` (`do_preadv`).
 ///
 /// # Safety
 /// As [`patina_readv`].
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_preadv(
     raw_fd: c_int,
     vector: *const GuestIovec,
@@ -341,13 +341,13 @@ pub unsafe extern "C" fn patina_preadv(
     transferred(&resolved, finish(moved, None), false)
 }
 
+#[unsafe(no_mangle)]
 /// `pwritev(2)`/`pwritev2` at a position: gather writes that leave the cursor
 /// alone, landing at the end of the file instead under `O_APPEND` (Linux) or
 /// `RWF_APPEND` — one end, taken once, so the segments stay contiguous.
 ///
 /// # Safety
 /// As [`patina_writev`].
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_pwritev(
     raw_fd: c_int,
     vector: *const GuestIovec,

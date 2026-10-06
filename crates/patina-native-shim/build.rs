@@ -1,12 +1,20 @@
-// This crate is part of the native-shim build closure that `cargo-patina`
-// carries embedded and unpacks to build a guest's linked shim. The only job of
-// this build script is to publish this crate's source directory to the build
-// script of any direct dependent via cargo's `links`/`DEP_*` metadata channel
-// (see `crates/patina-native-shim/AGENTS.md`), which is how `cargo-patina`'s
-// build script discovers every crate to embed — in-tree, from the crates.io
-// registry checkout, and from a git checkout alike.
+// Publish the embedded source location and generate native C staging inputs.
+mod build_support;
+mod symbol_metadata;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build_support.rs");
+    let out = std::env::var_os("OUT_DIR").unwrap();
+    let metadata = std::env::var_os("DEP_PATINA_DST_SYSCALLS_SYMBOL_METADATA")
+        .expect("syscalls normal dependency must export generated symbol metadata");
+    println!(
+        "cargo:rerun-if-changed={}",
+        std::path::Path::new(&metadata).display()
+    );
+    println!("cargo:rerun-if-changed=symbol_metadata.rs");
+    let symbols = symbol_metadata::read(std::path::Path::new(&metadata));
+    build_support::generate(std::path::Path::new(&out), &symbols);
     println!(
         "cargo:src_dir={}",
         std::env::var("CARGO_MANIFEST_DIR").unwrap()

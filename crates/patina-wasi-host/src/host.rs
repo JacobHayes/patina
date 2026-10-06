@@ -41,7 +41,7 @@ pub struct Preview1Host {
     /// host function, so counting cannot perturb the guest: the map is a pure
     /// observation of the same deterministic instruction stream that produces
     /// `WasiExecution::fuel_consumed`.
-    pub(super) hostcalls: BTreeMap<&'static str, u64>,
+    hostcalls: BTreeMap<&'static str, u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -119,8 +119,12 @@ impl Preview1Host {
 
     /// Record one call to the imported function `name`. The saturating add keeps
     /// a pathological guest from wrapping the counter around to a smaller depth.
-    pub(super) fn count_hostcall(&mut self, name: &'static str) {
-        let entry = self.hostcalls.entry(name).or_insert(0);
+    pub(super) fn hostcalls(&self) -> &BTreeMap<&'static str, u64> {
+        &self.hostcalls
+    }
+
+    pub(super) fn count_hostcall(&mut self, claim: crate::imports::HostcallClaim) {
+        let entry = self.hostcalls.entry(claim.name()).or_insert(0);
         *entry = entry.saturating_add(1);
     }
 

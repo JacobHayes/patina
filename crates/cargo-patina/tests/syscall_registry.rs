@@ -174,69 +174,10 @@ fn planted_gaps_are_reported() {
     assert_eq!(gaps.absent_but_defined, vec![absent]);
 }
 
-/// The identifier argument of a `MACRO(Ident)` invocation at the start of a
-/// trimmed `line`, e.g. `PATINA_FRAMEWORK_TRAP(CFArrayCreate)` → `CFArrayCreate`.
-fn macro_invocation_arg(line: &str, macro_name: &str) -> Option<String> {
-    let rest = line.strip_prefix(macro_name)?.strip_prefix('(')?;
-    let end = rest.find(')')?;
-    let ident = &rest[..end];
-    (!ident.is_empty() && ident.chars().all(|c| c.is_alphanumeric() || c == '_'))
-        .then(|| ident.to_owned())
-}
-
-/// The single string-literal argument of `prefix"…")` in `line`, if present.
-fn one_literal_arg(line: &str, prefix: &str) -> Option<String> {
-    let rest = line.split_once(prefix)?.1.trim_start();
-    let rest = rest.strip_prefix('"')?;
-    let end = rest.find('"')?;
-    Some(rest[..end].to_owned())
-}
-
-/// `patina_native_trap("class", "symbol")` → `(class, symbol)`.
-fn native_trap_args(line: &str) -> Option<(String, String)> {
-    let rest = line.split_once("patina_native_trap(")?.1;
-    let mut literals = rest.split('"').skip(1).step_by(2);
-    let class = literals.next()?.to_owned();
-    let symbol = literals.next()?.to_owned();
-    Some((symbol, class))
-}
-
-/// Every deny-trap-calling definition in the shim's C, as `(symbol, class)`:
-/// the two trap macros' invocations, the explicit `patina_native_trap` sites,
-/// and the `patina_process_trap` sites. The macro class is fixed by the macro
-/// (its body calls `patina_native_trap` with that literal class).
-fn c_deny_traps() -> BTreeSet<(String, String)> {
-    let mut set = BTreeSet::new();
-    for (_, source) in patina_dst_native_shim::POSIX_C_FAMILY_SOURCES {
-        for raw in source.lines() {
-            let line = raw.trim_start();
-            // Skip preprocessor lines so the macro `#define`/`#undef` are ignored;
-            // real invocations sit at column 0 with no leading `#`.
-            if !line.starts_with('#') {
-                if let Some(symbol) = macro_invocation_arg(line, "PATINA_FRAMEWORK_TRAP") {
-                    set.insert((symbol, "macos-framework".to_owned()));
-                    continue;
-                }
-                if let Some(symbol) = macro_invocation_arg(line, "PATINA_INTROSPECTION_TRAP") {
-                    set.insert((symbol, "host-introspection".to_owned()));
-                    continue;
-                }
-            }
-            if let Some(symbol) = one_literal_arg(line, "patina_process_trap(") {
-                set.insert((symbol, "process".to_owned()));
-            }
-            if let Some((symbol, class)) = native_trap_args(line) {
-                set.insert((symbol, class));
-            }
-        }
-    }
-    set
-}
-
-/// (e) Three-way agreement on the deny-trap surface, and the interposed rows
+/// (e) Registry agreement on the deny-trap surface, and the interposed rows
 /// never in it.
 #[test]
-fn deny_rows_agree_with_patina_target_and_the_c_trap_sites() {
+fn deny_rows_agree_with_patina_target() {
     let rows: BTreeSet<(String, String)> = SYMBOLS
         .iter()
         .filter_map(|symbol| match symbol.status {
@@ -255,16 +196,6 @@ fn deny_rows_agree_with_patina_target_and_the_c_trap_sites() {
          rows not in patina-target: {:?}\n  patina-target entries with no Deny row: {:?}",
         rows.difference(&target).collect::<Vec<_>>(),
         target.difference(&rows).collect::<Vec<_>>()
-    );
-    let c = c_deny_traps();
-    assert_eq!(
-        rows,
-        c,
-        "registry Deny rows and the shim's C trap sites differ.\n  \
-         rows with no trap site (a trap became a real model? flip the row): {:?}\n  \
-         trap sites with no Deny row (add one): {:?}",
-        rows.difference(&c).collect::<Vec<_>>(),
-        c.difference(&rows).collect::<Vec<_>>()
     );
     let trap_names: BTreeSet<&str> = target.iter().map(|(name, _)| name.as_str()).collect();
     let interposed_in_deny: Vec<&str> = SYMBOLS
@@ -302,178 +233,48 @@ fn deny_rows_agree_with_patina_target_and_the_c_trap_sites() {
     );
 }
 
-/// Non-vacuity for the C parse: the parser sees each trap shape.
-#[test]
-fn c_trap_parser_recognizes_every_trap_shape() {
-    let traps = c_deny_traps();
-    assert!(traps.contains(&("fork".to_owned(), "process".to_owned())));
-    assert!(traps.contains(&("CFRetain".to_owned(), "macos-framework".to_owned())));
-    assert!(traps.contains(&("IOIteratorNext".to_owned(), "host-introspection".to_owned())));
-    assert_eq!(traps.len(), native_deny_trap_symbols().len());
-}
-
-/// Every definition of the public C function `name` in `sources`: its text
-/// from the signature (at column 0) through the closing brace at column 0,
-/// or its one line. A declaration (a `;` before any `{`) is none.
-fn c_definitions(sources: &[&str], name: &str) -> Vec<String> {
-    let call = format!("{name}(");
-    let starts_definition = |line: &str| {
-        !line.starts_with([' ', '\t', '#', '/', '*', '}'])
-            && line.find(&call).is_some_and(|at| {
-                let head = &line[..at];
-                !head.trim().is_empty() && (head.ends_with(' ') || head.ends_with('*'))
-            })
-    };
-    let mut found = Vec::new();
-    for source in sources {
-        let lines: Vec<&str> = source.lines().collect();
-        let mut index = 0;
-        while index < lines.len() {
-            if !starts_definition(lines[index]) {
-                index += 1;
-                continue;
-            }
-            let mut text = String::new();
-            let mut opened = false;
-            while index < lines.len() {
-                let line = lines[index];
-                text.push_str(line);
-                text.push('\n');
-                index += 1;
-                if !opened {
-                    match (line.find('{'), line.find(';')) {
-                        (Some(brace), Some(semi)) if semi < brace => break,
-                        (None, Some(_)) => break,
-                        (Some(_), _) => opened = true,
-                        (None, None) => {}
-                    }
-                    if opened && line.trim_end().ends_with('}') {
-                        found.push(std::mem::take(&mut text));
-                        break;
-                    }
-                } else if line == "}" {
-                    found.push(std::mem::take(&mut text));
-                    break;
-                }
-            }
-        }
-    }
-    found
-}
-
-/// The cancellation-point gate over `sources`: each of glibc's cancellation
-/// points the shim defines (`status`) either acts (a sleep bracketed by
-/// `PATINA_CANCEL_ENTER`, or `pthread_testcancel`) or checks at its entry in
-/// every definition (`PATINA_CANCEL_POINT("name")`); one it does not define
-/// (or lists as `Absent`) is an import the audit refuses (`allowed` false);
-/// a deny-trap aborts by name at the call. Every entry check names one of
-/// glibc's points. Answers each violation.
-fn cancellation_gaps(
-    sources: &[&str],
-    status: impl Fn(&str) -> Option<SymbolStatus>,
-    allowed: impl Fn(&str) -> bool,
-) -> Vec<String> {
-    use patina_dst_native_shim::registry::cancellation::{
-        ACTS_AT, GLIBC_CANCELLATION_POINTS, ONLY_WHERE_IT_WAITS,
-    };
-    let mut gaps = Vec::new();
-    for &name in GLIBC_CANCELLATION_POINTS {
-        match status(name) {
-            // A deny-trap aborts by name at the call; a join stops where it
-            // would wait (the model's cancellable wait classes).
-            Some(SymbolStatus::Deny(_)) => {}
-            Some(_) if ONLY_WHERE_IT_WAITS.contains(&name) => {}
-            None | Some(SymbolStatus::Absent) => {
-                if allowed(name) {
-                    gaps.push(format!(
-                        "{name}: not defined by the shim, yet an allowed import"
-                    ));
-                }
-            }
-            Some(_) => {
-                let definitions = c_definitions(sources, name);
-                if definitions.is_empty() {
-                    gaps.push(format!("{name}: a symbol row, but no C definition found"));
-                }
-                let check = format!("PATINA_CANCEL_POINT(\"{name}\")");
-                for definition in definitions {
-                    let meets = if ACTS_AT.contains(&name) {
-                        definition.contains("PATINA_CANCEL_ENTER")
-                            || definition.contains("patina_cancel_test(")
-                    } else {
-                        definition.contains(&check)
-                    };
-                    if !meets {
-                        gaps.push(format!(
-                            "{name}: a definition without its cancellation check"
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    for source in sources {
-        for named in source.split("PATINA_CANCEL_POINT(\"").skip(1) {
-            let named = named.split('"').next().unwrap_or_default();
-            if !GLIBC_CANCELLATION_POINTS.contains(&named) {
-                gaps.push(format!(
-                    "{named}: an entry check names no glibc cancellation point"
-                ));
-            }
-        }
-    }
-    gaps
-}
-
-/// A pending cancel reaching any glibc cancellation point a guest can reach
-/// acts as glibc's does or stops the run by name, never passes silently:
-/// every such point is a shim C wrapper that acts or checks, or an import the
-/// audit refuses (patina-syscalls `cancellation.rs`).
+/// Every glibc cancellation point is a compiled shim definition or remains an
+/// import the real audit refuses. Paired with registry-derived C AST lints for
+/// the contracts of definitions; an import has no C body those lints can inspect.
 #[cfg(target_os = "linux")]
 #[test]
-fn every_glibc_cancellation_point_acts_stops_or_is_refused() {
-    let sources: Vec<&str> = patina_dst_native_shim::POSIX_C_FAMILY_SOURCES
-        .iter()
-        .map(|(_, source)| *source)
-        .collect();
-    let status = |name: &str| {
-        SYMBOLS
-            .iter()
-            .find(|symbol| symbol.name == name && symbol.platform.defines_on(Os::Linux))
-            .map(|symbol| symbol.status)
-    };
-    let gaps = cancellation_gaps(
-        &sources,
-        status,
-        patina_dst_target::native_elf_import_allowed,
-    );
+fn unimplemented_cancellation_points_are_refused_imports() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = compile_posix_object(dir.path());
+    let bytes = std::fs::read(path).unwrap();
+    let object = object::File::parse(&*bytes).unwrap();
+    let defined = defined_public_symbols(&object);
+    let allowed =
+        unprotected_cancellation_imports(&defined, patina_dst_target::native_elf_import_allowed);
     assert!(
-        gaps.is_empty(),
-        "cancellation points the model would pass silently: {gaps:#?}"
+        allowed.is_empty(),
+        "unimplemented glibc cancellation points escape through allowed host imports: {allowed:?}"
     );
 }
 
-/// Non-vacuity: a wrapper without its check, an allowed import, and a check
-/// naming no cancellation point are each reported; the checked wrapper and
-/// the acting sleep are not.
+#[cfg(target_os = "linux")]
+fn unprotected_cancellation_imports(
+    defined: &BTreeSet<String>,
+    import_allowed: impl Fn(&str) -> bool,
+) -> Vec<&'static str> {
+    patina_dst_native_shim::registry::cancellation::GLIBC_CANCELLATION_POINTS
+        .iter()
+        .copied()
+        .filter(|name| !defined.contains(*name) && import_allowed(name))
+        .collect()
+}
+
+/// Standalone detector selftest: granting an unimplemented cancellation import
+/// must be a finding even though there is no wrapper for the C syntax lint.
+#[cfg(target_os = "linux")]
 #[test]
-fn planted_cancellation_gaps_are_reported() {
-    let sources = [
-        "ssize_t read(int fd, void *to, size_t n) {\n    return patina_read(fd, to, n);\n}\n",
-        "ssize_t write(int fd, const void *from, size_t n) { PATINA_CANCEL_POINT(\"write\"); return 0; }\n",
-        "int sleep(unsigned s) {\n    PATINA_CANCEL_ENTER(outer);\n    PATINA_CANCEL_LEAVE(outer);\n}\n",
-        "int getpid(void) {\n    PATINA_CANCEL_POINT(\"getpid\");\n}\n",
-    ];
-    let status = |name: &str| {
-        matches!(name, "read" | "write" | "sleep" | "getpid").then_some(SymbolStatus::Modeled)
-    };
-    let gaps = cancellation_gaps(&sources, status, |name| name == "usleep");
+fn cancellation_refusal_detector_rejects_planted_allowance() {
+    // The planted definition set deliberately lacks this import, independently
+    // of how many cancellation points the real shim eventually implements.
+    let defined = BTreeSet::new();
     assert_eq!(
-        gaps,
-        [
-            "read: a definition without its cancellation check",
-            "usleep: not defined by the shim, yet an allowed import",
-            "getpid: an entry check names no glibc cancellation point",
-        ]
+        unprotected_cancellation_imports(&defined, |name| name == "aio_suspend"),
+        vec!["aio_suspend"]
     );
+    assert!(unprotected_cancellation_imports(&defined, |_| false).is_empty());
 }

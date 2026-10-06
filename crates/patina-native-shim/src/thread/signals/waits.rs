@@ -181,10 +181,10 @@ pub(crate) enum WaitMode {
     Pause = 2,
 }
 
+#[unsafe(no_mangle)]
 /// Wait/dequeue entry shared by pause, suspend, and timed signal waits.
 /// # Safety
 /// Pointers must be valid kernel-layout mask, info, and timespec buffers.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_signal_wait(
     set: *const u64,
     info: *mut Info,
@@ -285,7 +285,7 @@ pub unsafe extern "C" fn patina_signal_wait(
             Ok(Step::Continue) => drop(state),
             Ok(Step::Switch(task)) => switch_and_park(state, task, me),
             Err(error) => {
-                return -i64::from(error.into_posix());
+                return -i64::from(c_int::from(error.into_posix()));
             }
         }
         let matched = {

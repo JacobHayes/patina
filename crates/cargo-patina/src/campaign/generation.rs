@@ -445,9 +445,7 @@ mod tests {
         use std::os::unix::process::CommandExt;
         use std::time::Duration;
 
-        unsafe extern "C" {
-            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
-        }
+        use crate::fcntl;
         const F_SETFD: i32 = 2;
 
         let dir = tempfile::tempdir().expect("tempdir");

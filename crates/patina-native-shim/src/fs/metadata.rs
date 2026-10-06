@@ -163,16 +163,16 @@ fn write_metadata(metadata: patina_dst_abi::FsMetadata, out: *mut PatinaMetadata
     0
 }
 
+#[unsafe(no_mangle)]
 /// The guest's pid (`registry::IDENTITY_PID`): the one value `getpid`
 /// answers on both doors.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_pid() -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     registry::IDENTITY_PID as i32
 }
 
-/// The guest's parent, the pid namespace's init (`registry::INIT_PID`).
 #[unsafe(no_mangle)]
+/// The guest's parent, the pid namespace's init (`registry::INIT_PID`).
 pub extern "C" fn patina_ppid() -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     registry::INIT_PID as i32
@@ -219,20 +219,20 @@ pub(crate) const fn caller() -> Caller {
     }
 }
 
+#[unsafe(no_mangle)]
 /// The caller's user id ([`caller`]) — what every `st_uid`, the C
 /// `getuid`/`geteuid`, and the ownership comparisons read. A guest reading
 /// an owner reads this, never a per-entry field: the deterministic
 /// filesystem stores no owner because every entry is the caller's.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_uid() -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     caller().uid
 }
 
+#[unsafe(no_mangle)]
 /// Entry `index` of the virtual machine's passwd database
 /// (`registry::PASSWD`, file order) as its `/etc/passwd` line, or NULL past
 /// the last: what the C passwd readers answer from.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_passwd_line(index: u32) -> *const c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     usize::try_from(index)
@@ -241,8 +241,8 @@ pub extern "C" fn patina_passwd_line(index: u32) -> *const c_char {
         .map_or(std::ptr::null(), |line| line.as_ptr())
 }
 
-/// The caller's group id; see [`patina_uid`].
 #[unsafe(no_mangle)]
+/// The caller's group id; see [`patina_uid`].
 pub extern "C" fn patina_gid() -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     caller().gid
@@ -258,6 +258,7 @@ pub(crate) fn node_name() -> Result<String, c_int> {
     with_context_raw(|context| Ok(context.hostname().to_owned()))
 }
 
+#[unsafe(no_mangle)]
 /// `uname(3)` on Darwin: the virtual Darwin kernel's self-description
 /// (`darwin_identity`) into the caller's `struct utsname`. 0, or -1 with
 /// [`patina_errno`] (`EFAULT` for NULL).
@@ -265,7 +266,6 @@ pub(crate) fn node_name() -> Result<String, c_int> {
 /// # Safety
 /// `out` must be NULL or writable for a Darwin `struct utsname`.
 #[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_uname(out: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if out.is_null() {
@@ -282,6 +282,7 @@ pub unsafe extern "C" fn patina_uname(out: *mut c_void) -> c_int {
     0
 }
 
+#[unsafe(no_mangle)]
 /// Read the metadata of the entry `(dirfd, path)` resolves to: the one entry
 /// behind `stat`, `lstat`, `fstatat`, `statx`, `access`, `statfs` and every
 /// other by-path metadata read on both doors. `flags` are `PATINA_RESOLVE_*`:
@@ -293,7 +294,6 @@ pub unsafe extern "C" fn patina_uname(out: *mut c_void) -> c_int {
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string and `out` to a
 /// writable `struct patina_metadata`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_metadata_at(
     dirfd: c_int,
     path: *const c_char,
@@ -332,6 +332,7 @@ pub unsafe extern "C" fn patina_metadata_at(
     write_metadata(metadata, out)
 }
 
+#[unsafe(no_mangle)]
 /// `access`/`faccessat`'s answer for the node a record describes, both
 /// doors: 0 or the errno. The caller is the one modeled identity: the owner
 /// of every volume entry (the owner triad answers), and not root, so a
@@ -341,7 +342,6 @@ pub unsafe extern "C" fn patina_metadata_at(
 ///
 /// # Safety
 /// `values` must point to a readable record.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_access_answer(values: *const PatinaMetadata, mode: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: readable per this function's contract.
@@ -391,11 +391,11 @@ pub(crate) fn node_owner(fs: u32) -> (u32, u32) {
     }
 }
 
+#[unsafe(no_mangle)]
 /// The C face of [`node_owner`].
 ///
 /// # Safety
 /// `uid` and `gid` must be writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_node_owner(fs: u32, uid: *mut u32, gid: *mut u32) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let (owner, group) = node_owner(fs);
@@ -504,11 +504,11 @@ fn write_patina_metadata(metadata: PatinaMetadata, out: *mut PatinaMetadata) -> 
     0
 }
 
+#[unsafe(no_mangle)]
 /// Read full metadata for a deterministic descriptor.
 ///
 /// # Safety
 /// `out` must point to a writable `struct patina_metadata`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut PatinaMetadata) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // A FIFO descriptor is a pipe endpoint, not a filesystem descriptor: the
@@ -577,6 +577,7 @@ pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut Patina
     }
 }
 
+#[unsafe(no_mangle)]
 /// Change the permission bits of the entry `(dirfd, path)` names (`chmod` /
 /// `fchmodat`). `flags` are `PATINA_RESOLVE_*`: without `NOFOLLOW` a trailing
 /// symlink resolves and its TARGET changes (the `chmod` and flagless `fchmodat`
@@ -585,7 +586,6 @@ pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut Patina
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_chmod(
     dirfd: c_int,
     path: *const c_char,
@@ -627,9 +627,9 @@ pub unsafe extern "C" fn patina_chmod(
     }
 }
 
+#[unsafe(no_mangle)]
 /// Change the permission bits of the entry an open descriptor names (`fchmod`).
 /// A descriptor already names the node, so there is no symlink to resolve.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // A FIFO endpoint is a pipe, not a filesystem descriptor — so the bits it
@@ -729,6 +729,7 @@ fn resolve_time_arguments(
     Ok((pick(atime_kind, atime)?, pick(mtime_kind, mtime)?))
 }
 
+#[unsafe(no_mangle)]
 /// `utimensat(2)` on a `(dirfd, path)`: set the entry's access and
 /// modification times (each `PATINA_TIME_OMIT`, `PATINA_TIME_NOW`, or
 /// `PATINA_TIME_SET` with its nanoseconds); `ctime` moves whenever either does.
@@ -739,7 +740,6 @@ fn resolve_time_arguments(
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn patina_utimensat(
     dirfd: c_int,
@@ -826,12 +826,12 @@ pub unsafe extern "C" fn patina_utimensat(
     }
 }
 
+#[unsafe(no_mangle)]
 /// `futimens(3)` / `utimensat(fd, NULL, …)`: the same change, on the node an
 /// open descriptor holds. An `O_PATH` descriptor is `EBADF` (the kernel's
 /// `fdget` never hands one out for this call). A descriptor on something the
 /// filesystem holds no node for refuses loudly. Named FIFO endpoints reach
 /// their retained inode, including after unlink.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_futimens(
     raw_fd: c_int,
     atime_kind: u32,
@@ -924,6 +924,7 @@ fn chown_notifies(uid: u32, gid: u32, before: u32, after: u32) -> bool {
     uid != ID_UNCHANGED || gid != ID_UNCHANGED || before != after
 }
 
+#[unsafe(no_mangle)]
 /// `chown`/`lchown`/`fchownat` on a `(dirfd, path)`; `flags` are
 /// `PATINA_RESOLVE_*` (`NOFOLLOW` names a symlink itself, `EMPTY_PATH` lets
 /// `AT_EMPTY_PATH` name the base). A symlink keeps its mode and data times,
@@ -931,7 +932,6 @@ fn chown_notifies(uid: u32, gid: u32, before: u32, after: u32) -> bool {
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_chown(
     dirfd: c_int,
     path: *const c_char,
@@ -985,9 +985,9 @@ pub unsafe extern "C" fn patina_chown(
     }
 }
 
+#[unsafe(no_mangle)]
 /// `fchown`: the same decision on the node a descriptor holds. `O_PATH` is
 /// `EBADF`; descriptors without a modeled inode refuse loudly.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let resolved = match fdget(raw_fd) {
@@ -1040,13 +1040,13 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `truncate(2)`: a regular file's length by name (a trailing symlink is
 /// followed). A negative length is `EINVAL`, a directory `EISDIR`, any other
 /// kind `EINVAL`; the driver charges `w` on the entry.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_truncate(dirfd: c_int, path: *const c_char, length: i64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let Ok(length) = u64::try_from(length) else {
@@ -1122,6 +1122,7 @@ const FALLOC_FL_OPERATIONS: u32 = FALLOC_FL_PUNCH_HOLE
 /// none of its own (mqueuefs).
 const MAX_NON_LFS: u64 = 0x7fff_ffff;
 
+#[unsafe(no_mangle)]
 /// `fallocate(2)`, in the kernel's order of refusals: a bad range is
 /// `EINVAL`; an unknown bit, two operation bits at once, `PUNCH_HOLE` without
 /// `KEEP_SIZE`, or a range-shifting mode with `KEEP_SIZE` is `EOPNOTSUPP`
@@ -1136,7 +1137,6 @@ const MAX_NON_LFS: u64 = 0x7fff_ffff;
 /// modes (`COLLAPSE_RANGE`, `INSERT_RANGE`) and `UNSHARE_RANGE` are
 /// `EOPNOTSUPP` after the size limit, as the file's own `fallocate` answers
 /// on filesystems without them. One recorded operation whatever the range.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length: i64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if offset < 0 || length <= 0 {
@@ -1248,6 +1248,7 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
     }
 }
 
+#[unsafe(no_mangle)]
 /// Capture a deterministic directory snapshot for POSIX readdir iteration.
 ///
 /// Iteration is a read OF A DESCRIPTOR, not a fresh lookup of a name: the `r` it
@@ -1264,7 +1265,6 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
 ///
 /// # Safety
 /// `state_out` must be writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_read_dir(raw_fd: c_int, state_out: *mut *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if state_out.is_null() {
@@ -1301,6 +1301,7 @@ pub(crate) fn dir_accessed(raw_fd: c_int) {
     }
 }
 
+#[unsafe(no_mangle)]
 /// Copy the next directory-snapshot entry (its name, kind and inode) into
 /// caller-owned storage.
 ///
@@ -1309,7 +1310,6 @@ pub(crate) fn dir_accessed(raw_fd: c_int) {
 /// # Safety
 /// `state` must be a pointer returned by [`patina_read_dir`], `name_buf` must
 /// be writable for `buf_len` bytes, and `kind` and `ino` must be writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_read_dir_next(
     state: *mut c_void,
     name_buf: *mut c_char,
@@ -1348,12 +1348,12 @@ pub unsafe extern "C" fn patina_read_dir_next(
     1
 }
 
+#[unsafe(no_mangle)]
 /// Free a directory snapshot returned by [`patina_read_dir`].
 ///
 /// # Safety
 /// `state` must be null or a pointer returned by [`patina_read_dir`] not yet
 /// freed.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_read_dir_free(state: *mut c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if !state.is_null() {

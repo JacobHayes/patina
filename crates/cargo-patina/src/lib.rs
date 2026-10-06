@@ -56,8 +56,6 @@ mod shim_build;
 mod shim_cache;
 mod sites;
 mod syscalls;
-#[cfg(test)]
-mod test_source;
 mod trace_cmd;
 mod trace_view;
 mod values;
@@ -111,11 +109,23 @@ const FD_CLOEXEC: i32 = 1;
 
 #[cfg(unix)]
 unsafe extern "C" {
-    // Declared with the variadic tail it really has: Darwin arm64 reads anonymous
-    // varargs from the stack, so a non-variadic declaration passes `arg` in a
-    // register the callee never reads and `F_SETFD` writes stack garbage instead.
+    // Darwin arm64 passes anonymous arguments on the stack. A fixed-arity
+    // declaration would place F_SETFD's argument in the wrong location.
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
 }
+
+// The one shared binding must satisfy the real C-variadic ABI, including on
+// Darwin arm64. A fixed-arity declaration cannot inhabit this function type.
+#[cfg(unix)]
+const _: unsafe extern "C" fn(i32, i32, ...) -> i32 = fcntl;
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn prctl(option: std::ffi::c_int, ...) -> std::ffi::c_int;
+}
+
+#[cfg(target_os = "linux")]
+const _: unsafe extern "C" fn(std::ffi::c_int, ...) -> std::ffi::c_int = prctl;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Mode {

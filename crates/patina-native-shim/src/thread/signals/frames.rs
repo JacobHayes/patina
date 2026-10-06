@@ -290,6 +290,7 @@ pub(crate) fn release() {
     }
 }
 
+#[unsafe(no_mangle)]
 /// The calling thread's private signal stack, for the containment tests'
 /// budget detector (a shim built with `planted-faults`): its base, its size
 /// and one level's budget, written to `out[0..3]`. Answers -1 on a thread
@@ -298,7 +299,6 @@ pub(crate) fn release() {
 /// # Safety
 /// `out` is writable for three words.
 #[cfg(feature = "planted-faults")]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_planted_private_stack(out: *mut usize) -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let Some(private) = PRIVATE.get() else {

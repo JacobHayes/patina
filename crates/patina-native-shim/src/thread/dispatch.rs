@@ -35,6 +35,7 @@ const DISPATCH_TIME_FOREVER: u64 = u64::MAX;
 #[cfg(target_os = "macos")]
 const DISPATCH_TIMED_OUT: isize = -1;
 
+#[unsafe(no_mangle)]
 /// Reduce `dispatch_time(when, delta)` to the relative monotonic token that
 /// [`patina_dispatch_semaphore_wait`] consumes. std only ever calls it as
 /// `dispatch_time(DISPATCH_TIME_NOW, nanos)` for `park_timeout`, so a
@@ -45,7 +46,6 @@ const DISPATCH_TIMED_OUT: isize = -1;
 /// # Safety
 /// C ABI entry point; no pointers are dereferenced.
 #[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_dispatch_time(when: u64, delta: i64) -> u64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if when == DISPATCH_TIME_FOREVER {
@@ -59,6 +59,7 @@ pub extern "C" fn patina_dispatch_time(when: u64, delta: i64) -> u64 {
     (delta as u64).min(DISPATCH_TIME_FOREVER - 1)
 }
 
+#[unsafe(no_mangle)]
 /// Allocate a modeled dispatch semaphore and return its opaque handle. Pure
 /// local allocation — no scheduling point, mirroring the non-blocking
 /// `dispatch_semaphore_create`.
@@ -67,7 +68,6 @@ pub extern "C" fn patina_dispatch_time(when: u64, delta: i64) -> u64 {
 /// C ABI entry point; the returned pointer is an opaque token, never
 /// dereferenced by the shim or by std.
 #[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_dispatch_semaphore_create(value: isize) -> *mut c_void {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut state = lock_state();
@@ -83,6 +83,7 @@ pub extern "C" fn patina_dispatch_semaphore_create(value: isize) -> *mut c_void 
     handle as *mut c_void
 }
 
+#[unsafe(no_mangle)]
 /// Release a modeled dispatch semaphore (its `Parker`'s `Drop`). Handles are
 /// never reused, so simply dropping the table entry is safe.
 ///
@@ -90,12 +91,12 @@ pub extern "C" fn patina_dispatch_semaphore_create(value: isize) -> *mut c_void 
 /// C ABI entry point; `object` is an opaque handle from
 /// [`patina_dispatch_semaphore_create`].
 #[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_dispatch_release(object: *mut c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     lock_state().dispatch.remove(&(object as usize));
 }
 
+#[unsafe(no_mangle)]
 /// Wait on a modeled dispatch semaphore, routing any block through the
 /// deterministic scheduler and virtual clock. Returns `0` when acquired (or
 /// signalled) and a non-zero sentinel when a timed wait reaches its
@@ -105,7 +106,6 @@ pub extern "C" fn patina_dispatch_release(object: *mut c_void) {
 /// C ABI entry point; `sem` is an opaque handle from
 /// [`patina_dispatch_semaphore_create`].
 #[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_dispatch_semaphore_wait(sem: *mut c_void, timeout: u64) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let key = sem as usize;
@@ -184,6 +184,7 @@ pub extern "C" fn patina_dispatch_semaphore_wait(sem: *mut c_void, timeout: u64)
     }
 }
 
+#[unsafe(no_mangle)]
 /// Signal a modeled dispatch semaphore, waking one waiter if the increment
 /// leaves a non-positive count (i.e. a task was blocked). Returns `1` when a
 /// task was woken, `0` otherwise; std ignores the value.
@@ -192,7 +193,6 @@ pub extern "C" fn patina_dispatch_semaphore_wait(sem: *mut c_void, timeout: u64)
 /// C ABI entry point; `sem` is an opaque handle from
 /// [`patina_dispatch_semaphore_create`].
 #[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_dispatch_semaphore_signal(sem: *mut c_void) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let key = sem as usize;

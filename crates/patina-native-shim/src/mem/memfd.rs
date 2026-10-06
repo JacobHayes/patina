@@ -70,12 +70,12 @@ pub(crate) fn secret_resized(handle: u64, length: u64) {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `memfd_secret(2)`: `O_CLOEXEC` is the only flag (`EINVAL` otherwise), and
 /// the file is a new empty regular one, mode 0600 as `alloc_anon_inode` makes
 /// it, open for reading and writing. The virtual kernel runs with secret
 /// memory enabled, as 6.8 does by default. A new descriptor, or -1 with the
 /// errno.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_memfd_secret(flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     /// Linux's `O_CLOEXEC`.
@@ -100,6 +100,7 @@ pub extern "C" fn patina_memfd_secret(flags: u32) -> c_int {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `memfd_create(2)` in its order: the flags, `MFD_EXEC` with
 /// `MFD_NOEXEC_SEAL`, the name, then the file (`ENODEV` for a huge page size
 /// the machine has no pool for). A new descriptor, or -1 with the errno.
@@ -107,7 +108,6 @@ pub extern "C" fn patina_memfd_secret(flags: u32) -> c_int {
 /// # Safety
 /// `name` must be NULL or point to a string readable up to its NUL or to
 /// 250 bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_memfd_create(name: *const c_char, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let allowed = if flags & MFD_HUGETLB != 0 {
@@ -174,9 +174,9 @@ fn sealable(fd: c_int) -> Result<crate::fdtable::Resolved, c_int> {
     crate::fdget(fd)
 }
 
+#[unsafe(no_mangle)]
 /// `fcntl(F_GET_SEALS)`: the seals of an anonymous file; every other
 /// descriptor is `EINVAL`. -1 with the errno on failure.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_get_seals(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let handle = match sealable(fd) {
@@ -192,10 +192,10 @@ pub extern "C" fn patina_get_seals(fd: c_int) -> c_int {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `fcntl(F_ADD_SEALS)`, in `memfd_add_seals`' order: a description not open
 /// for writing `EPERM`, an unknown seal or a file that cannot be sealed
 /// `EINVAL`, then the filesystem's judgment. -1 with the errno on failure.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_add_seals(fd: c_int, seals: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let resolved = match sealable(fd) {

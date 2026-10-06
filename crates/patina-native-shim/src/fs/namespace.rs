@@ -65,13 +65,13 @@ unsafe fn path_unit(
     }
 }
 
+#[unsafe(no_mangle)]
 /// Create a deterministic directory (`mkdir`/`mkdirat`) at the caller's
 /// requested `mode` under the process umask, exactly as the kernel applies it
 /// to `mkdir(2)`. A trailing symlink is not followed: the name must be free.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // `vfs_mkdir` keeps the permission triads and the sticky bit of the
@@ -91,6 +91,7 @@ pub unsafe extern "C" fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u
     }
 }
 
+#[unsafe(no_mangle)]
 /// Create a named pipe (`mkfifo`/`mkfifoat`, and `mknod`/`mknodat` with
 /// `S_IFIFO`) at the caller's requested `mode` under the process umask. Only
 /// the NAME is filesystem state, so this is one recorded boundary operation
@@ -99,7 +100,6 @@ pub unsafe extern "C" fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_mkfifo(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mode = (mode & 0o7777) & !paths::umask();
@@ -126,6 +126,7 @@ const S_IFBLK: u32 = 0o060000;
 const S_IFREG: u32 = 0o100000;
 const S_IFSOCK: u32 = 0o140000;
 
+#[unsafe(no_mangle)]
 /// `mknod(2)`/`mknodat(2)`, in the kernel's order of refusals (Linux
 /// `do_mknodat`): the type first (`may_mknod`: a directory is `EPERM`, an
 /// unknown type `EINVAL`), then the name (`ENOENT` for a missing parent,
@@ -140,7 +141,6 @@ const S_IFSOCK: u32 = 0o140000;
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_mknod(
     dirfd: c_int,
     path: *const c_char,
@@ -192,13 +192,13 @@ pub unsafe extern "C" fn patina_mknod(
     }
 }
 
+#[unsafe(no_mangle)]
 /// Remove a name (`unlink`/`unlinkat`). Never follows a trailing symlink: the
 /// link entry itself is what goes. A final `.`, `..` or `/` names no entry to
 /// unlink: `EISDIR` once the parent resolved (`do_unlinkat`).
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_unlink(dirfd: c_int, path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let spelled = match path_from_c(path) {
@@ -223,6 +223,7 @@ pub unsafe extern "C" fn patina_unlink(dirfd: c_int, path: *const c_char) -> c_i
     }
 }
 
+#[unsafe(no_mangle)]
 /// Remove an empty deterministic directory (`rmdir`/`unlinkat(AT_REMOVEDIR)`).
 /// A final component that names no entry is refused once the parent resolved
 /// (`do_rmdir`): `.` is `EINVAL`, `..` is `ENOTEMPTY` (the directory it names
@@ -230,7 +231,6 @@ pub unsafe extern "C" fn patina_unlink(dirfd: c_int, path: *const c_char) -> c_i
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_rmdir(dirfd: c_int, path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let spelled = match path_from_c(path) {
@@ -318,6 +318,7 @@ mod rename_flag_tests {
     }
 }
 
+#[unsafe(no_mangle)]
 /// Rename a deterministic filesystem entry (`rename`/`renameat`, which pass no
 /// flags, and `renameat2`). Neither side follows a trailing symlink: the kernel
 /// renames link entries as entries. The refusals come in `do_renameat2`'s
@@ -331,7 +332,6 @@ mod rename_flag_tests {
 ///
 /// # Safety
 /// `from` and `to` must point to valid NUL-terminated UTF-8 strings.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_renameat2(
     fromfd: c_int,
     from: *const c_char,
@@ -412,13 +412,13 @@ pub unsafe extern "C" fn patina_renameat2(
     }
 }
 
+#[unsafe(no_mangle)]
 /// Create a deterministic symbolic link (`symlink`/`symlinkat`). Only the LINK
 /// side resolves — `target` is the link's literal contents, stored verbatim —
 /// and an empty target is `ENOENT`, as `symlink(2)` answers.
 ///
 /// # Safety
 /// `target` and `link_path` must point to valid NUL-terminated UTF-8 strings.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_symlink(
     target: *const c_char,
     dirfd: c_int,
@@ -445,6 +445,7 @@ pub unsafe extern "C" fn patina_symlink(
     }
 }
 
+#[unsafe(no_mangle)]
 /// Create a deterministic hard link (`link`/`linkat`). The driver shares one
 /// inode between `from` and `to`, or duplicates the symlink entry when `from`
 /// is itself a symlink — the POSIX "hard link the symlink itself" behavior of
@@ -453,7 +454,6 @@ pub unsafe extern "C" fn patina_symlink(
 ///
 /// # Safety
 /// `from` and `to` must point to valid NUL-terminated UTF-8 strings.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_link(
     fromfd: c_int,
     from: *const c_char,
@@ -500,6 +500,7 @@ pub unsafe extern "C" fn patina_link(
     }
 }
 
+#[unsafe(no_mangle)]
 /// Read a deterministic symbolic link's target bytes (`readlink`/
 /// `readlinkat`). An empty path names the descriptor itself, as the kernel's
 /// `readlinkat` allows; a name that is not a symlink is `EINVAL`, a zero-length
@@ -508,7 +509,6 @@ pub unsafe extern "C" fn patina_link(
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string and `buf` must be
 /// writable for `len` bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_read_link(
     dirfd: c_int,
     path: *const c_char,
@@ -623,6 +623,7 @@ fn copy_path_out(path: &str, buf: *mut c_char, len: usize) -> isize {
     isize::try_from(bytes.len()).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
 }
 
+#[unsafe(no_mangle)]
 /// The one path resolver, exported for the caller that wants the canonical
 /// NAME rather than an operation on it (`realpath`). Resolves `(dirfd, path)` — the
 /// working directory for `PATINA_AT_FDCWD`, a directory descriptor's node
@@ -637,7 +638,6 @@ fn copy_path_out(path: &str, buf: *mut c_char, len: usize) -> isize {
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string, `buf` must be
 /// writable for `len` bytes when `len` is nonzero, and `kind` must be writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_resolve_path(
     dirfd: c_int,
     path: *const c_char,
@@ -694,6 +694,7 @@ pub unsafe extern "C" fn patina_resolve_path(
     copy_path_out(&path, buf, len)
 }
 
+#[unsafe(no_mangle)]
 /// `getcwd(2)`: where the working directory's NODE is now, NUL-terminated in
 /// `buf` when it fits (`ERANGE` otherwise; `len == 0` reports the length
 /// alone), returning the length. `ENOENT` once the directory has been
@@ -701,7 +702,6 @@ pub unsafe extern "C" fn patina_resolve_path(
 ///
 /// # Safety
 /// `buf` must be writable for `len` bytes when `len` is nonzero.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_getcwd(buf: *mut c_char, len: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match paths::cwd_path() {
@@ -710,6 +710,7 @@ pub unsafe extern "C" fn patina_getcwd(buf: *mut c_char, len: usize) -> isize {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `chdir(2)`: resolve `(dirfd, path)` (symlinks followed) and make the
 /// directory it names the working directory. `ENOENT` for a missing name,
 /// `ENOTDIR` for anything but a directory, `EACCES` for one the modeled
@@ -717,7 +718,6 @@ pub unsafe extern "C" fn patina_getcwd(buf: *mut c_char, len: usize) -> isize {
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_chdir(dirfd: c_int, path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let path = match path_from_c(path) {
@@ -733,10 +733,10 @@ pub unsafe extern "C" fn patina_chdir(dirfd: c_int, path: *const c_char) -> c_in
     }
 }
 
+#[unsafe(no_mangle)]
 /// `fchdir(2)`: a directory descriptor — opened plainly or `O_PATH` — becomes
 /// the working directory. `EBADF` for a number that names nothing, `ENOTDIR`
 /// for any other kind.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_fchdir(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match paths::fchdir(raw_fd) {
@@ -748,9 +748,9 @@ pub extern "C" fn patina_fchdir(raw_fd: c_int) -> c_int {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `umask(2)`: install `mask` (its permission bits) as the process umask every
 /// creating entry applies, and return the previous one. Never fails.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_umask(mask: u32) -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     set_errno(0);

@@ -15,6 +15,7 @@ lockfile = true
 [tools]
 # The selector follows releases only when mise.lock is deliberately refreshed.
 rust = "latest"
+ast-grep = "0.45.3"
 
 [tasks.setup]
 description = "Install the pinned root-workspace Rust toolchain, components and targets"
@@ -31,6 +32,7 @@ toolchain = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]
 # Register an existing rustup install with mise too. This repairs older mise
 # Rust symlink registries that otherwise resolve `latest` from installed tools.
 subprocess.run(["mise", "install", "rust@" + toolchain["channel"]], check=True)
+subprocess.run(["mise", "install", "ast-grep"], check=True)
 args = ["rustup", "toolchain", "install", toolchain["channel"], "--profile", toolchain["profile"]]
 for component in toolchain["components"]:
     args.extend(["--component", component])

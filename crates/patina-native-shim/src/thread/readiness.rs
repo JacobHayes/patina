@@ -65,7 +65,7 @@ fn poll(fds: &mut [PollFd], timeout: Option<u64>, mut remaining: Option<&mut u64
             return count;
         }
         if let Err(error) = state.ensure_active() {
-            return -i64::from(error.into_posix());
+            return -i64::from(c_int::from(error.into_posix()));
         }
         let me = current_task();
         if deadline.is_none()
@@ -98,7 +98,7 @@ fn poll(fds: &mut [PollFd], timeout: Option<u64>, mut remaining: Option<&mut u64
             Ok(Step::Continue) => drop(state),
             Err(error) => {
                 unregister_waiters(&mut state, me, &locs);
-                return -i64::from(error.into_posix());
+                return -i64::from(c_int::from(error.into_posix()));
             }
         }
         {
@@ -113,11 +113,11 @@ fn poll(fds: &mut [PollFd], timeout: Option<u64>, mut remaining: Option<&mut u64
     }
 }
 
+#[unsafe(no_mangle)]
 /// Raw-errno ABI shared by poll/ppoll on both doors. Negative timeout means
 /// indefinite; nonnegative timeout is relative nanoseconds.
 /// # Safety
 /// `fds` names `count` pollfd records; non-null mask names eight bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_poll(
     fds: *mut PollFd,
     count: usize,
@@ -153,9 +153,9 @@ pub unsafe extern "C" fn patina_poll(
     }
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// Same buffer contract as patina_epoll_wait; optional mask names eight bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_epoll_wait_masked(
     ep: i32,
     events: *mut c_void,
@@ -176,13 +176,13 @@ pub unsafe extern "C" fn patina_epoll_wait_masked(
     }
 }
 
+#[unsafe(no_mangle)]
 /// select/pselect use native-word fd sets. Timeout is relative nanoseconds;
 /// `remaining` lets each door write its timeval/timespec by its ABI rules.
 /// The sets are copied in and out whole (`EFAULT` for one that cannot be),
 /// as `core_sys_select` copies them.
 /// # Safety
 /// An optional mask names eight bytes; optional remaining names a u64.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_select(
     nfds: i32,
     read: *mut u64,
@@ -276,13 +276,13 @@ pub unsafe extern "C" fn patina_select(
     count
 }
 
+#[unsafe(no_mangle)]
 /// The `select` row (`kern_select`): its `struct timeval` copied in and
 /// normalized — microseconds reaching a second carry into the seconds; only
 /// a time that is still negative is `EINVAL` — and the unslept time written
 /// back where it can be.
 /// # Safety
 /// As [`patina_select`]; a non-null `timeval` names the guest's timeval.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_select_timeval(
     nfds: i32,
     read: *mut u64,

@@ -1,0 +1,15 @@
+{
+  "id": "sdk-site-macros",
+  "valid": [
+    "macro_rules! local { () => { () }; }",
+    "#[macro_export]\n/// helper\n#[doc(hidden)]\nmacro_rules! __patina_static_site { () => { () }; }",
+    "#[macro_export]\n/* helper */\nmacro_rules! lifecycle_event { () => { () }; }",
+    "#[cfg_attr(doc, doc=\"macro_export\")] macro_rules! local { () => { () }; }"
+  ],
+  "invalid": [
+    "#[macro_export]\n/// new site\n// comment\n#[doc(hidden)]\nmacro_rules! added { () => { () }; }",
+    "#[macro_export(local_inner_macros)] macro_rules! added { () => { () }; }",
+    "#[cfg_attr(any(), macro_export)]\n/* intervening */\n#[doc(hidden)] macro_rules! added { () => { () }; }",
+    "#[r#macro_export] macro_rules! added { () => { () }; }"
+  ]
+}

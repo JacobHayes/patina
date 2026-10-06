@@ -258,9 +258,10 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   set" — indistinguishable from a default, and therefore silent. Resolve each
   knob once, at configuration time, from the family's control plane; a
   configuration value consulted at finalization is a bug even when the code
-  reads correctly. Enforce it cheaply with a source lint that fails on the
-  forbidden read shape, paired with a table gate so a newly declared variable
-  cannot skip the mechanism. Found when eight documented report suppressors
+  reads correctly. Enforce it with the runtime's Clippy ban on process-environment
+  reads, allowing only configuration resolution. Generate suppression constants
+  and their metadata from one declaration so a variable cannot skip the mechanism.
+  Found when eight documented report suppressors
   turned out to be inert across the whole native family — half from this, half
   from the supervisor forwarding only one of them into the cleared child
   environment.
@@ -303,3 +304,25 @@ If `AGENTS.local.md` exists, read it after this file for local maintainer
 recipes. It is intentionally gitignored and may contain machine-specific paths,
 VM names, sandbox snapshot IDs, model choices, and VCS-tool workflows. Do not
 copy those details into tracked docs unless they become portable project policy.
+
+## Structural invariant enforcement
+
+Tests must exercise compiled behavior, not read or patch implementation source.
+Use opaque claim/accessor types and private state first; use compiler or syntax
+lints where construction alone cannot close the class. `scripts/check-structure.sh`
+runs the AST rules in both check tiers and CI through the ast-grep tool pinned
+by `mise.lock`. Before scanning the product, the gate runs ast-grep's native
+valid/invalid fixture suite for every rule. Its policy pins the rule-file and
+rule-ID inventory and owns the exact shim export exceptions in one place.
+Prove new rules reject a planted violation, then restore the source; retain
+small syntax fixtures rather than a test that patches product source.
+Rust rules cover every file in the owning crate, including files outside
+`src/`; module-path and include rules forbid escaping that scanned tree.
+Cargo entrypoint paths and source symlinks cannot escape it either; implicit
+entrypoints cannot hide under excluded build-artifact directories. C protection
+and trap inventory rules cover headers as well as C implementation files.
+The panic-scope binding is reserved and cannot be consumed before return.
+Native panic acceptance uses the explicitly armed `test-panic` feature; missing
+SUD acceptance compiles its C object with `PATINA_TEST_NO_SUD`. Both hooks are
+absent from ordinary builds. Embedded C sources and guest programs are fixtures
+or build inputs, and compiled-object inspections remain valid product checks.

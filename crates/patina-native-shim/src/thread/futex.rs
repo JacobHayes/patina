@@ -35,7 +35,7 @@ pub(crate) fn futex_wait(addr: usize, expected: u32, private: bool, bitset: u32)
     while restart {
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
-            return super::fail(error.into_posix());
+            return super::fail(c_int::from(error.into_posix()));
         }
         let me = current_task();
         // SAFETY: `addr` is the guest's futex word per this function's contract;
@@ -53,7 +53,7 @@ pub(crate) fn futex_wait(addr: usize, expected: u32, private: bool, bitset: u32)
         ) {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => fatal("futex wait parked without transferring the baton"),
-            Err(error) => return error.into_posix(),
+            Err(error) => return c_int::from(error.into_posix()),
         }
         #[cfg(target_os = "linux")]
         match signals::resume() {
@@ -69,6 +69,7 @@ pub(crate) fn futex_wait(addr: usize, expected: u32, private: bool, bitset: u32)
     0
 }
 
+#[unsafe(no_mangle)]
 /// Timed `FUTEX_WAIT`/`FUTEX_WAIT_BITSET`: like [`patina_futex_wait`] but
 /// with a deadline on the virtual-clock timer queue. `absolute` is 0 for a
 /// relative `FUTEX_WAIT` timeout (added to the current `clock` time) and
@@ -81,7 +82,6 @@ pub(crate) fn futex_wait(addr: usize, expected: u32, private: bool, bitset: u32)
 ///
 /// # Safety
 /// `addr` must be the address of a live, aligned 4-byte futex word.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_futex_wait_timed(
     addr: usize,
     expected: u32,
@@ -119,7 +119,7 @@ pub(crate) fn futex_wait_timed(
     };
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
-        return super::fail(error.into_posix());
+        return super::fail(c_int::from(error.into_posix()));
     }
     let me = current_task();
     // SAFETY: `addr` is the guest's futex word per this function's contract;
@@ -149,7 +149,7 @@ pub(crate) fn futex_wait_timed(
     ) {
         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
         Ok(Step::Continue) => drop(state),
-        Err(error) => return error.into_posix(),
+        Err(error) => return c_int::from(error.into_posix()),
     }
     // Whether the deadline ended the wait is read before a pending
     // handler runs, which could itself wait and take the flag.
@@ -167,12 +167,12 @@ pub(crate) fn futex_wait_timed(
     if timed_out { super::fail(ETIMEDOUT) } else { 0 }
 }
 
+#[unsafe(no_mangle)]
 /// FUTEX_WAKE: wake up to `count` tasks (all if `count < 0`) parked on
 /// `addr`. Returns the number woken.
 ///
 /// # Safety
 /// C ABI entry point.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_futex_wake(addr: usize, count: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     futex_wake(addr, count, true)

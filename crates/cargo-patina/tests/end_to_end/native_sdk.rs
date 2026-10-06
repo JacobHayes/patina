@@ -23,13 +23,19 @@ fn main() {
 }
 "#;
 
-// A guest whose `reachable!` site is behind an argv branch the campaign never
-// takes: invisible to lazy registration, visible through the link-time table.
+// Every literal SDK site macro is behind an argv branch the campaign never
+// takes: invisible to lazy registration, visible through the linked table.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const BUGGIFY_NEVER_REACHABLE_MAIN: &str = r#"
 fn main() {
     patina_dst::lifecycle::setup_complete();
     if std::env::args().any(|arg| arg == "--take-never-branch") {
+        let _ = patina_dst::buggify!("never-called-buggify");
+        let _ = patina_dst::buggify_with_prob!("never-called-probability", 1.0);
+        let _ = patina_dst::buggify_delay!("never-called-delay");
+        let _ = patina_dst::buggify_knob!("never-called-knob", 3, 1, 5);
+        patina_dst::always!(true, "never-called-always");
+        patina_dst::sometimes!(true, "never-called-sometimes");
         patina_dst::reachable!("never-called-reachable");
     }
     println!("guest-finished");

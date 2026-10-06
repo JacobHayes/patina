@@ -102,16 +102,16 @@ pub(in crate::thread) fn install_mask(mask: u64) {
 pub(in crate::thread) fn activate() -> TaskId {
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
-        error.into_posix();
+        let _ = c_int::from(error.into_posix());
     }
     current_task()
 }
 
+#[unsafe(no_mangle)]
 /// A SIGSYS frame's return: the mask a guest syscall installed, and the
 /// private registration guest code runs under ([`frames`]).
 /// # Safety
 /// Pointers name the signal frame's mask and alternate-stack fields.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_signal_frame(mask: *mut u64, stack: *mut Stack) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let dirty = FRAME_DIRTY.with(|dirty| dirty.replace(0));
@@ -123,13 +123,13 @@ pub unsafe extern "C" fn patina_signal_frame(mask: *mut u64, stack: *mut Stack) 
     frames::trap_return(stack);
 }
 
+#[unsafe(no_mangle)]
 /// A guest restorer's `rt_sigreturn` (both doors, `c/posix/init.c`): the frame
 /// at `mask` is the guest's own, and the kernel installs its saved mask as the
 /// return's. Keep the containment signals out of it, as every mask the guest
 /// installs ([`host_mask`]); a frame that cannot be read is left to the
 /// kernel's `rt_sigreturn`, which faults it as it would natively. Answers the
 /// vehicle that issues the kernel's `rt_sigreturn`: glibc's real `syscall(2)`.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_signal_return(mask: usize) -> usize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if let Ok(saved) = crate::uaccess::read::<u64>(mask) {

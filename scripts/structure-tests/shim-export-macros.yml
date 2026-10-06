@@ -1,0 +1,12 @@
+{
+  "id": "shim-export-macros",
+  "valid": [
+    "macro_rules! value { () => { 1 }; }",
+    "guest!(\"#[unsafe(no_mangle)] extern \\\"C\\\" fn fixture() {}\");"
+  ],
+  "invalid": [
+    "macro_rules! export { () => { #[unsafe(no_mangle)] pub fn bad() {} }; }",
+    "export! { pub extern \"C\" fn bad() {} }",
+    "macro_rules! bad { () => { #[unsafe(r#no_mangle)] fn bad() {} }; }"
+  ]
+}

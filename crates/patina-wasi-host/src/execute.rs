@@ -1,5 +1,6 @@
 //! Audited Wasmi execution, fuel accounting, and guest outcomes.
 
+use crate::imports::Imports;
 use crate::limits::build_store_limits;
 use crate::preview1::define_preview1;
 use crate::sdk::define_patina_sdk;
@@ -7,7 +8,9 @@ use crate::static_sites::declare_wasm_static_sites;
 use crate::{Preview1Host, WasiRunError};
 use patina_dst_target::WasiAudit;
 use std::collections::BTreeMap;
-use wasmi::{Config as WasmiConfig, Engine, Error as WasmiError, Linker, Module, Store, TrapCode};
+#[cfg(test)]
+use wasmi::Linker;
+use wasmi::{Config as WasmiConfig, Engine, Error as WasmiError, Module, Store, TrapCode};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WasiExecution {
@@ -116,7 +119,7 @@ pub fn execute_preview1_with_fuel(
     declare_wasm_static_sites(&mut host.context, module_bytes)?;
     let engine = Engine::new(&deterministic_wasmi_config());
     let module = Module::new(&engine, module_bytes).map_err(WasiRunError::Engine)?;
-    let mut linker = Linker::<Preview1Host>::new(&engine);
+    let mut linker = Imports::new(&engine);
     define_preview1(&mut linker).map_err(WasiRunError::Engine)?;
     define_patina_sdk(&mut linker).map_err(WasiRunError::Engine)?;
     let mut store = Store::new(&engine, host);
@@ -148,7 +151,7 @@ pub fn execute_preview1_with_fuel(
             .get_fuel()
             .expect("fuel metering was enabled on the Wasmi engine"),
     );
-    let hostcalls = store.data().hostcalls.clone();
+    let hostcalls = store.data().hostcalls().clone();
     let output_result = store
         .into_data()
         .finish_with_output()

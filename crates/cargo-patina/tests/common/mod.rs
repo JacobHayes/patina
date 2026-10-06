@@ -140,15 +140,16 @@ pub fn compile_posix_object(dir: &Path) -> PathBuf {
     .unwrap();
     let source = dir.join("patina_posix.c");
     std::fs::write(&source, patina_dst_native_shim::POSIX_C_SOURCE).unwrap();
-    compile_staged_posix_object(dir)
+    compile_staged_posix_object(dir, &[])
 }
 
-/// Recompile staged sources, also used by branch-mutation detectors.
-pub fn compile_staged_posix_object(dir: &Path) -> PathBuf {
+/// Compile staged sources with acceptance-only compiler definitions.
+pub fn compile_staged_posix_object(dir: &Path, flags: &[&str]) -> PathBuf {
     let source = dir.join("patina_posix.c");
     let object = dir.join("patina_posix.o");
     let status = c_compiler()
         .args(patina_dst_native_shim::POSIX_C_FLAGS)
+        .args(flags)
         .arg("-I")
         .arg(dir)
         .arg("-c")

@@ -1,0 +1,114 @@
+id: shim-abi-entry
+language: Rust
+severity: error
+message: Exported shim functions must begin with an explicit PanicScope::enter guard.
+files:
+  - crates/patina-native-shim/**/*.rs
+ignores:
+  - '**/target/**'
+rule:
+  all:
+    - kind: function_item
+    - any:
+        - follows:
+            all:
+              - kind: attribute_item
+              - has:
+                  kind: identifier
+                  regex: '^(r#)?(no_mangle|export_name)$'
+                  stopBy: end
+            stopBy:
+              not:
+                any:
+                  - kind: attribute_item
+                  - kind: line_comment
+                  - kind: block_comment
+        - all:
+            - has:
+                kind: visibility_modifier
+            - has:
+                kind: function_modifiers
+                has:
+                  kind: extern_modifier
+                  any:
+                    - has:
+                        kind: string_literal
+                        regex: '^"C(-unwind)?"$'
+                    # `extern fn` uses the implicit C ABI.
+                    - not:
+                        has:
+                          kind: string_literal
+    - not:
+        all:
+          - has:
+              field: name
+              # These four implement panic/stack ownership itself. Entering a
+              # scope changes abort classification or restores stale trap state.
+              # __real_dlsym is the unit-test-only fake host resolver.
+              regex: '^({{shim_export_exceptions}})$'
+          # Exempt only these actual symbol names, never an export_name alias
+          # on a similarly named function in another module.
+          - follows:
+              all:
+                - kind: attribute_item
+                - has:
+                    kind: identifier
+                    regex: '^(r#)?no_mangle$'
+                    stopBy: end
+              stopBy:
+                not:
+                  any:
+                    - kind: attribute_item
+                    - kind: line_comment
+                    - kind: block_comment
+    - any:
+        - not:
+            has:
+              field: body
+              has:
+                all:
+                  - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter();'
+                  - not:
+                      follows:
+                        all:
+                          - not:
+                              any:
+                                - kind: line_comment
+                                - kind: block_comment
+                          - not:
+                              regex: "^[{}]$"
+                        stopBy: end
+        # Reserve the binding: no expression, capture, macro token, or renamed
+        # binding may consume or expose it before the enclosing scope ends.
+        - has:
+            field: body
+            has:
+              all:
+                - kind: identifier
+                - regex: '^_panic_scope$'
+                - not:
+                    inside:
+                      pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter();'
+                      stopBy: neighbor
+              stopBy: end
+---
+id: shim-export-macros
+language: Rust
+severity: error
+message: Exporting shim functions from macro definitions or invocations is forbidden; use ordinary guarded functions.
+files:
+  - crates/patina-native-shim/**/*.rs
+ignores:
+  - '**/target/**'
+# No exporting macros are allowlisted. Forbid export/ABI identifier tokens in
+# either macro token tree, including variable visibility and ABI arguments.
+# Literal fixture strings remain data.
+rule:
+  all:
+    - any:
+        - kind: macro_definition
+        - kind: macro_invocation
+    - has:
+        kind: identifier
+        regex: '^(r#)?(no_mangle|export_name|extern)$'
+        stopBy: end

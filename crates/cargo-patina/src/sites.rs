@@ -28,7 +28,7 @@ mod report;
 mod scan;
 mod selftest;
 
-use recognize::RECOGNIZER_NAMES;
+use recognize::recognizer_count;
 use recognize::scan_file;
 use report::KIND_ORDER;
 use report::build_report;

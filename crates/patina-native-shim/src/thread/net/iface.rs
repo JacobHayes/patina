@@ -185,12 +185,12 @@ pub struct PatinaInterface {
     pub ipv6: [u8; 16],
 }
 
+#[unsafe(no_mangle)]
 /// The `position`th interface (index order), for `getifaddrs`: 0 with the
 /// record written, `-EINVAL` past the last.
 ///
 /// # Safety
 /// `out` must point to a writable `struct patina_interface`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_net_interface(position: u32, out: *mut PatinaInterface) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let Some(interface) = VIRTUAL_INTERFACES.get(position as usize) else {

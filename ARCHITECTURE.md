@@ -1141,6 +1141,10 @@ The `patina-dst` crate (at `crates/patina`) is a dependency-light cooperative-SU
 
 Under a native build the bridge is a thin prefixed C ABI (`patina_buggify`, `patina_always`, `patina_rng`, …) the shim exports and resolves against the auto-initialized global `Context`. All randomness is a pure deterministic function of the root seed and the site's explicit label: per-run activation and per-evaluation firing derive from a splitmix PRF and are **never recorded per evaluation**, so replay re-derives them from the seed and the trace's recorded config with no trace bloat. The realized config, active-site set, knob picks, and virtual-time cutoff live in an additive `buggify` field of the trace metadata (absent when buggify is off; conflicting replay knobs fail closed like the fault knobs), and enabling buggify folds a `+buggify` fingerprint component so a buggify trace never cross-replays with a non-buggify build. Fatal signals — an `always!` violation, a duplicate label — flush captured output, emit a distinct marker line, and abort. Literal-label SDK macro calls also emit a dependency-free link-time site table under `cfg(patina)`; the native shim and WASI host enumerate it before execution and add `declared_site` rows to the one-line `PATINA_SDK_REPORT`, so never-reached oracles are visible without constructors or trace/fingerprint changes.
 
+One SDK declaration generates every exported site macro, its literal-label
+descriptor arm, and the metadata consumed by source recognition. The structural
+lint rejects site exports outside that declaration.
+
 ### The verdict ABI
 
 A guest reports what it concluded about its own run through **one** verb — `patina_verdict(kind, label+len, detail+len)` natively, the matching `patina_sdk` `verdict` import on wasip1, `Context::verdict` in process — and `patina_dst::verdict(kind, label, detail)` in the SDK. The `kind` is a closed enum (`VIOLATION`, `PASS`, `ABORT_INTENT`) carried as data, so a new kind is one enum value the compiler walks to every consumer rather than a new symbol; an unrecognized kind is refused, never defaulted. `label` aggregates verdicts and shares the site-label namespace of `sometimes!`/`sites.json`, but a verdict registers no site: the duplicate-label rule does not apply to it, and reporting one label many times in a run is the point. `detail` is optional UTF-8 (JSON by convention), recorded verbatim.
@@ -1180,7 +1184,8 @@ bindings use generated types. Conformance is a root-workspace crate,
 `crates/patina-conformance`, that depends on the pure registry and never links
 the shim runtime into the host oracle: its scenarios are plain functions built
 into one probe binary, and `crates/cargo-patina/tests/native_conformance.rs`
-runs each natively and under patina and compares the observations live, exact
+runs catalog-generated individual tests natively and under patina and compares
+the observations live, exact
 but for each scenario's declared normalizations and gaps. See the
 [revised contract](docs/arcs/syscall-conformance.md#revised-contract-supersedes-conflicting-decisions-below)
 for the acceptance boundary; exhaustive coverage of the registry is still open

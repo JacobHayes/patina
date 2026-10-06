@@ -1,9 +1,10 @@
 //! Patina SDK import registration and deterministic runtime bridges.
 
 use crate::Preview1Host;
+use crate::imports::Imports;
 use crate::memory::{memory, offset, read_guest_bytes, write_u32};
 use patina_dst_runtime::{Context, CustomOpMode, RuntimeError, SiteOutcome, VerdictKind};
-use wasmi::{Caller, Error as WasmiError, Linker};
+use wasmi::{Caller, Error as WasmiError};
 
 /// Read a cooperative-SUT label/site string from guest linear memory. Labels are
 /// tiny, but they still ride the standard `max_io_bytes` ceiling through
@@ -91,29 +92,25 @@ fn patina_sdk_site(
 /// module is defined unconditionally (like the preview1 imports): when buggify is
 /// disabled the sites register lazily and stay inert, exactly as native, so a
 /// `patina_sdk`-importing guest run without `--buggify` behaves as all-no-op.
-pub(super) fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> {
+pub(super) fn define_patina_sdk(linker: &mut Imports) -> Result<(), WasmiError> {
     const MODULE: &str = "patina_sdk";
     linker.func_wrap(
         MODULE,
         "is_simulated",
         // The deterministic context is always installed for a WASI run, so this is
         // authoritative `true`; a foreign runtime never resolves the import.
-        |mut caller: Caller<'_, Preview1Host>| -> i32 {
-            caller.data_mut().count_hostcall("is_simulated");
-            1
-        },
+        |_caller: Caller<'_, Preview1Host>| -> i32 { 1 },
     )?;
     linker.func_wrap(
         MODULE,
         "buggify",
-        |mut caller: Caller<'_, Preview1Host>,
+        |caller: Caller<'_, Preview1Host>,
          label: i32,
          label_len: i32,
          site: i32,
          site_len: i32,
          prob_permille: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("buggify");
             patina_sdk_site(
                 caller,
                 label,
@@ -130,13 +127,12 @@ pub(super) fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(),
     linker.func_wrap(
         MODULE,
         "buggify_delay",
-        |mut caller: Caller<'_, Preview1Host>,
+        |caller: Caller<'_, Preview1Host>,
          label: i32,
          label_len: i32,
          site: i32,
          site_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("buggify_delay");
             patina_sdk_site(caller, label, label_len, site, site_len, |ctx, l, s| {
                 ctx.buggify_delay(l, s)
             })
@@ -154,7 +150,6 @@ pub(super) fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(),
          lo: i64,
          hi: i64|
          -> Result<i64, WasmiError> {
-            caller.data_mut().count_hostcall("buggify_knob");
             let label = read_patina_label(&caller, label, label_len)?;
             let site = read_patina_label(&caller, site, site_len)?;
             match caller
@@ -174,14 +169,13 @@ pub(super) fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(),
     linker.func_wrap(
         MODULE,
         "always",
-        |mut caller: Caller<'_, Preview1Host>,
+        |caller: Caller<'_, Preview1Host>,
          condition: i32,
          label: i32,
          label_len: i32,
          site: i32,
          site_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("always");
             patina_sdk_site(
                 caller,
                 label,
@@ -195,14 +189,13 @@ pub(super) fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(),
     linker.func_wrap(
         MODULE,
         "sometimes",
-        |mut caller: Caller<'_, Preview1Host>,
+        |caller: Caller<'_, Preview1Host>,
          condition: i32,
          label: i32,
          label_len: i32,
          site: i32,
          site_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("sometimes");
             patina_sdk_site(
                 caller,
                 label,
@@ -216,13 +209,12 @@ pub(super) fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(),
     linker.func_wrap(
         MODULE,
         "reachable",
-        |mut caller: Caller<'_, Preview1Host>,
+        |caller: Caller<'_, Preview1Host>,
          label: i32,
          label_len: i32,
          site: i32,
          site_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("reachable");
             patina_sdk_site(caller, label, label_len, site, site_len, |ctx, l, s| {
                 ctx.reachable_mark(l, s)
             })
@@ -242,7 +234,6 @@ pub(super) fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(),
          detail: i32,
          detail_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("verdict");
             let kind = VerdictKind::from_abi(kind).ok_or_else(|| {
                 WasmiError::new(format!(
                     "patina_sdk verdict: unknown verdict kind {kind}; the guest was built \
@@ -280,7 +271,6 @@ against a newer verdict ABI than this runtime provides"
          fault_eligible: i32,
          out_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("custom_op_begin");
             let label = read_patina_label(&caller, label, label_len)?;
             let key = read_guest_bytes(&caller, key, key_len)?;
             let mode = caller
@@ -309,7 +299,6 @@ wasm32 length"
         MODULE,
         "custom_op_replay_result",
         |mut caller: Caller<'_, Preview1Host>, out: i32, out_cap: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("custom_op_replay_result");
             let out_cap = offset(out_cap)?;
             // A short buffer leaves the operation open (nothing is consumed), so
             // the guest can retry with the length `custom_op_begin` reported.
@@ -341,7 +330,6 @@ the guest offered a {out_cap}-byte buffer"
          result: i32,
          result_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("custom_op_record");
             let result = read_guest_bytes(&caller, result, result_len)?;
             caller
                 .data_mut()
@@ -354,16 +342,12 @@ the guest offered a {out_cap}-byte buffer"
     linker.func_wrap(
         MODULE,
         "rng",
-        |mut caller: Caller<'_, Preview1Host>| -> u64 {
-            caller.data_mut().count_hostcall("rng");
-            caller.data_mut().context.buggify_rng()
-        },
+        |mut caller: Caller<'_, Preview1Host>| -> u64 { caller.data_mut().context.buggify_rng() },
     )?;
     linker.func_wrap(
         MODULE,
         "lifecycle_setup_complete",
         |mut caller: Caller<'_, Preview1Host>| -> i32 {
-            caller.data_mut().count_hostcall("lifecycle_setup_complete");
             let host = caller.data_mut();
             host.context.lifecycle_setup_complete();
             // Mirror the native shim: the lifecycle marker rides the captured guest
@@ -380,7 +364,6 @@ the guest offered a {out_cap}-byte buffer"
          label: i32,
          label_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("lifecycle_event");
             let label = read_patina_label(&caller, label, label_len)?;
             let line = format!("PATINA_LIFECYCLE_EVENT label={label}\n");
             caller.data_mut().stderr.extend_from_slice(line.as_bytes());
@@ -439,7 +422,7 @@ mod tests {
         wasm_config.consume_fuel(true);
         let engine = Engine::new(&wasm_config);
         let module = Module::new(&engine, &wasm).unwrap();
-        let mut linker = Linker::<Preview1Host>::new(&engine);
+        let mut linker = Imports::new(&engine);
         define_preview1(&mut linker).unwrap();
         define_patina_sdk(&mut linker).unwrap();
         let mut store = Store::new(

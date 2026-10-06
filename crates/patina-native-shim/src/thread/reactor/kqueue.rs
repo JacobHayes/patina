@@ -95,17 +95,17 @@ fn fatal_filter(filter: i16, fd: c_int, direction: &str) -> ! {
     ));
 }
 
+#[unsafe(no_mangle)]
 /// Allocate a virtual kqueue. Activates the thread subsystem so a later
 /// blocking `kevent` gather can park through the baton.
 ///
 /// # Safety
 /// C ABI entry point.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_kqueue() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
-        return super::super::fail(error.into_posix());
+        return super::super::fail(c_int::from(error.into_posix()));
     }
     let id = state.net.next_kq;
     state.net.next_kq = state.net.next_kq.wrapping_add(1);
@@ -154,6 +154,7 @@ pub(crate) fn kqueue_forget_number(fd: c_int) {
     }
 }
 
+#[unsafe(no_mangle)]
 /// Apply one changelist entry to a kqueue. Returns 0 on success or a
 /// positive errno the C layer places in an EV_ERROR receipt. Registry
 /// mutation only — no scheduling point, no trace event — except an
@@ -162,7 +163,6 @@ pub(crate) fn kqueue_forget_number(fd: c_int) {
 ///
 /// # Safety
 /// C ABI entry point; `ident` for EVFILT_READ/WRITE is a descriptor.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_kqueue_apply(
     kq_fd: c_int,
     ident: u64,
@@ -520,13 +520,13 @@ fn commit_rearm(state: &mut ThreadRuntime, id: u64, keys: &[FilterKey]) {
     }
 }
 
+#[unsafe(no_mangle)]
 /// Gather up to `nevents` ready events into `out`, blocking per `mode`.
 /// Applies the changelist beforehand from C via [`patina_kqueue_apply`];
 /// this call is only the readiness gather + deterministic park.
 ///
 /// # Safety
 /// `out` must be writable for `nevents` [`PatinaKevent`]s.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_kevent_gather(
     kq_fd: c_int,
     out: *mut c_void,
@@ -629,7 +629,7 @@ pub unsafe extern "C" fn patina_kevent_gather(
                 let mut state = lock_state();
                 unregister_waiters(&mut state, me, &locs);
                 detach_user_waiter(&mut state, id, me);
-                return super::super::fail(error.into_posix());
+                return super::super::fail(c_int::from(error.into_posix()));
             }
         }
         let mut state = lock_state();

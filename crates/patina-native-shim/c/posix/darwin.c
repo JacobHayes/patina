@@ -513,40 +513,8 @@ void *IOServiceMatching(const char *name) {
 #define PATINA_INTROSPECTION_TRAP(name)                                        \
     void name(void) { patina_native_trap("host-introspection", #name); }
 
-/* Trust-root empty path: the cert iterator is empty, so no certificate is ever
- * indexed, DER-encoded, or trust-queried, and no os_error is formatted. */
-PATINA_FRAMEWORK_TRAP(CFArrayGetValueAtIndex)     /* empty array: never indexed */
-PATINA_FRAMEWORK_TRAP(SecCertificateCopyData)     /* no cert to DER-encode */
-PATINA_FRAMEWORK_TRAP(SecTrustSettingsCopyTrustSettings) /* no cert to query */
-PATINA_FRAMEWORK_TRAP(SecCopyErrorMessageString)  /* errSecNoTrustSettings != error path */
-/* Per-cert trust-settings inspection (CFDictionary/CFNumber/CFString compares)
- * only runs once a cert is yielded — never on the empty path. */
-PATINA_FRAMEWORK_TRAP(CFDictionaryGetValueIfPresent)
-PATINA_FRAMEWORK_TRAP(CFEqual)
-PATINA_FRAMEWORK_TRAP(CFNumberGetValue)
-PATINA_FRAMEWORK_TRAP(CFGetTypeID)
-/* CFString builders and the get-rule retain: security-framework's cert/policy
- * name construction and iana's to_utf8 fallback are all downstream of a yielded
- * cert or a NULL CFStringGetCStringPtr — neither occurs. */
-PATINA_FRAMEWORK_TRAP(CFRetain)
-PATINA_FRAMEWORK_TRAP(CFStringCreateWithBytesNoCopy)
-PATINA_FRAMEWORK_TRAP(CFStringCreateWithCStringNoCopy)
-PATINA_FRAMEWORK_TRAP(CFStringGetBytes)
-PATINA_FRAMEWORK_TRAP(CFStringGetLength)
-/* CFData accessors belong to the IOKit CPU-frequency property read, dead once
- * IOServiceMatching returns NULL. */
-PATINA_FRAMEWORK_TRAP(CFDataGetBytePtr)
-PATINA_FRAMEWORK_TRAP(CFDataGetLength)
-PATINA_FRAMEWORK_TRAP(CFDataGetBytes)
-PATINA_FRAMEWORK_TRAP(CFDataGetTypeID)
-
-/* The IOKit registry walk is entered only with a non-NULL matching dictionary;
- * IOServiceMatching returns NULL, so none of these is reached. */
-PATINA_INTROSPECTION_TRAP(IOIteratorNext)
-PATINA_INTROSPECTION_TRAP(IOObjectRelease)
-PATINA_INTROSPECTION_TRAP(IORegistryEntryCreateCFProperty)
-PATINA_INTROSPECTION_TRAP(IORegistryEntryGetName)
-PATINA_INTROSPECTION_TRAP(IOServiceGetMatchingServices)
+/* The registry generates unreachable framework and introspection wrappers. */
+#include "darwin_traps.h"
 
 #undef PATINA_FRAMEWORK_TRAP
 #undef PATINA_INTROSPECTION_TRAP

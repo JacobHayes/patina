@@ -7,9 +7,9 @@ pub(in crate::thread) struct SignalFd {
     pub arrivals: u64,
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `mask` names an eight-byte Linux signal set.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_signalfd(
     fd: i32,
     mask: *const u64,
@@ -174,7 +174,7 @@ pub(crate) unsafe fn read(handle: u64, nonblocking: bool, buf: *mut c_void, len:
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
-            Err(error) => return crate::fail(error.into_posix()) as isize,
+            Err(error) => return crate::fail(c_int::from(error.into_posix())) as isize,
         }
         if resume() == Resumed::Eintr {
             return crate::fail(EINTR) as isize;

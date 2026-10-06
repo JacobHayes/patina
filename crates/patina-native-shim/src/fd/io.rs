@@ -60,11 +60,11 @@ pub(crate) fn transferred(resolved: &Resolved, moved: isize, write: bool) -> isi
     moved
 }
 
+#[unsafe(no_mangle)]
 /// Read bytes into caller-owned memory.
 ///
 /// # Safety
 /// `destination` must be writable for `length` bytes when nonzero.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_read(
     raw_fd: c_int,
     destination: *mut c_void,
@@ -200,11 +200,11 @@ fn fs_write(fd: Fd, source: *const c_void, length: usize) -> isize {
     }
 }
 
+#[unsafe(no_mangle)]
 /// Write bytes from caller-owned memory.
 ///
 /// # Safety
 /// `source` must be readable for `length` bytes when nonzero.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_write(
     raw_fd: c_int,
     source: *const c_void,
@@ -379,12 +379,12 @@ pub(crate) unsafe fn fs_pread(
     }
 }
 
+#[unsafe(no_mangle)]
 /// Positional read (`pread`): read at `offset` without moving the file cursor;
 /// see [`positional_target`] for the refusals.
 ///
 /// # Safety
 /// `destination` must be writable for `length` bytes when nonzero.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_pread(
     raw_fd: c_int,
     destination: *mut c_void,
@@ -476,13 +476,13 @@ unsafe fn fs_pwrite_resolved(
     unsafe { fs_pwrite(Fd(resolved.handle), source, length, offset) }
 }
 
+#[unsafe(no_mangle)]
 /// Positional write (`pwrite`): write at `offset` without moving the file
 /// cursor; see [`positional_target`] for the refusals and
 /// [`positional_write_offset`] for `O_APPEND`.
 ///
 /// # Safety
 /// `source` must be readable for `length` bytes when nonzero.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_pwrite(
     raw_fd: c_int,
     source: *const c_void,

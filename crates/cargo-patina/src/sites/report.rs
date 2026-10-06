@@ -194,7 +194,7 @@ pub(super) fn build_report(
             "files_scanned": scan.files_scanned,
             "files_unparsed": scan.files_unparsed,
             "cache": scan.cache_state.as_str(),
-            "recognizers": RECOGNIZER_NAMES.len(),
+            "recognizers": recognizer_count(),
             "recognizer_version": RECOGNIZER_TABLE_VERSION,
             "unparsed": scan.unparsed,
         }),

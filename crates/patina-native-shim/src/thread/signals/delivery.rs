@@ -2,9 +2,9 @@
 
 use super::*;
 
+#[unsafe(no_mangle)]
 /// Called at the boundary return, not at generation. No lock survives a host
 /// unblock: handlers can re-enter either door and acquire the runtime normally.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_signal_deliver() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     deliver();

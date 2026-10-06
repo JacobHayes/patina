@@ -382,7 +382,7 @@ pub(crate) unsafe fn mq_timedsend(
         }
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
-            return fail(error.into_posix());
+            return fail(c_int::from(error.into_posix()));
         }
         let Some(queue_id) = state.ipc.mq_opens.get(&handle).map(|open| open.queue) else {
             return fail(EBADF);
@@ -524,7 +524,7 @@ pub(crate) unsafe fn mq_timedreceive(
         }
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
-            return fail(error.into_posix());
+            return fail(c_int::from(error.into_posix()));
         }
         let Some(queue_id) = state.ipc.mq_opens.get(&handle).map(|open| open.queue) else {
             return fail(EBADF);

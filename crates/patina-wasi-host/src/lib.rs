@@ -20,6 +20,7 @@ mod abi;
 mod execute;
 mod fs;
 mod host;
+mod imports;
 mod limits;
 mod memory;
 mod preview1;

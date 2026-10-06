@@ -1,0 +1,12 @@
+{
+  "id": "sdk-site-export-invocations",
+  "valid": [
+    "ordinary! { name }",
+    "fixture!(\"#[macro_export] macro_rules! guest {}\");"
+  ],
+  "invalid": [
+    "exporter! { #[macro_export] macro_rules! added { () => { () }; } }",
+    "exporter! { #[cfg_attr(any(), macro_export)] macro_rules! added { () => { () }; } }",
+    "exporter! { #[r#macro_export] macro_rules! added { () => { () }; } }"
+  ]
+}

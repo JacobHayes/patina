@@ -2,11 +2,11 @@
 
 use super::*;
 
+#[unsafe(no_mangle)]
 /// Libc-layout marshalling supplies glibc's init-time restorer; raw callers keep
 /// their exact flags/restorer. Both doors perform one install through the core.
 /// # Safety
 /// Non-null pointers name readable/writable kernel action records.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_signal_action_libc(
     sig: i32,
     action: *const Action,
@@ -39,10 +39,10 @@ pub unsafe extern "C" fn patina_signal_action_libc(
     }
 }
 
+#[unsafe(no_mangle)]
 /// Kernel-layout action entry shared by both syscall doors.
 /// # Safety
 /// Non-null pointers must name readable/writable kernel sigaction structures.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_signal_action(
     sig: i32,
     action: *const Action,
@@ -98,9 +98,9 @@ pub unsafe extern "C" fn patina_signal_action(
     0
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// The optional mask pointers must be valid for eight bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_signal_mask(
     how: i32,
     set: *const u64,
@@ -162,9 +162,9 @@ pub unsafe extern "C" fn patina_signal_mask(
     0
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `set` must be writable for `size` bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_signal_pending(set: *mut u8, size: usize) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if size > SIGSET_BYTES {
@@ -191,9 +191,9 @@ pub unsafe extern "C" fn patina_signal_pending(set: *mut u8, size: usize) -> i64
     0
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// Stack pointers must be valid Linux stack_t buffers when non-null.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_signal_altstack(stack: *const Stack, old: *mut Stack) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // One managed task per host thread. Where the thread's shim handlers

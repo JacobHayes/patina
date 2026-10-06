@@ -208,10 +208,10 @@ impl Clock {
     }
 }
 
+#[unsafe(no_mangle)]
 /// Whether glibc's `clock_gettime`/`clock_getres` of `id` are the vDSO's
 /// ([`Clock::in_vdso`]): the C door then stores the answer in user space
 /// itself.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_clock_in_vdso(id: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     c_int::from(Clock::decode(id).is_some_and(Clock::in_vdso))
@@ -339,12 +339,12 @@ fn copy_in<T: Copy>(from: usize) -> Result<T, i64> {
     uaccess::read(from).map_err(|_| -i64::from(EFAULT))
 }
 
+#[unsafe(no_mangle)]
 /// `clock_gettime(2)`: 0 or `-errno`; the clock is judged before the time
 /// is copied out.
 ///
 /// # Safety
 /// None beyond the ABI: `out` is copied to as the kernel copies.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_clock_gettime(id: c_int, out: *mut Timespec) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let Some(clock) = Clock::decode(id) else {
@@ -360,11 +360,11 @@ pub unsafe extern "C" fn patina_clock_gettime(id: c_int, out: *mut Timespec) -> 
     }
 }
 
+#[unsafe(no_mangle)]
 /// `clock_getres(2)`: 0 or `-errno`; a NULL `res` is not written.
 ///
 /// # Safety
 /// None beyond the ABI: `res` is copied to as the kernel copies.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_clock_getres(id: c_int, res: *mut Timespec) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let resolution = match Clock::decode(id).ok_or(EINVAL).and_then(resolution) {
@@ -430,6 +430,7 @@ fn sleep_on(clock: Clock, flags: c_int) -> Sleep {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `clock_nanosleep(2)`: 0 or `-errno`. The clock is checked first (an
 /// unknown one `EINVAL`, one with no sleep `EOPNOTSUPP`), then the request
 /// (`EFAULT`, then `EINVAL`), then the clock's own rules ([`sleep_on`]); a
@@ -439,7 +440,6 @@ fn sleep_on(clock: Clock, flags: c_int) -> Sleep {
 ///
 /// # Safety
 /// None beyond the ABI: `request` and `rem` are copied as the kernel copies.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_clock_nanosleep(
     id: c_int,
     flags: c_int,

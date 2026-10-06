@@ -264,11 +264,8 @@ fn campaign_fault_bands_do_not_emit_crash_restart() {
 // EVERY generation while the reports still look healthy. No run surfaces that,
 // which is why it is gated structurally rather than left to review.
 //
-// Class-level pairing: `gen_byte` is the one claims table every band indexes
-// through, and these two tests are its halves. This one proves the claims are
-// disjoint and in range; `every_generation_hash_read_goes_through_a_claim`
-// proves no band bypassed the table with a literal index. A new colliding band
-// has to fail one of them.
+// Class-level pairing: opaque band storage accepts only a declared `gen_byte`
+// claim. This test checks that knobs assign distinct, in-range claims.
 /// Every claim in the campaign, assembled from the knob table plus the
 /// exploration bands no knob owns. A knob cannot go missing from this list:
 /// it is derived from [`FaultKnob::ALL`], so a new variant arrives here as
@@ -280,7 +277,7 @@ fn every_claim() -> Vec<(String, usize)> {
         .collect();
     for knob in FaultKnob::ALL {
         for index in campaign_band(*knob).unwrap_or(&[]) {
-            claims.push((format!("{:?}", knob), *index));
+            claims.push((format!("{:?}", knob), *index as usize));
         }
     }
     claims

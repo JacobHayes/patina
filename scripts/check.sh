@@ -230,6 +230,7 @@ run_full() {
   run_rung 'file-size ratchet' python3 -B scripts/check-file-size.py || return $?
   run_rung 'file-size ratchet selftest' python3 -B scripts/check-file-size.py --selftest || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
+  run_rung 'structural lints' scripts/check-structure.sh || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?
   run_rung 'Darwin-cfg clippy' cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings || return $?
@@ -269,6 +270,7 @@ run_fast() {
   run_rung 'file-size ratchet' python3 -B scripts/check-file-size.py || return $?
   run_rung 'file-size ratchet selftest' python3 -B scripts/check-file-size.py --selftest || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
+  run_rung 'structural lints' scripts/check-structure.sh || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?
   run_rung 'Darwin-cfg clippy' cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings || return $?

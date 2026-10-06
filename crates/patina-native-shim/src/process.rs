@@ -8,28 +8,29 @@ pub extern "C" fn patina_thread_id() -> c_int {
     thread::deterministic_thread_id()
 }
 
+#[unsafe(no_mangle)]
 /// `sched_yield`/`thread::yield_now`: take a deterministic scheduling point
 /// instead of yielding the host scheduler. std's `mpsc`/`mpmc` backoff spins
 /// through `thread::yield_now` before parking, so an uninterposed `sched_yield`
 /// would be a host scheduling call outside the runtime. A no-op until the
 /// thread subsystem activates, so single-threaded programs are unaffected.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_sched_yield() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let _ = thread::sched_point();
     0
 }
 
+#[unsafe(no_mangle)]
 /// The `--yield-points` guard hook: `patina_yield.c` forwards every
 /// SanitizerCoverage guard hit here with the instrumented call site, so a
 /// record/replay yield divergence can name the exact guest location that took
 /// the extra scheduling point. Otherwise identical to [`patina_sched_yield`].
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_yield_point(site: *const c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     thread::yield_point_from(site as usize);
 }
 
+#[unsafe(no_mangle)]
 /// The runtime side of the packaged `exit` interposer (patina_posix.c). It runs
 /// at the process's main-return / `exit(3)` boundary — the one point that
 /// executes on the exiting thread AFTER its managed body but BEFORE the C runtime
@@ -44,7 +45,6 @@ pub extern "C" fn patina_yield_point(site: *const c_void) {
 /// public `exit`, which the C interposer defines), so there is no recursion —
 /// glibc's `exit` still runs the atexit chain (finalizing the trace in record
 /// mode) and the TLS destructors, now with the teardown flag set.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_exit(status: c_int) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     patina_note_guest_exit_status(status);
@@ -108,6 +108,7 @@ pub extern "C" fn patina_abort() -> ! {
     unsafe { (hostapi::get().host_abort)() }
 }
 
+#[unsafe(no_mangle)]
 /// Mark the process as having entered post-`main` teardown WITHOUT terminating.
 /// The Linux `__libc_start_main` interposer (patina_posix.c) calls this from its
 /// wrapper `main` the instant the guest's real `main` returns — before it hands
@@ -118,23 +119,23 @@ pub extern "C" fn patina_abort() -> ! {
 /// strong-def only catches EXPLICIT `exit(3)`/`std::process::exit`. Setting the
 /// flag here silences the root task's `--yield-points` teardown yields on that
 /// natural path (see `thread::sched_point`).
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_note_main_returned() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     thread::note_main_returned();
 }
 
+#[unsafe(no_mangle)]
 /// Whether the process is in its post-`main` teardown (1) or not (0). After
 /// `main` returns only the root task runs, so the POSIX layer's internal locks
 /// (a stream's, the environment's) have nothing left to exclude, and waiting
 /// on one a parked task holds would be a scheduling operation past the end of
 /// the run — the refusal in `with_context_msg`. They are not taken then.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_in_teardown() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     c_int::from(thread::main_returned())
 }
 
+#[unsafe(no_mangle)]
 /// Linux interposer-engagement canary. `patina_finalize_atexit` (patina_posix.c)
 /// calls this from the `atexit` hook, which glibc runs AFTER the thread-local
 /// destructors on every exit-chain path that reaches it. On Linux the teardown
@@ -152,7 +153,6 @@ pub extern "C" fn patina_in_teardown() -> c_int {
 /// now that `patina_thread_join`'s host reap fixes the one known load-dependent
 /// branch (the joiner-vs-worker `Arc<thread::Inner>` teardown race).
 #[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_assert_teardown_engaged() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if !thread::main_returned() {

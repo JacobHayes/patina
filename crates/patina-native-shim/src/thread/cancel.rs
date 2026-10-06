@@ -207,11 +207,11 @@ impl ThreadRuntime {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `pthread_cancel(handle)`: 0, `ESRCH` for a handle the model does not
 /// know, or [`ACT`] when the caller cancels itself while asynchronously
 /// cancellable (its own type, or inside a sleep, where only a signal
 /// handler runs guest code).
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_thread_cancel(handle: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let me = current_task();
@@ -279,12 +279,12 @@ pub extern "C" fn patina_thread_cancel(handle: usize) -> c_int {
     }
 }
 
+#[unsafe(no_mangle)]
 /// `pthread_setcancelstate(state, old)`: 0, `EINVAL` for an unknown state,
 /// or [`ACT`] when enabling meets a pending cancel asynchronously.
 ///
 /// # Safety
 /// `old` must be null or writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_cancel_setstate(new: c_int, old: *mut c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if !(0..=CANCEL_DISABLE).contains(&new) {
@@ -305,12 +305,12 @@ pub unsafe extern "C" fn patina_cancel_setstate(new: c_int, old: *mut c_int) -> 
     }
 }
 
+#[unsafe(no_mangle)]
 /// `pthread_setcanceltype(type, old)`: 0, `EINVAL` for an unknown type, or
 /// [`ACT`] when becoming asynchronous meets a pending cancel.
 ///
 /// # Safety
 /// `old` must be null or writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_cancel_settype(new: c_int, old: *mut c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if !(0..=CANCEL_ASYNCHRONOUS).contains(&new) {
@@ -331,18 +331,18 @@ pub unsafe extern "C" fn patina_cancel_settype(new: c_int, old: *mut c_int) -> c
     }
 }
 
-/// `pthread_testcancel`: 1 when the caller must act on a cancel now.
 #[unsafe(no_mangle)]
+/// `pthread_testcancel`: 1 when the caller must act on a cancel now.
 pub extern "C" fn patina_cancel_test() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     c_int::from(lock_state().cancels.get(current_task()).acts())
 }
 
+#[unsafe(no_mangle)]
 /// A C wrapper enters a cancellation point the model acts at: [`ACT`] when a
 /// cancel is pending, else the point the thread was already inside (a signal
 /// handler's sleep runs inside another's), which [`patina_cancel_leave`]
 /// restores: 0 for none, else its depth plus one.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_cancel_enter() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let me = current_task();
@@ -357,9 +357,9 @@ pub extern "C" fn patina_cancel_enter() -> c_int {
     outer
 }
 
+#[unsafe(no_mangle)]
 /// The C wrapper leaves the cancellation point [`patina_cancel_enter`]
 /// entered: [`ACT`] when a cancel arrived while the thread was in it.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_cancel_leave(outer: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let me = current_task();
@@ -369,13 +369,13 @@ pub extern "C" fn patina_cancel_leave(outer: c_int) -> c_int {
     if cancel.acts() { ACT } else { 0 }
 }
 
+#[unsafe(no_mangle)]
 /// The entry of a glibc cancellation point the model does not act at (the C
 /// `PATINA_CANCEL_POINT`): a thread with a cancel to act on stops the run by
 /// name, where glibc would end it here.
 ///
 /// # Safety
 /// `name` must be a NUL-terminated string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_cancel_point(name: *const std::ffi::c_char) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if REQUESTS.load(Ordering::Relaxed) == 0 {

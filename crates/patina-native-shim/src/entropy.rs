@@ -2,13 +2,13 @@
 
 use super::*;
 
+#[unsafe(no_mangle)]
 /// Fill caller-owned memory with deterministic bytes: 0, or -1 with `EFAULT`
 /// for a buffer the guest cannot write (the bytes are drawn either way,
 /// except for a NULL buffer).
 ///
 /// # Safety
 /// `destination` is a guest address; it is written only through `uaccess`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_entropy(destination: *mut c_void, length: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if length != 0 && destination.is_null() {
@@ -42,6 +42,7 @@ pub(crate) fn getrandom_flags_accepted(flags: u32) -> bool {
 /// down to the modeled 4096-byte page.
 const MAX_RW_COUNT: usize = i32::MAX as usize & !4095;
 
+#[unsafe(no_mangle)]
 /// `getrandom(2)` over the seeded stream: the byte count, -1/`EINVAL` for a
 /// flag word the kernel refuses, or -1/`EFAULT` for a null buffer. The stream
 /// never blocks and has one pool, so the accepted flags change nothing. One
@@ -50,7 +51,6 @@ const MAX_RW_COUNT: usize = i32::MAX as usize & !4095;
 ///
 /// # Safety
 /// `destination` must be writable for `length` bytes when `length` is nonzero.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_getrandom(
     destination: *mut c_void,
     length: usize,

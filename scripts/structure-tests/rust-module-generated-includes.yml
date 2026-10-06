@@ -1,0 +1,14 @@
+{
+  "id": "rust-module-generated-includes",
+  "valid": [
+    "include!(concat!(env!(\"OUT_DIR\"), \"/shim_sources.rs\"));",
+    "include!(concat!(env!(\"OUT_DIR\"), \"/posix_sources.rs\"));",
+    "include_str!(\"guest.rs\");"
+  ],
+  "invalid": [
+    "include!(\"owned.rs\");",
+    "include!(concat!(env!(\"OUT_DIR\"), \"/new_implementation.rs\"));",
+    "include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/outside.rs\"));",
+    "use std::include as load;"
+  ]
+}

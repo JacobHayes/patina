@@ -241,6 +241,7 @@ pub(crate) fn forget_description(desc: DescId) {
     }
 }
 
+#[unsafe(no_mangle)]
 /// Allocate a virtual epoll instance. Syscall-shaped
 /// (`epoll_create1(flags)`) so a future syscall-user-dispatch SIGSYS
 /// dispatcher can call it with raw register arguments; the C interposer
@@ -249,7 +250,6 @@ pub(crate) fn forget_description(desc: DescId) {
 ///
 /// # Safety
 /// C ABI entry point.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_epoll_create1(flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if flags & !EPOLL_CLOEXEC != 0 {
@@ -257,7 +257,7 @@ pub extern "C" fn patina_epoll_create1(flags: c_int) -> c_int {
     }
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
-        return super::super::fail(error.into_posix());
+        return super::super::fail(c_int::from(error.into_posix()));
     }
     let id = state.net.next_epoll;
     state.net.next_epoll = state.net.next_epoll.wrapping_add(1);
@@ -285,6 +285,7 @@ pub extern "C" fn patina_epoll_create1(flags: c_int) -> c_int {
     }
 }
 
+#[unsafe(no_mangle)]
 /// Apply one `epoll_ctl` op. Syscall-shaped (`epoll_ctl(epfd, op, fd,
 /// event)`) for the SUD dispatcher. Registry mutation only — no
 /// scheduling point, no trace event. The kernel's `do_epoll_ctl`
@@ -304,7 +305,6 @@ pub extern "C" fn patina_epoll_create1(flags: c_int) -> c_int {
 /// # Safety
 /// `event` is the guest's `struct epoll_event` for every op but DEL;
 /// it is copied in through `uaccess`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_epoll_ctl(
     epfd: c_int,
     op: c_int,
@@ -450,6 +450,7 @@ fn watched_sources(state: &ThreadRuntime, id: u64) -> Vec<(ReadyDir, c_int)> {
 /// `EP_MAX_EVENTS`: the most events one wait may ask for.
 const MAX_EVENTS: c_int = (c_int::MAX as usize / std::mem::size_of::<EpollEvent>()) as c_int;
 
+#[unsafe(no_mangle)]
 /// Gather up to `maxevents` ready events into `events`, blocking per the
 /// millisecond `timeout_ms` (-1 = block until ready, 0 = poll, > 0 =
 /// relative virtual-clock deadline). Syscall-shaped (`epoll_wait(epfd,
@@ -461,7 +462,6 @@ const MAX_EVENTS: c_int = (c_int::MAX as usize / std::mem::size_of::<EpollEvent>
 ///
 /// # Safety
 /// C ABI entry point; `events` is the guest's buffer.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_epoll_wait(
     epfd: c_int,
     events: *mut c_void,
@@ -554,7 +554,7 @@ pub unsafe extern "C" fn patina_epoll_wait(
             Err(error) => {
                 let mut state = lock_state();
                 unregister_waiters(&mut state, me, &locs);
-                return super::super::fail(error.into_posix());
+                return super::super::fail(c_int::from(error.into_posix()));
             }
         }
         let mut state = lock_state();

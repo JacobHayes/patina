@@ -109,7 +109,10 @@ fn a_recorder_that_dies_without_unwinding_leaves_its_path_recordable() {
     use std::os::unix::process::ExitStatusExt;
     const CHILD_TRACE: &str = "PATINA_TEST_ABORTING_RECORDER_TRACE";
     const SIGABRT: i32 = 6;
-    if let Some(trace) = env::var_os(CHILD_TRACE) {
+    // This process-control sentinel belongs to the host test, not a run knob.
+    #[allow(clippy::disallowed_methods)]
+    let child_trace = env::var_os(CHILD_TRACE);
+    if let Some(trace) = child_trace {
         let _recorder = Context::from_config(RuntimeConfig::record(1, trace, "fp")).unwrap();
         std::process::abort();
     }

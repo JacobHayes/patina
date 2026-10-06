@@ -105,12 +105,11 @@ mod orchestration {
 
     #[cfg(feature = "macros")]
     fn libtest_exact_name(test: &DstTest) -> String {
-        if let Some(rest) = test.test_path.strip_prefix(test.harness_target) {
-            if let Some(rest) = rest.strip_prefix("::") {
-                if !rest.is_empty() {
-                    return rest.to_string();
-                }
-            }
+        if let Some(rest) = test.test_path.strip_prefix(test.harness_target)
+            && let Some(rest) = rest.strip_prefix("::")
+            && !rest.is_empty()
+        {
+            return rest.to_string();
         }
         test.test_path.to_string()
     }

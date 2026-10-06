@@ -3,96 +3,82 @@
 use crate::buggify::BuggifyDiagnostics;
 use crate::liveness::LivenessWatchdog;
 use crate::schedule::ScheduleDiagnostics;
-use crate::{
-    ENV_CLOCK_FAULT_REPORT, ENV_COVERAGE_REPORT, ENV_CUSTOMOP_FAULT_REPORT, ENV_DEPTH_REPORT,
-    ENV_DNS_FAULT_REPORT, ENV_ENTROPY_FAULT_REPORT, ENV_FS_FAULT_REPORT, ENV_LIVENESS_REPORT,
-    ENV_NET_FAULT_REPORT, ENV_SCHEDULE_POLICY_REPORT, ENV_SCHEDULE_REPORT, ENV_SDK_REPORT,
-    ENV_SWARM_REPORT,
-};
+// A report cannot be declared without its control-plane spelling. The same
+// rows generate the enum, ordered iteration, and public constants.
+macro_rules! report_registry {
+    ($($(#[$doc:meta])* $variant:ident => $env:ident = $name:literal;)+) => {
+        $( $(#[$doc])* pub const $env: &str = $name; )+
 
-/// One end-of-run diagnostic report, and the `PATINA_*` variable that silences
-/// it. Every report any layer emits — the runtime's own, the native shim's
-/// coverage line, the supervisor's WASI depth line — has a variant here, so the
-/// set of suppression knobs is enumerable rather than a per-emitter habit.
-///
-/// Suppression is presentation, never run semantics: no variant is a fingerprint
-/// input, none is recorded into a trace, and none participates in replay
-/// reconciliation. A replay with different suppression settings reconciles
-/// against the recording and produces the identical op stream.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Report {
-    /// `PATINA_SCHEDULE_REPORT` — per-task scheduling boundaries and vacuity.
-    Schedule,
-    /// `PATINA_SCHEDULE_POLICY_REPORT` — the realized PCT/starvation selection.
-    SchedulePolicy,
-    /// `PATINA_SWARM_REPORT` — the swarm fault-class draw.
-    Swarm,
-    /// `PATINA_LIVENESS_REPORT` — the liveness watchdog's armed/fired state.
-    Liveness,
-    /// `PATINA_SDK_REPORT` — cooperative-SUT site registration/activation/firing.
-    Sdk,
-    /// `PATINA_FS_FAULT_REPORT` — filesystem fault-injection accounting.
-    FsFault,
-    /// `PATINA_DNS_FAULT_REPORT` — DNS fault-injection accounting.
-    DnsFault,
-    /// `PATINA_NET_FAULT_REPORT` — network fault-injection accounting.
-    NetFault,
-    /// `PATINA_ENTROPY_FAULT_REPORT` — guest entropy-request fault-injection
-    /// accounting.
-    EntropyFault,
-    /// `PATINA_CLOCK_FAULT_REPORT` — guest realtime-epoch jump fault-injection
-    /// accounting.
-    ClockFault,
-    /// `PATINA_CUSTOMOP_FAULT_REPORT` — guest custom-operation fault-injection
-    /// accounting.
-    CustomOpFault,
-    /// `PATINA_COVERAGE_REPORT` — native yield-point edge coverage, emitted by
-    /// the shim at its own finalization point rather than by [`Context::finish`].
-    Coverage,
-    /// `PATINA_DEPTH_REPORT` — WASI fuel/hostcall depth, emitted by the
-    /// supervisor because WASI guests execute in its process.
-    Depth,
+        /// End-of-run diagnostic reports. Suppression affects presentation only,
+        /// never fingerprints, recorded effects, or replay reconciliation.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub enum Report { $( $(#[$doc])* $variant, )+ }
+
+        impl Report {
+            /// Every report, in declaration order. All families forward these
+            /// same rows, so a report cannot skip their control-plane plumbing.
+            pub const ALL: [Self; [$(stringify!($variant)),+].len()] = [$(Self::$variant),+];
+
+            /// The control-plane variable that suppresses this report.
+            #[must_use]
+            pub const fn env(self) -> &'static str {
+                match self { $(Self::$variant => $env,)+ }
+            }
+        }
+    };
 }
 
-impl Report {
-    /// Every report, in declaration order. Family plumbing (the native child's
-    /// environment, a campaign's pinned child diagnostics) iterates THIS, so a
-    /// report added here cannot be carried by one family and dropped by another.
-    pub const ALL: [Self; 13] = [
-        Self::Schedule,
-        Self::SchedulePolicy,
-        Self::Swarm,
-        Self::Liveness,
-        Self::Sdk,
-        Self::FsFault,
-        Self::DnsFault,
-        Self::NetFault,
-        Self::EntropyFault,
-        Self::ClockFault,
-        Self::CustomOpFault,
-        Self::Coverage,
-        Self::Depth,
-    ];
-
-    /// The `PATINA_*` variable that suppresses this report.
-    #[must_use]
-    pub const fn env(self) -> &'static str {
-        match self {
-            Self::Schedule => ENV_SCHEDULE_REPORT,
-            Self::SchedulePolicy => ENV_SCHEDULE_POLICY_REPORT,
-            Self::Swarm => ENV_SWARM_REPORT,
-            Self::Liveness => ENV_LIVENESS_REPORT,
-            Self::Sdk => ENV_SDK_REPORT,
-            Self::FsFault => ENV_FS_FAULT_REPORT,
-            Self::DnsFault => ENV_DNS_FAULT_REPORT,
-            Self::NetFault => ENV_NET_FAULT_REPORT,
-            Self::EntropyFault => ENV_ENTROPY_FAULT_REPORT,
-            Self::ClockFault => ENV_CLOCK_FAULT_REPORT,
-            Self::CustomOpFault => ENV_CUSTOMOP_FAULT_REPORT,
-            Self::Coverage => ENV_COVERAGE_REPORT,
-            Self::Depth => ENV_DEPTH_REPORT,
-        }
-    }
+report_registry! {
+    /// Suppress the default-on end-of-run schedule diagnostic when set to a false-y
+    /// value (`0`, `off`, `false`, `no`). The diagnostic is on by default.
+    Schedule => ENV_SCHEDULE_REPORT = "PATINA_SCHEDULE_REPORT";
+    /// Suppress the default-on end-of-run exploration-policy diagnostic
+    /// (`PATINA_SCHEDULE_POLICY`) when set to a false-y value. On by default when a
+    /// policy is active.
+    SchedulePolicy => ENV_SCHEDULE_POLICY_REPORT = "PATINA_SCHEDULE_POLICY_REPORT";
+    /// Suppress the default-on end-of-run swarm-selection diagnostic
+    /// (`PATINA_SWARM_REPORT`) when set to a false-y value. On by default for every
+    /// run that applied swarm selection.
+    Swarm => ENV_SWARM_REPORT = "PATINA_SWARM_REPORT";
+    /// Suppress the default-on end-of-run liveness-watchdog diagnostic
+    /// (`PATINA_LIVENESS_REPORT`) when set to a false-y value.
+    Liveness => ENV_LIVENESS_REPORT = "PATINA_LIVENESS_REPORT";
+    /// Suppress the default-on end-of-run cooperative-SUT diagnostic when set to a
+    /// false-y value (`0`, `off`, `false`, `no`). On by default when buggify is
+    /// enabled.
+    Sdk => ENV_SDK_REPORT = "PATINA_SDK_REPORT";
+    /// Suppress the default-on end-of-run filesystem fault-injection diagnostic
+    /// when set to a false-y value (`0`, `off`, `false`, `no`). The diagnostic is on
+    /// by default when fs fault knobs had eligible traffic.
+    FsFault => ENV_FS_FAULT_REPORT = "PATINA_FS_FAULT_REPORT";
+    /// Suppress the default-on end-of-run DNS fault-injection diagnostic when set to
+    /// a false-y value (`0`, `off`, `false`, `no`).
+    DnsFault => ENV_DNS_FAULT_REPORT = "PATINA_DNS_FAULT_REPORT";
+    /// Suppress the default-on end-of-run network fault-injection diagnostic when
+    /// set to a false-y value (`0`, `off`, `false`, `no`). The diagnostic is on by
+    /// default: it fires a loud warning when the net fault knobs could perturb
+    /// delivery and fault-eligible traffic occurred, yet ZERO fault effects landed
+    /// (the silent-inertness class — historically the inert TCP stream path).
+    NetFault => ENV_NET_FAULT_REPORT = "PATINA_NET_FAULT_REPORT";
+    /// Suppress the default-on end-of-run entropy fault-injection diagnostic when set
+    /// to a false-y value (`0`, `off`, `false`, `no`).
+    EntropyFault => ENV_ENTROPY_FAULT_REPORT = "PATINA_ENTROPY_FAULT_REPORT";
+    /// Suppress the default-on end-of-run clock (realtime-epoch jump)
+    /// fault-injection diagnostic when set to a false-y value (`0`, `off`, `false`,
+    /// `no`).
+    ClockFault => ENV_CLOCK_FAULT_REPORT = "PATINA_CLOCK_FAULT_REPORT";
+    /// Suppress the default-on end-of-run custom-operation fault-injection
+    /// diagnostic when set to a false-y value (`0`, `off`, `false`, `no`).
+    CustomOpFault => ENV_CUSTOMOP_FAULT_REPORT = "PATINA_CUSTOMOP_FAULT_REPORT";
+    /// Suppress the default-on native yield-point coverage diagnostic when set to a
+    /// false-y value (`0`, `off`, `false`, `no`). The diagnostic is emitted by the
+    /// native shim at the same finalization point as the runtime reports.
+    Coverage => ENV_COVERAGE_REPORT = "PATINA_COVERAGE_REPORT";
+    /// Suppress the default-on WASI depth diagnostic when set to a false-y value
+    /// (`0`, `off`, `false`, `no`). WASI guests execute in-process, so the line is
+    /// emitted by `cargo-patina` rather than by a shim, but the gate spelling matches
+    /// [`ENV_COVERAGE_REPORT`] so both diagnostics are silenced the same way.
+    Depth => ENV_DEPTH_REPORT = "PATINA_DEPTH_REPORT";
 }
 
 /// Which end-of-run diagnostic reports this run prints. Every report is on by
@@ -759,6 +745,30 @@ mod tests {
             line.contains(" errors_by_op=- "),
             "the error class stayed off and must not borrow the short class's ops:\n{line}"
         );
+    }
+
+    /// Absent knobs leave every report on; only the documented false-y spellings
+    /// suppress; an explicit truthy value re-enables what an ambient `0` had
+    /// suppressed (the pin a campaign puts on its children).
+    #[test]
+    fn report_config_parses_the_documented_spellings() {
+        assert!(ReportConfig::default().enabled(Report::Schedule));
+        for value in ["0", "off", "FALSE", " no "] {
+            let config = ReportConfig::default()
+                .applied(|name| (name == Report::Schedule.env()).then(|| value.to_string()));
+            assert!(!config.enabled(Report::Schedule), "{value:?} must suppress");
+            assert!(
+                config.enabled(Report::Swarm),
+                "{value:?} must not touch a sibling report"
+            );
+        }
+        for value in ["1", "", "yes", "on"] {
+            let config = ReportConfig::default()
+                .applied(|_| Some("0".to_string()))
+                .applied(|name| (name == Report::Sdk.env()).then(|| value.to_string()));
+            assert!(config.enabled(Report::Sdk), "{value:?} must re-enable");
+            assert!(!config.enabled(Report::Swarm));
+        }
     }
 
     // Report suppression is presentation, not run semantics: two recordings of the

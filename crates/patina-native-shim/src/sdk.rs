@@ -106,19 +106,19 @@ fn buggify_site_call(
     }
 }
 
-/// `patina_dst::is_simulated()`: 1 whenever the deterministic runtime is installed.
 #[unsafe(no_mangle)]
+/// `patina_dst::is_simulated()`: 1 whenever the deterministic runtime is installed.
 pub extern "C" fn patina_is_simulated() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     c_int::from(ensure_runtime().is_ok())
 }
 
+#[unsafe(no_mangle)]
 /// `buggify!` / `buggify_with_prob!`: `prob_permille < 0` uses the run default.
 /// Returns 1 when the site fires, 0 otherwise.
 ///
 /// # Safety
 /// Label and site pointers must describe live UTF-8 slices of the given lengths.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_buggify(
     label: *const u8,
     label_len: usize,
@@ -133,12 +133,12 @@ pub unsafe extern "C" fn patina_buggify(
     })
 }
 
+#[unsafe(no_mangle)]
 /// `buggify_delay!`: on firing, advance virtual time deterministically. Returns
 /// 1 when it delayed.
 ///
 /// # Safety
 /// See [`patina_buggify`].
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_buggify_delay(
     label: *const u8,
     label_len: usize,
@@ -151,12 +151,12 @@ pub unsafe extern "C" fn patina_buggify_delay(
     })
 }
 
+#[unsafe(no_mangle)]
 /// `buggify_knob!`: a per-run perturbed value within `[lo, hi]` for an active
 /// site, or `default` otherwise. A duplicate label aborts.
 ///
 /// # Safety
 /// See [`patina_buggify`].
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_buggify_knob(
     label: *const u8,
     label_len: usize,
@@ -183,12 +183,12 @@ pub unsafe extern "C" fn patina_buggify_knob(
     }
 }
 
+#[unsafe(no_mangle)]
 /// `always!`: a false `condition` is a fatal invariant violation under the
 /// simulator (independent of buggify being enabled).
 ///
 /// # Safety
 /// See [`patina_buggify`].
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_always(
     condition: c_int,
     label: *const u8,
@@ -202,11 +202,11 @@ pub unsafe extern "C" fn patina_always(
     })
 }
 
+#[unsafe(no_mangle)]
 /// `sometimes!`: coverage oracle noting the site reached and satisfied-if-true.
 ///
 /// # Safety
 /// See [`patina_buggify`].
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_sometimes(
     condition: c_int,
     label: *const u8,
@@ -220,11 +220,11 @@ pub unsafe extern "C" fn patina_sometimes(
     })
 }
 
+#[unsafe(no_mangle)]
 /// `reachable!`: coverage oracle noting the site reached.
 ///
 /// # Safety
 /// See [`patina_buggify`].
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_reachable(
     label: *const u8,
     label_len: usize,
@@ -237,6 +237,7 @@ pub unsafe extern "C" fn patina_reachable(
     })
 }
 
+#[unsafe(no_mangle)]
 /// `patina_dst::verdict(...)`: report one structured guest verdict.
 ///
 /// The verdict ABI is a SINGLE verb — `kind` is data, not a symbol per kind — so
@@ -249,7 +250,6 @@ pub unsafe extern "C" fn patina_reachable(
 /// # Safety
 /// Label and detail pointers must describe live UTF-8 slices of the given
 /// lengths (or be null with a zero length).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_verdict(
     kind: u32,
     label: *const u8,
@@ -363,6 +363,7 @@ pub unsafe extern "C" fn patina_custom_op_begin(
     }
 }
 
+#[unsafe(no_mangle)]
 /// Copy the recorded result of the open custom operation into `out`, closing it.
 /// Returns the number of bytes written, or -1 when `out_cap` is smaller than the
 /// length `patina_custom_op_begin` reported (nothing is copied and the operation
@@ -370,7 +371,6 @@ pub unsafe extern "C" fn patina_custom_op_begin(
 ///
 /// # Safety
 /// `out` must be writable for `out_cap` bytes, or be null when `out_cap == 0`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_custom_op_replay_result(out: *mut u8, out_cap: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // `with_context_raw`, not `with_context`: one custom operation is ONE
@@ -408,13 +408,13 @@ pub unsafe extern "C" fn patina_custom_op_replay_result(out: *mut u8, out_cap: u
     bytes.len() as isize
 }
 
+#[unsafe(no_mangle)]
 /// Report what the guest's `perform` produced, closing the open custom operation
 /// and recording its trace event.
 ///
 /// # Safety
 /// `result` must describe a live slice of `result_len` bytes (or be null with a
 /// zero length).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_custom_op_record(result: *const u8, result_len: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller passes a live slice.
@@ -447,15 +447,15 @@ unsafe fn custom_op_bytes<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
-/// `patina_dst::rng()`: a deterministic 64-bit draw bridged to the root seed.
 #[unsafe(no_mangle)]
+/// `patina_dst::rng()`: a deterministic 64-bit draw bridged to the root seed.
 pub extern "C" fn patina_rng() -> u64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     with_context(|context| Ok(context.buggify_rng())).unwrap_or(0)
 }
 
-/// `patina_dst::lifecycle::setup_complete()`: mark the setup boundary and emit a marker.
 #[unsafe(no_mangle)]
+/// `patina_dst::lifecycle::setup_complete()`: mark the setup boundary and emit a marker.
 pub extern "C" fn patina_lifecycle_setup_complete() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let _ = with_context(|context| {
@@ -466,11 +466,11 @@ pub extern "C" fn patina_lifecycle_setup_complete() -> c_int {
     0
 }
 
+#[unsafe(no_mangle)]
 /// `patina_dst::lifecycle::event!("label")`: emit a lifecycle marker.
 ///
 /// # Safety
 /// Label pointer must describe a live UTF-8 slice of `label_len` bytes.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller passes a live slice.

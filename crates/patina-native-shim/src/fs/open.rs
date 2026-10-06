@@ -54,6 +54,7 @@ pub(crate) fn deny(message: &str) -> c_int {
     fail(ENOSYS)
 }
 
+#[unsafe(no_mangle)]
 /// `openat(2)` over the deterministic filesystem: resolve `(dirfd, path)`
 /// through the one resolver, then open what it names. Every success is a fresh
 /// guest number from the descriptor table (lowest free, `EMFILE` past
@@ -72,7 +73,6 @@ pub(crate) fn deny(message: &str) -> c_int {
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_openat(
     dirfd: c_int,
     path: *const c_char,
@@ -84,6 +84,7 @@ pub unsafe extern "C" fn patina_openat(
     unsafe { open_at(dirfd, path, flags, mode, 0) }
 }
 
+#[unsafe(no_mangle)]
 /// `openat2(2)` past its `struct open_how` checks: [`patina_openat`] with the
 /// resolution confined by `resolve`, `PATINA_RESOLVE_*` restriction bits
 /// (`paths::RESOLVE_SCOPE_FLAGS`); any other bit is `EINVAL`.
@@ -91,7 +92,6 @@ pub unsafe extern "C" fn patina_openat(
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_openat2(
     dirfd: c_int,
     path: *const c_char,

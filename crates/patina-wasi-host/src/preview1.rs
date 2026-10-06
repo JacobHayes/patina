@@ -9,6 +9,7 @@ use crate::abi::{
 };
 use crate::fs::WasiPathOpen;
 use crate::host::{WasiDescriptor, WasiSubscription};
+use crate::imports::Imports;
 use crate::memory::{
     environment_strings, memory, offset, read_guest_bytes, read_iovecs, read_u16, read_u32,
     read_u64, string_buffer_size, write_filestat, write_string_vector, write_u16, write_u32,
@@ -16,15 +17,14 @@ use crate::memory::{
 };
 use crate::{Preview1Host, WasiHostError};
 use patina_dst_abi::{FsEntryKind, FsMetadata, SeekWhence};
-use wasmi::{Caller, Error as WasmiError, Linker};
+use wasmi::{Caller, Error as WasmiError};
 
-pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> {
+pub(super) fn define_preview1(linker: &mut Imports) -> Result<(), WasmiError> {
     const MODULE: &str = "wasi_snapshot_preview1";
     linker.func_wrap(
         MODULE,
         "args_sizes_get",
         |mut caller: Caller<'_, Preview1Host>, count: i32, size: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("args_sizes_get");
             let values = caller.data().arguments.clone();
             write_u32(&mut caller, count, values.len() as u32)?;
             write_u32(&mut caller, size, string_buffer_size(&values)?)?;
@@ -38,7 +38,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          pointers: i32,
          buffer: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("args_get");
             let values = caller.data().arguments.clone();
             write_string_vector(&mut caller, pointers, buffer, &values)?;
             Ok(0)
@@ -48,7 +47,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
         MODULE,
         "environ_sizes_get",
         |mut caller: Caller<'_, Preview1Host>, count: i32, size: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("environ_sizes_get");
             let values = environment_strings(caller.data());
             write_u32(&mut caller, count, values.len() as u32)?;
             write_u32(&mut caller, size, string_buffer_size(&values)?)?;
@@ -62,7 +60,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          pointers: i32,
          buffer: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("environ_get");
             let values = environment_strings(caller.data());
             write_string_vector(&mut caller, pointers, buffer, &values)?;
             Ok(0)
@@ -75,7 +72,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          pointer: i32,
          length: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("random_get");
             let length = offset(length)?;
             let mut bytes = vec![0; length];
             caller
@@ -93,7 +89,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          clock: i32,
          result: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("clock_res_get");
             let Some(clock) = wasi_clock(clock) else {
                 return Ok(28);
             };
@@ -110,7 +105,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          _precision: i64,
          result: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("clock_time_get");
             let Some(clock) = wasi_clock(clock) else {
                 return Ok(28);
             };
@@ -125,13 +119,12 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
     linker.func_wrap(
         MODULE,
         "fd_advise",
-        |mut caller: Caller<'_, Preview1Host>,
+        |caller: Caller<'_, Preview1Host>,
          fd: i32,
          offset: i64,
          len: i64,
          advice: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_advise");
             if !(0..=5).contains(&advice) {
                 return Ok(WASI_ERRNO_INVAL);
             }
@@ -152,7 +145,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          offset: i64,
          len: i64|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_allocate");
             match wasi_call(
                 caller
                     .data_mut()
@@ -167,7 +159,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
         MODULE,
         "fd_close",
         |mut caller: Caller<'_, Preview1Host>, fd: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_close");
             match wasi_call(caller.data_mut().fd_close(fd as u32))? {
                 Ok(()) => Ok(WASI_ERRNO_SUCCESS),
                 Err(errno) => Ok(errno),
@@ -178,7 +169,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
         MODULE,
         "fd_fdstat_get",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, result: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_fdstat_get");
             let fd = fd as u32;
             let (filetype, flags, rights, inheriting) = match fd {
                 0 => (WASI_FILETYPE_CHARACTER_DEVICE, 0, WASI_RIGHT_FD_READ, 0),
@@ -212,7 +202,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
         MODULE,
         "fd_fdstat_set_flags",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, fdflags: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_fdstat_set_flags");
             let Ok(fdflags) = u16::try_from(fdflags) else {
                 return Ok(WASI_ERRNO_INVAL);
             };
@@ -230,7 +219,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          rights: i64,
          inheriting: i64|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_fdstat_set_rights");
             match wasi_call(caller.data_mut().fd_fdstat_set_rights(
                 fd as u32,
                 rights as u64,
@@ -245,7 +233,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
         MODULE,
         "fd_filestat_set_size",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, len: i64| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_filestat_set_size");
             match wasi_call(
                 caller
                     .data_mut()
@@ -265,7 +252,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          mtime_nanos: i64,
          fst_flags: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_filestat_set_times");
             let Ok(fst_flags) = u16::try_from(fst_flags) else {
                 return Ok(WASI_ERRNO_INVAL);
             };
@@ -292,7 +278,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
         MODULE,
         "fd_filestat_get",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, result: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_filestat_get");
             let fd = fd as u32;
             let (metadata, filetype) = match fd {
                 0..=2 => (
@@ -347,7 +332,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
         MODULE,
         "fd_prestat_get",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, result: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_prestat_get");
             match caller.data().descriptors.get(&(fd as u32)) {
                 Some(WasiDescriptor::Directory {
                     path,
@@ -371,7 +355,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          result: i32,
          length: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_prestat_dir_name");
             let name = match caller.data().descriptors.get(&(fd as u32)) {
                 Some(WasiDescriptor::Directory {
                     path,
@@ -396,7 +379,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          count: i32,
          read: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_read");
             let vectors = read_iovecs(&caller, iovecs, count)?;
             let max_len = vectors.iter().try_fold(0usize, |total, (_, length)| {
                 total
@@ -431,7 +413,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          file_offset: i64,
          read: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_pread");
             let vectors = read_iovecs(&caller, iovecs, count)?;
             let max_len = vectors.iter().try_fold(0usize, |total, (_, length)| {
                 total
@@ -470,7 +451,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          cookie: i64,
          result: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_readdir");
             let path = match caller.data().descriptors.get(&(fd as u32)) {
                 Some(WasiDescriptor::Directory { path, .. }) => path.clone(),
                 _ => return Ok(WASI_ERRNO_BADF),
@@ -522,7 +502,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
         MODULE,
         "fd_renumber",
         |mut caller: Caller<'_, Preview1Host>, from: i32, to: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_renumber");
             match wasi_call(caller.data_mut().fd_renumber(from as u32, to as u32))? {
                 Ok(()) => Ok(WASI_ERRNO_SUCCESS),
                 Err(errno) => Ok(errno),
@@ -533,7 +512,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
         MODULE,
         "fd_datasync",
         |mut caller: Caller<'_, Preview1Host>, fd: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_datasync");
             match wasi_call(caller.data_mut().fd_sync(fd as u32))? {
                 Ok(()) => Ok(WASI_ERRNO_SUCCESS),
                 Err(errno) => Ok(errno),
@@ -544,7 +522,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
         MODULE,
         "fd_sync",
         |mut caller: Caller<'_, Preview1Host>, fd: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_sync");
             match wasi_call(caller.data_mut().fd_sync(fd as u32))? {
                 Ok(()) => Ok(WASI_ERRNO_SUCCESS),
                 Err(errno) => Ok(errno),
@@ -560,7 +537,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          whence: i32,
          result: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_seek");
             let whence = match whence {
                 0 => SeekWhence::Start,
                 1 => SeekWhence::Current,
@@ -580,7 +556,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
         MODULE,
         "fd_tell",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, result: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_tell");
             match wasi_call(caller.data_mut().fd_seek(fd as u32, 0, SeekWhence::Current))? {
                 Ok(position) => {
                     write_u64(&mut caller, result, position)?;
@@ -598,7 +573,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          path: i32,
          path_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("path_create_directory");
             let bytes = read_guest_bytes(&caller, path, path_len)?;
             let path = match wasi_call(caller.data().resolve_path(fd as u32, &bytes))? {
                 Ok(path) => path,
@@ -636,7 +610,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          path_len: i32,
          result: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("path_filestat_get");
             let Ok(flags) = u32::try_from(flags) else {
                 return Ok(WASI_ERRNO_INVAL);
             };
@@ -679,7 +652,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          mtime_nanos: i64,
          fst_flags: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("path_filestat_set_times");
             let (Ok(flags), Ok(fst_flags)) = (u32::try_from(flags), u16::try_from(fst_flags))
             else {
                 return Ok(WASI_ERRNO_INVAL);
@@ -723,7 +695,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          fdflags: i32,
          result: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("path_open");
             let (Ok(directory_flags), Ok(oflags), Ok(fdflags)) = (
                 u32::try_from(directory_flags),
                 u16::try_from(oflags),
@@ -770,7 +741,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          path: i32,
          path_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("path_remove_directory");
             let bytes = read_guest_bytes(&caller, path, path_len)?;
             let path = match wasi_call(caller.data().resolve_path(fd as u32, &bytes))? {
                 Ok(path) => path,
@@ -802,7 +772,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          to: i32,
          to_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("path_rename");
             let from_bytes = read_guest_bytes(&caller, from, from_len)?;
             let to_bytes = read_guest_bytes(&caller, to, to_len)?;
             let from = match wasi_call(caller.data().resolve_path(from_fd as u32, &from_bytes))? {
@@ -843,7 +812,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          new_path: i32,
          new_path_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("path_link");
             let Ok(old_flags) = u32::try_from(old_flags) else {
                 return Ok(WASI_ERRNO_INVAL);
             };
@@ -873,7 +841,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          link_path: i32,
          link_path_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("path_symlink");
             let target = read_guest_bytes(&caller, target, target_len)?;
             let link_path = read_guest_bytes(&caller, link_path, link_path_len)?;
             match wasi_call(
@@ -897,7 +864,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          buffer_len: i32,
          result: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("path_readlink");
             let path = read_guest_bytes(&caller, path, path_len)?;
             let target = match wasi_call(caller.data_mut().path_readlink(fd as u32, &path))? {
                 Ok(target) => target,
@@ -917,7 +883,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          path: i32,
          path_len: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("path_unlink_file");
             let bytes = read_guest_bytes(&caller, path, path_len)?;
             let path = match wasi_call(caller.data().resolve_path(fd as u32, &bytes))? {
                 Ok(path) => path,
@@ -947,7 +912,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          count: i32,
          written: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_write");
             let vectors = read_iovecs(&caller, iovecs, count)?;
             let memory = memory(&caller)?;
             let mut buffers = Vec::with_capacity(vectors.len());
@@ -975,7 +939,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          file_offset: i64,
          written: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("fd_pwrite");
             let vectors = read_iovecs(&caller, iovecs, count)?;
             let memory = memory(&caller)?;
             let mut buffers = Vec::with_capacity(vectors.len());
@@ -1000,14 +963,11 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
     linker.func_wrap(
         MODULE,
         "sock_accept",
-        |mut caller: Caller<'_, Preview1Host>,
+        |caller: Caller<'_, Preview1Host>,
          fd: i32,
          _flags: i32,
          _result: i32|
-         -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("sock_accept");
-            Ok(caller.data().sock_accept(fd as u32, 0))
-        },
+         -> Result<i32, WasmiError> { Ok(caller.data().sock_accept(fd as u32, 0)) },
     )?;
     linker.func_wrap(
         MODULE,
@@ -1020,7 +980,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          read: i32,
          result_flags: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("sock_recv");
             if flags & !0x3 != 0 {
                 return Ok(WASI_ERRNO_INVAL);
             }
@@ -1057,7 +1016,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          flags: i32,
          written: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("sock_send");
             if flags != 0 {
                 return Ok(WASI_ERRNO_INVAL);
             }
@@ -1083,7 +1041,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
         MODULE,
         "sock_shutdown",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, flags: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("sock_shutdown");
             if flags == 0 || flags & !0x3 != 0 {
                 return Ok(WASI_ERRNO_INVAL);
             }
@@ -1102,7 +1059,6 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
          count: i32,
          result: i32|
          -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("poll_oneoff");
             let count = offset(count)?;
             if count == 0 {
                 return Ok(WASI_ERRNO_INVAL);
@@ -1168,24 +1124,21 @@ pub(super) fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), W
     linker.func_wrap(
         MODULE,
         "sched_yield",
-        |mut caller: Caller<'_, Preview1Host>| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("sched_yield");
+        |caller: Caller<'_, Preview1Host>| -> Result<i32, WasmiError> {
             Ok(caller.data().sched_yield())
         },
     )?;
     linker.func_wrap(
         MODULE,
         "proc_raise",
-        |mut caller: Caller<'_, Preview1Host>, signal: i32| -> Result<i32, WasmiError> {
-            caller.data_mut().count_hostcall("proc_raise");
+        |caller: Caller<'_, Preview1Host>, signal: i32| -> Result<i32, WasmiError> {
             Ok(caller.data().proc_raise(signal as u32))
         },
     )?;
     linker.func_wrap(
         MODULE,
         "proc_exit",
-        |mut caller: Caller<'_, Preview1Host>, code: i32| -> Result<(), WasmiError> {
-            caller.data_mut().count_hostcall("proc_exit");
+        |_caller: Caller<'_, Preview1Host>, code: i32| -> Result<(), WasmiError> {
             Err(WasmiError::i32_exit(code))
         },
     )?;

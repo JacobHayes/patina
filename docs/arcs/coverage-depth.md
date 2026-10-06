@@ -362,13 +362,12 @@ emphasized) — implemented 2026-08-06.** Hostcall counters in `Preview1Host`,
 Wave-D implementation notes (where the design was silent, the nearest wave A-C
 precedent was followed):
 
-- **Counters are per-wrapper, and a source lint keeps them complete.** `wasmi`'s
-  `Linker::func_wrap` offers no interception point, so each of the 56 imported
-  functions bumps `Preview1Host::count_hostcall("<its own name>")` as its first
-  statement. `depth_source_lints::every_wasi_import_wrapper_counts_its_own_hostcall`
-  pairs every `func_wrap` name with a counting call of the SAME name in definition
-  order and rejects duplicate names, so a newly added import cannot silently drop
-  out of the depth report or merge into another row.
+- **One private registration path counts every import.** Preview1 and SDK
+  registration use `Imports`, which owns the Wasmi linker privately. Its sealed
+  adapters increment the registered name before invoking a wrapper; bodies
+  cannot mint the claim needed to increment a counter themselves. Registration
+  rejects duplicate report names across modules, so distinct imports cannot
+  merge their depth rows. A construction test exercises that rejection.
 - **No new flags.** Depth plateau reuses `--plateau-after`, so the CLI registry and
   the flag-drift gate are untouched.
 - **D1's WASI analogue.** Fuel metering is pinned on, so a completed run with

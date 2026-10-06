@@ -14,9 +14,9 @@ macro_rules! managed_op {
     }};
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `mutex` must reference a valid `pthread_mutex_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_mutex_init(mutex: *mut c_void, attr: *const c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: a null or initialized attribute, per the pthread contract.
@@ -28,9 +28,9 @@ pub unsafe extern "C" fn patina_mutex_init(mutex: *mut c_void, attr: *const c_vo
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `mutex` must reference a valid `pthread_mutex_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_mutex_lock(mutex: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
@@ -45,14 +45,14 @@ pub unsafe extern "C" fn patina_mutex_lock(mutex: *mut c_void) -> c_int {
                 switch_and_park(state, picked, me);
                 0
             }
-            Err(error) => error.into_posix(),
+            Err(error) => c_int::from(error.into_posix()),
         }
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `mutex` must reference a valid `pthread_mutex_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_mutex_trylock(mutex: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
@@ -64,9 +64,9 @@ pub unsafe extern "C" fn patina_mutex_trylock(mutex: *mut c_void) -> c_int {
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `mutex` must reference a valid `pthread_mutex_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_mutex_unlock(mutex: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
@@ -75,25 +75,26 @@ pub unsafe extern "C" fn patina_mutex_unlock(mutex: *mut c_void) -> c_int {
         let mut scheduler = RealScheduler;
         match state.table.unlock(&mut scheduler, me, mutex as usize) {
             Ok(()) => 0,
-            Err(error) => error.into_posix(),
+            Err(error) => c_int::from(error.into_posix()),
         }
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `mutex` must reference a valid `pthread_mutex_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_mutex_destroy(mutex: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
         let mut state = lock_state();
         match state.table.destroy_mutex(mutex as usize) {
             Ok(()) => 0,
-            Err(error) => error.into_posix(),
+            Err(error) => c_int::from(error.into_posix()),
         }
     })
 }
 
+#[unsafe(no_mangle)]
 /// `os_unfair_lock` (macOS) routed through the deterministic scheduler using
 /// the shared mutex table, keyed on the lock's address. `os_unfair_lock` is a
 /// bare `u32` with no init call, so the table lazily registers it on first
@@ -113,7 +114,6 @@ pub unsafe extern "C" fn patina_mutex_destroy(mutex: *mut c_void) -> c_int {
 /// # Safety
 /// `lock` must reference a valid `os_unfair_lock`.
 #[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_os_unfair_lock_lock(lock: *mut c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // Run the lock natively — never through the deterministic model — for an
@@ -157,10 +157,10 @@ pub unsafe extern "C" fn patina_os_unfair_lock_lock(lock: *mut c_void) {
     }
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `lock` must reference a valid `os_unfair_lock`.
 #[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_os_unfair_lock_trylock(lock: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // Allocator-internal lock: run natively (see `patina_os_unfair_lock_lock`).
@@ -183,10 +183,10 @@ pub unsafe extern "C" fn patina_os_unfair_lock_trylock(lock: *mut c_void) -> c_i
     )
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `lock` must reference a valid `os_unfair_lock` the caller holds.
 #[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_os_unfair_lock_unlock(lock: *mut c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // Allocator-internal lock: run natively (see `patina_os_unfair_lock_lock`).
@@ -218,6 +218,7 @@ pub unsafe extern "C" fn patina_os_unfair_lock_unlock(lock: *mut c_void) {
     }
 }
 
+#[unsafe(no_mangle)]
 /// Deterministic `pthread_rwlock_*`. Reader/writer contention routes through
 /// the scheduler exactly like the mutex/cond interposition: the lock's kind
 /// (from its attribute or static initializer; glibc's default prefers
@@ -228,7 +229,6 @@ pub unsafe extern "C" fn patina_os_unfair_lock_unlock(lock: *mut c_void) {
 ///
 /// # Safety
 /// `lock` must reference a valid `pthread_rwlock_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_rwlock_init(lock: *mut c_void, attr: *const c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: a null or initialized attribute, per the pthread contract.
@@ -240,9 +240,9 @@ pub unsafe extern "C" fn patina_rwlock_init(lock: *mut c_void, attr: *const c_vo
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `lock` must reference a valid `pthread_rwlock_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_rwlock_rdlock(lock: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
@@ -257,14 +257,14 @@ pub unsafe extern "C" fn patina_rwlock_rdlock(lock: *mut c_void) -> c_int {
                 switch_and_park(state, picked, me);
                 0
             }
-            Err(error) => error.into_posix(),
+            Err(error) => c_int::from(error.into_posix()),
         }
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `lock` must reference a valid `pthread_rwlock_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_rwlock_wrlock(lock: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
@@ -279,14 +279,14 @@ pub unsafe extern "C" fn patina_rwlock_wrlock(lock: *mut c_void) -> c_int {
                 switch_and_park(state, picked, me);
                 0
             }
-            Err(error) => error.into_posix(),
+            Err(error) => c_int::from(error.into_posix()),
         }
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `lock` must reference a valid `pthread_rwlock_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_rwlock_tryrdlock(lock: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
@@ -297,9 +297,9 @@ pub unsafe extern "C" fn patina_rwlock_tryrdlock(lock: *mut c_void) -> c_int {
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `lock` must reference a valid `pthread_rwlock_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_rwlock_trywrlock(lock: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
@@ -311,9 +311,9 @@ pub unsafe extern "C" fn patina_rwlock_trywrlock(lock: *mut c_void) -> c_int {
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `lock` must reference a valid `pthread_rwlock_t` the caller holds.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_rwlock_unlock(lock: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
@@ -322,28 +322,28 @@ pub unsafe extern "C" fn patina_rwlock_unlock(lock: *mut c_void) -> c_int {
         let mut scheduler = RealScheduler;
         match state.table.rwlock_unlock(&mut scheduler, me, lock as usize) {
             Ok(()) => 0,
-            Err(error) => error.into_posix(),
+            Err(error) => c_int::from(error.into_posix()),
         }
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `lock` must reference a valid `pthread_rwlock_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_rwlock_destroy(lock: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
         let mut state = lock_state();
         match state.table.destroy_rwlock(lock as usize) {
             Ok(()) => 0,
-            Err(error) => error.into_posix(),
+            Err(error) => c_int::from(error.into_posix()),
         }
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `cond` must reference a valid `pthread_cond_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_cond_init(cond: *mut c_void, attr: *const c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: a null or initialized attribute, per the pthread contract.
@@ -355,10 +355,10 @@ pub unsafe extern "C" fn patina_cond_init(cond: *mut c_void, attr: *const c_void
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `cond` and `mutex` must reference valid pthread objects, and the caller
 /// must own `mutex`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_cond_wait(cond: *mut c_void, mutex: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
@@ -370,7 +370,7 @@ pub unsafe extern "C" fn patina_cond_wait(cond: *mut c_void, mutex: *mut c_void)
                 0
             }
             Ok(Step::Continue) => fatal("cond wait parked without transferring the baton"),
-            Err(error) => error.into_posix(),
+            Err(error) => c_int::from(error.into_posix()),
         }
     })
 }
@@ -406,6 +406,7 @@ unsafe fn timespec_nanos(ptr: *const c_void) -> Result<u64, c_int> {
         .ok_or(EOVERFLOW)
 }
 
+#[unsafe(no_mangle)]
 /// Timed condition wait. Like [`patina_cond_wait`], but parks with the
 /// wait's absolute deadline, on the condition's clock, registered on the
 /// virtual-clock timer queue. A signal before the deadline returns 0 (the
@@ -419,7 +420,6 @@ unsafe fn timespec_nanos(ptr: *const c_void) -> Result<u64, c_int> {
 /// # Safety
 /// `cond` and `mutex` must reference valid pthread objects the caller owns,
 /// and `abstime` a valid `struct timespec`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_cond_timedwait(
     cond: *mut c_void,
     mutex: *mut c_void,
@@ -451,14 +451,14 @@ pub unsafe extern "C" fn patina_cond_timedwait(
         Ok(false) => {}
         Ok(true) => {
             if let Err(error) = state.table.unlock(&mut scheduler, me, mutex_key) {
-                return error.into_posix();
+                return c_int::from(error.into_posix());
             }
             // SAFETY: a valid `pthread_mutex_t`, per this function's contract.
             let kind = unsafe { MutexKind::of_static(mutex) };
             match state.begin_lock(me, mutex_key, kind) {
                 Ok(Step::Continue) => drop(state),
                 Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
-                Err(error) => return error.into_posix(),
+                Err(error) => return c_int::from(error.into_posix()),
             }
             return ETIMEDOUT;
         }
@@ -469,7 +469,7 @@ pub unsafe extern "C" fn patina_cond_timedwait(
         .table
         .cond_wait(&mut scheduler, me, cond_key, mutex_key)
     {
-        return error.into_posix();
+        return c_int::from(error.into_posix());
     }
     match state.block_timed(
         me,
@@ -480,7 +480,7 @@ pub unsafe extern "C" fn patina_cond_timedwait(
     ) {
         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
         Ok(Step::Continue) => drop(state),
-        Err(error) => return error.into_posix(),
+        Err(error) => return c_int::from(error.into_posix()),
     }
     // Resumed. A timer wake left `me` in `timed_out` and holding no mutex; a
     // signal wake removed `me` from the condition and re-granted the mutex.
@@ -491,7 +491,7 @@ pub unsafe extern "C" fn patina_cond_timedwait(
         match state.begin_lock(me, mutex_key, kind) {
             Ok(Step::Continue) => drop(state),
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
-            Err(error) => return error.into_posix(),
+            Err(error) => return c_int::from(error.into_posix()),
         }
         ETIMEDOUT
     } else {
@@ -500,9 +500,9 @@ pub unsafe extern "C" fn patina_cond_timedwait(
     }
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `cond` must reference a valid `pthread_cond_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_cond_signal(cond: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
@@ -510,14 +510,14 @@ pub unsafe extern "C" fn patina_cond_signal(cond: *mut c_void) -> c_int {
         let mut scheduler = RealScheduler;
         match state.table.cond_signal(&mut scheduler, cond as usize) {
             Ok(()) => 0,
-            Err(error) => error.into_posix(),
+            Err(error) => c_int::from(error.into_posix()),
         }
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `cond` must reference a valid `pthread_cond_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_cond_broadcast(cond: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
@@ -525,21 +525,21 @@ pub unsafe extern "C" fn patina_cond_broadcast(cond: *mut c_void) -> c_int {
         let mut scheduler = RealScheduler;
         match state.table.cond_broadcast(&mut scheduler, cond as usize) {
             Ok(()) => 0,
-            Err(error) => error.into_posix(),
+            Err(error) => c_int::from(error.into_posix()),
         }
     })
 }
 
+#[unsafe(no_mangle)]
 /// # Safety
 /// `cond` must reference a valid `pthread_cond_t`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_cond_destroy(cond: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
         let mut state = lock_state();
         match state.table.destroy_cond(cond as usize) {
             Ok(()) => 0,
-            Err(error) => error.into_posix(),
+            Err(error) => c_int::from(error.into_posix()),
         }
     })
 }

@@ -12,6 +12,7 @@ static STREAM_SALVAGE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 type StreamFlusher = unsafe extern "C" fn();
 type StreamSalvage = unsafe extern "C" fn(*mut *const c_void) -> usize;
 
+#[unsafe(no_mangle)]
 /// Register the POSIX layer's stdio flush, which [`patina_shutdown`] runs
 /// first, and the salvage of its stdout buffer, which every refusal runs
 /// ([`flush_before_refusal`]). Null pointers unregister.
@@ -19,7 +20,6 @@ type StreamSalvage = unsafe extern "C" fn(*mut *const c_void) -> usize;
 /// # Safety
 /// `flusher` must be a valid `void (*)(void)` and `salvage` a valid
 /// `size_t (*)(const void **)` for the life of the process.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_register_stream_flusher(
     flusher: Option<StreamFlusher>,
     salvage: Option<StreamSalvage>,
@@ -31,6 +31,7 @@ pub unsafe extern "C" fn patina_register_stream_flusher(
     STREAM_SALVAGE.store(salvage, Ordering::Release);
 }
 
+#[unsafe(no_mangle)]
 /// Finalize the runtime on an exit path, writing any recorded trace and
 /// flushing captured stdio. The guest's stdio buffers are written first, as
 /// glibc's `exit` flushes them after the atexit handlers (`_IO_cleanup`); the
@@ -39,7 +40,6 @@ pub unsafe extern "C" fn patina_register_stream_flusher(
 /// the packaged startup path registers this through `atexit` so record mode
 /// finalizes on normal exit without an explicit call, and a second call (for
 /// example an application that still calls it explicitly) is a no-op.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_shutdown() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let pointer = STREAM_FLUSHER.load(Ordering::Acquire);
@@ -187,12 +187,12 @@ const GUEST_EXIT_UNKNOWN: i32 = i32::MIN;
 static GUEST_EXIT_STATUS: std::sync::atomic::AtomicI32 =
     std::sync::atomic::AtomicI32::new(GUEST_EXIT_UNKNOWN);
 
+#[unsafe(no_mangle)]
 /// Record the guest's own exit status. Called from the `__libc_start_main`
 /// wrapper the moment the guest's `main` returns, and from [`patina_exit`] for
 /// an explicit `exit(3)`/`std::process::exit`. The FIRST recording wins: `main`
 /// returning is the guest's verdict, and glibc's own later `exit()` of that same
 /// code must not be mistaken for a second, independent one.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_note_guest_exit_status(status: c_int) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let _ = GUEST_EXIT_STATUS.compare_exchange(
@@ -228,13 +228,13 @@ fn report_shutdown_error(message: &str) {
     let _ = host_write_all(2, line.as_bytes());
 }
 
+#[unsafe(no_mangle)]
 /// Flush captured stdout/stderr to the real host descriptors WITHOUT finalizing
 /// the run (unlike [`patina_shutdown`], which also finishes the trace/record),
 /// salvaging what the C streams buffered ([`flush_before_refusal`]). The
-/// process-class deny-traps in `c/patina_posix.c` call this immediately
+/// process-class deny-traps in the staged `patina_posix.c` call this immediately
 /// before `host_abort()`: `host_abort()` skips the atexit-driven shutdown flush, so
 /// without it the guest's buffered output and the deny diagnostic would be lost.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_flush_captured_stdio() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match flush_before_refusal() {

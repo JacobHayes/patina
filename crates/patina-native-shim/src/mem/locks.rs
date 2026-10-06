@@ -236,8 +236,8 @@ fn first_hole(start: usize, len: usize) -> Option<usize> {
         .find(|page| !mapped(*page, PAGE))
 }
 
-/// `mlock`/`mlock2` (mm/mlock.c `do_mlock`): 0 or `-errno`.
 #[unsafe(no_mangle)]
+/// `mlock`/`mlock2` (mm/mlock.c `do_mlock`): 0 or `-errno`.
 pub extern "C" fn patina_mlock(start: usize, len: usize, flags: u32) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if flags & !MLOCK_ONFAULT != 0 {
@@ -287,8 +287,8 @@ pub extern "C" fn patina_mlock(start: usize, len: usize, flags: u32) -> i64 {
     }
 }
 
-/// `munlock` (`apply_vma_lock_flags` with no flag): 0 or `-errno`.
 #[unsafe(no_mangle)]
+/// `munlock` (`apply_vma_lock_flags` with no flag): 0 or `-errno`.
 pub extern "C" fn patina_munlock(start: usize, len: usize) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let Some(len) = round_up(len.saturating_add(start & (PAGE - 1))) else {
@@ -317,8 +317,8 @@ pub extern "C" fn patina_munlock(start: usize, len: usize) -> i64 {
 const DENY_MCL_CURRENT: &str = "patina: mlockall(MCL_CURRENT) has no model (the kernel judges \
     it by total_vm, which is unreadable without /proc); failing closed\n";
 
-/// `mlockall` (`apply_mlockall_flags`): 0 or `-errno`.
 #[unsafe(no_mangle)]
+/// `mlockall` (`apply_mlockall_flags`): 0 or `-errno`.
 pub extern "C" fn patina_mlockall(flags: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if flags == 0 || flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 || flags == MCL_ONFAULT
@@ -337,8 +337,8 @@ pub extern "C" fn patina_mlockall(flags: c_int) -> i64 {
     0
 }
 
-/// `munlockall`: every lock and `MCL_FUTURE` end.
 #[unsafe(no_mangle)]
+/// `munlockall`: every lock and `MCL_FUTURE` end.
 pub extern "C" fn patina_munlockall() -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut mappings = MAPPINGS.lock();

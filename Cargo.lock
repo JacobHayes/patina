@@ -58,6 +58,7 @@ dependencies = [
  "libc",
  "memchr",
  "object",
+ "patina-dst",
  "patina-dst-abi",
  "patina-dst-conformance",
  "patina-dst-driver-api",

@@ -32,9 +32,12 @@ runs:
     - name: Install Rust components and targets
       shell: bash
       run: mise run setup
-    - name: Check toolchain pins and detector
+    - name: Check locked tool availability and toolchain detector
       shell: bash
-      run: python3 -B scripts/check-toolchain.py && python3 -B scripts/check-toolchain.py --selftest
+      run: |
+        mise exec -- ast-grep --version
+        python3 -B scripts/check-toolchain.py
+        python3 -B scripts/check-toolchain.py --selftest
     - uses: actions/cache/save@v5
       if: github.ref == 'refs/heads/main' && steps.mise-cache.outputs.cache-hit != 'true'
       with:

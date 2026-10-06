@@ -27,7 +27,7 @@ pub extern "C" fn patina_raise(sig: i32) -> i32 {
     }
     let mut state = super::lock_state();
     if let Err(error) = state.ensure_active() {
-        return crate::fail(error.into_posix());
+        return crate::fail(error.into_posix().into());
     }
     let task = super::current_task();
     drop(state);

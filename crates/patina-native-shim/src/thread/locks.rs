@@ -429,7 +429,7 @@ pub(crate) fn set(file: LockIdentity, request: Lock, wait: bool) -> Result<(), c
                 drop(state);
                 None
             }
-            Err(error) => Some(error.into_posix()),
+            Err(error) => Some(c_int::from(error.into_posix())),
         };
         {
             let mut state = lock_state();

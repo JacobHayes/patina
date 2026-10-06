@@ -75,6 +75,8 @@
 //! [ARCHITECTURE.md]: https://github.com/JacobHayes/patina/blob/main/ARCHITECTURE.md
 //! [`block_on`]: https://docs.rs/patina-dst-async
 
+#![deny(clippy::disallowed_methods)]
+
 use crate::buggify::Buggify;
 use crate::custom_op::PendingCustomOp;
 use crate::liveness::{CpuTime, LivenessWatchdog, SpinRescue};
@@ -102,8 +104,6 @@ mod replay;
 mod reports;
 mod schedule;
 mod swarm;
-#[cfg(test)]
-mod test_sources;
 mod time;
 
 pub use config::{
@@ -130,7 +130,12 @@ pub use buggify::{
 
 pub use custom_op::CustomOpMode;
 
-pub use reports::{Report, ReportConfig};
+pub use reports::{
+    ENV_CLOCK_FAULT_REPORT, ENV_COVERAGE_REPORT, ENV_CUSTOMOP_FAULT_REPORT, ENV_DEPTH_REPORT,
+    ENV_DNS_FAULT_REPORT, ENV_ENTROPY_FAULT_REPORT, ENV_FS_FAULT_REPORT, ENV_LIVENESS_REPORT,
+    ENV_NET_FAULT_REPORT, ENV_SCHEDULE_POLICY_REPORT, ENV_SCHEDULE_REPORT, ENV_SDK_REPORT,
+    ENV_SWARM_REPORT, Report, ReportConfig,
+};
 
 pub use patina_dst_abi::VerdictKind;
 
@@ -178,17 +183,6 @@ pub const ENV_FACTS: &str = "PATINA_FACTS";
 /// exactly the split between [`ENV_TRACE`] and [`ENV_TRACE_FD`]. Setting both
 /// [`ENV_FACTS`] and this variable is refused.
 pub const ENV_FACTS_FD: &str = "PATINA_FACTS_FD";
-
-/// Suppress the default-on native yield-point coverage diagnostic when set to a
-/// false-y value (`0`, `off`, `false`, `no`). The diagnostic is emitted by the
-/// native shim at the same finalization point as the runtime reports.
-pub const ENV_COVERAGE_REPORT: &str = "PATINA_COVERAGE_REPORT";
-
-/// Suppress the default-on WASI depth diagnostic when set to a false-y value
-/// (`0`, `off`, `false`, `no`). WASI guests execute in-process, so the line is
-/// emitted by `cargo-patina` rather than by a shim, but the gate spelling matches
-/// [`ENV_COVERAGE_REPORT`] so both diagnostics are silenced the same way.
-pub const ENV_DEPTH_REPORT: &str = "PATINA_DEPTH_REPORT";
 
 /// Inherited host descriptor carrying an encoded `patina_dst_fs_mem::FsImage`. When
 /// set, `native-run` streams a read-only host directory tree into the guest and
@@ -387,39 +381,6 @@ pub const ENV_DNS_LATENCY: &str = "PATINA_DNS_LATENCY_NANOS";
 /// Semantic configuration, not a fault knob: names outside it are NXDOMAIN.
 pub const ENV_DNS_ENTRIES: &str = "PATINA_DNS_ENTRIES_JSON";
 
-/// Suppress the default-on end-of-run schedule diagnostic when set to a false-y
-/// value (`0`, `off`, `false`, `no`). The diagnostic is on by default.
-pub const ENV_SCHEDULE_REPORT: &str = "PATINA_SCHEDULE_REPORT";
-
-/// Suppress the default-on end-of-run network fault-injection diagnostic when
-/// set to a false-y value (`0`, `off`, `false`, `no`). The diagnostic is on by
-/// default: it fires a loud warning when the net fault knobs could perturb
-/// delivery and fault-eligible traffic occurred, yet ZERO fault effects landed
-/// (the silent-inertness class — historically the inert TCP stream path).
-pub const ENV_NET_FAULT_REPORT: &str = "PATINA_NET_FAULT_REPORT";
-
-/// Suppress the default-on end-of-run filesystem fault-injection diagnostic
-/// when set to a false-y value (`0`, `off`, `false`, `no`). The diagnostic is on
-/// by default when fs fault knobs had eligible traffic.
-pub const ENV_FS_FAULT_REPORT: &str = "PATINA_FS_FAULT_REPORT";
-
-/// Suppress the default-on end-of-run DNS fault-injection diagnostic when set to
-/// a false-y value (`0`, `off`, `false`, `no`).
-pub const ENV_DNS_FAULT_REPORT: &str = "PATINA_DNS_FAULT_REPORT";
-
-/// Suppress the default-on end-of-run entropy fault-injection diagnostic when set
-/// to a false-y value (`0`, `off`, `false`, `no`).
-pub const ENV_ENTROPY_FAULT_REPORT: &str = "PATINA_ENTROPY_FAULT_REPORT";
-
-/// Suppress the default-on end-of-run clock (realtime-epoch jump)
-/// fault-injection diagnostic when set to a false-y value (`0`, `off`, `false`,
-/// `no`).
-pub const ENV_CLOCK_FAULT_REPORT: &str = "PATINA_CLOCK_FAULT_REPORT";
-
-/// Suppress the default-on end-of-run custom-operation fault-injection
-/// diagnostic when set to a false-y value (`0`, `off`, `false`, `no`).
-pub const ENV_CUSTOMOP_FAULT_REPORT: &str = "PATINA_CUSTOMOP_FAULT_REPORT";
-
 /// Enable cooperative-SUT (buggify) fault injection. Its value is the
 /// per-evaluation firing probability in per-mille for an active site (0..=1000);
 /// an empty value uses the FoundationDB default of 25% (250). Presence of the
@@ -441,11 +402,6 @@ pub const ENV_BUGGIFY_CUTOFF: &str = "PATINA_BUGGIFY_CUTOFF_NANOS";
 /// Inert without [`ENV_BUGGIFY`]. When set and the guest never calls
 /// `setup_complete()`, the run fails loudly at finalization.
 pub const ENV_BUGGIFY_AFTER_SETUP: &str = "PATINA_BUGGIFY_AFTER_SETUP";
-
-/// Suppress the default-on end-of-run cooperative-SUT diagnostic when set to a
-/// false-y value (`0`, `off`, `false`, `no`). On by default when buggify is
-/// enabled.
-pub const ENV_SDK_REPORT: &str = "PATINA_SDK_REPORT";
 
 /// Enable the PCT (Probabilistic Concurrency Testing) exploration scheduling
 /// policy. Its value is the target bug depth `d` (>= 1); an empty value uses the
@@ -478,16 +434,6 @@ pub const ENV_SCHED_STARVE_WINDOW: &str = "PATINA_SCHED_STARVE_WINDOW";
 /// fingerprint component.
 pub const ENV_SWARM: &str = "PATINA_SWARM";
 
-/// Suppress the default-on end-of-run swarm-selection diagnostic
-/// (`PATINA_SWARM_REPORT`) when set to a false-y value. On by default for every
-/// run that applied swarm selection.
-pub const ENV_SWARM_REPORT: &str = "PATINA_SWARM_REPORT";
-
-/// Suppress the default-on end-of-run exploration-policy diagnostic
-/// (`PATINA_SCHEDULE_POLICY`) when set to a false-y value. On by default when a
-/// policy is active.
-pub const ENV_SCHEDULE_POLICY_REPORT: &str = "PATINA_SCHEDULE_POLICY_REPORT";
-
 /// The compatibility-fingerprint component a supervisor folds (as `+buggify`)
 /// when a run arms cooperative-SUT injection, and the component swarm strips
 /// again when a generation deselects the `buggify` class.
@@ -514,10 +460,6 @@ pub const ENV_CONVERGE_WITHIN: &str = "PATINA_CONVERGE_WITHIN_NANOS";
 /// When unset and converge is enabled, the runtime derives it from the buggify
 /// damage-control cutoff (if buggify is enabled) else 0.
 pub const ENV_HEAL_AFTER: &str = "PATINA_HEAL_AFTER_NANOS";
-
-/// Suppress the default-on end-of-run liveness-watchdog diagnostic
-/// (`PATINA_LIVENESS_REPORT`) when set to a false-y value.
-pub const ENV_LIVENESS_REPORT: &str = "PATINA_LIVENESS_REPORT";
 
 // Return codes for the shim's `patina_harness_install` C ABI, shared by the
 // native shim (which returns them) and `patina-dst-harness` (which maps them to
@@ -988,105 +930,6 @@ impl From<EffectError> for RuntimeError {
 impl From<TraceError> for RuntimeError {
     fn from(value: TraceError) -> Self {
         Self::Trace(value)
-    }
-}
-
-/// Source-level convention lints for the end-of-run report knobs.
-///
-/// The class these pin is "the runtime reads the process environment after the
-/// runtime is installed". On the native path that read is routed through the
-/// interposed `getenv`, which by finalization sees only the scrubbed
-/// deterministic environment with no context in the slot — so it returns NULL
-/// and every knob silently reads as absent. Every report knob is therefore
-/// resolved once, at configuration time, into [`ReportConfig`].
-#[cfg(test)]
-mod source_lints {
-    use super::{Report, ReportConfig};
-    use crate::test_sources::rust_sources;
-    use std::collections::BTreeSet;
-
-    /// The gate behind [`Report`]: a suppression variable declared in this file
-    /// but missing from the table would be documented, parsed by nothing, and
-    /// inert — the exact failure this whole mechanism exists to remove.
-    #[test]
-    fn report_table_covers_every_declared_suppression_variable() {
-        let sources = rust_sources("src");
-        let declared: BTreeSet<&str> = sources
-            .iter()
-            .flat_map(|(_, source)| source.lines())
-            .filter_map(|line| {
-                let rest = line.trim().strip_prefix("pub const ENV_")?;
-                let (name, value) = rest.split_once(": &str = ")?;
-                name.ends_with("_REPORT")
-                    .then(|| value.trim().trim_end_matches(';').trim_matches('"'))
-            })
-            .collect();
-        let table: BTreeSet<&str> = Report::ALL.iter().map(|report| report.env()).collect();
-        assert_eq!(
-            declared, table,
-            "every declared PATINA_*_REPORT variable needs a Report variant (and vice versa)"
-        );
-    }
-
-    /// No report knob may be read from the process environment. Assembled at
-    /// runtime so this test's own text cannot match itself.
-    #[test]
-    fn no_report_knob_is_read_from_the_process_environment() {
-        for (_, source) in rust_sources("src") {
-            // Whitespace-stripped so the lint survives any rustfmt line breaking.
-            let packed: String = source.chars().filter(|c| !c.is_whitespace()).collect();
-            for needle in [
-                format!("env{}var(ENV_", "::"),
-                format!("env{}var_os(ENV_", "::"),
-            ] {
-                let mut cursor = 0;
-                while let Some(offset) = packed[cursor..].find(&needle) {
-                    let start = cursor + offset + needle.len();
-                    let end = start + packed[start..].find(')').expect("closing parenthesis");
-                    assert!(
-                        !packed[start..end].ends_with("_REPORT"),
-                        "ENV_{} is read from the process environment; resolve it once into \
-                     ReportConfig at configuration time instead — a native finalization-time \
-                     read returns NULL and silently disables the knob",
-                        &packed[start..end],
-                    );
-                    cursor = end;
-                }
-            }
-        }
-    }
-
-    /// Absent knobs leave every report on; only the documented false-y spellings
-    /// suppress; an explicit truthy value re-enables what an ambient `0` had
-    /// suppressed (the pin a campaign puts on its children).
-    #[test]
-    fn report_config_parses_the_documented_spellings() {
-        // `ReportConfig` indexes by discriminant while `applied` iterates `ALL`,
-        // so a reordered or duplicated row would read one report's setting under
-        // another's name. Pin the two orders together.
-        for (index, report) in Report::ALL.iter().enumerate() {
-            assert_eq!(
-                *report as usize, index,
-                "Report::ALL must be in variant order"
-            );
-        }
-        assert!(ReportConfig::default().enabled(Report::Schedule));
-        for value in ["0", "off", "FALSE", " no "] {
-            let config = ReportConfig::default()
-                .applied(|name| (name == Report::Schedule.env()).then(|| value.to_string()));
-            assert!(!config.enabled(Report::Schedule), "{value:?} must suppress");
-            assert!(
-                config.enabled(Report::Swarm),
-                "{value:?} must not touch a sibling report"
-            );
-        }
-        for value in ["1", "", "yes", "on"] {
-            let config = ReportConfig::default()
-                .applied(|_| Some("0".to_string()))
-                .applied(|name| (name == Report::Sdk.env()).then(|| value.to_string()));
-            assert!(config.enabled(Report::Sdk), "{value:?} must re-enable");
-            assert!(!config.enabled(Report::Swarm));
-        }
     }
 }
 

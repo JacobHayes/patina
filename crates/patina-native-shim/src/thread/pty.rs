@@ -359,7 +359,7 @@ pub(crate) fn open_master(flags: u32, cloexec: bool) -> c_int {
     let index = {
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
-            return fail(error.into_posix());
+            return fail(c_int::from(error.into_posix()));
         }
         let ptys = &mut state.ptys;
         ptys.ptmx.get_or_insert(NodeTimes::at(now));

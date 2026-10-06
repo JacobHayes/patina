@@ -16,6 +16,8 @@ crate-type = ["rlib", "staticlib"]
 # (`patina_planted_fault`), and the private signal stack's bounds for its
 # budget detector (`patina_planted_private_stack`); never in a guest's build.
 planted-faults = []
+# Clock panic failpoint used only by the native panic-policy acceptance test.
+test-panic = []
 
 [dependencies]
 libc.workspace = true

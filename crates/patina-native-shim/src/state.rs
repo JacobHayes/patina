@@ -168,7 +168,27 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
 /// rest of the process — which is why the window is entered exclusively through
 /// [`in_shim_bootstrap`], where a stored init error turns every answer below it
 /// into a named abort.
-pub(crate) static SHIM_BOOTSTRAP: AtomicBool = AtomicBool::new(true);
+mod bootstrap {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static ACTIVE: AtomicBool = AtomicBool::new(true);
+
+    pub(super) fn finish() {
+        ACTIVE.store(false, Ordering::Release);
+    }
+
+    pub(super) fn active() -> bool {
+        if !ACTIVE.load(Ordering::Acquire) {
+            return false;
+        }
+        super::abort_if_init_failed();
+        true
+    }
+}
+
+pub(crate) fn finish_shim_bootstrap() {
+    bootstrap::finish();
+}
 
 #[repr(C)]
 struct StaticSiteDescriptor {
@@ -284,11 +304,11 @@ fn descriptor_text(
 }
 
 /// Whether the process is still in the shim-bootstrap window (see
-/// [`SHIM_BOOTSTRAP`]). Read lock-free so the interposers can branch on it on
+/// `bootstrap::ACTIVE`). Read lock-free so the interposers can branch on it on
 /// entry, before touching any shim lock or the guest allocator.
 ///
 /// This is the ONE door into the window, and it fails closed on a failed init:
-/// [`SHIM_BOOTSTRAP`] is cleared only by a SUCCESSFUL [`install`], so an
+/// `bootstrap::ACTIVE` is cleared only by a SUCCESSFUL [`install`], so an
 /// initialization that failed closed (a `--fingerprint` mismatch, a bad
 /// `--mount` corpus, ...) leaves the window open for the rest of the process.
 /// Every answer behind it — a zero clock, a zero CPU time, `ENOENT` for a
@@ -298,15 +318,11 @@ fn descriptor_text(
 /// boundary operations are clock reads used to spin at 100% CPU on a fabricated
 /// frozen clock instead of aborting on the fingerprint mismatch. Consulting the
 /// stored init error HERE, rather than at each answer, covers the paths that
-/// exist and the ones not yet written; `bootstrap_window_lints` keeps it the
-/// only reader of the flag.
+/// exist and the ones not yet written. The flag is private to the bootstrap
+/// module, whose only reader performs this check.
 #[inline]
 pub(crate) fn in_shim_bootstrap() -> bool {
-    if !SHIM_BOOTSTRAP.load(Ordering::Acquire) {
-        return false;
-    }
-    abort_if_init_failed();
-    true
+    bootstrap::active()
 }
 
 thread_local! {

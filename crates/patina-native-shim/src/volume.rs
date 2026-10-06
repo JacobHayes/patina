@@ -295,12 +295,12 @@ pub(crate) fn statx_extra(fs: u32, mask: u32) -> (u32, u64) {
     }
 }
 
+#[unsafe(no_mangle)]
 /// The C `statx`'s [`statx_extra`]: the mask bits to add; the mount id is
 /// written to `mount_id`.
 ///
 /// # Safety
 /// `mount_id` must be writable.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_statx_extra(fs: u32, mask: u32, mount_id: *mut u64) -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let (bits, id) = statx_extra(fs, mask);
@@ -357,12 +357,12 @@ fn copy_out(description: KernelStatfs, out: *mut KernelStatfs) -> c_int {
     0
 }
 
+#[unsafe(no_mangle)]
 /// `statfs(2)`: the filesystem `path` (a trailing symlink followed) is on.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string; `out`, when
 /// non-null, to a writable `struct statfs`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_statfs(path: *const c_char, out: *mut KernelStatfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let path = match path_from_c(path) {
@@ -396,11 +396,11 @@ pub unsafe extern "C" fn patina_statfs(path: *const c_char, out: *mut KernelStat
     }
 }
 
+#[unsafe(no_mangle)]
 /// `fstatfs(2)`: the filesystem a descriptor is on.
 ///
 /// # Safety
 /// `out`, when non-null, must point to a writable `struct statfs`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_fstatfs(raw_fd: c_int, out: *mut KernelStatfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match descriptor_filesystem(raw_fd) {
@@ -689,13 +689,13 @@ pub struct KernelUstat {
     pub f_fpack: [u8; 6],
 }
 
+#[unsafe(no_mangle)]
 /// `ustat(2)`: the free-block and free-inode counts of the filesystem mounted
 /// on device `dev` (the kernel's 32-bit `new_encode_dev` word). A device with
 /// no filesystem is `EINVAL`, judged before the buffer (`vfs_ustat`).
 ///
 /// # Safety
 /// `out`, when non-null, must point to a writable `struct ustat`.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_ustat(dev: u32, out: *mut KernelUstat) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let major = (dev & 0xfff00) >> 8;

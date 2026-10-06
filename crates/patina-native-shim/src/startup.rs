@@ -8,17 +8,17 @@ pub extern "C" fn patina_note_boundary_symbol(symbol: *const c_char) {
     LAST_BOUNDARY_SYMBOL.store(symbol.cast_mut(), Ordering::Relaxed);
 }
 
+#[unsafe(no_mangle)]
 /// Install the POSIX interposer's internal-panic policy without installing a
 /// runtime. Bare prefixed-C embedders have no guest abort interposer or required
 /// host aliases and deliberately do not call this startup control-plane entry.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_init_panic_policy() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::panic_boundary::install();
 }
 
-/// Mark that the packaged C startup constructor finished capture/init/scrub.
 #[unsafe(no_mangle)]
+/// Mark that the packaged C startup constructor finished capture/init/scrub.
 pub extern "C" fn patina_note_startup_constructor_finished() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // The loader runs the constructor on the main thread.
@@ -26,6 +26,7 @@ pub extern "C" fn patina_note_startup_constructor_finished() {
     STARTUP_CONSTRUCTOR_FINISHED.store(true, Ordering::Release);
 }
 
+#[unsafe(no_mangle)]
 /// Capture one `PATINA_NAME=value` constructor-time control-plane entry for
 /// later shim-internal configuration reads. Guest-visible getenv never serves
 /// this map.
@@ -33,7 +34,6 @@ pub extern "C" fn patina_note_startup_constructor_finished() {
 /// # Safety
 /// `entry` must point to a valid NUL-terminated string for the duration of the
 /// call.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_control_set_entry(entry: *const c_char) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if entry.is_null() {
@@ -101,11 +101,11 @@ pub(crate) fn init_from_env() -> c_int {
     install(context)
 }
 
+#[unsafe(no_mangle)]
 /// Build the runtime from the `PATINA_*` protocol. Idempotent: the packaged
 /// startup path (a constructor in the POSIX layer) calls this automatically, so
 /// an explicit call from application code that also wants it is a no-op rather
 /// than a double-init error.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_init_from_env() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if slot().lock().is_some() {
@@ -115,6 +115,7 @@ pub extern "C" fn patina_init_from_env() -> c_int {
     init_from_env()
 }
 
+#[unsafe(no_mangle)]
 /// Install the deterministic runtime for a shim-backed harness (see
 /// `patina-dst-harness`, USAGE-MODES.md startup Option B). Called by
 /// `patina_dst_harness::run`/`run_with` under `cargo patina run --harness`
@@ -132,7 +133,6 @@ pub extern "C" fn patina_init_from_env() -> c_int {
 /// (`HARNESS_ERR_ALREADY_INSTALLED`); there is no `PATINA_MODE` in the control
 /// plane, i.e. not under `cargo patina run` (`HARNESS_ERR_NOT_UNDER_PATINA`); or
 /// the configuration failed to build/validate (`HARNESS_ERR_CONFIG`).
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_harness_install() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // Ordering matters: report the most specific fail-closed reason first. A

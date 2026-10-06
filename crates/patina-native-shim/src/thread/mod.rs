@@ -60,6 +60,7 @@ mod kqueue;
 mod lifecycle;
 mod net_state;
 mod pipe;
+mod posix_error;
 mod reactor;
 mod sync;
 mod table;
@@ -404,9 +405,9 @@ enum ThreadError {
 }
 
 impl ThreadError {
-    fn into_posix(self) -> c_int {
+    fn into_posix(self) -> posix_error::PosixErrno {
         match self {
-            Self::Posix(code) => code,
+            Self::Posix(code) => posix_error::PosixErrno::new(code),
             Self::Fatal(message) => fatal(&message),
         }
     }
@@ -711,7 +712,7 @@ fn switch_and_park(state: SpinGuard<'_, ThreadRuntime>, picked: TaskId, me: Task
                 Ok(Step::Continue) => return,
                 Err(error) => fatal(&format!(
                     "resuming pthread wait failed: {}",
-                    error.into_posix()
+                    c_int::from(error.into_posix())
                 )),
             }
         }
@@ -1330,7 +1331,7 @@ pub(crate) unsafe fn managed_sleep(
     ) {
         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
         Ok(Step::Continue) => drop(state),
-        Err(error) => return Some(error.into_posix()),
+        Err(error) => return Some(c_int::from(error.into_posix())),
     }
     // A bare sleep is on no waiter list; clear a defensive timer flag anyway.
     lock_state().timed_out.remove(&me);

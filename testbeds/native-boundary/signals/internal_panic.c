@@ -1,9 +1,10 @@
-/* The harness plants a Rust panic at the clock ABI entry, after its ownership
- * guard but before any runtime lock. This guest uses no undefined inputs. */
+/* Arm the feature-only clock panic after startup, before any runtime lock. */
 #include "patina_native.h"
 #include <assert.h>
 #include <stdint.h>
+extern void patina_test_arm_clock_panic(void);
 int main(void) {
+    patina_test_arm_clock_panic();
     uint64_t nanos = 0;
     assert(patina_clock_now(1, &nanos) == 0);
     return 0;

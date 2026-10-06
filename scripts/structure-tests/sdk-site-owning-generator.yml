@@ -1,0 +1,10 @@
+{
+  "id": "sdk-site-owning-generator",
+  "valid": [
+    "macro_rules! declare_site_macros { () => { #[macro_export] macro_rules! added { () => { () }; } }; }",
+    "macro_rules! helper { () => { \"macro_export\" }; }"
+  ],
+  "invalid": [
+    "macro_rules! another { () => { #[macro_export] macro_rules! added { () => { () }; } }; }"
+  ]
+}

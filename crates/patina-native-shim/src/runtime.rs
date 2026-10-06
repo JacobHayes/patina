@@ -155,11 +155,11 @@ pub(crate) fn trap_fatal(message: &str) -> ! {
     crate::host_abort();
 }
 
+#[unsafe(no_mangle)]
 /// `fcntl(F_SETOWN)`, `F_SETOWN_EX` and `F_SETSIG`: who `SIGIO` and
 /// `SIGURG` go to. Neither signal is delivered, so on an open descriptor
 /// this stops by name rather than answer as if they would be; a closed or
 /// `O_PATH` one is `EBADF` first.
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_fcntl_owner(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if let Err(errno) = fdget(raw_fd) {
@@ -171,13 +171,13 @@ pub extern "C" fn patina_fcntl_owner(raw_fd: c_int) -> c_int {
     );
 }
 
+#[unsafe(no_mangle)]
 /// `fcntl(F_GETOWN)`, `F_GETSIG` and, with `ex` nonzero, `F_GETOWN_EX`
 /// into `owner` (the guest's `struct f_owner_ex`). Nothing ever sets a
 /// descriptor's owner or signal (the setters stop by name,
 /// [`patina_fcntl_owner`]), so the answers are 6.8's for a file with none:
 /// 0, 0 and `{F_OWNER_TID, 0}` (`EFAULT` for memory that cannot take it).
 /// A closed or `O_PATH` descriptor is `EBADF` first (`check_fcntl_cmd`).
-#[unsafe(no_mangle)]
 pub extern "C" fn patina_fcntl_owner_get(raw_fd: c_int, ex: c_int, owner: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if let Err(errno) = fdget(raw_fd) {
@@ -192,6 +192,7 @@ pub extern "C" fn patina_fcntl_owner_get(raw_fd: c_int, ex: c_int, owner: *mut c
     0
 }
 
+#[unsafe(no_mangle)]
 /// C-callable loud fail-closed for the SUD C layer (arming failures, region
 /// discovery). The C side formats no message text of its own (it references no
 /// non-allowlisted stdio), so the diagnostic is emitted here through the glibc
@@ -200,7 +201,6 @@ pub extern "C" fn patina_fcntl_owner_get(raw_fd: c_int, ex: c_int, owner: *mut c
 /// # Safety
 /// `message` must be a valid NUL-terminated C string.
 #[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_sud_report_fatal(message: *const c_char) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller passes a valid NUL-terminated C string.
@@ -210,6 +210,7 @@ pub unsafe extern "C" fn patina_sud_report_fatal(message: *const c_char) -> ! {
     trap_fatal(&text);
 }
 
+#[unsafe(no_mangle)]
 /// As [`patina_sud_report_fatal`] with the trapped syscall number and faulting
 /// instruction address appended — used by the SIGSYS handler's provenance and
 /// out-of-text aborts (§4.4).
@@ -217,7 +218,6 @@ pub unsafe extern "C" fn patina_sud_report_fatal(message: *const c_char) -> ! {
 /// # Safety
 /// `message` must be a valid NUL-terminated C string.
 #[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_sud_report_fatal_addr(
     message: *const c_char,
     nr: std::ffi::c_long,
@@ -1163,7 +1163,7 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     let probe = Box::new(0u8);
     std::hint::black_box(probe.as_ref());
     drop(probe);
-    SHIM_BOOTSTRAP.store(false, Ordering::Release);
+    finish_shim_bootstrap();
     0
 }
 

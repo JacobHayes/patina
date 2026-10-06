@@ -899,7 +899,7 @@ pub(super) fn is_runtime_diagnostic(line: &str) -> bool {
 ///     pre-init/deny-trap abort paths — and those already print a `patina: ...`
 ///     line, which arrives here as evidence anyway. Exporting it for a guest's
 ///     abort would mean writing it out of a signal-time path in
-///     `c/patina_posix.c`, which is not clean.
+///     the staged `patina_posix.c`, which is not clean.
 ///
 /// So: a Rust panic, which is how an ordinary guest reaches `SIGABRT` (a panic
 /// that cannot unwind, a double panic, `panic=abort`). Its header carries the

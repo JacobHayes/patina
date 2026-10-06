@@ -6,5 +6,5 @@
 # that read as a single reviewed list.
 crates/patina-syscalls/src/generated.rs generated # emitted by scripts/refresh-syscalls.py
 crates/patina-syscalls/src/linux.rs 2878 # exhaustive per-syscall disposition table
-crates/patina-syscalls/src/symbols.rs 2817 # exhaustive shim-symbol-to-syscall table
+crates/patina-syscalls/src/symbols.rs 2804 # exhaustive shim-symbol-to-syscall table
 # Pending splits.

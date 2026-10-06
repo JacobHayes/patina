@@ -31,7 +31,7 @@
 //! defined by the same rule applied to *its* prefix. [`GuidancePlan::new`]
 //! resolves that with one forward pass over the sparse log rather than recursion.
 
-use sha2::{Digest, Sha256};
+use crate::campaign::gen_byte::Hash;
 
 /// One generation that moved a coverage/depth dimension, with how much it moved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,10 +67,6 @@ const EXPLOIT_BASE_PERMILLE: u64 = 700;
 /// stays worth revisiting, and a hard floor keeps the mode from silently
 /// degenerating into the unguided scheme.
 const EXPLOIT_FLOOR_PERMILLE: u64 = 200;
-/// A mask byte below this takes the corresponding derivation byte from the fresh
-/// hash instead of the ancestor's; 64/256 mutates ~25% of the bytes, so a child
-/// keeps most of its ancestor's knob configuration.
-const MUTATION_THRESHOLD: u8 = 64;
 /// Drought denominator when the plateau window is disabled (`--plateau-after 0`),
 /// so the decay schedule stays defined rather than dividing by zero.
 const DEFAULT_DROUGHT_WINDOW: u64 = 200;
@@ -96,10 +92,8 @@ pub(crate) fn exploit_permille(drought: u64, plateau_window: u64) -> u64 {
 
 /// The unguided derivation input: the pure per-generation hash every campaign has
 /// always used. Guided mode starts from this and may replace it.
-pub(crate) fn base_generation_hash(seed_base: u64, generation: u64) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(format!("patina-campaign-{seed_base}-{generation}").as_bytes());
-    hasher.finalize().into()
+pub(crate) fn base_generation_hash(seed_base: u64, generation: u64) -> Hash {
+    Hash::derive(seed_base, generation)
 }
 
 /// Inherit most of `ancestor`'s derivation bytes, taking the rest from `fresh`.
@@ -109,26 +103,8 @@ pub(crate) fn base_generation_hash(seed_base: u64, generation: u64) -> [u8; 32] 
 /// preserves ~75% of the ancestor's knob settings while the rest move. Deriving a
 /// brand-new hash from the ancestor's index instead would be indistinguishable
 /// from exploration — the mode would be inert.
-fn mutate(ancestor: &[u8; 32], fresh: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"patina-campaign-guided-mask-v1");
-    hasher.update(fresh);
-    let mask: [u8; 32] = hasher.finalize().into();
-    let mut out = *ancestor;
-    let mut took_any = false;
-    for index in 0..32 {
-        if mask[index] < MUTATION_THRESHOLD {
-            out[index] = fresh[index];
-            took_any = true;
-        }
-    }
-    if !took_any {
-        // Always inherit at least one byte from the fresh hash so two children of
-        // one ancestor cannot collapse onto an identical configuration.
-        let index = usize::from(fresh[0] % 32);
-        out[index] = fresh[index];
-    }
-    out
+fn mutate(ancestor: &Hash, fresh: &Hash) -> Hash {
+    ancestor.mutate(fresh)
 }
 
 /// The resolved guidance state for one campaign invocation.
@@ -139,7 +115,7 @@ pub(crate) struct GuidancePlan {
     ancestors: Vec<NoveltyEntry>,
     /// `hashes[i]` is the effective derivation input of `ancestors[i]`, resolved
     /// against that ancestor's own prefix.
-    hashes: Vec<[u8; 32]>,
+    hashes: Vec<Hash>,
 }
 
 impl GuidancePlan {
@@ -176,7 +152,7 @@ impl GuidancePlan {
             .collect();
         // Forward pass: ancestor i is derived from ancestors strictly below it,
         // which — the log being strictly increasing — is exactly the prefix `..i`.
-        let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(ancestors.len());
+        let mut hashes: Vec<Hash> = Vec::with_capacity(ancestors.len());
         for index in 0..ancestors.len() {
             let (hash, _) = derive(
                 seed_base,
@@ -196,7 +172,7 @@ impl GuidancePlan {
     }
 
     /// The derivation input for `generation`, plus why it was chosen.
-    pub(crate) fn generation_hash(&self, generation: u64) -> ([u8; 32], GuidanceDecision) {
+    pub(crate) fn generation_hash(&self, generation: u64) -> (Hash, GuidanceDecision) {
         // Truncate below the generation being derived: this is the tear-safety
         // property described in the module docs.
         let cut = self
@@ -217,15 +193,15 @@ fn derive(
     plateau_window: u64,
     generation: u64,
     ancestors: &[NoveltyEntry],
-    ancestor_hashes: &[[u8; 32]],
-) -> ([u8; 32], GuidanceDecision) {
+    ancestor_hashes: &[Hash],
+) -> (Hash, GuidanceDecision) {
     debug_assert_eq!(ancestors.len(), ancestor_hashes.len());
     let base = base_generation_hash(seed_base, generation);
     let Some(last) = ancestors.last() else {
         return (base, GuidanceDecision::NoAncestors);
     };
     let drought = generation.saturating_sub(1).saturating_sub(last.generation);
-    let roll = u64::from(u16::from_le_bytes([base[8], base[9]]) % 1000);
+    let roll = base.guidance_roll();
     if roll >= exploit_permille(drought, plateau_window) {
         return (base, GuidanceDecision::Explore);
     }
@@ -235,9 +211,7 @@ fn derive(
     let total: u64 = ancestors
         .iter()
         .fold(0u64, |sum, entry| sum.saturating_add(entry.weight));
-    let mut ticket = u64::from_le_bytes([
-        base[10], base[11], base[12], base[13], base[14], base[15], base[16], base[17],
-    ]) % total;
+    let mut ticket = base.guidance_ticket(total);
     let mut chosen = ancestors.len() - 1;
     for (index, entry) in ancestors.iter().enumerate() {
         if ticket < entry.weight {
@@ -360,7 +334,7 @@ fn detector_exploit_inherits_its_ancestor() -> (&'static str, bool, String) {
             continue;
         };
         let (ancestor_hash, _) = plan.generation_hash(ancestor);
-        let shared = (0..32).filter(|i| hash[*i] == ancestor_hash[*i]).count();
+        let shared = hash.shared_bytes(ancestor_hash);
         // Two separate claims. The per-generation floor is the one that
         // discriminates: a freshly derived hash shares 32/256 bytes with the
         // ancestor in expectation, so 8/32 is unreachable without inheritance.

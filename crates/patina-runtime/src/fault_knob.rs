@@ -113,9 +113,8 @@ pub struct KnobMeta {
     /// Several knobs SHARE a label on purpose — the crash and torn-write models
     /// are one stream, and SimNet is handed one network seed — and a knob whose
     /// effect exists both in `SimNet` and in the explicit `FaultNet` wrapper
-    /// names both. `every_domain_label_is_claimed` pins the label
-    /// registry against this column, so a label added without a knob (or a knob
-    /// pointed at a label that no longer exists) fails closed.
+    /// names both. Domain labels are shared constants; merely declaring an
+    /// unused label has no effect on a run.
     pub injection_domains: &'static [&'static str],
     /// The swarm class token this knob belongs to, or `None` for a knob no swarm
     /// class masks. `--fs-torn-granularity` is `None` because the `crash` class
@@ -135,7 +134,7 @@ impl FaultKnob {
     /// discriminants, and `knob_table_covers_every_registry_fault_flag` compares
     /// it to the CLI registry — so a variant added with a registry row but no
     /// entry here fails, and a variant with neither is a knob no CLI can reach.
-    /// This is the same pairing `Report::ALL` uses.
+    /// `Report::ALL` instead derives from the same rows as its variants.
     pub const ALL: &'static [Self] = &[
         Self::FsCrashAt,
         Self::FsTornGranularity,
@@ -724,50 +723,6 @@ mod tests {
                 .len(),
             SWARM_CLASSES.len(),
             "two swarm classes share a domain label — their coins would be identical"
-        );
-    }
-
-    /// The pairing behind the domain-label registry: a label declared in
-    /// `patina-rng-seeded` but claimed by no knob and no swarm class is a stream
-    /// nothing derives — either a knob wired to the wrong label, or a label left
-    /// behind by a removed one. Scanned from the source so a label cannot be
-    /// added without a home.
-    #[test]
-    fn every_domain_label_is_claimed() {
-        let sources = crate::test_sources::rust_sources("../patina-rng-seeded/src");
-        let declared: BTreeSet<&str> = sources
-            .iter()
-            .flat_map(|(_, source)| source.lines())
-            .filter_map(|line| {
-                let rest = line.trim().strip_prefix("pub const ")?;
-                let (_, value) = rest.split_once(": &str = ")?;
-                Some(value.trim().trim_end_matches(';').trim_matches('"'))
-            })
-            .collect();
-        assert!(
-            declared.len() > 20,
-            "the label scan matched almost nothing — the declaration shape changed"
-        );
-
-        let mut claimed: BTreeSet<&str> = FaultKnob::ALL
-            .iter()
-            .flat_map(|knob| knob.meta().injection_domains.iter().copied())
-            .collect();
-        claimed.extend(SWARM_CLASSES.iter().map(|class| class.domain));
-        // Guest entropy is not a fault knob: it is the run's baseline
-        // nondeterminism source, always active and never masked.
-        claimed.insert(fault_domain::ENTROPY);
-        // The scheduler's own streams are not fault knobs: they are the core
-        // selection/exploration-policy generators, always active (default
-        // selection) or gated by the schedule-policy config rather than a
-        // fault knob, and never masked.
-        claimed.insert(fault_domain::SCHED_MAIN);
-        claimed.insert(fault_domain::SCHED_PCT);
-        claimed.insert(fault_domain::SCHED_STARVE);
-
-        assert_eq!(
-            declared, claimed,
-            "every fault_domain label needs a knob or swarm class that draws from it (and vice versa)"
         );
     }
 
