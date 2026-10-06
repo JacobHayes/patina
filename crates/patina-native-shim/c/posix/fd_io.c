@@ -14,8 +14,7 @@
  * descriptor table, and the entry dispatches on what the number names. Nothing
  * in this file asks what kind of descriptor it holds -- the SUD rows call the
  * same entries, which is what keeps the libc door and the raw-syscall door
- * byte-identical. Rust decodes fcntl varargs; the fixed adapter here keeps the
- * platform flag and struct-flock translations.
+ * byte-identical. Rust owns fcntl decoding and its platform flag/struct-flock translations.
  */
 
 /*
@@ -61,133 +60,6 @@ int isatty(int fd) {
     return 0;
 }
 #endif
-
-/* The platform's file-status flags <-> the shim's PATINA_O_* status vocabulary,
- * for F_GETFL/F_SETFL. Only the bits the kernel reports through F_GETFL are
- * translated: the access mode, O_APPEND, O_NONBLOCK, O_PATH, and on Linux
- * O_DIRECTORY and O_LARGEFILE. */
-static int patina_getfl_to_posix(uint32_t status) {
-    int flags;
-    int readable = (status & PATINA_O_READ) != 0;
-    int writable = (status & PATINA_O_WRITE) != 0;
-    if (readable && writable) flags = O_RDWR;
-    else if (writable) flags = O_WRONLY;
-    else flags = O_RDONLY;
-    if (status & PATINA_O_APPEND) flags |= O_APPEND;
-    if (status & PATINA_O_NONBLOCK) flags |= O_NONBLOCK;
-#ifdef O_PATH
-    if (status & PATINA_O_PATH) flags |= O_PATH;
-#endif
-#ifdef __linux__
-    /* Linux keeps O_DIRECTORY in the description's f_flags; XNU does not. */
-    if (status & PATINA_O_DIRECTORY) flags |= O_DIRECTORY;
-    /* A 64-bit kernel forces O_LARGEFILE into every open(2)-minted description
-     * (fs/open.c build_open_how) and F_GETFL reports it; the shim's table
-     * remembers which those are. glibc defines the O_LARGEFILE macro as 0 on
-     * 64-bit targets, so the bit is the kernel's, for this architecture. */
-    if (status & PATINA_O_OPENED) flags |= PATINA_KERNEL_O_LARGEFILE;
-    /* A slave opened through TIOCGPTPEER keeps the O_CLOEXEC it was opened
-     * with in f_flags (dentry_open strips only O_CREAT/O_EXCL/O_NOCTTY/O_TRUNC). */
-    if (status & PATINA_O_CLOEXEC) flags |= O_CLOEXEC;
-#endif
-    return flags;
-}
-
-static uint32_t patina_setfl_from_posix(int flags) {
-    uint32_t status = 0;
-    if (flags & O_APPEND) status |= PATINA_O_APPEND;
-    if (flags & O_NONBLOCK) status |= PATINA_O_NONBLOCK;
-    return status;
-}
-
-static int patina_fcntl_record_lock(int fd, int command, struct flock *lock);
-
-/* Fixed-argument platform adapter for the Rust variadic entries. The adapter
- * retains the platform flag/struct-flock translations; it never reads varargs. */
-__attribute__((visibility("hidden")))
-int patina_fcntl_impl(int fd, int command, int argument, void *pointer, int large_file) {
-#ifdef __linux__
-    /* These checks refuse; they never act through pthread_exit/forced unwind. */
-    if (command == F_SETLKW || command == F_OFD_SETLKW) {
-        if (large_file) PATINA_CANCEL_POINT("fcntl64");
-        else PATINA_CANCEL_POINT("fcntl");
-    }
-#else
-    (void)large_file;
-#endif
-    if (command == F_GETLK || command == F_SETLK || command == F_SETLKW
-#ifdef F_OFD_SETLK
-        || command == F_OFD_GETLK || command == F_OFD_SETLK || command == F_OFD_SETLKW
-#endif
-    ) return patina_fcntl_record_lock(fd, command, pointer);
-#ifdef F_GETOWN_EX
-    if (command == F_GETOWN_EX) return fail_int(patina_fcntl_owner_get(fd, 1, pointer));
-#endif
-    switch (command) {
-        case F_GETFD: {
-            int cloexec = patina_fd_getfd(fd);
-            if (cloexec < 0) return fail_int(cloexec);
-            return cloexec ? FD_CLOEXEC : 0;
-        }
-        case F_SETFD:
-            return fail_int(patina_fd_setfd(fd, (argument & FD_CLOEXEC) != 0));
-        case F_GETFL: {
-            int status = patina_fd_getfl(fd);
-            if (status < 0) return fail_int(status);
-            return patina_getfl_to_posix((uint32_t)status);
-        }
-        case F_SETFL:
-            return fail_int(patina_fd_setfl(fd, patina_setfl_from_posix(argument)));
-        case F_DUPFD:
-            return fail_int(patina_dupfd(fd, argument, 0));
-#ifdef F_DUPFD_CLOEXEC
-        case F_DUPFD_CLOEXEC:
-            return fail_int(patina_dupfd(fd, argument, 1));
-#endif
-#ifdef F_GETPIPE_SZ
-        case F_GETPIPE_SZ:
-            return fail_int(patina_pipe_size(fd));
-        case F_SETPIPE_SZ:
-            return fail_int(patina_pipe_set_size(fd, argument));
-#endif
-#ifdef F_ADD_SEALS
-        case F_ADD_SEALS:
-            return fail_int(patina_add_seals(fd, (uint32_t)argument));
-        case F_GET_SEALS:
-            return fail_int(patina_get_seals(fd));
-#endif
-        /* SIGIO and SIGURG are never delivered: a named fatal. */
-        case F_SETOWN:
-#ifdef F_SETOWN_EX
-        case F_SETOWN_EX:
-#endif
-#ifdef F_SETSIG
-        case F_SETSIG:
-#endif
-            return fail_int(patina_fcntl_owner(fd));
-#ifdef __linux__
-        /* Nothing sets an owner or a signal: the unset answers. */
-        case F_GETOWN:
-        case F_GETSIG:
-            return fail_int(patina_fcntl_owner_get(fd, 0, NULL));
-#endif
-#ifdef __APPLE__
-        /* Rust std maps File::sync_all to F_FULLFSYNC on Darwin. */
-        case F_FULLFSYNC:
-            return fail_int(patina_fsync(fd));
-#endif
-        default:
-            break;
-    }
-    /* An unknown command on an open descriptor is EINVAL; on a closed one the
-     * kernel answers EBADF first. */
-    if (patina_fd_kind(fd) < 0) {
-        errno = EBADF;
-        return -1;
-    }
-    errno = EINVAL;
-    return -1;
-}
 
 ssize_t read(int fd, void *destination, size_t length) {
     PATINA_CANCEL_POINT("read");
@@ -422,50 +294,6 @@ int ftruncate64(int fd, off64_t length) {
 }
 
 #endif
-
-/* POSIX record locks (F_GETLK/F_SETLK/F_SETLKW) and the Linux open-file-
- * description variants (F_OFD_*): the platform's commands, lock types and
- * struct flock translated onto patina_record_lock's, which both doors call.
- * An unknown lock type passes through as one the entry refuses (EINVAL). */
-static int patina_fcntl_record_lock(int fd, int command, struct flock *lock) {
-    uint32_t patina_command;
-    switch (command) {
-        case F_GETLK: patina_command = PATINA_F_GETLK; break;
-        case F_SETLK: patina_command = PATINA_F_SETLK; break;
-        case F_SETLKW: patina_command = PATINA_F_SETLKW; break;
-#ifdef F_OFD_SETLK
-        case F_OFD_GETLK: patina_command = PATINA_F_OFD_GETLK; break;
-        case F_OFD_SETLK: patina_command = PATINA_F_OFD_SETLK; break;
-        case F_OFD_SETLKW: patina_command = PATINA_F_OFD_SETLKW; break;
-#endif
-        default: errno = EINVAL; return -1;
-    }
-    if (lock == NULL) return fail_int(patina_record_lock(fd, patina_command, NULL));
-    struct patina_flock request = {
-        .l_type = lock->l_type == F_RDLCK   ? PATINA_F_RDLCK
-                  : lock->l_type == F_WRLCK ? PATINA_F_WRLCK
-                  : lock->l_type == F_UNLCK ? PATINA_F_UNLCK
-                                            : -1,
-        .l_whence = lock->l_whence,
-        .l_start = (int64_t)lock->l_start,
-        .l_len = (int64_t)lock->l_len,
-        .l_pid = (int32_t)lock->l_pid,
-    };
-    int result = patina_record_lock(fd, patina_command, &request);
-    if (result < 0) return fail_int(result);
-    if (patina_command == PATINA_F_GETLK || patina_command == PATINA_F_OFD_GETLK) {
-        lock->l_type = request.l_type == PATINA_F_RDLCK   ? F_RDLCK
-                       : request.l_type == PATINA_F_WRLCK ? F_WRLCK
-                                                          : F_UNLCK;
-        if (request.l_type != PATINA_F_UNLCK) {
-            lock->l_whence = SEEK_SET;
-            lock->l_start = (off_t)request.l_start;
-            lock->l_len = (off_t)request.l_len;
-            lock->l_pid = (pid_t)request.l_pid;
-        }
-    }
-    return 0;
-}
 
 /* ioctl: the one Rust entry the SUD row calls too (patina_ioctl), which reads
  * the request as the kernel's unsigned int. */

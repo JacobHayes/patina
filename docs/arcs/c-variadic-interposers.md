@@ -188,3 +188,9 @@ explicit anchor plus one-codegen-unit contract. The acceptance matrix inspects
 native Rust object members with nm in debug and opt-level=3 builds on ELF and
 Mach-O; extracting those members avoids Apple nm's inability to parse newer
 LLVM bitcode bundled in Rust's standard library.
+
+The fcntl fixed adapter is also Rust-owned: libc's platform flock layouts are
+expressible directly, and no shared C helper requires the adapter to stay.
+Status flags, errno and record-lock translation move together. Guest record
+memory uses the existing uaccess boundary, with field-only writes on GETLK.
+The cancellation rule now follows the Rust export and its waiting-command check.
