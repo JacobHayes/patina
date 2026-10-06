@@ -1,6 +1,7 @@
 # Arc: shrinking the native C shim
 
-Status: design complete; environment, entropy and memory adapters are Rust, 2026-10-06.
+Status: wave 2 ordinary adapters are Rust; Linux abort retains its C entry, 2026-10-06.
+The follow-up frame-lifetime audit below blocks landing despite passing tests.
 Focused evidence below is separate from the full landing battery.
 
 ## Decision and inventory
@@ -263,25 +264,27 @@ added). The full landing battery is deliberately not run in this design round.
 ## Wave 2 ownership
 
 `entropy.c` is now `src/posix/entropy.rs`, including the private Darwin lookup
-entries. Shared `fail_int`/`fail_size` errno adapters are guarded hidden Rust
-bridges while remaining C callers exist. The guest-export cfg and unique archive
-anchor are unchanged.
+entries. Shared errno adapters are Rust helpers; the temporary hidden `fail_int`/
+`fail_size` bridges are removed once their last C callers move. The guest-export
+cfg and unique archive anchor are unchanged.
 
 `mem.c` is now the Linux-only `src/posix/memory.rs`. Pointer-valued raw
 results retain the kernel failure range (-4095 through -1), and allocator
 bootstrap continues through the existing private host memory model.
 
 `privileged.c` is now `src/posix/privileged.rs`. The adapters retain signed
-syscall-word conversions and reboot magic values. Shared `signal_result`
+syscall-word conversions and reboot magic values. Shared `patina_signal_result`
 is a hidden guarded Rust bridge and delivers pending signals before errno.
 
 `sched_identity.c` is now `src/posix/sched_identity.rs`, including passwd
 iteration and resource-limit adapters. Darwin platform glue still uses its
-physical-memory constant, declared beside the retained C headers.
+physical-memory constant, declared beside the retained C headers. Its old
+Darwin timeval helper is removed with its last C caller.
 
-`readiness.c` is now `src/posix/readiness.rs` and its platform modules, with platform reactors
-and fixed fortify entries. Shared fortify failures are hidden guarded Rust
-bridges; Darwin poll uses a private returning C sleep bridge until wave 4.
+`readiness.c` is now `src/posix/readiness.rs` and its platform modules, with
+platform reactors and fixed fortify entries. Shared fortify failures are Rust
+helpers; their temporary hidden C bridges are removed with their last C callers.
+Darwin poll uses a private returning C sleep bridge until wave 4.
 
 `fd_io.c` is now `src/posix/fd_io.rs` and its Linux terminal/descriptor
 modules. C stdio uses the hidden guarded Rust `patina_isatty` implementation.
@@ -294,3 +297,90 @@ counts; resolver and interface lists retain their libc allocator ownership.
 `fs.c` is now `src/posix/fs/`, split into paths, directories, metadata,
 timestamps, volume and xattr adapters. The platform dirfd conversion is Rust;
 C stdio receives both metadata and stat through hidden guarded `patina_fd_stat`.
+Darwin exports the header's allocating `realpath$DARWIN_EXTSN` spelling.
+The fixed open implementation uses Rust module visibility once its last C
+caller moves.
+
+`signal_process.c` retains only Linux `abort`; the other adapters are in
+`src/posix/signal_process.rs` and its Linux module. Reserved signal handling,
+cancellation refusals, pending delivery and TLS diagnostics retain their existing
+contracts. Shared Darwin denial is a private Rust helper; C stdio exposes
+its existing sentinel lookup and fatal diagnostic privately until wave 3.
+
+**Wave 2 safety exception:** the design expected `abort` to move. Its required
+first-statement Rust guard would make `patina_abort` observe a guest panic as
+shim-owned, changing healthy trace finalization into an infrastructure failure.
+The C entry preserves `patina_abort`'s caller-ownership check before its guard;
+no export-rule exception or panic-boundary redesign is added.
+
+## Wave 2 evidence
+
+Each file's commit passes the existing Linux native tests for its area and
+guest-export-enabled clippy with warnings denied on host,
+`aarch64-unknown-linux-gnu` and `aarch64-apple-darwin`, using the command above.
+The existing ownership matrix checks the moved exports with `nm`: exactly one
+strong Rust definition, none C, with Linux routes hidden and sharing their
+definition's object/address, in both debug/unwind and optimized/abort archives.
+The remaining private bridges also have one strong Rust definition and none C.
+
+The Linux suites pass: native ABI (45), containment (40), raw (16) and signals
+(38), plus the matching filesystem, network, environment, platform, scheduling
+and gate end-to-end modules. Focused native conformance covers all moved
+families on Ubuntu 24.04/glibc 2.39, kernel 6.8, including native comparison,
+Patina repeats and replay. The only coverage additions are small calls in the
+existing PTY, kqueue and portable-process guests for previously uncovered
+spellings. Layout checks are compile-time size/offset assertions.
+
+The supplied mac-test helper passes native ABI (27), containment (18), signals
+(8) and shim library tests (94) against this workspace. Linux shim library
+tests pass (302). Compiled-symbol registry and host-alias gates pass on Linux
+(9/5) and macOS (7/5); structure, formatting, file-size and flag-drift gates
+pass. Cross-clippy is compilation evidence, not Linux arm64 execution.
+
+Physical C lines in `c/posix/` fall from **8,038** at the wave 1 parent to
+**3,812**, removing **4,226** lines. All local Cargo/mise commands use the
+required low-CPU wrapper, scratch stays under the supplied cache directory,
+and `target` remains an mbx symlink. The coordinator owns the full landing
+battery; it is not run here.
+
+## Follow-up: callback frame lifetime
+
+The ownership matrix discovers definitions from the compiled Rust archive,
+using the existing registry to identify libc names. Strong private ABI entries
+are also checked; weak bootstrap hooks retain their intentional C overrides.
+The route classifier remains the one implementation-ownership inventory.
+Behavioral variadic cases remain explicit because they exercise operands,
+not an inventory of adapter spellings.
+
+The frame-lifetime audit finds a blocker beyond the added `signal_result`
+guard. Linux `with_context` calls `sched_point`, which delivers before model
+work and after baton handoff. Blocking resume/restart paths and
+`patina_sud_dispatch` also deliver before returning. `deliver` itself keeps
+its existing panic scope, allocated vectors, fault scope and delivery-restore
+guard live while handlers run. Darwin `patina_raise` similarly keeps scopes
+live across its current-thread delivery vehicle. Supported handlers can leave
+by `siglongjmp`, `setcontext` or `swapcontext`; ownership suspension does not
+remove these frames or their destructors.
+
+Added adapter guards span those paths in Linux entropy; mmap/mmap64, munmap,
+msync, memfd_create and mlockall; privileged dispatch; uname/gethostname,
+sched_yield, getrusage, sysinfo and affinity adapters; ordinary descriptor
+I/O/transfers/close paths; poll/select/epoll waits; socket adapters and named-host
+resolution; filesystem adapters and the private metadata bridge; signal/process
+dispatch and Darwin raise. Fortify diagnostics and guest SIGABRT delivery are
+also callback paths. Pending-cancellation checks remain returning refusals,
+and delivered-handler pthread_exit/acting cancellation remains refused.
+
+A C helper called by guarded Rust adapters cannot close this class. C public
+entries avoid adding those outer Rust frames and preserve the pre-wave behavior,
+but the older model/delivery frames remain. Eliminating all live Rust frames
+requires a separate model/delivery continuation design, including blocking
+restart paths. Deferring or suppressing existing delivery changes behavior and
+is outside this adapter port. Passing native nonlocal-return tests proves
+observed runtime behavior, not the Rust frame-lifetime invariant. No partial
+signal-result fix is presented as closing the class.
+
+After the ownership simplification, the requested checks pass: Linux native ABI
+(45), raw (16), signals (38), shim library (302), guest-export-enabled clippy on
+all three targets above, structure, formatting and file-size; mac-test native
+ABI (27) and signals (8). These passing checks do not remove the lifetime blocker.

@@ -264,6 +264,14 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 
 ## Signal boundaries
 
+- Panic ownership suspension does not remove a Rust frame or its destructors.
+  A C callee cannot make a guarded Rust caller safe across guest siglongjmp or
+  context restoration. Before moving an adapter, trace model calls through
+  sched_point, blocking resume and SUD dispatch as well as its explicit delivery
+  helper. The follow-up audit in `docs/arcs/c-to-rust.md` records the existing
+  model/delivery lifetime blocker; passing guest tests does not establish this
+  Rust language invariant.
+
 - `raise` is a modeled entry on both platforms, not an audit allowance. Darwin's
   `thread/signals_darwin.rs` records generation for the baton holder before the
   private current-thread vehicle delivers an unblocked ordinary handler. It
@@ -524,3 +532,9 @@ Darwin inventory is separate from Linux runtime rows. The generated native
 Darwin module preserves BSD/Mach/ARM namespace, subcodes, guarded alternatives
 and invalid slots. Never infer runtime support or observed errno from a source
 declaration. Raw-entry coverage and C symbol status remain distinct.
+
+When moving Darwin libc adapters, inspect the header's symbol spelling with
+the packaged C feature macros. For example, `_DARWIN_C_SOURCE` makes allocating
+`realpath` bind `realpath$DARWIN_EXTSN`. Pair the existing compiled-object
+registry gate with the real C caller; a Rust export of the plain name can
+compile and link while the caller still reaches libSystem.

@@ -342,14 +342,14 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
  * refuses by name whatever would move the thread pointer. `modify_ldt`'s row
  * answers an int in a zero-extended register, errors included, and glibc's
  * wrapper hands that int back as it is (-22 for EINVAL, errno untouched):
- * `signal_result` does the same, since such a value is never negative.
+ * `patina_signal_result` does the same, since such a value is never negative.
  */
 int arch_prctl(int code, unsigned long addr) {
-    return signal_result(patina_sud_dispatch(SYS_arch_prctl, (uint64_t)(int64_t)code,
+    return patina_signal_result(patina_sud_dispatch(SYS_arch_prctl, (uint64_t)(int64_t)code,
         (uint64_t)addr, 0, 0, 0, 0, 0));
 }
 int modify_ldt(int func, void *ptr, unsigned long bytecount) {
-    return signal_result(patina_sud_dispatch(SYS_modify_ldt, (uint64_t)(int64_t)func,
+    return patina_signal_result(patina_sud_dispatch(SYS_modify_ldt, (uint64_t)(int64_t)func,
         (uintptr_t)ptr, (uint64_t)bytecount, 0, 0, 0, 0));
 }
 #endif

@@ -77,6 +77,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/pidfd.h>
+#include <sys/signalfd.h>
 #include <sys/prctl.h>
 #include <sys/ptrace.h>
 #include <sys/random.h>
@@ -133,26 +134,9 @@ static void patina_internal_unlock(pthread_mutex_t *lock, int held) {
     if (held) (void)patina_mutex_unlock(lock);
 }
 
-/* Rust-owned errno adapters shared by remaining C slices. */
-extern int fail_int(int result);
-extern ssize_t fail_size(intptr_t result);
+/* Rust-owned entropy implementations shared with dlsym. */
 extern int patina_deterministic_getentropy(void *destination, size_t length);
 extern ssize_t patina_deterministic_getrandom(void *destination, size_t length, unsigned int flags);
-
-#ifdef __APPLE__
-/* Loud fail-closed: one deterministic diagnostic line on captured stderr,
- * then a recoverable ENOSYS. Never falls through to the host. The line goes
- * to the captured-stderr SINK directly (not through the interposed write on
- * guest number 2): a runtime diagnostic must reach the supervisor even after
- * the guest dup2'd a file over its stderr. */
-static int patina_posix_deny(const char *message) {
-    (void)patina_stdio_write(2, message, strlen(message));
-    errno = ENOSYS;
-    return -1;
-}
-
-#endif
-
 #ifdef __linux__
 /*
  * zstd's static library references these weak tracing hooks (Linux corpus only;
@@ -218,13 +202,8 @@ __attribute__((noreturn)) static void patina_act_on_cancel(void) {
  */
 #define PATINA_CANCEL_POINT(name) patina_cancel_point(name)
 
-extern int signal_result(int64_t rc);
+extern int patina_signal_result(int64_t rc);
 
-/* glibc's `__fortify_fail` (debug/fortify_fail.c), the `_FORTIFY_SOURCE`
- * entries' answer to a call the compiler proved wrong: "*** MESSAGE ***:
- * terminated" on stderr in one write, then SIGABRT (a guest abort). */
-extern _Noreturn void patina_fortify_fail(const char *message);
-extern _Noreturn void patina_chk_fail(void);
 #else
 /* macOS: cancellation is not modeled (pthread_cancel answers ENOSYS). */
 #define PATINA_CANCEL_POINT(name) ((void)0)
@@ -293,6 +272,7 @@ extern ssize_t __readlinkat_chk(int, const char *, char *, size_t, size_t);
 _Static_assert(sizeof(struct statvfs) == 112 && offsetof(struct statvfs, f_type) == 88, "Rust Statvfs layout");
 _Static_assert(sizeof(struct statvfs64) == 112 && offsetof(struct statvfs64, f_type) == 88, "Rust Statvfs64 layout");
 extern ssize_t __recv_chk(int, void *, size_t, size_t, int);
+extern int tkill(pid_t, int);
 extern ssize_t __recvfrom_chk(int, void *, size_t, size_t, int, struct sockaddr *, socklen_t *);
 _Static_assert(sizeof(struct rtnl_link_stats) == 96 && offsetof(struct rtnl_link_stats, rx_nohandler) == 92, "Rust LinkStats layout");
 extern ssize_t __read(int fd, void *destination, size_t length);

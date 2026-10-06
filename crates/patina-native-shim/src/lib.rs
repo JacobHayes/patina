@@ -3,10 +3,11 @@
 //! Internal crate: the native interposition layer that `cargo patina build`
 //! links below a guest binary. The Rust side here exposes prefixed
 //! `patina_*` C ABI entry points over the deterministic runtime; the bundled C
-//! interposer (the staged `patina_posix.c` and its per-family slices under `c/posix/`,
-//! exported as [`POSIX_C_SOURCE`] and [`POSIX_C_FAMILY_SOURCES`]) provides
-//! most libc-compatible symbols (file, socket, clock, thread, entropy) that route a
-//! guest's ordinary `std` calls into it. The prefixed Rust surface
+//! glue (the staged `patina_posix.c` and its slices under `c/posix/`,
+//! exported as [`POSIX_C_SOURCE`] and [`POSIX_C_FAMILY_SOURCES`]) retains startup,
+//! callback, clock-store, cancellation and stdio seams. Guest-only Rust adapters
+//! provide ordinary libc symbols over the same prefixed models. The prefixed
+//! Rust surface
 //! exports ambient libc names only in the guest build (`patina_posix_exports`), so
 //! linking this crate alone cannot silently alter unrelated host operations.
 //! Adopters never depend on this crate; see [ARCHITECTURE.md] for the shim

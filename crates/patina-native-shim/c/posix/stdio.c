@@ -131,7 +131,7 @@ static struct patina_stream patina_stream_stdout = {
 static struct patina_stream patina_stream_stderr = {
     .fd = 2, .unbuffered = 1, .lock = PATINA_STREAM_LOCK_INIT, .storage = patina_stderr_bytes};
 
-__attribute__((noreturn)) static void patina_stdio_trap(const char *symbol) {
+__attribute__((noreturn, visibility("hidden"))) void patina_stdio_trap(const char *symbol) {
     static const char prefix[] = "patina: stdio call on a non-sentinel FILE* reached under patina: ";
     (void)patina_stdio_write(2, prefix, sizeof prefix - 1);
     (void)patina_stdio_write(2, symbol, strlen(symbol));
@@ -147,7 +147,7 @@ __attribute__((noreturn)) static void patina_stdio_trap(const char *symbol) {
  * write through patina_write on that number, so `printf` after `dup2(file, 1)`
  * lands in the file exactly as it does under a kernel; the trap diagnostic
  * goes to the captured-stderr sink directly, as every runtime diagnostic does. */
-static int patina_sentinel_fd(FILE *stream) {
+__attribute__((visibility("hidden"))) int patina_sentinel_fd(FILE *stream) {
     if (stream == &patina_sentinel_stdout_storage) {
         return 1;
     }
