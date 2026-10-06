@@ -270,3 +270,7 @@ anchor are unchanged.
 `mem.c` is now the Linux-only `src/posix/memory.rs`. Pointer-valued raw
 results retain the kernel failure range (-4095 through -1), and allocator
 bootstrap continues through the existing private host memory model.
+
+`privileged.c` is now `src/posix/privileged.rs`. The adapters retain signed
+syscall-word conversions and reboot magic values. Shared `signal_result`
+is a hidden guarded Rust bridge and delivers pending signals before errno.

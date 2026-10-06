@@ -225,11 +225,7 @@ __attribute__((noreturn)) static void patina_act_on_cancel(void) {
  */
 #define PATINA_CANCEL_POINT(name) patina_cancel_point(name)
 
-static int signal_result(int64_t rc) {
-    patina_signal_deliver();
-    if (rc < 0) { errno = (int)-rc; return -1; }
-    return (int)rc;
-}
+extern int signal_result(int64_t rc);
 
 /* glibc's `__fortify_fail` (debug/fortify_fail.c), the `_FORTIFY_SOURCE`
  * entries' answer to a call the compiler proved wrong: "*** MESSAGE ***:
@@ -263,3 +259,32 @@ extern void patina_capture_control_plane(void);
 extern const char *patina_control_getenv(const char *name);
 extern void patina_scrub_environ(void);
 extern char *patina_env_lookup(const char *name);
+
+/* Rust-owned fixed adapters referenced by the C route table. */
+#ifdef __linux__
+extern int mount(const char *source, const char *target, const char *type, unsigned long flags, const void *data);
+extern int umount2(const char *target, int flags);
+extern int pivot_root(const char *new_root, const char *put_old);
+extern int open_tree(int dirfd, const char *path, unsigned int flags);
+extern int move_mount(int from_dirfd, const char *from_path, int to_dirfd, const char *to_path, unsigned int flags);
+extern int fsopen(const char *fs_name, unsigned int flags);
+extern int fsconfig(int fd, unsigned int cmd, const char *key, const void *value, int aux);
+extern int fsmount(int fd, unsigned int flags, unsigned int attr_flags);
+extern int fspick(int dirfd, const char *path, unsigned int flags);
+extern int mount_setattr(int dirfd, const char *path, unsigned int flags, void *attr, size_t size);
+extern int acct(const char *path);
+extern int vhangup(void);
+extern int swapon(const char *path, int flags);
+extern int swapoff(const char *path);
+extern int reboot(int howto);
+extern int init_module(void *image, unsigned long length, const char *params);
+extern int delete_module(const char *name, unsigned int flags);
+extern int quotactl(int cmd, const char *special, int id, char *addr);
+extern int unshare(int flags);
+extern int setns(int fd, int nstype);
+extern int chroot(const char *path);
+#ifdef __x86_64__
+extern int iopl(int level);
+extern int ioperm(unsigned long from, unsigned long count, int turn_on);
+#endif
+#endif

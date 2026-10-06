@@ -15,7 +15,6 @@ const FAMILIES: &[&str] = &[
     "fd_io",
     "thread_sync",
     "signal_process",
-    "privileged",
     "net",
     "readiness",
     "stdio",
@@ -53,13 +52,37 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
     let mut ordinary = Vec::new();
     let mut x86 = Vec::new();
     let mut assembly = Vec::new();
+    let mut assembly_x86 = Vec::new();
     for row in symbols {
         if !row.linux || !row.routed || row.name == "__wrap_dlsym" {
             continue;
         }
         if matches!(
             row.name.as_str(),
-            "mmap"
+            "mount"
+                | "umount2"
+                | "pivot_root"
+                | "open_tree"
+                | "move_mount"
+                | "fsopen"
+                | "fsconfig"
+                | "fsmount"
+                | "fspick"
+                | "mount_setattr"
+                | "acct"
+                | "vhangup"
+                | "swapon"
+                | "swapoff"
+                | "reboot"
+                | "init_module"
+                | "delete_module"
+                | "quotactl"
+                | "iopl"
+                | "ioperm"
+                | "unshare"
+                | "setns"
+                | "chroot"
+                | "mmap"
                 | "mmap64"
                 | "munmap"
                 | "msync"
@@ -94,7 +117,11 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
                 | "__open"
                 | "__open64"
         ) {
-            assembly.push(row.name.as_str());
+            if row.only_x86 {
+                assembly_x86.push(row.name.as_str());
+            } else {
+                assembly.push(row.name.as_str());
+            }
         } else if row.only_x86 {
             x86.push(row.name.as_str());
         } else {
@@ -106,6 +133,7 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         ("PATINA_ROUTED", ordinary),
         ("PATINA_ROUTED_X86_64", x86),
         ("PATINA_ROUTED_ASM", assembly),
+        ("PATINA_ROUTED_ASM_X86_64", assembly_x86),
     ] {
         rows.sort_unstable();
         write!(routing, "#define {name}(X)").unwrap();

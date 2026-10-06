@@ -406,8 +406,8 @@ pub use actions::{
     patina_signal_action, patina_signal_action_libc, patina_signal_altstack, patina_signal_mask,
     patina_signal_pending,
 };
-#[cfg(test)]
-use delivery::patina_signal_deliver;
+#[cfg(any(test, patina_posix_exports))]
+pub(crate) use delivery::patina_signal_deliver;
 pub(crate) use delivery::{deliver, refresh_handler_mask};
 use delivery::{fault_entered, install_host_action};
 pub use generation::patina_raw_exit_group;

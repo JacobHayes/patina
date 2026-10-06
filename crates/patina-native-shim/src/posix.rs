@@ -6,6 +6,7 @@ use core::ffi::c_int;
 mod entropy;
 #[cfg(target_os = "linux")]
 mod memory;
+mod privileged;
 
 pub(crate) use crate::variadic::{error, model_result};
 
@@ -42,3 +43,17 @@ pub extern "C" fn fail_size(result: isize) -> isize {
 core::arch::global_asm!(".hidden fail_int", ".hidden fail_size");
 #[cfg(target_os = "macos")]
 core::arch::global_asm!(".private_extern _fail_int", ".private_extern _fail_size");
+
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub extern "C" fn signal_result(result: i64) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::thread::signals::patina_signal_deliver();
+    if result < 0 {
+        error(-result as c_int)
+    } else {
+        result as c_int
+    }
+}
+#[cfg(target_os = "linux")]
+core::arch::global_asm!(".hidden signal_result");

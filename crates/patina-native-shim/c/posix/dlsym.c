@@ -68,6 +68,9 @@ extern __typeof__(open) __open;
 extern __typeof__(open64) __open64;
 #define PATINA_ROUTE_EXTERN(name) extern __typeof__(name) patina_route_##name __attribute__((visibility("hidden")));
 PATINA_ROUTED_ASM(PATINA_ROUTE_EXTERN)
+#ifdef __x86_64__
+PATINA_ROUTED_ASM_X86_64(PATINA_ROUTE_EXTERN)
+#endif
 #undef PATINA_ROUTE_EXTERN
 void *__wrap_dlsym(void *handle, const char *symbol);
 extern __typeof__(__wrap_dlsym) patina_route_dlsym
@@ -84,6 +87,7 @@ void *patina_dlsym_route(const char *symbol) {
         PATINA_ROUTED_ASM(PATINA_ROUTE_ENTRY)
 #ifdef __x86_64__
         PATINA_ROUTED_X86_64(PATINA_ROUTE_ENTRY)
+        PATINA_ROUTED_ASM_X86_64(PATINA_ROUTE_ENTRY)
 #endif
         {"dlsym", (void *)(uintptr_t)&patina_route_dlsym},
     };
