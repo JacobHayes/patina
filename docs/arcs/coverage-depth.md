@@ -131,8 +131,8 @@ run that requested coverage → loud error, never a silent empty report (§10, D
    join `MARKER_PREFIXES` (`output.rs:360-372`) so the lines also surface in `markers`.
 
 **Why not RunMetadata / the trace**: the trace is the replay contract — schedule + effects
-only (`RunMetadata`, `patina-trace/src/lib.rs:272`, records *configuration*, never
-observations; `MAX_TRACE_BYTES` 256 MiB, `lib.rs:51`). Coverage is an observation *about* a
+only (`RunMetadata`, `patina-trace/src/metadata.rs:324`, records *configuration*, never
+observations; `MAX_TRACE_BYTES` 256 MiB, `patina-trace/src/lib.rs:80`). Coverage is an observation *about* a
 run; folding megabytes of observation into the contract bloats every trace and buys
 nothing replay needs. (A compact `coverage_digest` in metadata as a record/replay
 divergence cross-check is a genuine detection opportunity — deferred, see §11.)

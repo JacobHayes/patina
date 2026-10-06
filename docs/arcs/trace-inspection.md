@@ -8,7 +8,7 @@ overengineered, but nicely inspectable — discovery/analysis via CLI + --help d
 ## 1. Problem
 
 A `.patina` trace (up to 256 MiB / 1,000,000 events per timeline —
-`crates/patina-trace/src/lib.rs:51-52`) currently has exactly two consumers:
+`crates/patina-trace/src/lib.rs:80-81`) currently has exactly two consumers:
 
 1. **Full HTML render** — `render_trace_file`
    (`crates/cargo-patina/src/render.rs:188`), reachable only as a `--render`/
@@ -19,7 +19,7 @@ A `.patina` trace (up to 256 MiB / 1,000,000 events per timeline —
    trace?") and reports divergence only as its failure mode.
 
 The format is deliberately plain JSON (`TraceBundle::to_bytes` doc,
-`patina-trace/src/lib.rs:510-517`: "a bundle can be inspected with any JSON tool
+`patina-trace/src/bundle.rs:202-210`: "a bundle can be inspected with any JSON tool
 (`jq . run.patina`)"). So the gap is not raw access — it is **semantics**: task
 attribution, virtual-time reconstruction, op categories, filters, aggregates,
 and divergence location all live as private code inside `render.rs`, unreachable
@@ -40,7 +40,7 @@ comparator.
   Vec<TraceEvent> }`; `TraceEvent { sequence, order, incarnation, operation,
   outcome }`. Branch timelines resolve by replaying the parent prefix while
   lifecycle markers share the same v5 global-order namespace.
-- **RunMetadata** (lib.rs:270-335): `root_seed`, `decision_policy`,
+- **RunMetadata** (`patina-trace/src/metadata.rs:324`): `root_seed`, `decision_policy`,
   `fingerprint`, plus optional config records: `faults`, `buggify` (incl.
   realized `active_sites`/`knobs`), `guest_argv`, `schedule_policy` (PCT /
   starvation), `swarm`, `watchdog` (informational-only), `sud`. All additive,
@@ -64,7 +64,7 @@ comparator.
   a wasip1 trace has no `task_*`/`scheduler_next` (single-threaded guest) and no
   TCP ops; a native trace can carry all of them. There is no per-family record
   schema — family is a usage profile, not a format.
-- **Replay divergence semantics** (`patina-trace/src/lib.rs:825-858, 1043-1060`):
+- **Replay divergence semantics** (`patina-trace/src/replay.rs:150-183`):
   operation structural-equality first (`Replayer::expect` →
   `OperationMismatch { sequence, expected, actual }`), then outcome equality
   (`compare_outcome` → `OutcomeMismatch`), plus the two length classes
@@ -232,7 +232,7 @@ future config record surfaces without a code change; the typed fields above it
 are the stable, documented subset. `info` shares/absorbs the `trace_facts`
 helper rather than duplicating it.
 
-Buggify honesty (already documented in-format, `patina-trace/src/lib.rs:112-118`):
+Buggify honesty (already documented in-format, `patina-trace/src/metadata.rs:106-116`):
 per-evaluation firings are re-derived from the seed, not recorded, so `info`
 reports the config + realized `active_sites`/`knobs`, and says so.
 
