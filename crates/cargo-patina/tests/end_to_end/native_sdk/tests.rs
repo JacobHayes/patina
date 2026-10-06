@@ -2,9 +2,9 @@
 
 use super::*;
 
-// Class pairing: the SDK declaration generates every literal descriptor and
-// sdk-site-macros.yml rejects exports that bypass it. Exercise all declared
-// macros through the linked product, including a newly added registry row.
+// Class pairing: the SDK declaration generates macros and literal descriptors
+// together. Exercise all declared macros through the linked product, including
+// a newly added registry row.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn every_declared_sdk_macro_emits_an_unreached_linked_descriptor() {

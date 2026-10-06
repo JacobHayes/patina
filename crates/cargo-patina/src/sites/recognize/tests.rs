@@ -2,9 +2,9 @@
 
 use super::*;
 
-// Class pairing: declaration generation and sdk-site-macros.yml make every
-// exported site macro publish metadata. This fixture exercises the actual
-// recognizer for every row, including a newly declared name and import alias.
+// Class pairing: the SDK declaration generates macros and metadata together.
+// This fixture exercises the actual recognizer for every row, including a
+// newly declared name and import alias.
 #[test]
 fn every_declared_sdk_site_macro_is_recognized() {
     let directory = tempfile::tempdir().unwrap();

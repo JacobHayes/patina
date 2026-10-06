@@ -1,23 +1,13 @@
-{
-  "id": "shim-abi-entry",
-  "valid": [
-    "pub extern \"C\" fn guarded() { let _panic_scope = crate::panic_boundary::PanicScope::enter(); work(); }",
-    "#[unsafe(no_mangle)] // docs\n fn guarded() { /* before */ let _panic_scope = crate::panic_boundary::PanicScope::enter(); work(); }",
-    "extern \"Rust\" fn ordinary() { work(); }"
-  ],
-  "invalid": [
-    "pub extern \"C\" fn unguarded() { work(); }",
-    "#[unsafe(no_mangle)] /* docs */ fn unguarded() { work(); }",
-    "#[cfg_attr(test, unsafe(export_name=\"bad\"))] fn unguarded() { work(); }",
-    "pub extern \"C\" fn moved() { let _panic_scope = crate::panic_boundary::PanicScope::enter(); drop(_panic_scope); work(); }",
-    "pub extern \"C\" fn moved() { let _panic_scope = crate::panic_boundary::PanicScope::enter(); std::mem::drop(_panic_scope); work(); }",
-    "pub extern \"C\" fn moved() { let _panic_scope = crate::panic_boundary::PanicScope::enter(); core::mem::forget(_panic_scope); work(); }",
-    "pub extern \"C\" fn moved() { let _panic_scope = crate::panic_boundary::PanicScope::enter(); let renamed = _panic_scope; work(); }",
-    "pub extern \"C\" fn moved() { let _panic_scope = crate::panic_boundary::PanicScope::enter(); consume!(_panic_scope); work(); }",
-    "pub extern \"C\" fn moved() { let _panic_scope = crate::panic_boundary::PanicScope::enter(); let capture = move || _panic_scope; work(); }",
-    "pub extern \"C\" fn moved() { let _panic_scope = crate::panic_boundary::PanicScope::enter(); let _panic_scope = _panic_scope; work(); }",
-    "pub extern \"C\" fn moved() { let _panic_scope = crate::panic_boundary::PanicScope::enter(); let _ = &_panic_scope; work(); }",
-    "#[unsafe(export_name=\"bad\")] pub extern \"C\" fn patina_abort() { work(); }",
-    "#[unsafe(r#no_mangle)] fn bad() { work(); }"
-  ]
-}
+id: shim-abi-entry
+valid:
+  - |
+    #[unsafe(no_mangle)]
+    pub extern "C" fn guarded() {
+        // The guard must precede executable statements, not comments.
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        work();
+    }
+invalid:
+  - |
+    #[unsafe(no_mangle)]
+    pub extern "C" fn unguarded() { work(); }

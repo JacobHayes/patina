@@ -287,7 +287,7 @@ fn unprotected_cancellation_imports(
 }
 
 /// Standalone detector selftest: granting an unimplemented cancellation import
-/// must be a finding even though there is no wrapper for the C syntax lint.
+/// must be a finding even though there is no compiled shim wrapper.
 #[cfg(target_os = "linux")]
 #[test]
 fn cancellation_refusal_detector_rejects_planted_allowance() {

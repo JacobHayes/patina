@@ -316,18 +316,20 @@ copy those details into tracked docs unless they become portable project policy.
 Tests must exercise compiled behavior, not read or patch implementation source.
 Use opaque claim/accessor types and private state first; use compiler or syntax
 lints where construction alone cannot close the class. `scripts/check-structure.sh`
-runs the AST rules in both check tiers and CI through the ast-grep tool pinned
-by `mise.lock`. Before scanning the product, the gate runs ast-grep's native
-valid/invalid fixture suite for every rule. Its policy pins the rule-file and
-rule-ID inventory and owns the exact shim export exceptions in one place.
-Prove new rules reject a planted violation, then restore the source; retain
-small syntax fixtures rather than a test that patches product source.
-Rust rules cover every file in the owning crate, including files outside
-`src/`; module-path and include rules forbid escaping that scanned tree.
-Cargo entrypoint paths and source symlinks cannot escape it either; implicit
-entrypoints cannot hide under excluded build-artifact directories. C protection
-and trap inventory rules cover headers as well as C implementation files.
-The panic-scope binding is reserved and cannot be consumed before return.
+runs one static Rust rule in both check tiers and CI through ast-grep pinned
+by `mise.lock`: explicit shim exports enter and retain their panic scope. One
+must-match fixture and one near-miss fixture run before the product scan.
+The rule owns its five ownership/test exceptions directly. The shared CLI
+fcntl/prctl bindings have compiler-checked variadic function types; conflicting
+re-declarations fail the existing Clippy `-D warnings` gate. The CLI has no
+ioctl declaration. Prefer libc's bindings when adding new host calls.
+Keep this gate small: no generated rules, libc spelling inventories or policy
+validator. SDK site metadata comes from its declaration generator; C headers,
+cancellation entry order and trap bodies rely on compilation, object checks,
+native acceptance tests and review. Those tests are not exhaustive per-wrapper
+dominance proofs. Macro-generated exports, link-name aliases, external module
+paths and source symlinks are outside this syntax gate's coverage; it is a
+guard against ordinary mistakes, not an adversarial source-containment boundary.
 Native panic acceptance uses the explicitly armed `test-panic` feature; missing
 SUD acceptance compiles its C object with `PATINA_TEST_NO_SUD`. Both hooks are
 absent from ordinary builds. Embedded C sources and guest programs are fixtures

@@ -105,15 +105,15 @@ cases require host SIGABRT and an incomplete trace.
 The fcntl waiting commands and all six open spellings check cancellation
 immediately after entering that scope. Pending cancellation refuses by name;
 these Rust frames never initiate glibc forced unwind. The shared cancellation
-inventory includes the glibc internal open aliases. Generated AST rules enforce
-the guarded entry order and fcntl's waiting-command condition. Acting
+inventory includes the glibc internal open aliases. Compiled ABI guests exercise
+pending cancellation at these doors; review checks the entry order. Acting
 cancellation frames are not converted to Rust C ABI, and C-unwind is not used
 as a substitute for proving callback and cleanup ownership.
 
 The compiler checks known runtime-symbol signatures. Exports use the correct C
 ABI, variadic signature, return type and non-generic definition without blanket
-lint allowances. Existing panic-scope and variadic-inventory rules remain
-intact, with no new exceptions.
+lint allowances. The static panic-scope rule checks explicit exports, with no
+new exceptions; shared CLI variadic bindings have compiler-checked types.
 
 ## Acceptance and limits
 

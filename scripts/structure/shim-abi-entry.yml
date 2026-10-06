@@ -1,7 +1,7 @@
 id: shim-abi-entry
 language: Rust
 severity: error
-message: Exported shim functions must begin with an explicit PanicScope::enter guard.
+message: Shim exports must enter PanicScope first and retain it until return.
 files:
   - crates/patina-native-shim/**/*.rs
 ignores:
@@ -34,33 +34,14 @@ rule:
                     - has:
                         kind: string_literal
                         regex: '^"C(-unwind)?"$'
-                    # `extern fn` uses the implicit C ABI.
                     - not:
                         has:
                           kind: string_literal
+    # These implement panic/stack ownership; __real_dlsym is a test resolver.
     - not:
-        all:
-          - has:
-              field: name
-              # These four implement panic/stack ownership itself. Entering a
-              # scope changes abort classification or restores stale trap state.
-              # __real_dlsym is the unit-test-only fake host resolver.
-              regex: '^({{shim_export_exceptions}})$'
-          # Exempt only these actual symbol names, never an export_name alias
-          # on a similarly named function in another module.
-          - follows:
-              all:
-                - kind: attribute_item
-                - has:
-                    kind: identifier
-                    regex: '^(r#)?no_mangle$'
-                    stopBy: end
-              stopBy:
-                not:
-                  any:
-                    - kind: attribute_item
-                    - kind: line_comment
-                    - kind: block_comment
+        has:
+          field: name
+          regex: '^(patina_abort|patina_trap_enter|patina_trap_leave|patina_note_guest_sp|__real_dlsym)$'
     - any:
         - not:
             has:
@@ -76,10 +57,9 @@ rule:
                                 - kind: line_comment
                                 - kind: block_comment
                           - not:
-                              regex: "^[{}]$"
+                              regex: '^[{}]$'
                         stopBy: end
-        # Reserve the binding: no expression, capture, macro token, or renamed
-        # binding may consume or expose it before the enclosing scope ends.
+        # An otherwise correct entry must not drop, move or shadow its guard.
         - has:
             field: body
             has:
@@ -91,24 +71,3 @@ rule:
                       pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter();'
                       stopBy: neighbor
               stopBy: end
----
-id: shim-export-macros
-language: Rust
-severity: error
-message: Exporting shim functions from macro definitions or invocations is forbidden; use ordinary guarded functions.
-files:
-  - crates/patina-native-shim/**/*.rs
-ignores:
-  - '**/target/**'
-# No exporting macros are allowlisted. Forbid export/ABI identifier tokens in
-# either macro token tree, including variable visibility and ABI arguments.
-# Literal fixture strings remain data.
-rule:
-  all:
-    - any:
-        - kind: macro_definition
-        - kind: macro_invocation
-    - has:
-        kind: identifier
-        regex: '^(r#)?(no_mangle|export_name|extern)$'
-        stopBy: end

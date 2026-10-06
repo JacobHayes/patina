@@ -338,20 +338,20 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   both its includes and `POSIX_C_FAMILY_SOURCES` from that inventory, so every
   included slice is exported for installed builds. Slices share headers and
   static helpers and are not compiled separately. System headers belong in
-  `posix/core.c`, enforced by `scripts/structure/shim-system-headers.yml`.
+  `posix/core.c`; compilation checks the assembled translation unit.
   The same build script generates the Linux dlsym routes from the complete
   symbol inventory, including architecture metadata. Its versioned metadata
   comes from the normal syscalls dependency's build output; the shim does not
   compile the full syscalls crate again as a host build dependency.
 - Every ordinary exported Rust function starts with
   `let _panic_scope = crate::panic_boundary::PanicScope::enter();`. The AST lint
-  skips attribute comments and forbids exports inside macro definitions or
-  invocations, with no macro allowlist. It reserves `_panic_scope`: no other
-  reference to that binding may drop, move, capture, or expose the guard.
+  checks explicit function definitions and skips attribute comments.
+  Keep exports explicit rather than hiding them in macros. It reserves
+  `_panic_scope`: no other reference may drop, move, capture, or expose the guard.
   The gate tests every rule against valid and invalid syntax fixtures before
-  scanning all Rust files in the crate; external module paths are refused.
-  Abort and the three stack/trap ownership
-  primitives implement ownership themselves; a normal guard would change their
+  scanning Rust files under the crate; external module paths are not checked.
+  Abort and the three stack/trap ownership primitives implement ownership
+  themselves; a normal guard would change their
   behavior. The unit-test-only fake host resolver is also exempt.
   The `test-panic` feature adds an armed clock-panic failpoint and its control
   export for the unwind/abort acceptance test. Production builds omit both.
@@ -435,15 +435,16 @@ oversized operands in the argument-category guest and compiled mutation matrix.
 Fixed flag, errno and expressible layout translation belongs alongside the Rust
 door. The fcntl/open cancellation check immediately follows the panic guard;
 it refuses pending cancellation by name and never initiates forced unwind.
-The generated AST rules enforce both that order and fcntl's waiting commands.
+Compiled C guests in `native_abi::variadic` exercise pending cancellation at
+the fcntl waiting commands and open doors; entry order is reviewed.
 
 Keep the modeled `vsnprintf`/FILE engine and its internal stream helpers in C;
 the Rust printf doors pass `VaList` through its fixed bridge. Acting cancellation,
 thread-exit/cleanup frames and host-resolution vehicles also remain C. Linux's
 syscall assembly captures raw machine words for the fixed Rust entry; it must
 not decode six fictitious variadic arguments or lose the guest-SP sigreturn
-path. New doors must satisfy the existing export guard and variadic inventory
-rules without exceptions. See [the design](../../docs/arcs/c-variadic-interposers.md).
+path. New doors must satisfy the export guard without exceptions and extend
+the compiled ABI acceptance cases. See [the design](../../docs/arcs/c-variadic-interposers.md).
 
 ## Source bundle and `links`
 

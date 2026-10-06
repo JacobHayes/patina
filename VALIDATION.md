@@ -983,10 +983,12 @@ unregistered and duplicate definitions; its planted duplicate proves detection.
 
 Linux x86_64 executes all ported families. macOS arm64 executes the common
 fcntl/open/ioctl/stdio families and checks the registry absence of the Linux-only
-mremap/ptrace/prctl/syscall doors. All exported Rust entries remain subject to
-the panic-scope and variadic-declaration AST rules without new exceptions.
-Generated cancellation rules cover each Rust fcntl/open export and the waiting
-fcntl command helper. Cross-clippy for Linux arm64 is compile-time evidence,
+mremap/ptrace/prctl/syscall doors. Explicit Rust shim exports remain subject to
+the panic-scope AST rule without new exceptions. The shared CLI fcntl/prctl
+bindings have compiler-checked variadic types; conflicting declarations fail
+Clippy's `-D warnings` gate. Cancellation is exercised by the compiled
+fcntl/open guests; syntax no longer pins every cancellation or trap body.
+Cross-clippy for Linux arm64 is compile-time evidence,
 not runtime evidence on that architecture. The full landing battery is separate
 from these focused acceptance checks.
 
