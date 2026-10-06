@@ -79,11 +79,11 @@ not the binary; timings are unaffected):
   of a non-integrated package is refused loudly (`lib.rs:6183`). The macro
   therefore routes through the **native** family, not this path.
 - **Registry/drift machinery.** Help output is generated from the single flag
-  registry in `crates/cargo-patina/src/help.rs` (schema `patina.help/v2`,
+  registry in `crates/cargo-patina/src/help.rs` and its `help/` modules (schema `patina.help/v2`,
   progressive disclosure); a test-only enumeration fails on any parsed flag
   missing from the registry, and `scripts/check-flag-drift.sh` gates flag
   tokens in the listed docs. Result envelopes: `patina.result/v1`
-  (`crates/cargo-patina/src/output.rs`), campaign `patina.campaign/v2`
+  (`crates/cargo-patina/src/output/envelope.rs`), campaign `patina.campaign/v2`
   (`crates/cargo-patina/src/campaign/report.rs`, `CAMPAIGN_ENVELOPE_SCHEMA`).
 - **Debug is the bug-finding profile** (README "Debug vs release guest
   builds"): `debug_assert!`/overflow checks as free oracles, denser

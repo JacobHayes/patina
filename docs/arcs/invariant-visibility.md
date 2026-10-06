@@ -11,7 +11,7 @@ answer, without grepping: where does this codebase have invariant/property instr
 crates have none? Which `sometimes!` claims has no campaign ever satisfied? Which assertions exist
 that Patina cannot see at all? Before this arc, the only artifacts were the per-run `PATINA_SDK_REPORT` stderr
 line (`crates/patina-runtime/src/reports.rs`) and verbatim marker capture on failing campaign
-generations (`crates/cargo-patina/src/output.rs:364`). Waves 1-2 add the static inventory and
+generations (`crates/cargo-patina/src/output/outcomes.rs`). Waves 1-2 add the static inventory and
 single-run join; Wave 3 adds campaign aggregation into the shared exercised-site store.
 
 This arc makes instrumentation *visible*: a static inventory of every assertion/property site, a
@@ -61,7 +61,7 @@ runtime/campaign exercised view, and a merged report — hierarchical, progressi
   `<out>/sites.json` (`patina.campaign.sites/v1`) for `sites --exercised OUTDIR` and the
   sometimes-gate.
 - **CLI/config** — verbs run/test/build/audit/replay/explore/campaign/sites/minimize
-  (`crates/cargo-patina/src/help.rs`); global `--format human|json` and `--no-config`
+  (`crates/cargo-patina/src/help.rs` and its `help/` modules); global `--format human|json` and `--no-config`
   (`help.rs` global output group, result envelope `patina.result/v1`, `output.rs`). Help is
   progressive-disclosure `patina.help/v2` with index vs per-verb payloads. Registry drift gates
   cover parser↔registry, value grammars, and repeatability; Wave 4 adds registry-driven config

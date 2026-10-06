@@ -37,7 +37,7 @@ package / native binary / WASI module) from the argument; `run`, `audit`, and
 the fly).
 
 Never guess flag names — the CLI has gone through renames. The authoritative
-registry is `crates/cargo-patina/src/help.rs`, and it is the single source for
+registry is `crates/cargo-patina/src/help.rs` and its `help/` modules, and it is the single source for
 both halves of the CLI: the help/JSON/usage text AND the parsers themselves
 (`cli.rs` builds each verb+family's `clap::Command` from the same rows). A flag
 the help omits cannot be parsed, and one it advertises cannot be rejected.
@@ -108,7 +108,7 @@ What to run after touching common surfaces:
   a quick guardrail after small edits.
 - Harness/SDK macro behavior: run the focused crate or testbed test, then
   `mise run check:fast`; run `mise run check` if it changes runtime semantics.
-- CLI parser/help/flag behavior: inspect `crates/cargo-patina/src/help.rs`, run
+- CLI parser/help/flag behavior: inspect `crates/cargo-patina/src/help.rs` and its `help/` modules, run
   the focused CLI tests plus `scripts/check-flag-drift.sh` through `mise exec --`,
   then `mise run check:fast`.
 

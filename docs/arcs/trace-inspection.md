@@ -12,7 +12,7 @@ A `.patina` trace (up to 256 MiB / 1,000,000 events per timeline —
 
 1. **Full HTML render** — `render_trace_file`
    (`crates/cargo-patina/src/render.rs:188`), reachable only as a `--render`/
-   `--report` side effect of a run or replay (`crates/cargo-patina/src/output.rs:254`).
+   `--report` side effect of a run or replay (`crates/cargo-patina/src/output/reports.rs`).
    There is no way to render, summarize, or query an *existing* trace file
    without re-executing something.
 2. **Replay** — which answers only one question ("does this build reproduce this

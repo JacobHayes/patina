@@ -69,7 +69,7 @@ never-reached literal-label sites visible.
   `artifacts.site_coverage`. The signature store remains `<out>/signatures.json`; the shared
   exercised-site store is `<out>/sites.json`, schema `patina.campaign.sites/v1`.
 * Flags live in the typed registry with a structural drift gate
-  (`crates/cargo-patina/src/help.rs:954-1080`, gate per `help.rs:16`); `Value::Optional`
+  (`crates/cargo-patina/src/help/workflows.rs`, gate per `help.rs`); `Value::Optional`
   with a typed `Kind` is established precedent (`--buggify[=<PERMILLE>]`).
 * Testbeds already carry `sometimes!` sites (workq: `dedup-suppressed-double-apply`,
   `job-failed`, `redelivery-observed`; liveness-campaign: `digest-even`;

@@ -26,7 +26,7 @@ cited locations.
 The CLI is a two-part system: a **declarative registry** (data) and **hand-rolled
 family parsers** (code), tied together by generic drift-gate tests.
 
-**The registry** (`crates/cargo-patina/src/help.rs`, 1,731 lines) declares every
+**The registry** (`crates/cargo-patina/src/help.rs` and its `help/` modules) declares every
 flag once — name, short form, `Value::{None,Required,Optional}` arity, one of 15
 typed `Kind` value grammars (`help.rs:26-58`: u64/u32/usize/positive-u64/permille/
 nanos-range/crash-spec/key-value/socket/preopen/unsupported-symbols/enum/symbol/
@@ -44,18 +44,18 @@ verb* (run's native/WASI/cargo groups, `help.rs:554-669`). The registry generate
 The registry does **not** drive parsing (`help.rs:12-16` states this explicitly).
 
 **The parsers** are per-family `match` loops over token indices in
-`crates/cargo-patina/src/parse.rs` (routing + parse fns + helpers),
+`crates/cargo-patina/src/parse.rs` and its `parse/` modules (routing + parse fns + helpers),
 `campaign.rs:190-357`, and `output.rs:97-170`. Measured by function span, the
 hand-rolled parsing code is:
 
 | Where | What | ~LOC |
 |---|---|---|
-| `parse.rs` | verb routing, `locate_positionals`, `reject_stranded_artifact`, 15 `parse_*` family fns, value validators, `split_opt`/`required_value`/`set_once` helpers | 2,250 |
+| `parse.rs` and `parse/` | verb routing, `locate_positionals`, `reject_stranded_artifact`, 15 `parse_*` family fns, value validators, `split_opt`/`required_value`/`set_once` helpers | 2,250 |
 | `campaign.rs:190-357` | campaign parse (incl. `--spec` JSON layering) | 170 |
 | `output.rs:97-170` | pre-routing global `--format/--render/--report` extraction | 75 |
 | **total** | | **~2,500** |
 
-**The enforcement layer** (in `tests.rs` and `parse/tests.rs`, ≈860 lines of the ~2,600-line
+**The enforcement layer** (in `tests.rs`, `parse/tests.rs`, and the `parse/*/tests.rs` modules, ≈860 lines of the ~2,600-line
 test module, plus a repo script):
 
 - `registry_covers_every_parsed_flag` (`tests.rs`) — every flag a parser
