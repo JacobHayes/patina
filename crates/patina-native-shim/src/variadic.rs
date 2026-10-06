@@ -52,12 +52,7 @@ pub unsafe extern "C" fn fcntl64(fd: c_int, command: c_int, args: ...) -> c_int 
 }
 
 unsafe fn dispatch(fd: c_int, command: c_int, mut args: VaList<'_>, large_file: c_int) -> c_int {
-    // Compiled-in injection, never a patched source copy. The real-ABI panic
-    // probe pairs this with the exported-boundary ownership lint.
-    #[cfg(feature = "planted-faults")]
-    if fd == c_int::MIN {
-        panic!("planted variadic boundary panic");
-    }
+    let mutated = fault(1);
     use libc::{F_DUPFD, F_DUPFD_CLOEXEC, F_GETLK, F_SETFD, F_SETFL, F_SETLK, F_SETLKW};
     #[allow(unused_mut)]
     let mut pointer = matches!(command, F_GETLK | F_SETLK | F_SETLKW);
@@ -79,11 +74,77 @@ unsafe fn dispatch(fd: c_int, command: c_int, mut args: VaList<'_>, large_file: 
         if pointer {
             (0, args.next_arg::<*mut c_void>())
         } else if integer {
-            (args.next_arg::<c_int>(), core::ptr::null_mut())
+            (
+                {
+                    let value = args.next_arg::<c_int>();
+                    if mutated {
+                        args.next_arg::<c_int>()
+                    } else {
+                        value
+                    }
+                },
+                core::ptr::null_mut(),
+            )
         } else {
             (0, core::ptr::null_mut())
         }
     };
     // SAFETY: fixed platform adapter, with exactly the decoded command payload.
     unsafe { patina_fcntl_impl(fd, command, argument, pointer, large_file) }
+}
+
+#[cfg(target_os = "linux")]
+mod memory;
+
+#[cfg(target_os = "linux")]
+fn errno(value: c_int) {
+    // SAFETY: libc provides the current thread's errno cell on both platforms.
+    unsafe {
+        #[cfg(target_os = "linux")]
+        {
+            *libc::__errno_location() = value;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            *libc::__error() = value;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn raw_result(value: i64) -> i64 {
+    if (-4095..=-1).contains(&value) {
+        errno(-value as c_int);
+        -1
+    } else {
+        value
+    }
+}
+
+#[cfg(feature = "test-panic")]
+static TEST_FAULT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Arm a single explicitly selected variadic boundary in acceptance builds.
+#[cfg(feature = "test-panic")]
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_variadic_test_arm(family: u32, fault: u32) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    TEST_FAULT.store(family * 256 + fault, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn fault(family: u32) -> bool {
+    #[cfg(feature = "test-panic")]
+    {
+        use std::sync::atomic::Ordering;
+        let state = TEST_FAULT.load(Ordering::SeqCst);
+        if state / 256 == family {
+            TEST_FAULT.store(0, Ordering::SeqCst);
+            if state % 256 == 1 {
+                panic!("planted variadic boundary panic");
+            }
+            return state % 256 == 2;
+        }
+    }
+    let _ = family;
+    false
 }

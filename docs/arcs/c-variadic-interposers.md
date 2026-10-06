@@ -167,3 +167,24 @@ remaining entry points, and the full landing gate remain later-round evidence.
 [unwind]: https://doc.rust-lang.org/nomicon/ffi.html#ffi-and-unwinding
 [runtime-lint]: https://github.com/rust-lang/rust/blob/1.99.0/compiler/rustc_lint/src/runtime_symbols.rs
 [release]: https://github.com/rust-lang/rust/releases/tag/1.99.0
+
+## Port evidence
+
+The mremap door and its errno adapter are Rust-owned. Only MREMAP_FIXED
+consumes the optional destination: DONTUNMAP without FIXED lets the kernel
+choose the address. Its C guest exercises both absent forms and fixed placement.
+The explicitly armed test-panic hook supports boundary panic and payload mutation
+without patching product source. Linux-only doors retain their platform scope;
+Darwin checks their absence through the registry while running the common doors.
+
+The alternate daybreak diff was evaluated: its global_asm aliases and the
+Linux C routing table can extract the defining member (a 16-codegen-unit
+Linux debug probe also retains both fcntl symbols). It supplies no equivalent
+private extraction reference on Darwin, where the routing table has only the
+entropy pair. An earlier library satisfying the public name therefore removes
+the reason to extract that archive member. Nor does global_asm itself enforce
+co-location with definitions after module/codegen partition changes. Retain the
+explicit anchor plus one-codegen-unit contract. The acceptance matrix inspects
+native Rust object members with nm in debug and opt-level=3 builds on ELF and
+Mach-O; extracting those members avoids Apple nm's inability to parse newer
+LLVM bitcode bundled in Rust's standard library.

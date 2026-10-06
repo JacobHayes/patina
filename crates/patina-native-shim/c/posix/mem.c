@@ -95,17 +95,4 @@ int memfd_create(const char *name, unsigned int flags) {
     return fail_int(patina_memfd_create(name, flags));
 }
 
-/* glibc reads the fifth argument only when a flag names a new address. */
-void *mremap(void *address, size_t old_length, size_t new_length, int flags, ...) {
-    void *new_address = NULL;
-    if ((flags & (MREMAP_FIXED | MREMAP_DONTUNMAP)) != 0) {
-        va_list ap;
-        va_start(ap, flags);
-        new_address = va_arg(ap, void *);
-        va_end(ap);
-    }
-    return patina_mem_address(patina_mremap((uintptr_t)address, old_length, new_length,
-                                            (uintptr_t)(unsigned)flags,
-                                            (uintptr_t)new_address));
-}
 #endif

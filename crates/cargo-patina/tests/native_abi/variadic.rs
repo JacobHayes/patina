@@ -1,88 +1,10 @@
 //! Real libc-door coverage for Rust variadic boundary ownership.
 use crate::common;
 
-use common::native::{Guest, assert_success, text};
-use std::process::Command;
+use common::native::assert_success;
 
-#[test]
-fn fcntl_panic_is_internal_with_either_panic_strategy_and_hook() {
-    // Class pairing: the exported-boundary ownership lint and the shared
-    // internal-fatal detector. Injection is compiled into planted-faults;
-    // no test edits a copy of production source.
-    for strategy in ["unwind", "abort"] {
-        let dir = tempfile::tempdir().unwrap();
-        let output = assert_success(
-            Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-                .current_dir(common::native_workspace())
-                .args([
-                    "rustc",
-                    "--lib",
-                    "--locked",
-                    "--message-format=json",
-                    "-p",
-                    "patina-dst-native-shim",
-                    "--features",
-                    "planted-faults",
-                    "--target-dir",
-                ])
-                .arg(dir.path().join("build"))
-                .arg("--")
-                .args(patina_dst_native_shim::POSIX_RUST_FLAGS)
-                .arg("-C")
-                .arg(format!("panic={strategy}"))
-                .output()
-                .unwrap(),
-        );
-        let archives: Vec<_> = text(&output.stdout)
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .filter(|message| message["reason"] == "compiler-artifact")
-            .flat_map(|message| message["filenames"].as_array().unwrap().clone())
-            .filter_map(|name| name.as_str().map(str::to_owned))
-            .filter(|name| name.ends_with("/libpatina_dst_native_shim.a"))
-            .collect();
-        assert_eq!(archives.len(), 1, "one built guest archive");
-        let object = common::compile_posix_object(dir.path());
-        let source = dir.path().join("variadic_panic.rs");
-        std::fs::write(
-            &source,
-            r#"
-unsafe extern "C" { fn fcntl(fd: i32, cmd: i32, ...) -> i32; }
-fn main() {
-    if std::env::args().any(|arg| arg == "replace") {
-        std::panic::set_hook(Box::new(|_| {}));
-    }
-    unsafe { fcntl(i32::MIN, 3); }
-    panic!("the planted boundary returned");
-}
-"#,
-        )
-        .unwrap();
-        let binary = dir.path().join("variadic-panic");
-        let mut rustc = Command::new("rustc");
-        rustc
-            .arg("--edition=2024")
-            .arg(&source)
-            .args(["-C", &format!("panic={strategy}"), "-C"])
-            .arg(format!("link-arg={}", object.display()))
-            .arg("-C")
-            .arg(format!("link-arg={}", archives[0]))
-            .arg("-o")
-            .arg(&binary);
-        if cfg!(target_os = "linux") {
-            rustc.args(["-C", "link-arg=-Wl,--wrap=dlsym", "-C", "link-arg=-lc"]);
-        }
-        assert_success(rustc.output().unwrap());
-        let guest = Guest { dir, binary };
-        guest.assert_internal_fatal(&[], &["planted variadic boundary panic"]);
-        let diagnostics: &[&str] = match (strategy, cfg!(target_os = "linux")) {
-            ("unwind", _) => &["patina native shim panic: unwinding an owned boundary"],
-            ("abort", true) => &["patina native shim panic: aborting an owned boundary"],
-            _ => &[], // Darwin libc abort: signal + incomplete trace still required.
-        };
-        guest.assert_internal_fatal(&["replace"], diagnostics);
-    }
-}
+#[path = "variadic/matrix.rs"]
+mod matrix;
 
 #[test]
 fn fcntl_promoted_int_pointer_and_absent_arguments_reach_the_model() {
@@ -140,4 +62,57 @@ int main(int argc, char **argv) {
     for (mode, name) in [("cancel", "fcntl"), ("64", "fcntl64")] {
         guest.assert_internal_fatal(&[mode], &[&format!("pending cancellation reaches {name},")]);
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn mremap_optional_address_is_read_only_for_fixed_placement() {
+    // Class pairing: the variadic export inventory and PanicScope boundary lint;
+    // these real C calls also cover the absent optional operand on each ABI.
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path().join("mremap.c");
+    std::fs::write(
+        &source,
+        r#"
+#define _GNU_SOURCE
+#include <sys/mman.h>
+#include <string.h>
+#include <stdint.h>
+#ifndef MREMAP_DONTUNMAP
+#define MREMAP_DONTUNMAP 4
+#endif
+int main(void) {
+    const size_t page = 4096;
+    unsigned char *source = mmap(0, page, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (source == MAP_FAILED) return 1;
+    source[0] = 0x59;
+    /* No optional argument, including DONTUNMAP without FIXED. */
+    unsigned char *same = mremap(source, page, page, 0);
+    if (same != source || same[0] != 0x59) return 2;
+    unsigned char *moved = mremap(same, page, page,
+                                 MREMAP_MAYMOVE | MREMAP_DONTUNMAP);
+    if (moved == MAP_FAILED || moved == same || moved[0] != 0x59) return 3;
+    if (munmap(same, page)) return 4;
+    unsigned char *target = mmap(0, page, PROT_NONE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (target == MAP_FAILED) return 5;
+    unsigned char *fixed = mremap(moved, page, page,
+                                 MREMAP_MAYMOVE | MREMAP_FIXED, target);
+    if (fixed != target || fixed[0] != 0x59) return 6;
+    return munmap(fixed, page) ? 7 : 0;
+}
+"#,
+    )
+    .unwrap();
+    let guest = common::native::assert_build_c_guest(
+        source.to_str().unwrap(),
+        common::native::CLink::PosixShim,
+    );
+    let (output, trace) = guest.record_standalone(&[]);
+    assert_success(output);
+    patina_dst_trace::TraceBundle::load(&trace)
+        .unwrap()
+        .validate()
+        .unwrap();
 }

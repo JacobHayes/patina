@@ -315,6 +315,8 @@ fn caching() -> bool {
 mod hooks;
 mod locks;
 mod mapping;
+#[cfg(patina_posix_exports)]
+pub(crate) use mapping::patina_mremap;
 mod segments;
 
 #[cfg(test)]
