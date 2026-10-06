@@ -202,3 +202,9 @@ The glibc internal aliases now share cancellation refusal with public opens;
 the cancellation inventory and generated Rust entry rules cover every spelling.
 Creat and fortify wrappers call the fixed Rust adapter; C retains its shared
 fortify-stop helper and no duplicate open flag translation.
+
+The ioctl door is Rust-owned. It truncates Linux requests before classifying
+operands, distinguishes explicit integer and pointer operations (rather than
+inferring types from IOC encoding), and reads nothing for absent or refused
+payloads. The generic and terminal guests cover both the common descriptor
+operations and Linux's scalar terminal requests.

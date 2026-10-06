@@ -49,9 +49,15 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
             .collect();
         assert_eq!(archives.len(), 1, "one built guest archive");
         let object = common::compile_posix_object(dir.path());
-        let mut cases = vec![(1, 0, "fcntl"), (3, 0, "open"), (3, 1, "openat")];
+        let mut cases = vec![
+            (4, 0, "ioctl"),
+            (1, 0, "fcntl"),
+            (3, 0, "open"),
+            (3, 1, "openat"),
+        ];
         if cfg!(target_os = "linux") {
             cases.extend([
+                (4, 2, "ioctl"),
                 (1, 1, "fcntl64"),
                 (2, 0, "mremap"),
                 (3, 2, "open64"),
@@ -140,7 +146,8 @@ fn main() {
             };
             guest.assert_internal_fatal(&[&family, "1", &variant, "replace"], diagnostics);
             eprintln!(
-                "matrix {strategy}: {name}: normal, operand mutation, original hook, replaced hook passed"
+                "matrix {strategy}: {name}[{variant}]: control=0, planted operand failure={}, original hook and replaced hook passed",
+                mutated.status.code().unwrap()
             );
         }
     }
@@ -268,6 +275,7 @@ const C_CALLS: &str = r#"
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
@@ -324,6 +332,15 @@ int variadic_call(unsigned family, unsigned fault, unsigned variant) {
         return created >= 0 && !fstat(created, &value) && (value.st_mode & 0777) == 0623 ? 0 : 30;
     }
     case 4: {
+#ifdef __linux__
+        if (variant == 2) {
+            int master = posix_openpt(O_RDWR | O_NOCTTY);
+            if (master < 0 || grantpt(master) || unlockpt(master)) return 90;
+            patina_variadic_test_arm(family, fault);
+            int peer = ioctl(master, TIOCGPTPEER, O_RDWR, O_RDONLY);
+            return peer >= 0 && (fcntl(peer, F_GETFL) & O_ACCMODE) == O_RDWR ? 0 : 40;
+        }
+#endif
         int enabled = 1;
         patina_variadic_test_arm(family, fault);
         return !ioctl(fd, FIONBIO, &enabled, (void *)0) && (fcntl(fd, F_GETFL) & O_NONBLOCK) ? 0 : 40;

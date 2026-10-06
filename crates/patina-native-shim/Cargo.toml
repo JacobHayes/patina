@@ -21,7 +21,7 @@ test-panic = []
 
 [dependencies]
 libc.workspace = true
-linux-raw-sys.workspace = true
+linux-raw-sys = { workspace = true, features = ["ioctl"] }
 patina-dst-syscalls.workspace = true
 patina-dst-abi.workspace = true
 patina-dst-driver-api.workspace = true

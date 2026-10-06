@@ -190,3 +190,55 @@ int main(int argc, char **argv) {
         );
     }
 }
+#[test]
+fn ioctl_absent_pointer_and_scalar_arguments_reach_the_model() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path().join("ioctl.c");
+    std::fs::write(
+        &source,
+        r#"
+#define _GNU_SOURCE
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <termios.h>
+int main(void) {
+    int fd = open("/ioctl", O_CREAT | O_RDWR, 0600);
+    if (fd < 0 || write(fd, "abcd", 4) != 4 || lseek(fd, 0, SEEK_SET)) return 1;
+    if (ioctl(fd, FIOCLEX) || fcntl(fd, F_GETFD) != FD_CLOEXEC) return 2;
+    if (ioctl(fd, FIONCLEX) || fcntl(fd, F_GETFD)) return 3;
+    int on = 1, available = -1;
+    if (ioctl(fd, FIONBIO, &on) || !(fcntl(fd, F_GETFL) & O_NONBLOCK)) return 4;
+    if (ioctl(fd, FIONREAD, &available) || available != 4) return 5;
+    errno = 0;
+    if (ioctl(fd, FIONBIO, (int *)0) != -1 || errno != EFAULT) return 6;
+#ifdef __linux__
+    /* The kernel truncates request to unsigned int before decoding its operand. */
+    available = -1;
+    if (ioctl(fd, 0x100000000UL | FIONREAD, &available) || available != 4) return 7;
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0 || grantpt(master) || unlockpt(master)) return 8;
+    int slave = ioctl(master, TIOCGPTPEER, O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (slave < 0 || fcntl(slave, F_GETFD) != FD_CLOEXEC ||
+        (fcntl(slave, F_GETFL) & O_ACCMODE) != O_RDWR) return 9;
+    if (ioctl(slave, TCFLSH, TCIOFLUSH) || ioctl(slave, TCSBRK, 1)) return 10;
+    if (close(slave) || close(master)) return 11;
+#endif
+    return close(fd) ? 12 : 0;
+}
+"#,
+    )
+    .unwrap();
+    let guest = common::native::assert_build_c_guest(
+        source.to_str().unwrap(),
+        common::native::CLink::PosixShim,
+    );
+    let (output, trace) = guest.record_standalone(&[]);
+    assert_success(output);
+    patina_dst_trace::TraceBundle::load(&trace)
+        .unwrap()
+        .validate()
+        .unwrap();
+}

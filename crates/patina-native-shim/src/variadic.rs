@@ -3,6 +3,7 @@
 use core::ffi::{CStr, c_int};
 
 mod fcntl;
+mod ioctl;
 mod open;
 
 /// An unresolved private reference in the POSIX object extracts this member,

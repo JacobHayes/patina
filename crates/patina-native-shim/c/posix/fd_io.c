@@ -295,16 +295,6 @@ int ftruncate64(int fd, off64_t length) {
 
 #endif
 
-/* ioctl: the one Rust entry the SUD row calls too (patina_ioctl), which reads
- * the request as the kernel's unsigned int. */
-int ioctl(int fd, unsigned long request, ...) {
-    va_list ap;
-    va_start(ap, request);
-    void *arg = va_arg(ap, void *);
-    va_end(ap);
-    return fail_int(patina_ioctl(fd, (uint64_t)request, arg));
-}
-
 #ifdef __linux__
 /* glibc's tcgetattr (sysdeps/unix/sysv/linux/tcgetattr.c): TCGETS into the
  * kernel's termios through the same entry the ioctl row takes, then the user
