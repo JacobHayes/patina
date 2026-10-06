@@ -142,11 +142,10 @@ unsafe fn decode(dirfd: c_int, path: *const c_char, flags: c_int, mut args: VaLi
     unsafe { implementation(dirfd, path, flags, mode) }
 }
 
-/// Fixed entry shared by creat and fortify wrappers that remain in C.
+/// Fixed implementation shared by Rust creat and fortify adapters.
 /// # Safety
 /// `path` points to a NUL-terminated string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_openat_impl(
+pub(crate) unsafe fn patina_openat_impl(
     dirfd: c_int,
     path: *const c_char,
     flags: c_int,
@@ -219,9 +218,3 @@ unsafe fn implementation(dirfd: c_int, path: *const c_char, flags: c_int, mode: 
     // SAFETY: path belongs to the caller; model owns all descriptor/path resolution.
     super::model_result(unsafe { crate::patina_openat(dirfd, path, translated, mode & 0o7777) })
 }
-
-// Fixed C callers must bind the adapter defined in this guest archive.
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(".hidden patina_openat_impl");
-#[cfg(target_os = "macos")]
-core::arch::global_asm!(".private_extern _patina_openat_impl");

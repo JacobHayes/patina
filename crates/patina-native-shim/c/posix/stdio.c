@@ -214,7 +214,7 @@ static void patina_stream_doallocate(struct patina_stream *s) {
     int saved = errno;
     struct patina_metadata values;
     struct stat status;
-    if (fill_stat(patina_fd_metadata_values(s->fd, &values), &values, &status) == 0) {
+    if (patina_fd_stat(s->fd, &values, &status) == 0) {
 #ifdef __APPLE__
         if (status.st_blksize > 0) size = (size_t)status.st_blksize;
 #else

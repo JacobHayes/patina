@@ -11,13 +11,13 @@ struct ReadDirState {
 /// the corresponding `S_IF*` bit onto the entry's permission bits.
 pub(crate) const PATINA_ENTRY_FILE: u32 = 1;
 pub(crate) const PATINA_ENTRY_DIRECTORY: u32 = 2;
-const PATINA_ENTRY_SYMLINK: u32 = 3;
+pub(crate) const PATINA_ENTRY_SYMLINK: u32 = 3;
 pub(crate) const PATINA_ENTRY_FIFO: u32 = 4;
 pub(crate) const PATINA_ENTRY_SOCKET: u32 = 5;
 pub(crate) const PATINA_ENTRY_CHAR: u32 = 6;
 /// The anonymous inode's kind (`alloc_anon_inode`: permission bits alone,
 /// no file-type bits).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_ENTRY_ANON: u32 = 7;
 
 pub(crate) fn metadata_kind(kind: FsEntryKind) -> u32 {

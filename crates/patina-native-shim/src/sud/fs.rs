@@ -149,7 +149,7 @@ pub(super) fn openat_patina_flags(flags: u64) -> u32 {
 }
 
 /// The kernel `open(2)` flag bits the deterministic filesystem models. Mirrors
-/// the C `patina_openat_impl`'s `supported` mask exactly: a bit outside it names
+/// `patina_openat_impl`'s `supported` mask exactly: a bit outside it names
 /// a behavior nothing here implements (`O_TMPFILE`, `O_DIRECT`, `O_SYNC`, …), so
 /// it fails closed rather than being silently dropped.
 /// (`O_NONBLOCK` changes the open of exactly one modeled kind — a FIFO, where

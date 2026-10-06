@@ -12,16 +12,6 @@
  */
 
 #ifdef __linux__
-/* Fixed C adapters share libc errno conversion. The public syscall door and
- * raw register/stack capture live in Rust's variadic/syscall.rs. */
-static long dispatch_result(long result) {
-    if (result < 0 && result > -4096) {
-        errno = (int)-result;
-        return -1;
-    }
-    return result;
-}
-
 /*
  * A guest's own signal restorer. The kernel builds a handler's frame with the
  * action's `sa_restorer` as its return address, so a runtime that installs its

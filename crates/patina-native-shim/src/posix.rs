@@ -4,6 +4,7 @@ use core::ffi::c_int;
 
 mod entropy;
 mod fd_io;
+mod fs;
 #[cfg(target_os = "linux")]
 mod memory;
 mod net;
@@ -108,4 +109,17 @@ core::arch::global_asm!(".hidden patina_fortify_fail", ".hidden patina_chk_fail"
 #[cfg(target_os = "linux")]
 pub(crate) fn get_errno() -> c_int {
     unsafe { *libc::__errno_location() }
+}
+
+pub(crate) fn at(directory: c_int) -> c_int {
+    if directory == libc::AT_FDCWD {
+        crate::paths::AT_FDCWD
+    } else {
+        directory
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn get_errno() -> c_int {
+    unsafe { *libc::__error() }
 }

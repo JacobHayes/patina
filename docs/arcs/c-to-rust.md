@@ -290,3 +290,7 @@ Three previously uncovered PTY spellings run in the existing conformance guest.
 `net.c` is now `src/posix/net.rs` and its resolver/interface modules. Socket
 results retain signal delivery before errno without narrowing successful byte
 counts; resolver and interface lists retain their libc allocator ownership.
+
+`fs.c` is now `src/posix/fs/`, split into paths, directories, metadata,
+timestamps, volume and xattr adapters. The platform dirfd conversion is Rust;
+C stdio receives both metadata and stat through hidden guarded `patina_fd_stat`.

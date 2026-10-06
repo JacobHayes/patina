@@ -139,13 +139,6 @@ extern ssize_t fail_size(intptr_t result);
 extern int patina_deterministic_getentropy(void *destination, size_t length);
 extern ssize_t patina_deterministic_getrandom(void *destination, size_t length, unsigned int flags);
 
-/* The platform's AT_FDCWD on the wire: the runtime's path resolver takes the
- * Linux value (PATINA_AT_FDCWD) whatever this libc spells it as, so every *at
- * interposer maps its dirfd through here. */
-static int32_t patina_at(int dirfd) {
-    return dirfd == AT_FDCWD ? PATINA_AT_FDCWD : dirfd;
-}
-
 #ifdef __APPLE__
 /* Loud fail-closed: one deterministic diagnostic line on captured stderr,
  * then a recoverable ENOSYS. Never falls through to the host. The line goes
@@ -291,6 +284,14 @@ extern int __ppoll_chk(struct pollfd *fds, nfds_t nfds, const struct timespec *t
 #include <sys/file.h>
 /* Rust-owned descriptor doors and the private buffering query. */
 extern int patina_isatty(int fd);
+extern int __open_2(const char *, int);
+extern int __open64_2(const char *, int);
+extern int __openat_2(int, const char *, int);
+extern int __openat64_2(int, const char *, int);
+extern ssize_t __readlink_chk(const char *, char *, size_t, size_t);
+extern ssize_t __readlinkat_chk(int, const char *, char *, size_t, size_t);
+_Static_assert(sizeof(struct statvfs) == 112 && offsetof(struct statvfs, f_type) == 88, "Rust Statvfs layout");
+_Static_assert(sizeof(struct statvfs64) == 112 && offsetof(struct statvfs64, f_type) == 88, "Rust Statvfs64 layout");
 extern ssize_t __recv_chk(int, void *, size_t, size_t, int);
 extern ssize_t __recvfrom_chk(int, void *, size_t, size_t, int, struct sockaddr *, socklen_t *);
 _Static_assert(sizeof(struct rtnl_link_stats) == 96 && offsetof(struct rtnl_link_stats, rx_nohandler) == 92, "Rust LinkStats layout");
@@ -302,3 +303,5 @@ extern ssize_t __pread64_chk(int fd, void *destination, size_t length, off64_t o
 extern int __ptsname_r_chk(int fd, char *buf, size_t buflen, size_t nreal);
 extern int __ttyname_r_chk(int fd, char *buf, size_t buflen, size_t nreal);
 #endif
+
+extern int patina_fd_stat(int, struct patina_metadata *, struct stat *) __attribute__((visibility("hidden")));
