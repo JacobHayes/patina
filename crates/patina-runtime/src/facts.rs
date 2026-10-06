@@ -28,7 +28,8 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
-use crate::{LivenessViolation, ScheduleDiagnostics};
+use crate::ScheduleDiagnostics;
+use crate::liveness::LivenessViolation;
 
 /// The stable schema identifier of the facts document.
 pub const FACTS_SCHEMA: &str = "patina.runfacts/v1";

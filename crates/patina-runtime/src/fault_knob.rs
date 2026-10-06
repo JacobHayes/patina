@@ -734,9 +734,10 @@ mod tests {
     /// added without a home.
     #[test]
     fn every_domain_label_is_claimed() {
-        let source = include_str!("../../patina-rng-seeded/src/lib.rs");
-        let declared: BTreeSet<&str> = source
-            .lines()
+        let sources = crate::test_sources::rust_sources("../patina-rng-seeded/src");
+        let declared: BTreeSet<&str> = sources
+            .iter()
+            .flat_map(|(_, source)| source.lines())
             .filter_map(|line| {
                 let rest = line.trim().strip_prefix("pub const ")?;
                 let (_, value) = rest.split_once(": &str = ")?;

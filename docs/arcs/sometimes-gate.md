@@ -33,10 +33,10 @@ never-reached literal-label sites visible.
 **Runtime side — complete, no changes needed.**
 
 * Site kinds: `BuggifyKind::{Fault, Delay, Knob, Always, Sometimes, Reachable}`
-  (`crates/patina-runtime/src/lib.rs:2234-2261`). Registry is a
+  (`crates/patina-runtime/src/buggify.rs`). Registry is a
   `BTreeMap<label, BuggifySite>`; a label reused at a different call site is a fatal
-  duplicate (`lib.rs:2377-2400`).
-* `sometimes_check` (`lib.rs:2780-2800`) and `reachable_mark` (`lib.rs:2803-2815`) are
+  duplicate (`buggify.rs`).
+* `sometimes_check` (`buggify.rs`) and `reachable_mark` (`buggify.rs`) are
   **unconditional**: they register + set their bits regardless of `--buggify`, activation
   permille, swarm selection, or the damage-control cutoff. Only fault/delay/knob firing is
   activation-gated. This settles the swarm-denominator question (below): swarm can never

@@ -10,7 +10,7 @@ Patina can *drive* cooperative-SUT sites and *observe* oracles, but nobody — h
 answer, without grepping: where does this codebase have invariant/property instrumentation? Which
 crates have none? Which `sometimes!` claims has no campaign ever satisfied? Which assertions exist
 that Patina cannot see at all? Before this arc, the only artifacts were the per-run `PATINA_SDK_REPORT` stderr
-line (`crates/patina-runtime/src/lib.rs:4968`) and verbatim marker capture on failing campaign
+line (`crates/patina-runtime/src/reports.rs`) and verbatim marker capture on failing campaign
 generations (`crates/cargo-patina/src/output.rs:364`). Waves 1-2 add the static inventory and
 single-run join; Wave 3 adds campaign aggregation into the shared exercised-site store.
 
@@ -44,12 +44,12 @@ runtime/campaign exercised view, and a merged report — hierarchical, progressi
   `buggify_delay!`, `buggify_knob!`, `always!`, `sometimes!`, `reachable!`. Each captures
   `concat!(file!(), ":", line!())` and routes through `__rt` shims
   (`crates/patina/src/lib.rs:308-405`) that are inert outside Patina.
-- **Runtime registry** — `crates/patina-runtime/src/lib.rs:2284-2300` (`BuggifySite`: label-keyed,
-  stores `site: "file:line"` used *only* for duplicate detection), `:2237-2250` (`BuggifyKind`:
-  fault/delay/knob/always/sometimes/reachable), `:2377-2401` (`register`: a label reused at a
+- **Runtime registry** — `crates/patina-runtime/src/buggify.rs` (`BuggifySite`: label-keyed,
+  stores `site: "file:line"` used *only* for duplicate detection), `BuggifyKind` (
+  fault/delay/knob/always/sometimes/reachable), `register` (a label reused at a
   different call site is a fatal `DuplicateLabel`, so **a label is process-unique** — sound join
   identity). Per-site counters: evals, fires, reachable, sometimes_satisfied, always_violated, knob.
-- **Per-run emission** — `emit_sdk_report`, `crates/patina-runtime/src/lib.rs:4968-5015`: one
+- **Per-run emission** — `emit_sdk_report`, `crates/patina-runtime/src/reports.rs`: one
   `PATINA_SDK_REPORT` stderr line, per-site token
   `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->|@<file:line>`.
   `BuggifySiteReport` carries the macro/import `site` field, so `cargo patina sites --exercised`
