@@ -2,6 +2,8 @@
 //! probes these also execute on macOS and Linux arm64, and pin virtual time.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 mod common;
+#[path = "native_abi/variadic.rs"]
+mod variadic;
 use common::native::*;
 
 /// Class pairing: runtime boot-origin translation invariance; exercises the

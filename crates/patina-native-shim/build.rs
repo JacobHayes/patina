@@ -3,6 +3,7 @@ mod build_support;
 mod symbol_metadata;
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(patina_posix_exports)");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build_support.rs");
     let out = std::env::var_os("OUT_DIR").unwrap();

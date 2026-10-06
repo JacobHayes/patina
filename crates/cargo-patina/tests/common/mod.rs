@@ -54,25 +54,38 @@ pub fn workspace_manifest() -> PathBuf {
 
 /// Build (idempotently) and locate `libpatina_dst_native_shim.a`.
 pub fn shim_archive() -> PathBuf {
-    shim_archive_with(&[])
+    build_shim_archive(&[], true)
 }
 
 /// The shim archive built with `features`, in a target directory of its own
 /// so it never replaces the plain one other guests link.
 pub fn shim_archive_with(features: &[&str]) -> PathBuf {
+    build_shim_archive(features, true)
+}
+
+pub fn prefixed_shim_archive() -> PathBuf {
+    build_shim_archive(&[], false)
+}
+
+fn build_shim_archive(features: &[&str], posix: bool) -> PathBuf {
     let mut profile = profile_dir();
     let mut target_dir = profile
         .parent()
         .expect("profile dir has a target parent")
         .to_path_buf();
-    if !features.is_empty() {
-        let variant = features.join("+");
+    {
+        let variant = format!(
+            "{}-{}",
+            if posix { "posix" } else { "prefixed" },
+            features.join("+")
+        );
         target_dir = target_dir.join(&variant);
         profile = target_dir.join(profile.file_name().expect("profile name"));
     }
     let mut build = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     build
-        .arg("build")
+        .arg("rustc")
+        .arg("--lib")
         .arg("--locked")
         .arg("--manifest-path")
         .arg(workspace_manifest())
@@ -85,6 +98,11 @@ pub fn shim_archive_with(features: &[&str]) -> PathBuf {
     }
     if profile.file_name().and_then(|n| n.to_str()) == Some("release") {
         build.arg("--release");
+    }
+    if posix {
+        build
+            .arg("--")
+            .args(patina_dst_native_shim::POSIX_RUST_FLAGS);
     }
     let status = build
         .status()

@@ -638,7 +638,9 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
                 .args(["--features", "test-panic"])
                 .arg("--target-dir")
                 .arg(&target)
-                .args(["--", "-C", &format!("panic={strategy}")])
+                .arg("--")
+                .args(patina_dst_native_shim::POSIX_RUST_FLAGS)
+                .args(["-C", &format!("panic={strategy}")])
                 .output()
                 .unwrap(),
         );

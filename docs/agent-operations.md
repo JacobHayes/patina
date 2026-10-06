@@ -292,6 +292,10 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   writing the diagnostic: an absolute toolchain `cargo` still invokes the `PATH`
   `rustc` proxy, so the working directory — not the cargo binary — picks the
   compiler.
+- A Cargo wrapper used to interrupt a build phase must select the exact package
+  or binary arguments, then acknowledge only successful completion. The shim and
+  guest both use `cargo rustc`; intercepting the subcommand alone can pause the
+  shim before the guest executable exists and misdiagnose an uplift failure.
 - Guest binaries relink automatically when the shim or the runtime beneath it
   changes: the injected build flags carry a hash of the link inputs' bytes, so
   Cargo's own fingerprint invalidates. No source-touching or `target/` deletion

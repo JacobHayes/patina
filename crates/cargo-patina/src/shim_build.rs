@@ -294,10 +294,13 @@ fn build_native_shim_at(
     }
     let mut build = command();
     shim_cache::inherit(&mut build, &work)?;
-    build.args(["build", "--locked", "-p", "patina-dst-native-shim"]);
+    build.args(["rustc", "--lib", "--locked", "-p", "patina-dst-native-shim"]);
     if release {
         build.arg("--release");
     }
+    build
+        .arg("--")
+        .args(patina_dst_native_shim::POSIX_RUST_FLAGS);
     let status = build
         .status()
         .map_err(|e| CliError(format!("building shim: {e}")))?;

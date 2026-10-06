@@ -405,7 +405,7 @@ Rules that follow:
   without a binding, a `Trap`/`Absent` row with one, or a binding that names no
   row is a compile error (`build_dispatch`); the by-name twin is
   `sud::tests::bindings_match_the_registry_rows`.
-- A new C interposer needs a `SymbolRow` (platform, the rows it serves, a
+- A new C or Rust interposer needs a `SymbolRow` (platform, the rows it serves, a
   status); the object-scan gate (`cargo-patina/tests/syscall_registry.rs`)
   fails on an unlisted definition, a stale row, or an `Absent` row that gained
   a definition. A deny-trap needs a `Deny(class)` row AND its entry in
@@ -416,6 +416,15 @@ Rules that follow:
   and binding instead, so the three vehicles cannot disagree.
 - Reasoning strings are the diagnostic a guest sees on a trap; keep them
   one-line, present-tense, and honest about what is modeled today.
+
+Rust variadic entry points live in `src/variadic.rs`, enabled only by the
+private `patina_posix_exports` compiler cfg on the guest archive build. Keep it
+off dependency rlibs, unit tests and bare prefixed-ABI links. Guest archive
+builds use one codegen unit: the extraction anchor and Linux assembly aliases
+must share the definitions' object. The C constructor references the anchor;
+Linux dlsym routes use hidden aliases, never cross-object C alias attributes.
+The remaining fixed C platform adapter is hidden. See
+[the design](../../docs/arcs/c-variadic-interposers.md) before extending it.
 
 ## Source bundle and `links`
 

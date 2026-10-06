@@ -64,7 +64,9 @@ PATINA_ROUTED(PATINA_ROUTE_ALIAS)
 #ifdef __x86_64__
 PATINA_ROUTED_X86_64(PATINA_ROUTE_ALIAS)
 #endif
-extern long patina_route_syscall(long number, ...) __attribute__((visibility("hidden")));
+#define PATINA_ROUTE_EXTERN(name) extern __typeof__(name) patina_route_##name __attribute__((visibility("hidden")));
+PATINA_ROUTED_ASM(PATINA_ROUTE_EXTERN)
+#undef PATINA_ROUTE_EXTERN
 void *__wrap_dlsym(void *handle, const char *symbol);
 extern __typeof__(__wrap_dlsym) patina_route_dlsym
     __attribute__((alias("__wrap_dlsym"), visibility("hidden")));

@@ -763,13 +763,21 @@ mod tests {
             assert!(made.success(), "mkfifo {fifo} failed");
         }
         let cargo = sync.join("cargo");
+        // The shim and guest both use cargo rustc. Pause the selected guest
+        // binary only, after its successful uplift, rather than a Cargo verb.
         fs::write(
             &cargo,
             format!(
                 "#!/bin/sh\n\
              real=\"{real}\"\n\
-             [ \"$1\" = rustc ] || exec \"$real\" \"$@\"\n\
+             guest=0; previous=\"\"\n\
+             for arg do\n\
+               if [ \"$previous\" = --bin ] && [ \"$arg\" = \"{bin}\" ]; then guest=1; fi\n\
+               previous=\"$arg\"\n\
+             done\n\
+             [ \"$guest\" = 1 ] || exec \"$real\" \"$@\"\n\
              \"$real\" \"$@\"; status=$?\n\
+             [ \"$status\" = 0 ] || exit \"$status\"\n\
              echo uplifted > \"{sync}/to-test\"; read _ < \"{sync}/to-cargo\"\n\
              exit $status\n",
                 real = active_toolchain_binary("cargo").display(),

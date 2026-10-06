@@ -1390,7 +1390,11 @@ static void patina_finalize_atexit(void) {
  * honor constructor priorities, minimizing false early-init failures while still
  * letting deliberately earlier constructors (the e2e uses .init_array.00099 on
  * ELF) prove the fail-closed path. */
+/* A unique reference extracts the Rust interposer object on Darwin too, where
+ * a public fcntl reference may already have resolved to libSystem. */
+extern void patina_variadic_link(void);
 __attribute__((constructor(101))) static void patina_native_start(void) {
+    patina_variadic_link();
     /* Idempotent on Linux; also serves platforms without __libc_start_main. */
     patina_init_panic_policy();
     atexit(patina_finalize_atexit);

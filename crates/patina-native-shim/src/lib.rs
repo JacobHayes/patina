@@ -4,15 +4,19 @@
 //! links below a guest binary. The Rust side here exposes prefixed
 //! `patina_*` C ABI entry points over the deterministic runtime; the bundled C
 //! interposer (the staged `patina_posix.c` and its per-family slices under `c/posix/`,
-//! exported as [`POSIX_C_SOURCE`] and [`POSIX_C_FAMILY_SOURCES`]) provides the
-//! libc-compatible symbols (file, socket, clock, thread, entropy) that route a
+//! exported as [`POSIX_C_SOURCE`] and [`POSIX_C_FAMILY_SOURCES`]) provides
+//! most libc-compatible symbols (file, socket, clock, thread, entropy) that route a
 //! guest's ordinary `std` calls into it. The prefixed Rust surface
-//! deliberately does not export ambient `open`/`read`/pthread symbols, so
+//! exports ambient libc names only in the guest build (`patina_posix_exports`), so
 //! linking this crate alone cannot silently alter unrelated host operations.
 //! Adopters never depend on this crate; see [ARCHITECTURE.md] for the shim
 //! design and its fail-closed doctrine.
 //!
 //! [ARCHITECTURE.md]: https://github.com/JacobHayes/patina/blob/main/ARCHITECTURE.md
+
+// Enabled only on the guest archive, never the runner's dependency rlib.
+#[cfg(patina_posix_exports)]
+mod variadic;
 
 mod bundle;
 mod coverage;

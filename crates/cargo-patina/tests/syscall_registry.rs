@@ -8,7 +8,7 @@
 //! * (d) every symbol row names a symbol the compiled shim objects define on
 //!   this platform — or, for `Absent`, provably do NOT define — and every
 //!   defined public symbol has a row (the `patina_*` runtime ABI is excluded
-//!   by the prefix rule, and the Rust objects may export nothing else);
+//!   by the prefix rule, and Rust libc definitions obey the same registry);
 //! * (e) `patina-target`'s classification lists agree with the rows: the
 //!   deny-trap list is exactly the `Deny(class)` rows, which are exactly the
 //!   trap-calling definitions in the shim's C, and no interposed symbol is in
@@ -82,15 +82,17 @@ fn every_defined_public_symbol_has_a_row_and_every_row_is_defined() {
     let bytes = std::fs::read(&object_path).unwrap();
     let object = object::File::parse(&*bytes).expect("parse the POSIX shim object");
     let mut defined = defined_public_symbols(&object);
-    // The Rust objects contribute the `patina_*` runtime ABI (prefix-excluded)
-    // and must export nothing else unmangled: the crate deliberately defines no
-    // ambient libc name in Rust. Fold them in so the same gap logic judges them.
+    // Rust interposers and C definitions share one registry; neither producer
+    // may silently supply a second definition of a public symbol.
     let archive = std::fs::read(shim_archive()).unwrap();
     let mut rust_exports = BTreeSet::new();
     for_each_shim_member(&archive, |member| {
         for name in defined_public_symbols(member) {
             if rustc_demangle::try_demangle(&name).is_err() {
-                rust_exports.insert(name);
+                assert!(
+                    rust_exports.insert(name.clone()),
+                    "duplicate Rust definition: {name}"
+                );
             }
         }
     });
@@ -112,13 +114,10 @@ fn every_defined_public_symbol_has_a_row_and_every_row_is_defined() {
                     | "__rust_realloc"
             )
     };
-    let stray: Vec<&String> = rust_exports
-        .iter()
-        .filter(|name| !is_control_plane_abi(name) && !toolchain_glue(name))
-        .collect();
+    let duplicates = duplicate_libc_definitions(&defined, &rust_exports);
     assert!(
-        stray.is_empty(),
-        "the Rust shim objects export unmangled symbols outside the patina_* ABI: {stray:?}"
+        duplicates.is_empty(),
+        "duplicate C/Rust definitions: {duplicates:?}"
     );
     defined.extend(
         rust_exports
@@ -139,6 +138,29 @@ fn every_defined_public_symbol_has_a_row_and_every_row_is_defined() {
         gaps.undefined,
         gaps.absent_but_defined
     );
+}
+
+// Prefixed bootstrap hooks have intentional weak/strong overrides. Public
+// libc entries must have exactly one producer, regardless of implementation.
+fn duplicate_libc_definitions<'a>(
+    c: &'a BTreeSet<String>,
+    rust: &'a BTreeSet<String>,
+) -> Vec<&'a String> {
+    c.intersection(rust)
+        .filter(|name| !is_control_plane_abi(name))
+        .collect()
+}
+
+#[test]
+fn planted_duplicate_interposer_is_reported() {
+    // Class pairing: object-level uniqueness across both definition producers.
+    let c = BTreeSet::from(["fcntl".to_owned(), "patina_sud_arm_thread".to_owned()]);
+    let rust = c.clone();
+    assert_eq!(
+        duplicate_libc_definitions(&c, &rust),
+        vec![&"fcntl".to_owned()]
+    );
+    assert!(duplicate_libc_definitions(&c, &BTreeSet::new()).is_empty());
 }
 
 /// Non-vacuity: a doctored definition set reports each gap direction.

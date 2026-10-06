@@ -1,4 +1,4 @@
-//! Every public symbol the shim's C slices define — the libc/pthread/Darwin
+//! Every public symbol the shim's C slices and Rust interposers define — the libc/pthread/Darwin
 //! face of the runtime — mapped onto the syscall rows it serves, plus the
 //! known ABI spellings the shim deliberately does NOT define (`Absent`), so the
 //! gap is enumerated and gated rather than discovered by a guest.

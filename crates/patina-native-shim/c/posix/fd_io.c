@@ -14,8 +14,8 @@
  * descriptor table, and the entry dispatches on what the number names. Nothing
  * in this file asks what kind of descriptor it holds -- the SUD rows call the
  * same entries, which is what keeps the libc door and the raw-syscall door
- * byte-identical. The only kind question left to C is the one the platform
- * vocabulary forces: which `fcntl` commands carry a pointer.
+ * byte-identical. Rust decodes fcntl varargs; the fixed adapter here keeps the
+ * platform flag and struct-flock translations.
  */
 
 /*
@@ -102,46 +102,27 @@ static uint32_t patina_setfl_from_posix(int flags) {
 
 static int patina_fcntl_record_lock(int fd, int command, struct flock *lock);
 
-/* The record-lock commands that wait for a conflicting lock to go. */
-static int patina_fcntl_waits(int command) {
-#ifdef F_OFD_SETLKW
-    if (command == F_OFD_SETLKW) return 1;
+/* Fixed-argument platform adapter for the Rust variadic entries. The adapter
+ * retains the platform flag/struct-flock translations; it never reads varargs. */
+__attribute__((visibility("hidden")))
+int patina_fcntl_impl(int fd, int command, int argument, void *pointer, int large_file) {
+#ifdef __linux__
+    /* These checks refuse; they never act through pthread_exit/forced unwind. */
+    if (command == F_SETLKW || command == F_OFD_SETLKW) {
+        if (large_file) PATINA_CANCEL_POINT("fcntl64");
+        else PATINA_CANCEL_POINT("fcntl");
+    }
+#else
+    (void)large_file;
 #endif
-    return command == F_SETLKW;
-}
-
-int fcntl(int fd, int command, ...) {
-    /* POSIX record locks (F_GETLK/F_SETLK/F_SETLKW) and the Linux open-file-
-     * description variants (F_OFD_*) carry a pointer: see
-     * patina_fcntl_record_lock below. Every other modeled command carries an int
-     * (or nothing), so the variadic argument is read exactly once, by type. */
     if (command == F_GETLK || command == F_SETLK || command == F_SETLKW
 #ifdef F_OFD_SETLK
         || command == F_OFD_GETLK || command == F_OFD_SETLK || command == F_OFD_SETLKW
 #endif
-    ) {
-        /* Only the waiting lock commands are cancellable (glibc's
-         * __libc_fcntl64). */
-        if (patina_fcntl_waits(command)) PATINA_CANCEL_POINT("fcntl");
-        va_list ap;
-        va_start(ap, command);
-        struct flock *lock = va_arg(ap, struct flock *);
-        va_end(ap);
-        return patina_fcntl_record_lock(fd, command, lock);
-    }
+    ) return patina_fcntl_record_lock(fd, command, pointer);
 #ifdef F_GETOWN_EX
-    if (command == F_GETOWN_EX) {
-        va_list ap;
-        va_start(ap, command);
-        void *owner = va_arg(ap, void *);
-        va_end(ap);
-        return fail_int(patina_fcntl_owner_get(fd, 1, owner));
-    }
+    if (command == F_GETOWN_EX) return fail_int(patina_fcntl_owner_get(fd, 1, pointer));
 #endif
-    va_list ap;
-    va_start(ap, command);
-    int argument = va_arg(ap, int);
-    va_end(ap);
     switch (command) {
         case F_GETFD: {
             int cloexec = patina_fd_getfd(fd);
@@ -207,27 +188,6 @@ int fcntl(int fd, int command, ...) {
     errno = EINVAL;
     return -1;
 }
-
-#ifdef __linux__
-/*
- * glibc's LFS alias of fcntl. Anything compiled with _FILE_OFFSET_BITS=64 —
- * which is every bundled C library that touches files, SQLite's unix VFS
- * included — emits `fcntl64`, so leaving it uninterposed sent record locks
- * (F_SETLK on the virtual database/WAL descriptors) to the HOST fcntl, which
- * fails EBADF and surfaces as SQLITE_IOERR_LOCK. The variadic argument is
- * forwarded as an opaque pointer-sized value the way glibc's own wrapper does:
- * `fcntl` re-reads it as whichever type the command defines.
- */
-int fcntl64(int fd, int command, ...) {
-    if (patina_fcntl_waits(command)) PATINA_CANCEL_POINT("fcntl64");
-    va_list ap;
-    va_start(ap, command);
-    void *argument = va_arg(ap, void *);
-    va_end(ap);
-    return fcntl(fd, command, argument);
-}
-
-#endif
 
 ssize_t read(int fd, void *destination, size_t length) {
     PATINA_CANCEL_POINT("read");

@@ -948,6 +948,17 @@ The e2e refusal cases also require the old file to remain untouched because no
 recording was attempted. The metadata probe documents a conservative audit limit,
 not runtime acceptance or a reason to skip undecodable bytes (see the taxonomy).
 
+### Rust variadic libc entries
+
+`native_abi::variadic` calls the libc doors from compiled C with promoted int,
+record-lock pointer and absent arguments, checks Linux's large-file spelling
+and dlsym address identity, and proves pending cancellation still refuses by
+name. Its compiled-in `planted-faults` injection exercises the real Rust fcntl
+frame under unwind/abort with original/replaced panic hooks: host SIGABRT and
+an incomplete trace are required. The object registry gate combines C and Rust
+exports and rejects duplicate public definitions; its planted duplicate proves
+that detector fires. These pair with the exported-boundary ownership lint.
+
 ### Maintenance rule
 
 **Every new point-level regression pin must name its class-level pairing in a

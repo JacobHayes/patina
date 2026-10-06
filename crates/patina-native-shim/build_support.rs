@@ -60,7 +60,7 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         if !row.linux || !row.routed || row.name == "__wrap_dlsym" {
             continue;
         }
-        if row.name == "syscall" {
+        if matches!(row.name.as_str(), "syscall" | "fcntl" | "fcntl64") {
             assembly.push(row.name.as_str());
         } else if row.only_x86 {
             x86.push(row.name.as_str());

@@ -357,7 +357,8 @@ pub fn assert_build_c_guest_with_flags(name: &str, link: CLink, flags: &[&str]) 
     match link {
         CLink::Unlinked => {}
         CLink::Shim => {
-            cc.arg(ARCHIVE.get_or_init(super::shim_archive));
+            static PREFIXED: OnceLock<PathBuf> = OnceLock::new();
+            cc.arg(PREFIXED.get_or_init(super::prefixed_shim_archive));
         }
         CLink::PosixShim | CLink::PosixShimWithoutSud | CLink::PosixShimPlanted => {
             static PLANTED: OnceLock<PathBuf> = OnceLock::new();
