@@ -407,3 +407,57 @@ int main(void) {
         .validate()
         .unwrap();
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn syscall_raw_capture_preserves_zero_through_six_machine_arguments() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path().join("syscall.c");
+    std::fs::write(&source, r#"
+#define _GNU_SOURCE
+#include <sys/syscall.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+int main(void) {
+    if (syscall(SYS_getpid) != getpid()) return 1;
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/raw-args", O_CREAT | O_RDWR, 0600);
+    if (fd < 0) return 2;
+    if (syscall(SYS_write, fd, "six-args", (size_t)8) != 8) return 3;
+    if (syscall(SYS_lseek, fd, (off_t)0, SEEK_SET) != 0) return 4;
+    char bytes[8] = {0};
+    if (syscall(SYS_read, fd, bytes, sizeof(bytes)) != 8 || memcmp(bytes, "six-args", 8)) return 5;
+    if (syscall(SYS_ftruncate, fd, (off_t)8192)) return 6;
+    /* mmap's fd and offset occupy the fifth and sixth captured positions. */
+    char *mapping = (char *)syscall(SYS_mmap, (void *)0, (size_t)4096,
+                     PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)4096);
+    if (mapping == MAP_FAILED) return 7;
+    memcpy(mapping, "offset", 6);
+    if (syscall(SYS_msync, mapping, (size_t)4096, MS_SYNC)) return 8;
+    memset(bytes, 0, sizeof(bytes));
+    if (syscall(SYS_pread64, fd, bytes, (size_t)6, (off_t)4096) != 6 || memcmp(bytes, "offset", 6)) return 9;
+    char *target = mmap(0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (target == MAP_FAILED) return 10;
+    void *moved = (void *)syscall(SYS_mremap, mapping, (size_t)4096, (size_t)4096,
+                                MREMAP_MAYMOVE | MREMAP_FIXED, target);
+    if (moved != target || memcmp(moved, "offset", 6)) return 11;
+    if (syscall(SYS_munmap, moved, (size_t)4096) || syscall(SYS_close, fd)) return 12;
+    errno = 0;
+    if (syscall(SYS_close, -1) != -1 || errno != EBADF) return 13;
+    return 0;
+}
+"#).unwrap();
+    let guest = common::native::assert_build_c_guest(
+        source.to_str().unwrap(),
+        common::native::CLink::PosixShim,
+    );
+    let (output, trace) = guest.record_standalone(&[]);
+    assert_success(output);
+    patina_dst_trace::TraceBundle::load(&trace)
+        .unwrap()
+        .validate()
+        .unwrap();
+}

@@ -115,3 +115,6 @@ fn deliver_signals() {
         patina_signal_deliver();
     }
 }
+
+#[cfg(target_os = "linux")]
+mod syscall;

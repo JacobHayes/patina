@@ -61,6 +61,7 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
         if cfg!(target_os = "linux") {
             cases.extend([
                 (4, 2, "ioctl"),
+                (8, 0, "syscall"),
                 (6, 0, "prctl"),
                 (5, 0, "ptrace"),
                 (1, 1, "fcntl64"),

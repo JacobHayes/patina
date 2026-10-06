@@ -226,3 +226,8 @@ variadic doors and pass a platform VaList into a hidden fixed C bridge. C owns
 the sentinel FILE layouts, stream locks/buffering and vsnprintf engine, including
 va_copy and heap fallback. The internal formatter takes a FILE sentinel instead
 of exposing the C-only stream layout. No host vfprintf is called.
+
+Syscall now captures all six machine words in architecture assembly owned by
+Rust, then enters a guarded fixed Rust dispatcher. There is no C or Rust
+six-item VaList read. The guest-SP sigreturn branch and its libc layout adapter
+move together; the raw-trap C handler calls that same guarded adapter.

@@ -12,40 +12,14 @@
  */
 
 #ifdef __linux__
-/*
- * The libc `syscall(2)` vehicle. glibc's is a register shuffle straight into
- * the kernel; this one forwards EVERY number into the same dispatcher the
- * SIGSYS handler uses (`patina_sud_dispatch`, generated from the syscall
- * registry), so the three vehicles a guest has — the libc wrapper, this
- * wrapper, and a raw `syscall` instruction — cannot answer one number
- * differently. Rust std reaches it for futex (Mutex/Condvar/parking) and the
- * `getrandom` crate for SYS_getrandom; both were the old two-entry allowlist
- * and are now ordinary registry rows.
- *
- * All six arguments are read from the variadic list, as musl's syscall() does:
- * a caller that passed fewer leaves the rest as whatever the registers and
- * stack hold, exactly what the kernel would have seen. The dispatcher's raw
- * `-errno` is reshaped into this wrapper's `-1`/`errno` contract. The faulting
- * address argument is 0: this is a call, not a trap.
- */
+/* Fixed C adapters share libc errno conversion. The public syscall door and
+ * raw register/stack capture live in Rust's variadic/syscall.rs. */
 static long dispatch_result(long result) {
     if (result < 0 && result > -4096) {
         errno = (int)-result;
         return -1;
     }
     return result;
-}
-
-/* Reached only from the assembly entry below: `used` keeps an LTO build from
- * dropping or renaming it. */
-__attribute__((used, visibility("hidden"))) long patina_libc_syscall(long number, ...) {
-    va_list ap;
-    va_start(ap, number);
-    uint64_t args[6];
-    for (int i = 0; i < 6; i++) args[i] = va_arg(ap, uint64_t);
-    va_end(ap);
-    return dispatch_result(patina_sud_dispatch((long)number, args[0], args[1], args[2],
-                                               args[3], args[4], args[5], 0));
 }
 
 /*
@@ -60,7 +34,7 @@ __attribute__((used, visibility("hidden"))) long patina_libc_syscall(long number
  * and names that vehicle — glibc's real `syscall(2)`, a leaf that leaves the
  * stack alone — and both doors resume there with the number in its first
  * argument register: the SIGSYS handler by editing the trapped context, and
- * the `syscall` entry below by a tail jump with the stack pointer it was
+ * the Rust-owned `syscall` entry by a tail jump with the stack pointer it was
  * called with. The kernel then restores the interrupted context, mask
  * included, exactly as it would natively; a frame it cannot read is its
  * SIGSEGV, as natively.
@@ -69,81 +43,9 @@ __attribute__((used, visibility("hidden"))) long patina_libc_syscall(long number
  * return installs. The containment signals are kept out of it
  * (`patina_signal_return`), as every other mask the guest installs.
  */
-__attribute__((visibility("hidden"))) uintptr_t patina_guest_sigreturn(uintptr_t sp) {
-#if defined(__x86_64__)
-    /* The restorer's `ret` popped `pretcode`: the ucontext is at sp. */
-    uintptr_t uc = sp;
-#elif defined(__aarch64__)
-    /* `struct rt_sigframe { siginfo_t info; struct ucontext uc; }` at sp. */
-    uintptr_t uc = sp + sizeof(siginfo_t);
-#else
-#error "guest rt_sigreturn: unsupported architecture"
-#endif
-    /* glibc's ucontext_t keeps the kernel's layout up to uc_sigmask. */
-    return patina_signal_return(uc + offsetof(ucontext_t, uc_sigmask));
-}
-
-/*
- * The public `syscall(2)`: every number but `rt_sigreturn` goes to
- * `patina_libc_syscall` untouched (a tail jump keeps the variadic registers
- * and stack), and `rt_sigreturn` resumes at the host vehicle with the stack
- * pointer this entry was reached with (see above). The number is compared as
- * the kernel reads it, 32 bits wide.
- */
-#if defined(__x86_64__)
-__asm__(".text\n"
-        ".globl syscall\n"
-        ".type syscall,@function\n"
-        ".p2align 4\n"
-        "syscall:\n"
-        "  endbr64\n"
-        "  cmpl $15, %edi\n" /* __NR_rt_sigreturn */
-        "  je 1f\n"
-        "  jmp patina_libc_syscall\n"
-        "1:\n"
-        "  movq %rsp, %rdi\n"
-        "  andq $-16, %rsp\n"
-        "  pushq %rdi\n"
-        "  pushq %rdi\n"
-        "  call patina_guest_sigreturn\n"
-        "  popq %rsp\n"
-        "  movl $15, %edi\n"
-        "  jmpq *%rax\n"
-        ".size syscall, .-syscall\n"
-        /* dlsym's route to this entry (c/posix/dlsym.c): a hidden alias,
-         * resolved when the shim is linked, as its C aliases are. */
-        ".globl patina_route_syscall\n"
-        ".hidden patina_route_syscall\n"
-        ".set patina_route_syscall, syscall\n");
-#elif defined(__aarch64__)
-__asm__(".text\n"
-        ".globl syscall\n"
-        ".type syscall,%function\n"
-        ".p2align 2\n"
-        "syscall:\n"
-        "  bti c\n"
-        "  cmp w0, #139\n" /* __NR_rt_sigreturn */
-        "  b.eq 1f\n"
-        "  b patina_libc_syscall\n"
-        "1:\n"
-        "  mov x0, sp\n"
-        "  sub sp, sp, #16\n"
-        "  str x0, [sp]\n"
-        "  bl patina_guest_sigreturn\n"
-        "  ldr x1, [sp]\n"
-        "  mov sp, x1\n"
-        "  mov x16, x0\n"
-        "  mov x0, #139\n"
-        "  br x16\n"
-        ".size syscall, .-syscall\n"
-        /* dlsym's route to this entry (c/posix/dlsym.c): a hidden alias,
-         * resolved when the shim is linked, as its C aliases are. */
-        ".globl patina_route_syscall\n"
-        ".hidden patina_route_syscall\n"
-        ".set patina_route_syscall, syscall\n");
-#else
-#error "syscall(2) entry: unsupported architecture"
-#endif
+/* Rust owns the layout adapter and both architecture entries. The SUD signal
+ * handler below shares its guest-frame preparation. */
+extern __attribute__((visibility("hidden"))) uintptr_t patina_guest_sigreturn(uintptr_t sp);
 
 /* ==========================================================================
  * Syscall-user-dispatch (SUD).
