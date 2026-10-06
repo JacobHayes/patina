@@ -25,9 +25,11 @@ not add models or relax refusals.
 | printf, fprintf, patina_stream_printf | Variadic doors pass their FILE*/format and VaList through a fixed C bridge. The modeled C stream engine owns formatting, buffering and captured writes. |
 | syscall | Linux architecture-specific raw capture and guest-SP restoration assembly reside in the Rust module. A fixed Rust entry receives raw machine words and reaches the shared dispatcher. The guest sigreturn layout adapter is Rust-owned too. There is no C six-word variadic decoder. |
 
-The C stdio engine remains because its `vsnprintf` formatting, `va_copy` sizing
+At the end of this port the C stdio engine remains: its `vsnprintf` formatting, `va_copy` sizing
 pass, heap fallback, stream locks and private FILE state form one implementation.
-Reimplementing printf formatting in Rust would add a second formatter. The
+Reimplementing printf formatting in Rust would add a second formatter.
+The follow-on [C reduction arc](c-to-rust.md) instead moves the stream engine
+to Rust while retaining libc formatting through a private vsnprintf alias. The
 bridge reaches `patina_stream_vprintf`, never host `vfprintf` with a modeled
 FILE pointer. Internal-linkage helpers shared by code that remains C stay with
 that engine and the existing fortify wrappers.
@@ -152,4 +154,5 @@ The coordinator runs the full landing battery separately.
 
 These ABI tests do not extend a model's supported operations, prove libSystem
 internal interposition or replace the wider syscall conformance suite. The
-retained C formatting and forced-unwind frames remain deliberate boundaries.
+follow-on C reduction arc reclassifies the engine and host-resolution vehicles;
+forced-unwind frames remain deliberate boundaries.

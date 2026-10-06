@@ -1180,7 +1180,7 @@ static int patina_main_wrapper(int argc, char **argv, char **envp) {
 
 int __libc_start_main(patina_main_fn main_fn, int argc, char **argv, void *init,
                       void *fini, void *rtld_fini, void *stack_end) {
-    patina_host_environ = argv + argc + 1;
+    patina_env_save_host(argv + argc + 1);
     /* The POSIX link supplies host aliases; install panic containment before
      * any guest constructors, independently of whether Context is deferred. */
     patina_init_panic_policy();

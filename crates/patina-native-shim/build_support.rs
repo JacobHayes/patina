@@ -8,7 +8,6 @@ use crate::symbol_metadata::Symbol;
 // the slices share static helpers in one translation unit.
 const FAMILIES: &[&str] = &[
     "core",
-    "env",
     "init",
     "time",
     "sched_identity",
@@ -62,7 +61,13 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         }
         if matches!(
             row.name.as_str(),
-            "syscall"
+            "getenv"
+                | "setenv"
+                | "unsetenv"
+                | "clearenv"
+                | "putenv"
+                | "secure_getenv"
+                | "syscall"
                 | "fcntl"
                 | "fcntl64"
                 | "mremap"

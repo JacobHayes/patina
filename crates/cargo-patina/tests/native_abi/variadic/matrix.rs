@@ -73,7 +73,15 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
                 (3, 5, "__open64"),
             ]);
         }
-        assert_symbol_ownership(Path::new(&archives[0]), &object, &cases, strategy);
+        // The non-variadic environment port shares the extraction object and
+        // route contract. Class pairing: combined symbol registry/duplicate
+        // detector; inspect machine objects, never source spelling.
+        let mut ownership_cases = cases.clone();
+        ownership_cases.extend(["getenv", "setenv", "unsetenv", "putenv"].map(|name| (0, 0, name)));
+        if cfg!(target_os = "linux") {
+            ownership_cases.extend(["clearenv", "secure_getenv"].map(|name| (0, 0, name)));
+        }
+        assert_symbol_ownership(Path::new(&archives[0]), &object, &ownership_cases, strategy);
         let c_source = dir.path().join("variadic-call.c");
         let c_object = dir.path().join("variadic-call.o");
         std::fs::write(&c_source, C_CALLS).unwrap();

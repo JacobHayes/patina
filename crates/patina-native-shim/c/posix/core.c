@@ -259,3 +259,11 @@ _Noreturn static void patina_chk_fail(void) {
 /* macOS: cancellation is not modeled (pthread_cancel answers ENOSYS). */
 #define PATINA_CANCEL_POINT(name) ((void)0)
 #endif
+
+/* Rust-owned environment state; private bridges for the remaining C callers. */
+extern void patina_env_save_host(char **next);
+extern void patina_environ_install(char **next);
+extern void patina_capture_control_plane(void);
+extern const char *patina_control_getenv(const char *name);
+extern void patina_scrub_environ(void);
+extern char *patina_env_lookup(const char *name);

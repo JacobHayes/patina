@@ -438,9 +438,12 @@ it refuses pending cancellation by name and never initiates forced unwind.
 Compiled C guests in `native_abi::variadic` exercise pending cancellation at
 the fcntl waiting commands and open doors; entry order is reviewed.
 
-Keep the modeled `vsnprintf`/FILE engine and its internal stream helpers in C;
-the Rust printf doors pass `VaList` through its fixed bridge. Acting cancellation,
-thread-exit/cleanup frames and host-resolution vehicles also remain C. Linux's
+The modeled stdio engine currently lives in C; the Rust printf doors pass
+`VaList` through its fixed bridge. The [C reduction design](../../docs/arcs/c-to-rust.md)
+moves that engine to Rust with a private host vsnprintf alias, and moves
+host-resolution vehicles too. Retain its enumerated cancellation, cleanup,
+nonlocal-callback, emergency-fatal and guest-fault-store C seams. Environment
+ownership is already Rust (`src/posix_env.rs`) in the guest-only archive. Linux's
 syscall assembly captures raw machine words for the fixed Rust entry; it must
 not decode six fictitious variadic arguments or lose the guest-SP sigreturn
 path. New doors must satisfy the export guard without exceptions and extend

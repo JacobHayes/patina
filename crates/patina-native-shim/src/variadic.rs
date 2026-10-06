@@ -69,12 +69,12 @@ fn fault(family: u32) -> bool {
     false
 }
 
-fn error(value: c_int) -> c_int {
+pub(crate) fn error(value: c_int) -> c_int {
     errno(value);
     -1
 }
 
-fn model_result(result: c_int) -> c_int {
+pub(crate) fn model_result(result: c_int) -> c_int {
     if result < 0 {
         errno(crate::patina_errno());
     }

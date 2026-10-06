@@ -60,19 +60,19 @@ pub extern "C" fn patina_errno() -> c_int {
 // ---- The guest environment ----------------------------------------------------
 //
 // The environment is the process's own `environ` array, as it is under glibc:
-// the C layer (`c/posix/env.c`) runs glibc's getenv/setenv/unsetenv/putenv/
+// the POSIX layer (`src/posix_env.rs`) runs glibc's getenv/setenv/unsetenv/putenv/
 // clearenv over whatever array `environ` names, so a pointer `getenv` answers
 // is the entry's own bytes, new names are appended, an array the program
 // assigns is honoured and a `putenv` string stays aliased. The runtime's part
 // is the array the run STARTS with — the startup `--env` map, the one piece
 // the trace records, published once the ambient host environment is scrubbed
 // (and again when a deferred harness installs the runtime) — and the gates
-// below, which decide when the C layer may answer at all.
+// below, which decide when the POSIX layer may answer at all.
 //
 // Mutations are guest-driven and therefore deterministic: nothing is recorded
 // per mutation, and replay reproduces them by re-executing the guest.
 
-/// May the C `getenv` read `environ`? 1 to read it, 0 to answer NULL: before
+/// May the POSIX `getenv` read `environ`? 1 to read it, 0 to answer NULL: before
 /// the startup constructor finishes, `environ` is still the ambient host
 /// environment, and Rust/libc startup code can probe it before Patina's
 /// constructor runs, so those probes see the historical empty environment
@@ -96,7 +96,7 @@ pub extern "C" fn patina_env_read_gate() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-/// May the C layer mutate `environ`? 0 to go ahead, -1 (`ENOSYS`, with a
+/// May the POSIX layer mutate `environ`? 0 to go ahead, -1 (`ENOSYS`, with a
 /// diagnostic) when no runtime is installed. Unlike a lookup, a pre-startup
 /// WRITE would change the ambient host array the constructor is about to
 /// scrub, and the guest and the run would then disagree about the
