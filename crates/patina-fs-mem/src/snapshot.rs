@@ -12,9 +12,8 @@ use std::fmt;
 use patina_dst_abi::{EffectError, ErrorCode};
 
 use crate::Times;
-use crate::{
-    EntryMetadata, FileData, Inode, InodeId, MODE_MASK, MemFs, normalize_entry_path, parent_path,
-};
+use crate::namespace::{normalize_entry_path, parent_path};
+use crate::{EntryMetadata, FileData, Inode, InodeId, MODE_MASK, MemFs};
 use patina_dst_abi::FsEntryKind;
 
 /// Magic prefix identifying an encoded [`FsSnapshot`] stream.
