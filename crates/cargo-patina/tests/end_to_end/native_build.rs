@@ -246,7 +246,7 @@ exit "$status"
     // Cargo build BOTH crate types even though the guest links only the rlib, and
     // the cdylib runs a real link. The shim's link arguments must never reach it: on
     // x86_64 Linux that link is refused outright (`relocation R_X86_64_PC32 cannot
-    // be used against symbol 'environ'`, from `patina_environ_base`), and on every
+    // be used against symbol 'environ'`, from the shim's environment code), and on every
     // platform the whole deterministic shim is force-included into a shared object
     // nobody loads. Scoping the link arguments to `cargo rustc`'s trailing arguments
     // confines them to the guest's own final link.
@@ -330,7 +330,7 @@ exit "$status"
     /// link line: the POSIX layer's constructor-retained `environ` accessor and the
     /// `--yield-points` hook.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const SHIM_LINK_MARKER_SYMBOLS: &[&[u8]] = &[b"patina_environ_base", b"patina_yield_point"];
+    const SHIM_LINK_MARKER_SYMBOLS: &[&[u8]] = &[b"patina_environ_install", b"patina_yield_point"];
 
     /// Whether `image`'s symbol table names `symbol`. Symbol names are stored as
     /// plain NUL-terminated strings in both Mach-O and ELF string tables, so a byte
