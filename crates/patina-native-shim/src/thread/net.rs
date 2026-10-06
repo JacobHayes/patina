@@ -27,12 +27,12 @@
 use super::*;
 
 pub(crate) mod abi;
-mod addr;
+pub(crate) mod addr;
 pub(crate) mod iface;
 mod inet;
 #[cfg(target_os = "linux")]
 mod ipctl;
-mod msg;
+pub(crate) mod msg;
 #[cfg(target_os = "linux")]
 mod netlink;
 mod opts;

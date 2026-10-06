@@ -13,7 +13,6 @@ const FAMILIES: &[&str] = &[
     "fs",
     "thread_sync",
     "signal_process",
-    "net",
     "stdio",
     "darwin",
     "dlsym",
@@ -56,7 +55,34 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         }
         if matches!(
             row.name.as_str(),
-            "pread64"
+            "socket"
+                | "socketpair"
+                | "bind"
+                | "connect"
+                | "listen"
+                | "accept"
+                | "accept4"
+                | "getsockname"
+                | "getpeername"
+                | "shutdown"
+                | "setsockopt"
+                | "getsockopt"
+                | "sendto"
+                | "send"
+                | "recvfrom"
+                | "recv"
+                | "sendmsg"
+                | "recvmsg"
+                | "sendmmsg"
+                | "recvmmsg"
+                | "__recv_chk"
+                | "__recvfrom_chk"
+                | "if_nametoindex"
+                | "getaddrinfo"
+                | "freeaddrinfo"
+                | "getifaddrs"
+                | "freeifaddrs"
+                | "pread64"
                 | "pwrite64"
                 | "__read"
                 | "__write"

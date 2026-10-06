@@ -286,3 +286,7 @@ bridges; Darwin poll uses a private returning C sleep bridge until wave 4.
 `fd_io.c` is now `src/posix/fd_io.rs` and its Linux terminal/descriptor
 modules. C stdio uses the hidden guarded Rust `patina_isatty` implementation.
 Three previously uncovered PTY spellings run in the existing conformance guest.
+
+`net.c` is now `src/posix/net.rs` and its resolver/interface modules. Socket
+results retain signal delivery before errno without narrowing successful byte
+counts; resolver and interface lists retain their libc allocator ownership.

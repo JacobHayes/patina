@@ -6,6 +6,7 @@ mod entropy;
 mod fd_io;
 #[cfg(target_os = "linux")]
 mod memory;
+mod net;
 mod privileged;
 mod readiness;
 mod sched_identity;

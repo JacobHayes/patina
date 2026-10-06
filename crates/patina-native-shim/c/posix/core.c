@@ -291,6 +291,9 @@ extern int __ppoll_chk(struct pollfd *fds, nfds_t nfds, const struct timespec *t
 #include <sys/file.h>
 /* Rust-owned descriptor doors and the private buffering query. */
 extern int patina_isatty(int fd);
+extern ssize_t __recv_chk(int, void *, size_t, size_t, int);
+extern ssize_t __recvfrom_chk(int, void *, size_t, size_t, int, struct sockaddr *, socklen_t *);
+_Static_assert(sizeof(struct rtnl_link_stats) == 96 && offsetof(struct rtnl_link_stats, rx_nohandler) == 92, "Rust LinkStats layout");
 extern ssize_t __read(int fd, void *destination, size_t length);
 extern ssize_t __write(int fd, const void *source, size_t length);
 extern ssize_t __read_chk(int fd, void *destination, size_t length, size_t buflen);
