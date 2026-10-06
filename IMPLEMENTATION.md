@@ -645,7 +645,8 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    `RuntimeConfig::apply_liveness_env`. A default-on `PATINA_LIVENESS_REPORT` line
    at a clean finish proves the watchdog was armed and did not fire (non-vacuity).
 
-2. **`cargo patina campaign`** (`crates/cargo-patina/src/campaign.rs`): a
+2. **`cargo patina campaign`** (`crates/cargo-patina/src/campaign.rs`,
+   `crates/cargo-patina/src/campaign/driver.rs`): a
    config-driven, deterministic sweep. Each generation is an independent child
    `cargo patina run --record` whose seed and every randomized knob (buggify,
    swarm, PCT, fault knobs, the liveness budgets) are a pure function of

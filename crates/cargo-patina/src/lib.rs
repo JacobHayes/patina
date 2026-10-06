@@ -56,6 +56,8 @@ mod shim_build;
 mod shim_cache;
 mod sites;
 mod syscalls;
+#[cfg(test)]
+mod test_source;
 mod trace_cmd;
 mod trace_view;
 mod values;

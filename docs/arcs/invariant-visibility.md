@@ -55,7 +55,7 @@ runtime/campaign exercised view, and a merged report — hierarchical, progressi
   `BuggifySiteReport` carries the macro/import `site` field, so `cargo patina sites --exercised`
   can join a run's labels back to static SDK rows. Trace metadata still records only config +
   active labels (`BuggifyConfigRecord`, `crates/patina-trace/src/lib.rs:121`).
-- **Campaign** — `patina.campaign/v2` envelope (`crates/cargo-patina/src/campaign.rs`): class
+- **Campaign** — `patina.campaign/v2` envelope (`crates/cargo-patina/src/campaign/report.rs`): class
   histogram, deduped signatures, notable runs, artifact pointers, `sdk_sites` coverage summary,
   and `artifacts.site_coverage`. Wave 3 parses every generation's SDK report into
   `<out>/sites.json` (`patina.campaign.sites/v1`) for `sites --exercised OUTDIR` and the

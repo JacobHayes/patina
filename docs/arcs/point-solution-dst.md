@@ -84,7 +84,7 @@ not the binary; timings are unaffected):
   missing from the registry, and `scripts/check-flag-drift.sh` gates flag
   tokens in the listed docs. Result envelopes: `patina.result/v1`
   (`crates/cargo-patina/src/output.rs`), campaign `patina.campaign/v2`
-  (`crates/cargo-patina/src/campaign.rs:52`).
+  (`crates/cargo-patina/src/campaign/report.rs`, `CAMPAIGN_ENVELOPE_SCHEMA`).
 - **Debug is the bug-finding profile** (README "Debug vs release guest
   builds"): `debug_assert!`/overflow checks as free oracles, denser
   yield-point windows, faster loop. Macro guests build debug by default.

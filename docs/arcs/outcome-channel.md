@@ -6,7 +6,7 @@ Waves A, B, and C landed. Lands as `docs/arcs/outcome-channel.md`.
 ## 1. Problem
 
 Campaign outcome classification is stdout archaeology. The classifier
-(`crates/cargo-patina/src/campaign.rs`, `classify(exit_code, stdout, stderr)`)
+(`crates/cargo-patina/src/campaign/classify.rs`, `classify(exit_code, stdout, stderr)`)
 substring-matches both captured streams against hardcoded marker lists. That
 design has three concrete failures:
 

@@ -12,7 +12,7 @@ way to "keep pushing" after `--gens 500` finishes clean is to restart from
 scratch with `--gens 1000` (re-running the 500 you already paid for), and the
 only way to "cut losses" mid-flight is Ctrl-C — which currently **loses the
 signature store entirely**, because `signatures.json` is written only at
-campaign end (`campaign.rs:847-849`).
+campaign end (`campaign/state.rs`, `write_signature_store`).
 
 **User-settled decision: resumable + extendable campaigns.** Campaign state
 persists in `--out-dir`; `cargo patina campaign --extend N` continues an
@@ -25,41 +25,49 @@ later layer on top of this state — see §10.)
 
 ## 2. What exists today (verified)
 
-All references are to `crates/cargo-patina/src/campaign.rs` at the current
-head.
+Source references name items in `crates/cargo-patina/src/campaign.rs`
+and its `campaign/` submodules.
 
-- **Spec.** `CampaignSpec` (`:71-94`) is the complete determinism-relevant
+- **Spec.** `CampaignSpec` (`campaign/spec.rs`) is the complete determinism-relevant
   configuration: `generations`, `seed_base`, `timeout_secs`, `guest_args`, and
   the knob switches (`buggify`, `swarm`, `pct`, `faults`, `watchdog_nanos`,
   `converge_nanos`, `heal_after_nanos`, `report`). It is populated from flags
-  and/or a `--spec FILE.json` (key names at `:124-147`). **Nothing about the
-  spec is persisted to the out-dir today** — there is no `spec.json`; an
+  and/or a `--spec FILE.json` (key names in `campaign/spec.rs`, `apply_json`).
+  **Nothing about the spec is persisted to the out-dir today** — there is no `spec.json`; an
   out-dir cannot answer "what campaign produced you".
 - **Seed/knob derivation is a pure function of the generation number.**
   `generation_hash(seed_base, generation)` =
-  `SHA-256("patina-campaign-<seed_base>-<generation>")` (`:1076-1080`); the
+  `SHA-256("patina-campaign-<seed_base>-<generation>")` (`campaign.rs`); the
   seed is bytes 0..8 and every randomized knob reads fixed hash bytes
-  (`derive_flags`, `:1020-1072`). No cross-generation state feeds derivation.
+  (`campaign.rs`, `derive_flags`). No cross-generation state feeds derivation.
 - **Signature store.** An in-memory `BTreeMap<String, SignatureRecord>`
-  (`:713`), deduped by `class|shape|policy` key; novelty = first insertion
-  (`:782-798`). Serialized once, at the end, as `signatures.json`
-  (`patina.campaign.signatures/v1`, `:1160-1176`). There is a writer but **no
-  loader** — `SignatureRecord` has `to_json` only (`:642-661`).
+  (`campaign/state.rs`), deduped by `class|shape|policy` key; novelty = first
+  insertion
+  (`campaign/driver.rs`, `run_campaign`). Serialized once, at the end, as
+  `signatures.json`
+  (`patina.campaign.signatures/v1`, `campaign/state.rs`,
+  `write_signature_store`). There is a writer but **no
+  loader** — `SignatureRecord` has `to_json` only (`campaign/state.rs`).
 - **Out-dir contents.** `traces/` (per-generation scratch, deleted after each
-  generation, `:804`), `failures/generation-<N>.patina` (valid failing traces,
-  `:1112-1124`), `reports/generation-<N>.html` (with `--report-failures`), and
+  generation, `campaign/driver.rs`, `run_campaign`),
+  `failures/generation-<N>.patina` (valid failing traces,
+  `campaign/repro.rs`, `save_failure_trace`), `reports/generation-<N>.html`
+  (with `--report-failures`), and
   `signatures.json`. Nothing else.
 - **Artifact identity.** `run_campaign` resolves the artifact and reads its
-  bytes for family sniffing (`artifact_family`, `:1150-1158`) but records no
+  bytes for family sniffing (`campaign/state.rs`, `artifact_family_from_bytes`)
+  but records no
   hash anywhere. (The build-on-run path already prints a content `sha256` —
   `lib.rs:3961-3970` — so content-hashing has precedent and the bytes are
   already in hand.)
 - **Outputs.** Human mode: `PATINA_CAMPAIGN_START`, wall-clock-free
   `PATINA_CAMPAIGN_GEN` lines for novel/failing generations,
   `PATINA_CAMPAIGN_PROGRESS` heartbeat every `--progress-every` generations
-  (wall clock appears *only* here, `:1178-1198`), and a cumulative summary.
+  (wall clock appears *only* here, `campaign/report.rs`,
+  `print_progress_heartbeat`), and a cumulative summary.
   JSON mode: the summary-first `patina.campaign/v2` envelope
-  (`classes`/`signatures`/`notable_runs`/`artifacts`, `:1244-1320`).
+  (`classes`/`signatures`/`notable_runs`/`artifacts`,
+  `campaign/report.rs`, `build_campaign_envelope`).
 - **Determinism proof.** The e2e test re-runs the same spec into a second
   out-dir and asserts byte-identical `PATINA_CAMPAIGN_GEN` streams and
   `signatures.json` (`tests/end_to_end.rs:2507-2531`).
@@ -101,7 +109,8 @@ cargo patina campaign --resume  [--out-dir DIR]      # finish an interrupted cam
   reverse migration (users depending on silent overrides) is not removable.
 - **Host-side flags remain accepted**, because they are not part of the swept
   configuration's meaning: `--progress-every` (presentation only, already
-  excluded from `CampaignSpec` for exactly this reason, `:179-182`) and
+  excluded from `CampaignSpec` for exactly this reason, `campaign/parse.rs`,
+  `CampaignInvocation`) and
   `--timeout-secs` (a wall-clock harness backstop, the campaign analog of
   replay's re-suppliable host inputs; a slower machine legitimately needs a
   larger backstop to complete the *same* deterministic generations). If
@@ -173,7 +182,7 @@ Decisions inside the format:
 - **What belongs vs. what is derived.** `spec` is the *target* configuration
   (`generations` = current cumulative target; `--extend N` rewrites it to
   `target + N`), serialized with **exactly the `--spec` JSON key names**
-  (`apply_json`, `:124-147`) so the `spec` block is itself a valid `--spec`
+  (`campaign/spec.rs`, `apply_json`) so the `spec` block is itself a valid `--spec`
   file — one canonical dialect, agent-inspectable and reusable, no drift
   surface. `generations_done` is the sole cursor (§2). `classes`,
   `signatures`, and `notable_runs` are accumulated *outputs* that cannot be
@@ -238,7 +247,8 @@ Honest caveats, stated rather than hidden:
 - The invariant inherits the same wall-clock boundary the existing
   deterministic-re-run test lives with: a generation that hits the
   `--timeout-secs` backstop is classified from a wall-clock event
-  (`:742-750`), so equality holds on the (normal) executions where no
+  (`campaign/generation.rs`, `run_generation`), so equality holds on the
+  (normal) executions where no
   generation times out. This is not weakened by extension — it is the
   pre-existing boundary of campaign determinism, and re-supplying a larger
   `--timeout-secs` on extend can only *remove* timeout nondeterminism, never
@@ -326,7 +336,8 @@ the two supported hosts.)
 ## 8. Decision 6 — failure modes and artifact identity
 
 Campaign records the artifact's content `sha256` at first run (bytes are
-already read for family sniffing, `:1150`; hashing precedent at
+already read for family sniffing, `campaign/state.rs`, `artifact_identity`;
+hashing precedent at
 `lib.rs:3961`). On `--extend`/`--resume` the recorded path is re-read and
 re-hashed; any mismatch refuses:
 
