@@ -44,6 +44,8 @@ pub const GLIBC_CANCELLATION_POINTS: &[&str] = &[
     "msgrcv",
     "msgsnd",
     "msync",
+    "__open",
+    "__open64",
     "open",
     "open64",
     "open_by_handle_at",

@@ -538,114 +538,9 @@ int linkat(int fromfd, const char *from, int tofd, const char *to, int flags) {
  * layer can enforce -- so the honest thing to hand it is the caller's request
  * and nothing invented.
  */
-static int patina_openat_impl(int dirfd, const char *path, int flags, mode_t mode) {
-    patina_note_boundary_symbol("open");
-    int supported = O_ACCMODE | O_CREAT | O_TRUNC | O_APPEND | O_EXCL;
-#ifdef O_CLOEXEC
-    supported |= O_CLOEXEC;
-#endif
-#ifdef O_LARGEFILE
-    supported |= O_LARGEFILE;
-#endif
-#ifdef O_NOFOLLOW
-    supported |= O_NOFOLLOW;
-#endif
-#ifdef O_DIRECTORY
-    supported |= O_DIRECTORY;
-#endif
-#ifdef O_PATH
-    supported |= O_PATH;
-#endif
-    /* O_NONBLOCK changes the open of exactly one modeled kind -- a FIFO, where
-     * it turns the rendezvous with the opposite end into an immediate answer.
-     * On a regular file or a directory it is the no-op it is on every Unix, and
-     * callers add it defensively there. */
-#ifdef O_NONBLOCK
-    supported |= O_NONBLOCK;
-#endif
-    /* O_NOCTTY matters to exactly one modeled kind, a pseudoterminal slave
-     * (whether it may become the controlling terminal); elsewhere it is the
-     * no-op it is on every Unix. */
-    supported |= O_NOCTTY;
-    if ((flags & ~supported) != 0) {
-        errno = ENOSYS;
-        return -1;
-    }
-    uint32_t patina_flags = 0;
-    int path_only = 0;
-#ifdef O_PATH
-    /* O_PATH ignores the access mode entirely -- it opens nothing, so there is
-     * nothing to ask for. */
-    if (flags & O_PATH) {
-        path_only = 1;
-        patina_flags |= PATINA_O_PATH;
-    }
-#endif
-    if (!path_only) {
-        switch (flags & O_ACCMODE) {
-            case O_RDONLY: patina_flags |= PATINA_O_READ; break;
-            case O_WRONLY: patina_flags |= PATINA_O_WRITE; break;
-            case O_RDWR: patina_flags |= PATINA_O_READ | PATINA_O_WRITE; break;
-            default: errno = EINVAL; return -1;
-        }
-        if (flags & O_CREAT) patina_flags |= PATINA_O_CREATE;
-        if (flags & O_TRUNC) patina_flags |= PATINA_O_TRUNCATE;
-        if (flags & O_APPEND) patina_flags |= PATINA_O_APPEND;
-        if (flags & O_EXCL) patina_flags |= PATINA_O_EXCLUSIVE;
-    }
-#ifdef O_NOFOLLOW
-    if (flags & O_NOFOLLOW) patina_flags |= PATINA_O_NOFOLLOW;
-#endif
-#ifdef O_NONBLOCK
-    if (flags & O_NONBLOCK) patina_flags |= PATINA_O_NONBLOCK;
-#endif
-#ifdef O_CLOEXEC
-    if (flags & O_CLOEXEC) patina_flags |= PATINA_O_CLOEXEC;
-#endif
-#ifdef O_DIRECTORY
-    if (flags & O_DIRECTORY) patina_flags |= PATINA_O_DIRECTORY;
-#endif
-    if (flags & O_NOCTTY) patina_flags |= PATINA_O_NOCTTY;
-    return fail_int(patina_openat(patina_at(dirfd), path, patina_flags, (uint32_t)(mode & 07777)));
-}
-
-/*
- * Read open(2)'s variadic creation mode. Only ever called when the flags say
- * the kernel would read it: a variadic argument that was never passed is
- * undefined behavior to fetch, so the O_CREAT test guards every call site.
- */
-static mode_t patina_open_mode(va_list *ap) {
-    return (mode_t)va_arg(*ap, unsigned int);
-}
-
-static int patina_openat_variadic(int dirfd, const char *path, int flags, va_list *ap) {
-    mode_t mode = 0;
-    if (flags & O_CREAT) mode = patina_open_mode(ap);
-    return patina_openat_impl(dirfd, path, flags, mode);
-}
-
-int open(const char *path, int flags, ...) {
-    PATINA_CANCEL_POINT("open");
-    va_list ap;
-    va_start(ap, flags);
-    int result = patina_openat_variadic(AT_FDCWD, path, flags, &ap);
-    va_end(ap);
-    return result;
-}
-
-/*
- * openat: the dirfd-relative spelling. rustix's libc backend lowers its `fs`
- * calls onto these on both platforms, so they are strong defs in the common
- * section rather than Apple-only.
- */
-int openat(int dirfd, const char *path, int flags, ...) {
-    PATINA_CANCEL_POINT("openat");
-    va_list ap;
-    va_start(ap, flags);
-    int result = patina_openat_variadic(dirfd, path, flags, &ap);
-    va_end(ap);
-    return result;
-}
+/* Rust owns the shared flag/mode adapter, including these fixed callers. */
+extern int patina_openat_impl(int dirfd, const char *path, int flags, uint32_t mode)
+    __attribute__((visibility("hidden")));
 
 /*
  * `creat(path, mode)` is exactly `open(path, O_WRONLY|O_CREAT|O_TRUNC, mode)`, so
@@ -659,43 +554,6 @@ int creat(const char *path, mode_t mode) {
 }
 
 #ifdef __linux__
-int open64(const char *path, int flags, ...) {
-    PATINA_CANCEL_POINT("open64");
-    va_list ap;
-    va_start(ap, flags);
-    int result = patina_openat_variadic(AT_FDCWD, path, flags, &ap);
-    va_end(ap);
-    return result;
-}
-
-/* glibc's LFS alias of openat (rustix's libc backend lowers its fs calls onto
- * the *64 names on 64-bit Linux). */
-int openat64(int dirfd, const char *path, int flags, ...) {
-    PATINA_CANCEL_POINT("openat64");
-    va_list ap;
-    va_start(ap, flags);
-    int result = patina_openat_variadic(dirfd, path, flags, &ap);
-    va_end(ap);
-    return result;
-}
-
-/* glibc's exported internal names for open, which older objects import. */
-int __open(const char *path, int flags, ...) {
-    va_list ap;
-    va_start(ap, flags);
-    int result = patina_openat_variadic(AT_FDCWD, path, flags, &ap);
-    va_end(ap);
-    return result;
-}
-
-int __open64(const char *path, int flags, ...) {
-    va_list ap;
-    va_start(ap, flags);
-    int result = patina_openat_variadic(AT_FDCWD, path, flags, &ap);
-    va_end(ap);
-    return result;
-}
-
 /* glibc's `_FORTIFY_SOURCE` opens (io/open_2.c, open64_2.c, openat_2.c,
  * openat64_2.c): the compiler saw the call pass no mode, so a flag word that
  * needs one (`O_CREAT`, or all of `O_TMPFILE`) is `__fortify_fail`, naming the

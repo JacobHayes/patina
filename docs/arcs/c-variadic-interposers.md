@@ -194,3 +194,11 @@ expressible directly, and no shared C helper requires the adapter to stay.
 Status flags, errno and record-lock translation move together. Guest record
 memory uses the existing uaccess boundary, with field-only writes on GETLK.
 The cancellation rule now follows the Rust export and its waiting-command check.
+
+All six open doors and the shared fixed flag/mode adapter are Rust-owned.
+Linux reads an unsigned mode; Darwin reads the promoted int. Creation and
+O_TMPFILE require the operand (O_TMPFILE remains the existing ENOSYS refusal).
+The glibc internal aliases now share cancellation refusal with public opens;
+the cancellation inventory and generated Rust entry rules cover every spelling.
+Creat and fortify wrappers call the fixed Rust adapter; C retains its shared
+fortify-stop helper and no duplicate open flag translation.

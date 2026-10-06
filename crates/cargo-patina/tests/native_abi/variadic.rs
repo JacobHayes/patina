@@ -116,3 +116,77 @@ int main(void) {
         .validate()
         .unwrap();
 }
+
+#[test]
+fn open_family_promoted_mode_and_absent_mode_reach_the_model() {
+    // Class pairing: the guarded variadic inventory and the shared wrong-slot matrix.
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path().join("open.c");
+    std::fs::write(
+        &source,
+        r#"
+#define _GNU_SOURCE
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <pthread.h>
+#ifdef __linux__
+extern int __open(const char *, int, ...);
+extern int __open64(const char *, int, ...);
+#endif
+static int check(int fd, unsigned mode) {
+    struct stat value;
+    if (fd < 0 || fstat(fd, &value) || (value.st_mode & 0777) != mode) return 1;
+    return close(fd);
+}
+int main(int argc, char **argv) {
+    (void)argc; (void)argv;
+    umask(0);
+    if (check(open("/mode-open", O_CREAT | O_RDWR, 0641), 0641)) return 1;
+    if (check(open("/mode-open", O_RDONLY), 0641)) return 2;
+    if (check(openat(AT_FDCWD, "/mode-openat", O_CREAT | O_RDWR, 0623), 0623)) return 3;
+    if (check(openat(AT_FDCWD, "/mode-openat", O_RDONLY), 0623)) return 4;
+#ifdef __linux__
+    if (check(open64("/mode-open64", O_CREAT | O_RDWR, 0642), 0642)) return 5;
+    if (check(open64("/mode-open64", O_RDONLY), 0642)) return 6;
+    if (check(openat64(AT_FDCWD, "/mode-openat64", O_CREAT | O_RDWR, 0624), 0624)) return 7;
+    if (check(openat64(AT_FDCWD, "/mode-openat64", O_RDONLY), 0624)) return 8;
+    if (check(__open("/mode-__open", O_CREAT | O_RDWR, 0643), 0643)) return 9;
+    if (check(__open("/mode-__open", O_RDONLY), 0643)) return 10;
+    if (check(__open64("/mode-__open64", O_CREAT | O_RDWR, 0644), 0644)) return 11;
+    if (check(__open64("/mode-__open64", O_RDONLY), 0644)) return 12;
+#endif
+    errno = 0;
+    if (open("/missing", O_RDONLY) != -1 || errno != ENOENT) return 13;
+#ifdef __linux__
+    if (argc > 1) {
+        if (pthread_cancel(pthread_self())) return 14;
+        if (argv[1][0] == '6') __open64("/mode-open", O_RDONLY);
+        else __open("/mode-open", O_RDONLY);
+        return 15;
+    }
+#endif
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    let guest = common::native::assert_build_c_guest(
+        source.to_str().unwrap(),
+        common::native::CLink::PosixShim,
+    );
+    let (output, trace) = guest.record_standalone(&[]);
+    assert_success(output);
+    patina_dst_trace::TraceBundle::load(&trace)
+        .unwrap()
+        .validate()
+        .unwrap();
+    #[cfg(target_os = "linux")]
+    for (mode, symbol) in [("cancel", "__open"), ("64", "__open64")] {
+        guest.assert_internal_fatal(
+            &[mode],
+            &[&format!("pending cancellation reaches {symbol},")],
+        );
+    }
+}

@@ -62,7 +62,16 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         }
         if matches!(
             row.name.as_str(),
-            "syscall" | "fcntl" | "fcntl64" | "mremap"
+            "syscall"
+                | "fcntl"
+                | "fcntl64"
+                | "mremap"
+                | "open"
+                | "openat"
+                | "open64"
+                | "openat64"
+                | "__open"
+                | "__open64"
         ) {
             assembly.push(row.name.as_str());
         } else if row.only_x86 {

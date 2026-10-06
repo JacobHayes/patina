@@ -75,7 +75,10 @@ pub fn emit(fixtures: Option<&Path>) {
         if !defined || ONLY_WHERE_IT_WAITS.contains(name) {
             continue;
         }
-        if matches!(*name, "fcntl" | "fcntl64") {
+        if matches!(
+            *name,
+            "fcntl" | "fcntl64" | "open" | "openat" | "open64" | "openat64" | "__open" | "__open64"
+        ) {
             rust::cancellation(name, fixtures);
             continue;
         }

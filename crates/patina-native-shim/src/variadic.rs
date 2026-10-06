@@ -3,6 +3,7 @@
 use core::ffi::{CStr, c_int};
 
 mod fcntl;
+mod open;
 
 /// An unresolved private reference in the POSIX object extracts this member,
 /// even when an earlier libc/libSystem already offered the public symbols.
@@ -78,7 +79,6 @@ fn model_result(result: c_int) -> c_int {
     result
 }
 
-#[cfg(target_os = "linux")]
 fn cancel(name: &CStr) {
     #[cfg(target_os = "linux")]
     // SAFETY: a static C string; this check refuses, never initiates forced unwind.

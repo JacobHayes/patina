@@ -49,9 +49,16 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
             .collect();
         assert_eq!(archives.len(), 1, "one built guest archive");
         let object = common::compile_posix_object(dir.path());
-        let mut cases = vec![(1, 0, "fcntl")];
+        let mut cases = vec![(1, 0, "fcntl"), (3, 0, "open"), (3, 1, "openat")];
         if cfg!(target_os = "linux") {
-            cases.extend([(1, 1, "fcntl64"), (2, 0, "mremap")]);
+            cases.extend([
+                (1, 1, "fcntl64"),
+                (2, 0, "mremap"),
+                (3, 2, "open64"),
+                (3, 3, "openat64"),
+                (3, 4, "__open"),
+                (3, 5, "__open64"),
+            ]);
         }
         assert_symbol_ownership(Path::new(&archives[0]), &object, &cases, strategy);
         let c_source = dir.path().join("variadic-call.c");
@@ -163,6 +170,8 @@ fn assert_symbol_ownership(
         members.push(path);
     }
     assert!(!members.is_empty(), "shim object members must be present");
+    #[cfg(target_os = "linux")]
+    assert_hidden_routes(&members, cases);
     let archive_nm = assert_success(
         Command::new("nm")
             .args(["-g", "-A"])
@@ -207,7 +216,7 @@ fn assert_symbol_ownership(
             definitions(&c_nm.stdout, symbol).is_empty(),
             "C still defines {symbol}"
         );
-        if cfg!(target_os = "linux") {
+        if cfg!(target_os = "linux") && *symbol != "patina_stream_printf" {
             let route = definitions(&archive_nm.stdout, &format!("patina_route_{symbol}"));
             assert_eq!(
                 route, rust,
@@ -215,6 +224,40 @@ fn assert_symbol_ownership(
             );
         }
         eprintln!("nm {strategy}: {symbol}: one strong Rust definition, zero C definitions");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn assert_hidden_routes(members: &[std::path::PathBuf], cases: &[(u32, u32, &str)]) {
+    use object::{Object, ObjectSymbol};
+    let mut routes = std::collections::BTreeMap::<String, Vec<u8>>::new();
+    for path in members {
+        let bytes = std::fs::read(path).unwrap();
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        for symbol in file.symbols().filter(|symbol| symbol.is_definition()) {
+            let name = symbol.name().unwrap();
+            if !name.starts_with("patina_route_") {
+                continue;
+            }
+            let object::SymbolFlags::Elf { st_other, .. } = symbol.flags() else {
+                panic!("Linux route {name} must be an ELF symbol");
+            };
+            routes
+                .entry(name.to_owned())
+                .or_default()
+                .push(st_other & 3);
+        }
+    }
+    for (_, _, symbol) in cases {
+        if *symbol == "patina_stream_printf" {
+            continue;
+        }
+        let name = format!("patina_route_{symbol}");
+        assert_eq!(
+            routes.get(&name).map(Vec::as_slice),
+            Some([2].as_slice()),
+            "{name} must have exactly one ELF STV_HIDDEN definition"
+        );
     }
 }
 
