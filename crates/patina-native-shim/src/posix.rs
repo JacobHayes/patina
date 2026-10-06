@@ -7,6 +7,7 @@ mod entropy;
 #[cfg(target_os = "linux")]
 mod memory;
 mod privileged;
+mod sched_identity;
 
 pub(crate) use crate::variadic::{error, model_result};
 
@@ -57,3 +58,16 @@ pub extern "C" fn signal_result(result: i64) -> c_int {
 }
 #[cfg(target_os = "linux")]
 core::arch::global_asm!(".hidden signal_result");
+
+pub(crate) fn errno(value: c_int) {
+    unsafe {
+        #[cfg(target_os = "linux")]
+        {
+            *libc::__errno_location() = value;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            *libc::__error() = value;
+        }
+    }
+}

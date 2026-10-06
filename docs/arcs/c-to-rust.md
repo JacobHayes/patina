@@ -274,3 +274,7 @@ bootstrap continues through the existing private host memory model.
 `privileged.c` is now `src/posix/privileged.rs`. The adapters retain signed
 syscall-word conversions and reboot magic values. Shared `signal_result`
 is a hidden guarded Rust bridge and delivers pending signals before errno.
+
+`sched_identity.c` is now `src/posix/sched_identity.rs`, including passwd
+iteration and resource-limit adapters. Darwin platform glue still uses its
+physical-memory constant, declared beside the retained C headers.

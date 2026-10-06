@@ -288,3 +288,10 @@ extern int iopl(int level);
 extern int ioperm(unsigned long from, unsigned long count, int turn_on);
 #endif
 #endif
+
+/* Darwin world-model constant still used by the platform adapters. */
+#define PATINA_PHYSICAL_MEMORY_BYTES (UINT64_C(8) * 1024 * 1024 * 1024)
+#ifdef __linux__
+extern int __res_init(void);
+extern int res_init(void);
+#endif

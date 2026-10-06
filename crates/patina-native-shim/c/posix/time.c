@@ -257,11 +257,3 @@ unsigned int sleep(unsigned int seconds) {
     return seconds;
 }
 
-#ifndef __linux__
-/* Split a nanosecond count into a `struct timeval` (the Darwin getrusage; the
- * Linux rows fill theirs in Rust). All virtual CPU time is user time. */
-static void patina_timeval_from_nanos(uint64_t nanos, struct timeval *out) {
-    out->tv_sec = (time_t)(nanos / UINT64_C(1000000000));
-    out->tv_usec = (suseconds_t)((nanos % UINT64_C(1000000000)) / 1000);
-}
-#endif

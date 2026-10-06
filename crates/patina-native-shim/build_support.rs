@@ -10,7 +10,6 @@ const FAMILIES: &[&str] = &[
     "core",
     "init",
     "time",
-    "sched_identity",
     "fs",
     "fd_io",
     "thread_sync",
@@ -59,7 +58,33 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         }
         if matches!(
             row.name.as_str(),
-            "mount"
+            "getpid"
+                | "getppid"
+                | "gettid"
+                | "__res_init"
+                | "res_init"
+                | "uname"
+                | "sched_yield"
+                | "sched_getcpu"
+                | "sched_setaffinity"
+                | "getuid"
+                | "geteuid"
+                | "getgid"
+                | "getegid"
+                | "sysconf"
+                | "getrusage"
+                | "sysinfo"
+                | "getrlimit"
+                | "setrlimit"
+                | "getrlimit64"
+                | "setrlimit64"
+                | "sched_getaffinity"
+                | "gethostname"
+                | "getpwuid_r"
+                | "setpwent"
+                | "endpwent"
+                | "getpwent"
+                | "mount"
                 | "umount2"
                 | "pivot_root"
                 | "open_tree"
