@@ -68,6 +68,7 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
                 | "mremap"
                 | "ioctl"
                 | "ptrace"
+                | "prctl"
                 | "open"
                 | "openat"
                 | "open64"

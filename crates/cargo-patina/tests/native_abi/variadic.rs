@@ -281,3 +281,58 @@ int main(int argc, char **argv) {
         .unwrap();
     guest.assert_internal_fatal(&["traceme"], &["PTRACE_TRACEME"]);
 }
+#[cfg(target_os = "linux")]
+#[test]
+fn prctl_option_specific_absent_word_pointer_and_reserved_arguments_reach_the_model() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path().join("prctl.c");
+    std::fs::write(&source, r#"
+#define _GNU_SOURCE
+#include <sys/prctl.h>
+#include <linux/filter.h>
+#include <string.h>
+#include <errno.h>
+#include <signal.h>
+#ifndef PR_GET_AUXV
+#define PR_GET_AUXV 0x41555856
+#endif
+int main(int argc, char **argv) {
+    (void)argv;
+    if (argc > 1) { prctl(PR_SET_SECCOMP, 1UL); return 20; }
+    if (prctl(PR_GET_DUMPABLE) != 1) return 1;
+    if (prctl(PR_SET_DUMPABLE, 0UL) || prctl(PR_GET_DUMPABLE) != 0) return 2;
+    if (prctl(PR_SET_DUMPABLE, 1UL) || prctl(PR_GET_DUMPABLE) != 1) return 3;
+    char name[16] = {0};
+    if (prctl(PR_SET_NAME, "variadic-name") || prctl(PR_GET_NAME, name)) return 4;
+    if (strcmp(name, "variadic-name")) return 5;
+    int signal = 0;
+    if (prctl(PR_SET_PDEATHSIG, (unsigned long)SIGUSR1) || prctl(PR_GET_PDEATHSIG, &signal) || signal != SIGUSR1) return 6;
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1UL, 0UL, 0UL, 0UL) || prctl(PR_GET_NO_NEW_PRIVS, 0UL, 0UL, 0UL, 0UL) != 1) return 7;
+    errno = 0;
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1UL, 1UL, 0UL, 0UL) != -1 || errno != EINVAL) return 8;
+    unsigned long auxv[128] = {0};
+    if (prctl(PR_GET_AUXV, auxv, (unsigned long)sizeof(auxv), 0UL, 0UL) <= 0) return 9;
+    errno = 0;
+    if (prctl(-1) != -1 || errno != EINVAL) return 10;
+    errno = 0;
+    if (prctl(PR_SET_SECCOMP, 0UL) != -1 || errno != EINVAL) return 11;
+    errno = 0;
+    if (prctl(PR_SET_SECCOMP, 2UL, (void *)0) != -1 || errno != EFAULT) return 12;
+    struct sock_fprog empty = {0};
+    errno = 0;
+    if (prctl(PR_SET_SECCOMP, 2UL, &empty) != -1 || errno != EINVAL) return 13;
+    return 0;
+}
+"#).unwrap();
+    let guest = common::native::assert_build_c_guest(
+        source.to_str().unwrap(),
+        common::native::CLink::PosixShim,
+    );
+    let (output, trace) = guest.record_standalone(&[]);
+    assert_success(output);
+    patina_dst_trace::TraceBundle::load(&trace)
+        .unwrap()
+        .validate()
+        .unwrap();
+    guest.assert_internal_fatal(&["strict"], &["entering strict mode"]);
+}

@@ -214,3 +214,9 @@ nothing; ATTACH reads only pid; SEIZE reads its address/options; PEEK retains
 its local output word and never reads an unused caller data argument. Signal
 delivery still precedes libc errno conversion. The existing model refuses
 PEEK with ESRCH because no process is traced; no successful tracing is claimed.
+
+Prctl's Linux door consumes option-specific unsigned-long or pointer arguments.
+Options whose reserved words are part of the contract retain those reads;
+queries and refused options consume nothing unused. SECCOMP consumes a filter
+pointer only in filter mode. The shared SUD model and signal-before-errno order
+are retained, including the existing signal-result adapter's error conversion.

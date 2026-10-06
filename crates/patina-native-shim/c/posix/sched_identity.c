@@ -195,19 +195,6 @@ int sysinfo(struct sysinfo *info) {
     return signal_result(patina_sud_dispatch(SYS_sysinfo, (uintptr_t)info, 0, 0, 0, 0, 0, 0));
 }
 
-int prctl(int option, ...) {
-    va_list ap;
-    va_start(ap, option);
-    unsigned long arg2 = va_arg(ap, unsigned long);
-    unsigned long arg3 = va_arg(ap, unsigned long);
-    unsigned long arg4 = va_arg(ap, unsigned long);
-    unsigned long arg5 = va_arg(ap, unsigned long);
-    va_end(ap);
-
-    return signal_result(patina_sud_dispatch(SYS_prctl, (uint64_t)option,
-        arg2, arg3, arg4, arg5, 0, 0));
-}
-
 /*
  * getrlimit/setrlimit (the sysinfo crate reads limits): the virtual kernel's
  * limits (patina_prlimit, which the SUD getrlimit/setrlimit/prlimit64 rows

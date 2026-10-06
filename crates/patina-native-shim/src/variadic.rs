@@ -100,6 +100,8 @@ fn cancel_fcntl(command: c_int, name: &CStr) {
 }
 
 #[cfg(target_os = "linux")]
+mod prctl;
+#[cfg(target_os = "linux")]
 mod ptrace;
 
 #[cfg(target_os = "linux")]
