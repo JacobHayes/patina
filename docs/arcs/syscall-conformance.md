@@ -200,7 +200,7 @@ forwards into the same dispatcher instead of its two-number allowlist.
   own), and a row with no shape there (`fork`, legacy `signalfd`, most removed
   numbers) is an x86_64-only section.
 - Each scenario is one `#[test]` in
-  `crates/cargo-patina/tests/native_conformance.rs`: per vehicle, the native
+  `crates/cargo-patina/tests/native_conformance/native_conformance.rs`: per vehicle, the native
   run (the host kernel is the oracle) must pass and agree with the scenario's
   first vehicle; the `cargo patina run` observation of the same run is compared
   with it field by field. Normalization is typed and declared at the call site

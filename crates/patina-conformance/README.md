@@ -67,7 +67,7 @@ neither a scenario nor an exclusion accounts for, and exits 1 while any remain.
 
 Adding a scenario: write `src/scenarios/<family>/<name>.rs` with its `run`
 function and `SCENARIO` declaration, list it in `catalog::SCENARIOS`, add its
-`#[test]` to `native_conformance.rs`, run the test, and declare what patina
+`#[test]` to `crates/cargo-patina/tests/native_conformance/native_conformance.rs`, run the test, and declare what patina
 does differently as gaps naming the responsible code.
 
 The network scenarios (`net/*`, `readiness/*`) use the host's loopback stack

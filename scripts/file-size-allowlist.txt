@@ -8,4 +8,3 @@ crates/patina-syscalls/src/generated.rs generated # emitted by scripts/refresh-s
 crates/patina-syscalls/src/linux.rs 2878 # exhaustive per-syscall disposition table
 crates/patina-syscalls/src/symbols.rs 2817 # exhaustive shim-symbol-to-syscall table
 # Pending splits.
-crates/cargo-patina/tests/native_conformance.rs 2353 # pending split

@@ -210,7 +210,7 @@ At a delivery point, `SIG_DFL` for a Term/Core signal: `patina_shutdown` (`lib.r
 
 ## 3. The harness contract the scenarios rely on
 
-- Every run (`crates/cargo-patina/tests/native_conformance.rs`) is its own process group under a deadline, and each supervisor's observed outcome is compared — `waitpid` natively, `guest_exit` (signal and core flag) from the `cargo patina … --format json` envelope under patina, record and replay.
+- Every run (`crates/cargo-patina/tests/native_conformance/process.rs`) is its own process group under a deadline, and each supervisor's observed outcome is compared — `waitpid` natively, `guest_exit` (signal and core flag) from the `cargo patina … --format json` envelope under patina, record and replay.
 - A scenario that means to die announces it (`Probe::dies_by(signal)`, the `expect_death` event) as its last act; any other native signal death is no oracle.
 - Gaps: `Failure::Differs` names every difference a scenario still shows with its exact patina value; `Failure::Stops` pins the event count, the ending and the diagnostic of a by-design death.
 - The recorded run's trace is read back through `cargo patina trace events --format json`; a scenario's `trace` facts (§4) are checked against it.
