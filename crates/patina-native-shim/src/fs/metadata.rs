@@ -678,12 +678,12 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
     // A userfaultfd's inode is its own and the caller's
     // (`anon_inode_create_getfile`), so the change is allowed.
     #[cfg(target_os = "linux")]
-    if let Ok(resolved) = resolve_fd(raw_fd) {
-        if resolved.kind == FdKind::Userfaultfd {
-            mem::userfaultfd::set_mode(resolved.handle, mode);
-            set_errno(0);
-            return 0;
-        }
+    if let Ok(resolved) = resolve_fd(raw_fd)
+        && resolved.kind == FdKind::Userfaultfd
+    {
+        mem::userfaultfd::set_mode(resolved.handle, mode);
+        set_errno(0);
+        return 0;
     }
     let fd = match fs_handle(raw_fd) {
         Ok(fd) => fd,
@@ -1294,10 +1294,10 @@ pub unsafe extern "C" fn patina_read_dir(raw_fd: c_int, state_out: *mut *mut c_v
 /// then answers.
 #[cfg(target_os = "linux")]
 pub(crate) fn dir_accessed(raw_fd: c_int) {
-    if let Ok(resolved) = resolve_fd(raw_fd) {
-        if resolved.kind == FdKind::Dir {
-            fsnotify::dir_read(Fd(resolved.handle));
-        }
+    if let Ok(resolved) = resolve_fd(raw_fd)
+        && resolved.kind == FdKind::Dir
+    {
+        fsnotify::dir_read(Fd(resolved.handle));
     }
 }
 

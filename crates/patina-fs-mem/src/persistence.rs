@@ -258,13 +258,13 @@ impl MemFs {
     ) -> InodeId {
         let fresh = self.next_inode;
         self.next_inode = self.next_inode.checked_add(1).expect("inode IDs exhausted");
-        if kind != FsEntryKind::Directory {
-            if let Some(inode) = previous.inodes.get(&node) {
-                let mut carried = inode.clone();
-                carried.links = 0;
-                carried.openers = 0;
-                self.inodes.insert(fresh, carried);
-            }
+        if kind != FsEntryKind::Directory
+            && let Some(inode) = previous.inodes.get(&node)
+        {
+            let mut carried = inode.clone();
+            carried.links = 0;
+            carried.openers = 0;
+            self.inodes.insert(fresh, carried);
         }
         fresh
     }

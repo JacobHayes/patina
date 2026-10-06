@@ -188,12 +188,12 @@ unsafe fn cursor_writev(
     flags: i32,
 ) -> isize {
     let file = resolved.kind == FdKind::File;
-    if file && flags & RWF_APPEND != 0 {
-        if let Err(errno) =
+    if file
+        && flags & RWF_APPEND != 0
+        && let Err(errno) =
             with_context(|context| context.fs_seek(Fd(resolved.handle), 0, SeekWhence::End))
-        {
-            return fail(errno) as isize;
-        }
+    {
+        return fail(errno) as isize;
     }
     let mut moved = 0usize;
     let mut stopped = None;
@@ -215,10 +215,12 @@ unsafe fn cursor_writev(
 /// `RWF_DSYNC`/`RWF_SYNC` after a write that moved bytes: the durability the
 /// flags promise, through the same `fsync` the descriptor would take.
 fn sync_written(resolved: Resolved, moved: usize, flags: i32, stopped: Option<c_int>) -> isize {
-    if moved != 0 && resolved.kind == FdKind::File && flags & (RWF_DSYNC | RWF_SYNC) != 0 {
-        if let Err(errno) = crate::fs_sync_handle(Fd(resolved.handle)) {
-            return fail(errno) as isize;
-        }
+    if moved != 0
+        && resolved.kind == FdKind::File
+        && flags & (RWF_DSYNC | RWF_SYNC) != 0
+        && let Err(errno) = crate::fs_sync_handle(Fd(resolved.handle))
+    {
+        return fail(errno) as isize;
     }
     finish(moved, stopped)
 }

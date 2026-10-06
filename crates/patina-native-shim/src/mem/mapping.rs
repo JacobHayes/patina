@@ -31,18 +31,21 @@ fn map_anonymous(addr: usize, len: usize, prot: c_int, flags: c_int, offset: i64
             return fail(EINVAL);
         };
         let len = len.next_multiple_of(size);
-        if len == 0 || offset as usize % PAGE != 0 {
+        if len == 0 || !(offset as usize).is_multiple_of(PAGE) {
             return fail(EINVAL);
         }
         // `MAP_FIXED_NOREPLACE` is `MAP_FIXED` to `hugetlb_get_unmapped_area`.
-        if flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0 && addr % size != 0 {
+        if flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0 && !addr.is_multiple_of(size) {
             return fail(EINVAL);
         }
         return map_huge_pages(addr, len, prot, flags, size);
     }
     let lock = if flags & MAP_LOCKED != 0 || TRACKED.load(Ordering::Acquire) {
         // The judgments `do_mmap` makes before a lock is weighed.
-        if len == 0 || offset as usize % PAGE != 0 || (fixed && addr % PAGE != 0) {
+        if len == 0
+            || !(offset as usize).is_multiple_of(PAGE)
+            || (fixed && !addr.is_multiple_of(PAGE))
+        {
             None
         } else {
             match lock_request(flags, len) {
@@ -81,7 +84,7 @@ fn map_anonymous(addr: usize, len: usize, prot: c_int, flags: c_int, offset: i64
 /// A mapping of a guest descriptor, in `ksys_mmap_pgoff`/`do_mmap`'s order
 /// of refusals.
 fn map_file(addr: usize, len: usize, prot: c_int, flags: c_int, fd: c_int, offset: i64) -> i64 {
-    if offset as u64 % PAGE as u64 != 0 {
+    if !(offset as u64).is_multiple_of(PAGE as u64) {
         return fail(EINVAL);
     }
     // `fget` never returns an `O_PATH` file.
@@ -112,7 +115,7 @@ fn map_file(addr: usize, len: usize, prot: c_int, flags: c_int, fd: c_int, offse
     }
     let fixed = flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0;
     let align = huge.map_or(PAGE, |size| size as usize);
-    if fixed && addr % align != 0 {
+    if fixed && !addr.is_multiple_of(align) {
         return fail(EINVAL);
     }
     // `MAP_FIXED_NOREPLACE` is refused over a live mapping before the file is
@@ -204,7 +207,7 @@ fn map_file_judged(
     if let Some(size) = huge {
         // `hugetlbfs_file_mmap`: a huge-page-aligned offset, then the pool.
         let fixed = flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0;
-        if offset as u64 % size != 0 || (fixed && addr as u64 % size != 0) {
+        if !(offset as u64).is_multiple_of(size) || (fixed && !(addr as u64).is_multiple_of(size)) {
             return fail(EINVAL);
         }
         let flags = flags & (MAP_TYPE | MAP_NORESERVE | MAP_FIXED | MAP_FIXED_NOREPLACE);
@@ -347,22 +350,21 @@ pub(super) fn alias(
         return view;
     }
     let start = view as usize;
-    if let Some(desc) = object.desc() {
-        if hold(desc).is_err() {
-            host(Syscall::N_munmap, [start, rounded, 0, 0, 0, 0]);
-            finish(replaced);
-            return fail(EBADF);
-        }
+    if let Some(desc) = object.desc()
+        && hold(desc).is_err()
+    {
+        host(Syscall::N_munmap, [start, rounded, 0, 0, 0, 0]);
+        finish(replaced);
+        return fail(EBADF);
     }
     {
         let mut mappings = MAPPINGS.lock();
         mappings.views.set(start, start + rounded, object);
-        if let Some(ino) = object.ino() {
-            if object.writes_back(ino) {
-                if let Some(cache) = mappings.caches.get_mut(&ino) {
-                    cache.track(true);
-                }
-            }
+        if let Some(ino) = object.ino()
+            && object.writes_back(ino)
+            && let Some(cache) = mappings.caches.get_mut(&ino)
+        {
+            cache.track(true);
         }
         mappings.publish();
     }
@@ -419,27 +421,30 @@ fn cache_for(ino: u64, handle: u64, size: u64) -> Result<c_int, i64> {
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_mprotect(addr: usize, len: usize, prot: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if prot & (PROT_WRITE | PROT_EXEC) != 0 && addr % PAGE == 0 && len != 0 && tracking() {
-        if let Some(end) = round_up(len).and_then(|len| addr.checked_add(len)) {
-            let refused = MAPPINGS
-                .lock()
-                .views
-                .within(addr, end)
-                .into_iter()
-                .find(|(_, _, object)| object.refuses(prot))
-                .map(|(start, _, _)| start);
-            if let Some(refused) = refused {
-                if refused > addr {
-                    let before = host(
-                        Syscall::N_mprotect,
-                        [addr, refused - addr, prot as usize, 0, 0, 0],
-                    );
-                    if before < 0 {
-                        return before;
-                    }
+    if prot & (PROT_WRITE | PROT_EXEC) != 0
+        && addr.is_multiple_of(PAGE)
+        && len != 0
+        && tracking()
+        && let Some(end) = round_up(len).and_then(|len| addr.checked_add(len))
+    {
+        let refused = MAPPINGS
+            .lock()
+            .views
+            .within(addr, end)
+            .into_iter()
+            .find(|(_, _, object)| object.refuses(prot))
+            .map(|(start, _, _)| start);
+        if let Some(refused) = refused {
+            if refused > addr {
+                let before = host(
+                    Syscall::N_mprotect,
+                    [addr, refused - addr, prot as usize, 0, 0, 0],
+                );
+                if before < 0 {
+                    return before;
                 }
-                return fail(EACCES);
             }
+            return fail(EACCES);
         }
     }
     host(Syscall::N_mprotect, [addr, len, prot as usize, 0, 0, 0])
@@ -471,7 +476,7 @@ pub extern "C" fn patina_mremap(
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let tracked = tracking();
-    let locked = tracked && old % PAGE == 0 && MAPPINGS.lock().locks.at(old).is_some();
+    let locked = tracked && old.is_multiple_of(PAGE) && MAPPINGS.lock().locks.at(old).is_some();
     if locked && new_len > old_len {
         let growth = round_up(new_len).unwrap_or(new_len) - round_up(old_len).unwrap_or(old_len);
         let total = MAPPINGS.lock().locks.total() + growth;

@@ -14,7 +14,7 @@ Each guest's internal assertions and its harness assertions form the proof.
 | `end_to_end` | `text_metadata_probe.rs`: native-return assertion, declared executable-text metadata refusal, and absent trace facts in the libtest result; portable import-refusal companion | Metadata Linux x86_64; import refusal Linux + macOS |
 
 All seven targets run in `mise run check` and the workspace-test CI jobs:
-Linux stable/MSRV on both architectures, macOS stable. They are **not** in
+Linux on both architectures and macOS, all on the pinned toolchain. They are **not** in
 `check:fast`. That tier retains `shim_host_alias`'s compiled-object scan and
 planted leak, and `test_support`'s parsing/deadline checks.
 
@@ -145,7 +145,7 @@ escape taxonomy for the metadata policy and residuals.
 Syscall conformance owns host-equivalent fd/fs/readiness semantics, including
 pipe alias lifetimes, duplex socketpairs, creation permissions, FIFO transfers,
 and zero-flags epoll/eventfd readiness with exact userdata. The raw readiness
-probe also runs explicitly in x86_64 MSRV CI. Oracle expectations currently
+probe also runs explicitly in x86_64 Linux CI. Oracle expectations currently
 exist only on x86_64 Linux; portable ABI tests, scheduler park/wake tests and
 exact virtual deadlines remain separate. No pending or whole-probe divergence
 is credited as native acceptance evidence.

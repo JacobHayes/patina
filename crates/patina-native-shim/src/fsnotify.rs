@@ -556,10 +556,10 @@ pub(crate) fn moved(from: &str, to: &str, source: &FsMetadata, target: Option<&F
     if watching() {
         move_events(from, to, source, target);
     }
-    if let Some(target) = target {
-        if target.kind == FsEntryKind::Directory || target.nlink <= 1 {
-            last_name_gone(target.ino, held);
-        }
+    if let Some(target) = target
+        && (target.kind == FsEntryKind::Directory || target.nlink <= 1)
+    {
+        last_name_gone(target.ino, held);
     }
 }
 
@@ -570,12 +570,12 @@ pub(crate) fn exchanged(first: &str, second: &str, a: &FsMetadata, b: &FsMetadat
     if a.ino == b.ino {
         return;
     }
-    if held_parent(first).is_some() || held_parent(second).is_some() {
-        if let (Some(first_name), Some(second_name)) = (parent(first), parent(second)) {
-            DENTRIES
-                .lock()
-                .rename(&[(first_name, second_name), (second_name, first_name)]);
-        }
+    if (held_parent(first).is_some() || held_parent(second).is_some())
+        && let (Some(first_name), Some(second_name)) = (parent(first), parent(second))
+    {
+        DENTRIES
+            .lock()
+            .rename(&[(first_name, second_name), (second_name, first_name)]);
     }
     if watching() {
         move_events(first, second, a, None);

@@ -135,7 +135,7 @@ pub fn config() -> Config {
 /// determinism boundary) and is pinned by a unit test; do not reorder it.
 pub fn seed() -> [u8; 32] {
     let mut bytes = [0u8; 32];
-    for chunk in bytes.chunks_exact_mut(8) {
+    for chunk in bytes.as_chunks_mut::<8>().0 {
         chunk.copy_from_slice(&patina_dst::rng().to_le_bytes());
     }
     bytes

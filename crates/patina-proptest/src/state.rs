@@ -437,14 +437,14 @@ mod tests {
         model: &BTreeMap<u8, u8>,
         command: &Cmd,
     ) -> Result<(), String> {
-        if let Cmd::Get(k) = command {
-            if system.get(k) != model.get(k) {
-                return Err(format!(
-                    "get({k}) diverged: sut={:?} model={:?}",
-                    system.get(k),
-                    model.get(k)
-                ));
-            }
+        if let Cmd::Get(k) = command
+            && system.get(k) != model.get(k)
+        {
+            return Err(format!(
+                "get({k}) diverged: sut={:?} model={:?}",
+                system.get(k),
+                model.get(k)
+            ));
         }
         Ok(())
     }

@@ -155,17 +155,15 @@ pub(super) fn recv_stream(handle: c_int, want: Want) -> Result<Incoming, c_int> 
             }
             // An error, or nothing to skip yet, is the receive's own to
             // answer below.
-            if skip {
-                if let Ok(Some(skipped)) = with_context_raw(|context| context.net_tcp_recv(sid, 1))
-                {
-                    if let (false, Some(pair)) = (
-                        skipped.is_empty(),
-                        state.net.sockets.inet.streams.get_mut(&key),
-                    ) {
-                        pair.receiving(handle).took(1);
-                        continue;
-                    }
-                }
+            if skip
+                && let Ok(Some(skipped)) = with_context_raw(|context| context.net_tcp_recv(sid, 1))
+                && let (false, Some(pair)) = (
+                    skipped.is_empty(),
+                    state.net.sockets.inet.streams.get_mut(&key),
+                )
+            {
+                pair.receiving(handle).took(1);
+                continue;
             }
         }
         let room = |left: usize| match mark {

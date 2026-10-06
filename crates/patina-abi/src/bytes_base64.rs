@@ -64,7 +64,7 @@ fn sextet(symbol: u8) -> Option<u32> {
 
 pub(crate) fn decode(text: &str) -> Result<Vec<u8>, String> {
     let symbols = text.as_bytes();
-    if symbols.len() % 4 != 0 {
+    if !symbols.len().is_multiple_of(4) {
         return Err(format!(
             "base64 length {} is not a multiple of 4",
             symbols.len()

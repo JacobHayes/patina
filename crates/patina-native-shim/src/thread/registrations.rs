@@ -257,7 +257,7 @@ pub(crate) fn rseq(area: usize, len: u32, flags: i32, sig: u32) -> i64 {
         }
         return -i64::from(errno::EBUSY);
     }
-    if len < RSEQ_ORIG_SIZE || area % RSEQ_ORIG_SIZE as usize != 0 {
+    if len < RSEQ_ORIG_SIZE || !area.is_multiple_of(RSEQ_ORIG_SIZE as usize) {
         return einval;
     }
     if !crate::uaccess::access_ok(area, len as usize) {
@@ -393,7 +393,7 @@ fn walk(head: usize, tid: u32) {
 /// baton holder runs, so
 /// the read-modify-write needs no atomic compare-and-exchange.
 fn owner_died(word: usize, tid: u32, pi: bool, pending: bool) -> Result<(), ()> {
-    if word % 4 != 0 {
+    if !word.is_multiple_of(4) {
         return Err(());
     }
     let value = crate::uaccess::read::<u32>(word).map_err(|_| ())?;

@@ -399,7 +399,7 @@ block. Verify: macro unit tests; a `testbeds/` adopter crate whose
 `#[patina_dst::test]` tests run under **plain `cargo test`** in the battery
 (one passing, one seeded-failure asserting the panic message carries seed +
 both repro commands, one PATH-scrubbed run asserting the absence failure);
-double-run identical; MSRV 1.86 build of the new crates; no new deps
+double-run identical; pinned-toolchain build of the new crates; no new deps
 (`cargo tree` asserted in the battery).
 
 **Wave C — skills + links** (one skill doc, drift `DOCS` list, README/llms.txt/

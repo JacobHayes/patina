@@ -404,11 +404,12 @@ pub(crate) fn partition(
                 // parser then rejects it as a stray positional, instead of the
                 // operator's `--buggify 500` silently meaning "buggify at the
                 // default rate, and 500 is a Cargo test filter".
-                if let Some(next) = arguments.get(index + 1) {
-                    if next != "--" && !next.to_string_lossy().starts_with('-') {
-                        owned.push(next.clone());
-                        index += 1;
-                    }
+                if let Some(next) = arguments.get(index + 1)
+                    && next != "--"
+                    && !next.to_string_lossy().starts_with('-')
+                {
+                    owned.push(next.clone());
+                    index += 1;
                 }
             }
             Some(_) => owned.push(argument.clone()),

@@ -917,14 +917,14 @@ fn scan_instrumentation_markers(binary: &Path) -> Result<MarkerScan, CliError> {
         if yield_marker.find(&window).is_some() {
             return Ok(MarkerScan::YieldPoints);
         }
-        if cov_tail.is_none() {
-            if let Some(at) = cov_marker.find(&window) {
-                let from = at + PATINA_COV_MARKER_PREFIX.len();
-                // Without all its trailing bytes yet, the match lies within the
-                // retained overlap and is found again once they are read.
-                if window.len() - from >= PATINA_COV_MARKER_TRAILING {
-                    cov_tail = Some(window[from..from + PATINA_COV_MARKER_TRAILING].to_vec());
-                }
+        if cov_tail.is_none()
+            && let Some(at) = cov_marker.find(&window)
+        {
+            let from = at + PATINA_COV_MARKER_PREFIX.len();
+            // Without all its trailing bytes yet, the match lies within the
+            // retained overlap and is found again once they are read.
+            if window.len() - from >= PATINA_COV_MARKER_TRAILING {
+                cov_tail = Some(window[from..from + PATINA_COV_MARKER_TRAILING].to_vec());
             }
         }
         // Retain only the trailing `overlap` bytes so a marker split across the

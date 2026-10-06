@@ -135,44 +135,44 @@ pub(super) fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliErro
         .first()
         .and_then(|value| value.to_str())
         .map(str::to_string);
-    if let Some(name) = verb.as_deref() {
-        if help::verb(name).is_some() {
-            arguments.remove(0);
-            let topic = help::topic_for(name);
-            // Record the canonical verb name (a `'static` from the registry) so
-            // later usage errors in the family parser point at the right section.
-            if let help::Topic::Verb(canonical) = topic {
-                set_current_verb(Some(canonical));
-            }
-            if help_requested(&arguments) {
-                return Ok(ParseResult::Help(topic));
-            }
-            // `-V`/`--version` is intercepted everywhere before `--`, exactly like
-            // `--help`, so every verb honors it (not just the top level and the
-            // cargo family).
-            if version_requested(&arguments) {
-                return Ok(ParseResult::Version);
-            }
-            return match name {
-                "campaign" => campaign::parse(arguments).map(ParseResult::Campaign),
-                "coverage" => coverage::parse(arguments).map(ParseResult::Coverage),
-                "sites" => sites::parse(arguments).map(ParseResult::Sites),
-                "syscalls" => syscalls::parse(arguments).map(ParseResult::Syscalls),
-                "explore" => parse_explore(arguments).map(ParseResult::Explore),
-                "build" => parse_build(arguments),
-                "audit" => parse_audit(arguments),
-                "run" => parse_run(arguments),
-                "test" => parse_test(arguments),
-                // `replay` is the sole replay entry point for all three families,
-                // routed by the same artifact inference as `run`: it restores each
-                // family's semantic config (seed, fault knobs, buggify, guest argv)
-                // from the trace and exposes no semantic flags.
-                "replay" => parse_replay(arguments),
-                "minimize" => parse_minimize(arguments).map(ParseResult::Minimize),
-                "trace" => parse_trace(arguments).map(ParseResult::Trace),
-                _ => unreachable!("verb() gated the known-verb set"),
-            };
+    if let Some(name) = verb.as_deref()
+        && help::verb(name).is_some()
+    {
+        arguments.remove(0);
+        let topic = help::topic_for(name);
+        // Record the canonical verb name (a `'static` from the registry) so
+        // later usage errors in the family parser point at the right section.
+        if let help::Topic::Verb(canonical) = topic {
+            set_current_verb(Some(canonical));
         }
+        if help_requested(&arguments) {
+            return Ok(ParseResult::Help(topic));
+        }
+        // `-V`/`--version` is intercepted everywhere before `--`, exactly like
+        // `--help`, so every verb honors it (not just the top level and the
+        // cargo family).
+        if version_requested(&arguments) {
+            return Ok(ParseResult::Version);
+        }
+        return match name {
+            "campaign" => campaign::parse(arguments).map(ParseResult::Campaign),
+            "coverage" => coverage::parse(arguments).map(ParseResult::Coverage),
+            "sites" => sites::parse(arguments).map(ParseResult::Sites),
+            "syscalls" => syscalls::parse(arguments).map(ParseResult::Syscalls),
+            "explore" => parse_explore(arguments).map(ParseResult::Explore),
+            "build" => parse_build(arguments),
+            "audit" => parse_audit(arguments),
+            "run" => parse_run(arguments),
+            "test" => parse_test(arguments),
+            // `replay` is the sole replay entry point for all three families,
+            // routed by the same artifact inference as `run`: it restores each
+            // family's semantic config (seed, fault knobs, buggify, guest argv)
+            // from the trace and exposes no semantic flags.
+            "replay" => parse_replay(arguments),
+            "minimize" => parse_minimize(arguments).map(ParseResult::Minimize),
+            "trace" => parse_trace(arguments).map(ParseResult::Trace),
+            _ => unreachable!("verb() gated the known-verb set"),
+        };
     }
     match verb.as_deref() {
         Some("-h" | "--help") => Ok(ParseResult::Help(help::Topic::Overview)),
@@ -216,12 +216,11 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     // shim-linked and runs it under the native pre-run gate exactly like `audit`
     // (and exactly like a prebuilt binary). Either way an existing directory
     // resolves as a source and is NEVER passed through as guest argv.
-    if target.is_none() {
-        if let ArgKind::SourcePackage(manifest) = classify_arg(&first)? {
-            if package_integrates_patina(Some(&manifest), None) {
-                return parse_cargo("run".to_string(), rest);
-            }
-        }
+    if target.is_none()
+        && let ArgKind::SourcePackage(manifest) = classify_arg(&first)?
+        && package_integrates_patina(Some(&manifest), None)
+    {
+        return parse_cargo("run".to_string(), rest);
     }
     match resolve_positional(&first, target.as_deref())? {
         Some((ArtifactFamily::Wasm, mut module)) => {
@@ -390,13 +389,12 @@ fn parse_replay(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     // `--branch`/`--timeline`); a plain package rebuilds shim-linked and replays
     // through the native path, where the trace is loaded and fail-closed BEFORE
     // any guest execution.
-    if target.is_none() {
-        if let ArgKind::SourcePackage(manifest) = classify_arg(&origin)? {
-            if package_integrates_patina(Some(&manifest), None) {
-                let package_dir = cargo_package_dir(&origin)?;
-                return parse_cargo_replay(package_dir, trace, flags);
-            }
-        }
+    if target.is_none()
+        && let ArgKind::SourcePackage(manifest) = classify_arg(&origin)?
+        && package_integrates_patina(Some(&manifest), None)
+    {
+        let package_dir = cargo_package_dir(&origin)?;
+        return parse_cargo_replay(package_dir, trace, flags);
     }
     match resolve_positional(&origin, target.as_deref())? {
         Some((ArtifactFamily::Wasm, module)) => {

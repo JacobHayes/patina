@@ -202,19 +202,19 @@ pub(in crate::thread::net) fn shutdown(handle: c_int, bits: u8) -> Result<(), c_
     socket.shutdown |= bits;
     let mut wakes = waiters(&mut state, handle, Dir::Recv);
     wakes.extend(waiters(&mut state, handle, Dir::Send));
-    if let Some((sid, key)) = stream {
-        if bits & SEND_SHUTDOWN != 0 {
-            with_context_raw(|context| context.net_tcp_shutdown(sid, ShutdownHow::Write))?;
-            if let Some(peer) = state
-                .net
-                .sockets
-                .inet
-                .streams
-                .get(&key)
-                .and_then(|pair| pair.other(handle))
-            {
-                wakes.extend(waiters(&mut state, peer, Dir::Recv));
-            }
+    if let Some((sid, key)) = stream
+        && bits & SEND_SHUTDOWN != 0
+    {
+        with_context_raw(|context| context.net_tcp_shutdown(sid, ShutdownHow::Write))?;
+        if let Some(peer) = state
+            .net
+            .sockets
+            .inet
+            .streams
+            .get(&key)
+            .and_then(|pair| pair.other(handle))
+        {
+            wakes.extend(waiters(&mut state, peer, Dir::Recv));
         }
     }
     drop(state);

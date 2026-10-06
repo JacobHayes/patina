@@ -643,9 +643,9 @@ pub unsafe extern "C" fn patina_kevent_gather(
 /// Unlink `me` from the kq's EVFILT_USER waiter list. Idempotent, so the
 /// gather resume paths call it unconditionally.
 fn detach_user_waiter(state: &mut ThreadRuntime, id: u64, me: TaskId) {
-    if let Some(slot) = state.net.kqueues.get_mut(&id) {
-        if let Some(index) = slot.kq.waiters.iter().position(|task| *task == me) {
-            slot.kq.waiters.remove(index);
-        }
+    if let Some(slot) = state.net.kqueues.get_mut(&id)
+        && let Some(index) = slot.kq.waiters.iter().position(|task| *task == me)
+    {
+        slot.kq.waiters.remove(index);
     }
 }

@@ -259,14 +259,14 @@ impl Leg<'_> {
         let compared = judge_native(oracle, self.vehicle, &native, reference, diverged)?;
 
         #[cfg(target_arch = "x86_64")]
-        if self.vehicle == Vehicle::Raw {
-            if let Err(reason) = host::syscall_user_dispatch() {
-                if required("PATINA_REQUIRE_SUD") {
-                    return Err(vec![format!("PATINA_REQUIRE_SUD=1: {reason}")]);
-                }
-                not_run(&format!("{} under patina", self.name()), &reason);
-                return Ok(());
+        if self.vehicle == Vehicle::Raw
+            && let Err(reason) = host::syscall_user_dispatch()
+        {
+            if required("PATINA_REQUIRE_SUD") {
+                return Err(vec![format!("PATINA_REQUIRE_SUD=1: {reason}")]);
             }
+            not_run(&format!("{} under patina", self.name()), &reason);
+            return Ok(());
         }
 
         let gaps: Vec<&catalog::Gap> = self.scenario.gaps_for(self.vehicle).collect();

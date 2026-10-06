@@ -99,13 +99,13 @@ impl SimNetBuilder {
                 "virtual TCP receive buffer size must be greater than zero",
             ));
         }
-        if let Some((min, max)) = self.jitter_nanos {
-            if min > max {
-                return Err(EffectError::new(
-                    ErrorCode::InvalidInput,
-                    "virtual network jitter range requires min <= max",
-                ));
-            }
+        if let Some((min, max)) = self.jitter_nanos
+            && min > max
+        {
+            return Err(EffectError::new(
+                ErrorCode::InvalidInput,
+                "virtual network jitter range requires min <= max",
+            ));
         }
         for (name, permille) in [
             ("drop", self.drop_permille),

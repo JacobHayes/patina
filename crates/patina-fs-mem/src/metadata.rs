@@ -173,12 +173,11 @@ impl MemFs {
     /// an unsearchable directory answers `EACCES`, never "not found", so the
     /// names behind it cannot be probed through the error code.
     pub(super) fn check_search_path(&self, path: &str) -> DriverResult<()> {
-        if path != "/" {
-            if let Some(root) = self.directories.get("/") {
-                if !owner_allows(root.mode, SEARCH) {
-                    return Err(denied("/", "search"));
-                }
-            }
+        if path != "/"
+            && let Some(root) = self.directories.get("/")
+            && !owner_allows(root.mode, SEARCH)
+        {
+            return Err(denied("/", "search"));
         }
         let mut current = String::new();
         for component in path
@@ -214,10 +213,10 @@ impl MemFs {
     /// Creating, removing, or renaming a NAME inside a directory is a write to
     /// that directory: `w` and `x` both.
     pub(super) fn check_directory_write(&self, directory: &str) -> DriverResult<()> {
-        if let Some(metadata) = self.directories.get(directory) {
-            if !owner_allows(metadata.mode, WRITE | SEARCH) {
-                return Err(denied(directory, "modify"));
-            }
+        if let Some(metadata) = self.directories.get(directory)
+            && !owner_allows(metadata.mode, WRITE | SEARCH)
+        {
+            return Err(denied(directory, "modify"));
         }
         Ok(())
     }

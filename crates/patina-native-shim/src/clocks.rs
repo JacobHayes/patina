@@ -591,10 +591,10 @@ pub(crate) fn settimeofday(tv: *const [i64; 2], tz: *const [i32; 2]) -> i64 {
             tv_nsec: micros * 1000,
         })
     };
-    if !tz.is_null() {
-        if let Err(errno) = copy_in::<[i32; 2]>(tz as usize) {
-            return errno;
-        }
+    if !tz.is_null()
+        && let Err(errno) = copy_in::<[i32; 2]>(tz as usize)
+    {
+        return errno;
     }
     if time.is_some_and(|ts| ts.valid_nanos().is_none()) {
         return -i64::from(EINVAL);

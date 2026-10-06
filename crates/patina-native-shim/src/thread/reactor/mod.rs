@@ -295,11 +295,11 @@ pub(super) fn register_readiness_waiters(
         // watch needs no waiter because an eventfd is always writable.
         #[cfg(target_os = "linux")]
         if resolved.kind == FdKind::SignalFd {
-            if dir == ReadyDir::Read {
-                if let Some(fd) = state.signals.signalfds.get_mut(&resolved.handle) {
-                    fd.waiters.push_back(me);
-                    locs.push(WaiterLoc::SignalFdRecv(resolved.handle));
-                }
+            if dir == ReadyDir::Read
+                && let Some(fd) = state.signals.signalfds.get_mut(&resolved.handle)
+            {
+                fd.waiters.push_back(me);
+                locs.push(WaiterLoc::SignalFdRecv(resolved.handle));
             }
             continue;
         }
@@ -333,11 +333,11 @@ pub(super) fn register_readiness_waiters(
         }
         #[cfg(target_os = "linux")]
         if resolved.kind == FdKind::EventFd {
-            if dir == ReadyDir::Read {
-                if let Some(efd) = state.net.eventfds.get_mut(&fd) {
-                    efd.read_waiters.push_back(me);
-                    locs.push(WaiterLoc::EventFdRecv(fd));
-                }
+            if dir == ReadyDir::Read
+                && let Some(efd) = state.net.eventfds.get_mut(&fd)
+            {
+                efd.read_waiters.push_back(me);
+                locs.push(WaiterLoc::EventFdRecv(fd));
             }
             continue;
         }
@@ -349,17 +349,17 @@ pub(super) fn register_readiness_waiters(
                 ReadyDir::Read => end.read_channel,
                 ReadyDir::Write => end.write_channel,
             };
-            if let Some(channel) = channel {
-                if let Some(ch) = state.net.pipe_channels.get_mut(&channel) {
-                    match dir {
-                        ReadyDir::Read => {
-                            ch.recv_waiters.push_back(me);
-                            locs.push(WaiterLoc::PipeRecv(channel));
-                        }
-                        ReadyDir::Write => {
-                            ch.send_waiters.push_back(me);
-                            locs.push(WaiterLoc::PipeSend(channel));
-                        }
+            if let Some(channel) = channel
+                && let Some(ch) = state.net.pipe_channels.get_mut(&channel)
+            {
+                match dir {
+                    ReadyDir::Read => {
+                        ch.recv_waiters.push_back(me);
+                        locs.push(WaiterLoc::PipeRecv(channel));
+                    }
+                    ReadyDir::Write => {
+                        ch.send_waiters.push_back(me);
+                        locs.push(WaiterLoc::PipeSend(channel));
                     }
                 }
             }
@@ -409,10 +409,10 @@ pub(super) fn unregister_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[
                 }
             }
             WaiterLoc::Mutex(key) => {
-                if let Some(entry) = state.table.mutexes.get_mut(&key) {
-                    if let Some(index) = entry.waiters.iter().position(|task| *task == me) {
-                        entry.waiters.remove(index);
-                    }
+                if let Some(entry) = state.table.mutexes.get_mut(&key)
+                    && let Some(index) = entry.waiters.iter().position(|task| *task == me)
+                {
+                    entry.waiters.remove(index);
                 }
             }
             WaiterLoc::RwRead(key) | WaiterLoc::RwWrite(key) => {
@@ -428,18 +428,18 @@ pub(super) fn unregister_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[
                 }
             }
             WaiterLoc::Cond(cond, mutex) => {
-                if let Some(entry) = state.table.conds.get_mut(&cond) {
-                    if let Some(index) = entry.waiters.iter().position(|(task, _)| *task == me) {
-                        entry.waiters.remove(index);
-                    }
+                if let Some(entry) = state.table.conds.get_mut(&cond)
+                    && let Some(index) = entry.waiters.iter().position(|(task, _)| *task == me)
+                {
+                    entry.waiters.remove(index);
                 }
                 unregister_waiters(state, me, &[WaiterLoc::Mutex(mutex)]);
             }
             WaiterLoc::Join(target) => {
-                if let Some(entry) = state.table.threads.get_mut(&target) {
-                    if entry.joiner == Some(me) {
-                        entry.joiner = None;
-                    }
+                if let Some(entry) = state.table.threads.get_mut(&target)
+                    && entry.joiner == Some(me)
+                {
+                    entry.joiner = None;
                 }
             }
             WaiterLoc::PipeRecv(channel) => {

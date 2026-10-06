@@ -276,10 +276,10 @@ impl Buggify {
             Some(_) => return Ok(SiteOutcome::Ok),
             None => {}
         }
-        if let Some(existing) = self.sites.get(label) {
-            if existing.site != site || existing.kind != kind {
-                return Ok(SiteOutcome::DuplicateLabel);
-            }
+        if let Some(existing) = self.sites.get(label)
+            && (existing.site != site || existing.kind != kind)
+        {
+            return Ok(SiteOutcome::DuplicateLabel);
         }
         self.declared_sites.insert(
             label.to_string(),
@@ -297,10 +297,10 @@ impl Buggify {
     /// registration the activation decision is computed once and frozen.
     fn register(&mut self, label: &str, site: &str, kind: BuggifyKind) -> Result<u64, String> {
         let hash = label_hash(label);
-        if let Some(declared) = self.declared_sites.get(label) {
-            if declared.site != site || declared.kind != kind {
-                return Err(declared.site.clone());
-            }
+        if let Some(declared) = self.declared_sites.get(label)
+            && (declared.site != site || declared.kind != kind)
+        {
+            return Err(declared.site.clone());
         }
         match self.sites.get(label) {
             Some(existing) if existing.site != site || existing.kind != kind => {

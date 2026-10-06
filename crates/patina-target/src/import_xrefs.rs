@@ -190,8 +190,10 @@ fn decode_plt_stub_slot(
         // `adrp x16, <page>` followed by `ldr x17, [x16, #<offset>]`.
         Architecture::Aarch64 => {
             let instructions = entry
-                .chunks_exact(4)
-                .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("chunk has four bytes")))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| u32::from_le_bytes(*bytes))
                 .collect::<Vec<_>>();
             instructions
                 .windows(2)
@@ -253,28 +255,28 @@ fn collect_macho_import_targets_for<Mach>(
         if let Ok(Some(command)) = command.dysymtab() {
             dysymtab = Some(command);
         }
-        if let Ok(Some((segment, section_data))) = Mach::Segment::from_command(command) {
-            if let Ok(segment_sections) = segment.sections(endian, section_data) {
-                for section in segment_sections {
-                    let section_type = section.section_type(endian);
-                    if matches!(
-                        section_type,
-                        object::macho::S_NON_LAZY_SYMBOL_POINTERS
-                            | object::macho::S_LAZY_SYMBOL_POINTERS
-                            | object::macho::S_SYMBOL_STUBS
-                    ) {
-                        let entry_size = if section_type == object::macho::S_SYMBOL_STUBS {
-                            u64::from(section.reserved2(endian)).max(1)
-                        } else {
-                            pointer_size
-                        };
-                        sections.push((
-                            section.addr(endian).into(),
-                            section.size(endian).into(),
-                            section.reserved1(endian),
-                            entry_size,
-                        ));
-                    }
+        if let Ok(Some((segment, section_data))) = Mach::Segment::from_command(command)
+            && let Ok(segment_sections) = segment.sections(endian, section_data)
+        {
+            for section in segment_sections {
+                let section_type = section.section_type(endian);
+                if matches!(
+                    section_type,
+                    object::macho::S_NON_LAZY_SYMBOL_POINTERS
+                        | object::macho::S_LAZY_SYMBOL_POINTERS
+                        | object::macho::S_SYMBOL_STUBS
+                ) {
+                    let entry_size = if section_type == object::macho::S_SYMBOL_STUBS {
+                        u64::from(section.reserved2(endian)).max(1)
+                    } else {
+                        pointer_size
+                    };
+                    sections.push((
+                        section.addr(endian).into(),
+                        section.size(endian).into(),
+                        section.reserved1(endian),
+                        entry_size,
+                    ));
                 }
             }
         }
@@ -374,15 +376,17 @@ fn scan_aarch64_import_xrefs(
     origins: &mut BTreeMap<String, BTreeSet<NativeProvenance>>,
 ) {
     let instructions = data
-        .chunks_exact(4)
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("chunk has four bytes")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| u32::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     for (index, instruction) in instructions.iter().copied().enumerate() {
         let pc = section_address + index as u64 * 4;
-        if let Some(target) = aarch64_branch_target(instruction, pc) {
-            if let Some(symbol) = targets.get(&target) {
-                insert_origin(origins, symbol, provenance.for_address(pc, section_name));
-            }
+        if let Some(target) = aarch64_branch_target(instruction, pc)
+            && let Some(symbol) = targets.get(&target)
+        {
+            insert_origin(origins, symbol, provenance.for_address(pc, section_name));
         }
         let Some((register, page)) = aarch64_adrp_target(instruction, pc) else {
             continue;
@@ -390,10 +394,10 @@ fn scan_aarch64_import_xrefs(
         let Some(next) = instructions.get(index + 1).copied() else {
             continue;
         };
-        if let Some(target) = aarch64_ldr_unsigned_target(next, register, page) {
-            if let Some(symbol) = targets.get(&target) {
-                insert_origin(origins, symbol, provenance.for_address(pc, section_name));
-            }
+        if let Some(target) = aarch64_ldr_unsigned_target(next, register, page)
+            && let Some(symbol) = targets.get(&target)
+        {
+            insert_origin(origins, symbol, provenance.for_address(pc, section_name));
         }
     }
 }

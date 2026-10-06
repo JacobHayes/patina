@@ -140,10 +140,10 @@ fn disconnect(handle: c_int, tcp: bool) -> Result<(), c_int> {
             .map(|local| local.ip)
             .filter(|_| inet.addr_locked);
     } else {
-        if !inet.addr_locked {
-            if let Some(local) = &mut inet.local {
-                local.ip = unspecified(inet.v6).ip;
-            }
+        if !inet.addr_locked
+            && let Some(local) = &mut inet.local
+        {
+            local.ip = unspecified(inet.v6).ip;
         }
         if let Some(udp) = inet.udp {
             released = with_context_raw(|context| context.net_connect(udp, "", None));
@@ -170,10 +170,10 @@ pub(super) fn connect_datagram(handle: c_int, bytes: &[u8]) -> Result<(), c_int>
     let inet = as_inet_mut(sock_mut(&mut state, handle)?);
     inet.peer = Some(peer);
     inet.peer_extra = extra;
-    if let Some(local) = &mut inet.local {
-        if local.ip.is_unspecified() {
-            local.ip = source;
-        }
+    if let Some(local) = &mut inet.local
+        && local.ip.is_unspecified()
+    {
+        local.ip = source;
     }
     // The socket now receives only what its peer sends to its (routed) local
     // address: the kernel's 4-tuple lookup.

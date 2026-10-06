@@ -97,10 +97,10 @@ fn vtime_span(events: &[&Value]) -> (Option<u64>, Option<u64>) {
         let op = event.get("operation").unwrap_or(&Value::Null);
         let out = event.get("outcome").unwrap_or(&Value::Null);
         let kind = op.get("kind").and_then(Value::as_str);
-        if kind == Some("clock_now") {
-            if let Some(value) = outcome_u64(out) {
-                current = Some(value);
-            }
+        if kind == Some("clock_now")
+            && let Some(value) = outcome_u64(out)
+        {
+            current = Some(value);
         }
         if let Some(value) = op.get("now_nanos").and_then(Value::as_u64) {
             current = Some(value);
@@ -242,10 +242,10 @@ fn print_swarm_metadata(metadata: &Value) {
 }
 
 fn print_optional_metadata(metadata: &Value, key: &str, label: &str) {
-    if let Some(value) = metadata.get(key) {
-        if !value.is_null() {
-            println!("{label}: {}", compact_json_lossy(value));
-        }
+    if let Some(value) = metadata.get(key)
+        && !value.is_null()
+    {
+        println!("{label}: {}", compact_json_lossy(value));
     }
 }
 

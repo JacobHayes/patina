@@ -680,18 +680,17 @@ liveness-safe."
         },
         captured,
     )?;
-    if let Some(coverage) = coverage {
-        if !output::options().is_json() {
-            if let Some(path) = coverage.map_path {
-                eprintln!(
-                    "PATINA_COVERAGE map={} edges={}/{} covered_permille={}",
-                    path.display(),
-                    coverage.edges_covered,
-                    coverage.edges_total,
-                    coverage.covered_permille,
-                );
-            }
-        }
+    if let Some(coverage) = coverage
+        && !output::options().is_json()
+        && let Some(path) = coverage.map_path
+    {
+        eprintln!(
+            "PATINA_COVERAGE map={} edges={}/{} covered_permille={}",
+            path.display(),
+            coverage.edges_covered,
+            coverage.edges_total,
+            coverage.covered_permille,
+        );
     }
     Ok(exit)
 }

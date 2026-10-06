@@ -162,14 +162,14 @@ pub fn reduce_params<O: ScenarioOracle>(
 /// and any non-empty value can collapse to the empty string.
 fn shrink_value(value: &str) -> Vec<String> {
     let mut candidates = Vec::new();
-    if let Ok(number) = value.parse::<u64>() {
-        if number != 0 {
-            candidates.push("0".to_string());
-            let mut half = number / 2;
-            while half > 0 {
-                candidates.push(half.to_string());
-                half /= 2;
-            }
+    if let Ok(number) = value.parse::<u64>()
+        && number != 0
+    {
+        candidates.push("0".to_string());
+        let mut half = number / 2;
+        while half > 0 {
+            candidates.push(half.to_string());
+            half /= 2;
         }
     }
     if !value.is_empty() {

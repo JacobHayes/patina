@@ -71,7 +71,7 @@ Prefer JSON when parsing results programmatically.
 ## Check ladder (run before claiming done)
 
 With [mise](https://mise.jdx.dev/) (one-time `mise run setup` installs
-toolchains/targets, including the 1.86 MSRV toolchain with `wasm32-wasip1`):
+the pinned Rust toolchain, components and targets from `rust-toolchain.toml`):
 
 - `mise run check:fast` — the inner-loop tier: fmt, clippy (host +
   cross-target `x86_64-unknown-linux-gnu` for Linux-cfg code,
@@ -79,21 +79,25 @@ toolchains/targets, including the 1.86 MSRV toolchain with `wasm32-wasip1`):
   Darwin-cfg code), every workspace
   test except `cargo-patina`'s `end_to_end` and seven native execution targets
   (syscall conformance among them), the cheap classifier selftests, CLI flag drift,
-  MSRV `cargo check`, WASI validation, and cross-target smoke. It is designed to
+  toolchain pin drift, WASI validation, and cross-target smoke. It is designed to
   give ordinary edits an honest signal quickly, but it is not landing evidence.
 - `mise run check` — the local pre-landing battery: the cheap checks above,
-  docs, packaging, the local MSRV rungs (cargo check, the cargo-patina rodata
-  detector, and the `patina-dst` macros feature test), the full stable workspace
+  docs, packaging, the `patina-dst` macros feature test, the full pinned workspace
   test suite including `end_to_end`, native acceptance tests and the syscall
   conformance scenarios, WASI/cross smoke, and the workq/pubsub/macro-adopter
   and FIFO/rustix-default/cap-std testbeds. Cheap failure checks run first; the e2e-heavy workspace test rung runs
   alone; independent runtime/testbed rungs then overlap. The runner prints
   one overall result and a retained log directory (commands and per-rung timings),
   suppresses successful command chatter, and replays a failed rung's complete log. **This is the local landing gate.** CI/final gates add
-  `mise run msrv` and the audit corpus.
-- `mise run msrv` — the complete Rust 1.86 workspace suite. This is CI/final-gate
-  evidence, not part of the ordinary local landing gate.
+  the audit corpus.
 - `mise run smoke`, `mise run audit-corpus`, `mise run demo` — individual pieces.
+
+Rust is pinned in `mise.lock`; `mise.toml` uses `latest` so deliberate lockfile
+updates can advance it. `rust-toolchain.toml` mirrors the exact version for
+rustup users. `scripts/check-toolchain.py` checks both pins and the active
+compiler; its selftest plants drift in each file. Fast/full checks and every CI
+job run it. Setup also registers the toolchain with mise, repairing older Rust
+install symlink registries that can bypass lock resolution.
 
 Run cargo and repository scripts through `mise exec --` or `mise run` so the repo
 selected toolchain is active. `scripts/check.sh` is the quiet/timed log-replay

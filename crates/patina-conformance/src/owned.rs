@@ -65,10 +65,10 @@ pub fn rmid_args(ctl: Syscall, id: i64) -> [i64; 3] {
 /// owns no key.
 pub fn sweep(dir: &Path) -> Vec<String> {
     let mut removed = Vec::new();
-    if let Ok(name) = CString::new(mq_name(dir)) {
-        if sys(Syscall::N_mq_unlink, [name.as_ptr() as i64, 0, 0]) == 0 {
-            removed.push(format!("mq {}", mq_name(dir)));
-        }
+    if let Ok(name) = CString::new(mq_name(dir))
+        && sys(Syscall::N_mq_unlink, [name.as_ptr() as i64, 0, 0]) == 0
+    {
+        removed.push(format!("mq {}", mq_name(dir)));
     }
     let kinds = [
         ("shm", SHM_PROJECT, Syscall::N_shmget, Syscall::N_shmctl),

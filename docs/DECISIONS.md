@@ -82,7 +82,7 @@ cluster so the fixes have citable symptom records.
   merges at point two; full battery green at the integrated tip (5m52s).
 - **2026-08-06 — clap adoption REJECTED by the spike's mechanical rule.**
   The throwaway clap port of `run`+`campaign` passed every functional gate
-  (byte-identical help JSON/human help, e2e green, MSRV, single dependent)
+  (byte-identical help JSON/human help, e2e green, compiler compatibility, single dependent)
   but cost +117 net parser LOC (804→921) with a 116-LOC bridge, +3.3s cold
   build, +2.33 MB binary. The decision rule required ≤0 net LOC, so the
   spike was deleted (no middle state) and the flag > env > `.patina/` >
@@ -173,7 +173,7 @@ cluster so the fixes have citable symptom records.
 - **2026-08-06 (landing round) — clap port landed; verdict adopt.** The full
   registry-driven port of all verbs landed with net −820 non-test lines, no
   bridge, `default-features = false` (+3.4% binary), and clap pinned `~4.6`
-  for MSRV. The port surfaced four shipped parser bugs, each pinned
+  for deliberate dependency upgrades. The port surfaced four shipped parser bugs, each pinned
   red-before/green-after; one user-visible rename fell out (`campaign
   --report` → `--report-failures`, the old spelling having been unreachable
   behind the global `--report OUT.html`). Wall-clock build-cost numbers in

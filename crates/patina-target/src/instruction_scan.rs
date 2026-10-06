@@ -136,9 +136,8 @@ pub(super) fn scan_instruction_ranges(
         let name = section.name().unwrap_or("<text>");
         match architecture {
             Architecture::Aarch64 => {
-                for (index, instruction) in data.chunks_exact(4).enumerate() {
-                    let instruction =
-                        u32::from_le_bytes(instruction.try_into().expect("chunk has four bytes"));
+                for (index, instruction) in data.as_chunks::<4>().0.iter().enumerate() {
+                    let instruction = u32::from_le_bytes(*instruction);
                     if let Some((category, mnemonic)) = aarch64_instruction_category(instruction) {
                         let offset = index * 4;
                         escapes.push(

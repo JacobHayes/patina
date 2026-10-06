@@ -124,10 +124,10 @@ pub(crate) unsafe fn generate_signal(
     };
     activate();
     let mut state = lock_state();
-    if let SignalTarget::Task(task) = target {
-        if !state.signals.tasks.contains_key(&task) {
-            return -i64::from(ESRCH);
-        }
+    if let SignalTarget::Task(task) = target
+        && !state.signals.tasks.contains_key(&task)
+    {
+        return -i64::from(ESRCH);
     }
     if !valid {
         return -i64::from(EINVAL);

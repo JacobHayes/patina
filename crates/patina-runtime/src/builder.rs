@@ -162,15 +162,14 @@ impl RuntimeBuilder {
         };
         if let (Some(installed), Some(configured)) =
             (installed_clock_epoch, self.config.realtime_epoch_nanos)
+            && installed != configured
         {
-            if installed != configured {
-                return Err(RuntimeError::Config(format!(
-                    "the installed clock runs on realtime epoch {installed} ns but the \
+            return Err(RuntimeError::Config(format!(
+                "the installed clock runs on realtime epoch {installed} ns but the \
                      configured realtime epoch is {configured} ns; the configured epoch \
                      would be silently ignored. Configure the epoch on the clock or drop \
                      the explicit clock so the runtime builds it."
-                )));
-            }
+            )));
         }
         let recorded_realtime_epoch =
             installed_clock_epoch.unwrap_or_else(|| self.config.realtime_epoch_nanos());
@@ -181,12 +180,11 @@ impl RuntimeBuilder {
             .transpose()?;
         if let (Some(installed), Some(configured)) =
             (installed_boot_origin, self.config.boot_origin_nanos)
+            && installed != configured
         {
-            if installed != configured {
-                return Err(RuntimeError::Config(
-                    "installed clock conflicts with configured boot origin".into(),
-                ));
-            }
+            return Err(RuntimeError::Config(
+                "installed clock conflicts with configured boot origin".into(),
+            ));
         }
         let recorded_boot_origin =
             installed_boot_origin.unwrap_or_else(|| self.config.boot_origin_nanos());

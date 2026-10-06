@@ -42,15 +42,20 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   gate.
 - `mise run check:fast` is an inner-loop tier, not landing evidence. It includes
   fmt, the four clippy passes, all workspace tests except the `cargo-patina`
-  `end_to_end` binary and the seven native execution targets, cheap selftests, flag drift, MSRV cargo
-  check, WASI, and cross-target smoke. `mise run check` is the default local
-  landing gate; CI/final gates add the full `mise run msrv` suite and audit
-  corpus breadth. For runtime/shim/trace/target changes, the native acceptance
+  `end_to_end` binary and the seven native execution targets, cheap selftests, flag and toolchain
+  drift, WASI, and cross-target smoke. `mise run check` is the default local
+  landing gate; CI/final gates add audit corpus breadth. For runtime/shim/trace/target changes, the native acceptance
   targets (`native_abi`, `native_conformance`, `native_containment`, `native_raw`,
   `native_signals`, `native_trace`, `native_workloads`) and WASI/cross-target checks are
   part of the evidence, not optional cleanup. The syscall conformance scenarios
   are Linux-only (both architectures); on macOS their test target compiles to
   nothing, while shared native signal/panic coverage still executes.
+- Verify the selected compiler as well as toolchain pin files. Mise 2026.9.18
+  can treat existing Rust install symlinks outside its managed directories as
+  user-linked tools and bypass lock resolution. Setup registers the pinned Rust
+  toolchain; the drift gate also checks `rustc -V` so agreeing files cannot hide
+  the wrong compiler. For lock-resolution proofs, isolate mise's install registry
+  without changing shared rustup defaults or uninstalling toolchains.
 - A green gate is only evidence if it can fail. Selftests and planted fixtures
   should prove classifiers, drift detectors, default-deny audits, and vacuity
   checks actually bite.

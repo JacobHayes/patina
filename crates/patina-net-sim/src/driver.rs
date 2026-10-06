@@ -611,10 +611,10 @@ impl NetDriver for SimNet {
             }
             endpoint.peer
         };
-        if matches!(how, ShutdownHow::Write | ShutdownHow::Both) {
-            if let Some(peer) = peer.and_then(|peer| self.tcp_endpoints.get_mut(&peer)) {
-                peer.remote_write_closed = true;
-            }
+        if matches!(how, ShutdownHow::Write | ShutdownHow::Both)
+            && let Some(peer) = peer.and_then(|peer| self.tcp_endpoints.get_mut(&peer))
+        {
+            peer.remote_write_closed = true;
         }
         Ok(())
     }
@@ -801,22 +801,22 @@ impl NetDriver for SimNet {
                     endpoint.reset = true;
                     endpoint.peer = None;
                 }
-                if let Some(peer) = peer {
-                    if let Some(endpoint) = self.tcp_endpoints.get_mut(&peer) {
-                        endpoint.reset = true;
-                        endpoint.peer = None;
-                    }
+                if let Some(peer) = peer
+                    && let Some(endpoint) = self.tcp_endpoints.get_mut(&peer)
+                {
+                    endpoint.reset = true;
+                    endpoint.peer = None;
                 }
                 self.tcp_endpoints.remove(&acceptor);
             }
             return Ok(());
         }
         if let Some(endpoint) = self.tcp_endpoints.remove(&socket) {
-            if let Some(peer) = endpoint.peer {
-                if let Some(peer_endpoint) = self.tcp_endpoints.get_mut(&peer) {
-                    peer_endpoint.remote_write_closed = true;
-                    peer_endpoint.peer = None;
-                }
+            if let Some(peer) = endpoint.peer
+                && let Some(peer_endpoint) = self.tcp_endpoints.get_mut(&peer)
+            {
+                peer_endpoint.remote_write_closed = true;
+                peer_endpoint.peer = None;
             }
             return Ok(());
         }

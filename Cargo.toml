@@ -56,7 +56,7 @@ opt-level = 3
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.86"
+rust-version = "1.99"
 repository = "https://github.com/JacobHayes/patina"
 
 [workspace.dependencies]
@@ -87,10 +87,8 @@ patina-dst-trace = { path = "crates/patina-trace", version = "0.1.0" }
 patina-dst-wasi-host = { path = "crates/patina-wasi-host", version = "0.1.0" }
 patina-dst-wrapper-fault = { path = "crates/patina-wrapper-fault", version = "0.1.0" }
 patina-dst-wrapper-latency = { path = "crates/patina-wrapper-latency", version = "0.1.0" }
-# The CLI's token engine. Pinned to a minor (`~4.6`) rather than `^4.6` because
-# clap raises its own MSRV in minor releases: 4.6 requires Rust 1.85, which fits
-# the workspace's 1.86, but 4.7 need not. Bumping the minor is a deliberate step
-# that re-runs `mise run msrv`. Default features are off: the CLI renders its own
+# The CLI's token engine. Minor upgrades are deliberate because parser error
+# wording is user-visible. Default features are off: the CLI renders its own
 # help and usage from the flag registry, and `color` would make error output
 # terminal-dependent, which a machine-parsed CLI must not be.
 libc = "0.2.189"

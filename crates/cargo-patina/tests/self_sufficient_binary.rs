@@ -20,31 +20,9 @@
 use object::{Object, ObjectSection, SectionFlags, SectionKind};
 use std::path::Path;
 
-/// A workspace-root hit is harmless only when it is the file name Rust stored
-/// for a panic location. rustc 1.86 emits those as absolute `Location::file()`
-/// strings in loadable rodata; newer rustc emits workspace-relative paths. A
-/// runtime checkout dependency (the bug class pinned here) bakes a directory
-/// path such as `env!("CARGO_MANIFEST_DIR")`, not a Rust source-location file.
-fn rust_source_location_at(data: &[u8], offset: usize, root: &[u8]) -> bool {
-    let Some(suffix) = data.get(offset + root.len()..) else {
-        return false;
-    };
-    if !suffix.starts_with(b"/crates/") {
-        return false;
-    }
-    let terminator = suffix
-        .iter()
-        .position(|byte| matches!(*byte, 0 | b'\n'))
-        .unwrap_or(suffix.len());
-    suffix[..terminator]
-        .windows(3)
-        .any(|window| window == b".rs")
-}
-
 fn checkout_dependency_hits(data: &[u8], root: &[u8]) -> usize {
     data.windows(root.len())
-        .enumerate()
-        .filter(|(offset, window)| *window == root && !rust_source_location_at(data, *offset, root))
+        .filter(|window| *window == root)
         .count()
 }
 
@@ -115,7 +93,7 @@ fn the_cli_binary_does_not_name_its_source_checkout() {
 }
 
 #[test]
-fn panic_location_filter_still_catches_runtime_checkout_paths() {
+fn planted_checkout_paths_trip_the_detector() {
     let root = workspace_root().as_bytes();
     let mut panic_location = Vec::new();
     panic_location.push(0);
@@ -125,8 +103,8 @@ fn panic_location_filter_still_catches_runtime_checkout_paths() {
 
     assert_eq!(
         checkout_dependency_hits(&panic_location, root),
-        0,
-        "rustc 1.86 absolute panic Location::file() strings are not runtime checkout dependencies"
+        1,
+        "absolute source paths must trip the detector on the pinned compiler too"
     );
 
     let mut runtime_lookup = Vec::new();

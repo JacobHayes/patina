@@ -518,20 +518,20 @@ pub(super) fn shutdown(handle: c_int, bits: u8) -> Result<(), c_int> {
     as_unix_mut(socket).arrivals += 1;
     let mut wakes = waiters(&mut state, handle, Dir::Recv);
     wakes.extend(waiters(&mut state, handle, Dir::Send));
-    if let Some(peer) = peer.filter(|_| ty != SOCK_DGRAM) {
-        if let Some(other) = state.net.sockets.table.get_mut(&peer) {
-            let mut peer_bits = 0;
-            if bits & RCV_SHUTDOWN != 0 {
-                peer_bits |= SEND_SHUTDOWN;
-            }
-            if bits & SEND_SHUTDOWN != 0 {
-                peer_bits |= RCV_SHUTDOWN;
-            }
-            other.shutdown |= peer_bits;
-            as_unix_mut(other).arrivals += 1;
-            wakes.extend(waiters(&mut state, peer, Dir::Recv));
-            wakes.extend(waiters(&mut state, peer, Dir::Send));
+    if let Some(peer) = peer.filter(|_| ty != SOCK_DGRAM)
+        && let Some(other) = state.net.sockets.table.get_mut(&peer)
+    {
+        let mut peer_bits = 0;
+        if bits & RCV_SHUTDOWN != 0 {
+            peer_bits |= SEND_SHUTDOWN;
         }
+        if bits & SEND_SHUTDOWN != 0 {
+            peer_bits |= RCV_SHUTDOWN;
+        }
+        other.shutdown |= peer_bits;
+        as_unix_mut(other).arrivals += 1;
+        wakes.extend(waiters(&mut state, peer, Dir::Recv));
+        wakes.extend(waiters(&mut state, peer, Dir::Send));
     }
     drop(state);
     wake_all(wakes);
@@ -557,10 +557,10 @@ pub(super) fn close(
             names.abstract_names.remove(bytes);
         }
         UnixName::Path(_) => {
-            if let Some(ino) = unix.ino {
-                if names.paths.get(&ino) == Some(&handle) {
-                    names.paths.remove(&ino);
-                }
+            if let Some(ino) = unix.ino
+                && names.paths.get(&ino) == Some(&handle)
+            {
+                names.paths.remove(&ino);
             }
         }
         UnixName::Unnamed => {}
@@ -583,16 +583,16 @@ pub(super) fn close(
             }
         }
     }
-    if let Some(peer) = unix.peer.filter(|_| ty != SOCK_DGRAM) {
-        if let Some(other) = state.net.sockets.table.get_mut(&peer) {
-            other.shutdown = SHUTDOWN_MASK;
-            if !unix.queue.is_empty() || embryo {
-                other.error = ECONNRESET;
-            }
-            as_unix_mut(other).arrivals += 1;
-            wakes.extend(waiters(state, peer, Dir::Recv));
-            wakes.extend(waiters(state, peer, Dir::Send));
+    if let Some(peer) = unix.peer.filter(|_| ty != SOCK_DGRAM)
+        && let Some(other) = state.net.sockets.table.get_mut(&peer)
+    {
+        other.shutdown = SHUTDOWN_MASK;
+        if !unix.queue.is_empty() || embryo {
+            other.error = ECONNRESET;
         }
+        as_unix_mut(other).arrivals += 1;
+        wakes.extend(waiters(state, peer, Dir::Recv));
+        wakes.extend(waiters(state, peer, Dir::Send));
     }
     (wakes, rights)
 }
@@ -926,10 +926,8 @@ fn recv_stream(
         }
         let got = incoming.data.len();
         let mut wakes = Vec::new();
-        if consumed {
-            if let Some(peer) = peer {
-                wakes.extend(room_freed(&mut state, peer));
-            }
+        if consumed && let Some(peer) = peer {
+            wakes.extend(room_freed(&mut state, peer));
         }
         let socket = sock_mut(&mut state, handle)?;
         let done = got >= target

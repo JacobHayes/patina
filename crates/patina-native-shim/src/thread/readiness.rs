@@ -68,12 +68,12 @@ fn poll(fds: &mut [PollFd], timeout: Option<u64>, mut remaining: Option<&mut u64
             return -i64::from(error.into_posix());
         }
         let me = current_task();
-        if deadline.is_none() {
-            if let Some(timeout) = timeout {
-                let now = with_context_raw(|context| context.now(ClockKind::Monotonic))
-                    .unwrap_or_else(|_| fatal("readiness wait clock read failed"));
-                deadline = Some(now.saturating_add(timeout));
-            }
+        if deadline.is_none()
+            && let Some(timeout) = timeout
+        {
+            let now = with_context_raw(|context| context.now(ClockKind::Monotonic))
+                .unwrap_or_else(|_| fatal("readiness wait clock read failed"));
+            deadline = Some(now.saturating_add(timeout));
         }
         if deadline.is_some_and(|deadline| {
             with_context_raw(|context| context.now(ClockKind::Monotonic))
@@ -267,10 +267,10 @@ pub unsafe extern "C" fn patina_select(
         }
     }
     for (set, bits) in [read, write, except].into_iter().zip(&out) {
-        if !set.is_null() {
-            if let Err(errno) = crate::uaccess::write_slice(set as usize, bits) {
-                return -i64::from(errno);
-            }
+        if !set.is_null()
+            && let Err(errno) = crate::uaccess::write_slice(set as usize, bits)
+        {
+            return -i64::from(errno);
         }
     }
     count

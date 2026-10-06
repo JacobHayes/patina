@@ -403,7 +403,7 @@ fn native_shim_cache_base(
 /// A resolved rustc, as `rustc -vV` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RustcIdentity {
-    /// The `rustc -vV` banner line, e.g. `rustc 1.86.0 (05f9846f8 2025-03-31)`.
+    /// The `rustc -vV` banner line, e.g. `rustc 1.98.1 (48a229cea 2026-09-01)`.
     banner: String,
     /// The full `-vV` block: release, commit hash, host triple, LLVM version.
     pub(super) verbose: String,
@@ -926,18 +926,18 @@ mod tests {
             banner: "rustc 1.98.0 (stable)".into(),
             verbose: "rustc 1.98.0 (stable)\ncommit-hash: stable".into(),
         };
-        let msrv = RustcIdentity {
-            banner: "rustc 1.86.0 (msrv)".into(),
-            verbose: "rustc 1.86.0 (msrv)\ncommit-hash: msrv".into(),
+        let other = RustcIdentity {
+            banner: "rustc 1.98.1 (other)".into(),
+            verbose: "rustc 1.98.1 (other)\ncommit-hash: other".into(),
         };
         let base = native_shim_cache_base(workspace, None).unwrap();
         let stable_artifact =
             publish_native_shim(&archive, &base, "bundle-a", &stable, "debug").unwrap();
-        fs::write(&archive, b"msrv archive").unwrap();
-        let msrv_artifact =
-            publish_native_shim(&archive, &base, "bundle-a", &msrv, "debug").unwrap();
+        fs::write(&archive, b"other archive").unwrap();
+        let other_artifact =
+            publish_native_shim(&archive, &base, "bundle-a", &other, "debug").unwrap();
         let changed = publish_native_shim(&archive, &base, "bundle-b", &stable, "debug").unwrap();
-        assert_ne!(stable_artifact.staticlib, msrv_artifact.staticlib);
+        assert_ne!(stable_artifact.staticlib, other_artifact.staticlib);
         assert_ne!(stable_artifact.staticlib, changed.staticlib);
         let same_bytes_other_bundle =
             publish_native_shim(&archive, &base, "bundle-a", &stable, "debug").unwrap();
@@ -946,7 +946,10 @@ mod tests {
             fs::read(&stable_artifact.staticlib).unwrap(),
             b"stable archive"
         );
-        assert_eq!(fs::read(&msrv_artifact.staticlib).unwrap(), b"msrv archive");
+        assert_eq!(
+            fs::read(&other_artifact.staticlib).unwrap(),
+            b"other archive"
+        );
         // Equal banners and bytes still cannot alias different complete identities.
         let mut rebuilt_toolchain = stable.clone();
         rebuilt_toolchain
@@ -1279,14 +1282,14 @@ mod tests {
 
         // Differing banners are self-explanatory; no full dump.
         let other = RustcIdentity {
-            banner: "rustc 1.86.0 (05f9846f8 2025-03-31)".into(),
-            verbose: "rustc 1.86.0 (05f9846f8 2025-03-31)\ncommit-hash: 05f9846f8".into(),
+            banner: "rustc 1.98.1 (48a229cea 2026-09-01)".into(),
+            verbose: "rustc 1.98.1 (48a229cea 2026-09-01)\ncommit-hash: 48a229cea".into(),
         };
         let message =
             toolchain_mismatch_message(&shim, Path::new("/patina"), &other, Path::new("/g"));
-        assert!(message.contains("rustc 1.86.0"), "{message}");
+        assert!(message.contains("rustc 1.98.1"), "{message}");
         assert!(
-            !message.contains("commit-hash: 05f9846f8"),
+            !message.contains("commit-hash: 48a229cea"),
             "differing banners need no full dump:\n{message}"
         );
     }

@@ -355,7 +355,7 @@ pub(super) fn read(
     let copying = buffer != 0 && length != 0;
     let data: Vec<u8> = match &key.payload {
         Payload::User(data) => data.clone(),
-        Payload::Keyring(_) if copying && length <= PAGE_SIZE && length % 4 != 0 => {
+        Payload::Keyring(_) if copying && length <= PAGE_SIZE && !length.is_multiple_of(4) => {
             return Err(errno::EINVAL.into());
         }
         Payload::Keyring(links) if copying && length >= 4 * links.len() && links.len() > 1 => {

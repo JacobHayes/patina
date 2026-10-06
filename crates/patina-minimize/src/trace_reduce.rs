@@ -221,10 +221,11 @@ fn subtree_ids(bundle: &TraceBundle, root_index: usize) -> BTreeSet<String> {
     loop {
         let mut added = false;
         for timeline in &bundle.timelines {
-            if let Some(parent) = &timeline.parent {
-                if ids.contains(parent) && ids.insert(timeline.id.clone()) {
-                    added = true;
-                }
+            if let Some(parent) = &timeline.parent
+                && ids.contains(parent)
+                && ids.insert(timeline.id.clone())
+            {
+                added = true;
             }
         }
         if !added {

@@ -24,10 +24,10 @@ impl EventFilters {
         if !self.tasks.is_empty() && !self.tasks.contains(&event.lane) {
             return false;
         }
-        if let Some((start, end)) = self.seq {
-            if event.seq < start || event.seq > end {
-                return false;
-            }
+        if let Some((start, end)) = self.seq
+            && (event.seq < start || event.seq > end)
+        {
+            return false;
         }
         if self.notable && event.notable.is_none() {
             return false;

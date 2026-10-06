@@ -203,13 +203,13 @@ impl CampaignDepthMeta {
                 self.fuel_max, self.fuel_total
             ));
         }
-        if let Some(last) = self.last_new_depth_gen {
-            if last >= self.generations_applied {
-                return Err(format!(
-                    "last_new_depth_gen={last} is not below generations_applied={}",
-                    self.generations_applied
-                ));
-            }
+        if let Some(last) = self.last_new_depth_gen
+            && last >= self.generations_applied
+        {
+            return Err(format!(
+                "last_new_depth_gen={last} is not below generations_applied={}",
+                self.generations_applied
+            ));
         }
         let mut previous = None;
         for (generation, new_kinds, fuel_max) in &self.new_depth_log {

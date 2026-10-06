@@ -14,8 +14,8 @@ The current `keyring` facade (4.2.0) requires `v1` or `cli`, whose feature bundl
 include other credential stores. Its own documentation directs backend-specific
 applications to `keyring-core` plus the selected store instead. The guest uses
 that supported interface for the current backend, and also tests 3.6.3's
-single-crate Linux-only interface. This preserves the repository's Rust 1.86
-MSRV (the facade requires 1.88; the split backend requires 1.85).
+single-crate Linux-only interface. Both fit the repository's Rust 1.99 toolchain;
+the split keeps this guest focused on the Linux backend.
 
 Published sources inspected:
 

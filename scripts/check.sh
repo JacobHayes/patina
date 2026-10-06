@@ -17,7 +17,7 @@ export CARGO_TARGET_DIR="$check_target_base/serial"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/check.sh <full|fast|msrv>
+Usage: scripts/check.sh <full|fast>
        scripts/check.sh --selftest
 
   full  Full local pre-landing gate. Cheap checks run first, the e2e-heavy
@@ -26,8 +26,6 @@ Usage: scripts/check.sh <full|fast|msrv>
   fast  Inner-loop gate; excludes cargo-patina end_to_end and the seven native execution targets
         and the landing-only docs/packaging/testbed/full-e2e rungs.
         Targeted native ABI feedback: mise run check:native-abi.
-  msrv  Execute the complete Rust 1.86 suite. This is CI/final-gate evidence,
-        not part of the ordinary local landing gate.
 
 Successful rungs are silent; the overall result includes retained logs with
 per-rung commands and timings, and counts the conformance scenarios the host
@@ -42,7 +40,7 @@ EOF
 }
 
 case ${1:-} in
-  full|fast|msrv) profile=$1 ;;
+  full|fast) profile=$1 ;;
   --selftest) profile=selftest ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
@@ -191,29 +189,6 @@ run_fast_workspace_tests() {
     cargo test --quiet -p cargo-patina --locked --doc
 }
 
-run_msrv_check() {
-  cargo +1.86.0 check --workspace --all-targets --locked --target-dir "$check_target_base/msrv-check"
-}
-
-run_msrv_detector() {
-  cargo +1.86.0 test --quiet --target-dir "$check_target_base/msrv-check" -p cargo-patina \
-    --test self_sufficient_binary --locked
-}
-
-run_msrv_macro_feature_test() {
-  cargo +1.86.0 test --quiet --target-dir "$check_target_base/msrv-check" -p patina-dst \
-    --features macros --locked
-}
-
-run_msrv_full() {
-  # Keep MSRV artifacts separate from the stable serial and parallel target dirs.
-  # cargo-patina's internal shim cache independently keys itself by the complete
-  # toolchain.
-  local msrv_target="$check_target_base/msrv"
-  cargo +1.86.0 test --quiet --target-dir "$msrv_target" --workspace --locked &&
-    cargo +1.86.0 test --quiet --target-dir "$msrv_target" -p patina-dst --features macros --locked
-}
-
 # Class detector: successful child chatter stays in retained logs, while failed
 # children preserve their status, command, and original stdout/stderr.
 output_selftest() (
@@ -248,6 +223,8 @@ output_selftest() (
 run_full() {
   # Cheap, high-signal failures stay serial and stop before expensive work.
   run_rung 'output contract selftest' output_selftest || return $?
+  run_rung 'toolchain pin drift' python3 -B scripts/check-toolchain.py || return $?
+  run_rung 'toolchain pin drift selftest' python3 -B scripts/check-toolchain.py --selftest || return $?
   run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
   run_rung 'benchmark statistics tests' python3 -B scripts/test-bench.py || return $?
   run_rung 'file-size ratchet' python3 -B scripts/check-file-size.py || return $?
@@ -265,16 +242,14 @@ run_full() {
   run_rung 'crate packaging' cargo package --workspace --no-verify --locked --allow-dirty || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
-  run_rung 'MSRV cargo check' run_msrv_check || return $?
-  run_rung 'MSRV rodata detector' run_msrv_detector || return $?
-  run_rung 'MSRV macro feature test' run_msrv_macro_feature_test || return $?
 
-  # The cargo-patina end_to_end binary dominates the stable workspace suite and
+  # The cargo-patina end_to_end binary dominates the pinned workspace suite and
   # contends badly with other CPU-heavy cargo/check rungs, so the full workspace
   # test rung (the native_conformance scenarios included) runs alone. The
   # post-test group below gets one Cargo target dir per rung through
   # start_rung, plus each script's own runtime scratch paths.
-  run_rung 'stable workspace tests (includes e2e)' cargo test --quiet --workspace --locked || return $?
+  run_rung 'macro feature test' cargo test --quiet -p patina-dst --features macros --locked || return $?
+  run_rung 'pinned workspace tests (includes e2e)' cargo test --quiet --workspace --locked || return $?
 
   start_rung 'native ecosystem testbeds' scripts/check-native-testbeds.sh
   start_rung 'macro adopter testbed' testbeds/patina-macro-adopter/run.sh
@@ -287,6 +262,8 @@ run_full() {
 
 run_fast() {
   run_rung 'output contract selftest' output_selftest || return $?
+  run_rung 'toolchain pin drift' python3 -B scripts/check-toolchain.py || return $?
+  run_rung 'toolchain pin drift selftest' python3 -B scripts/check-toolchain.py --selftest || return $?
   run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
   run_rung 'benchmark statistics tests' python3 -B scripts/test-bench.py || return $?
   run_rung 'file-size ratchet' python3 -B scripts/check-file-size.py || return $?
@@ -302,7 +279,6 @@ run_fast() {
   # Run it alone, then group the short independent smoke/selftest rungs.
   run_rung 'workspace tests (no e2e/native execution targets)' run_fast_workspace_tests || return $?
   run_rung 'CLI flag drift' scripts/check-flag-drift.sh || return $?
-  run_rung 'MSRV cargo check' run_msrv_check || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
 
@@ -320,5 +296,4 @@ case $profile in
     run_full
     ;;
   fast) run_fast ;;
-  msrv) run_rung 'MSRV full compatibility suite' run_msrv_full ;;
 esac

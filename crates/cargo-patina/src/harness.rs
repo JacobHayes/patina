@@ -643,10 +643,10 @@ fn run_native_harness_seed(
         .get("message")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
-    if stderr.trim().is_empty() {
-        if let Some(message) = &message {
-            stderr.push_str(message);
-        }
+    if stderr.trim().is_empty()
+        && let Some(message) = &message
+    {
+        stderr.push_str(message);
     }
     Ok(HarnessSeedRun {
         exit_code,
@@ -813,10 +813,11 @@ fn native_harness_failure_block(failure: NativeHarnessFailure<'_>) -> String {
         block.push_str("\n  stdout tail:\n");
         block.push_str(&indent_tail(&failure.first.stdout, 10));
     }
-    if let Some(message) = &failure.latest.message {
-        if !message.trim().is_empty() && !failure.latest.stderr.contains(message) {
-            block.push_str(&format!("\n  message: {message}"));
-        }
+    if let Some(message) = &failure.latest.message
+        && !message.trim().is_empty()
+        && !failure.latest.stderr.contains(message)
+    {
+        block.push_str(&format!("\n  message: {message}"));
     }
     block
 }

@@ -284,23 +284,23 @@ pub(super) fn reconcile_replay_realtime_epoch(
     installed_clock_epoch: Option<u64>,
     recorded: u64,
 ) -> Result<u64, RuntimeError> {
-    if let Some(supplied) = config.realtime_epoch_nanos {
-        if supplied != recorded {
-            return Err(RuntimeError::Config(format!(
-                "replay --realtime-epoch ({supplied} ns) conflicts with the trace's recorded \
+    if let Some(supplied) = config.realtime_epoch_nanos
+        && supplied != recorded
+    {
+        return Err(RuntimeError::Config(format!(
+            "replay --realtime-epoch ({supplied} ns) conflicts with the trace's recorded \
                  realtime epoch ({recorded} ns); the trace is authoritative, so omit the \
                  flag (or supply the matching value)"
-            )));
-        }
+        )));
     }
-    if let Some(installed) = installed_clock_epoch {
-        if installed != recorded {
-            return Err(RuntimeError::Config(format!(
-                "the installed clock runs on realtime epoch {installed} ns but the trace \
+    if let Some(installed) = installed_clock_epoch
+        && installed != recorded
+    {
+        return Err(RuntimeError::Config(format!(
+            "the installed clock runs on realtime epoch {installed} ns but the trace \
                  was recorded on {recorded} ns; install a clock on the recorded epoch or \
                  let the runtime build it"
-            )));
-        }
+        )));
     }
     Ok(recorded)
 }
@@ -332,14 +332,14 @@ pub(super) fn reconcile_replay_hostname(
     config: &RuntimeConfig,
     recorded: &str,
 ) -> Result<String, RuntimeError> {
-    if let Some(supplied) = config.hostname.as_deref() {
-        if supplied != recorded {
-            return Err(RuntimeError::Config(format!(
-                "replay --hostname ({supplied:?}) conflicts with the trace's recorded node \
+    if let Some(supplied) = config.hostname.as_deref()
+        && supplied != recorded
+    {
+        return Err(RuntimeError::Config(format!(
+            "replay --hostname ({supplied:?}) conflicts with the trace's recorded node \
                  name ({recorded:?}); the trace is authoritative, so omit the flag (or \
                  supply the matching value)"
-            )));
-        }
+        )));
     }
     Ok(recorded.to_owned())
 }

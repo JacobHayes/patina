@@ -42,12 +42,12 @@ impl Replayer {
             });
         }
         let decisions = bundle.resolved_timeline(timeline)?;
-        if let Some(stop) = bundle.metadata.compute_stop {
-            if stop.steps != decisions.len() as u64 || stop.task.0 == 0 {
-                return Err(TraceError::Invalid(
-                    "compute stop must name a task at the end of its exact prefix".into(),
-                ));
-            }
+        if let Some(stop) = bundle.metadata.compute_stop
+            && (stop.steps != decisions.len() as u64 || stop.task.0 == 0)
+        {
+            return Err(TraceError::Invalid(
+                "compute stop must name a task at the end of its exact prefix".into(),
+            ));
         }
         let execution_seed = bundle
             .timelines

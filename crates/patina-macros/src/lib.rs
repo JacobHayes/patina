@@ -185,10 +185,10 @@ fn literal_to_cli_value(text: &str) -> Result<String, String> {
     if text.starts_with('"') {
         return parse_string_literal(text);
     }
-    if text.starts_with('r') {
-        if let Some(value) = parse_raw_string_literal(text) {
-            return Ok(value);
-        }
+    if text.starts_with('r')
+        && let Some(value) = parse_raw_string_literal(text)
+    {
+        return Ok(value);
     }
     if text
         .bytes()

@@ -245,7 +245,7 @@ forwards into the same dispatcher instead of its two-number allowlist.
   temporary directory and runs under a deadline; a scenario's forked children
   are reaped within one.
 - The tests run in the full workspace suite (`mise run check`, CI on Linux
-  x86_64 and arm64, the MSRV suite) and not in `check:fast`; streams and logs
+  x86_64 and arm64) and not in `check:fast`; streams and logs
   are kept under the target dir's `conformance/<scenario>/<vehicle>/`.
 
 ## 5. Foundations (serial where they touch the same code)

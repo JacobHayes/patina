@@ -100,7 +100,7 @@ const DEFAULT_NATIVE_FINGERPRINT: &str = "patina-native";
 const NATIVE_GUEST_ARGV0: &str = "patina-guest";
 // Native supervisor descriptors are inherited at their already-open fd numbers;
 // the child discovers them from `PATINA_TRACE_FD` / `PATINA_FS_IMAGE_FD`. Keeping
-// the actual numbers avoids a macOS Rust 1.86 fork/exec edge where pre-exec
+// the actual numbers avoids a macOS fork/exec edge where pre-exec
 // relocation onto fixed low fds could still leave those fds closed after exec.
 #[cfg(unix)]
 const F_GETFD: i32 = 1;
@@ -891,16 +891,17 @@ and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)
     // `--record` (exit 0, no file, no error), the worst outcome. Fail closed so the
     // caller cannot mistake it for a recording. (Only on success: a guest that
     // failed legitimately may not have reached the point of writing a trace.)
-    if let Mode::Record { path, .. } = &invocation.mode {
-        if captured.exit_code == 0 && !path.is_file() {
-            return Err(CliError(format!(
-                "record run exited 0 but wrote no trace to {}: the guest's runtime did \
+    if let Mode::Record { path, .. } = &invocation.mode
+        && captured.exit_code == 0
+        && !path.is_file()
+    {
+        return Err(CliError(format!(
+            "record run exited 0 but wrote no trace to {}: the guest's runtime did \
 not engage the recorder, so `--record` was a silent no-op. Ensure the package \
 integrates the Patina runtime, or record under the native runtime: cargo patina run \
 <DIR|Cargo.toml> --record <PATH>.",
-                path.display()
-            )));
-        }
+            path.display()
+        )));
     }
     let (trace_path, seed, timeline) = match &invocation.mode {
         Mode::Seeded { seed } => (None, Some(*seed), "main".to_string()),

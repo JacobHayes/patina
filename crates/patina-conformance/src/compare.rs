@@ -210,10 +210,10 @@ impl Normalizer {
                 ParsedNorm::Alternatives(_) => unreachable!("skipped above"),
             };
         }
-        if let Some(number) = retire {
-            if let Some(table) = self.labels.get_mut("fd") {
-                table.remove(&number);
-            }
+        if let Some(number) = retire
+            && let Some(table) = self.labels.get_mut("fd")
+        {
+            table.remove(&number);
         }
     }
 

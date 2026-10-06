@@ -52,14 +52,12 @@ impl FsDriver for CrashFs {
         if let (Ok(end), Some(path)) = (
             self.live.seek(fd, 0, SeekWhence::Current),
             self.open_paths.get(&fd).cloned(),
-        ) {
-            if let Some(start) = usize::try_from(end)
-                .ok()
-                .and_then(|end| end.checked_sub(written))
-            {
-                self.dirtied(fd, start as u64, written);
-                self.last_write = Some((path, start, written));
-            }
+        ) && let Some(start) = usize::try_from(end)
+            .ok()
+            .and_then(|end| end.checked_sub(written))
+        {
+            self.dirtied(fd, start as u64, written);
+            self.last_write = Some((path, start, written));
         }
         Ok(written)
     }
@@ -541,8 +539,8 @@ impl CrashFs {
                 .is_ok_and(|data| data.is_written(page * DIRTY_PAGE / BLOCK_SIZE))
         };
         let partial = [
-            (offset % DIRTY_PAGE != 0).then_some(offset / DIRTY_PAGE),
-            (offset.saturating_add(len) % DIRTY_PAGE != 0)
+            (!offset.is_multiple_of(DIRTY_PAGE)).then_some(offset / DIRTY_PAGE),
+            (!offset.saturating_add(len).is_multiple_of(DIRTY_PAGE))
                 .then_some((offset.saturating_add(len) - 1) / DIRTY_PAGE),
         ]
         .map(|page| page.filter(|page| written(*page)));
@@ -564,10 +562,10 @@ impl CrashFs {
     /// `ino` may have lost its last name or reference: once it is gone, its
     /// dirty pages go with it.
     fn forget_if_gone(&mut self, ino: Option<u64>) {
-        if let Some(ino) = ino.filter(|ino| self.dirty.contains_key(ino)) {
-            if self.live.inode_metadata(ino).is_err() {
-                self.dirty.remove(&ino);
-            }
+        if let Some(ino) = ino.filter(|ino| self.dirty.contains_key(ino))
+            && self.live.inode_metadata(ino).is_err()
+        {
+            self.dirty.remove(&ino);
         }
     }
 }

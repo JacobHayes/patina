@@ -494,10 +494,10 @@ impl ClassifyRules {
 /// would otherwise hide but can never downgrade one patina detected.
 pub fn classify(generation: &GenerationFacts, rules: &ClassifyRules) -> CampaignClass {
     let built_in = built_in_class(&generation.facts);
-    if matches!(built_in, CampaignClass::Ok | CampaignClass::Unclassified) {
-        if let Some(declared) = rules.declared(generation) {
-            return declared;
-        }
+    if matches!(built_in, CampaignClass::Ok | CampaignClass::Unclassified)
+        && let Some(declared) = rules.declared(generation)
+    {
+        return declared;
     }
     built_in
 }
@@ -570,10 +570,10 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
     //    be filed under another's class. Checked in a fixed order, so a generation
     //    with two vacuous planes always gets the same one class.
     for class in CampaignClass::ALL {
-        if let Some(plane) = class.vacuous_plane() {
-            if facts.plane_vacuous(plane) {
-                return *class;
-            }
+        if let Some(plane) = class.vacuous_plane()
+            && facts.plane_vacuous(plane)
+        {
+            return *class;
         }
     }
     // 8. Patina fail-closed refusal: the envelope attributed the failure to
@@ -850,12 +850,11 @@ pub(super) fn is_runtime_diagnostic(line: &str) -> bool {
     let line = line.trim_start();
     let head = line.split_whitespace().next().unwrap_or_default();
     // Tier 1: the runtime's end-of-run report family.
-    if let Some(name) = head.strip_prefix("PATINA_") {
-        if name.ends_with("_REPORT")
-            || matches!(name, "SCHEDULE_POLICY" | "LIFECYCLE" | "LIFECYCLE_EVENT")
-        {
-            return true;
-        }
+    if let Some(name) = head.strip_prefix("PATINA_")
+        && (name.ends_with("_REPORT")
+            || matches!(name, "SCHEDULE_POLICY" | "LIFECYCLE" | "LIFECYCLE_EVENT"))
+    {
+        return true;
     }
     // Tier 2: the supervisor's pre-run advisories.
     //
@@ -975,13 +974,12 @@ fn normalize_shape(line: &str) -> String {
 fn policy_annotation(output: &str) -> String {
     for line in output.lines() {
         let line = line.trim();
-        if line.starts_with("PATINA_SCHEDULE_POLICY") {
-            if let Some(depth) = line
+        if line.starts_with("PATINA_SCHEDULE_POLICY")
+            && let Some(depth) = line
                 .split_whitespace()
                 .find_map(|token| token.strip_prefix("bug_depth="))
-            {
-                return format!("bug_depth={depth}");
-            }
+        {
+            return format!("bug_depth={depth}");
         }
     }
     String::new()

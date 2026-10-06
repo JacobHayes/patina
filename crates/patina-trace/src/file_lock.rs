@@ -15,46 +15,49 @@ use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Take an exclusive `flock(2)` on `file`, held until it is closed. Two opens of
+/// Take an exclusive advisory lock on `file`, held until it is closed. Two opens of
 /// one file contend even inside one process. With `wait` false a lock held
 /// elsewhere is [`io::ErrorKind::WouldBlock`].
 pub fn lock_exclusive(file: &File, wait: bool) -> io::Result<()> {
-    lock(file, wait, 2)
+    retry_interrupted(|| {
+        if wait {
+            file.lock()
+        } else {
+            file.try_lock().map_err(lock_error)
+        }
+    })
 }
 
-/// Take a shared `flock(2)` on `file`. Other shared holders may coexist;
+/// Take a shared advisory lock on `file`. Other shared holders may coexist;
 /// exclusive holders contend. As with [`lock_exclusive`], correctness requires
 /// a filesystem with working advisory flock semantics (not all NFS mounts do).
 pub fn lock_shared(file: &File, wait: bool) -> io::Result<()> {
-    lock(file, wait, 1)
+    retry_interrupted(|| {
+        if wait {
+            file.lock_shared()
+        } else {
+            file.try_lock_shared().map_err(lock_error)
+        }
+    })
 }
 
-#[cfg(unix)]
-fn lock(file: &File, wait: bool, mode: i32) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-    const LOCK_NB: i32 = 4;
-    unsafe extern "C" {
-        fn flock(fd: i32, operation: i32) -> i32;
+fn lock_error(error: fs::TryLockError) -> io::Error {
+    // Cache eviction, campaign ownership and trace writers share this contract:
+    // contention stays WouldBlock rather than becoming an ordinary I/O failure.
+    match error {
+        fs::TryLockError::WouldBlock => io::ErrorKind::WouldBlock.into(),
+        fs::TryLockError::Error(error) => error,
     }
-    let operation = if wait { mode } else { mode | LOCK_NB };
+}
+
+fn retry_interrupted(mut acquire: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    // std's Unix File locks can return Interrupted; retain our wait policy.
     loop {
-        // SAFETY: `flock` only reads the descriptor, which `file` keeps open.
-        if unsafe { flock(file.as_raw_fd(), operation) } == 0 {
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
+        match acquire() {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => return result,
         }
     }
-}
-
-#[cfg(not(unix))]
-fn lock(_file: &File, _wait: bool, _mode: i32) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "file locking is unsupported on this platform",
-    ))
 }
 
 /// Whether `path` names the file `file` has open. False once the name is
@@ -150,13 +153,66 @@ pub fn remove_dead_scratch(path: &Path) {
 mod tests {
     use super::*;
 
+    // Class-level detector for every cache/campaign/trace lock caller: distinct
+    // handles must contend, and closing the holder must release ownership.
+    #[test]
+    fn exclusive_contention_and_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("exclusive");
+        let owner = File::create(&path).unwrap();
+        let contender = OpenOptions::new().write(true).open(&path).unwrap();
+        let reader = File::open(&path).unwrap();
+        lock_exclusive(&owner, true).unwrap();
+        assert!(matches!(
+            contender.try_lock(),
+            Err(fs::TryLockError::WouldBlock)
+        ));
+        assert_eq!(
+            lock_exclusive(&contender, false).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            lock_shared(&reader, false).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(owner);
+        lock_exclusive(&contender, false).unwrap();
+        assert_eq!(
+            lock_shared(&reader, false).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(contender);
+        lock_shared(&reader, false).unwrap();
+    }
+
+    #[test]
+    fn interruptions_retry_but_other_errors_propagate() {
+        let mut calls = 0;
+        retry_interrupted(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(io::ErrorKind::Interrupted.into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
+        assert_eq!(
+            retry_interrupted(|| Err(io::ErrorKind::PermissionDenied.into()))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
     #[test]
     fn shared_holders_coexist_and_exclusive_holders_contend() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("shared");
         let first = File::create(&path).unwrap();
         let second = OpenOptions::new().write(true).open(&path).unwrap();
-        lock_shared(&first, false).unwrap();
+        lock_shared(&first, true).unwrap();
         lock_shared(&second, false).unwrap();
         let contender = OpenOptions::new().write(true).open(&path).unwrap();
         assert_eq!(

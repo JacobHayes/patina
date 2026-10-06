@@ -217,14 +217,13 @@ impl Instance {
         } else {
             // `event_compare`: the cookie is not compared, and nothing merges
             // into an `IN_IGNORED`.
-            if let Some(last) = self.queue.back() {
-                if last.mask & IN_IGNORED == 0
-                    && last.mask == event.mask
-                    && last.wd == event.wd
-                    && last.name == event.name
-                {
-                    return false;
-                }
+            if let Some(last) = self.queue.back()
+                && last.mask & IN_IGNORED == 0
+                && last.mask == event.mask
+                && last.wd == event.wd
+                && last.name == event.name
+            {
+                return false;
             }
             self.queue.push_back(event);
         }
@@ -327,10 +326,10 @@ impl Inotify {
     fn inode_removed(&mut self, ino: u64) -> Vec<TaskId> {
         let mut wake = self.report(&[Target::Inode(ino)], IN_DELETE_SELF, 0, false);
         for instance in self.instances.values_mut() {
-            if let Some(&wd) = instance.by_ino.get(&ino) {
-                if instance.destroy(wd) {
-                    wake.extend(instance.waiters.drain(..));
-                }
+            if let Some(&wd) = instance.by_ino.get(&ino)
+                && instance.destroy(wd)
+            {
+                wake.extend(instance.waiters.drain(..));
             }
         }
         wake

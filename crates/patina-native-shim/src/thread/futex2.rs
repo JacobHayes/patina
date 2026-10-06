@@ -84,7 +84,7 @@ fn fits(value: u64) -> Result<u32, i64> {
 /// page the caller can read (`get_user_pages_fast`: `EFAULT`). A private
 /// key reads nothing, so a wake by it names any user address.
 fn key(word: &Word) -> Result<(), i64> {
-    if word.addr % 4 != 0 {
+    if !word.addr.is_multiple_of(4) {
         return Err(fail(EINVAL));
     }
     if !crate::uaccess::access_ok(word.addr, 4) {

@@ -228,7 +228,7 @@ pub(crate) fn build_coverage_map(
         // SAFETY: pc-table arrays are process-lifetime static storage. `len` is
         // the number of `(pc, flags)` pairs, so the raw word slice is `len * 2`.
         let words = unsafe { slice::from_raw_parts(range.start as *const usize, range.len * 2) };
-        for pair in words.chunks_exact(2) {
+        for pair in words.as_chunks::<2>().0.iter() {
             let raw_pc = pair[0];
             let delta = if raw_pc <= 1 {
                 // On current Darwin/LLVM builds a handful of unexecuted guard

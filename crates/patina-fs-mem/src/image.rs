@@ -185,12 +185,12 @@ fn validate_decoded(entries: &[FsImageEntry]) -> Result<(), FsImageError> {
     for entry in entries {
         let path = entry.path();
         validate_entry_path(path)?;
-        if let Some(previous) = previous {
-            if path <= previous {
-                return Err(FsImageError::Malformed(
-                    "entries are not strictly sorted by path (unsorted or duplicate)",
-                ));
-            }
+        if let Some(previous) = previous
+            && path <= previous
+        {
+            return Err(FsImageError::Malformed(
+                "entries are not strictly sorted by path (unsorted or duplicate)",
+            ));
         }
         previous = Some(path);
     }

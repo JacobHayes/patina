@@ -498,18 +498,17 @@ impl Context {
                 }
             }
         }
-        if !self.recording_flushed {
-            if let Execution::Record { recorder, sink } = &mut self.execution {
-                self.recording_flushed = true;
-                let result = match sink {
-                    RecordSink::Transport(transport) => transport.write_prefix(recorder),
-                    RecordSink::Path { path, .. } => std::fs::File::create(path).and_then(|file| {
-                        recorder.write_prefix(file).map_err(std::io::Error::other)
-                    }),
-                };
-                if result.is_err() {
-                    return RuntimeError::ComputeStopExport;
-                }
+        if !self.recording_flushed
+            && let Execution::Record { recorder, sink } = &mut self.execution
+        {
+            self.recording_flushed = true;
+            let result = match sink {
+                RecordSink::Transport(transport) => transport.write_prefix(recorder),
+                RecordSink::Path { path, .. } => std::fs::File::create(path)
+                    .and_then(|file| recorder.write_prefix(file).map_err(std::io::Error::other)),
+            };
+            if result.is_err() {
+                return RuntimeError::ComputeStopExport;
             }
         }
         RuntimeError::ComputeBound { task, steps }

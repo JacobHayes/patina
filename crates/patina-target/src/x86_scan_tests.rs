@@ -639,21 +639,22 @@ fn x86_decoder_matches_objdump_external_corpus() {
         let trimmed = line.trim_start();
         if let Some((addr_hex, rest)) = trimmed.split_once(":\t") {
             let is_instruction_line = rest.contains('\t');
-            if addr_hex.bytes().all(|c| c.is_ascii_hexdigit()) && is_instruction_line {
-                if let Ok(addr) = u64::from_str_radix(addr_hex, 16) {
-                    if addr >= base && addr < base + data.len() as u64 {
-                        golden.insert(addr);
-                        // Read the full instruction from the ELF, so
-                        // prefixes wrapping onto objdump continuation
-                        // rows cannot hide its EVEX prefix.
-                        if corpus_evex_map(&data[(addr - base) as usize..]).is_some() {
-                            evex_count += 1;
-                        }
-                        let (_, mnemonic) = rest.split_once('\t').unwrap();
-                        if mnemonic.split_whitespace().next() == Some("syscall") {
-                            syscalls.insert(format!("instruction@.text+0x{:x}", addr - base));
-                        }
-                    }
+            if addr_hex.bytes().all(|c| c.is_ascii_hexdigit())
+                && is_instruction_line
+                && let Ok(addr) = u64::from_str_radix(addr_hex, 16)
+                && addr >= base
+                && addr < base + data.len() as u64
+            {
+                golden.insert(addr);
+                // Read the full instruction from the ELF, so
+                // prefixes wrapping onto objdump continuation
+                // rows cannot hide its EVEX prefix.
+                if corpus_evex_map(&data[(addr - base) as usize..]).is_some() {
+                    evex_count += 1;
+                }
+                let (_, mnemonic) = rest.split_once('\t').unwrap();
+                if mnemonic.split_whitespace().next() == Some("syscall") {
+                    syscalls.insert(format!("instruction@.text+0x{:x}", addr - base));
                 }
             }
         }

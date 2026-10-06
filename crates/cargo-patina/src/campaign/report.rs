@@ -498,14 +498,14 @@ fn print_edge_coverage_summary(edge_coverage: &EdgeCoverageState, artifact_path:
 }
 
 fn append_edge_coverage_complete(line: &mut String, edge_coverage: &EdgeCoverageState) {
-    if let EdgeCoverageState::Active(store) = edge_coverage {
-        if let Some(meta) = store.meta() {
-            line.push_str(&format!(
-                " covered_permille={} plateaued={}",
-                meta.covered_permille(),
-                meta.plateaued as u8,
-            ));
-        }
+    if let EdgeCoverageState::Active(store) = edge_coverage
+        && let Some(meta) = store.meta()
+    {
+        line.push_str(&format!(
+            " covered_permille={} plateaued={}",
+            meta.covered_permille(),
+            meta.plateaued as u8,
+        ));
     }
 }
 

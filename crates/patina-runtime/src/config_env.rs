@@ -498,10 +498,10 @@ impl RuntimeConfig {
     where
         F: Fn(&str) -> Option<String>,
     {
-        if let Some(value) = get(ENV_FACTS) {
-            if !value.trim().is_empty() {
-                self.facts_path = Some(std::path::PathBuf::from(value));
-            }
+        if let Some(value) = get(ENV_FACTS)
+            && !value.trim().is_empty()
+        {
+            self.facts_path = Some(std::path::PathBuf::from(value));
         }
         self
     }

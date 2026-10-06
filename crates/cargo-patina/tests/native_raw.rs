@@ -108,7 +108,7 @@ mod linux {
             let out = g.assert_seed_repeatability(1, 2, &[]);
             let fields = assert_fields(&out, "PR_GET_AUXV ", &["len", "random"]);
             let len: usize = fields["len"].parse().unwrap();
-            assert!(len > 0 && len <= 4096 && len % 16 == 0);
+            assert!(len > 0 && len <= 4096 && len.is_multiple_of(16));
             assert_lower_hex(fields["random"], 32);
         } else {
             g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);

@@ -110,24 +110,24 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
     // parsing family, so the native-only restriction is enforced here, where the
     // artifact family is finally known, and the refusal names the flag the
     // operator typed rather than silently dropping it from every generation.
-    if state.artifact.family != "native" {
-        if let Some(flag) = non_native_invocation_flag(&state.spec) {
-            return Err(CliError::usage(format!(
-                "{flag} is a native `run` option, but this campaign's artifact is a {} module: \
+    if state.artifact.family != "native"
+        && let Some(flag) = non_native_invocation_flag(&state.spec)
+    {
+        return Err(CliError::usage(format!(
+            "{flag} is a native `run` option, but this campaign's artifact is a {} module: \
                  the native invocation controls belong to the native supervisor; sweep a \
                  native artifact to use it",
-                state.artifact.family
-            )));
-        }
+            state.artifact.family
+        )));
     }
 
-    if let CampaignMode::Resume = mode {
-        if state.generations_done == state.spec.generations {
-            return Err(CliError(format!(
-                "campaign complete at {}/{}; use --extend N to continue",
-                state.generations_done, state.spec.generations
-            )));
-        }
+    if let CampaignMode::Resume = mode
+        && state.generations_done == state.spec.generations
+    {
+        return Err(CliError(format!(
+            "campaign complete at {}/{}; use --extend N to continue",
+            state.generations_done, state.spec.generations
+        )));
     }
     if let CampaignMode::Extend { additional } = mode {
         state.spec.generations = state

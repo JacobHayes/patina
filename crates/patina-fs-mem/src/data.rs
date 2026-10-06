@@ -286,10 +286,8 @@ impl FileData {
                     .iter()
                     .any(|byte| *byte != 0)
             });
-        if dirty {
-            if let Some(block) = self.written.get_mut(index) {
-                Arc::make_mut(block)[within..].fill(0);
-            }
+        if dirty && let Some(block) = self.written.get_mut(index) {
+            Arc::make_mut(block)[within..].fill(0);
         }
     }
 

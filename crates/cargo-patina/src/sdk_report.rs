@@ -383,10 +383,10 @@ pub(crate) fn parse_exercised_file(path: &Path) -> Result<ExercisedSource, CliEr
             path.display()
         ))
     })?;
-    if let Ok(json) = serde_json::from_str::<Value>(&text) {
-        if json.get("schema").and_then(Value::as_str) == Some(CAMPAIGN_SITES_SCHEMA) {
-            return exercised_source_from_store(path, &json);
-        }
+    if let Ok(json) = serde_json::from_str::<Value>(&text)
+        && json.get("schema").and_then(Value::as_str) == Some(CAMPAIGN_SITES_SCHEMA)
+    {
+        return exercised_source_from_store(path, &json);
     }
     parse_raw_report_file(path, &text)
 }

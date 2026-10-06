@@ -930,7 +930,7 @@ const CPUMASK_BYTES: usize = std::mem::size_of::<u64>();
 /// # Safety
 /// `mask` must be NULL or writable for `len` bytes.
 pub(crate) unsafe fn getaffinity(pid: i32, len: u32, mask: *mut u8) -> i64 {
-    if (len as usize) * 8 < 1 || len as usize % CPUMASK_BYTES != 0 {
+    if (len as usize) * 8 < 1 || !(len as usize).is_multiple_of(CPUMASK_BYTES) {
         return errno(EINVAL);
     }
     if find(&lock_state(), pid).is_none() {

@@ -33,10 +33,10 @@ pub unsafe extern "C" fn patina_stdio_write(
     // Runtime diagnostics can print with Context/ThreadRuntime locked. They use
     // the same captured sink, but must not schedule or re-enter either lock.
     // Guest writes still take their ordinary scheduling point.
-    if !in_shim_critical() {
-        if let Err(errno) = thread::sched_point() {
-            return fail(errno) as isize;
-        }
+    if !in_shim_critical()
+        && let Err(errno) = thread::sched_point()
+    {
+        return fail(errno) as isize;
     }
     let bytes = if length == 0 {
         &[]

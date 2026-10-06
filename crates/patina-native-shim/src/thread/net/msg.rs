@@ -119,7 +119,9 @@ fn iovecs(iov: usize, count: usize) -> Result<Vec<(usize, usize)>, c_int> {
     }
     let raw = uaccess::read_bytes(iov, count * 16)?;
     let segments: Vec<(usize, usize)> = raw
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .map(|segment| (usize_at(segment, 0), usize_at(segment, 8)))
         .collect();
     if segments
@@ -195,8 +197,8 @@ fn control(handle: c_int, bytes: &[u8]) -> Result<Control, c_int> {
                         if rights.len() + count > SCM_MAX_FD {
                             return Err(EINVAL);
                         }
-                        for fd in data.chunks_exact(4) {
-                            let fd = i32::from_ne_bytes(fd.try_into().unwrap());
+                        for fd in data.as_chunks::<4>().0.iter() {
+                            let fd = i32::from_ne_bytes(*fd);
                             let desc = crate::fd_table()
                                 .lock()
                                 .resolve(fd)
@@ -648,10 +650,10 @@ pub extern "C" fn patina_sock_recvmmsg(
         match error {
             Some(errno) if received == 0 => Err(errno),
             Some(errno) => {
-                if errno != EWOULDBLOCK {
-                    if let Some(socket) = lock_state().net.sockets.table.get_mut(&handle) {
-                        socket.error = errno;
-                    }
+                if errno != EWOULDBLOCK
+                    && let Some(socket) = lock_state().net.sockets.table.get_mut(&handle)
+                {
+                    socket.error = errno;
                 }
                 Ok(received as i64)
             }

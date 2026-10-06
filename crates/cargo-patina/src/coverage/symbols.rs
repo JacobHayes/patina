@@ -82,10 +82,10 @@ fn demangle_symbol(name: &str) -> String {
     if let Ok(demangled) = rustc_demangle::try_demangle(name) {
         return format!("{demangled:#}");
     }
-    if let Some(stripped) = name.strip_prefix('_') {
-        if let Ok(demangled) = rustc_demangle::try_demangle(stripped) {
-            return format!("{demangled:#}");
-        }
+    if let Some(stripped) = name.strip_prefix('_')
+        && let Ok(demangled) = rustc_demangle::try_demangle(stripped)
+    {
+        return format!("{demangled:#}");
     }
     name.trim_start_matches('_').to_string()
 }

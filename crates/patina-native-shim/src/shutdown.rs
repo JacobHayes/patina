@@ -256,11 +256,11 @@ pub(crate) fn flush_captured_stdio() -> io::Result<()> {
 /// guest-held stdio lock, or call the guest's C-stream salvage callback. Emit
 /// only the already captured prefix if available; leave all storage in place.
 pub(crate) fn flush_observed_stdio() {
-    if let Some(slot) = STDIO.get() {
-        if let Some(capture) = slot.try_lock() {
-            let _ = host_write_all(1, &capture.pending[0]);
-            let _ = host_write_all(2, &capture.pending[1]);
-        }
+    if let Some(slot) = STDIO.get()
+        && let Some(capture) = slot.try_lock()
+    {
+        let _ = host_write_all(1, &capture.pending[0]);
+        let _ = host_write_all(2, &capture.pending[1]);
     }
 }
 

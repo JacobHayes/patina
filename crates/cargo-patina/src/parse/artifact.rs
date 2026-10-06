@@ -484,26 +484,26 @@ pub(crate) fn locate_positionals(
         if argument == "--" {
             break;
         }
-        if let Some(text) = argument.to_str() {
-            if text.starts_with('-') {
-                let name = cli::split_name(text);
-                match help::flag_arity(verb, name) {
-                    Some(help::Value::Required(..)) if name == text => {
-                        // A registered value-taking flag consumes the next token.
-                        index += 2;
-                        continue;
-                    }
-                    Some(_) => {
-                        // A registered valueless/optional flag, or one with an
-                        // inline `=VALUE`: it consumes no separate token.
-                        index += 1;
-                        continue;
-                    }
-                    None => {
-                        // Unknown flag: stop conservatively.
-                        stop = Some(index);
-                        break;
-                    }
+        if let Some(text) = argument.to_str()
+            && text.starts_with('-')
+        {
+            let name = cli::split_name(text);
+            match help::flag_arity(verb, name) {
+                Some(help::Value::Required(..)) if name == text => {
+                    // A registered value-taking flag consumes the next token.
+                    index += 2;
+                    continue;
+                }
+                Some(_) => {
+                    // A registered valueless/optional flag, or one with an
+                    // inline `=VALUE`: it consumes no separate token.
+                    index += 1;
+                    continue;
+                }
+                None => {
+                    // Unknown flag: stop conservatively.
+                    stop = Some(index);
+                    break;
                 }
             }
         }
@@ -584,25 +584,25 @@ pub(crate) fn reject_stranded_artifact(verb: &str, tail: &[OsString]) -> Result<
         if argument == "--" {
             break;
         }
-        if let Some(text) = argument.to_str() {
-            if text.starts_with('-') {
-                let name = cli::split_name(text);
-                match help::flag_arity(verb, name) {
-                    Some(help::Value::Required(..)) if name == text => {
-                        index += 2;
-                        after_unknown_flag = false;
-                        continue;
-                    }
-                    Some(_) => {
-                        index += 1;
-                        after_unknown_flag = false;
-                        continue;
-                    }
-                    None => {
-                        after_unknown_flag = true;
-                        index += 1;
-                        continue;
-                    }
+        if let Some(text) = argument.to_str()
+            && text.starts_with('-')
+        {
+            let name = cli::split_name(text);
+            match help::flag_arity(verb, name) {
+                Some(help::Value::Required(..)) if name == text => {
+                    index += 2;
+                    after_unknown_flag = false;
+                    continue;
+                }
+                Some(_) => {
+                    index += 1;
+                    after_unknown_flag = false;
+                    continue;
+                }
+                None => {
+                    after_unknown_flag = true;
+                    index += 1;
+                    continue;
                 }
             }
         }

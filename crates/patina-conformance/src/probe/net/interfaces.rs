@@ -117,7 +117,10 @@ impl Probe {
         );
         let mut entries = Vec::new();
         if result >= 0 {
-            for entry in buf[..(conf.len.max(0) as usize).min(buf.len())].chunks_exact(IFREQ) {
+            for entry in buf[..(conf.len.max(0) as usize).min(buf.len())]
+                .as_chunks::<IFREQ>()
+                .0
+            {
                 let end = entry[..IFNAMSIZ]
                     .iter()
                     .position(|b| *b == 0)
@@ -136,7 +139,7 @@ impl Probe {
             .arg("find", find);
         let builder = if result >= 0 {
             builder
-                .field("whole_entries", conf.len as usize % IFREQ == 0)
+                .field("whole_entries", (conf.len as usize).is_multiple_of(IFREQ))
                 .field(
                     "found",
                     found.map_or(Value::Null, |(_, ip)| Value::from(ip.to_string())),

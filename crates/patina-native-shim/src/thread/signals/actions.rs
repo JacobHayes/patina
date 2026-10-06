@@ -237,10 +237,10 @@ pub unsafe extern "C" fn patina_signal_altstack(stack: *const Stack, old: *mut S
         previous
     };
     // The new stack took, whether or not the old one can be copied out.
-    if let Some(stack) = stack {
-        if trap_routed(SIGSEGV) {
-            fault::registered(stack);
-        }
+    if let Some(stack) = stack
+        && trap_routed(SIGSEGV)
+    {
+        fault::registered(stack);
     }
     if !old.is_null() && crate::uaccess::write(old as usize, &previous).is_err() {
         return -i64::from(EFAULT);

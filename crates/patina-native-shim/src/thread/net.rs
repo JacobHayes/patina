@@ -649,11 +649,11 @@ pub extern "C" fn patina_sock_accept(fd: c_int, addr: usize, len_ptr: usize, fla
             let mut state = lock_state();
             install(&mut state, accepted, nonblocking_new, cloexec)?
         };
-        if addr != 0 {
-            if let Err(errno) = addr::copy_out(&peer, addr, len_ptr) {
-                crate::patina_close(new_fd);
-                return Err(errno);
-            }
+        if addr != 0
+            && let Err(errno) = addr::copy_out(&peer, addr, len_ptr)
+        {
+            crate::patina_close(new_fd);
+            return Err(errno);
         }
         Ok(i64::from(new_fd))
     })())

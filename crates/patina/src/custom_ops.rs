@@ -244,8 +244,7 @@ mod custom_op_ffi {
 /// lives here, in the guest's build. JSON rather than a denser binary format
 /// because a custom op's value is triage: the key and result stay legible in
 /// `cargo patina trace`, which a non-self-describing encoding would reduce to a
-/// blob. It is also already in the workspace, so it adds no third-party crate
-/// and no MSRV risk to a 1.86 build.
+/// blob. It is also already in the workspace, so it adds no third-party crate.
 ///
 /// # Panics
 ///

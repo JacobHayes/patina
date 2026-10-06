@@ -183,10 +183,10 @@ pub extern "C" fn patina_fcntl_owner_get(raw_fd: c_int, ex: c_int, owner: *mut c
     if let Err(errno) = fdget(raw_fd) {
         return fail(errno);
     }
-    if ex != 0 {
-        if let Err(errno) = uaccess::write(owner as usize, &[0i32; 2]) {
-            return fail(errno);
-        }
+    if ex != 0
+        && let Err(errno) = uaccess::write(owner as usize, &[0i32; 2])
+    {
+        return fail(errno);
     }
     set_errno(0);
     0
@@ -553,7 +553,7 @@ fn handoff_key_from_control() -> Result<HandoffSealKey, String> {
         ));
     }
     let mut bytes = [0_u8; 32];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let text = std::str::from_utf8(chunk).map_err(|_| {
             format!(
                 "{} must be 64 lowercase hex characters",

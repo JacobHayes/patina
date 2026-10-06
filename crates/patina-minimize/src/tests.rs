@@ -144,7 +144,7 @@ pub(super) fn shapes() -> Vec<Shape> {
         values.len() >= 3
     }
     fn marker_and_even_length(values: &[u64]) -> bool {
-        values.contains(&999) && values.len() % 2 == 0
+        values.contains(&999) && values.len().is_multiple_of(2)
     }
     fn every_even_value_survives(values: &[u64]) -> bool {
         // Only the odd decisions are droppable, and they alternate with the

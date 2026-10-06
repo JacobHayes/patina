@@ -6,7 +6,7 @@ Lookup map — the capability levels and the cross-cutting sections:
 
 | Section | Scope | Status |
 |---|---|---|
-| [V0](#v0-workspace-quality) | workspace quality gates (fmt/clippy/tests/docs/MSRV + validation scripts) | standing |
+| [V0](#v0-workspace-quality) | workspace quality gates (fmt/clippy/tests/docs/toolchain pins + validation scripts) | standing |
 | [V1](#v1-deterministic-rust-level-vertical-slice) | deterministic vertical slice at the explicit `Context` boundary | complete |
 | [V2](#v2-cooperative-scheduling-and-simulation-drivers) | cooperative scheduling, SimNet, wrappers, branching, async executor | complete |
 | [V3](#v3-wasi-patina-target) | WASI Preview 1 target | complete (entire audited surface) |
@@ -41,14 +41,15 @@ Required locally before landing (`mise run check`):
   `--target aarch64-apple-darwin`, so Linux-cfg, per-architecture and Darwin-cfg
   code lint from any host)
 - `cargo doc --workspace --no-deps`
-- `cargo test --workspace` on the stable toolchain, including the
+- `cargo test --workspace` on the pinned toolchain, including the
   `cargo-patina` `end_to_end` integration-test binary
 - `scripts/check-flag-drift.sh` (CLI flag drift gate over the user-facing docs and every shell script)
 - packaging (`cargo package --workspace --no-verify`) so manifest/readme/include
   drift fails before release work
-- local MSRV compatibility: `cargo +1.86.0 check --workspace --all-targets`, the
-  `cargo-patina` self-sufficient-binary rodata detector, and the `patina-dst`
-  macros feature test
+- `scripts/check-toolchain.py` checks `mise.lock`, `rust-toolchain.toml`, and
+  the active compiler; its selftest plants mismatches in each pin and a missing
+  lockfile. The self-sufficient-binary rodata detector runs in workspace tests,
+  and the `patina-dst` macros feature test runs on the pinned toolchain
 - `scripts/validate-wasi.sh` when validating V3
 - `mise run check:native-abi` for focused native ABI feedback; the full native acceptance tests and ecosystem testbeds are included in `mise run check`
 - `scripts/smoke-cross-target.sh` when validating cross-target determinism
@@ -57,19 +58,18 @@ Required locally before landing (`mise run check`):
 
 `mise run check:fast` is the inner loop: fmt, the four clippy passes, every workspace
 test except cargo-patina's e2e/native execution targets (conformance among them),
-the cheap selftests, CLI flag drift, MSRV `cargo check`, WASI validation, and
+the cheap selftests, CLI flag drift, toolchain pin drift, WASI validation, and
 cross-target smoke. It is intentionally not landing evidence.
 
-`mise run msrv` executes the complete Rust 1.86 workspace suite and the macros
-feature test. That full MSRV suite is CI/final-gate evidence rather than part of
-the ordinary local landing gate; the local gate covers the measured MSRV-only
-classes seen so far (compile compatibility, the self-sufficient-binary rodata
-detector, and the macros feature surface).
+Every CI job installs the toolchain through mise using the committed lock.
+The Rust toolchain, components and targets live inside a cached mise directory,
+with isolated Rust homes on hosted and self-hosted runners. Cargo build caches
+include the pin files in their keys and only main writes caches.
 
 These checks must run without network access after dependencies have been
 fetched. For local development, `mise run setup` installs the Rust
-toolchains/targets needed by these gates. After cheap failure checks, the full
-local gate runs the e2e-heavy stable workspace test rung alone, then overlaps
+toolchain/components/targets needed by these gates. After cheap failure checks, the full
+local gate runs the e2e-heavy pinned workspace test rung alone, then overlaps
 runtime/testbed rungs with independent scratch/output paths. Successful rung logs
 are retained with commands and timings; the console shows one overall result
 and the log directory, plus a failed rung's complete log.
@@ -158,9 +158,11 @@ Native toolchain propagation has a class-level e2e detector:
 `a_hostile_per_directory_proxy_builds_with_the_guest_compiler` makes ambient
 shim-directory rustc and PATH Cargo fail, so native metadata, compiler probes,
 and both builds must use the materialized guest invocation. The real rustup
-pairing, `a_rust_toolchain_pin_builds_with_the_guest_compiler`, builds an
-MSRV-pinned guest against a different ambient default (loudly skipped when
-rustup/MSRV is unavailable). Both failed before propagation and pass with it.
+pairing, `a_rust_toolchain_pin_builds_with_the_guest_compiler`, builds a
+repository-version-pinned guest against a different ambient default (loudly
+skipped when rustup/the pinned toolchain is unavailable or the default agrees).
+The hostile proxy remains the non-skipping class detector. Both failed before
+propagation and pass with it.
 `an_unverifiable_guest_compiler_is_refused_before_the_link` and
 `unmaterializable_guest_toolchains_refuse_without_fallback` plant identity
 mismatches in each verification directory, failed guest queries, an empty
@@ -205,7 +207,7 @@ integration testing, with reviewable guests in `testbeds/native-boundary/`:
 - `shim_host_alias`: compiled-object doctrine scan and planted leak.
 
 The seven native targets run in the full `check` workspace-test rung, in
-both Linux CI architectures on stable and MSRV, and in the stable macOS job.
+both Linux CI architectures and in the macOS job on the pinned toolchain.
 `check:fast` retains the cheap `shim_host_alias` object scan, not native execution.
 `mise run check:native-abi` selects just `native_abi`; a libtest filter selects an
 individual proof. The guest/build/gate map is in
@@ -527,7 +529,7 @@ scrubbed PR_GET_AUXV and denied prctl, legacy filesystem spellings, FIFO rows,
 creation-mode enforcement and raw/libc fcntl parity. Raw eventfd/epoll semantics
 live in the conformance scenario `readiness/epoll`, including the exact
 zero-creation-flags / 0xC0FFEE userdata case through the raw vehicle (not one of
-its declared HUP gaps), which every x86_64 CI row runs, stable and MSRV.
+its declared HUP gaps), which every x86_64 CI test row runs.
 
 Directory-descriptor-relative (`*at`) resolution is proved by a second committed MRE, `testbeds/cap-std-dirfd/` — a std + `cap-std` guest. `cap-std` is the capability-based filesystem API: it opens ONE directory through std (libc → the C interposer) and then resolves every path component itself against that descriptor with raw `openat(dirfd, name, O_PATH|O_DIRECTORY|O_NOFOLLOW)`, `statx(dirfd, name)`, `readlinkat(dirfd, name)`, `faccessat2(dirfd, ".")`, `mkdirat`/`unlinkat`/`renameat`/`symlinkat`, and `getdents64` over a descriptor derived by `fcntl(dirfd, F_GETFL)` + `openat(dirfd, ".")`. One guest therefore exercises BOTH entry paths on the SAME descriptor, which is exactly the property under test: the two only agree because they share one directory-descriptor table in the runtime (`patina_diropen`/`patina_dirpath`). Its `run-patina.sh` skips **loudly and counted** (`cap-std-dirfd: SKIPPED 1 …`) on non-SUD/non-Linux hosts and, under SUD, asserts audit→`SUD-managed`, byte-identical same-seed repeats on **stdout AND the captured stderr** (a refusal diagnostic lands on the latter, so comparing stdout alone would not notice a nondeterministic deny), and byte-identical record→replay, printing `CAPSTD_LEGS_RAN branch=sud …`; the full landing gate runs it in `native ecosystem testbeds`, and every Linux CI row runs it through the receipt-checking wrapper. RED before the resolution landed: with every `*at` row modeling `AT_FDCWD` only and the libc `open` refusing `O_PATH`, the guest dies on its FIRST call — `Dir::open_ambient_dir: Function not implemented (os error 38)`. It also carries the `O_PATH` leg (`opath=nocost,list=r,walk=x`): a `0o400` directory is listable but not traversable, a `0o100` one is traversable but not listable, and a `0o000` one still accepts a path-only open whose descriptor then refuses to be read — RED when both directory opens were the same open, which charged `x` and handed back a readable handle. The deny-string parity rule the SUD layer depends on (a raw guest and a libc guest must record the same captured stderr for the same refusal) is itself gated: a unit test extracts the C `O_PATH` deny macro from `patina_posix.c` and compares it byte-for-byte with the SUD constant, and is RED-proven by perturbing either spelling.
 
@@ -728,13 +730,13 @@ Any failure aborts replay. There is no permissive fallback and no record-on-miss
 Before a release, run the V2 end-to-end fixture for:
 
 - debug and release profiles;
-- the minimum supported Rust version and the repository toolchain;
+- the pinned repository Rust toolchain;
 - Linux and macOS when CI is available;
 - seeds `0`, `1`, `u64::MAX`, and at least 100 generated seeds.
 
-The routine push/pull-request matrix in `.github/workflows/ci.yml` runs stable and Rust 1.86 across Linux x86_64 and aarch64. Every row executes the workspace tests (including all native acceptance tests) plus the WASI/cross-target checks and FIFO/rustix-default/cap-std testbeds; each row's workspace suite runs as two parallel `cargo nextest` partitions (plus its doctests) beside one job for the row's other gates, and every test job installs `strace` and sets `PATINA_REQUIRE_STRACE=1` so the syscall-containment pass cannot silently skip. Stable rows additionally run the `workq` and `pubsub` testbeds, while stable Linux runs formatting, clippy, docs, the flag-drift gate, the audit corpus, and the fuzz-sweep and campaign classifier selftests. A strict `audit` job checks RustSec advisories over the root and every testbed lockfile with no ignores.
+The routine push/pull-request matrix in `.github/workflows/ci.yml` runs pinned Rust 1.99.0 across Linux x86_64 and aarch64. Every row executes the workspace tests (including all native acceptance tests) plus the WASI/cross-target checks and FIFO/rustix-default/cap-std testbeds; each row's workspace suite runs as two parallel `cargo nextest` partitions (plus its doctests) beside one job for the row's other gates, and every test job installs `strace` and sets `PATINA_REQUIRE_STRACE=1` so the syscall-containment pass cannot silently skip. Both Linux rows additionally run the `workq` and `pubsub` testbeds, while Linux runs formatting, clippy, docs, the flag-drift gate, the audit corpus, and the fuzz-sweep and campaign classifier selftests. A strict `audit` job checks RustSec advisories over the root and every testbed lockfile with no ignores.
 
-Stable macOS runs as a clean-host safety net daily and on manual dispatch, not on every locally validated push. It executes the workspace tests (including the Darwin native legs), WASI/cross-target probes, FIFO/workq/pubsub testbeds, and the macOS audit corpus; the full Rust 1.86 suite remains covered on both Linux architectures and by explicit local `mise run msrv` final-gate runs. The ordinary local landing gate runs only the measured MSRV compile/detector/macros rungs. The 200-generation randomized `workq` campaign runs nightly on Linux and on manual dispatch, without a duplicate hosted-macOS campaign. (`cargo package --workspace --locked` is included in the local landing gate and is also the pre-publish packaging check.)
+The self-hosted `jrh-mini` macOS runner runs as a platform safety net daily and on manual dispatch, not on every locally validated push. It executes the workspace tests (including the Darwin native legs), WASI/cross-target probes, FIFO/workq/pubsub testbeds, and the macOS audit corpus; the macros feature test runs in each Linux test row and the local full gate. The 200-generation randomized `workq` campaign runs nightly on Linux and on manual dispatch, without a duplicate macOS campaign. (`cargo package --workspace --locked` is included in the local landing gate and is also the pre-publish packaging check.)
 
 A failure report must retain the command, seed, trace bundle when one exists, Patina version, Rust version, target triple, and compatibility fingerprint.
 
@@ -927,6 +929,17 @@ boundary threshold) is a calibration point-pin: it must carry a comment stating
 what it is calibrated against and how a drift would surface. When a class-level
 detector exists but does not run in CI, that gap is itself a tracked item — a
 detector that "would fire" is only evidence if it actually executes.
+
+### Advisory file-lock ownership
+
+`patina-trace::file_lock`'s `exclusive_contention_and_release` and
+`shared_holders_coexist_and_exclusive_holders_contend` detect ownership failures
+across distinct handles, shared/exclusive contention, and release on close. They
+are the class-level pairing for cache leases, campaign ownership and trace writer
+locks. The planted mutation that makes the exclusive try-lock wrapper always
+succeed must fail the contention assertion. `interruptions_retry_but_other_errors_propagate`
+checks that interrupted std acquisitions retry while other I/O errors propagate.
+These tests run in the workspace test rung of fast/full and CI.
 
 ### Native shim cache isolation and eviction
 

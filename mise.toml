@@ -4,45 +4,59 @@
 # Heavy standalone testbeds keep their own setup and are not required for
 # ordinary local development.
 
+# mise.lock is lockfile version 3. Older mise warns that it can't read it, then
+# silently resolves `rust = "latest"` to whatever is installed; refuse instead.
+min_version = "2026.9.18"
+
+[settings]
+# Lock every configured tool, including tools added later.
+lockfile = true
+
 [tools]
-# Select a stable Rust toolchain for the default local shell. Rust components,
-# targets, and the MSRV toolchain are installed by `mise run setup` through
-# rustup because they are toolchain-specific.
-rust = "stable"
+# The selector follows releases only when mise.lock is deliberately refreshed.
+rust = "latest"
 
 [tasks.setup]
-description = "Install root-workspace Rust toolchains and targets"
-run = '''
+description = "Install the pinned root-workspace Rust toolchain, components and targets"
+run = """
+#!/usr/bin/env bash
 set -euo pipefail
-rustup toolchain install stable --component rustfmt --component clippy --target wasm32-wasip1
-# x86_64 Linux std and aarch64 Darwin std let clippy check each OS's cfg code
-# (the shim's SUD dispatcher, the Darwin syscall inventory) from the other; no
-# cross C toolchain or SDK is needed because clippy never links.
-rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin
-rustup toolchain install 1.86.0 --target wasm32-wasip1
+python3 - <<'PYTHON'
+import subprocess
+import tomllib
+from pathlib import Path
+
+# Keep components and cross-target std libraries in the rustup-facing file.
+toolchain = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]
+# Register an existing rustup install with mise too. This repairs older mise
+# Rust symlink registries that otherwise resolve `latest` from installed tools.
+subprocess.run(["mise", "install", "rust@" + toolchain["channel"]], check=True)
+args = ["rustup", "toolchain", "install", toolchain["channel"], "--profile", toolchain["profile"]]
+for component in toolchain["components"]:
+    args.extend(["--component", component])
+for target in toolchain["targets"]:
+    args.extend(["--target", target])
+subprocess.run(args, check=True)
+PYTHON
 cc --version >/dev/null
-echo "Patina local toolchains are ready."
-'''
+echo "Patina local toolchain is ready."
+"""
 
 # The check runner keeps cheap, high-signal failures serial, runs only measured
 # overlap groups concurrently, retains per-rung timings in logs, hides successful
 # command chatter, and replays complete failure logs. That last failure-log
 # contract is the mise feature gap that keeps the small shell runner in place.
 [tasks.check]
-description = "Full local pre-landing validation (audit-corpus and full MSRV suite run in CI/final gates)"
+description = "Full local pre-landing validation (audit-corpus runs in CI/final gates)"
 run = "scripts/check.sh full"
 
 # Inner-loop tier: fmt, the four clippy passes, all workspace tests except the
 # cargo-patina end_to_end and native execution targets (conformance included),
-# cheap selftests, flag drift, MSRV cargo check, WASI validation, and
+# cheap selftests, flag and toolchain drift, WASI validation, and
 # cross-target smoke.
 [tasks."check:fast"]
 description = "Fast iteration tier of `check`; not sufficient for landing"
 run = "scripts/check.sh fast"
-
-[tasks.msrv]
-description = "Run the full Rust 1.86 suite (CI/final-gate tier)"
-run = "scripts/check.sh msrv"
 
 [tasks."check:native-abi"]
 description = "Targetable native ABI feedback, without the full landing battery"

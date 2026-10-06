@@ -51,7 +51,11 @@ pre-run refusal — never a silent escape to the host.
 
 ## Quickstart
 
-Requires stable Rust (MSRV 1.86) and a C compiler.
+Requires Rust 1.99 and a C compiler. The repository pins Rust 1.99.0 in
+`mise.lock`, with a checked `rust-toolchain.toml` mirror for rustup users.
+`mise.toml` selects `latest`; normal installs honor the lock. Advance the lock
+and mirror together when upgrading Rust. Setup registers the pin with mise;
+checks also reject an active compiler that differs from the pin.
 
 ```sh
 git clone https://github.com/JacobHayes/patina
@@ -370,8 +374,7 @@ host runs: a host kernel update that moves an answer is a pin question. Moving t
 
 If you use [mise](https://mise.jdx.dev/): `mise run setup` installs toolchains
 and targets, `mise run check:fast` is the inner-loop signal, `mise run check` is
-the local landing gate, `mise run msrv` is the full Rust 1.86 CI/final-gate
-suite, and `mise run demo` runs a small end-to-end demo. For focused shim ABI
+the local landing gate, and `mise run demo` runs a small end-to-end demo. For focused shim ABI
 feedback, use `mise run check:native-abi`; the individually selectable native test
 targets and their platform coverage are listed in
 [testbeds/native-boundary](testbeds/native-boundary/README.md).

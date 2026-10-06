@@ -316,7 +316,7 @@ pub(crate) unsafe fn mbind(
     if flags & MPOL_MF_MOVE_ALL != 0 {
         return fail(EPERM);
     }
-    if start % PAGE != 0 {
+    if !start.is_multiple_of(PAGE) {
         return fail(EINVAL);
     }
     let Some(len) = len.checked_add(PAGE - 1).map(|len| len & !(PAGE - 1)) else {
@@ -459,7 +459,7 @@ pub(crate) fn set_mempolicy_home_node(start: usize, len: usize, home: u64, flags
     if home >= MAX_NUMNODES || home != 0 {
         return fail(EINVAL);
     }
-    if start % PAGE != 0 {
+    if !start.is_multiple_of(PAGE) {
         return fail(EINVAL);
     }
     let Some(len) = len.checked_add(PAGE - 1).map(|len| len & !(PAGE - 1)) else {

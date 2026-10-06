@@ -138,16 +138,16 @@ pub(crate) fn layer_arguments(
         applied: applied.clone(),
     });
 
-    if applied.iter().any(|entry| entry.source == "config") {
-        if let Some(path) = repo.as_ref().map(|repo| repo.path.display().to_string()) {
-            let keys = applied
-                .iter()
-                .filter(|entry| entry.source == "config")
-                .map(|entry| entry.key.as_str())
-                .collect::<Vec<_>>()
-                .join(",");
-            eprintln!("PATINA_CONFIG applied={verb}:{keys} path={path}");
-        }
+    if applied.iter().any(|entry| entry.source == "config")
+        && let Some(path) = repo.as_ref().map(|repo| repo.path.display().to_string())
+    {
+        let keys = applied
+            .iter()
+            .filter(|entry| entry.source == "config")
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!("PATINA_CONFIG applied={verb}:{keys} path={path}");
     }
 
     if injected.is_empty() {
@@ -850,16 +850,14 @@ fn find_key_position(text: &str, key_path: &[&str]) -> Option<(usize, usize)> {
             .iter()
             .map(String::as_str)
             .eq(table_path.iter().copied())
+            && let Some((left, _)) = without_comment.split_once('=')
+            && unquote_key(left.trim()) == *key
         {
-            if let Some((left, _)) = without_comment.split_once('=') {
-                if unquote_key(left.trim()) == *key {
-                    let col = raw_line
-                        .find(left.trim())
-                        .map(|value| value + 1)
-                        .unwrap_or(1);
-                    return Some((line_index + 1, col));
-                }
-            }
+            let col = raw_line
+                .find(left.trim())
+                .map(|value| value + 1)
+                .unwrap_or(1);
+            return Some((line_index + 1, col));
         }
     }
     None

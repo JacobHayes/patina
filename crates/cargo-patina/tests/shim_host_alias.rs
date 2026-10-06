@@ -38,10 +38,10 @@ fn shim_undefined_externals(archive_bytes: &[u8]) -> BTreeSet<String> {
     let mut undefined = BTreeSet::new();
     for_each_shim_member(archive_bytes, |object| {
         for symbol in object.symbols() {
-            if symbol.is_undefined() {
-                if let Ok(name) = symbol.name() {
-                    undefined.insert(name.to_owned());
-                }
+            if symbol.is_undefined()
+                && let Ok(name) = symbol.name()
+            {
+                undefined.insert(name.to_owned());
             }
         }
     });

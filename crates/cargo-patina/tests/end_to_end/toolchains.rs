@@ -119,13 +119,13 @@ mod tests {
         );
     }
 
-    // Real rustup directory resolution: the guest pins MSRV while the cache would
+    // Real rustup directory resolution: the guest pins the repository version while the cache would
     // select the default. The hostile per-directory proxy is the non-skipping
     // class-level detector; this test covers rustup's actual selector.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_rust_toolchain_pin_builds_with_the_guest_compiler() {
-        const PINNED: &str = "1.86.0";
+        const PINNED: &str = "1.99.0";
         let Some(installed) = rustup_toolchain_list() else {
             eprintln!(
                 "SKIP a_rust_toolchain_pin_builds_with_the_guest_compiler: no rustup on PATH, \

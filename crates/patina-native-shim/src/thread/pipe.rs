@@ -594,12 +594,12 @@ pub(crate) fn fifo_open(
     // The channel is the node's one reference: taken when it comes into
     // existence, dropped when it is reclaimed. Outside the state lock, like
     // every other runtime call from this module.
-    if opened_channel {
-        if let Err(errno) = super::with_context(|context| context.fs_retain_inode(ino)) {
-            abandon();
-            wake_all(woken);
-            return super::fail(errno);
-        }
+    if opened_channel
+        && let Err(errno) = super::with_context(|context| context.fs_retain_inode(ino))
+    {
+        abandon();
+        wake_all(woken);
+        return super::fail(errno);
     }
     wake_all(woken);
 
@@ -1138,42 +1138,42 @@ fn pipe_close_locked(handle: u64) -> Result<(), c_int> {
     let Some(end) = state.net.pipe_ends.remove(&fd) else {
         return Err(super::EBADF);
     };
-    if let Some(ino) = end.inode {
-        if let Some(inode) = state.net.pipe_inodes.get_mut(&ino) {
-            inode.ends -= 1;
-            if inode.ends == 0 {
-                state.net.pipe_inodes.remove(&ino);
-            }
+    if let Some(ino) = end.inode
+        && let Some(inode) = state.net.pipe_inodes.get_mut(&ino)
+    {
+        inode.ends -= 1;
+        if inode.ends == 0 {
+            state.net.pipe_inodes.remove(&ino);
         }
     }
     let mut waiters = Vec::new();
     let mut released_ino = None;
     // Dropping a READER reference: writers get EPIPE only once the last one
     // goes, and only then are blocked writers woken to observe it.
-    if let Some(channel) = end.read_channel {
-        if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
-            channel.read_refs -= 1;
-            if channel.read_refs == 0 {
-                #[cfg(target_os = "linux")]
-                {
-                    channel.write_events = channel.write_events.wrapping_add(1);
-                }
-                waiters.extend(channel.send_waiters.drain(..));
+    if let Some(channel) = end.read_channel
+        && let Some(channel) = state.net.pipe_channels.get_mut(&channel)
+    {
+        channel.read_refs -= 1;
+        if channel.read_refs == 0 {
+            #[cfg(target_os = "linux")]
+            {
+                channel.write_events = channel.write_events.wrapping_add(1);
             }
+            waiters.extend(channel.send_waiters.drain(..));
         }
     }
     // Dropping a WRITER reference: readers see EOF (once drained) only after
     // the last writer closes, and only then are blocked readers woken.
-    if let Some(channel) = end.write_channel {
-        if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
-            channel.write_refs -= 1;
-            if channel.write_refs == 0 {
-                #[cfg(target_os = "linux")]
-                {
-                    channel.read_events = channel.read_events.wrapping_add(1);
-                }
-                waiters.extend(channel.recv_waiters.drain(..));
+    if let Some(channel) = end.write_channel
+        && let Some(channel) = state.net.pipe_channels.get_mut(&channel)
+    {
+        channel.write_refs -= 1;
+        if channel.write_refs == 0 {
+            #[cfg(target_os = "linux")]
+            {
+                channel.read_events = channel.read_events.wrapping_add(1);
             }
+            waiters.extend(channel.recv_waiters.drain(..));
         }
     }
     // Reclaim any channel with no references left on either side. Channel ids
@@ -1200,11 +1200,11 @@ fn pipe_close_locked(handle: u64) -> Result<(), c_int> {
     drop(state);
     // The last endpoint on a FIFO's channel drops the node's reference; if
     // its last name went first, that is where the node is finally freed.
-    if let Some(ino) = released_ino {
-        if let Err(errno) = super::with_context(|context| context.fs_release_inode(ino)) {
-            wake_all(waiters);
-            return Err(errno);
-        }
+    if let Some(ino) = released_ino
+        && let Err(errno) = super::with_context(|context| context.fs_release_inode(ino))
+    {
+        wake_all(waiters);
+        return Err(errno);
     }
     wake_all(waiters);
     Ok(())

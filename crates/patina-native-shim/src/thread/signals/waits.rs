@@ -240,15 +240,14 @@ pub unsafe extern "C" fn patina_signal_wait(
     loop {
         super::super::timers::fire_due();
         let mut state = lock_state();
-        if mode == WaitMode::Dequeue {
-            if let Some(instance) = state.dequeue_signal(me, wanted, false) {
-                // Dequeued: a siginfo that cannot be copied out loses it.
-                if !info.is_null() && crate::uaccess::write(info as usize, &instance.info).is_err()
-                {
-                    return -i64::from(EFAULT);
-                }
-                return i64::from(instance.sig);
+        if mode == WaitMode::Dequeue
+            && let Some(instance) = state.dequeue_signal(me, wanted, false)
+        {
+            // Dequeued: a siginfo that cannot be copied out loses it.
+            if !info.is_null() && crate::uaccess::write(info as usize, &instance.info).is_err() {
+                return -i64::from(EFAULT);
             }
+            return i64::from(instance.sig);
         }
         if let Some(deadline) = deadline {
             let now = with_context_raw(|context| context.now(ClockKind::Monotonic))

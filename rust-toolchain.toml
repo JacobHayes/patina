@@ -1,0 +1,18 @@
+# mise.lock is the authoritative tool version pin; keep this rustup mirror equal.
+# Mise's Rust backend sets RUSTUP_TOOLCHAIN from mise.toml + mise.lock, which
+# overrides rustup's directory selector. Idiomatic-file discovery is opt-in;
+# our explicit mise Rust entry selects the version, while setup reads the
+# components/targets below. Standalone rustup reads this file directly.
+# scripts/check-toolchain.py checks both pins and the active compiler, catching
+# older mise Rust install symlink registries that can bypass lock resolution.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+# Clippy checks OS/architecture cfg code without cross-linking or a cross SDK.
+targets = [
+  "wasm32-wasip1",
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "aarch64-apple-darwin",
+]

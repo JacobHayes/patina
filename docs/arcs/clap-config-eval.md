@@ -106,7 +106,7 @@ ever worries anyone, but the graph cannot route it into the shim.)
 
 ## 2. Honest capability mapping
 
-clap 4 (builder API; MSRV 1.74 vs. workspace `rust-version = 1.86` — compatible,
+clap 4 (builder API; workspace `rust-version = 1.99` — compatible,
 spike re-verifies) against each bespoke feature:
 
 | Bespoke feature | clap-4 equivalent | Fidelity |
@@ -301,8 +301,8 @@ Marginal cost drops from ~20-25 lines to ~12-15, and one hand-maintained mirror
 is deleted.
 
 **Recurring costs that change sign**: clap version upgrades become our problem
-(error-text churn against byte-exact gates; MSRV policy of a fast-moving crate
-vs. workspace MSRV 1.86 — clap has historically bumped MSRV in minor versions,
+(error-text churn against byte-exact gates; compiler requirements of a fast-moving crate
+vs. workspace Rust 1.99 — clap can raise compiler requirements in minor versions,
 so `clap` would need a pinned minor and a documented upgrade gate). Compile time:
 clap 4 + default features adds ~8-10 crates to the build graph of the one
 binary crate; measured in the spike, expected low single-digit seconds cold,
@@ -357,7 +357,7 @@ parser→clap port without further prompting if it clearly passes.
 - Measured, not estimated: net LOC delta for the two verbs (parser code removed
   vs. builder/extraction/bridge code added); cold and incremental
   `cargo build -p cargo-patina` wall-clock before/after; `cargo patina` binary
-  size delta; MSRV check (`cargo +1.86 check -p cargo-patina`).
+  size delta; pinned-toolchain check (`cargo check -p cargo-patina`).
 - `cargo tree -i clap` shows cargo-patina as the only dependent (mechanical
   confirmation of the graph argument in §1).
 
@@ -430,7 +430,7 @@ different times under different, unrecorded contention. The build-cost delta is
 therefore an order-of-magnitude sanity check, not a number to defend; the
 warm-rebuild result (the ported crate rebuilding FASTER) is plausible on
 mechanism but wants a re-measure on a quiet machine before it is quoted. The LOC,
-binary-size, MSRV, and dependency-graph rows are contention-independent.
+binary-size, compiler-compatibility, and dependency-graph rows are contention-independent.
 
 A measurement trap worth recording: this machine's `~/.cargo/config.toml` sets
 `build.build-dir` to a workspace-path-hashed shared directory, so `CARGO_TARGET_DIR`
@@ -448,7 +448,7 @@ alone does NOT produce a cold build — only a fresh workspace PATH does. The fi
 | Cold `cargo build -p cargo-patina --release` (contended) | 37.36 s | 45.90 s | +8.54 s (unreliable) |
 | Warm rebuild of `cargo-patina` alone (contended) | 11.40 / 11.59 s | 10.71 / 8.55 s | faster (unreliable) |
 | Release binary | 10,076,640 B | 10,417,264 B | +340,624 B (+3.4%) |
-| MSRV `cargo +1.86.0 check` | clean | clean | — |
+| Historical compiler-compatibility check (retired tier) | clean | clean | — |
 | `cargo tree -i clap` | — | `clap → cargo-patina` only | single dependent |
 
 There is no bridge. The 116-line spike bridge existed to reconcile two parsing
@@ -461,8 +461,8 @@ dependency carries `default-features = false`: the CLI renders its own help and
 usage from the registry, so clap's `help`, `usage`, and `color` features are all
 dead weight — and `color` would have made error output terminal-dependent, which
 a machine-parsed CLI must not be. clap is pinned `~4.6` rather than `^4.6`
-because clap raises its MSRV in minor releases (4.6 needs 1.85 against our 1.86);
-bumping the minor is a deliberate step that re-runs `mise run msrv`.
+because clap minor releases can change compiler requirements and user-visible
+errors; bumping the minor is a deliberate step that re-runs `mise run check`.
 
 The warm-rebuild result was the surprise: the crate appears to compile *faster*
 with clap linked, which is mechanically plausible because ~1,900 lines of
@@ -573,8 +573,8 @@ shipped bugs fell out of writing the declaration down, and the marginal cost of 
 new flag dropped from "registry row + parser arm + driver route + mirror line" to
 "registry row + extraction line".
 
-The honest costs: a dependency whose error wording is user-visible and whose MSRV
-policy is not ours (mitigated by the `~4.6` pin), a cold-build cost measured at
+The honest costs: a dependency whose error wording is user-visible and whose compiler
+requirements are not ours (mitigated by the `~4.6` pin), a cold-build cost measured at
 +8.5 s but under heavy contention (§9.2 — read it as single-digit seconds, not as
 a figure), +340 KB of binary, and a `Family` concept a reader must learn before
 the registry makes sense. Against a CLI with eleven verbs and twenty-two families whose defining

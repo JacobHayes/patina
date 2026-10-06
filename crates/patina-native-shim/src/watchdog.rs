@@ -200,25 +200,22 @@ pub(crate) fn report_and_abort(
         text.len = 0;
         let mut named = false;
         for _ in 0..200 {
-            if let Some(result) = SYMBOL.try_lock() {
-                if let Some(symbol) = result.as_ref() {
-                    if symbol.len != 0 {
-                        if let Ok(name) = std::str::from_utf8(&symbol.name[..symbol.len]) {
-                            let _ =
-                                write!(text, "patina: sampled_symbol={name}+{:#x} ", symbol.offset);
-                            if let Some(size) = symbol.size {
-                                let _ = writeln!(text, "symbol_size={size} symbol_range=checked");
-                            } else {
-                                let _ = writeln!(
-                                    text,
-                                    "symbol_size=unavailable symbol_range=loader-nearest"
-                                );
-                            }
-                            named = true;
-                        }
+            if let Some(result) = SYMBOL.try_lock()
+                && let Some(symbol) = result.as_ref()
+            {
+                if symbol.len != 0
+                    && let Ok(name) = std::str::from_utf8(&symbol.name[..symbol.len])
+                {
+                    let _ = write!(text, "patina: sampled_symbol={name}+{:#x} ", symbol.offset);
+                    if let Some(size) = symbol.size {
+                        let _ = writeln!(text, "symbol_size={size} symbol_range=checked");
+                    } else {
+                        let _ =
+                            writeln!(text, "symbol_size=unavailable symbol_range=loader-nearest");
                     }
-                    break;
+                    named = true;
                 }
+                break;
             }
             platform::wait_ms(1);
         }

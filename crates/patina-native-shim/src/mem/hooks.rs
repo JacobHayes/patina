@@ -8,10 +8,10 @@ use super::*;
 /// returns. A write-back the filesystem refuses stays dirty for the next one;
 /// the read itself is not failed for it.
 pub(crate) fn reading(handle: u64) {
-    if let Some(ino) = cached_ino(handle) {
-        if let Some(writer) = writer_of(ino) {
-            let _ = write_back(ino, writer);
-        }
+    if let Some(ino) = cached_ino(handle)
+        && let Some(writer) = writer_of(ino)
+    {
+        let _ = write_back(ino, writer);
     }
 }
 
@@ -250,10 +250,10 @@ pub extern "C" fn patina_msync(addr: usize, len: usize, flags: c_int) -> i64 {
         if secret {
             return fail(EINVAL);
         }
-        if let Some(writer) = writer_of(ino) {
-            if let Err(errno) = write_back(ino, writer) {
-                return fail(errno);
-            }
+        if let Some(writer) = writer_of(ino)
+            && let Err(errno) = write_back(ino, writer)
+        {
+            return fail(errno);
         }
         if let Err(errno) = crate::with_context(|context| context.fs_sync(Fd(handle))) {
             return fail(errno);

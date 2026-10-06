@@ -1,0 +1,42 @@
+name: Set up pinned tools
+description: Install locked mise tools and Rust components/targets, then verify the pins
+runs:
+  using: composite
+  steps:
+    # Rust's normal mise installs are symlinks to rustup. Put its real homes
+    # inside the cache too, isolated from Homebrew and the self-hosted user.
+    - name: Set isolated tool homes
+      shell: bash
+      run: |
+        mkdir -p "$RUNNER_TEMP/patina-mise"
+        # Ignore the self-hosted user's global tools/config; lock repo tools only.
+        : > "$RUNNER_TEMP/patina-mise/global.toml"
+        {
+          echo "MISE_GLOBAL_CONFIG_FILE=$RUNNER_TEMP/patina-mise/global.toml"
+          echo "MISE_DATA_DIR=$RUNNER_TEMP/patina-mise"
+          echo "RUSTUP_HOME=$RUNNER_TEMP/patina-mise/rustup"
+          echo "CARGO_HOME=$RUNNER_TEMP/patina-mise/cargo"
+        } >> "$GITHUB_ENV"
+    - uses: actions/cache/restore@v5
+      id: mise-cache
+      with:
+        path: ${{ runner.temp }}/patina-mise
+        key: mise-2026.9.18-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.toml', 'mise.lock', 'rust-toolchain.toml') }}
+    # Installs its own binary whether or not Homebrew mise is already present.
+    # Cache after setup so every component and target is retained too.
+    - uses: jdx/mise-action@v3
+      with:
+        version: 2026.9.18
+        cache: false
+        install_args: --locked
+    - name: Install Rust components and targets
+      shell: bash
+      run: mise run setup
+    - name: Check toolchain pins and detector
+      shell: bash
+      run: python3 -B scripts/check-toolchain.py && python3 -B scripts/check-toolchain.py --selftest
+    - uses: actions/cache/save@v5
+      if: github.ref == 'refs/heads/main' && steps.mise-cache.outputs.cache-hit != 'true'
+      with:
+        path: ${{ runner.temp }}/patina-mise
+        key: ${{ steps.mise-cache.outputs.cache-primary-key }}

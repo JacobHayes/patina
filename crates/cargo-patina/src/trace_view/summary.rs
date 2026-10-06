@@ -34,10 +34,10 @@ pub fn summarize(kind: &str, op: &Value, out: &Value) -> String {
         // The inode a FIFO `fstat` names.
         "ino",
     ] {
-        if let Some(v) = op.get(key) {
-            if let Some(text) = scalar(v) {
-                parts.push(format!("{key}={text}"));
-            }
+        if let Some(v) = op.get(key)
+            && let Some(text) = scalar(v)
+        {
+            parts.push(format!("{key}={text}"));
         }
     }
     // A permission mode is only readable in octal: `mode=0o644` says what
@@ -66,14 +66,13 @@ pub fn summarize(kind: &str, op: &Value, out: &Value) -> String {
         if !named.is_empty() {
             parts.push(format!("flags={}", named.join("|")));
         }
-        if let Some(mode) = flags.get("mode").and_then(Value::as_u64) {
-            if flags
+        if let Some(mode) = flags.get("mode").and_then(Value::as_u64)
+            && flags
                 .get("create")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
-            {
-                parts.push(format!("mode=0o{mode:o}"));
-            }
+        {
+            parts.push(format!("mode=0o{mode:o}"));
         }
     }
     if let Some(mode) = op.get("mode").and_then(Value::as_u64) {
@@ -109,10 +108,10 @@ pub fn summarize(kind: &str, op: &Value, out: &Value) -> String {
                 }
             }
             "handle" | "socket" | "u64" | "usize" | "optional_u64" => {
-                if let Some(v) = out.get("value") {
-                    if let Some(text) = scalar(v) {
-                        parts.push(format!("→ {text}"));
-                    }
+                if let Some(v) = out.get("value")
+                    && let Some(text) = scalar(v)
+                {
+                    parts.push(format!("→ {text}"));
                 }
             }
             "send_report" => {

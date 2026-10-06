@@ -228,14 +228,12 @@ fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     let mut cur = Some(start);
     while let Some(dir) = cur {
         let manifest = dir.join("Cargo.toml");
-        if manifest.is_file() {
-            if let Ok(text) = fs::read_to_string(&manifest) {
-                if let Ok(doc) = toml::from_str::<toml::Table>(&text) {
-                    if doc.contains_key("workspace") {
-                        return Some(dir.to_path_buf());
-                    }
-                }
-            }
+        if manifest.is_file()
+            && let Ok(text) = fs::read_to_string(&manifest)
+            && let Ok(doc) = toml::from_str::<toml::Table>(&text)
+            && doc.contains_key("workspace")
+        {
+            return Some(dir.to_path_buf());
         }
         cur = dir.parent();
     }

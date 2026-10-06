@@ -146,13 +146,12 @@ impl PctState {
     /// the currently-running task so a higher-priority task preempts it.
     fn advance(&mut self) {
         self.step += 1;
-        if let Some(&new_priority) = self.change_points.get(&self.step) {
-            if let Some(task) = self.last_selected {
-                if let Some(slot) = self.priorities.get_mut(&task) {
-                    *slot = new_priority;
-                    self.change_points_hit += 1;
-                }
-            }
+        if let Some(&new_priority) = self.change_points.get(&self.step)
+            && let Some(task) = self.last_selected
+            && let Some(slot) = self.priorities.get_mut(&task)
+        {
+            *slot = new_priority;
+            self.change_points_hit += 1;
         }
     }
 

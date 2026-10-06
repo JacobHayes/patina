@@ -24,10 +24,10 @@ pub(crate) fn parse_native_harness_from(
     if seed.is_some() && seeds.is_some() {
         return Err(CliError::usage("--seed and --seeds are mutually exclusive"));
     }
-    if let Some(count) = seeds {
-        if count == 0 || count > 1_000_000 {
-            return Err(CliError::usage("--seeds must be between 1 and 1000000"));
-        }
+    if let Some(count) = seeds
+        && (count == 0 || count > 1_000_000)
+    {
+        return Err(CliError::usage("--seeds must be between 1 and 1000000"));
     }
     Ok(NativeHarnessInvocation {
         origin,

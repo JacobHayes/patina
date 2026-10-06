@@ -165,7 +165,7 @@ impl Probe {
         builder: EventBuilder<'_>,
     ) -> (i64, Option<Region>) {
         let builder = if result >= 0 {
-            builder.field("aligned", result as usize % page_size() == 0)
+            builder.field("aligned", (result as usize).is_multiple_of(page_size()))
         } else {
             builder
         };

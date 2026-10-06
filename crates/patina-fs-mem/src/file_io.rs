@@ -63,7 +63,7 @@ impl Inode {
     /// A length change to `len`: a hugetlbfs file sizes in whole huge pages
     /// (`hugetlbfs_setattr`), then the node's seals (`shmem_setattr`).
     pub(super) fn check_resize_seals(&self, len: u64) -> DriverResult<()> {
-        if self.huge_page != 0 && len % self.huge_page != 0 {
+        if self.huge_page != 0 && !len.is_multiple_of(self.huge_page) {
             return Err(EffectError::new(
                 ErrorCode::InvalidInput,
                 "a hugetlbfs file sizes in whole huge pages",

@@ -269,10 +269,10 @@ pub fn flatten(
                 let category = Category::of_kind(&kind);
 
                 // Advance the virtual-time cursor from any absolute reading on this event.
-                if kind == "clock_now" {
-                    if let Some(n) = outcome_u64(&out) {
-                        vtime = Some(n);
-                    }
+                if kind == "clock_now"
+                    && let Some(n) = outcome_u64(&out)
+                {
+                    vtime = Some(n);
                 }
                 if let Some(n) = op.get("now_nanos").and_then(Value::as_u64) {
                     vtime = Some(n);
@@ -284,10 +284,10 @@ pub fn flatten(
 
                 // SchedulerNext re-points the current lane; ops before the first decision
                 // (or in a single-threaded run) stay on `main`.
-                if kind == "scheduler_next" {
-                    if let Some(id) = out.get("value").and_then(Value::as_u64) {
-                        current = LaneKey::Task(id);
-                    }
+                if kind == "scheduler_next"
+                    && let Some(id) = out.get("value").and_then(Value::as_u64)
+                {
+                    current = LaneKey::Task(id);
                 }
 
                 let lane = match &kind[..] {
@@ -311,19 +311,18 @@ pub fn flatten(
                 if kind == "task_park" || kind == "task_park_timed" {
                     stat.parks += 1;
                 }
-                if kind == "task_spawn" {
-                    if let Some(id) = outcome_task(&out) {
-                        let child = lanes.entry(LaneKey::Task(id)).or_default();
-                        if child.label.is_none() {
-                            child.label =
-                                op.get("label").and_then(Value::as_str).map(str::to_string);
-                        }
+                if kind == "task_spawn"
+                    && let Some(id) = outcome_task(&out)
+                {
+                    let child = lanes.entry(LaneKey::Task(id)).or_default();
+                    if child.label.is_none() {
+                        child.label = op.get("label").and_then(Value::as_str).map(str::to_string);
                     }
                 }
-                if kind == "task_complete" {
-                    if let Some(id) = op.get("task").and_then(Value::as_u64) {
-                        lanes.entry(LaneKey::Task(id)).or_default().completed = true;
-                    }
+                if kind == "task_complete"
+                    && let Some(id) = op.get("task").and_then(Value::as_u64)
+                {
+                    lanes.entry(LaneKey::Task(id)).or_default().completed = true;
                 }
 
                 let detail = summarize(&kind, &op, &out);

@@ -279,11 +279,11 @@ fn join_exercised<'a>(scan: &StaticScan, source: &'a ExercisedSource) -> JoinRes
             joined.by_site_id.insert(site.id.clone(), exercised);
             continue;
         }
-        if let Some(location) = normalize_runtime_site(&scan.workspace_root, &exercised.site) {
-            if let Some(site) = dynamic_by_location.get(&location) {
-                joined.by_site_id.insert(site.id.clone(), exercised);
-                continue;
-            }
+        if let Some(location) = normalize_runtime_site(&scan.workspace_root, &exercised.site)
+            && let Some(site) = dynamic_by_location.get(&location)
+        {
+            joined.by_site_id.insert(site.id.clone(), exercised);
+            continue;
         }
         joined.unmatched.push(UnmatchedRuntimeSite {
             label: exercised.label.clone(),
@@ -349,10 +349,10 @@ fn site_rows_json(sites: &[JoinedSite<'_>]) -> Value {
             .map(|joined| {
                 let mut value = serde_json::to_value(joined.site)
                     .expect("site records are JSON-serializable objects");
-                if let (Some(object), Some(exercised)) = (value.as_object_mut(), joined.exercised) {
-                    if joined.site.runtime != "invisible" {
-                        object.insert("exercised".to_string(), json!(exercised));
-                    }
+                if let (Some(object), Some(exercised)) = (value.as_object_mut(), joined.exercised)
+                    && joined.site.runtime != "invisible"
+                {
+                    object.insert("exercised".to_string(), json!(exercised));
                 }
                 value
             })
@@ -361,35 +361,36 @@ fn site_rows_json(sites: &[JoinedSite<'_>]) -> Value {
 }
 
 fn site_matches(site: &SiteRecord, options: &SitesOptions) -> bool {
-    if let Some(crate_filter) = &options.crate_filter {
-        if &site.crate_name != crate_filter {
-            return false;
-        }
+    if let Some(crate_filter) = &options.crate_filter
+        && &site.crate_name != crate_filter
+    {
+        return false;
     }
-    if let Some(module_filter) = &options.module_filter {
-        if &site.module != module_filter {
-            return false;
-        }
+    if let Some(module_filter) = &options.module_filter
+        && &site.module != module_filter
+    {
+        return false;
     }
-    if let Some(group_filter) = &options.group_filter {
-        if !site.groups.iter().any(|group| group == group_filter) {
-            return false;
-        }
+    if let Some(group_filter) = &options.group_filter
+        && !site.groups.iter().any(|group| group == group_filter)
+    {
+        return false;
     }
-    if let Some(site_filter) = &options.site_filter {
-        if &site.id != site_filter && site.label.as_ref() != Some(site_filter) {
-            return false;
-        }
+    if let Some(site_filter) = &options.site_filter
+        && &site.id != site_filter
+        && site.label.as_ref() != Some(site_filter)
+    {
+        return false;
     }
-    if let Some(kind_filter) = &options.kind_filter {
-        if &site.kind != kind_filter {
-            return false;
-        }
+    if let Some(kind_filter) = &options.kind_filter
+        && &site.kind != kind_filter
+    {
+        return false;
     }
-    if let Some(runtime_filter) = &options.runtime_filter {
-        if &site.runtime != runtime_filter {
-            return false;
-        }
+    if let Some(runtime_filter) = &options.runtime_filter
+        && &site.runtime != runtime_filter
+    {
+        return false;
     }
     true
 }

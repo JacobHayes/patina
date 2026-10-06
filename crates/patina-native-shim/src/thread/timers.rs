@@ -241,11 +241,13 @@ impl Timers {
     /// after now, the periods it skipped its overrun (`posixtimer_rearm`),
     /// reported in the record and by `timer_getoverrun`.
     pub(super) fn dequeued(&mut self, info: &mut Info) {
-        if info.signo() == SIGALRM && !self.real.queued && self.real.incr != 0 {
-            if let Ok(now) = now_on(Line::Monotonic) {
-                forward(&mut self.real.expires, now, self.real.incr);
-                self.real.queued = true;
-            }
+        if info.signo() == SIGALRM
+            && !self.real.queued
+            && self.real.incr != 0
+            && let Ok(now) = now_on(Line::Monotonic)
+        {
+            forward(&mut self.real.expires, now, self.real.incr);
+            self.real.queued = true;
         }
         let Some(id) = info.timer_id() else {
             return;
@@ -360,10 +362,10 @@ impl ThreadRuntime {
             0
         };
         // A thread target that exited takes nothing.
-        if let SignalTarget::Task(task) = target {
-            if !self.signals.has_task(task) {
-                return Vec::new();
-            }
+        if let SignalTarget::Task(task) = target
+            && !self.signals.has_task(task)
+        {
+            return Vec::new();
         }
         if let Some(queued) = self.signals.queued_timer(sig, id) {
             // Its record is still pending: one more overrun.
@@ -1054,10 +1056,10 @@ pub(crate) fn timerfd_settime(fd: c_int, flags: i32, new: usize, old: usize) -> 
     timer.queued = value != 0;
     state.publish_alarm();
     drop(state);
-    if old != 0 {
-        if let Err(code) = uaccess::write(old, &spec(previous)) {
-            return errno(code);
-        }
+    if old != 0
+        && let Err(code) = uaccess::write(old, &spec(previous))
+    {
+        return errno(code);
     }
     0
 }

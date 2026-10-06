@@ -486,10 +486,10 @@ impl Blocks {
                 emptied.push(number);
             }
         };
-        if low_leaf == 0 {
-            if let Some(head) = self.head.as_mut() {
-                clear(0, head);
-            }
+        if low_leaf == 0
+            && let Some(head) = self.head.as_mut()
+        {
+            clear(0, head);
         }
         if high_leaf >= 1 {
             for (number, leaf) in self.leaves.range_mut(low_leaf.max(1)..=high_leaf) {

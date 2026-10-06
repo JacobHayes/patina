@@ -59,7 +59,7 @@ pub(crate) fn shmat(id: i32, addr: usize, flags: i32) -> i64 {
     }
     let mut addr = addr;
     if addr != 0 {
-        if addr % SHMLBA != 0 {
+        if !addr.is_multiple_of(SHMLBA) {
             if flags & SHM_RND == 0 {
                 return fail(EINVAL);
             }
@@ -108,7 +108,7 @@ pub(crate) fn shmdt(addr: usize) -> i64 {
     if let Err(errno) = boundary() {
         return fail(errno);
     }
-    if addr % crate::mem::PAGE != 0 {
+    if !addr.is_multiple_of(crate::mem::PAGE) {
         return fail(EINVAL);
     }
     let size_of = |id: i32| {

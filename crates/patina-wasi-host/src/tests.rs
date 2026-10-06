@@ -8,8 +8,10 @@ use patina_dst_runtime::{Context, RuntimeConfig};
 
 pub(super) fn read_stdout_u64s(stdout: &[u8]) -> Vec<u64> {
     stdout
-        .chunks_exact(8)
-        .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| u64::from_le_bytes(*chunk))
         .collect()
 }
 
@@ -102,14 +104,13 @@ fn every_wasi_import_wrapper_counts_its_own_hostcall() {
     let mut counted: Vec<String> = Vec::new();
     let mut previous = "";
     for line in body.lines() {
-        if previous.trim() == "MODULE," {
-            if let Some(name) = line
+        if previous.trim() == "MODULE,"
+            && let Some(name) = line
                 .trim()
                 .strip_prefix('"')
                 .and_then(|r| r.split_once('"'))
-            {
-                names.push(name.0.to_string());
-            }
+        {
+            names.push(name.0.to_string());
         }
         if let Some(rest) = line.split_once(&counter) {
             counted.push(

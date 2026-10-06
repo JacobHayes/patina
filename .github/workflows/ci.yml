@@ -7,7 +7,7 @@ on:
     # a PR (used for iterating on Linux-only behavior from macOS).
     branches: [main, "ci/**"]
   # The heavy randomized workq campaign runs nightly on Linux, alongside one
-  # stable macOS clean-host safety-net run. Ordinary pushes rely on the
+  # pinned macOS safety-net run. Ordinary pushes rely on the
   # developer's full local macOS landing gate and spend hosted-runner time on
   # the Linux platforms unavailable locally.
   schedule:
@@ -30,18 +30,17 @@ permissions:
   contents: read
 
 jobs:
-  # Each push/PR/dispatch row (stable and MSRV on both Linux architectures) is
+  # Each push/PR/dispatch row (the pinned toolchain on both Linux architectures) is
   # split into parallel jobs so wall time is the longest slice, not the sum:
   # `tests` runs the complete workspace suite in two nextest partitions, and
   # `gates` runs every other check of the row. Together they run exactly the
   # battery the single per-row job ran before.
   tests:
     if: github.event_name != 'schedule' && !inputs.bench_only
-    name: ${{ matrix.toolchain }} / ${{ matrix.runner }} / tests ${{ matrix.shard }}/2
+    name: Rust / ${{ matrix.runner }} / tests ${{ matrix.shard }}/2
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, msrv]
         # x86_64 and aarch64 Linux surface different platform gaps (libgcc
         # split-stack wrap symbols exist only on x86; the dev VM is aarch64).
         runner: [ubuntu-latest, ubuntu-24.04-arm]
@@ -63,16 +62,10 @@ jobs:
       PATINA_REQUIRE_STRACE: '1'
     steps:
       - uses: actions/checkout@v7
-      - if: matrix.toolchain == 'stable'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-      - if: matrix.toolchain == 'msrv'
-        uses: dtolnay/rust-toolchain@1.86.0
-        with:
-          targets: wasm32-wasip1
+      - uses: ./.github/actions/setup-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
+          key: rust-${{ hashFiles('mise.lock', 'rust-toolchain.toml') }}
           # The partitions build identical artifacts; one saves for both,
           # and only main saves, so branch and PR runs cannot evict main's cache.
           save-if: ${{ matrix.shard == 1 && github.ref == 'refs/heads/main' }}
@@ -95,10 +88,9 @@ jobs:
           python3 -c 'import ctypes; r = ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1); print("landlock ABI:", r if r > 0 else "unavailable (errno %d)" % ctypes.get_errno())' || true
       # The complete workspace suite, split across the two partitions by test
       # name (nextest runs every test binary; doctests run separately below).
-      # Stable executes it on each Linux platform, the syscall conformance
+      # Rust executes it on each Linux platform, the syscall conformance
       # scenarios (native_conformance) included; x86_64 also runs their raw
-      # vehicle under SUD. MSRV is the full Rust 1.86 final-gate tier (the same
-      # battery `mise run msrv` runs locally, conformance included). Nested
+      # vehicle under SUD. Nested
       # Patina shim caches are compiler-identity keyed. Off the pinned kernel
       # the conformance comparison only reports (to this step's job summary),
       # and nextest hides a passing test's stderr, so the summary is repeated
@@ -110,16 +102,15 @@ jobs:
           exit "$status"
       - if: matrix.shard == 1
         run: cargo test --workspace --doc --locked
-      - if: matrix.shard == 1 && matrix.toolchain == 'msrv'
+      - if: matrix.shard == 1
         run: cargo test -p patina-dst --features macros --locked
 
   gates:
     if: github.event_name != 'schedule' && !inputs.bench_only
-    name: ${{ matrix.toolchain }} / ${{ matrix.runner }} / gates
+    name: Rust / ${{ matrix.runner }} / gates
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, msrv]
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     env:
@@ -132,32 +123,20 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v7
-      - if: matrix.toolchain == 'stable'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          targets: wasm32-wasip1
-      - if: matrix.toolchain == 'msrv'
-        uses: dtolnay/rust-toolchain@1.86.0
-        with:
-          targets: wasm32-wasip1
+      - uses: ./.github/actions/setup-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
+          key: rust-${{ hashFiles('mise.lock', 'rust-toolchain.toml') }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # File-size ratchet: no Rust file grows past the cap or its allowlisted ceiling.
-      - if: matrix.toolchain == 'stable'
-        run: python3 -B scripts/check-file-size.py && python3 -B scripts/check-file-size.py --selftest
-      - if: matrix.toolchain == 'stable'
-        run: cargo fmt --all -- --check
-      - if: matrix.toolchain == 'stable'
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - if: matrix.toolchain == 'stable'
-        run: cargo doc --workspace --no-deps --locked
+      - run: python3 -B scripts/check-file-size.py && python3 -B scripts/check-file-size.py --selftest
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo doc --workspace --no-deps --locked
       # Flag drift gate: every --flag mentioned in the docs OR in any shell script
       # must exist in the CLI's own machine-readable registry (or the script's
       # small allowlist of non-patina flags).
-      - if: matrix.toolchain == 'stable'
-        run: scripts/check-flag-drift.sh
+      - run: scripts/check-flag-drift.sh
       - run: scripts/validate-wasi.sh
       - run: scripts/check-native-testbeds.sh
       - run: scripts/smoke-cross-target.sh
@@ -166,43 +145,39 @@ jobs:
       # covered by a Rust test; the campaign selftest is ALSO exercised by the
       # `campaign_selftest_passes` integration test but kept here as a direct
       # CLI-level gate against the shipped subcommand.
-      - if: matrix.toolchain == 'stable'
-        run: testbeds/workq/fuzz-sweep.sh --selftest
-      - if: matrix.toolchain == 'stable'
-        run: cargo run -p cargo-patina --quiet -- campaign --selftest
+      - run: testbeds/workq/fuzz-sweep.sh --selftest
+      - run: cargo run -p cargo-patina --quiet -- campaign --selftest
       # The flagship durable-work-queue testbed's full self-checking gate
       # (determinism, record/replay, net/fs faults, crash-recovery, buggify
       # sweep). Its dependency tree is tiny (patina-dst + sha2 only). The
       # heavier randomized fault-combination sweep over this same testbed runs
       # nightly (see the `nightly` job).
-      - if: matrix.toolchain == 'stable'
-        run: testbeds/workq/run-patina.sh
+      - run: testbeds/workq/run-patina.sh
       # The async-native testbed's full self-checking gate (multi-seed
       # determinism + cross-seed outcome invariance, record/strict-replay,
       # fail-closed planted-bug legs).
-      - if: matrix.toolchain == 'stable'
-        run: testbeds/pubsub/run-patina.sh
+      - run: testbeds/pubsub/run-patina.sh
       # The ecosystem symbol-audit corpus: 20 per-crate MREs built + audited,
       # each compared strictly (both directions) to a committed platform
-      # expectation file. Stable Linux x86_64 runs it here; the daily/manual
+      # expectation file. Linux x86_64 runs it here; the daily/manual
       # macOS job below checks the independently recorded macOS surface.
-      - if: matrix.toolchain == 'stable' && matrix.runner == 'ubuntu-latest'
+      - if: matrix.runner == 'ubuntu-latest'
         run: testbeds/audit-corpus/run.sh
 
-  # Hosted macOS is a clean-environment safety net, not a duplicate of every
-  # locally validated push. Run the stable macOS gates daily and on explicit
-  # manual dispatch; MSRV remains covered on both Linux architectures.
+  # The self-hosted macOS runner is a platform safety net, not a duplicate of every
+  # locally validated push. Run the pinned macOS gates daily and on explicit
+  # manual dispatch on the jrh-mini self-hosted Mac.
   macos:
     if: (github.event_name == 'workflow_dispatch' && !inputs.bench_only) || github.event.schedule == '17 7 * * *'
-    runs-on: macos-latest
+    runs-on: [self-hosted, jrh-mini]
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
+      - uses: ./.github/actions/setup-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
+          key: rust-${{ hashFiles('mise.lock', 'rust-toolchain.toml') }}
           workspaces: .
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # The native shim's per-user build cache (macOS location).
           cache-directories: |
             ~/Library/Caches/patina
@@ -226,6 +201,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-toolchain
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
@@ -244,20 +220,20 @@ jobs:
   # jobs already run the flagship workq testbed's full self-checking battery;
   # nightly adds breadth by sweeping 200 randomized fault-combination
   # generations, including the schedule-fuzz tier. The campaign runs on Linux,
-  # where it covers the same deterministic model without duplicating hosted
-  # macOS minutes; the daily macOS job runs the full deterministic gate suite.
+  # where it covers the same deterministic model without duplicating
+  # macOS campaign work; the daily macOS job runs the full deterministic gate suite.
   nightly:
     if: (github.event_name == 'workflow_dispatch' && !inputs.bench_only) || github.event.schedule == '17 7 * * *'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
+      - uses: ./.github/actions/setup-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
+          key: rust-${{ hashFiles('mise.lock', 'rust-toolchain.toml') }}
           # The sweep builds cargo-patina and workq under the root target dir.
           workspaces: .
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # The native shim's per-user build cache.
           cache-directories: |
             ~/.cache/patina
@@ -287,9 +263,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
+          key: rust-${{ hashFiles('mise.lock', 'rust-toolchain.toml') }}
           workspaces: .
           cache-directories: |
             ~/.cache/patina
@@ -322,6 +299,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-toolchain
       - uses: actions/download-artifact@v8
         with:
           pattern: bench-*

@@ -77,10 +77,11 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     // that is present is rejected after parsing so the error names the doctrine.
     let scan = crate::locate_positionals("campaign", &arguments, 1);
     let artifact = scan.positionals.into_iter().next().map(PathBuf::from);
-    if artifact.is_none() && !continuation_requested {
-        if let Some(stop) = scan.stop {
-            crate::reject_stranded_artifact("campaign", &arguments[stop..])?;
-        }
+    if artifact.is_none()
+        && !continuation_requested
+        && let Some(stop) = scan.stop
+    {
+        crate::reject_stranded_artifact("campaign", &arguments[stop..])?;
     }
     let args = cli::parse("campaign", help::Family::Sole, scan.rest)?;
 

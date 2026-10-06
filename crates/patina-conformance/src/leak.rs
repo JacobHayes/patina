@@ -235,16 +235,17 @@ impl Filter {
             .rsplit_once('=')
             .map(|(_, value)| value.trim())
             .and_then(leading_fd);
-        if matches!(name, "openat" | "openat2" | "open") && trusted_path(args) {
-            if let Some(fd) = returned {
-                self.trusted.insert(fd.to_string());
-            }
+        if matches!(name, "openat" | "openat2" | "open")
+            && trusted_path(args)
+            && let Some(fd) = returned
+        {
+            self.trusted.insert(fd.to_string());
         }
-        if name == "close" {
-            if let Some(fd) = leading_fd(args) {
-                self.trusted.remove(fd);
-                self.memfds.remove(fd);
-            }
+        if name == "close"
+            && let Some(fd) = leading_fd(args)
+        {
+            self.trusted.remove(fd);
+            self.memfds.remove(fd);
         }
         // What an unmapped range held is gone; a moved file range moves.
         if matches!(name, "munmap" | "mremap") {
@@ -345,12 +346,11 @@ impl Filter {
         {
             return;
         }
-        if matches!(name, "read" | "pread64" | "fstat" | "fcntl" | "lseek") {
-            if let Some(fd) = leading_fd(args) {
-                if matches!(fd, "0" | "1" | "2" | "3") || self.trusted.contains(fd) {
-                    return;
-                }
-            }
+        if matches!(name, "read" | "pread64" | "fstat" | "fcntl" | "lseek")
+            && let Some(fd) = leading_fd(args)
+            && (matches!(fd, "0" | "1" | "2" | "3") || self.trusted.contains(fd))
+        {
+            return;
         }
         // The calls the page cache makes on its memfds (`src/mem/cache.rs`).
         if matches!(name, "pread64" | "pwrite64" | "ftruncate" | "fallocate")

@@ -200,12 +200,12 @@ fn decode_one(b: &[u8]) -> Step {
         }
     }
     // REX must immediately precede the opcode in 64-bit mode.
-    if let Some(&r) = b.get(p) {
-        if (0x40..=0x4F).contains(&r) {
-            rexw = r & 0x08 != 0;
-            evex_incompatible_prefix = true;
-            p += 1;
-        }
+    if let Some(&r) = b.get(p)
+        && (0x40..=0x4F).contains(&r)
+    {
+        rexw = r & 0x08 != 0;
+        evex_incompatible_prefix = true;
+        p += 1;
     }
     let op = match b.get(p) {
         Some(&x) => x,

@@ -412,10 +412,10 @@ impl Context {
         if !schedule.vacuous.is_empty() {
             findings.push(facts::vacuous_schedule_finding(&schedule));
         }
-        if let Some(report) = self.scheduler.as_ref().and_then(|s| s.policy_report()) {
-            if report.starve_vacuous > 0 {
-                findings.push(facts::vacuous_starvation_finding(report.starve_vacuous));
-            }
+        if let Some(report) = self.scheduler.as_ref().and_then(|s| s.policy_report())
+            && report.starve_vacuous > 0
+        {
+            findings.push(facts::vacuous_starvation_finding(report.starve_vacuous));
         }
         facts::document(planes, findings)
     }
@@ -438,10 +438,10 @@ impl Context {
             }
         };
         bytes.push(b'\n');
-        if let Some(output) = self.facts.as_mut() {
-            if let Err(error) = output.write(&bytes) {
-                eprintln!("PATINA_INFRA run_facts write_failed reason={error:?}");
-            }
+        if let Some(output) = self.facts.as_mut()
+            && let Err(error) = output.write(&bytes)
+        {
+            eprintln!("PATINA_INFRA run_facts write_failed reason={error:?}");
         }
     }
 
@@ -469,13 +469,14 @@ a recorded result or a replay fetch",
                 label: pending.label,
             });
         }
-        if self.require_crash_selector_reached && !self.crash_fired {
-            if let Some(selector) = self.crash_at {
-                return Err(RuntimeError::CrashSelectorUnreached {
-                    selector,
-                    counts: self.crash_counts,
-                });
-            }
+        if self.require_crash_selector_reached
+            && !self.crash_fired
+            && let Some(selector) = self.crash_at
+        {
+            return Err(RuntimeError::CrashSelectorUnreached {
+                selector,
+                counts: self.crash_counts,
+            });
         }
         // Any runtime diagnostic no embedder drained. The shim and the WASI host
         // drain after each SDK entry point so the lines interleave with guest

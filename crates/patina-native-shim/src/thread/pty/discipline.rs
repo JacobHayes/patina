@@ -291,11 +291,11 @@ impl Pair {
             cell.delim = false;
         }
         self.canon = 0;
-        if self.canonical() {
-            if let Some(last) = self.to_slave.back_mut() {
-                last.delim = true;
-                self.canon = self.to_slave.len();
-            }
+        if self.canonical()
+            && let Some(last) = self.to_slave.back_mut()
+        {
+            last.delim = true;
+            self.canon = self.to_slave.len();
         }
     }
 

@@ -95,8 +95,8 @@ fn every_defined_public_symbol_has_a_row_and_every_row_is_defined() {
         }
     });
     // rustc emits unmangled globals of its own into the Rust object set: the
-    // DWARF EH personality reference, the gdb-scripts section marker, and (on
-    // MSRV 1.86) allocator shims. None is a definition the shim wrote, so none
+    // DWARF EH personality reference, the gdb-scripts section marker, and
+    // allocator shims. None is a definition the shim wrote, so none
     // needs a row.
     let toolchain_glue = |name: &str| {
         name.starts_with("DW.ref.")

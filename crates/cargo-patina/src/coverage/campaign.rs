@@ -192,13 +192,13 @@ impl CampaignCoverageMeta {
                 self.edges_total
             ));
         }
-        if let Some(last) = self.last_new_edge_gen {
-            if last >= self.generations_applied {
-                return Err(format!(
-                    "last_new_edge_gen={last} is not below generations_applied={}",
-                    self.generations_applied
-                ));
-            }
+        if let Some(last) = self.last_new_edge_gen
+            && last >= self.generations_applied
+        {
+            return Err(format!(
+                "last_new_edge_gen={last} is not below generations_applied={}",
+                self.generations_applied
+            ));
         }
         let mut previous = None;
         for (generation, new_edges) in &self.new_edge_log {
@@ -672,15 +672,19 @@ pub(super) fn count_bits(bytes: &[u8], edge_count: usize) -> usize {
 
 pub(super) fn decode_u64_vec(bytes: &[u8]) -> Vec<u64> {
     bytes
-        .chunks_exact(8)
-        .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| u64::from_le_bytes(*chunk))
         .collect()
 }
 
 pub(super) fn decode_i64_vec(bytes: &[u8]) -> Vec<i64> {
     bytes
-        .chunks_exact(8)
-        .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| i64::from_le_bytes(*chunk))
         .collect()
 }
 
