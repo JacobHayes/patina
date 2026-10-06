@@ -430,7 +430,7 @@ Fail loud, no partial stdout — matching the crate's fail-closed doctrine:
   unknown `--kind` token usage error.
 - **Registry gates**: the extended `accepted_flags`/grammar/index tests (§8)
   are themselves the drift protection.
-- **e2e round-trip** (`crates/cargo-patina/tests/end_to_end.rs`, which already
+- **e2e round-trip** (`crates/cargo-patina/tests/end_to_end/`, which already
   records WASI, native, and cargo-family traces): for a freshly recorded trace
   of each family — `info` counts equal the run envelope's
   `trace.event_count`; unfiltered `events` line count equals `info`'s count;

@@ -100,7 +100,7 @@ This is the currently implemented acceptance level. The application explicitly e
 Automated evidence:
 
 - crate unit tests cover ABI serialization, each concrete driver, trace validation, runtime modes, and CLI parsing;
-- `crates/cargo-patina/tests/end_to_end.rs` creates an independent fixture package and verifies seeded runs plus record/replay through separate child processes;
+- `crates/cargo-patina/tests/end_to_end/cargo_replay.rs` creates an independent fixture package and verifies seeded runs plus record/replay through separate child processes;
 - the `patina-dst-runtime` examples provide a manual smoke path.
 
 Manual smoke test from the repository root:

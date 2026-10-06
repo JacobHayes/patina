@@ -18,7 +18,6 @@ crates/cargo-patina/src/parse/tests.rs 1624 # pending split
 crates/cargo-patina/src/sites.rs 2464 # pending split
 crates/cargo-patina/src/trace_cmd.rs 1590 # pending split
 crates/cargo-patina/src/trace_view.rs 1650 # pending split
-crates/cargo-patina/tests/end_to_end.rs 19238 # pending split
 crates/cargo-patina/tests/native_conformance.rs 2353 # pending split
 crates/patina-abi/src/lib.rs 1978 # pending split
 crates/patina-async/src/lib.rs 1764 # pending split

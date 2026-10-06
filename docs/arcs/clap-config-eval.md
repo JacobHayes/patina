@@ -346,7 +346,7 @@ parser→clap port without further prompting if it clearly passes.
   main (the registry stays the JSON source, so this should be trivially true —
   a diff here means the registry stopped being authoritative, which is a fail).
 - `scripts/check-flag-drift.sh` green, unmodified.
-- End-to-end tests for the two verbs (`crates/cargo-patina/tests/end_to_end.rs`)
+- End-to-end tests for the two verbs (`crates/cargo-patina/tests/end_to_end/`)
   pass; any *error-message* text changes are inventoried and judged (better is
   acceptable; a lost `--help` pointer or lost exit-code contract is a fail).
 - Human `--help` output either byte-identical (registry renderer retained —
