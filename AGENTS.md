@@ -147,10 +147,22 @@ Gates worth knowing individually:
 
 - **Fail closed, loudly.** An unmodeled effect is a refusal or a named abort,
   never a silent fallback to the host. Do not add permissive fallbacks.
+- **Structure before tests.** Enforce an invariant by construction first, in
+  this order:
+  1. make the bad state unrepresentable: types, visibility, ownership, one
+     choke point;
+  2. failing that, a compiler or lint rule (`clippy.toml` `disallowed-*`, a
+     `#[deny]`);
+  3. only then, a behavioural test that drives the product.
+  Never enforce a code convention by scanning or patching source text in a
+  test: such tests rot silently as code moves, and pass vacuously. Need a
+  fault for a test? Use a test-only hook compiled into the product (a feature
+  or failpoint), not a patched copy of the source.
 - **Detection before fixes.** A new bug class needs a standalone detector that
   provably fires (red-before/green-after) before or alongside the point fix.
-  Every new point-level regression pin must name its class-level pairing
-  (VALIDATION.md, "Maintenance rule").
+  Per "Structure before tests", the strongest detector is the type or lint
+  that rejects the class at compile time. Every new point-level regression pin
+  must name its class-level pairing (VALIDATION.md, "Maintenance rule").
 - **No cruft.** No deprecation aliases, compatibility shims, or dual code
   paths for renamed surfaces — migrate every caller and doc in the same change.
 - **Determinism claims are verified, not asserted.** Byte-identical repeats,

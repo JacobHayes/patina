@@ -21,7 +21,7 @@ Lookup map — the capability levels and the cross-cutting sections:
 
 ## Validation principles
 
-1. **Test observable contracts, not implementation details.** Seeds, traces, replay failures, virtual effects, and CLI behavior are public contracts.
+1. **Test observable contracts, not implementation details.** Seeds, traces, replay failures, virtual effects, and CLI behavior are public contracts. Internal conventions (who may read a field, which wrapper a call goes through) are enforced by types, visibility or lints, never by tests that scan or patch source text (AGENTS.md, "Structure before tests").
 2. **Make nondeterminism failures visible.** A missing driver, malformed trace, incompatible fingerprint, mismatched operation, or unconsumed replay event must fail the run.
 3. **Use independent repetitions.** Reproducibility means separate processes produce the same result, not merely that one object can be queried twice.
 4. **Keep replay stricter than seed reruns.** Replay verifies the exact ordered boundary-operation stream and rejects compatibility mismatches.
@@ -920,8 +920,9 @@ not runtime acceptance or a reason to skip undecodable bytes (see the taxonomy).
 **Every new point-level regression pin must name its class-level pairing in a
 comment, or be flagged in review.** A reproducer that pins one past bug is
 welcome, but it must sit beside a structural invariant (choke-point, distinct
-sentinel, default-deny audit, fail-closed reconcile) that a *new variant of the
-same family* would also trip. A tuned constant in a detector (a yield floor, a
+sentinel, default-deny audit, fail-closed reconcile, or a type or lint that
+makes the family unrepresentable) that a *new variant of the same family* would
+also trip. A tuned constant in a detector (a yield floor, a
 boundary threshold) is a calibration point-pin: it must carry a comment stating
 what it is calibrated against and how a drift would surface. When a class-level
 detector exists but does not run in CI, that gap is itself a tracked item — a
