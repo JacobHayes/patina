@@ -44,30 +44,30 @@ verb* (run's native/WASI/cargo groups, `help.rs:554-669`). The registry generate
 The registry does **not** drive parsing (`help.rs:12-16` states this explicitly).
 
 **The parsers** are per-family `match` loops over token indices in
-`crates/cargo-patina/src/lib.rs` (routing + parse fns + helpers ≈ lines 526-3507),
+`crates/cargo-patina/src/parse.rs` (routing + parse fns + helpers),
 `campaign.rs:190-357`, and `output.rs:97-170`. Measured by function span, the
 hand-rolled parsing code is:
 
 | Where | What | ~LOC |
 |---|---|---|
-| `lib.rs` | verb routing, `locate_positionals`, `reject_stranded_artifact`, 15 `parse_*` family fns, value validators, `split_opt`/`required_value`/`set_once` helpers | 2,250 |
+| `parse.rs` | verb routing, `locate_positionals`, `reject_stranded_artifact`, 15 `parse_*` family fns, value validators, `split_opt`/`required_value`/`set_once` helpers | 2,250 |
 | `campaign.rs:190-357` | campaign parse (incl. `--spec` JSON layering) | 170 |
 | `output.rs:97-170` | pre-routing global `--format/--render/--report` extraction | 75 |
 | **total** | | **~2,500** |
 
-**The enforcement layer** (all in `lib.rs` `tests`, ≈860 lines of the ~2,600-line
+**The enforcement layer** (in `tests.rs` and `parse/tests.rs`, ≈860 lines of the ~2,600-line
 test module, plus a repo script):
 
-- `registry_covers_every_parsed_flag` (`lib.rs:8146`) — every flag a parser
+- `registry_covers_every_parsed_flag` (`tests.rs`) — every flag a parser
   accepts must be registered, against a hand-maintained `accepted_flags` mirror
-  (`lib.rs:8010-8143`).
-- `registry_value_grammars_match_the_parsers` (`lib.rs:8689`) — for every
+  (`tests.rs`).
+- `registry_value_grammars_match_the_parsers` (`tests.rs`) — for every
   registered value-bearing flag, valid and invalid samples of its declared `Kind`
-  (`kind_samples`, `lib.rs:8389`) are driven through the **real** family parser
-  (`drive_flag`, `lib.rs:8493`) in every registry-implied form: inline `=`,
+  (`kind_samples`, `tests.rs`) are driven through the **real** family parser
+  (`drive_flag`, `tests.rs`) in every registry-implied form: inline `=`,
   spaced (required-value only), declared short, and the optional-value flags are
-  asserted to *reject* the space form (`=`-only semantics, `lib.rs:8780-8788`).
-- `registry_repeatable_flags_match_the_parsers` (`lib.rs:8820`) — repeat
+  asserted to *reject* the space form (`=`-only semantics, `tests.rs`).
+- `registry_repeatable_flags_match_the_parsers` (`tests.rs`) — repeat
   acceptance must match the `repeatable` field (`set_once` rejection otherwise).
 - `scripts/check-flag-drift.sh` (219 lines) — every `--flag` token in gated docs
   and all shell scripts, checked against the flag universe reconstructed from the
@@ -77,23 +77,23 @@ test module, plus a repo script):
 
 - Optional values are `=`-only: `--buggify` or `--buggify=500`, never
   `--buggify 500` (space form ambiguous with a positional; `help.rs:1442-1446`,
-  enforced at `lib.rs:8780`).
-- `set_once` duplicate rejection for non-repeatable value flags (`lib.rs:3443`).
+  enforced at `tests.rs`).
+- `set_once` duplicate rejection for non-repeatable value flags (`parse.rs`).
 - Cargo-family conservative passthrough: `test`/`run`-as-package forward every
   unrecognized option to Cargo verbatim, **interleaved and order-preserving**
-  (`parse_cargo` `lib.rs:1658-1659`), including non-UTF-8 tokens
-  (`lib.rs:1616-1621`).
-- Options and the artifact in any order: `locate_positionals` (`lib.rs:1228`)
+  (`parse_cargo` `parse.rs`), including non-UTF-8 tokens
+  (`parse.rs`).
+- Options and the artifact in any order: `locate_positionals` (`parse.rs`)
   scans with registry arity, stops conservatively at the first *unknown* flag
   (its next token could be that flag's value), and `reject_stranded_artifact`
-  (`lib.rs:1333`) turns a real artifact stranded behind an unknown flag into a
+  (`parse.rs`) turns a real artifact stranded behind an unknown flag into a
   loud routing error instead of a silent Cargo fallthrough.
 - One verb, several families: `run`/`audit`/`replay` decide the family from the
   positional's magic bytes (or `--target`), *then* run that family's parser —
   so `--fuel` on a native binary is rejected by construction, not by a
   cross-check.
 - `--help`/`-V` intercepted anywhere before `--`; a literal `--help` reaches a
-  guest only via `--arg=--help` (`lib.rs:8886-8896`).
+  guest only via `--arg=--help` (`tests.rs`).
 
 **Crate-graph constraint check**: nothing in the workspace depends on
 `cargo-patina` (verified: no other `Cargo.toml` lists it), and the shim/runtime
@@ -114,11 +114,11 @@ spike re-verifies) against each bespoke feature:
 | Required value, both `--f V` and `--f=V` | default `Arg` behavior | exact |
 | Optional value, `=`-only | `num_args(0..=1).require_equals(true).default_missing_value(...)` | exact — this is precisely what `require_equals` exists for |
 | `set_once` duplicate rejection | clap 4 default: a non-`Append` arg given twice errors ("cannot be used multiple times") | exact |
-| Repeatable flags (`--arg`, `--env`, `--allow`, `--param`) | `ArgAction::Append` | exact; `--param` unique-key check (`lib.rs:1650-1652`) stays a post-parse validation |
-| 15 typed value grammars | `value_parser`: `value_parser!(u64)`, ranges for permille (`0..=1000`), `PossibleValuesParser` for enums, and **custom parser fns** for nanos-range/crash-spec/socket/preopen/unsupported-symbols — i.e. today's validators (`validate_crash_at` `lib.rs:2480`, `validate_nanos_range` `lib.rs:2496`, `parse_wasi_preopen` `lib.rs:3470`, …) survive, re-plugged | exact plumbing; **the grammar code itself is not replaced** |
+| Repeatable flags (`--arg`, `--env`, `--allow`, `--param`) | `ArgAction::Append` | exact; `--param` unique-key check (`parse.rs`) stays a post-parse validation |
+| 15 typed value grammars | `value_parser`: `value_parser!(u64)`, ranges for permille (`0..=1000`), `PossibleValuesParser` for enums, and **custom parser fns** for nanos-range/crash-spec/socket/preopen/unsupported-symbols — i.e. today's validators (`validate_crash_at` `parse.rs`, `validate_nanos_range` `parse.rs`, `parse_wasi_preopen` `parse.rs`, …) survive, re-plugged | exact plumbing; **the grammar code itself is not replaced** |
 | Short flags `-p/-o/-h/-V` | `Arg::short` | exact |
 | Global output flags stripped pre-routing | `Arg::global(true)` | equivalent |
-| `--` trailing guest/oracle args | `Arg::last(true)` / manual split (today `split_trailing_args`, `lib.rs:2341`) | equivalent |
+| `--` trailing guest/oracle args | `Arg::last(true)` / manual split (today `split_trailing_args`, `parse.rs`) | equivalent |
 | Per-verb help sections with titled groups | `Command::next_help_heading` | close (layout differs; see help-output criterion in §7) |
 | Verb routing (`run`/`test`/…) | subcommands | equivalent |
 | **Interleaved unknown-flag passthrough to Cargo (order-preserving, non-UTF-8-safe)** | **none.** `allow_external_subcommands` is subcommand-level; `trailing_var_arg`+`allow_hyphen_values` stops patina-flag parsing at the first unknown token (breaking "options in any order"); `ignore_errors(true)` is documented as best-effort and drops the unknowns' positions | **must remain hand-rolled** (a pre-pass that partitions known patina flags from forwarded tokens — which requires an arity table, i.e. the registry, i.e. roughly `locate_positionals` generalized) |
@@ -224,7 +224,7 @@ Under registry-driven clap:
 | generic `Flag → Arg` builder + `Kind → value_parser` map | +150 |
 | per-verb+family `Command` assembly | +100 |
 | matches→invocation-struct extraction (the per-flag `matches.get_one::<u64>("seed")` arms; unavoidable — each family's invocation struct must still be populated) | +700 |
-| cross-flag validation kept (branch quorum `lib.rs:1761-1788`, `--sched-pct-steps` requires `--sched-pct`, buggify implies, …) — clap `ArgGroup`/`requires` covers some, the rest stays code | +150 |
+| cross-flag validation kept (branch quorum `parse.rs`, `--sched-pct-steps` requires `--sched-pct`, buggify implies, …) — clap `ArgGroup`/`requires` covers some, the rest stays code | +150 |
 | value validators kept (grammar fns) | +250 (moved, not removed) |
 | routing/positional layer kept (`locate_positionals`, `reject_stranded_artifact`, magic bytes, passthrough partition) | +400 (kept, slightly reshaped) |
 | clap error interception (exit codes, verb-synopsis pointer, `CliError` envelope) | +80 |
@@ -241,7 +241,7 @@ inline-`=` vs spaced-form divergence, missed duplicate rejection, arity
 mismatches, help/parser drift *for the flags clap owns*. The decisive
 observation: **these are exactly the classes the three generic walks already
 catch mechanically** — the walks were built as the general form of a real shipped
-regression (`--sleep-jitter-nanos 0:N` vs `0..N`, cited at `lib.rs:8694-8696`),
+regression (`--sleep-jitter-nanos 0:N` vs `0..N`, cited at `tests.rs`),
 and they run every flag through every form in both directions. Classes clap does
 *not* touch: value-grammar bugs (validators are still ours), routing/family
 bugs, passthrough bugs, JSON-help drift, config layering — which is where the
@@ -251,7 +251,7 @@ were semantic/routing-level, not token-level).
 So: **fewer lines (modestly), and mostly the same bug classes remaining**. clap
 converts "bug class prevented by a test we wrote" into "bug class prevented by
 construction" for the token layer — a real but bounded improvement, plus it
-removes the `accepted_flags` hand-maintained mirror (`lib.rs:8010-8143`), whose
+removes the `accepted_flags` hand-maintained mirror (`tests.rs`), whose
 completeness currently rests on `drive_flag`'s panic-on-missing-driver rather
 than on structure. New risk introduced: a dependency's behavior changes under
 upgrade (clap minor releases have historically adjusted error text and edge-case

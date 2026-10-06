@@ -44,12 +44,12 @@ not the binary; timings are unaffected):
 
 - **Interposition is link-time, not launch-time.** `run <BINARY>` execs the
   guest directly — `Command::new(&binary)` with `env_clear()` and a stamped
-  `argv[0]` (`crates/cargo-patina/src/lib.rs:5699`). There is no DYLD/LD_PRELOAD
+  `argv[0]` (`crates/cargo-patina/src/native_run.rs`). There is no DYLD/LD_PRELOAD
   insertion anywhere. Determinism exists only if the shim was linked in at
   build time (`--cfg patina_shim` + shim staticlib + POSIX object, injected via
-  rustc args for single sources at `lib.rs:4547` and via
+  rustc args for single sources at `native_build.rs` and via
   `CARGO_ENCODED_RUSTFLAGS` + an explicit host `--target` for packages at
-  `lib.rs:4593`). Consequence: **a running test process cannot
+  `native_build.rs`). Consequence: **a running test process cannot
   retro-instrument itself**; a `#[test]` under plain `cargo test` must
   delegate to a shim-linked build of itself.
 - **A shim-linked libtest harness works under the runtime today.** The `build`
@@ -69,9 +69,9 @@ not the binary; timings are unaffected):
 - **Measured loop costs** (release CLI, warm): `run tiny.rs --seed N` =
   0.39 s wall (three identical runs; includes the no-op shim `cargo build`,
   a fresh rustc compile into a per-invocation tempdir
-  (`build_on_the_fly`, `lib.rs:3941`), the audit gate, and the run).
+  (`build_on_the_fly`, `native_build.rs`), the audit gate, and the run).
   `run` of a prebuilt binary = 0.03 s. `explore run --seeds 20` = 0.20 s
-  (~10 ms/seed; explore builds once and reuses the artifact, `lib.rs:3994`).
+  (~10 ms/seed; explore builds once and reuses the artifact, `harness.rs`).
 - **The cargo family is not full interposition.** `cargo patina test` today
   re-runs `cargo test` with `--cfg patina/dst` and the env control plane
   (`lib.rs:6171`), sets `RUST_TEST_THREADS=1` (`lib.rs:6301`), and derives all
@@ -90,10 +90,10 @@ not the binary; timings are unaffected):
   yield-point windows, faster loop. Macro guests build debug by default.
 - **Single-source `--release` gap (cross-reference, fix in flight).** In the
   working tree, `--release` on a single `.rs` switches only the shim
-  staticlib's profile (`build_native_shim`, `lib.rs:4217`);
-  `build_native_source` (`lib.rs:4547`) never receives `invocation.release`,
+  staticlib's profile (`build_native_shim`, `shim_build.rs`);
+  `build_native_source` (`native_build.rs`) never receives `invocation.release`,
   so the guest itself compiles unoptimized. The package path honors it
-  (`lib.rs:4642`). The in-flight fix must thread the profile into the
+  (`native_build.rs`). The in-flight fix must thread the profile into the
   single-source rustc invocation. The macro is unaffected (it uses package
   builds, and defaults to debug), but the point-solution skill must not claim
   `run --release script.rs` optimizes the guest until that lands.
@@ -174,7 +174,7 @@ Steps, all existing machinery re-composed:
 
 1. **Build the harness shim-linked**: `cargo test --no-run
    --message-format=json` with the exact `CARGO_ENCODED_RUSTFLAGS` + explicit
-   host `--target` recipe of `build_native_package` (`lib.rs:4593`) — the
+   host `--target` recipe of `build_native_package` (`native_build.rs`) — the
    explicit target keeps shim link args off build scripts and proc macros,
    and keeps the shim-linked artifacts in a separate `target/<triple>/` cache
    layer so the plain `cargo test` cache is never thrashed. Select the
@@ -328,9 +328,9 @@ those questions more accurately than prose can.
 
 ## 3. Source-first polish (D10)
 
-Verified current path: `run script.rs` → `build_on_the_fly` (`lib.rs:3941`) →
+Verified current path: `run script.rs` → `build_on_the_fly` (`native_build.rs`) →
 shim staticlib no-op rebuild + content-addressed shim objects
-(`stage_shim_object`, `lib.rs:4439`) → single rustc compile into a
+(`stage_shim_object`, `shim_build.rs`) → single rustc compile into a
 per-invocation tempdir → audit gate → run, with a `PATINA_BUILD_ON_RUN` note
 (source, artifact, sha256) routed to stderr under `--format json`. Measured
 warm: **0.39 s** end to end.
@@ -348,7 +348,7 @@ Findings and minimal fixes:
   path with the sha256 alongside (both already computed for the build note) —
   an agent can key results and cache decisions on it.
 - **Explore failures lack a repro string**: `PATINA_EXPLORE_FAILURE seed=N
-  exit=E` (`lib.rs:4039`) makes the reader assemble the command campaign
+  exit=E` (`harness.rs`) makes the reader assemble the command campaign
   already hands out. Fix: append `repro="cargo patina run … --seed N"` to the
   line and the envelope.
 - **Dependencies need a package** — inherent to the rustc-only single-source
@@ -360,7 +360,7 @@ Findings and minimal fixes:
 ## 4. Boundary sketch: harness fixtures (unscheduled — see staged plan)
 
 `patina-dst-harness` already supports deferred init (`--harness` →
-`PATINA_DEFER_INIT`, `lib.rs:5713`; USAGE-MODES mode 2): a binary configures
+`PATINA_DEFER_INIT`, `native_run.rs`; USAGE-MODES mode 2): a binary configures
 the run in code, then executes under full interposition. Phase 2 embeds that
 as a **fixture** in another program's tests: `#[patina_dst::test(harness)]`
 runs the body inside `patina_dst_harness::run_with(|h| …, body)` so per-test

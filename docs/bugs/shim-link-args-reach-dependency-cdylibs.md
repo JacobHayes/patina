@@ -120,7 +120,7 @@ dependencies needs them. Interposition is unchanged: the shim's strong symbol
 definitions still land in the guest's own link exactly as before.
 
 - `native_package_rustflags` and `native_package_link_args`,
-  `crates/cargo-patina/src/lib.rs`.
+  `crates/cargo-patina/src/native_build.rs`.
 - `build_native_package` (`cargo rustc --package P --bin B`) and
   `build_native_harness` (`cargo rustc --package P {--lib|--test N|--bin N}`).
 

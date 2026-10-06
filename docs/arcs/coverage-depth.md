@@ -78,7 +78,7 @@ its `__sanitizer_cov_pcs_init(pcs_beg, pcs_end)` callback is registered by the s
 constructor that calls guard-init, so the hook pairs the k-th guard range with the k-th pcs
 range at runtime — no offline section-order assumptions. It adds zero executed instructions
 (the guest's instrumented code stream is identical), only data. Same LLVM `cl::opt`
-stability coupling the existing two `llvm-args` already accept (`lib.rs:4495-4502`).
+stability coupling the existing two `llvm-args` already accept (`native_build.rs`).
 Function-entry flags give function-level coverage for free.
 
 **ASLR handling — reuse the proven nm-delta scheme.** Runtime PCs (from the loaded pc-table)
@@ -115,14 +115,14 @@ run that requested coverage → loud error, never a silent empty report (§10, D
    `run --coverage-out PATH` / `replay --coverage-out PATH` makes the supervisor create
    the file and pass it as an inherited descriptor via `PATINA_COVERAGE_FD` — the exact
    `PATINA_TRACE_FD` pattern
-   (`cargo-patina/src/lib.rs:5805`, `patina-runtime/src/lib.rs:98`), written at finalize
+   (`cargo-patina/src/native_run.rs`, `patina-runtime/src/lib.rs:98`), written at finalize
    through host-alias writes (shim host-alias doctrine holds; no interposable symbol is
    called). Map format `patina.covmap/v1`: header (magic, version, guard count, range
    table), u32-LE counter array, i64-LE anchor-delta array (§1). ~12 bytes/edge; a 200k-edge
    binary dumps ~2.4 MB, folded and deleted by the campaign immediately (§6).
    Requesting `--coverage-out` for a non-instrumented binary is a loud usage error naming
    `cargo patina build --yield-points` (detection via the existing marker scan,
-   `binary_has_yield_points`, `lib.rs:4935-4967`).
+   `binary_has_yield_points`, `native_build.rs`).
 
 3. **The `patina.result/v1` run envelope** gains an additive `coverage` object (native yp:
    `{edges_total, edges_covered, covered_permille, map_path?}`) and `depth` object (WASI,
@@ -195,7 +195,7 @@ and every surface says "depth" so the two are never conflated.
 - **`fuel_consumed`** already exists and is documented as a deterministic function of the
   executed instruction stream (`patina-wasi-host/src/lib.rs:1294-1300`,
   `1335-1343`) — but is dropped on the floor today: `execute_preview1_with_fuel` returns it
-  and `finalize_inprocess` never sees it (`cargo-patina/src/lib.rs:3615-3639`,
+  and `finalize_inprocess` never sees it (`cargo-patina/src/wasi_exec.rs`,
   `output.rs:315-330`). Surfacing it is pure plumbing: add depth fields to
   `output::RunReport`.
 - **Hostcall counts** (new): `Preview1Host` counts calls per imported function name
@@ -295,8 +295,8 @@ is already the envelope's convention, `campaign.rs:1284-1303`).
   (same-seed double-run map byte-identity AND record→replay map byte-identity).
 - **Fingerprint**: unchanged. The native base fingerprint is caller-supplied
   (`DEFAULT_NATIVE_FINGERPRINT`, `lib.rs:2953`) and the policy suffix stays
-  `+yieldpoints` (`lib.rs:86`, `4972-4978`). Coverage requires a rebuilt hook object
-  (content-addressed restage is automatic, `lib.rs:4402-4429`) and pc-table adds data-only
+  `+yieldpoints` (`native_build.rs`, `4972-4978`). Coverage requires a rebuilt hook object
+  (content-addressed restage is automatic, `shim_build.rs`) and pc-table adds data-only
   sections; neither changes the yield sequence, so even pre-existing yp traces remain
   replayable against a same-source rebuild to exactly the degree they are today.
 - **Decision B1 — no coverage-only build mode (guards on, yields off).** It would double
@@ -503,6 +503,6 @@ E follows C.
   deliberately deferred: it changes trace bytes and needs its own RED-proof and
   teardown-window analysis. Noted as a candidate follow-up, not smuggled into wave A.
 - **LLVM coupling**: pc-table rides the same non-guaranteed-but-stable LLVM `cl::opt`
-  surface as the existing sancov flags (`lib.rs:4495-4502`) — one shared risk, no new class.
+  surface as the existing sancov flags (`native_build.rs`) — one shared risk, no new class.
 - Cross-references to the invariant-visibility and resumable-campaign arcs assume those
   docs land; the shared rollup config format is theirs to fix, this arc consumes it.

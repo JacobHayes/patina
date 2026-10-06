@@ -34,9 +34,9 @@ Two failing generations were measured end to end:
 
 ## 1. What the algorithm does
 
-Entry point `execute_minimize_trace` (`crates/cargo-patina/src/lib.rs:6772`).
+Entry point `execute_minimize_trace` (`crates/cargo-patina/src/minimize.rs`).
 
-**The oracle** (`lib.rs:6797`) — per candidate, unconditionally: create a fresh
+**The oracle** (`minimize.rs`) — per candidate, unconditionally: create a fresh
 `tempfile::tempdir()`, `write_atomic` the whole bundle (~100 KB of JSON here),
 `Command::status()` the user's oracle with `PATINA_MINIMIZE_TRACE` pointing at it,
 and treat a non-zero exit as "failure preserved". There is **no memoization, no
@@ -44,7 +44,7 @@ batching, no parallelism, and no call or time budget** — the registry
 (`crates/cargo-patina/src/help.rs:1934`) exposes only `--output`, `--timeline`, and
 `--prune-branches` for trace minimization.
 
-**Strategy selection** (`lib.rs:6785-6835`). A single unbranched timeline (this
+**Strategy selection** (`minimize.rs`). A single unbranched timeline (this
 case) runs a *joint loop*: `minimize_main` then `reduce_schedule`, repeated until a
 whole round changes nothing.
 

@@ -34,7 +34,7 @@ time (post-e135c94) and have since moved.
   `Context::fs_*` (runtime :2948+). Family parity for anything wired there is automatic.
 - Trace: `FaultConfigRecord` (patina-trace:93) round-trips knobs; replay is trace-authoritative
   with fail-closed reconciliation (`reconcile_replay_faults` :4528); the CLI native-replay parser
-  additionally rejects re-supplied semantic flags outright (cargo-patina/src/lib.rs:3103).
+  additionally rejects re-supplied semantic flags outright (cargo-patina/src/parse.rs).
   Fault knobs fold NO fingerprint component (only `+buggify/+pct/+starve/+swarm/+yieldpoints`
   do); that is the established pattern.
 - Vacuity: `NetFaultReport::is_vacuous` (driver-api:194-213), emitted at finalization
@@ -351,9 +351,9 @@ single `U64` base (not a range): net already decomposes base+jitter as two knobs
 1:1 onto SimNet; fs/dns use one range because they have no base/jitter split worth exposing.
 
 Verbs: `FAULT_FLAGS` already flows to `run` (all three families — the cargo/wasi/native parsers
-share the `apply_fault_flag` path, lib.rs:2750) and `test`; new knobs inherit that for free
+share the `apply_fault_flag` path, parse.rs) and `test`; new knobs inherit that for free
 (`--dns-*` on WASI: rejected with the family-exception message, §3.3). `replay` gets them added
-to the reject-with-explanation list (lib.rs:3103) — the trace is authoritative, no re-supply.
+to the reject-with-explanation list (parse.rs) — the trace is authoritative, no re-supply.
 `campaign --faults` extends its per-generation derivation (campaign.rs:971) with seeded bands:
 fs error [0, 100]‰, fs short [0, 200]‰, fs latency [0, hash-byte × 10µs], dns fail [0, 100]‰,
 net latency [0, 2.55ms] — measured-then-tuned like the existing drop/jitter bands. The registry
