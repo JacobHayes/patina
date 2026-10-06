@@ -40,10 +40,10 @@ runtime/campaign exercised view, and a merged report — hierarchical, progressi
 
 ## Ground truth today (verified)
 
-- **SDK macros** — `crates/patina/src/lib.rs:612-749`: `buggify!`, `buggify_with_prob!`,
+- **SDK macros** — `crates/patina/src/lib.rs:243-467`: `buggify!`, `buggify_with_prob!`,
   `buggify_delay!`, `buggify_knob!`, `always!`, `sometimes!`, `reachable!`. Each captures
   `concat!(file!(), ":", line!())` and routes through `__rt` shims
-  (`crates/patina/src/lib.rs:308-405`) that are inert outside Patina.
+  (`crates/patina/src/__rt.rs`) that are inert outside Patina.
 - **Runtime registry** — `crates/patina-runtime/src/buggify.rs` (`BuggifySite`: label-keyed,
   stores `site: "file:line"` used *only* for duplicate detection), `BuggifyKind` (
   fault/delay/knob/always/sometimes/reachable), `register` (a label reused at a

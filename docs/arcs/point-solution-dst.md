@@ -141,7 +141,7 @@ rebuilds **the same test target** shim-linked and runs it under the native
 runtime with `-- --test-threads=1 --exact <libtest-name> --nocapture`
 (orchestrate strips the leading crate segment from `module_path!` to form the
 libtest name). Inside that guest, `is_simulated()` is true (shim FFI,
-`crates/patina/src/lib.rs:117`), so the same wrapper runs the body directly.
+`crates/patina/src/simulation.rs:20`), so the same wrapper runs the body directly.
 Recursion is structurally impossible: the guard's true branch spawns nothing,
 and the false branch only ever spawns via cargo-patina, which always links the
 shim. The plain and guest binaries are two compilations of identical source;
