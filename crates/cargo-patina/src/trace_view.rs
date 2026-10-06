@@ -505,10 +505,8 @@ pub fn summarize(kind: &str, op: &Value, out: &Value) -> String {
     if let Some(mode) = op.get("mode").and_then(Value::as_u64) {
         parts.push(format!("mode=0o{mode:o}"));
     }
-    for key in ["bytes"] {
-        if let Some(Value::String(s)) = op.get(key) {
-            parts.push(format!("bytes≈{}", base64_len(s)));
-        }
+    if let Some(Value::String(s)) = op.get("bytes") {
+        parts.push(format!("bytes≈{}", base64_len(s)));
     }
     if let Some(k) = out.get("kind").and_then(Value::as_str) {
         match k {
