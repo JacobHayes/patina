@@ -16,7 +16,7 @@ implementation waves start on explicit go). Ground rules that apply across every
 
 | Arc | One-liner |
 |---|---|
-| [c-variadic-interposers](c-variadic-interposers.md) | Rust 1.99 variadic entry points: fcntl spike, linkage isolation, unwind contract and remaining port order. |
+| [c-variadic-interposers](c-variadic-interposers.md) | Rust-owned variadic libc doors and syscall capture: argument contracts, archive extraction, retained C boundaries and acceptance. |
 | [unified-fault-knobs](unified-fault-knobs.md) | Rate-based seeded fault knobs for every interposed domain (fs first, then DNS/TCP-connect/clock/entropy/spawn), wrapper drivers + per-domain vacuity reports, PRF domain-separated RNG (fixes the entropy/net-fault stream aliasing). |
 | [coverage-depth](coverage-depth.md) | Edge coverage in the sancov guard words (percent + density + plateau, offline symbolization), WASI fuel/hostcall depth, campaign accumulation; Wave E = coverage-guided generation scheduling. |
 | [invariant-visibility](invariant-visibility.md) | `cargo patina sites`: hybrid runtime-registry + syn-SCA inventory of assertions/oracles with driven/observed/invisible semantics, crate→module→site rollup, `.patina/config.toml`; Wave 5 = static site enumeration. |

@@ -1,5 +1,5 @@
 /*
- * Memory: mmap/mmap64, munmap, mremap, mprotect, msync, the mlock family and
+ * Memory: mmap/mmap64, munmap, mprotect, msync, the mlock family and
  * memfd_create — the C spellings of the one model in `src/mem/`
  * (`patina_mmap` & co.), which the SUD rows of the same names call too.
  *
@@ -25,13 +25,6 @@
  * state and reaches the host kernel through the glibc syscall(2) host alias,
  * resolved on first use.
  * ========================================================================== */
-
-#ifndef MREMAP_FIXED
-#define MREMAP_FIXED 2
-#endif
-#ifndef MREMAP_DONTUNMAP
-#define MREMAP_DONTUNMAP 4
-#endif
 
 /* The raw ABI's failure range: -4095..-1. */
 static int patina_mem_failed(int64_t result) {

@@ -523,22 +523,8 @@ int linkat(int fromfd, const char *from, int tofd, const char *to, int flags) {
                                 (flags & AT_SYMLINK_FOLLOW) != 0));
 }
 
-/*
- * open/openat/creat and the LFS aliases: decode the libc flag word onto the
- * runtime's PATINA_O_* vocabulary and hand the (dirfd, path) pair to the one
- * openat entry, which resolves it, decides the descriptor's kind from the
- * entry's, and applies the umask to a creating mode. A flag outside the modeled
- * set fails closed (ENOSYS) rather than being silently dropped.
- *
- * `mode` is the caller's creation mode -- open(2)'s third argument. POSIX says
- * the kernel reads it only when the flags can create the entry, and the
- * variadic argument is UNDEFINED otherwise, so every caller here passes 0
- * unless it saw O_CREAT and read a real `mode_t`. An open of an EXISTING file
- * must not touch that file's mode, which is the driver's rule, not a rule this
- * layer can enforce -- so the honest thing to hand it is the caller's request
- * and nothing invented.
- */
-/* Rust owns the shared flag/mode adapter, including these fixed callers. */
+/* Rust owns the open doors and their shared flag/mode adapter. These fixed
+ * callers retain C's shared fortify helper and use the same model entry. */
 extern int patina_openat_impl(int dirfd, const char *path, int flags, uint32_t mode)
     __attribute__((visibility("hidden")));
 

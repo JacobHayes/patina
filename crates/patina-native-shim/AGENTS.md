@@ -99,8 +99,8 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   looks right for the `0o666`/`0o777` callers and silently wrong for the caller
   who asked for `0o400` — and permission enforcement then judges every later
   open against the invented value. Read the variadic mode only when the flags
-  say the kernel would: `open`'s third argument is UNDEFINED without `O_CREAT`,
-  so a non-creating open must record no mode at all rather than whatever
+  say the kernel would: `open` needs its third argument for `O_CREAT` or
+  `O_TMPFILE`, and otherwise must record no mode at all rather than whatever
   happened to be in the register.
 - A descriptor answers metadata from the FILESYSTEM, not from a copy taken when
   it was opened. `fstat` on a FIFO endpoint — the one descriptor class the
@@ -411,20 +411,39 @@ Rules that follow:
   a definition. A deny-trap needs a `Deny(class)` row AND its entry in
   `patina-target`'s deny-trap list; the gate holds the C sites, the rows, and
   that list in three-way agreement.
-- The libc `syscall(2)` interposer (`posix/init.c`) forwards EVERY number into
+- The libc `syscall(2)` interposer (`src/variadic/`) forwards EVERY ordinary number into
   `patina_sud_dispatch`: never add a number-specific branch there; add the row
   and binding instead, so the three vehicles cannot disagree.
 - Reasoning strings are the diagnostic a guest sees on a trap; keep them
   one-line, present-tense, and honest about what is modeled today.
 
-Rust variadic entry points live in `src/variadic.rs`, enabled only by the
+Rust variadic entry points live under `src/variadic/`, enabled only by the
 private `patina_posix_exports` compiler cfg on the guest archive build. Keep it
 off dependency rlibs, unit tests and bare prefixed-ABI links. Guest archive
 builds use one codegen unit: the extraction anchor and Linux assembly aliases
 must share the definitions' object. The C constructor references the anchor;
 Linux dlsym routes use hidden aliases, never cross-object C alias attributes.
-The remaining fixed C platform adapter is hidden. See
-[the design](../../docs/arcs/c-variadic-interposers.md) before extending it.
+A successful many-codegen-unit build does not replace this extraction contract,
+especially on Darwin, where the Linux routing table is absent.
+
+Read optional arguments only when the command or flags consume them, using the
+promoted C type. The open doors consume a mode for `O_CREAT` or all of
+`O_TMPFILE`; Darwin's mode promotes to int. Pointer operands stay pointers.
+Ioctl scalar widths are request-specific too: terminal requests take promoted
+int, but INOTIFY_IOC_SETNEXTWD needs its full unsigned-long range check. Keep
+oversized operands in the argument-category guest and compiled mutation matrix.
+Fixed flag, errno and expressible layout translation belongs alongside the Rust
+door. The fcntl/open cancellation check immediately follows the panic guard;
+it refuses pending cancellation by name and never initiates forced unwind.
+The generated AST rules enforce both that order and fcntl's waiting commands.
+
+Keep the modeled `vsnprintf`/FILE engine and its internal stream helpers in C;
+the Rust printf doors pass `VaList` through its fixed bridge. Acting cancellation,
+thread-exit/cleanup frames and host-resolution vehicles also remain C. Linux's
+syscall assembly captures raw machine words for the fixed Rust entry; it must
+not decode six fictitious variadic arguments or lose the guest-SP sigreturn
+path. New doors must satisfy the existing export guard and variadic inventory
+rules without exceptions. See [the design](../../docs/arcs/c-variadic-interposers.md).
 
 ## Source bundle and `links`
 

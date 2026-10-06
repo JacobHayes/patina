@@ -335,7 +335,7 @@ pub(super) fn sys_fcntl(fd: i64, command: u64, arg: u64) -> i64 {
     }
 }
 
-/// `ioctl(2)`: the one entry the C `ioctl` calls too (`crate::ioctl`).
+/// `ioctl(2)`: the one entry the Rust libc `ioctl` calls too (`crate::ioctl`).
 pub(super) fn sys_ioctl(fd: i64, request: u64, arg: u64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;

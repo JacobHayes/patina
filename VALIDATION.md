@@ -950,14 +950,45 @@ not runtime acceptance or a reason to skip undecodable bytes (see the taxonomy).
 
 ### Rust variadic libc entries
 
-`native_abi::variadic` calls the libc doors from compiled C with promoted int,
-record-lock pointer and absent arguments, checks Linux's large-file spelling
-and dlsym address identity, and proves pending cancellation still refuses by
-name. Its compiled-in `planted-faults` injection exercises the real Rust fcntl
-frame under unwind/abort with original/replaced panic hooks: host SIGABRT and
-an incomplete trace are required. The object registry gate combines C and Rust
-exports and rejects duplicate public definitions; its planted duplicate proves
-that detector fires. These pair with the exported-boundary ownership lint.
+`native_abi::variadic` calls each migrated libc door from compiled C. Its guests
+exercise absent arguments, promoted integers, pointers and optional arguments
+as each contract permits: fcntl locks and flags; open creation modes and
+non-creating opens; ioctl descriptor and terminal requests; mremap fixed and
+non-fixed placement; ptrace request shapes; prctl option and reserved words;
+printf-family formatting; and raw syscall arguments. Linux's internal and
+large-file spellings are separate calls. Named cancellation refusals and Linux
+dlsym address identity are preserved.
+
+`variadic::matrix::every_variadic_family_contains_panics_and_detects_wrong_arguments`
+pairs a passing control with an explicitly armed, compiled-in `test-panic`
+failpoint for each door. Its operand mutation selects a deliberately wrong
+argument slot with a distinct supplied sentinel, or narrows the full unsigned
+word required by INOTIFY_IOC_SETNEXTWD. The terminal-int case passes O_RDWR
+and an O_RDONLY sentinel to TIOCGPTPEER, and checks the peer's F_GETFL access
+mode so a zeroed or shifted operand cannot pass. Each must fail the guest's semantic
+assertion. The same family selector arms a boundary panic under
+unwind/abort with original/replaced hooks; every panic must produce host SIGABRT
+and an incomplete trace. These tests exercise compiled product behavior and
+never patch implementation source. Their class-level pairings are the guarded
+export rule, typed command/option decoding and the common argument-category
+matrix.
+
+The matrix also runs `nm` on the shim's native Rust archive members and the C
+POSIX object in debug and opt-level=3 builds. Every migrated spelling must have
+exactly one strong Rust definition and no C definition. Linux routes must share
+the definition's object and address and carry ELF `STV_HIDDEN` visibility.
+Inspecting native members avoids Apple nm's inability to read the newer LLVM
+bitcode bundled with Rust std. The combined C/Rust registry gate rejects
+unregistered and duplicate definitions; its planted duplicate proves detection.
+
+Linux x86_64 executes all ported families. macOS arm64 executes the common
+fcntl/open/ioctl/stdio families and checks the registry absence of the Linux-only
+mremap/ptrace/prctl/syscall doors. All exported Rust entries remain subject to
+the panic-scope and variadic-declaration AST rules without new exceptions.
+Generated cancellation rules cover each Rust fcntl/open export and the waiting
+fcntl command helper. Cross-clippy for Linux arm64 is compile-time evidence,
+not runtime evidence on that architecture. The full landing battery is separate
+from these focused acceptance checks.
 
 ### Maintenance rule
 

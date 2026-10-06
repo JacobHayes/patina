@@ -79,7 +79,7 @@ pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
 }
 
 /// The record-lock commands of `patina_record_lock`, in Linux's numbering
-/// (the SUD `fcntl` row passes the guest's through; the C `fcntl` maps its
+/// (the SUD `fcntl` row passes the guest's through; the libc `fcntl` door maps its
 /// platform's onto them).
 pub(crate) const F_GETLK: u32 = 5;
 pub(crate) const F_SETLK: u32 = 6;
@@ -94,7 +94,7 @@ pub(crate) const F_UNLCK: i16 = 2;
 
 /// `struct flock` as the 64-bit Linux kernel lays it out (`struct
 /// patina_flock` in `patina_native.h`): what the SUD `fcntl` row reads from
-/// the guest, and what the C `fcntl` translates its platform's layout into.
+/// the guest, and what the libc `fcntl` door translates its platform's layout into.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PatinaFlock {
