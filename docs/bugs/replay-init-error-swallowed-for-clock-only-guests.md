@@ -90,7 +90,7 @@ Evidence:
   deadline — observed at 100% CPU for 22 minutes when an earlier run leaked it),
   with only the `sleep` control aborting correctly. GREEN after. The `stdout` leg
   was added later, RED against the bootstrap-window fix and GREEN after.
-- Enumeration gate: `bootstrap_window_lints` in `crates/patina-native-shim/src/lib.rs`
+- Enumeration gate: `bootstrap_window_lints` in `crates/patina-native-shim/src/tests.rs`
   pins the window's source call sites to a named list and forbids any second
   reader of `SHIM_BOOTSTRAP`, so a new bootstrap-window path has to be enumerated
   (and given a leg above) rather than appearing silently.
@@ -100,7 +100,7 @@ Evidence:
   deadline. It is what would hang if the re-entrancy latch or the spinlock-first
   ordering were dropped. It also shows the fix's reach: that guest used to exit 0
   silently (it is a `println!`-only guest) and now aborts.
-- No regression on healthy runs: with only `crates/patina-native-shim/src/lib.rs`
+- No regression on healthy runs: with only the native shim's Rust implementation
   swapped between the parent revision and this one, a guest exercising clock,
   CPU-time accounting, `read_link`, locks, fs, entropy and threads produced
   byte-identical stdout, byte-identical replay stdout, and byte-identical trace

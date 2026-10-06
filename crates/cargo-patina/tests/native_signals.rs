@@ -653,14 +653,37 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
         );
         std::fs::write(dir.path().join("Cargo.toml"), manifest).unwrap();
         std::fs::copy(workspace.join("Cargo.lock"), dir.path().join("Cargo.lock")).unwrap();
-        let source = shim.join("src/lib.rs");
-        let source_text = std::fs::read_to_string(&source).unwrap();
         let anchor = "pub unsafe extern \"C\" fn patina_clock_now(clock_id: u32, nanos: *mut u64) -> c_int {\n    let _panic_scope = crate::panic_boundary::PanicScope::enter();";
+        // Find the export wherever the shim's module layout puts it.
+        fn rust_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        rust_files(&shim.join("src"), &mut files);
+        let sites: Vec<_> = files
+            .into_iter()
+            .map(|path| {
+                let text = std::fs::read_to_string(&path).unwrap();
+                (path, text)
+            })
+            .filter(|(_, text)| text.contains(anchor))
+            .collect();
         assert_eq!(
-            source_text.matches(anchor).count(),
+            sites
+                .iter()
+                .map(|(_, text)| text.matches(anchor).count())
+                .sum::<usize>(),
             1,
             "one production ABI guard injection site"
         );
+        let (source, source_text) = sites.into_iter().next().unwrap();
         // A valid argument singles out the explicit query, not startup's clock reads.
         let planted = format!(
             "{anchor}\n    if clock_id == 1 {{ panic!(\"planted internal Rust panic\"); }}"

@@ -19,7 +19,6 @@ crates/patina-conformance/src/probe/net.rs 2461 # pending split
 crates/patina-fs-crash/src/lib.rs 3602 # pending split
 crates/patina-fs-mem/src/lib.rs 5732 # pending split
 crates/patina-minimize/src/lib.rs 2655 # pending split
-crates/patina-native-shim/src/lib.rs 17367 # pending split
 crates/patina-native-shim/src/mem/mod.rs 2042 # pending split
 crates/patina-native-shim/src/sud/mod.rs 2462 # pending split
 crates/patina-native-shim/src/thread/ipc.rs 2589 # pending split

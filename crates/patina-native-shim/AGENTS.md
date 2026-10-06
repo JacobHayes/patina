@@ -341,7 +341,7 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   in a fixed order so the slices
   share one set of headers and static helpers and produce one object. A slice
   is not compiled on its own; system headers go in `posix/core.c`; a new slice
-  is added to the umbrella AND to `POSIX_C_FAMILY_SOURCES` in `src/lib.rs`
+  is added to the umbrella AND to `POSIX_C_FAMILY_SOURCES` in `src/bundle.rs`
   (the installed `cargo-patina` stages only the exported slices — a lint pins
   the three lists together).
 - The time and identity models are Rust modules both doors call:
