@@ -562,8 +562,8 @@ struct NativeRunInvocation {
 /// native harness's re-emitted `run` command line — iterates
 /// [`FaultKnob::ALL`], so a knob added to the registry cannot be forwarded by one
 /// family and silently dropped by another. There is no per-knob field, accessor
-/// or forwarding row to forget: `knob_table_covers_every_registry_fault_flag`
-/// gates the enum against the registry, and everything else follows from it.
+/// or forwarding row to forget: the CLI builds its knob rows from ALL through
+/// an exhaustive grammar match, and everything else follows from it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct KnobValues(BTreeMap<FaultKnob, Vec<String>>);
 

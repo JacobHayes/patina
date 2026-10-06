@@ -796,6 +796,15 @@ External controls include:
 - liveness oracles (`--liveness-watchdog`, `--converge-within`);
 - simple key/value parameters (`--param`, exposed through `Context::param`).
 
+Fault storage and control-plane metadata derive from one runtime declaration.
+CLI knob rows are an exhaustive facet of its generated inventory; all execution
+families forward that inventory. Repeatable controls carry a typed encoding
+choice. Swarm masks derive from metadata, while the declared draw order remains
+trace-visible. Campaign claims and their complete inventory share one declaration;
+const validation requires exactly one knob or exploration owner for every claim.
+Campaign band policy exhaustively assigns a draw or typed waiver,
+with byte allocations validated during compilation.
+
 On native runs, `--fs-crash-at` is a crash boundary: the selected successful open/write/write_at/sync/close call records its ordinary result, the runtime exports a recovered `FsSnapshot`, the shim writes a sealed handoff on a supervisor-owned descriptor and exits via `_exit`, and the native supervisor starts one fresh incarnation with clean descriptors and the crash selector consumed. A record gives each incarnation its own trace channel and the supervisor joins the two into one lifecycle trace carrying the handoff's snapshot digest; a replay splits the trace, replays incarnation 0 to its crash, and refuses by name unless the re-derived snapshot has the recorded digest (see `docs/fs-crash-restart-protocol.md`). Cargo-family and WASI runs refuse `--fs-crash-at` until they have equivalent restart semantics. Targeted live I/O failure remains the `--fs-error-permille` fault class and does not roll the image back.
 
 Named scenario/profile selection remains a planned experiment-plane convenience.

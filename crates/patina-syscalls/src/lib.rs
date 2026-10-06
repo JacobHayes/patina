@@ -39,6 +39,8 @@ compile_error!("syscall registry requires Linux x86_64/aarch64 or Darwin aarch64
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
+mod linux_row;
+#[cfg(target_os = "linux")]
 pub use linux::SYSCALLS;
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -245,8 +245,10 @@ def generate(records, sources):
                 'impl Syscall {\npub const ALL: &\'static [Self] = &[',
                 *[f'Self::{ident(r["name"])},' for r in rows], '];\n',
                 'pub const fn number(self) -> u32 { self as u32 }\n',
-                'pub const fn name(self) -> &\'static str { match self {',
-                *[f'Self::{ident(r["name"])} => {quote(r["name"])},' for r in rows], '} }\n',
+                'pub const fn entry(self) -> &\'static crate::LinuxEntry { match self {',
+                *[f'Self::{ident(r["name"])} => &ENTRIES[{i}],' for i, r in enumerate(rows)], '} }\n',
+                'pub const fn name(self) -> &\'static str { self.entry().name }\n',
+                'pub const fn is_implemented(self) -> bool { self.entry().entry.is_some() }\n',
                 'pub const fn from_nr(nr: u32) -> Option<Self> { match nr {',
                 *[f'{r["nr"]} => Some(Self::{ident(r["name"])}),' for r in rows], '_ => None,} }\n}\n',
                 'pub const ENTRIES: &[crate::LinuxEntry] = &[\n']

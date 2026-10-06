@@ -12,16 +12,13 @@ use super::*;
 /// advertised and never forwarded, so every lookup in a harness run went
 /// NXDOMAIN as if no table had been supplied.
 pub(crate) fn repeatable_payload(knob: FaultKnob, values: &[String]) -> Result<String, CliError> {
-    match knob {
-        FaultKnob::DnsEntry => encode_dns_entries(values),
-        FaultKnob::NetPartition => encode_net_partitions(values),
-        // Every other knob is `Plumbing::Scalar` and carries its one value
-        // verbatim; the callers filter on plumbing before asking for a payload,
-        // and `every_repeatable_knob_has_an_encoder` proves this arm is dead for
-        // every knob the table marks repeatable.
-        scalar => Err(CliError(format!(
+    use patina_dst_runtime::RepeatableFormat;
+    match knob.meta().plumbing {
+        Plumbing::Repeatable(RepeatableFormat::DnsEntries) => encode_dns_entries(values),
+        Plumbing::Repeatable(RepeatableFormat::AddressPairs) => encode_net_partitions(values),
+        Plumbing::Scalar => Err(CliError(format!(
             "{} is not a repeatable knob",
-            scalar.meta().flag
+            knob.meta().flag
         ))),
     }
 }
@@ -67,7 +64,7 @@ pub(crate) fn knobs_of(args: &cli::Args) -> Result<KnobValues, CliError> {
         }
         let texts: Vec<String> = match meta.plumbing {
             Plumbing::Scalar => args.string(meta.flag).into_iter().collect(),
-            Plumbing::Repeatable => args
+            Plumbing::Repeatable(_) => args
                 .texts(meta.flag)
                 .into_iter()
                 .map(str::to_string)
@@ -76,7 +73,7 @@ pub(crate) fn knobs_of(args: &cli::Args) -> Result<KnobValues, CliError> {
         if texts.is_empty() {
             continue;
         }
-        if meta.plumbing == Plumbing::Repeatable {
+        if matches!(meta.plumbing, Plumbing::Repeatable(_)) {
             repeatable_payload(*knob, &texts)?;
         }
         values.insert(*knob, texts);
@@ -100,7 +97,7 @@ pub(crate) fn knob_env_pairs(knobs: &KnobValues) -> Result<Vec<(&'static str, St
         let meta = knob.meta();
         let payload = match meta.plumbing {
             Plumbing::Scalar => values[0].clone(),
-            Plumbing::Repeatable => repeatable_payload(*knob, values)?,
+            Plumbing::Repeatable(_) => repeatable_payload(*knob, values)?,
         };
         pairs.push((meta.env, payload));
     }

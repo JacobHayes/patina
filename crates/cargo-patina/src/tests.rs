@@ -809,109 +809,6 @@ mod registry {
         }
     }
 
-    /// Every family a group claims is one the verb declares, and every family a
-    /// verb with flag groups declares owns at least one flag. Flagless commands
-    /// have exactly one `Sole` form. Without this a typo in a group's
-    /// `families` would silently drop flags from a parser (they would simply
-    /// stop being accepted) rather than failing loudly.
-    #[test]
-    fn registry_families_are_declared_and_populated() {
-        for verb in help::VERBS {
-            let declared: BTreeSet<help::Family> =
-                verb.families.iter().map(|spec| spec.family).collect();
-            for group in verb.groups {
-                for family in group
-                    .families
-                    .iter()
-                    .chain(group.flags.iter().filter_map(|f| f.families).flatten())
-                {
-                    assert!(
-                        declared.contains(family),
-                        "verb `{}` group {:?} claims undeclared family {family:?}",
-                        verb.name,
-                        group.title
-                    );
-                }
-            }
-            if verb.groups.is_empty() {
-                assert_eq!(declared, BTreeSet::from([help::Family::Sole]));
-                assert_eq!(verb.families.len(), 1);
-                continue;
-            }
-            for spec in verb.families {
-                assert!(
-                    verb.family_flags(spec.family).next().is_some(),
-                    "verb `{}` declares family {:?} but no flag reaches it",
-                    verb.name,
-                    spec.family
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn every_report_knob_is_documented_in_the_environment_registry() {
-        // Same drift gate as the fault knobs, for the report suppressors: the
-        // registry is what `--help` and the JSON index publish, so a report the
-        // runtime can silence but the registry never names is a working knob
-        // nobody can discover — and an undocumented knob is the first step back
-        // toward one family carrying it and the rest dropping it.
-        let documented: String = help::ENVIRONMENT
-            .iter()
-            .map(|entry| entry.name)
-            .collect::<Vec<_>>()
-            .join(" ");
-        for report in patina_dst_runtime::Report::ALL {
-            assert!(
-                documented.contains(report.env()),
-                "{} has no row in the help environment registry",
-                report.env()
-            );
-        }
-    }
-
-    #[test]
-    fn knob_table_covers_every_registry_fault_flag() {
-        // The drift gate behind `FaultKnob`: every knob the registry declares has
-        // a variant, so every family's plumbing carries it. Without this, a knob
-        // can be parsed by one family and silently dropped on the way to the
-        // guest — the silent-inertness class, which looks exactly like a clean
-        // run. Compared in ORDER, not as a set: `FaultKnob::ALL` order is what
-        // the control plane and the re-emitted command line follow, and the
-        // registry is where that order is decided.
-        let table: Vec<&str> = FaultKnob::ALL.iter().map(|knob| knob.meta().flag).collect();
-        let registry: Vec<&str> = help::fault_flag_names().collect();
-        assert_eq!(
-            registry, table,
-            "every registry fault flag needs a FaultKnob variant, in registry order (and vice versa)"
-        );
-    }
-
-    /// The error arm in `repeatable_payload` must be dead: every knob the table
-    /// marks repeatable has an encoder, and every knob it marks scalar is
-    /// filtered out before one is asked for. A knob switched to
-    /// `Plumbing::Repeatable` without an encoder fails here rather than at the
-    /// first invocation that sets it.
-    #[test]
-    fn every_repeatable_knob_has_an_encoder() {
-        let mut repeatable = 0;
-        for knob in FaultKnob::ALL {
-            let sample = vec![knob_sample(*knob).to_string()];
-            match knob.meta().plumbing {
-                Plumbing::Repeatable => {
-                    repeatable += 1;
-                    repeatable_payload(*knob, &sample)
-                        .unwrap_or_else(|error| panic!("{knob:?} has no encoder: {error}"));
-                }
-                Plumbing::Scalar => assert!(
-                    repeatable_payload(*knob, &sample).is_err(),
-                    "{knob:?} is scalar but answered to a repeatable payload"
-                ),
-            }
-        }
-        assert!(repeatable > 0, "no repeatable knobs left to prove anything");
-    }
-
     #[test]
     fn every_fault_knob_reaches_every_family_and_is_refused_by_replay() {
         // Each knob, set to a valid value, must survive parsing into the same
@@ -927,7 +824,7 @@ mod registry {
             // forwarding path uses.
             let expected = match meta.plumbing {
                 Plumbing::Scalar => value.to_string(),
-                Plumbing::Repeatable => repeatable_payload(*knob, &[value.to_string()])
+                Plumbing::Repeatable(_) => repeatable_payload(*knob, &[value.to_string()])
                     .expect("every repeatable knob encodes its sample"),
             };
             for (verb, family) in [

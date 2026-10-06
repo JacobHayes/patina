@@ -131,13 +131,7 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
             title: "Native run options (run <BINARY>)",
             families: &[Family::Native],
             flags: &[
-                f(
-                    "--harness",
-                    None,
-                    Value::None,
-                    "Treat the binary as a patina-dst-harness (defers runtime init).",
-                    false,
-                ),
+                HARNESS_FLAG,
                 f(
                     "--mount",
                     None,
@@ -184,20 +178,8 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     ),
                     "--record",
                 ),
-                f(
-                    "--allow",
-                    None,
-                    Value::Required("SYMBOL", Kind::Symbol),
-                    "Add a known-safe symbol to the pre-run gate allow list.",
-                    true,
-                ),
-                f(
-                    "--allow-unsupported-symbols",
-                    None,
-                    Value::Required("all|name,...", Kind::UnsupportedSymbols),
-                    "Downgrade matching unsupported-symbol denials to a warning. An instruction-class finding (`instruction@.text+OFF`, an address that moves on every relink) also matches by the containing symbol its provenance names.",
-                    false,
-                ),
+                ALLOW_FLAG,
+                ALLOW_UNSUPPORTED_FLAG,
             ],
         },
         Group {
@@ -566,13 +548,10 @@ and takes no --allow (the allow list is native-only).",
             title: "Audit options",
             families: &[Family::Native],
             flags: &[
-                f(
-                    "--allow",
-                    None,
-                    Value::Required("SYMBOL", Kind::Symbol),
-                    "Treat SYMBOL as known-safe (native only).",
-                    true,
-                ),
+                Flag {
+                    doc: "Treat SYMBOL as known-safe (native only).",
+                    ..ALLOW_FLAG
+                },
                 f(
                     "--raw",
                     None,
@@ -646,27 +625,12 @@ only --fingerprint, --mount, --coverage-out, --harness, --compute-watchdog-ms, a
                     "Write a patina.covmap/v1 edge-counter map for the replayed native run.",
                     false,
                 ),
-                f(
-                    "--harness",
-                    None,
-                    Value::None,
-                    "Replay a patina-dst-harness binary (defers runtime init).",
-                    false,
-                ),
-                f(
-                    "--allow",
-                    None,
-                    Value::Required("SYMBOL", Kind::Symbol),
-                    "Add a known-safe symbol to the pre-run gate allow list.",
-                    true,
-                ),
-                f(
-                    "--allow-unsupported-symbols",
-                    None,
-                    Value::Required("all|name,...", Kind::UnsupportedSymbols),
-                    "Downgrade matching unsupported-symbol denials to a warning. An instruction-class finding (`instruction@.text+OFF`, an address that moves on every relink) also matches by the containing symbol its provenance names.",
-                    false,
-                ),
+                Flag {
+                    doc: "Replay a patina-dst-harness binary (defers runtime init).",
+                    ..HARNESS_FLAG
+                },
+                ALLOW_FLAG,
+                ALLOW_UNSUPPORTED_FLAG,
             ],
         },
         Group {

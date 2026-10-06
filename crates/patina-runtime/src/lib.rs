@@ -147,7 +147,9 @@ pub use patina_dst_trace::MAX_TRACE_BYTES;
 
 mod fault_knob;
 
-pub use fault_knob::{FaultKnob, KnobMeta, Masks, Plane, Plumbing, SWARM_CLASSES, SwarmClass};
+pub use fault_knob::{
+    FaultKnob, KnobMeta, Masks, Plane, Plumbing, RepeatableFormat, SWARM_CLASSES, SwarmClass,
+};
 
 mod facts;
 

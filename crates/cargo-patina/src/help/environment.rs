@@ -15,7 +15,7 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "CLI default override for `.patina/config.toml` keys (for example PATINA_SEED, PATINA_GENERATIONS): explicit flags still win; campaign scrubs run-default env names from child runs.",
     },
     EnvVar {
-        name: "PATINA_SCHEDULE_REPORT / PATINA_SCHEDULE_POLICY_REPORT / PATINA_SWARM_REPORT / PATINA_LIVENESS_REPORT / PATINA_SDK_REPORT / PATINA_FS_FAULT_REPORT / PATINA_DNS_FAULT_REPORT / PATINA_NET_FAULT_REPORT / PATINA_ENTROPY_FAULT_REPORT / PATINA_CLOCK_FAULT_REPORT / PATINA_CUSTOMOP_FAULT_REPORT / PATINA_COVERAGE_REPORT / PATINA_DEPTH_REPORT",
+        name: patina_dst_runtime::Report::ENV_NAMES,
         scope: "user",
         doc: "End-of-run diagnostics, all on by default; a false-y value (0/off/false/no) silences one, on every family. Presentation only: suppressing a report changes no recorded byte, so a quiet run and a loud one replay against each other. A campaign pins them all on, since for a campaign they are classifier inputs rather than cosmetics.",
     },

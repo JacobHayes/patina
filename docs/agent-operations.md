@@ -181,8 +181,10 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
 - A knob that several execution families each plumb through their own
   hand-maintained list will eventually be carried by some families and dropped by
   the rest, and a dropped knob looks exactly like a clean run. Derive every
-  family's plumbing from ONE table keyed to the flag registry, and gate that
-  table against the registry with a test. Two silent-inertness bugs of this shape
+  family's plumbing and configuration fields from one knob declaration. Build
+  CLI rows from its generated inventory through an exhaustive grammar match;
+  carry repeatable encodings as typed metadata. Reject duplicate spellings,
+  missing swarm ownership and family mismatches in const checks. Two silent-inertness bugs of this shape
   were found and structurally removed while unifying the fault knobs.
 - A replay/minimization oracle must require the intended terminal outcome, not
   just a failure marker and any nonzero exit: a guest can print its marker before
@@ -330,3 +332,10 @@ Native panic acceptance uses the explicitly armed `test-panic` feature; missing
 SUD acceptance compiles its C object with `PATINA_TEST_NO_SUD`. Both hooks are
 absent from ordinary builds. Embedded C sources and guest programs are fixtures
 or build inputs, and compiled-object inspections remain valid product checks.
+
+List-agreement checks belong at compilation: generate variants and inventories
+from one declaration, use exhaustive matches for policy decisions, and const
+assertions for uniqueness. Keep behavioral checks for parsing, wire encoding,
+round trips and draw order. Cache tests should inspect Cargo's typed artifact freshness receipts, never
+compiler progress wording. Cargo's uplift can rewrite even fresh executables,
+so published inode/mtime alone is not a cache-hit discriminator.

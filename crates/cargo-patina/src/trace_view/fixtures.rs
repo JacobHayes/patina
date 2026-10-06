@@ -186,6 +186,14 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
             Outcome::Unit,
         ),
         (
+            Operation::FsSetInodeTimes {
+                ino: 2,
+                atime_nanos: Some(1),
+                mtime_nanos: Some(2),
+            },
+            Outcome::Unit,
+        ),
+        (
             Operation::FsSetTimesByPath {
                 path: "/file".into(),
                 atime_nanos: Some(1),

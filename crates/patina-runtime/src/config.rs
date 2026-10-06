@@ -9,7 +9,7 @@ use crate::{
     RuntimeError, TornGranularity,
 };
 use patina_dst_sched_det::SchedulePolicy;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use std::path::PathBuf;
 
@@ -40,115 +40,10 @@ pub enum ExecutionMode {
     },
 }
 
-/// Seed-driven, default-off fault knobs layered onto the deterministic drivers.
-/// Every field is inert at its default so a run that configures no fault behaves
-/// exactly as before. Knobs are grouped by domain so new domains add a sub-struct
-/// instead of more loose top-level fields.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct FaultConfig {
-    pub fs: FsFaultConfig,
-    pub net: NetFaultConfig,
-    pub clock: ClockFaultConfig,
-    pub dns: DnsFaultConfig,
-    pub entropy: EntropyFaultConfig,
-    pub custom_op: CustomOpFaultConfig,
-}
-
-/// Filesystem fault knobs.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct FsFaultConfig {
-    /// Inject a filesystem crash after a chosen boundary operation.
-    pub crash_at: Option<CrashPoint>,
-    /// Granularity at which the injected crash tears the final unsynced write.
-    /// Inert without `crash_at`; defaults to whole-block.
-    pub torn_granularity: TornGranularity,
-    /// Seeded filesystem error probability in per-mille (0..=1000).
-    pub error_permille: u16,
-    /// Seeded short-read/short-write probability in per-mille (0..=1000).
-    pub short_permille: u16,
-    /// Inclusive `[min, max]` nanoseconds of seeded extra latency applied to
-    /// every fault-eligible filesystem operation before it executes.
-    pub latency_nanos: Option<(u64, u64)>,
-}
-
-/// Network fault knobs.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct NetFaultConfig {
-    /// Base link latency in nanoseconds applied to the default `SimNet` network.
-    pub latency_nanos: u64,
-    /// Inclusive `[min, max]` nanoseconds of seeded per-datagram/segment delivery jitter.
-    pub jitter_nanos: Option<(u64, u64)>,
-    /// Seeded datagram drop probability in per-mille (0..=1000).
-    pub drop_permille: u16,
-    /// Seeded datagram duplication probability in per-mille (0..=1000). A
-    /// duplicate is an independent copy with its own jitter draw.
-    pub duplicate_permille: u16,
-    /// Seeded probability in per-mille (0..=1000) that an otherwise-establishable
-    /// TCP connection is refused.
-    pub connect_refuse_permille: u16,
-    /// Seeded probability in per-mille (0..=1000) that a fault-eligible
-    /// established-stream operation tears the stream down with a reset.
-    pub reset_permille: u16,
-    /// Statically partitioned address pairs. Both directions of each pair are
-    /// blocked: a datagram addressed across it is dropped and a connect across it
-    /// is refused. Deterministic (rate 1.0), unlike the seeded knobs above.
-    pub partitions: BTreeSet<(String, String)>,
-    /// Virtual TCP receive-buffer size in bytes. `None` uses the driver default.
-    /// Not a fault: a capacity setting whose smaller values make would-block
-    /// behavior — and the guest's backpressure handling — reachable, so it has a
-    /// swarm class (an environment shape a generation may or may not adopt) but
-    /// no vacuity class (there is no "should have fired N times" rate to judge).
-    pub tcp_buffer_bytes: Option<usize>,
-}
-
-/// DNS fault knobs. They act only on names the run's host table DEFINES: an
-/// undefined name is NXDOMAIN as semantics, not as an injected fault.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DnsFaultConfig {
-    /// Seeded resolution-failure probability in per-mille (0..=1000). On fire, a
-    /// second draw picks NXDOMAIN (a stale or deleted record) or a transient
-    /// timeout (a slow or unreachable resolver).
-    pub fail_permille: u16,
-    /// Inclusive `[min, max]` nanoseconds of seeded latency applied before every
-    /// eligible resolution.
-    pub latency_nanos: Option<(u64, u64)>,
-}
-
-/// Entropy fault knobs. Guest entropy has no undefined-input exemption the way
-/// DNS does — every `Context::entropy_bytes` call is fault-eligible — so there is
-/// only the one knob, no host-table-shaped semantic configuration alongside it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct EntropyFaultConfig {
-    /// Seeded entropy-request failure probability in per-mille (0..=1000). On
-    /// fire, the request returns a deterministic named error instead of bytes.
-    pub fail_permille: u16,
-}
-
-/// Guest custom-operation fault knobs.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CustomOpFaultConfig {
-    /// Seeded failure probability in per-mille (0..=1000) for custom operations
-    /// the guest declared fault-eligible. On fire the operation's `perform`
-    /// closure does NOT run and the guest receives the failure it declared,
-    /// exactly as if the wrapped effect had failed.
-    ///
-    /// Applies only to declared-eligible operations: a custom op that declares
-    /// no failure shape has no error the runtime could invent for it, and
-    /// inventing one would mean handing a guest a value its own type does not
-    /// admit.
-    pub fail_permille: u16,
-}
-
-/// Clock fault knobs.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ClockFaultConfig {
-    /// Inclusive `[min, max]` nanoseconds of seeded extra latency per guest sleep.
-    pub sleep_jitter_nanos: Option<(u64, u64)>,
-    /// Magnitude in nanoseconds of the seeded signed realtime-epoch jump applied
-    /// to each `ClockKind::Realtime` read: an offset drawn uniformly in `[-hi,
-    /// hi]`, independently per read. Zero (the default) is off.
-    pub epoch_jump_nanos: u64,
-}
+pub use crate::fault_knob::{
+    ClockFaultConfig, CustomOpFaultConfig, DnsFaultConfig, EntropyFaultConfig, FaultConfig,
+    FsFaultConfig, NetFaultConfig,
+};
 
 /// Seed-driven cooperative-SUT (buggify) configuration. Inert (`enabled =
 /// false`) by default, so a run that does not opt in behaves exactly as before.
@@ -1027,15 +922,9 @@ fn validate_guest_env_entry(key: &str, value: &str) -> Result<(), RuntimeError> 
 
 #[cfg(test)]
 pub(super) mod tests {
-    use crate::config::{
-        ClockFaultConfig, CustomOpFaultConfig, DnsFaultConfig, EntropyFaultConfig, FaultConfig,
-        FsFaultConfig, NetFaultConfig, RuntimeConfig,
-    };
-    use crate::fs_crash::{CrashOp, CrashPoint};
+    use crate::config::{FaultConfig, RuntimeConfig};
     use crate::replay::{fault_config_from_record, fault_record};
-    use crate::{Context, FaultKnob, Plane, TornGranularity};
-
-    use std::collections::BTreeSet;
+    use crate::{Context, FaultKnob, Plane};
 
     /// Every fault knob must survive the trace round trip. A knob the record
     /// does not carry replays as its default — the run reproduces WITHOUT the
@@ -1066,63 +955,12 @@ pub(super) mod tests {
         }
     }
 
-    /// The two halves of "every knob" must describe the same configuration: the
-    /// FIELD view below, whose exhaustive struct literals make a new
-    /// `*FaultConfig` field a compile error, and the KNOB view, whose exhaustive
-    /// `set_sample` match makes a new [`FaultKnob`] one. A field added without a
-    /// knob (unreachable from any CLI) or a knob added without a field (carried
-    /// to the guest and then dropped) shows up here as a mismatch.
-    #[test]
-    fn fault_config_fields_and_fault_knobs_describe_the_same_configuration() {
-        let mut from_knobs = FaultConfig::default();
-        for knob in FaultKnob::ALL {
-            knob.set_sample(&mut from_knobs);
-        }
-        assert_eq!(from_knobs, every_fault_knob_enabled());
-    }
-
-    /// Every fault knob at a non-default value, written as EXHAUSTIVE struct
-    /// literals on purpose: a field added to any `*FaultConfig` sub-struct is a
-    /// compile error right here, which is what drags a new knob through the
-    /// swarm-coverage gate below instead of letting it land outside the swarm
-    /// table unnoticed. (A `..Default::default()` tail would leave a new field
-    /// silently absent — exactly the drift this gate exists to prevent.)
     pub(crate) fn every_fault_knob_enabled() -> FaultConfig {
-        FaultConfig {
-            fs: FsFaultConfig {
-                crash_at: Some(CrashPoint {
-                    op: CrashOp::Close,
-                    ordinal: 1,
-                }),
-                torn_granularity: TornGranularity::Byte,
-                error_permille: 1,
-                short_permille: 1,
-                latency_nanos: Some((1, 2)),
-            },
-            net: NetFaultConfig {
-                latency_nanos: 1,
-                jitter_nanos: Some((1, 2)),
-                drop_permille: 1,
-                duplicate_permille: 1,
-                connect_refuse_permille: 1,
-                reset_permille: 1,
-                partitions: BTreeSet::from([
-                    ("a".to_string(), "b".to_string()),
-                    ("b".to_string(), "a".to_string()),
-                ]),
-                tcp_buffer_bytes: Some(4096),
-            },
-            clock: ClockFaultConfig {
-                sleep_jitter_nanos: Some((1, 2)),
-                epoch_jump_nanos: 1,
-            },
-            dns: DnsFaultConfig {
-                fail_permille: 1,
-                latency_nanos: Some((1, 2)),
-            },
-            entropy: EntropyFaultConfig { fail_permille: 1 },
-            custom_op: CustomOpFaultConfig { fail_permille: 1 },
+        let mut faults = FaultConfig::default();
+        for knob in FaultKnob::ALL {
+            knob.set_sample(&mut faults);
         }
+        faults
     }
 
     #[test]

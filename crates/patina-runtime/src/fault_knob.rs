@@ -1,73 +1,17 @@
-//! The fault-knob registry: one enum over every seed-driven fault knob, and one
-//! metadata table keyed by it.
-//!
-//! A fault knob used to be hand-wired in six independent places — the CLI
-//! registry, the control-plane forwarding table, the domain-seed label registry,
-//! the swarm class list, the campaign band table, and the trace record — each
-//! pairing enforced only by an after-the-fact drift gate. [`FaultKnob`] makes the
-//! COMPILER the pairing: a new variant has no arm in [`FaultKnob::meta`], no
-//! `is_set`/`clear` behavior, no campaign band and no vacuity class until each
-//! decision is written down, and a decision that is deliberately absent is an
-//! explicit `None` rather than an omission.
-//!
-//! What lives here is the part every crate needs: flag name, control-plane
-//! variable, plumbing shape, configuration plane, injection domains, swarm class,
-//! and diagnostic report. Two facets deliberately do NOT: a knob's value grammar
-//! and families belong to the CLI registry (`cargo-patina/src/help.rs`, the
-//! single source for the help text and the parsers alike), and its campaign band
-//! and vacuity class belong to `cargo-patina/src/campaign.rs`, which owns the
-//! generation-hash layout and the outcome classes. Both are keyed by this enum
-//! through exhaustive matches, so the compiler still walks a new knob to them.
+//! Fault controls: one declaration owns variants, storage and metadata.
 
 use patina_dst_rng_seeded::fault_domain;
 
 use crate::{
-    ENV_CLOCK_FAULT_REPORT, ENV_CUSTOM_OP_FAIL_PERMILLE, ENV_CUSTOMOP_FAULT_REPORT,
+    CrashPoint, ENV_CLOCK_FAULT_REPORT, ENV_CUSTOM_OP_FAIL_PERMILLE, ENV_CUSTOMOP_FAULT_REPORT,
     ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_FAULT_REPORT, ENV_DNS_LATENCY,
     ENV_ENTROPY_FAIL_PERMILLE, ENV_ENTROPY_FAULT_REPORT, ENV_EPOCH_JUMP_NANOS, ENV_FS_CRASH_AT,
     ENV_FS_ERROR_PERMILLE, ENV_FS_FAULT_REPORT, ENV_FS_LATENCY, ENV_FS_SHORT_PERMILLE,
     ENV_FS_TORN_GRANULARITY, ENV_NET_CONNECT_REFUSE_PERMILLE, ENV_NET_DROP_PERMILLE,
     ENV_NET_DUPLICATE_PERMILLE, ENV_NET_FAULT_REPORT, ENV_NET_JITTER, ENV_NET_LATENCY,
     ENV_NET_PARTITIONS, ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES, ENV_SLEEP_JITTER,
-    FINGERPRINT_BUGGIFY, FaultConfig, TornGranularity,
+    FINGERPRINT_BUGGIFY, TornGranularity,
 };
-
-/// Every seed-driven fault knob the CLI registry declares, in registry order
-/// (`FAULT_FLAGS` then `DNS_FLAGS`).
-///
-/// The order is load-bearing for the control plane: filtering [`FaultKnob::ALL`]
-/// by [`Plumbing`] reproduces the order each family forwards its knobs in. It is
-/// deliberately NOT the swarm draw order — that one is trace-visible and is
-/// pinned separately by [`SWARM_CLASSES`].
-///
-/// Cooperative-SUT (buggify) and the scheduling-policy knobs (`--sched-pct`,
-/// `--starve`) are not fault knobs and are not variants here: they configure
-/// exploration rather than injecting an effect, and carry their own control-plane
-/// shapes. `buggify` still appears as a swarm class, which is why [`Masks`]
-/// exists.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum FaultKnob {
-    FsCrashAt,
-    FsTornGranularity,
-    FsErrorPermille,
-    FsShortPermille,
-    FsLatencyNanos,
-    SleepJitterNanos,
-    NetJitterNanos,
-    NetDropPermille,
-    NetLatencyNanos,
-    NetDuplicatePermille,
-    NetConnectRefusePermille,
-    NetResetPermille,
-    NetPartition,
-    NetTcpBufferBytes,
-    EntropyFailPermille,
-    EpochJumpNanos,
-    CustomOpFailPermille,
-    DnsEntry,
-    DnsFailPermille,
-    DnsLatencyNanos,
-}
 
 /// How a knob's value reaches a guest over the `PATINA_*` control plane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +21,14 @@ pub enum Plumbing {
     Scalar,
     /// A repeatable flag whose whole SET is carried as one encoded payload, and
     /// which is re-emitted onto a child command line once per element.
-    Repeatable,
+    Repeatable(RepeatableFormat),
+}
+
+/// Encoding of a repeatable control-plane payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepeatableFormat {
+    AddressPairs,
+    DnsEntries,
 }
 
 /// Which configuration plane a knob's control-plane variable is applied to.
@@ -98,9 +49,8 @@ pub enum Plane {
 /// One knob's cross-plane spellings. See [`FaultKnob::meta`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KnobMeta {
-    /// The CLI flag the knob is parsed from. This is the join key to the CLI
-    /// registry, which owns the flag's value grammar and families;
-    /// `knob_table_covers_every_registry_fault_flag` pins the two together.
+    /// The CLI spelling. Help rows derive from ALL through an exhaustive
+    /// grammar/prose match, so a knob cannot lack a registry row.
     pub flag: &'static str,
     /// The `PATINA_*` control-plane variable carrying it to a guest.
     pub env: &'static str,
@@ -116,315 +66,376 @@ pub struct KnobMeta {
     /// names both. Domain labels are shared constants; merely declaring an
     /// unused label has no effect on a run.
     pub injection_domains: &'static [&'static str],
-    /// The swarm class token this knob belongs to, or `None` for a knob no swarm
-    /// class masks. `--fs-torn-granularity` is `None` because the `crash` class
-    /// masks it together with `--fs-crash-at`; `--dns-entry` is `None` because
-    /// swarm masks faults, not workload.
+    /// The swarm mask owner, including modifiers sharing their primary knob's
+    /// class. Semantic configuration has no owner: swarm masks faults, not workload.
     pub swarm_class: Option<&'static str>,
     /// The `PATINA_*_REPORT` diagnostic line carrying the knob's per-class
     /// vacuity counters, or `None` for a knob with no rate to judge inert.
     pub report: Option<&'static str>,
 }
 
-impl FaultKnob {
-    /// Every knob, in registry order.
-    ///
-    /// Completeness is held by two paired gates rather than by the type system:
-    /// `all_is_in_variant_order` pins this list index-for-index against the
-    /// discriminants, and `knob_table_covers_every_registry_fault_flag` compares
-    /// it to the CLI registry — so a variant added with a registry row but no
-    /// entry here fails, and a variant with neither is a knob no CLI can reach.
-    /// `Report::ALL` instead derives from the same rows as its variants.
-    pub const ALL: &'static [Self] = &[
-        Self::FsCrashAt,
-        Self::FsTornGranularity,
-        Self::FsErrorPermille,
-        Self::FsShortPermille,
-        Self::FsLatencyNanos,
-        Self::SleepJitterNanos,
-        Self::NetJitterNanos,
-        Self::NetDropPermille,
-        Self::NetLatencyNanos,
-        Self::NetDuplicatePermille,
-        Self::NetConnectRefusePermille,
-        Self::NetResetPermille,
-        Self::NetPartition,
-        Self::NetTcpBufferBytes,
-        Self::EntropyFailPermille,
-        Self::EpochJumpNanos,
-        Self::CustomOpFailPermille,
-        Self::DnsEntry,
-        Self::DnsFailPermille,
-        Self::DnsLatencyNanos,
-    ];
+// Fields and knobs cannot be declared independently. Semantic rows have no
+// FaultConfig storage and generate inert field operations by construction.
+macro_rules! fault_registry {
+    (
+        configs { $( $config:ident as $group:ident {
+            $( $(#[$doc:meta])* $field:ident: $ty:ty => $variant:ident = $index:literal {
+                meta: KnobMeta { $($meta:tt)* }, sample: $sample:expr,
+            } )+
+        } )+ }
+        semantic { $( $semantic:ident = $semantic_index:literal => KnobMeta { $($semantic_meta:tt)* }; )+ }
+    ) => {
+        #[derive(Clone, Debug, Default, PartialEq, Eq)]
+        pub struct FaultConfig { $(pub $group: $config,)+ }
+        $(
+            #[derive(Clone, Debug, Default, PartialEq, Eq)]
+            pub struct $config { $( $(#[$doc])* pub $field: $ty, )+ }
+        )+
+        /// All fault controls, including semantic host-table configuration.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub enum FaultKnob { $($( $variant = $index, )+)+ $( $semantic = $semantic_index, )+ }
+        impl FaultKnob {
+            /// Registry order, preserved independently of storage grouping.
+            pub const ALL: &'static [Self] = &{
+                let mut rows = [$($(Self::$variant,)+)+ $(Self::$semantic,)+];
+                let mut i = 0;
+                while i < rows.len() {
+                    let mut j = i + 1;
+                    while j < rows.len() {
+                        if (rows[j] as usize) < rows[i] as usize {
+                            let saved = rows[i]; rows[i] = rows[j]; rows[j] = saved;
+                        }
+                        j += 1;
+                    }
+                    i += 1;
+                }
+                rows
+            };
+            #[must_use]
+            pub const fn meta(self) -> KnobMeta {
+                match self {
+                    $($(Self::$variant => KnobMeta { plane: Plane::Fault, $($meta)* },)+)+
+                    $(Self::$semantic => KnobMeta { plane: Plane::DnsTable, $($semantic_meta)* },)+
+                }
+            }
+            #[must_use]
+            pub fn is_set(self, faults: &FaultConfig) -> bool {
+                match self {
+                    $($(Self::$variant => faults.$group.$field != <$ty>::default(),)+)+
+                    $(Self::$semantic => false,)+
+                }
+            }
+            pub fn clear(self, faults: &mut FaultConfig) {
+                match self {
+                    $($(Self::$variant => faults.$group.$field = <$ty>::default(),)+)+
+                    $(Self::$semantic => {},)+
+                }
+            }
+            #[cfg(test)]
+            pub(crate) fn set_sample(self, faults: &mut FaultConfig) {
+                match self {
+                    $($(Self::$variant => faults.$group.$field = $sample,)+)+
+                    $(Self::$semantic => {},)+
+                }
+            }
+        }
+    };
+}
 
-    /// The knob's spellings on every plane it touches. The exhaustive match is
-    /// the point: a new variant does not compile until each column is decided,
-    /// and a column with nothing to say says `None` out loud.
-    #[must_use]
-    pub const fn meta(self) -> KnobMeta {
-        match self {
-            Self::FsCrashAt => KnobMeta {
-                flag: "--fs-crash-at",
-                env: ENV_FS_CRASH_AT,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::FS_CRASH],
-                swarm_class: Some("crash"),
-                // A crash fires at a chosen boundary op, not at a rate, so there
-                // is no "should have fired N times" judgement to report.
-                report: None,
-            },
-            Self::FsTornGranularity => KnobMeta {
-                flag: "--fs-torn-granularity",
-                env: ENV_FS_TORN_GRANULARITY,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::FS_CRASH],
-                // Masked by the `crash` class together with `--fs-crash-at`: the
-                // granularity is inert without a crash point, so selecting one
-                // without the other would ship a knob that cannot fire.
-                swarm_class: None,
-                report: None,
-            },
-            Self::FsErrorPermille => KnobMeta {
-                flag: "--fs-error-permille",
-                env: ENV_FS_ERROR_PERMILLE,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::FAULT_FS_ERROR],
-                swarm_class: Some("fs_error"),
-                report: Some(ENV_FS_FAULT_REPORT),
-            },
-            Self::FsShortPermille => KnobMeta {
-                flag: "--fs-short-permille",
-                env: ENV_FS_SHORT_PERMILLE,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::FAULT_FS_SHORT],
-                swarm_class: Some("fs_short"),
-                report: Some(ENV_FS_FAULT_REPORT),
-            },
-            Self::FsLatencyNanos => KnobMeta {
-                flag: "--fs-latency-nanos",
-                env: ENV_FS_LATENCY,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::FS_LATENCY],
-                swarm_class: Some("fs_latency"),
-                report: Some(ENV_FS_FAULT_REPORT),
-            },
-            Self::SleepJitterNanos => KnobMeta {
-                flag: "--sleep-jitter-nanos",
-                env: ENV_SLEEP_JITTER,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::SLEEP_JITTER],
-                swarm_class: Some("sleep_jitter"),
-                // The clock plane has no fault report: a sleep that was delayed
-                // is indistinguishable from a longer sleep, so there is nothing
-                // to count as "applied".
-                report: None,
-            },
-            Self::NetJitterNanos => KnobMeta {
-                flag: "--net-jitter-nanos",
-                env: ENV_NET_JITTER,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::NET_FAULT],
-                swarm_class: Some("net_jitter"),
-                report: Some(ENV_NET_FAULT_REPORT),
-            },
-            Self::NetDropPermille => KnobMeta {
-                flag: "--net-drop-permille",
-                env: ENV_NET_DROP_PERMILLE,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::NET_FAULT, fault_domain::FAULT_NET_DROP],
-                swarm_class: Some("net_drop"),
-                report: Some(ENV_NET_FAULT_REPORT),
-            },
-            Self::NetLatencyNanos => KnobMeta {
-                flag: "--net-latency-nanos",
-                env: ENV_NET_LATENCY,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                // A deterministic base link latency: applied to every delivery
-                // rather than drawn, so it derives no stream of its own.
-                injection_domains: &[],
-                swarm_class: Some("net_latency"),
-                report: Some(ENV_NET_FAULT_REPORT),
-            },
-            Self::NetDuplicatePermille => KnobMeta {
-                flag: "--net-duplicate-permille",
-                env: ENV_NET_DUPLICATE_PERMILLE,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[
+fault_registry! {
+    configs {
+        FsFaultConfig as fs {
+            /// Inject a filesystem crash after a chosen boundary operation.
+            crash_at: Option<CrashPoint> => FsCrashAt = 0 {
+                meta: KnobMeta {
+                    flag: "--fs-crash-at",
+                    env: ENV_FS_CRASH_AT,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::FS_CRASH],
+                    swarm_class: Some("crash"),
+                    // A crash fires at a chosen boundary op, not at a rate, so there
+                    // is no "should have fired N times" judgement to report.
+                    report: None,
+                },
+                sample: Some(crate::CrashPoint { op: crate::CrashOp::Close, ordinal: 1 }),
+            }
+            /// Granularity at which the injected crash tears the final unsynced write.
+            /// Inert without `crash_at`; defaults to whole-block.
+            torn_granularity: TornGranularity => FsTornGranularity = 1 {
+                meta: KnobMeta {
+                    flag: "--fs-torn-granularity",
+                    env: ENV_FS_TORN_GRANULARITY,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::FS_CRASH],
+                    swarm_class: Some("crash"),
+                    report: None,
+                },
+                sample: TornGranularity::Byte,
+            }
+            /// Seeded filesystem error probability in per-mille (0..=1000).
+            error_permille: u16 => FsErrorPermille = 2 {
+                meta: KnobMeta {
+                    flag: "--fs-error-permille",
+                    env: ENV_FS_ERROR_PERMILLE,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::FAULT_FS_ERROR],
+                    swarm_class: Some("fs_error"),
+                    report: Some(ENV_FS_FAULT_REPORT),
+                },
+                sample: 1,
+            }
+            /// Seeded short-read/short-write probability in per-mille (0..=1000).
+            short_permille: u16 => FsShortPermille = 3 {
+                meta: KnobMeta {
+                    flag: "--fs-short-permille",
+                    env: ENV_FS_SHORT_PERMILLE,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::FAULT_FS_SHORT],
+                    swarm_class: Some("fs_short"),
+                    report: Some(ENV_FS_FAULT_REPORT),
+                },
+                sample: 1,
+            }
+            /// Inclusive `[min, max]` nanoseconds of seeded extra latency applied to
+            /// every fault-eligible filesystem operation before it executes.
+            latency_nanos: Option<(u64, u64)> => FsLatencyNanos = 4 {
+                meta: KnobMeta {
+                    flag: "--fs-latency-nanos",
+                    env: ENV_FS_LATENCY,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::FS_LATENCY],
+                    swarm_class: Some("fs_latency"),
+                    report: Some(ENV_FS_FAULT_REPORT),
+                },
+                sample: Some((1, 2)),
+            }
+        }
+        NetFaultConfig as net {
+            /// Base link latency in nanoseconds applied to the default `SimNet` network.
+            latency_nanos: u64 => NetLatencyNanos = 8 {
+                meta: KnobMeta {
+                    flag: "--net-latency-nanos",
+                    env: ENV_NET_LATENCY,
+                    plumbing: Plumbing::Scalar,
+                    // A deterministic base link latency: applied to every delivery
+                    // rather than drawn, so it derives no stream of its own.
+                    injection_domains: &[],
+                    swarm_class: Some("net_latency"),
+                    report: Some(ENV_NET_FAULT_REPORT),
+                },
+                sample: 1,
+            }
+            /// Inclusive `[min, max]` nanoseconds of seeded per-datagram/segment delivery jitter.
+            jitter_nanos: Option<(u64, u64)> => NetJitterNanos = 6 {
+                meta: KnobMeta {
+                    flag: "--net-jitter-nanos",
+                    env: ENV_NET_JITTER,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::NET_FAULT],
+                    swarm_class: Some("net_jitter"),
+                    report: Some(ENV_NET_FAULT_REPORT),
+                },
+                sample: Some((1, 2)),
+            }
+            /// Seeded datagram drop probability in per-mille (0..=1000).
+            drop_permille: u16 => NetDropPermille = 7 {
+                meta: KnobMeta {
+                    flag: "--net-drop-permille",
+                    env: ENV_NET_DROP_PERMILLE,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::NET_FAULT, fault_domain::FAULT_NET_DROP],
+                    swarm_class: Some("net_drop"),
+                    report: Some(ENV_NET_FAULT_REPORT),
+                },
+                sample: 1,
+            }
+            /// Seeded datagram duplication probability in per-mille (0..=1000). A
+            /// duplicate is an independent copy with its own jitter draw.
+            duplicate_permille: u16 => NetDuplicatePermille = 9 {
+                meta: KnobMeta {
+                    flag: "--net-duplicate-permille",
+                    env: ENV_NET_DUPLICATE_PERMILLE,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[
                     fault_domain::NET_DUPLICATE,
                     fault_domain::FAULT_NET_DUPLICATE,
-                ],
-                swarm_class: Some("net_duplicate"),
-                report: Some(ENV_NET_FAULT_REPORT),
-            },
-            Self::NetConnectRefusePermille => KnobMeta {
-                flag: "--net-connect-refuse-permille",
-                env: ENV_NET_CONNECT_REFUSE_PERMILLE,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::NET_CONNECT_REFUSE],
-                swarm_class: Some("net_connect_refuse"),
-                report: Some(ENV_NET_FAULT_REPORT),
-            },
-            Self::NetResetPermille => KnobMeta {
-                flag: "--net-reset-permille",
-                env: ENV_NET_RESET_PERMILLE,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::NET_RESET],
-                swarm_class: Some("net_reset"),
-                report: Some(ENV_NET_FAULT_REPORT),
-            },
-            Self::NetPartition => KnobMeta {
-                flag: "--net-partition",
-                env: ENV_NET_PARTITIONS,
-                plumbing: Plumbing::Repeatable,
-                plane: Plane::Fault,
-                // Deterministic (rate 1.0): a datagram across a partition is
-                // always dropped, so nothing is drawn.
-                injection_domains: &[],
-                swarm_class: Some("net_partition"),
-                report: Some(ENV_NET_FAULT_REPORT),
-            },
-            Self::NetTcpBufferBytes => KnobMeta {
-                flag: "--net-tcp-buffer-bytes",
-                env: ENV_NET_TCP_BUFFER_BYTES,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[],
-                swarm_class: Some("net_tcp_buffer"),
-                // A capacity setting, not a fault: there is no rate that "should
-                // have fired", so no vacuity counter to report.
-                report: None,
-            },
-            Self::EntropyFailPermille => KnobMeta {
-                flag: "--entropy-fail-permille",
-                env: ENV_ENTROPY_FAIL_PERMILLE,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::ENTROPY_FAULT],
-                swarm_class: Some("entropy_fail"),
-                report: Some(ENV_ENTROPY_FAULT_REPORT),
-            },
-            Self::EpochJumpNanos => KnobMeta {
-                flag: "--epoch-jump-nanos",
-                env: ENV_EPOCH_JUMP_NANOS,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::EPOCH_JUMP],
-                swarm_class: Some("epoch_jump"),
-                report: Some(ENV_CLOCK_FAULT_REPORT),
-            },
-            Self::DnsEntry => KnobMeta {
-                flag: "--dns-entry",
-                env: ENV_DNS_ENTRIES,
-                plumbing: Plumbing::Repeatable,
-                plane: Plane::DnsTable,
-                injection_domains: &[],
-                swarm_class: None,
-                report: None,
-            },
-            Self::DnsFailPermille => KnobMeta {
-                flag: "--dns-fail-permille",
-                env: ENV_DNS_FAIL_PERMILLE,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::DNS_FAULT],
-                swarm_class: Some("dns_fail"),
-                report: Some(ENV_DNS_FAULT_REPORT),
-            },
-            Self::DnsLatencyNanos => KnobMeta {
-                flag: "--dns-latency-nanos",
-                env: ENV_DNS_LATENCY,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                injection_domains: &[fault_domain::DNS_LATENCY],
-                swarm_class: Some("dns_latency"),
-                report: Some(ENV_DNS_FAULT_REPORT),
-            },
-            Self::CustomOpFailPermille => KnobMeta {
-                flag: "--custom-op-fail-permille",
-                env: ENV_CUSTOM_OP_FAIL_PERMILLE,
-                plumbing: Plumbing::Scalar,
-                plane: Plane::Fault,
-                // One label here, but the stream it names is a FAMILY: each
-                // custom-op label draws from its own child stream keyed by this
-                // domain and the label's hash, so arming the knob over one
-                // operation class does not shift another's decisions.
-                injection_domains: &[fault_domain::CUSTOM_OP_FAULT],
-                swarm_class: Some("custom_op_fail"),
-                report: Some(ENV_CUSTOMOP_FAULT_REPORT),
-            },
+                    ],
+                    swarm_class: Some("net_duplicate"),
+                    report: Some(ENV_NET_FAULT_REPORT),
+                },
+                sample: 1,
+            }
+            /// Seeded probability in per-mille (0..=1000) that an otherwise-establishable
+            /// TCP connection is refused.
+            connect_refuse_permille: u16 => NetConnectRefusePermille = 10 {
+                meta: KnobMeta {
+                    flag: "--net-connect-refuse-permille",
+                    env: ENV_NET_CONNECT_REFUSE_PERMILLE,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::NET_CONNECT_REFUSE],
+                    swarm_class: Some("net_connect_refuse"),
+                    report: Some(ENV_NET_FAULT_REPORT),
+                },
+                sample: 1,
+            }
+            /// Seeded probability in per-mille (0..=1000) that a fault-eligible
+            /// established-stream operation tears the stream down with a reset.
+            reset_permille: u16 => NetResetPermille = 11 {
+                meta: KnobMeta {
+                    flag: "--net-reset-permille",
+                    env: ENV_NET_RESET_PERMILLE,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::NET_RESET],
+                    swarm_class: Some("net_reset"),
+                    report: Some(ENV_NET_FAULT_REPORT),
+                },
+                sample: 1,
+            }
+            /// Statically partitioned address pairs. Both directions of each pair are
+            /// blocked: a datagram addressed across it is dropped and a connect across it
+            /// is refused. Deterministic (rate 1.0), unlike the seeded knobs above.
+            partitions: std::collections::BTreeSet<(String, String)> => NetPartition = 12 {
+                meta: KnobMeta {
+                    flag: "--net-partition",
+                    env: ENV_NET_PARTITIONS,
+                    plumbing: Plumbing::Repeatable(RepeatableFormat::AddressPairs),
+                    // Deterministic (rate 1.0): a datagram across a partition is
+                    // always dropped, so nothing is drawn.
+                    injection_domains: &[],
+                    swarm_class: Some("net_partition"),
+                    report: Some(ENV_NET_FAULT_REPORT),
+                },
+                sample: std::collections::BTreeSet::from([("a".to_string(), "b".to_string()), ("b".to_string(), "a".to_string())]),
+            }
+            /// Virtual TCP receive-buffer size in bytes. `None` uses the driver default.
+            /// Not a fault: a capacity setting whose smaller values make would-block
+            /// behavior — and the guest's backpressure handling — reachable, so it has a
+            /// swarm class (an environment shape a generation may or may not adopt) but
+            /// no vacuity class (there is no "should have fired N times" rate to judge).
+            tcp_buffer_bytes: Option<usize> => NetTcpBufferBytes = 13 {
+                meta: KnobMeta {
+                    flag: "--net-tcp-buffer-bytes",
+                    env: ENV_NET_TCP_BUFFER_BYTES,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[],
+                    swarm_class: Some("net_tcp_buffer"),
+                    // A capacity setting, not a fault: there is no rate that "should
+                    // have fired", so no vacuity counter to report.
+                    report: None,
+                },
+                sample: Some(4096),
+            }
+        }
+        ClockFaultConfig as clock {
+            /// Inclusive `[min, max]` nanoseconds of seeded extra latency per guest sleep.
+            sleep_jitter_nanos: Option<(u64, u64)> => SleepJitterNanos = 5 {
+                meta: KnobMeta {
+                    flag: "--sleep-jitter-nanos",
+                    env: ENV_SLEEP_JITTER,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::SLEEP_JITTER],
+                    swarm_class: Some("sleep_jitter"),
+                    // The clock plane has no fault report: a sleep that was delayed
+                    // is indistinguishable from a longer sleep, so there is nothing
+                    // to count as "applied".
+                    report: None,
+                },
+                sample: Some((1, 2)),
+            }
+            /// Magnitude in nanoseconds of the seeded signed realtime-epoch jump applied
+            /// to each `ClockKind::Realtime` read: an offset drawn uniformly in `[-hi,
+            /// hi]`, independently per read. Zero (the default) is off.
+            epoch_jump_nanos: u64 => EpochJumpNanos = 15 {
+                meta: KnobMeta {
+                    flag: "--epoch-jump-nanos",
+                    env: ENV_EPOCH_JUMP_NANOS,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::EPOCH_JUMP],
+                    swarm_class: Some("epoch_jump"),
+                    report: Some(ENV_CLOCK_FAULT_REPORT),
+                },
+                sample: 1,
+            }
+        }
+        DnsFaultConfig as dns {
+            /// Seeded resolution-failure probability in per-mille (0..=1000). On fire, a
+            /// second draw picks NXDOMAIN (a stale or deleted record) or a transient
+            /// timeout (a slow or unreachable resolver).
+            fail_permille: u16 => DnsFailPermille = 18 {
+                meta: KnobMeta {
+                    flag: "--dns-fail-permille",
+                    env: ENV_DNS_FAIL_PERMILLE,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::DNS_FAULT],
+                    swarm_class: Some("dns_fail"),
+                    report: Some(ENV_DNS_FAULT_REPORT),
+                },
+                sample: 1,
+            }
+            /// Inclusive `[min, max]` nanoseconds of seeded latency applied before every
+            /// eligible resolution.
+            latency_nanos: Option<(u64, u64)> => DnsLatencyNanos = 19 {
+                meta: KnobMeta {
+                    flag: "--dns-latency-nanos",
+                    env: ENV_DNS_LATENCY,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::DNS_LATENCY],
+                    swarm_class: Some("dns_latency"),
+                    report: Some(ENV_DNS_FAULT_REPORT),
+                },
+                sample: Some((1, 2)),
+            }
+        }
+        EntropyFaultConfig as entropy {
+            /// Seeded entropy-request failure probability in per-mille (0..=1000). On
+            /// fire, the request returns a deterministic named error instead of bytes.
+            fail_permille: u16 => EntropyFailPermille = 14 {
+                meta: KnobMeta {
+                    flag: "--entropy-fail-permille",
+                    env: ENV_ENTROPY_FAIL_PERMILLE,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::ENTROPY_FAULT],
+                    swarm_class: Some("entropy_fail"),
+                    report: Some(ENV_ENTROPY_FAULT_REPORT),
+                },
+                sample: 1,
+            }
+        }
+        CustomOpFaultConfig as custom_op {
+            /// Seeded failure probability in per-mille (0..=1000) for custom operations
+            /// the guest declared fault-eligible. On fire the operation's `perform`
+            /// closure does NOT run and the guest receives the failure it declared,
+            /// exactly as if the wrapped effect had failed.
+            ///
+            /// Applies only to declared-eligible operations: a custom op that declares
+            /// no failure shape has no error the runtime could invent for it, and
+            /// inventing one would mean handing a guest a value its own type does not
+            /// admit.
+            fail_permille: u16 => CustomOpFailPermille = 16 {
+                meta: KnobMeta {
+                    flag: "--custom-op-fail-permille",
+                    env: ENV_CUSTOM_OP_FAIL_PERMILLE,
+                    plumbing: Plumbing::Scalar,
+                    // One label here, but the stream it names is a FAMILY: each
+                    // custom-op label draws from its own child stream keyed by this
+                    // domain and the label's hash, so arming the knob over one
+                    // operation class does not shift another's decisions.
+                    injection_domains: &[fault_domain::CUSTOM_OP_FAULT],
+                    swarm_class: Some("custom_op_fail"),
+                    report: Some(ENV_CUSTOMOP_FAULT_REPORT),
+                },
+                sample: 1,
+            }
         }
     }
-
-    /// Whether the knob is set to something other than its inert default.
-    ///
-    /// A [`Plane::DnsTable`] knob is not a [`FaultConfig`] field at all, so it
-    /// answers `false` here; `dns_table_knobs_are_outside_faultconfig` pins that,
-    /// and `RuntimeConfig::dns_entries` is where the host table actually lives.
-    #[must_use]
-    pub fn is_set(self, faults: &FaultConfig) -> bool {
-        match self {
-            Self::FsCrashAt => faults.fs.crash_at.is_some(),
-            Self::FsTornGranularity => faults.fs.torn_granularity != TornGranularity::default(),
-            Self::FsErrorPermille => faults.fs.error_permille != 0,
-            Self::FsShortPermille => faults.fs.short_permille != 0,
-            Self::FsLatencyNanos => faults.fs.latency_nanos.is_some(),
-            Self::SleepJitterNanos => faults.clock.sleep_jitter_nanos.is_some(),
-            Self::NetJitterNanos => faults.net.jitter_nanos.is_some(),
-            Self::NetDropPermille => faults.net.drop_permille != 0,
-            Self::NetLatencyNanos => faults.net.latency_nanos != 0,
-            Self::NetDuplicatePermille => faults.net.duplicate_permille != 0,
-            Self::NetConnectRefusePermille => faults.net.connect_refuse_permille != 0,
-            Self::NetResetPermille => faults.net.reset_permille != 0,
-            Self::NetPartition => !faults.net.partitions.is_empty(),
-            Self::NetTcpBufferBytes => faults.net.tcp_buffer_bytes.is_some(),
-            Self::EntropyFailPermille => faults.entropy.fail_permille != 0,
-            Self::EpochJumpNanos => faults.clock.epoch_jump_nanos != 0,
-            Self::DnsEntry => false,
-            Self::DnsFailPermille => faults.dns.fail_permille != 0,
-            Self::DnsLatencyNanos => faults.dns.latency_nanos.is_some(),
-            Self::CustomOpFailPermille => faults.custom_op.fail_permille != 0,
-        }
-    }
-
-    /// Reset the knob to its inert default, leaving no residue behind — what a
-    /// swarm generation does to a class its seed deselected.
-    pub fn clear(self, faults: &mut FaultConfig) {
-        match self {
-            Self::FsCrashAt => faults.fs.crash_at = None,
-            Self::FsTornGranularity => faults.fs.torn_granularity = TornGranularity::default(),
-            Self::FsErrorPermille => faults.fs.error_permille = 0,
-            Self::FsShortPermille => faults.fs.short_permille = 0,
-            Self::FsLatencyNanos => faults.fs.latency_nanos = None,
-            Self::SleepJitterNanos => faults.clock.sleep_jitter_nanos = None,
-            Self::NetJitterNanos => faults.net.jitter_nanos = None,
-            Self::NetDropPermille => faults.net.drop_permille = 0,
-            Self::NetLatencyNanos => faults.net.latency_nanos = 0,
-            Self::NetDuplicatePermille => faults.net.duplicate_permille = 0,
-            Self::NetConnectRefusePermille => faults.net.connect_refuse_permille = 0,
-            Self::NetResetPermille => faults.net.reset_permille = 0,
-            Self::NetPartition => faults.net.partitions.clear(),
-            Self::NetTcpBufferBytes => faults.net.tcp_buffer_bytes = None,
-            Self::EntropyFailPermille => faults.entropy.fail_permille = 0,
-            Self::EpochJumpNanos => faults.clock.epoch_jump_nanos = 0,
-            Self::DnsEntry => {}
-            Self::DnsFailPermille => faults.dns.fail_permille = 0,
-            Self::DnsLatencyNanos => faults.dns.latency_nanos = None,
-            Self::CustomOpFailPermille => faults.custom_op.fail_permille = 0,
-        }
-    }
+    semantic { DnsEntry = 17 => KnobMeta {
+            flag: "--dns-entry",
+            env: ENV_DNS_ENTRIES,
+            plumbing: Plumbing::Repeatable(RepeatableFormat::DnsEntries),
+            injection_domains: &[],
+            swarm_class: None,
+            report: None,
+        }; }
 }
 
 /// What a swarm class masks when the seed deselects it.
@@ -453,6 +464,65 @@ pub struct SwarmClass {
     pub masks: Masks,
 }
 
+// Const string comparison for registry validation and mask derivation.
+const fn same(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+const fn mask_count(token: &str) -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i < FaultKnob::ALL.len() {
+        if let Some(class) = FaultKnob::ALL[i].meta().swarm_class
+            && same(class, token)
+        {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+const fn mask_knobs<const N: usize>(token: &str) -> [FaultKnob; N] {
+    let mut rows = [FaultKnob::ALL[0]; N];
+    let mut index = 0;
+    let mut i = 0;
+    while i < FaultKnob::ALL.len() {
+        let knob = FaultKnob::ALL[i];
+        if let Some(class) = knob.meta().swarm_class
+            && same(class, token)
+        {
+            rows[index] = knob;
+            index += 1;
+        }
+        i += 1;
+    }
+    assert!(index == N && N > 0, "swarm class masks no knobs");
+    rows
+}
+
+// One token supplies both the trace-visible row and its generated mask.
+macro_rules! swarm_class {
+    ($token:literal, $domain:expr) => {
+        SwarmClass {
+            token: $token,
+            domain: $domain,
+            fingerprint_component: None,
+            masks: Masks::Knobs(&mask_knobs::<{ mask_count($token) }>($token)),
+        }
+    };
+}
+
 /// The swarm classes in DRAW ORDER — the order candidate and selected tokens are
 /// recorded in, which makes it trace-visible and therefore load-bearing. Each
 /// class draws from its own domain-separated coin, so the order does not affect
@@ -460,105 +530,25 @@ pub struct SwarmClass {
 ///
 /// Deliberately not [`FaultKnob::ALL`]'s order, and not one row per knob:
 /// `crash` covers two knobs, `--dns-entry` has no class, and `buggify` masks
-/// configuration no fault knob owns. `swarm_classes_and_knobs_agree` pins this
-/// list against the `swarm_class` column so neither side can drift.
+/// configuration no fault knob owns. Masks derive from knob metadata; const
+/// checks reject unknown class tokens, empty masks and duplicate draw domains.
 pub const SWARM_CLASSES: &[SwarmClass] = &[
-    SwarmClass {
-        token: "crash",
-        domain: fault_domain::SWARM_CRASH,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::FsCrashAt, FaultKnob::FsTornGranularity]),
-    },
-    SwarmClass {
-        token: "fs_error",
-        domain: fault_domain::SWARM_FS_ERROR,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::FsErrorPermille]),
-    },
-    SwarmClass {
-        token: "fs_short",
-        domain: fault_domain::SWARM_FS_SHORT,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::FsShortPermille]),
-    },
-    SwarmClass {
-        token: "fs_latency",
-        domain: fault_domain::SWARM_FS_LATENCY,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::FsLatencyNanos]),
-    },
-    SwarmClass {
-        token: "dns_fail",
-        domain: fault_domain::SWARM_DNS_FAIL,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::DnsFailPermille]),
-    },
-    SwarmClass {
-        token: "dns_latency",
-        domain: fault_domain::SWARM_DNS_LATENCY,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::DnsLatencyNanos]),
-    },
-    SwarmClass {
-        token: "sleep_jitter",
-        domain: fault_domain::SWARM_SLEEP_JITTER,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::SleepJitterNanos]),
-    },
-    SwarmClass {
-        token: "net_jitter",
-        domain: fault_domain::SWARM_NET_JITTER,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::NetJitterNanos]),
-    },
-    SwarmClass {
-        token: "net_drop",
-        domain: fault_domain::SWARM_NET_DROP,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::NetDropPermille]),
-    },
-    SwarmClass {
-        token: "net_latency",
-        domain: fault_domain::SWARM_NET_LATENCY,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::NetLatencyNanos]),
-    },
-    SwarmClass {
-        token: "net_duplicate",
-        domain: fault_domain::SWARM_NET_DUPLICATE,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::NetDuplicatePermille]),
-    },
-    SwarmClass {
-        token: "net_connect_refuse",
-        domain: fault_domain::SWARM_NET_CONNECT_REFUSE,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::NetConnectRefusePermille]),
-    },
-    SwarmClass {
-        token: "net_reset",
-        domain: fault_domain::SWARM_NET_RESET,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::NetResetPermille]),
-    },
-    SwarmClass {
-        token: "net_partition",
-        domain: fault_domain::SWARM_NET_PARTITION,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::NetPartition]),
-    },
-    SwarmClass {
-        token: "net_tcp_buffer",
-        domain: fault_domain::SWARM_NET_TCP_BUFFER,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::NetTcpBufferBytes]),
-    },
-    SwarmClass {
-        token: "entropy_fail",
-        domain: fault_domain::SWARM_ENTROPY_FAIL,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::EntropyFailPermille]),
-    },
+    swarm_class!("crash", fault_domain::SWARM_CRASH),
+    swarm_class!("fs_error", fault_domain::SWARM_FS_ERROR),
+    swarm_class!("fs_short", fault_domain::SWARM_FS_SHORT),
+    swarm_class!("fs_latency", fault_domain::SWARM_FS_LATENCY),
+    swarm_class!("dns_fail", fault_domain::SWARM_DNS_FAIL),
+    swarm_class!("dns_latency", fault_domain::SWARM_DNS_LATENCY),
+    swarm_class!("sleep_jitter", fault_domain::SWARM_SLEEP_JITTER),
+    swarm_class!("net_jitter", fault_domain::SWARM_NET_JITTER),
+    swarm_class!("net_drop", fault_domain::SWARM_NET_DROP),
+    swarm_class!("net_latency", fault_domain::SWARM_NET_LATENCY),
+    swarm_class!("net_duplicate", fault_domain::SWARM_NET_DUPLICATE),
+    swarm_class!("net_connect_refuse", fault_domain::SWARM_NET_CONNECT_REFUSE),
+    swarm_class!("net_reset", fault_domain::SWARM_NET_RESET),
+    swarm_class!("net_partition", fault_domain::SWARM_NET_PARTITION),
+    swarm_class!("net_tcp_buffer", fault_domain::SWARM_NET_TCP_BUFFER),
+    swarm_class!("entropy_fail", fault_domain::SWARM_ENTROPY_FAIL),
     SwarmClass {
         token: "buggify",
         domain: fault_domain::SWARM_BUGGIFY,
@@ -569,182 +559,59 @@ pub const SWARM_CLASSES: &[SwarmClass] = &[
     // (`sleep_jitter`, above): draw order is trace-visible, so a new class
     // never gets inserted where it would shift every later class's position
     // in an existing recorded candidate list.
-    SwarmClass {
-        token: "epoch_jump",
-        domain: fault_domain::SWARM_EPOCH_JUMP,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::EpochJumpNanos]),
-    },
-    SwarmClass {
-        token: "custom_op_fail",
-        domain: fault_domain::SWARM_CUSTOM_OP_FAIL,
-        fingerprint_component: None,
-        masks: Masks::Knobs(&[FaultKnob::CustomOpFailPermille]),
-    },
+    swarm_class!("epoch_jump", fault_domain::SWARM_EPOCH_JUMP),
+    swarm_class!("custom_op_fail", fault_domain::SWARM_CUSTOM_OP_FAIL),
 ];
 
-#[cfg(test)]
-impl FaultKnob {
-    /// Set the knob to a non-default sample value. The exhaustive match drags a
-    /// new knob into every gate that starts from "one knob set" — the swarm
-    /// coverage list, the per-knob wiring check, and the trace-record coverage
-    /// gate — instead of letting it land outside them unnoticed.
-    pub(crate) fn set_sample(self, faults: &mut FaultConfig) {
-        use crate::{CrashOp, CrashPoint};
-
-        match self {
-            Self::FsCrashAt => {
-                faults.fs.crash_at = Some(CrashPoint {
-                    op: CrashOp::Close,
-                    ordinal: 1,
-                });
-            }
-            Self::FsTornGranularity => faults.fs.torn_granularity = TornGranularity::Byte,
-            Self::FsErrorPermille => faults.fs.error_permille = 1,
-            Self::FsShortPermille => faults.fs.short_permille = 1,
-            Self::FsLatencyNanos => faults.fs.latency_nanos = Some((1, 2)),
-            Self::SleepJitterNanos => faults.clock.sleep_jitter_nanos = Some((1, 2)),
-            Self::NetJitterNanos => faults.net.jitter_nanos = Some((1, 2)),
-            Self::NetDropPermille => faults.net.drop_permille = 1,
-            Self::NetLatencyNanos => faults.net.latency_nanos = 1,
-            Self::NetDuplicatePermille => faults.net.duplicate_permille = 1,
-            Self::NetConnectRefusePermille => faults.net.connect_refuse_permille = 1,
-            Self::NetResetPermille => faults.net.reset_permille = 1,
-            Self::NetPartition => {
-                faults
-                    .net
-                    .partitions
-                    .insert(("a".to_string(), "b".to_string()));
-                faults
-                    .net
-                    .partitions
-                    .insert(("b".to_string(), "a".to_string()));
-            }
-            Self::NetTcpBufferBytes => faults.net.tcp_buffer_bytes = Some(4096),
-            Self::EntropyFailPermille => faults.entropy.fail_permille = 1,
-            Self::EpochJumpNanos => faults.clock.epoch_jump_nanos = 1,
-            Self::DnsEntry => {}
-            Self::DnsFailPermille => faults.dns.fail_permille = 1,
-            Self::DnsLatencyNanos => faults.dns.latency_nanos = Some((1, 2)),
-            Self::CustomOpFailPermille => faults.custom_op.fail_permille = 1,
+// Unique control-plane spellings and complete mask ownership are build gates.
+const _: () = {
+    let mut i = 0;
+    while i < FaultKnob::ALL.len() {
+        let meta = FaultKnob::ALL[i].meta();
+        let mut j = i + 1;
+        while j < FaultKnob::ALL.len() {
+            let other = FaultKnob::ALL[j].meta();
+            assert!(!same(meta.flag, other.flag), "duplicate knob flag");
+            assert!(
+                !same(meta.env, other.env),
+                "duplicate knob environment variable"
+            );
+            j += 1;
         }
+        if let Some(token) = meta.swarm_class {
+            let mut found = false;
+            j = 0;
+            while j < SWARM_CLASSES.len() {
+                if same(token, SWARM_CLASSES[j].token) {
+                    found = true;
+                }
+                j += 1;
+            }
+            assert!(found, "knob names an undeclared swarm class");
+        }
+        i += 1;
     }
-}
+    i = 0;
+    while i < SWARM_CLASSES.len() {
+        let mut j = i + 1;
+        while j < SWARM_CLASSES.len() {
+            assert!(
+                !same(SWARM_CLASSES[i].token, SWARM_CLASSES[j].token),
+                "duplicate swarm token"
+            );
+            assert!(
+                !same(SWARM_CLASSES[i].domain, SWARM_CLASSES[j].domain),
+                "duplicate swarm domain"
+            );
+            j += 1;
+        }
+        i += 1;
+    }
+};
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
-
     use super::*;
-
-    /// `ALL` is indexed by discriminant, so a reordered or duplicated row would
-    /// silently give one knob another's metadata — the same pin `Report::ALL`
-    /// carries. Paired with the CLI registry gate in `cargo-patina`, which is
-    /// what catches a variant left out of the list entirely.
-    #[test]
-    fn all_is_in_variant_order() {
-        for (index, knob) in FaultKnob::ALL.iter().enumerate() {
-            assert_eq!(
-                *knob as usize, index,
-                "FaultKnob::ALL must be in variant order"
-            );
-        }
-    }
-
-    /// Every column of the table is a distinct spelling of ONE knob, so no two
-    /// knobs may share a flag, a control-plane variable, or a swarm token.
-    #[test]
-    fn every_knob_has_its_own_spellings() {
-        let count = FaultKnob::ALL.len();
-        let flags: BTreeSet<&str> = FaultKnob::ALL.iter().map(|k| k.meta().flag).collect();
-        let envs: BTreeSet<&str> = FaultKnob::ALL.iter().map(|k| k.meta().env).collect();
-        assert_eq!(flags.len(), count, "two knobs share a CLI flag");
-        assert_eq!(
-            envs.len(),
-            count,
-            "two knobs share a control-plane variable"
-        );
-
-        let tokens: Vec<&str> = FaultKnob::ALL
-            .iter()
-            .filter_map(|k| k.meta().swarm_class)
-            .collect();
-        assert_eq!(
-            tokens.iter().collect::<BTreeSet<_>>().len(),
-            tokens.len(),
-            "two knobs claim the same swarm class"
-        );
-    }
-
-    /// The knob table and the swarm class table are two halves of one fact. A
-    /// knob that names a class must be masked by exactly that class, and a class
-    /// must mask only knobs that name it — so a copy-pasted row or a class token
-    /// renamed on one side cannot drift.
-    #[test]
-    fn swarm_classes_and_knobs_agree() {
-        let mut declared: BTreeMap<&str, Vec<FaultKnob>> = BTreeMap::new();
-        for knob in FaultKnob::ALL {
-            if let Some(token) = knob.meta().swarm_class {
-                declared.entry(token).or_default().push(*knob);
-            }
-        }
-        let mut masked: BTreeMap<&str, Vec<FaultKnob>> = BTreeMap::new();
-        for class in SWARM_CLASSES {
-            match class.masks {
-                Masks::Knobs(knobs) => {
-                    assert!(!knobs.is_empty(), "{} masks nothing", class.token);
-                    masked.insert(class.token, knobs.to_vec());
-                }
-                // The one class no fault knob owns.
-                Masks::Buggify => assert_eq!(class.token, "buggify"),
-            }
-        }
-        assert_eq!(
-            masked.keys().collect::<Vec<_>>(),
-            declared.keys().collect::<Vec<_>>(),
-            "every swarm class must be claimed by a knob, and vice versa"
-        );
-        // `crash` masks `--fs-torn-granularity` too, which declares no class of
-        // its own; every other class masks exactly the knobs that name it.
-        for (token, knobs) in &declared {
-            let masked = &masked[token];
-            for knob in knobs {
-                assert!(
-                    masked.contains(knob),
-                    "{token} does not mask the knob that names it: {knob:?}"
-                );
-            }
-        }
-        assert_eq!(
-            SWARM_CLASSES
-                .iter()
-                .map(|class| class.domain)
-                .collect::<BTreeSet<_>>()
-                .len(),
-            SWARM_CLASSES.len(),
-            "two swarm classes share a domain label — their coins would be identical"
-        );
-    }
-
-    /// A `Plane::DnsTable` knob is semantic configuration, not a `FaultConfig`
-    /// field — the claim `is_set` and `clear` make. If one ever grows a fault
-    /// field, both would start lying, so pin it.
-    #[test]
-    fn dns_table_knobs_are_outside_faultconfig() {
-        for knob in FaultKnob::ALL {
-            if knob.meta().plane != Plane::DnsTable {
-                continue;
-            }
-            let mut faults = FaultConfig::default();
-            knob.set_sample(&mut faults);
-            assert_eq!(
-                faults,
-                FaultConfig::default(),
-                "{knob:?} is on the DNS table plane but touched FaultConfig"
-            );
-            assert!(!knob.is_set(&faults));
-        }
-    }
 
     /// Every `Plane::Fault` knob's sample must be observable in `FaultConfig`,
     /// which is what makes the coverage gates elsewhere non-vacuous: a knob whose

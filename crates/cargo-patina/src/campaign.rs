@@ -163,96 +163,81 @@ const GEN_BAND_BYTES: usize = 64;
 #[path = "campaign/hash.rs"]
 pub(crate) mod gen_byte;
 
-/// The generation-hash bytes a knob's campaign band draws from, or `None` for a
-/// knob the campaign does not band.
-///
-/// The campaign owns the generation-hash layout, so this facet of the knob table
-/// lives here rather than in the runtime — but it is keyed by the same
-/// [`FaultKnob`], so the exhaustive match still walks a new knob to the decision.
-/// A `None` is a knob that is INERT in every campaign generation: it can be set
-/// by hand on a `run`, but no campaign will ever explore it. That is a real gap,
-/// not an oversight, and writing it out is what makes it visible.
-///
-/// `generation_byte_claims_are_disjoint` reads this to prove no two bands share a
-/// byte. Opaque `gen_byte::Bands` accepts only a declared claim.
-fn campaign_band(knob: FaultKnob) -> Option<&'static [gen_byte::Claim]> {
+/// Explicit reasons a campaign leaves a knob undrawn.
+enum BandWaiver {
+    /// Crash restart needs native reachability and two-incarnation minimization.
+    CrashRestart,
+    /// Torn granularity is inert without a generated crash selector.
+    CrashModifier,
+    /// Partition endpoints must come from the guest's topology.
+    Topology,
+    /// The DNS host table is workload shape passed through from the spec.
+    Workload,
+}
+enum BandPolicy {
+    Draw(&'static [gen_byte::Claim]),
+    Waived(BandWaiver),
+}
+impl BandPolicy {
+    const fn claims(self) -> &'static [gen_byte::Claim] {
+        match self {
+            Self::Draw(claims) => {
+                assert!(!claims.is_empty(), "drawn campaign band must claim bytes");
+                claims
+            }
+            Self::Waived(waiver) => match waiver {
+                BandWaiver::CrashRestart
+                | BandWaiver::CrashModifier
+                | BandWaiver::Topology
+                | BandWaiver::Workload => &[],
+            },
+        }
+    }
+}
+
+/// Exhaustive ownership of campaign band bytes: every knob is drawn or waived.
+const fn campaign_policy(knob: FaultKnob) -> BandPolicy {
     match knob {
         // Not drawn: crash placement is native-only (WASI/Cargo refuse
         // --fs-crash-at by name), and a native crash band still needs a
         // reachable crash point, classifier awareness of the named crash
         // errors, and `minimize` on two-incarnation traces
         // (docs/DECISIONS.md row 12).
-        FaultKnob::FsCrashAt | FaultKnob::FsTornGranularity => None,
-        FaultKnob::FsErrorPermille => Some(&[gen_byte::FS_ERROR]),
-        FaultKnob::FsShortPermille => Some(&[gen_byte::FS_SHORT]),
-        FaultKnob::FsLatencyNanos => Some(&[gen_byte::FS_LATENCY_HI]),
-        FaultKnob::SleepJitterNanos => Some(&[gen_byte::SLEEP_JITTER_HI]),
-        FaultKnob::NetDropPermille => Some(&[gen_byte::NET_DROP]),
-        FaultKnob::NetLatencyNanos => Some(&[gen_byte::NET_LATENCY]),
-        FaultKnob::DnsFailPermille => Some(&[gen_byte::DNS_FAIL]),
-        FaultKnob::DnsLatencyNanos => Some(&[gen_byte::DNS_LATENCY_HI]),
-        FaultKnob::NetJitterNanos => Some(&[gen_byte::NET_JITTER_HI]),
-        FaultKnob::NetDuplicatePermille => Some(&[gen_byte::NET_DUPLICATE]),
-        FaultKnob::NetConnectRefusePermille => Some(&[gen_byte::NET_CONNECT_REFUSE]),
-        FaultKnob::NetResetPermille => Some(&[gen_byte::NET_RESET]),
-        FaultKnob::NetTcpBufferBytes => Some(&[gen_byte::NET_TCP_BUFFER]),
-        FaultKnob::EntropyFailPermille => Some(&[gen_byte::ENTROPY_FAIL]),
-        FaultKnob::EpochJumpNanos => Some(&[gen_byte::EPOCH_JUMP]),
+        FaultKnob::FsCrashAt => BandPolicy::Waived(BandWaiver::CrashRestart),
+        FaultKnob::FsTornGranularity => BandPolicy::Waived(BandWaiver::CrashModifier),
+        FaultKnob::FsErrorPermille => BandPolicy::Draw(&[gen_byte::FS_ERROR]),
+        FaultKnob::FsShortPermille => BandPolicy::Draw(&[gen_byte::FS_SHORT]),
+        FaultKnob::FsLatencyNanos => BandPolicy::Draw(&[gen_byte::FS_LATENCY_HI]),
+        FaultKnob::SleepJitterNanos => BandPolicy::Draw(&[gen_byte::SLEEP_JITTER_HI]),
+        FaultKnob::NetDropPermille => BandPolicy::Draw(&[gen_byte::NET_DROP]),
+        FaultKnob::NetLatencyNanos => BandPolicy::Draw(&[gen_byte::NET_LATENCY]),
+        FaultKnob::DnsFailPermille => BandPolicy::Draw(&[gen_byte::DNS_FAIL]),
+        FaultKnob::DnsLatencyNanos => BandPolicy::Draw(&[gen_byte::DNS_LATENCY_HI]),
+        FaultKnob::NetJitterNanos => BandPolicy::Draw(&[gen_byte::NET_JITTER_HI]),
+        FaultKnob::NetDuplicatePermille => BandPolicy::Draw(&[gen_byte::NET_DUPLICATE]),
+        FaultKnob::NetConnectRefusePermille => BandPolicy::Draw(&[gen_byte::NET_CONNECT_REFUSE]),
+        FaultKnob::NetResetPermille => BandPolicy::Draw(&[gen_byte::NET_RESET]),
+        FaultKnob::NetTcpBufferBytes => BandPolicy::Draw(&[gen_byte::NET_TCP_BUFFER]),
+        FaultKnob::EntropyFailPermille => BandPolicy::Draw(&[gen_byte::ENTROPY_FAIL]),
+        FaultKnob::EpochJumpNanos => BandPolicy::Draw(&[gen_byte::EPOCH_JUMP]),
         // Banded, but emitted only for a spec that declares `--custom-op-faults`
         // — the same shape as the DNS knobs riding on `--dns-entry`. A guest
         // whose custom operations declare no failure shape has nothing this knob
         // could fail, so banding it unconditionally would put a provably inert
         // knob, and its vacuity class, into every campaign generation.
-        FaultKnob::CustomOpFailPermille => Some(&[gen_byte::CUSTOM_OP_FAIL]),
-        // WAIVED (see `BAND_WAIVERS`) — a partition names virtual ADDRESSES the
+        FaultKnob::CustomOpFailPermille => BandPolicy::Draw(&[gen_byte::CUSTOM_OP_FAIL]),
+        // WAIVED — a partition names virtual ADDRESSES the
         // guest actually uses, which the campaign has no generic pool for (unlike
         // `--dns-entry`, there is no `spec.net_partitions` list of candidate
         // endpoints). Synthesizing addresses the guest never dials would be a
         // band that provably never fires, which is worse than an honest gap.
-        FaultKnob::NetPartition => None,
+        FaultKnob::NetPartition => BandPolicy::Waived(BandWaiver::Topology),
         // Not a drawn band by design: the host table is the campaign's SHAPE, not
         // a per-generation draw, and is passed through from the spec (see the
         // DNS block in `derive_flags`).
-        FaultKnob::DnsEntry => None,
+        FaultKnob::DnsEntry => BandPolicy::Waived(BandWaiver::Workload),
     }
 }
-
-/// Every [`FaultKnob`] [`campaign_band`] leaves `None` MUST have a waiver here —
-/// a one-line reason the gap is a decision, not an oversight. `every_unbanded_knob_is_waived`
-/// makes a new knob with neither a band nor a waiver a loud compile-adjacent
-/// failure instead of a silent gap `the_campaign_bands_exactly_the_knobs_it_claims_to`
-/// would only catch if someone remembered to update its list by hand.
-#[cfg(test)]
-const BAND_WAIVERS: &[(FaultKnob, &str)] = &[
-    (
-        FaultKnob::FsCrashAt,
-        concat!(
-            "not drawn: crash restart is native-only (WASI/Cargo refuse ",
-            "--fs-crash-at by name), and a native crash band still needs a ",
-            "reachable crash point, classifier awareness of the named crash ",
-            "errors, and minimize on two-incarnation traces ",
-            "(docs/DECISIONS.md row 12)"
-        ),
-    ),
-    (
-        FaultKnob::FsTornGranularity,
-        concat!(
-            "paired with --fs-crash-at: torn granularity has no effect without ",
-            "the crash selector, so it stays suspended with crash generation"
-        ),
-    ),
-    (
-        FaultKnob::NetPartition,
-        "topology-shaped: a partition names virtual addresses the guest actually \
-         dials, and the campaign spec carries no generic pool of candidate \
-         endpoints to draw from (unlike --dns-entry's spec.dns_entries)",
-    ),
-    (
-        FaultKnob::DnsEntry,
-        "table-plane: the host table is the campaign's SHAPE (passed through from \
-         the spec), not a per-generation draw",
-    ),
-];
 
 /// The band material a generation draws every knob from: its 32-byte generation
 /// hash, followed by a domain-separated 32-byte extension block.
@@ -275,12 +260,12 @@ fn generation_bands(hash: &gen_byte::Hash) -> gen_byte::Bands {
 
 /// One band's `nth` claimed byte of the generation's band material.
 ///
-/// Reading through the claim is what makes [`campaign_band`] the single source
+/// Reading through the claim is what makes [`campaign_policy`] the single source
 /// rather than a parallel description: a band cannot draw from a byte the table
-/// did not give it, and a knob the table bands `None` cannot draw at all.
+/// did not give it, and a waived knob cannot draw at all.
 fn band_byte(hash: &gen_byte::Bands, knob: FaultKnob, nth: usize) -> u8 {
-    let band = campaign_band(knob)
-        .unwrap_or_else(|| panic!("{knob:?} draws a band the knob table does not claim"));
+    let band = campaign_policy(knob).claims();
+    assert!(!band.is_empty(), "{knob:?} draws a waived campaign band");
     hash.read(band[nth])
 }
 
@@ -288,7 +273,7 @@ fn band_byte(hash: &gen_byte::Bands, knob: FaultKnob, nth: usize) -> u8 {
 /// which should have fired repeatedly applied zero effects — is filed under, or
 /// `None` for a knob whose inertness no class names.
 ///
-/// Like [`campaign_band`], this facet belongs to the campaign rather than the
+/// Like [`campaign_policy`], this facet belongs to the campaign rather than the
 /// runtime, and like it, the exhaustive match turns a missing class into a
 /// decision instead of an omission.
 #[cfg(test)]
@@ -481,7 +466,7 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
                 hi: fs_latency_hi,
             },
         );
-        // Crash-restart placement is not drawn (see `campaign_band`); explicit
+        // Crash-restart placement is not drawn (see `campaign_policy`); explicit
         // native crash coverage lives in the e2e suite.
         let drop = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::NetDropPermille, 0)) * 200 / 255, // [0, 200] permille
@@ -710,3 +695,41 @@ fn generation_hash(seed_base: u64, generation: u64) -> gen_byte::Hash {
 #[cfg(test)]
 #[path = "campaign/tests.rs"]
 mod derivation_tests;
+
+// Every declared claim must have exactly one owner across knobs and exploration.
+const _: () = {
+    const fn claim(used: &mut [bool; GEN_BAND_BYTES], index: usize) {
+        assert!(
+            index >= gen_byte::SEED.end && index < GEN_BAND_BYTES,
+            "campaign byte outside fault band"
+        );
+        assert!(!used[index], "duplicate campaign byte allocation");
+        used[index] = true;
+    }
+    let mut used = [false; GEN_BAND_BYTES];
+    let mut i = 0;
+    while i < gen_byte::EXPLORATION_CLAIMS.len() {
+        claim(&mut used, gen_byte::EXPLORATION_CLAIMS[i] as usize);
+        i += 1;
+    }
+    i = 0;
+    while i < FaultKnob::ALL.len() {
+        let claims = campaign_policy(FaultKnob::ALL[i]).claims();
+        let mut j = 0;
+        while j < claims.len() {
+            claim(&mut used, claims[j] as usize);
+            j += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while i < gen_byte::Claim::ALL.len() {
+        let index = gen_byte::Claim::ALL[i] as usize;
+        assert!(
+            index >= gen_byte::SEED.end && index < GEN_BAND_BYTES,
+            "campaign byte outside fault band"
+        );
+        assert!(used[index], "unowned campaign byte claim");
+        i += 1;
+    }
+};

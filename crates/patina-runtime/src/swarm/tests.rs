@@ -128,8 +128,8 @@ fn swarm_class_table_covers_every_current_fault_field() {
     // The recorded candidate ORDER, written out by hand on purpose: it is
     // the one thing about `SWARM_CLASSES` that a trace can see, so deriving
     // it from the table would leave a reordered table ungated. That a class
-    // EXISTS for every knob is gated separately, off the table, by
-    // `swarm_classes_and_knobs_agree`.
+    // EXISTS for every masked knob is guaranteed by the generated masks and
+    // their compile-time ownership checks.
     assert_eq!(
         swarm.candidate_classes,
         vec![

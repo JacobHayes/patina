@@ -1,91 +1,93 @@
-//! Operation-kind and category registry.
-
+//! Exhaustive operation classification and the filter registry it generates.
 use super::*;
 
-/// The complete operation-kind registry. The companion [`operation_kind`] match
-/// has no wildcard arm, so adding an ABI operation fails the build until the
-/// new tag is consciously registered here.
-pub const OP_KINDS: &[(&str, Category)] = &[
-    ("entropy_fill", Category::Entropy),
-    ("clock_now", Category::Clock),
-    ("sleep_until", Category::Sleep),
-    ("fs_open", Category::Fs),
-    ("fs_read", Category::Fs),
-    ("fs_write", Category::Fs),
-    ("fs_read_at", Category::Fs),
-    ("fs_write_at", Category::Fs),
-    ("fs_write_back_at", Category::Fs),
-    ("fs_create_anonymous", Category::Fs),
-    ("fs_seals", Category::Fs),
-    ("fs_add_seals", Category::Fs),
-    ("fs_close", Category::Fs),
-    ("fs_dup", Category::Fs),
-    ("fs_seek", Category::Fs),
-    ("fs_metadata", Category::Fs),
-    ("fs_fd_metadata", Category::Fs),
-    ("fs_inode_metadata", Category::Fs),
-    ("fs_create_directory", Category::Fs),
-    ("fs_remove_file", Category::Fs),
-    ("fs_set_inode_mode", Category::Fs),
-    ("fs_retain_inode", Category::Fs),
-    ("fs_release_inode", Category::Fs),
-    ("fs_sync", Category::Fs),
-    ("fs_set_length", Category::Fs),
-    ("fs_set_length_by_path", Category::Fs),
-    ("fs_allocate", Category::Fs),
-    ("fs_set_times", Category::Fs),
-    ("fs_set_times_by_path", Category::Fs),
-    ("fs_read_directory", Category::Fs),
-    ("fs_read_directory_fd", Category::Fs),
-    ("fs_remove_directory", Category::Fs),
-    ("fs_rename", Category::Fs),
-    ("fs_link", Category::Fs),
-    ("fs_symlink", Category::Fs),
-    ("fs_read_link", Category::Fs),
-    ("fs_make_fifo", Category::Fs),
-    ("fs_make_node", Category::Fs),
-    ("fs_exchange", Category::Fs),
-    ("fs_rename_whiteout", Category::Fs),
-    ("fs_sync_all", Category::Fs),
-    ("fs_get_xattr", Category::Fs),
-    ("fs_list_xattr", Category::Fs),
-    ("fs_set_xattr", Category::Fs),
-    ("fs_remove_xattr", Category::Fs),
-    ("fs_set_mode", Category::Fs),
-    ("fs_set_fd_mode", Category::Fs),
-    ("fs_fd_path", Category::Fs),
-    ("fs_fd_ino", Category::Fs),
-    ("dns_resolve", Category::Net),
-    ("fs_crash", Category::Crash),
-    ("task_spawn", Category::Schedule),
-    ("task_yield", Category::Schedule),
-    ("task_park", Category::Schedule),
-    ("task_park_timed", Category::Schedule),
-    ("task_wake", Category::Schedule),
-    ("signal_generated", Category::Schedule),
-    ("task_complete", Category::Schedule),
-    ("scheduler_next", Category::Schedule),
-    ("net_bind", Category::Net),
-    ("net_bind_shared", Category::Net),
-    ("net_connect", Category::Net),
-    ("net_mark", Category::Net),
-    ("net_send", Category::Net),
-    ("net_recv", Category::Net),
-    ("net_close", Category::Net),
-    ("net_next_delivery", Category::Net),
-    ("net_tcp_listen", Category::Net),
-    ("net_tcp_accept", Category::Net),
-    ("net_tcp_connect", Category::Net),
-    ("net_tcp_send", Category::Net),
-    ("net_tcp_recv", Category::Net),
-    ("net_tcp_shutdown", Category::Net),
-    // A guest verdict is not an effect on any simulated plane; it is the guest
-    // reporting a conclusion, so it carries no plane category of its own.
-    ("verdict", Category::Other),
-    // A custom op is a guest-declared effect on a plane Patina does not model, so
-    // by construction it belongs to none of the simulated planes.
-    ("custom_op", Category::Other),
-];
+macro_rules! operation_kinds {
+    ($( $operation:pat => ($tag:literal, $category:ident); )+) => {
+        pub const OP_KINDS: &[(&str, Category)] = &[$(($tag, Category::$category),)+];
+        pub fn operation_kind(operation: &Operation) -> &'static str {
+            match operation { $($operation => $tag,)+ }
+        }
+    };
+}
+
+operation_kinds! {
+    Operation::EntropyFill { .. } => ("entropy_fill", Entropy);
+    Operation::ClockNow { .. } => ("clock_now", Clock);
+    Operation::SleepUntil { .. } => ("sleep_until", Sleep);
+    Operation::FsOpen { .. } => ("fs_open", Fs);
+    Operation::FsRead { .. } => ("fs_read", Fs);
+    Operation::FsWrite { .. } => ("fs_write", Fs);
+    Operation::FsReadAt { .. } => ("fs_read_at", Fs);
+    Operation::FsWriteAt { .. } => ("fs_write_at", Fs);
+    Operation::FsWriteBackAt { .. } => ("fs_write_back_at", Fs);
+    Operation::FsCreateAnonymous { .. } => ("fs_create_anonymous", Fs);
+    Operation::FsSeals { .. } => ("fs_seals", Fs);
+    Operation::FsAddSeals { .. } => ("fs_add_seals", Fs);
+    Operation::FsClose { .. } => ("fs_close", Fs);
+    Operation::FsDup { .. } => ("fs_dup", Fs);
+    Operation::FsSeek { .. } => ("fs_seek", Fs);
+    Operation::FsMetadata { .. } => ("fs_metadata", Fs);
+    Operation::FsFdMetadata { .. } => ("fs_fd_metadata", Fs);
+    Operation::FsInodeMetadata { .. } => ("fs_inode_metadata", Fs);
+    Operation::FsCreateDirectory { .. } => ("fs_create_directory", Fs);
+    Operation::FsRemoveFile { .. } => ("fs_remove_file", Fs);
+    Operation::FsSetInodeMode { .. } => ("fs_set_inode_mode", Fs);
+    Operation::FsRetainInode { .. } => ("fs_retain_inode", Fs);
+    Operation::FsReleaseInode { .. } => ("fs_release_inode", Fs);
+    Operation::FsSync { .. } => ("fs_sync", Fs);
+    Operation::FsSetLength { .. } => ("fs_set_length", Fs);
+    Operation::FsSetLengthByPath { .. } => ("fs_set_length_by_path", Fs);
+    Operation::FsAllocate { .. } => ("fs_allocate", Fs);
+    Operation::FsSetTimes { .. } => ("fs_set_times", Fs);
+    Operation::FsSetInodeTimes { .. } => ("fs_set_inode_times", Fs);
+    Operation::FsSetTimesByPath { .. } => ("fs_set_times_by_path", Fs);
+    Operation::FsReadDirectory { .. } => ("fs_read_directory", Fs);
+    Operation::FsReadDirectoryFd { .. } => ("fs_read_directory_fd", Fs);
+    Operation::FsRemoveDirectory { .. } => ("fs_remove_directory", Fs);
+    Operation::FsRename { .. } => ("fs_rename", Fs);
+    Operation::FsLink { .. } => ("fs_link", Fs);
+    Operation::FsSymlink { .. } => ("fs_symlink", Fs);
+    Operation::FsReadLink { .. } => ("fs_read_link", Fs);
+    Operation::FsMakeFifo { .. } => ("fs_make_fifo", Fs);
+    Operation::FsMakeNode { .. } => ("fs_make_node", Fs);
+    Operation::FsExchange { .. } => ("fs_exchange", Fs);
+    Operation::FsRenameWhiteout { .. } => ("fs_rename_whiteout", Fs);
+    Operation::FsSyncAll => ("fs_sync_all", Fs);
+    Operation::FsGetXattr { .. } => ("fs_get_xattr", Fs);
+    Operation::FsListXattr { .. } => ("fs_list_xattr", Fs);
+    Operation::FsSetXattr { .. } => ("fs_set_xattr", Fs);
+    Operation::FsRemoveXattr { .. } => ("fs_remove_xattr", Fs);
+    Operation::FsSetMode { .. } => ("fs_set_mode", Fs);
+    Operation::FsSetFdMode { .. } => ("fs_set_fd_mode", Fs);
+    Operation::FsFdPath { .. } => ("fs_fd_path", Fs);
+    Operation::FsFdIno { .. } => ("fs_fd_ino", Fs);
+    Operation::DnsResolve { .. } => ("dns_resolve", Net);
+    Operation::FsCrash => ("fs_crash", Crash);
+    Operation::TaskSpawn { .. } => ("task_spawn", Schedule);
+    Operation::TaskYield { .. } => ("task_yield", Schedule);
+    Operation::TaskPark { .. } => ("task_park", Schedule);
+    Operation::TaskParkTimed { .. } => ("task_park_timed", Schedule);
+    Operation::TaskWake { .. } => ("task_wake", Schedule);
+    Operation::SignalGenerated { .. } => ("signal_generated", Schedule);
+    Operation::TaskComplete { .. } => ("task_complete", Schedule);
+    Operation::SchedulerNext => ("scheduler_next", Schedule);
+    Operation::NetBind { .. } => ("net_bind", Net);
+    Operation::NetBindShared { .. } => ("net_bind_shared", Net);
+    Operation::NetConnect { .. } => ("net_connect", Net);
+    Operation::NetMark { .. } => ("net_mark", Net);
+    Operation::NetSend { .. } => ("net_send", Net);
+    Operation::NetRecv { .. } => ("net_recv", Net);
+    Operation::NetClose { .. } => ("net_close", Net);
+    Operation::NetNextDelivery { .. } => ("net_next_delivery", Net);
+    Operation::NetTcpListen { .. } => ("net_tcp_listen", Net);
+    Operation::NetTcpAccept { .. } => ("net_tcp_accept", Net);
+    Operation::NetTcpConnect { .. } => ("net_tcp_connect", Net);
+    Operation::NetTcpSend { .. } => ("net_tcp_send", Net);
+    Operation::NetTcpRecv { .. } => ("net_tcp_recv", Net);
+    Operation::NetTcpShutdown { .. } => ("net_tcp_shutdown", Net);
+    Operation::Verdict { .. } => ("verdict", Other);
+    Operation::CustomOp { .. } => ("custom_op", Other);
+}
 
 pub fn valid_op_kinds() -> BTreeSet<&'static str> {
     OP_KINDS.iter().map(|(kind, _)| *kind).collect()
@@ -99,87 +101,6 @@ pub fn op_kind_category(kind: &str) -> Option<Category> {
     OP_KINDS
         .iter()
         .find_map(|(candidate, category)| (*candidate == kind).then_some(*category))
-}
-
-pub fn operation_kind(operation: &Operation) -> &'static str {
-    match operation {
-        Operation::EntropyFill { .. } => "entropy_fill",
-        Operation::ClockNow { .. } => "clock_now",
-        Operation::SleepUntil { .. } => "sleep_until",
-        Operation::FsOpen { .. } => "fs_open",
-        Operation::FsRead { .. } => "fs_read",
-        Operation::FsWrite { .. } => "fs_write",
-        Operation::FsReadAt { .. } => "fs_read_at",
-        Operation::FsWriteAt { .. } => "fs_write_at",
-        Operation::FsWriteBackAt { .. } => "fs_write_back_at",
-        Operation::FsCreateAnonymous { .. } => "fs_create_anonymous",
-        Operation::FsSeals { .. } => "fs_seals",
-        Operation::FsAddSeals { .. } => "fs_add_seals",
-        Operation::FsClose { .. } => "fs_close",
-        Operation::FsDup { .. } => "fs_dup",
-        Operation::FsSeek { .. } => "fs_seek",
-        Operation::FsMetadata { .. } => "fs_metadata",
-        Operation::FsFdMetadata { .. } => "fs_fd_metadata",
-        Operation::FsInodeMetadata { .. } => "fs_inode_metadata",
-        Operation::FsCreateDirectory { .. } => "fs_create_directory",
-        Operation::FsRemoveFile { .. } => "fs_remove_file",
-        Operation::FsSetInodeMode { .. } => "fs_set_inode_mode",
-        Operation::FsRetainInode { .. } => "fs_retain_inode",
-        Operation::FsReleaseInode { .. } => "fs_release_inode",
-        Operation::FsSync { .. } => "fs_sync",
-        Operation::FsSetLength { .. } => "fs_set_length",
-        Operation::FsSetLengthByPath { .. } => "fs_set_length_by_path",
-        Operation::FsAllocate { .. } => "fs_allocate",
-        Operation::FsSetTimes { .. } => "fs_set_times",
-        Operation::FsSetInodeTimes { .. } => "fs_set_inode_times",
-        Operation::FsSetTimesByPath { .. } => "fs_set_times_by_path",
-        Operation::FsReadDirectory { .. } => "fs_read_directory",
-        Operation::FsReadDirectoryFd { .. } => "fs_read_directory_fd",
-        Operation::FsRemoveDirectory { .. } => "fs_remove_directory",
-        Operation::FsRename { .. } => "fs_rename",
-        Operation::FsLink { .. } => "fs_link",
-        Operation::FsSymlink { .. } => "fs_symlink",
-        Operation::FsReadLink { .. } => "fs_read_link",
-        Operation::FsMakeFifo { .. } => "fs_make_fifo",
-        Operation::FsMakeNode { .. } => "fs_make_node",
-        Operation::FsExchange { .. } => "fs_exchange",
-        Operation::FsRenameWhiteout { .. } => "fs_rename_whiteout",
-        Operation::FsSyncAll => "fs_sync_all",
-        Operation::FsGetXattr { .. } => "fs_get_xattr",
-        Operation::FsListXattr { .. } => "fs_list_xattr",
-        Operation::FsSetXattr { .. } => "fs_set_xattr",
-        Operation::FsRemoveXattr { .. } => "fs_remove_xattr",
-        Operation::FsSetMode { .. } => "fs_set_mode",
-        Operation::FsSetFdMode { .. } => "fs_set_fd_mode",
-        Operation::FsFdPath { .. } => "fs_fd_path",
-        Operation::FsFdIno { .. } => "fs_fd_ino",
-        Operation::DnsResolve { .. } => "dns_resolve",
-        Operation::FsCrash => "fs_crash",
-        Operation::TaskSpawn { .. } => "task_spawn",
-        Operation::TaskYield { .. } => "task_yield",
-        Operation::TaskPark { .. } => "task_park",
-        Operation::TaskParkTimed { .. } => "task_park_timed",
-        Operation::TaskWake { .. } => "task_wake",
-        Operation::SignalGenerated { .. } => "signal_generated",
-        Operation::TaskComplete { .. } => "task_complete",
-        Operation::SchedulerNext => "scheduler_next",
-        Operation::NetBind { .. } => "net_bind",
-        Operation::NetBindShared { .. } => "net_bind_shared",
-        Operation::NetConnect { .. } => "net_connect",
-        Operation::NetMark { .. } => "net_mark",
-        Operation::NetSend { .. } => "net_send",
-        Operation::NetRecv { .. } => "net_recv",
-        Operation::NetClose { .. } => "net_close",
-        Operation::NetNextDelivery { .. } => "net_next_delivery",
-        Operation::NetTcpListen { .. } => "net_tcp_listen",
-        Operation::NetTcpAccept { .. } => "net_tcp_accept",
-        Operation::NetTcpConnect { .. } => "net_tcp_connect",
-        Operation::NetTcpSend { .. } => "net_tcp_send",
-        Operation::NetTcpRecv { .. } => "net_tcp_recv",
-        Operation::NetTcpShutdown { .. } => "net_tcp_shutdown",
-        Operation::Verdict { .. } => "verdict",
-        Operation::CustomOp { .. } => "custom_op",
-    }
 }
 
 #[cfg(test)]

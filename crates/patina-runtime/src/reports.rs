@@ -19,6 +19,12 @@ macro_rules! report_registry {
             /// same rows, so a report cannot skip their control-plane plumbing.
             pub const ALL: [Self; [$(stringify!($variant)),+].len()] = [$(Self::$variant),+];
 
+            /// Joined spellings for the CLI environment registry.
+            pub const ENV_NAMES: &'static str = {
+                const JOINED: &str = concat!($($name, " / ",)+);
+                JOINED.split_at(JOINED.len() - 3).0
+            };
+
             /// The control-plane variable that suppresses this report.
             #[must_use]
             pub const fn env(self) -> &'static str {

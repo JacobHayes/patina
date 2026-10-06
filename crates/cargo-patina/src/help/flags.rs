@@ -82,168 +82,160 @@ pub(super) const SOURCE_SELECT: &[Flag] = &[
     TARGET_FLAG,
 ];
 
-pub(super) const FAULT_FLAGS: &[Flag] = &[
-    f(
-        "--fs-crash-at",
-        None,
-        Value::Required("SPEC", Kind::CrashSpec),
-        "Native only: after the Nth successful fs boundary op, terminate the process and restart once from the recovered filesystem; records and replays across both incarnations: open|write|sync|close[:N] (bare = :1).",
-        false,
-    ),
-    f(
-        "--fs-torn-granularity",
-        None,
-        Value::Required("block|byte", Kind::Enum(&["block", "byte"])),
-        "Torn-write granularity for --fs-crash-at: block (default) or byte.",
-        false,
-    ),
-    f(
-        "--fs-error-permille",
-        None,
-        Value::Required("N", Kind::Permille),
-        "Fail eligible fs ops at N per-mille with a seeded errno (EIO/ENOSPC/EINTR per op).",
-        false,
-    ),
-    f(
-        "--fs-short-permille",
-        None,
-        Value::Required("N", Kind::Permille),
-        "Truncate fs reads/writes at N per-mille (short I/O, ≥1 byte).",
-        false,
-    ),
-    f(
-        "--fs-latency-nanos",
-        None,
-        Value::Required("MIN..MAX", Kind::NanosRange),
-        "Add seeded latency drawn from [MIN, MAX] to every fault-eligible fs op, before it runs.",
-        false,
-    ),
-    f(
-        "--sleep-jitter-nanos",
-        None,
-        Value::Required("MIN..MAX", Kind::NanosRange),
-        "Add seeded latency drawn from [MIN, MAX] to every guest sleep.",
-        false,
-    ),
-    f(
-        "--net-jitter-nanos",
-        None,
-        Value::Required("MIN..MAX", Kind::NanosRange),
-        "Add seeded per-datagram delivery jitter drawn from [MIN, MAX].",
-        false,
-    ),
-    f(
-        "--net-drop-permille",
-        None,
-        Value::Required("N", Kind::Permille),
-        "Drop datagrams at N per-mille (0..=1000).",
-        false,
-    ),
-    f(
-        "--net-latency-nanos",
-        None,
-        Value::Required("N", Kind::U64),
-        "Base per-datagram/segment delivery latency in nanoseconds.",
-        false,
-    ),
-    f(
-        "--net-duplicate-permille",
-        None,
-        Value::Required("N", Kind::Permille),
-        "Deliver datagrams twice at N per-mille (each copy draws its own jitter).",
-        false,
-    ),
-    f(
-        "--net-connect-refuse-permille",
-        None,
-        Value::Required("N", Kind::Permille),
-        "Refuse otherwise-establishable TCP connections at N per-mille.",
-        false,
-    ),
-    f(
-        "--net-reset-permille",
-        None,
-        Value::Required("N", Kind::Permille),
-        "Reset an established TCP stream at N per-mille per data operation (both directions).",
-        false,
-    ),
-    f(
-        "--net-partition",
-        None,
-        Value::Required("A,B", Kind::AddressPair),
-        "Partition two virtual addresses from each other, both directions (repeatable).",
-        true,
-    ),
-    f(
-        "--net-tcp-buffer-bytes",
-        None,
-        Value::Required("N", Kind::Usize),
-        "Virtual TCP receive-buffer size; smaller values make would-block/partial sends reachable.",
-        false,
-    ),
-    f(
-        "--entropy-fail-permille",
-        None,
-        Value::Required("N", Kind::Permille),
-        "Fail guest entropy requests at N per-mille with a seeded named error instead of bytes.",
-        false,
-    ),
-    f(
-        "--epoch-jump-nanos",
-        None,
-        Value::Required("HI", Kind::U64),
-        "Jump each realtime-epoch read by a seeded signed offset in [-HI, HI] nanoseconds (saturating at 0).",
-        false,
-    ),
-    f(
-        "--custom-op-fail-permille",
-        None,
-        Value::Required("N", Kind::Permille),
-        "Fail guest custom operations that declared a failure shape at N per-mille, handing back that failure instead of running the operation.",
-        false,
-    ),
-];
+use patina_dst_runtime::{FaultKnob, Plumbing};
 
-/// The DNS domain: the host table (semantic configuration, like `--param`) and
-/// its two seeded fault knobs.
-///
-/// A slice of its own rather than rows in [`FAULT_FLAGS`], because wasip1 has no
-/// name-resolution surface at all — no `getaddrinfo`, no `sock_addr_resolve` — so
-/// the WASI parser must refuse these loudly instead of accepting knobs that could
-/// never fire. That family exception is declared once, by the owning GROUP in
-/// each verb, which is also the only place that can name families the verb
-/// actually has.
-/// The host table itself, split out because `campaign` takes it WITHOUT the fault
-/// knobs: a campaign draws `--dns-fail-permille`/`--dns-latency-nanos` per
-/// generation from the generation hash, so accepting them from the operator too
-/// would be two authorities over one knob.
-const DNS_ENTRY_FLAG: Flag = f(
-    "--dns-entry",
-    None,
-    Value::Required("NAME=ADDR", Kind::DnsEntry),
-    "Define NAME to resolve to IPv4 ADDR (repeatable). Undefined names are NXDOMAIN.",
-    true,
-);
+#[derive(Clone, Copy)]
+enum KnobGroup {
+    Fault,
+    Dns,
+}
 
-pub(super) const DNS_ENTRY_FLAGS: &[Flag] = &[DNS_ENTRY_FLAG];
-
-pub(super) const DNS_FLAGS: &[Flag] = &[
-    DNS_ENTRY_FLAG,
-    f(
-        "--dns-fail-permille",
-        None,
-        Value::Required("N", Kind::Permille),
-        "Fail resolutions of DEFINED names at N per-mille (seeded NXDOMAIN or timeout).",
-        false,
-    ),
-    f(
-        "--dns-latency-nanos",
-        None,
-        Value::Required("MIN..MAX", Kind::NanosRange),
-        "Add seeded latency drawn from [MIN, MAX] to every resolution of a defined name.",
-        false,
-    ),
-];
+// Every new runtime knob must declare its CLI grammar, prose and group here.
+const fn knob_flag(knob: FaultKnob) -> (Flag, KnobGroup) {
+    let (value, doc, group) = match knob {
+        FaultKnob::FsCrashAt => (
+            Value::Required("SPEC", Kind::CrashSpec),
+            "Native only: after the Nth successful fs boundary op, terminate the process and restart once from the recovered filesystem; records and replays across both incarnations: open|write|sync|close[:N] (bare = :1).",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::FsTornGranularity => (
+            Value::Required("block|byte", Kind::Enum(&["block", "byte"])),
+            "Torn-write granularity for --fs-crash-at: block (default) or byte.",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::FsErrorPermille => (
+            Value::Required("N", Kind::Permille),
+            "Fail eligible fs ops at N per-mille with a seeded errno (EIO/ENOSPC/EINTR per op).",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::FsShortPermille => (
+            Value::Required("N", Kind::Permille),
+            "Truncate fs reads/writes at N per-mille (short I/O, ≥1 byte).",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::FsLatencyNanos => (
+            Value::Required("MIN..MAX", Kind::NanosRange),
+            "Add seeded latency drawn from [MIN, MAX] to every fault-eligible fs op, before it runs.",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::SleepJitterNanos => (
+            Value::Required("MIN..MAX", Kind::NanosRange),
+            "Add seeded latency drawn from [MIN, MAX] to every guest sleep.",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::NetJitterNanos => (
+            Value::Required("MIN..MAX", Kind::NanosRange),
+            "Add seeded per-datagram delivery jitter drawn from [MIN, MAX].",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::NetDropPermille => (
+            Value::Required("N", Kind::Permille),
+            "Drop datagrams at N per-mille (0..=1000).",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::NetLatencyNanos => (
+            Value::Required("N", Kind::U64),
+            "Base per-datagram/segment delivery latency in nanoseconds.",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::NetDuplicatePermille => (
+            Value::Required("N", Kind::Permille),
+            "Deliver datagrams twice at N per-mille (each copy draws its own jitter).",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::NetConnectRefusePermille => (
+            Value::Required("N", Kind::Permille),
+            "Refuse otherwise-establishable TCP connections at N per-mille.",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::NetResetPermille => (
+            Value::Required("N", Kind::Permille),
+            "Reset an established TCP stream at N per-mille per data operation (both directions).",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::NetPartition => (
+            Value::Required("A,B", Kind::AddressPair),
+            "Partition two virtual addresses from each other, both directions (repeatable).",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::NetTcpBufferBytes => (
+            Value::Required("N", Kind::Usize),
+            "Virtual TCP receive-buffer size; smaller values make would-block/partial sends reachable.",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::EntropyFailPermille => (
+            Value::Required("N", Kind::Permille),
+            "Fail guest entropy requests at N per-mille with a seeded named error instead of bytes.",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::EpochJumpNanos => (
+            Value::Required("HI", Kind::U64),
+            "Jump each realtime-epoch read by a seeded signed offset in [-HI, HI] nanoseconds (saturating at 0).",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::CustomOpFailPermille => (
+            Value::Required("N", Kind::Permille),
+            "Fail guest custom operations that declared a failure shape at N per-mille, handing back that failure instead of running the operation.",
+            KnobGroup::Fault,
+        ),
+        FaultKnob::DnsEntry => (
+            Value::Required("NAME=ADDR", Kind::DnsEntry),
+            "Define NAME to resolve to IPv4 ADDR (repeatable). Undefined names are NXDOMAIN.",
+            KnobGroup::Dns,
+        ),
+        FaultKnob::DnsFailPermille => (
+            Value::Required("N", Kind::Permille),
+            "Fail resolutions of DEFINED names at N per-mille (seeded NXDOMAIN or timeout).",
+            KnobGroup::Dns,
+        ),
+        FaultKnob::DnsLatencyNanos => (
+            Value::Required("MIN..MAX", Kind::NanosRange),
+            "Add seeded latency drawn from [MIN, MAX] to every resolution of a defined name.",
+            KnobGroup::Dns,
+        ),
+    };
+    (
+        f(
+            knob.meta().flag,
+            None,
+            value,
+            doc,
+            matches!(knob.meta().plumbing, Plumbing::Repeatable(_)),
+        ),
+        group,
+    )
+}
+const fn knob_count(group: KnobGroup) -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i < FaultKnob::ALL.len() {
+        if knob_flag(FaultKnob::ALL[i]).1 as usize == group as usize {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+const fn knob_flags<const N: usize>(group: KnobGroup) -> [Flag; N] {
+    let mut rows = [knob_flag(FaultKnob::ALL[0]).0; N];
+    let mut index = 0;
+    let mut i = 0;
+    while i < FaultKnob::ALL.len() {
+        let (flag, owner) = knob_flag(FaultKnob::ALL[i]);
+        if owner as usize == group as usize {
+            rows[index] = flag;
+            index += 1;
+        }
+        i += 1;
+    }
+    assert!(index == N);
+    rows
+}
+pub(super) const FAULT_FLAGS: &[Flag] =
+    &knob_flags::<{ knob_count(KnobGroup::Fault) }>(KnobGroup::Fault);
+// WASI has no resolution surface. Campaign takes the semantic table alone.
+pub(super) const DNS_FLAGS: &[Flag] = &knob_flags::<{ knob_count(KnobGroup::Dns) }>(KnobGroup::Dns);
+pub(super) const DNS_ENTRY_FLAGS: &[Flag] = &[knob_flag(FaultKnob::DnsEntry).0];
 
 pub(super) const WASI_HOST_FLAGS: &[Flag] = &[
     f(
@@ -489,3 +481,27 @@ pub(super) const REPLAY_TIMELINE_FLAGS: &[Flag] = &[
         false,
     ),
 ];
+
+pub(super) const HARNESS_FLAG: Flag = f(
+    "--harness",
+    None,
+    Value::None,
+    "Treat the binary as a patina-dst-harness (defers runtime init).",
+    false,
+);
+
+pub(super) const ALLOW_FLAG: Flag = f(
+    "--allow",
+    None,
+    Value::Required("SYMBOL", Kind::Symbol),
+    "Add a known-safe symbol to the pre-run gate allow list.",
+    true,
+);
+
+pub(super) const ALLOW_UNSUPPORTED_FLAG: Flag = f(
+    "--allow-unsupported-symbols",
+    None,
+    Value::Required("all|name,...", Kind::UnsupportedSymbols),
+    "Downgrade matching unsupported-symbol denials to a warning. An instruction-class finding (`instruction@.text+OFF`, an address that moves on every relink) also matches by the containing symbol its provenance names.",
+    false,
+);

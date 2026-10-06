@@ -299,27 +299,18 @@ refused by name.",
             title: "Native run options (forwarded to every generation; native artifacts only)",
             families: SOLE,
             flags: &[
-                f(
-                    "--harness",
-                    None,
-                    Value::None,
-                    "Sweep a patina-dst-harness binary: every generation runs with --harness (defers runtime init).",
-                    false,
-                ),
-                f(
-                    "--allow",
-                    None,
-                    Value::Required("SYMBOL", Kind::Symbol),
-                    "Add a known-safe symbol to every generation's pre-run gate allow list.",
-                    true,
-                ),
-                f(
-                    "--allow-unsupported-symbols",
-                    None,
-                    Value::Required("all|name,...", Kind::UnsupportedSymbols),
-                    "Downgrade matching unsupported-symbol denials to a warning in every generation. An instruction-class finding (`instruction@.text+OFF`) also matches by the containing symbol its provenance names.",
-                    false,
-                ),
+                Flag {
+                    doc: "Sweep a patina-dst-harness binary: every generation runs with --harness (defers runtime init).",
+                    ..HARNESS_FLAG
+                },
+                Flag {
+                    doc: "Add a known-safe symbol to every generation's pre-run gate allow list.",
+                    ..ALLOW_FLAG
+                },
+                Flag {
+                    doc: "Downgrade matching unsupported-symbol denials to a warning in every generation. An instruction-class finding (`instruction@.text+OFF`) also matches by the containing symbol its provenance names.",
+                    ..ALLOW_UNSUPPORTED_FLAG
+                },
             ],
         },
     ],

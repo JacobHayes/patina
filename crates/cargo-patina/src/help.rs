@@ -46,6 +46,7 @@ use flags::REPLAY_TIMELINE_FLAGS;
 use flags::SOURCE_SELECT;
 use flags::TARGET_FLAG;
 use flags::WASI_HOST_FLAGS;
+use flags::{ALLOW_FLAG, ALLOW_UNSUPPORTED_FLAG, HARNESS_FLAG};
 pub use human::render;
 pub use human::usage_synopsis;
 use workflows::CAMPAIGN;
@@ -410,24 +411,6 @@ pub fn verb(name: &str) -> Option<&'static Verb> {
     VERBS.iter().copied().find(|verb| verb.name == name)
 }
 
-/// Every fault knob's flag name, in registry order. The gate surface for
-/// `patina_dst_runtime::FaultKnob`, so a knob added to [`FAULT_FLAGS`] or
-/// [`DNS_FLAGS`] cannot be forwarded by one family and silently dropped by
-/// another.
-///
-/// The repeatable knobs (`--dns-entry`, `--net-partition`) are IN this list. They
-/// used to be filtered out because the forwarding table carried one value per
-/// knob and they carry a set — but the set/scalar difference is now a column of
-/// the knob table rather than a reason to live outside it, and excluding them is
-/// what let `run <MODULE.wasm> --net-partition A,B` parse and then vanish.
-#[cfg(test)]
-pub fn fault_flag_names() -> impl Iterator<Item = &'static str> {
-    FAULT_FLAGS
-        .iter()
-        .chain(DNS_FLAGS.iter())
-        .map(|flag| flag.name)
-}
-
 /// The registered value-arity of a flag (matched by its long OR short name)
 /// under `verb`, consulting the verb's own flag groups plus the always-available
 /// global output and help flags. `None` means the flag is not registered for
@@ -574,3 +557,87 @@ pub fn topic_for(verb_token: &str) -> Topic {
         _ => Topic::Overview,
     }
 }
+
+// Every group/flag family must belong to its verb, and every declared form must
+// receive flags (except the sole flagless form). This gate evaluates at build time.
+const _: () = {
+    const fn contains(families: &[Family], family: Family) -> bool {
+        let mut i = 0;
+        while i < families.len() {
+            if families[i] as usize == family as usize {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+    let mut v = 0;
+    while v < VERBS.len() {
+        let verb = &VERBS[v];
+        if verb.groups.is_empty() {
+            assert!(
+                verb.families.len() == 1
+                    && verb.families[0].family as usize == Family::Sole as usize,
+                "invalid flagless family"
+            );
+        }
+        let mut g = 0;
+        while g < verb.groups.len() {
+            let group = &verb.groups[g];
+            let mut f = 0;
+            // Validate both the group declaration and each narrowed flag list.
+            while f <= group.flags.len() {
+                let families = if f == group.flags.len() {
+                    group.families
+                } else {
+                    match group.flags[f].families {
+                        Some(rows) => rows,
+                        None => group.families,
+                    }
+                };
+                let mut i = 0;
+                while i < families.len() {
+                    let mut declared = false;
+                    let mut j = 0;
+                    while j < verb.families.len() {
+                        if verb.families[j].family as usize == families[i] as usize {
+                            declared = true;
+                        }
+                        j += 1;
+                    }
+                    assert!(declared, "undeclared registry family");
+                    i += 1;
+                }
+                f += 1;
+            }
+            g += 1;
+        }
+        let mut i = 0;
+        while i < verb.families.len() {
+            let family = verb.families[i].family;
+            let mut populated = verb.groups.is_empty();
+            g = 0;
+            while g < verb.groups.len() {
+                let group = &verb.groups[g];
+                let mut f = 0;
+                while f < group.flags.len() {
+                    if contains(group.families, family) {
+                        match group.flags[f].families {
+                            None => populated = true,
+                            Some(rows) => {
+                                if contains(rows, family) {
+                                    populated = true;
+                                }
+                            }
+                        }
+                    }
+                    f += 1;
+                }
+                g += 1;
+            }
+            assert!(populated, "registry family has no flags");
+            i += 1;
+        }
+        v += 1;
+    }
+};

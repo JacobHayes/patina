@@ -715,7 +715,7 @@ mod tests {
             let meta = knob.meta();
             let expected = match meta.plumbing {
                 Plumbing::Scalar => knob_sample(*knob).to_string(),
-                Plumbing::Repeatable => {
+                Plumbing::Repeatable(_) => {
                     repeatable_payload(*knob, &[knob_sample(*knob).to_string()])
                         .expect("every repeatable knob encodes its sample")
                 }

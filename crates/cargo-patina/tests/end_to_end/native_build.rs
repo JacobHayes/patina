@@ -153,14 +153,8 @@ mod tests {
         );
     }
 
-    // Building the same package twice unchanged must hit Cargo's fingerprint cache
-    // the second time: the shim POSIX object (and the yield-point hook object under
-    // `--yield-points`) is staged at a stable content-addressed path in the shim's
-    // own target dir, not a fresh tempdir, so the `-Clink-arg=<object>` rustflag
-    // Cargo hashes into every crate fingerprint is byte-identical across runs. Cargo
-    // prints `Compiling` on stderr (which `build_native_package` inherits) only for
-    // crates it actually recompiles, so a cache hit leaves the second build's stderr
-    // free of any `Compiling` line.
+    // Cargo may rewrite an unchanged executable during uplift. Its typed
+    // compiler-artifact receipts expose freshness independently of file times.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn second_native_package_build_reuses_cargo_cache() {
@@ -168,41 +162,83 @@ mod tests {
         let package = directory.path().join("pkg");
         create_package_fixture(directory.path());
         let workspace = native_workspace();
-        let package = package.to_str().unwrap();
-        let plain: &[&str] = &[
+        let receipts = directory.path().join("cargo-receipts.jsonl");
+        let cargo = directory.path().join("cargo");
+        fs::write(
+            &cargo,
+            r#"#!/bin/sh
+[ "$1" = rustc ] || exec "$PATINA_TEST_REAL_CARGO" "$@"
+"$PATINA_TEST_REAL_CARGO" "$@" > "$PATINA_TEST_CARGO_RECEIPTS"
+status=$?
+cat "$PATINA_TEST_CARGO_RECEIPTS"
+exit "$status"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+        let real_cargo = active_toolchain_binary("cargo");
+        let envs = [
+            ("CARGO", cargo.to_str().unwrap()),
+            ("PATINA_TEST_REAL_CARGO", real_cargo.to_str().unwrap()),
+            ("PATINA_TEST_CARGO_RECEIPTS", receipts.to_str().unwrap()),
+        ];
+        let package_text = package.to_str().unwrap();
+        let plain = [
             "build",
-            package,
+            package_text,
             "--bin",
             "patina-native-pkg-fixture",
             "--release",
         ];
-        let yielded: &[&str] = &[
+        let yielded = [
             "build",
-            package,
+            package_text,
             "--bin",
             "patina-native-pkg-fixture",
             "--release",
             "--yield-points",
         ];
+        for flags in [&plain[..], &yielded[..]] {
+            invoke_in_with_env(workspace, flags, &envs);
+            invoke_in_with_env(workspace, flags, &envs);
+            let artifacts = cargo_artifact_receipts(&receipts);
+            assert!(
+                artifacts.iter().all(|row| row["fresh"] == true),
+                "unchanged build recompiled guest artifacts: {artifacts:?}"
+            );
+        }
 
-        // Cold build compiles the graph; the warm build must recompile nothing.
-        invoke(workspace, plain);
-        let warm = invoke(workspace, plain);
-        let warm_stderr = String::from_utf8_lossy(&warm.stderr);
+        // Positive control: a compiled guest-input change must fire this detector.
+        let main = package.join("src/main.rs");
+        fs::write(&main, "fn main() { println!(\"CACHE_REBUILD_PROBE\"); }\n").unwrap();
+        invoke_in_with_env(workspace, &yielded, &envs);
+        let artifacts = cargo_artifact_receipts(&receipts);
         assert!(
-            !warm_stderr.contains("Compiling "),
-            "second unchanged build recompiled the guest graph (cache miss):\n{warm_stderr}"
+            artifacts.iter().any(|row| row["fresh"] == false),
+            "rebuild detector did not fire: {artifacts:?}"
         );
+    }
 
-        // The same must hold for `--yield-points`, whose second object is also
-        // content-addressed rather than tempdir-staged.
-        invoke(workspace, yielded);
-        let warm_yield = invoke(workspace, yielded);
-        let warm_yield_stderr = String::from_utf8_lossy(&warm_yield.stderr);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn cargo_artifact_receipts(path: &Path) -> Vec<serde_json::Value> {
+        let artifacts: Vec<_> = fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|row| row["reason"] == "compiler-artifact")
+            .collect();
         assert!(
-            !warm_yield_stderr.contains("Compiling "),
-            "second unchanged --yield-points build recompiled the guest graph (cache miss):\n{warm_yield_stderr}"
+            artifacts
+                .iter()
+                .any(|row| row["target"]["name"] == "patina-native-pkg-fixture"
+                    && row["executable"].is_string()),
+            "missing guest artifact receipt: {artifacts:?}"
         );
+        assert!(
+            artifacts.iter().all(|row| row["fresh"].is_boolean()),
+            "artifact freshness must be typed: {artifacts:?}"
+        );
+        artifacts
     }
 
     // Regression for the SlateDB dogfooding feedback: a dependency that declares

@@ -58,35 +58,6 @@ fn every_native_entry_has_exactly_one_support_row() {
     }
 }
 
-/// A row's `Removed` family is exactly the set of numbers the table lists
-/// without an implementation, and those rows answer the kernel's own ENOSYS
-/// instead of trapping or reaching the host — so a number the kernel drops or
-/// revives moves the row.
-#[test]
-fn removed_rows_are_exactly_the_tables_unimplemented_numbers() {
-    let unimplemented: BTreeSet<&str> = ENTRIES
-        .iter()
-        .filter(|entry| !entry.is_implemented())
-        .map(|entry| entry.name)
-        .collect();
-    let removed_rows: BTreeSet<&str> = SYSCALLS
-        .iter()
-        .filter(|row| row.family == Family::Removed)
-        .map(|row| row.name)
-        .collect();
-    assert_eq!(
-        removed_rows, unimplemented,
-        "the Removed family must be exactly the table's entry-less numbers"
-    );
-    for row in SYSCALLS.iter().filter(|row| row.family == Family::Removed) {
-        assert!(
-            matches!(row.disposition, Disposition::SoftDeny(38)),
-            "{}: Family::Removed rows answer ENOSYS",
-            row.name
-        );
-    }
-}
-
 /// Names are unique, every trap class is a known one, every routed row and
 /// every trap that is not final names the arc that changes it, and `Absent`
 /// is exactly the rows `since` places past [`VIRTUAL_ABI`] (the `Removed`

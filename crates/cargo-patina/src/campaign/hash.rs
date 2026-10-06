@@ -14,10 +14,21 @@ use std::ops::Range;
 
 pub(super) const SEED: Range<usize> = 0..8;
 
-#[derive(Clone, Copy)]
-#[allow(non_camel_case_types)]
-#[repr(usize)]
-pub(super) enum Claim {
+// The enum and complete inventory cannot grow independently. Ownership lives
+// in campaign_policy and EXPLORATION_CLAIMS and is const-validated against ALL.
+macro_rules! claims {
+    ($( $(#[$doc:meta])* $name:ident = $index:literal, )+) => {
+        #[derive(Clone, Copy)]
+        #[allow(non_camel_case_types)]
+        #[repr(usize)]
+        pub(super) enum Claim { $( $(#[$doc])* $name = $index, )+ }
+        impl Claim {
+            pub(super) const ALL: &'static [Self] = &[$(Self::$name,)+];
+        }
+    };
+}
+
+claims! {
     BUGGIFY_ACTIVATION = 8,
     BUGGIFY_FIRE = 9,
     SCHED_PCT_DEPTH = 11,
@@ -80,13 +91,12 @@ impl Bands {
     }
 }
 
-#[cfg(test)]
-pub(super) const EXPLORATION_CLAIMS: &[(&str, usize)] = &[
-    ("buggify activation", BUGGIFY_ACTIVATION as usize),
-    ("buggify fire", BUGGIFY_FIRE as usize),
-    ("sched-pct depth", SCHED_PCT_DEPTH as usize),
-    ("starvation policy", SCHED_STARVE as usize),
-    ("starvation fire", STARVE_FIRE as usize),
+pub(super) const EXPLORATION_CLAIMS: &[Claim] = &[
+    BUGGIFY_ACTIVATION,
+    BUGGIFY_FIRE,
+    SCHED_PCT_DEPTH,
+    SCHED_STARVE,
+    STARVE_FIRE,
 ];
 
 /// The derivation input stays opaque before band expansion as well. Guidance
