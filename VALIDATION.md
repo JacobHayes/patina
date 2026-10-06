@@ -219,11 +219,32 @@ declared gap, does not substitute for native acceptance on that platform.
 is the native call-free starvation class detector. A main-thread atomic spin,
 a worker-thread spin, and a spin while holding the guest allocator all leave a
 parseable terminal trace and a structured `compute-bound` known-limit finding.
-PC samples must be nonzero on these unblocked-signal fixtures. Independent
-records match, and replay with a one-day host bound reproduces the terminal
-boundary without waiting for that bound. Single-thread compute and compute with
-a condvar-parked peer run well beyond the 25 ms test bound and complete. The
-single-task control first spawns and joins a peer to arm the observer; its trace
+Every sampling attempt must report either a nonzero authenticated PC or the
+explicit `sample-deadline` outcome when host descheduling exhausts its bounded
+delivery window; setup, send, and target errors still fail these fixtures.
+Synchronous replay guards explicitly report `synchronous-stop` instead of
+silently omitting the PC outcome. A planted record-only startup delay stops
+`worker-starved` on its main task before the spin: its synchronous replay
+previously failed the observer-only assertion, and now reports that outcome.
+Independent records agree on overlapping decisions; their host-time stops may
+truncate different eligible prefixes, including during thread startup before
+the intended spin. Every recording must name its recorded baton holder with a
+runnable peer, and each replays its own exact terminal task/count under a one-day
+host bound. A planted call-free delay before stderr setup reproduces the former
+same-seed byte-identity failure with three versus fifteen committed decisions;
+the prefix/eligibility/replay checks accept both.
+
+Specialized coverage additionally requires a hazard receipt in at least one of
+the two recorded outputs before its terminal diagnostic: allocator ownership, an entered custom perform,
+installed hostile handlers, and the guarded small stack are not inferred from
+mere scheduler eligibility. The allocator receipt permits allocations only on
+the owner's diagnostic scope, never on the observer. The small-stack receipt
+is written by SUD only after switching SP. Planted pre-hazard spins for the
+allocator, custom begin, and stack switch fail this coverage check even when
+their terminal prefixes and replays are otherwise valid.
+Single-thread compute and compute with a condvar-parked peer run well beyond
+the 25 ms test bound and complete. The single-task control first spawns and
+joins a peer to arm the observer; its trace
 must show both spawn and completion (the old unarmed control fails that pin).
 The Linux x86_64 `small-stack` mode retains its guarded 2 KiB stack probe. Finite
 compute with a runnable peer must complete under a raised 5,000 ms bound (not
@@ -256,7 +277,9 @@ Follow-up pins belong to that same `native_workloads::compute_watchdog_*` class:
 - `custom_perform_replays_the_committed_prefix` stops inside an open custom
   perform. Its runtime pairing starts with three committed decisions and four
   admitted operations (RED: terminal metadata advertised four), then proves
-  replay stops before requesting the absent outcome, including at finish.
+  replay stops before requesting the absent outcome, including at finish. The
+  native fixture may stop earlier during host setup; the runtime pairing proves
+  the open-perform case independently of host timing.
 - `never_calls_looping_or_allocating_abort_handlers` first proves handler
   registration by delivery, then requires both hostile-handler cases to end by
   SIGABRT. Shim `private_abort_tests` install real host handlers and block SIGABRT
@@ -292,8 +315,14 @@ Follow-up pins belong to that same `native_workloads::compute_watchdog_*` class:
 - Shim `terminal_sample_only_pins_its_target_and_first_acknowledgement` rejects a
   foreign thread and duplicate publication (RED accepted the foreign sample).
   `observer_blocks_guest_signals` queries the actual host mask on a helper thread
-  (RED left SIGINT unblocked). Observer replay must include its task's sampled PC
-  on the unblocked infinite-spin cases (RED passed no target handle).
+  (RED left SIGINT unblocked). Observer replay must attempt its recorded task and
+  report either its nonzero PC or an explicit bounded delivery expiry; other
+  unavailable reasons fail (RED passed no target handle).
+  `watchdog::delivery_tests::terminal_sample_delivers_an_authenticated_pc_from_a_running_thread`
+  supplies independent real-host delivery coverage in an isolated child: a
+  signal-unblocked, ready spinning target must publish its authenticated nonzero
+  PC using the production callback and unchanged per-attempt delivery budget.
+  Eight deadlines fail (RED: a neutered capture callback returned every time).
 - Runtime `branch_sessions_do_not_arm_the_host_compute_detector` pins the stated
   branch exclusion against an eligible recording control.
   `compute_stop_emits_a_structured_runtime_limit` drives a real eligible context
@@ -479,7 +508,9 @@ handler (`front-small`, `front-segv-small`, their autodisarm variants,
 `alarm-small`), and timer handlers that run between counter reads on an
 alternate stack (`alarm`), now match the native run. The frames' 6.8 rules
 (`do_sigaltstack`, and when guest code has left a handler) have unit
-detectors in `thread/signals/frames.rs`.
+detectors in `thread/signals/frames.rs`. The alarm fixture waits for a fixed
+target and saturates its reported count there: another host-timer delivery in
+the native loop-to-disarm window cannot turn scheduler timing into oracle output.
 `an_internal_stop_never_runs_a_guest_abort_handler` registers a guest SIGABRT
 handler that makes a raw syscall, then hits an internal stop: the run ends by
 SIGABRT with the named stop and the handler never runs (red before: glibc's

@@ -58,6 +58,10 @@ fn compute_watchdog_overflowed_recorder_does_not_enter_the_held_allocator() {
     assert_eq!(result["result"], "infra", "{result:#}");
     assert_eq!(result["guest_exit"]["signal_name"], "SIGABRT", "{result:#}");
     assert!(
+        recorded_hazard(result["stderr"].as_str().unwrap(), "overflow-held"),
+        "{result:#}"
+    );
+    assert!(
         result["stderr"]
             .as_str()
             .unwrap()
@@ -119,6 +123,101 @@ fn compute_watchdog_host_bound_is_not_a_fixed_one_second_timeout() {
     );
 }
 
+// Class pairing: the watchdog fixture still requires an authenticated nonzero
+// PC when delivery wins, while the bounded-handshake path must name its one
+// legitimate host-scheduling failure instead of silently omitting the sample.
+// Replay may instead reach its terminal prefix at a synchronous boundary,
+// which must explicitly say that no observer sampling attempt was made.
+fn assert_terminal_sample(stderr: &str, context: &str, synchronous: bool) {
+    if let Some(pc) = stderr
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("sampled_pc=0x"))
+    {
+        assert_ne!(
+            usize::from_str_radix(pc, 16).unwrap(),
+            0,
+            "terminal sampler returned a zero PC: {context}\n{stderr}"
+        );
+        return;
+    }
+    assert!(
+        stderr.lines().any(|line| {
+            line == "patina: compute-bound sampled_pc=unavailable reason=sample-deadline"
+                || (synchronous
+                    && line
+                        == "patina: compute-bound sampled_pc=unavailable reason=synchronous-stop")
+        }),
+        "terminal stop reported neither a PC nor a legitimate unavailable outcome: {context}\n{stderr}"
+    );
+}
+
+// Class pairing: validate host-time terminal stops from the recorded scheduler
+// state, alongside the runtime's runnable-versus-parked watchdog unit detector.
+// This accepts any eligible prefix, without pinning platform-specific counts.
+fn assert_compute_stop_eligible(
+    events: &[patina_dst_trace::TraceEvent],
+    stop: patina_dst_trace::ComputeStop,
+) {
+    use patina_dst_abi::{Operation, Outcome};
+    let mut runnable = std::collections::BTreeSet::new();
+    let mut running = None;
+    for event in events {
+        match (&event.operation, &event.outcome) {
+            (Operation::TaskSpawn { .. }, Outcome::Task(task)) => {
+                runnable.insert(*task);
+            }
+            (Operation::TaskYield { task } | Operation::TaskWake { task }, Outcome::Unit) => {
+                runnable.insert(*task);
+            }
+            (
+                Operation::TaskPark { task, .. }
+                | Operation::TaskParkTimed { task, .. }
+                | Operation::TaskComplete { task },
+                Outcome::Unit,
+            ) => {
+                runnable.remove(task);
+            }
+            (Operation::SchedulerNext, Outcome::OptionalTask(task)) => running = *task,
+            _ => {}
+        }
+    }
+    assert_eq!(stop.steps as usize, events.len());
+    assert_eq!(running, Some(stop.task), "stop must name the baton holder");
+    assert!(
+        runnable.contains(&stop.task),
+        "stopped task must be runnable"
+    );
+    assert!(
+        runnable.iter().any(|task| *task != stop.task),
+        "stop must have a runnable peer"
+    );
+}
+
+fn specialized_hazard(mode: &str) -> bool {
+    matches!(
+        mode,
+        "allocator-held"
+            | "payload-held"
+            | "overflow-held"
+            | "handler-loop"
+            | "handler-alloc"
+            | "custom-spin"
+            | "sync-buffer"
+            | "small-stack"
+    )
+}
+fn recorded_hazard(stderr: &str, mode: &str) -> bool {
+    let terminal = if mode == "overflow-held" {
+        "PATINA_INFRA compute_stop_export_failed reason=trace-overflow"
+    } else {
+        "PATINA_VIOLATION liveness "
+    };
+    stderr
+        .find(&format!("PATINA_LIFECYCLE_EVENT label=watchdog.{mode}\n"))
+        .zip(stderr.find(terminal))
+        .is_some_and(|(receipt, stop)| receipt < stop)
+}
+
 fn assert_compute_watchdog_cases(modes: &[&str], negative_controls: bool) {
     use std::process::Command;
     use std::time::{Duration, Instant};
@@ -169,136 +268,130 @@ fn assert_compute_watchdog_cases(modes: &[&str], negative_controls: bool) {
         // The outer deadline detects hangs, not timeout accuracy. A separate
         // paired-bound detector proves that the configured bound is load-bearing.
         eprintln!("compute watchdog {mode}: direct stop={direct_elapsed:?} bound=25ms");
-        let trace = g.dir.path().join(format!("{mode}.patina"));
-        let (record, elapsed) = run(
-            "run",
-            &[
-                "--seed",
-                "7",
-                "--record",
-                trace.to_str().unwrap(),
-                "--format",
-                "json",
-                "--",
-                mode,
-            ],
-            "25",
-        );
-        assert!(!record.status.success());
-        eprintln!("compute watchdog {mode}: record elapsed={elapsed:?} bound=25ms");
-        let record: serde_json::Value = serde_json::from_slice(&record.stdout).unwrap();
-        assert_eq!(
-            record["result"], "liveness",
-            "finding mode={mode}: {record}"
-        );
-        assert_eq!(
-            record["guest_exit"]["signal_name"], "SIGABRT",
-            "finding mode={mode}: {record}"
-        );
-        let finding = record["runtime_findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|finding| finding["detail"] == "compute-bound")
-            .unwrap();
-        assert_eq!(finding["known_limit"], true);
-        let stderr = record["stderr"].as_str().unwrap();
+        // Host time may truncate same-seed runs at different eligible prefixes,
+        // including thread-startup waits before the intended compute region.
+        // Replay each independently; compare only their overlapping decisions.
+        let mut previous: Option<Vec<patina_dst_trace::TraceEvent>> = None;
+        let mut reached_hazard = false;
+        for repetition in 0..2 {
+            let trace = g.dir.path().join(format!("{mode}-{repetition}.patina"));
+            let (record, elapsed) = run(
+                "run",
+                &[
+                    "--seed",
+                    "7",
+                    "--record",
+                    trace.to_str().unwrap(),
+                    "--format",
+                    "json",
+                    "--",
+                    mode,
+                ],
+                "25",
+            );
+            assert!(!record.status.success());
+            eprintln!("compute watchdog {mode}: record elapsed={elapsed:?} bound=25ms");
+            let record: serde_json::Value = serde_json::from_slice(&record.stdout).unwrap();
+            assert_eq!(
+                record["result"], "liveness",
+                "finding mode={mode}: {record}"
+            );
+            assert_eq!(
+                record["guest_exit"]["signal_name"], "SIGABRT",
+                "finding mode={mode}: {record}"
+            );
+            let finding = record["runtime_findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|finding| finding["detail"] == "compute-bound")
+                .unwrap();
+            assert_eq!(finding["known_limit"], true);
+            let stderr = record["stderr"].as_str().unwrap();
+            reached_hazard |= recorded_hazard(stderr, mode);
+            assert!(
+                stderr
+                    .lines()
+                    .any(|line| line.starts_with("PATINA_VIOLATION liveness ")),
+                "marker must start at column zero: {stderr}"
+            );
+            if mode == "starved" {
+                assert!(
+                    stderr.contains("COMPUTE_PARTIAL_STDERR\nPATINA_VIOLATION "),
+                    "{stderr}"
+                );
+            }
+            assert_terminal_sample(
+                stderr,
+                &format!("record mode={mode} elapsed={elapsed:?}"),
+                false,
+            );
+            let bundle = patina_dst_trace::TraceBundle::load(&trace).unwrap();
+            let terminal = bundle
+                .metadata
+                .compute_stop
+                .expect("recorded terminal fact");
+            assert_eq!(terminal.task.0, finding["task"].as_u64().unwrap());
+            assert_eq!(terminal.steps, finding["steps"].as_u64().unwrap());
+            let events = bundle.resolved_timeline("main").unwrap();
+            assert_compute_stop_eligible(&events, terminal);
+            if let Some(previous) = previous.as_ref() {
+                let common = previous.len().min(events.len());
+                assert_eq!(
+                    previous[..common],
+                    events[..common],
+                    "same-seed modeled decisions differ before the host-time stop: mode={mode}"
+                );
+            }
+            previous = Some(events);
+            // One day, rather than 25ms: replay must stop from the trace, not redetect.
+            let (replay, elapsed) = run(
+                "replay",
+                &[trace.to_str().unwrap(), "--format", "json"],
+                "86400000",
+            );
+            assert!(!replay.status.success());
+            // Replay must finish well before its one-day bound, allowing loaded CI.
+            assert!(
+                elapsed < Duration::from_secs(12),
+                "replay waited for host bound: {elapsed:?}"
+            );
+            eprintln!("compute watchdog {mode}: replay with one-day bound elapsed={elapsed:?}");
+            let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+            assert_eq!(replay["result"], "liveness", "{replay:#}");
+            assert_eq!(replay["guest_exit"]["signal_name"], "SIGABRT");
+            assert_terminal_sample(
+                replay["stderr"].as_str().unwrap(),
+                &format!("replay mode={mode}: {replay:#}"),
+                true,
+            );
+            if mode == "sync-buffer" {
+                assert!(
+                    replay["stdout"]
+                        .as_str()
+                        .unwrap()
+                        .contains("WATCHDOG_BUFFERED_C_STDOUT"),
+                    "synchronous stop lost C stdout: {replay:#}"
+                );
+            }
+            let replay_finding = replay["runtime_findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|finding| finding["detail"] == "compute-bound")
+                .unwrap();
+            assert_eq!(finding, replay_finding);
+            eprintln!(
+                "compute watchdog {mode} repetition={repetition}: record/replay terminal task={} steps={}",
+                terminal.task.0, terminal.steps
+            );
+        }
+        // Prefix/replay checks accept legitimate early startup stops, but
+        // neither recording reaching the hazard is NOT specialized coverage.
+        // Class pairing: planted pre-hazard compute must fail this detector.
         assert!(
-            stderr
-                .lines()
-                .any(|line| line.starts_with("PATINA_VIOLATION liveness ")),
-            "marker must start at column zero: {stderr}"
-        );
-        if mode == "starved" || mode == "allocator-held" {
-            assert!(
-                stderr.contains("COMPUTE_PARTIAL_STDERR\nPATINA_VIOLATION "),
-                "{stderr}"
-            );
-        }
-        let pc = record["stderr"]
-            .as_str()
-            .unwrap()
-            .split_whitespace()
-            .find_map(|field| field.strip_prefix("sampled_pc=0x"))
-            .unwrap_or_else(|| panic!("the unblocked terminal sampler must capture a PC: mode={mode} elapsed={elapsed:?}\n{stderr}"));
-        assert_ne!(usize::from_str_radix(pc, 16).unwrap(), 0);
-        let bundle = patina_dst_trace::TraceBundle::load(&trace).unwrap();
-        let terminal = bundle
-            .metadata
-            .compute_stop
-            .expect("recorded terminal fact");
-        assert_eq!(terminal.task.0, finding["task"].as_u64().unwrap());
-        assert_eq!(
-            terminal.task.0,
-            if mode == "worker-starved" { 2 } else { 1 }
-        );
-        assert_eq!(terminal.steps, finding["steps"].as_u64().unwrap());
-        assert_eq!(
-            terminal.steps as usize,
-            bundle.resolved_timeline("main").unwrap().len()
-        );
-        // One day, rather than 25ms: replay must stop from the trace, not redetect.
-        let (replay, elapsed) = run(
-            "replay",
-            &[trace.to_str().unwrap(), "--format", "json"],
-            "86400000",
-        );
-        assert!(!replay.status.success());
-        // Replay must finish well before its one-day bound, allowing loaded CI.
-        assert!(
-            elapsed < Duration::from_secs(12),
-            "replay waited for host bound: {elapsed:?}"
-        );
-        eprintln!("compute watchdog {mode}: replay with one-day bound elapsed={elapsed:?}");
-        let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
-        assert_eq!(replay["result"], "liveness", "{replay:#}");
-        assert_eq!(replay["guest_exit"]["signal_name"], "SIGABRT");
-        if matches!(
-            mode,
-            "starved" | "worker-starved" | "allocator-held" | "payload-held"
-        ) {
-            assert!(
-                replay["stderr"].as_str().unwrap().contains("sampled_pc=0x"),
-                "observer replay must sample its recorded task: {replay:#}"
-            );
-        }
-        if mode == "sync-buffer" {
-            assert!(
-                replay["stdout"]
-                    .as_str()
-                    .unwrap()
-                    .contains("WATCHDOG_BUFFERED_C_STDOUT"),
-                "synchronous stop lost C stdout: {replay:#}"
-            );
-        }
-        let replay_finding = replay["runtime_findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|finding| finding["detail"] == "compute-bound")
-            .unwrap();
-        assert_eq!(finding, replay_finding);
-        let repeat = g.dir.path().join(format!("{mode}-repeat.patina"));
-        let (output, _) = run(
-            "run",
-            &[
-                "--seed",
-                "7",
-                "--record",
-                repeat.to_str().unwrap(),
-                "--",
-                mode,
-            ],
-            "25",
-        );
-        assert!(!output.status.success());
-        assert_eq!(
-            std::fs::read(&trace).unwrap(),
-            std::fs::read(repeat).unwrap()
-        );
-        eprintln!(
-            "compute watchdog {mode}: record/replay terminal task={} steps={}",
-            terminal.task.0, terminal.steps
+            !specialized_hazard(mode) || reached_hazard,
+            "neither recording exercised its specialized hazard: mode={mode}"
         );
     }
     if !negative_controls {

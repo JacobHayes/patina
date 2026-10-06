@@ -543,10 +543,11 @@ static void autodisarm_high(void) {
     assert(sigaltstack(&off, NULL) == 0);
 }
 
+#define ALARM_TARGET 5
 static volatile sig_atomic_t alarms;
 static void on_alarm(int sig) {
     (void)sig;
-    alarms++;
+    if (alarms < ALARM_TARGET) alarms++;
 }
 
 static void alarm_reads(int small) {
@@ -569,9 +570,10 @@ static void alarm_reads(int small) {
     assert(sigaction(SIGALRM, &action, NULL) == 0);
     struct itimerval every = {{0, 1000}, {0, 1000}};
     assert(syscall(SYS_setitimer, ITIMER_REAL, &every, NULL) == 0);
-    while (alarms < 5) counter_read();
+    while (alarms < ALARM_TARGET) counter_read();
     struct itimerval off = {{0, 0}, {0, 0}};
     assert(syscall(SYS_setitimer, ITIMER_REAL, &off, NULL) == 0);
+    assert(alarms == ALARM_TARGET);
     printf("ALARMS %d\n", (int)alarms);
 }
 

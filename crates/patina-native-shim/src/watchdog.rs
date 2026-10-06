@@ -164,6 +164,16 @@ pub(crate) fn report(error: &RuntimeError) {
     let _ = super::host_write_all(2, &text.bytes[..text.len]);
 }
 
+pub(crate) fn report_synchronous(error: &RuntimeError) {
+    report(error);
+    // The recorded terminal prefix was reached at a guest boundary, not by
+    // the off-baton observer. Do not signal/sample the thread stopping itself.
+    let _ = super::host_write_all(
+        2,
+        b"patina: compute-bound sampled_pc=unavailable reason=synchronous-stop\n",
+    );
+}
+
 pub(crate) fn report_and_abort(
     error: &RuntimeError,
     handle: Option<usize>,
@@ -530,6 +540,10 @@ fn await_pc(
     let pc = read();
     (pc != 0).then_some(pc)
 }
+
+#[cfg(test)]
+#[path = "watchdog/delivery_tests.rs"]
+mod delivery_tests;
 
 #[cfg(test)]
 mod tests {

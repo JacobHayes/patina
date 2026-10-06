@@ -227,9 +227,20 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   timeout alone cannot detect a hardcoded shorter timeout. Host-time observations
   may commit a terminal refusal, never choose a task or change virtual time;
   record the terminal boundary so replay does not re-decide it from host time.
+  Same-seed watchdog recordings can stop at different eligible prefixes, even
+  during host thread startup before an intended infinite loop. Compare their
+  overlapping modeled decisions, validate each stop's runnable task/peer, and
+  replay each terminal prefix independently; byte-identical re-recordings are
+  not a host-time refusal guarantee. Establish output probes before eligibility.
+  Eligibility is not hazard coverage: require a recorded receipt from inside
+  each specialized condition, and keep setup-only stops from satisfying that
+  obligation. Best-effort sample expiry needs an independent real-delivery
+  detector that fails when the actual capture callback never acknowledges.
   Treat sample delivery as a handshake: inspect the acknowledgement after the
   final wait, authenticate its thread, and distinguish expiry from setup/send
   errors. Bounded sampling cannot promise delivery under arbitrary host stalls.
+  A prefix recorded during startup may replay through a synchronous boundary
+  guard instead of the observer; that path must explicitly name its unsampled PC.
   Keep synchronous C-stdio salvage separate from asynchronous observation, and
   arm the watchdog before testing a lone-task exemption. A missing scheduling
   point does not distinguish computation from untracked host blocking.

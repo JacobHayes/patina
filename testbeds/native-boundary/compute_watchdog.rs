@@ -1,7 +1,27 @@
 //! Calls are deliberately absent from the compute regions. The protocol uses
 //! atomics/condvars, never host sleeps or timing to arrange task states.
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+
+thread_local! {
+    // Only the owning guest's readiness diagnostic may allocate while held.
+    // The off-baton observer never has this permission, so an allocating
+    // exporter still deadlocks even while the diagnostic is being emitted.
+    static DIAGNOSTIC_ALLOCATION: Cell<bool> = const { Cell::new(false) };
+}
+fn allocator_blocked() -> bool {
+    ALLOCATOR_HELD.load(Ordering::Acquire)
+        && !DIAGNOSTIC_ALLOCATION.try_with(Cell::get).unwrap_or(false)
+}
+fn hazard_reached(label: &'static [u8]) {
+    DIAGNOSTIC_ALLOCATION.set(true);
+    assert_eq!(
+        unsafe { patina_lifecycle_event(label.as_ptr(), label.len()) },
+        0
+    );
+    DIAGNOSTIC_ALLOCATION.set(false);
+}
 
 // Class detector for off-baton finalization: the stopped thread may own the
 // guest allocator. A watchdog that clones/serializes via Vec or formats via
@@ -10,13 +30,13 @@ struct LockedAllocator;
 static ALLOCATOR_HELD: AtomicBool = AtomicBool::new(false);
 unsafe impl std::alloc::GlobalAlloc for LockedAllocator {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        while ALLOCATOR_HELD.load(Ordering::Acquire) {
+        while allocator_blocked() {
             std::hint::spin_loop();
         }
         unsafe { std::alloc::System.alloc(layout) }
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
-        while ALLOCATOR_HELD.load(Ordering::Acquire) {
+        while allocator_blocked() {
             std::hint::spin_loop();
         }
         unsafe { std::alloc::System.dealloc(pointer, layout) }
@@ -29,6 +49,7 @@ unsafe extern "C" {
     fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
     fn raise(sig: i32) -> i32;
     fn printf(format: *const std::ffi::c_char, ...) -> i32;
+    fn patina_lifecycle_event(label: *const u8, label_len: usize) -> i32;
     fn patina_custom_op_begin(
         label: *const u8,
         label_len: usize,
@@ -127,13 +148,28 @@ fn spin_on_a_small_stack() -> ! {
     assert_ne!(base as isize, -1);
     assert_eq!(unsafe { mprotect(base, 4096, 0) }, 0);
     let top = unsafe { base.add(4096 + 2048) };
+    let marker = b"PATINA_LIFECYCLE_EVENT label=watchdog.small-stack\n";
     unsafe {
         std::arch::asm!(
             "mov rsp, {top}",
+            "cmp rsp, {top}",
+            "jne 3f",
+            // Write only AFTER switching stacks. The normal SUD write path
+            // runs on the shim's private signal stack, not these 2 KiB.
+            "syscall",
+            "cmp rax, {length}",
+            "jne 3f",
             "2:",
             "pause",
             "jmp 2b",
+            "3:",
+            "ud2",
             top = in(reg) top,
+            length = const b"PATINA_LIFECYCLE_EVENT label=watchdog.small-stack\n".len(),
+            in("rax") 1usize, // Linux x86_64 write.
+            in("rdi") 2usize,
+            in("rsi") marker.as_ptr(),
+            in("rdx") marker.len(),
             options(noreturn)
         )
     }
@@ -160,6 +196,14 @@ fn main() {
                 // base64 padding boundaries, not just scalar scheduler events.
                 custom_op(|| (0..4097).map(|n| (n % 256) as u8).collect());
             }
+            // Establish output probes before a runnable peer makes even host
+            // startup/descheduling gaps eligible for the watchdog.
+            eprint!("COMPUTE_PARTIAL_STDERR");
+            if mode == "sync-buffer" {
+                // No newline/flush: a synchronous replay refusal must salvage
+                // this stream even if recording stopped during thread startup.
+                assert!(unsafe { printf(c"WATCHDOG_BUFFERED_C_STDOUT".as_ptr()) } > 0);
+            }
             let started = Arc::new(AtomicBool::new(false));
             let done = Arc::new(AtomicBool::new(false));
             let worker = {
@@ -172,7 +216,6 @@ fn main() {
                     done.store(true, Ordering::Release);
                 })
             };
-            eprint!("COMPUTE_PARTIAL_STDERR");
             let perform = || {
                 ALLOCATOR_HELD.store(
                     matches!(
@@ -181,6 +224,32 @@ fn main() {
                     ),
                     Ordering::Release,
                 );
+                let hazard: Option<&'static [u8]> = match mode.as_str() {
+                    "allocator-held" => Some(b"watchdog.allocator-held"),
+                    "payload-held" => Some(b"watchdog.payload-held"),
+                    "overflow-held" => Some(b"watchdog.overflow-held"),
+                    "handler-alloc" => Some(b"watchdog.handler-alloc"),
+                    "handler-loop" => Some(b"watchdog.handler-loop"),
+                    "custom-spin" => Some(b"watchdog.custom-spin"),
+                    "sync-buffer" => Some(b"watchdog.sync-buffer"),
+                    _ => None,
+                };
+                if let Some(label) = hazard {
+                    if matches!(
+                        mode.as_str(),
+                        "allocator-held" | "payload-held" | "overflow-held" | "handler-alloc"
+                    ) {
+                        assert!(ALLOCATOR_HELD.load(Ordering::Acquire));
+                    }
+                    if matches!(mode.as_str(), "handler-loop" | "handler-alloc") {
+                        assert!(HANDLER_SEEN.load(Ordering::Acquire));
+                        assert!(!PROBE_HANDLER.load(Ordering::Acquire));
+                    }
+                    // For custom modes this closure is entered only after
+                    // begin returned Record. Lifecycle diagnostics take no
+                    // scheduling point, so the open perform stays call-free.
+                    hazard_reached(label);
+                }
                 started.store(true, Ordering::Release);
                 while !done.load(Ordering::Acquire) {
                     std::hint::spin_loop();
@@ -188,11 +257,6 @@ fn main() {
                 ALLOCATOR_HELD.store(false, Ordering::Release);
                 Vec::new()
             };
-            if mode == "sync-buffer" {
-                // No newline/flush: only a synchronous refusal may salvage this
-                // C stream. Replay reaches the custom-op admission guard.
-                assert!(unsafe { printf(c"WATCHDOG_BUFFERED_C_STDOUT".as_ptr()) } > 0);
-            }
             if mode == "custom-spin" || mode == "sync-buffer" {
                 custom_op(perform);
             } else {

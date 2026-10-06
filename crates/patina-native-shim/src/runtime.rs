@@ -292,7 +292,7 @@ pub(crate) fn runtime_errno(error: &RuntimeError) -> c_int {
         // truncated trace.
         RuntimeError::FrozenClockChurn { .. } => abort_after_flushing_output(),
         RuntimeError::ComputeBound { .. } => {
-            watchdog::report(error);
+            watchdog::report_synchronous(error);
             abort_after_flushing_output()
         }
         RuntimeError::ComputeStopExport
@@ -656,7 +656,7 @@ pub(crate) fn with_context_msg<T>(
             // Baton-held refusal, unlike the observer. The registered salvage
             // only lends C stdout bytes; it takes no scheduling point/Context
             // lock (see salvage_buffered_stdout). Keep stop ownership here.
-            watchdog::report(&error);
+            watchdog::report_synchronous(&error);
             abort_after_flushing_output()
         }
         RuntimeError::ComputeStopExport

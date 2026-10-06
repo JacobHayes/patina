@@ -86,10 +86,22 @@ long compute with no runnable peer (the latter uses a mutex/condvar handshake,
 never a synchronization sleep). `finite` keeps a peer runnable while doing
 finite call-free work: it must complete below a raised bound, but recording with
 a short bound and replaying with a long bound must both stop. A partial stderr
-line before the spin pins fresh-line diagnostic framing. `native_workloads` requires named known-limit
-findings, an interrupted PC, valid and identical repeated terminal traces, and
-replay with the same task/prefix despite a much larger host bound. A comparative
-25/4,000 ms detector rejects fixed-timeout implementations without relying on a
+line before peer creation pins fresh-line diagnostic framing even if host thread
+startup stalls. `native_workloads` requires named known-limit findings, a nonzero
+interrupted PC or explicit sampling deadline, and valid eligible terminal traces.
+Synchronous replay stops explicitly report an unsampled PC (`synchronous-stop`).
+Repeated recordings agree on overlapping decisions; host timing can stop each
+at a different prefix, including before the intended spin. Each recording must
+replay its own exact task/prefix despite a much larger host bound. The runtime
+unit pairing independently proves the open-custom-perform case.
+
+Specialized modes emit lifecycle receipts only after entering their hazard;
+at least one of each mode's two recordings must contain its receipt. Early
+startup stops still replay correctly, but two such stops are not hazard coverage.
+The guarded small-stack receipt is a write from the switched stack through SUD.
+An isolated real-host sampler unit detector additionally requires an
+authenticated nonzero PC; permanent delivery failure cannot pass as expiry.
+A comparative 25/4,000 ms detector rejects fixed-timeout implementations without relying on a
 generous absolute ceiling; replay retains a generous 12-second ceiling. The
 Linux x86_64 `small-stack` mode exercises sampling on a guarded 2 KiB stack.
 These are runtime-limit tests, not host-equivalence claims or proof that every

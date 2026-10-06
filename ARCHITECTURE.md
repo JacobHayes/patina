@@ -553,8 +553,11 @@ and stops either from the observer or the existing boundary-budget guard before
 any further operation; finalization cannot turn it into success. A faster replay
 therefore cannot continue past the recorded refusal. The guarantee is the same
 **boundary prefix and named stop**, not an exact instruction or elapsed time.
-Seed-only repetitions of finite compute near the threshold need not stop at the
-same prefix. Branching terminal traces is explicitly refused; combining a
+Seed-only repetitions need not stop at the same prefix: any eligible gap,
+including host thread startup or descheduling before an intended infinite spin,
+can exhaust the host-time bound. Their overlapping modeled decisions agree;
+each recorded terminal prefix replays its own exact task and count. Branching
+terminal traces is explicitly refused; combining a
 terminal segment into a crash-restart lifecycle trace is also refused by the
 metadata agreement check, not silently replayed without its stop. Host-time
 detection is also disabled for branch sessions created from ordinary traces;
@@ -575,7 +578,8 @@ checks again after its final wait so a just-delivered acknowledgement is not
 lost. A sample still has a bounded, best-effort delivery window: blocked signals
 or host descheduling can exhaust it. Missing handles, installation/send failures,
 and expiry have distinct `sampled_pc=unavailable` reasons. Observer-driven replay
-samples the recorded task too; synchronous replay refusals do not sample a PC.
+samples the recorded task too; synchronous replay refusals do not sample a PC
+and explicitly report `sampled_pc=unavailable reason=synchronous-stop`.
 Neither path promises instruction identity. The diagnostic includes the raw PC and a delta from
 `patina_yield_point`; the delta supports offline symbolization when the PC is
 in the executable, but is not ASLR-independent for a different loaded image.
