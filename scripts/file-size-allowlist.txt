@@ -23,6 +23,5 @@ crates/patina-native-shim/src/mem/mod.rs 2042 # pending split
 crates/patina-native-shim/src/sud/mod.rs 2462 # pending split
 crates/patina-native-shim/src/thread/ipc.rs 2589 # pending split
 crates/patina-net-sim/src/lib.rs 2451 # pending split
-crates/patina-target/src/lib.rs 7008 # pending split
 crates/patina-trace/src/lib.rs 3931 # pending split
 crates/patina-wasi-host/src/lib.rs 5283 # pending split

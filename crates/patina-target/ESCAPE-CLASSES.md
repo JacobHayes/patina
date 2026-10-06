@@ -38,8 +38,9 @@ unit as a Rust crate's defining object (`crate=leaker_a object=crtstuff.c`). An
 unrecoverable object is reported as unknown instead.
 
 The class lists live in `native_escape_category` (labeling) and the
-interposed/allowlisted sets in `native_allowlisted_import` /
-`shim_control_plane_symbols` (gating), all in `crates/patina-target/src/lib.rs`.
+interposed/allowlisted sets in `native_allowlisted_import` (gating), both in
+`crates/patina-target/src/import_policy.rs`. `shim_control_plane_symbols`
+(gating) lives in `crates/patina-target/src/shim.rs`.
 
 ## Coverage matrix
 
