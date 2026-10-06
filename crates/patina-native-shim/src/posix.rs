@@ -4,6 +4,8 @@ use core::ffi::CStr;
 use core::ffi::c_int;
 
 mod entropy;
+#[cfg(target_os = "linux")]
+mod memory;
 
 pub(crate) use crate::variadic::{error, model_result};
 

@@ -1,6 +1,6 @@
 # Arc: shrinking the native C shim
 
-Status: design complete; environment and entropy adapters are Rust, 2026-10-06.
+Status: design complete; environment, entropy and memory adapters are Rust, 2026-10-06.
 Focused evidence below is separate from the full landing battery.
 
 ## Decision and inventory
@@ -266,3 +266,7 @@ added). The full landing battery is deliberately not run in this design round.
 entries. Shared `fail_int`/`fail_size` errno adapters are guarded hidden Rust
 bridges while remaining C callers exist. The guest-export cfg and unique archive
 anchor are unchanged.
+
+`mem.c` is now the Linux-only `src/posix/memory.rs`. Pointer-valued raw
+results retain the kernel failure range (-4095 through -1), and allocator
+bootstrap continues through the existing private host memory model.

@@ -338,3 +338,12 @@ pub(crate) use segments::{
     Segment, attach, attachments, detach, fault_in, mapped, policies_in, policy_at, resident,
     set_policy,
 };
+
+#[cfg(patina_posix_exports)]
+pub(crate) use hooks::patina_msync;
+#[cfg(patina_posix_exports)]
+pub(crate) use locks::{patina_mlock, patina_mlockall, patina_munlock, patina_munlockall};
+#[cfg(patina_posix_exports)]
+pub(crate) use mapping::{patina_mmap, patina_mprotect, patina_munmap};
+#[cfg(patina_posix_exports)]
+pub(crate) use memfd::patina_memfd_create;

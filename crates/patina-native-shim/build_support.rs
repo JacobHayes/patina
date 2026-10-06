@@ -13,7 +13,6 @@ const FAMILIES: &[&str] = &[
     "sched_identity",
     "fs",
     "fd_io",
-    "mem",
     "thread_sync",
     "signal_process",
     "privileged",
@@ -60,7 +59,18 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         }
         if matches!(
             row.name.as_str(),
-            "getentropy"
+            "mmap"
+                | "mmap64"
+                | "munmap"
+                | "msync"
+                | "mprotect"
+                | "mlock"
+                | "mlock2"
+                | "munlock"
+                | "mlockall"
+                | "munlockall"
+                | "memfd_create"
+                | "getentropy"
                 | "getrandom"
                 | "getenv"
                 | "setenv"
