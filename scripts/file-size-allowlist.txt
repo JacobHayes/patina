@@ -13,13 +13,5 @@ crates/patina-abi/src/lib.rs 1978 # pending split
 crates/patina-async/src/lib.rs 1764 # pending split
 crates/patina-driver-api/src/lib.rs 1690 # pending split
 crates/patina-minimize/src/lib.rs 2655 # pending split
-crates/patina-native-shim/src/mem/mod.rs 2042 # pending split
-crates/patina-native-shim/src/sud/fs.rs 1585 # pending split
-crates/patina-native-shim/src/sud/mod.rs 2462 # pending split
-crates/patina-native-shim/src/sud/privileged/keys.rs 1504 # pending split
-crates/patina-native-shim/src/thread/ipc.rs 2589 # pending split
-crates/patina-native-shim/src/thread/net/inet.rs 1977 # pending split
-crates/patina-native-shim/src/thread/pty.rs 1610 # pending split
-crates/patina-native-shim/src/thread/signals.rs 1642 # pending split
 crates/patina-net-sim/src/lib.rs 2451 # pending split
 crates/patina/src/lib.rs 1770 # pending split
