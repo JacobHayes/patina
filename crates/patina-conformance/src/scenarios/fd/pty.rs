@@ -618,6 +618,24 @@ pub fn run(p: &Probe) {
     );
     let slave = open_named(p, &name, "slave", O_RDWR | O_NOCTTY);
     p.require("open the slave by name", slave >= 0);
+    // Class pairing: the native ABI ownership matrix; these previously
+    // uncovered libc aliases share this live host/model PTY probe.
+    let master_name = unsafe { ptsname(master) };
+    p.check(
+        "ptsname names the slave",
+        !master_name.is_null()
+            && unsafe { CStr::from_ptr(master_name).to_bytes() == name.as_bytes() },
+    );
+    let slave_name = unsafe { ttyname(slave) };
+    p.check(
+        "ttyname names the slave",
+        !slave_name.is_null()
+            && unsafe { CStr::from_ptr(slave_name).to_bytes() == name.as_bytes() },
+    );
+    p.check(
+        "tcdrain accepts the empty slave queue",
+        answer(p, "tcdrain", slave, unsafe { tcdrain(slave) }) == 0,
+    );
     p.check("the slave is a terminal", tty(p, slave) == 1);
     p.check(
         "ttyname_r names the slave",
@@ -893,6 +911,9 @@ pub const SCENARIO: Scenario = Scenario {
         "unlockpt",
         "ptsname_r",
         "ttyname_r",
+        "ptsname",
+        "ttyname",
+        "tcdrain",
         "__ptsname_r_chk",
         "__ttyname_r_chk",
         "openpty",

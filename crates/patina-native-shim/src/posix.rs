@@ -3,6 +3,7 @@ use core::ffi::CStr;
 use core::ffi::c_int;
 
 mod entropy;
+mod fd_io;
 #[cfg(target_os = "linux")]
 mod memory;
 mod privileged;
@@ -102,3 +103,8 @@ pub extern "C" fn patina_chk_fail() -> ! {
 }
 #[cfg(target_os = "linux")]
 core::arch::global_asm!(".hidden patina_fortify_fail", ".hidden patina_chk_fail");
+
+#[cfg(target_os = "linux")]
+pub(crate) fn get_errno() -> c_int {
+    unsafe { *libc::__errno_location() }
+}

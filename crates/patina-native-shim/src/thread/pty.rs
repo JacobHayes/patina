@@ -576,6 +576,8 @@ fn hung_up(pair: &Pair) -> bool {
 
 mod discipline;
 mod io;
+#[cfg(patina_posix_exports)]
+pub(crate) use io::patina_pty_name;
 mod ioctl;
 
 use discipline::{Cell, EXTPROC, ROOM, touch_side, unmodeled};

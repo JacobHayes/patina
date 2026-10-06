@@ -282,3 +282,7 @@ physical-memory constant, declared beside the retained C headers.
 `readiness.c` is now `src/posix/readiness.rs` and its platform modules, with platform reactors
 and fixed fortify entries. Shared fortify failures are hidden guarded Rust
 bridges; Darwin poll uses a private returning C sleep bridge until wave 4.
+
+`fd_io.c` is now `src/posix/fd_io.rs` and its Linux terminal/descriptor
+modules. C stdio uses the hidden guarded Rust `patina_isatty` implementation.
+Three previously uncovered PTY spellings run in the existing conformance guest.

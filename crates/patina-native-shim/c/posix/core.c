@@ -285,3 +285,17 @@ extern int res_init(void);
 extern int __poll_chk(struct pollfd *fds, nfds_t nfds, int timeout, size_t fdslen);
 extern int __ppoll_chk(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout, const sigset_t *mask, size_t fdslen);
 #endif
+
+#ifdef __linux__
+#include <pty.h>
+#include <sys/file.h>
+/* Rust-owned descriptor doors and the private buffering query. */
+extern int patina_isatty(int fd);
+extern ssize_t __read(int fd, void *destination, size_t length);
+extern ssize_t __write(int fd, const void *source, size_t length);
+extern ssize_t __read_chk(int fd, void *destination, size_t length, size_t buflen);
+extern ssize_t __pread_chk(int fd, void *destination, size_t length, off_t offset, size_t buflen);
+extern ssize_t __pread64_chk(int fd, void *destination, size_t length, off64_t offset, size_t buflen);
+extern int __ptsname_r_chk(int fd, char *buf, size_t buflen, size_t nreal);
+extern int __ttyname_r_chk(int fd, char *buf, size_t buflen, size_t nreal);
+#endif
