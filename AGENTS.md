@@ -122,7 +122,7 @@ Gates worth knowing individually:
   (beyond a small allowlist of non-patina guest/tool/script flags). If you
   mention or invoke a patina flag anywhere, it must exist; if you rename a flag,
   the gate finds every stale mention — in prose or in a script's flag arrays.
-- `scripts/check-file-size.py` — no Rust file over 2,000 lines unless it's
+- `scripts/check-file-size.py` — no Rust file over 1,500 lines unless it's
   listed in `scripts/file-size-allowlist.txt`, and a listed file may not grow
   past its ceiling. Over the cap? Split the file by concern; don't raise a ceiling.
   A change that shrinks a listed file lowers or removes its entry.

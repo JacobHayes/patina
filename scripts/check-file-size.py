@@ -16,7 +16,7 @@ from pathlib import Path
 import sys
 import unittest
 
-CAP = 2000
+CAP = 1500
 ROOT = Path(__file__).resolve().parent.parent
 ALLOWLIST = ROOT / 'scripts' / 'file-size-allowlist.txt'
 SKIP_DIRS = {'target', '.git', '.jj'}
