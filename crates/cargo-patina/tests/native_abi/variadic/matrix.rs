@@ -73,15 +73,7 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
                 (3, 5, "__open64"),
             ]);
         }
-        // The non-variadic environment port shares the extraction object and
-        // route contract. Class pairing: combined symbol registry/duplicate
-        // detector; inspect machine objects, never source spelling.
-        let mut ownership_cases = cases.clone();
-        ownership_cases.extend(["getenv", "setenv", "unsetenv", "putenv"].map(|name| (0, 0, name)));
-        if cfg!(target_os = "linux") {
-            ownership_cases.extend(["clearenv", "secure_getenv"].map(|name| (0, 0, name)));
-        }
-        assert_symbol_ownership(Path::new(&archives[0]), &object, &ownership_cases, strategy);
+        assert_symbol_ownership(Path::new(&archives[0]), &object, &cases, strategy);
         let c_source = dir.path().join("variadic-call.c");
         let c_object = dir.path().join("variadic-call.o");
         std::fs::write(&c_source, C_CALLS).unwrap();
@@ -192,8 +184,6 @@ fn assert_symbol_ownership(
         members.push(path);
     }
     assert!(!members.is_empty(), "shim object members must be present");
-    #[cfg(target_os = "linux")]
-    assert_hidden_routes(&members, cases);
     let archive_nm = assert_success(
         Command::new("nm")
             .args(["-g", "-A"])
@@ -226,7 +216,43 @@ fn assert_symbol_ownership(
             })
             .collect()
     };
+    // Discover the Rust-owned surface from compiled definitions. The existing
+    // registry identifies libc spellings; strong prefixed definitions are private
+    // ABI. Weak bootstrap hooks intentionally receive strong C definitions.
+    // Behavioral cases above still exercise operand decoding, not ownership data.
+    let symbols: std::collections::BTreeSet<String> = text(&archive_nm.stdout)
+        .lines()
+        .filter_map(|line| {
+            let words: Vec<_> = line.split_whitespace().collect();
+            let name = *words.last()?;
+            let name = if cfg!(target_os = "macos") {
+                name.strip_prefix('_').unwrap_or(name)
+            } else {
+                name
+            };
+            (words.len() >= 3
+                && matches!(words[words.len() - 2], "T" | "W")
+                && !name.starts_with("patina_route_")
+                && ((name.starts_with("patina_") && words[words.len() - 2] == "T")
+                    || patina_dst_native_shim::registry::SYMBOLS
+                        .iter()
+                        .any(|row| row.name == name)))
+            .then(|| name.to_owned())
+        })
+        .collect();
+    assert!(
+        !symbols.is_empty(),
+        "Rust export discovery must not be empty"
+    );
     for (_, _, symbol) in cases {
+        assert!(
+            symbols.contains(*symbol),
+            "missing behavioral entry {symbol}"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    assert_hidden_routes(&members, &symbols);
+    for symbol in &symbols {
         let rust = definitions(&archive_nm.stdout, symbol);
         assert_eq!(
             rust.len(),
@@ -238,7 +264,7 @@ fn assert_symbol_ownership(
             definitions(&c_nm.stdout, symbol).is_empty(),
             "C still defines {symbol}"
         );
-        if cfg!(target_os = "linux") && *symbol != "patina_stream_printf" {
+        if cfg!(target_os = "linux") && !symbol.starts_with("patina_") {
             let route = definitions(&archive_nm.stdout, &format!("patina_route_{symbol}"));
             assert_eq!(
                 route, rust,
@@ -250,7 +276,10 @@ fn assert_symbol_ownership(
 }
 
 #[cfg(target_os = "linux")]
-fn assert_hidden_routes(members: &[std::path::PathBuf], cases: &[(u32, u32, &str)]) {
+fn assert_hidden_routes(
+    members: &[std::path::PathBuf],
+    symbols: &std::collections::BTreeSet<String>,
+) {
     use object::{Object, ObjectSymbol};
     let mut routes = std::collections::BTreeMap::<String, Vec<u8>>::new();
     for path in members {
@@ -270,8 +299,8 @@ fn assert_hidden_routes(members: &[std::path::PathBuf], cases: &[(u32, u32, &str
                 .push(st_other & 3);
         }
     }
-    for (_, _, symbol) in cases {
-        if *symbol == "patina_stream_printf" {
+    for symbol in symbols {
+        if symbol.starts_with("patina_") {
             continue;
         }
         let name = format!("patina_route_{symbol}");

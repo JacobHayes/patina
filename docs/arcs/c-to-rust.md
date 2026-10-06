@@ -1,6 +1,6 @@
 # Arc: shrinking the native C shim
 
-Status: design complete; whole-file environment spike implemented, 2026-10-06.
+Status: design complete; environment and entropy adapters are Rust, 2026-10-06.
 Focused evidence below is separate from the full landing battery.
 
 ## Decision and inventory
@@ -259,3 +259,10 @@ All local Cargo/mise invocations use the required low-CPU wrapper and cache
 scratch directory; `target` remains an mbx symlink. The spike leaves **8,038**
 physical C lines (349 removed, eight private-bridge declaration/comment lines
 added). The full landing battery is deliberately not run in this design round.
+
+## Wave 2 ownership
+
+`entropy.c` is now `src/posix/entropy.rs`, including the private Darwin lookup
+entries. Shared `fail_int`/`fail_size` errno adapters are guarded hidden Rust
+bridges while remaining C callers exist. The guest-export cfg and unique archive
+anchor are unchanged.

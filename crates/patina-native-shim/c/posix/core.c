@@ -133,15 +133,11 @@ static void patina_internal_unlock(pthread_mutex_t *lock, int held) {
     if (held) (void)patina_mutex_unlock(lock);
 }
 
-static int fail_int(int result) {
-    if (result < 0) errno = patina_errno();
-    return result;
-}
-
-static ssize_t fail_size(intptr_t result) {
-    if (result < 0) errno = patina_errno();
-    return (ssize_t)result;
-}
+/* Rust-owned errno adapters shared by remaining C slices. */
+extern int fail_int(int result);
+extern ssize_t fail_size(intptr_t result);
+extern int patina_deterministic_getentropy(void *destination, size_t length);
+extern ssize_t patina_deterministic_getrandom(void *destination, size_t length, unsigned int flags);
 
 /* The platform's AT_FDCWD on the wire: the runtime's path resolver takes the
  * Linux value (PATINA_AT_FDCWD) whatever this libc spells it as, so every *at

@@ -16,6 +16,8 @@
 
 // Enabled only on the guest archive, never the runner's dependency rlib.
 #[cfg(patina_posix_exports)]
+mod posix;
+#[cfg(patina_posix_exports)]
 mod posix_env;
 #[cfg(patina_posix_exports)]
 mod variadic;

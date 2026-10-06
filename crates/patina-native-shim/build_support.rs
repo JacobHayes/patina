@@ -11,7 +11,6 @@ const FAMILIES: &[&str] = &[
     "init",
     "time",
     "sched_identity",
-    "entropy",
     "fs",
     "fd_io",
     "mem",
@@ -61,7 +60,9 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         }
         if matches!(
             row.name.as_str(),
-            "getenv"
+            "getentropy"
+                | "getrandom"
+                | "getenv"
                 | "setenv"
                 | "unsetenv"
                 | "clearenv"
