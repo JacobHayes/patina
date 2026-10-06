@@ -78,6 +78,7 @@
 #include <sys/eventfd.h>
 #include <sys/pidfd.h>
 #include <sys/prctl.h>
+#include <sys/ptrace.h>
 #include <sys/random.h>
 #include <sys/sysinfo.h>
 #include <sys/syscall.h>

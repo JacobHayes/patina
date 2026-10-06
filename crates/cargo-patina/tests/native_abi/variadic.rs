@@ -242,3 +242,42 @@ int main(void) {
         .validate()
         .unwrap();
 }
+#[cfg(target_os = "linux")]
+#[test]
+fn ptrace_request_specific_pid_pointer_and_absent_arguments_reach_the_model() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path().join("ptrace.c");
+    std::fs::write(&source, r#"
+#define _GNU_SOURCE
+#include <sys/ptrace.h>
+#include <unistd.h>
+#include <errno.h>
+int main(int argc, char **argv) {
+    (void)argv;
+    if (argc > 1) { ptrace(PTRACE_TRACEME); return 10; }
+    errno = 0;
+    if (ptrace(PTRACE_ATTACH, getpid()) != -1 || errno != EPERM) return 1;
+    errno = 0;
+    if (ptrace(PTRACE_DETACH, getpid(), (void *)0, (void *)0) != -1 || errno != ESRCH) return 2;
+    errno = 0;
+    if (ptrace(PTRACE_SEIZE, getpid(), (void *)1, (void *)0) != -1 || errno != EIO) return 3;
+    errno = 0;
+    if (ptrace(PTRACE_SEIZE, getpid(), (void *)0, (void *)PTRACE_O_TRACESYSGOOD) != -1 || errno != EPERM) return 4;
+    long word = 0;
+    errno = 0;
+    if (ptrace(PTRACE_PEEKDATA, getpid(), &word) != -1 || errno != ESRCH) return 5;
+    return 0;
+}
+"#).unwrap();
+    let guest = common::native::assert_build_c_guest(
+        source.to_str().unwrap(),
+        common::native::CLink::PosixShim,
+    );
+    let (output, trace) = guest.record_standalone(&[]);
+    assert_success(output);
+    patina_dst_trace::TraceBundle::load(&trace)
+        .unwrap()
+        .validate()
+        .unwrap();
+    guest.assert_internal_fatal(&["traceme"], &["PTRACE_TRACEME"]);
+}

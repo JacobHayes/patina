@@ -102,31 +102,6 @@ int setns(int fd, int nstype) {
     return signal_result(patina_sud_dispatch(SYS_setns, (uint64_t)(int64_t)fd,
         (uint64_t)(int64_t)nstype, 0, 0, 0, 0, 0));
 }
-/*
- * glibc's `long ptrace(enum __ptrace_request, ...)`: the pid, address and data
- * are variadic; for PTRACE_PEEKTEXT/PEEKDATA/PEEKUSER (1-3) glibc hands the
- * kernel its own word as the data and answers the word read, with errno 0.
- */
-long ptrace(int request, ...) {
-    va_list ap;
-    va_start(ap, request);
-    pid_t pid = va_arg(ap, pid_t);
-    void *addr = va_arg(ap, void *);
-    void *data = va_arg(ap, void *);
-    va_end(ap);
-    long word = 0;
-    int peek = request > 0 && request < 4;
-    if (peek) data = &word;
-    long result = patina_sud_dispatch(SYS_ptrace, (uint64_t)(int64_t)request,
-        (uint64_t)(int64_t)pid, (uintptr_t)addr, (uintptr_t)data, 0, 0, 0);
-    patina_signal_deliver();
-    result = dispatch_result(result);
-    if (result >= 0 && peek) {
-        errno = 0;
-        return word;
-    }
-    return result;
-}
 int chroot(const char *path) {
     return signal_result(patina_sud_dispatch(SYS_chroot, (uintptr_t)path, 0, 0, 0, 0, 0, 0));
 }

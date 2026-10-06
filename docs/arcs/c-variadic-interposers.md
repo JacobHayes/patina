@@ -208,3 +208,9 @@ operands, distinguishes explicit integer and pointer operations (rather than
 inferring types from IOC encoding), and reads nothing for absent or refused
 payloads. The generic and terminal guests cover both the common descriptor
 operations and Linux's scalar terminal requests.
+
+Ptrace's Linux door and errno/PEEK-result adapter are Rust-owned. TRACEME reads
+nothing; ATTACH reads only pid; SEIZE reads its address/options; PEEK retains
+its local output word and never reads an unused caller data argument. Signal
+delivery still precedes libc errno conversion. The existing model refuses
+PEEK with ESRCH because no process is traced; no successful tracing is claimed.

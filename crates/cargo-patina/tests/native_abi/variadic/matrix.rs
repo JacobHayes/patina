@@ -58,6 +58,7 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
         if cfg!(target_os = "linux") {
             cases.extend([
                 (4, 2, "ioctl"),
+                (5, 0, "ptrace"),
                 (1, 1, "fcntl64"),
                 (2, 0, "mremap"),
                 (3, 2, "open64"),

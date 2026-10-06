@@ -98,3 +98,17 @@ fn cancel_fcntl(command: c_int, name: &CStr) {
     #[cfg(target_os = "macos")]
     let _ = (command, name);
 }
+
+#[cfg(target_os = "linux")]
+mod ptrace;
+
+#[cfg(target_os = "linux")]
+fn deliver_signals() {
+    unsafe extern "C" {
+        fn patina_signal_deliver();
+    }
+    // SAFETY: the shared signal boundary requires no arguments.
+    unsafe {
+        patina_signal_deliver();
+    }
+}
