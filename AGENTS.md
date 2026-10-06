@@ -162,6 +162,14 @@ Gates worth knowing individually:
   test: such tests rot silently as code moves, and pass vacuously. Need a
   fault for a test? Use a test-only hook compiled into the product (a feature
   or failpoint), not a patched copy of the source.
+- **Enforcement earns its cost.** Every test, lint, fixture, generator and
+  gate is code to read, run and maintain. Do as much as needed, as little as
+  possible: protect invariants whose violation is likely, costly and silent,
+  with the smallest mechanism that does it, and stop there. No enumerated
+  fixtures, no self-tests of tooling beyond one must-fail case per rule, no
+  generators or policy files unless a static rule truly can't express the
+  invariant. A review finding is an input, not a mandate: decline a fix whose
+  machinery outweighs the risk, and say why.
 - **Detection before fixes.** A new bug class needs a standalone detector that
   provably fires (red-before/green-after) before or alongside the point fix.
   Per "Structure before tests", the strongest detector is the type or lint
