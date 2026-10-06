@@ -48,7 +48,7 @@ never-reached literal-label sites visible.
   require runtime evaluation to appear.
 * `emit_sdk_report` (`lib.rs:4963-5015`), called from `Context::finish` (`lib.rs:4003`),
   writes **one line to the real process stderr**, on the native shim and the wasip1 host
-  alike (the wasi host drives the same `Context`; `crates/patina-wasi-host/src/lib.rs:2567-2583`).
+  alike (the wasi host drives the same `Context`; `crates/patina-wasi-host/src/host.rs`, `Preview1Host::finish_with_output`).
   It is **default-on**, emitted whenever buggify is enabled, any site registered, or the
   link-time table declared a site, and suppressed only by a false-y `PATINA_SDK_REPORT` env.
   Declaration row format: `declared_site=<label>|<kind>|@<file:line>`. Evaluated row format:

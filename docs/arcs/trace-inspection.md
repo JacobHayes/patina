@@ -59,7 +59,7 @@ comparator.
 - **Op vocabulary is shared across families.** Both the WASI host and the native
   supervisor record through the same `patina-dst-runtime::Context` boundary and
   the single `patina_dst_abi::Operation`/`Outcome` enums
-  (`crates/patina-wasi-host/src/lib.rs:20`; the full variant set is emitted from
+  (`crates/patina-wasi-host/src/host.rs`, `Preview1Host`; the full variant set is emitted from
   `crates/patina-runtime/src/`). Families differ only in *which subset appears*:
   a wasip1 trace has no `task_*`/`scheduler_next` (single-threaded guest) and no
   TCP ops; a native trace can carry all of them. There is no per-family record

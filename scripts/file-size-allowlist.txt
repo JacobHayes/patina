@@ -32,5 +32,4 @@ crates/patina-native-shim/src/thread/net/inet.rs 1977 # pending split
 crates/patina-native-shim/src/thread/pty.rs 1610 # pending split
 crates/patina-native-shim/src/thread/signals.rs 1642 # pending split
 crates/patina-net-sim/src/lib.rs 2451 # pending split
-crates/patina-wasi-host/src/lib.rs 5283 # pending split
 crates/patina/src/lib.rs 1770 # pending split
