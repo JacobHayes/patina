@@ -33,6 +33,16 @@ pub unsafe extern "C" fn ioctl(fd: c_int, request: c_ulong, mut args: ...) -> c_
                     value
                 }) as usize as *mut c_void
             }
+            #[cfg(target_os = "linux")]
+            Payload::Word => {
+                let word = args.next_arg::<c_ulong>();
+                // The width probe deliberately models a narrowing decoder.
+                (if mutated {
+                    u64::from(word as u32)
+                } else {
+                    word
+                }) as *mut c_void
+            }
             Payload::Pointer => args.next_arg::<*mut c_void>(),
         }
     };
@@ -48,6 +58,8 @@ enum Payload {
     Absent,
     #[cfg(target_os = "linux")]
     Int,
+    #[cfg(target_os = "linux")]
+    Word,
     Pointer,
 }
 
@@ -59,9 +71,11 @@ fn payload(request: u64) -> Payload {
     #[cfg(target_os = "linux")]
     {
         use linux_raw_sys::ioctl::*;
-        if matches!(request as u32, TCFLSH | TIOCGPTPEER)
-            || request == crate::thread::inotify::INOTIFY_IOC_SETNEXTWD
-        {
+        if request == crate::thread::inotify::INOTIFY_IOC_SETNEXTWD {
+            // inotify_ioctl validates the full word before narrowing the id.
+            return Payload::Word;
+        }
+        if matches!(request as u32, TCFLSH | TIOCGPTPEER) {
             return Payload::Int;
         }
         if matches!(

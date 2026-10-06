@@ -231,3 +231,9 @@ Syscall now captures all six machine words in architecture assembly owned by
 Rust, then enters a guarded fixed Rust dispatcher. There is no C or Rust
 six-item VaList read. The guest-SP sigreturn branch and its libc layout adapter
 move together; the raw-trap C handler calls that same guarded adapter.
+
+The ioctl scalar category distinguishes promoted int terminal operands from the
+full unsigned-long INOTIFY_IOC_SETNEXTWD value. Its high bits reach the existing
+model's range check; a compiled guest reproduces EINVAL for 0x100000001UL and a
+valid explicit watch id. A compiled width-narrowing failpoint must make the
+same oversized-word semantic assertion fail with exit 40.

@@ -60,8 +60,9 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
         ];
         if cfg!(target_os = "linux") {
             cases.extend([
-                (4, 2, "ioctl"),
                 (8, 0, "syscall"),
+                (4, 1, "ioctl"),
+                (4, 2, "ioctl"),
                 (6, 0, "prctl"),
                 (5, 0, "ptrace"),
                 (1, 1, "fcntl64"),
@@ -290,6 +291,7 @@ const C_CALLS: &str = r#"
 #include <sys/ptrace.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <sys/inotify.h>
 extern int __open(const char *, int, ...);
 extern int __open64(const char *, int, ...);
 #endif
@@ -346,6 +348,13 @@ int variadic_call(unsigned family, unsigned fault, unsigned variant) {
             patina_variadic_test_arm(family, fault);
             int peer = ioctl(master, TIOCGPTPEER, O_RDWR, O_RDONLY);
             return peer >= 0 && (fcntl(peer, F_GETFL) & O_ACCMODE) == O_RDWR ? 0 : 40;
+        }
+        if (variant == 1) {
+            int watches = (int)syscall(SYS_inotify_init1, IN_NONBLOCK);
+            if (watches < 0) return 90;
+            errno = 0;
+            patina_variadic_test_arm(family, fault);
+            return ioctl(watches, _IOW('I', 0, int), 0x100000001UL) == -1 && errno == EINVAL ? 0 : 40;
         }
 #endif
         int enabled = 1;

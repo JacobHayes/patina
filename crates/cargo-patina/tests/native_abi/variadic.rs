@@ -204,6 +204,10 @@ fn ioctl_absent_pointer_and_scalar_arguments_reach_the_model() {
 #include <errno.h>
 #include <stdlib.h>
 #include <termios.h>
+#ifdef __linux__
+#include <sys/inotify.h>
+#include <sys/syscall.h>
+#endif
 int main(void) {
     int fd = open("/ioctl", O_CREAT | O_RDWR, 0600);
     if (fd < 0 || write(fd, "abcd", 4) != 4 || lseek(fd, 0, SEEK_SET)) return 1;
@@ -225,6 +229,16 @@ int main(void) {
         (fcntl(slave, F_GETFL) & O_ACCMODE) != O_RDWR) return 9;
     if (ioctl(slave, TCFLSH, TCIOFLUSH) || ioctl(slave, TCSBRK, 1)) return 10;
     if (close(slave) || close(master)) return 11;
+    /* Class pairing: command-directed payload widths and the operand matrix.
+     * SETNEXTWD validates a full unsigned word, unlike the terminal int args. */
+    int watches = (int)syscall(SYS_inotify_init1, IN_NONBLOCK);
+    unsigned long nextwd = _IOW('I', 0, int);
+    if (watches < 0) return 13;
+    errno = 0;
+    if (ioctl(watches, nextwd, 0x100000001UL) != -1 || errno != EINVAL) return 14;
+    if (ioctl(watches, nextwd, 37UL)) return 15;
+    if (syscall(SYS_inotify_add_watch, watches, "/ioctl", IN_MODIFY) != 37) return 16;
+    if (close(watches)) return 17;
 #endif
     return close(fd) ? 12 : 0;
 }
