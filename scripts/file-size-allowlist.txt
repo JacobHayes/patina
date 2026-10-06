@@ -9,6 +9,5 @@ crates/patina-syscalls/src/linux.rs 2878 # exhaustive per-syscall disposition ta
 crates/patina-syscalls/src/symbols.rs 2817 # exhaustive shim-symbol-to-syscall table
 # Pending splits.
 crates/cargo-patina/tests/native_conformance.rs 2353 # pending split
-crates/patina-minimize/src/lib.rs 2655 # pending split
 crates/patina-net-sim/src/lib.rs 2451 # pending split
 crates/patina/src/lib.rs 1770 # pending split

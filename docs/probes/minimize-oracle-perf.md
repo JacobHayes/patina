@@ -48,14 +48,14 @@ batching, no parallelism, and no call or time budget** — the registry
 case) runs a *joint loop*: `minimize_main` then `reduce_schedule`, repeated until a
 whole round changes nothing.
 
-**`minimize_index`** (`crates/patina-minimize/src/lib.rs:263`) is textbook ddmin: a
+**`minimize_index`** (`crates/patina-minimize/src/trace_reduce.rs:281`) is textbook ddmin: a
 granularity ladder 2, 4, 8, … n; each pass cuts the reducible window into
 `granularity` chunks and tries deleting each in order. On the **first accepted
 deletion it lowers granularity by one and restarts the scan at index 0**; on a fully
 rejected pass it doubles granularity, stopping once granularity ≥ window. Candidates
 are structurally validated (`validate()`) before reaching the oracle.
 
-**`reduce_schedule`** (`patina-minimize/src/lib.rs:370`) rewrites `SchedulerNext`
+**`reduce_schedule`** (`patina-minimize/src/schedule.rs:57`) rewrites `SchedulerNext`
 outcomes only — `collapse_switches` (rewrite the later of an adjacent differing pair
 to the earlier task) and `canonicalize_order` (lower each pick toward the smallest
 task id the run actually scheduled) — each restarting its own scan after any accept,
@@ -176,7 +176,7 @@ survives, and a candidate that stops reproducing is simply rejected.
 **Correctness risk: low.** It answers a different question than trace shrinking and
 does not reduce the decision stream, so it complements rather than replaces
 minimize. **Gap it fills**: `minimize --scenario` today reduces only `--seed` and
-`--param` values (`patina-minimize/src/lib.rs:612-709`); nothing reduces the
+`--param` values (`patina-minimize/src/scenario.rs`); nothing reduces the
 campaign's generated fault-knob vector, which is where campaign failures actually
 come from.
 
