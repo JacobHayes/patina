@@ -5,6 +5,7 @@ use core::ffi::{CStr, c_int};
 mod fcntl;
 mod ioctl;
 mod open;
+mod stdio;
 
 /// An unresolved private reference in the POSIX object extracts this member,
 /// even when an earlier libc/libSystem already offered the public symbols.

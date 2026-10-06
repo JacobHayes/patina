@@ -220,3 +220,9 @@ Options whose reserved words are part of the contract retain those reads;
 queries and refused options consume nothing unused. SECCOMP consumes a filter
 pointer only in filter mode. The shared SUD model and signal-before-errno order
 are retained, including the existing signal-result adapter's error conversion.
+
+Printf, fprintf and the internal assertion formatter now enter guarded Rust
+variadic doors and pass a platform VaList into a hidden fixed C bridge. C owns
+the sentinel FILE layouts, stream locks/buffering and vsnprintf engine, including
+va_copy and heap fallback. The internal formatter takes a FILE sentinel instead
+of exposing the C-only stream layout. No host vfprintf is called.

@@ -16,8 +16,6 @@ pub unsafe extern "C" fn ioctl(fd: c_int, request: c_ulong, mut args: ...) -> c_
     let mutated = super::fault(4);
     #[cfg(target_os = "linux")]
     let request = u64::from(request as u32);
-    #[cfg(target_os = "macos")]
-    let request = request as u64;
     // SAFETY: the selected request names the operand type. No generic IOC-bit
     // inference: some _IOW operations take an integer, some _IO take a pointer.
     let payload = payload(request);

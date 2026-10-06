@@ -69,6 +69,8 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
                 | "ioctl"
                 | "ptrace"
                 | "prctl"
+                | "printf"
+                | "fprintf"
                 | "open"
                 | "openat"
                 | "open64"

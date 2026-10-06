@@ -50,6 +50,9 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
         assert_eq!(archives.len(), 1, "one built guest archive");
         let object = common::compile_posix_object(dir.path());
         let mut cases = vec![
+            (7, 0, "printf"),
+            (7, 1, "fprintf"),
+            (7, 2, "patina_stream_printf"),
             (4, 0, "ioctl"),
             (1, 0, "fcntl"),
             (3, 0, "open"),
@@ -289,6 +292,7 @@ const C_CALLS: &str = r#"
 extern int __open(const char *, int, ...);
 extern int __open64(const char *, int, ...);
 #endif
+extern int patina_stream_printf(FILE *, const char *, ...);
 extern void patina_variadic_test_arm(unsigned family, unsigned fault);
 /* Each representative supplies a valid extra operand so fault=2 can read the
  * wrong variadic position without invoking undefined behavior in the probe. */
@@ -365,6 +369,7 @@ int variadic_call(unsigned family, unsigned fault, unsigned variant) {
         const char *format = "%d";
         if (variant == 0) return printf(format, 123, 7) == 3 ? 0 : 70;
         if (variant == 1) return fprintf(stderr, format, 123, 7) == 3 ? 0 : 70;
+        if (variant == 2) return patina_stream_printf(stderr, format, 123, 7) == 3 ? 0 : 70;
         return 90;
     }
 #ifdef __linux__

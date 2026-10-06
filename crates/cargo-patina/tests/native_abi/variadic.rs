@@ -336,3 +336,74 @@ int main(int argc, char **argv) {
         .unwrap();
     guest.assert_internal_fatal(&["strict"], &["entering strict mode"]);
 }
+#[test]
+fn printf_doors_preserve_promotions_pointers_and_long_formatting() {
+    // Class pairing: the guarded variadic inventory and shared wrong-slot matrix.
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path().join("stdio.c");
+    std::fs::write(&source, r#"
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+extern int patina_stream_printf(FILE *, const char *, ...);
+int main(void) {
+    /* FILE handles remain the modeled sentinels; their descriptors can name a
+     * virtual file, so pread observes the bytes each formatted door produced. */
+    int fd = open("/formatted", O_CREAT | O_RDWR, 0600);
+    if (fd < 0 || dup2(fd, STDOUT_FILENO) != STDOUT_FILENO) return 1;
+    const char *format = "mix:%hhd:%hu:%.2f:%s:%p%n\n";
+    int count = -1;
+    char expected[256];
+    int expected_count = -1;
+    int length = snprintf(expected, sizeof(expected), format, (signed char)-7,
+                          (unsigned short)513, (float)1.25, "words", (void *)&count,
+                          &expected_count);
+    if (length <= 0 || expected_count != length - 1) return 2;
+    if (printf(format, (signed char)-7, (unsigned short)513, (float)1.25,
+               "words", (void *)&count, &count) != length || count != expected_count) return 3;
+    count = -1;
+    if (fprintf(stdout, format, (signed char)-7, (unsigned short)513, (float)1.25,
+                "words", (void *)&count, &count) != length || count != expected_count) return 4;
+    count = -1;
+    if (patina_stream_printf(stdout, format, (signed char)-7, (unsigned short)513, (float)1.25,
+                             "words", (void *)&count, &count) != length || count != expected_count) return 5;
+    if (fflush(stdout)) return 6;
+    char actual[256] = {0};
+    for (int door = 0; door < 3; door++) {
+        if (pread(fd, actual, (size_t)length, (off_t)door * length) != length ||
+            memcmp(actual, expected, (size_t)length)) return 7;
+    }
+    char *long_text = malloc(8193);
+    char *long_actual = malloc(8192);
+    if (!long_text || !long_actual) return 8;
+    memset(long_text, 'x', 8192); long_text[8192] = 0;
+    if (printf("%s", long_text) != 8192 || fprintf(stdout, "%s", long_text) != 8192 ||
+        patina_stream_printf(stdout, "%s", long_text) != 8192 || fflush(stdout)) return 9;
+    for (int door = 0; door < 3; door++) {
+        off_t offset = (off_t)3 * length + (off_t)door * 8192;
+        if (pread(fd, long_actual, 8192, offset) != 8192 || memcmp(long_actual, long_text, 8192)) return 10;
+    }
+    free(long_actual);
+    free(long_text);
+    if (printf("%s", "") != 0 || printf("plain") != 5 || fprintf(stdout, "plain") != 5 ||
+        patina_stream_printf(stdout, "fixed") != 5 || fflush(stdout)) return 11;
+    if (pread(fd, actual, 15, (off_t)3 * length + 3 * 8192) != 15 ||
+        memcmp(actual, "plainplainfixed", 15)) return 12;
+    return close(fd) ? 13 : 0;
+}
+"#).unwrap();
+    let guest = common::native::assert_build_c_guest_with_flags(
+        source.to_str().unwrap(),
+        common::native::CLink::PosixShim,
+        &["-fno-builtin"],
+    );
+    let (output, trace) = guest.record_standalone(&[]);
+    assert_success(output);
+    patina_dst_trace::TraceBundle::load(&trace)
+        .unwrap()
+        .validate()
+        .unwrap();
+}

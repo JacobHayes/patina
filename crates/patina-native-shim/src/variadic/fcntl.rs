@@ -208,6 +208,10 @@ fn record_lock(fd: c_int, command: u32, pointer: *mut libc::flock) -> c_int {
         Ok(lock) => lock,
         Err(errno) => return super::error(errno),
     };
+    #[allow(
+        clippy::unnecessary_cast,
+        reason = "libc lock constants are i32 on Linux and i16 on Darwin"
+    )]
     let mut request = crate::PatinaFlock {
         l_type: match original.l_type {
             value if value == libc::F_RDLCK as i16 => crate::F_RDLCK,

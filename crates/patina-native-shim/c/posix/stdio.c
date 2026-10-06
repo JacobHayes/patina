@@ -488,24 +488,15 @@ int vfprintf(FILE *stream, const char *format, va_list arguments) {
     return patina_stream_vprintf(patina_stream_of(stream, "vfprintf"), format, arguments);
 }
 
-int fprintf(FILE *stream, const char *format, ...) {
-    struct patina_stream *s = patina_stream_of(stream, "fprintf");
-    va_list arguments;
-    va_start(arguments, format);
-    int written = patina_stream_vprintf(s, format, arguments);
-    va_end(arguments);
-    return written;
+/* The Rust doors pass a genuine platform va_list into this modeled engine. */
+__attribute__((visibility("hidden")))
+int patina_format_bridge(FILE *stream, const char *format, va_list arguments, int use_stdout) {
+    struct patina_stream *s = use_stdout ? &patina_stream_stdout : patina_stream_of(stream, "fprintf");
+    return patina_stream_vprintf(s, format, arguments);
 }
 
 #ifndef __APPLE__
-/* Put a formatted message into a stream (the printf family's engine). */
-static int patina_stream_printf(struct patina_stream *s, const char *format, ...) {
-    va_list arguments;
-    va_start(arguments, format);
-    int written = patina_stream_vprintf(s, format, arguments);
-    va_end(arguments);
-    return written;
-}
+extern int patina_stream_printf(FILE *stream, const char *format, ...);
 
 /*
  * glibc's `assert()` failure hook (assert/assert.c `__assert_fail_base`,
@@ -523,7 +514,7 @@ _Noreturn void __assert_fail(const char *assertion, const char *file, unsigned i
     const char *program = patina_program_path != NULL ? patina_program_path : "";
     const char *slash = strrchr(program, '/');
     if (slash != NULL) program = slash + 1;
-    (void)patina_stream_printf(&patina_stream_stderr, "%s%s%s:%u: %s%sAssertion `%s' failed.\n",
+    (void)patina_stream_printf(stderr, "%s%s%s:%u: %s%sAssertion `%s' failed.\n",
                                program, program[0] != '\0' ? ": " : "", file, line,
                                function != NULL ? function : "", function != NULL ? ": " : "",
                                assertion);
@@ -536,14 +527,6 @@ _Noreturn void __assert_fail(const char *assertion, const char *file, unsigned i
  * family is also what keeps glibc's own printf away from the sentinel globals —
  * a probe or guest calling printf must reach the shim, never glibc's stdio
  * (whose vtable hardening aborts on a foreign FILE). */
-int printf(const char *format, ...) {
-    va_list arguments;
-    va_start(arguments, format);
-    int written = patina_stream_vprintf(&patina_stream_stdout, format, arguments);
-    va_end(arguments);
-    return written;
-}
-
 /* glibc's puts answers the bytes written, the newline included
  * (libio/ioputs.c); POSIX asks only for a non-negative number. */
 int puts(const char *string) {
