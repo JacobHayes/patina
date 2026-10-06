@@ -520,7 +520,10 @@ exempt regardless of duration.
 
 The observer starts on first managed thread creation, uses the single HostApi
 alias table (Linux private futex waits; Darwin dispatch semaphore waits), and
-adds no clock read, atomic, or counter to scheduling points. Both private helpers
+adds no clock read, atomic, or counter to scheduling points. Darwin's private
+wait semaphore is prepared before either helper starts; helper waits only read
+it. A contended Rust `Once` would park through guest dispatch interposers, so
+private helper threads must never initialize shared wait state lazily. Both private helpers
 block all blockable signals through the host pthread mask at entry, before taking
 runtime locks. No initialized POSIX semaphore is moved by these waits. No `sem_clockwait`
 or recent-glibc symbol is required. It try-locks ThreadRuntime then Context,

@@ -228,6 +228,12 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   Keep synchronous C-stdio salvage separate from asynchronous observation, and
   arm the watchdog before testing a lone-task exemption. A missing scheduling
   point does not distinguish computation from untracked host blocking.
+- Private host helpers must prepare shared lazy state before creation. On
+  Darwin, contended Rust `Once`/`OnceLock` parks through public dispatch
+  semaphores, which bind to the guest scheduler in a shim-linked binary.
+  Resolving the initializer's own host calls privately does not contain the
+  synchronization around it. A planted private wait inside the initializer
+  exposes this race without changing guest timing or scheduler policy.
 - The host-alias doctrine is structural: shim internals reach real host
   primitives through private resolved aliases, never by calling public symbols
   that guest code can import.

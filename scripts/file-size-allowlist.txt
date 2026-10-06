@@ -12,7 +12,7 @@ crates/cargo-patina/src/coverage.rs 2308 # pending split
 crates/cargo-patina/src/help.rs 3158 # pending split
 crates/cargo-patina/src/parse.rs 2274 # pending split
 crates/cargo-patina/src/sites.rs 2464 # pending split
-crates/cargo-patina/tests/end_to_end.rs 19305 # pending split
+crates/cargo-patina/tests/end_to_end.rs 19238 # pending split
 crates/cargo-patina/tests/native_conformance.rs 2353 # pending split
 crates/patina-conformance/src/probe.rs 4091 # pending split
 crates/patina-conformance/src/probe/net.rs 2461 # pending split

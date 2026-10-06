@@ -121,12 +121,11 @@ pub(super) fn facts_from_envelope(envelope: &serde_json::Value) -> RunFacts {
 /// The verb is `run` for a `replay` child too: the envelope describes the run
 /// that happened, not the command that asked for it.
 ///
-/// Only a run envelope counts. Under `--format json` a CLI-side failure emits an
-/// envelope of its own (`verb: "cli"`, `result: "error"`) — a build failure, a
-/// pre-run gate refusal, a supervisor error. That is patina declining to run the
-/// child at all, not a result for it: for a campaign generation it classifies
-/// INFRA through the no-envelope rule, and for a `minimize` candidate it means
-/// the candidate reported nothing and is rejected.
+/// Only a run envelope counts. CLI-side build and supervisor errors instead
+/// carry `verb: "cli"` and classify INFRA through the no-envelope rule. Native
+/// pre-run audit refusals carry a `run` envelope with the typed
+/// `native_prerun_audit` class; the classifier explicitly keeps them INFRA.
+/// Neither kind reports a guest outcome that a minimization target can match.
 pub(crate) fn run_envelope(stdout: &str) -> Option<serde_json::Value> {
     stdout.lines().rev().find_map(|line| {
         let line = line.trim();

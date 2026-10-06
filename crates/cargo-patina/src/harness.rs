@@ -805,6 +805,10 @@ fn native_harness_failure_block(failure: NativeHarnessFailure<'_>) -> String {
             failure.first.exit_code, failure.latest.exit_code
         ));
     }
+    if failure.reproduced == Some(false) && failure.first.stderr != failure.latest.stderr {
+        block.push_str("\n  first-run stderr tail:\n");
+        block.push_str(&indent_tail(&failure.first.stderr, 20));
+    }
     if !failure.first.stdout.trim().is_empty() {
         block.push_str("\n  stdout tail:\n");
         block.push_str(&indent_tail(&failure.first.stdout, 10));

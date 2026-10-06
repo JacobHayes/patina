@@ -537,6 +537,11 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
     if !facts.envelope {
         return CampaignClass::Infra;
     }
+    // A pre-run refusal has an envelope, but no guest executed. Preserve the
+    // same infrastructure attribution as a CLI/build failure without a result.
+    if facts.refusal.as_deref() == Some(crate::output::NATIVE_PRERUN_REFUSAL) {
+        return CampaignClass::Infra;
+    }
     // A runtime limitation is infrastructure evidence, not a guest bug. Do not
     // erase an independently reported safety verdict that preceded the stop.
     if facts.findings.iter().any(|finding| finding.known_limit)

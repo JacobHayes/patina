@@ -17,6 +17,11 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
+// This file is over the file-size cap; new tests go in submodules under
+// `end_to_end/`, which cargo does not discover as separate test binaries.
+#[path = "end_to_end/prerun_and_watchdog.rs"]
+mod prerun_and_watchdog;
+
 #[test]
 fn wasi_run_preopen_policy_controls_write_access() {
     let directory = tempdir().unwrap();
@@ -17659,78 +17664,6 @@ fn campaign_classifies_a_level_one_guest_from_spec_declared_patterns() {
         "the refusal must name the problem:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&bad.stdout),
         String::from_utf8_lossy(&bad.stderr)
-    );
-}
-
-// Gate: a guest the pre-run default-deny gate refuses is sweepable through the
-// same hatches `run` offers, and — the non-vacuity half — WITHOUT them the
-// campaign still files the child refusal as INFRA, its existing class, rather
-// than regressing to UNCLASSIFIED. macOS-only for the same reason the pre-run
-// gate test is: the Mach semaphore is the still-uninterposed blocking
-// representative (`PLANTED_ESCAPE_SOURCE`).
-#[cfg(target_os = "macos")]
-#[test]
-fn campaign_forwards_the_prerun_gate_hatches_to_every_generation() {
-    let directory = tempdir().unwrap();
-    let source = directory.path().join("planted_escape.rs");
-    fs::write(&source, PLANTED_ESCAPE_SOURCE).unwrap();
-    let guest = directory.path().join("planted-escape-campaign");
-    invoke(
-        native_workspace(),
-        &[
-            "build",
-            source.to_str().unwrap(),
-            "--output",
-            guest.to_str().unwrap(),
-        ],
-    );
-
-    // RED: default-deny. Every generation is the child's pre-run refusal, filed
-    // as INFRA (harness/infrastructure failure, not a SUT finding) — pinned here
-    // so a forwarding change cannot quietly turn a known refusal into an
-    // unrecognized outcome.
-    let denied = campaign_run(&directory.path().join("red"), &guest, &[]);
-    assert!(!denied.status.success(), "the gate must deny every child");
-    let envelope = campaign_json_stdout(&denied);
-    assert_eq!(envelope["classes"]["INFRA"], 2, "{}", envelope["classes"]);
-    assert_eq!(envelope["classes"]["UNCLASSIFIED"], serde_json::Value::Null);
-
-    // GREEN (a): the blanket hatch.
-    let hatched = campaign_run(
-        &directory.path().join("green-all"),
-        &guest,
-        &["--allow-unsupported-symbols", "all"],
-    );
-    assert!(
-        hatched.status.success(),
-        "--allow-unsupported-symbols must reach every generation:\nstderr:\n{}",
-        String::from_utf8_lossy(&hatched.stderr)
-    );
-    assert_eq!(campaign_json_stdout(&hatched)["classes"]["OK"], 2);
-
-    // GREEN (b): the repeatable known-safe list, every occurrence forwarded (one
-    // symbol alone still fails closed on the other, so a truncated list cannot
-    // pass this).
-    let allowed = campaign_run(
-        &directory.path().join("green-allow"),
-        &guest,
-        &["--allow", "semaphore_wait", "--allow", "semaphore_signal"],
-    );
-    assert!(
-        allowed.status.success(),
-        "both --allow occurrences must reach every generation:\nstderr:\n{}",
-        String::from_utf8_lossy(&allowed.stderr)
-    );
-    assert_eq!(campaign_json_stdout(&allowed)["classes"]["OK"], 2);
-
-    let partial = campaign_run(
-        &directory.path().join("partial"),
-        &guest,
-        &["--allow", "semaphore_wait"],
-    );
-    assert!(
-        !partial.status.success(),
-        "a truncated allow list must still fail closed"
     );
 }
 

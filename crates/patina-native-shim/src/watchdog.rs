@@ -33,6 +33,10 @@ pub(crate) fn start() {
     static START: Once = Once::new();
     START.call_once(|| {
         let _ = super::hostapi::get();
+        // Prepare before either unmanaged helper can contend on Rust's Once.
+        // Darwin's contended Once parks through public dispatch semaphores,
+        // which belong to the guest scheduler, not these private host threads.
+        platform::prepare_wait();
         // dladdr may need a loader lock owned by the stopped guest. Prestart a
         // helper, so lookup cannot block the stop or allocate a thread at abort.
         for entry in [
@@ -440,17 +444,32 @@ mod platform {
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    pub(super) fn prepare_wait() {}
+
     #[cfg(target_os = "macos")]
-    pub(super) fn wait_ms(ms: u64) {
-        static SEM: OnceLock<usize> = OnceLock::new();
+    static SEM: OnceLock<usize> = OnceLock::new();
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn prepare_wait() {
         let host = super::super::hostapi::get();
-        let sem = *SEM.get_or_init(|| {
+        SEM.get_or_init(|| {
             let sem = unsafe { (host.dispatch_semaphore_create)(0) };
             if sem.is_null() {
                 super::super::trap_fatal("compute watchdog semaphore initialization failed");
             }
             sem as usize
         });
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn wait_ms(ms: u64) {
+        let host = super::super::hostapi::get();
+        let Some(&sem) = SEM.get() else {
+            super::super::trap_fatal(
+                "compute watchdog wait was not prepared before helper startup",
+            );
+        };
         let deadline = unsafe { (host.host_dispatch_time)(0, (ms * 1_000_000) as i64) };
         if unsafe { (host.dispatch_semaphore_wait)(sem as *mut c_void, deadline) } == 0 {
             super::super::trap_fatal("compute watchdog semaphore unexpectedly signalled");

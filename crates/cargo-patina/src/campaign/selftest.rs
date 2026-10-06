@@ -543,6 +543,20 @@ pub(super) fn selftest() -> Result<i32, CliError> {
         ),
     );
 
+    // Class pairing: campaign_forwards_the_prerun_gate_hatches_to_every_generation.
+    // The typed gate receipt is infrastructure, even when guest-like output or
+    // a spec pattern would otherwise claim a violation. Its runtime-refusal
+    // twin above must remain FAIL_CLOSED_ABORT.
+    let prerun = facts_from_envelope(&serde_json::json!({
+        "exit_code": 2,
+        "refusal": {"class": crate::output::NATIVE_PRERUN_REFUSAL}
+    }));
+    check(
+        "infra-structured-prerun-refusal",
+        CampaignClass::Infra,
+        classify(&planted(prerun, "CORRUPTION detected"), &declares_violation),
+    );
+
     // -- the supervisor backstops --------------------------------------------
     check(
         "starvation-stall-exit-111",

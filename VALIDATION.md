@@ -240,6 +240,16 @@ prefixes, and must propagate a planted writer failure. These cases run on both
 OS families in the normal native-workloads target; cross-clippy alone is not
 execution evidence for macOS or Linux arm64.
 
+`end_to_end::native_watchdog_helpers_leave_guest_scheduling_and_panics_alone`
+is the private-helper ownership class detector: fresh same-seed processes start
+helpers, synchronize a worker, then panic normally with exit 101. Their records
+are byte-identical and replay preserves the panic and captured output. It pairs
+with the same-named lib/bin/integration harness selection pin. Planted Darwin
+initializer contention (a private timed wait before publishing the semaphore)
+turns lazy helper initialization into `scheduler task 0 does not exist` and
+SIGABRT; preparing it before helper creation passes with the same contention.
+The parent of the watchdog introduction has no helper and passes the detector.
+
 Follow-up pins belong to that same `native_workloads::compute_watchdog_*` class:
 - `custom_perform_replays_the_committed_prefix` stops inside an open custom
   perform. Its runtime pairing starts with three committed decisions and four
@@ -591,6 +601,14 @@ Determinism and fail-closed guarantees: buggify decisions are pure functions of 
 Lifecycle gating is causal through the runner: `run --buggify-after-setup` declares that the guest calls `setup_complete()`, so buggify stays inert until that call, and a declared-but-never-called run fails loudly (`PATINA_BUGGIFY_SETUP_NEVER_CALLED` + abort) after recording its trace — verified by a `cargo-patina` end-to-end test. Without the flag, buggify is armed from the start and `setup_complete()` is a boundary/coverage marker.
 
 Literal-label SDK macro sites are declared through a dependency-free link-time table under `cfg(patina)`: the native shim reads the native linker section and the WASI host reads the wasm custom section before the guest runs. Declarations do not register/evaluate a site, compute activation, or enter trace metadata, so replay fingerprints and buggify decisions are unchanged; dynamic labels and hand-written `patina_sdk` imports still require runtime evaluation to appear.
+
+Campaign pre-run refusals are infrastructure even when the child emits a
+structured `native_prerun_audit` run envelope. The classifier selftest pairs that
+receipt with a runtime refusal that remains `FAIL_CLOSED_ABORT`.
+`end_to_end::campaign_forwards_the_prerun_gate_hatches_to_every_generation`
+proves the Mach semaphore fixture returns the pre-run receipt with no guest exit
+before testing campaign denial and both forwarding hatches; changing only the
+classification pin cannot satisfy it.
 
 The first-class `cargo patina campaign` layer parses every generation's `PATINA_SDK_REPORT`, pins every end-of-run report on for its children (they are classifier inputs, so an inherited `PATINA_*_REPORT=0` must never blind a generation), writes `<out-dir>/sites.json` (`patina.campaign.sites/v1`, including `generations_observed`), surfaces `sdk_sites`/coverage summaries in human output, heartbeats, and JSON envelopes, and fails by default when any `sometimes!`/`reachable!` oracle is never satisfied (including declared-but-never-registered rows with `registered_gens=0`). `--allow-unmet-sometimes[=MIN_GENS]` is the explicit waiver. The campaign selftest proves met, unmet, declared-unreached, waived-bare, waived-under-threshold, enforced-at-threshold, and malformed-row coverage classes; the end-to-end suite plants never-satisfied and never-called oracles as RED detectors and extends deterministic reruns to byte-compare `sites.json`.
 
