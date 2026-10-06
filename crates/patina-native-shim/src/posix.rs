@@ -1,5 +1,4 @@
 //! Guest-only ordinary POSIX adapters. Host dependency builds omit this module.
-#[cfg(target_os = "linux")]
 use core::ffi::CStr;
 use core::ffi::c_int;
 
@@ -7,6 +6,7 @@ mod entropy;
 #[cfg(target_os = "linux")]
 mod memory;
 mod privileged;
+mod readiness;
 mod sched_identity;
 
 pub(crate) use crate::variadic::{error, model_result};
@@ -18,7 +18,6 @@ pub(crate) fn size_result(result: isize) -> isize {
     result
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn cancel(name: &CStr) {
     #[cfg(target_os = "linux")]
     unsafe {
@@ -59,15 +58,47 @@ pub extern "C" fn signal_result(result: i64) -> c_int {
 #[cfg(target_os = "linux")]
 core::arch::global_asm!(".hidden signal_result");
 
-pub(crate) fn errno(value: c_int) {
-    unsafe {
-        #[cfg(target_os = "linux")]
-        {
-            *libc::__errno_location() = value;
+pub(crate) use crate::variadic::errno;
+
+#[cfg(target_os = "linux")]
+pub(crate) fn fortify_fail(message: &CStr) -> ! {
+    let head = b"*** ";
+    let tail = b" ***: terminated\n";
+    let mut line = [0u8; 128];
+    line[..head.len()].copy_from_slice(head);
+    let mut at = head.len();
+    for &byte in message.to_bytes() {
+        if at >= line.len() - tail.len() - 1 {
+            break;
         }
-        #[cfg(target_os = "macos")]
-        {
-            *libc::__error() = value;
-        }
+        line[at] = byte;
+        at += 1;
     }
+    line[at..at + tail.len()].copy_from_slice(tail);
+    at += tail.len();
+    unsafe {
+        crate::patina_stdio_write(2, line.as_ptr().cast(), at);
+    }
+    crate::patina_abort()
 }
+#[cfg(target_os = "linux")]
+pub(crate) fn chk_fail() -> ! {
+    fortify_fail(c"buffer overflow detected")
+}
+
+#[cfg(target_os = "linux")]
+/// # Safety
+/// message points to a terminated C diagnostic string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_fortify_fail(message: *const core::ffi::c_char) -> ! {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    fortify_fail(unsafe { CStr::from_ptr(message) })
+}
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_chk_fail() -> ! {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    chk_fail()
+}
+#[cfg(target_os = "linux")]
+core::arch::global_asm!(".hidden patina_fortify_fail", ".hidden patina_chk_fail");

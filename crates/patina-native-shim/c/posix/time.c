@@ -257,3 +257,10 @@ unsigned int sleep(unsigned int seconds) {
     return seconds;
 }
 
+#ifdef __APPLE__
+/* Private returning bridge for Rust poll's existing Darwin sleep adapter. */
+__attribute__((visibility("hidden")))
+int patina_readiness_nanosleep(const struct timespec *duration, struct timespec *remaining) {
+    return patina_nanosleep(duration, remaining);
+}
+#endif

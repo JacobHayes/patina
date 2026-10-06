@@ -15,7 +15,6 @@ const FAMILIES: &[&str] = &[
     "thread_sync",
     "signal_process",
     "net",
-    "readiness",
     "stdio",
     "darwin",
     "dlsym",
@@ -58,7 +57,18 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         }
         if matches!(
             row.name.as_str(),
-            "getpid"
+            "epoll_create1"
+                | "epoll_ctl"
+                | "epoll_wait"
+                | "epoll_pwait"
+                | "eventfd"
+                | "ppoll"
+                | "select"
+                | "pselect"
+                | "__poll_chk"
+                | "__ppoll_chk"
+                | "poll"
+                | "getpid"
                 | "getppid"
                 | "gettid"
                 | "__res_init"

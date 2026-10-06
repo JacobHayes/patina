@@ -38,6 +38,27 @@ pub(crate) struct PatinaKevent {
     pub(super) udata: usize,
 }
 
+#[cfg(target_os = "macos")]
+const _: () = {
+    assert!(size_of::<PatinaKevent>() == size_of::<libc::kevent>());
+    assert!(
+        core::mem::offset_of!(PatinaKevent, ident) == core::mem::offset_of!(libc::kevent, ident)
+    );
+    assert!(
+        core::mem::offset_of!(PatinaKevent, filter) == core::mem::offset_of!(libc::kevent, filter)
+    );
+    assert!(
+        core::mem::offset_of!(PatinaKevent, flags) == core::mem::offset_of!(libc::kevent, flags)
+    );
+    assert!(
+        core::mem::offset_of!(PatinaKevent, fflags) == core::mem::offset_of!(libc::kevent, fflags)
+    );
+    assert!(core::mem::offset_of!(PatinaKevent, data) == core::mem::offset_of!(libc::kevent, data));
+    assert!(
+        core::mem::offset_of!(PatinaKevent, udata) == core::mem::offset_of!(libc::kevent, udata)
+    );
+};
+
 /// A descriptor's kernel poll mask (`EPOLL*` bits, [`net::abi`]'s
 /// `POLL*`) and its per-direction arrival sequences, for the readiness
 /// reactors: what the object's poll function answers now, computed

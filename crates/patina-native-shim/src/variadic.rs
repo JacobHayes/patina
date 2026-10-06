@@ -17,7 +17,7 @@ pub extern "C" fn patina_variadic_link() {
 #[cfg(target_os = "linux")]
 mod memory;
 
-fn errno(value: c_int) {
+pub(crate) fn errno(value: c_int) {
     // SAFETY: libc provides the current thread's errno cell on both platforms.
     unsafe {
         #[cfg(target_os = "linux")]

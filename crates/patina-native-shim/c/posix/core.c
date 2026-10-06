@@ -230,23 +230,8 @@ extern int signal_result(int64_t rc);
 /* glibc's `__fortify_fail` (debug/fortify_fail.c), the `_FORTIFY_SOURCE`
  * entries' answer to a call the compiler proved wrong: "*** MESSAGE ***:
  * terminated" on stderr in one write, then SIGABRT (a guest abort). */
-_Noreturn static void patina_fortify_fail(const char *message) {
-    static const char head[] = "*** ";
-    static const char tail[] = " ***: terminated\n";
-    char line[128];
-    size_t at = 0;
-    for (size_t i = 0; i < sizeof head - 1; ++i) line[at++] = head[i];
-    for (; *message != '\0' && at < sizeof line - sizeof tail; ++message) line[at++] = *message;
-    for (size_t i = 0; i < sizeof tail - 1; ++i) line[at++] = tail[i];
-    (void)patina_stdio_write(2, line, at);
-    patina_abort();
-}
-
-/* glibc's `__chk_fail` (debug/chk_fail.c): a buffer smaller than the call may
- * write. */
-_Noreturn static void patina_chk_fail(void) {
-    patina_fortify_fail("buffer overflow detected");
-}
+extern _Noreturn void patina_fortify_fail(const char *message);
+extern _Noreturn void patina_chk_fail(void);
 #else
 /* macOS: cancellation is not modeled (pthread_cancel answers ENOSYS). */
 #define PATINA_CANCEL_POINT(name) ((void)0)
@@ -294,4 +279,9 @@ extern int ioperm(unsigned long from, unsigned long count, int turn_on);
 #ifdef __linux__
 extern int __res_init(void);
 extern int res_init(void);
+#endif
+
+#ifdef __linux__
+extern int __poll_chk(struct pollfd *fds, nfds_t nfds, int timeout, size_t fdslen);
+extern int __ppoll_chk(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout, const sigset_t *mask, size_t fdslen);
 #endif

@@ -278,3 +278,7 @@ is a hidden guarded Rust bridge and delivers pending signals before errno.
 `sched_identity.c` is now `src/posix/sched_identity.rs`, including passwd
 iteration and resource-limit adapters. Darwin platform glue still uses its
 physical-memory constant, declared beside the retained C headers.
+
+`readiness.c` is now `src/posix/readiness.rs` and its platform modules, with platform reactors
+and fixed fortify entries. Shared fortify failures are hidden guarded Rust
+bridges; Darwin poll uses a private returning C sleep bridge until wave 4.

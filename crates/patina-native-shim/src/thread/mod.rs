@@ -50,13 +50,13 @@ use crate::{hostapi, in_shim_bootstrap, in_shim_critical};
 mod dispatch;
 #[cfg(target_os = "linux")]
 #[path = "reactor/epoll.rs"]
-mod epoll;
+pub(crate) mod epoll;
 #[cfg(target_os = "linux")]
 mod eventfd;
 mod futex;
 #[cfg(target_os = "macos")]
 #[path = "reactor/kqueue.rs"]
-mod kqueue;
+pub(crate) mod kqueue;
 mod lifecycle;
 mod net_state;
 mod pipe;
