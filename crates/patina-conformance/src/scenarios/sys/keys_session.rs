@@ -72,13 +72,17 @@ fn read(p: &Probe, id: i64, expected: &[u8]) {
     );
 }
 
-// Native collection is asynchronous. Allow only its documented transient
-// refusals while waiting, and require the final ENOKEY/ENOKEY pair. Patina's
+// Native collection is asynchronous and passes through three states, in
+// order: still linked (READ ENOKEY, SEARCH EKEYREVOKED), unlinked but not yet
+// destroyed (EACCES, ENOKEY), destroyed (ENOKEY, ENOKEY). Allow only those
+// refusals while waiting, and require the final pair. SEARCH goes first: its
+// ENOKEY proves the unlink, so a later READ's ENOKEY is destruction, never the
+// still-linked ENOKEY of a sample that straddles the unlink. Patina's
 // immediate-collection interleaving completes on the first attempt.
 fn collected(p: &Probe, ring: i64, key: i64, name: &CStr) -> bool {
     for _ in 0..5000 {
-        let read = ctl(p, READ, key, 0, 0, 0);
         let found = search(p, ring, name);
+        let read = ctl(p, READ, key, 0, 0, 0);
         if read == neg(ENOKEY) && found == neg(ENOKEY) {
             return true;
         }
