@@ -2,6 +2,8 @@
 use core::ffi::CStr;
 use core::ffi::c_int;
 
+#[cfg(target_os = "macos")]
+mod darwin;
 mod entropy;
 mod fd_io;
 mod fs;

@@ -517,6 +517,9 @@ ARCHITECTURE.md "Native (linked shim)" and `crates/cargo-patina/build.rs`).
   native interposition change; run `mise run check` for the full native typed
   targets, ecosystem testbeds and landing evidence. If the change can affect WASI or cross-target behavior,
   also run `scripts/validate-wasi.sh` and `scripts/smoke-cross-target.sh`.
+- Rust ABI probes must align opaque output storage to the C layout. A byte array
+  promises only byte alignment; use a target type or explicitly aligned storage,
+  including for rusage and Mach task-info buffers.
 - OS- or architecture-specific paths must be executed on that OS/arch before
   being described as working; cross-clippy/cross-builds are useful, but not
   execution evidence.

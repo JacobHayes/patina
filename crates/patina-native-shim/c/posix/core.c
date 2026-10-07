@@ -102,6 +102,14 @@ _Static_assert(sizeof(pthread_mutex_t) == 64 && offsetof(pthread_mutex_t, __sig)
 #include <mach/machine.h>
 #include <mach/processor_info.h>
 #include <mach/vm_statistics.h>
+_Static_assert(sizeof(struct vm_statistics64) == 248 && _Alignof(struct vm_statistics64) == 8 && offsetof(struct vm_statistics64, wire_count) == 12 && HOST_VM_INFO64_COUNT == 62, "Rust VmStatistics64 SDK layout");
+_Static_assert(sizeof(struct task_basic_info_32) == 32 && _Alignof(struct task_basic_info_32) == 4 && offsetof(struct task_basic_info_32, user_time) == 12, "Rust Basic32 layout");
+_Static_assert(sizeof(struct task_basic_info_64) == 40 && _Alignof(struct task_basic_info_64) == 4 && offsetof(struct task_basic_info_64, user_time) == 20, "Rust Basic64 layout");
+#ifdef __aarch64__
+_Static_assert(TASK_BASIC_INFO_64 == 18 && sizeof(struct task_basic_info_64_2) == 40 && offsetof(struct task_basic_info_64_2, user_time) == 20, "Rust arm64 Basic64 flavor");
+#else
+_Static_assert(TASK_BASIC_INFO_64 == 5, "Rust x86 Basic64 flavor");
+#endif
 #include <mach-o/dyld.h>
 #include <os/lock.h>
 #include <stddef.h>
@@ -229,8 +237,6 @@ extern int ioperm(unsigned long from, unsigned long count, int turn_on);
 #endif
 #endif
 
-/* Darwin world-model constant still used by the platform adapters. */
-#define PATINA_PHYSICAL_MEMORY_BYTES (UINT64_C(8) * 1024 * 1024 * 1024)
 #ifdef __linux__
 extern int __res_init(void);
 extern int res_init(void);

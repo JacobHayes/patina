@@ -518,7 +518,11 @@ const KERN_SUCCESS: c_int = 0;
 
 // user_time in microseconds, at offset 24 (three 8-byte vm sizes precede it).
 fn user_time_us() -> i64 {
-    let mut buf = [0u8; 256];
+    // Mach task_info takes naturally aligned integer-word storage.
+    #[repr(C, align(8))]
+    struct Buffer([u8; 256]);
+    let mut aligned = Buffer([0; 256]);
+    let buf = &mut aligned.0;
     let mut count = MACH_TASK_BASIC_INFO_COUNT;
     let rc = unsafe { task_info(0, MACH_TASK_BASIC_INFO, buf.as_mut_ptr(), &mut count) };
     assert_eq!(rc, KERN_SUCCESS, "task_info failed");

@@ -390,6 +390,18 @@ fn formatter() -> Formatter {
         core::mem::transmute::<*mut c_void, Formatter>(crate::host::hostapi::resolve(c"vsnprintf"))
     })
 }
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn format_buffer(
+    buffer: *mut c_char,
+    length: usize,
+    format: *const c_char,
+    args: VaList<'_>,
+) -> c_int {
+    let saved = super::get_errno();
+    let formatter = formatter();
+    super::errno(saved);
+    unsafe { formatter(buffer, length, format, args) }
+}
 /// # Safety
 /// Format/arguments obey printf's ABI; explicit streams must be sentinels.
 pub(crate) unsafe fn format_to(

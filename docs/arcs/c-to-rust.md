@@ -1,6 +1,6 @@
 # Arc: shrinking the native C shim
 
-Status: wave 3 stdio is Rust; Darwin and dynamic lookup are next, 2026-10-07.
+Status: wave 3 stdio and Darwin adapters are Rust; dynamic lookup is next, 2026-10-07.
 The frame-lifetime audit below records a pre-existing hazard; this wave neither
 introduces nor closes it.
 Focused evidence below is separate from the full landing battery.
@@ -406,3 +406,15 @@ The new portable failed-stream/formatting test rejects a compiled missing-error-
 bug (exit 3) then passes repeats and record/replay. Three-target guest-export
 clippy, crate check, formatting, structure and file-size checks pass. C: 3,812 →
 3,121 lines after stdio.
+
+Darwin adapters and globals move to `src/posix/darwin.rs` and its task/inventory
+modules. Existing registry-generated framework/introspection traps now emit Rust;
+registry rows and spellings are unchanged. Mach basic-info layouts absent from
+libc have matching Rust and SDK C assertions. The SDK VM-statistics layout is
+explicit too: libc already includes newer tail fields. No Darwin implementation
+stays C.
+
+Darwin evidence: three-target guest-export clippy, crate check/library tests,
+formatting, structure and file-size pass. Linux native suites and registry/host
+alias gates pass; macOS native ABI (28), signals (8), containment (18), platform
+e2e (12), library (94), registry (7) and host aliases (5) pass. C: 2,420 lines.

@@ -13,7 +13,6 @@ const FAMILIES: &[&str] = &[
     "thread_sync",
     "signal_process",
     "stdio",
-    "darwin",
     "dlsym",
 ];
 
@@ -31,19 +30,17 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         writeln!(sources, "(\"posix/{family}.c\", include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/c/posix/{family}.c\"))),").unwrap();
         println!("cargo:rerun-if-changed=c/posix/{family}.c");
     }
-    sources.push_str("(\"posix/darwin_traps.h\", include_str!(concat!(env!(\"OUT_DIR\"), \"/darwin_traps.h\"))),\n");
     sources.push_str("];\n");
-    let mut darwin_traps =
-        String::from("/* Deny wrappers generated from the symbol inventory. */\n");
+    let mut darwin_traps = String::from("// Deny wrappers generated from the symbol registry.\n");
     for row in symbols {
-        let macro_name = match row.deny_class.as_deref() {
-            Some("macos-framework") => "PATINA_FRAMEWORK_TRAP",
-            Some("host-introspection") => "PATINA_INTROSPECTION_TRAP",
+        let class = match row.deny_class.as_deref() {
+            Some(class @ ("macos-framework" | "host-introspection")) => class,
             _ => continue,
         };
-        writeln!(darwin_traps, "{macro_name}({})", row.name).unwrap();
+        writeln!(darwin_traps,
+            "#[unsafe(no_mangle)]\npub extern \"C\" fn {}() -> ! {{\n    let _panic_scope = crate::panic_boundary::PanicScope::enter();\n    native_trap(c\"{class}\", c\"{}\")\n}}", row.name, row.name).unwrap();
     }
-    std::fs::write(out.join("darwin_traps.h"), darwin_traps).unwrap();
+    std::fs::write(out.join("darwin_traps.rs"), darwin_traps).unwrap();
     let mut ordinary = Vec::new();
     let mut x86 = Vec::new();
     let mut assembly = Vec::new();

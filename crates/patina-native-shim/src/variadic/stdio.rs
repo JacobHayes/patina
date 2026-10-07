@@ -60,3 +60,17 @@ unsafe fn format_to(
     // SAFETY: this is a real platform VaList, not a pointer-sized substitute.
     unsafe { crate::posix::stdio::format_to(stream, format, args, stdout != 0) }
 }
+
+/// Private byte-buffer diagnostic formatter; never takes a FILE.
+/// # Safety
+/// Format, byte buffer and arguments obey vsnprintf's contract.
+#[cfg(target_os = "macos")]
+pub(crate) unsafe extern "C" fn diagnostic(
+    buffer: *mut c_char,
+    length: usize,
+    format: *const c_char,
+    args: ...
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    unsafe { crate::posix::stdio::format_buffer(buffer, length, format, args) }
+}
