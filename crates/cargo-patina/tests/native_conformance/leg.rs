@@ -8,7 +8,7 @@ use super::process::{
 };
 use crate::common;
 use patina_dst_conformance::catalog::{self, Need, Scenario};
-use patina_dst_conformance::compare::{self, Observation, Termination};
+use patina_dst_conformance::compare::{self, Observation, Origin, Termination};
 use patina_dst_conformance::host::{self, Cause, NotRun};
 use patina_dst_conformance::observe::parse_stream;
 use patina_dst_conformance::vehicle::Vehicle;
@@ -67,6 +67,14 @@ impl Leg<'_> {
         format!("{}[{}]", self.scenario.name, self.vehicle.name())
     }
 
+    /// What this leg's `leg` run of its vehicle observes is.
+    fn origin(&self, leg: compare::Leg) -> Origin {
+        Origin {
+            leg,
+            vehicle: self.vehicle,
+        }
+    }
+
     fn args(&self) -> Vec<String> {
         vec![
             self.scenario.name.to_string(),
@@ -103,7 +111,7 @@ impl Leg<'_> {
         owned::sweep(self.dir);
         let output = output?;
         self.keep("native", &output);
-        direct_observation(&output)
+        direct_observation(&output, self.origin(compare::Leg::Native))
     }
 
     fn cargo_patina(&self, run_name: &str, arguments: &[&str]) -> Result<Output, String> {
@@ -134,7 +142,7 @@ impl Leg<'_> {
             .find_map(|gap| gap.failure.hang_deadline());
         let Some(within) = hang else {
             let output = self.cargo_patina(run_name, &arguments)?;
-            return envelope_observation(&output);
+            return envelope_observation(&output, self.origin(compare::Leg::Patina));
         };
         let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
         command
@@ -152,7 +160,7 @@ impl Leg<'_> {
                 // (never confirmed: it progressed or had not stalled long).
                 std::fs::write(self.logs.join(format!("{run_name}.hang")), &watch.last_seen)
                     .unwrap();
-                envelope_observation(&output)
+                envelope_observation(&output, self.origin(compare::Leg::Patina))
             }
             common::Deadlined::Killed { stdout, stderr } => {
                 std::fs::write(self.logs.join(format!("{run_name}.stdout")), &stdout).unwrap();
@@ -166,6 +174,7 @@ impl Leg<'_> {
                     ));
                 };
                 Ok(Observation {
+                    origin: self.origin(compare::Leg::Patina),
                     events: parse_stream(&text(&journal))?,
                     termination: Termination::Hung,
                     stderr: format!("{}\nconfirmed stuck: {}", text(&stderr), watch.last_seen),
@@ -189,7 +198,7 @@ impl Leg<'_> {
                 "json",
             ],
         )?;
-        envelope_observation(&output)
+        envelope_observation(&output, self.origin(compare::Leg::Patina))
     }
 
     fn trace_ops(&self, trace: &Path) -> Result<Vec<Value>, String> {
@@ -241,7 +250,7 @@ impl Leg<'_> {
             },
             &output,
         );
-        direct_observation(&output)
+        direct_observation(&output, self.origin(compare::Leg::Patina))
     }
 
     /// Every check of this leg; `reference` is the scenario's first native
@@ -250,13 +259,13 @@ impl Leg<'_> {
     pub(super) fn check(
         &self,
         oracle: &Oracle,
-        reference: &mut Option<(Vehicle, Observation)>,
+        reference: &mut Option<Observation>,
         diverged: &mut Vec<String>,
     ) -> Result<(), Vec<String>> {
         let native = self
             .native()
             .map_err(|error| vec![format!("native run: {error}")])?;
-        let compared = judge_native(oracle, self.vehicle, &native, reference, diverged)?;
+        let compared = judge_native(oracle, &native, reference, diverged)?;
 
         #[cfg(target_arch = "x86_64")]
         if self.vehicle == Vehicle::Raw

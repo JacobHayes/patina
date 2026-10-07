@@ -39,7 +39,7 @@
 mod common;
 
 use patina_dst_conformance::catalog;
-use patina_dst_conformance::compare::{Observation, Termination};
+use patina_dst_conformance::compare::{Observation, Origin, Termination};
 use patina_dst_conformance::host::{self, Cause};
 use patina_dst_conformance::observe::parse_stream;
 use std::path::Path;
@@ -136,8 +136,9 @@ fn conform(name: &str) {
     );
 }
 
-/// A planted stream: `(op, ret)` events, a check where `op` is "check".
-fn planted(events: &[(&str, i64)], termination: Termination) -> Observation {
+/// A planted stream from `origin`: `(op, ret)` events, a check where `op` is
+/// "check".
+fn planted(origin: Origin, events: &[(&str, i64)], termination: Termination) -> Observation {
     let stream: String = events
         .iter()
         .enumerate()
@@ -155,6 +156,7 @@ fn planted(events: &[(&str, i64)], termination: Termination) -> Observation {
         })
         .collect();
     Observation {
+        origin,
         events: parse_stream(&stream).unwrap(),
         termination,
         stderr: String::new(),

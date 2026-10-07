@@ -1,7 +1,7 @@
 //! Probe construction, process state, run deadlines, and observation decoding.
 
 use crate::common;
-use patina_dst_conformance::compare::{Observation, Termination};
+use patina_dst_conformance::compare::{Observation, Origin, Termination};
 use patina_dst_conformance::host::NotRun;
 use patina_dst_conformance::observe::parse_stream;
 use serde_json::Value;
@@ -134,8 +134,9 @@ pub(super) fn text(bytes: &[u8]) -> String {
 }
 
 /// A process run that wrote the stream itself (native, or shim-linked directly).
-pub(super) fn direct_observation(output: &Output) -> Result<Observation, String> {
+pub(super) fn direct_observation(output: &Output, origin: Origin) -> Result<Observation, String> {
     Ok(Observation {
+        origin,
         events: parse_stream(&text(&output.stdout))?,
         termination: termination(output.status),
         stderr: text(&output.stderr),
@@ -144,7 +145,7 @@ pub(super) fn direct_observation(output: &Output) -> Result<Observation, String>
 
 /// A `cargo patina … --format json` run: the guest's streams and exit are in
 /// the `patina.result/v1` envelope; a refusal's message joins the stderr.
-pub(super) fn envelope_observation(output: &Output) -> Result<Observation, String> {
+pub(super) fn envelope_observation(output: &Output, origin: Origin) -> Result<Observation, String> {
     let envelope: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
         format!(
             "not a patina.result/v1 envelope ({error}); cargo-patina {}: {}",
@@ -162,6 +163,7 @@ pub(super) fn envelope_observation(output: &Output) -> Result<Observation, Strin
         (None, None) => Termination::Unreported,
     };
     Ok(Observation {
+        origin,
         events: parse_stream(envelope["stdout"].as_str().unwrap_or(""))?,
         termination,
         stderr: format!(

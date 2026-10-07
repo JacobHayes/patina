@@ -15,7 +15,9 @@
 //! to be issued. Every vehicle returns the kernel convention: `>= 0` on
 //! success, `-errno` on failure.
 
+#[cfg(target_os = "linux")]
 use patina_dst_syscalls::Syscall;
+#[cfg(target_os = "linux")]
 use std::ffi::c_long;
 
 /// Six register-sized arguments, the kernel ABI's maximum.
@@ -64,6 +66,7 @@ impl Vehicle {
     }
 
     /// Issue `row` with `args`; kernel-style result (`-errno` on failure).
+    #[cfg(target_os = "linux")]
     pub fn call(self, row: Syscall, args: Args) -> i64 {
         match self {
             Vehicle::Libc => libc_door(row, args),
@@ -88,6 +91,7 @@ pub fn fold_errno(result: i64) -> i64 {
 }
 
 /// glibc's `syscall(2)` with the row's number.
+#[cfg(target_os = "linux")]
 fn syscall_door(row: Syscall, a: Args) -> i64 {
     // SAFETY: the scenario owns every pointer it passes in `a`.
     unsafe {
@@ -105,6 +109,7 @@ fn syscall_door(row: Syscall, a: Args) -> i64 {
 
 // glibc exports `futimesat` (deprecated, still a strong symbol) and
 // `getdents64`; the libc crate declares neither.
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
     pub(crate) fn futimesat(
         dirfd: libc::c_int,
@@ -116,6 +121,7 @@ unsafe extern "C" {
 
 // glibc's wrappers of the process-descriptor rows (2.36) and the x86_64
 // thread-pointer rows, which the libc crate does not declare.
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn pidfd_open(pid: libc::pid_t, flags: libc::c_uint) -> libc::c_int;
     fn pidfd_getfd(pidfd: libc::c_int, targetfd: libc::c_int, flags: libc::c_uint) -> libc::c_int;
@@ -144,6 +150,7 @@ unsafe extern "C" {
 }
 
 // glibc's wrappers of privileged rows the libc crate does not declare.
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn pivot_root(new_root: *const libc::c_char, put_old: *const libc::c_char) -> libc::c_int;
     fn init_module(
@@ -183,6 +190,7 @@ unsafe extern "C" {
 /// The glibc symbol of the same name, folded to the kernel result convention.
 /// A row glibc has no wrapper for is spelled `syscall(2)`, the same door glibc
 /// itself would use.
+#[cfg(target_os = "linux")]
 fn libc_door(row: Syscall, a: Args) -> i64 {
     use libc::*;
     // SAFETY: the scenario owns every pointer it passes in `a`.
@@ -1024,7 +1032,7 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
 
 /// The inline `syscall` instruction: the exact direct-syscall class the
 /// import audit cannot see, trapped by SUD under patina.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn raw_syscall(nr: u32, a: Args) -> i64 {
     let ret: i64;
     // SAFETY: the scenario owns every pointer it passes in `a`; the kernel

@@ -19,11 +19,13 @@
 //!   registry entries no scenario or exclusion accounts for.
 //!
 //! The scenarios and the probe API are the Linux syscall ABI and build only
-//! there; the comparison and the leak filter are plain Rust.
+//! there; the comparison, the leak filter and the vehicles' names are plain
+//! Rust.
 
 pub mod compare;
 pub mod leak;
 pub mod observe;
+pub mod vehicle;
 
 #[cfg(target_os = "linux")]
 pub mod catalog;
@@ -43,5 +45,3 @@ pub mod record;
 mod scenarios;
 #[cfg(target_os = "linux")]
 pub mod signals;
-#[cfg(target_os = "linux")]
-pub mod vehicle;

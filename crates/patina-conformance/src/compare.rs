@@ -8,6 +8,7 @@
 //! are always exactly the current gap.
 
 use crate::observe::{CHECK_OP, EXPECT_DEATH_OP, EXPECT_EXIT_OP, Event, ParsedNorm};
+use crate::vehicle::Vehicle;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -51,9 +52,45 @@ impl fmt::Display for Termination {
     }
 }
 
+/// Which side of the differential a run is: the host kernel, or patina.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Leg {
+    Native,
+    Patina,
+}
+
+impl Leg {
+    fn name(self) -> &'static str {
+        match self {
+            Leg::Native => "native",
+            Leg::Patina => "patina",
+        }
+    }
+}
+
+/// What produced an observation, set by the runner that produced it; every
+/// comparison message names its sides from this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Origin {
+    pub leg: Leg,
+    pub vehicle: Vehicle,
+}
+
+impl Origin {
+    /// This side's name against `other`: what tells the two apart.
+    fn name_against(self, other: Origin) -> &'static str {
+        if self.leg == other.leg {
+            self.vehicle.name()
+        } else {
+            self.leg.name()
+        }
+    }
+}
+
 /// One run of a scenario through one vehicle.
 #[derive(Clone, Debug)]
 pub struct Observation {
+    pub origin: Origin,
     /// The raw (unnormalized) event stream.
     pub events: Vec<Event>,
     pub termination: Termination,
@@ -442,8 +479,9 @@ enum Found {
     },
 }
 
-impl fmt::Display for Found {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Found {
+    /// The difference, its sides named `reference` and `other`.
+    fn describe(&self, reference: &str, other: &str) -> String {
         match self {
             Found::Field {
                 seq,
@@ -451,10 +489,8 @@ impl fmt::Display for Found {
                 path,
                 native,
                 patina,
-            } => write!(f, "seq {seq} {op} {path}: native {native}, patina {patina}"),
-            Found::Check { seq, label } => {
-                write!(f, "seq {seq} check {label:?} fails under patina")
-            }
+            } => format!("seq {seq} {op} {path}: {reference} {native}, {other} {patina}"),
+            Found::Check { seq, label } => format!("seq {seq} check {label:?} fails under {other}"),
         }
     }
 }
@@ -590,6 +626,23 @@ pub fn judge(
     patina: &Observation,
     gaps: &[Expected<'_>],
 ) -> Result<Verdict, Vec<String>> {
+    let (from, to) = (native.origin, patina.origin);
+    if from.leg != Leg::Native || to.leg != Leg::Patina || from.vehicle != to.vehicle {
+        return Err(vec![format!(
+            "judge compares a native and a patina run of one vehicle, not {from:?} and {to:?}"
+        )]);
+    }
+    compare(native, patina, gaps)
+}
+
+/// The comparison itself; its messages name each side from its origin.
+fn compare(
+    native: &Observation,
+    patina: &Observation,
+    gaps: &[Expected<'_>],
+) -> Result<Verdict, Vec<String>> {
+    let reference = native.origin.name_against(patina.origin);
+    let other = patina.origin.name_against(native.origin);
     let native_events = normalize(native.events.clone());
     let patina_events = normalize(patina.events.clone());
     let (stops, differs): (Vec<&Expected<'_>>, Vec<&Expected<'_>>) =
@@ -601,18 +654,21 @@ pub fn judge(
             if native_events.len() != patina_events.len() {
                 let first = found(&native_events, &patina_events);
                 failures.push(format!(
-                    "event count: native {}, patina {}{}",
+                    "event count: {reference} {}, {other} {}{}",
                     native_events.len(),
                     patina_events.len(),
                     first
                         .first()
-                        .map(|found| format!("; first difference: {found}"))
+                        .map(|found| format!(
+                            "; first difference: {}",
+                            found.describe(reference, other)
+                        ))
                         .unwrap_or_default()
                 ));
             }
             if native.termination != patina.termination {
                 failures.push(format!(
-                    "termination: native {}, patina {}",
+                    "termination: {reference} {}, {other} {}",
                     native.termination, patina.termination
                 ));
             }
@@ -667,7 +723,10 @@ pub fn judge(
             Failure::Stops { .. } | Failure::Hangs { .. } => false,
         });
         if !declared {
-            failures.push(format!("undeclared difference: {found}"));
+            failures.push(format!(
+                "undeclared difference: {}",
+                found.describe(reference, other)
+            ));
         }
     }
     if failures.is_empty() {
@@ -762,13 +821,63 @@ fn check_stop(
 /// Compare two native observations of one scenario through different
 /// vehicles: the host kernel answers every vehicle the same way.
 pub fn vehicles_agree(reference: &Observation, other: &Observation) -> Result<(), Vec<String>> {
-    judge(reference, other, &[]).map(|_| ())
+    let (from, to) = (reference.origin, other.origin);
+    if from.leg != Leg::Native || to.leg != Leg::Native || from.vehicle == to.vehicle {
+        return Err(vec![format!(
+            "vehicles_agree compares native runs of two vehicles, not {from:?} and {to:?}"
+        )]);
+    }
+    compare(reference, other, &[]).map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::observe::Norm;
+
+    const NATIVE: Origin = Origin {
+        leg: Leg::Native,
+        vehicle: Vehicle::Syscall,
+    };
+
+    /// `super::judge` with each side's origin set as its runner would.
+    fn judge(
+        native: &Observation,
+        patina: &Observation,
+        gaps: &[Expected<'_>],
+    ) -> Result<Verdict, Vec<String>> {
+        let patina = Observation {
+            origin: Origin {
+                leg: Leg::Patina,
+                ..NATIVE
+            },
+            ..patina.clone()
+        };
+        super::judge(native, &patina, gaps)
+    }
+
+    /// A comparison of the wrong pair of runs is refused, whatever the
+    /// streams: a native run against another, a patina run against its own
+    /// vehicle's or another vehicle's native one as `vehicles_agree`.
+    #[test]
+    fn comparisons_refuse_the_wrong_pair_of_runs() {
+        let on = |leg, vehicle| Observation {
+            origin: Origin { leg, vehicle },
+            ..native()
+        };
+        let (syscall, libc) = (
+            on(Leg::Native, Vehicle::Syscall),
+            on(Leg::Native, Vehicle::Libc),
+        );
+        let patina = on(Leg::Patina, Vehicle::Syscall);
+        assert!(super::judge(&syscall, &patina, &[]).is_ok());
+        assert!(super::judge(&syscall, &syscall, &[]).is_err());
+        assert!(super::judge(&patina, &syscall, &[]).is_err());
+        assert!(super::judge(&libc, &patina, &[]).is_err());
+        assert!(vehicles_agree(&syscall, &libc).is_ok());
+        assert!(vehicles_agree(&syscall, &syscall).is_err());
+        assert!(vehicles_agree(&syscall, &patina).is_err());
+    }
 
     fn event(seq: u64, op: &str, ret: i64) -> Event {
         Event {
@@ -797,6 +906,7 @@ mod tests {
 
     fn observation(events: Vec<Event>) -> Observation {
         Observation {
+            origin: NATIVE,
             events,
             termination: Termination::Exited(0),
             stderr: String::new(),
@@ -938,6 +1048,7 @@ mod tests {
 
     fn stopped(stderr: &str) -> Observation {
         Observation {
+            origin: NATIVE,
             events: vec![event(0, "openat", 3)],
             termination: Termination::Signaled {
                 signal: 6,
@@ -978,6 +1089,7 @@ mod tests {
 
     fn hung(events: usize) -> Observation {
         Observation {
+            origin: NATIVE,
             events: native().events.into_iter().take(events).collect(),
             termination: Termination::Hung,
             stderr: String::new(),

@@ -116,9 +116,8 @@ impl Oracle {
 /// that fails otherwise, fail on every host.
 pub(super) fn judge_native(
     oracle: &Oracle,
-    vehicle: Vehicle,
     native: &Observation,
-    reference: &mut Option<(Vehicle, Observation)>,
+    reference: &mut Option<Observation>,
     diverged: &mut Vec<String>,
 ) -> Result<bool, Vec<String>> {
     let judged = match compare::native_verdict(native) {
@@ -135,15 +134,13 @@ pub(super) fn judge_native(
         }
     };
     match reference {
-        Some((first, observation)) => {
-            compare::vehicles_agree(observation, native).map_err(|failures| {
-                prefixed(
-                    &format!("natively, differs from {}: ", first.name()),
-                    failures,
-                )
-            })?
-        }
-        None => *reference = Some((vehicle, native.clone())),
+        Some(first) => compare::vehicles_agree(first, native).map_err(|failures| {
+            prefixed(
+                &format!("natively, differs from {}: ", first.origin.vehicle.name()),
+                failures,
+            )
+        })?,
+        None => *reference = Some(native.clone()),
     }
     Ok(judged)
 }
@@ -196,6 +193,7 @@ pub(super) fn tail(stderr: &str) -> String {
 mod tests {
     use super::*;
     use crate::planted;
+    use patina_dst_conformance::compare::{Leg, Origin};
 
     /// On a faked host off the pinned kernel, or on the pinned kernel with
     /// another glibc, a difference from patina and a failed native check are
@@ -210,9 +208,19 @@ mod tests {
         let pinned = Oracle::on(&format!("{major}.{minor}.0-139-generic"), glibc, false);
         let other_glibc = Oracle::on(&pinned.release, "2.40", false);
         let forced = Oracle::on(&off.release, glibc, true);
-        let native = planted(&[("close", 0), ("check", 1)], Termination::Exited(0));
-        let patina = planted(&[("close", -1), ("check", 1)], Termination::Exited(0));
-        let failed = planted(&[("close", 0), ("check", 0)], Termination::Exited(101));
+        let from = |leg, vehicle| Origin { leg, vehicle };
+        let libc = from(Leg::Native, Vehicle::Libc);
+        let native = planted(libc, &[("close", 0), ("check", 1)], Termination::Exited(0));
+        let patina = planted(
+            from(Leg::Patina, Vehicle::Libc),
+            &[("close", -1), ("check", 1)],
+            Termination::Exited(0),
+        );
+        let failed = planted(
+            libc,
+            &[("close", 0), ("check", 0)],
+            Termination::Exited(101),
+        );
         let judge = || compare::judge(&native, &patina, &[]);
 
         let mut diverged = Vec::new();
@@ -228,28 +236,20 @@ mod tests {
         let before = diverged.len();
         let mut reference = None;
         assert_eq!(
-            judge_native(&off, Vehicle::Libc, &failed, &mut reference, &mut diverged),
+            judge_native(&off, &failed, &mut reference, &mut diverged),
             Ok(false)
         );
         assert_eq!(diverged.len(), before + 1);
-        assert!(judge_native(&pinned, Vehicle::Libc, &failed, &mut None, &mut Vec::new()).is_err());
+        assert!(judge_native(&pinned, &failed, &mut None, &mut Vec::new()).is_err());
 
-        let mut reference = Some((Vehicle::Libc, native.clone()));
+        let mut reference = Some(native.clone());
         let disagreeing = planted(
+            from(Leg::Native, Vehicle::Syscall),
             &[("close", 0), ("check", 1), ("close", 0)],
             Termination::Exited(0),
         );
         let mut none = Vec::new();
-        assert!(
-            judge_native(
-                &off,
-                Vehicle::Syscall,
-                &disagreeing,
-                &mut reference,
-                &mut none
-            )
-            .is_err()
-        );
+        assert!(judge_native(&off, &disagreeing, &mut reference, &mut none).is_err());
         assert!(none.is_empty());
 
         let summary = tempfile::NamedTempFile::new().unwrap();
@@ -297,8 +297,22 @@ mod tests {
             (died, died, &[][..], false),
             (exited, failed, &[][..], false),
         ] {
-            let native = planted(&[("check", 1)], native);
-            let patina = planted(&[("check", 1)], patina);
+            let native = planted(
+                Origin {
+                    leg: Leg::Native,
+                    vehicle: Vehicle::Libc,
+                },
+                &[("check", 1)],
+                native,
+            );
+            let patina = planted(
+                Origin {
+                    leg: Leg::Patina,
+                    vehicle: Vehicle::Libc,
+                },
+                &[("check", 1)],
+                patina,
+            );
             assert_eq!(
                 undeclared_death(&native, &patina, gaps).is_some(),
                 crash,
