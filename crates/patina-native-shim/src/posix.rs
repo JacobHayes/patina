@@ -17,6 +17,7 @@ mod readiness;
 mod sched_identity;
 mod signal_process;
 pub(crate) mod stdio;
+mod thread_sync;
 mod time;
 
 pub(crate) use crate::variadic::{error, model_result};
@@ -37,10 +38,9 @@ pub(crate) fn cancel(name: &CStr) {
     let _ = name;
 }
 
+/// A raw model result as libc's: pending signals delivered before errno.
 #[cfg(target_os = "linux")]
-#[unsafe(export_name = "patina_signal_result")]
-pub extern "C" fn signal_result(result: i64) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+pub(crate) fn signal_result(result: i64) -> c_int {
     crate::thread::signals::patina_signal_deliver();
     if result < 0 {
         error(-result as c_int)
@@ -48,8 +48,6 @@ pub extern "C" fn signal_result(result: i64) -> c_int {
         result as c_int
     }
 }
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(".hidden patina_signal_result");
 
 pub(crate) use crate::variadic::errno;
 

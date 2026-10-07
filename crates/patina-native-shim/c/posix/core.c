@@ -175,20 +175,6 @@ __attribute__((noreturn)) static void patina_act_on_cancel(void) {
         if (patina_cancel_leave(outer) < 0) patina_act_on_cancel(); \
     } while (0)
 
-/*
- * Every other glibc cancellation point the shim defines: the model does not
- * act there, so a thread reaching one with a cancel to act on stops the run by
- * name, where glibc would end the thread at the entry. `name` is the glibc
- * cancellation point reached (patina-syscalls src/cancellation.rs lists them,
- * and a gate holds each wrapper to its check).
- */
-#define PATINA_CANCEL_POINT(name) patina_cancel_point(name)
-
-extern int patina_signal_result(int64_t rc);
-
-#else
-/* macOS: cancellation is not modeled (pthread_cancel answers ENOSYS). */
-#define PATINA_CANCEL_POINT(name) ((void)0)
 #endif
 
 /* Rust-owned fixed adapters referenced by the C route table. */
