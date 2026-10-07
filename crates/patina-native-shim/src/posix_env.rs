@@ -253,9 +253,7 @@ unsafe fn find(
 /// Shared with localtime_r, never through the public interposable getenv name.
 /// # Safety
 /// `name` is a C string; callers synchronize environment reads with mutations.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_env_lookup(name: *const c_char) -> *mut c_char {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+pub(crate) unsafe fn env_lookup(name: *const c_char) -> *mut c_char {
     unsafe {
         if crate::patina_env_read_gate() == 0 {
             return null_mut();
@@ -360,7 +358,7 @@ unsafe fn remove(name: *const c_char, length: usize) {
 pub unsafe extern "C" fn getenv(name: *const c_char) -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_boundary_symbol(c"getenv".as_ptr());
-    unsafe { patina_env_lookup(name) }
+    unsafe { env_lookup(name) }
 }
 
 /// # Safety
@@ -457,7 +455,7 @@ pub unsafe extern "C" fn putenv(string: *mut c_char) -> c_int {
 pub unsafe extern "C" fn secure_getenv(name: *const c_char) -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_boundary_symbol(c"secure_getenv".as_ptr());
-    unsafe { patina_env_lookup(name) }
+    unsafe { env_lookup(name) }
 }
 
 #[cfg(target_os = "linux")]
@@ -526,8 +524,3 @@ core::arch::global_asm!(".private_extern _patina_control_getenv");
 core::arch::global_asm!(".hidden patina_scrub_environ");
 #[cfg(target_os = "macos")]
 core::arch::global_asm!(".private_extern _patina_scrub_environ");
-
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(".hidden patina_env_lookup");
-#[cfg(target_os = "macos")]
-core::arch::global_asm!(".private_extern _patina_env_lookup");

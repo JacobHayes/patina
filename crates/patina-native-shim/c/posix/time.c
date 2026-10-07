@@ -1,5 +1,7 @@
 /*
- * Time: clocks, sleeps, and localtime_r.
+ * Time: the clock seams that store into caller memory, and the sleeps an
+ * acting cancellation surrounds. Clock and sleep calculation, Darwin's clocks
+ * and localtime_r are Rust (src/posix/time.rs).
  *
  * This file is one family slice of the native shim's single C translation unit:
  * `c/patina_posix.c` #includes every slice under `c/posix/` in a fixed order, so the
@@ -20,10 +22,8 @@ static void patina_vdso_store(struct timespec *out, struct timespec value) {
     target->tv_sec = value.tv_sec;
     target->tv_nsec = value.tv_nsec;
 }
-#endif
 
 static int patina_clock_gettime_libc(clockid_t clock_id, struct timespec *time) {
-#ifdef __linux__
     /* Every Linux clock id is decoded once, in Rust, for both doors. */
     struct timespec now;
     int vdso = patina_clock_in_vdso((int)clock_id);
@@ -34,27 +34,6 @@ static int patina_clock_gettime_libc(clockid_t clock_id, struct timespec *time) 
     }
     if (vdso) patina_vdso_store(time, now);
     return 0;
-#else
-    uint32_t patina_clock;
-    if (clock_id == CLOCK_REALTIME) patina_clock = PATINA_CLOCK_REALTIME;
-    else if (clock_id == CLOCK_MONOTONIC
-#ifdef __APPLE__
-        || clock_id == CLOCK_UPTIME_RAW
-#endif
-    ) patina_clock = PATINA_CLOCK_MONOTONIC;
-    else {
-        errno = EINVAL;
-        return -1;
-    }
-    uint64_t nanos = 0;
-    if (patina_clock_now(patina_clock, &nanos) != 0) {
-        errno = patina_errno();
-        return -1;
-    }
-    time->tv_sec = (time_t)(nanos / UINT64_C(1000000000));
-    time->tv_nsec = (long)(nanos % UINT64_C(1000000000));
-    return 0;
-#endif
 }
 
 int clock_gettime(clockid_t clock_id, struct timespec *time) {
@@ -62,7 +41,6 @@ int clock_gettime(clockid_t clock_id, struct timespec *time) {
     return patina_clock_gettime_libc(clock_id, time);
 }
 
-#ifdef __linux__
 /* glibc's internal spelling (GLIBC_PRIVATE), which static archives built
  * against glibc call directly: the same clock. */
 int __clock_gettime(clockid_t clock_id, struct timespec *time) {
@@ -87,6 +65,11 @@ int clock_getres(clockid_t clock_id, struct timespec *res) {
 }
 #endif
 
+/* The realtime clock as whole seconds and microseconds (src/posix/time.rs);
+ * 0, or -1 with errno set. The stores into caller memory stay here, outside
+ * every shim entry, so a time the caller cannot take faults in the caller. */
+extern int patina_time_of_day(int64_t *seconds, int64_t *micros);
+
 /*
  * Whole-second CLOCK_REALTIME. Bundled C libraries reach for `time` where Rust
  * would use `SystemTime::now` (SQLite's `unixCurrentTime`/`unixRandomness` seed
@@ -96,14 +79,10 @@ int clock_getres(clockid_t clock_id, struct timespec *res) {
  */
 time_t time(time_t *out) {
     patina_note_boundary_symbol("time");
-    uint64_t nanos = 0;
-    if (patina_clock_now(PATINA_CLOCK_REALTIME, &nanos) != 0) {
-        errno = patina_errno();
-        return (time_t)-1;
-    }
-    time_t seconds = (time_t)(nanos / UINT64_C(1000000000));
-    if (out != NULL) *out = seconds;
-    return seconds;
+    int64_t seconds, micros;
+    if (patina_time_of_day(&seconds, &micros) != 0) return (time_t)-1;
+    if (out != NULL) *out = (time_t)seconds;
+    return (time_t)seconds;
 }
 
 /* glibc's gettimeofday (sysdeps/unix/sysv/linux/gettimeofday.c): a time zone
@@ -111,13 +90,10 @@ time_t time(time_t *out) {
  * realtime clock in microseconds. */
 static int patina_gettimeofday(struct timeval *restrict time, void *restrict zone) {
     if (zone != NULL) memset(zone, 0, sizeof(struct timezone));
-    uint64_t nanos = 0;
-    if (patina_clock_now(PATINA_CLOCK_REALTIME, &nanos) != 0) {
-        errno = patina_errno();
-        return -1;
-    }
-    time->tv_sec = (time_t)(nanos / UINT64_C(1000000000));
-    time->tv_usec = (suseconds_t)((nanos % UINT64_C(1000000000)) / UINT64_C(1000));
+    int64_t seconds, micros;
+    if (patina_time_of_day(&seconds, &micros) != 0) return -1;
+    time->tv_sec = (time_t)seconds;
+    time->tv_usec = (suseconds_t)micros;
     return 0;
 }
 
@@ -134,59 +110,17 @@ int __gettimeofday(struct timeval *restrict time, void *restrict zone) {
 }
 #endif
 
-/* glibc 2.39's nanosleep is clock_nanosleep(CLOCK_REALTIME, 0, ...) with the
- * answer moved to errno: the row's own copies, so an unreadable request (NULL
- * too) is EFAULT and `remaining` is written only by an interrupted sleep. */
-static int patina_nanosleep(const struct timespec *duration, struct timespec *remaining) {
 #ifdef __linux__
-    int64_t result = patina_clock_nanosleep(CLOCK_REALTIME, 0, duration, remaining);
-    if (result < 0) {
-        errno = (int)-result;
-        return -1;
-    }
-    return 0;
-#else
-    if (duration == NULL || duration->tv_sec < 0 || duration->tv_nsec < 0 ||
-        duration->tv_nsec >= 1000000000L) {
-        errno = EINVAL;
-        return -1;
-    }
-    uint64_t now = 0;
-    if (patina_clock_now(PATINA_CLOCK_MONOTONIC, &now) != 0) {
-        errno = patina_errno();
-        return -1;
-    }
-    uint64_t seconds = (uint64_t)duration->tv_sec;
-    if (seconds > UINT64_MAX / UINT64_C(1000000000)) {
-        errno = EOVERFLOW;
-        return -1;
-    }
-    uint64_t delta = seconds * UINT64_C(1000000000) + (uint64_t)duration->tv_nsec;
-    if (delta > UINT64_MAX - now) {
-        errno = EOVERFLOW;
-        return -1;
-    }
-    if (patina_sleep_until_remaining(PATINA_CLOCK_MONOTONIC, now + delta, (int64_t *)remaining) != 0) {
-        errno = patina_errno();
-        return -1;
-    }
-    if (remaining != NULL) memset(remaining, 0, sizeof *remaining);
-    return 0;
-#endif
-}
+/* The sleep (src/posix/time.rs) inside the acting cancellation point. */
+extern int patina_nanosleep(const struct timespec *duration, struct timespec *remaining);
 
 int nanosleep(const struct timespec *duration, struct timespec *remaining) {
-#ifdef __linux__
     PATINA_CANCEL_ENTER(outer);
     int rc = patina_nanosleep(duration, remaining);
     PATINA_CANCEL_LEAVE(outer);
     return rc;
-#else
-    return patina_nanosleep(duration, remaining);
-#endif
 }
 
-#ifdef __linux__
 /*
  * Rust's std::thread::sleep on Linux sleeps through clock_nanosleep rather
  * than nanosleep. Unlike nanosleep, this call returns the error number
@@ -204,63 +138,17 @@ int clock_nanosleep(clockid_t clock_id, int flags, const struct timespec *reques
     return rc;
 }
 
-#endif
-
-/*
- * localtime_r: glibc's time zone over the virtual machine (src/localtime.rs):
- * TZ, read at the first call as glibc reads it, names a POSIX rule string or a
- * zoneinfo file; the machine ships no zoneinfo, so a name glibc cannot find a
- * file for answers what glibc answers then (UTC for an unset or empty TZ, the
- * rule string otherwise), and a zoneinfo file the guest put where glibc would
- * read it is a named refusal. A year past `int` is EOVERFLOW.
- */
-struct tm *localtime_r(const time_t *timep, struct tm *result) {
-    if (timep == NULL || result == NULL) {
-        errno = EFAULT;
-        return NULL;
-    }
-    struct patina_tm tm;
-    if (patina_localtime((int64_t)*timep, patina_env_lookup("TZ"), patina_env_lookup("TZDIR"),
-                         &tm) != 0) {
-        errno = patina_errno();
-        return NULL;
-    }
-    result->tm_sec = tm.sec;
-    result->tm_min = tm.min;
-    result->tm_hour = tm.hour;
-    result->tm_mday = tm.mday;
-    result->tm_mon = tm.mon;
-    result->tm_year = tm.year;
-    result->tm_wday = tm.wday;
-    result->tm_yday = tm.yday;
-    result->tm_isdst = tm.isdst;
-    result->tm_gmtoff = (long)tm.gmtoff;
-    result->tm_zone = (char *)tm.zone;
-    return result;
-}
-
 /* sleep() is the whole-second face of the same interruptible sleep. POSIX
  * rounds a fractional unslept second up in its unsigned return value. */
 unsigned int sleep(unsigned int seconds) {
     struct timespec duration = {(time_t)seconds, 0};
     struct timespec remaining = {0, 0};
-#ifdef __linux__
     PATINA_CANCEL_ENTER(outer);
     int rc = patina_nanosleep(&duration, &remaining);
     PATINA_CANCEL_LEAVE(outer);
-#else
-    int rc = patina_nanosleep(&duration, &remaining);
-#endif
     if (rc == 0) return 0;
     if (errno == EINTR)
         return (unsigned int)remaining.tv_sec + (remaining.tv_nsec != 0);
     return seconds;
-}
-
-#ifdef __APPLE__
-/* Private returning bridge for Rust poll's existing Darwin sleep adapter. */
-__attribute__((visibility("hidden")))
-int patina_readiness_nanosleep(const struct timespec *duration, struct timespec *remaining) {
-    return patina_nanosleep(duration, remaining);
 }
 #endif

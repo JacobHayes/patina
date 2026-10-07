@@ -203,7 +203,6 @@ extern void patina_environ_install(char **next);
 extern void patina_capture_control_plane(void);
 extern const char *patina_control_getenv(const char *name);
 extern void patina_scrub_environ(void);
-extern char *patina_env_lookup(const char *name);
 
 /* Rust-owned fixed adapters referenced by the C route table. */
 #ifdef __linux__

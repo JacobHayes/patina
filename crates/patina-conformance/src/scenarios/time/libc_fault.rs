@@ -6,7 +6,8 @@
 //! it cannot write faults in the caller: a `SIGSEGV` at that address, which
 //! the handler here repairs so the store retries and completes. The vDSO
 //! hands every other clock (the CPU clocks, the alarm clocks) to the system
-//! call, where it is `EFAULT`.
+//! call, where it is `EFAULT`. `time` and `gettimeofday` store the realtime
+//! clock they read into the caller's memory the same way.
 //!
 //! glibc's `nanosleep` is `clock_nanosleep(CLOCK_REALTIME)`, the row: a NULL
 //! or unreadable request is `EFAULT`, and a sleep that completes leaves
@@ -23,6 +24,8 @@ use libc::*;
 use patina_dst_syscalls::Syscall;
 
 type ClockFn = unsafe extern "C" fn(clockid_t, *mut timespec) -> c_int;
+/// A realtime store into the armed page: whether it read and stored a time.
+type StoreFn = fn(usize) -> bool;
 
 unsafe extern "C" {
     fn __clock_gettime(clock: clockid_t, time: *mut timespec) -> c_int;
@@ -73,6 +76,41 @@ pub fn run(p: &Probe) {
             r == neg(EFAULT),
         );
     }
+    // The realtime stores: `time`'s whole seconds, `gettimeofday`'s time.
+    let stores: [(&str, StoreFn); 2] = [
+        ("time", |page| {
+            // SAFETY: the store lands in the armed page.
+            let seconds = unsafe { time(page as *mut time_t) };
+            seconds > 0 && unsafe { (page as *const time_t).read() } == seconds
+        }),
+        ("gettimeofday", |page| {
+            // SAFETY: as above; no zone.
+            let r = unsafe { gettimeofday(page as *mut timeval, std::ptr::null_mut()) };
+            r == 0 && unsafe { (page as *const timeval).read() }.tv_usec >= 0
+        }),
+    ];
+    for (name, door) in stores {
+        let page = read_only(timeval {
+            tv_sec: -1,
+            tv_usec: -1,
+        }) as usize;
+        let before = fault::observed().count;
+        fault::arm(page, Repair::Protect);
+        let stored = door(page);
+        let seen = fault::observed();
+        p.rec
+            .event(name, 0)
+            .field("faults", (seen.count - before) as i64)
+            .field("accerr", seen.code == SEGV_ACCERR)
+            .field("at_time", seen.address == page)
+            .field("stored", stored)
+            .emit();
+        p.check(
+            &format!("{name} into a read-only time faults in the caller"),
+            seen.count == before + 1 && seen.code == SEGV_ACCERR && seen.address == page,
+        );
+        p.check("and the retried store lands", stored);
+    }
     drop(installed);
 
     let sleep = |request: *const timespec, rem: *mut timespec| {
@@ -117,6 +155,8 @@ pub const SCENARIO: Scenario = Scenario {
         "__clock_gettime",
         "clock_getres",
         "nanosleep",
+        "time",
+        "gettimeofday",
     ],
     ..DEFAULTS
 };

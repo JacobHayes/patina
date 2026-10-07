@@ -48,23 +48,13 @@ pub unsafe extern "C" fn poll(
                     tv_sec: (timeout / 1000) as libc::time_t,
                     tv_nsec: (timeout % 1000) as libc::c_long * 1_000_000,
                 };
-                if patina_readiness_nanosleep(&duration, core::ptr::null_mut()) != 0 {
+                if super::time::sleep_for(&duration, core::ptr::null_mut()) != 0 {
                     return -1;
                 }
             }
             0
         }
     }
-}
-
-#[cfg(target_os = "macos")]
-unsafe extern "C" {
-    // The Darwin implementation remains in time.c in this wave. This private
-    // alias avoids a call through an interposable guest symbol.
-    fn patina_readiness_nanosleep(
-        duration: *const libc::timespec,
-        remaining: *mut libc::timespec,
-    ) -> c_int;
 }
 
 #[cfg(target_os = "macos")]
