@@ -128,6 +128,7 @@ pub(super) fn front_action(action: Action) -> Action {
 pub unsafe extern "C" fn patina_fault_route(
     sig: i32,
     info: *const Info,
+    _context: *const c_void,
     frame: *mut Frame,
     handler: *mut Action,
 ) -> i32 {
@@ -866,6 +867,29 @@ impl Frame {
             position: canary as usize,
         }
     }
+}
+
+#[unsafe(no_mangle)]
+/// The counter trap's SIGSEGV route: a counter read the trap declined is a
+/// named stop before any route ([`patina_signal_fault`]).
+///
+/// # Safety
+/// As [`patina_signal_fault`]'s, and `context` is the trap frame's ucontext.
+#[cfg(target_arch = "x86_64")]
+pub unsafe extern "C" fn patina_tsc_route(
+    _sig: i32,
+    info: *const Info,
+    context: *const c_void,
+    frame: *mut Frame,
+    handler: *mut Action,
+) -> i32 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if unsafe { (*info).code() } == SI_KERNEL {
+        let context = context.cast::<libc::ucontext_t>();
+        let pc = unsafe { (*context).uc_mcontext.gregs[libc::REG_RIP as usize] } as usize;
+        crate::tsc::patina_tsc_declined(pc);
+    }
+    unsafe { patina_signal_fault(info, frame, handler) }
 }
 
 #[unsafe(no_mangle)]

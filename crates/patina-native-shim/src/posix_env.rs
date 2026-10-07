@@ -40,9 +40,8 @@ unsafe fn array() -> *mut *mut c_char {
 
 /// # Safety
 /// Startup-only: `next` is the original, terminated stack envp array.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_env_save_host(next: *mut *mut c_char) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+#[cfg(target_os = "linux")]
+pub(crate) unsafe fn save_host(next: *mut *mut c_char) {
     unsafe {
         HOST = next;
     }
@@ -76,9 +75,7 @@ fn fatal(message: &'static [u8]) -> ! {
 /// Capture once, before startup publishes the deterministic guest map.
 /// # Safety
 /// Called only during single-threaded CRT startup.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_capture_control_plane() {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+pub(crate) unsafe fn capture_control_plane() {
     // SAFETY: startup is single-threaded; original CRT arrays are terminated.
     unsafe {
         if CAPTURED {
@@ -124,14 +121,12 @@ pub unsafe extern "C" fn patina_capture_control_plane() {
 
 /// # Safety
 /// `name` is null or a terminated C string; called during startup only.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_control_getenv(name: *const c_char) -> *const c_char {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+pub(crate) unsafe fn control_getenv(name: *const c_char) -> *const c_char {
     unsafe {
         if name.is_null() || libc::strncmp(name, c"PATINA_".as_ptr(), 7) != 0 {
             return ptr::null();
         }
-        patina_capture_control_plane();
+        capture_control_plane();
         let (entry, _) = find(CONTROL, name, libc::strlen(name));
         if entry.is_null() || (*entry).is_null() {
             ptr::null()
@@ -144,9 +139,7 @@ pub unsafe extern "C" fn patina_control_getenv(name: *const c_char) -> *const c_
 /// Commit the startup map without moving libc/dyld's retained trailer.
 /// # Safety
 /// Called once after capture, runtime installation and Linux auxv scrubbing.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_scrub_environ() {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+pub(crate) unsafe fn scrub_environ() {
     unsafe {
         if HOST.is_null() {
             return;
@@ -156,7 +149,7 @@ pub unsafe extern "C" fn patina_scrub_environ() {
         while !guest.is_null() && !(*guest.add(count)).is_null() {
             count += 1;
         }
-        let reserved = patina_control_getenv(c"PATINA_INITIAL_STACK".as_ptr());
+        let reserved = control_getenv(c"PATINA_INITIAL_STACK".as_ptr());
         if reserved.is_null() {
             if count != 0 {
                 fatal(b"patina: unreserved initial-stack environment: nonempty map requires cargo patina run\n");
@@ -501,26 +494,6 @@ core::arch::global_asm!(
 );
 
 #[cfg(target_os = "linux")]
-core::arch::global_asm!(".hidden patina_env_save_host");
-#[cfg(target_os = "macos")]
-core::arch::global_asm!(".private_extern _patina_env_save_host");
-
-#[cfg(target_os = "linux")]
 core::arch::global_asm!(".hidden patina_environ_install");
 #[cfg(target_os = "macos")]
 core::arch::global_asm!(".private_extern _patina_environ_install");
-
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(".hidden patina_capture_control_plane");
-#[cfg(target_os = "macos")]
-core::arch::global_asm!(".private_extern _patina_capture_control_plane");
-
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(".hidden patina_control_getenv");
-#[cfg(target_os = "macos")]
-core::arch::global_asm!(".private_extern _patina_control_getenv");
-
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(".hidden patina_scrub_environ");
-#[cfg(target_os = "macos")]
-core::arch::global_asm!(".private_extern _patina_scrub_environ");

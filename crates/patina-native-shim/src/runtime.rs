@@ -192,45 +192,6 @@ pub extern "C" fn patina_fcntl_owner_get(raw_fd: c_int, ex: c_int, owner: *mut c
     0
 }
 
-#[unsafe(no_mangle)]
-/// C-callable loud fail-closed for the SUD C layer (arming failures, region
-/// discovery). The C side formats no message text of its own (it references no
-/// non-allowlisted stdio), so the diagnostic is emitted here through the glibc
-/// host-write alias before aborting.
-///
-/// # Safety
-/// `message` must be a valid NUL-terminated C string.
-#[cfg(target_os = "linux")]
-pub unsafe extern "C" fn patina_sud_report_fatal(message: *const c_char) -> ! {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: the caller passes a valid NUL-terminated C string.
-    let text = unsafe { CStr::from_ptr(message) }
-        .to_string_lossy()
-        .into_owned();
-    trap_fatal(&text);
-}
-
-#[unsafe(no_mangle)]
-/// As [`patina_sud_report_fatal`] with the trapped syscall number and faulting
-/// instruction address appended — used by the SIGSYS handler's provenance and
-/// out-of-text aborts (§4.4).
-///
-/// # Safety
-/// `message` must be a valid NUL-terminated C string.
-#[cfg(target_os = "linux")]
-pub unsafe extern "C" fn patina_sud_report_fatal_addr(
-    message: *const c_char,
-    nr: std::ffi::c_long,
-    addr: usize,
-) -> ! {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: the caller passes a valid NUL-terminated C string.
-    let text = unsafe { CStr::from_ptr(message) }
-        .to_string_lossy()
-        .into_owned();
-    trap_fatal(&format!("{text} (syscall {nr} at {addr:#x})"));
-}
-
 /// Pass a process-local memory syscall through to the host kernel via glibc's
 /// `syscall(2)` wrapper, resolved as a host alias (its kernel entry sits in
 /// glibc text, the SUD-allowed region). See [`sud`] `mem_passthrough`.
@@ -1059,19 +1020,15 @@ pub(crate) fn runtime_config_from_control_plane()
     Ok((config, trace_fd))
 }
 
-/// The syscall-user-dispatch arming flag, OWNED by Rust and exported so the C
-/// arming path (`patina_sud_init`) writes it (`PATINA_SUD_ARMED = 1`) when it
-/// arms SUD. The dependency points C→Rust deliberately: C is only ever linked
-/// where this Rust lib is present, but the Rust lib's own test binary links NO C
-/// objects — so a Rust→C reference (the previous `patina_sud_is_armed()`) left
-/// the lib-test binary with an undefined symbol. As an `AtomicU8` it lives in a
-/// writable section (unlike a plain `static`, which C could not store into).
+/// Whether startup armed syscall-user-dispatch for this run
+/// (`posix::lifecycle`), exported for the native-boundary guests that check
+/// it. As an `AtomicU8` it lives in a writable section.
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 pub static PATINA_SUD_ARMED: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 /// Whether SUD was armed for this run, shaped for [`RunMetadata::sud`]:
-/// `Some(true)` iff the C layer armed syscall-user-dispatch, else `None`
+/// `Some(true)` iff startup armed syscall-user-dispatch, else `None`
 /// (macOS, a non-SUD kernel, a standalone binary). Never records `Some(false)`,
 /// so old and non-SUD traces stay byte-identical.
 #[cfg(target_os = "linux")]
@@ -1088,16 +1045,14 @@ fn sud_armed_metadata() -> Option<bool> {
     None
 }
 
-/// The timestamp-counter trap arming flag, OWNED by Rust and exported so the C
-/// arming path (`patina_tsc_init`) writes it (`PATINA_TSC_ARMED = 1`) when it
-/// arms `prctl(PR_SET_TSC, PR_TSC_SIGSEGV)`. Same C→Rust ownership direction and
-/// rationale as [`PATINA_SUD_ARMED`].
+/// Whether startup armed the timestamp-counter trap, exported as
+/// [`PATINA_SUD_ARMED`] is.
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 pub static PATINA_TSC_ARMED: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 /// Whether the timestamp-counter trap was armed for this run, shaped for
-/// `RunMetadata::tsc`: `Some(true)` iff the C layer armed it, else `None`
+/// `RunMetadata::tsc`: `Some(true)` iff startup armed it, else `None`
 /// (macOS, arm64, a kernel without `PR_SET_TSC`, a standalone binary). Never
 /// records `Some(false)`, so old and untrapped traces stay byte-identical.
 #[cfg(target_os = "linux")]

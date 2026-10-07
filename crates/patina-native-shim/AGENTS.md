@@ -429,7 +429,8 @@ Rust variadic entry points live under `src/variadic/`, enabled only by the
 private `patina_posix_exports` compiler cfg on the guest archive build. Keep it
 off dependency rlibs, unit tests and bare prefixed-ABI links. Guest archive
 builds use one codegen unit: the extraction anchor and Linux assembly aliases
-must share the definitions' object. The C constructor references the anchor;
+must share the definitions' object. The C object references the anchor, which
+extracts the member holding the Rust constructor;
 Linux dlsym routes use hidden aliases, never cross-object C alias attributes.
 A successful many-codegen-unit build does not replace this extraction contract,
 especially on Darwin, where the Linux routing table is absent.

@@ -119,12 +119,6 @@ _Static_assert(TASK_BASIC_INFO_64 == 5, "Rust x86 Basic64 flavor");
 
 #endif
 
-/* Rust stream callbacks registered at startup (init.c): the flush the
- * runtime makes on its exit paths, and the hand-over of buffered stdout the
- * runtime makes before every refusal ends the run. */
-extern void patina_stdio_flush_at_exit(void);
-extern size_t patina_stdio_take_pending(const void **bytes);
-
 #ifdef __linux__
 /*
  * zstd's static library references these weak tracing hooks (Linux corpus only;
@@ -196,13 +190,6 @@ extern int patina_signal_result(int64_t rc);
 /* macOS: cancellation is not modeled (pthread_cancel answers ENOSYS). */
 #define PATINA_CANCEL_POINT(name) ((void)0)
 #endif
-
-/* Rust-owned environment state; private bridges for the remaining C callers. */
-extern void patina_env_save_host(char **next);
-extern void patina_environ_install(char **next);
-extern void patina_capture_control_plane(void);
-extern const char *patina_control_getenv(const char *name);
-extern void patina_scrub_environ(void);
 
 /* Rust-owned fixed adapters referenced by the C route table. */
 #ifdef __linux__

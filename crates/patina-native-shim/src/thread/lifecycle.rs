@@ -8,32 +8,6 @@ struct ThreadStart {
     arg: *mut c_void,
 }
 
-// Arm syscall-user-dispatch on the calling managed thread. The real
-// definition is in the C layer (patina_posix.c); it is a no-op unless SUD was
-// armed for this run. The Rust half of the shim also ships in probes that link
-// the staticlib WITHOUT the C layer (the C-ABI-only host-alias probe/test),
-// where this call would be an unresolved reference. Provide a WEAK no-op
-// definition so those links resolve; when the C layer is linked its STRONG
-// definition overrides this weak one and real arming happens. Mirrors the
-// `.weak __real_dlsym` idiom used for the wrap alias.
-#[cfg(target_os = "linux")]
-unsafe extern "C" {
-    fn patina_sud_arm_thread();
-    fn patina_tsc_arm_thread();
-}
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".text",
-    ".weak patina_sud_arm_thread",
-    ".p2align 2",
-    "patina_sud_arm_thread:",
-    "ret",
-    ".weak patina_tsc_arm_thread",
-    ".p2align 2",
-    "patina_tsc_arm_thread:",
-    "ret",
-);
-
 /// Everything a managed thread does before its guest routine runs, on the
 /// new host thread: take the task, arm the per-thread traps, take the
 /// host registrations over, register the completion, then wait for the
@@ -55,18 +29,11 @@ fn thread_prelude(raw: *mut c_void) -> (StartRoutine, *mut c_void) {
     // `__libc_start_main`. A no-op when SUD was not armed for this run
     // (non-SUD kernel or standalone binary).
     #[cfg(target_os = "linux")]
-    // SAFETY: the C symbol takes no arguments and is a no-op unless the main
-    // thread armed SUD for this run.
-    unsafe {
-        patina_sud_arm_thread()
-    };
+    crate::sud::arming::arm_sud();
     // The timestamp-counter setting is per-thread too, so it arms at the same
     // two sites. A no-op when the trap was not armed for this run.
     #[cfg(target_os = "linux")]
-    // SAFETY: as above, for the TSC trap.
-    unsafe {
-        patina_tsc_arm_thread()
-    };
+    crate::sud::arming::arm_tsc();
     // glibc's start_thread registered this thread with the host kernel
     // before calling here: take the registrations over before the guest
     // runs on it, and register the task's completion as this thread's
@@ -115,8 +82,8 @@ extern "C" fn thread_trampoline(raw: *mut c_void) -> *mut c_void {
 // the guest routine from C: the one frame glibc's forced unwind
 // (`pthread_exit`, cancellation) crosses between the guest's frames and
 // `start_thread` is then C, never a Rust frame, which could not be
-// unwound. Weak, as `patina_sud_arm_thread` is: a link without the C layer
-// leaves it unresolved, and `thread_trampoline` serves.
+// unwound. Weak: a link without the C layer leaves it unresolved, and
+// `thread_trampoline` serves.
 #[cfg(target_os = "linux")]
 core::arch::global_asm!(
     ".weak patina_thread_body",

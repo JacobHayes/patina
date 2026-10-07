@@ -337,8 +337,7 @@ unsafe fn sync(s: *mut Stream) -> c_int {
         }
     }
 }
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_stdio_flush_at_exit() {
+pub(super) extern "C" fn flush_at_exit() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     unsafe {
         sync(&raw mut OUT);
@@ -346,8 +345,7 @@ pub extern "C" fn patina_stdio_flush_at_exit() {
 }
 /// # Safety
 /// `bytes` points to writable pointer storage; called on terminating paths.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_stdio_take_pending(bytes: *mut *const c_void) -> usize {
+pub(super) unsafe extern "C" fn take_pending(bytes: *mut *const c_void) -> usize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     unsafe {
         let used = if OUT.area { OUT.used } else { 0 };
@@ -598,16 +596,6 @@ pub extern "C" fn funlockfile(stream: *mut libc::FILE) {
 }
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".hidden patina_stdio_flush_at_exit",
-    ".hidden patina_stdio_take_pending"
-);
-#[cfg(target_os = "macos")]
-core::arch::global_asm!(
-    ".private_extern _patina_stdio_flush_at_exit",
-    ".private_extern _patina_stdio_take_pending"
-);
 
 #[cfg(target_os = "linux")]
 core::arch::global_asm!(

@@ -2,6 +2,8 @@
  * delivery, and guest panic ownership must reach patina_abort unchanged. */
 #ifndef __APPLE__
 extern int patina_stream_printf(FILE *stream, const char *format, ...);
+/* The program's argv[0] (src/posix/lifecycle/linux.rs). */
+extern __attribute__((visibility("hidden"))) const char *patina_program_path;
 
 /*
  * glibc's `assert()` failure hook (assert/assert.c `__assert_fail_base`,

@@ -1,12 +1,12 @@
 //! Syscall-user-dispatch (SUD) dispatch table — Linux only.
 //!
-//! The C layer (`patina_posix.c`) arms SUD (`prctl(PR_SET_SYSCALL_USER_DISPATCH,
+//! Startup (`posix::lifecycle`) arms SUD (`prctl(PR_SET_SYSCALL_USER_DISPATCH,
 //! …)` with allowed region = glibc's executable segment, NULL selector) and
-//! installs a `SIGSYS` handler. When guest code executes a raw `syscall`/`svc`
+//! installs the C `SIGSYS` handler. When guest code executes a raw `syscall`/`svc`
 //! instruction outside glibc's text, the kernel rolls the instruction back and
 //! delivers a synchronous, thread-directed `SIGSYS` at the exact faulting IP.
-//! The C handler decodes the syscall number and its six argument registers from
-//! the `ucontext`, then calls [`patina_sud_dispatch`], which routes the call
+//! The handler decodes the syscall number and its six argument registers from
+//! the `ucontext` (in Rust), then calls [`patina_sud_dispatch`], which routes the call
 //! into the *same* `patina_*` entry points the C interposers use and returns the
 //! value the handler writes back into the syscall's return register (raw ABI:
 //! a negative value is `-errno`, there is no libc `errno` step).
@@ -39,6 +39,7 @@ use std::cell::Cell;
 use crate::registry::{Arch, Disposition, SYSCALLS, SyscallRow};
 use crate::{PatinaFlock, PatinaMetadata, PatinaTimestamp};
 
+pub(crate) mod arming;
 mod fd_io;
 mod fs;
 mod mem;
@@ -49,6 +50,8 @@ mod readiness;
 mod sched_identity;
 mod signal_process;
 pub(crate) use signal_process::auxv_value;
+#[cfg(patina_posix_exports)]
+pub(crate) use signal_process::{PATINA_SUD_AUXV_BASE, PATINA_SUD_AUXV_LEN};
 #[cfg(target_arch = "x86_64")]
 mod thread_pointer;
 mod time;

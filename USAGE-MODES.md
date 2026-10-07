@@ -75,7 +75,7 @@ Built and run through `cargo patina build` / `cargo patina run --harness`
 --harness` forwards it to every generation and to the reproduce commands it
 prints). Startup is *Option B:
 deferred init* (the name code comments reference): the flag sets
-`PATINA_DEFER_INIT=1`, the shim's C constructor still
+`PATINA_DEFER_INIT=1`, the shim's startup constructor still
 captures the control plane, registers finalization, and scrubs the
 environment, but leaves the runtime uninstalled; `patina_harness_install`
 applies the harness configuration as a control-plane overlay and installs

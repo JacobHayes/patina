@@ -5,19 +5,17 @@ thread_local! {
     static MESSAGE: UnsafeCell<[c_char; 512]> = const { UnsafeCell::new([0; 512]) };
     static PENDING: Cell<bool> = const { Cell::new(false) };
 }
-unsafe extern "C" {
-    static patina_program_path: *const c_char;
-}
 // Generated from existing registry rows. Entries are opaque hidden addresses;
 // no alias is ever called through a fabricated function signature.
 include!(concat!(env!("OUT_DIR"), "/dlsym_routes.rs"));
 
 unsafe fn set_error(symbol: *const c_char) {
     unsafe {
-        let program = if patina_program_path.is_null() {
+        let program = super::super::lifecycle::program_path();
+        let program = if program.is_null() {
             c""
         } else {
-            CStr::from_ptr(patina_program_path)
+            CStr::from_ptr(program)
         };
         let name = if symbol.is_null() {
             c"(null)"

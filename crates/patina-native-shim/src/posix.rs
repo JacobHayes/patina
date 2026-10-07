@@ -8,6 +8,7 @@ mod dlsym;
 mod entropy;
 mod fd_io;
 mod fs;
+mod lifecycle;
 #[cfg(target_os = "linux")]
 mod memory;
 mod net;

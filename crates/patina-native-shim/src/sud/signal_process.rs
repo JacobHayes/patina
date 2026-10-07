@@ -11,19 +11,17 @@ use super::*;
 /// [`prctl_option`].
 pub(super) const PR_GET_AUXV: u32 = 0x4155_5856;
 
-/// The shim's own auxv region is published by C's
-/// `patina_sud_determinize_at_random` before the SUD probe, independently of SUD
-/// support. The later vDSO scrub mutates it in place before SUD arms. It is the
+/// The shim's own auxv region is published by startup's AT_RANDOM
+/// determinization (`posix::lifecycle`) before the SUD probe, independently of
+/// SUD support. The later vDSO scrub mutates it in place before SUD arms. It is the
 /// base pointer of the initial-stack aux array and its byte length through the
 /// terminating `AT_NULL` pair
-/// (inclusive). OWNED by Rust and written by C — the same C→Rust ownership
-/// direction as [`crate::PATINA_SUD_ARMED`], so the lib's own test binary (which
-/// links no C) still defines the symbols. The `PR_GET_AUXV` dispatch row copies
+/// (inclusive). The `PR_GET_AUXV` dispatch row copies
 /// from here so a raw `prctl(PR_GET_AUXV)` serves the SAME determinized auxv the
 /// shim already produced in memory — `AT_RANDOM` replaced with seed-derived
 /// bytes and `AT_SYSINFO_EHDR` renamed to `AT_IGNORE` — instead of the kernel's
 /// pristine `saved_auxv`, which would reintroduce the entropy / vDSO escape
-/// (SUD-DESIGN.md §6, §9). `0` until C captures it; a trap seeing `0` fails
+/// (SUD-DESIGN.md §6, §9). `0` until startup captures it; a trap seeing `0` fails
 /// closed rather than serve garbage (see [`sys_prctl`]).
 #[unsafe(no_mangle)]
 pub static PATINA_SUD_AUXV_BASE: AtomicUsize = AtomicUsize::new(0);
@@ -31,8 +29,8 @@ pub static PATINA_SUD_AUXV_BASE: AtomicUsize = AtomicUsize::new(0);
 #[unsafe(no_mangle)]
 pub static PATINA_SUD_AUXV_LEN: AtomicUsize = AtomicUsize::new(0);
 
-/// The value of the kernel's auxv entry `key`, from the region published by
-/// `patina_sud_determinize_at_random` before the SUD probe. The later vDSO scrub
+/// The value of the kernel's auxv entry `key`, from the region published at
+/// startup before the SUD probe. The later vDSO scrub
 /// mutates this array in place; return its current value if it has one.
 pub(crate) fn auxv_value(key: u64) -> Option<u64> {
     let base = PATINA_SUD_AUXV_BASE.load(Ordering::Relaxed);
@@ -41,7 +39,7 @@ pub(crate) fn auxv_value(key: u64) -> Option<u64> {
         return None;
     }
     // SAFETY: the initial stack's aux array remains mapped for the process
-    // lifetime. `patina_sud_determinize_at_random` publishes it before the SUD
+    // lifetime. Startup publishes it before the SUD
     // probe, and the later vDSO scrub may mutate its contents in place.
     let pairs = unsafe { std::slice::from_raw_parts(base as *const [u64; 2], len / 16) };
     pairs.iter().find(|pair| pair[0] == key).map(|pair| pair[1])
@@ -181,7 +179,7 @@ fn prctl_get_auxv(arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64 {
         );
     }
     // SAFETY: `base`/`len` describe the shim's own auxv region on the initial
-    // stack, published by `patina_sud_determinize_at_random`. The later vDSO
+    // stack, published at startup. The later vDSO
     // scrub mutates it in place before SUD arms; the storage stays valid for
     // this synchronous dispatch.
     let saved = unsafe { std::slice::from_raw_parts(base as *const u8, len) };

@@ -136,7 +136,7 @@ pub extern "C" fn patina_in_teardown() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-/// Linux interposer-engagement canary. `patina_finalize_atexit` (patina_posix.c)
+/// Linux interposer-engagement canary. The atexit finalizer (`posix::lifecycle`)
 /// calls this from the `atexit` hook, which glibc runs AFTER the thread-local
 /// destructors on every exit-chain path that reaches it. On Linux the teardown
 /// flag MUST already be set by then — the natural `main` return sets it through

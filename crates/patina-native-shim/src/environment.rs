@@ -130,8 +130,7 @@ pub extern "C" fn patina_env_write_gate() -> c_int {
 /// no C layer is linked (direct C-ABI embedders and the Rust lib tests). Stored
 /// as a data pointer because Rust has no atomic function-pointer type. The
 /// dependency points C→Rust: the Rust lib's own test binary links no C
-/// objects, so naming `environ`'s owner here would leave it undefined (the
-/// same trap documented for `PATINA_SUD_ARMED`).
+/// objects, so naming `environ`'s owner here would leave it undefined.
 static ENVIRON_INSTALLER: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 type EnvironInstaller = unsafe extern "C" fn(*mut *mut c_char);
