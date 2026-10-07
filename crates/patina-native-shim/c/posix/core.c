@@ -125,9 +125,6 @@ _Static_assert(TASK_BASIC_INFO_64 == 5, "Rust x86 Basic64 flavor");
 extern void patina_stdio_flush_at_exit(void);
 extern size_t patina_stdio_take_pending(const void **bytes);
 
-/* Rust-owned entropy implementations shared with dlsym. */
-extern int patina_deterministic_getentropy(void *destination, size_t length);
-extern ssize_t patina_deterministic_getrandom(void *destination, size_t length, unsigned int flags);
 #ifdef __linux__
 /*
  * zstd's static library references these weak tracing hooks (Linux corpus only;

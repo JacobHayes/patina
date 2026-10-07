@@ -1129,7 +1129,7 @@ extern void *__real_dlsym(void *handle, const char *symbol);
 
 static patina_main_fn patina_real_main;
 /* The program's argv[0], which glibc's dlerror names a failed lookup by. */
-static const char *patina_program_path;
+__attribute__((visibility("hidden"))) const char *patina_program_path;
 
 /*
  * The main thread's pthread_exit unwinds out of `main` into glibc's

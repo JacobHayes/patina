@@ -13,7 +13,7 @@
 //! netlink dumps, net/netlink covers those). The scenario reaches both
 //! symbols through `dlsym`, a program's other way to them: the shim defines
 //! both, and under patina `dlsym` answers its own definitions
-//! (c/posix/dlsym.c `patina_dlsym_route`).
+//! (src/posix/dlsym.rs `patina_dlsym_route`).
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{ARPHRD_LOOPBACK, IfField, Probe, SIOCGIFFLAGS, SIOCGIFINDEX, family_name};

@@ -283,7 +283,7 @@ pub(crate) mod hostapi {
 
     // The real glibc resolver, reached through the `-Wl,--wrap=dlsym` alias
     // `__real_dlsym`. Guest and std `dlsym` references bind to the shim's
-    // `__wrap_dlsym` (c/posix/dlsym.c), which answers only from its routing
+    // `__wrap_dlsym` (src/posix/dlsym/linux.rs), which answers only from its routing
     // table of shim definitions; only this shim-internal path
     // reaches the real resolver. Any consumer of the shim staticlib that drives a
     // host vehicle (managed threads / trace-fd I/O / baton) must link

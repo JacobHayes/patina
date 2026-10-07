@@ -411,7 +411,7 @@ forwards into the same dispatcher instead of its two-number allowlist.
   scenarios reach `getifaddrs`/`freeifaddrs` and the
   `__recv_chk`/`__recvfrom_chk`/`__poll_chk`/`__ppoll_chk` fortify spellings
   through `dlsym`, which under patina answers the shim's own definitions
-  (c/posix/dlsym.c), so each is defined in the shim and routed there.
+  (src/posix/dlsym.rs), so each is defined in the shim and routed there.
   `uname`, `gethostname` and `res_init` are host identity (the time +
   identity family).
   Status: one socket model (`thread/net.rs` and `thread/net/*`) behind both

@@ -96,7 +96,7 @@ impl Probe {
     /// probe binary cannot import it (the pre-run audit would refuse the
     /// whole binary), so the libc vehicle reaches glibc's definition
     /// dynamically, and under patina `dlsym` answers only what the shim
-    /// defines (c/posix/dlsym.c `__wrap_dlsym`).
+    /// defines (src/posix/dlsym.rs `__wrap_dlsym`).
     pub fn resolve(&self, symbol: &str) -> Option<*mut libc::c_void> {
         let c = cstr(symbol);
         // SAFETY: a NUL-terminated name looked up in the global scope.

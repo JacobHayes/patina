@@ -1,6 +1,6 @@
 # Arc: shrinking the native C shim
 
-Status: wave 3 stdio and Darwin adapters are Rust; dynamic lookup is next, 2026-10-07.
+Status: wave 3 complete: stdio, Darwin adapters and dynamic lookup are Rust, 2026-10-07.
 The frame-lifetime audit below records a pre-existing hazard; this wave neither
 introduces nor closes it.
 Focused evidence below is separate from the full landing battery.
@@ -63,7 +63,7 @@ not retain their Darwin definitions.
 | init (Linux): `patina_fault_front`, `patina_tsc_sigsegv`, `patina_guest_signal`, `patina_run_guest_handler`, `patina_tsc_take_real_fault` | Stay C, reduce | Guest/displaced signal handlers can siglongjmp or restore context. Keep their frame/canary storage and callback sandwich; move routing, decode and bookkeeping into returning Rust helpers. |
 | init: `patina_fault_stop` | Stay C | Emergency path reached from those C frames uses only pre-resolved host calls. A named exported Rust bridge must enter PanicScope, touching TLS/panic state on a path that must avoid both; retain the direct call rather than adding a separate unguarded callback channel. Do not add a guard exception. |
 | dlsym: `PATINA_ROUTE_ALIAS` expansions for retained C definitions | Stay C, generated | GNU alias targets must be in the same translation unit. Emit only residual C aliases after their definitions in the umbrella; do not alias a C definition from a Rust object. |
-| dlsym: `patina_dlsym_route`, `patina_dlerror_set`, `__wrap_dlsym`, `dlerror`, TLS storage, table/entry generation and all other macros | Move | Rust-generated route table references hidden aliases; generate Rust assembly aliases beside Rust definitions and typed extern references to remaining C aliases. |
+| dlsym: `patina_dlsym_route`, `patina_dlerror_set`, `__wrap_dlsym`, `dlerror`, TLS storage, table/entry generation and all other macros | Move | Rust-generated route table references hidden aliases; generate Rust assembly aliases beside Rust definitions and opaque address declarations for remaining C aliases (never dereferenced). |
 | init: all remaining functions, data and machinery | Move | Includes `patina_main_exited`, cleanup resolver/push/pop helpers, SUD decode/arming, TSC/front setup, auxv/maps parser, constructor/finalizer, host aliases and stack-switch assembly. Keep helper calls returning before C invokes guests; never move a guest callback into the helper. |
 
 This is a **frame-lifetime** decision, not a claim that Rust cannot express
@@ -389,32 +389,31 @@ ABI (27) and signals (8). These passing checks do not close the lifetime hazard;
 
 ## Wave 3 ownership
 
-The complete stdio engine is `src/posix/stdio.rs` and its Linux buffering module:
-sentinels, state, scheduler locks, flush/salvage callbacks and fixed writers move
-together. Variadic doors call it directly; `patina_format_bridge`, the C sentinel
-lookup/fatal diagnostic, and temporary fstat/isatty bridges are removed. Formatting
-uses a private host vsnprintf with a VaList clone before the stack pass. The tiny
-Linux `__assert_fail` abort door stays C: its Rust formatter returns
-before `patina_abort` inspects guest panic ownership and delivers SIGABRT, retaining
-the existing handler frame lifetime. Startup retains the callback declarations
-until wave 4.
+The complete stdio engine moves to `src/posix/stdio.rs` and its Linux module:
+sentinels, buffers, scheduler locks, flush/salvage callbacks and fortify writers.
+Variadic doors call Rust directly; the format bridge, C sentinel lookup/fatal
+helper and temporary fstat/isatty bridges are gone. Private host vsnprintf takes
+a VaList cloned before the stack pass; the heap pass uses the clone. The tiny
+Linux `__assert_fail` door stays C: Rust formatting returns before guest SIGABRT
+delivery, preserving panic ownership and handler frame lifetime.
 
-Stdio evidence: Linux native ABI (46), signals (38), conformance (196), platform
-e2e (7), shim library (302), registry (9) and host aliases (5) pass. macOS native
-ABI (28), signals (8), platform e2e (12) and shim library (94) pass; conformance has no macOS cases.
-The new portable failed-stream/formatting test rejects a compiled missing-error-flag
-bug (exit 3) then passes repeats and record/replay. Three-target guest-export
-clippy, crate check, formatting, structure and file-size checks pass. C: 3,812 →
-3,121 lines after stdio.
+Darwin adapters/globals and registry-generated framework traps move to
+`src/posix/darwin.rs` and its task/inventory modules; none stays C. Mach layouts
+absent from libc have Rust/SDK assertions. VM statistics uses the SDK layout
+explicitly because pinned libc already includes newer tail fields. Dynamic
+lookup and dlerror TLS move to `src/posix/dlsym.rs` and its Linux module. The
+existing registry generator emits Rust routes to opaque hidden addresses, never
+called through invented signatures. `dlsym.c` retains only same-object GNU aliases
+for C exports, whose targets must share a translation unit. Startup callback
+declarations and hidden program-path storage stay with C until wave 4.
 
-Darwin adapters and globals move to `src/posix/darwin.rs` and its task/inventory
-modules. Existing registry-generated framework/introspection traps now emit Rust;
-registry rows and spellings are unchanged. Mach basic-info layouts absent from
-libc have matching Rust and SDK C assertions. The SDK VM-statistics layout is
-explicit too: libc already includes newer tail fields. No Darwin implementation
-stays C.
-
-Darwin evidence: three-target guest-export clippy, crate check/library tests,
-formatting, structure and file-size pass. Linux native suites and registry/host
-alias gates pass; macOS native ABI (28), signals (8), containment (18), platform
-e2e (12), library (94), registry (7) and host aliases (5) pass. C: 2,420 lines.
+Evidence: Linux native ABI (46), signals (38), conformance (196), stdio/platform
+e2e (7), shim library (302), registry and host-alias gates pass. macOS ABI (28),
+signals (8), containment (18), native e2e (98), library (94), registry and
+host-alias gates pass; conformance has no macOS cases. The one new portable
+failed-stream/formatting test rejects a compiled missing-error-flag bug (exit 3),
+then passes repeats and record/replay. Existing opaque-buffer probes now supply
+ABI-aligned storage. Three-target guest-export clippy, crate check, formatting,
+structure and file-size gates pass; Linux arm64 is compilation evidence only.
+The final fast battery passes (20 rungs); the coordinator runs the full gate.
+Shim C: **3,812 → 2,261 physical lines**.

@@ -1,4 +1,4 @@
-//! Generate the staged C translation unit and its routing table from owned data.
+//! Generate retained C staging, hidden aliases and Rust routes from owned data.
 use std::fmt::Write;
 use std::path::Path;
 
@@ -43,8 +43,6 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
     std::fs::write(out.join("darwin_traps.rs"), darwin_traps).unwrap();
     let mut ordinary = Vec::new();
     let mut x86 = Vec::new();
-    let mut assembly = Vec::new();
-    let mut assembly_x86 = Vec::new();
     for row in symbols {
         if !row.linux || !row.routed || row.name == "__wrap_dlsym" {
             continue;
@@ -361,6 +359,7 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
                 | "ioctl"
                 | "ptrace"
                 | "prctl"
+                | "dlerror"
                 | "vfprintf"
                 | "fputs"
                 | "fwrite"
@@ -385,24 +384,16 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
                 | "__open"
                 | "__open64"
         ) {
-            if row.only_x86 {
-                assembly_x86.push(row.name.as_str());
-            } else {
-                assembly.push(row.name.as_str());
-            }
+            // Rust/assembly definitions already carry their own hidden aliases.
         } else if row.only_x86 {
             x86.push(row.name.as_str());
         } else {
             ordinary.push(row.name.as_str());
         }
     }
-    let mut routing = String::from("/* Generated from the symbol registry. */\n#ifdef __linux__\n");
-    for (name, mut rows) in [
-        ("PATINA_ROUTED", ordinary),
-        ("PATINA_ROUTED_X86_64", x86),
-        ("PATINA_ROUTED_ASM", assembly),
-        ("PATINA_ROUTED_ASM_X86_64", assembly_x86),
-    ] {
+    let mut routing =
+        String::from("/* Same-object C aliases from the symbol registry. */\n#ifdef __linux__\n");
+    for (name, mut rows) in [("PATINA_ROUTED", ordinary), ("PATINA_ROUTED_X86_64", x86)] {
         rows.sort_unstable();
         write!(routing, "#define {name}(X)").unwrap();
         for row in rows {
@@ -410,6 +401,35 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         }
         routing.push('\n');
     }
+    let mut rust_routes = String::from(
+        "// Hidden addresses generated from the symbol registry.\nunsafe extern \"C\" {\n",
+    );
+    for row in symbols {
+        if !row.linux || !row.routed || row.name == "__wrap_dlsym" {
+            continue;
+        }
+        if row.only_x86 {
+            rust_routes.push_str("#[cfg(target_arch = \"x86_64\")]\n");
+        }
+        writeln!(rust_routes, "static patina_route_{}: u8;", row.name).unwrap();
+    }
+    rust_routes.push_str("static patina_route_dlsym: u8;\n}\npub(super) fn route(name: &CStr) -> *mut c_void {\n    match name.to_bytes() {\n");
+    for row in symbols {
+        if !row.linux || !row.routed || row.name == "__wrap_dlsym" {
+            continue;
+        }
+        if row.only_x86 {
+            rust_routes.push_str("#[cfg(target_arch = \"x86_64\")]\n");
+        }
+        writeln!(
+            rust_routes,
+            "b\"{}\" => (&raw const patina_route_{}).cast_mut().cast(),",
+            row.name, row.name
+        )
+        .unwrap();
+    }
+    rust_routes.push_str("b\"dlsym\" => (&raw const patina_route_dlsym).cast_mut().cast(),\n_ => core::ptr::null_mut(),\n}\n}\n");
+    std::fs::write(out.join("dlsym_routes.rs"), rust_routes).unwrap();
     routing.push_str("#endif\n");
     std::fs::write(out.join("patina_posix.c"), umbrella).unwrap();
     std::fs::write(out.join("posix_sources.rs"), sources).unwrap();

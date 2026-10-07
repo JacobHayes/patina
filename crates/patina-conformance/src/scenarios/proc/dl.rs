@@ -234,7 +234,7 @@ pub const SCENARIO: Scenario = Scenario {
         Gap {
             status: Status::ByDesign,
             vehicles: &[Vehicle::Libc],
-            what: "dlsym never answers a host definition: gnu_get_libc_version, glibc's own, resolves to NULL (c/posix/dlsym.c __wrap_dlsym over patina_dlsym_route, which answers only the names the shim defines)",
+            what: "dlsym never answers a host definition: gnu_get_libc_version, glibc's own, resolves to NULL (src/posix/dlsym.rs __wrap_dlsym over patina_dlsym_route, which answers only the names the shim defines)",
             failure: Failure::Differs(&[
                 Difference::field(6, "dlsym", "fields.resolved", Observed::Bool(false)),
                 Difference::check(7, "gnu_get_libc_version resolves"),

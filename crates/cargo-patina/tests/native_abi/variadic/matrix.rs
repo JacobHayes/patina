@@ -265,7 +265,7 @@ fn assert_symbol_ownership(
             "C still defines {symbol}"
         );
         if cfg!(target_os = "linux") && !symbol.starts_with("patina_") {
-            let route = definitions(&archive_nm.stdout, &format!("patina_route_{symbol}"));
+            let route = definitions(&archive_nm.stdout, &route_name(symbol));
             assert_eq!(
                 route, rust,
                 "hidden route shares {symbol}'s object and address"
@@ -273,6 +273,16 @@ fn assert_symbol_ownership(
         }
         eprintln!("nm {strategy}: {symbol}: one strong Rust definition, zero C definitions");
     }
+}
+
+fn route_name(symbol: &str) -> String {
+    // --wrap changes the definition spelling; lookup still names libc dlsym.
+    let symbol = if symbol == "__wrap_dlsym" {
+        "dlsym"
+    } else {
+        symbol
+    };
+    format!("patina_route_{symbol}")
 }
 
 #[cfg(target_os = "linux")]
@@ -303,7 +313,7 @@ fn assert_hidden_routes(
         if symbol.starts_with("patina_") {
             continue;
         }
-        let name = format!("patina_route_{symbol}");
+        let name = route_name(symbol);
         assert_eq!(
             routes.get(&name).map(Vec::as_slice),
             Some([2].as_slice()),

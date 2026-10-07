@@ -10,7 +10,7 @@
 //!
 //! libc only, and through `dlsym` (a program may reach them that way as
 //! well as by linking): the shim defines all four, and under patina `dlsym`
-//! answers its own definitions (c/posix/dlsym.c `patina_dlsym_route`). The
+//! answers its own definitions (src/posix/dlsym.rs `patina_dlsym_route`). The
 //! overflow path (`__chk_fail`, SIGABRT) is not exercised.
 //!
 //! Reads right after a send rely on loopback delivery before the send

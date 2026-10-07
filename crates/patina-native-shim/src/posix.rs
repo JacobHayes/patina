@@ -4,6 +4,7 @@ use core::ffi::c_int;
 
 #[cfg(target_os = "macos")]
 mod darwin;
+mod dlsym;
 mod entropy;
 mod fd_io;
 mod fs;

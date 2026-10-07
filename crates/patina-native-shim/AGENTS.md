@@ -15,7 +15,7 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 - Dynamic resolution (`dlsym` on Linux) is a second, non-static path into libc:
   the guest never imports the name, so the pre-run audit cannot see it. It
   answers every name the shim defines as a libc contract (the registry's
-  `Modeled`/`Partial` rows; `build_support.rs` generates the routing header
+  `Modeled`/`Partial` rows; `build_support.rs` generates Rust routes and the retained C alias header
   from the symbol inventory) and NULL otherwise — never a
   deny-trapped name, a control-plane entry or a host entry. The table returns
   the code the static linker would have bound the caller to, and never a
