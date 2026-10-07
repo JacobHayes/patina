@@ -5,8 +5,9 @@
 //! remain consistent. pthread returns error numbers directly, not via errno.
 //!
 //! Linux keeps the frames glibc's forced unwind crosses in
-//! `c/posix/thread_sync.c`: the thread body, pthread_exit, the acting
-//! cancellation doors and pthread_once, which calls the once helpers here.
+//! `c/posix/thread_sync.c`: the thread body, pthread_exit and the acting
+//! cancellation doors. pthread_once is C on both platforms, so no Rust frame
+//! is live while the guest's init routine runs; it calls the once helpers here.
 use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_void};
 use core::ptr::null_mut;
@@ -405,7 +406,6 @@ unsafe fn once_settle(entry: *mut Once, state: c_int) {
 ///
 /// # Safety
 /// `entry` names writable storage.
-#[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_once_begin(
     control: *mut libc::pthread_once_t,
@@ -425,7 +425,6 @@ pub unsafe extern "C" fn patina_once_begin(
 ///
 /// # Safety
 /// `entry` is one [`patina_once_begin`] claimed.
-#[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_once_done(entry: *mut c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
@@ -454,31 +453,11 @@ core::arch::global_asm!(
     ".hidden patina_once_reset",
 );
 
-/// macOS: no forced unwind reaches the init routine (pthread_exit and
-/// cancellation fail closed), so the whole door is Rust.
-///
-/// # Safety
-/// As pthread_once's.
 #[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_once(
-    control: *mut libc::pthread_once_t,
-    init_routine: extern "C" fn(),
-) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    match unsafe { once_begin(control as usize) } {
-        Err(errno) => errno,
-        Ok(entry) if entry.is_null() => 0,
-        Ok(entry) => {
-            {
-                let _guest = crate::panic_boundary::PanicScope::suspend();
-                init_routine();
-            }
-            unsafe { once_settle(entry, DONE) };
-            0
-        }
-    }
-}
+core::arch::global_asm!(
+    ".private_extern _patina_once_begin",
+    ".private_extern _patina_once_done",
+);
 
 /// The x86_64 thread-pointer rows' glibc wrappers (glibc declares neither in a
 /// header). Both enter the one model (`src/sud/thread_pointer.rs`), which

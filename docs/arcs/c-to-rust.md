@@ -53,8 +53,8 @@ not retain their Darwin definitions.
 | core: `patina_exit_thread`, `patina_act_on_cancel`, `PATINA_CANCEL_ENTER`, `PATINA_CANCEL_LEAVE` | Stay C | Invoke host pthread_exit only after model calls return; glibc forced unwind crosses these frames. |
 | core: everything else, including `PATINA_CANCEL_POINT`, `patina_internal_lock/unlock`, `fail_int/size`, `patina_at`, `signal_result`, `patina_posix_deny`, `patina_fortify_fail`, `patina_chk_fail` | Move | Typed private helpers; pending cancellation refusal does not unwind. Retain only includes/prototypes required to compile C seams. |
 | thread_sync (Linux): `patina_thread_body`, `pthread_exit`, `pthread_cancel`, `pthread_setcancelstate`, `pthread_setcanceltype`, `pthread_testcancel` | Stay C, reduce | Start routine or an acting cancellation can force-unwind these frames; Rust model calls must already have returned. |
-| thread_sync (Linux): `pthread_once` | Stay C, reduce | Owns the cleanup record across `init_routine`; guest pthread_exit/cancellation resets the once state during unwinding. |
-| thread_sync: `patina_once_reset`, once registry/state/locking, all remaining functions and Darwin variants | Move | Rust state machine and returning cleanup callback; keep cleanup record storage and guest invocation in the Linux C caller. Darwin exit/cancel retains its current refusal contract. |
+| thread_sync: `pthread_once` | Stay C, reduce | Calls `init_routine` with no Rust frame live (a guest `longjmp` out of it skips no destructor). Linux also owns the cleanup record across it; guest pthread_exit/cancellation resets the once state during unwinding. |
+| thread_sync: `patina_once_reset`, once registry/state/locking, all remaining functions and Darwin variants | Move | Rust state machine and returning cleanup callback; keep cleanup record storage (Linux) and guest invocation in the C caller. Darwin exit/cancel retains its current refusal contract. |
 | time (Linux): `nanosleep`, `clock_nanosleep`, `sleep` | Stay C, reduce | Acting cancellation surrounds a Rust sleep call. Keep only entry/leave and final result handling in C. |
 | time (Linux): `patina_vdso_store`, `patina_clock_gettime_libc`, `clock_gettime`, `__clock_gettime`, `clock_getres` | Stay C, reduce | vDSO-compatible stores intentionally fault outside shim ownership. A live Rust export guard would turn the caller's SIGSEGV into a shim fault; a handler can also siglongjmp over that store. Keep outer/store seam; move clock decisions/calculation. |
 | time: `time`, `patina_gettimeofday`, `gettimeofday`, `__gettimeofday` (where defined) | Stay C, reduce | These also store into caller memory after Rust model calls return. Preserve their outside-scope fault/handler behavior; move clock calculation. Extend the existing libc-fault detector before shrinking these seams. |
@@ -427,9 +427,10 @@ their caller-memory stores on both platforms. The libc-fault detector was
 extended first: `time/libc_fault` now also checks that both fault in the caller.
 
 `src/posix/thread_sync.rs` owns the pthread adapters, the once registry and
-state machine, and the Darwin doors. Linux keeps the thread body, exit,
-cancellation doors and `pthread_once`, whose cleanup record and guest call stay
-in C around returning Rust claim/settle/reset helpers.
+state machine, and the Darwin doors other than `pthread_once`. Linux keeps the
+thread body, exit and cancellation doors in C. `pthread_once` stays C on both
+platforms, so the guest's init routine runs with no Rust frame live: its guest
+call (and Linux's cleanup record) wrap returning Rust claim/settle/reset helpers.
 
 `src/posix/lifecycle/` owns the constructor (an `.init_array.00101` /
 `__mod_init_func` entry), the atexit finalizer, start preparation in the

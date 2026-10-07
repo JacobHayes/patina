@@ -1,8 +1,9 @@
 /*
  * Threads: the frames glibc's forced unwind (pthread_exit, an acting
- * cancellation) crosses. The pthread adapters, pthread_once's state and the
- * Darwin doors are Rust (src/posix/thread_sync.rs); these C bodies call its
- * returning helpers before anything can leave nonlocally.
+ * cancellation) crosses, and pthread_once's guest call on both platforms. The
+ * pthread adapters, pthread_once's state and the other Darwin doors are Rust
+ * (src/posix/thread_sync.rs); these C bodies call its returning helpers before
+ * anything can leave nonlocally.
  *
  * This file is one family slice of the native shim's single C translation unit:
  * `c/patina_posix.c` #includes every slice under `c/posix/` in a fixed order, so the
@@ -61,27 +62,37 @@ void pthread_testcancel(void) {
     if (patina_cancel_test()) patina_act_on_cancel();
 }
 
+#endif
+
 /* The Rust once state (src/posix/thread_sync.rs): a claimed entry, or NULL
- * once done; then done, or fresh again when the routine never returns. */
+ * once done; then done, or (Linux) fresh again when the routine never
+ * returns. */
 extern int patina_once_begin(pthread_once_t *once_control, void **entry);
 extern void patina_once_done(void *entry);
+#ifdef __linux__
 extern void patina_once_reset(void *entry);
+#endif
 
 /*
- * pthread_once keeps the cleanup record around the guest's init routine: one
- * that never returns (pthread_exit, or a cancellation acting in it) leaves the
- * control fresh again as the unwind leaves this frame, glibc's
- * clear_once_control (nptl pthread_once.c).
+ * pthread_once calls the guest's init routine from C on both platforms, with
+ * every Rust helper returned. Linux keeps the cleanup record around it: a
+ * routine that never returns (pthread_exit, or a cancellation acting in it)
+ * leaves the control fresh again as the unwind leaves this frame, glibc's
+ * clear_once_control (nptl pthread_once.c). Darwin's pthread_exit and
+ * cancellation fail closed, so no forced unwind reaches the routine there.
  */
 int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
     void *entry;
     int rc = patina_once_begin(once_control, &entry);
     if (rc != 0 || entry == NULL) return rc;
+#ifdef __linux__
     struct _pthread_cleanup_buffer reset;
     patina_cleanup_push(&reset, patina_once_reset, entry);
+#endif
     init_routine();
+#ifdef __linux__
     patina_cleanup_pop(&reset, 0);
+#endif
     patina_once_done(entry);
     return 0;
 }
-#endif
