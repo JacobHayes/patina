@@ -249,11 +249,19 @@ fn main() {
     let port = unsafe { mach_host_self() };
 
     const HOST_VM_INFO64: c_int = 4;
-    let mut stat = [0u8; 1024];
+    let mut stat = [u64::MAX; 128]; // 8-byte aligned, with unwritten bytes visible.
     let mut count: c_uint = 256;
     let vm = unsafe {
         host_statistics64(port, HOST_VM_INFO64, stat.as_mut_ptr() as *mut c_void, &mut count)
     };
+    assert_eq!(vm, 0);
+    assert_eq!(count, 62); // The SDK's 248-byte reply, in 32-bit words.
+    let fields = unsafe {
+        std::slice::from_raw_parts(stat.as_ptr().cast::<u32>(), count as usize)
+    };
+    assert_eq!(&fields[..4], &[524288, 786432, 524288, 262144],
+        "free, active, inactive and wired pages must occupy SDK offsets 0, 4, 8, 12");
+    assert!(fields[4..].iter().all(|&word| word == 0), "other VM statistics must be zero");
 
     const PROCESSOR_CPU_LOAD_INFO: c_int = 2;
     let mut ncpu: c_uint = 0;
