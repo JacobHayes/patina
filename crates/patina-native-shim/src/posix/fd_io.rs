@@ -2,7 +2,7 @@
 use super::{cancel, error, model_result, size_result};
 use core::ffi::{c_int, c_void};
 #[cfg(target_os = "linux")]
-mod linux;
+pub(super) mod linux;
 
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]

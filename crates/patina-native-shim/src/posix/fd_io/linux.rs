@@ -252,7 +252,7 @@ pub unsafe extern "C" fn pipe2(pipefd: *mut c_int, flags: c_int) -> c_int {
     }
 }
 
-pub(super) use terminal::isatty_impl;
+pub(in crate::posix) use terminal::isatty_impl;
 core::arch::global_asm!(
     ".globl patina_route_pread64",
     ".hidden patina_route_pread64",

@@ -5,7 +5,7 @@ use core::ffi::{CStr, c_int};
 mod fcntl;
 mod ioctl;
 pub(crate) mod open;
-mod stdio;
+pub(crate) mod stdio;
 
 /// An unresolved private reference in the POSIX object extracts this member,
 /// even when an earlier libc/libSystem already offered the public symbols.
@@ -52,7 +52,7 @@ pub extern "C" fn patina_variadic_test_arm(family: u32, fault: u32) {
     TEST_FAULT.store(family * 256 + fault, std::sync::atomic::Ordering::SeqCst);
 }
 
-fn fault(family: u32) -> bool {
+pub(crate) fn fault(family: u32) -> bool {
     #[cfg(feature = "test-panic")]
     {
         use std::sync::atomic::Ordering;

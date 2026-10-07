@@ -5,7 +5,7 @@
 //! `patina_*` C ABI entry points over the deterministic runtime; the bundled C
 //! glue (the staged `patina_posix.c` and its slices under `c/posix/`,
 //! exported as [`POSIX_C_SOURCE`] and [`POSIX_C_FAMILY_SOURCES`]) retains startup,
-//! callback, clock-store, cancellation and stdio seams. Guest-only Rust adapters
+//! callback, clock-store and cancellation seams. Guest-only Rust adapters
 //! provide ordinary libc symbols over the same prefixed models. The prefixed
 //! Rust surface
 //! exports ambient libc names only in the guest build (`patina_posix_exports`), so

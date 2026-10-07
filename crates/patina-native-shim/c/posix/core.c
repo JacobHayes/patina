@@ -24,6 +24,7 @@
 #include "patina_native.h"
 
 #include <arpa/inet.h>
+#include <assert.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -92,6 +93,7 @@
 #include <unistd.h>
 
 #ifdef __APPLE__
+_Static_assert(sizeof(pthread_mutex_t) == 64 && offsetof(pthread_mutex_t, __sig) == 0 && _PTHREAD_RECURSIVE_MUTEX_SIG_init == 0x32AAABA2, "Rust recursive stream mutex initializer");
 #include <crt_externs.h>
 #include <libproc.h>
 #include <mach/host_info.h>
@@ -109,30 +111,11 @@
 
 #endif
 
-/* Defined in stdio.c and registered at startup (init.c): the flush the
+/* Rust stream callbacks registered at startup (init.c): the flush the
  * runtime makes on its exit paths, and the hand-over of buffered stdout the
  * runtime makes before every refusal ends the run. */
-static void patina_stdio_flush_at_exit(void);
-static size_t patina_stdio_take_pending(const void **bytes);
-
-/*
- * A lock the POSIX layer takes for libc's own state (a stream's `_IO_lock_t`,
- * the environment's `envlock`), over the scheduler's mutex so concurrent
- * threads queue on it: whether it was taken. After `main` returns only the root
- * task runs — every other task stays parked where it was, at a scheduling
- * point, with the state consistent — so there is nothing to exclude, and
- * waiting on a lock a parked task holds would be a scheduling operation past
- * the end of the run, which the runtime refuses. None is taken then, as
- * glibc's exit flush (`_IO_cleanup`) takes none.
- */
-static int patina_internal_lock(pthread_mutex_t *lock) {
-    if (patina_in_teardown()) return 0;
-    return patina_mutex_lock(lock) == 0;
-}
-
-static void patina_internal_unlock(pthread_mutex_t *lock, int held) {
-    if (held) (void)patina_mutex_unlock(lock);
-}
+extern void patina_stdio_flush_at_exit(void);
+extern size_t patina_stdio_take_pending(const void **bytes);
 
 /* Rust-owned entropy implementations shared with dlsym. */
 extern int patina_deterministic_getentropy(void *destination, size_t length);
@@ -262,7 +245,6 @@ extern int __ppoll_chk(struct pollfd *fds, nfds_t nfds, const struct timespec *t
 #include <pty.h>
 #include <sys/file.h>
 /* Rust-owned descriptor doors and the private buffering query. */
-extern int patina_isatty(int fd);
 extern int __open_2(const char *, int);
 extern int __open64_2(const char *, int);
 extern int __openat_2(int, const char *, int);
@@ -284,4 +266,3 @@ extern int __ptsname_r_chk(int fd, char *buf, size_t buflen, size_t nreal);
 extern int __ttyname_r_chk(int fd, char *buf, size_t buflen, size_t nreal);
 #endif
 
-extern int patina_fd_stat(int, struct patina_metadata *, struct stat *) __attribute__((visibility("hidden")));

@@ -437,7 +437,11 @@ const RUSAGE_SELF: c_int = 0;
 
 // ru_utime in microseconds: the first two 8-byte words of `struct rusage`.
 fn utime_us() -> i64 {
-    let mut buf = [0u8; 256];
+    // rusage contains native words; byte storage alone promises no alignment.
+    #[repr(C, align(8))]
+    struct Buffer([u8; 256]);
+    let mut aligned = Buffer([0; 256]);
+    let buf = &mut aligned.0;
     let rc = unsafe { getrusage(RUSAGE_SELF, buf.as_mut_ptr()) };
     assert_eq!(rc, 0, "getrusage failed");
     let seconds = i64::from_ne_bytes(buf[0..8].try_into().unwrap());

@@ -12,6 +12,7 @@ mod privileged;
 mod readiness;
 mod sched_identity;
 mod signal_process;
+pub(crate) mod stdio;
 
 pub(crate) use crate::variadic::{error, model_result};
 

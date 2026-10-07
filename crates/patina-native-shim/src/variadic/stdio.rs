@@ -1,14 +1,5 @@
-//! Variadic formatting doors; C retains FILE layouts, locking and vsnprintf.
+//! Variadic formatting doors into the private Rust stream engine.
 use core::ffi::{VaList, c_char, c_int};
-
-unsafe extern "C" {
-    fn patina_format_bridge(
-        stream: *mut libc::FILE,
-        format: *const c_char,
-        args: VaList<'_>,
-        stdout: c_int,
-    ) -> c_int;
-}
 
 #[cfg(target_os = "linux")]
 core::arch::global_asm!(
@@ -25,7 +16,7 @@ core::arch::global_asm!(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn printf(format: *const c_char, args: ...) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: the modeled C engine owns the stdout sentinel and copies VaList.
+    // SAFETY: the Rust engine owns the stdout sentinel and clones VaList.
     unsafe { format_to(core::ptr::null_mut(), format, args, 1) }
 }
 
@@ -38,7 +29,7 @@ pub unsafe extern "C" fn fprintf(
     args: ...
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: the bridge validates the sentinel before formatting.
+    // SAFETY: the engine validates the sentinel before formatting.
     unsafe { format_to(stream, format, args, 0) }
 }
 
@@ -67,5 +58,5 @@ unsafe fn format_to(
         let _ = unsafe { args.next_arg::<c_int>() };
     }
     // SAFETY: this is a real platform VaList, not a pointer-sized substitute.
-    unsafe { patina_format_bridge(stream, format, args, stdout) }
+    unsafe { crate::posix::stdio::format_to(stream, format, args, stdout != 0) }
 }

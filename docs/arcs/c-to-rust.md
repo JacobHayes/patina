@@ -1,6 +1,6 @@
 # Arc: shrinking the native C shim
 
-Status: wave 2 ordinary adapters are Rust; Linux abort retains its C entry, 2026-10-06.
+Status: wave 3 stdio is Rust; Darwin and dynamic lookup are next, 2026-10-07.
 The frame-lifetime audit below records a pre-existing hazard; this wave neither
 introduces nor closes it.
 Focused evidence below is separate from the full landing battery.
@@ -386,3 +386,23 @@ After the ownership simplification, the requested checks pass: Linux native ABI
 all three targets above, structure, formatting and file-size; mac-test native
 ABI (27) and signals (8). These passing checks do not close the lifetime hazard; its fix is the separate
 [signal frame safety design](signal-frame-safety.md), not yet implemented.
+
+## Wave 3 ownership
+
+The complete stdio engine is `src/posix/stdio.rs` and its Linux buffering module:
+sentinels, state, scheduler locks, flush/salvage callbacks and fixed writers move
+together. Variadic doors call it directly; `patina_format_bridge`, the C sentinel
+lookup/fatal diagnostic, and temporary fstat/isatty bridges are removed. Formatting
+uses a private host vsnprintf with a VaList clone before the stack pass. The tiny
+Linux `__assert_fail` abort door stays C: its Rust formatter returns
+before `patina_abort` inspects guest panic ownership and delivers SIGABRT, retaining
+the existing handler frame lifetime. Startup retains the callback declarations
+until wave 4.
+
+Stdio evidence: Linux native ABI (46), signals (38), conformance (196), platform
+e2e (7), shim library (302), registry (9) and host aliases (5) pass. macOS native
+ABI (28), signals (8), platform e2e (12) and shim library (94) pass; conformance has no macOS cases.
+The new portable failed-stream/formatting test rejects a compiled missing-error-flag
+bug (exit 3) then passes repeats and record/replay. Three-target guest-export
+clippy, crate check, formatting, structure and file-size checks pass. C: 3,812 →
+3,121 lines after stdio.

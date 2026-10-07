@@ -475,3 +475,72 @@ int main(void) {
         .validate()
         .unwrap();
 }
+
+#[test]
+fn formatted_stream_failure_and_replay() {
+    // Class pairing: fd/stdio conformance and the guarded export ownership matrix.
+    // A compiled failpoint suppresses the error flag; the same guest must reject it.
+    use common::native::{Guest, text};
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("stream.c");
+    std::fs::write(
+        &source,
+        r#"
+#include <stdio.h>
+#include <unistd.h>
+#include <errno.h>
+extern void patina_variadic_test_arm(unsigned, unsigned);
+int main(int argc, char **argv) {
+    (void)argv;
+    if (close(2)) return 1;
+    if (argc > 1) patina_variadic_test_arm(9, 2);
+    errno = 0;
+    if (fprintf(stderr, "%s", "failed") != EOF || errno != EBADF) return 2;
+    if (!ferror(stderr)) return 3;
+    clearerr(stderr);
+    if (ferror(stderr)) return 4;
+    return printf("formatted:%d:%.2f\n", 513, 1.25) == 19 ? 0 : 5;
+}
+"#,
+    )
+    .unwrap();
+    let object = common::compile_posix_object(dir.path());
+    let archive = common::shim_archive_with(&["test-panic"]);
+    let binary = dir.path().join("guest");
+    let mut cc = common::c_compiler();
+    cc.arg("-fno-builtin").arg(&source).arg(object).arg(archive);
+    if cfg!(target_os = "linux") {
+        cc.args(["-Wl,--wrap=dlsym", "-Wl,--gc-sections"]);
+    } else {
+        cc.arg("-Wl,-dead_strip");
+    }
+    assert_success(cc.arg("-o").arg(&binary).output().unwrap());
+    let guest = Guest { dir, binary };
+    let (mutated, _) = guest.record_standalone(&["bug"]);
+    assert_eq!(
+        mutated.status.code(),
+        Some(3),
+        "missing error flag must fail: {}",
+        text(&mutated.stderr)
+    );
+    let expected = b"formatted:513:1.25\n";
+    assert_eq!(guest.assert_seed_repeatability(1, 2, &[]), expected);
+    let (recorded, trace) = guest.record_standalone(&[]);
+    assert_eq!(assert_success(recorded).stdout, expected);
+    let first = std::fs::read(&trace).unwrap();
+    let (repeat, _) = guest.record_standalone(&[]);
+    assert_eq!(assert_success(repeat).stdout, expected);
+    assert_eq!(
+        std::fs::read(&trace).unwrap(),
+        first,
+        "record trace identity"
+    );
+    assert_eq!(
+        assert_success(guest.command(
+            "replay",
+            &[trace.to_str().unwrap(), "--fingerprint", "native-boundary"]
+        ))
+        .stdout,
+        expected
+    );
+}

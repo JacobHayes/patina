@@ -5,7 +5,7 @@ use crate::paths::RESOLVE_EMPTY_PATH;
 use crate::paths::{AT_FDCWD, RESOLVE_NOFOLLOW};
 use core::ffi::{c_char, c_int};
 mod directory;
-mod metadata;
+pub(super) mod metadata;
 mod paths;
 mod times;
 #[cfg(target_os = "linux")]

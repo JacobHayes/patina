@@ -23,7 +23,7 @@ const _: () = {
 };
 const IBAUD0: libc::tcflag_t = 0o20000000000;
 
-pub(in crate::posix::fd_io) fn isatty_impl(fd: c_int) -> c_int {
+pub(in crate::posix) fn isatty_impl(fd: c_int) -> c_int {
     let mut kernel = MaybeUninit::<KernelTermios>::uninit();
     c_int::from(
         unsafe {
@@ -34,12 +34,6 @@ pub(in crate::posix::fd_io) fn isatty_impl(fd: c_int) -> c_int {
             ))
         } == 0,
     )
-}
-// C stdio's buffering choice shares this private implementation.
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_isatty(fd: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    isatty_impl(fd)
 }
 /// # Safety
 /// `termios_p` is writable as tcgetattr requires.
@@ -422,7 +416,6 @@ pub unsafe extern "C" fn openpty(
     }
 }
 core::arch::global_asm!(
-    ".hidden patina_isatty",
     ".globl patina_route_tcgetattr",
     ".hidden patina_route_tcgetattr",
     ".set patina_route_tcgetattr, tcgetattr",

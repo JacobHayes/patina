@@ -133,7 +133,7 @@ pub(crate) mod hostapi {
     // SAFETY: as above.
     unsafe impl Sync for HostApi {}
 
-    fn resolve(name: &CStr) -> *mut c_void {
+    pub(crate) fn resolve(name: &CStr) -> *mut c_void {
         // SAFETY: `dlsym` with a valid NUL-terminated symbol name and the
         // `RTLD_NEXT` pseudo-handle.
         let ptr = unsafe { dlsym(RTLD_NEXT, name.as_ptr()) };
@@ -418,7 +418,7 @@ pub(crate) mod hostapi {
     // SAFETY: as above.
     unsafe impl Sync for HostApi {}
 
-    fn resolve(name: &CStr) -> *mut c_void {
+    pub(crate) fn resolve(name: &CStr) -> *mut c_void {
         // SAFETY: `__real_dlsym` (the wrap-provided real glibc `dlsym`) with a
         // valid NUL-terminated name and the `RTLD_NEXT` pseudo-handle.
         let ptr = unsafe { __real_dlsym(RTLD_NEXT, name.as_ptr()) };

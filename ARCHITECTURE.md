@@ -63,10 +63,9 @@ prefixed-ABI archives omit them. `src/variadic/` owns the variadic `fcntl`,
 applicable aliases. Rust also owns their fixed flag, errno and record-lock
 layout adapters. `src/posix/` owns ordinary entropy, memory, privileged,
 scheduler/identity, descriptor, readiness, network, filesystem and signal/process
-adapters; `src/posix_env.rs` owns the guest environment. The printf doors pass a
-`VaList` through a fixed bridge to the
-C modeled stream engine, which formats with `vsnprintf` and writes captured
-output. Linux's `syscall` entry captures raw ABI words in architecture-specific
+adapters and sentinel streams; `src/posix_env.rs` owns the guest environment.
+The printf doors pass a `VaList` directly to the Rust stream engine, which uses
+a private resolved host `vsnprintf` and writes through modeled descriptors. Linux's `syscall` entry captures raw ABI words in architecture-specific
 assembly in the Rust module, then calls a fixed Rust dispatcher; it preserves
 the guest-stack restoration path. These entries retain the registry's platform
 scope and use the existing models.
@@ -74,8 +73,7 @@ scope and use the existing models.
 The POSIX object's unique anchor extracts the Rust member even when libc has
 already supplied the public name. Guest archive compilation uses one codegen
 unit to keep that anchor, the definitions and Linux's hidden route aliases
-together; no whole-archive link is needed. C retains the modeled stdio engine,
-acting cancellation and thread-exit frames, guest callback frames, clock stores,
+together; no whole-archive link is needed. C retains acting cancellation and thread-exit frames, guest callback frames, clock stores,
 host-resolution vehicles and Darwin platform adapters. Linux abort retains a C
 entry so its Rust model can inspect caller panic ownership before entering its
 guard. The [C-to-Rust design](docs/arcs/c-to-rust.md) lists the retained seams;

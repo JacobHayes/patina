@@ -402,14 +402,6 @@ pub extern "C" fn strsignal(sig: c_int) -> *mut c_char {
     })
 }
 
-// These remain C-owned while the stream engine waits for wave 3. Expose the
-// existing static implementations with hidden visibility, without new wrappers.
-unsafe extern "C" {
-    static mut stderr: *mut libc::FILE;
-    fn patina_sentinel_fd(stream: *mut libc::FILE) -> c_int;
-    fn patina_stdio_trap(symbol: *const c_char) -> !;
-}
-
 /// # Safety
 /// prefix is null or a readable NUL-terminated string.
 #[unsafe(no_mangle)]
@@ -422,9 +414,9 @@ pub unsafe extern "C" fn psignal(sig: c_int, prefix: *const c_char) {
         numbered(&mut unknown, b"Unknown signal ", sig);
         unknown.as_ptr()
     };
-    let fd = unsafe { patina_sentinel_fd(stderr) };
+    let fd = super::super::stdio::sentinel_fd(unsafe { super::super::stdio::STDERR });
     if fd < 0 {
-        unsafe { patina_stdio_trap(c"psignal".as_ptr()) }
+        super::super::stdio::trap(c"psignal")
     }
     let mut parts = [libc::iovec {
         iov_base: ptr::null_mut(),

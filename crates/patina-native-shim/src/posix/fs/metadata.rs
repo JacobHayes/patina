@@ -134,23 +134,14 @@ unsafe fn fill_stat(
     }
 }
 
-/// Private bridge for C stdio's fstat-driven stream allocation. The metadata
-/// output preserves stdio's rdev-major probe alongside the libc stat output.
-/// # Safety
-/// Both outputs point to writable storage of their declared layouts.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_fd_stat(
+// Stream allocation needs both rdev-major and the target stat block size.
+pub(in crate::posix) unsafe fn fd_stat(
     fd: c_int,
     values: *mut PatinaMetadata,
     status: *mut libc::stat,
 ) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     unsafe { fill_stat(fd_metadata(fd, values), values, status) }
 }
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(".hidden patina_fd_stat");
-#[cfg(target_os = "macos")]
-core::arch::global_asm!(".private_extern _patina_fd_stat");
 
 unsafe fn access_impl(directory: c_int, path: *const c_char, mode: c_int) -> c_int {
     unsafe {
