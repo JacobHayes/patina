@@ -264,7 +264,7 @@ fn assert_symbol_ownership(
             definitions(&c_nm.stdout, symbol).is_empty(),
             "C still defines {symbol}"
         );
-        if cfg!(target_os = "linux") && !symbol.starts_with("patina_") {
+        if cfg!(target_os = "linux") && routed(symbol) {
             let route = definitions(&archive_nm.stdout, &route_name(symbol));
             assert_eq!(
                 route, rust,
@@ -273,6 +273,14 @@ fn assert_symbol_ownership(
         }
         eprintln!("nm {strategy}: {symbol}: one strong Rust definition, zero C definitions");
     }
+}
+
+/// Shim control-plane rows (startup, weak-hook stubs) carry no hidden route.
+fn routed(symbol: &str) -> bool {
+    use patina_dst_native_shim::registry::{SYMBOLS, SymbolStatus};
+    SYMBOLS
+        .iter()
+        .any(|row| row.name == symbol && row.status != SymbolStatus::ControlPlane)
 }
 
 fn route_name(symbol: &str) -> String {
@@ -309,10 +317,7 @@ fn assert_hidden_routes(
                 .push(st_other & 3);
         }
     }
-    for symbol in symbols {
-        if symbol.starts_with("patina_") {
-            continue;
-        }
+    for symbol in symbols.iter().filter(|symbol| routed(symbol)) {
         let name = route_name(symbol);
         assert_eq!(
             routes.get(&name).map(Vec::as_slice),

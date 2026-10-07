@@ -102,3 +102,31 @@ pub(crate) fn deny(message: &CStr) -> c_int {
     }
     error(libc::ENOSYS)
 }
+
+// zstd's static library references these weak tracing hooks (Linux corpus
+// only; the macOS zstd build config does not surface them). A begin() that
+// answers 0 disables tracing (zstd_trace.h), so these no-op strong
+// definitions satisfy the weak references and keep the names off the import
+// table. C linkage does not encode argument types: opaque pointers bind.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub extern "C" fn ZSTD_trace_compress_begin(_cctx: *const core::ffi::c_void) -> u64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    0
+}
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub extern "C" fn ZSTD_trace_compress_end(_ctx: u64, _trace: *const core::ffi::c_void) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+}
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub extern "C" fn ZSTD_trace_decompress_begin(_dctx: *const core::ffi::c_void) -> u64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    0
+}
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub extern "C" fn ZSTD_trace_decompress_end(_ctx: u64, _trace: *const core::ffi::c_void) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+}

@@ -1,8 +1,8 @@
 # Arc: shrinking the native C shim
 
-Status: wave 3 complete: stdio, Darwin adapters and dynamic lookup are Rust, 2026-10-07.
-The frame-lifetime audit below records a pre-existing hazard; this wave neither
-introduces nor closes it.
+Status: wave 4 complete: startup, lifecycle, clock calculation and pthread
+adapters are Rust; C keeps the enumerated seams, 2026-10-07. The frame-lifetime
+audit below records a pre-existing hazard; no wave introduces or closes it.
 Focused evidence below is separate from the full landing battery.
 
 ## Decision and inventory
@@ -417,3 +417,48 @@ ABI-aligned storage. Three-target guest-export clippy, crate check, formatting,
 structure and file-size gates pass; Linux arm64 is compilation evidence only.
 The final fast battery passes (20 rungs); the coordinator runs the full gate.
 Shim C: **3,812 → 2,261 physical lines**.
+
+## Wave 4 ownership
+
+`src/posix/time.rs` owns clock and sleep calculation, Darwin's clocks and
+sleeps, and `localtime_r`. Linux keeps the vDSO clock stores and the
+cancellation sandwiches around a Rust sleep; `time` and `gettimeofday` keep
+their caller-memory stores on both platforms. The libc-fault detector was
+extended first: `time/libc_fault` now also checks that both fault in the caller.
+
+`src/posix/thread_sync.rs` owns the pthread adapters, the once registry and
+state machine, and the Darwin doors. Linux keeps the thread body, exit,
+cancellation doors and `pthread_once`, whose cleanup record and guest call stay
+in C around returning Rust claim/settle/reset helpers.
+
+`src/posix/lifecycle/` owns the constructor (an `.init_array.00101` /
+`__mod_init_func` entry), the atexit finalizer, start preparation in the
+original order, cleanup push/pop, host resolution, the maps and auxv work, trap
+arming and the guest-handler assembly. Managed threads arm through
+`sud::arming` without weak symbols. The C object references the extraction
+anchor. Linux `__libc_start_main` and the main wrapper, the handler frames,
+`patina_tsc_take_real_fault` and `patina_fault_stop` remain C, reading
+Rust-owned hidden statics. ZSTD hooks are Rust; `core.c` keeps headers, layout
+assertions and the acting-cancellation glue.
+
+Two seams stay C beyond the table. The SIGSYS handler frame stays because its
+dispatch delivers guest handlers: Rust decodes and completes the trap around the
+C call, adding no Rust frame around delivery. The counter trap's instruction
+check and `patina_interrupted_sp` run before `patina_trap_enter`; a guarded Rust
+call there would take ownership first.
+
+Startup bridges with only Rust callers are module functions now. The route
+generator lists retained C definitions; the ownership matrix skips
+control-plane rows. A unit test covers the moved maps parser's glibc naming.
+
+Evidence: Linux native ABI (46), conformance (196), containment (40), signals
+(38), native e2e (88), shim library (303), registry and host-alias gates pass;
+macOS ABI (28), containment (18), signals (8), native e2e (98), library (94),
+registry and host-alias gates pass. The extended detector fails on a planted
+in-shim `time` store (a named shim fault), and the parser test fails when the
+`libc-` version digit is not required. Three-target guest-export clippy,
+structure and file-size gates pass; Linux arm64 is compilation evidence only.
+
+Shim C: **2,261 → 782 physical lines**, above the 400–650 estimate: the
+retained handler frames and their comments account for most of `init.c`.
+
