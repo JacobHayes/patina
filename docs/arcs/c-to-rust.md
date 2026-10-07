@@ -384,5 +384,5 @@ signal-result fix is presented as closing the class.
 After the ownership simplification, the requested checks pass: Linux native ABI
 (45), raw (16), signals (38), shim library (302), guest-export-enabled clippy on
 all three targets above, structure, formatting and file-size; mac-test native
-ABI (27) and signals (8). These passing checks do not close the lifetime hazard; its fix is a separate
-signal-frame design.
+ABI (27) and signals (8). These passing checks do not close the lifetime hazard; its fix is the separate
+[signal frame safety design](signal-frame-safety.md), not yet implemented.
