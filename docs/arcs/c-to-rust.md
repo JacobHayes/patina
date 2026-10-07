@@ -1,7 +1,8 @@
 # Arc: shrinking the native C shim
 
 Status: wave 2 ordinary adapters are Rust; Linux abort retains its C entry, 2026-10-06.
-The follow-up frame-lifetime audit below blocks landing despite passing tests.
+The frame-lifetime audit below records a pre-existing hazard; this wave neither
+introduces nor closes it.
 Focused evidence below is separate from the full landing battery.
 
 ## Decision and inventory
@@ -352,8 +353,8 @@ The route classifier remains the one implementation-ownership inventory.
 Behavioral variadic cases remain explicit because they exercise operands,
 not an inventory of adapter spellings.
 
-The frame-lifetime audit finds a blocker beyond the added `signal_result`
-guard. Linux `with_context` calls `sched_point`, which delivers before model
+The frame-lifetime audit finds a hazard that predates this wave: the old C
+adapters already called guarded Rust model entries that deliver signals. Linux `with_context` calls `sched_point`, which delivers before model
 work and after baton handoff. Blocking resume/restart paths and
 `patina_sud_dispatch` also deliver before returning. `deliver` itself keeps
 its existing panic scope, allocated vectors, fault scope and delivery-restore
@@ -383,4 +384,5 @@ signal-result fix is presented as closing the class.
 After the ownership simplification, the requested checks pass: Linux native ABI
 (45), raw (16), signals (38), shim library (302), guest-export-enabled clippy on
 all three targets above, structure, formatting and file-size; mac-test native
-ABI (27) and signals (8). These passing checks do not remove the lifetime blocker.
+ABI (27) and signals (8). These passing checks do not close the lifetime hazard; its fix is a separate
+signal-frame design.
