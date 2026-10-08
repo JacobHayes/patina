@@ -462,6 +462,76 @@ fn arg_fd(reg: u64) -> i64 {
     reg as i32 as i64
 }
 
+#[cfg(patina_posix_exports)]
+mod forwarding {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    use super::{c_int, c_long};
+
+    /// Encode a libc argument as the corresponding raw syscall word.
+    pub(crate) trait Word {
+        fn word(self) -> u64;
+    }
+
+    impl Word for i32 {
+        fn word(self) -> u64 {
+            self as i64 as u64
+        }
+    }
+
+    impl Word for u32 {
+        fn word(self) -> u64 {
+            self as u64
+        }
+    }
+
+    impl Word for u64 {
+        fn word(self) -> u64 {
+            self
+        }
+    }
+
+    impl Word for usize {
+        fn word(self) -> u64 {
+            self as u64
+        }
+    }
+
+    impl<T> Word for *const T {
+        fn word(self) -> u64 {
+            self.expose_provenance() as u64
+        }
+    }
+
+    impl<T> Word for *mut T {
+        fn word(self) -> u64 {
+            self.expose_provenance() as u64
+        }
+    }
+
+    /// Forward libc's syscall operands through the shared SUD path.
+    ///
+    /// # Safety
+    /// `args` must be the libc caller's operands for `nr`; each pointer operand
+    /// must satisfy the contract under which that syscall row accesses it.
+    pub(crate) unsafe fn forward(nr: c_long, args: &[u64]) -> c_int {
+        let mut words = [0; 6];
+        for (word, arg) in words.iter_mut().zip(args) {
+            *word = *arg;
+        }
+        // SAFETY: The caller upholds the syscall row's pointer contract for this synchronous dispatch.
+        let result = unsafe {
+            super::patina_sud_dispatch(
+                nr, words[0], words[1], words[2], words[3], words[4], words[5], 0,
+            )
+        };
+        crate::posix::signal_result(result)
+    }
+}
+
+#[cfg(patina_posix_exports)]
+pub(crate) use forwarding::{Word, forward};
+
 mod bindings;
 mod dispatch;
 

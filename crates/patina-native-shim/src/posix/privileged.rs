@@ -1,4 +1,8 @@
 //! Typed libc spellings of the privileged syscall rows.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
+#[cfg(target_os = "linux")]
+use crate::sud::Word;
 use core::ffi::{c_char, c_int};
 #[cfg(target_os = "linux")]
 use core::ffi::{c_ulong, c_void};
@@ -15,18 +19,19 @@ pub unsafe extern "C" fn mount(
     data: *const c_void,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
+    // SAFETY: The caller's guest-pointer contract keeps these addresses live for the synchronous row dispatch.
+    unsafe {
+        crate::sud::forward(
             libc::SYS_mount,
-            source as u64,
-            target as u64,
-            kind as u64,
-            flags,
-            data as u64,
-            0,
-            0,
+            &[
+                source.word(),
+                target.word(),
+                kind.word(),
+                flags.word(),
+                data.word(),
+            ],
         )
-    })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -35,18 +40,8 @@ pub unsafe extern "C" fn mount(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn umount2(target: *const c_char, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
-            libc::SYS_umount2,
-            target as u64,
-            flags as i64 as u64,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-    })
+    // SAFETY: The caller's guest-pointer contract keeps `target` live for the synchronous row dispatch.
+    unsafe { crate::sud::forward(libc::SYS_umount2, &[target.word(), flags.word()]) }
 }
 
 #[cfg(target_os = "linux")]
@@ -55,18 +50,8 @@ pub unsafe extern "C" fn umount2(target: *const c_char, flags: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pivot_root(new_root: *const c_char, put_old: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
-            libc::SYS_pivot_root,
-            new_root as u64,
-            put_old as u64,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-    })
+    // SAFETY: The caller's guest-pointer contract keeps both paths live for the synchronous row dispatch.
+    unsafe { crate::sud::forward(libc::SYS_pivot_root, &[new_root.word(), put_old.word()]) }
 }
 
 #[cfg(target_os = "linux")]
@@ -75,18 +60,13 @@ pub unsafe extern "C" fn pivot_root(new_root: *const c_char, put_old: *const c_c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn open_tree(dirfd: c_int, path: *const c_char, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
+    // SAFETY: The caller's guest-pointer contract keeps `path` live for the synchronous row dispatch.
+    unsafe {
+        crate::sud::forward(
             libc::SYS_open_tree,
-            dirfd as i64 as u64,
-            path as u64,
-            flags as u64,
-            0,
-            0,
-            0,
-            0,
+            &[dirfd.word(), path.word(), flags.word()],
         )
-    })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -101,18 +81,19 @@ pub unsafe extern "C" fn move_mount(
     flags: u32,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
+    // SAFETY: The caller's guest-pointer contract keeps both paths live for the synchronous row dispatch.
+    unsafe {
+        crate::sud::forward(
             libc::SYS_move_mount,
-            from_dirfd as i64 as u64,
-            from_path as u64,
-            to_dirfd as i64 as u64,
-            to_path as u64,
-            flags as u64,
-            0,
-            0,
+            &[
+                from_dirfd.word(),
+                from_path.word(),
+                to_dirfd.word(),
+                to_path.word(),
+                flags.word(),
+            ],
         )
-    })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -121,18 +102,8 @@ pub unsafe extern "C" fn move_mount(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fsopen(fs_name: *const c_char, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
-            libc::SYS_fsopen,
-            fs_name as u64,
-            flags as u64,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-    })
+    // SAFETY: The caller's guest-pointer contract keeps `fs_name` live for the synchronous row dispatch.
+    unsafe { crate::sud::forward(libc::SYS_fsopen, &[fs_name.word(), flags.word()]) }
 }
 
 #[cfg(target_os = "linux")]
@@ -147,18 +118,13 @@ pub unsafe extern "C" fn fsconfig(
     aux: c_int,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
+    // SAFETY: The caller's guest-pointer contract keeps the pointer operands live for the synchronous row dispatch.
+    unsafe {
+        crate::sud::forward(
             libc::SYS_fsconfig,
-            fd as i64 as u64,
-            cmd as u64,
-            key as u64,
-            value as u64,
-            aux as i64 as u64,
-            0,
-            0,
+            &[fd.word(), cmd.word(), key.word(), value.word(), aux.word()],
         )
-    })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -167,18 +133,13 @@ pub unsafe extern "C" fn fsconfig(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fsmount(fd: c_int, flags: u32, attr_flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
+    // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
+    unsafe {
+        crate::sud::forward(
             libc::SYS_fsmount,
-            fd as i64 as u64,
-            flags as u64,
-            attr_flags as u64,
-            0,
-            0,
-            0,
-            0,
+            &[fd.word(), flags.word(), attr_flags.word()],
         )
-    })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -187,18 +148,8 @@ pub unsafe extern "C" fn fsmount(fd: c_int, flags: u32, attr_flags: u32) -> c_in
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fspick(dirfd: c_int, path: *const c_char, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
-            libc::SYS_fspick,
-            dirfd as i64 as u64,
-            path as u64,
-            flags as u64,
-            0,
-            0,
-            0,
-            0,
-        )
-    })
+    // SAFETY: The caller's guest-pointer contract keeps `path` live for the synchronous row dispatch.
+    unsafe { crate::sud::forward(libc::SYS_fspick, &[dirfd.word(), path.word(), flags.word()]) }
 }
 
 #[cfg(target_os = "linux")]
@@ -213,18 +164,19 @@ pub unsafe extern "C" fn mount_setattr(
     size: usize,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
+    // SAFETY: The caller's guest-pointer contract keeps `path` and `attr` live for the synchronous row dispatch.
+    unsafe {
+        crate::sud::forward(
             libc::SYS_mount_setattr,
-            dirfd as i64 as u64,
-            path as u64,
-            flags as u64,
-            attr as u64,
-            size as u64,
-            0,
-            0,
+            &[
+                dirfd.word(),
+                path.word(),
+                flags.word(),
+                attr.word(),
+                size.word(),
+            ],
         )
-    })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -233,9 +185,8 @@ pub unsafe extern "C" fn mount_setattr(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn acct(path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(libc::SYS_acct, path as u64, 0, 0, 0, 0, 0, 0)
-    })
+    // SAFETY: The caller's guest-pointer contract keeps `path` live for the synchronous row dispatch.
+    unsafe { crate::sud::forward(libc::SYS_acct, &[path.word()]) }
 }
 
 #[cfg(target_os = "linux")]
@@ -244,9 +195,8 @@ pub unsafe extern "C" fn acct(path: *const c_char) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vhangup() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(libc::SYS_vhangup, 0, 0, 0, 0, 0, 0, 0)
-    })
+    // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
+    unsafe { crate::sud::forward(libc::SYS_vhangup, &[]) }
 }
 
 #[cfg(target_os = "linux")]
@@ -255,18 +205,8 @@ pub unsafe extern "C" fn vhangup() -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn swapon(path: *const c_char, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
-            libc::SYS_swapon,
-            path as u64,
-            flags as i64 as u64,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-    })
+    // SAFETY: The caller's guest-pointer contract keeps `path` live for the synchronous row dispatch.
+    unsafe { crate::sud::forward(libc::SYS_swapon, &[path.word(), flags.word()]) }
 }
 
 #[cfg(target_os = "linux")]
@@ -275,9 +215,8 @@ pub unsafe extern "C" fn swapon(path: *const c_char, flags: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn swapoff(path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(libc::SYS_swapoff, path as u64, 0, 0, 0, 0, 0, 0)
-    })
+    // SAFETY: The caller's guest-pointer contract keeps `path` live for the synchronous row dispatch.
+    unsafe { crate::sud::forward(libc::SYS_swapoff, &[path.word()]) }
 }
 
 #[cfg(target_os = "linux")]
@@ -286,18 +225,13 @@ pub unsafe extern "C" fn swapoff(path: *const c_char) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn reboot(howto: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
+    // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
+    unsafe {
+        crate::sud::forward(
             libc::SYS_reboot,
-            0xfee1dead,
-            672274793,
-            howto as i64 as u64,
-            0,
-            0,
-            0,
-            0,
+            &[0xfee1dead_u64, 672274793_u64, howto.word()],
         )
-    })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -310,18 +244,13 @@ pub unsafe extern "C" fn init_module(
     params: *const c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
+    // SAFETY: The caller's guest-pointer contract keeps `image` and `params` live for the synchronous row dispatch.
+    unsafe {
+        crate::sud::forward(
             libc::SYS_init_module,
-            image as u64,
-            length,
-            params as u64,
-            0,
-            0,
-            0,
-            0,
+            &[image.word(), length.word(), params.word()],
         )
-    })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -330,18 +259,8 @@ pub unsafe extern "C" fn init_module(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn delete_module(name: *const c_char, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
-            libc::SYS_delete_module,
-            name as u64,
-            flags as u64,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-    })
+    // SAFETY: The caller's guest-pointer contract keeps `name` live for the synchronous row dispatch.
+    unsafe { crate::sud::forward(libc::SYS_delete_module, &[name.word(), flags.word()]) }
 }
 
 #[cfg(target_os = "linux")]
@@ -355,18 +274,13 @@ pub unsafe extern "C" fn quotactl(
     addr: *mut c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
+    // SAFETY: The caller's guest-pointer contract keeps `special` and `addr` live for the synchronous row dispatch.
+    unsafe {
+        crate::sud::forward(
             libc::SYS_quotactl,
-            cmd as i64 as u64,
-            special as u64,
-            id as i64 as u64,
-            addr as u64,
-            0,
-            0,
-            0,
+            &[cmd.word(), special.word(), id.word(), addr.word()],
         )
-    })
+    }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -375,9 +289,8 @@ pub unsafe extern "C" fn quotactl(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iopl(level: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(libc::SYS_iopl, level as i64 as u64, 0, 0, 0, 0, 0, 0)
-    })
+    // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
+    unsafe { crate::sud::forward(libc::SYS_iopl, &[level.word()]) }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -386,18 +299,13 @@ pub unsafe extern "C" fn iopl(level: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ioperm(from: c_ulong, count: c_ulong, turn_on: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
+    // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
+    unsafe {
+        crate::sud::forward(
             libc::SYS_ioperm,
-            from,
-            count,
-            turn_on as i64 as u64,
-            0,
-            0,
-            0,
-            0,
+            &[from.word(), count.word(), turn_on.word()],
         )
-    })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -406,9 +314,8 @@ pub unsafe extern "C" fn ioperm(from: c_ulong, count: c_ulong, turn_on: c_int) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unshare(flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(libc::SYS_unshare, flags as i64 as u64, 0, 0, 0, 0, 0, 0)
-    })
+    // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
+    unsafe { crate::sud::forward(libc::SYS_unshare, &[flags.word()]) }
 }
 
 #[cfg(target_os = "linux")]
@@ -417,18 +324,8 @@ pub unsafe extern "C" fn unshare(flags: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setns(fd: c_int, nstype: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
-            libc::SYS_setns,
-            fd as i64 as u64,
-            nstype as i64 as u64,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-    })
+    // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
+    unsafe { crate::sud::forward(libc::SYS_setns, &[fd.word(), nstype.word()]) }
 }
 
 #[cfg(target_os = "linux")]
@@ -437,9 +334,8 @@ pub unsafe extern "C" fn setns(fd: c_int, nstype: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chroot(path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(libc::SYS_chroot, path as u64, 0, 0, 0, 0, 0, 0)
-    })
+    // SAFETY: The caller's guest-pointer contract keeps `path` live for the synchronous row dispatch.
+    unsafe { crate::sud::forward(libc::SYS_chroot, &[path.word()]) }
 }
 
 #[cfg(target_os = "macos")]
