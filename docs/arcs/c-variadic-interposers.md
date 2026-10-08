@@ -44,8 +44,9 @@ next to a variadic definition.
 
 `c/patina_posix.c` includes its C slices as one translation unit. A C alias
 attribute cannot name a definition in a Rust object. Migrated Linux dlsym
-routes therefore refer to hidden `patina_route_<name>` assembly aliases beside
-the Rust definitions, rather than cross-object C aliases.
+routes therefore refer to hidden `patina_route_<name>` assembly aliases, which
+`build_support.rs` generates from the symbol registry into the Rust object,
+rather than cross-object C aliases.
 
 The guest archive uses the common `POSIX_RUST_FLAGS` recipe:
 `--cfg=patina_posix_exports` and `-Ccodegen-units=1`. The unique

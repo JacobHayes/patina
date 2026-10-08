@@ -452,48 +452,6 @@ pub unsafe extern "C" fn secure_getenv(name: *const c_char) -> *mut c_char {
 }
 
 #[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_getenv",
-    ".hidden patina_route_getenv",
-    ".set patina_route_getenv, getenv"
-);
-
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_setenv",
-    ".hidden patina_route_setenv",
-    ".set patina_route_setenv, setenv"
-);
-
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_unsetenv",
-    ".hidden patina_route_unsetenv",
-    ".set patina_route_unsetenv, unsetenv"
-);
-
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_clearenv",
-    ".hidden patina_route_clearenv",
-    ".set patina_route_clearenv, clearenv"
-);
-
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_putenv",
-    ".hidden patina_route_putenv",
-    ".set patina_route_putenv, putenv"
-);
-
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_secure_getenv",
-    ".hidden patina_route_secure_getenv",
-    ".set patina_route_secure_getenv, secure_getenv"
-);
-
-#[cfg(target_os = "linux")]
 core::arch::global_asm!(".hidden patina_environ_install");
 #[cfg(target_os = "macos")]
 core::arch::global_asm!(".private_extern _patina_environ_install");

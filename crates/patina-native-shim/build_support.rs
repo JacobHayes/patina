@@ -96,6 +96,10 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
     let mut rust_routes = String::from(
         "// Hidden addresses generated from the symbol registry.\nunsafe extern \"C\" {\n",
     );
+    let mut rust_aliases =
+        String::from("// Hidden route aliases generated from the symbol registry.\n");
+    let mut ordinary_aliases = Vec::new();
+    let mut x86_aliases = Vec::new();
     for row in symbols {
         if !row.linux || !row.routed || row.name == "__wrap_dlsym" {
             continue;
@@ -104,6 +108,48 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
             rust_routes.push_str("#[cfg(target_arch = \"x86_64\")]\n");
         }
         writeln!(rust_routes, "static patina_route_{}: u8;", row.name).unwrap();
+    }
+    for row in symbols {
+        if !row.linux || C_ROUTED.contains(&row.name.as_str()) {
+            continue;
+        }
+        let alias = if row.name == "__wrap_dlsym" {
+            Some(("dlsym", "__wrap_dlsym"))
+        } else if row.routed || row.deny_class.as_deref() == Some("process") {
+            Some((row.name.as_str(), row.name.as_str()))
+        } else {
+            None
+        };
+        let Some(alias) = alias else { continue };
+        if row.only_x86 {
+            x86_aliases.push(alias);
+        } else {
+            ordinary_aliases.push(alias);
+        }
+    }
+    for (cfg, aliases) in [
+        (None, ordinary_aliases.as_mut_slice()),
+        (
+            Some("#[cfg(target_arch = \"x86_64\")]\n"),
+            x86_aliases.as_mut_slice(),
+        ),
+    ] {
+        aliases.sort_unstable();
+        if aliases.is_empty() {
+            continue;
+        }
+        if let Some(cfg) = cfg {
+            rust_aliases.push_str(cfg);
+        }
+        rust_aliases.push_str("core::arch::global_asm!(r#\"\n");
+        for (alias, target) in aliases.iter() {
+            writeln!(
+                rust_aliases,
+                ".globl patina_route_{alias}\n.hidden patina_route_{alias}\n.set patina_route_{alias}, {target}"
+            )
+            .unwrap();
+        }
+        rust_aliases.push_str("\"#);\n");
     }
     rust_routes.push_str("static patina_route_dlsym: u8;\n}\npub(super) fn route(name: &CStr) -> *mut c_void {\n    match name.to_bytes() {\n");
     for row in symbols {
@@ -122,6 +168,7 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
     }
     rust_routes.push_str("b\"dlsym\" => (&raw const patina_route_dlsym).cast_mut().cast(),\n_ => core::ptr::null_mut(),\n}\n}\n");
     std::fs::write(out.join("dlsym_routes.rs"), rust_routes).unwrap();
+    std::fs::write(out.join("route_aliases.rs"), rust_aliases).unwrap();
     routing.push_str("#endif\n");
     std::fs::write(out.join("patina_posix.c"), umbrella).unwrap();
     std::fs::write(out.join("posix_sources.rs"), sources).unwrap();

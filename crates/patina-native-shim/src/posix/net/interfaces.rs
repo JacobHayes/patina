@@ -191,11 +191,3 @@ pub unsafe extern "C" fn freeifaddrs(list: *mut libc::ifaddrs) {
         libc::free(list.cast());
     }
 }
-core::arch::global_asm!(
-    ".globl patina_route_getifaddrs",
-    ".hidden patina_route_getifaddrs",
-    ".set patina_route_getifaddrs, getifaddrs",
-    ".globl patina_route_freeifaddrs",
-    ".hidden patina_route_freeifaddrs",
-    ".set patina_route_freeifaddrs, freeifaddrs",
-);

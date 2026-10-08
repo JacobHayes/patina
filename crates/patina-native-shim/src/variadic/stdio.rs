@@ -1,16 +1,6 @@
 //! Variadic formatting doors into the private Rust stream engine.
 use core::ffi::{VaList, c_char, c_int};
 
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_printf",
-    ".hidden patina_route_printf",
-    ".set patina_route_printf, printf",
-    ".globl patina_route_fprintf",
-    ".hidden patina_route_fprintf",
-    ".set patina_route_fprintf, fprintf",
-);
-
 /// # Safety
 /// Format and arguments obey printf's contract.
 #[unsafe(no_mangle)]

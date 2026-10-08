@@ -114,38 +114,3 @@ pub unsafe extern "C" fn memfd_create(name: *const c_char, flags: u32) -> c_int 
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::model_result(unsafe { crate::mem::patina_memfd_create(name, flags) })
 }
-core::arch::global_asm!(
-    ".globl patina_route_mmap",
-    ".hidden patina_route_mmap",
-    ".set patina_route_mmap, mmap",
-    ".globl patina_route_mmap64",
-    ".hidden patina_route_mmap64",
-    ".set patina_route_mmap64, mmap64",
-    ".globl patina_route_munmap",
-    ".hidden patina_route_munmap",
-    ".set patina_route_munmap, munmap",
-    ".globl patina_route_msync",
-    ".hidden patina_route_msync",
-    ".set patina_route_msync, msync",
-    ".globl patina_route_mprotect",
-    ".hidden patina_route_mprotect",
-    ".set patina_route_mprotect, mprotect",
-    ".globl patina_route_mlock",
-    ".hidden patina_route_mlock",
-    ".set patina_route_mlock, mlock",
-    ".globl patina_route_mlock2",
-    ".hidden patina_route_mlock2",
-    ".set patina_route_mlock2, mlock2",
-    ".globl patina_route_munlock",
-    ".hidden patina_route_munlock",
-    ".set patina_route_munlock, munlock",
-    ".globl patina_route_mlockall",
-    ".hidden patina_route_mlockall",
-    ".set patina_route_mlockall, mlockall",
-    ".globl patina_route_munlockall",
-    ".hidden patina_route_munlockall",
-    ".set patina_route_munlockall, munlockall",
-    ".globl patina_route_memfd_create",
-    ".hidden patina_route_memfd_create",
-    ".set patina_route_memfd_create, memfd_create"
-);

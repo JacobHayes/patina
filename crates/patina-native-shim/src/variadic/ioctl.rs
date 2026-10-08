@@ -1,13 +1,6 @@
 //! Request-directed ioctl decoding; unknown/refused operations consume nothing.
 use core::ffi::{c_int, c_ulong, c_void};
 
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_ioctl",
-    ".hidden patina_route_ioctl",
-    ".set patina_route_ioctl, ioctl",
-);
-
 /// # Safety
 /// A modeled consuming request supplies its promoted integer or pointer operand.
 #[unsafe(no_mangle)]

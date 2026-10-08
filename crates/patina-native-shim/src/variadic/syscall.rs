@@ -39,9 +39,6 @@ syscall:
   movl $15, %edi
   jmpq *%rax
 .size syscall, .-syscall
-.globl patina_route_syscall
-.hidden patina_route_syscall
-.set patina_route_syscall, syscall
 "#,
     options(att_syntax)
 );
@@ -84,9 +81,6 @@ syscall:
   mov x0, #139
   br x16
 .size syscall, .-syscall
-.globl patina_route_syscall
-.hidden patina_route_syscall
-.set patina_route_syscall, syscall
 "#
 );
 

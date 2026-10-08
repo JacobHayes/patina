@@ -61,11 +61,3 @@ pub extern "C" fn dlerror() -> *mut c_char {
     }
     MESSAGE.with(|message| message.get().cast())
 }
-core::arch::global_asm!(
-    ".globl patina_route_dlsym",
-    ".hidden patina_route_dlsym",
-    ".set patina_route_dlsym, __wrap_dlsym",
-    ".globl patina_route_dlerror",
-    ".hidden patina_route_dlerror",
-    ".set patina_route_dlerror, dlerror",
-);

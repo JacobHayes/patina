@@ -414,12 +414,3 @@ pub unsafe extern "C" fn getaddrinfo(
         0
     }
 }
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_getaddrinfo",
-    ".hidden patina_route_getaddrinfo",
-    ".set patina_route_getaddrinfo, getaddrinfo",
-    ".globl patina_route_freeaddrinfo",
-    ".hidden patina_route_freeaddrinfo",
-    ".set patina_route_freeaddrinfo, freeaddrinfo",
-);

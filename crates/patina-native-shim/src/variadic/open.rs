@@ -1,12 +1,6 @@
 //! libc open spellings share one flag/mode adapter with fixed C callers.
 use core::ffi::{VaList, c_char, c_int};
 
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_open",
-    ".hidden patina_route_open",
-    ".set patina_route_open, open",
-);
 /// # Safety
 /// `path` is a C string; creation flags supply the promoted mode argument.
 #[unsafe(no_mangle)]
@@ -17,12 +11,6 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, args: ...) -> c
     unsafe { decode(libc::AT_FDCWD, path, flags, args) }
 }
 
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_openat",
-    ".hidden patina_route_openat",
-    ".set patina_route_openat, openat",
-);
 /// # Safety
 /// `path` is a C string; creation flags supply the promoted mode argument.
 #[unsafe(no_mangle)]
@@ -39,12 +27,6 @@ pub unsafe extern "C" fn openat(
 }
 
 #[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_open64",
-    ".hidden patina_route_open64",
-    ".set patina_route_open64, open64",
-);
-#[cfg(target_os = "linux")]
 /// # Safety
 /// `path` is a C string; creation flags supply the promoted mode argument.
 #[unsafe(no_mangle)]
@@ -55,12 +37,6 @@ pub unsafe extern "C" fn open64(path: *const c_char, flags: c_int, args: ...) ->
     unsafe { decode(libc::AT_FDCWD, path, flags, args) }
 }
 
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_openat64",
-    ".hidden patina_route_openat64",
-    ".set patina_route_openat64, openat64",
-);
 #[cfg(target_os = "linux")]
 /// # Safety
 /// `path` is a C string; creation flags supply the promoted mode argument.
@@ -78,12 +54,6 @@ pub unsafe extern "C" fn openat64(
 }
 
 #[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route___open",
-    ".hidden patina_route___open",
-    ".set patina_route___open, __open",
-);
-#[cfg(target_os = "linux")]
 /// # Safety
 /// `path` is a C string; creation flags supply the promoted mode argument.
 #[unsafe(no_mangle)]
@@ -94,12 +64,6 @@ pub unsafe extern "C" fn __open(path: *const c_char, flags: c_int, args: ...) ->
     unsafe { decode(libc::AT_FDCWD, path, flags, args) }
 }
 
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route___open64",
-    ".hidden patina_route___open64",
-    ".set patina_route___open64, __open64",
-);
 #[cfg(target_os = "linux")]
 /// # Safety
 /// `path` is a C string; creation flags supply the promoted mode argument.

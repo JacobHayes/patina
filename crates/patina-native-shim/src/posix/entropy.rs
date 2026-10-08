@@ -60,12 +60,6 @@ pub unsafe extern "C" fn CCRandomGenerateBytes(destination: *mut c_void, length:
 
 #[cfg(target_os = "linux")]
 core::arch::global_asm!(
-    ".globl patina_route_getentropy",
-    ".hidden patina_route_getentropy",
-    ".set patina_route_getentropy, getentropy",
-    ".globl patina_route_getrandom",
-    ".hidden patina_route_getrandom",
-    ".set patina_route_getrandom, getrandom",
     ".hidden patina_deterministic_getentropy",
     ".hidden patina_deterministic_getrandom"
 );

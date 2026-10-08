@@ -2,11 +2,6 @@
 use core::ffi::{c_int, c_ulong, c_void};
 use libc as k;
 const PR_GET_AUXV: c_int = 0x4155_5856;
-core::arch::global_asm!(
-    ".globl patina_route_prctl",
-    ".hidden patina_route_prctl",
-    ".set patina_route_prctl, prctl",
-);
 
 /// # Safety
 /// Options supply their documented pointer/unsigned-long operands and reserved words.

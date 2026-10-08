@@ -1,11 +1,6 @@
 //! glibc ptrace decoding without reading ignored operands.
 use core::ffi::{c_int, c_long, c_void};
 use linux_raw_sys::ptrace as k;
-core::arch::global_asm!(
-    ".globl patina_route_ptrace",
-    ".hidden patina_route_ptrace",
-    ".set patina_route_ptrace, ptrace",
-);
 
 /// # Safety
 /// Each request supplies the arguments it consumes; pointers obey ptrace's ABI.

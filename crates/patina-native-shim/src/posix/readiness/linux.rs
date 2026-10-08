@@ -233,36 +233,3 @@ pub unsafe extern "C" fn __ppoll_chk(
         ))
     }
 }
-
-core::arch::global_asm!(
-    ".globl patina_route_epoll_create1",
-    ".hidden patina_route_epoll_create1",
-    ".set patina_route_epoll_create1, epoll_create1",
-    ".globl patina_route_epoll_ctl",
-    ".hidden patina_route_epoll_ctl",
-    ".set patina_route_epoll_ctl, epoll_ctl",
-    ".globl patina_route_epoll_wait",
-    ".hidden patina_route_epoll_wait",
-    ".set patina_route_epoll_wait, epoll_wait",
-    ".globl patina_route_epoll_pwait",
-    ".hidden patina_route_epoll_pwait",
-    ".set patina_route_epoll_pwait, epoll_pwait",
-    ".globl patina_route_eventfd",
-    ".hidden patina_route_eventfd",
-    ".set patina_route_eventfd, eventfd",
-    ".globl patina_route_ppoll",
-    ".hidden patina_route_ppoll",
-    ".set patina_route_ppoll, ppoll",
-    ".globl patina_route_select",
-    ".hidden patina_route_select",
-    ".set patina_route_select, select",
-    ".globl patina_route_pselect",
-    ".hidden patina_route_pselect",
-    ".set patina_route_pselect, pselect",
-    ".globl patina_route___poll_chk",
-    ".hidden patina_route___poll_chk",
-    ".set patina_route___poll_chk, __poll_chk",
-    ".globl patina_route___ppoll_chk",
-    ".hidden patina_route___ppoll_chk",
-    ".set patina_route___ppoll_chk, __ppoll_chk",
-);

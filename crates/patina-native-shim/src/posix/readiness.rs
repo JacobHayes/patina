@@ -61,10 +61,3 @@ pub unsafe extern "C" fn poll(
 mod darwin;
 #[cfg(target_os = "linux")]
 mod linux;
-
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_poll",
-    ".hidden patina_route_poll",
-    ".set patina_route_poll, poll"
-);

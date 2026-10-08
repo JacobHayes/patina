@@ -1,13 +1,6 @@
 //! Linux mremap has a fifth argument only for explicit fixed placement.
 use core::ffi::{c_int, c_void};
 
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_mremap",
-    ".hidden patina_route_mremap",
-    ".set patina_route_mremap, mremap",
-);
-
 /// # Safety
 /// Mapping ranges obey mremap's contract; FIXED supplies a pointer argument.
 #[unsafe(no_mangle)]

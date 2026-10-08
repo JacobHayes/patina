@@ -109,17 +109,3 @@ pub extern "C" fn setlinebuf(stream: *mut libc::FILE) {
         );
     }
 }
-core::arch::global_asm!(
-    ".globl patina_route_setvbuf",
-    ".hidden patina_route_setvbuf",
-    ".set patina_route_setvbuf, setvbuf",
-    ".globl patina_route_setbuf",
-    ".hidden patina_route_setbuf",
-    ".set patina_route_setbuf, setbuf",
-    ".globl patina_route_setbuffer",
-    ".hidden patina_route_setbuffer",
-    ".set patina_route_setbuffer, setbuffer",
-    ".globl patina_route_setlinebuf",
-    ".hidden patina_route_setlinebuf",
-    ".set patina_route_setlinebuf, setlinebuf",
-);

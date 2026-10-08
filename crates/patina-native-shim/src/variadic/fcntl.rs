@@ -13,16 +13,6 @@ mod linux {
     pub(super) const F_GETSIG: c_int = k::F_GETSIG as c_int;
 }
 
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_fcntl",
-    ".hidden patina_route_fcntl",
-    ".set patina_route_fcntl, fcntl",
-    ".globl patina_route_fcntl64",
-    ".hidden patina_route_fcntl64",
-    ".set patina_route_fcntl64, fcntl64",
-);
-
 /// # Safety
 /// The optional argument has the promoted type required by `command`.
 #[unsafe(no_mangle)]

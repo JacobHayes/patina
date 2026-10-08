@@ -224,10 +224,3 @@ pub unsafe extern "C" fn localtime_r(
     }
     result
 }
-
-#[cfg(target_os = "linux")]
-core::arch::global_asm!(
-    ".globl patina_route_localtime_r",
-    ".hidden patina_route_localtime_r",
-    ".set patina_route_localtime_r, localtime_r"
-);
