@@ -601,6 +601,8 @@ macro_rules! for_each_scenario {
             proc_vm_rw => proc::vm_rw,
             proc_wait => proc::wait,
             readiness_epoll => readiness::epoll,
+        #[cfg(target_arch = "aarch64")]
+            readiness_epoll_f2 => readiness::epoll_f2,
             readiness_epoll_edges => readiness::epoll_edges,
             readiness_fanotify => readiness::fanotify,
             readiness_inotify => readiness::inotify,

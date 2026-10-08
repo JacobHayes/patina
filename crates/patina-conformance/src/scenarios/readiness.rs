@@ -1,5 +1,7 @@
 pub mod epoll;
 pub mod epoll_edges;
+#[cfg(target_arch = "aarch64")]
+pub mod epoll_f2;
 pub mod fanotify;
 pub mod inotify;
 pub mod poll;

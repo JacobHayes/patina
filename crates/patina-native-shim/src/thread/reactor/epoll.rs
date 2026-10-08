@@ -102,6 +102,22 @@ fn read_event(address: usize) -> Result<(u32, u64), c_int> {
     Ok((event.events, event.data))
 }
 
+#[cfg(target_arch = "aarch64")]
+fn write_event(address: usize, event: &EpollEvent) -> Result<(), c_int> {
+    let events = event.events;
+    let data = event.data;
+    crate::uaccess::write(address, &events)?;
+    crate::uaccess::write(
+        address + std::mem::offset_of!(KernelEpollEvent, data),
+        &data,
+    )
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn write_event(address: usize, event: &EpollEvent) -> Result<(), c_int> {
+    crate::uaccess::write(address, event)
+}
+
 /// The poll bits a read-direction wakeup carries (`EPOLLIN`, `EPOLLPRI`,
 /// `EPOLLRDNORM`, `EPOLLRDBAND`, `EPOLLMSG`, `EPOLLRDHUP`), and a
 /// write-direction one (`EPOLLOUT`, `EPOLLWRNORM`, `EPOLLWRBAND`).
@@ -553,9 +569,7 @@ pub unsafe extern "C" fn patina_epoll_wait(
                 .events
                 .iter()
                 .enumerate()
-                .take_while(|(at, event)| {
-                    crate::uaccess::write(events as usize + at * size, *event).is_ok()
-                })
+                .take_while(|(at, event)| write_event(events as usize + at * size, event).is_ok())
                 .count();
             if written == 0 {
                 return fail(super::super::EFAULT);
