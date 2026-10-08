@@ -1,4 +1,6 @@
 //! Typed fcntl arguments and platform flags/record-lock layouts.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use core::ffi::{VaList, c_int, c_void};
 
 #[cfg(target_os = "linux")]
@@ -9,14 +11,6 @@ mod linux {
     pub(super) const F_SETOWN_EX: c_int = k::F_SETOWN_EX as c_int;
     pub(super) const F_SETSIG: c_int = k::F_SETSIG as c_int;
     pub(super) const F_GETSIG: c_int = k::F_GETSIG as c_int;
-}
-
-#[cfg(target_os = "linux")]
-unsafe extern "C" {
-    fn patina_pipe_size(fd: c_int) -> c_int;
-    fn patina_pipe_set_size(fd: c_int, size: c_int) -> c_int;
-    fn patina_add_seals(fd: c_int, seals: u32) -> c_int;
-    fn patina_get_seals(fd: c_int) -> c_int;
 }
 
 #[cfg(target_os = "linux")]
@@ -113,15 +107,14 @@ unsafe fn dispatch(fd: c_int, command: c_int, mut args: VaList<'_>) -> c_int {
         F_SETFL => crate::patina_fd_setfl(fd, setfl_from_posix(argument)),
         F_DUPFD => crate::patina_dupfd(fd, argument, 0),
         F_DUPFD_CLOEXEC => crate::patina_dupfd(fd, argument, 1),
-        // SAFETY: these fixed model entries take only integer descriptor data.
         #[cfg(target_os = "linux")]
-        libc::F_GETPIPE_SZ => unsafe { patina_pipe_size(fd) },
+        libc::F_GETPIPE_SZ => crate::thread::patina_pipe_size(fd),
         #[cfg(target_os = "linux")]
-        libc::F_SETPIPE_SZ => unsafe { patina_pipe_set_size(fd, argument) },
+        libc::F_SETPIPE_SZ => crate::thread::patina_pipe_set_size(fd, argument),
         #[cfg(target_os = "linux")]
-        libc::F_ADD_SEALS => unsafe { patina_add_seals(fd, argument as u32) },
+        libc::F_ADD_SEALS => crate::mem::patina_add_seals(fd, argument as u32),
         #[cfg(target_os = "linux")]
-        libc::F_GET_SEALS => unsafe { patina_get_seals(fd) },
+        libc::F_GET_SEALS => crate::mem::patina_get_seals(fd),
         libc::F_SETOWN => crate::patina_fcntl_owner(fd),
         #[cfg(target_os = "linux")]
         linux::F_SETOWN_EX | linux::F_SETSIG => crate::patina_fcntl_owner(fd),
