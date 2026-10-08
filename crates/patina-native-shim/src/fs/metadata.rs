@@ -38,37 +38,37 @@ pub(crate) const PATINA_FS_VOLUME: u32 = 0;
 pub(crate) const PATINA_FS_PIPEFS: u32 = 1;
 pub(crate) const PATINA_FS_SOCKFS: u32 = 2;
 /// A namespace file's nsfs inode (`crate::nsfs`): root's, on device 0:4.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_FS_NSFS: u32 = 3;
 /// The entropy device's node (`volume::urandom_metadata`): root's, on
 /// devtmpfs (0:5).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_FS_DEVTMPFS: u32 = 4;
 /// A pseudoterminal's slave node (`thread::pty`): its opener's and the tty
 /// group's, on devpts (0:24).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_FS_DEVPTS: u32 = 5;
 /// The pseudoterminal multiplexer's node, `/dev/ptmx`: root's and the tty
 /// group's, on devtmpfs (0:5) like the entropy device's, bound at its own
 /// path.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_FS_PTMX: u32 = 6;
 /// 6.8's one anonymous inode (`volume::anon_inode_metadata`), which every
 /// eventfd, timerfd, signalfd, epoll, inotify, pidfd and Landlock ruleset
 /// descriptor is a file on: root's, on anon_inodefs (0:15).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_FS_ANON_INODE: u32 = 7;
 /// A userfaultfd's own anonymous inode (`mem::userfaultfd`, a secure inode
 /// `anon_inode_create_getfile` makes per descriptor): its creator's, on
 /// anon_inodefs like the shared one.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_FS_ANON_OWN: u32 = 8;
 
 /// The `(major, minor)` device a `PATINA_FS_*` filesystem reports through
 /// `st_dev`/`stx_dev_*` (`PATINA_*_DEV_*` in `patina_native.h`): the volume is
 /// an ext4-like filesystem on block device 8:1, pipefs and sockfs anonymous
 /// devices of their own.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) fn fs_device(fs: u32) -> (u32, u32) {
     match fs {
         PATINA_FS_PIPEFS => (0, 14),

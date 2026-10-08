@@ -1,33 +1,11 @@
 //! Stat layouts and permission/ownership adapters.
+
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 use crate::PatinaMetadata;
 use core::{mem::MaybeUninit, ptr};
 
-fn stat_mode(values: &PatinaMetadata) -> libc::mode_t {
-    let kind = match values.kind {
-        crate::PATINA_ENTRY_DIRECTORY => libc::S_IFDIR,
-        crate::PATINA_ENTRY_SYMLINK => libc::S_IFLNK,
-        crate::PATINA_ENTRY_FIFO => libc::S_IFIFO,
-        crate::PATINA_ENTRY_SOCKET => libc::S_IFSOCK,
-        crate::PATINA_ENTRY_CHAR => libc::S_IFCHR,
-        crate::PATINA_ENTRY_ANON => 0,
-        _ => libc::S_IFREG,
-    };
-    kind | (values.mode & 0o7777) as libc::mode_t
-}
-fn device(fs: u32) -> (u32, u32) {
-    // The C adapter uses this vocabulary on both platforms; macOS has no
-    // producers for Linux-only pseudo-filesystems, but preserves its encoding.
-    match fs {
-        1 => (0, 14),
-        2 => (0, 8),
-        3 => (0, 4),
-        4 | 6 => (0, 5),
-        5 => (0, 24),
-        7 | 8 => (0, 15),
-        _ => (8, 1),
-    }
-}
 fn makedev(major: u32, minor: u32) -> libc::dev_t {
     #[cfg(target_os = "macos")]
     {
@@ -43,18 +21,19 @@ fn makedev(major: u32, minor: u32) -> libc::dev_t {
             | (minor & 0xff)) as libc::dev_t
     }
 }
-fn blksize(values: &PatinaMetadata) -> u64 {
-    if values.fs == 5 { 1024 } else { 4096 }
-}
 unsafe fn metadata(
     directory: c_int,
     path: *const c_char,
     flags: u32,
     out: *mut PatinaMetadata,
 ) -> c_int {
+    // SAFETY: the caller upholds the libc path contract and provides writable
+    // metadata storage for this model entry.
     unsafe { model_result(crate::patina_metadata_at(directory, path, flags, out)) }
 }
 unsafe fn fd_metadata(fd: c_int, out: *mut PatinaMetadata) -> c_int {
+    // SAFETY: the caller provides writable metadata storage for this model
+    // entry, normally a local `MaybeUninit` output.
     unsafe { model_result(crate::patina_fd_metadata_full(fd, out)) }
 }
 
@@ -72,6 +51,8 @@ unsafe fn stat_at(
     flags: c_int,
     values: *mut PatinaMetadata,
 ) -> c_int {
+    // SAFETY: callers uphold the path contract; the empty-path branch checks
+    // null before dereferencing, and non-null paths are valid C strings.
     unsafe {
         if flags & !STAT_AT_FLAGS != 0 {
             return error(AT_FLAG_REFUSAL);
@@ -102,22 +83,34 @@ unsafe fn fill_stat(
     if status.is_null() {
         return error(libc::EFAULT);
     }
+    // SAFETY: successful metadata initialized `values`; `status` is non-null
+    // here and must be writable and aligned for the caller's libc contract.
+    unsafe { write_stat(&*values, status) };
+    0
+}
+
+/// Encode the libc `stat` layout, preserving its zero-first, field-by-field
+/// direct-store sequence.
+///
+/// # Safety
+/// `values` must be readable; `status` must be writable, aligned and live for
+/// the duration of the call.
+unsafe fn write_stat(values: &PatinaMetadata, status: *mut libc::stat) {
+    // SAFETY: required by this codec's contract; the memset intentionally
+    // precedes the existing field stores.
     unsafe {
-        let values = &*values;
         ptr::write_bytes(status.cast::<u8>(), 0, size_of::<libc::stat>());
-        let (major, minor) = device(values.fs);
-        (*status).st_mode = stat_mode(values);
+        let (major, minor) = crate::fs::fs_device(values.fs);
+        (*status).st_mode = crate::fs::stat_mode(values);
         (*status).st_dev = makedev(major, minor);
         (*status).st_rdev = makedev(values.rdev_major, values.rdev_minor);
         (*status).st_nlink = values.nlink as libc::nlink_t;
         (*status).st_ino = values.ino as libc::ino_t;
         (*status).st_size = values.length as libc::off_t;
-        let mut uid = 0;
-        let mut gid = 0;
-        crate::patina_node_owner(values.fs, &mut uid, &mut gid);
+        let (uid, gid) = crate::fs::node_owner(values.fs);
         (*status).st_uid = uid as libc::uid_t;
         (*status).st_gid = gid as libc::gid_t;
-        (*status).st_blksize = blksize(values) as libc::blksize_t;
+        (*status).st_blksize = crate::fs::stat_blksize(values) as libc::blksize_t;
         (*status).st_blocks = values.blocks as libc::blkcnt_t;
         (*status).st_atime = values.atime.sec as libc::time_t;
         (*status).st_atime_nsec = values.atime.nsec as libc::c_long;
@@ -130,7 +123,6 @@ unsafe fn fill_stat(
             (*status).st_birthtime = values.btime.sec as libc::time_t;
             (*status).st_birthtime_nsec = values.btime.nsec as libc::c_long;
         }
-        0
     }
 }
 
@@ -140,10 +132,14 @@ pub(in crate::posix) unsafe fn fd_stat(
     values: *mut PatinaMetadata,
     status: *mut libc::stat,
 ) -> c_int {
+    // SAFETY: `values` is writable metadata storage and `status` has the
+    // caller's libc layout/alignment contract.
     unsafe { fill_stat(fd_metadata(fd, values), values, status) }
 }
 
 unsafe fn access_impl(directory: c_int, path: *const c_char, mode: c_int) -> c_int {
+    // SAFETY: callers uphold the libc path contract; `values` is local output
+    // storage and is read only after metadata succeeds.
     unsafe {
         let mut values = MaybeUninit::<PatinaMetadata>::uninit();
         if metadata(directory, path, 0, values.as_mut_ptr()) < 0 {
@@ -159,6 +155,7 @@ unsafe fn access_impl(directory: c_int, path: *const c_char, mode: c_int) -> c_i
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `path` is valid per this export's libc string contract.
     unsafe { access_impl(AT_FDCWD, path, mode) }
 }
 
@@ -175,6 +172,7 @@ pub unsafe extern "C" fn faccessat(
     if flags & !(libc::AT_EACCESS | libc::AT_SYMLINK_NOFOLLOW) != 0 {
         return error(libc::EINVAL);
     }
+    // SAFETY: `path` is valid per this export's libc string contract.
     unsafe { access_impl(at(directory), path, mode) }
 }
 
@@ -203,6 +201,7 @@ pub unsafe extern "C" fn fchmodat(
         } else {
             0
         };
+    // SAFETY: `path` is valid per this export's libc string contract.
     unsafe {
         model_result(crate::patina_chmod(
             at(directory),
@@ -235,6 +234,7 @@ pub unsafe extern "C" fn fchownat(
     if flags & AT_EMPTY_PATH != 0 {
         resolve_flags |= RESOLVE_EMPTY_PATH;
     }
+    // SAFETY: `path` is valid per this export's libc string contract.
     unsafe {
         model_result(crate::patina_chown(
             at(directory),
@@ -310,36 +310,23 @@ const _: () = {
 };
 
 #[cfg(target_os = "linux")]
+/// Encode the libc `statx` layout with its existing zero-first store order.
+///
 /// # Safety
-/// The guest string and output buffer satisfy libc statx's contract.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn statx(
-    directory: c_int,
-    path: *const c_char,
-    flags: c_int,
-    mask: u32,
-    status: *mut libc::statx,
-) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if flags & libc::AT_STATX_SYNC_TYPE == libc::AT_STATX_SYNC_TYPE || mask & 0x80000000 != 0 {
-        return error(libc::EINVAL);
-    }
+/// `values` must be readable; `status` must satisfy this door's existing
+/// direct-store contract and be writable, aligned and live for the call.
+unsafe fn write_statx(values: &PatinaMetadata, mask: u32, status: *mut libc::statx) {
+    // SAFETY: required by this codec's contract; this direct write is
+    // intentionally unchecked and follows the metadata lookup.
     unsafe {
-        let mut values = MaybeUninit::<PatinaMetadata>::uninit();
-        if stat_at(directory, path, flags, values.as_mut_ptr()) < 0 {
-            return -1;
-        }
-        let values = values.assume_init();
         ptr::write_bytes(status.cast::<u8>(), 0, size_of::<libc::statx>());
         let mut mount_id = 0;
         (*status).stx_mask = libc::STATX_BASIC_STATS
             | crate::volume::patina_statx_extra(values.fs, mask, &mut mount_id);
-        (*status).stx_blksize = blksize(&values) as u32;
-        (*status).stx_mode = stat_mode(&values) as u16;
+        (*status).stx_blksize = crate::fs::stat_blksize(values) as u32;
+        (*status).stx_mode = crate::fs::stat_mode(values) as u16;
         (*status).stx_nlink = values.nlink;
-        let mut uid = 0;
-        let mut gid = 0;
-        crate::patina_node_owner(values.fs, &mut uid, &mut gid);
+        let (uid, gid) = crate::fs::node_owner(values.fs);
         (*status).stx_uid = uid;
         (*status).stx_gid = gid;
         (*status).stx_ino = values.ino;
@@ -356,11 +343,39 @@ pub unsafe extern "C" fn statx(
             (*status).stx_btime.tv_nsec = values.btime.nsec as u32;
         }
         (*status).stx_mnt_id = mount_id;
-        let (major, minor) = device(values.fs);
+        let (major, minor) = crate::fs::fs_device(values.fs);
         (*status).stx_dev_major = major;
         (*status).stx_dev_minor = minor;
         (*status).stx_rdev_major = values.rdev_major;
         (*status).stx_rdev_minor = values.rdev_minor;
+    }
+}
+
+#[cfg(target_os = "linux")]
+/// # Safety
+/// The guest string and output buffer satisfy libc statx's contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn statx(
+    directory: c_int,
+    path: *const c_char,
+    flags: c_int,
+    mask: u32,
+    status: *mut libc::statx,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if flags & libc::AT_STATX_SYNC_TYPE == libc::AT_STATX_SYNC_TYPE || mask & 0x80000000 != 0 {
+        return error(libc::EINVAL);
+    }
+    // SAFETY: the exported entry's contract covers `path`; metadata uses
+    // local output storage, and the codec preserves this door's direct-store
+    // access to `status` (including its existing null/fault policy).
+    unsafe {
+        let mut values = MaybeUninit::<PatinaMetadata>::uninit();
+        if stat_at(directory, path, flags, values.as_mut_ptr()) < 0 {
+            return -1;
+        }
+        let values = values.assume_init();
+        write_statx(&values, mask, status);
         0
     }
 }
@@ -370,6 +385,7 @@ pub unsafe extern "C" fn statx(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chmod(path: *const c_char, mode: libc::mode_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `path` is valid per this export's libc string contract.
     unsafe { model_result(crate::patina_chmod(AT_FDCWD, path, mode as libc::c_uint, 0)) }
 }
 
@@ -388,6 +404,7 @@ pub unsafe extern "C" fn chown(
     group: libc::gid_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `path` is valid per this export's libc string contract.
     unsafe { model_result(crate::patina_chown(AT_FDCWD, path, 0, owner, group)) }
 }
 
@@ -400,6 +417,7 @@ pub unsafe extern "C" fn lchown(
     group: libc::gid_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `path` is valid per this export's libc string contract.
     unsafe {
         model_result(crate::patina_chown(
             AT_FDCWD,
@@ -422,6 +440,8 @@ pub extern "C" fn fchown(fd: c_int, owner: libc::uid_t, group: libc::gid_t) -> c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stat(path: *const c_char, status: *mut libc::stat) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `path` and `status` satisfy this export's libc metadata
+    // contract; the local metadata is read only after a successful result.
     unsafe {
         let mut values = MaybeUninit::<PatinaMetadata>::uninit();
         let result = metadata(AT_FDCWD, path, 0, values.as_mut_ptr());
@@ -434,6 +454,8 @@ pub unsafe extern "C" fn stat(path: *const c_char, status: *mut libc::stat) -> c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lstat(path: *const c_char, status: *mut libc::stat) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `path` and `status` satisfy this export's libc metadata
+    // contract; the local metadata is read only after a successful result.
     unsafe {
         let mut values = MaybeUninit::<PatinaMetadata>::uninit();
         let result = metadata(AT_FDCWD, path, RESOLVE_NOFOLLOW, values.as_mut_ptr());
@@ -446,6 +468,8 @@ pub unsafe extern "C" fn lstat(path: *const c_char, status: *mut libc::stat) -> 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstat(fd: c_int, status: *mut libc::stat) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `status` satisfies this export's libc metadata contract; local
+    // metadata is read only after a successful result.
     unsafe {
         let mut values = MaybeUninit::<PatinaMetadata>::uninit();
         let result = fd_metadata(fd, values.as_mut_ptr());
@@ -463,6 +487,8 @@ pub unsafe extern "C" fn fstatat(
     flags: c_int,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `path` and `status` satisfy this export's libc metadata
+    // contract; the local metadata is read only after a successful result.
     unsafe {
         let mut values = MaybeUninit::<PatinaMetadata>::uninit();
         let result = stat_at(directory, path, flags, values.as_mut_ptr());
@@ -476,6 +502,8 @@ pub unsafe extern "C" fn fstatat(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stat64(path: *const c_char, status: *mut libc::stat64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `path` and `status` satisfy this export's libc metadata
+    // contract; the local metadata is read only after a successful result.
     unsafe {
         let mut values = MaybeUninit::<PatinaMetadata>::uninit();
         let result = metadata(AT_FDCWD, path, 0, values.as_mut_ptr());
@@ -489,6 +517,8 @@ pub unsafe extern "C" fn stat64(path: *const c_char, status: *mut libc::stat64) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lstat64(path: *const c_char, status: *mut libc::stat64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `path` and `status` satisfy this export's libc metadata
+    // contract; the local metadata is read only after a successful result.
     unsafe {
         let mut values = MaybeUninit::<PatinaMetadata>::uninit();
         let result = metadata(AT_FDCWD, path, RESOLVE_NOFOLLOW, values.as_mut_ptr());
@@ -502,6 +532,8 @@ pub unsafe extern "C" fn lstat64(path: *const c_char, status: *mut libc::stat64)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstat64(fd: c_int, status: *mut libc::stat64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `status` satisfies this export's libc metadata contract; local
+    // metadata is read only after a successful result.
     unsafe {
         let mut values = MaybeUninit::<PatinaMetadata>::uninit();
         let result = fd_metadata(fd, values.as_mut_ptr());
@@ -520,6 +552,8 @@ pub unsafe extern "C" fn fstatat64(
     flags: c_int,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `path` and `status` satisfy this export's libc metadata
+    // contract; the local metadata is read only after a successful result.
     unsafe {
         let mut values = MaybeUninit::<PatinaMetadata>::uninit();
         let result = stat_at(directory, path, flags, values.as_mut_ptr());

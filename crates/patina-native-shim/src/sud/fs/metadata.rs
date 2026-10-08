@@ -30,45 +30,9 @@ const fn empty_metadata() -> PatinaMetadata {
     }
 }
 
-/// The virtual volume's block size, the same 4 KiB the statfs profile
-/// reports (`st_blksize`); `st_blocks` is the record's own allocation.
-const STAT_BLOCK_SIZE: u64 = 4096;
-
-/// `st_blksize`: the volume's block, but for a devpts node, whose inode
-/// takes its superblock's 1 KiB (`devpts_fill_super`). Byte for byte with
-/// the C `patina_stat_blksize`.
-fn stat_blksize(values: &StatValues) -> u64 {
-    if values.fs == crate::PATINA_FS_DEVPTS {
-        1024
-    } else {
-        STAT_BLOCK_SIZE
-    }
-}
-
 /// The one virtual volume's mount id (`stx_mnt_id`), the C
 /// `PATINA_STATX_MNT_ID`.
 pub(super) const STATX_MNT_ID_VALUE: u64 = crate::volume::ROOT_MOUNT.id as u64;
-
-/// `st_mode`: the entry's file-type bits ORed with its permission bits, byte
-/// for byte with the C `patina_stat_mode` (the anonymous inode has none).
-pub(in crate::sud) fn stat_mode(values: &StatValues) -> u32 {
-    let kind = match values.kind {
-        PATINA_ENTRY_ANON => 0,
-        PATINA_ENTRY_DIRECTORY => S_IFDIR,
-        PATINA_ENTRY_SYMLINK => S_IFLNK,
-        PATINA_ENTRY_FIFO => S_IFIFO,
-        PATINA_ENTRY_SOCKET => S_IFSOCK,
-        PATINA_ENTRY_CHAR => S_IFCHR,
-        _ => S_IFREG,
-    };
-    kind | (values.mode & 0o7777)
-}
-
-/// The owner `stat` reports, the one the C door reports too
-/// ([`crate::node_owner`]).
-pub(crate) fn stat_owner(values: &StatValues) -> (u32, u32) {
-    crate::node_owner(values.fs)
-}
 
 /// The kernel's `new_encode_dev`: the 32-bit device word `struct stat` carries.
 fn encode_dev((major, minor): (u32, u32)) -> u64 {
@@ -134,13 +98,13 @@ impl KernelStat {
         Self {
             st_dev: encode_dev(crate::fs_device(values.fs)),
             st_rdev: encode_dev((values.rdev_major, values.rdev_minor)),
-            st_mode: stat_mode(values),
+            st_mode: crate::fs::stat_mode(values),
             st_nlink: values.nlink as _,
             st_ino: values.ino,
             st_size: values.length as i64,
-            st_uid: stat_owner(values).0,
-            st_gid: stat_owner(values).1,
-            st_blksize: stat_blksize(values) as _,
+            st_uid: crate::fs::node_owner(values.fs).0,
+            st_gid: crate::fs::node_owner(values.fs).1,
+            st_blksize: crate::fs::stat_blksize(values) as _,
             st_blocks: values.blocks as i64,
             st_atime: values.atime.sec,
             st_atime_nsec: values.atime.nsec as _,
@@ -391,11 +355,11 @@ pub(in crate::sud) fn sys_statx(
     };
     let mut stx = Statx {
         stx_mask: STATX_BASIC_STATS | extra,
-        stx_blksize: stat_blksize(&values) as u32,
-        stx_mode: stat_mode(&values) as u16,
+        stx_blksize: crate::fs::stat_blksize(&values) as u32,
+        stx_mode: crate::fs::stat_mode(&values) as u16,
         stx_nlink: values.nlink,
-        stx_uid: stat_owner(&values).0,
-        stx_gid: stat_owner(&values).1,
+        stx_uid: crate::fs::node_owner(values.fs).0,
+        stx_gid: crate::fs::node_owner(values.fs).1,
         stx_ino: values.ino,
         stx_size: values.length,
         stx_blocks: values.blocks,

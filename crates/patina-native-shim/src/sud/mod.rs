@@ -246,8 +246,6 @@ const PATINA_ENTRY_SOCKET: u32 = 5;
 
 const PATINA_ENTRY_CHAR: u32 = 6;
 
-const PATINA_ENTRY_ANON: u32 = 7;
-
 // getdents64 `d_type` values (linux_dirent64).
 const DT_FIFO: u8 = uapi::DT_FIFO as u8;
 
@@ -260,20 +258,6 @@ const DT_LNK: u8 = uapi::DT_LNK as u8;
 const DT_SOCK: u8 = uapi::DT_SOCK as u8;
 
 const DT_CHR: u8 = uapi::DT_CHR as u8;
-
-// File-mode bits for the kernel `struct stat`/`struct statx` (mirrors the C
-// `patina_mode_for_kind`).
-const S_IFIFO: u32 = uapi::S_IFIFO;
-
-const S_IFDIR: u32 = uapi::S_IFDIR;
-
-const S_IFREG: u32 = uapi::S_IFREG;
-
-const S_IFLNK: u32 = uapi::S_IFLNK;
-
-const S_IFSOCK: u32 = uapi::S_IFSOCK;
-
-const S_IFCHR: u32 = uapi::S_IFCHR;
 
 // `*at` flag bits.
 const AT_SYMLINK_NOFOLLOW: u64 = uapi::AT_SYMLINK_NOFOLLOW as u64;
