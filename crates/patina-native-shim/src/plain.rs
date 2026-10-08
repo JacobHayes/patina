@@ -95,3 +95,24 @@ pub(crate) fn bytes_mut<T: Plain>(value: &mut T) -> &mut [u8] {
         core::slice::from_raw_parts_mut((value as *mut T).cast::<u8>(), core::mem::size_of::<T>())
     }
 }
+
+/// Store a plain value at an aligned destination.
+///
+/// # Safety
+/// `destination` must be aligned and valid for writing one `T`.
+#[allow(dead_code)]
+pub(crate) unsafe fn store<T: Plain>(destination: *mut T, value: T) {
+    // SAFETY: the caller guarantees that `destination` is aligned and writable for one `T`.
+    unsafe { destination.write(value) };
+}
+
+/// Store a plain value at a destination that may be unaligned.
+///
+/// # Safety
+/// `destination` must be valid for writing one `T`.
+#[allow(dead_code)]
+pub(crate) unsafe fn store_unaligned<T: Plain>(destination: *mut T, value: T) {
+    // SAFETY: the caller guarantees that `destination` is writable for one `T`; unaligned writes
+    // do not require an alignment invariant.
+    unsafe { destination.write_unaligned(value) };
+}

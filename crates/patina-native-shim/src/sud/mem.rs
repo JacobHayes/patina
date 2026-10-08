@@ -10,36 +10,50 @@ use super::*;
 
 pub(super) fn sys_mmap(args: [u64; 6]) -> i64 {
     // The model validates every argument the kernel would.
-    crate::mem::patina_mmap(
-        args[0] as usize,
-        args[1] as usize,
-        args[2] as c_int,
-        args[3] as c_int,
-        arg_fd(args[4]) as c_int,
-        args[5] as i64,
+    crate::abi::raw(
+        crate::mem::mmap(
+            args[0] as usize,
+            args[1] as usize,
+            args[2] as c_int,
+            args[3] as c_int,
+            arg_fd(args[4]) as c_int,
+            args[5] as i64,
+        )
+        .map(|address| address as i64),
     )
 }
 
 pub(super) fn sys_munmap(args: [u64; 6]) -> i64 {
-    crate::mem::patina_munmap(args[0] as usize, args[1] as usize)
+    crate::abi::raw(crate::mem::munmap(args[0] as usize, args[1] as usize))
 }
 
 pub(super) fn sys_mremap(args: [u64; 6]) -> i64 {
-    crate::mem::patina_mremap(
-        args[0] as usize,
-        args[1] as usize,
-        args[2] as usize,
-        args[3] as usize,
-        args[4] as usize,
+    crate::abi::raw(
+        crate::mem::mremap(
+            args[0] as usize,
+            args[1] as usize,
+            args[2] as usize,
+            args[3] as usize,
+            args[4] as usize,
+        )
+        .map(|address| address as i64),
     )
 }
 
 pub(super) fn sys_msync(args: [u64; 6]) -> i64 {
-    crate::mem::patina_msync(args[0] as usize, args[1] as usize, args[2] as c_int)
+    crate::abi::raw(crate::mem::msync(
+        args[0] as usize,
+        args[1] as usize,
+        args[2] as c_int,
+    ))
 }
 
 pub(super) fn sys_mprotect(args: [u64; 6]) -> i64 {
-    crate::mem::patina_mprotect(args[0] as usize, args[1] as usize, args[2] as c_int)
+    crate::abi::raw(crate::mem::mprotect(
+        args[0] as usize,
+        args[1] as usize,
+        args[2] as c_int,
+    ))
 }
 
 /// `getrlimit(2)`: the limit (`EINVAL` for an unknown resource first), then
@@ -55,8 +69,9 @@ pub(super) fn sys_getrlimit(resource: u64, out: u64) -> i64 {
     if out == 0 {
         return -EFAULT;
     }
-    // SAFETY: the guest's `struct rlimit`, non-null.
-    unsafe { (out as *mut crate::limits::Rlimit).write_unaligned(limit) };
+    // SAFETY: the direct-store contract requires writable guest output storage; null was checked,
+    // and unaligned access plus invalid-mapping fault behavior are unchanged.
+    unsafe { crate::plain::store_unaligned(out as *mut crate::limits::Rlimit, limit) };
     0
 }
 

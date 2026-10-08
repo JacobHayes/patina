@@ -1,5 +1,7 @@
 //! Regular-file page-cache funnel hooks and synchronization.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 // ---------------------------------------------------------------- the funnels' hooks
@@ -210,57 +212,67 @@ pub(crate) fn crashed() {
 /// answering `ENOMEM` only after the views past it are synced.
 pub extern "C" fn patina_msync(addr: usize, len: usize, flags: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let result = host(Syscall::N_msync, [addr, len, flags as usize, 0, 0, 0]);
-    if (result != 0 && result != -i64::from(ENOMEM)) || !tracking() {
-        return result;
-    }
-    let end = addr.saturating_add(round_up(len).unwrap_or(usize::MAX));
-    let (files, busy) = {
-        let mappings = MAPPINGS.lock();
-        let busy = (flags & MS_INVALIDATE != 0)
-            .then(|| {
-                mappings
-                    .locks
-                    .within(addr, end)
-                    .first()
-                    .map(|(from, _, _)| *from)
-            })
-            .flatten();
-        let mut files: Vec<(u64, u64, bool)> = if flags & MS_SYNC == 0 {
-            Vec::new()
-        } else {
-            mappings
-                .views
-                .within(addr, busy.unwrap_or(end))
-                .into_iter()
-                .filter(|(_, _, object)| object.is_shared())
-                .filter_map(|(_, _, object)| {
-                    let handle = mappings.descs.get(&object.desc()?)?;
-                    Some((object.ino()?, *handle, object.is_secret()))
+    crate::abi::raw(msync(addr, len, flags))
+}
+
+pub(crate) fn msync(addr: usize, len: usize, flags: c_int) -> crate::abi::SysResult<i64> {
+    'result: {
+        let result = host(Syscall::N_msync, [addr, len, flags as usize, 0, 0, 0]);
+        if (result != 0 && result != -i64::from(ENOMEM)) || !tracking() {
+            break 'result crate::abi::LinuxReturn::new(result)
+                .decode()
+                .map(|result| result as i64);
+        }
+        let end = addr.saturating_add(round_up(len).unwrap_or(usize::MAX));
+        let (files, busy) = {
+            let mappings = MAPPINGS.lock();
+            let busy = (flags & MS_INVALIDATE != 0)
+                .then(|| {
+                    mappings
+                        .locks
+                        .within(addr, end)
+                        .first()
+                        .map(|(from, _, _)| *from)
                 })
-                .collect()
+                .flatten();
+            let mut files: Vec<(u64, u64, bool)> = if flags & MS_SYNC == 0 {
+                Vec::new()
+            } else {
+                mappings
+                    .views
+                    .within(addr, busy.unwrap_or(end))
+                    .into_iter()
+                    .filter(|(_, _, object)| object.is_shared())
+                    .filter_map(|(_, _, object)| {
+                        let handle = mappings.descs.get(&object.desc()?)?;
+                        Some((object.ino()?, *handle, object.is_secret()))
+                    })
+                    .collect()
+            };
+            files.sort_unstable();
+            files.dedup_by_key(|(ino, _, _)| *ino);
+            (files, busy)
         };
-        files.sort_unstable();
-        files.dedup_by_key(|(ino, _, _)| *ino);
-        (files, busy)
-    };
-    crate::LAST_BOUNDARY_SYMBOL.store(c"msync".as_ptr().cast_mut(), Ordering::Relaxed);
-    for (ino, handle, secret) in files {
-        // Secret memory has no `fsync` operation (`vfs_fsync_range`).
-        if secret {
-            return fail(EINVAL);
+        crate::LAST_BOUNDARY_SYMBOL.store(c"msync".as_ptr().cast_mut(), Ordering::Relaxed);
+        for (ino, handle, secret) in files {
+            // Secret memory has no `fsync` operation (`vfs_fsync_range`).
+            if secret {
+                break 'result Err(crate::abi::Errno::new(EINVAL));
+            }
+            if let Some(writer) = writer_of(ino)
+                && let Err(errno) = write_back(ino, writer)
+            {
+                break 'result Err(crate::abi::Errno::new(errno));
+            }
+            if let Err(errno) = crate::with_context(|context| context.fs_sync(Fd(handle))) {
+                break 'result Err(crate::abi::Errno::new(errno));
+            }
         }
-        if let Some(writer) = writer_of(ino)
-            && let Err(errno) = write_back(ino, writer)
-        {
-            return fail(errno);
+        if busy.is_some() {
+            break 'result Err(crate::abi::Errno::new(crate::EBUSY));
         }
-        if let Err(errno) = crate::with_context(|context| context.fs_sync(Fd(handle))) {
-            return fail(errno);
-        }
+        crate::abi::LinuxReturn::new(result)
+            .decode()
+            .map(|result| result as i64)
     }
-    if busy.is_some() {
-        return fail(crate::EBUSY);
-    }
-    result
 }

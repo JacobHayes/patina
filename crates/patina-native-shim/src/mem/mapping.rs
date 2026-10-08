@@ -1,8 +1,29 @@
 //! Address-space mappings and mapped-view bookkeeping.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 // ---------------------------------------------------------------- mappings
+
+/// `mmap(2)`: the address, or `-errno` at the prefixed ABI boundary.
+pub(crate) fn mmap(
+    addr: usize,
+    len: usize,
+    prot: c_int,
+    flags: c_int,
+    fd: c_int,
+    offset: i64,
+) -> crate::abi::SysResult<usize> {
+    let result = if flags & MAP_ANONYMOUS != 0 {
+        map_anonymous(addr, len, prot, flags, offset)
+    } else {
+        map_file(addr, len, prot, flags, fd, offset)
+    };
+    crate::abi::LinuxReturn::new(result)
+        .decode()
+        .map(|address| address as usize)
+}
 
 /// `mmap(2)`: the address, or `-errno`.
 #[unsafe(no_mangle)]
@@ -15,10 +36,7 @@ pub extern "C" fn patina_mmap(
     offset: i64,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if flags & MAP_ANONYMOUS != 0 {
-        return map_anonymous(addr, len, prot, flags, offset);
-    }
-    map_file(addr, len, prot, flags, fd, offset)
+    crate::abi::raw(mmap(addr, len, prot, flags, fd, offset).map(|address| address as i64))
 }
 
 /// An anonymous mapping: host address space. Linux ignores its descriptor,
@@ -421,45 +439,64 @@ fn cache_for(ino: u64, handle: u64, size: u64) -> Result<c_int, i64> {
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_mprotect(addr: usize, len: usize, prot: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if prot & (PROT_WRITE | PROT_EXEC) != 0
-        && addr.is_multiple_of(PAGE)
-        && len != 0
-        && tracking()
-        && let Some(end) = round_up(len).and_then(|len| addr.checked_add(len))
-    {
-        let refused = MAPPINGS
-            .lock()
-            .views
-            .within(addr, end)
-            .into_iter()
-            .find(|(_, _, object)| object.refuses(prot))
-            .map(|(start, _, _)| start);
-        if let Some(refused) = refused {
-            if refused > addr {
-                let before = host(
-                    Syscall::N_mprotect,
-                    [addr, refused - addr, prot as usize, 0, 0, 0],
-                );
-                if before < 0 {
-                    return before;
+    crate::abi::raw(mprotect(addr, len, prot))
+}
+
+pub(crate) fn mprotect(addr: usize, len: usize, prot: c_int) -> crate::abi::SysResult<i64> {
+    'result: {
+        if prot & (PROT_WRITE | PROT_EXEC) != 0
+            && addr.is_multiple_of(PAGE)
+            && len != 0
+            && tracking()
+            && let Some(end) = round_up(len).and_then(|len| addr.checked_add(len))
+        {
+            let refused = MAPPINGS
+                .lock()
+                .views
+                .within(addr, end)
+                .into_iter()
+                .find(|(_, _, object)| object.refuses(prot))
+                .map(|(start, _, _)| start);
+            if let Some(refused) = refused {
+                if refused > addr {
+                    let before = host(
+                        Syscall::N_mprotect,
+                        [addr, refused - addr, prot as usize, 0, 0, 0],
+                    );
+                    if before < 0 {
+                        break 'result crate::abi::LinuxReturn::new(before)
+                            .decode()
+                            .map(|result| result as i64);
+                    }
                 }
+                break 'result Err(crate::abi::Errno::new(EACCES));
             }
-            return fail(EACCES);
         }
+        crate::abi::LinuxReturn::new(host(
+            Syscall::N_mprotect,
+            [addr, len, prot as usize, 0, 0, 0],
+        ))
+        .decode()
+        .map(|result| result as i64)
     }
-    host(Syscall::N_mprotect, [addr, len, prot as usize, 0, 0, 0])
 }
 
 /// `munmap(2)`: 0, or `-errno`.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_munmap(addr: usize, len: usize) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::abi::raw(munmap(addr, len))
+}
+
+pub(crate) fn munmap(addr: usize, len: usize) -> crate::abi::SysResult<i64> {
     let result = host(Syscall::N_munmap, [addr, len, 0, 0, 0, 0]);
     if result == 0 && tracking() {
         crate::LAST_BOUNDARY_SYMBOL.store(c"munmap".as_ptr().cast_mut(), Ordering::Relaxed);
         forget(addr, len);
     }
-    result
+    crate::abi::LinuxReturn::new(result)
+        .decode()
+        .map(|result| result as i64)
 }
 
 /// `mremap(2)`: the new address, or `-errno`. A view moved, grown, shrunk or
@@ -475,93 +512,108 @@ pub extern "C" fn patina_mremap(
     new_addr: usize,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let tracked = tracking();
-    let locked = tracked && old.is_multiple_of(PAGE) && MAPPINGS.lock().locks.at(old).is_some();
-    if locked && new_len > old_len {
-        let growth = round_up(new_len).unwrap_or(new_len) - round_up(old_len).unwrap_or(old_len);
-        let total = MAPPINGS.lock().locks.total() + growth;
-        if total / PAGE > lock_limit_pages() {
-            return fail(crate::EWOULDBLOCK);
-        }
-    }
-    let result = host(
-        Syscall::N_mremap,
-        [old, old_len, new_len, flags, new_addr, 0],
-    );
-    if result < 0 || !tracked {
-        return result;
-    }
-    crate::LAST_BOUNDARY_SYMBOL.store(c"mremap".as_ptr().cast_mut(), Ordering::Relaxed);
-    let moved_to = result as usize;
-    let (Some(old_len), Some(new_len)) = (round_up(old_len), round_up(new_len)) else {
-        return result;
-    };
-    // Old size 0 duplicates a shared mapping and `MREMAP_DONTUNMAP` leaves the
-    // old range mapped: either way the old range stays, and the new one is a
-    // second mapping of its object.
-    let duplicated = old_len == 0 || flags & MREMAP_DONTUNMAP != 0;
-    let replaced = if flags & MREMAP_FIXED != 0 {
-        take_all(moved_to, moved_to + new_len)
-    } else {
-        Vec::new()
-    };
-    let mut mappings = MAPPINGS.lock();
-    let source_end = old + old_len.max(PAGE);
-    let views = if duplicated {
-        mappings.views.within(old, source_end)
-    } else {
-        mappings.views.cut(old, old + old_len)
-    };
-    let policies = if duplicated {
-        mappings.policies.within(old, source_end)
-    } else {
-        mappings.policies.cut(old, old + old_len)
-    };
-    let locks = if duplicated {
-        Vec::new()
-    } else {
-        mappings.locks.cut(old, old + old_len)
-    };
-    // A piece keeps its place relative to the old start; the piece that ended
-    // the old range is the one a growth extends.
-    let place = |start: usize, end: usize| {
-        let from = moved_to + (start - old);
-        let to = if end >= old + old_len {
-            moved_to + new_len
-        } else {
-            (moved_to + (end - old)).min(moved_to + new_len)
-        };
-        (from < to).then_some((from, to))
-    };
-    let mut dropped = replaced;
-    for (start, end, object) in views {
-        match place(start, end) {
-            Some((from, to)) => mappings.views.set(from, to, object),
-            None if !duplicated => dropped.push((start, end, object)),
-            None => {}
-        }
-    }
-    for (start, end, policy) in policies {
-        if let Some((from, to)) = place(start, end) {
-            mappings.policies.set(from, to, policy);
-        }
-    }
-    let mut grown = None;
-    for (start, end, onfault) in locks {
-        if let Some((from, to)) = place(start, end) {
-            mappings.locks.set(from, to, onfault);
-            if end >= old + old_len && new_len > old_len && !onfault {
-                grown = Some((moved_to + old_len, new_len - old_len));
+    crate::abi::raw(mremap(old, old_len, new_len, flags, new_addr).map(|address| address as i64))
+}
+
+pub(crate) fn mremap(
+    old: usize,
+    old_len: usize,
+    new_len: usize,
+    flags: usize,
+    new_addr: usize,
+) -> crate::abi::SysResult<usize> {
+    'result: {
+        let tracked = tracking();
+        let locked = tracked && old.is_multiple_of(PAGE) && MAPPINGS.lock().locks.at(old).is_some();
+        if locked && new_len > old_len {
+            let growth =
+                round_up(new_len).unwrap_or(new_len) - round_up(old_len).unwrap_or(old_len);
+            let total = MAPPINGS.lock().locks.total() + growth;
+            if total / PAGE > lock_limit_pages() {
+                break 'result Err(crate::abi::Errno::new(crate::EWOULDBLOCK));
             }
         }
+        let result = host(
+            Syscall::N_mremap,
+            [old, old_len, new_len, flags, new_addr, 0],
+        );
+        if result < 0 || !tracked {
+            break 'result crate::abi::LinuxReturn::new(result)
+                .decode()
+                .map(|address| address as usize);
+        }
+        crate::LAST_BOUNDARY_SYMBOL.store(c"mremap".as_ptr().cast_mut(), Ordering::Relaxed);
+        let moved_to = result as usize;
+        let (Some(old_len), Some(new_len)) = (round_up(old_len), round_up(new_len)) else {
+            break 'result Ok(result as usize);
+        };
+        // Old size 0 duplicates a shared mapping and `MREMAP_DONTUNMAP` leaves the
+        // old range mapped: either way the old range stays, and the new one is a
+        // second mapping of its object.
+        let duplicated = old_len == 0 || flags & MREMAP_DONTUNMAP != 0;
+        let replaced = if flags & MREMAP_FIXED != 0 {
+            take_all(moved_to, moved_to + new_len)
+        } else {
+            Vec::new()
+        };
+        let mut mappings = MAPPINGS.lock();
+        let source_end = old + old_len.max(PAGE);
+        let views = if duplicated {
+            mappings.views.within(old, source_end)
+        } else {
+            mappings.views.cut(old, old + old_len)
+        };
+        let policies = if duplicated {
+            mappings.policies.within(old, source_end)
+        } else {
+            mappings.policies.cut(old, old + old_len)
+        };
+        let locks = if duplicated {
+            Vec::new()
+        } else {
+            mappings.locks.cut(old, old + old_len)
+        };
+        // A piece keeps its place relative to the old start; the piece that ended
+        // the old range is the one a growth extends.
+        let place = |start: usize, end: usize| {
+            let from = moved_to + (start - old);
+            let to = if end >= old + old_len {
+                moved_to + new_len
+            } else {
+                (moved_to + (end - old)).min(moved_to + new_len)
+            };
+            (from < to).then_some((from, to))
+        };
+        let mut dropped = replaced;
+        for (start, end, object) in views {
+            match place(start, end) {
+                Some((from, to)) => mappings.views.set(from, to, object),
+                None if !duplicated => dropped.push((start, end, object)),
+                None => {}
+            }
+        }
+        for (start, end, policy) in policies {
+            if let Some((from, to)) = place(start, end) {
+                mappings.policies.set(from, to, policy);
+            }
+        }
+        let mut grown = None;
+        for (start, end, onfault) in locks {
+            if let Some((from, to)) = place(start, end) {
+                mappings.locks.set(from, to, onfault);
+                if end >= old + old_len && new_len > old_len && !onfault {
+                    grown = Some((moved_to + old_len, new_len - old_len));
+                }
+            }
+        }
+        mappings.publish();
+        drop(mappings);
+        finish(dropped);
+        if let Some((start, len)) = grown {
+            let _ignore_errors = populate(start, len);
+        }
+        Ok(result as usize)
     }
-    mappings.publish();
-    drop(mappings);
-    finish(dropped);
-    if let Some((start, len)) = grown {
-        let _ignore_errors = populate(start, len);
-    }
-    result
 }
 
 /// Remove `[from, to)` from the address space's per-range state, answering

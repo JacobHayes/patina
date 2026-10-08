@@ -1,27 +1,16 @@
 //! Linux memory adapters: the raw failure range is distinct from pointer bits.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use core::ffi::{c_char, c_int, c_void};
 
-fn failed(result: i64) -> bool {
-    crate::abi::libc_result(
-        crate::abi::LinuxReturn::new(result).decode().map(|_| false),
-        true,
-    )
-}
-fn address(result: i64) -> *mut c_void {
-    if failed(result) {
-        libc::MAP_FAILED
-    } else {
-        result as usize as *mut c_void
-    }
-}
 fn result(value: i64) -> c_int {
-    if failed(value) { -1 } else { 0 }
+    crate::abi::libc_result(crate::abi::LinuxReturn::new(value).decode().map(|_| 0), -1)
 }
 
 /// # Safety
 /// Mapping ranges satisfy mmap's existing guest contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mmap(
+unsafe extern "C" fn mmap(
     hint: *mut c_void,
     length: usize,
     protection: c_int,
@@ -30,19 +19,15 @@ pub unsafe extern "C" fn mmap(
     offset: libc::off_t,
 ) -> *mut c_void {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    address(crate::mem::patina_mmap(
-        hint as usize,
-        length,
-        protection,
-        flags,
-        fd,
-        offset,
-    ))
+    crate::abi::libc_result(
+        crate::mem::mmap(hint as usize, length, protection, flags, fd, offset),
+        libc::MAP_FAILED as usize,
+    ) as *mut c_void
 }
 /// # Safety
 /// Same range contract as mmap64.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mmap64(
+unsafe extern "C" fn mmap64(
     hint: *mut c_void,
     length: usize,
     protection: c_int,
@@ -51,34 +36,32 @@ pub unsafe extern "C" fn mmap64(
     offset: libc::off64_t,
 ) -> *mut c_void {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    address(crate::mem::patina_mmap(
-        hint as usize,
-        length,
-        protection,
-        flags,
-        fd,
-        offset,
-    ))
+    crate::abi::libc_result(
+        crate::mem::mmap(hint as usize, length, protection, flags, fd, offset),
+        libc::MAP_FAILED as usize,
+    ) as *mut c_void
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn munmap(address: *mut c_void, length: usize) -> c_int {
+extern "C" fn munmap(address: *mut c_void, length: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    result(crate::mem::patina_munmap(address as usize, length))
+    crate::abi::libc_result(crate::mem::munmap(address as usize, length).map(|_| 0), -1)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn msync(address: *mut c_void, length: usize, flags: c_int) -> c_int {
+extern "C" fn msync(address: *mut c_void, length: usize, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::cancel(c"msync");
-    result(crate::mem::patina_msync(address as usize, length, flags))
+    crate::abi::libc_result(
+        crate::mem::msync(address as usize, length, flags).map(|_| 0),
+        -1,
+    )
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn mprotect(address: *mut c_void, length: usize, protection: c_int) -> c_int {
+extern "C" fn mprotect(address: *mut c_void, length: usize, protection: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    result(crate::mem::patina_mprotect(
-        address as usize,
-        length,
-        protection,
-    ))
+    crate::abi::libc_result(
+        crate::mem::mprotect(address as usize, length, protection).map(|_| 0),
+        -1,
+    )
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn mlock(address: *const c_void, length: usize) -> c_int {
@@ -110,5 +93,8 @@ pub extern "C" fn munlockall() -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memfd_create(name: *const c_char, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    super::model_result(unsafe { crate::mem::patina_memfd_create(name, flags) })
+    super::model_result({
+        // SAFETY: this export's contract guarantees the bounded name scan can read through NUL.
+        unsafe { crate::mem::patina_memfd_create(name, flags) }
+    })
 }

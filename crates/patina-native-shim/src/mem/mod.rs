@@ -42,6 +42,8 @@
 //! attachments, which are views of a segment's memfd), the memory locks and the
 //! memory policies (`crate::numa`).
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 mod barrier;
 mod cache;
 mod memfd;
@@ -337,9 +339,11 @@ pub(crate) use segments::{
     set_policy,
 };
 
-pub(crate) use hooks::patina_msync;
+pub(crate) use hooks::msync;
 pub(crate) use locks::{patina_mlock, patina_mlockall, patina_munlock, patina_munlockall};
-pub(crate) use mapping::{patina_mmap, patina_mprotect, patina_mremap, patina_munmap};
+#[cfg(patina_posix_exports)]
+pub(crate) use mapping::patina_mremap;
+pub(crate) use mapping::{mmap, mprotect, mremap, munmap};
 pub(crate) use memfd::{
     patina_add_seals, patina_get_seals, patina_memfd_create, patina_memfd_secret,
 };
