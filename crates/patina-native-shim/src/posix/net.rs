@@ -1,4 +1,7 @@
-//! Socket adapters preserve signed kernel results and signal-before-errno order.
+//! Socket libc doors project the shared typed cores after preserving delivery order.
+
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::cancel;
 use crate::thread::net;
 use core::ffi::{c_char, c_int, c_void};
@@ -6,53 +9,51 @@ mod gai;
 #[cfg(target_os = "linux")]
 mod interfaces;
 
-fn socket_result(rc: i64) -> isize {
-    crate::abi::libc_delivered(crate::abi::from_neg(rc), -1) as isize
-}
 #[unsafe(no_mangle)]
 pub extern "C" fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    socket_result(net::patina_sock_socket(domain, ty, protocol)) as c_int
+    crate::abi::libc_delivered(net::socket(domain, ty, protocol), -1) as c_int
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn socketpair(domain: c_int, ty: c_int, protocol: c_int, sv: *mut c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    socket_result(net::patina_sock_socketpair(
-        domain,
-        ty,
-        protocol,
-        sv as usize,
-    )) as c_int
+    crate::abi::libc_delivered(net::socketpair(domain, ty, protocol, sv as usize), -1) as c_int
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn bind(fd: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    socket_result(net::patina_sock_bind(
-        fd,
-        addr as usize,
-        i64::from(len as i32),
-    )) as c_int
+    crate::abi::libc_delivered(
+        net::bind(
+            fd,
+            addr as usize,
+            i64::from(crate::abi::kernel_int(len as usize)),
+        ),
+        -1,
+    ) as c_int
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn connect(fd: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"connect");
-    socket_result(net::patina_sock_connect(
-        fd,
-        addr as usize,
-        i64::from(len as i32),
-    )) as c_int
+    crate::abi::libc_delivered(
+        net::connect(
+            fd,
+            addr as usize,
+            i64::from(crate::abi::kernel_int(len as usize)),
+        ),
+        -1,
+    ) as c_int
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn listen(fd: c_int, backlog: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    socket_result(net::patina_sock_listen(fd, backlog)) as c_int
+    crate::abi::libc_delivered(net::listen(fd, backlog), -1) as c_int
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn accept(fd: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"accept");
-    socket_result(net::patina_sock_accept(fd, addr as usize, len as usize, 0)) as c_int
+    crate::abi::libc_delivered(net::accept(fd, addr as usize, len as usize, 0), -1) as c_int
 }
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
@@ -64,12 +65,7 @@ pub extern "C" fn accept4(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"accept4");
-    socket_result(net::patina_sock_accept(
-        fd,
-        addr as usize,
-        len as usize,
-        flags,
-    )) as c_int
+    crate::abi::libc_delivered(net::accept(fd, addr as usize, len as usize, flags), -1) as c_int
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn getsockname(
@@ -78,7 +74,7 @@ pub extern "C" fn getsockname(
     len: *mut libc::socklen_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    socket_result(net::patina_sock_name(fd, addr as usize, len as usize, 0)) as c_int
+    crate::abi::libc_delivered(net::name(fd, addr as usize, len as usize, 0), -1) as c_int
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn getpeername(
@@ -87,12 +83,12 @@ pub extern "C" fn getpeername(
     len: *mut libc::socklen_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    socket_result(net::patina_sock_name(fd, addr as usize, len as usize, 1)) as c_int
+    crate::abi::libc_delivered(net::name(fd, addr as usize, len as usize, 1), -1) as c_int
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn shutdown(fd: c_int, how: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    socket_result(net::patina_sock_shutdown(fd, how)) as c_int
+    crate::abi::libc_delivered(net::shutdown(fd, how), -1) as c_int
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn setsockopt(
@@ -103,13 +99,16 @@ pub extern "C" fn setsockopt(
     len: libc::socklen_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    socket_result(net::patina_sock_setsockopt(
-        fd,
-        level,
-        optname,
-        value as usize,
-        i64::from(len as i32),
-    )) as c_int
+    crate::abi::libc_delivered(
+        net::setsockopt(
+            fd,
+            level,
+            optname,
+            value as usize,
+            i64::from(crate::abi::kernel_int(len as usize)),
+        ),
+        -1,
+    ) as c_int
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn getsockopt(
@@ -120,13 +119,10 @@ pub extern "C" fn getsockopt(
     len: *mut libc::socklen_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    socket_result(net::patina_sock_getsockopt(
-        fd,
-        level,
-        optname,
-        value as usize,
-        len as usize,
-    )) as c_int
+    crate::abi::libc_delivered(
+        net::getsockopt(fd, level, optname, value as usize, len as usize),
+        -1,
+    ) as c_int
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn sendto(
@@ -139,20 +135,23 @@ pub extern "C" fn sendto(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"sendto");
-    socket_result(net::patina_sock_sendto(
-        fd,
-        buf as usize,
-        len,
-        flags,
-        addr as usize,
-        i64::from(alen as i32),
-    ))
+    crate::abi::libc_delivered(
+        net::sendto(
+            fd,
+            buf as usize,
+            len,
+            flags,
+            addr as usize,
+            i64::from(crate::abi::kernel_int(alen as usize)),
+        ),
+        -1,
+    ) as isize
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn send(fd: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"send");
-    socket_result(net::patina_sock_sendto(fd, buf as usize, len, flags, 0, 0))
+    crate::abi::libc_delivered(net::sendto(fd, buf as usize, len, flags, 0, 0), -1) as isize
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn recvfrom(
@@ -165,39 +164,28 @@ pub extern "C" fn recvfrom(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"recvfrom");
-    socket_result(net::patina_sock_recvfrom(
-        fd,
-        buf as usize,
-        len,
-        flags,
-        addr as usize,
-        alen as usize,
-    ))
+    crate::abi::libc_delivered(
+        net::recvfrom(fd, buf as usize, len, flags, addr as usize, alen as usize),
+        -1,
+    ) as isize
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn recv(fd: c_int, buf: *mut c_void, len: usize, flags: c_int) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"recv");
-    socket_result(net::patina_sock_recvfrom(
-        fd,
-        buf as usize,
-        len,
-        flags,
-        0,
-        0,
-    ))
+    crate::abi::libc_delivered(net::recvfrom(fd, buf as usize, len, flags, 0, 0), -1) as isize
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn sendmsg(fd: c_int, msg: *const libc::msghdr, flags: c_int) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"sendmsg");
-    socket_result(net::msg::patina_sock_sendmsg(fd, msg as usize, flags))
+    crate::abi::libc_delivered(net::msg::sendmsg(fd, msg as usize, flags), -1) as isize
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn recvmsg(fd: c_int, msg: *mut libc::msghdr, flags: c_int) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"recvmsg");
-    socket_result(net::msg::patina_sock_recvmsg(fd, msg as usize, flags))
+    crate::abi::libc_delivered(net::msg::recvmsg(fd, msg as usize, flags), -1) as isize
 }
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
@@ -209,12 +197,7 @@ pub extern "C" fn sendmmsg(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"sendmmsg");
-    socket_result(net::msg::patina_sock_sendmmsg(
-        fd,
-        vec as usize,
-        vlen,
-        flags,
-    )) as c_int
+    crate::abi::libc_delivered(net::msg::sendmmsg(fd, vec as usize, vlen, flags), -1) as c_int
 }
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
@@ -227,13 +210,10 @@ pub extern "C" fn recvmmsg(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"recvmmsg");
-    socket_result(net::msg::patina_sock_recvmmsg(
-        fd,
-        vec as usize,
-        vlen,
-        flags,
-        timeout as usize,
-    )) as c_int
+    crate::abi::libc_delivered(
+        net::msg::recvmmsg(fd, vec as usize, vlen, flags, timeout as usize),
+        -1,
+    ) as c_int
 }
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
@@ -249,14 +229,7 @@ pub extern "C" fn __recv_chk(
     if len > buflen {
         super::chk_fail();
     }
-    socket_result(net::patina_sock_recvfrom(
-        fd,
-        buf as usize,
-        len,
-        flags,
-        0,
-        0,
-    ))
+    crate::abi::libc_delivered(net::recvfrom(fd, buf as usize, len, flags, 0, 0), -1) as isize
 }
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
@@ -274,20 +247,17 @@ pub extern "C" fn __recvfrom_chk(
     if len > buflen {
         super::chk_fail();
     }
-    socket_result(net::patina_sock_recvfrom(
-        fd,
-        buf as usize,
-        len,
-        flags,
-        addr as usize,
-        alen as usize,
-    ))
+    crate::abi::libc_delivered(
+        net::recvfrom(fd, buf as usize, len, flags, addr as usize, alen as usize),
+        -1,
+    ) as isize
 }
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn if_nametoindex(ifname: *const c_char) -> libc::c_uint {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: each successful query initializes the output, and the caller supplies a valid C string for this call.
     unsafe {
         let mut interface = core::mem::MaybeUninit::<net::iface::PatinaInterface>::uninit();
         let mut at = 0;

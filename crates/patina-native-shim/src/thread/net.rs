@@ -1,9 +1,9 @@
 //! Sockets: the one socket layer behind both doors.
 //!
-//! Every socket syscall has one kernel-shaped entry here (`patina_sock_*`: the
-//! raw arguments, guest pointers as addresses, `-errno` on failure) that the C
-//! interposers and the SUD rows both call, so the two doors cannot disagree.
-//! An entry resolves the descriptor (`EBADF`, `ENOTSOCK`), copies its
+//! Every socket syscall has one kernel-shaped typed core here. The prefixed
+//! `patina_sock_*` exports project it to `-errno`; the libc and SUD doors
+//! project the same core to their own result convention, so the doors cannot
+//! disagree. A core resolves the descriptor (`EBADF`, `ENOTSOCK`), copies its
 //! arguments in the way `net/socket.c` does (`move_addr_to_kernel`, the
 //! message header, the iovecs, the control messages; `EFAULT` for what cannot
 //! be read, never a fault in the shim), and hands the family the request:
@@ -23,6 +23,8 @@
 //! ([`socket_poll`]), computed the way the family's poll function computes
 //! it, plus an arrival count for edge-triggered interest. Nothing here reads
 //! host network state.
+
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
 
@@ -284,10 +286,6 @@ pub(crate) enum Dir {
     Send,
 }
 
-fn errno_result(result: Result<i64, c_int>) -> i64 {
-    crate::abi::raw(result.map_err(crate::abi::Errno::new))
-}
-
 /// The unrecorded virtual now: a function of the recorded sleeps, so a
 /// deadline built on it reproduces on replay.
 pub(crate) fn now() -> Result<u64, c_int> {
@@ -468,29 +466,32 @@ fn create(state: &mut ThreadRuntime, family: i32, ty: i32, protocol: i32) -> Res
     Ok(handle)
 }
 
-#[unsafe(no_mangle)]
-/// `socket(2)`.
-pub extern "C" fn patina_sock_socket(family: c_int, ty: c_int, protocol: c_int) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+pub(crate) fn socket(family: c_int, ty: c_int, protocol: c_int) -> crate::abi::SysResult<i64> {
+    (|| {
         let (nonblocking, cloexec) = creation_flags(ty & !SOCK_TYPE_MASK)?;
         let mut state = lock_state();
         let handle = create(&mut state, family, ty & SOCK_TYPE_MASK, protocol)?;
         install(&mut state, handle, nonblocking, cloexec).map(i64::from)
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
 }
 
 #[unsafe(no_mangle)]
+/// `socket(2)`.
+pub extern "C" fn patina_sock_socket(family: c_int, ty: c_int, protocol: c_int) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::abi::raw(socket(family, ty, protocol))
+}
+
 /// `socketpair(2)`: the numbers are written to `sv` before the pair exists,
 /// as `__sys_socketpair` does (a bad `sv` is `EFAULT` whatever the family).
-pub extern "C" fn patina_sock_socketpair(
+pub(crate) fn socketpair(
     family: c_int,
     ty: c_int,
     protocol: c_int,
     sv: usize,
-) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+) -> crate::abi::SysResult<i64> {
+    (|| {
         let (nonblocking, cloexec) = creation_flags(ty & !SOCK_TYPE_MASK)?;
         let ty = ty & SOCK_TYPE_MASK;
         let mut state = lock_state();
@@ -529,7 +530,19 @@ pub extern "C" fn patina_sock_socketpair(
                 Err(errno)
             }
         }
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_sock_socketpair(
+    family: c_int,
+    ty: c_int,
+    protocol: c_int,
+    sv: usize,
+) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::abi::raw(socketpair(family, ty, protocol, sv))
 }
 
 /// Drop a socket no number was bound to.
@@ -566,11 +579,8 @@ enum Family {
     Netlink,
 }
 
-#[unsafe(no_mangle)]
-/// `bind(2)`.
-pub extern "C" fn patina_sock_bind(fd: c_int, addr: usize, len: i64) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+pub(crate) fn bind(fd: c_int, addr: usize, len: i64) -> crate::abi::SysResult<i64> {
+    (|| {
         sched_point()?;
         let (handle, _) = lookup(fd)?;
         let address = addr::copy_in(addr, len)?;
@@ -581,14 +591,19 @@ pub extern "C" fn patina_sock_bind(fd: c_int, addr: usize, len: i64) -> i64 {
             Family::Netlink => netlink::bind(handle, &address),
         }
         .map(|()| 0)
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
 }
 
 #[unsafe(no_mangle)]
-/// `connect(2)`.
-pub extern "C" fn patina_sock_connect(fd: c_int, addr: usize, len: i64) -> i64 {
+/// `bind(2)`.
+pub extern "C" fn patina_sock_bind(fd: c_int, addr: usize, len: i64) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+    crate::abi::raw(bind(fd, addr, len))
+}
+
+pub(crate) fn connect(fd: c_int, addr: usize, len: i64) -> crate::abi::SysResult<i64> {
+    (|| {
         sched_point()?;
         let (handle, nonblocking) = lookup(fd)?;
         let address = addr::copy_in(addr, len)?;
@@ -599,18 +614,23 @@ pub extern "C" fn patina_sock_connect(fd: c_int, addr: usize, len: i64) -> i64 {
             Family::Netlink => netlink::connect(handle, &address),
         }
         .map(|()| 0)
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
+}
+
+#[unsafe(no_mangle)]
+/// `connect(2)`.
+pub extern "C" fn patina_sock_connect(fd: c_int, addr: usize, len: i64) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::abi::raw(connect(fd, addr, len))
 }
 
 /// `net.core.somaxconn`: the most a `listen` backlog is taken as. macOS's
 /// `kern.ipc.somaxconn` is not declared; its backlog is capped the same.
 const SOMAXCONN: i32 = crate::registry::KERNEL_CONFIG.somaxconn;
 
-#[unsafe(no_mangle)]
-/// `listen(2)`.
-pub extern "C" fn patina_sock_listen(fd: c_int, backlog: c_int) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+pub(crate) fn listen(fd: c_int, backlog: c_int) -> crate::abi::SysResult<i64> {
+    (|| {
         sched_point()?;
         let (handle, _) = lookup(fd)?;
         // `(unsigned int)backlog > somaxconn`: a negative one is the maximum.
@@ -626,14 +646,25 @@ pub extern "C" fn patina_sock_listen(fd: c_int, backlog: c_int) -> i64 {
             Family::Netlink => Err(EOPNOTSUPP),
         }
         .map(|()| 0)
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
 }
 
 #[unsafe(no_mangle)]
-/// `accept4(2)` (`accept` is flags 0).
-pub extern "C" fn patina_sock_accept(fd: c_int, addr: usize, len_ptr: usize, flags: c_int) -> i64 {
+/// `listen(2)`.
+pub extern "C" fn patina_sock_listen(fd: c_int, backlog: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+    crate::abi::raw(listen(fd, backlog))
+}
+
+/// `accept4(2)` (`accept` is flags 0).
+pub(crate) fn accept(
+    fd: c_int,
+    addr: usize,
+    len_ptr: usize,
+    flags: c_int,
+) -> crate::abi::SysResult<i64> {
+    (|| {
         let (nonblocking_new, cloexec) = creation_flags(flags)?;
         sched_point()?;
         let (handle, nonblocking) = lookup(fd)?;
@@ -655,14 +686,24 @@ pub extern "C" fn patina_sock_accept(fd: c_int, addr: usize, len_ptr: usize, fla
             return Err(errno);
         }
         Ok(i64::from(new_fd))
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
 }
 
 #[unsafe(no_mangle)]
-/// `getsockname(2)` (`peer` 0) and `getpeername(2)` (`peer` 1).
-pub extern "C" fn patina_sock_name(fd: c_int, addr: usize, len_ptr: usize, peer: c_int) -> i64 {
+pub extern "C" fn patina_sock_accept(fd: c_int, addr: usize, len_ptr: usize, flags: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+    crate::abi::raw(accept(fd, addr, len_ptr, flags))
+}
+
+/// `getsockname(2)` (`peer` 0) and `getpeername(2)` (`peer` 1).
+pub(crate) fn name(
+    fd: c_int,
+    addr: usize,
+    len_ptr: usize,
+    peer: c_int,
+) -> crate::abi::SysResult<i64> {
+    (|| {
         let (handle, _) = lookup(fd)?;
         let name = {
             let state = lock_state();
@@ -675,14 +716,19 @@ pub extern "C" fn patina_sock_name(fd: c_int, addr: usize, len_ptr: usize, peer:
             }
         };
         addr::copy_out(&name, addr, len_ptr).map(|()| 0)
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
 }
 
 #[unsafe(no_mangle)]
-/// `shutdown(2)`: `SHUT_RD`/`SHUT_WR`/`SHUT_RDWR` as `sk_shutdown` bits.
-pub extern "C" fn patina_sock_shutdown(fd: c_int, how: c_int) -> i64 {
+pub extern "C" fn patina_sock_name(fd: c_int, addr: usize, len_ptr: usize, peer: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+    crate::abi::raw(name(fd, addr, len_ptr, peer))
+}
+
+/// `shutdown(2)`: `SHUT_RD`/`SHUT_WR`/`SHUT_RDWR` as `sk_shutdown` bits.
+pub(crate) fn shutdown(fd: c_int, how: c_int) -> crate::abi::SysResult<i64> {
+    (|| {
         sched_point()?;
         let (handle, _) = lookup(fd)?;
         let bits = how.wrapping_add(1);
@@ -696,7 +742,14 @@ pub extern "C" fn patina_sock_shutdown(fd: c_int, how: c_int) -> i64 {
             Family::Netlink => Err(EOPNOTSUPP),
         }
         .map(|()| 0)
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_sock_shutdown(fd: c_int, how: c_int) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::abi::raw(shutdown(fd, how))
 }
 
 /// Send one message through `handle` (every send entry and `write`).
@@ -735,18 +788,16 @@ fn with_nonblock(flags: c_int, nonblocking: bool) -> c_int {
     }
 }
 
-#[unsafe(no_mangle)]
 /// `sendto(2)` (`send` is no address).
-pub extern "C" fn patina_sock_sendto(
+pub(crate) fn sendto(
     fd: c_int,
     buf: usize,
     len: usize,
     flags: c_int,
     addr: usize,
     alen: i64,
-) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+) -> crate::abi::SysResult<i64> {
+    (|| {
         sched_point()?;
         let (handle, nonblocking) = lookup(fd)?;
         let to = if addr != 0 {
@@ -760,21 +811,33 @@ pub extern "C" fn patina_sock_sendto(
             with_nonblock(flags, nonblocking),
         );
         send_message(handle, message).map(|sent| sent as i64)
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn patina_sock_sendto(
+    fd: c_int,
+    buf: usize,
+    len: usize,
+    flags: c_int,
+    addr: usize,
+    alen: i64,
+) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::abi::raw(sendto(fd, buf, len, flags, addr, alen))
+}
+
 /// `recvfrom(2)` (`recv` is no address).
-pub extern "C" fn patina_sock_recvfrom(
+pub(crate) fn recvfrom(
     fd: c_int,
     buf: usize,
     len: usize,
     flags: c_int,
     addr: usize,
     alen_ptr: usize,
-) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+) -> crate::abi::SysResult<i64> {
+    (|| {
         sched_point()?;
         let (handle, nonblocking) = lookup(fd)?;
         let want = Want {
@@ -788,7 +851,21 @@ pub extern "C" fn patina_sock_recvfrom(
             addr::copy_out(incoming.from.as_deref().unwrap_or(&[]), addr, alen_ptr)?;
         }
         Ok(incoming.len as i64)
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_sock_recvfrom(
+    fd: c_int,
+    buf: usize,
+    len: usize,
+    flags: c_int,
+    addr: usize,
+    alen_ptr: usize,
+) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::abi::raw(recvfrom(fd, buf, len, flags, addr, alen_ptr))
 }
 
 /// Drop the in-flight references of descriptors that were not installed.
@@ -864,17 +941,15 @@ pub(crate) fn pipe_signal(flags: c_int, nosigpipe: bool) {
     }
 }
 
-#[unsafe(no_mangle)]
 /// `setsockopt(2)`.
-pub extern "C" fn patina_sock_setsockopt(
+pub(crate) fn setsockopt(
     fd: c_int,
     level: c_int,
     name: c_int,
     value: usize,
     len: i64,
-) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+) -> crate::abi::SysResult<i64> {
+    (|| {
         let (handle, _) = lookup(fd)?;
         if len < 0 {
             return Err(EINVAL);
@@ -887,20 +962,31 @@ pub extern "C" fn patina_sock_setsockopt(
             .get_mut(&handle)
             .ok_or(crate::EBADF)?;
         opts::set(socket, level, name, value, len as usize).map(|()| 0)
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn patina_sock_setsockopt(
+    fd: c_int,
+    level: c_int,
+    name: c_int,
+    value: usize,
+    len: i64,
+) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::abi::raw(setsockopt(fd, level, name, value, len))
+}
+
 /// `getsockopt(2)`.
-pub extern "C" fn patina_sock_getsockopt(
+pub(crate) fn getsockopt(
     fd: c_int,
     level: c_int,
     name: c_int,
     value: usize,
     len_ptr: usize,
-) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+) -> crate::abi::SysResult<i64> {
+    (|| {
         let (handle, _) = lookup(fd)?;
         let mut state = lock_state();
         let listening = inet::listening(&state, handle) || unix::listening(&state, handle);
@@ -918,7 +1004,20 @@ pub extern "C" fn patina_sock_getsockopt(
             peer_creds,
         };
         opts::get(socket, facts, level, name, value, len_ptr).map(|()| 0)
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_sock_getsockopt(
+    fd: c_int,
+    level: c_int,
+    name: c_int,
+    value: usize,
+    len_ptr: usize,
+) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::abi::raw(getsockopt(fd, level, name, value, len_ptr))
 }
 
 /// Free a socket whose description's last reference went (the universal

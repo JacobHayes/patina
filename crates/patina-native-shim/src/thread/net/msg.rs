@@ -14,6 +14,8 @@
 //! caller's control buffer as `put_cmsg` and `scm_detach_fds` lay them,
 //! `MSG_CTRUNC` for what does not fit.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 /// `struct msghdr`'s layout.
@@ -341,15 +343,20 @@ fn send_one(handle: c_int, nonblocking: bool, msg: usize, flags: c_int) -> Resul
     send_message(handle, message)
 }
 
+pub(crate) fn sendmsg(fd: c_int, msg: usize, flags: c_int) -> crate::abi::SysResult<i64> {
+    (|| {
+        sched_point()?;
+        let (handle, nonblocking) = lookup(fd)?;
+        send_one(handle, nonblocking, msg, flags).map(|sent| sent as i64)
+    })()
+    .map_err(crate::abi::Errno::new)
+}
+
 #[unsafe(no_mangle)]
 /// `sendmsg(2)`.
 pub extern "C" fn patina_sock_sendmsg(fd: c_int, msg: usize, flags: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
-        sched_point()?;
-        let (handle, nonblocking) = lookup(fd)?;
-        send_one(handle, nonblocking, msg, flags).map(|sent| sent as i64)
-    })())
+    crate::abi::raw(sendmsg(fd, msg, flags))
 }
 
 /// Lay one control message into the guest's buffer at `*at` (`put_cmsg`):
@@ -531,24 +538,32 @@ fn cmsg_flags(_flags: c_int) -> c_int {
     0
 }
 
+pub(crate) fn recvmsg(fd: c_int, msg: usize, flags: c_int) -> crate::abi::SysResult<i64> {
+    (|| {
+        sched_point()?;
+        let (handle, nonblocking) = lookup(fd)?;
+        recv_one(handle, nonblocking, msg, flags).map(|len| len as i64)
+    })()
+    .map_err(crate::abi::Errno::new)
+}
+
 #[unsafe(no_mangle)]
 /// `recvmsg(2)`.
 pub extern "C" fn patina_sock_recvmsg(fd: c_int, msg: usize, flags: c_int) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
-        sched_point()?;
-        let (handle, nonblocking) = lookup(fd)?;
-        recv_one(handle, nonblocking, msg, flags).map(|len| len as i64)
-    })())
+    crate::abi::raw(recvmsg(fd, msg, flags))
 }
 
-#[unsafe(no_mangle)]
 /// `sendmmsg(2)`: up to `UIO_MAXIOV` messages, each's sent length written
 /// back; the count sent, or the first message's error when none was.
 #[cfg(target_os = "linux")]
-pub extern "C" fn patina_sock_sendmmsg(fd: c_int, vec: usize, vlen: u32, flags: c_int) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+pub(crate) fn sendmmsg(
+    fd: c_int,
+    vec: usize,
+    vlen: u32,
+    flags: c_int,
+) -> crate::abi::SysResult<i64> {
+    (|| {
         sched_point()?;
         let vlen = (vlen as usize).min(UIO_MAXIOV);
         let (handle, nonblocking) = lookup(fd)?;
@@ -574,28 +589,34 @@ pub extern "C" fn patina_sock_sendmmsg(fd: c_int, vec: usize, vlen: u32, flags: 
             Some(errno) if sent == 0 => Err(errno),
             _ => Ok(sent as i64),
         }
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
+}
+
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_sock_sendmmsg(fd: c_int, vec: usize, vlen: u32, flags: c_int) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::abi::raw(sendmmsg(fd, vec, vlen, flags))
 }
 
 /// `MSG_WAITFORONE`: after the first message a batch receive stops waiting.
 #[cfg(target_os = "linux")]
 const MSG_WAITFORONE_FLAG: c_int = MSG_WAITFORONE;
 
-#[unsafe(no_mangle)]
 /// `recvmmsg(2)` (`do_recvmmsg`): the messages received, each's length
 /// written back. An invalid timeout is refused before anything; the
 /// timeout is checked after each message; an error after the first is left
 /// pending on the socket (unless it is `EAGAIN`).
 #[cfg(target_os = "linux")]
-pub extern "C" fn patina_sock_recvmmsg(
+pub(crate) fn recvmmsg(
     fd: c_int,
     vec: usize,
     vlen: u32,
     flags: c_int,
     timeout: usize,
-) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    errno_result((|| {
+) -> crate::abi::SysResult<i64> {
+    (|| {
         let end = if timeout == 0 {
             None
         } else {
@@ -659,7 +680,21 @@ pub extern "C" fn patina_sock_recvmmsg(
             }
             None => Ok(received as i64),
         }
-    })())
+    })()
+    .map_err(crate::abi::Errno::new)
+}
+
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_sock_recvmmsg(
+    fd: c_int,
+    vec: usize,
+    vlen: u32,
+    flags: c_int,
+    timeout: usize,
+) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::abi::raw(recvmmsg(fd, vec, vlen, flags, timeout))
 }
 
 #[cfg(test)]

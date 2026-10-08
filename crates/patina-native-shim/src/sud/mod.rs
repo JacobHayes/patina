@@ -6,10 +6,11 @@
 //! instruction outside glibc's text, the kernel rolls the instruction back and
 //! delivers a synchronous, thread-directed `SIGSYS` at the exact faulting IP.
 //! The handler decodes the syscall number and its six argument registers from
-//! the `ucontext` (in Rust), then calls [`patina_sud_dispatch`], which routes the call
-//! into the *same* `patina_*` entry points the C interposers use and returns the
-//! value the handler writes back into the syscall's return register (raw ABI:
-//! a negative value is `-errno`, there is no libc `errno` step).
+//! the `ucontext` (in Rust), then calls [`patina_sud_dispatch`], which routes
+//! the call into the same typed core or prefixed entry as the libc door and
+//! returns the value the handler writes back into the syscall's return
+//! register (raw ABI: a negative value is `-errno`, there is no libc `errno`
+//! step).
 //!
 //! Soundness: the trap is synchronous — it *is* the guest's own effect boundary,
 //! semantically identical to the guest having called an interposed `read()` — so
@@ -92,9 +93,9 @@ use linux_raw_sys::errno;
 use linux_raw_sys::general as uapi;
 use std::ffi::{c_char, c_int, c_long, c_void};
 
-// SUD rows call the `patina_*` entries the C interposers call, by module path:
-// there is no second implementation of any effect, and the compiler checks
-// every signature.
+// SUD rows call shared typed cores or the remaining `patina_*` entries by
+// module path: there is no second implementation of any effect, and the
+// compiler checks every signature.
 
 // The kernel ABI's own values, from its uapi headers for the target
 // architecture (`linux-raw-sys`): errno values shape raw-syscall returns

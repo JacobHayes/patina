@@ -1,5 +1,7 @@
 //! Name resolution from numeric inputs and Patina's deterministic host table.
 //! Returned lists use the guest's libc allocator, as their C predecessors do.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use crate::thread::net::{addr, iface};
 use core::ffi::{c_char, c_int};
 use core::ptr::{null, null_mut};
@@ -66,6 +68,7 @@ struct Address {
 }
 
 unsafe fn configured(family: c_int) -> bool {
+    // SAFETY: `patina_net_interface` initializes the output before returning 0, which is checked before `assume_init`.
     unsafe {
         let mut interface = core::mem::MaybeUninit::<iface::PatinaInterface>::uninit();
         let mut at = 0;
@@ -89,6 +92,7 @@ unsafe fn make_node(
     protocol: c_int,
     canonical: *const c_char,
 ) -> *mut libc::addrinfo {
+    // SAFETY: allocations are checked before dereference, and `address` and `canonical` satisfy the caller's read contract.
     unsafe {
         let node = libc::calloc(1, size_of::<libc::addrinfo>()).cast::<libc::addrinfo>();
         if node.is_null() {
@@ -151,6 +155,7 @@ unsafe fn make_node(
     }
 }
 unsafe fn free_list(mut res: *mut libc::addrinfo) {
+    // SAFETY: `res` is null or a complete list whose nodes and members are libc allocations.
     unsafe {
         while !res.is_null() {
             let next = (*res).ai_next;
@@ -166,11 +171,13 @@ unsafe fn free_list(mut res: *mut libc::addrinfo) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn freeaddrinfo(res: *mut libc::addrinfo) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller guarantees null or a complete list returned by getaddrinfo.
     unsafe {
         free_list(res);
     }
 }
 unsafe fn parse_port(mut service: *const c_char) -> c_int {
+    // SAFETY: callers pass null or a valid NUL-terminated service string before this helper is called.
     unsafe {
         if *service == 0 {
             return -1;
@@ -212,6 +219,7 @@ pub unsafe extern "C" fn getaddrinfo(
     res: *mut *mut libc::addrinfo,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the documented contract makes `hints` readable and `res` writable; non-null strings are NUL-terminated.
     unsafe {
         let no_hints = core::mem::MaybeUninit::<libc::addrinfo>::zeroed();
         let hints = if hints.is_null() {

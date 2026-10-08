@@ -130,7 +130,7 @@ pub(crate) fn from_model<T: Signed>(result: T) -> SysResult<T> {
 }
 
 /// Bridge a legacy result encoded as a negative errno.
-#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+#[cfg_attr(not(all(target_os = "linux", patina_posix_exports)), allow(dead_code))]
 pub(crate) fn from_neg(result: i64) -> SysResult<i64> {
     if result < 0 {
         Err(Errno::new(-result as c_int))
@@ -181,7 +181,7 @@ pub(crate) mod reg {
 }
 
 /// A libc door's `size_t` narrowed to the kernel `int` glibc forwards.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", patina_posix_exports)), allow(dead_code))]
 #[inline]
 pub(crate) const fn kernel_int(value: usize) -> c_int {
     value as c_int

@@ -18,8 +18,8 @@ type Handler = fn(i64, [u64; 6]) -> i64;
 /// no row; `tests::bindings_match_the_registry_rows` reports the same
 /// conditions by name.
 ///
-/// fd/dirfd registers go through [`arg_fd`]; `AT_FDCWD` and any negative fd are
-/// 32-bit `int`s the kernel reads from the low register bits.
+/// Most fd/dirfd registers go through [`arg_fd`]; socket rows use the checked
+/// kernel-width decoders in `abi::reg` before calling their typed cores.
 use crate::registry::Syscall;
 
 pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
@@ -1125,51 +1125,141 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     }),
     (Syscall::N_truncate, |_, a| sys_truncate(a[0], a[1] as i64)),
     // ---- network: the shared socket entries, argument for argument ----
-    (Syscall::N_socket, |_, a| sys_socket(a[0], a[1], a[2])),
-    (Syscall::N_socketpair, |_, a| {
-        sys_socketpair(a[0], a[1], a[2], a[3])
+    (Syscall::N_socket, |_, a| {
+        sys_socket(
+            crate::abi::reg::int(a[0]),
+            crate::abi::reg::int(a[1]),
+            crate::abi::reg::int(a[2]),
+        )
     }),
-    (Syscall::N_bind, |_, a| sys_bind(arg_fd(a[0]), a[1], a[2])),
-    (Syscall::N_listen, |_, a| sys_listen(arg_fd(a[0]), a[1])),
+    (Syscall::N_socketpair, |_, a| {
+        sys_socketpair(
+            crate::abi::reg::int(a[0]),
+            crate::abi::reg::int(a[1]),
+            crate::abi::reg::int(a[2]),
+            crate::abi::reg::ptr::<c_int>(a[3]).expose_provenance(),
+        )
+    }),
+    (Syscall::N_bind, |_, a| {
+        sys_bind(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::ptr::<libc::sockaddr>(a[1]).expose_provenance(),
+            i64::from(crate::abi::reg::int(a[2])),
+        )
+    }),
+    (Syscall::N_listen, |_, a| {
+        sys_listen(crate::abi::reg::fd(a[0]), crate::abi::reg::int(a[1]))
+    }),
     (Syscall::N_connect, |_, a| {
-        sys_connect(arg_fd(a[0]), a[1], a[2])
+        sys_connect(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::ptr::<libc::sockaddr>(a[1]).expose_provenance(),
+            i64::from(crate::abi::reg::int(a[2])),
+        )
     }),
     (Syscall::N_accept, |_, a| {
-        sys_accept(arg_fd(a[0]), a[1], a[2], 0)
+        sys_accept(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::ptr::<libc::sockaddr>(a[1]).expose_provenance(),
+            crate::abi::reg::ptr::<c_int>(a[2]).expose_provenance(),
+            0,
+        )
     }),
     (Syscall::N_accept4, |_, a| {
-        sys_accept(arg_fd(a[0]), a[1], a[2], a[3])
+        sys_accept(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::ptr::<libc::sockaddr>(a[1]).expose_provenance(),
+            crate::abi::reg::ptr::<c_int>(a[2]).expose_provenance(),
+            crate::abi::reg::int(a[3]),
+        )
     }),
     (Syscall::N_sendto, |_, a| {
-        sys_sendto(arg_fd(a[0]), a[1], a[2], a[3], a[4], a[5])
+        sys_sendto(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::ptr::<c_void>(a[1]).expose_provenance(),
+            crate::abi::reg::size(a[2]),
+            crate::abi::reg::uint(a[3]) as c_int,
+            crate::abi::reg::ptr::<libc::sockaddr>(a[4]).expose_provenance(),
+            i64::from(crate::abi::reg::int(a[5])),
+        )
     }),
     (Syscall::N_recvfrom, |_, a| {
-        sys_recvfrom(arg_fd(a[0]), a[1], a[2], a[3], a[4], a[5])
+        sys_recvfrom(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::ptr::<c_void>(a[1]).expose_provenance(),
+            crate::abi::reg::size(a[2]),
+            crate::abi::reg::uint(a[3]) as c_int,
+            crate::abi::reg::ptr::<libc::sockaddr>(a[4]).expose_provenance(),
+            crate::abi::reg::ptr::<c_int>(a[5]).expose_provenance(),
+        )
     }),
     (Syscall::N_sendmsg, |_, a| {
-        sys_sendmsg(arg_fd(a[0]), a[1], a[2])
+        sys_sendmsg(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::ptr::<libc::msghdr>(a[1]).expose_provenance(),
+            crate::abi::reg::uint(a[2]) as c_int,
+        )
     }),
     (Syscall::N_recvmsg, |_, a| {
-        sys_recvmsg(arg_fd(a[0]), a[1], a[2])
+        sys_recvmsg(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::ptr::<libc::msghdr>(a[1]).expose_provenance(),
+            crate::abi::reg::uint(a[2]) as c_int,
+        )
     }),
     (Syscall::N_sendmmsg, |_, a| {
-        sys_sendmmsg(arg_fd(a[0]), a[1], a[2], a[3])
+        sys_sendmmsg(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::ptr::<libc::mmsghdr>(a[1]).expose_provenance(),
+            crate::abi::reg::uint(a[2]),
+            crate::abi::reg::uint(a[3]) as c_int,
+        )
     }),
     (Syscall::N_recvmmsg, |_, a| {
-        sys_recvmmsg(arg_fd(a[0]), a[1], a[2], a[3], a[4])
+        sys_recvmmsg(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::ptr::<libc::mmsghdr>(a[1]).expose_provenance(),
+            crate::abi::reg::uint(a[2]),
+            crate::abi::reg::uint(a[3]) as c_int,
+            crate::abi::reg::ptr::<libc::timespec>(a[4]).expose_provenance(),
+        )
     }),
-    (Syscall::N_shutdown, |_, a| sys_shutdown(arg_fd(a[0]), a[1])),
+    (Syscall::N_shutdown, |_, a| {
+        sys_shutdown(crate::abi::reg::fd(a[0]), crate::abi::reg::int(a[1]))
+    }),
     (Syscall::N_getsockname, |_, a| {
-        sys_name(arg_fd(a[0]), a[1], a[2], false)
+        sys_name(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::ptr::<libc::sockaddr>(a[1]).expose_provenance(),
+            crate::abi::reg::ptr::<c_int>(a[2]).expose_provenance(),
+            false,
+        )
     }),
     (Syscall::N_getpeername, |_, a| {
-        sys_name(arg_fd(a[0]), a[1], a[2], true)
+        sys_name(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::ptr::<libc::sockaddr>(a[1]).expose_provenance(),
+            crate::abi::reg::ptr::<c_int>(a[2]).expose_provenance(),
+            true,
+        )
     }),
     (Syscall::N_setsockopt, |_, a| {
-        sys_setsockopt(arg_fd(a[0]), a[1], a[2], a[3], a[4])
+        sys_setsockopt(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::int(a[1]),
+            crate::abi::reg::int(a[2]),
+            crate::abi::reg::ptr::<c_void>(a[3]).expose_provenance(),
+            i64::from(crate::abi::reg::int(a[4])),
+        )
     }),
     (Syscall::N_getsockopt, |_, a| {
-        sys_getsockopt(arg_fd(a[0]), a[1], a[2], a[3], a[4])
+        sys_getsockopt(
+            crate::abi::reg::fd(a[0]),
+            crate::abi::reg::int(a[1]),
+            crate::abi::reg::int(a[2]),
+            crate::abi::reg::ptr::<c_void>(a[3]).expose_provenance(),
+            crate::abi::reg::ptr::<c_int>(a[4]).expose_provenance(),
+        )
     }),
     // ---- readiness ----
     (Syscall::N_epoll_create1, |_, a| sys_epoll_create1(a[0])),

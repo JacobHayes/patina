@@ -1,133 +1,101 @@
-//! SUD rows — sockets: every row is the shared `patina_sock_*` entry the C
-//! socket interposers call, argument for argument (the kernel reads the
-//! `int` arguments from the low register bits, a length as `int`).
+//! SUD rows — sockets. The kernel-sized operands are decoded in `bindings`
+//! and these handlers call the same typed cores as the libc doors.
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
 
-pub(super) fn sys_socket(family: u64, ty: u64, protocol: u64) -> i64 {
-    crate::thread::net::patina_sock_socket(family as c_int, ty as c_int, protocol as c_int)
+pub(super) fn sys_socket(family: c_int, ty: c_int, protocol: c_int) -> i64 {
+    crate::abi::raw(crate::thread::net::socket(family, ty, protocol))
 }
 
-pub(super) fn sys_socketpair(family: u64, ty: u64, protocol: u64, sv: u64) -> i64 {
-    // `sv` is the guest's `int[2]`, written through `uaccess`.
-    crate::thread::net::patina_sock_socketpair(
-        family as c_int,
-        ty as c_int,
-        protocol as c_int,
-        sv as usize,
-    )
+pub(super) fn sys_socketpair(family: c_int, ty: c_int, protocol: c_int, sv: usize) -> i64 {
+    crate::abi::raw(crate::thread::net::socketpair(family, ty, protocol, sv))
 }
 
-pub(super) fn sys_bind(fd: i64, addr: u64, len: u64) -> i64 {
-    // The address is copied in through `uaccess`.
-    crate::thread::net::patina_sock_bind(fd as c_int, addr as usize, i64::from(len as i32))
+pub(super) fn sys_bind(fd: c_int, addr: usize, len: i64) -> i64 {
+    crate::abi::raw(crate::thread::net::bind(fd, addr, len))
 }
 
-pub(super) fn sys_listen(fd: i64, backlog: u64) -> i64 {
-    crate::thread::net::patina_sock_listen(fd as c_int, backlog as c_int)
+pub(super) fn sys_listen(fd: c_int, backlog: c_int) -> i64 {
+    crate::abi::raw(crate::thread::net::listen(fd, backlog))
 }
 
-pub(super) fn sys_connect(fd: i64, addr: u64, len: u64) -> i64 {
-    // The address is copied in through `uaccess`.
-    crate::thread::net::patina_sock_connect(fd as c_int, addr as usize, i64::from(len as i32))
+pub(super) fn sys_connect(fd: c_int, addr: usize, len: i64) -> i64 {
+    crate::abi::raw(crate::thread::net::connect(fd, addr, len))
 }
 
-pub(super) fn sys_accept(fd: i64, addr: u64, len_ptr: u64, flags: u64) -> i64 {
-    // The name is copied out through `uaccess`.
-    crate::thread::net::patina_sock_accept(
-        fd as c_int,
-        addr as usize,
-        len_ptr as usize,
-        flags as c_int,
-    )
+pub(super) fn sys_accept(fd: c_int, addr: usize, len_ptr: usize, flags: c_int) -> i64 {
+    crate::abi::raw(crate::thread::net::accept(fd, addr, len_ptr, flags))
 }
 
-pub(super) fn sys_sendto(fd: i64, buf: u64, len: u64, flags: u64, addr: u64, alen: u64) -> i64 {
-    // The buffer and the address are copied in through `uaccess`.
-    crate::thread::net::patina_sock_sendto(
-        fd as c_int,
-        buf as usize,
-        len as usize,
-        flags as c_int,
-        addr as usize,
-        i64::from(alen as i32),
-    )
+pub(super) fn sys_sendto(
+    fd: c_int,
+    buf: usize,
+    len: usize,
+    flags: c_int,
+    addr: usize,
+    alen: i64,
+) -> i64 {
+    crate::abi::raw(crate::thread::net::sendto(fd, buf, len, flags, addr, alen))
 }
 
-pub(super) fn sys_recvfrom(fd: i64, buf: u64, len: u64, flags: u64, addr: u64, alen: u64) -> i64 {
-    // The buffer and the name are copied out through `uaccess`.
-    crate::thread::net::patina_sock_recvfrom(
-        fd as c_int,
-        buf as usize,
-        len as usize,
-        flags as c_int,
-        addr as usize,
-        alen as usize,
-    )
+pub(super) fn sys_recvfrom(
+    fd: c_int,
+    buf: usize,
+    len: usize,
+    flags: c_int,
+    addr: usize,
+    alen_ptr: usize,
+) -> i64 {
+    crate::abi::raw(crate::thread::net::recvfrom(
+        fd, buf, len, flags, addr, alen_ptr,
+    ))
 }
 
-pub(super) fn sys_sendmsg(fd: i64, msg: u64, flags: u64) -> i64 {
-    // The header and what it names are copied through `uaccess`.
-    crate::thread::net::msg::patina_sock_sendmsg(fd as c_int, msg as usize, flags as c_int)
+pub(super) fn sys_sendmsg(fd: c_int, msg: usize, flags: c_int) -> i64 {
+    crate::abi::raw(crate::thread::net::msg::sendmsg(fd, msg, flags))
 }
 
-pub(super) fn sys_recvmsg(fd: i64, msg: u64, flags: u64) -> i64 {
-    crate::thread::net::msg::patina_sock_recvmsg(fd as c_int, msg as usize, flags as c_int)
+pub(super) fn sys_recvmsg(fd: c_int, msg: usize, flags: c_int) -> i64 {
+    crate::abi::raw(crate::thread::net::msg::recvmsg(fd, msg, flags))
 }
 
-pub(super) fn sys_sendmmsg(fd: i64, vec: u64, vlen: u64, flags: u64) -> i64 {
-    crate::thread::net::msg::patina_sock_sendmmsg(
-        fd as c_int,
-        vec as usize,
-        vlen as u32,
-        flags as c_int,
-    )
+pub(super) fn sys_sendmmsg(fd: c_int, vec: usize, vlen: u32, flags: c_int) -> i64 {
+    crate::abi::raw(crate::thread::net::msg::sendmmsg(fd, vec, vlen, flags))
 }
 
-pub(super) fn sys_recvmmsg(fd: i64, vec: u64, vlen: u64, flags: u64, timeout: u64) -> i64 {
-    crate::thread::net::msg::patina_sock_recvmmsg(
-        fd as c_int,
-        vec as usize,
-        vlen as u32,
-        flags as c_int,
-        timeout as usize,
-    )
+pub(super) fn sys_recvmmsg(fd: c_int, vec: usize, vlen: u32, flags: c_int, timeout: usize) -> i64 {
+    crate::abi::raw(crate::thread::net::msg::recvmmsg(
+        fd, vec, vlen, flags, timeout,
+    ))
 }
 
-pub(super) fn sys_shutdown(fd: i64, how: u64) -> i64 {
-    crate::thread::net::patina_sock_shutdown(fd as c_int, how as c_int)
+pub(super) fn sys_shutdown(fd: c_int, how: c_int) -> i64 {
+    crate::abi::raw(crate::thread::net::shutdown(fd, how))
 }
 
-pub(super) fn sys_name(fd: i64, addr: u64, len_ptr: u64, peer: bool) -> i64 {
-    // The name is copied out through `uaccess`.
-    crate::thread::net::patina_sock_name(
-        fd as c_int,
-        addr as usize,
-        len_ptr as usize,
+pub(super) fn sys_name(fd: c_int, addr: usize, len_ptr: usize, peer: bool) -> i64 {
+    crate::abi::raw(crate::thread::net::name(
+        fd,
+        addr,
+        len_ptr,
         c_int::from(peer),
-    )
+    ))
 }
 
-pub(super) fn sys_setsockopt(fd: i64, level: u64, name: u64, value: u64, len: u64) -> i64 {
-    // The value is copied in through `uaccess`.
-    crate::thread::net::patina_sock_setsockopt(
-        fd as c_int,
-        level as c_int,
-        name as c_int,
-        value as usize,
-        i64::from(len as i32),
-    )
+pub(super) fn sys_setsockopt(fd: c_int, level: c_int, name: c_int, value: usize, len: i64) -> i64 {
+    crate::abi::raw(crate::thread::net::setsockopt(fd, level, name, value, len))
 }
 
-pub(super) fn sys_getsockopt(fd: i64, level: u64, name: u64, value: u64, len_ptr: u64) -> i64 {
-    // The value and its length are copied through `uaccess`.
-    crate::thread::net::patina_sock_getsockopt(
-        fd as c_int,
-        level as c_int,
-        name as c_int,
-        value as usize,
-        len_ptr as usize,
-    )
+pub(super) fn sys_getsockopt(
+    fd: c_int,
+    level: c_int,
+    name: c_int,
+    value: usize,
+    len_ptr: usize,
+) -> i64 {
+    crate::abi::raw(crate::thread::net::getsockopt(
+        fd, level, name, value, len_ptr,
+    ))
 }

@@ -153,24 +153,16 @@ fn socketpair_answers_in_kernel_order() {
         AF_INET, AF_UNIX, EPROTONOSUPPORT, SOCK_CLOEXEC, SOCK_NONBLOCK, SOCK_STREAM,
     };
     let mut sv = [-1i32; 2];
-    let at = sv.as_mut_ptr() as u64;
+    let at = sv.as_mut_ptr() as usize;
     // `__sys_socketpair`: the creation flags first, then both numbers
     // are written to `sv` before any socket exists, then the family.
     assert_eq!(
-        sys_socketpair(AF_UNIX as u64, (SOCK_STREAM | 0x1_0000) as u64, 0, at),
+        sys_socketpair(AF_UNIX, SOCK_STREAM | 0x1_0000, 0, at),
         -EINVAL
     );
+    assert_eq!(sys_socketpair(AF_INET, SOCK_STREAM, 0, 0), -EFAULT);
     assert_eq!(
-        sys_socketpair(AF_INET as u64, SOCK_STREAM as u64, 0, 0),
-        -EFAULT
-    );
-    assert_eq!(
-        sys_socketpair(
-            AF_UNIX as u64,
-            (SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC) as u64,
-            6,
-            at
-        ),
+        sys_socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 6, at),
         -i64::from(EPROTONOSUPPORT)
     );
 }

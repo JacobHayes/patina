@@ -1,4 +1,6 @@
 //! libc-owned getifaddrs allocation, with the virtual interface table.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use crate::thread::net::iface;
 use core::ffi::{c_char, c_int};
 
@@ -85,6 +87,7 @@ fn prefix(mask: &mut [u8; 16], mut prefix: u32) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getifaddrs(out: *mut *mut libc::ifaddrs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `out` is caller-writable, successful interface queries initialize their entries, and `calloc` holds the counted `Entry` list.
     unsafe {
         let mut interfaces = [core::mem::MaybeUninit::<iface::PatinaInterface>::uninit(); 8];
         let mut count = 0;
@@ -187,6 +190,7 @@ pub unsafe extern "C" fn getifaddrs(out: *mut *mut libc::ifaddrs) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn freeifaddrs(list: *mut libc::ifaddrs) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller guarantees null or the allocation returned by getifaddrs.
     unsafe {
         libc::free(list.cast());
     }
