@@ -30,7 +30,8 @@ pub unsafe extern "C" fn read(fd: c_int, destination: *mut c_void, length: usize
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"read");
     // SAFETY: the caller's read-buffer contract is forwarded to the model entry.
-    unsafe { size_result(crate::patina_read(fd, destination, length)) }
+    let result = unsafe { crate::fd::patina_read(fd, destination, length) };
+    crate::abi::libc_result(crate::abi::from_model(result), result)
 }
 /// # Safety
 /// `source` follows write's buffer contract.
@@ -39,7 +40,8 @@ pub unsafe extern "C" fn write(fd: c_int, source: *const c_void, length: usize) 
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"write");
     // SAFETY: the caller's write-buffer contract is forwarded to the model entry.
-    unsafe { size_result(crate::patina_write(fd, source, length)) }
+    let result = unsafe { crate::fd::patina_write(fd, source, length) };
+    crate::abi::libc_result(crate::abi::from_model(result), result)
 }
 /// # Safety
 /// `destination` follows pread's buffer contract.

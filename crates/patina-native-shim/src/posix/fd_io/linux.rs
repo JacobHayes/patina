@@ -38,7 +38,8 @@ pub unsafe extern "C" fn pwrite64(
 pub unsafe extern "C" fn __read(fd: c_int, buffer: *mut c_void, length: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller's read-buffer contract is forwarded to the model entry.
-    unsafe { size_result(crate::patina_read(fd, buffer, length)) }
+    let result = unsafe { crate::fd::patina_read(fd, buffer, length) };
+    crate::abi::libc_result(crate::abi::from_model(result), result)
 }
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
@@ -46,7 +47,8 @@ pub unsafe extern "C" fn __read(fd: c_int, buffer: *mut c_void, length: usize) -
 pub unsafe extern "C" fn __write(fd: c_int, buffer: *const c_void, length: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller's write-buffer contract is forwarded to the model entry.
-    unsafe { size_result(crate::patina_write(fd, buffer, length)) }
+    let result = unsafe { crate::fd::patina_write(fd, buffer, length) };
+    crate::abi::libc_result(crate::abi::from_model(result), result)
 }
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
@@ -64,7 +66,8 @@ pub unsafe extern "C" fn __read_chk(
         if length > buflen {
             crate::posix::chk_fail();
         }
-        size_result(crate::patina_read(fd, buffer, length))
+        let result = crate::fd::patina_read(fd, buffer, length);
+        crate::abi::libc_result(crate::abi::from_model(result), result)
     }
 }
 /// # Safety

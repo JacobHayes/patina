@@ -24,7 +24,8 @@ pub(super) fn sys_read(fd: i64, buf: u64, count: u64) -> i64 {
         return err;
     }
     // SAFETY: `buf`/`count` describe a guest buffer per the read(2) contract.
-    ret_isize(unsafe { crate::fd::patina_read(fd as c_int, buf as *mut c_void, count as usize) })
+    let result = unsafe { crate::fd::patina_read(fd as c_int, buf as *mut c_void, count as usize) };
+    crate::abi::raw(crate::abi::from_model(result).map(|value| value as i64))
 }
 
 pub(super) fn sys_write(fd: i64, buf: u64, count: u64) -> i64 {
@@ -32,7 +33,9 @@ pub(super) fn sys_write(fd: i64, buf: u64, count: u64) -> i64 {
         return err;
     }
     // SAFETY: `buf`/`count` describe a guest buffer per the write(2) contract.
-    ret_isize(unsafe { crate::fd::patina_write(fd as c_int, buf as *const c_void, count as usize) })
+    let result =
+        unsafe { crate::fd::patina_write(fd as c_int, buf as *const c_void, count as usize) };
+    crate::abi::raw(crate::abi::from_model(result).map(|value| value as i64))
 }
 
 pub(super) fn sys_close(fd: i64) -> i64 {
