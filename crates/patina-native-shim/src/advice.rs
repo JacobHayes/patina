@@ -129,6 +129,20 @@ struct Cachestat {
     nr_recently_evicted: u64,
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::CachestatRange { off: u64, len: u64 });
+    crate::plain!(super::Cachestat {
+        nr_cache: u64,
+        nr_dirty: u64,
+        nr_writeback: u64,
+        nr_evicted: u64,
+        nr_recently_evicted: u64,
+    });
+}
+
 /// The pages of a `size`-byte file within `range` (`filemap_cachestat`
 /// over the pages `range` spans, `first_index` to `last_index`): the first
 /// and last, none when the range holds no page of the file.

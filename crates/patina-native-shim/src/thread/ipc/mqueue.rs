@@ -49,11 +49,31 @@ pub(crate) struct MqAttr {
 
 /// `struct sigevent`: the members `mq_notify` reads.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct SigEvent {
     pub(super) value: u64,
     pub(super) signo: i32,
     pub(super) notify: i32,
     pub(super) rest: [i32; 12],
+}
+
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::MqAttr {
+        flags: i64,
+        maxmsg: i64,
+        msgsize: i64,
+        curmsgs: i64,
+        reserved: [i64; 4],
+    });
+    crate::plain!(super::SigEvent {
+        value: u64,
+        signo: i32,
+        notify: i32,
+        rest: [i32; 12],
+    });
 }
 
 pub(super) struct MqSender {

@@ -590,8 +590,29 @@ pub(crate) fn setsid() -> i64 {
 
 /// `struct new_utsname`: six 65-byte fields.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct Utsname {
     fields: [[u8; UTS_LEN]; 6],
+}
+
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    use super::*;
+
+    crate::plain!(super::Utsname {
+        fields: [[u8; UTS_LEN]; 6],
+    });
+    crate::plain!(super::CapHeader {
+        version: u32,
+        pid: i32,
+    });
+    crate::plain!(super::CapData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    });
 }
 const UTS_LEN: usize = 65;
 

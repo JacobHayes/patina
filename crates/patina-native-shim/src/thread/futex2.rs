@@ -64,6 +64,18 @@ struct Waitv {
     reserved: u32,
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::Waitv {
+        val: u64,
+        uaddr: u64,
+        flags: u32,
+        reserved: u32,
+    });
+}
+
 /// A word's flags (`futex2_to_flags`, `futex_flags_valid`): a flag outside
 /// `FUTEX2_VALID_MASK` or a size other than 32 bits is `EINVAL`. Answers
 /// whether the key is private.

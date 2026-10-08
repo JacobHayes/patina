@@ -14,8 +14,20 @@ const UTS_LEN: usize = 256;
 /// Darwin's `struct utsname`: sysname, nodename, release, version, machine
 /// (no NIS domain name).
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct Utsname {
     fields: [[u8; UTS_LEN]; 5],
+}
+
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    use super::*;
+
+    crate::plain!(super::Utsname {
+        fields: [[u8; UTS_LEN]; 5],
+    });
 }
 
 /// The Darwin machine name of the build's architecture.

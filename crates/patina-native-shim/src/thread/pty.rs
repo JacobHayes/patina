@@ -146,6 +146,26 @@ struct Winsize {
     ypixel: u16,
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::Termios {
+        iflag: u32,
+        oflag: u32,
+        cflag: u32,
+        lflag: u32,
+        line: u8,
+        cc: [u8; 19],
+    });
+    crate::plain!(super::Winsize {
+        row: u16,
+        col: u16,
+        xpixel: u16,
+        ypixel: u16,
+    });
+}
+
 /// One pair.
 struct Pair {
     /// `TTY_PTY_LOCK` on the master: the slave may not be opened.

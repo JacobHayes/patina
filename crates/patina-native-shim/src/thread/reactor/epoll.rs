@@ -49,6 +49,17 @@ pub(crate) struct EpollEvent {
     data: u64,
 }
 
+#[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::EpollEvent {
+        events: u32,
+        data: u64
+    });
+}
+
 /// The poll bits a read-direction wakeup carries (`EPOLLIN`, `EPOLLPRI`,
 /// `EPOLLRDNORM`, `EPOLLRDBAND`, `EPOLLMSG`, `EPOLLRDHUP`), and a
 /// write-direction one (`EPOLLOUT`, `EPOLLWRNORM`, `EPOLLWRBAND`).

@@ -538,6 +538,17 @@ struct EpollSlot {
     toff: u32,
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::EpollSlot {
+        efd: u32,
+        tfd: u32,
+        toff: u32,
+    });
+}
+
 /// `kcmp_epoll_target`: the slot copied in (`EFAULT`), the first task's
 /// descriptor (`EBADF`), the second task's epoll descriptor (`EBADF` when
 /// not open, `EINVAL` when not an epoll instance), the interest it holds for

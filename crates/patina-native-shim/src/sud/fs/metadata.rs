@@ -82,7 +82,7 @@ fn encode_dev((major, minor): (u32, u32)) -> u64 {
 /// timestamps, the block geometry, a device node's `st_rdev`).
 #[cfg(target_arch = "x86_64")]
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(in crate::sud) struct KernelStat {
     st_dev: u64,
     st_ino: u64,
@@ -106,7 +106,7 @@ pub(in crate::sud) struct KernelStat {
 
 #[cfg(target_arch = "aarch64")]
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(in crate::sud) struct KernelStat {
     st_dev: u64,
     st_ino: u64,
@@ -248,7 +248,7 @@ pub(in crate::sud) struct StatxTimestamp {
 
 /// Kernel `struct statx` (arch-independent).
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(in crate::sud) struct Statx {
     stx_mask: u32,
     stx_blksize: u32,
@@ -274,6 +274,88 @@ pub(in crate::sud) struct Statx {
     stx_dio_mem_align: u32,
     stx_dio_offset_align: u32,
     __spare3: [u64; 12],
+}
+
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    #[cfg(target_arch = "x86_64")]
+    crate::plain!(super::KernelStat {
+        st_dev: u64,
+        st_ino: u64,
+        st_nlink: u64,
+        st_mode: u32,
+        st_uid: u32,
+        st_gid: u32,
+        __pad0: u32,
+        st_rdev: u64,
+        st_size: i64,
+        st_blksize: i64,
+        st_blocks: i64,
+        st_atime: i64,
+        st_atime_nsec: i64,
+        st_mtime: i64,
+        st_mtime_nsec: i64,
+        st_ctime: i64,
+        st_ctime_nsec: i64,
+        __unused: [i64; 3],
+    });
+
+    #[cfg(target_arch = "aarch64")]
+    crate::plain!(super::KernelStat {
+        st_dev: u64,
+        st_ino: u64,
+        st_mode: u32,
+        st_nlink: u32,
+        st_uid: u32,
+        st_gid: u32,
+        st_rdev: u64,
+        __pad1: u64,
+        st_size: i64,
+        st_blksize: i32,
+        __pad2: i32,
+        st_blocks: i64,
+        st_atime: i64,
+        st_atime_nsec: u64,
+        st_mtime: i64,
+        st_mtime_nsec: u64,
+        st_ctime: i64,
+        st_ctime_nsec: u64,
+        __unused: [u32; 2],
+    });
+
+    crate::plain!(super::StatxTimestamp {
+        tv_sec: i64,
+        tv_nsec: u32,
+        __reserved: i32,
+    });
+    crate::plain!(super::Statx {
+        stx_mask: u32,
+        stx_blksize: u32,
+        stx_attributes: u64,
+        stx_nlink: u32,
+        stx_uid: u32,
+        stx_gid: u32,
+        stx_mode: u16,
+        __spare0: u16,
+        stx_ino: u64,
+        stx_size: u64,
+        stx_blocks: u64,
+        stx_attributes_mask: u64,
+        stx_atime: super::StatxTimestamp,
+        stx_btime: super::StatxTimestamp,
+        stx_ctime: super::StatxTimestamp,
+        stx_mtime: super::StatxTimestamp,
+        stx_rdev_major: u32,
+        stx_rdev_minor: u32,
+        stx_dev_major: u32,
+        stx_dev_minor: u32,
+        stx_mnt_id: u64,
+        stx_dio_mem_align: u32,
+        stx_dio_offset_align: u32,
+        __spare3: [u64; 12],
+    });
 }
 
 pub(in crate::sud) fn sys_statx(

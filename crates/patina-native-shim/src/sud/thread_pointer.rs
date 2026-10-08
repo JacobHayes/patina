@@ -122,6 +122,18 @@ struct UserDesc {
     limit: u32,
     flags: u32,
 }
+
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::UserDesc {
+        entry_number: u32,
+        base_addr: u32,
+        limit: u32,
+        flags: u32,
+    });
+}
 /// `user_desc`'s `contents` (bits 1-2), `read_exec_only` (bit 3) and
 /// `seg_not_present` (bit 5).
 const CONTENTS_SHIFT: u32 = 1;

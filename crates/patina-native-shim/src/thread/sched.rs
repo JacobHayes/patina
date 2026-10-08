@@ -705,6 +705,24 @@ pub(crate) struct SchedAttr {
     util_max: u32,
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::SchedAttr {
+        size: u32,
+        policy: u32,
+        flags: u64,
+        nice: i32,
+        priority: u32,
+        runtime: u64,
+        deadline: u64,
+        period: u64,
+        util_min: u32,
+        util_max: u32,
+    });
+}
+
 /// `sched_getattr(pid, attr, size, flags)`: the policy, flags, nice or
 /// priority and clamps, `min(size, 56)` bytes written and that size in
 /// `attr.size`; a size under the first version or above a page, a flag, a

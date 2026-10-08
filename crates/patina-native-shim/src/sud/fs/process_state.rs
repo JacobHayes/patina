@@ -58,6 +58,16 @@ struct KernelTimespec {
     pub(super) tv_nsec: i64,
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::KernelTimespec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    });
+}
+
 /// A time argument on the runtime's `PATINA_TIME_*` vocabulary.
 pub(in crate::sud) type TimeArgument = (u32, PatinaTimestamp);
 

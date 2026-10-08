@@ -173,6 +173,16 @@ pub(crate) struct Timespec {
     pub nsec: i64,
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::Timespec {
+        sec: i64,
+        nsec: i64
+    });
+}
+
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WaitMode {

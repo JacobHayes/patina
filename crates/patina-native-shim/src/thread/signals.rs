@@ -87,6 +87,20 @@ impl Default for Stack {
 pub(crate) struct Info {
     pub words: [u64; 16],
 }
+
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::Action {
+        handler: usize,
+        flags: u64,
+        restorer: usize,
+        mask: u64,
+    });
+    crate::plain!(super::Info { words: [u64; 16] });
+}
+
 impl Info {
     fn new(sig: u8, code: i32) -> Self {
         let mut info = Self { words: [0; 16] };

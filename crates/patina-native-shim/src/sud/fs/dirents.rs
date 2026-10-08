@@ -26,9 +26,20 @@ const MOUNT_ID: i32 = STATX_MNT_ID_VALUE as i32;
 
 /// The fixed header of a guest `struct file_handle`.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct FileHandleHeader {
     handle_bytes: u32,
     handle_type: i32,
+}
+
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::FileHandleHeader {
+        handle_bytes: u32,
+        handle_type: i32,
+    });
 }
 
 /// `name_to_handle_at(2)` (`fs/fhandle.c`): the flags first (`EINVAL`), then

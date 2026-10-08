@@ -378,9 +378,20 @@ pub unsafe extern "C" fn patina_cond_wait(cond: *mut c_void, mutex: *mut c_void)
 /// A C `struct timespec` for the supported 64-bit targets. `time_t` and
 /// `long` are both 64-bit on macOS and Linux aarch64/x86_64.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct CTimespec {
     pub(crate) tv_sec: i64,
     pub(crate) tv_nsec: i64,
+}
+
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::CTimespec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    });
 }
 
 /// Convert an absolute `struct timespec` deadline to nanoseconds: `EINVAL`

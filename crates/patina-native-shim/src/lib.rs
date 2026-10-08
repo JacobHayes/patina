@@ -26,6 +26,7 @@ mod variadic;
 include!(concat!(env!("OUT_DIR"), "/route_aliases.rs"));
 
 mod abi;
+mod plain;
 
 mod bundle;
 mod coverage;

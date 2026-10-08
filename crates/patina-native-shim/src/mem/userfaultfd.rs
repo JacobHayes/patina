@@ -103,6 +103,17 @@ struct Api {
     ioctls: u64,
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::Api {
+        api: u64,
+        features: u64,
+        ioctls: u64,
+    });
+}
+
 /// A new context, its features not yet enabled: the handle a new
 /// descriptor's description takes.
 pub(crate) fn created() -> u64 {

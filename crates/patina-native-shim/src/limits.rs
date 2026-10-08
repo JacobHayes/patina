@@ -61,6 +61,13 @@ pub(crate) struct Rlimit {
     pub max: u64,
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::Rlimit { cur: u64, max: u64 });
+}
+
 const fn limit(cur: u64, max: u64) -> Rlimit {
     Rlimit { cur, max }
 }

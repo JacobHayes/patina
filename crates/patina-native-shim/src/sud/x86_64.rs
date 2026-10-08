@@ -79,6 +79,16 @@ struct KernelUtimbuf {
     modtime: i64,
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::KernelUtimbuf {
+        actime: i64,
+        modtime: i64,
+    });
+}
+
 /// A `timeval` time argument (`utimes`/`futimesat`): microseconds in range.
 fn timeval_argument(time: &Timeval) -> Result<TimeArgument, i64> {
     if !(0..1_000_000).contains(&time.tv_usec) {

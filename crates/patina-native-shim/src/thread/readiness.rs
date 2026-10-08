@@ -19,6 +19,17 @@ pub(crate) struct PollFd {
     pub revents: i16,
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    });
+}
+
 fn poll(fds: &mut [PollFd], timeout: Option<u64>, mut remaining: Option<&mut u64>) -> i64 {
     // Rust std checks the standard descriptors before a deferred harness has
     // installed Context. An immediately resolved query needs neither clock nor

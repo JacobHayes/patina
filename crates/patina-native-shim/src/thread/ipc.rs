@@ -200,6 +200,17 @@ pub(crate) struct Sembuf {
     flg: i16,
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::Sembuf {
+        num: u16,
+        op: i16,
+        flg: i16,
+    });
+}
+
 /// An object's `kern_ipc_perm`: its key, owner, mode (with the kind's status
 /// bits, such as `SHM_DEST`) and sequence number.
 #[derive(Clone, Copy)]

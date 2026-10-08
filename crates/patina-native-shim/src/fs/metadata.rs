@@ -87,6 +87,7 @@ pub(crate) fn fs_device(fs: u32) -> (u32, u32) {
 /// is not here because it is a property of the one identity the runtime
 /// models, read through [`patina_uid`]/[`patina_gid`], never per entry.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct PatinaMetadata {
     /// A `PATINA_ENTRY_*` kind.
     pub kind: u32,
@@ -117,6 +118,31 @@ pub struct PatinaMetadata {
 pub struct PatinaTimestamp {
     pub sec: i64,
     pub nsec: i64,
+}
+
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::PatinaTimestamp {
+        sec: i64,
+        nsec: i64
+    });
+    crate::plain!(super::PatinaMetadata {
+        kind: u32,
+        mode: u32,
+        nlink: u32,
+        fs: u32,
+        rdev_major: u32,
+        rdev_minor: u32,
+        length: u64,
+        blocks: u64,
+        ino: u64,
+        atime: super::PatinaTimestamp,
+        mtime: super::PatinaTimestamp,
+        ctime: super::PatinaTimestamp,
+        btime: super::PatinaTimestamp,
+    });
 }
 
 const NANOS_PER_SECOND: i128 = 1_000_000_000;

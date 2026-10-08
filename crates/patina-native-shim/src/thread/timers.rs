@@ -642,6 +642,19 @@ pub(crate) struct Sigevent {
     pad: [i32; 11],
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::Sigevent {
+        value: u64,
+        signo: i32,
+        notify: i32,
+        thread_id: i32,
+        pad: [i32; 11],
+    });
+}
+
 const SIGEV_SIGNAL: i32 = 0;
 const SIGEV_NONE: i32 = 1;
 const SIGEV_THREAD: i32 = 2;

@@ -185,6 +185,27 @@ pub struct PatinaInterface {
     pub ipv6: [u8; 16],
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::PatinaInterface {
+        index: u32,
+        flags: u32,
+        mtu: u32,
+        hardware_type: u16,
+        name: [u8; 16],
+        hardware_address: [u8; 6],
+        broadcast_hardware_address: [u8; 6],
+        ipv4: [u8; 4],
+        ipv4_netmask: [u8; 4],
+        ipv4_broadcast: [u8; 4],
+        has_ipv6: u8,
+        ipv6_prefix: u8,
+        ipv6: [u8; 16],
+    });
+}
+
 #[unsafe(no_mangle)]
 /// The `position`th interface (index order), for `getifaddrs`: 0 with the
 /// record written, `-EINVAL` past the last.

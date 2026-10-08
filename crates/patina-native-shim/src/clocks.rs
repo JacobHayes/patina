@@ -514,6 +514,27 @@ pub(crate) struct Rusage {
     counters: [i64; 14],
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    use super::*;
+
+    crate::plain!(super::Timespec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    });
+    crate::plain!(super::Timeval {
+        tv_sec: i64,
+        tv_usec: i64,
+    });
+    crate::plain!(super::Rusage {
+        utime: Timeval,
+        stime: Timeval,
+        counters: [i64; 14],
+    });
+}
+
 const RUSAGE_SELF: i32 = 0;
 const RUSAGE_CHILDREN: i32 = -1;
 const RUSAGE_THREAD: i32 = 1;

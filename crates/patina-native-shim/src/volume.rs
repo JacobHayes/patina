@@ -41,6 +41,26 @@ pub struct KernelStatfs {
     pub f_spare: [i64; 4],
 }
 
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::KernelStatfs {
+        f_type: i64,
+        f_bsize: i64,
+        f_blocks: u64,
+        f_bfree: u64,
+        f_bavail: u64,
+        f_files: u64,
+        f_ffree: u64,
+        f_fsid: [i32; 2],
+        f_namelen: i64,
+        f_frsize: i64,
+        f_flags: i64,
+        f_spare: [i64; 4],
+    });
+}
+
 /// linux/magic.h.
 const EXT4_SUPER_MAGIC: i64 = 0xEF53;
 const PIPEFS_MAGIC: i64 = 0x5049_5045;
