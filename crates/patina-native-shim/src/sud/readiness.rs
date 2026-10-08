@@ -5,24 +5,27 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
+use crate::abi::{Errno, SysResult};
 
 // ---- Readiness reactor (epoll) + eventfd ----
 
 pub(super) fn sys_epoll_create1(flags: u64) -> i64 {
-    ret_i32(crate::thread::epoll::patina_epoll_create1(flags as c_int))
+    crate::abi::raw(crate::thread::epoll::create1(flags as c_int).map(i64::from))
 }
 
 pub(super) fn sys_epoll_ctl(epfd: i64, op: i64, fd: i64, event: u64) -> i64 {
-    // SAFETY: `event` is a guest `struct epoll_event` for ADD/MOD (NULL for DEL,
-    // which the entry tolerates).
-    ret_i32(unsafe {
-        crate::thread::epoll::patina_epoll_ctl(
-            epfd as c_int,
-            op as c_int,
-            fd as c_int,
-            (event as *const c_void).cast(),
-        )
-    })
+    // SAFETY: `event` is the guest event buffer for ADD/MOD (NULL for DEL); the core reads via uaccess.
+    crate::abi::raw(
+        unsafe {
+            crate::thread::epoll::ctl_core(
+                epfd as c_int,
+                op as c_int,
+                fd as c_int,
+                (event as *const c_void).cast(),
+            )
+        }
+        .map(i64::from),
+    )
 }
 
 pub(super) fn sys_epoll_pwait(
@@ -37,16 +40,15 @@ pub(super) fn sys_epoll_pwait(
         return -EINVAL;
     }
 
-    // SAFETY: the event buffer and optional signal mask are guest pointers;
-    // the entry copies them through `uaccess`.
+    // SAFETY: event and optional mask are guest pointers read or written through uaccess.
     unsafe {
-        crate::thread::readiness::patina_epoll_wait_masked(
+        crate::abi::raw(crate::thread::readiness::epoll_wait_masked_core(
             epfd as i32,
             events as *mut c_void,
             maxevents as i32,
             timeout_ms as i32,
             sigmask as *const u64,
-        )
+        ))
     }
 }
 
@@ -84,10 +86,7 @@ pub(super) fn sys_epoll_pwait2(
 }
 
 pub(super) fn sys_eventfd2(initval: u64, flags: i64) -> i64 {
-    ret_i32(crate::thread::patina_eventfd(
-        initval as u32,
-        flags as c_int,
-    ))
+    crate::abi::raw(crate::thread::create(initval as u32, flags as c_int).map(i64::from))
 }
 
 /// The unslept time a `ppoll`/`pselect6` writes back to its non-NULL
@@ -95,8 +94,16 @@ pub(super) fn sys_eventfd2(initval: u64, flags: i64) -> i64 {
 /// timeout, and a copy that fails is ignored, the answer standing
 /// (`poll_select_finish`: a timeout in read-only memory must not turn a
 /// completed wait into a fault).
-fn write_back_timeout(timeout: u64, requested: Option<u64>, remaining: u64, rc: i64) {
-    if timeout == 0 || requested == Some(0) || !(rc >= 0 || rc == -EINTR) {
+fn write_back_timeout(
+    timeout: u64,
+    requested: Option<u64>,
+    remaining: u64,
+    result: &SysResult<i64>,
+) {
+    if timeout == 0
+        || requested == Some(0)
+        || !(result.is_ok() || result == &Err(Errno::new(EINTR as c_int)))
+    {
         return;
     }
     let left = Timespec {
@@ -110,7 +117,7 @@ fn write_back_timeout(timeout: u64, requested: Option<u64>, remaining: u64, rc: 
 /// libc's wrapper, the raw row writes the unslept timeout back to the guest.
 pub(super) fn sys_ppoll(fds: u64, nfds: u64, timeout: u64, sigmask: u64, sigsetsize: u64) -> i64 {
     // 6.8's order: the timeout, then the mask's size (`set_user_sigmask`,
-    // whose copy-in `patina_poll` does before the descriptors).
+    // whose copy-in `poll_core` does before the descriptors).
     let timeout_ptr = timeout;
     let timeout = if timeout == 0 {
         None
@@ -131,10 +138,9 @@ pub(super) fn sys_ppoll(fds: u64, nfds: u64, timeout: u64, sigmask: u64, sigsets
         return -EINVAL;
     }
     let mut remaining = timeout.unwrap_or(0);
-    // SAFETY: `fds` and `sigmask` are guest pointers checked and copied by
-    // `patina_poll`; `remaining` is local storage.
-    let rc = unsafe {
-        crate::thread::readiness::patina_poll(
+    // SAFETY: `fds` and `sigmask` are guest pointers checked by poll_core; remaining is local.
+    let result = unsafe {
+        crate::thread::readiness::poll_core(
             fds as *mut _,
             nfds as usize,
             timeout.map_or(-1, |n| n.min(i64::MAX as u64) as i64),
@@ -142,8 +148,8 @@ pub(super) fn sys_ppoll(fds: u64, nfds: u64, timeout: u64, sigmask: u64, sigsets
             &mut remaining,
         )
     };
-    write_back_timeout(timeout_ptr, timeout, remaining, rc);
-    rc
+    write_back_timeout(timeout_ptr, timeout, remaining, &result);
+    crate::abi::raw(result)
 }
 
 /// select writes its timeval back; the raw pselect6 row writes its timespec
@@ -158,21 +164,20 @@ pub(super) fn sys_select(
 ) -> i64 {
     let Some(sigarg) = sigarg else {
         // The `select` row: the shared entry normalizes its timeval.
-        // SAFETY: the sets and the timeval are the guest's, copied through
-        // `uaccess`.
+        // SAFETY: the sets and timeval are guest pointers checked through uaccess.
         return unsafe {
-            crate::thread::readiness::patina_select_timeval(
+            crate::abi::raw(crate::thread::readiness::select_timeval_core(
                 nfds as i32,
                 read as *mut u64,
                 write as *mut u64,
                 except as *mut u64,
                 timeout as usize,
-            )
+            ))
         };
     };
     // 6.8's order: the (set, size) argpack is copied in
     // (`get_sigset_argpack`), then the timeout, then the size is judged
-    // (`set_user_sigmask`, whose copy-in `patina_select` does before the
+    // (`set_user_sigmask`, whose copy-in `select_core` does before the
     // sets).
     let pair = if sigarg == 0 {
         [0, 0]
@@ -195,10 +200,9 @@ pub(super) fn sys_select(
     }
     let mask = pair[0] as *const u64;
     let mut remaining = nanos.max(0) as u64;
-    // SAFETY: the sets and mask are guest pointers checked and copied by
-    // `patina_select`; `remaining` is local storage.
-    let rc = unsafe {
-        crate::thread::readiness::patina_select(
+    // SAFETY: the sets and mask are checked by select_core; remaining is local storage.
+    let result = unsafe {
+        crate::thread::readiness::select_core(
             nfds as i32,
             read as *mut u64,
             write as *mut u64,
@@ -208,6 +212,11 @@ pub(super) fn sys_select(
             &mut remaining,
         )
     };
-    write_back_timeout(timeout, (nanos >= 0).then_some(nanos as u64), remaining, rc);
-    rc
+    write_back_timeout(
+        timeout,
+        (nanos >= 0).then_some(nanos as u64),
+        remaining,
+        &result,
+    );
+    crate::abi::raw(result)
 }

@@ -1,8 +1,11 @@
 //! poll/select are adapters over the same readiness predicates and per-source
 //! wait queues as epoll. All use no-restart signal waits and atomic mask swaps.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::signals::{Resumed, resume, temporary_mask, with_mask, with_temporary_mask};
 use super::*;
 use crate::EINTR;
+use crate::abi::{Errno, SysResult};
 
 pub(super) const POLLIN: i16 = 0x001;
 const POLLPRI: i16 = 0x002;
@@ -30,7 +33,11 @@ mod plain_impls {
     });
 }
 
-fn poll(fds: &mut [PollFd], timeout: Option<u64>, mut remaining: Option<&mut u64>) -> i64 {
+fn poll_sources(
+    fds: &mut [PollFd],
+    timeout: Option<u64>,
+    mut remaining: Option<&mut u64>,
+) -> SysResult<i64> {
     // Rust std checks the standard descriptors before a deferred harness has
     // installed Context. An immediately resolved query needs neither clock nor
     // scheduler; activate only when this call genuinely needs to park.
@@ -73,10 +80,10 @@ fn poll(fds: &mut [PollFd], timeout: Option<u64>, mut remaining: Option<&mut u64
         }
         update_remaining(deadline, &mut remaining);
         if count != 0 || timeout == Some(0) {
-            return count;
+            return Ok(count);
         }
         if let Err(error) = state.ensure_active() {
-            return -i64::from(c_int::from(error.into_posix()));
+            return Err(Errno::new(c_int::from(error.into_posix())));
         }
         let me = current_task();
         if deadline.is_none()
@@ -91,7 +98,7 @@ fn poll(fds: &mut [PollFd], timeout: Option<u64>, mut remaining: Option<&mut u64
                 .unwrap_or_else(|_| fatal("readiness wait clock read failed"))
                 >= deadline
         }) {
-            return 0;
+            return Ok(0);
         }
         let locs = register_readiness_waiters(&mut state, me, &watched);
         let step = match deadline {
@@ -109,7 +116,7 @@ fn poll(fds: &mut [PollFd], timeout: Option<u64>, mut remaining: Option<&mut u64
             Ok(Step::Continue) => drop(state),
             Err(error) => {
                 unregister_waiters(&mut state, me, &locs);
-                return -i64::from(c_int::from(error.into_posix()));
+                return Err(Errno::new(c_int::from(error.into_posix())));
             }
         }
         {
@@ -119,7 +126,7 @@ fn poll(fds: &mut [PollFd], timeout: Option<u64>, mut remaining: Option<&mut u64
         }
         update_remaining(deadline, &mut remaining);
         if resume() == Resumed::Eintr {
-            return -i64::from(EINTR);
+            return Err(Errno::new(EINTR as c_int));
         }
     }
 }
@@ -137,30 +144,42 @@ pub unsafe extern "C" fn patina_poll(
     remaining: *mut u64,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this entry forwards its documented guest-buffer contract.
+    crate::abi::raw(unsafe { poll_core(fds, count, timeout, mask, remaining) })
+}
+
+/// Poll the guest's array and optional signal mask, returning a typed result.
+///
+/// # Safety
+/// `fds` names `count` guest pollfd records; non-null `mask` and `remaining`
+/// name eight readable and writable guest bytes respectively.
+pub(crate) unsafe fn poll_core(
+    fds: *mut PollFd,
+    count: usize,
+    timeout: i64,
+    mask: *const u64,
+    remaining: *mut u64,
+) -> SysResult<i64> {
     // `ppoll`: the signal mask is copied in before `do_sys_poll` judges the
     // count against the limit, then reads the array whole; every `revents`
     // is copied back out once the wait ends, whatever it answered.
-    let mask = match temporary_mask(mask) {
-        Ok(mask) => mask,
-        Err(errno) => return errno,
-    };
+    let mask = temporary_mask(mask)?;
     if count > crate::fd_limit() {
-        return -i64::from(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
-    let mut local = match crate::uaccess::read_vec::<PollFd>(fds as usize, count) {
-        Ok(local) => local,
-        Err(errno) => return -i64::from(errno),
-    };
-    let rc = with_mask(mask, || {
-        poll(
+    let mut local = crate::uaccess::read_vec::<PollFd>(fds as usize, count).map_err(Errno::new)?;
+    let result = with_mask(mask, || {
+        // SAFETY: the core contract makes `remaining` null or writable for one u64.
+        let remaining = unsafe { remaining.as_mut() };
+        poll_sources(
             &mut local,
             (timeout >= 0).then_some(timeout as u64),
-            unsafe { remaining.as_mut() },
+            remaining,
         )
     });
     match crate::uaccess::write_slice(fds as usize, &local) {
-        Ok(()) => rc,
-        Err(errno) => -i64::from(errno),
+        Ok(()) => result,
+        Err(errno) => Err(Errno::new(errno)),
     }
 }
 
@@ -175,14 +194,27 @@ pub unsafe extern "C" fn patina_epoll_wait_masked(
     mask: *const u64,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this entry forwards its documented event and mask buffers.
+    crate::abi::raw(unsafe { epoll_wait_masked_core(ep, events, capacity, timeout, mask) })
+}
+
+/// Wait on epoll under an optional temporary signal mask.
+///
+/// # Safety
+/// `events` names `capacity` writable guest records and non-null `mask` names
+/// eight readable guest bytes.
+pub(crate) unsafe fn epoll_wait_masked_core(
+    ep: i32,
+    events: *mut c_void,
+    capacity: i32,
+    timeout: i32,
+    mask: *const u64,
+) -> SysResult<i64> {
+    // SAFETY: the contract above supplies both guest buffers to their uaccess readers.
     unsafe {
         with_temporary_mask(mask, || {
-            let rc = epoll::patina_epoll_wait(ep, events, capacity, timeout);
-            if rc < 0 {
-                -i64::from(crate::patina_errno())
-            } else {
-                i64::from(rc)
-            }
+            // SAFETY: `events` and its capacity satisfy the epoll wait core contract.
+            epoll::wait_core(ep, events, capacity, timeout).map(i64::from)
         })
     }
 }
@@ -204,14 +236,29 @@ pub unsafe extern "C" fn patina_select(
     remaining: *mut u64,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this entry forwards its documented guest-buffer contract.
+    crate::abi::raw(unsafe { select_core(nfds, read, write, except, timeout, mask, remaining) })
+}
+
+/// Run select/pselect over native-word guest fd sets.
+///
+/// # Safety
+/// Optional `mask` names eight readable guest bytes; optional `remaining`
+/// names one writable guest u64. Each non-null fd set follows the syscall ABI.
+pub(crate) unsafe fn select_core(
+    nfds: i32,
+    read: *mut u64,
+    write: *mut u64,
+    except: *mut u64,
+    timeout: i64,
+    mask: *const u64,
+    remaining: *mut u64,
+) -> SysResult<i64> {
     // `do_pselect`: the signal mask is copied in before `core_sys_select`
     // judges the count and reads the sets.
-    let mask = match temporary_mask(mask) {
-        Ok(mask) => mask,
-        Err(errno) => return errno,
-    };
+    let mask = temporary_mask(mask)?;
     if nfds < 0 {
-        return -i64::from(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     // `core_sys_select`: a count past the table is the table's size.
     let nfds = nfds.min(crate::fd_limit() as i32);
@@ -226,7 +273,7 @@ pub unsafe extern "C" fn patina_select(
     let (sets_in, write_in, except_in) = match (load(read), load(write), load(except)) {
         (Ok(read), Ok(write), Ok(except)) => (read, write, except),
         (Err(errno), _, _) | (_, Err(errno), _) | (_, _, Err(errno)) => {
-            return -i64::from(errno);
+            return Err(Errno::new(errno));
         }
     };
     let mut fds = Vec::new();
@@ -245,7 +292,7 @@ pub unsafe extern "C" fn patina_select(
         }
         if events != 0 {
             if crate::fd_table().lock().resolve(fd).is_none() {
-                return -i64::from(crate::EBADF);
+                return Err(Errno::new(crate::EBADF));
             }
             fds.push(PollFd {
                 fd,
@@ -254,14 +301,15 @@ pub unsafe extern "C" fn patina_select(
             });
         }
     }
-    let rc = with_mask(mask, || {
-        poll(&mut fds, (timeout >= 0).then_some(timeout as u64), unsafe {
-            remaining.as_mut()
-        })
-    });
-    if rc < 0 {
-        return rc;
-    }
+    with_mask(mask, || {
+        // SAFETY: the core contract makes `remaining` null or writable for one u64.
+        let remaining = unsafe { remaining.as_mut() };
+        poll_sources(
+            &mut fds,
+            (timeout >= 0).then_some(timeout as u64),
+            remaining,
+        )
+    })?;
     let mut out = [vec![0u64; words], vec![0u64; words], vec![0u64; words]];
     let mut count = 0;
     for fd in fds {
@@ -281,10 +329,10 @@ pub unsafe extern "C" fn patina_select(
         if !set.is_null()
             && let Err(errno) = crate::uaccess::write_slice(set as usize, bits)
         {
-            return -i64::from(errno);
+            return Err(Errno::new(errno));
         }
     }
-    count
+    Ok(count)
 }
 
 #[unsafe(no_mangle)]
@@ -302,24 +350,37 @@ pub unsafe extern "C" fn patina_select_timeval(
     timeval: usize,
 ) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this entry forwards the documented timeval and fd-set contracts.
+    crate::abi::raw(unsafe { select_timeval_core(nfds, read, write, except, timeval) })
+}
+
+/// Select using libc's timeval input and output behavior.
+///
+/// # Safety
+/// As [`select_core`], with nonzero `timeval` naming the caller's timeval.
+pub(crate) unsafe fn select_timeval_core(
+    nfds: i32,
+    read: *mut u64,
+    write: *mut u64,
+    except: *mut u64,
+    timeval: usize,
+) -> SysResult<i64> {
     const USEC: i64 = 1_000_000;
     let nanos = if timeval == 0 {
         -1
     } else {
-        let [sec, usec]: [i64; 2] = match crate::uaccess::read(timeval) {
-            Ok(tv) => tv,
-            Err(errno) => return -i64::from(errno),
-        };
+        let [sec, usec]: [i64; 2] = crate::uaccess::read(timeval).map_err(Errno::new)?;
         let sec = sec.saturating_add(usec / USEC);
         let nsec = (usec % USEC) * 1000;
         if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
-            return -i64::from(EINVAL);
+            return Err(Errno::new(EINVAL));
         }
         sec.saturating_mul(1_000_000_000).saturating_add(nsec)
     };
     let mut remaining = nanos.max(0) as u64;
-    let rc = unsafe {
-        patina_select(
+    // SAFETY: all guest sets retain the caller contract; `remaining` is local.
+    let result = unsafe {
+        select_core(
             nfds,
             read,
             write,
@@ -329,7 +390,7 @@ pub unsafe extern "C" fn patina_select_timeval(
             &mut remaining,
         )
     };
-    if timeval != 0 && (rc >= 0 || rc == -i64::from(EINTR)) {
+    if timeval != 0 && (result.is_ok() || result == Err(Errno::new(EINTR as c_int))) {
         let left = [
             (remaining / 1_000_000_000) as i64,
             ((remaining % 1_000_000_000) / 1000) as i64,
@@ -338,7 +399,7 @@ pub unsafe extern "C" fn patina_select_timeval(
         // leaves the result as it is.
         let _ = crate::uaccess::write(timeval, &left);
     }
-    rc
+    result
 }
 
 #[cfg(test)]

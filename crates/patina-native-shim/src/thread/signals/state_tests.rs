@@ -316,7 +316,10 @@ fn shim_scopes_close_where_they_opened() {
         assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
         let after_delivery = fault::open_scopes();
         let blocked = bit(SIGSEGV);
-        deeper(|| assert_eq!(unsafe { with_temporary_mask(&blocked, || 0) }, 0));
+        deeper(|| {
+            // SAFETY: `blocked` is a live signal mask word for the duration of the wait.
+            assert_eq!(unsafe { with_temporary_mask(&blocked, || Ok(0)) }, Ok(0));
+        });
         let after_temporary = fault::open_scopes();
         patina_signal_restorer(usr1.restorer);
         let segv = Action {

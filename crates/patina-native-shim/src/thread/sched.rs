@@ -11,11 +11,12 @@
 //! table; another user's process, init, root's, is not the caller's to
 //! change: [`same_owner`]). The virtual machine has one CPU: the affinity of
 //! every thread is that CPU, and every thread runs on it.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
+use crate::abi::{Errno, SysResult};
 use crate::identity::Process;
 use crate::limits::{RLIMIT_NICE, RLIMIT_RTPRIO};
-use crate::neg_errno as errno;
 use crate::registry::{IDENTITY_PID, INIT_PID};
 use crate::{E2BIG, EACCES, EFAULT, ERANGE};
 use std::ffi::CStr;
@@ -406,41 +407,41 @@ fn targets(
 
 /// `getpriority(which, who)`: `20 - nice` of the highest-priority thread
 /// named (the raw row's encoding; glibc converts it back).
-pub(crate) fn getpriority(which: i32, who: i32) -> i64 {
+pub(crate) fn getpriority(which: i32, who: i32) -> SysResult<i64> {
     let state = lock_state();
     let Some(targets) = targets(&state, which, who, PRIO_WHICH, UserZero::Caller) else {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     };
     targets
         .iter()
         .map(|tid| i64::from(20 - state.sched.get(*tid).nice))
         .max()
-        .unwrap_or(errno(ESRCH))
+        .ok_or_else(|| Errno::new(ESRCH))
 }
 
 /// `setpriority(which, who, nice)`: the nice value clamped to `-20..=19`,
 /// set on every named thread the caller may change; another user's is
 /// `EPERM` ([`same_owner`]), and raising a thread's priority past what
 /// `RLIMIT_NICE` allows `EACCES`. The last refusal is the answer.
-pub(crate) fn setpriority(which: i32, who: i32, nice: i32) -> i64 {
+pub(crate) fn setpriority(which: i32, who: i32, nice: i32) -> SysResult<i64> {
     let mut state = lock_state();
     let Some(targets) = targets(&state, which, who, PRIO_WHICH, UserZero::Caller) else {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     };
     let nice = nice.clamp(MIN_NICE, MAX_NICE);
-    let mut result = errno(ESRCH);
+    let mut result = Err(Errno::new(ESRCH));
     for tid in targets {
         let mut attrs = state.sched.get(tid);
         if !same_owner(tid) {
-            result = errno(EPERM);
+            result = Err(Errno::new(EPERM));
             continue;
         }
         if nice < attrs.nice && !nice_allowed(nice) {
-            result = errno(EACCES);
+            result = Err(Errno::new(EACCES));
             continue;
         }
-        if result == errno(ESRCH) {
-            result = 0;
+        if result == Err(Errno::new(ESRCH)) {
+            result = Ok(0);
         }
         attrs.nice = nice;
         state.sched.set(tid, attrs);
@@ -449,34 +450,34 @@ pub(crate) fn setpriority(which: i32, who: i32, nice: i32) -> i64 {
 }
 
 /// `sched_getscheduler`: the policy, with `SCHED_RESET_ON_FORK` or'd in.
-pub(crate) fn getscheduler(pid: i32) -> i64 {
+pub(crate) fn getscheduler(pid: i32) -> SysResult<i64> {
     if pid < 0 {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     let state = lock_state();
     let Some(tid) = find(&state, pid) else {
-        return errno(ESRCH);
+        return Err(Errno::new(ESRCH));
     };
     let attrs = state.sched.get(tid);
-    i64::from(attrs.policy)
+    Ok(i64::from(attrs.policy)
         | if attrs.reset_on_fork {
             i64::from(RESET_ON_FORK)
         } else {
             0
-        }
+        })
 }
 
 /// `sched_getparam`: the realtime priority (0 under a normal policy).
 ///
 /// # Safety
 /// `param` must be NULL or writable for an `int`.
-pub(crate) unsafe fn getparam(pid: i32, param: *mut i32) -> i64 {
+pub(crate) unsafe fn getparam(pid: i32, param: *mut i32) -> SysResult<i64> {
     if param.is_null() || pid < 0 {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     let state = lock_state();
     let Some(tid) = find(&state, pid) else {
-        return errno(ESRCH);
+        return Err(Errno::new(ESRCH));
     };
     let attrs = state.sched.get(tid);
     let priority = if rt_policy(attrs.policy) {
@@ -486,7 +487,7 @@ pub(crate) unsafe fn getparam(pid: i32, param: *mut i32) -> i64 {
     };
     // SAFETY: per this function's contract.
     unsafe { param.write_unaligned(priority as i32) };
-    0
+    Ok(0)
 }
 
 /// A request to `__sched_setscheduler`.
@@ -528,27 +529,27 @@ fn deadline_params_valid(request: &Request) -> bool {
 /// `__sched_setscheduler` for an unprivileged caller: past the argument
 /// checks (`EINVAL`), `user_check_sched_setscheduler`'s `EPERM`s, another
 /// user's thread ([`same_owner`]) among them.
-fn setscheduler(state: &mut ThreadRuntime, tid: i32, request: Request) -> i64 {
+fn setscheduler(state: &mut ThreadRuntime, tid: i32, request: Request) -> SysResult<i64> {
     let current = state.sched.get(tid);
     let (policy, reset_on_fork) = if request.policy < 0 {
         (current.policy, current.reset_on_fork)
     } else {
         let policy = request.policy as u32;
         if !valid_policy(policy) {
-            return errno(EINVAL);
+            return Err(Errno::new(EINVAL));
         }
         (policy, request.flags & SCHED_FLAG_RESET_ON_FORK != 0)
     };
     if request.flags & !(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV) != 0 {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     if request.priority > MAX_RT_PRIO - 1 {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     if (policy == SCHED_DEADLINE && !deadline_params_valid(&request))
         || rt_policy(policy) != (request.priority != 0)
     {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     // user_check_sched_setscheduler: whatever needs CAP_SYS_NICE is EPERM.
     let privileged = (fair_policy(policy)
@@ -564,10 +565,10 @@ fn setscheduler(state: &mut ThreadRuntime, tid: i32, request: Request) -> i64 {
         || !same_owner(tid)
         || (current.reset_on_fork && !reset_on_fork);
     if privileged {
-        return errno(EPERM);
+        return Err(Errno::new(EPERM));
     }
     if request.flags & SCHED_FLAG_SUGOV != 0 {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     let mut next = current;
     if request.flags & SCHED_FLAG_UTIL_CLAMP != 0 {
@@ -587,14 +588,14 @@ fn setscheduler(state: &mut ThreadRuntime, tid: i32, request: Request) -> i64 {
             requested(SCHED_FLAG_UTIL_CLAMP_MIN, request.util_min, 0),
             requested(SCHED_FLAG_UTIL_CLAMP_MAX, request.util_max, CAPACITY),
         ) else {
-            return errno(EINVAL);
+            return Err(Errno::new(EINVAL));
         };
         let (min, max) = (
             min.unwrap_or(current.util_min),
             max.unwrap_or(current.util_max),
         );
         if min > max {
-            return errno(EINVAL);
+            return Err(Errno::new(EINVAL));
         }
         next.util_min = min;
         next.util_max = max;
@@ -606,7 +607,7 @@ fn setscheduler(state: &mut ThreadRuntime, tid: i32, request: Request) -> i64 {
     }
     next.rt_priority = request.priority;
     state.sched.set(tid, next);
-    0
+    Ok(0)
 }
 
 /// `sched_setscheduler` (a policy, or'd with `SCHED_RESET_ON_FORK`) and
@@ -615,20 +616,24 @@ fn setscheduler(state: &mut ThreadRuntime, tid: i32, request: Request) -> i64 {
 ///
 /// # Safety
 /// `param` must be NULL or readable for an `int`.
-pub(crate) unsafe fn setscheduler_param(pid: i32, policy: Option<i32>, param: *const i32) -> i64 {
+pub(crate) unsafe fn setscheduler_param(
+    pid: i32,
+    policy: Option<i32>,
+    param: *const i32,
+) -> SysResult<i64> {
     let policy = match policy {
-        Some(policy) if policy < 0 => return errno(EINVAL),
+        Some(policy) if policy < 0 => return Err(Errno::new(EINVAL)),
         Some(policy) => policy,
         None => SETPARAM_POLICY,
     };
     if param.is_null() || pid < 0 {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     // SAFETY: per this function's contract.
     let priority = unsafe { param.read_unaligned() } as u32;
     let mut state = lock_state();
     let Some(tid) = find(&state, pid) else {
-        return errno(ESRCH);
+        return Err(Errno::new(ESRCH));
     };
     let (policy, flags) = if policy != SETPARAM_POLICY && policy & RESET_ON_FORK != 0 {
         (policy & !RESET_ON_FORK, SCHED_FLAG_RESET_ON_FORK)
@@ -647,17 +652,17 @@ pub(crate) unsafe fn setscheduler_param(pid: i32, policy: Option<i32>, param: *c
 
 /// `sched_get_priority_max`/`_min`: the realtime policies' 1..99, 0 for the
 /// others, `EINVAL` for an unknown policy.
-pub(crate) fn priority_bound(policy: i32, max: bool) -> i64 {
+pub(crate) fn priority_bound(policy: i32, max: bool) -> SysResult<i64> {
     match policy as u32 {
         SCHED_FIFO | SCHED_RR if policy >= 0 => {
             if max {
-                i64::from(MAX_RT_PRIO - 1)
+                Ok(i64::from(MAX_RT_PRIO - 1))
             } else {
-                1
+                Ok(1)
             }
         }
-        SCHED_OTHER | SCHED_BATCH | SCHED_IDLE | SCHED_DEADLINE if policy >= 0 => 0,
-        _ => errno(EINVAL),
+        SCHED_OTHER | SCHED_BATCH | SCHED_IDLE | SCHED_DEADLINE if policy >= 0 => Ok(0),
+        _ => Err(Errno::new(EINVAL)),
     }
 }
 
@@ -665,14 +670,14 @@ pub(crate) fn priority_bound(policy: i32, max: bool) -> i64 {
 /// deadline, and a fair thread's base slice in whole ticks (on one CPU
 /// under a tick, so 0). The pid is judged, then the slice copied out
 /// (`EFAULT`).
-pub(crate) fn rr_interval(pid: i32, out: *mut crate::clocks::Timespec) -> i64 {
+pub(crate) fn rr_interval(pid: i32, out: *mut crate::clocks::Timespec) -> SysResult<i64> {
     if pid < 0 {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     let policy = {
         let state = lock_state();
         let Some(tid) = find(&state, pid) else {
-            return errno(ESRCH);
+            return Err(Errno::new(ESRCH));
         };
         state.sched.get(tid).policy
     };
@@ -684,8 +689,8 @@ pub(crate) fn rr_interval(pid: i32, out: *mut crate::clocks::Timespec) -> i64 {
     let ticks = slice / crate::clocks::TICK_NSEC;
     let slice = crate::clocks::Timespec::from_nanos(ticks * crate::clocks::TICK_NSEC);
     match crate::uaccess::write(out as usize, &slice) {
-        Ok(()) => 0,
-        Err(_) => errno(EFAULT),
+        Ok(()) => Ok(0),
+        Err(_) => Err(Errno::new(EFAULT)),
     }
 }
 
@@ -730,14 +735,14 @@ mod plain_impls {
 ///
 /// # Safety
 /// `attr` must be NULL or writable for `size` bytes.
-pub(crate) unsafe fn getattr(pid: i32, attr: *mut u8, size: u32, flags: u32) -> i64 {
+pub(crate) unsafe fn getattr(pid: i32, attr: *mut u8, size: u32, flags: u32) -> SysResult<i64> {
     if attr.is_null() || pid < 0 || !(ATTR_SIZE_VER0..=PAGE_SIZE).contains(&size) || flags != 0 {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     let attrs = {
         let state = lock_state();
         let Some(tid) = find(&state, pid) else {
-            return errno(ESRCH);
+            return Err(Errno::new(ESRCH));
         };
         state.sched.get(tid)
     };
@@ -768,7 +773,7 @@ pub(crate) unsafe fn getattr(pid: i32, attr: *mut u8, size: u32, flags: u32) -> 
     unsafe {
         std::ptr::copy_nonoverlapping((&raw const value).cast::<u8>(), attr, written as usize)
     };
-    0
+    Ok(0)
 }
 
 /// `sched_setattr(pid, attr, flags)`: `sched_copy_attr`'s size negotiation
@@ -778,9 +783,9 @@ pub(crate) unsafe fn getattr(pid: i32, attr: *mut u8, size: u32, flags: u32) -> 
 ///
 /// # Safety
 /// `attr` must be NULL or readable and writable for its `size` bytes.
-pub(crate) unsafe fn setattr(pid: i32, attr: *mut u8, flags: u32) -> i64 {
+pub(crate) unsafe fn setattr(pid: i32, attr: *mut u8, flags: u32) -> SysResult<i64> {
     if attr.is_null() || pid < 0 || flags != 0 {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     // SAFETY: per this function's contract (the first field is the size).
     let mut size = unsafe { attr.cast::<u32>().read_unaligned() };
@@ -792,7 +797,7 @@ pub(crate) unsafe fn setattr(pid: i32, attr: *mut u8, flags: u32) -> i64 {
     if !(ATTR_SIZE_VER0..=PAGE_SIZE).contains(&size) || !tail_zero() {
         // SAFETY: as above.
         unsafe { attr.cast::<u32>().write_unaligned(ATTR_SIZE) };
-        return errno(E2BIG);
+        return Err(Errno::new(E2BIG));
     }
     let mut value = SchedAttr::default();
     // SAFETY: as above; the first `min(size, 56)` bytes.
@@ -804,14 +809,14 @@ pub(crate) unsafe fn setattr(pid: i32, attr: *mut u8, flags: u32) -> i64 {
         )
     };
     if value.flags & SCHED_FLAG_UTIL_CLAMP != 0 && size < ATTR_SIZE {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     if (value.policy as i32) < 0 {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     let mut state = lock_state();
     let Some(tid) = find(&state, pid) else {
-        return errno(ESRCH);
+        return Err(Errno::new(ESRCH));
     };
     let mut request = Request {
         policy: if value.flags & SCHED_FLAG_KEEP_POLICY != 0 {
@@ -865,7 +870,7 @@ fn read_ioprio(attrs: Attrs, raw: bool) -> i32 {
 /// (checked first), then an unknown `which` is `EINVAL` and nobody named
 /// `ESRCH`; the named threads are set in turn, stopping at the first of
 /// another user's (`EPERM`, [`same_owner`]).
-pub(crate) fn ioprio_set(which: i32, who: i32, ioprio: i32) -> i64 {
+pub(crate) fn ioprio_set(which: i32, who: i32, ioprio: i32) -> SysResult<i64> {
     let class = (ioprio >> IOPRIO_CLASS_SHIFT) & 7;
     let level = ioprio & 7;
     let checked = match class {
@@ -877,22 +882,22 @@ pub(crate) fn ioprio_set(which: i32, who: i32, ioprio: i32) -> i64 {
         _ => Err(EINVAL),
     };
     if let Err(code) = checked {
-        return errno(code);
+        return Err(Errno::new(code));
     }
     let mut state = lock_state();
     let Some(targets) = targets(&state, which, who, IOPRIO_WHICH, UserZero::Root) else {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     };
     if targets.is_empty() {
-        return errno(ESRCH);
+        return Err(Errno::new(ESRCH));
     }
     for tid in targets {
         if !same_owner(tid) {
-            return errno(EPERM);
+            return Err(Errno::new(EPERM));
         }
         state.sched.set_ioprio(tid, ioprio);
     }
-    0
+    Ok(0)
 }
 
 /// The identity of the I/O context of thread `tid` (the pid for the main
@@ -902,10 +907,10 @@ pub(crate) fn io_context(tid: i32) -> Option<u64> {
 }
 
 /// `ioprio_get(which, who)`: the best (lowest) of the named threads'.
-pub(crate) fn ioprio_get(which: i32, who: i32) -> i64 {
+pub(crate) fn ioprio_get(which: i32, who: i32) -> SysResult<i64> {
     let state = lock_state();
     let Some(targets) = targets(&state, which, who, IOPRIO_WHICH, UserZero::Caller) else {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     };
     targets
         .iter()
@@ -916,12 +921,12 @@ pub(crate) fn ioprio_get(which: i32, who: i32) -> i64 {
             ))
         })
         .min()
-        .unwrap_or(errno(ESRCH))
+        .ok_or_else(|| Errno::new(ESRCH))
 }
 
 /// `personality(persona)`: the caller's previous persona; the query
 /// `0xffffffff` changes nothing.
-pub(crate) fn personality(persona: u32) -> i64 {
+pub(crate) fn personality(persona: u32) -> SysResult<i64> {
     let mut state = lock_state();
     let tid = current_tid();
     let mut attrs = state.sched.get(tid);
@@ -930,7 +935,7 @@ pub(crate) fn personality(persona: u32) -> i64 {
         attrs.persona = persona;
         state.sched.set(tid, attrs);
     }
-    i64::from(previous)
+    Ok(i64::from(previous))
 }
 
 /// The caller's persona (what `uname` answers under).
@@ -947,21 +952,21 @@ const CPUMASK_BYTES: usize = std::mem::size_of::<u64>();
 ///
 /// # Safety
 /// `mask` must be NULL or writable for `len` bytes.
-pub(crate) unsafe fn getaffinity(pid: i32, len: u32, mask: *mut u8) -> i64 {
+pub(crate) unsafe fn getaffinity(pid: i32, len: u32, mask: *mut u8) -> SysResult<i64> {
     if (len as usize) * 8 < 1 || !(len as usize).is_multiple_of(CPUMASK_BYTES) {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
     if find(&lock_state(), pid).is_none() {
-        return errno(ESRCH);
+        return Err(Errno::new(ESRCH));
     }
     let written = (len as usize).min(CPUMASK_BYTES);
     if mask.is_null() {
-        return errno(EFAULT);
+        return Err(Errno::new(EFAULT));
     }
     let bits = 1u64.to_ne_bytes();
     // SAFETY: per this function's contract.
     unsafe { std::ptr::copy_nonoverlapping(bits.as_ptr(), mask, written) };
-    written as i64
+    Ok(written as i64)
 }
 
 /// `sched_setaffinity(pid, len, mask)`: the mask is read first (a short one
@@ -972,38 +977,38 @@ pub(crate) unsafe fn getaffinity(pid: i32, len: u32, mask: *mut u8) -> i64 {
 ///
 /// # Safety
 /// `mask` must be NULL or readable for `len` bytes.
-pub(crate) unsafe fn setaffinity(pid: i32, len: u32, mask: *const u8) -> i64 {
+pub(crate) unsafe fn setaffinity(pid: i32, len: u32, mask: *const u8) -> SysResult<i64> {
     let read = (len as usize).min(CPUMASK_BYTES);
     if read > 0 && mask.is_null() {
-        return errno(EFAULT);
+        return Err(Errno::new(EFAULT));
     }
     let mut bytes = [0u8; CPUMASK_BYTES];
     // SAFETY: per this function's contract.
     unsafe { std::ptr::copy_nonoverlapping(mask, bytes.as_mut_ptr(), read) };
     let Some(tid) = find(&lock_state(), pid) else {
-        return errno(ESRCH);
+        return Err(Errno::new(ESRCH));
     };
     if !same_owner(tid) {
-        return errno(EPERM);
+        return Err(Errno::new(EPERM));
     }
     if u64::from_ne_bytes(bytes) & 1 == 0 {
-        return errno(EINVAL);
+        return Err(Errno::new(EINVAL));
     }
-    0
+    Ok(0)
 }
 
 /// `getcpu(cpu, node, cache)`: CPU 0 on node 0.
 ///
 /// # Safety
 /// `cpu` and `node` must be NULL or writable for a `u32`.
-pub(crate) unsafe fn getcpu(cpu: *mut u32, node: *mut u32) -> i64 {
+pub(crate) unsafe fn getcpu(cpu: *mut u32, node: *mut u32) -> SysResult<i64> {
     for out in [cpu, node] {
         if !out.is_null() {
             // SAFETY: per this function's contract.
             unsafe { out.write_unaligned(0) };
         }
     }
-    0
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -1065,27 +1070,36 @@ mod tests {
     fn init_is_another_users_process() {
         crate::thread::signals::tests::isolated(|| {
             let best_effort = |level| (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | level;
-            assert_eq!(setpriority(PRIO_PROCESS, 0, 5), 0);
-            assert_eq!(getpriority(PRIO_USER, 0), 15);
-            assert_eq!(setpriority(PRIO_PROCESS, INIT, 5), errno(EPERM));
+            assert_eq!(setpriority(PRIO_PROCESS, 0, 5), Ok(0));
+            assert_eq!(getpriority(PRIO_USER, 0), Ok(15));
+            assert_eq!(setpriority(PRIO_PROCESS, INIT, 5), Err(Errno::new(EPERM)));
             let own = ioprio_get(IOPRIO_WHO_PROCESS, 0);
-            assert_eq!(ioprio_set(IOPRIO_WHO_USER, 0, best_effort(2)), errno(EPERM));
+            assert_eq!(
+                ioprio_set(IOPRIO_WHO_USER, 0, best_effort(2)),
+                Err(Errno::new(EPERM))
+            );
             assert_eq!(ioprio_get(IOPRIO_WHO_PROCESS, 0), own);
             assert_eq!(crate::identity::setpgid(0, INIT), 0);
-            assert_eq!(setpriority(PRIO_PGRP, 0, 6), errno(EPERM));
-            assert_eq!(getpriority(PRIO_PROCESS, 0), 14);
-            assert_eq!(ioprio_set(IOPRIO_WHO_PGRP, 0, best_effort(3)), errno(EPERM));
-            assert_eq!(ioprio_get(IOPRIO_WHO_PROCESS, 0), i64::from(best_effort(3)));
+            assert_eq!(setpriority(PRIO_PGRP, 0, 6), Err(Errno::new(EPERM)));
+            assert_eq!(getpriority(PRIO_PROCESS, 0), Ok(14));
+            assert_eq!(
+                ioprio_set(IOPRIO_WHO_PGRP, 0, best_effort(3)),
+                Err(Errno::new(EPERM))
+            );
+            assert_eq!(
+                ioprio_get(IOPRIO_WHO_PROCESS, 0),
+                Ok(i64::from(best_effort(3)))
+            );
         });
     }
 
     #[test]
     fn priority_bounds_are_the_kernels() {
-        assert_eq!(priority_bound(SCHED_FIFO as i32, true), 99);
-        assert_eq!(priority_bound(SCHED_RR as i32, false), 1);
-        assert_eq!(priority_bound(SCHED_IDLE as i32, true), 0);
-        assert_eq!(priority_bound(4, true), errno(EINVAL));
-        assert_eq!(priority_bound(-1, false), errno(EINVAL));
+        assert_eq!(priority_bound(SCHED_FIFO as i32, true), Ok(99));
+        assert_eq!(priority_bound(SCHED_RR as i32, false), Ok(1));
+        assert_eq!(priority_bound(SCHED_IDLE as i32, true), Ok(0));
+        assert_eq!(priority_bound(4, true), Err(Errno::new(EINVAL)));
+        assert_eq!(priority_bound(-1, false), Err(Errno::new(EINVAL)));
     }
 
     #[test]

@@ -71,11 +71,8 @@ pub(super) fn sys_futex(args: [u64; 6]) -> i64 {
 
 pub(super) fn sys_getrandom(buf: u64, len: u64, flags: u64) -> i64 {
     // SAFETY: `buf`/`len` describe a guest buffer.
-    let count =
-        unsafe { crate::entropy::patina_getrandom(buf as *mut c_void, len as usize, flags as u32) };
-    if count < 0 {
-        -(crate::environment::patina_errno() as i64)
-    } else {
-        count as i64
-    }
+    crate::abi::raw(
+        unsafe { crate::entropy::getrandom(buf as *mut c_void, len as usize, flags as u32) }
+            .map(|count| count as i64),
+    )
 }

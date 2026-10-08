@@ -59,15 +59,14 @@ pub(super) fn sys_poll(fds: u64, nfds: u64, timeout_ms: i64) -> i64 {
     };
     // SAFETY: `fds` is the guest's array of `nfds` pollfd entries; the entry
     // checks it before reading.
-
     unsafe {
-        crate::thread::readiness::patina_poll(
+        crate::abi::raw(crate::thread::readiness::poll_core(
             fds as *mut _,
             nfds as usize,
             timeout,
             std::ptr::null(),
             std::ptr::null_mut(),
-        )
+        ))
     }
 }
 

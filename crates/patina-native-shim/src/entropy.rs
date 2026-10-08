@@ -1,31 +1,62 @@
 //! Deterministic entropy and getrandom entry points.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
+use crate::abi::{SysResult, failed};
+
+/// Fill caller-owned memory from the seeded stream.
+///
+/// # Safety
+/// `destination` is a guest address; it is written only through `uaccess`.
+pub(crate) unsafe fn fill(destination: *mut c_void, length: usize) -> SysResult<()> {
+    if length != 0 && destination.is_null() {
+        return Err(failed(EFAULT));
+    }
+    let result = with_context(|context| context.entropy_bytes(length));
+    match result {
+        Ok(bytes) => match uaccess::write_bytes(destination as usize, &bytes) {
+            Ok(()) => {
+                set_errno(0);
+                Ok(())
+            }
+            Err(errno) => Err(failed(errno)),
+        },
+        Err(errno) => Err(failed(errno)),
+    }
+}
+
+/// `getrandom(2)` over the seeded stream.
+///
+/// # Safety
+/// `destination` must be writable for `length` bytes when it is nonzero.
+pub(crate) unsafe fn getrandom(
+    destination: *mut c_void,
+    length: usize,
+    flags: u32,
+) -> SysResult<isize> {
+    if !getrandom_flags_accepted(flags) {
+        return Err(failed(EINVAL));
+    }
+    if length != 0 && destination.is_null() {
+        return Err(failed(EFAULT));
+    }
+    let length = length.min(MAX_RW_COUNT);
+    // SAFETY: this function has the same destination contract as `fill`.
+    unsafe { fill(destination, length) }?;
+    Ok(length as isize)
+}
 
 #[unsafe(no_mangle)]
-/// Fill caller-owned memory with deterministic bytes: 0, or -1 with `EFAULT`
-/// for a buffer the guest cannot write (the bytes are drawn either way,
-/// except for a NULL buffer).
+/// Fill caller-owned memory with deterministic bytes: 0, or -1 on failure.
 ///
 /// # Safety
 /// `destination` is a guest address; it is written only through `uaccess`.
 pub unsafe extern "C" fn patina_entropy(destination: *mut c_void, length: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if length != 0 && destination.is_null() {
-        return fail(EFAULT);
-    }
-    let result = with_context(|context| context.entropy_bytes(length));
-    match result {
-        // Copied as the kernel's `copy_to_user` copies: a buffer the guest
-        // cannot write is `EFAULT`, never a fault in shim code.
-        Ok(bytes) => match uaccess::write_bytes(destination as usize, &bytes) {
-            Ok(()) => {
-                set_errno(0);
-                0
-            }
-            Err(errno) => fail(errno),
-        },
-        Err(errno) => fail(errno),
+    // SAFETY: this export carries the guest-buffer contract documented above.
+    match unsafe { fill(destination, length) } {
+        Ok(()) => 0,
+        Err(_) => -1,
     }
 }
 
@@ -57,16 +88,6 @@ pub unsafe extern "C" fn patina_getrandom(
     flags: u32,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if !getrandom_flags_accepted(flags) {
-        return fail(EINVAL) as isize;
-    }
-    if length != 0 && destination.is_null() {
-        return fail(EFAULT) as isize;
-    }
-    let length = length.min(MAX_RW_COUNT);
-    // SAFETY: Guaranteed by this function's C ABI contract.
-    match unsafe { patina_entropy(destination, length) } {
-        0 => length as isize,
-        _ => -1,
-    }
+    // SAFETY: this export carries getrandom's documented guest-buffer contract.
+    unsafe { getrandom(destination, length, flags) }.unwrap_or(-1)
 }

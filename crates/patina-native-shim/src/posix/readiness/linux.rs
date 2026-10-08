@@ -1,5 +1,8 @@
 //! Linux readiness and fixed fortify entries.
-use crate::posix::{cancel, error, model_result};
+#![deny(clippy::undocumented_unsafe_blocks)]
+
+use crate::abi;
+use crate::posix::{cancel, error};
 use crate::thread::{epoll, readiness};
 use core::ffi::c_int;
 
@@ -18,26 +21,27 @@ const _: () = {
 };
 
 #[unsafe(no_mangle)]
-pub extern "C" fn epoll_create1(flags: c_int) -> c_int {
+extern "C" fn epoll_create1(flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    model_result(epoll::patina_epoll_create1(flags))
+    abi::libc_result(epoll::create1(flags), -1)
 }
 /// # Safety
 /// `event` has the epoll_ctl buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn epoll_ctl(
+unsafe extern "C" fn epoll_ctl(
     epfd: c_int,
     op: c_int,
     fd: c_int,
     event: *mut libc::epoll_event,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    unsafe { model_result(epoll::patina_epoll_ctl(epfd, op, fd, event.cast())) }
+    // SAFETY: the caller provides epoll_ctl's event buffer; the core reads via uaccess.
+    abi::libc_result(unsafe { epoll::ctl_core(epfd, op, fd, event.cast()) }, -1)
 }
 /// # Safety
 /// `events` is writable for `maxevents` records.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn epoll_wait(
+unsafe extern "C" fn epoll_wait(
     epfd: c_int,
     events: *mut libc::epoll_event,
     maxevents: c_int,
@@ -45,19 +49,16 @@ pub unsafe extern "C" fn epoll_wait(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"epoll_wait");
-    unsafe {
-        model_result(epoll::patina_epoll_wait(
-            epfd,
-            events.cast(),
-            maxevents,
-            timeout,
-        ))
-    }
+    // SAFETY: the caller provides `maxevents` writable records; the core copies by uaccess.
+    abi::libc_result(
+        unsafe { epoll::wait_core(epfd, events.cast(), maxevents, timeout) },
+        -1,
+    )
 }
 /// # Safety
 /// The event and optional mask buffers follow epoll_pwait's contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn epoll_pwait(
+unsafe extern "C" fn epoll_pwait(
     epfd: c_int,
     events: *mut libc::epoll_event,
     maxevents: c_int,
@@ -66,22 +67,27 @@ pub unsafe extern "C" fn epoll_pwait(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"epoll_pwait");
-    unsafe {
-        crate::posix::signal_result(readiness::patina_epoll_wait_masked(
-            epfd,
-            events.cast(),
-            maxevents,
-            timeout,
-            sigmask.cast(),
-        ))
-    }
+    // SAFETY: event and optional mask buffers follow epoll_pwait's caller contract.
+    abi::libc_delivered(
+        unsafe {
+            readiness::epoll_wait_masked_core(
+                epfd,
+                events.cast(),
+                maxevents,
+                timeout,
+                sigmask.cast(),
+            )
+        },
+        -1,
+    ) as c_int
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn eventfd(initval: libc::c_uint, flags: c_int) -> c_int {
+extern "C" fn eventfd(initval: libc::c_uint, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    model_result(crate::thread::patina_eventfd(initval, flags))
+    abi::libc_result(crate::thread::create(initval, flags), -1)
 }
 unsafe fn timeout_nanos(ts: *const libc::timespec) -> i64 {
+    // SAFETY: null is returned above; the caller guarantees a readable timespec otherwise.
     unsafe {
         if ts.is_null() {
             return -1;
@@ -103,7 +109,7 @@ unsafe fn timeout_nanos(ts: *const libc::timespec) -> i64 {
 /// # Safety
 /// Buffers follow ppoll's contract; timeout is null or readable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ppoll(
+unsafe extern "C" fn ppoll(
     fds: *mut libc::pollfd,
     count: libc::nfds_t,
     timeout: *const libc::timespec,
@@ -111,24 +117,28 @@ pub unsafe extern "C" fn ppoll(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"ppoll");
+    // SAFETY: fds and mask follow ppoll's caller contract; timeout was checked above.
     unsafe {
         let nanos = timeout_nanos(timeout);
         if nanos == -2 {
             return error(libc::EINVAL);
         }
-        crate::posix::signal_result(readiness::patina_poll(
-            fds.cast(),
-            count as usize,
-            nanos,
-            mask.cast(),
-            core::ptr::null_mut(),
-        ))
+        abi::libc_delivered(
+            readiness::poll_core(
+                fds.cast(),
+                count as usize,
+                nanos,
+                mask.cast(),
+                core::ptr::null_mut(),
+            ),
+            -1,
+        ) as c_int
     }
 }
 /// # Safety
 /// Sets and optional timeout follow select's contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn select(
+unsafe extern "C" fn select(
     nfds: c_int,
     read: *mut libc::fd_set,
     write: *mut libc::fd_set,
@@ -137,20 +147,24 @@ pub unsafe extern "C" fn select(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"select");
+    // SAFETY: fd sets and timeval follow select's caller contract; the core uses uaccess.
     unsafe {
-        crate::posix::signal_result(readiness::patina_select_timeval(
-            nfds,
-            read.cast(),
-            write.cast(),
-            except.cast(),
-            timeout as usize,
-        ))
+        abi::libc_delivered(
+            readiness::select_timeval_core(
+                nfds,
+                read.cast(),
+                write.cast(),
+                except.cast(),
+                timeout as usize,
+            ),
+            -1,
+        ) as c_int
     }
 }
 /// # Safety
 /// Buffers follow pselect's contract; timeout is null or readable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pselect(
+unsafe extern "C" fn pselect(
     nfds: c_int,
     read: *mut libc::fd_set,
     write: *mut libc::fd_set,
@@ -160,26 +174,30 @@ pub unsafe extern "C" fn pselect(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"pselect");
+    // SAFETY: fd sets, timeout and mask follow pselect's caller contract; the core uses uaccess.
     unsafe {
         let nanos = timeout_nanos(timeout);
         if nanos == -2 {
             return error(libc::EINVAL);
         }
-        crate::posix::signal_result(readiness::patina_select(
-            nfds,
-            read.cast(),
-            write.cast(),
-            except.cast(),
-            nanos,
-            mask.cast(),
-            core::ptr::null_mut(),
-        ))
+        abi::libc_delivered(
+            readiness::select_core(
+                nfds,
+                read.cast(),
+                write.cast(),
+                except.cast(),
+                nanos,
+                mask.cast(),
+                core::ptr::null_mut(),
+            ),
+            -1,
+        ) as c_int
     }
 }
 /// # Safety
 /// Poll records must be writable within `fdslen` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __poll_chk(
+unsafe extern "C" fn __poll_chk(
     fds: *mut libc::pollfd,
     nfds: libc::nfds_t,
     timeout: c_int,
@@ -190,24 +208,28 @@ pub unsafe extern "C" fn __poll_chk(
     if fdslen / size_of::<libc::pollfd>() < nfds as usize {
         crate::posix::chk_fail();
     }
+    // SAFETY: fortify validated the record count; poll_core uses uaccess for records.
     unsafe {
-        crate::posix::signal_result(readiness::patina_poll(
-            fds.cast(),
-            nfds as usize,
-            if timeout < 0 {
-                -1
-            } else {
-                i64::from(timeout) * 1_000_000
-            },
-            core::ptr::null(),
-            core::ptr::null_mut(),
-        ))
+        abi::libc_delivered(
+            readiness::poll_core(
+                fds.cast(),
+                nfds as usize,
+                if timeout < 0 {
+                    -1
+                } else {
+                    i64::from(timeout) * 1_000_000
+                },
+                core::ptr::null(),
+                core::ptr::null_mut(),
+            ),
+            -1,
+        ) as c_int
     }
 }
 /// # Safety
 /// Poll records must be writable within `fdslen` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __ppoll_chk(
+unsafe extern "C" fn __ppoll_chk(
     fds: *mut libc::pollfd,
     nfds: libc::nfds_t,
     timeout: *const libc::timespec,
@@ -219,17 +241,21 @@ pub unsafe extern "C" fn __ppoll_chk(
     if fdslen / size_of::<libc::pollfd>() < nfds as usize {
         crate::posix::chk_fail();
     }
+    // SAFETY: fortify validated the record count; timeout and mask follow ppoll's contract.
     unsafe {
         let nanos = timeout_nanos(timeout);
         if nanos == -2 {
             return error(libc::EINVAL);
         }
-        crate::posix::signal_result(readiness::patina_poll(
-            fds.cast(),
-            nfds as usize,
-            nanos,
-            mask.cast(),
-            core::ptr::null_mut(),
-        ))
+        abi::libc_delivered(
+            readiness::poll_core(
+                fds.cast(),
+                nfds as usize,
+                nanos,
+                mask.cast(),
+                core::ptr::null_mut(),
+            ),
+            -1,
+        ) as c_int
     }
 }

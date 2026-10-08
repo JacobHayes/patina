@@ -1,4 +1,6 @@
 //! Readiness adapters; the Rust reactors own scheduling and descriptor state.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::cancel;
 #[cfg(target_os = "macos")]
 use super::error;
@@ -7,27 +9,28 @@ use core::ffi::c_int;
 /// # Safety
 /// The caller supplies writable poll records.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn poll(
-    fds: *mut libc::pollfd,
-    count: libc::nfds_t,
-    timeout: c_int,
-) -> c_int {
+unsafe extern "C" fn poll(fds: *mut libc::pollfd, count: libc::nfds_t, timeout: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"poll");
+    // SAFETY: Linux consumes the guest records through uaccess; Darwin's limited
+    // fallback follows poll's writable-record contract directly.
     unsafe {
         #[cfg(target_os = "linux")]
         {
-            super::signal_result(crate::thread::readiness::patina_poll(
-                fds.cast(),
-                count as usize,
-                if timeout < 0 {
-                    -1
-                } else {
-                    i64::from(timeout) * 1_000_000
-                },
-                core::ptr::null(),
-                core::ptr::null_mut(),
-            ))
+            crate::abi::libc_delivered(
+                crate::thread::readiness::poll_core(
+                    fds.cast(),
+                    count as usize,
+                    if timeout < 0 {
+                        -1
+                    } else {
+                        i64::from(timeout) * 1_000_000
+                    },
+                    core::ptr::null(),
+                    core::ptr::null_mut(),
+                ),
+                -1,
+            ) as c_int
         }
         #[cfg(target_os = "macos")]
         {

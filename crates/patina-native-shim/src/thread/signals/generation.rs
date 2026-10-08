@@ -1,6 +1,8 @@
 //! Signal generation, thread exits, tid clearing, and temporary masks.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
+use crate::abi::{Errno, SysResult};
 
 #[derive(Clone, Copy)]
 pub(crate) enum GenerationTarget {
@@ -226,6 +228,7 @@ pub(in crate::thread) fn clear_tid(task: TaskId) {
         .take();
     if let Some(address) = address {
         // The guest keeps this word alive through exit, as for set_tid_address(2).
+        // SAFETY: the registered clear_child_tid contract keeps this address writable.
         unsafe {
             (address as *mut i32).write_volatile(0);
         }
@@ -271,6 +274,7 @@ pub extern "C" fn patina_pthread_kill(handle: usize, sig: i32) -> i32 {
     }
     activate();
     refresh_handler_mask();
+    // SAFETY: hostapi initialization installs a callable pthread_self entry.
     let task = if handle == unsafe { (crate::hostapi::get().host_pthread_self)() } {
         Some(current_task())
     } else {
@@ -279,6 +283,7 @@ pub extern "C" fn patina_pthread_kill(handle: usize, sig: i32) -> i32 {
     let Some(task) = task else {
         return ESRCH;
     };
+    // SAFETY: this thread-targeted signal carries no guest siginfo pointer.
     let rc = unsafe {
         generate_signal(
             GenerationTarget::Thread {
@@ -293,30 +298,37 @@ pub extern "C" fn patina_pthread_kill(handle: usize, sig: i32) -> i32 {
     -rc as i32
 }
 
-pub(in crate::thread) unsafe fn with_temporary_mask(
+/// Run a typed wait under the temporary mask supplied by the caller.
+///
+/// # Safety
+/// A non-null `mask` points to the optional guest mask described by the wait API.
+pub(in crate::thread) unsafe fn with_temporary_mask<T>(
     mask: *const u64,
-    body: impl FnOnce() -> i64,
-) -> i64 {
+    body: impl FnOnce() -> SysResult<T>,
+) -> SysResult<T> {
     match temporary_mask(mask) {
         Ok(mask) => with_mask(mask, body),
-        Err(errno) => errno,
+        Err(errno) => Err(errno),
     }
 }
 
 /// The temporary mask a wait names, copied in as `set_user_sigmask` copies
 /// it (`None`: the wait names none): a wait whose own arguments the kernel
 /// judges after it (`ppoll`, `pselect6`) copies it in first.
-pub(in crate::thread) fn temporary_mask(mask: *const u64) -> Result<Option<u64>, i64> {
+pub(in crate::thread) fn temporary_mask(mask: *const u64) -> SysResult<Option<u64>> {
     if mask.is_null() {
         return Ok(None);
     }
     crate::uaccess::read::<u64>(mask as usize)
         .map(Some)
-        .map_err(|_| -i64::from(EFAULT))
+        .map_err(|_| Errno::new(EFAULT))
 }
 
 /// [`with_temporary_mask`] with the mask already copied in.
-pub(in crate::thread) fn with_mask(requested: Option<u64>, body: impl FnOnce() -> i64) -> i64 {
+pub(in crate::thread) fn with_mask<T>(
+    requested: Option<u64>,
+    body: impl FnOnce() -> SysResult<T>,
+) -> SysResult<T> {
     let Some(requested) = requested else {
         return body();
     };
@@ -332,7 +344,7 @@ pub(in crate::thread) fn with_mask(requested: Option<u64>, body: impl FnOnce() -
     let pending = lock_state().signals.has_deliverable(me);
     let rc = if pending {
         deliver();
-        -i64::from(EINTR)
+        Err(Errno::new(EINTR))
     } else {
         body()
     };

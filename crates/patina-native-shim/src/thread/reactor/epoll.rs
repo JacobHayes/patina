@@ -5,6 +5,7 @@ use super::{BlockClass, Wait};
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{c_int, c_void};
 
+use crate::abi::{SysResult, failed};
 use patina_dst_abi::ClockKind;
 
 use super::{
@@ -321,12 +322,16 @@ pub(crate) fn forget_description(desc: DescId) {
 /// C ABI entry point.
 pub extern "C" fn patina_epoll_create1(flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    create1(flags).unwrap_or(-1)
+}
+
+pub(crate) fn create1(flags: c_int) -> SysResult<c_int> {
     if flags & !EPOLL_CLOEXEC != 0 {
-        return super::super::fail(super::EINVAL);
+        return Err(failed(super::EINVAL));
     }
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
-        return super::super::fail(c_int::from(error.into_posix()));
+        return Err(failed(c_int::from(error.into_posix())));
     }
     let id = state.net.next_epoll;
     state.net.next_epoll = state.net.next_epoll.wrapping_add(1);
@@ -345,11 +350,11 @@ pub extern "C" fn patina_epoll_create1(flags: c_int) -> c_int {
     ) {
         Ok(fd) => {
             super::super::set_errno(0);
-            fd
+            Ok(fd)
         }
         Err(errno) => {
             state.net.epolls.remove(&id);
-            super::super::fail(errno)
+            Err(failed(errno))
         }
     }
 }
@@ -381,18 +386,32 @@ pub unsafe extern "C" fn patina_epoll_ctl(
     event: *const EpollEvent,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let fail = super::super::fail;
+    // SAFETY: this export carries the event-buffer contract documented above.
+    unsafe { ctl_core(epfd, op, fd, event) }.unwrap_or(-1)
+}
+
+/// Apply one epoll_ctl operation and retain its model errno write points.
+///
+/// # Safety
+/// `event` names the guest's `struct epoll_event` for every op but DEL; it is
+/// copied in through `uaccess`.
+pub(crate) unsafe fn ctl_core(
+    epfd: c_int,
+    op: c_int,
+    fd: c_int,
+    event: *const EpollEvent,
+) -> SysResult<c_int> {
     let (events, data) = if op == EPOLL_CTL_DEL {
         (0, 0)
     } else {
         match read_event(event as usize) {
             Ok((events, data)) => (events & !EPOLLWAKEUP, data),
-            Err(errno) => return fail(errno),
+            Err(errno) => return Err(failed(errno)),
         }
     };
     let mut state = lock_state();
     let id = match ep_id(epfd) {
-        Err(errno) if errno == super::super::EBADF => return fail(errno),
+        Err(errno) if errno == super::super::EBADF => return Err(failed(errno)),
         id => id,
     };
     // `fdget` of the target: an `O_PATH` descriptor opened nothing
@@ -402,17 +421,17 @@ pub unsafe extern "C" fn patina_epoll_ctl(
         .resolve(fd)
         .filter(|target| !target.kind.is_path_only())
     else {
-        return fail(super::super::EBADF);
+        return Err(failed(super::super::EBADF));
     };
     if matches!(
         target.kind,
         FdKind::File | FdKind::Dir | FdKind::Urandom | FdKind::LandlockRuleset | FdKind::Namespace
     ) {
-        return fail(EPERM);
+        return Err(failed(EPERM));
     }
     let id = match id {
         Ok(id) if fd != epfd => id,
-        _ => return fail(super::EINVAL),
+        _ => return Err(failed(super::EINVAL)),
     };
     if op != EPOLL_CTL_DEL
         && events & EPOLLEXCLUSIVE != 0
@@ -420,7 +439,7 @@ pub unsafe extern "C" fn patina_epoll_ctl(
             || (op == EPOLL_CTL_ADD
                 && (target.kind == FdKind::Epoll || events & !EXCLUSIVE_OK_BITS != 0)))
     {
-        return fail(super::EINVAL);
+        return Err(failed(super::EINVAL));
     }
     // Readiness is defined over every pollable kind but another epoll
     // instance: nested epoll is not modeled and fails closed loudly.
@@ -442,31 +461,31 @@ pub unsafe extern "C" fn patina_epoll_ctl(
     match op {
         EPOLL_CTL_ADD => {
             if ep.interests.contains_key(&fd) {
-                return fail(super::super::EEXIST);
+                return Err(failed(super::super::EEXIST));
             }
             ep.interests.insert(fd, registered);
         }
         EPOLL_CTL_DEL => {
             return if ep.forget(fd) {
-                0
+                Ok(0)
             } else {
-                fail(super::super::ENOENT)
+                Err(failed(super::super::ENOENT))
             };
         }
         EPOLL_CTL_MOD => {
             let Some(interest) = ep.interests.get_mut(&fd) else {
-                return fail(super::super::ENOENT);
+                return Err(failed(super::super::ENOENT));
             };
             if interest.events & EPOLLEXCLUSIVE != 0 {
-                return fail(super::EINVAL);
+                return Err(failed(super::EINVAL));
             }
             *interest = registered;
         }
-        _ => return fail(super::EINVAL),
+        _ => return Err(failed(super::EINVAL)),
     }
     // `ep_insert`/`ep_modify` poll the item once and queue it if ready.
     ep.observe(fd, mask, seqs);
-    0
+    Ok(0)
 }
 
 /// Observe every interest of instance `id` (see [`Epoll::observe`]),
@@ -538,12 +557,25 @@ pub unsafe extern "C" fn patina_epoll_wait(
     timeout_ms: c_int,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let fail = super::super::fail;
+    // SAFETY: this export carries the event-buffer contract documented above.
+    unsafe { wait_core(epfd, events, maxevents, timeout_ms) }.unwrap_or(-1)
+}
+
+/// Gather ready epoll events using the reactor's deterministic wait path.
+///
+/// # Safety
+/// `events` is the guest's writable buffer for `maxevents` records.
+pub(crate) unsafe fn wait_core(
+    epfd: c_int,
+    events: *mut c_void,
+    maxevents: c_int,
+    timeout_ms: c_int,
+) -> SysResult<c_int> {
     if let Err(errno) = sched_point() {
-        return fail(errno);
+        return Err(failed(errno));
     }
     if !(1..=MAX_EVENTS).contains(&maxevents) {
-        return fail(super::EINVAL);
+        return Err(failed(super::EINVAL));
     }
     let capacity = maxevents as usize;
     let me = current_task();
@@ -554,11 +586,11 @@ pub unsafe extern "C" fn patina_epoll_wait(
         let mut state = lock_state();
         let id = match ep_id(epfd) {
             Ok(id) => id,
-            Err(errno) => return fail(errno),
+            Err(errno) => return Err(failed(errno)),
         };
         let now = match with_context_raw(|c| c.monotonic_now_unrecorded()) {
             Ok(now) => now,
-            Err(errno) => return fail(errno),
+            Err(errno) => return Err(failed(errno)),
         };
         let masks = scan(&mut state, id);
         let ep = &mut state.net.epolls.get_mut(&id).expect("epoll exists").ep;
@@ -572,7 +604,7 @@ pub unsafe extern "C" fn patina_epoll_wait(
                 .take_while(|(at, event)| write_event(events as usize + at * size, event).is_ok())
                 .count();
             if written == 0 {
-                return fail(super::super::EFAULT);
+                return Err(failed(super::super::EFAULT));
             }
             let delivery = if written < delivery.events.len() {
                 ep.plan(&masks, written)
@@ -580,11 +612,11 @@ pub unsafe extern "C" fn patina_epoll_wait(
                 delivery
             };
             ep.commit(delivery);
-            return c_int::try_from(written).unwrap_or(c_int::MAX);
+            return Ok(c_int::try_from(written).unwrap_or(c_int::MAX));
         }
 
         if timeout_ms == 0 {
-            return 0;
+            return Ok(0);
         }
         // A bounded gather whose deadline has passed with nothing ready
         // returns zero events — never re-parks on an elapsed deadline
@@ -593,7 +625,7 @@ pub unsafe extern "C" fn patina_epoll_wait(
             let deadline =
                 *timeout_deadline.get_or_insert(now.saturating_add(timeout_ms as u64 * 1_000_000));
             if now >= deadline {
-                return 0;
+                return Ok(0);
             }
         }
         // Nothing ready: park with multi-fd fan-in on the shared core.
@@ -621,7 +653,7 @@ pub unsafe extern "C" fn patina_epoll_wait(
             Err(error) => {
                 let mut state = lock_state();
                 unregister_waiters(&mut state, me, &locs);
-                return super::super::fail(c_int::from(error.into_posix()));
+                return Err(failed(c_int::from(error.into_posix())));
             }
         }
         let mut state = lock_state();
@@ -629,7 +661,7 @@ pub unsafe extern "C" fn patina_epoll_wait(
         state.timed_out.remove(&me);
         drop(state);
         if super::signals::resume() == super::signals::Resumed::Eintr {
-            return super::super::fail(super::super::EINTR);
+            return Err(failed(super::super::EINTR));
         }
     }
 }

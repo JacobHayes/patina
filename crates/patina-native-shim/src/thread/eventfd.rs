@@ -1,6 +1,9 @@
 //! Linux eventfd state and entry points.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
+#[cfg(target_os = "linux")]
+use crate::abi::{SysResult, failed};
 
 // ------------------------------------------------------------------
 // eventfd (Linux). A deterministic in-process model of the kernel's 64-bit
@@ -38,15 +41,20 @@ pub(crate) struct EventFd {
 #[cfg(target_os = "linux")]
 pub extern "C" fn patina_eventfd(initval: u32, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    create(initval, flags).unwrap_or(-1)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn create(initval: u32, flags: c_int) -> SysResult<c_int> {
     const EFD_SEMAPHORE: c_int = 0o1;
     const EFD_CLOEXEC: c_int = 0o2000000;
     const EFD_NONBLOCK: c_int = 0o4000;
     if flags & !(EFD_SEMAPHORE | EFD_CLOEXEC | EFD_NONBLOCK) != 0 {
-        return super::fail(EINVAL);
+        return Err(failed(EINVAL));
     }
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
-        return super::fail(c_int::from(error.into_posix()));
+        return Err(failed(c_int::from(error.into_posix())));
     }
     let handle = next_handle(&mut state);
     state.net.eventfds.insert(
@@ -71,11 +79,11 @@ pub extern "C" fn patina_eventfd(initval: u32, flags: c_int) -> c_int {
     ) {
         Ok(fd) => {
             super::set_errno(0);
-            fd
+            Ok(fd)
         }
         Err(errno) => {
             state.net.eventfds.remove(&handle);
-            super::fail(errno)
+            Err(failed(errno))
         }
     }
 }

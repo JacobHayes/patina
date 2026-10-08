@@ -1,8 +1,10 @@
 //! Darwin kqueue readiness model.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{c_int, c_void};
 
+use crate::abi::{SysResult, failed};
 use patina_dst_abi::ClockKind;
 
 use super::{
@@ -103,9 +105,13 @@ fn fatal_filter(filter: i16, fd: c_int, direction: &str) -> ! {
 /// C ABI entry point.
 pub extern "C" fn patina_kqueue() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    create().unwrap_or(-1)
+}
+
+pub(crate) fn create() -> SysResult<c_int> {
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
-        return super::super::fail(c_int::from(error.into_posix()));
+        return Err(failed(c_int::from(error.into_posix())));
     }
     let id = state.net.next_kq;
     state.net.next_kq = state.net.next_kq.wrapping_add(1);
@@ -120,11 +126,11 @@ pub extern "C" fn patina_kqueue() -> c_int {
     match super::super::install_fd(FdKind::Kqueue, id, O_READ | O_WRITE, true) {
         Ok(fd) => {
             super::super::set_errno(0);
-            fd
+            Ok(fd)
         }
         Err(errno) => {
             state.net.kqueues.remove(&id);
-            super::super::fail(errno)
+            Err(failed(errno))
         }
     }
 }
@@ -535,8 +541,23 @@ pub unsafe extern "C" fn patina_kevent_gather(
     timeout_nanos: u64,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this export carries the documented output-buffer contract.
+    unsafe { gather_core(kq_fd, out, nevents, mode, timeout_nanos) }.unwrap_or(-1)
+}
+
+/// Gather up to `nevents` ready events and park using the virtual clock.
+///
+/// # Safety
+/// `out` must be writable for `nevents` [`PatinaKevent`]s.
+pub(crate) unsafe fn gather_core(
+    kq_fd: c_int,
+    out: *mut c_void,
+    nevents: c_int,
+    mode: c_int,
+    timeout_nanos: u64,
+) -> SysResult<c_int> {
     if let Err(errno) = sched_point() {
-        return super::super::fail(errno);
+        return Err(failed(errno));
     }
     let capacity = nevents.max(0) as usize;
     let me = current_task();
@@ -545,11 +566,11 @@ pub unsafe extern "C" fn patina_kevent_gather(
     loop {
         let mut state = lock_state();
         let Some(id) = kq_id(&state, kq_fd) else {
-            return super::super::fail(super::super::EBADF);
+            return Err(failed(super::super::EBADF));
         };
         let now = match with_context_raw(|c| c.monotonic_now_unrecorded()) {
             Ok(now) => now,
-            Err(errno) => return super::super::fail(errno),
+            Err(errno) => return Err(failed(errno)),
         };
         let (ready, rearm_not_ready, earliest_timer) = scan(&state, id, now);
         commit_rearm(&mut state, id, &rearm_not_ready);
@@ -558,6 +579,7 @@ pub unsafe extern "C" fn patina_kevent_gather(
             let count = ready.len().min(capacity);
             let delivered = &ready[..count];
             if !out.is_null() {
+                // SAFETY: the gather core contract supplies writable output storage for `count`.
                 let slots =
                     unsafe { std::slice::from_raw_parts_mut(out.cast::<PatinaKevent>(), count) };
                 for (slot, event) in slots.iter_mut().zip(delivered) {
@@ -565,11 +587,11 @@ pub unsafe extern "C" fn patina_kevent_gather(
                 }
             }
             commit_delivered(&mut state, id, delivered);
-            return c_int::try_from(count).unwrap_or(c_int::MAX);
+            return Ok(c_int::try_from(count).unwrap_or(c_int::MAX));
         }
 
         if mode == MODE_POLL {
-            return 0;
+            return Ok(0);
         }
 
         // A bounded gather whose deadline has passed with nothing ready
@@ -579,7 +601,7 @@ pub unsafe extern "C" fn patina_kevent_gather(
         if mode == MODE_TIMEOUT {
             let deadline = *timeout_deadline.get_or_insert(now.saturating_add(timeout_nanos));
             if now >= deadline {
-                return 0;
+                return Ok(0);
             }
         }
 
@@ -629,7 +651,7 @@ pub unsafe extern "C" fn patina_kevent_gather(
                 let mut state = lock_state();
                 unregister_waiters(&mut state, me, &locs);
                 detach_user_waiter(&mut state, id, me);
-                return super::super::fail(c_int::from(error.into_posix()));
+                return Err(failed(c_int::from(error.into_posix())));
             }
         }
         let mut state = lock_state();

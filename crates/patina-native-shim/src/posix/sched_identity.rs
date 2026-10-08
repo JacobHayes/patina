@@ -1,9 +1,12 @@
 //! Ordinary identity, scheduler and process inventory ABI adapters.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use core::ffi::{c_char, c_int, c_long};
 use core::ptr;
 
 #[cfg(target_os = "linux")]
 unsafe fn dispatch(number: c_long, args: [u64; 6]) -> c_int {
+    // SAFETY: the SUD adapter interprets pointer registers as guest addresses and checks them per row.
     super::signal_result(unsafe {
         crate::sud::patina_sud_dispatch(
             number, args[0], args[1], args[2], args[3], args[4], args[5], 0,
@@ -56,9 +59,11 @@ pub unsafe extern "C" fn pthread_threadid_np(
     if thread_id.is_null() {
         return libc::EINVAL;
     }
+    // SAFETY: both pthread handles use libc's scalar pthread_t representation.
     if thread != 0 && unsafe { libc::pthread_equal(thread, libc::pthread_self()) } == 0 {
         return libc::ENOTSUP;
     }
+    // SAFETY: the caller contract makes non-null thread_id writable for one u64.
     unsafe {
         thread_id.write(crate::patina_thread_id() as u64);
     }
@@ -68,10 +73,12 @@ pub unsafe extern "C" fn pthread_threadid_np(
 unsafe fn virtual_uname(name: *mut libc::utsname) -> c_int {
     #[cfg(target_os = "linux")]
     {
+        // SAFETY: the uname syscall adapter copies the guest output through uaccess.
         unsafe { dispatch(libc::SYS_uname, [name as u64, 0, 0, 0, 0, 0]) }
     }
     #[cfg(target_os = "macos")]
     {
+        // SAFETY: the caller supplies uname's output buffer; the entry copies through uaccess.
         super::model_result(unsafe { crate::patina_uname(name.cast()) })
     }
 }
@@ -84,6 +91,7 @@ const _: () = assert!(size_of::<libc::utsname>() == 5 * 256);
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uname(name: *mut libc::utsname) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this export carries uname's output-buffer contract.
     unsafe { virtual_uname(name) }
 }
 
@@ -110,6 +118,8 @@ pub unsafe extern "C" fn sched_setaffinity(
     mask: *const libc::cpu_set_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `mask` is the caller's syscall input pointer and the SUD row
+    // performs its established access.
     unsafe {
         dispatch(
             libc::SYS_sched_setaffinity,
@@ -167,6 +177,7 @@ pub unsafe extern "C" fn getrusage(who: c_int, usage: *mut libc::rusage) -> c_in
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     {
+        // SAFETY: the getrusage syscall adapter copies its guest output through uaccess.
         unsafe { dispatch(libc::SYS_getrusage, [who as u64, usage as u64, 0, 0, 0, 0]) }
     }
     #[cfg(target_os = "macos")]
@@ -174,6 +185,7 @@ pub unsafe extern "C" fn getrusage(who: c_int, usage: *mut libc::rusage) -> c_in
         if usage.is_null() {
             return super::error(libc::EFAULT);
         }
+        // SAFETY: non-null usage is writable under getrusage's caller contract.
         unsafe {
             ptr::write_bytes(usage, 0, 1);
             if who == libc::RUSAGE_SELF {
@@ -194,6 +206,7 @@ pub unsafe extern "C" fn getrusage(who: c_int, usage: *mut libc::rusage) -> c_in
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sysinfo(info: *mut libc::sysinfo) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the sysinfo syscall adapter copies its guest output through uaccess.
     unsafe { dispatch(libc::SYS_sysinfo, [info as u64, 0, 0, 0, 0, 0]) }
 }
 
@@ -209,6 +222,7 @@ fn limit_result(result: i64) -> c_int {
 #[cfg(target_os = "linux")]
 unsafe fn get_limit(resource: u32, output: *mut libc::rlimit64) -> c_int {
     let mut limit = crate::limits::Rlimit { cur: 0, max: 0 };
+    // SAFETY: the limit core accepts a null output or writes into local `limit` storage.
     let result = unsafe {
         crate::limits::patina_prlimit(
             0,
@@ -222,6 +236,7 @@ unsafe fn get_limit(resource: u32, output: *mut libc::rlimit64) -> c_int {
         )
     };
     if result == 0 && !output.is_null() {
+        // SAFETY: output is non-null here and writable under getrlimit's caller contract.
         unsafe {
             (*output).rlim_cur = limit.cur;
             (*output).rlim_max = limit.max;
@@ -233,16 +248,19 @@ unsafe fn get_limit(resource: u32, output: *mut libc::rlimit64) -> c_int {
 #[cfg(target_os = "linux")]
 unsafe fn set_limit(resource: u32, input: *const libc::rlimit64) -> c_int {
     if input.is_null() {
+        // SAFETY: null new_limit is valid for the getrlimit-only prlimit request.
         return limit_result(unsafe {
             crate::limits::patina_prlimit(0, resource, ptr::null(), ptr::null_mut())
         });
     }
+    // SAFETY: non-null input is readable under setrlimit's caller contract.
     let limit = unsafe {
         crate::limits::Rlimit {
             cur: (*input).rlim_cur,
             max: (*input).rlim_max,
         }
     };
+    // SAFETY: `limit` is local readable storage and the old-value output is null.
     limit_result(unsafe { crate::limits::patina_prlimit(0, resource, &limit, ptr::null_mut()) })
 }
 
@@ -268,6 +286,7 @@ pub unsafe extern "C" fn getrlimit(
     output: *mut libc::rlimit,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this export carries getrlimit's documented output-buffer contract.
     unsafe { get_limit(resource, output.cast()) }
 }
 #[cfg(target_os = "linux")]
@@ -279,6 +298,7 @@ pub unsafe extern "C" fn setrlimit(
     input: *const libc::rlimit,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this export carries setrlimit's documented input-buffer contract.
     unsafe { set_limit(resource, input.cast()) }
 }
 #[cfg(target_os = "linux")]
@@ -290,6 +310,7 @@ pub unsafe extern "C" fn getrlimit64(
     output: *mut libc::rlimit64,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this export carries getrlimit64's documented output-buffer contract.
     unsafe { get_limit(resource, output) }
 }
 #[cfg(target_os = "linux")]
@@ -301,6 +322,7 @@ pub unsafe extern "C" fn setrlimit64(
     input: *const libc::rlimit64,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this export carries setrlimit64's documented input-buffer contract.
     unsafe { set_limit(resource, input) }
 }
 
@@ -314,6 +336,8 @@ pub unsafe extern "C" fn sched_getaffinity(
     mask: *mut libc::cpu_set_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller supplies the output buffer, and the SUD row writes no
+    // more than the returned byte count.
     let written = unsafe {
         dispatch(
             libc::SYS_sched_getaffinity,
@@ -330,6 +354,8 @@ pub unsafe extern "C" fn sched_getaffinity(
     if written < 0 {
         return -1;
     }
+    // SAFETY: the core's successful byte count is within cpusetsize and the remaining
+    // caller-provided output range is writable under sched_getaffinity's contract.
     unsafe {
         ptr::write_bytes(
             mask.cast::<u8>().add(written as usize),
@@ -346,13 +372,17 @@ pub unsafe extern "C" fn sched_getaffinity(
 pub unsafe extern "C" fn gethostname(name: *mut c_char, len: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut buf = core::mem::MaybeUninit::<libc::utsname>::uninit();
+    // SAFETY: buf is writable local storage for a utsname.
     if unsafe { virtual_uname(buf.as_mut_ptr()) } != 0 {
         return -1;
     }
+    // SAFETY: virtual_uname initialized buf on success, so nodename is a valid field address.
     let node = unsafe { ptr::addr_of!((*buf.as_ptr()).nodename).cast::<c_char>() };
     #[cfg(target_os = "linux")]
     {
+        // SAFETY: uname's nodename is NUL-terminated within the initialized struct.
         let node_len = unsafe { libc::strlen(node) } + 1;
+        // SAFETY: the caller supplies the len-byte output range required by this API.
         unsafe {
             ptr::copy_nonoverlapping(node, name, len.min(node_len));
         }
@@ -365,7 +395,9 @@ pub unsafe extern "C" fn gethostname(name: *mut c_char, len: usize) -> c_int {
         if len == 0 {
             return 0;
         }
+        // SAFETY: uname's nodename is NUL-terminated within the initialized struct.
         let copied = unsafe { libc::strlen(node) }.min(len - 1);
+        // SAFETY: len is nonzero and the caller supplies that writable output range.
         unsafe {
             ptr::copy_nonoverlapping(node, name, copied);
             name.add(copied).write(0);
@@ -380,10 +412,13 @@ unsafe fn passwd_parse(
     buf: *mut c_char,
     buflen: usize,
 ) -> c_int {
+    // SAFETY: line is a NUL-terminated passwd row; pwd and buf follow the caller's
+    // documented output contract, and this function checks the required buffer length.
     let length = unsafe { libc::strlen(line) };
     if buflen < length + 3 {
         return libc::ERANGE;
     }
+    // SAFETY: the length check above established space for the full terminated row.
     unsafe {
         ptr::copy_nonoverlapping(line, buf, length + 1);
     }
@@ -391,6 +426,7 @@ unsafe fn passwd_parse(
     let mut at = buf;
     for field in &mut fields {
         *field = at;
+        // SAFETY: at remains within the copied passwd row and advances only over its bytes.
         unsafe {
             while at.read() != b':' as c_char && at.read() != 0 {
                 at = at.add(1);
@@ -404,6 +440,7 @@ unsafe fn passwd_parse(
     let mut ids = [0u64; 2];
     for (id, value) in ids.iter_mut().enumerate() {
         let mut digit = fields[2 + id];
+        // SAFETY: digit points into the copied row and is advanced only over digit bytes.
         unsafe {
             while (b'0' as c_char..=b'9' as c_char).contains(&digit.read()) {
                 *value = value
@@ -413,6 +450,7 @@ unsafe fn passwd_parse(
             }
         }
     }
+    // SAFETY: pwd is writable and fields point into the caller's output buffer.
     unsafe {
         (*pwd).pw_name = fields[0];
         (*pwd).pw_passwd = fields[1];
@@ -442,6 +480,7 @@ pub unsafe extern "C" fn getpwuid_r(
     result: *mut *mut libc::passwd,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller contract guarantees result is writable for one pointer.
     unsafe {
         result.write(ptr::null_mut());
     }
@@ -451,6 +490,8 @@ pub unsafe extern "C" fn getpwuid_r(
         let error = if line.is_null() {
             0
         } else {
+            // SAFETY: patina_passwd_line returns a NUL-terminated row; output buffers
+            // follow this export's caller contract.
             unsafe { passwd_parse(line, pwd, buf, buflen) }
         };
         if line.is_null() || error != 0 {
@@ -462,7 +503,9 @@ pub unsafe extern "C" fn getpwuid_r(
             super::errno(error);
             return error;
         }
+        // SAFETY: passwd_parse succeeded and the caller provides writable pwd storage.
         if unsafe { (*pwd).pw_uid } == uid {
+            // SAFETY: result is writable under this export's caller contract.
             unsafe {
                 result.write(pwd);
             }
@@ -485,6 +528,8 @@ static mut PASSWD_BUFFER: [c_char; 256] = [0; 256];
 #[unsafe(no_mangle)]
 pub extern "C" fn setpwent() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this process-global cursor is accessed under the MT-Unsafe getpwent
+    // interface contract, whose callers must serialize enumeration operations.
     unsafe {
         PASSWD_CURSOR = 0;
     }
@@ -493,6 +538,8 @@ pub extern "C" fn setpwent() {
 #[unsafe(no_mangle)]
 pub extern "C" fn endpwent() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this process-global cursor is accessed under the MT-Unsafe getpwent
+    // interface contract, whose callers must serialize enumeration operations.
     unsafe {
         PASSWD_CURSOR = 0;
     }
@@ -501,6 +548,8 @@ pub extern "C" fn endpwent() {
 #[unsafe(no_mangle)]
 pub extern "C" fn getpwent() -> *mut libc::passwd {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the shared cursor and scratch storage follow getpwent's MT-Unsafe
+    // interface contract; callers must serialize enumeration operations.
     unsafe {
         let line = crate::patina_passwd_line(PASSWD_CURSOR);
         if line.is_null() {

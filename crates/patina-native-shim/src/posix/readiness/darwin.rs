@@ -1,5 +1,8 @@
 //! Darwin kevent adapters; allocation remains owned by libc.
-use crate::posix::{error, model_result};
+#![deny(clippy::undocumented_unsafe_blocks)]
+
+use crate::abi;
+use crate::posix::error;
 use crate::thread::kqueue;
 use core::ffi::c_int;
 
@@ -15,11 +18,12 @@ const _: () = {
     assert!(core::mem::offset_of!(libc::kevent, udata) == 24);
 };
 #[unsafe(no_mangle)]
-pub extern "C" fn kqueue() -> c_int {
+extern "C" fn kqueue() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    model_result(kqueue::patina_kqueue())
+    abi::libc_result(kqueue::create(), -1)
 }
 unsafe fn mode(timeout: *const libc::timespec) -> (c_int, u64) {
+    // SAFETY: the caller contract makes non-null timeout readable as one timespec.
     unsafe {
         if timeout.is_null() {
             return (1, 0);
@@ -38,7 +42,7 @@ unsafe fn mode(timeout: *const libc::timespec) -> (c_int, u64) {
 /// # Safety
 /// Changelist, eventlist and timeout follow kevent's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kevent(
+unsafe extern "C" fn kevent(
     kq: c_int,
     changelist: *const libc::kevent,
     nchanges: c_int,
@@ -47,6 +51,8 @@ pub unsafe extern "C" fn kevent(
     timeout: *const libc::timespec,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller supplies changelist/timeout buffers and a writable
+    // event list under kevent's contract; the gather core writes that list directly.
     unsafe {
         if crate::patina_fd_kind(kq) != 11 {
             return error(libc::EBADF);
@@ -91,19 +97,16 @@ pub unsafe extern "C" fn kevent(
             return nout;
         }
         let (mode, nanos) = mode(timeout);
-        model_result(kqueue::patina_kevent_gather(
-            kq,
-            eventlist.cast(),
-            nevents.max(0),
-            mode,
-            nanos,
-        ))
+        abi::libc_result(
+            kqueue::gather_core(kq, eventlist.cast(), nevents.max(0), mode, nanos),
+            -1,
+        )
     }
 }
 /// # Safety
 /// Changelist, eventlist and timeout follow kevent64's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kevent64(
+unsafe extern "C" fn kevent64(
     kq: c_int,
     changelist: *const libc::kevent64_s,
     nchanges: c_int,
@@ -113,6 +116,8 @@ pub unsafe extern "C" fn kevent64(
     timeout: *const libc::timespec,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller supplies changelist/timeout buffers; the gather core
+    // writes only to allocated scratch here, and eventlist follows kevent64's contract.
     unsafe {
         if crate::patina_fd_kind(kq) != 11 {
             return error(libc::EBADF);
@@ -166,11 +171,13 @@ pub unsafe extern "C" fn kevent64(
         if capacity > 0 && scratch.is_null() {
             return error(libc::ENOMEM);
         }
-        let count = kqueue::patina_kevent_gather(kq, scratch.cast(), capacity, mode, nanos);
-        if count < 0 {
-            libc::free(scratch.cast());
-            return error(crate::patina_errno());
-        }
+        let count = match kqueue::gather_core(kq, scratch.cast(), capacity, mode, nanos) {
+            Ok(count) => count,
+            Err(errno) => {
+                libc::free(scratch.cast());
+                return abi::libc_result(Err(errno), -1);
+            }
+        };
         for index in 0..count as usize {
             let event = eventlist.add(index);
             let source = scratch.add(index);

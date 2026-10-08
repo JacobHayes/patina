@@ -82,6 +82,7 @@ fn poll_ppoll_select_pselect_never_restart_and_restore_temporary_masks() {
                 generate(SIGUSR1);
             });
             assert_eq!(
+                // SAFETY: syscall pointers refer to the live stack-backed arrays above.
                 unsafe {
                     crate::sud::patina_sud_dispatch(
                         syscall_number(name),
@@ -122,6 +123,7 @@ fn select_reports_only_ready_sets_and_preserves_input_on_error() {
         let mut except = read;
         let mut remaining = 99;
         assert_eq!(
+            // SAFETY: the sets and remaining value are live local storage for the call.
             unsafe {
                 readiness::patina_select(
                     wr + 1,
@@ -141,6 +143,7 @@ fn select_reports_only_ready_sets_and_preserves_input_on_error() {
         assert_eq!(remaining, 100);
         read = 1u64 << rd;
         assert_eq!(
+            // SAFETY: the read set and remaining value are live local storage for the call.
             unsafe {
                 readiness::patina_select(
                     rd + 1,
@@ -158,6 +161,7 @@ fn select_reports_only_ready_sets_and_preserves_input_on_error() {
         assert_eq!(remaining, 0);
         let mut invalid = 1u64 << 63;
         assert_eq!(
+            // SAFETY: the invalid set is still a live local buffer for the call.
             unsafe {
                 readiness::patina_select(
                     64,
@@ -173,12 +177,14 @@ fn select_reports_only_ready_sets_and_preserves_input_on_error() {
         );
         assert_eq!(invalid, 1u64 << 63);
         assert_eq!(
+            // SAFETY: the byte slice is live and writable for the one-byte call.
             unsafe { crate::patina_write(wr, b"x".as_ptr().cast(), 1) },
             1
         );
         read = 1u64 << rd;
         write = 1u64 << wr;
         assert_eq!(
+            // SAFETY: both fd sets and remaining are live local storage for the call.
             unsafe {
                 readiness::patina_select(
                     wr + 1,

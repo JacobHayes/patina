@@ -1,5 +1,7 @@
 //! Registry rows bound to their syscall handlers.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 /// A routed row's handler: the syscall number and its six argument registers
@@ -149,6 +151,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_getegid, |_, _| {
         i64::from(crate::identity::credential().gid)
     }),
+    // SAFETY: the identity core consumes these guest addresses with its uaccess checks.
     (Syscall::N_getresuid, |_, a| unsafe {
         crate::identity::getres(
             crate::identity::Id::User,
@@ -157,6 +160,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             a[2] as *mut u32,
         )
     }),
+    // SAFETY: the identity core consumes these guest addresses with its uaccess checks.
     (Syscall::N_getresgid, |_, a| unsafe {
         crate::identity::getres(
             crate::identity::Id::Group,
@@ -195,13 +199,16 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_setfsgid, |_, _| {
         crate::identity::set_fs(crate::identity::Id::Group)
     }),
+    // SAFETY: the identity core copies the guest list through its uaccess checks.
     (Syscall::N_getgroups, |_, a| unsafe {
         crate::identity::getgroups(a[0] as i32, a[1] as *mut u32)
     }),
     (Syscall::N_setgroups, |_, _| crate::identity::setgroups()),
+    // SAFETY: capget validates and copies both guest structures through uaccess.
     (Syscall::N_capget, |_, a| unsafe {
         crate::identity::capget(a[0] as *mut _, a[1] as *mut _)
     }),
+    // SAFETY: capset validates and copies both guest structures through uaccess.
     (Syscall::N_capset, |_, a| unsafe {
         crate::identity::capset(
             crate::identity::credential(),
@@ -357,63 +364,100 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_ioperm, |nr, a| {
         privileged::answer(nr, privileged::ioperm, a)
     }),
+    // SAFETY: uname writes its guest result through uaccess.
     (Syscall::N_uname, |_, a| unsafe {
         crate::identity::uname(a[0] as *mut _, crate::thread::sched::persona())
     }),
+    // SAFETY: sysinfo writes its guest result through uaccess.
     (Syscall::N_sysinfo, |_, a| unsafe {
         crate::identity::sysinfo(a[0] as *mut _)
     }),
     // ---- scheduling attributes, affinity and persona (`thread::sched`) ----
     (Syscall::N_personality, |_, a| {
-        crate::thread::sched::personality(a[0] as u32)
+        crate::abi::raw(crate::thread::sched::personality(a[0] as u32))
     }),
     (Syscall::N_getpriority, |_, a| {
-        crate::thread::sched::getpriority(a[0] as i32, a[1] as i32)
+        crate::abi::raw(crate::thread::sched::getpriority(a[0] as i32, a[1] as i32))
     }),
     (Syscall::N_setpriority, |_, a| {
-        crate::thread::sched::setpriority(a[0] as i32, a[1] as i32, a[2] as i32)
+        crate::abi::raw(crate::thread::sched::setpriority(
+            a[0] as i32,
+            a[1] as i32,
+            a[2] as i32,
+        ))
     }),
-    (Syscall::N_sched_setparam, |_, a| unsafe {
-        crate::thread::sched::setscheduler_param(a[0] as i32, None, a[1] as *const i32)
+    (Syscall::N_sched_setparam, |_, a| {
+        // SAFETY: the syscall argument is sched_setparam's guest `sched_param` input.
+        crate::abi::raw(unsafe {
+            crate::thread::sched::setscheduler_param(a[0] as i32, None, a[1] as *const i32)
+        })
     }),
-    (Syscall::N_sched_getparam, |_, a| unsafe {
-        crate::thread::sched::getparam(a[0] as i32, a[1] as *mut i32)
+    (Syscall::N_sched_getparam, |_, a| {
+        // SAFETY: the syscall argument is sched_getparam's guest output buffer.
+        crate::abi::raw(unsafe { crate::thread::sched::getparam(a[0] as i32, a[1] as *mut i32) })
     }),
-    (Syscall::N_sched_setscheduler, |_, a| unsafe {
-        crate::thread::sched::setscheduler_param(a[0] as i32, Some(a[1] as i32), a[2] as *const i32)
+    (Syscall::N_sched_setscheduler, |_, a| {
+        // SAFETY: the syscall argument is sched_setscheduler's guest `sched_param` input.
+        crate::abi::raw(unsafe {
+            crate::thread::sched::setscheduler_param(
+                a[0] as i32,
+                Some(a[1] as i32),
+                a[2] as *const i32,
+            )
+        })
     }),
     (Syscall::N_sched_getscheduler, |_, a| {
-        crate::thread::sched::getscheduler(a[0] as i32)
+        crate::abi::raw(crate::thread::sched::getscheduler(a[0] as i32))
     }),
     (Syscall::N_sched_get_priority_max, |_, a| {
-        crate::thread::sched::priority_bound(a[0] as i32, true)
+        crate::abi::raw(crate::thread::sched::priority_bound(a[0] as i32, true))
     }),
     (Syscall::N_sched_get_priority_min, |_, a| {
-        crate::thread::sched::priority_bound(a[0] as i32, false)
+        crate::abi::raw(crate::thread::sched::priority_bound(a[0] as i32, false))
     }),
     (Syscall::N_sched_rr_get_interval, |_, a| {
-        crate::thread::sched::rr_interval(a[0] as i32, a[1] as *mut Timespec)
+        crate::abi::raw(crate::thread::sched::rr_interval(
+            a[0] as i32,
+            a[1] as *mut Timespec,
+        ))
     }),
-    (Syscall::N_sched_setattr, |_, a| unsafe {
-        crate::thread::sched::setattr(a[0] as i32, a[1] as *mut u8, a[2] as u32)
+    (Syscall::N_sched_setattr, |_, a| {
+        // SAFETY: the syscall argument is sched_setattr's guest attr input/output buffer.
+        crate::abi::raw(unsafe {
+            crate::thread::sched::setattr(a[0] as i32, a[1] as *mut u8, a[2] as u32)
+        })
     }),
-    (Syscall::N_sched_getattr, |_, a| unsafe {
-        crate::thread::sched::getattr(a[0] as i32, a[1] as *mut u8, a[2] as u32, a[3] as u32)
+    (Syscall::N_sched_getattr, |_, a| {
+        // SAFETY: the syscall argument is sched_getattr's guest output buffer.
+        crate::abi::raw(unsafe {
+            crate::thread::sched::getattr(a[0] as i32, a[1] as *mut u8, a[2] as u32, a[3] as u32)
+        })
     }),
-    (Syscall::N_sched_setaffinity, |_, a| unsafe {
-        crate::thread::sched::setaffinity(a[0] as i32, a[1] as u32, a[2] as *const u8)
+    (Syscall::N_sched_setaffinity, |_, a| {
+        // SAFETY: the syscall argument is sched_setaffinity's guest cpu mask input.
+        crate::abi::raw(unsafe {
+            crate::thread::sched::setaffinity(a[0] as i32, a[1] as u32, a[2] as *const u8)
+        })
     }),
-    (Syscall::N_sched_getaffinity, |_, a| unsafe {
-        crate::thread::sched::getaffinity(a[0] as i32, a[1] as u32, a[2] as *mut u8)
+    (Syscall::N_sched_getaffinity, |_, a| {
+        // SAFETY: the syscall argument is sched_getaffinity's guest cpu mask output.
+        crate::abi::raw(unsafe {
+            crate::thread::sched::getaffinity(a[0] as i32, a[1] as u32, a[2] as *mut u8)
+        })
     }),
-    (Syscall::N_getcpu, |_, a| unsafe {
-        crate::thread::sched::getcpu(a[0] as *mut u32, a[1] as *mut u32)
+    (Syscall::N_getcpu, |_, a| {
+        // SAFETY: both syscall arguments are optional writable u32 outputs.
+        crate::abi::raw(unsafe { crate::thread::sched::getcpu(a[0] as *mut u32, a[1] as *mut u32) })
     }),
     (Syscall::N_ioprio_set, |_, a| {
-        crate::thread::sched::ioprio_set(a[0] as i32, a[1] as i32, a[2] as i32)
+        crate::abi::raw(crate::thread::sched::ioprio_set(
+            a[0] as i32,
+            a[1] as i32,
+            a[2] as i32,
+        ))
     }),
     (Syscall::N_ioprio_get, |_, a| {
-        crate::thread::sched::ioprio_get(a[0] as i32, a[1] as i32)
+        crate::abi::raw(crate::thread::sched::ioprio_get(a[0] as i32, a[1] as i32))
     }),
     (Syscall::N_nanosleep, |_, a| {
         sys_nanosleep(a[0] as *const Timespec, a[1] as *mut Timespec)
@@ -442,6 +486,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_gettid, |_, _| {
         crate::process::patina_thread_id() as i64
     }),
+    // SAFETY: the guest keeps clear_child_tid writable until its task exits.
     (Syscall::N_set_tid_address, |_, a| unsafe {
         crate::thread::signals::patina_set_tid_address(a[0] as *mut i32)
     }),
@@ -485,10 +530,12 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     // ---- resource limits: the virtual kernel's (`crate::mem`) ----
     (Syscall::N_getrlimit, |_, a| sys_getrlimit(a[0], a[1])),
     (Syscall::N_setrlimit, |_, a| sys_setrlimit(a[0], a[1])),
+    // SAFETY: prlimit copies its optional guest limit structures through uaccess.
     (Syscall::N_prlimit64, |_, a| unsafe {
         crate::limits::patina_prlimit(a[0] as c_int, a[1] as u32, a[2] as *const _, a[3] as *mut _)
     }),
     (Syscall::N_remap_file_pages, mem_passthrough),
+    // SAFETY: memfd_create reads the guest name through uaccess.
     (Syscall::N_memfd_create, |_, a| unsafe {
         ret_i32(crate::mem::patina_memfd_create(
             a[0] as *const c_char,
@@ -508,6 +555,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_shmdt, |_, a| {
         crate::thread::ipc::shmdt(a[0] as usize)
     }),
+    // SAFETY: shmctl accesses the guest control structure through uaccess.
     (Syscall::N_shmctl, |_, a| unsafe {
         crate::thread::ipc::shmctl(a[0] as i32, a[1] as i32, a[2] as *mut _)
     }),
@@ -530,15 +578,18 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             a[3] as *const _,
         )
     }),
+    // SAFETY: semctl copies guest arguments through uaccess.
     (Syscall::N_semctl, |_, a| unsafe {
         crate::thread::ipc::semctl(a[0] as i32, a[1] as i32, a[2] as i32, a[3] as usize)
     }),
     (Syscall::N_msgget, |_, a| {
         crate::thread::ipc::msgget(a[0] as i32, a[1] as i32)
     }),
+    // SAFETY: msgsnd copies the guest message through uaccess.
     (Syscall::N_msgsnd, |_, a| unsafe {
         crate::thread::ipc::msgsnd(a[0] as i32, a[1] as *const u8, a[2] as usize, a[3] as i32)
     }),
+    // SAFETY: msgrcv copies the guest message through uaccess.
     (Syscall::N_msgrcv, |_, a| unsafe {
         crate::thread::ipc::msgrcv(
             a[0] as i32,
@@ -548,10 +599,12 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             a[4] as i32,
         )
     }),
+    // SAFETY: msgctl accesses the guest control structure through uaccess.
     (Syscall::N_msgctl, |_, a| unsafe {
         crate::thread::ipc::msgctl(a[0] as i32, a[1] as i32, a[2] as *mut _)
     }),
     // ---- POSIX message queues: the one-process model (`thread::ipc`) ----
+    // SAFETY: mq_open reads both guest inputs through uaccess.
     (Syscall::N_mq_open, |_, a| unsafe {
         crate::thread::ipc::mq_open(
             a[0] as *const c_char,
@@ -560,9 +613,11 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             a[3] as *const _,
         )
     }),
+    // SAFETY: mq_unlink reads the guest name through uaccess.
     (Syscall::N_mq_unlink, |_, a| unsafe {
         crate::thread::ipc::mq_unlink(a[0] as *const c_char)
     }),
+    // SAFETY: mq_timedsend copies its message and timeout through uaccess.
     (Syscall::N_mq_timedsend, |_, a| unsafe {
         crate::thread::ipc::mq_timedsend(
             arg_fd(a[0]) as c_int,
@@ -572,6 +627,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             a[4] as *const _,
         )
     }),
+    // SAFETY: mq_timedreceive copies its message, priority and timeout through uaccess.
     (Syscall::N_mq_timedreceive, |_, a| unsafe {
         crate::thread::ipc::mq_timedreceive(
             arg_fd(a[0]) as c_int,
@@ -581,16 +637,20 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             a[4] as *const _,
         )
     }),
+    // SAFETY: mq_notify copies the guest notification structure through uaccess.
     (Syscall::N_mq_notify, |_, a| unsafe {
         crate::thread::ipc::mq_notify(arg_fd(a[0]) as c_int, a[1] as *const _)
     }),
+    // SAFETY: mq_getsetattr copies its guest attributes through uaccess.
     (Syscall::N_mq_getsetattr, |_, a| unsafe {
         crate::thread::ipc::mq_getsetattr(arg_fd(a[0]) as c_int, a[1] as *const _, a[2] as *mut _)
     }),
     // ---- memory policy on the one memory node (`crate::numa`) ----
+    // SAFETY: set_mempolicy validates and copies the guest node mask through uaccess.
     (Syscall::N_set_mempolicy, |_, a| unsafe {
         crate::numa::set_mempolicy(a[0] as i32, a[1] as *const u64, a[2])
     }),
+    // SAFETY: get_mempolicy writes optional guest results through uaccess.
     (Syscall::N_get_mempolicy, |_, a| unsafe {
         crate::numa::get_mempolicy(
             a[0] as *mut i32,
@@ -600,6 +660,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             a[4],
         )
     }),
+    // SAFETY: mbind validates and copies the guest node mask through uaccess.
     (Syscall::N_mbind, |_, a| unsafe {
         crate::numa::mbind(
             a[0] as usize,
@@ -610,6 +671,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             a[5] as u32,
         )
     }),
+    // SAFETY: move_pages accesses page, node and status arrays through uaccess.
     (Syscall::N_move_pages, |_, a| unsafe {
         crate::numa::move_pages(
             a[0] as i32,
@@ -620,6 +682,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             a[5] as i32,
         )
     }),
+    // SAFETY: migrate_pages validates and copies both guest node masks through uaccess.
     (Syscall::N_migrate_pages, |_, a| unsafe {
         crate::numa::migrate_pages(a[0] as i32, a[1], a[2] as *const u64, a[3] as *const u64)
     }),
@@ -631,6 +694,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     }),
     // ---- signals / process rows owned by the signals conformance family ----
     // `rt_sigaction` for SIGSYS would replace the dispatch handler: fatal.
+    // SAFETY: the signal action core copies guest structures through uaccess.
     (Syscall::N_rt_sigaction, |_, a| unsafe {
         patina_signal_action(
             a[0] as i32,
@@ -639,6 +703,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             a[3] as usize,
         )
     }),
+    // SAFETY: the signal mask core copies guest sets through uaccess.
     (Syscall::N_rt_sigprocmask, |_, a| unsafe {
         patina_signal_mask(
             a[0] as i32,
@@ -695,12 +760,15 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     }),
     // No restart block is ever pending (the registry row says why).
     (Syscall::N_restart_syscall, |_, _| -EINTR),
+    // SAFETY: signal_pending writes the guest set through uaccess.
     (Syscall::N_rt_sigpending, |_, a| unsafe {
         patina_signal_pending(a[0] as *mut u8, a[1] as usize)
     }),
+    // SAFETY: signal_altstack copies optional guest stacks through uaccess.
     (Syscall::N_sigaltstack, |_, a| unsafe {
         patina_signal_altstack(a[0] as *const Stack, a[1] as *mut Stack)
     }),
+    // SAFETY: this thread-targeted signal carries no guest siginfo pointer.
     (Syscall::N_tkill, |_, a| unsafe {
         generate_signal(
             GenerationTarget::Thread {
@@ -711,6 +779,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             GenerationInfo::Thread,
         )
     }),
+    // SAFETY: generate_signal copies the optional queued guest info through uaccess.
     (Syscall::N_rt_sigqueueinfo, |_, a| unsafe {
         generate_signal(
             GenerationTarget::Process { pid: a[0] as i32 },
@@ -718,6 +787,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             GenerationInfo::Queued(a[2] as *const Info),
         )
     }),
+    // SAFETY: generate_signal copies the optional queued guest info through uaccess.
     (Syscall::N_rt_tgsigqueueinfo, |_, a| unsafe {
         generate_signal(
             GenerationTarget::Thread {
@@ -729,6 +799,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
         )
     }),
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: pause passes only null optional buffers to the signal wait core.
     (Syscall::N_pause, |_, _| unsafe {
         patina_signal_wait(
             std::ptr::null(),
@@ -738,6 +809,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             WaitMode::Pause,
         )
     }),
+    // SAFETY: the signal wait core copies the guest mask through uaccess.
     (Syscall::N_rt_sigsuspend, |_, a| unsafe {
         patina_signal_wait(
             a[0] as *const u64,
@@ -747,6 +819,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
             WaitMode::Suspend,
         )
     }),
+    // SAFETY: the signal wait core copies its guest set, info and timeout through uaccess.
     (Syscall::N_rt_sigtimedwait, |_, a| unsafe {
         patina_signal_wait(
             a[0] as *const u64,
@@ -876,8 +949,8 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
         sys_fremovexattr(arg_fd(a[0]), a[1])
     }),
     // ---- in-kernel copies ----
-    // SAFETY (all five): the pointers are the guest's per each row's contract.
     (Syscall::N_copy_file_range, |_, a| {
+        // SAFETY: copy_file_range copies optional guest offsets through uaccess.
         ret_isize(unsafe {
             crate::transfer::patina_copy_file_range(
                 arg_fd(a[0]) as c_int,
@@ -890,6 +963,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
         })
     }),
     (Syscall::N_sendfile, |_, a| {
+        // SAFETY: sendfile copies its optional guest offset through uaccess.
         ret_isize(unsafe {
             crate::transfer::patina_sendfile(
                 arg_fd(a[0]) as c_int,
@@ -900,6 +974,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
         })
     }),
     (Syscall::N_splice, |_, a| {
+        // SAFETY: splice copies its optional guest offsets through uaccess.
         ret_isize(unsafe {
             crate::transfer::patina_splice(
                 arg_fd(a[0]) as c_int,
@@ -920,6 +995,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
         ))
     }),
     (Syscall::N_vmsplice, |_, a| {
+        // SAFETY: vmsplice copies the guest iovec array through uaccess.
         ret_isize(unsafe {
             crate::transfer::patina_vmsplice(
                 arg_fd(a[0]) as c_int,
