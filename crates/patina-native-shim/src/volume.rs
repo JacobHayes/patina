@@ -21,8 +21,8 @@ use std::ffi::{c_char, c_int};
 
 use crate::fdtable::FdKind;
 use crate::{
-    EBADF, EFAULT, EINVAL, ENOENT, PATINA_FS_PIPEFS, PATINA_FS_SOCKFS, PATINA_FS_VOLUME, fail,
-    fs_device, path_from_c, paths, resolve_fd, set_errno, thread,
+    EBADF, EFAULT, EINVAL, ENOENT, PATINA_FS_PIPEFS, PATINA_FS_SOCKFS, PATINA_FS_VOLUME, fs_device,
+    path_from_c, paths, resolve_fd, set_errno, thread,
 };
 
 /// The kernel's (and glibc's) 64-bit `struct statfs`.
@@ -369,14 +369,14 @@ pub(crate) fn block_size(raw_fd: c_int) -> Result<i32, c_int> {
 
 /// Copy a description out, as `do_statfs_native` does last: a NULL buffer is
 /// `EFAULT`, after everything else has been judged.
-fn copy_out(description: KernelStatfs, out: *mut KernelStatfs) -> c_int {
+fn copy_out(description: KernelStatfs, out: *mut KernelStatfs) -> crate::abi::SysResult<()> {
     if out.is_null() {
-        return fail(EFAULT);
+        return Err(crate::abi::failed(EFAULT));
     }
     // SAFETY: `out` is non-null and writable per the C ABI contract.
     unsafe { out.write(description) };
     set_errno(0);
-    0
+    Ok(())
 }
 
 #[unsafe(no_mangle)]
@@ -387,16 +387,29 @@ fn copy_out(description: KernelStatfs, out: *mut KernelStatfs) -> c_int {
 /// non-null, to a writable `struct statfs`.
 pub unsafe extern "C" fn patina_statfs(path: *const c_char, out: *mut KernelStatfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The prefixed C ABI contract guarantees a readable path string.
+    unsafe { statfs(path, out) }.map_or(-1, |_| 0)
+}
+
+/// Resolve a path and return its modeled filesystem description.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string; `out`, when
+/// non-null, must point to writable `KernelStatfs` storage.
+pub(crate) unsafe fn statfs(
+    path: *const c_char,
+    out: *mut KernelStatfs,
+) -> crate::abi::SysResult<()> {
     // SAFETY: This export's C ABI contract guarantees a readable path string.
     let path = match unsafe { path_from_c(path) } {
         Ok(path) => path,
-        Err(errno) => return fail(errno),
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     match paths::resolve(paths::AT_FDCWD, &path, 0) {
         Ok(paths::Resolution::Volume(resolved)) if resolved.metadata.is_some() => {
             copy_out(Filesystem::Volume.describe(), out)
         }
-        Ok(paths::Resolution::Volume(_)) => fail(ENOENT),
+        Ok(paths::Resolution::Volume(_)) => Err(crate::abi::failed(ENOENT)),
         Ok(paths::Resolution::Virtual(paths::Virtual::Urandom)) => {
             copy_out(Filesystem::Devtmpfs.describe(), out)
         }
@@ -407,7 +420,7 @@ pub unsafe extern "C" fn patina_statfs(path: *const c_char, out: *mut KernelStat
             copy_out(Filesystem::Devtmpfs.describe(), out)
         }
         Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Pts(_))) if !entry.exists() => {
-            fail(ENOENT)
+            Err(crate::abi::failed(ENOENT))
         }
         Ok(paths::Resolution::Virtual(paths::Virtual::Pts(_) | paths::Virtual::Devpts)) => {
             copy_out(Filesystem::Devpts.describe(), out)
@@ -415,7 +428,7 @@ pub unsafe extern "C" fn patina_statfs(path: *const c_char, out: *mut KernelStat
         Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Tty)) => {
             entry.unmodeled("the filesystem statistics")
         }
-        Err(errno) => fail(errno),
+        Err(errno) => Err(crate::abi::failed(errno)),
     }
 }
 
@@ -426,9 +439,18 @@ pub unsafe extern "C" fn patina_statfs(path: *const c_char, out: *mut KernelStat
 /// `out`, when non-null, must point to a writable `struct statfs`.
 pub unsafe extern "C" fn patina_fstatfs(raw_fd: c_int, out: *mut KernelStatfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The prefixed C ABI contract guarantees writable output storage.
+    unsafe { fstatfs(raw_fd, out) }.map_or(-1, |_| 0)
+}
+
+/// Describe the modeled filesystem a descriptor is on.
+///
+/// # Safety
+/// `out`, when non-null, must point to writable `KernelStatfs` storage.
+pub(crate) unsafe fn fstatfs(raw_fd: c_int, out: *mut KernelStatfs) -> crate::abi::SysResult<()> {
     match descriptor_filesystem(raw_fd) {
         Ok(filesystem) => copy_out(filesystem.describe(), out),
-        Err(errno) => fail(errno),
+        Err(errno) => Err(crate::abi::failed(errno)),
     }
 }
 
@@ -723,16 +745,25 @@ pub struct KernelUstat {
 /// `out`, when non-null, must point to a writable `struct ustat`.
 pub unsafe extern "C" fn patina_ustat(dev: u32, out: *mut KernelUstat) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The prefixed C ABI contract guarantees writable output storage.
+    unsafe { ustat(dev, out) }.map_or(-1, |_| 0)
+}
+
+/// Return the legacy free-block/inode view for a modeled block device.
+///
+/// # Safety
+/// `out`, when non-null, must point to writable `KernelUstat` storage.
+pub(crate) unsafe fn ustat(dev: u32, out: *mut KernelUstat) -> crate::abi::SysResult<()> {
     let major = (dev & 0xfff00) >> 8;
     let minor = (dev & 0xff) | ((dev >> 12) & 0xfff00);
     let Some(filesystem) = Filesystem::ALL
         .into_iter()
         .find(|filesystem| filesystem.device() == (major, minor))
     else {
-        return fail(EINVAL);
+        return Err(crate::abi::failed(EINVAL));
     };
     if out.is_null() {
-        return fail(EFAULT);
+        return Err(crate::abi::failed(EFAULT));
     }
     let description = filesystem.describe();
     // SAFETY: `out` is non-null and writable per the C ABI contract.
@@ -744,7 +775,7 @@ pub unsafe extern "C" fn patina_ustat(dev: u32, out: *mut KernelUstat) -> c_int 
         })
     };
     set_errno(0);
-    0
+    Ok(())
 }
 
 #[cfg(test)]

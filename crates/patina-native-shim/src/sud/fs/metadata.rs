@@ -390,7 +390,7 @@ pub(in crate::sud) fn sys_statfs(path: u64, buf: u64) -> i64 {
         Err(errno) => return errno,
     };
     // SAFETY: `path` is a guest C string; `buf` the guest's `struct statfs`.
-    ret_i32(unsafe { crate::volume::patina_statfs(path, (buf as *mut c_void).cast()) })
+    crate::abi::raw(unsafe { crate::volume::statfs(path, (buf as *mut c_void).cast()) }.map(|_| 0))
 }
 
 /// `fstatfs(2)`.
@@ -399,5 +399,7 @@ pub(in crate::sud) fn sys_fstatfs(fd: i64, buf: u64) -> i64 {
         return err;
     }
     // SAFETY: `buf` is the guest's `struct statfs` storage.
-    ret_i32(unsafe { crate::volume::patina_fstatfs(fd as c_int, (buf as *mut c_void).cast()) })
+    crate::abi::raw(
+        unsafe { crate::volume::fstatfs(fd as c_int, (buf as *mut c_void).cast()) }.map(|_| 0),
+    )
 }

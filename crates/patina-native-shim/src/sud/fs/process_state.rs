@@ -130,30 +130,36 @@ pub(in crate::sud) fn sys_utimensat(dirfd: i64, path: u64, times: u64, flags: u6
         if let Some(err) = fd_out_of_range(dirfd) {
             return err;
         }
-        return ret_i32(crate::fs::patina_futimens(
-            dirfd as c_int,
-            atime.0,
-            atime.1,
-            mtime.0,
-            mtime.1,
-        ));
+        return crate::abi::raw(
+            crate::abi::from_model(crate::fs::patina_futimens(
+                dirfd as c_int,
+                atime.0,
+                atime.1,
+                mtime.0,
+                mtime.1,
+            ))
+            .map(i64::from),
+        );
     }
     let path = match guest_path(path) {
         Ok(path) => path,
         Err(errno) => return errno,
     };
     // SAFETY: `path` is a valid NUL-terminated guest string pointer.
-    ret_i32(unsafe {
-        crate::fs::patina_utimensat(
-            dirfd as c_int,
-            path,
-            resolve_flags(flags),
-            atime.0,
-            atime.1,
-            mtime.0,
-            mtime.1,
-        )
-    })
+    crate::abi::raw(
+        crate::abi::from_model(unsafe {
+            crate::fs::patina_utimensat(
+                dirfd as c_int,
+                path,
+                resolve_flags(flags),
+                atime.0,
+                atime.1,
+                mtime.0,
+                mtime.1,
+            )
+        })
+        .map(i64::from),
+    )
 }
 
 /// `fchownat(2)`, and the x86_64 legacy `chown`/`lchown`: `AT_SYMLINK_NOFOLLOW`

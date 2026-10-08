@@ -1,8 +1,11 @@
 //! libc timestamp spellings lower to the model's three time argument kinds.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 use crate::PatinaTimestamp;
 
 unsafe fn timespec_argument(time: *const libc::timespec) -> Result<(u32, PatinaTimestamp), c_int> {
+    // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
         let zero = PatinaTimestamp { sec: 0, nsec: 0 };
         if time.is_null() {
@@ -27,6 +30,7 @@ unsafe fn timespec_argument(time: *const libc::timespec) -> Result<(u32, PatinaT
     }
 }
 unsafe fn timeval_argument(time: *const libc::timeval) -> Result<(u32, PatinaTimestamp), c_int> {
+    // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
         let zero = PatinaTimestamp { sec: 0, nsec: 0 };
         if time.is_null() {
@@ -50,6 +54,7 @@ unsafe fn utimens_impl(
     times: *const libc::timespec,
     flags: u32,
 ) -> c_int {
+    // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
         let (atime_kind, atime) = match timespec_argument(times) {
             Ok(value) => value,
@@ -60,9 +65,12 @@ unsafe fn utimens_impl(
             Ok(value) => value,
             Err(result) => return result,
         };
-        model_result(crate::patina_utimensat(
-            directory, path, flags, atime_kind, atime, mtime_kind, mtime,
-        ))
+        crate::abi::libc_result(
+            crate::abi::from_model(crate::patina_utimensat(
+                directory, path, flags, atime_kind, atime, mtime_kind, mtime,
+            )),
+            -1,
+        )
     }
 }
 unsafe fn utimes_impl(
@@ -71,6 +79,7 @@ unsafe fn utimes_impl(
     times: *const libc::timeval,
     flags: u32,
 ) -> c_int {
+    // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
         let (atime_kind, atime) = match timeval_argument(times) {
             Ok(value) => value,
@@ -81,9 +90,12 @@ unsafe fn utimes_impl(
             Ok(value) => value,
             Err(result) => return result,
         };
-        model_result(crate::patina_utimensat(
-            directory, path, flags, atime_kind, atime, mtime_kind, mtime,
-        ))
+        crate::abi::libc_result(
+            crate::abi::from_model(crate::patina_utimensat(
+                directory, path, flags, atime_kind, atime, mtime_kind, mtime,
+            )),
+            -1,
+        )
     }
 }
 
@@ -100,6 +112,7 @@ pub unsafe extern "C" fn utimensat(
     if path.is_null() {
         return error(libc::EINVAL);
     }
+    // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
         if !times.is_null()
             && (*times).tv_nsec == libc::UTIME_OMIT
@@ -131,6 +144,7 @@ pub unsafe extern "C" fn utimensat(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn futimens(fd: c_int, times: *const libc::timespec) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
         let (atime_kind, atime) = match timespec_argument(times) {
             Ok(value) => value,
@@ -141,9 +155,12 @@ pub unsafe extern "C" fn futimens(fd: c_int, times: *const libc::timespec) -> c_
             Ok(value) => value,
             Err(result) => return result,
         };
-        model_result(crate::patina_futimens(
-            fd, atime_kind, atime, mtime_kind, mtime,
-        ))
+        crate::abi::libc_result(
+            crate::abi::from_model(crate::patina_futimens(
+                fd, atime_kind, atime, mtime_kind, mtime,
+            )),
+            -1,
+        )
     }
 }
 
@@ -152,6 +169,7 @@ pub unsafe extern "C" fn futimens(fd: c_int, times: *const libc::timespec) -> c_
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn utimes(path: *const c_char, times: *const libc::timeval) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe { utimes_impl(AT_FDCWD, path, times, 0) }
 }
 
@@ -160,6 +178,7 @@ pub unsafe extern "C" fn utimes(path: *const c_char, times: *const libc::timeval
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lutimes(path: *const c_char, times: *const libc::timeval) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe { utimes_impl(AT_FDCWD, path, times, RESOLVE_NOFOLLOW) }
 }
 
@@ -168,6 +187,7 @@ pub unsafe extern "C" fn lutimes(path: *const c_char, times: *const libc::timeva
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn futimes(fd: c_int, times: *const libc::timeval) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
         let (atime_kind, atime) = match timeval_argument(times) {
             Ok(value) => value,
@@ -178,9 +198,12 @@ pub unsafe extern "C" fn futimes(fd: c_int, times: *const libc::timeval) -> c_in
             Ok(value) => value,
             Err(result) => return result,
         };
-        model_result(crate::patina_futimens(
-            fd, atime_kind, atime, mtime_kind, mtime,
-        ))
+        crate::abi::libc_result(
+            crate::abi::from_model(crate::patina_futimens(
+                fd, atime_kind, atime, mtime_kind, mtime,
+            )),
+            -1,
+        )
     }
 }
 
@@ -189,6 +212,7 @@ pub unsafe extern "C" fn futimes(fd: c_int, times: *const libc::timeval) -> c_in
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn utime(path: *const c_char, times: *const libc::utimbuf) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
         if times.is_null() {
             return utimens_impl(AT_FDCWD, path, core::ptr::null(), 0);
@@ -201,15 +225,18 @@ pub unsafe extern "C" fn utime(path: *const c_char, times: *const libc::utimbuf)
             sec: (*times).modtime as libc::time_t,
             nsec: 0,
         };
-        model_result(crate::patina_utimensat(
-            AT_FDCWD,
-            path,
-            0,
-            crate::TIME_SET,
-            atime,
-            crate::TIME_SET,
-            mtime,
-        ))
+        crate::abi::libc_result(
+            crate::abi::from_model(crate::patina_utimensat(
+                AT_FDCWD,
+                path,
+                0,
+                crate::TIME_SET,
+                atime,
+                crate::TIME_SET,
+                mtime,
+            )),
+            -1,
+        )
     }
 }
 
@@ -223,6 +250,7 @@ pub unsafe extern "C" fn futimesat(
     times: *const libc::timeval,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
         if path.is_null() {
             return futimes(directory, times);

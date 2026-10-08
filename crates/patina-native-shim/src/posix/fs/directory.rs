@@ -1,4 +1,6 @@
 //! Directory streams preserve each platform's existing descriptor ownership.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 use core::ptr;
 
@@ -24,6 +26,8 @@ const _: () = {
 
 #[cfg(target_os = "linux")]
 unsafe fn allocate(fd: c_int) -> *mut libc::DIR {
+    // SAFETY: `malloc` returns storage for `Directory`; null is checked before
+    // each field is initialized within that allocation.
     unsafe {
         let directory = libc::malloc(size_of::<Directory>()).cast::<Directory>();
         if directory.is_null() {
@@ -40,6 +44,8 @@ unsafe fn allocate(fd: c_int) -> *mut libc::DIR {
 
 #[cfg(target_os = "linux")]
 unsafe fn next(directory: *mut Directory, error_out: *mut c_int) -> *mut libc::dirent64 {
+    // SAFETY: callers pass a live `Directory` and writable local `error_out`;
+    // `size`/`offset` bound each entry to the initialized data array.
     unsafe {
         error_out.write(0);
         if (*directory).offset >= (*directory).size {
@@ -85,6 +91,8 @@ struct Directory {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut libc::DIR {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `path` is readable per opendir's contract; allocated directory
+    // storage is checked before any field access.
     unsafe {
         let flags = crate::O_READ | crate::O_DIRECTORY | crate::O_CLOEXEC;
         #[cfg(target_os = "linux")]
@@ -105,15 +113,14 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut libc::DIR {
         #[cfg(target_os = "macos")]
         {
             let mut state = ptr::null_mut();
-            if crate::patina_read_dir(fd, &mut state) != 0 {
-                let saved = crate::patina_errno();
+            if let Err(errno) = crate::fs::read_dir(fd, &mut state) {
                 crate::patina_close(fd);
-                error(saved);
+                error(errno.get());
                 return ptr::null_mut();
             }
             let directory = libc::calloc(1, size_of::<Directory>()).cast::<Directory>();
             if directory.is_null() {
-                crate::patina_read_dir_free(state);
+                crate::fs::free_dir(state);
                 crate::patina_close(fd);
                 error(libc::ENOMEM);
                 return ptr::null_mut();
@@ -130,6 +137,8 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut libc::DIR {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdopendir(fd: c_int) -> *mut libc::DIR {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `fd` is validated before the metadata read, and allocated
+    // directory storage is checked before any field access.
     unsafe {
         #[cfg(target_os = "linux")]
         {
@@ -160,13 +169,13 @@ pub unsafe extern "C" fn fdopendir(fd: c_int) -> *mut libc::DIR {
         #[cfg(target_os = "macos")]
         {
             let mut state = ptr::null_mut();
-            if crate::patina_read_dir(fd, &mut state) != 0 {
-                error(crate::patina_errno());
+            if let Err(errno) = crate::fs::read_dir(fd, &mut state) {
+                error(errno.get());
                 return ptr::null_mut();
             }
             let directory = libc::calloc(1, size_of::<Directory>()).cast::<Directory>();
             if directory.is_null() {
-                crate::patina_read_dir_free(state);
+                crate::fs::free_dir(state);
                 error(libc::ENOMEM);
                 return ptr::null_mut();
             }
@@ -183,6 +192,8 @@ pub unsafe extern "C" fn fdopendir(fd: c_int) -> *mut libc::DIR {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn readdir64(dirp: *mut libc::DIR) -> *mut libc::dirent64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `dirp` is a live stream per readdir64's contract; `next` writes
+    // its error result into this local integer.
     unsafe {
         let mut failure = 0;
         let entry = next(dirp.cast(), &mut failure);
@@ -198,6 +209,8 @@ pub unsafe extern "C" fn readdir64(dirp: *mut libc::DIR) -> *mut libc::dirent64 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn readdir(dirp: *mut libc::DIR) -> *mut libc::dirent {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `dirp` is a live stream per readdir's contract; the macOS branch
+    // writes its entry only after the snapshot core returns an entry.
     unsafe {
         #[cfg(target_os = "linux")]
         {
@@ -209,17 +222,20 @@ pub unsafe extern "C" fn readdir(dirp: *mut libc::DIR) -> *mut libc::dirent {
             let mut kind = 0;
             let mut ino = 0;
             let entry = ptr::addr_of_mut!((*directory).entry);
-            let result = crate::patina_read_dir_next(
+            let result = crate::fs::read_dir_next(
                 (*directory).state,
                 ptr::addr_of_mut!((*entry).d_name).cast(),
                 size_of_val(&(*entry).d_name),
                 &mut kind,
                 &mut ino,
             );
-            if result < 0 {
-                error(crate::patina_errno());
-                return ptr::null_mut();
-            }
+            let result = match result {
+                Ok(result) => result,
+                Err(errno) => {
+                    error(errno.get());
+                    return ptr::null_mut();
+                }
+            };
             if result == 0 {
                 return ptr::null_mut();
             }
@@ -245,6 +261,8 @@ unsafe fn readdir_copy(
     entry: *mut libc::dirent64,
     result: *mut *mut libc::dirent64,
 ) -> c_int {
+    // SAFETY: callers provide a live stream, writable entry, and writable
+    // result pointer per readdir_r's contract.
     unsafe {
         let mut failure = 0;
         let next = next(dirp.cast(), &mut failure);
@@ -274,6 +292,8 @@ pub unsafe extern "C" fn readdir_r(
     result: *mut *mut libc::dirent,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller provides a live stream, writable entry, and writable
+    // result pointer per readdir_r's contract.
     unsafe {
         #[cfg(target_os = "linux")]
         {
@@ -308,6 +328,8 @@ pub unsafe extern "C" fn readdir64_r(
     result: *mut *mut libc::dirent64,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller provides a live stream, writable entry, and writable
+    // result pointer per readdir64_r's contract.
     unsafe { readdir_copy(dirp, entry, result) }
 }
 
@@ -321,6 +343,8 @@ pub unsafe extern "C" fn getdents64(
     length: usize,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `dirp` and its output buffer satisfy getdents64's libc contract;
+    // the dispatcher writes only the requested guest range.
     let result = unsafe {
         crate::sud::patina_sud_dispatch(
             libc::SYS_getdents64,
@@ -345,6 +369,7 @@ pub unsafe extern "C" fn getdents64(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn closedir(dirp: *mut libc::DIR) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `dirp` is an owned live stream per closedir's contract.
     unsafe {
         #[cfg(target_os = "linux")]
         {
@@ -358,7 +383,7 @@ pub unsafe extern "C" fn closedir(dirp: *mut libc::DIR) -> c_int {
         #[cfg(target_os = "macos")]
         {
             let directory = dirp.cast::<Directory>();
-            crate::patina_read_dir_free((*directory).state);
+            crate::fs::free_dir((*directory).state);
             crate::patina_close((*directory).owned_fd);
             libc::free(directory.cast());
             0
@@ -368,6 +393,7 @@ pub unsafe extern "C" fn closedir(dirp: *mut libc::DIR) -> c_int {
 
 #[cfg(target_os = "linux")]
 unsafe fn seek(dirp: *mut libc::DIR, position: libc::c_long) {
+    // SAFETY: callers pass a live `DIR` allocated by this module.
     unsafe {
         let directory = dirp.cast::<Directory>();
         crate::patina_seek((*directory).fd, position, libc::SEEK_SET as u32);
@@ -382,6 +408,7 @@ unsafe fn seek(dirp: *mut libc::DIR, position: libc::c_long) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rewinddir(dirp: *mut libc::DIR) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `dirp` is a live stream per rewinddir's contract.
     unsafe {
         #[cfg(target_os = "linux")]
         {
@@ -391,11 +418,11 @@ pub unsafe extern "C" fn rewinddir(dirp: *mut libc::DIR) {
         {
             let directory = dirp.cast::<Directory>();
             let mut state = ptr::null_mut();
-            if crate::patina_read_dir((*directory).owned_fd, &mut state) != 0 {
-                error(crate::patina_errno());
+            if let Err(errno) = crate::fs::read_dir((*directory).owned_fd, &mut state) {
+                error(errno.get());
                 return;
             }
-            crate::patina_read_dir_free((*directory).state);
+            crate::fs::free_dir((*directory).state);
             (*directory).state = state;
         }
     }
@@ -407,6 +434,7 @@ pub unsafe extern "C" fn rewinddir(dirp: *mut libc::DIR) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn seekdir(dirp: *mut libc::DIR, position: libc::c_long) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `dirp` is a live stream per seekdir's contract.
     unsafe {
         seek(dirp, position);
     }
@@ -418,6 +446,7 @@ pub unsafe extern "C" fn seekdir(dirp: *mut libc::DIR, position: libc::c_long) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn telldir(dirp: *mut libc::DIR) -> libc::c_long {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `dirp` is a live stream per telldir's contract.
     unsafe { (*dirp.cast::<Directory>()).filepos }
 }
 
@@ -426,6 +455,7 @@ pub unsafe extern "C" fn telldir(dirp: *mut libc::DIR) -> libc::c_long {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dirfd(dirp: *mut libc::DIR) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `dirp` is a live stream per dirfd's contract.
     unsafe {
         #[cfg(target_os = "linux")]
         {

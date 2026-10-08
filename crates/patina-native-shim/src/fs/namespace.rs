@@ -526,6 +526,23 @@ pub unsafe extern "C" fn patina_read_link(
     len: usize,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The prefixed C ABI contract guarantees a readable path string
+    // and a writable destination for `len` bytes.
+    unsafe { read_link(dirfd, path, buf, len) }.unwrap_or(-1)
+}
+
+/// Read a deterministic symbolic link's target bytes, preserving the model
+/// errno write for either door.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string and `buf` must be
+/// writable for `len` bytes.
+pub(crate) unsafe fn read_link(
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut c_char,
+    len: usize,
+) -> crate::abi::SysResult<isize> {
     // Bootstrap window (see `SHIM_BOOTSTRAP`): this is an allocator's init-time
     // config probe — tikv-jemallocator's `obtain_malloc_conf` does
     // `readlink("/etc/malloc.conf")` while holding its init lock. The deterministic
@@ -535,15 +552,15 @@ pub unsafe extern "C" fn patina_read_link(
     // or touching the runtime. A guest's own deterministic `read_link` runs after
     // bootstrap and is unaffected.
     if in_shim_bootstrap() {
-        return fail(ENOENT) as isize;
+        return Err(crate::abi::failed(ENOENT));
     }
     if len == 0 || buf.is_null() {
-        return fail(EINVAL) as isize;
+        return Err(crate::abi::failed(EINVAL));
     }
     // SAFETY: This export's C ABI contract guarantees a readable path string.
     let path = match unsafe { path_from_c(path) } {
         Ok(path) => path,
-        Err(errno) => return fail(errno) as isize,
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     // A descriptor whose node is not on the volume (a namespace file's nsfs
     // inode, the entropy device, a pipe, a socket, an anonymous inode) names
@@ -554,7 +571,7 @@ pub unsafe extern "C" fn patina_read_link(
             !matches!(resolved.kind, FdKind::File | FdKind::Dir | FdKind::OPath)
         })
     {
-        return fail(ENOENT) as isize;
+        return Err(crate::abi::failed(ENOENT));
     }
     let resolved = match paths::resolve(
         dirfd,
@@ -564,25 +581,34 @@ pub unsafe extern "C" fn patina_read_link(
         Ok(paths::Resolution::Volume(resolved)) => resolved,
         // The entropy device is no link.
         Ok(paths::Resolution::Virtual(paths::Virtual::Urandom)) => {
-            return fail(EINVAL) as isize;
+            return Err(crate::abi::failed(EINVAL));
         }
         #[cfg(target_os = "linux")]
         Ok(paths::Resolution::Virtual(paths::Virtual::Namespace(index))) => {
-            return read_namespace_link(index, buf, len);
+            let result = read_namespace_link(index, buf, len);
+            return if result < 0 {
+                Err(crate::abi::Errno::last())
+            } else {
+                Ok(result)
+            };
         }
         // The terminal nodes and devpts's root are no links either.
         #[cfg(target_os = "linux")]
         Ok(paths::Resolution::Virtual(entry)) => {
-            return fail(if entry.exists() { EINVAL } else { ENOENT }) as isize;
+            return Err(crate::abi::failed(if entry.exists() {
+                EINVAL
+            } else {
+                ENOENT
+            }));
         }
-        Err(errno) => return fail(errno) as isize,
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     match resolved.metadata.map(|metadata| metadata.kind) {
-        None => return fail(ENOENT) as isize,
+        None => return Err(crate::abi::failed(ENOENT)),
         Some(FsEntryKind::Symlink) => {}
         // The descriptor's own node, named by an empty path, is no link:
         // `ENOENT` rather than `EINVAL` (`do_readlinkat`).
-        Some(_) if path.is_empty() => return fail(ENOENT) as isize,
+        Some(_) if path.is_empty() => return Err(crate::abi::failed(ENOENT)),
         Some(
             FsEntryKind::File
             | FsEntryKind::Directory
@@ -590,7 +616,7 @@ pub unsafe extern "C" fn patina_read_link(
             | FsEntryKind::Socket
             | FsEntryKind::CharDevice,
         ) => {
-            return fail(EINVAL) as isize;
+            return Err(crate::abi::failed(EINVAL));
         }
     }
     match with_context(|context| context.fs_read_link(&resolved.path)) {
@@ -604,9 +630,9 @@ pub unsafe extern "C" fn patina_read_link(
                     .copy_from_slice(&bytes[..copied]);
             }
             set_errno(0);
-            isize::try_from(copied).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
+            isize::try_from(copied).map_err(|_| crate::abi::failed(EOVERFLOW))
         }
-        Err(errno) => fail(errno) as isize,
+        Err(errno) => Err(crate::abi::failed(errno)),
     }
 }
 

@@ -1,4 +1,6 @@
 //! Linux statfs/statvfs spellings, including glibc 2.39's f_type.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 use crate::volume::KernelStatfs;
 use core::{
@@ -53,6 +55,7 @@ unsafe fn convert(result: c_int, fs: *const KernelStatfs, out: *mut libc::statvf
     if result < 0 {
         return model_result(result);
     }
+    // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     unsafe {
         let fs = &*fs;
         let out = out.cast::<Statvfs>();
@@ -78,17 +81,23 @@ unsafe fn convert(result: c_int, fs: *const KernelStatfs, out: *mut libc::statvf
     }
 }
 unsafe fn path_vfs(path: *const c_char, out: *mut libc::statvfs) -> c_int {
+    // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     unsafe {
         let mut fs = MaybeUninit::<KernelStatfs>::uninit();
-        let result = crate::volume::patina_statfs(path, fs.as_mut_ptr());
-        convert(result, fs.as_ptr(), out)
+        match crate::volume::statfs(path, fs.as_mut_ptr()) {
+            Ok(()) => convert(0, fs.as_ptr(), out),
+            Err(errno) => crate::abi::libc_result(Err(errno), -1),
+        }
     }
 }
 unsafe fn fd_vfs(fd: c_int, out: *mut libc::statvfs) -> c_int {
+    // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     unsafe {
         let mut fs = MaybeUninit::<KernelStatfs>::uninit();
-        let result = crate::volume::patina_fstatfs(fd, fs.as_mut_ptr());
-        convert(result, fs.as_ptr(), out)
+        match crate::volume::fstatfs(fd, fs.as_mut_ptr()) {
+            Ok(()) => convert(0, fs.as_ptr(), out),
+            Err(errno) => crate::abi::libc_result(Err(errno), -1),
+        }
     }
 }
 
@@ -97,7 +106,11 @@ unsafe fn fd_vfs(fd: c_int, out: *mut libc::statvfs) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn statfs(path: *const c_char, out: *mut libc::statfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    unsafe { model_result(crate::volume::patina_statfs(path, out.cast())) }
+    // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
+    crate::abi::libc_result(
+        unsafe { crate::volume::statfs(path, out.cast()) }.map(|_| 0),
+        -1,
+    )
 }
 
 /// # Safety
@@ -105,7 +118,11 @@ pub unsafe extern "C" fn statfs(path: *const c_char, out: *mut libc::statfs) -> 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstatfs(fd: c_int, out: *mut libc::statfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    unsafe { model_result(crate::volume::patina_fstatfs(fd, out.cast())) }
+    // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
+    crate::abi::libc_result(
+        unsafe { crate::volume::fstatfs(fd, out.cast()) }.map(|_| 0),
+        -1,
+    )
 }
 
 /// # Safety
@@ -113,6 +130,7 @@ pub unsafe extern "C" fn fstatfs(fd: c_int, out: *mut libc::statfs) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn statvfs(path: *const c_char, out: *mut libc::statvfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     unsafe { path_vfs(path, out.cast()) }
 }
 
@@ -121,6 +139,7 @@ pub unsafe extern "C" fn statvfs(path: *const c_char, out: *mut libc::statvfs) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstatvfs(fd: c_int, out: *mut libc::statvfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     unsafe { fd_vfs(fd, out.cast()) }
 }
 
@@ -129,7 +148,11 @@ pub unsafe extern "C" fn fstatvfs(fd: c_int, out: *mut libc::statvfs) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn statfs64(path: *const c_char, out: *mut libc::statfs64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    unsafe { model_result(crate::volume::patina_statfs(path, out.cast())) }
+    // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
+    crate::abi::libc_result(
+        unsafe { crate::volume::statfs(path, out.cast()) }.map(|_| 0),
+        -1,
+    )
 }
 
 /// # Safety
@@ -137,7 +160,11 @@ pub unsafe extern "C" fn statfs64(path: *const c_char, out: *mut libc::statfs64)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstatfs64(fd: c_int, out: *mut libc::statfs64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    unsafe { model_result(crate::volume::patina_fstatfs(fd, out.cast())) }
+    // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
+    crate::abi::libc_result(
+        unsafe { crate::volume::fstatfs(fd, out.cast()) }.map(|_| 0),
+        -1,
+    )
 }
 
 /// # Safety
@@ -145,6 +172,7 @@ pub unsafe extern "C" fn fstatfs64(fd: c_int, out: *mut libc::statfs64) -> c_int
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn statvfs64(path: *const c_char, out: *mut libc::statvfs64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     unsafe { path_vfs(path, out.cast()) }
 }
 
@@ -153,5 +181,6 @@ pub unsafe extern "C" fn statvfs64(path: *const c_char, out: *mut libc::statvfs6
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstatvfs64(fd: c_int, out: *mut libc::statvfs64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     unsafe { fd_vfs(fd, out.cast()) }
 }

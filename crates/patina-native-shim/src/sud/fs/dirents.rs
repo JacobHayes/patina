@@ -216,9 +216,9 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
         // open, so a later `chmod` cannot break a walk under way and an `O_PATH`
         // descriptor (which opened nothing) cannot iterate at all.
         // SAFETY: `snapshot` is writable local storage.
-        let rc = unsafe { crate::fs::patina_read_dir(fd, &mut snapshot) };
+        let rc = crate::abi::raw(unsafe { crate::fs::read_dir(fd, &mut snapshot) }.map(|_| 0));
         if rc != 0 {
-            return -(crate::environment::patina_errno() as i64);
+            return rc;
         }
         dir.snapshot = snapshot as usize;
         // Resume at the position: skip the entries before it.
@@ -227,15 +227,18 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
         let mut ino: u64 = 0;
         for _ in 0..dir.position {
             // SAFETY: `snapshot` is the live box; `name` is writable for its length.
-            let rc = unsafe {
-                crate::fs::patina_read_dir_next(
-                    snapshot,
-                    name.as_mut_ptr() as *mut c_char,
-                    name.len(),
-                    &mut kind,
-                    &mut ino,
-                )
-            };
+            let rc = crate::abi::raw(
+                unsafe {
+                    crate::fs::read_dir_next(
+                        snapshot,
+                        name.as_mut_ptr() as *mut c_char,
+                        name.len(),
+                        &mut kind,
+                        &mut ino,
+                    )
+                }
+                .map(i64::from),
+            );
             if rc != 1 {
                 break;
             }
@@ -253,15 +256,18 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
             let mut buf = [0u8; 256];
             let (mut kind, mut ino) = (0u32, 0u64);
             // SAFETY: `snapshot` is the live box; `buf` is writable for its length.
-            let rc = unsafe {
-                crate::fs::patina_read_dir_next(
-                    snapshot,
-                    buf.as_mut_ptr() as *mut c_char,
-                    buf.len(),
-                    &mut kind,
-                    &mut ino,
-                )
-            };
+            let rc = crate::abi::raw(
+                unsafe {
+                    crate::fs::read_dir_next(
+                        snapshot,
+                        buf.as_mut_ptr() as *mut c_char,
+                        buf.len(),
+                        &mut kind,
+                        &mut ino,
+                    )
+                }
+                .map(i64::from),
+            );
             match rc {
                 1 => {
                     // SAFETY: `buf` now holds a NUL-terminated name.
@@ -279,7 +285,7 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
                     if written > 0 {
                         break;
                     }
-                    return -(crate::environment::patina_errno() as i64);
+                    return rc;
                 }
             }
         };

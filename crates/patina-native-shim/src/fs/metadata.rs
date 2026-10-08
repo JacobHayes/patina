@@ -1299,12 +1299,24 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
 /// `state_out` must be writable.
 pub unsafe extern "C" fn patina_read_dir(raw_fd: c_int, state_out: *mut *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the prefixed ABI contract requires `state_out` to be writable.
+    unsafe { read_dir(raw_fd, state_out) }.map_or(-1, |_| 0)
+}
+
+/// Capture a directory snapshot and return the owned snapshot pointer.
+///
+/// # Safety
+/// `state_out` must be writable.
+pub(crate) unsafe fn read_dir(
+    raw_fd: c_int,
+    state_out: *mut *mut c_void,
+) -> crate::abi::SysResult<()> {
     if state_out.is_null() {
-        return fail(EINVAL);
+        return Err(crate::abi::failed(EINVAL));
     }
     let fd = match fs_handle(raw_fd) {
         Ok(fd) => fd,
-        Err(errno) => return fail(errno),
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     match with_context(|context| context.fs_read_directory_fd(fd)) {
         Ok(listed) => {
@@ -1315,9 +1327,9 @@ pub unsafe extern "C" fn patina_read_dir(raw_fd: c_int, state_out: *mut *mut c_v
             // SAFETY: `state_out` was checked and is required to be writable.
             unsafe { state_out.write(Box::into_raw(state).cast()) };
             set_errno(0);
-            0
+            Ok(())
         }
-        Err(errno) => fail(errno),
+        Err(errno) => Err(crate::abi::failed(errno)),
     }
 }
 
@@ -1350,14 +1362,30 @@ pub unsafe extern "C" fn patina_read_dir_next(
     ino: *mut u64,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the prefixed ABI contract covers the snapshot and output buffers.
+    unsafe { read_dir_next(state, name_buf, buf_len, kind, ino) }.unwrap_or(-1)
+}
+
+/// Copy the next entry from a captured directory snapshot.
+///
+/// # Safety
+/// `state` must be a snapshot returned by [`read_dir`], `name_buf` must be
+/// writable for `buf_len` bytes, and `kind` and `ino` must be writable.
+pub(crate) unsafe fn read_dir_next(
+    state: *mut c_void,
+    name_buf: *mut c_char,
+    buf_len: usize,
+    kind: *mut u32,
+    ino: *mut u64,
+) -> crate::abi::SysResult<c_int> {
     if state.is_null() || kind.is_null() || ino.is_null() || (buf_len != 0 && name_buf.is_null()) {
-        return fail(EINVAL);
+        return Err(crate::abi::failed(EINVAL));
     }
     // SAFETY: Guaranteed by this function's C ABI contract.
     let state = unsafe { &mut *state.cast::<ReadDirState>() };
     let Some(entry) = state.entries.get(state.position) else {
         set_errno(0);
-        return 0;
+        return Ok(0);
     };
     let bytes = entry.name.as_bytes();
     if bytes
@@ -1365,7 +1393,7 @@ pub unsafe extern "C" fn patina_read_dir_next(
         .checked_add(1)
         .is_none_or(|needed| needed > buf_len)
     {
-        return fail(EINVAL);
+        return Err(crate::abi::failed(EINVAL));
     }
     // SAFETY: The destination buffer has room for the bytes plus a NUL.
     unsafe {
@@ -1377,7 +1405,7 @@ pub unsafe extern "C" fn patina_read_dir_next(
     }
     state.position += 1;
     set_errno(0);
-    1
+    Ok(1)
 }
 
 #[unsafe(no_mangle)]
@@ -1388,6 +1416,15 @@ pub unsafe extern "C" fn patina_read_dir_next(
 /// freed.
 pub unsafe extern "C" fn patina_read_dir_free(state: *mut c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the prefixed ABI contract guarantees null or an owned snapshot.
+    unsafe { free_dir(state) }
+}
+
+/// Free a snapshot produced by [`read_dir`].
+///
+/// # Safety
+/// `state` must be null or a live, not-yet-freed pointer returned by [`read_dir`].
+pub(crate) unsafe fn free_dir(state: *mut c_void) {
     if !state.is_null() {
         // SAFETY: Guaranteed by this function's C ABI contract.
         drop(unsafe { Box::from_raw(state.cast::<ReadDirState>()) });

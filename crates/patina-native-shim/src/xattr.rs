@@ -26,8 +26,8 @@ use patina_dst_driver_api::xattr_permission;
 
 use crate::fdtable::FdKind;
 use crate::{
-    E2BIG, EFAULT, EINVAL, ENOENT, EOPNOTSUPP, EPERM, ERANGE, fail, fdget, path_from_c, paths,
-    set_errno, thread, with_context,
+    E2BIG, EFAULT, EINVAL, ENOENT, EOPNOTSUPP, EPERM, ERANGE, fdget, path_from_c, paths, set_errno,
+    thread, with_context,
 };
 
 /// `XATTR_NAME_MAX` / `XATTR_SIZE_MAX` / `XATTR_LIST_MAX`.
@@ -185,10 +185,10 @@ fn pseudo_refusal(mode: u32, regular: bool, immutable: bool, name: &str, write: 
 fn copy_out(bytes: &[u8], buffer: *mut c_void, size: usize) -> isize {
     if size != 0 {
         if bytes.len() > size {
-            return fail(ERANGE) as isize;
+            return crate::fail(ERANGE) as isize;
         }
         if buffer.is_null() {
-            return fail(EFAULT) as isize;
+            return crate::fail(EFAULT) as isize;
         }
         // SAFETY: the guest's buffer is writable for `size >= bytes.len()` bytes.
         unsafe { slice::from_raw_parts_mut(buffer.cast::<u8>(), bytes.len()) }
@@ -227,14 +227,31 @@ pub unsafe extern "C" fn patina_getxattr(
     size: usize,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the prefixed ABI contract covers the path, name, and output buffer.
+    unsafe { getxattr(raw_fd, path, by, name, value, size) }.unwrap_or(-1)
+}
+
+/// Resolve and copy an extended attribute for either ABI door.
+///
+/// # Safety
+/// `path` and `name`, when non-null, must be NUL-terminated strings; `value`
+/// must be writable for `size` bytes when non-null.
+pub(crate) unsafe fn getxattr(
+    raw_fd: c_int,
+    path: *const c_char,
+    by: c_int,
+    name: *const c_char,
+    value: *mut c_void,
+    size: usize,
+) -> crate::abi::SysResult<isize> {
     // SAFETY: This export's contract guarantees a NUL-terminated path when used.
     let node = match unsafe { node(raw_fd, path, by) } {
         Ok(node) => node,
-        Err(errno) => return fail(errno) as isize,
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     let name = match copy_name(name) {
         Ok(name) => name,
-        Err(errno) => return fail(errno) as isize,
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     let target = match node {
         Node::Volume(target) => target,
@@ -243,12 +260,14 @@ pub unsafe extern "C" fn patina_getxattr(
             regular,
             immutable,
         } => {
-            return fail(pseudo_refusal(mode, regular, immutable, &name, false)) as isize;
+            return Err(crate::abi::failed(pseudo_refusal(
+                mode, regular, immutable, &name, false,
+            )));
         }
     };
     match with_context(|context| context.fs_get_xattr(&target, &name)) {
-        Ok(bytes) => copy_out(&bytes, value, size.min(XATTR_SIZE_MAX)),
-        Err(errno) => fail(errno) as isize,
+        Ok(bytes) => crate::abi::from_model(copy_out(&bytes, value, size.min(XATTR_SIZE_MAX))),
+        Err(errno) => Err(crate::abi::failed(errno)),
     }
 }
 
@@ -265,15 +284,31 @@ pub unsafe extern "C" fn patina_listxattr(
     size: usize,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the prefixed ABI contract covers the path and output buffer.
+    unsafe { listxattr(raw_fd, path, by, list, size) }.unwrap_or(-1)
+}
+
+/// List extended attributes for either ABI door.
+///
+/// # Safety
+/// `path`, when non-null, must be a NUL-terminated string; `list` must be
+/// writable for `size` bytes when non-null.
+pub(crate) unsafe fn listxattr(
+    raw_fd: c_int,
+    path: *const c_char,
+    by: c_int,
+    list: *mut c_void,
+    size: usize,
+) -> crate::abi::SysResult<isize> {
     // SAFETY: This export's contract guarantees a NUL-terminated path when used.
     let target = match unsafe { node(raw_fd, path, by) } {
         Ok(Node::Volume(target)) => target,
-        Ok(Node::Pseudo { .. }) => return copy_out(&[], list, size),
-        Err(errno) => return fail(errno) as isize,
+        Ok(Node::Pseudo { .. }) => return crate::abi::from_model(copy_out(&[], list, size)),
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     match with_context(|context| context.fs_list_xattr(&target)) {
-        Ok(bytes) => copy_out(&bytes, list, size),
-        Err(errno) => fail(errno) as isize,
+        Ok(bytes) => crate::abi::from_model(copy_out(&bytes, list, size)),
+        Err(errno) => Err(crate::abi::failed(errno)),
     }
 }
 
@@ -294,26 +329,44 @@ pub unsafe extern "C" fn patina_setxattr(
     flags: c_int,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the prefixed ABI contract covers the path, name, and value.
+    unsafe { setxattr(raw_fd, path, by, name, value, size, flags) }.unwrap_or(-1)
+}
+
+/// Set an extended attribute for either ABI door.
+///
+/// # Safety
+/// `path` and `name`, when non-null, must be NUL-terminated strings; `value`
+/// must be readable for `size` bytes when non-null.
+pub(crate) unsafe fn setxattr(
+    raw_fd: c_int,
+    path: *const c_char,
+    by: c_int,
+    name: *const c_char,
+    value: *const c_void,
+    size: usize,
+    flags: c_int,
+) -> crate::abi::SysResult<c_int> {
     let descriptor = if by == XATTR_BY_FD {
         match descriptor_node(raw_fd) {
             Ok(node) => Some(node),
-            Err(errno) => return fail(errno),
+            Err(errno) => return Err(crate::abi::failed(errno)),
         }
     } else {
         None
     };
     if flags & !XATTR_FLAGS != 0 {
-        return fail(EINVAL);
+        return Err(crate::abi::failed(EINVAL));
     }
     let name = match copy_name(name) {
         Ok(name) => name,
-        Err(errno) => return fail(errno),
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     if size > XATTR_SIZE_MAX {
-        return fail(E2BIG);
+        return Err(crate::abi::failed(E2BIG));
     }
     if size != 0 && value.is_null() {
-        return fail(EFAULT);
+        return Err(crate::abi::failed(EFAULT));
     }
     let bytes = if size == 0 {
         &[][..]
@@ -326,7 +379,7 @@ pub unsafe extern "C" fn patina_setxattr(
         // SAFETY: This export's contract guarantees a NUL-terminated path when used.
         None => match unsafe { path_node(path, by == XATTR_BY_PATH) } {
             Ok(node) => node,
-            Err(errno) => return fail(errno),
+            Err(errno) => return Err(crate::abi::failed(errno)),
         },
     };
     let target = match node {
@@ -335,16 +388,20 @@ pub unsafe extern "C" fn patina_setxattr(
             mode,
             regular,
             immutable,
-        } => return fail(pseudo_refusal(mode, regular, immutable, &name, true)),
+        } => {
+            return Err(crate::abi::failed(pseudo_refusal(
+                mode, regular, immutable, &name, true,
+            )));
+        }
     };
     match with_context(|context| context.fs_set_xattr(&target, &name, bytes, flags as u32)) {
         Ok(()) => {
             #[cfg(target_os = "linux")]
             crate::fsnotify::xattr_changed(&target, fifo_end(by, raw_fd));
             set_errno(0);
-            0
+            Ok(0)
         }
-        Err(errno) => fail(errno),
+        Err(errno) => Err(crate::abi::failed(errno)),
     }
 }
 
@@ -360,26 +417,40 @@ pub unsafe extern "C" fn patina_removexattr(
     name: *const c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the prefixed ABI contract covers the path and name.
+    unsafe { removexattr(raw_fd, path, by, name) }.unwrap_or(-1)
+}
+
+/// Remove an extended attribute for either ABI door.
+///
+/// # Safety
+/// `path` and `name`, when non-null, must be NUL-terminated strings.
+pub(crate) unsafe fn removexattr(
+    raw_fd: c_int,
+    path: *const c_char,
+    by: c_int,
+    name: *const c_char,
+) -> crate::abi::SysResult<c_int> {
     // The descriptor row resolves the descriptor, then the name; the path
     // rows copy the name before they look the path up.
     let descriptor = if by == XATTR_BY_FD {
         match descriptor_node(raw_fd) {
             Ok(node) => Some(node),
-            Err(errno) => return fail(errno),
+            Err(errno) => return Err(crate::abi::failed(errno)),
         }
     } else {
         None
     };
     let name = match copy_name(name) {
         Ok(name) => name,
-        Err(errno) => return fail(errno),
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     let node = match descriptor {
         Some(node) => node,
         // SAFETY: This export's contract guarantees a NUL-terminated path when used.
         None => match unsafe { path_node(path, by == XATTR_BY_PATH) } {
             Ok(node) => node,
-            Err(errno) => return fail(errno),
+            Err(errno) => return Err(crate::abi::failed(errno)),
         },
     };
     let target = match node {
@@ -388,16 +459,20 @@ pub unsafe extern "C" fn patina_removexattr(
             mode,
             regular,
             immutable,
-        } => return fail(pseudo_refusal(mode, regular, immutable, &name, true)),
+        } => {
+            return Err(crate::abi::failed(pseudo_refusal(
+                mode, regular, immutable, &name, true,
+            )));
+        }
     };
     match with_context(|context| context.fs_remove_xattr(&target, &name)) {
         Ok(()) => {
             #[cfg(target_os = "linux")]
             crate::fsnotify::xattr_changed(&target, fifo_end(by, raw_fd));
             set_errno(0);
-            0
+            Ok(0)
         }
-        Err(errno) => fail(errno),
+        Err(errno) => Err(crate::abi::failed(errno)),
     }
 }
 

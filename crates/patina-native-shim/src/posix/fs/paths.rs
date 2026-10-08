@@ -1,4 +1,6 @@
 //! Paths, namespace operations, fixed open and fortify entries.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 use core::ptr;
 
@@ -9,6 +11,7 @@ use crate::variadic::open::patina_openat_impl;
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getcwd(destination: *mut c_char, length: usize) -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         if !destination.is_null() && length == 0 {
             error(libc::EINVAL);
@@ -51,6 +54,7 @@ pub unsafe extern "C" fn getcwd(destination: *mut c_char, length: usize) -> *mut
 #[cfg_attr(target_os = "macos", unsafe(export_name = "realpath$DARWIN_EXTSN"))]
 pub unsafe extern "C" fn realpath(path: *const c_char, destination: *mut c_char) -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         let mut resolved = [0 as c_char; libc::PATH_MAX as usize];
         let mut kind = 0;
@@ -92,6 +96,7 @@ pub unsafe extern "C" fn realpath(path: *const c_char, destination: *mut c_char)
 pub unsafe extern "C" fn creat(path: *const c_char, mode: libc::mode_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"creat");
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         patina_openat_impl(
             libc::AT_FDCWD,
@@ -112,6 +117,7 @@ unsafe fn open_fixed(
     if flags & libc::O_CREAT != 0 || flags & libc::O_TMPFILE == libc::O_TMPFILE {
         super::super::fortify_fail(name);
     }
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { patina_openat_impl(directory, path, flags, 0) }
 }
 
@@ -129,6 +135,7 @@ pub unsafe extern "C" fn linkat(
     if flags & !libc::AT_SYMLINK_FOLLOW != 0 {
         return error(libc::EINVAL);
     }
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         model_result(crate::patina_link(
             at(fromfd),
@@ -148,6 +155,7 @@ pub unsafe extern "C" fn unlinkat(directory: c_int, path: *const c_char, flags: 
     if flags & !libc::AT_REMOVEDIR != 0 {
         return error(AT_FLAG_REFUSAL);
     }
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         model_result(if flags & libc::AT_REMOVEDIR != 0 {
             crate::patina_rmdir(at(directory), path)
@@ -167,6 +175,7 @@ unsafe fn mknod_impl(
     if kernel_device as libc::dev_t != device {
         return error(libc::EINVAL);
     }
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         model_result(crate::patina_mknod(
             directory,
@@ -182,6 +191,7 @@ unsafe fn mknod_impl(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chdir(path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { model_result(crate::patina_chdir(AT_FDCWD, path)) }
 }
 
@@ -206,6 +216,7 @@ pub unsafe extern "C" fn umask(mask: libc::mode_t) -> libc::mode_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn symlink(target: *const c_char, link_path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { model_result(crate::patina_symlink(target, AT_FDCWD, link_path)) }
 }
 
@@ -218,6 +229,7 @@ pub unsafe extern "C" fn symlinkat(
     link_path: *const c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { model_result(crate::patina_symlink(target, at(directory), link_path)) }
 }
 
@@ -230,7 +242,12 @@ pub unsafe extern "C" fn readlink(
     length: usize,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    unsafe { size_result(crate::patina_read_link(AT_FDCWD, path, destination, length)) }
+    // SAFETY: the libc caller provides a readable path and writable buffer per
+    // readlink's contract.
+    crate::abi::libc_result(
+        unsafe { crate::fs::read_link(AT_FDCWD, path, destination, length) },
+        -1,
+    )
 }
 
 /// # Safety
@@ -243,14 +260,12 @@ pub unsafe extern "C" fn readlinkat(
     length: usize,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    unsafe {
-        size_result(crate::patina_read_link(
-            at(directory),
-            path,
-            destination,
-            length,
-        ))
-    }
+    // SAFETY: the libc caller provides a readable path and writable buffer per
+    // readlinkat's contract.
+    crate::abi::libc_result(
+        unsafe { crate::fs::read_link(at(directory), path, destination, length) },
+        -1,
+    )
 }
 
 /// # Safety
@@ -258,6 +273,7 @@ pub unsafe extern "C" fn readlinkat(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn link(from: *const c_char, to: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { model_result(crate::patina_link(AT_FDCWD, from, AT_FDCWD, to, 0)) }
 }
 
@@ -270,6 +286,7 @@ pub unsafe extern "C" fn mknod(
     device: libc::dev_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { mknod_impl(AT_FDCWD, path, mode, device) }
 }
 
@@ -283,6 +300,7 @@ pub unsafe extern "C" fn mknodat(
     device: libc::dev_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { mknod_impl(at(directory), path, mode, device) }
 }
 
@@ -291,6 +309,7 @@ pub unsafe extern "C" fn mknodat(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mkfifo(path: *const c_char, mode: libc::mode_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { model_result(crate::patina_mkfifo(AT_FDCWD, path, mode as libc::c_uint)) }
 }
 
@@ -303,6 +322,7 @@ pub unsafe extern "C" fn mkfifoat(
     mode: libc::mode_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         model_result(crate::patina_mkfifo(
             at(directory),
@@ -317,6 +337,7 @@ pub unsafe extern "C" fn mkfifoat(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mkdir(path: *const c_char, mode: libc::mode_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         model_result(crate::patina_mkdir(
             AT_FDCWD,
@@ -335,6 +356,7 @@ pub unsafe extern "C" fn mkdirat(
     mode: libc::mode_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         model_result(crate::patina_mkdir(
             at(directory),
@@ -349,6 +371,7 @@ pub unsafe extern "C" fn mkdirat(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { model_result(crate::patina_unlink(AT_FDCWD, path)) }
 }
 
@@ -357,6 +380,7 @@ pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { model_result(crate::patina_rmdir(AT_FDCWD, path)) }
 }
 
@@ -365,6 +389,7 @@ pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rename(from: *const c_char, to: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { model_result(crate::patina_renameat2(AT_FDCWD, from, AT_FDCWD, to, 0)) }
 }
 
@@ -378,6 +403,7 @@ pub unsafe extern "C" fn renameat(
     to: *const c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { model_result(crate::patina_renameat2(at(fromfd), from, at(tofd), to, 0)) }
 }
 
@@ -393,6 +419,7 @@ pub unsafe extern "C" fn renameat2(
     flags: u32,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         model_result(crate::patina_renameat2(
             at(fromfd),
@@ -409,6 +436,7 @@ pub unsafe extern "C" fn renameat2(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn truncate(path: *const c_char, length: libc::off_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { model_result(crate::patina_truncate(AT_FDCWD, path, length)) }
 }
 
@@ -418,6 +446,7 @@ pub unsafe extern "C" fn truncate(path: *const c_char, length: libc::off_t) -> c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn truncate64(path: *const c_char, length: libc::off64_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe { model_result(crate::patina_truncate(AT_FDCWD, path, length)) }
 }
 
@@ -428,6 +457,7 @@ pub unsafe extern "C" fn truncate64(path: *const c_char, length: libc::off64_t) 
 pub unsafe extern "C" fn __open_2(path: *const c_char, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"__open_2");
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         open_fixed(
             libc::AT_FDCWD,
@@ -445,6 +475,7 @@ pub unsafe extern "C" fn __open_2(path: *const c_char, flags: c_int) -> c_int {
 pub unsafe extern "C" fn __open64_2(path: *const c_char, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"__open64_2");
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         open_fixed(
             libc::AT_FDCWD,
@@ -462,6 +493,7 @@ pub unsafe extern "C" fn __open64_2(path: *const c_char, flags: c_int) -> c_int 
 pub unsafe extern "C" fn __openat_2(directory: c_int, path: *const c_char, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"__openat_2");
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         open_fixed(
             directory,
@@ -483,6 +515,7 @@ pub unsafe extern "C" fn __openat64_2(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"__openat64_2");
+    // SAFETY: The unsafe callee receives the validated operands under this libc entry’s documented contract.
     unsafe {
         open_fixed(
             directory,
@@ -507,7 +540,12 @@ pub unsafe extern "C" fn __readlink_chk(
     if length > buflen {
         super::super::chk_fail();
     }
-    unsafe { size_result(crate::patina_read_link(AT_FDCWD, path, destination, length)) }
+    // SAFETY: the libc caller provides a readable path and writable buffer per
+    // readlink's contract; fortify checked the requested length above.
+    crate::abi::libc_result(
+        unsafe { crate::fs::read_link(AT_FDCWD, path, destination, length) },
+        -1,
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -525,14 +563,12 @@ pub unsafe extern "C" fn __readlinkat_chk(
     if length > buflen {
         super::super::chk_fail();
     }
-    unsafe {
-        size_result(crate::patina_read_link(
-            at(directory),
-            path,
-            destination,
-            length,
-        ))
-    }
+    // SAFETY: the libc caller provides a readable path and writable buffer per
+    // readlinkat's contract; fortify checked the requested length above.
+    crate::abi::libc_result(
+        unsafe { crate::fs::read_link(at(directory), path, destination, length) },
+        -1,
+    )
 }
 
 #[cfg(target_os = "linux")]

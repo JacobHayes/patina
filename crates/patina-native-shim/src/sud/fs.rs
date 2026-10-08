@@ -322,7 +322,7 @@ pub(super) fn sys_openat(dirfd: i64, path: u64, flags: u64, mode: u64) -> i64 {
 pub(crate) fn release_dir_iteration(fd: c_int) {
     if let Some(iteration) = DIR_ITERATIONS.lock().unwrap().remove(&fd) {
         // SAFETY: `snapshot` is null or the live `patina_read_dir` box for this fd.
-        unsafe { crate::fs::patina_read_dir_free(iteration.snapshot as *mut c_void) };
+        unsafe { crate::fs::free_dir(iteration.snapshot as *mut c_void) };
     }
 }
 
@@ -352,7 +352,7 @@ pub(crate) fn seek_dir_iteration(fd: c_int, offset: i64, whence: u32) -> Option<
         },
     ) {
         // SAFETY: `snapshot` is null or the live `patina_read_dir` box for this fd.
-        unsafe { crate::fs::patina_read_dir_free(dir.snapshot as *mut c_void) };
+        unsafe { crate::fs::free_dir(dir.snapshot as *mut c_void) };
     }
     Some(target)
 }

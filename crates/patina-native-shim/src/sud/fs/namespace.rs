@@ -161,9 +161,10 @@ pub(in crate::sud) fn sys_readlinkat(dirfd: i64, path: u64, buf: u64, bufsize: u
         Err(errno) => return errno,
     };
     // SAFETY: `path` is valid; `buf` is writable for `bufsize`.
-    ret_isize(unsafe {
-        crate::fs::patina_read_link(dirfd as c_int, path, buf as *mut c_char, bufsize as usize)
-    })
+    crate::abi::raw(
+        unsafe { crate::fs::read_link(dirfd as c_int, path, buf as *mut c_char, bufsize as usize) }
+            .map(|result| result as i64),
+    )
 }
 
 pub(in crate::sud) fn sys_renameat(

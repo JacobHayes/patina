@@ -14,13 +14,15 @@ use super::*;
 
 unsafe extern "C" {
     fn patina_dup2(oldfd: c_int, newfd: c_int) -> c_int;
-    fn patina_ustat(dev: u32, out: *mut c_void) -> c_int;
 }
 
 /// `ustat(2)`: the kernel reads the device as an `unsigned int`.
 pub(super) fn sys_ustat(dev: u64, ubuf: u64) -> i64 {
     // SAFETY: `ubuf` is the guest's `struct ustat` storage (or NULL, EFAULT).
-    ret_i32(unsafe { patina_ustat(dev as u32, ubuf as *mut c_void) })
+    crate::abi::raw(
+        unsafe { crate::volume::ustat(dev as u32, ubuf as *mut crate::volume::KernelUstat) }
+            .map(|_| 0),
+    )
 }
 
 /// `dup2(2)`. It differs from `dup3` in EXACTLY the equal-fd case:
@@ -117,22 +119,28 @@ pub(super) fn sys_futimesat(dirfd: i64, path: u64, times: u64) -> i64 {
         if let Some(err) = fd_out_of_range(dirfd) {
             return err;
         }
-        return ret_i32(crate::fs::patina_futimens(
-            dirfd as c_int,
-            atime.0,
-            atime.1,
-            mtime.0,
-            mtime.1,
-        ));
+        return crate::abi::raw(
+            crate::abi::from_model(crate::fs::patina_futimens(
+                dirfd as c_int,
+                atime.0,
+                atime.1,
+                mtime.0,
+                mtime.1,
+            ))
+            .map(i64::from),
+        );
     }
     let path = match guest_path(path) {
         Ok(path) => path,
         Err(errno) => return errno,
     };
     // SAFETY: `path` is a valid NUL-terminated guest string pointer.
-    ret_i32(unsafe {
-        crate::fs::patina_utimensat(dirfd as c_int, path, 0, atime.0, atime.1, mtime.0, mtime.1)
-    })
+    crate::abi::raw(
+        crate::abi::from_model(unsafe {
+            crate::fs::patina_utimensat(dirfd as c_int, path, 0, atime.0, atime.1, mtime.0, mtime.1)
+        })
+        .map(i64::from),
+    )
 }
 
 /// `utime(2)`: whole-second times; a null buffer is now/now.
@@ -151,17 +159,20 @@ pub(super) fn sys_utime(path: u64, times: u64) -> i64 {
         Err(errno) => return errno,
     };
     // SAFETY: `path` is a valid NUL-terminated guest string pointer.
-    ret_i32(unsafe {
-        crate::fs::patina_utimensat(
-            AT_FDCWD as c_int,
-            path,
-            0,
-            atime.0,
-            atime.1,
-            mtime.0,
-            mtime.1,
-        )
-    })
+    crate::abi::raw(
+        crate::abi::from_model(unsafe {
+            crate::fs::patina_utimensat(
+                AT_FDCWD as c_int,
+                path,
+                0,
+                atime.0,
+                atime.1,
+                mtime.0,
+                mtime.1,
+            )
+        })
+        .map(i64::from),
+    )
 }
 
 /// The legacy `getdents(2)`: the same per-descriptor iteration `getdents64`

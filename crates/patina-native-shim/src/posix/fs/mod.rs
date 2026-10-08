@@ -1,5 +1,5 @@
 //! Filesystem ABI adapters; all effects use the existing filesystem model.
-use super::{at, cancel, error, model_result, size_result};
+use super::{at, cancel, error, model_result};
 #[cfg(target_os = "linux")]
 use crate::paths::RESOLVE_EMPTY_PATH;
 use crate::paths::{AT_FDCWD, RESOLVE_NOFOLLOW};
