@@ -30,6 +30,8 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_signalfd, |_, a| unsafe {
+        // SAFETY: `a[1]` is the guest pointer to the 8-byte signal set;
+        // `patina_signalfd` reads it through `uaccess` after checking the size.
         crate::thread::signals::fd::patina_signalfd(
             a[0] as i32,
             a[1] as *const u64,
@@ -38,6 +40,8 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
         )
     }),
     (Syscall::N_signalfd4, |_, a| unsafe {
+        // SAFETY: `a[1]` is the guest pointer to the 8-byte signal set;
+        // `patina_signalfd` reads it through `uaccess` after checking the size.
         crate::thread::signals::fd::patina_signalfd(
             a[0] as i32,
             a[1] as *const u64,
@@ -432,22 +436,20 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
         crate::thread::futex2::futex_waitv(a)
     }),
     (Syscall::N_getrandom, |_, a| sys_getrandom(a[0], a[1], a[2])),
-    // SAFETY: plain runtime entry, no pointers.
     (Syscall::N_sched_yield, |_, _| {
-        ret_i32(unsafe { patina_sched_yield() })
+        ret_i32(crate::process::patina_sched_yield())
     }),
-    // SAFETY: as above.
-    (Syscall::N_gettid, |_, _| unsafe {
-        patina_thread_id() as i64
+    (Syscall::N_gettid, |_, _| {
+        crate::process::patina_thread_id() as i64
     }),
     (Syscall::N_set_tid_address, |_, a| unsafe {
-        patina_set_tid_address(a[0] as *mut i32)
+        crate::thread::signals::patina_set_tid_address(a[0] as *mut i32)
     }),
-    (Syscall::N_exit, |_, a| unsafe {
-        patina_raw_exit(a[0] as c_int)
+    (Syscall::N_exit, |_, a| {
+        crate::thread::signals::patina_raw_exit(a[0] as c_int)
     }),
-    (Syscall::N_exit_group, |_, a| unsafe {
-        patina_raw_exit_group(a[0] as c_int)
+    (Syscall::N_exit_group, |_, a| {
+        crate::thread::signals::patina_raw_exit_group(a[0] as c_int)
     }),
     // ---- memory: the mapping rows go through the one mapping model (a file
     // mapping is a view of the file's page cache); the rest is process-local
@@ -465,31 +467,36 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_madvise, mem_passthrough),
     (Syscall::N_brk, mem_passthrough),
     (Syscall::N_mincore, mem_passthrough),
-    (Syscall::N_mlock, |_, a| unsafe {
-        patina_mlock(a[0] as usize, a[1] as usize, 0)
+    (Syscall::N_mlock, |_, a| {
+        crate::mem::patina_mlock(a[0] as usize, a[1] as usize, 0)
     }),
-    (Syscall::N_mlock2, |_, a| unsafe {
-        patina_mlock(a[0] as usize, a[1] as usize, a[2] as u32)
+    (Syscall::N_mlock2, |_, a| {
+        crate::mem::patina_mlock(a[0] as usize, a[1] as usize, a[2] as u32)
     }),
-    (Syscall::N_munlock, |_, a| unsafe {
-        patina_munlock(a[0] as usize, a[1] as usize)
+    (Syscall::N_munlock, |_, a| {
+        crate::mem::patina_munlock(a[0] as usize, a[1] as usize)
     }),
-    (Syscall::N_mlockall, |_, a| unsafe {
-        patina_mlockall(a[0] as c_int)
+    (Syscall::N_mlockall, |_, a| {
+        crate::mem::patina_mlockall(a[0] as c_int)
     }),
-    (Syscall::N_munlockall, |_, _| unsafe { patina_munlockall() }),
+    (Syscall::N_munlockall, |_, _| {
+        crate::mem::patina_munlockall()
+    }),
     // ---- resource limits: the virtual kernel's (`crate::mem`) ----
     (Syscall::N_getrlimit, |_, a| sys_getrlimit(a[0], a[1])),
     (Syscall::N_setrlimit, |_, a| sys_setrlimit(a[0], a[1])),
     (Syscall::N_prlimit64, |_, a| unsafe {
-        patina_prlimit(a[0] as c_int, a[1] as u32, a[2] as *const _, a[3] as *mut _)
+        crate::limits::patina_prlimit(a[0] as c_int, a[1] as u32, a[2] as *const _, a[3] as *mut _)
     }),
     (Syscall::N_remap_file_pages, mem_passthrough),
     (Syscall::N_memfd_create, |_, a| unsafe {
-        ret_i32(patina_memfd_create(a[0] as *const c_char, a[1] as u32))
+        ret_i32(crate::mem::patina_memfd_create(
+            a[0] as *const c_char,
+            a[1] as u32,
+        ))
     }),
-    (Syscall::N_memfd_secret, |_, a| unsafe {
-        ret_i32(patina_memfd_secret(a[0] as u32))
+    (Syscall::N_memfd_secret, |_, a| {
+        ret_i32(crate::mem::patina_memfd_secret(a[0] as u32))
     }),
     // ---- System V IPC: the one-process model (`thread::ipc`) ----
     (Syscall::N_shmget, |_, a| {
@@ -872,7 +879,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     // SAFETY (all five): the pointers are the guest's per each row's contract.
     (Syscall::N_copy_file_range, |_, a| {
         ret_isize(unsafe {
-            patina_copy_file_range(
+            crate::transfer::patina_copy_file_range(
                 arg_fd(a[0]) as c_int,
                 a[1] as *mut i64,
                 arg_fd(a[2]) as c_int,
@@ -884,7 +891,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     }),
     (Syscall::N_sendfile, |_, a| {
         ret_isize(unsafe {
-            patina_sendfile(
+            crate::transfer::patina_sendfile(
                 arg_fd(a[0]) as c_int,
                 arg_fd(a[1]) as c_int,
                 a[2] as *mut i64,
@@ -894,7 +901,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     }),
     (Syscall::N_splice, |_, a| {
         ret_isize(unsafe {
-            patina_splice(
+            crate::transfer::patina_splice(
                 arg_fd(a[0]) as c_int,
                 a[1] as *mut i64,
                 arg_fd(a[2]) as c_int,
@@ -905,48 +912,53 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
         })
     }),
     (Syscall::N_tee, |_, a| {
-        ret_isize(unsafe {
-            patina_tee(
-                arg_fd(a[0]) as c_int,
-                arg_fd(a[1]) as c_int,
-                a[2] as usize,
-                a[3] as u32,
-            )
-        })
+        ret_isize(crate::transfer::patina_tee(
+            arg_fd(a[0]) as c_int,
+            arg_fd(a[1]) as c_int,
+            a[2] as usize,
+            a[3] as u32,
+        ))
     }),
     (Syscall::N_vmsplice, |_, a| {
         ret_isize(unsafe {
-            patina_vmsplice(
+            crate::transfer::patina_vmsplice(
                 arg_fd(a[0]) as c_int,
-                a[1] as *const c_void,
+                (a[1] as *const c_void).cast(),
                 a[2] as i64,
                 a[3] as u32,
             )
         })
     }),
     // ---- page-cache advice and writeback ----
-    // SAFETY (all five): plain runtime entries with no pointers.
-    (Syscall::N_sync, |_, _| ret_i32(unsafe { patina_sync() })),
+    (
+        Syscall::N_sync,
+        |_, _| ret_i32(crate::advice::patina_sync()),
+    ),
     (Syscall::N_syncfs, |_, a| {
-        ret_i32(unsafe { patina_syncfs(arg_fd(a[0]) as c_int) })
+        ret_i32(crate::advice::patina_syncfs(arg_fd(a[0]) as c_int))
     }),
     (Syscall::N_sync_file_range, |_, a| {
-        ret_i32(unsafe {
-            patina_sync_file_range(arg_fd(a[0]) as c_int, a[1] as i64, a[2] as i64, a[3] as u32)
-        })
+        ret_i32(crate::advice::patina_sync_file_range(
+            arg_fd(a[0]) as c_int,
+            a[1] as i64,
+            a[2] as i64,
+            a[3] as u32,
+        ))
     }),
     (Syscall::N_readahead, |_, a| {
-        ret_i32(unsafe { patina_readahead(arg_fd(a[0]) as c_int, a[1] as i64, a[2] as usize) })
+        ret_i32(crate::advice::patina_readahead(
+            arg_fd(a[0]) as c_int,
+            a[1] as i64,
+            a[2] as usize,
+        ))
     }),
     (Syscall::N_fadvise64, |_, a| {
-        ret_i32(unsafe {
-            patina_fadvise(
-                arg_fd(a[0]) as c_int,
-                a[1] as i64,
-                a[2] as i64,
-                a[3] as c_int,
-            )
-        })
+        ret_i32(crate::advice::patina_fadvise(
+            arg_fd(a[0]) as c_int,
+            a[1] as i64,
+            a[2] as i64,
+            a[3] as c_int,
+        ))
     }),
     (Syscall::N_cachestat, |_, a| {
         crate::advice::cachestat(

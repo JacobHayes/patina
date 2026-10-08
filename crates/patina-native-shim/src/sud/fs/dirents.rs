@@ -1,5 +1,7 @@
 //! File-handle and directory-entry syscall encoding.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 // ---- name_to_handle_at ----
@@ -203,10 +205,9 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
         // open, so a later `chmod` cannot break a walk under way and an `O_PATH`
         // descriptor (which opened nothing) cannot iterate at all.
         // SAFETY: `snapshot` is writable local storage.
-        let rc = unsafe { patina_read_dir(fd, &mut snapshot) };
+        let rc = unsafe { crate::fs::patina_read_dir(fd, &mut snapshot) };
         if rc != 0 {
-            // SAFETY: plain thread-local read.
-            return -(unsafe { patina_errno() } as i64);
+            return -(crate::environment::patina_errno() as i64);
         }
         dir.snapshot = snapshot as usize;
         // Resume at the position: skip the entries before it.
@@ -216,7 +217,7 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
         for _ in 0..dir.position {
             // SAFETY: `snapshot` is the live box; `name` is writable for its length.
             let rc = unsafe {
-                patina_read_dir_next(
+                crate::fs::patina_read_dir_next(
                     snapshot,
                     name.as_mut_ptr() as *mut c_char,
                     name.len(),
@@ -242,7 +243,7 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
             let (mut kind, mut ino) = (0u32, 0u64);
             // SAFETY: `snapshot` is the live box; `buf` is writable for its length.
             let rc = unsafe {
-                patina_read_dir_next(
+                crate::fs::patina_read_dir_next(
                     snapshot,
                     buf.as_mut_ptr() as *mut c_char,
                     buf.len(),
@@ -267,8 +268,7 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
                     if written > 0 {
                         break;
                     }
-                    // SAFETY: plain thread-local read.
-                    return -(unsafe { patina_errno() } as i64);
+                    return -(crate::environment::patina_errno() as i64);
                 }
             }
         };

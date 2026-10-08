@@ -18,6 +18,8 @@
 //! buffer, as glibc's does, so a guest mixing `readdir(d)` with a raw
 //! `getdents64(dirfd(d))` reads one cursor.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 /// The directory-iteration snapshot behind a directory fd. The snapshot pointer
@@ -55,8 +57,7 @@ pub(super) fn fd_kind(fd: i64) -> Option<c_int> {
     if fd < 0 || fd > c_int::MAX as i64 {
         return None;
     }
-    // SAFETY: a plain table lookup; no pointers.
-    let kind = unsafe { patina_fd_kind(fd as c_int) };
+    let kind = crate::fd::patina_fd_kind(fd as c_int);
     (kind >= 0).then_some(kind)
 }
 
@@ -276,7 +277,7 @@ pub(super) fn sys_openat2(dirfd: i64, path: u64, how: u64, size: u64) -> i64 {
     }
     // SAFETY: `path` is the guest's NUL-terminated string pointer.
     ret_i32(unsafe {
-        patina_openat2(
+        crate::fs::patina_openat2(
             dirfd as c_int,
             path,
             openat_patina_flags(flags),
@@ -301,7 +302,7 @@ pub(super) fn sys_openat(dirfd: i64, path: u64, flags: u64, mode: u64) -> i64 {
     };
     // SAFETY: `path` is the guest's NUL-terminated string pointer.
     ret_i32(unsafe {
-        patina_openat(
+        crate::fs::patina_openat(
             dirfd as c_int,
             path,
             openat_patina_flags(flags),
@@ -321,7 +322,7 @@ pub(super) fn sys_openat(dirfd: i64, path: u64, flags: u64, mode: u64) -> i64 {
 pub(crate) fn release_dir_iteration(fd: c_int) {
     if let Some(iteration) = DIR_ITERATIONS.lock().unwrap().remove(&fd) {
         // SAFETY: `snapshot` is null or the live `patina_read_dir` box for this fd.
-        unsafe { patina_read_dir_free(iteration.snapshot as *mut c_void) };
+        unsafe { crate::fs::patina_read_dir_free(iteration.snapshot as *mut c_void) };
     }
 }
 
@@ -351,7 +352,7 @@ pub(crate) fn seek_dir_iteration(fd: c_int, offset: i64, whence: u32) -> Option<
         },
     ) {
         // SAFETY: `snapshot` is null or the live `patina_read_dir` box for this fd.
-        unsafe { patina_read_dir_free(dir.snapshot as *mut c_void) };
+        unsafe { crate::fs::patina_read_dir_free(dir.snapshot as *mut c_void) };
     }
     Some(target)
 }

@@ -1,5 +1,7 @@
 //! Filesystem metadata and stat-family syscall encoding.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 // ---- Metadata (fstat / newfstatat / statx) ----
@@ -154,10 +156,9 @@ impl KernelStat {
 pub(in crate::sud) fn fd_stat_values(fd: c_int) -> Result<StatValues, i64> {
     let mut v = empty_metadata();
     // SAFETY: the out-pointer is writable local storage.
-    let rc = unsafe { patina_fd_metadata_full(fd, &mut v) };
+    let rc = unsafe { crate::fs::patina_fd_metadata_full(fd, &mut v) };
     if rc != 0 {
-        // SAFETY: plain thread-local read.
-        return Err(-(unsafe { patina_errno() } as i64));
+        return Err(-(crate::environment::patina_errno() as i64));
     }
     Ok(v)
 }
@@ -172,10 +173,9 @@ pub(in crate::sud) fn path_stat_values(
     let path = guest_path(path)?;
     let mut v = empty_metadata();
     // SAFETY: `path` is a valid guest C string; the out-pointer is local storage.
-    let rc = unsafe { patina_metadata_at(dirfd as c_int, path, flags, &mut v) };
+    let rc = unsafe { crate::fs::patina_metadata_at(dirfd as c_int, path, flags, &mut v) };
     if rc != 0 {
-        // SAFETY: plain thread-local read.
-        return Err(-(unsafe { patina_errno() } as i64));
+        return Err(-(crate::environment::patina_errno() as i64));
     }
     Ok(v)
 }
@@ -344,7 +344,7 @@ pub(in crate::sud) fn sys_statfs(path: u64, buf: u64) -> i64 {
         Err(errno) => return errno,
     };
     // SAFETY: `path` is a guest C string; `buf` the guest's `struct statfs`.
-    ret_i32(unsafe { patina_statfs(path, buf as *mut c_void) })
+    ret_i32(unsafe { crate::volume::patina_statfs(path, (buf as *mut c_void).cast()) })
 }
 
 /// `fstatfs(2)`.
@@ -353,5 +353,5 @@ pub(in crate::sud) fn sys_fstatfs(fd: i64, buf: u64) -> i64 {
         return err;
     }
     // SAFETY: `buf` is the guest's `struct statfs` storage.
-    ret_i32(unsafe { patina_fstatfs(fd as c_int, buf as *mut c_void) })
+    ret_i32(unsafe { crate::volume::patina_fstatfs(fd as c_int, (buf as *mut c_void).cast()) })
 }

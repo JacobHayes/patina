@@ -4,6 +4,8 @@
 //! `adjtimex`/`clock_adjtime`. Every clock id is decoded once, in
 //! `crate::clocks`, which the C interposers call too.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 pub(super) fn sys_clock_gettime(clock: u64, out: *mut Timespec) -> i64 {
@@ -73,13 +75,15 @@ pub(super) fn sys_nanosleep(req: *const Timespec, rem: *mut Timespec) -> i64 {
     };
     let mut now: u64 = 0;
     // SAFETY: local storage.
-    let rc = unsafe { patina_clock_now(PATINA_CLOCK_MONOTONIC, &mut now) };
+    let rc = unsafe { crate::time_abi::patina_clock_now(PATINA_CLOCK_MONOTONIC, &mut now) };
     if rc != 0 {
         return ret_i32(rc);
     }
     let deadline = now.saturating_add(rel);
     // SAFETY: no pointers.
-    ret_i32(unsafe { patina_sleep_until_remaining(PATINA_CLOCK_MONOTONIC, deadline, rem.cast()) })
+    ret_i32(unsafe {
+        crate::time_abi::patina_sleep_until_remaining(PATINA_CLOCK_MONOTONIC, deadline, rem.cast())
+    })
 }
 
 pub(super) fn sys_clock_nanosleep(

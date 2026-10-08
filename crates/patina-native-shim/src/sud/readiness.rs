@@ -2,24 +2,25 @@
 //! `epoll_pwait*`), `eventfd2`, `ppoll` and `pselect6` over the same reactor
 //! core. The x86_64-only forms live in `x86_64.rs` or alias these rows.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 // ---- Readiness reactor (epoll) + eventfd ----
 
 pub(super) fn sys_epoll_create1(flags: u64) -> i64 {
-    // SAFETY: no pointers.
-    ret_i32(unsafe { patina_epoll_create1(flags as c_int) })
+    ret_i32(crate::thread::epoll::patina_epoll_create1(flags as c_int))
 }
 
 pub(super) fn sys_epoll_ctl(epfd: i64, op: i64, fd: i64, event: u64) -> i64 {
     // SAFETY: `event` is a guest `struct epoll_event` for ADD/MOD (NULL for DEL,
     // which the entry tolerates).
     ret_i32(unsafe {
-        patina_epoll_ctl(
+        crate::thread::epoll::patina_epoll_ctl(
             epfd as c_int,
             op as c_int,
             fd as c_int,
-            event as *const c_void,
+            (event as *const c_void).cast(),
         )
     })
 }
@@ -35,6 +36,9 @@ pub(super) fn sys_epoll_pwait(
     if sigmask != 0 && sigsetsize != 8 {
         return -EINVAL;
     }
+
+    // SAFETY: the event buffer and optional signal mask are guest pointers;
+    // the entry copies them through `uaccess`.
     unsafe {
         crate::thread::readiness::patina_epoll_wait_masked(
             epfd as i32,
@@ -80,8 +84,10 @@ pub(super) fn sys_epoll_pwait2(
 }
 
 pub(super) fn sys_eventfd2(initval: u64, flags: i64) -> i64 {
-    // SAFETY: no pointers.
-    ret_i32(unsafe { patina_eventfd(initval as u32, flags as c_int) })
+    ret_i32(crate::thread::patina_eventfd(
+        initval as u32,
+        flags as c_int,
+    ))
 }
 
 /// The unslept time a `ppoll`/`pselect6` writes back to its non-NULL
@@ -125,6 +131,8 @@ pub(super) fn sys_ppoll(fds: u64, nfds: u64, timeout: u64, sigmask: u64, sigsets
         return -EINVAL;
     }
     let mut remaining = timeout.unwrap_or(0);
+    // SAFETY: `fds` and `sigmask` are guest pointers checked and copied by
+    // `patina_poll`; `remaining` is local storage.
     let rc = unsafe {
         crate::thread::readiness::patina_poll(
             fds as *mut _,
@@ -187,6 +195,8 @@ pub(super) fn sys_select(
     }
     let mask = pair[0] as *const u64;
     let mut remaining = nanos.max(0) as u64;
+    // SAFETY: the sets and mask are guest pointers checked and copied by
+    // `patina_select`; `remaining` is local storage.
     let rc = unsafe {
         crate::thread::readiness::patina_select(
             nfds as i32,

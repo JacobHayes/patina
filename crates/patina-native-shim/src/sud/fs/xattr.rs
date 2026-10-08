@@ -1,5 +1,7 @@
 //! Extended-attribute syscall handling.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 // ---- extended attributes ----
@@ -23,7 +25,7 @@ pub(in crate::sud) fn sys_getxattr(
 ) -> i64 {
     // SAFETY: guest pointers per the getxattr(2) contract.
     ret_isize(unsafe {
-        patina_getxattr(
+        crate::xattr::patina_getxattr(
             -1,
             path as *const c_char,
             xattr_by(follow),
@@ -37,7 +39,7 @@ pub(in crate::sud) fn sys_getxattr(
 pub(in crate::sud) fn sys_fgetxattr(fd: i64, name: u64, value: u64, size: u64) -> i64 {
     // SAFETY: guest pointers per the fgetxattr(2) contract.
     ret_isize(unsafe {
-        patina_getxattr(
+        crate::xattr::patina_getxattr(
             fd as c_int,
             std::ptr::null(),
             crate::xattr::XATTR_BY_FD,
@@ -51,7 +53,7 @@ pub(in crate::sud) fn sys_fgetxattr(fd: i64, name: u64, value: u64, size: u64) -
 pub(in crate::sud) fn sys_listxattr(path: u64, list: u64, size: u64, follow: bool) -> i64 {
     // SAFETY: guest pointers per the listxattr(2) contract.
     ret_isize(unsafe {
-        patina_listxattr(
+        crate::xattr::patina_listxattr(
             -1,
             path as *const c_char,
             xattr_by(follow),
@@ -64,7 +66,7 @@ pub(in crate::sud) fn sys_listxattr(path: u64, list: u64, size: u64, follow: boo
 pub(in crate::sud) fn sys_flistxattr(fd: i64, list: u64, size: u64) -> i64 {
     // SAFETY: guest pointers per the flistxattr(2) contract.
     ret_isize(unsafe {
-        patina_listxattr(
+        crate::xattr::patina_listxattr(
             fd as c_int,
             std::ptr::null(),
             crate::xattr::XATTR_BY_FD,
@@ -84,7 +86,7 @@ pub(in crate::sud) fn sys_setxattr(
 ) -> i64 {
     // SAFETY: guest pointers per the setxattr(2) contract.
     ret_i32(unsafe {
-        patina_setxattr(
+        crate::xattr::patina_setxattr(
             -1,
             path as *const c_char,
             xattr_by(follow),
@@ -99,7 +101,7 @@ pub(in crate::sud) fn sys_setxattr(
 pub(in crate::sud) fn sys_fsetxattr(fd: i64, name: u64, value: u64, size: u64, flags: u64) -> i64 {
     // SAFETY: guest pointers per the fsetxattr(2) contract.
     ret_i32(unsafe {
-        patina_setxattr(
+        crate::xattr::patina_setxattr(
             fd as c_int,
             std::ptr::null(),
             crate::xattr::XATTR_BY_FD,
@@ -114,7 +116,7 @@ pub(in crate::sud) fn sys_fsetxattr(fd: i64, name: u64, value: u64, size: u64, f
 pub(in crate::sud) fn sys_removexattr(path: u64, name: u64, follow: bool) -> i64 {
     // SAFETY: guest pointers per the removexattr(2) contract.
     ret_i32(unsafe {
-        patina_removexattr(
+        crate::xattr::patina_removexattr(
             -1,
             path as *const c_char,
             xattr_by(follow),
@@ -126,7 +128,7 @@ pub(in crate::sud) fn sys_removexattr(path: u64, name: u64, follow: bool) -> i64
 pub(in crate::sud) fn sys_fremovexattr(fd: i64, name: u64) -> i64 {
     // SAFETY: guest pointers per the fremovexattr(2) contract.
     ret_i32(unsafe {
-        patina_removexattr(
+        crate::xattr::patina_removexattr(
             fd as c_int,
             std::ptr::null(),
             crate::xattr::XATTR_BY_FD,

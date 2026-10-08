@@ -8,6 +8,8 @@
 //! argument re-shuffles of a modern row (`open`, `stat`, `pipe`, `epoll_wait`,
 //! …) bind their modern handler directly in `BINDINGS`.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 unsafe extern "C" {
@@ -57,6 +59,7 @@ pub(super) fn sys_poll(fds: u64, nfds: u64, timeout_ms: i64) -> i64 {
     };
     // SAFETY: `fds` is the guest's array of `nfds` pollfd entries; the entry
     // checks it before reading.
+
     unsafe {
         crate::thread::readiness::patina_poll(
             fds as *mut _,
@@ -105,10 +108,13 @@ pub(super) fn sys_futimesat(dirfd: i64, path: u64, times: u64) -> i64 {
         if let Some(err) = fd_out_of_range(dirfd) {
             return err;
         }
-        // SAFETY: no pointers.
-        return ret_i32(unsafe {
-            patina_futimens(dirfd as c_int, atime.0, atime.1, mtime.0, mtime.1)
-        });
+        return ret_i32(crate::fs::patina_futimens(
+            dirfd as c_int,
+            atime.0,
+            atime.1,
+            mtime.0,
+            mtime.1,
+        ));
     }
     let path = match guest_path(path) {
         Ok(path) => path,
@@ -116,7 +122,7 @@ pub(super) fn sys_futimesat(dirfd: i64, path: u64, times: u64) -> i64 {
     };
     // SAFETY: `path` is a valid NUL-terminated guest string pointer.
     ret_i32(unsafe {
-        patina_utimensat(dirfd as c_int, path, 0, atime.0, atime.1, mtime.0, mtime.1)
+        crate::fs::patina_utimensat(dirfd as c_int, path, 0, atime.0, atime.1, mtime.0, mtime.1)
     })
 }
 
@@ -137,7 +143,7 @@ pub(super) fn sys_utime(path: u64, times: u64) -> i64 {
     };
     // SAFETY: `path` is a valid NUL-terminated guest string pointer.
     ret_i32(unsafe {
-        patina_utimensat(
+        crate::fs::patina_utimensat(
             AT_FDCWD as c_int,
             path,
             0,

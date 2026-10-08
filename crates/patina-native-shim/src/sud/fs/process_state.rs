@@ -1,5 +1,7 @@
 //! Working-directory, umask, timestamp, ownership, and size syscalls.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 // ---- The working directory and the umask ----
@@ -16,10 +18,9 @@ pub(in crate::sud) fn sys_getcwd(buf: u64, size: u64) -> i64 {
         return -ERANGE;
     }
     // SAFETY: `buf` is the guest's buffer, writable for `size` bytes.
-    let length = unsafe { patina_getcwd(buf as *mut c_char, size as usize) };
+    let length = unsafe { crate::fs::patina_getcwd(buf as *mut c_char, size as usize) };
     if length < 0 {
-        // SAFETY: plain thread-local read.
-        return -(unsafe { patina_errno() } as i64);
+        return -(crate::environment::patina_errno() as i64);
     }
     length as i64 + 1
 }
@@ -31,7 +32,7 @@ pub(in crate::sud) fn sys_chdir(path: u64) -> i64 {
         Err(errno) => return errno,
     };
     // SAFETY: `path` is a valid NUL-terminated guest string pointer.
-    ret_i32(unsafe { patina_chdir(AT_FDCWD as c_int, path) })
+    ret_i32(unsafe { crate::fs::patina_chdir(AT_FDCWD as c_int, path) })
 }
 
 /// `fchdir(2)`.
@@ -39,14 +40,12 @@ pub(in crate::sud) fn sys_fchdir(fd: i64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    // SAFETY: a plain runtime call with no pointers.
-    ret_i32(unsafe { patina_fchdir(fd as c_int) })
+    ret_i32(crate::fs::patina_fchdir(fd as c_int))
 }
 
 /// `umask(2)`: never fails; answers the previous mask.
 pub(in crate::sud) fn sys_umask(mask: u64) -> i64 {
-    // SAFETY: a plain runtime call with no pointers.
-    i64::from(unsafe { patina_umask(mask as u32) })
+    i64::from(crate::fs::patina_umask(mask as u32))
 }
 
 // ---- Timestamps, ownership and sizes ----
@@ -121,10 +120,13 @@ pub(in crate::sud) fn sys_utimensat(dirfd: i64, path: u64, times: u64, flags: u6
         if let Some(err) = fd_out_of_range(dirfd) {
             return err;
         }
-        // SAFETY: no pointers.
-        return ret_i32(unsafe {
-            patina_futimens(dirfd as c_int, atime.0, atime.1, mtime.0, mtime.1)
-        });
+        return ret_i32(crate::fs::patina_futimens(
+            dirfd as c_int,
+            atime.0,
+            atime.1,
+            mtime.0,
+            mtime.1,
+        ));
     }
     let path = match guest_path(path) {
         Ok(path) => path,
@@ -132,7 +134,7 @@ pub(in crate::sud) fn sys_utimensat(dirfd: i64, path: u64, times: u64, flags: u6
     };
     // SAFETY: `path` is a valid NUL-terminated guest string pointer.
     ret_i32(unsafe {
-        patina_utimensat(
+        crate::fs::patina_utimensat(
             dirfd as c_int,
             path,
             resolve_flags(flags),
@@ -158,7 +160,7 @@ pub(in crate::sud) fn sys_fchownat(dirfd: i64, path: u64, uid: u64, gid: u64, fl
     };
     // SAFETY: `path` is a valid NUL-terminated guest string pointer.
     ret_i32(unsafe {
-        patina_chown(
+        crate::fs::patina_chown(
             dirfd as c_int,
             path,
             resolve_flags(flags),
@@ -173,8 +175,11 @@ pub(in crate::sud) fn sys_fchown(fd: i64, uid: u64, gid: u64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    // SAFETY: no pointers.
-    ret_i32(unsafe { patina_fchown(fd as c_int, uid as u32, gid as u32) })
+    ret_i32(crate::fs::patina_fchown(
+        fd as c_int,
+        uid as u32,
+        gid as u32,
+    ))
 }
 
 /// `truncate(2)`: by name, following a trailing symlink.
@@ -184,7 +189,7 @@ pub(in crate::sud) fn sys_truncate(path: u64, length: i64) -> i64 {
         Err(errno) => return errno,
     };
     // SAFETY: `path` is a valid NUL-terminated guest string pointer.
-    ret_i32(unsafe { patina_truncate(AT_FDCWD as c_int, path, length) })
+    ret_i32(unsafe { crate::fs::patina_truncate(AT_FDCWD as c_int, path, length) })
 }
 
 /// `fallocate(2)`: the mode word is the kernel's; the one entry decodes it.
@@ -192,6 +197,10 @@ pub(in crate::sud) fn sys_fallocate(fd: i64, mode: u64, offset: i64, length: i64
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    // SAFETY: no pointers.
-    ret_i32(unsafe { patina_fallocate(fd as c_int, mode as u32, offset, length) })
+    ret_i32(crate::fs::patina_fallocate(
+        fd as c_int,
+        mode as u32,
+        offset,
+        length,
+    ))
 }

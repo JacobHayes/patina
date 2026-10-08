@@ -6,6 +6,8 @@
 //! entry dispatches on what it names — so nothing here (and nothing in the C
 //! layer) decides by descriptor class, and the two doors cannot drift.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 /// Guard the fd against the negative/oversized values that cannot be Patina
@@ -23,7 +25,7 @@ pub(super) fn sys_read(fd: i64, buf: u64, count: u64) -> i64 {
         return err;
     }
     // SAFETY: `buf`/`count` describe a guest buffer per the read(2) contract.
-    ret_isize(unsafe { patina_read(fd as c_int, buf as *mut c_void, count as usize) })
+    ret_isize(unsafe { crate::fd::patina_read(fd as c_int, buf as *mut c_void, count as usize) })
 }
 
 pub(super) fn sys_write(fd: i64, buf: u64, count: u64) -> i64 {
@@ -31,15 +33,14 @@ pub(super) fn sys_write(fd: i64, buf: u64, count: u64) -> i64 {
         return err;
     }
     // SAFETY: `buf`/`count` describe a guest buffer per the write(2) contract.
-    ret_isize(unsafe { patina_write(fd as c_int, buf as *const c_void, count as usize) })
+    ret_isize(unsafe { crate::fd::patina_write(fd as c_int, buf as *const c_void, count as usize) })
 }
 
 pub(super) fn sys_close(fd: i64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    // SAFETY: no pointers.
-    ret_i32(unsafe { patina_close(fd as c_int) })
+    ret_i32(crate::fd::patina_close(fd as c_int))
 }
 
 pub(super) fn sys_lseek(fd: i64, offset: i64, whence: u64) -> i64 {
@@ -47,11 +48,9 @@ pub(super) fn sys_lseek(fd: i64, offset: i64, whence: u64) -> i64 {
         return err;
     }
     // patina_seek returns the new offset or -1; shape it to the raw convention.
-    // SAFETY: no pointers.
-    let result = unsafe { patina_seek(fd as c_int, offset, whence as u32) };
+    let result = crate::fd::patina_seek(fd as c_int, offset, whence as u32);
     if result < 0 {
-        // SAFETY: plain thread-local read.
-        -(unsafe { patina_errno() } as i64)
+        -(crate::environment::patina_errno() as i64)
     } else {
         result
     }
@@ -64,7 +63,9 @@ pub(super) fn sys_pread(fd: i64, buf: u64, count: u64, offset: i64) -> i64 {
         return err;
     }
     // SAFETY: `buf`/`count` describe a guest buffer per the pread(2) contract.
-    ret_isize(unsafe { patina_pread(fd as c_int, buf as *mut c_void, count as usize, offset) })
+    ret_isize(unsafe {
+        crate::fd::patina_pread(fd as c_int, buf as *mut c_void, count as usize, offset)
+    })
 }
 
 pub(super) fn sys_pwrite(fd: i64, buf: u64, count: u64, offset: i64) -> i64 {
@@ -72,7 +73,9 @@ pub(super) fn sys_pwrite(fd: i64, buf: u64, count: u64, offset: i64) -> i64 {
         return err;
     }
     // SAFETY: `buf`/`count` describe a guest buffer per the pwrite(2) contract.
-    ret_isize(unsafe { patina_pwrite(fd as c_int, buf as *const c_void, count as usize, offset) })
+    ret_isize(unsafe {
+        crate::fd::patina_pwrite(fd as c_int, buf as *const c_void, count as usize, offset)
+    })
 }
 
 /// `readv`/`writev` and the `*v2` rows at position -1: the vector, the
@@ -84,9 +87,9 @@ pub(super) fn sys_readv(fd: i64, iov: u64, count: u64, flags: u64) -> i64 {
     }
     // SAFETY: `iov`/`count` describe the guest's vector per the readv(2) contract.
     ret_isize(unsafe {
-        patina_readv(
+        crate::iov::patina_readv(
             fd as c_int,
-            iov as *const c_void,
+            (iov as *const c_void).cast(),
             count as i64,
             flags as i32,
         )
@@ -99,9 +102,9 @@ pub(super) fn sys_writev(fd: i64, iov: u64, count: u64, flags: u64) -> i64 {
     }
     // SAFETY: `iov`/`count` describe the guest's vector per the writev(2) contract.
     ret_isize(unsafe {
-        patina_writev(
+        crate::iov::patina_writev(
             fd as c_int,
-            iov as *const c_void,
+            (iov as *const c_void).cast(),
             count as i64,
             flags as i32,
         )
@@ -114,9 +117,9 @@ pub(super) fn sys_writev(fd: i64, iov: u64, count: u64, flags: u64) -> i64 {
 pub(super) fn sys_preadv(fd: i64, iov: u64, count: u64, offset: i64, flags: u64) -> i64 {
     // SAFETY: as `sys_readv`.
     ret_isize(unsafe {
-        patina_preadv(
+        crate::iov::patina_preadv(
             fd as c_int,
-            iov as *const c_void,
+            (iov as *const c_void).cast(),
             count as i64,
             offset,
             flags as i32,
@@ -127,9 +130,9 @@ pub(super) fn sys_preadv(fd: i64, iov: u64, count: u64, offset: i64, flags: u64)
 pub(super) fn sys_pwritev(fd: i64, iov: u64, count: u64, offset: i64, flags: u64) -> i64 {
     // SAFETY: as `sys_writev`.
     ret_isize(unsafe {
-        patina_pwritev(
+        crate::iov::patina_pwritev(
             fd as c_int,
-            iov as *const c_void,
+            (iov as *const c_void).cast(),
             count as i64,
             offset,
             flags as i32,
@@ -161,8 +164,7 @@ pub(super) fn sys_fsync(fd: i64) -> i64 {
     }
     // A directory fd IS an ordinary deterministic-filesystem fd, so `fsync` on it
     // is the crash model's namespace-durability barrier with no special case.
-    // SAFETY: no pointers.
-    ret_i32(unsafe { patina_fsync(fd as c_int) })
+    ret_i32(crate::fd::patina_fsync(fd as c_int))
 }
 
 pub(super) fn sys_ftruncate(fd: i64, length: i64) -> i64 {
@@ -172,16 +174,14 @@ pub(super) fn sys_ftruncate(fd: i64, length: i64) -> i64 {
     if length < 0 {
         return -EINVAL;
     }
-    // SAFETY: no pointers.
-    ret_i32(unsafe { patina_set_len(fd as c_int, length as u64) })
+    ret_i32(crate::fd::patina_set_len(fd as c_int, length as u64))
 }
 
 pub(super) fn sys_flock(fd: i64, operation: i64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    // SAFETY: no pointers.
-    ret_i32(unsafe { patina_flock(fd as c_int, operation as c_int) })
+    ret_i32(crate::fd::patina_flock(fd as c_int, operation as c_int))
 }
 
 // ---- Duplication and closing ----
@@ -190,8 +190,7 @@ pub(super) fn sys_dup(fd: i64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    // SAFETY: no pointers.
-    ret_i32(unsafe { patina_dup(fd as c_int) })
+    ret_i32(crate::fd::patina_dup(fd as c_int))
 }
 
 /// `dup3(2)`: the kernel refuses a flag other than `O_CLOEXEC` before it looks
@@ -205,14 +204,20 @@ pub(super) fn sys_dup3(oldfd: i64, newfd: i64, flags: u64) -> i64 {
         return err;
     }
     let newfd = c_int::try_from(newfd).unwrap_or(-1);
-    // SAFETY: no pointers.
-    ret_i32(unsafe { patina_dup3(oldfd as c_int, newfd, c_int::from(flags & O_CLOEXEC != 0)) })
+    ret_i32(crate::fd::patina_dup3(
+        oldfd as c_int,
+        newfd,
+        c_int::from(flags & O_CLOEXEC != 0),
+    ))
 }
 
 /// `close_range(2)`: the kernel reads `first`/`last` as unsigned ints.
 pub(super) fn sys_close_range(first: u64, last: u64, flags: u64) -> i64 {
-    // SAFETY: no pointers.
-    ret_i32(unsafe { patina_close_range(first as u32, last as u32, flags as u32) })
+    ret_i32(crate::fd::patina_close_range(
+        first as u32,
+        last as u32,
+        flags as u32,
+    ))
 }
 
 // ---- fcntl / ioctl ----
@@ -274,55 +279,52 @@ pub(super) fn sys_fcntl(fd: i64, command: u64, arg: u64) -> i64 {
     let cfd = fd as c_int;
     match command {
         F_GETFD => {
-            // SAFETY: no pointers.
-            let cloexec = unsafe { patina_fd_getfd(cfd) };
+            let cloexec = crate::fd::patina_fd_getfd(cfd);
             if cloexec < 0 {
                 return ret_i32(cloexec);
             }
             if cloexec != 0 { FD_CLOEXEC } else { 0 }
         }
-        // SAFETY: no pointers.
-        F_SETFD => {
-            ret_i32(unsafe { patina_fd_setfd(cfd, c_int::from(arg & FD_CLOEXEC as u64 != 0)) })
-        }
+        F_SETFD => ret_i32(crate::fd::patina_fd_setfd(
+            cfd,
+            c_int::from(arg & FD_CLOEXEC as u64 != 0),
+        )),
         F_GETFL => {
-            // SAFETY: no pointers.
-            let status = unsafe { patina_fd_getfl(cfd) };
+            let status = crate::fd::patina_fd_getfl(cfd);
             if status < 0 {
                 return ret_i32(status);
             }
             getfl_to_kernel(status as u32)
         }
-        // SAFETY: no pointers.
-        F_SETFL => ret_i32(unsafe { patina_fd_setfl(cfd, setfl_from_kernel(arg)) }),
-        // SAFETY: no pointers.
-        F_DUPFD => ret_i32(unsafe { patina_dupfd(cfd, arg as c_int, 0) }),
-        // SAFETY: no pointers.
-        F_DUPFD_CLOEXEC => ret_i32(unsafe { patina_dupfd(cfd, arg as c_int, 1) }),
-        // SAFETY: no pointers.
-        F_ADD_SEALS => ret_i32(unsafe { patina_add_seals(cfd, arg as u32) }),
-        // SAFETY: no pointers.
-        F_GET_SEALS => ret_i32(unsafe { patina_get_seals(cfd) }),
-        // SAFETY: no pointers.
-        F_GETPIPE_SZ => ret_i32(unsafe { patina_pipe_size(cfd) }),
-        // SAFETY: no pointers.
-        F_SETPIPE_SZ => ret_i32(unsafe { patina_pipe_set_size(cfd, arg as c_int) }),
+        F_SETFL => ret_i32(crate::fd::patina_fd_setfl(cfd, setfl_from_kernel(arg))),
+        F_DUPFD => ret_i32(crate::fd::patina_dupfd(cfd, arg as c_int, 0)),
+        F_DUPFD_CLOEXEC => ret_i32(crate::fd::patina_dupfd(cfd, arg as c_int, 1)),
+        F_ADD_SEALS => ret_i32(crate::mem::patina_add_seals(cfd, arg as u32)),
+        F_GET_SEALS => ret_i32(crate::mem::patina_get_seals(cfd)),
+        F_GETPIPE_SZ => ret_i32(crate::thread::patina_pipe_size(cfd)),
+        F_SETPIPE_SZ => ret_i32(crate::thread::patina_pipe_set_size(cfd, arg as c_int)),
         // POSIX record locks and their OFD variants: the one entry the C fcntl
         // calls too, reading the guest's kernel-layout `struct flock`.
         F_GETLK | F_SETLK | F_SETLKW | F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW => {
             // SAFETY: `arg` is the guest's `struct flock` (or null) per the
             // fcntl(2) contract; the entry refuses a null one EFAULT.
-            ret_i32(unsafe { patina_record_lock(cfd, command as u32, arg as *mut PatinaFlock) })
+            ret_i32(unsafe {
+                crate::fd::patina_record_lock(cfd, command as u32, arg as *mut PatinaFlock)
+            })
         }
-        // SAFETY: no pointers.
-        F_SETOWN | F_SETOWN_EX | F_SETSIG => ret_i32(unsafe { patina_fcntl_owner(cfd) }),
-        // SAFETY: no pointer is read or written.
-        F_GETOWN | F_GETSIG => {
-            ret_i32(unsafe { patina_fcntl_owner_get(cfd, 0, std::ptr::null_mut()) })
-        }
-        // SAFETY: the entry writes the guest's `struct f_owner_ex` through
+        F_SETOWN | F_SETOWN_EX | F_SETSIG => ret_i32(crate::runtime::patina_fcntl_owner(cfd)),
+        F_GETOWN | F_GETSIG => ret_i32(crate::runtime::patina_fcntl_owner_get(
+            cfd,
+            0,
+            std::ptr::null_mut(),
+        )),
+        // The entry writes the guest's `struct f_owner_ex` through
         // `uaccess`, EFAULT for memory that cannot take it.
-        F_GETOWN_EX => ret_i32(unsafe { patina_fcntl_owner_get(cfd, 1, arg as *mut c_void) }),
+        F_GETOWN_EX => ret_i32(crate::runtime::patina_fcntl_owner_get(
+            cfd,
+            1,
+            arg as *mut c_void,
+        )),
         // An unknown command on an open descriptor is EINVAL; on a closed one
         // the kernel answers EBADF first (C parity).
         _ => {
@@ -342,7 +344,9 @@ pub(super) fn sys_ioctl(fd: i64, request: u64, arg: u64) -> i64 {
     }
     // The kernel reads the request as an `unsigned int`.
     // SAFETY: `arg` is the guest's argument for the request.
-    ret_i32(unsafe { patina_ioctl(fd as c_int, u64::from(request as u32), arg as *mut c_void) })
+    ret_i32(unsafe {
+        crate::ioctl::patina_ioctl(fd as c_int, u64::from(request as u32), arg as *mut c_void)
+    })
 }
 
 /// `pipe2(2)`: `O_NONBLOCK` and `O_CLOEXEC` are honored at creation, `O_DIRECT`
@@ -364,10 +368,10 @@ pub(super) fn sys_pipe2(fds_out: u64, flags: u64) -> i64 {
     let mut read_fd: c_int = 0;
     let mut write_fd: c_int = 0;
     // SAFETY: local writable storage for the pair.
-    let rc = unsafe { patina_pipe(&mut read_fd, &mut write_fd, nonblocking, cloexec) };
+    let rc =
+        unsafe { crate::thread::patina_pipe(&mut read_fd, &mut write_fd, nonblocking, cloexec) };
     if rc != 0 {
-        // SAFETY: plain thread-local read.
-        return -(unsafe { patina_errno() } as i64);
+        return -(crate::environment::patina_errno() as i64);
     }
     // SAFETY: `fds_out` is the guest's `int[2]`.
     unsafe {

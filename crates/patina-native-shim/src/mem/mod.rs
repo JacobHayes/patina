@@ -315,8 +315,6 @@ fn caching() -> bool {
 mod hooks;
 mod locks;
 mod mapping;
-#[cfg(patina_posix_exports)]
-pub(crate) use mapping::patina_mremap;
 mod segments;
 
 #[cfg(test)]
@@ -339,11 +337,9 @@ pub(crate) use segments::{
     set_policy,
 };
 
-#[cfg(patina_posix_exports)]
 pub(crate) use hooks::patina_msync;
-#[cfg(patina_posix_exports)]
 pub(crate) use locks::{patina_mlock, patina_mlockall, patina_munlock, patina_munlockall};
-#[cfg(patina_posix_exports)]
-pub(crate) use mapping::{patina_mmap, patina_mprotect, patina_munmap};
-#[cfg(patina_posix_exports)]
-pub(crate) use memfd::patina_memfd_create;
+pub(crate) use mapping::{patina_mmap, patina_mprotect, patina_mremap, patina_munmap};
+pub(crate) use memfd::{
+    patina_add_seals, patina_get_seals, patina_memfd_create, patina_memfd_secret,
+};

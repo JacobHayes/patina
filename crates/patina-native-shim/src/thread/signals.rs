@@ -413,14 +413,13 @@ use delivery::{fault_entered, install_host_action};
 #[cfg(any(test, patina_posix_exports))]
 pub(crate) use generation::patina_pthread_kill;
 pub use generation::patina_raw_exit_group;
-#[cfg(test)]
-use generation::patina_set_tid_address;
 #[cfg(patina_posix_exports)]
 pub(crate) use generation::patina_signal_reserved;
 pub(crate) use generation::{
     GenerationInfo, GenerationTarget, abort_through_kernel, generate_signal,
 };
 pub(super) use generation::{clear_tid, temporary_mask, with_mask, with_temporary_mask};
+pub(crate) use generation::{patina_raw_exit, patina_set_tid_address};
 #[cfg(test)]
 use mask::patina_signal_frame;
 use mask::{SEGV_UNKNOWN, containment_kept_unblocked, host, segv_bit, segv_blocked};

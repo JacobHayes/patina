@@ -1,5 +1,7 @@
 //! Directory namespace mutation and access syscalls.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 // ---- Directory namespace ops ----
@@ -10,7 +12,7 @@ pub(in crate::sud) fn sys_mkdirat(dirfd: i64, path: u64, mode: u64) -> i64 {
         Err(errno) => return errno,
     };
     // SAFETY: `path` is a valid NUL-terminated guest string pointer.
-    ret_i32(unsafe { patina_mkdir(dirfd as c_int, path, (mode & 0o7777) as u32) })
+    ret_i32(unsafe { crate::fs::patina_mkdir(dirfd as c_int, path, (mode & 0o7777) as u32) })
 }
 
 /// `mknodat(2)`, the only door a raw-syscall guest has to a FIFO, a socket
@@ -23,7 +25,7 @@ pub(in crate::sud) fn sys_mknodat(dirfd: i64, path: u64, mode: u64, device: u64)
         Err(errno) => return errno,
     };
     // SAFETY: `path` is a valid NUL-terminated guest string pointer.
-    ret_i32(unsafe { patina_mknod(dirfd as c_int, path, mode as u32, device as u32) })
+    ret_i32(unsafe { crate::fs::patina_mknod(dirfd as c_int, path, mode as u32, device as u32) })
 }
 
 pub(in crate::sud) fn sys_unlinkat(dirfd: i64, path: u64, flags: u64) -> i64 {
@@ -35,11 +37,12 @@ pub(in crate::sud) fn sys_unlinkat(dirfd: i64, path: u64, flags: u64) -> i64 {
         Ok(path) => path,
         Err(errno) => return errno,
     };
-    // SAFETY: `path` is a valid NUL-terminated guest string pointer.
     if flags & AT_REMOVEDIR != 0 {
-        ret_i32(unsafe { patina_rmdir(dirfd as c_int, path) })
+        // SAFETY: `path` is a valid NUL-terminated guest string pointer.
+        ret_i32(unsafe { crate::fs::patina_rmdir(dirfd as c_int, path) })
     } else {
-        ret_i32(unsafe { patina_unlink(dirfd as c_int, path) })
+        // SAFETY: as above.
+        ret_i32(unsafe { crate::fs::patina_unlink(dirfd as c_int, path) })
     }
 }
 
@@ -51,7 +54,7 @@ pub(in crate::sud) fn sys_symlinkat(target: u64, newdirfd: i64, linkpath: u64) -
         (Err(errno), _) | (_, Err(errno)) => return errno,
     };
     // SAFETY: both are valid NUL-terminated string pointers.
-    ret_i32(unsafe { patina_symlink(target, newdirfd as c_int, linkpath) })
+    ret_i32(unsafe { crate::fs::patina_symlink(target, newdirfd as c_int, linkpath) })
 }
 
 /// Existence / permission probe (`faccessat`, `faccessat2`, and the x86_64
@@ -97,7 +100,9 @@ pub(in crate::sud) fn sys_fchmodat(dirfd: i64, path: u64, mode: u64, flags: u64)
         Err(errno) => return errno,
     };
     // SAFETY: `path` is a valid NUL-terminated guest string pointer.
-    ret_i32(unsafe { patina_chmod(dirfd as c_int, path, mode as u32, resolve_flags(flags)) })
+    ret_i32(unsafe {
+        crate::fs::patina_chmod(dirfd as c_int, path, mode as u32, resolve_flags(flags))
+    })
 }
 
 /// Raw `fchmod` -> `patina_fchmod`. A descriptor already names the node, so
@@ -106,8 +111,7 @@ pub(in crate::sud) fn sys_fchmod(fd: i64, mode: u64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    // SAFETY: a plain runtime call with no pointers.
-    ret_i32(unsafe { patina_fchmod(fd as c_int, mode as u32) })
+    ret_i32(crate::fs::patina_fchmod(fd as c_int, mode as u32))
 }
 
 /// Raw `linkat`/`link` -> the same deterministic hard link the `patina_link`
@@ -133,7 +137,7 @@ pub(in crate::sud) fn sys_linkat(
     };
     // SAFETY: both are valid NUL-terminated string pointers.
     ret_i32(unsafe {
-        patina_link(
+        crate::fs::patina_link(
             olddirfd as c_int,
             oldpath,
             newdirfd as c_int,
@@ -158,7 +162,7 @@ pub(in crate::sud) fn sys_readlinkat(dirfd: i64, path: u64, buf: u64, bufsize: u
     };
     // SAFETY: `path` is valid; `buf` is writable for `bufsize`.
     ret_isize(unsafe {
-        patina_read_link(dirfd as c_int, path, buf as *mut c_char, bufsize as usize)
+        crate::fs::patina_read_link(dirfd as c_int, path, buf as *mut c_char, bufsize as usize)
     })
 }
 
@@ -177,7 +181,7 @@ pub(in crate::sud) fn sys_renameat(
     // judges them (`crate::patina_renameat2`).
     // SAFETY: both are valid NUL-terminated string pointers.
     ret_i32(unsafe {
-        patina_renameat2(
+        crate::fs::patina_renameat2(
             olddirfd as c_int,
             oldpath,
             newdirfd as c_int,
