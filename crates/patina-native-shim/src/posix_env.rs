@@ -1,17 +1,30 @@
 //! POSIX environment ownership, including the original stack and private control map.
 //! Guest pointers remain borrowed; replaced strings intentionally live forever,
 //! as libc getenv/putenv require. Only mutators take the scheduler's envlock.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use core::ffi::{c_char, c_int};
 use core::ptr::{self, null_mut};
 
-// Startup fields are written before guest threads run. ALLOCATED is accessed
-// under EnvLock; unlocked readers have libc's caller synchronization contract.
-static mut CONTROL: *mut *mut c_char = null_mut();
-static mut CAPTURED: bool = false;
-static mut HOST: *mut *mut c_char = null_mut();
-static mut HOST_COUNT: usize = 0;
-static mut ALLOCATED: *mut *mut c_char = null_mut();
-static mut ENV_LOCK: libc::pthread_mutex_t = libc::PTHREAD_MUTEX_INITIALIZER;
+// Startup fields are written before guest threads run. The allocated array is
+// accessed under EnvLock; unlocked readers have libc's caller synchronization contract.
+struct EnvironmentState {
+    control: *mut *mut c_char,
+    captured: bool,
+    host: *mut *mut c_char,
+    host_count: usize,
+    allocated: *mut *mut c_char,
+    lock: libc::pthread_mutex_t,
+}
+
+static mut STATE: EnvironmentState = EnvironmentState {
+    control: null_mut(),
+    captured: false,
+    host: null_mut(),
+    host_count: 0,
+    allocated: null_mut(),
+    lock: libc::PTHREAD_MUTEX_INITIALIZER,
+};
 
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
@@ -25,7 +38,7 @@ unsafe extern "C" {
 }
 
 unsafe fn array() -> *mut *mut c_char {
-    // SAFETY: process CRT storage remains live throughout startup and teardown.
+    // SAFETY: the CRT's environment pointer remains live through startup and teardown.
     unsafe {
         #[cfg(target_os = "linux")]
         {
@@ -42,8 +55,9 @@ unsafe fn array() -> *mut *mut c_char {
 /// Startup-only: `next` is the original, terminated stack envp array.
 #[cfg(target_os = "linux")]
 pub(crate) unsafe fn save_host(next: *mut *mut c_char) {
+    // SAFETY: startup supplies the original terminated stack array before guest threads run.
     unsafe {
-        HOST = next;
+        STATE.host = next;
     }
 }
 
@@ -52,6 +66,7 @@ pub(crate) unsafe fn save_host(next: *mut *mut c_char) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_environ_install(next: *mut *mut c_char) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller supplies a process-lifetime terminated array, or null for clearenv.
     unsafe {
         #[cfg(target_os = "linux")]
         {
@@ -76,26 +91,26 @@ fn fatal(message: &'static [u8]) -> ! {
 /// # Safety
 /// Called only during single-threaded CRT startup.
 pub(crate) unsafe fn capture_control_plane() {
-    // SAFETY: startup is single-threaded; original CRT arrays are terminated.
+    // SAFETY: startup is single-threaded and the original CRT arrays are terminated.
     unsafe {
-        if CAPTURED {
+        if STATE.captured {
             return;
         }
-        CAPTURED = true;
+        STATE.captured = true;
         #[cfg(target_os = "macos")]
         {
-            HOST = (*_NSGetArgv()).add(*_NSGetArgc() as usize + 1);
+            STATE.host = (*_NSGetArgv()).add(*_NSGetArgc() as usize + 1);
         }
-        if HOST.is_null() {
-            HOST = array();
+        if STATE.host.is_null() {
+            STATE.host = array();
         }
-        if HOST.is_null() {
+        if STATE.host.is_null() {
             return;
         }
         let mut kept = 0;
-        let mut entry = HOST;
+        let mut entry = STATE.host;
         while !(*entry).is_null() {
-            HOST_COUNT += 1;
+            STATE.host_count += 1;
             if libc::strncmp(*entry, c"PATINA_".as_ptr(), 7) == 0 {
                 kept += 1;
             }
@@ -106,7 +121,7 @@ pub(crate) unsafe fn capture_control_plane() {
             fatal(b"patina: failed to capture the PATINA_* control plane before scrubbing the environment\n");
         }
         let mut index = 0;
-        entry = HOST;
+        entry = STATE.host;
         while !(*entry).is_null() {
             if libc::strncmp(*entry, c"PATINA_".as_ptr(), 7) == 0 {
                 *snapshot.add(index) = *entry;
@@ -115,19 +130,20 @@ pub(crate) unsafe fn capture_control_plane() {
             }
             entry = entry.add(1);
         }
-        CONTROL = snapshot;
+        STATE.control = snapshot;
     }
 }
 
 /// # Safety
 /// `name` is null or a terminated C string; called during startup only.
 pub(crate) unsafe fn control_getenv(name: *const c_char) -> *const c_char {
+    // SAFETY: `name` is null or terminated, and startup serializes control-plane capture.
     unsafe {
         if name.is_null() || libc::strncmp(name, c"PATINA_".as_ptr(), 7) != 0 {
             return ptr::null();
         }
         capture_control_plane();
-        let (entry, _) = find(CONTROL, name, libc::strlen(name));
+        let (entry, _) = find(STATE.control, name, libc::strlen(name));
         if entry.is_null() || (*entry).is_null() {
             ptr::null()
         } else {
@@ -140,8 +156,9 @@ pub(crate) unsafe fn control_getenv(name: *const c_char) -> *const c_char {
 /// # Safety
 /// Called once after capture, runtime installation and Linux auxv scrubbing.
 pub(crate) unsafe fn scrub_environ() {
+    // SAFETY: called once after capture; STATE.host names the original stack array and retained trailer.
     unsafe {
-        if HOST.is_null() {
+        if STATE.host.is_null() {
             return;
         }
         let guest = array();
@@ -154,11 +171,11 @@ pub(crate) unsafe fn scrub_environ() {
             if count != 0 {
                 fatal(b"patina: unreserved initial-stack environment: nonempty map requires cargo patina run\n");
             }
-            ptr::write_bytes(HOST, 0, HOST_COUNT + 1);
-            patina_environ_install(HOST);
+            ptr::write_bytes(STATE.host, 0, STATE.host_count + 1);
+            patina_environ_install(STATE.host);
             return;
         }
-        let trailer = HOST.add(HOST_COUNT + 1);
+        let trailer = STATE.host.add(STATE.host_count + 1);
         // Linux Elf{32,64}_auxv_t is a pair of native words on our 64-bit
         // targets. Darwin's apple vector is a terminated pointer array.
         #[cfg(target_os = "linux")]
@@ -178,45 +195,49 @@ pub(crate) unsafe fn scrub_environ() {
             end.add(1).byte_offset_from(trailer) as usize
         };
         if libc::strcmp(reserved, c"1".as_ptr()) != 0
-            || count > HOST_COUNT
-            || trailer_bytes > (HOST_COUNT - count) * size_of::<*mut c_char>()
+            || count > STATE.host_count
+            || trailer_bytes > (STATE.host_count - count) * size_of::<*mut c_char>()
         {
             fatal(b"patina: insufficient initial-stack environment reservation\n");
         }
-        ptr::write_bytes(HOST, 0, HOST_COUNT + 1);
+        ptr::write_bytes(STATE.host, 0, STATE.host_count + 1);
         if count != 0 {
-            ptr::copy_nonoverlapping(guest, HOST, count);
+            ptr::copy_nonoverlapping(guest, STATE.host, count);
         }
         ptr::copy_nonoverlapping(
             trailer.cast::<u8>(),
-            HOST.add(count + 1).cast(),
+            STATE.host.add(count + 1).cast(),
             trailer_bytes,
         );
-        patina_environ_install(HOST);
+        patina_environ_install(STATE.host);
     }
 }
 
 struct EnvLock(bool);
 impl EnvLock {
     unsafe fn take() -> Self {
-        Self(
-            crate::process::patina_in_teardown() == 0
-                && unsafe { crate::thread::patina_mutex_lock((&raw mut ENV_LOCK).cast()) } == 0,
-        )
+        let acquired = if crate::process::patina_in_teardown() != 0 {
+            false
+        } else {
+            // SAFETY: STATE.lock is a process-lifetime mutex initialized before any mutator runs.
+            unsafe { crate::thread::patina_mutex_lock((&raw mut STATE.lock).cast()) == 0 }
+        };
+        Self(acquired)
     }
 }
 impl Drop for EnvLock {
     fn drop(&mut self) {
         if self.0 {
-            // SAFETY: this guard acquired the same process-lifetime lock.
+            // SAFETY: this guard records ownership of STATE.lock until its drop.
             unsafe {
-                crate::thread::patina_mutex_unlock((&raw mut ENV_LOCK).cast());
+                crate::thread::patina_mutex_unlock((&raw mut STATE.lock).cast());
             }
         }
     }
 }
 
 unsafe fn invalid(name: *const c_char) -> bool {
+    // SAFETY: null is checked before dereferencing or passing the name to libc string routines.
     unsafe { name.is_null() || *name == 0 || !libc::strchr(name, b'=' as c_int).is_null() }
 }
 
@@ -227,6 +248,7 @@ unsafe fn find(
     length: usize,
 ) -> (*mut *mut c_char, usize) {
     let mut count = 0;
+    // SAFETY: callers provide a null or terminated environment array and a readable C name.
     unsafe {
         if !entry.is_null() {
             while !(*entry).is_null() {
@@ -247,6 +269,7 @@ unsafe fn find(
 /// # Safety
 /// `name` is a C string; callers synchronize environment reads with mutations.
 pub(crate) unsafe fn env_lookup(name: *const c_char) -> *mut c_char {
+    // SAFETY: callers provide a C name and synchronize reads with environment mutations.
     unsafe {
         if crate::patina_env_read_gate() == 0 {
             return null_mut();
@@ -273,6 +296,7 @@ unsafe fn add(
     combined: *mut c_char,
     replace: c_int,
 ) -> c_int {
+    // SAFETY: callers provide C name/value strings or a live borrowed `combined` string; EnvLock serializes mutations.
     unsafe {
         let length = libc::strlen(name);
         let _lock = EnvLock::take();
@@ -286,8 +310,8 @@ unsafe fn add(
                 return crate::variadic::error(libc::ENOMEM);
             };
             // Remember ownership before realloc invalidates the old pointer.
-            let owned = base == ALLOCATED;
-            let grown = libc::realloc(ALLOCATED.cast(), bytes).cast::<*mut c_char>();
+            let owned = base == STATE.allocated;
+            let grown = libc::realloc(STATE.allocated.cast(), bytes).cast::<*mut c_char>();
             if grown.is_null() {
                 return crate::variadic::error(libc::ENOMEM);
             }
@@ -297,7 +321,7 @@ unsafe fn add(
             *grown.add(size) = null_mut();
             *grown.add(size + 1) = null_mut();
             entry = grown.add(size);
-            ALLOCATED = grown;
+            STATE.allocated = grown;
             patina_environ_install(grown);
         }
         if (*entry).is_null() || replace != 0 {
@@ -322,6 +346,7 @@ unsafe fn add(
 }
 
 unsafe fn remove(name: *const c_char, length: usize) {
+    // SAFETY: caller provides a readable C name and mutation is serialized through EnvLock.
     unsafe {
         let _lock = EnvLock::take();
         let mut entry = array();
@@ -351,6 +376,7 @@ unsafe fn remove(name: *const c_char, length: usize) {
 pub unsafe extern "C" fn getenv(name: *const c_char) -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_boundary_symbol(c"getenv".as_ptr());
+    // SAFETY: the C contract supplies a terminated name; the read gate returns before access pre-startup.
     unsafe { env_lookup(name) }
 }
 
@@ -364,6 +390,7 @@ pub unsafe extern "C" fn setenv(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_boundary_symbol(c"setenv".as_ptr());
+    // SAFETY: the C contract supplies name/value strings; invalid names are rejected first.
     unsafe {
         if invalid(name) {
             return crate::variadic::error(libc::EINVAL);
@@ -381,6 +408,7 @@ pub unsafe extern "C" fn setenv(
 pub unsafe extern "C" fn unsetenv(name: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_boundary_symbol(c"unsetenv".as_ptr());
+    // SAFETY: the C contract supplies a name string; invalid names are rejected first.
     unsafe {
         if invalid(name) {
             return crate::variadic::error(libc::EINVAL);
@@ -401,12 +429,13 @@ pub extern "C" fn clearenv() -> c_int {
     if crate::patina_env_write_gate() != 0 {
         return crate::variadic::model_result(-1);
     }
+    // SAFETY: mutation is serialized, and only the shim-owned pointer array is freed.
     unsafe {
         let _lock = EnvLock::take();
         let base = array();
-        if !base.is_null() && base == ALLOCATED {
+        if !base.is_null() && base == STATE.allocated {
             libc::free(base.cast());
-            ALLOCATED = null_mut();
+            STATE.allocated = null_mut();
         }
         patina_environ_install(null_mut());
     }
@@ -422,6 +451,7 @@ pub unsafe extern "C" fn putenv(string: *mut c_char) -> c_int {
     if crate::patina_env_write_gate() != 0 {
         return crate::variadic::model_result(-1);
     }
+    // SAFETY: caller guarantees writable terminated storage that stays live while installed.
     unsafe {
         let end = libc::strchr(string, b'=' as c_int);
         if end.is_null() {
@@ -448,6 +478,7 @@ pub unsafe extern "C" fn putenv(string: *mut c_char) -> c_int {
 pub unsafe extern "C" fn secure_getenv(name: *const c_char) -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_boundary_symbol(c"secure_getenv".as_ptr());
+    // SAFETY: the C contract supplies a terminated name; the read gate returns before access pre-startup.
     unsafe { env_lookup(name) }
 }
 
