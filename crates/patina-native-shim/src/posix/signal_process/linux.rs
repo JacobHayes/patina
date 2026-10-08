@@ -1,5 +1,8 @@
 //! Linux libc signal layouts, diagnostics and process-descriptor adapters.
-use super::{dispatch, process_trap};
+#![deny(clippy::undocumented_unsafe_blocks)]
+
+use super::process_trap;
+use crate::sud::Word;
 use crate::thread::signals::{self, Action, Info};
 use core::ffi::{c_char, c_int};
 use core::ptr;
@@ -15,10 +18,12 @@ unsafe fn clear_internal_signals(
         return ptr::null();
     }
     let internal = (1u64 << 31) | (1u64 << 32);
+    // SAFETY: callers supply a readable sigset_t; unaligned access matches its word representation.
     let word = unsafe { set.cast::<u64>().read_unaligned() };
     if word & internal == 0 {
         return set;
     }
+    // SAFETY: callers supply readable `set` and writable scratch storage of one sigset_t.
     unsafe {
         ptr::copy_nonoverlapping(set, copy, 1);
         copy.cast::<u64>().write_unaligned(word & !internal);
@@ -42,6 +47,7 @@ pub unsafe extern "C" fn sigaction(
     let next = if act.is_null() {
         None
     } else {
+        // SAFETY: the unsafe entry contract makes a non-null `act` readable for this call.
         Some(unsafe {
             Action {
                 handler: (*act).sa_sigaction,
@@ -51,6 +57,7 @@ pub unsafe extern "C" fn sigaction(
             }
         })
     };
+    // SAFETY: `next` is either null or a live local Action; `prior` is writable local storage.
     let rc = unsafe {
         signals::patina_signal_action_libc(
             sig,
@@ -59,6 +66,7 @@ pub unsafe extern "C" fn sigaction(
         )
     };
     if !old.is_null() && rc == 0 {
+        // SAFETY: the unsafe entry contract makes non-null `old` writable for this call.
         unsafe {
             ptr::write_bytes(old, 0, 1);
             (*old).sa_sigaction = prior.handler;
@@ -91,6 +99,7 @@ pub extern "C" fn signal(sig: c_int, handler: libc::sighandler_t) -> libc::sigha
     let bit = 1u64 << (sig - 1);
     let next = Action {
         handler,
+        // SAFETY: guest entries are serialized by the deterministic task baton while `_sigintr` is accessed.
         flags: if unsafe { SIGINTR } & bit != 0 {
             0
         } else {
@@ -100,6 +109,7 @@ pub extern "C" fn signal(sig: c_int, handler: libc::sighandler_t) -> libc::sigha
         mask: bit,
     };
     let mut old = Action::default();
+    // SAFETY: both Action pointers refer to live local values for this synchronous model call.
     if crate::posix::signal_result(unsafe {
         signals::patina_signal_action_libc(sig, &next, &mut old)
     }) < 0
@@ -119,7 +129,9 @@ pub unsafe extern "C" fn pthread_sigmask(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut copy = core::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    // SAFETY: the unsafe entry contract supplies a readable `set`; `copy` is writable scratch storage.
     let set = unsafe { clear_internal_signals(set, copy.as_mut_ptr()) };
+    // SAFETY: the unsafe entry contract covers `set` and `old`, and the call reads/writes at most one word.
     let rc = unsafe { signals::patina_signal_mask(how, set.cast(), old.cast(), size_of::<u64>()) };
     signals::deliver();
     (-rc) as c_int
@@ -135,7 +147,9 @@ pub unsafe extern "C" fn sigprocmask(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut copy = core::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    // SAFETY: the unsafe entry contract supplies a readable `set`; `copy` is writable scratch storage.
     let set = unsafe { clear_internal_signals(set, copy.as_mut_ptr()) };
+    // SAFETY: the unsafe entry contract covers `set` and `old`, and the call reads/writes at most one word.
     crate::posix::signal_result(unsafe {
         signals::patina_signal_mask(how, set.cast(), old.cast(), size_of::<u64>())
     })
@@ -146,6 +160,7 @@ pub unsafe extern "C" fn sigprocmask(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigpending(set: *mut libc::sigset_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the unsafe entry contract supplies writable `set` storage for one word.
     crate::posix::signal_result(unsafe {
         signals::patina_signal_pending(set.cast(), size_of::<u64>())
     })
@@ -174,6 +189,7 @@ pub unsafe extern "C" fn sigaltstack(
     old: *mut libc::stack_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the unsafe entry contract covers optional input and output stack pointers.
     crate::posix::signal_result(unsafe {
         signals::patina_signal_altstack(stack.cast(), old.cast())
     })
@@ -183,6 +199,7 @@ pub unsafe extern "C" fn sigaltstack(
 pub extern "C" fn pause() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::posix::cancel(c"pause");
+    // SAFETY: pause passes null for every pointer operand to the signal wait model.
     crate::posix::signal_result(unsafe {
         signals::patina_signal_wait(
             ptr::null(),
@@ -200,6 +217,7 @@ pub extern "C" fn pause() -> c_int {
 pub unsafe extern "C" fn sigsuspend(set: *const libc::sigset_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::posix::cancel(c"sigsuspend");
+    // SAFETY: the unsafe entry contract supplies the readable mask when `set` is non-null.
     crate::posix::signal_result(unsafe {
         signals::patina_signal_wait(
             set.cast(),
@@ -216,6 +234,7 @@ unsafe fn timedwait(
     info: *mut libc::siginfo_t,
     timeout: *const libc::timespec,
 ) -> c_int {
+    // SAFETY: this unsafe helper's caller supplies the optional signal set, info, and timeout buffers.
     let rc = crate::posix::signal_result(unsafe {
         signals::patina_signal_wait(
             set.cast(),
@@ -225,7 +244,9 @@ unsafe fn timedwait(
             signals::WaitMode::Dequeue,
         )
     });
+    // SAFETY: a positive result fills non-null `info` under the helper's caller contract.
     if rc > 0 && !info.is_null() && unsafe { (*info).si_code } == libc::SI_TKILL {
+        // SAFETY: the same successful dequeue grants writable access to the returned siginfo_t.
         unsafe {
             (*info).si_code = libc::SI_USER;
         }
@@ -243,6 +264,7 @@ pub unsafe extern "C" fn sigtimedwait(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::posix::cancel(c"sigtimedwait");
+    // SAFETY: this entry's unsafe contract satisfies timedwait's pointer requirements.
     unsafe { timedwait(set, info, timeout) }
 }
 /// # Safety
@@ -254,6 +276,7 @@ pub unsafe extern "C" fn sigwaitinfo(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::posix::cancel(c"sigwaitinfo");
+    // SAFETY: this entry's unsafe contract satisfies timedwait's set/info requirements; timeout is null.
     unsafe { timedwait(set, info, ptr::null()) }
 }
 /// # Safety
@@ -263,6 +286,7 @@ pub unsafe extern "C" fn sigwait(set: *const libc::sigset_t, sig: *mut c_int) ->
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::posix::cancel(c"sigwait");
     loop {
+        // SAFETY: the unsafe entry contract supplies the readable mask; output pointers are null here.
         let rc = unsafe {
             signals::patina_signal_wait(
                 set.cast(),
@@ -279,6 +303,7 @@ pub unsafe extern "C" fn sigwait(set: *const libc::sigset_t, sig: *mut c_int) ->
         if rc < 0 {
             return (-rc) as c_int;
         }
+        // SAFETY: the unsafe entry contract supplies writable storage for the selected signal number.
         unsafe {
             sig.write(rc as c_int);
         }
@@ -294,10 +319,11 @@ pub extern "C" fn sigqueue(pid: libc::pid_t, sig: c_int, value: libc::sigval) ->
     info.words[1] = u64::from(libc::SI_QUEUE as u32);
     info.words[2] = u64::from(crate::patina_pid() as u32) | (u64::from(crate::patina_uid()) << 32);
     info.words[3] = value.sival_ptr as u64;
+    // SAFETY: `info` is a live local buffer for the synchronous syscall dispatch.
     unsafe {
-        dispatch(
+        crate::sud::forward(
             libc::SYS_rt_sigqueueinfo,
-            [pid as u64, sig as u64, ptr::addr_of!(info) as u64, 0, 0, 0],
+            &[pid.word(), sig.word(), ptr::addr_of!(info).word()],
         )
     }
 }
@@ -391,14 +417,17 @@ pub extern "C" fn strsignal(sig: c_int) -> *mut c_char {
     if let Some(description) = description(sig) {
         return description.as_ptr().cast_mut();
     }
-    SIGNAL_BUFFER.with(|buffer| unsafe {
-        let out = &mut *buffer.get();
-        if (34..=64).contains(&sig) {
-            numbered(out, b"Real-time signal ", sig - 34);
-        } else {
-            numbered(out, b"Unknown signal ", sig);
+    SIGNAL_BUFFER.with(|buffer| {
+        // SAFETY: the thread-local closure gives exclusive access to this thread's signal buffer.
+        unsafe {
+            let out = &mut *buffer.get();
+            if (34..=64).contains(&sig) {
+                numbered(out, b"Real-time signal ", sig - 34);
+            } else {
+                numbered(out, b"Unknown signal ", sig);
+            }
+            out.as_mut_ptr()
         }
-        out.as_mut_ptr()
     })
 }
 
@@ -414,6 +443,7 @@ pub unsafe extern "C" fn psignal(sig: c_int, prefix: *const c_char) {
         numbered(&mut unknown, b"Unknown signal ", sig);
         unknown.as_ptr()
     };
+    // SAFETY: STDERR is the initialized thread-local sentinel stream slot used by this door.
     let fd = super::super::stdio::sentinel_fd(unsafe { super::super::stdio::STDERR });
     if fd < 0 {
         super::super::stdio::trap(c"psignal")
@@ -423,9 +453,11 @@ pub unsafe extern "C" fn psignal(sig: c_int, prefix: *const c_char) {
         iov_len: 0,
     }; 4];
     let mut count = 0;
+    // SAFETY: the unsafe entry contract makes a non-null prefix readable as a C string.
     if !prefix.is_null() && unsafe { prefix.read() } != 0 {
         parts[count] = libc::iovec {
             iov_base: prefix.cast_mut().cast(),
+            // SAFETY: the unsafe entry contract makes the prefix NUL-terminated and readable.
             iov_len: unsafe { libc::strlen(prefix) },
         };
         count += 1;
@@ -437,6 +469,7 @@ pub unsafe extern "C" fn psignal(sig: c_int, prefix: *const c_char) {
     }
     parts[count] = libc::iovec {
         iov_base: description.cast_mut().cast(),
+        // SAFETY: description is a static or local NUL-terminated C string built above.
         iov_len: unsafe { libc::strlen(description) },
     };
     count += 1;
@@ -445,6 +478,7 @@ pub unsafe extern "C" fn psignal(sig: c_int, prefix: *const c_char) {
         iov_len: 1,
     };
     count += 1;
+    // SAFETY: each iovec points to live readable bytes and `count` is within the four-element array.
     unsafe {
         crate::iov::patina_writev(fd, parts.as_ptr().cast(), count as i64, 0);
     }
@@ -465,10 +499,11 @@ pub extern "C" fn killpg(group: libc::pid_t, sig: c_int) -> c_int {
     if group < 0 {
         return crate::posix::error(libc::EINVAL);
     }
+    // SAFETY: killpg forwards scalar identifiers only; the negated group keeps the prior u64 encoding.
     unsafe {
-        dispatch(
+        crate::sud::forward(
             libc::SYS_kill,
-            [(-(i64::from(group))) as u64, sig as u64, 0, 0, 0, 0],
+            &[((-(i64::from(group))) as u64).word(), sig.word()],
         )
     }
 }
@@ -479,6 +514,7 @@ pub extern "C" fn siginterrupt(sig: c_int, interrupt: c_int) -> c_int {
         return crate::posix::error(libc::EINVAL);
     }
     let mut act = Action::default();
+    // SAFETY: null input plus a live local output Action satisfy the model's pointer contract.
     if crate::posix::signal_result(unsafe {
         signals::patina_signal_action_libc(sig, ptr::null(), &mut act)
     }) < 0
@@ -486,6 +522,7 @@ pub extern "C" fn siginterrupt(sig: c_int, interrupt: c_int) -> c_int {
         return -1;
     }
     let bit = 1u64 << (sig - 1);
+    // SAFETY: signal entries are serialized by the deterministic task baton while `_sigintr` is accessed.
     unsafe {
         if interrupt != 0 {
             SIGINTR |= bit;
@@ -495,6 +532,7 @@ pub extern "C" fn siginterrupt(sig: c_int, interrupt: c_int) -> c_int {
             act.flags |= libc::SA_RESTART as u64;
         }
     }
+    // SAFETY: the live local Action is readable for the update; the output pointer is null.
     crate::posix::signal_result(unsafe {
         signals::patina_signal_action_libc(sig, &act, ptr::null_mut())
     })
@@ -502,43 +540,30 @@ pub extern "C" fn siginterrupt(sig: c_int, interrupt: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn tgkill(tgid: libc::pid_t, tid: libc::pid_t, sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    unsafe {
-        dispatch(
-            libc::SYS_tgkill,
-            [tgid as u64, tid as u64, sig as u64, 0, 0, 0],
-        )
-    }
+    // SAFETY: tgkill forwards only scalar process, thread, and signal numbers.
+    unsafe { crate::sud::forward(libc::SYS_tgkill, &[tgid.word(), tid.word(), sig.word()]) }
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn tkill(tid: libc::pid_t, sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    unsafe { dispatch(libc::SYS_tkill, [tid as u64, sig as u64, 0, 0, 0, 0]) }
+    // SAFETY: tkill forwards only scalar thread and signal numbers.
+    unsafe { crate::sud::forward(libc::SYS_tkill, &[tid.word(), sig.word()]) }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pidfd_open(pid: libc::pid_t, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    unsafe {
-        dispatch(
-            libc::SYS_pidfd_open,
-            [pid as i64 as u64, flags as u64, 0, 0, 0, 0],
-        )
-    }
+    // SAFETY: pidfd_open forwards only scalar arguments.
+    unsafe { crate::sud::forward(libc::SYS_pidfd_open, &[pid.word(), flags.word()]) }
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn pidfd_getfd(pidfd: c_int, targetfd: c_int, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: pidfd_getfd forwards only scalar descriptor and flag values.
     unsafe {
-        dispatch(
+        crate::sud::forward(
             libc::SYS_pidfd_getfd,
-            [
-                pidfd as i64 as u64,
-                targetfd as i64 as u64,
-                flags as u64,
-                0,
-                0,
-                0,
-            ],
+            &[pidfd.word(), targetfd.word(), flags.word()],
         )
     }
 }
@@ -552,17 +577,11 @@ pub unsafe extern "C" fn pidfd_send_signal(
     flags: u32,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `info` obeys this unsafe entry's readable siginfo contract when the row reads it.
     unsafe {
-        dispatch(
+        crate::sud::forward(
             libc::SYS_pidfd_send_signal,
-            [
-                pidfd as i64 as u64,
-                sig as i64 as u64,
-                info as u64,
-                flags as u64,
-                0,
-                0,
-            ],
+            &[pidfd.word(), sig.word(), info.word(), flags.word()],
         )
     }
 }
@@ -577,16 +596,16 @@ pub unsafe extern "C" fn process_madvise(
     flags: u32,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: `iov` obeys this unsafe entry's vlen-element input contract when the row reads it.
     unsafe {
-        dispatch(
+        crate::sud::forward(
             libc::SYS_process_madvise,
-            [
-                pidfd as i64 as u64,
-                iov as u64,
-                vlen as u64,
-                advice as i64 as u64,
-                flags as u64,
-                0,
+            &[
+                pidfd.word(),
+                iov.word(),
+                vlen.word(),
+                advice.word(),
+                flags.word(),
             ],
         ) as isize
     }
@@ -594,12 +613,8 @@ pub unsafe extern "C" fn process_madvise(
 #[unsafe(no_mangle)]
 pub extern "C" fn process_mrelease(pidfd: c_int, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    unsafe {
-        dispatch(
-            libc::SYS_process_mrelease,
-            [pidfd as i64 as u64, flags as u64, 0, 0, 0, 0],
-        )
-    }
+    // SAFETY: process_mrelease forwards only scalar descriptor and flag values.
+    unsafe { crate::sud::forward(libc::SYS_process_mrelease, &[pidfd.word(), flags.word()]) }
 }
 /// # Safety
 /// local and remote follow libc's iovec input contracts.
@@ -613,16 +628,17 @@ pub unsafe extern "C" fn process_vm_readv(
     flags: libc::c_ulong,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the unsafe entry contract supplies both iovec arrays for their element counts.
     unsafe {
-        dispatch(
+        crate::sud::forward(
             libc::SYS_process_vm_readv,
-            [
-                pid as i64 as u64,
-                local as u64,
-                liovcnt,
-                remote as u64,
-                riovcnt,
-                flags,
+            &[
+                pid.word(),
+                local.word(),
+                liovcnt.word(),
+                remote.word(),
+                riovcnt.word(),
+                flags.word(),
             ],
         ) as isize
     }
@@ -639,16 +655,17 @@ pub unsafe extern "C" fn process_vm_writev(
     flags: libc::c_ulong,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the unsafe entry contract supplies both iovec arrays for their element counts.
     unsafe {
-        dispatch(
+        crate::sud::forward(
             libc::SYS_process_vm_writev,
-            [
-                pid as i64 as u64,
-                local as u64,
-                liovcnt,
-                remote as u64,
-                riovcnt,
-                flags,
+            &[
+                pid.word(),
+                local.word(),
+                liovcnt.word(),
+                remote.word(),
+                riovcnt.word(),
+                flags.word(),
             ],
         ) as isize
     }
@@ -703,10 +720,11 @@ pub unsafe extern "C" fn waitid(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::posix::cancel(c"waitid");
+    // SAFETY: the unsafe entry contract supplies a writable siginfo output when non-null.
     unsafe {
-        dispatch(
+        crate::sud::forward(
             libc::SYS_waitid,
-            [idtype as u64, id as u64, infop as u64, options as u64, 0, 0],
+            &[idtype.word(), id.word(), infop.word(), options.word()],
         )
     }
 }
@@ -720,6 +738,7 @@ pub extern "C" fn __libc_current_sigrtmax() -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn signalfd(fd: c_int, mask: *const libc::sigset_t, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the unsafe entry contract supplies a readable mask when the model reads it.
     crate::posix::signal_result(unsafe {
         signals::fd::patina_signalfd(fd, mask.cast(), size_of::<u64>(), flags)
     })

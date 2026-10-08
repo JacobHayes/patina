@@ -1,6 +1,7 @@
 //! SUD rows — signals and process control: `rt_sigaction` (SIGSYS re-registration
 //! is fatal), and `prctl`'s option table (`PR_GET_AUXV` served from the shim's
 //! scrubbed auxv, `PR_SET_SECCOMP` through the seccomp row's model).
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
 
@@ -198,6 +199,7 @@ fn prctl_set_name(user_name: u64) -> i64 {
     // the conformance row exercises the deterministic valid/null cases.
     let src = user_name as *const u8;
     while len < name.len() {
+        // SAFETY: the syscall caller's PR_SET_NAME operand addresses readable bytes; this direct access preserves its access path.
         let value = unsafe { *src.add(len) };
         if value == 0 {
             break;
@@ -370,6 +372,7 @@ pub(super) fn sys_waitid(which: u64, upid: u64, options: u64) -> i64 {
 }
 
 pub(super) fn sys_kill(pid: i64, sig: i64) -> i64 {
+    // SAFETY: process-directed kill carries no pointer operands; the model owns target validation.
     unsafe {
         generate_signal(
             GenerationTarget::Process { pid: pid as i32 },
@@ -379,6 +382,7 @@ pub(super) fn sys_kill(pid: i64, sig: i64) -> i64 {
     }
 }
 pub(super) fn sys_tgkill(tgid: i64, tid: i64, sig: i64) -> i64 {
+    // SAFETY: thread-directed kill carries no pointer operands; the model owns target validation.
     unsafe {
         generate_signal(
             GenerationTarget::Thread {

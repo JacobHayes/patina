@@ -1,14 +1,9 @@
 //! Ordinary process and signal ABI adapters. Callback frames remain in init.c.
-use core::ffi::{CStr, c_char, c_int, c_short};
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 #[cfg(target_os = "linux")]
-unsafe fn dispatch(number: libc::c_long, args: [u64; 6]) -> c_int {
-    super::signal_result(unsafe {
-        crate::sud::patina_sud_dispatch(
-            number, args[0], args[1], args[2], args[3], args[4], args[5], 0,
-        )
-    })
-}
+use crate::sud::Word;
+use core::ffi::{CStr, c_char, c_int, c_short};
 
 /// # Safety
 /// Termination follows libc's process and destructor contract.
@@ -29,16 +24,14 @@ pub extern "C" fn raise(sig: c_int) -> c_int {
         if crate::thread::signals::patina_signal_reserved(sig) != 0 {
             return super::error(libc::EINVAL);
         }
+        // SAFETY: tgkill receives only the shim's process/thread IDs and the scalar signal number.
         unsafe {
-            dispatch(
+            crate::sud::forward(
                 libc::SYS_tgkill,
-                [
-                    crate::patina_pid() as u64,
-                    crate::patina_thread_id() as u64,
-                    sig as u64,
-                    0,
-                    0,
-                    0,
+                &[
+                    crate::patina_pid().word(),
+                    crate::patina_thread_id().word(),
+                    sig.word(),
                 ],
             )
         }
@@ -52,6 +45,7 @@ pub extern "C" fn raise(sig: c_int) -> c_int {
 fn process_trap(symbol: &CStr) -> ! {
     let prefix = b"patina: process spawn reached under patina: ";
     let suffix = b"; the process class is a deterministic-runtime non-goal; failing closed\n";
+    // SAFETY: each byte slice is a live read-only buffer for the synchronous stdio writes.
     unsafe {
         crate::patina_stdio_write(2, prefix.as_ptr().cast(), prefix.len());
         crate::patina_stdio_write(2, symbol.as_ptr().cast(), symbol.count_bytes());
@@ -87,10 +81,11 @@ pub unsafe extern "C" fn waitpid(
     super::cancel(c"waitpid");
     #[cfg(target_os = "linux")]
     {
+        // SAFETY: the unsafe libc entry contract supplies a writable status pointer when non-null.
         unsafe {
-            dispatch(
+            crate::sud::forward(
                 libc::SYS_wait4,
-                [pid as u64, status as u64, options as u64, 0, 0, 0],
+                &[pid.word(), status.word(), options.word()],
             )
         }
     }
@@ -106,7 +101,8 @@ pub extern "C" fn setsid() -> libc::pid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     {
-        unsafe { dispatch(libc::SYS_setsid, [0; 6]) }
+        // SAFETY: setsid has no pointer operands.
+        unsafe { crate::sud::forward(libc::SYS_setsid, &[]) }
     }
     #[cfg(target_os = "macos")]
     {
@@ -119,7 +115,8 @@ pub extern "C" fn setgid(gid: libc::gid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     {
-        unsafe { dispatch(libc::SYS_setgid, [gid as u64, 0, 0, 0, 0, 0]) }
+        // SAFETY: setgid forwards one scalar identifier and no pointers.
+        unsafe { crate::sud::forward(libc::SYS_setgid, &[gid.word()]) }
     }
     #[cfg(target_os = "macos")]
     {
@@ -136,7 +133,8 @@ pub extern "C" fn setuid(uid: libc::uid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     {
-        unsafe { dispatch(libc::SYS_setuid, [uid as u64, 0, 0, 0, 0, 0]) }
+        // SAFETY: setuid forwards one scalar identifier and no pointers.
+        unsafe { crate::sud::forward(libc::SYS_setuid, &[uid.word()]) }
     }
     #[cfg(target_os = "macos")]
     {
@@ -153,7 +151,8 @@ pub extern "C" fn setpgid(pid: libc::pid_t, pgid: libc::pid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     {
-        unsafe { dispatch(libc::SYS_setpgid, [pid as u64, pgid as u64, 0, 0, 0, 0]) }
+        // SAFETY: setpgid forwards two scalar identifiers and no pointers.
+        unsafe { crate::sud::forward(libc::SYS_setpgid, &[pid.word(), pgid.word()]) }
     }
     #[cfg(target_os = "macos")]
     {
@@ -176,12 +175,8 @@ pub extern "C" fn setpgid(pid: libc::pid_t, pgid: libc::pid_t) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setgroups(count: usize, groups: *const libc::gid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    unsafe {
-        dispatch(
-            libc::SYS_setgroups,
-            [count as u64, groups as u64, 0, 0, 0, 0],
-        )
-    }
+    // SAFETY: the unsafe libc entry contract supplies `groups` for `count` elements when used.
+    unsafe { crate::sud::forward(libc::SYS_setgroups, &[count.word(), groups.word()]) }
 }
 #[cfg(target_os = "macos")]
 /// # Safety
@@ -285,7 +280,8 @@ pub extern "C" fn kill(pid: libc::pid_t, sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     {
-        unsafe { dispatch(libc::SYS_kill, [pid as u64, sig as u64, 0, 0, 0, 0]) }
+        // SAFETY: kill forwards only scalar process and signal numbers.
+        unsafe { crate::sud::forward(libc::SYS_kill, &[pid.word(), sig.word()]) }
     }
     #[cfg(target_os = "macos")]
     {
