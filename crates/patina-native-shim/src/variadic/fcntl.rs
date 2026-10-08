@@ -4,6 +4,71 @@
 use core::ffi::{VaList, c_int, c_void};
 
 #[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KernelFlock {
+    l_type: libc::c_short,
+    l_whence: libc::c_short,
+    pad0: u32,
+    l_start: libc::off_t,
+    l_len: libc::off_t,
+    l_pid: libc::pid_t,
+    pad1: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KernelFlock {
+    l_start: libc::off_t,
+    l_len: libc::off_t,
+    l_pid: libc::pid_t,
+    l_type: libc::c_short,
+    l_whence: libc::c_short,
+}
+
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    #[cfg(target_os = "linux")]
+    crate::plain!(super::KernelFlock {
+        l_type: libc::c_short,
+        l_whence: libc::c_short,
+        pad0: u32,
+        l_start: libc::off_t,
+        l_len: libc::off_t,
+        l_pid: libc::pid_t,
+        pad1: u32,
+    });
+
+    #[cfg(target_os = "macos")]
+    crate::plain!(super::KernelFlock {
+        l_start: libc::off_t,
+        l_len: libc::off_t,
+        l_pid: libc::pid_t,
+        l_type: libc::c_short,
+        l_whence: libc::c_short,
+    });
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<KernelFlock>() == core::mem::size_of::<libc::flock>());
+    assert!(
+        core::mem::offset_of!(KernelFlock, l_type) == core::mem::offset_of!(libc::flock, l_type)
+    );
+    assert!(
+        core::mem::offset_of!(KernelFlock, l_whence)
+            == core::mem::offset_of!(libc::flock, l_whence)
+    );
+    assert!(
+        core::mem::offset_of!(KernelFlock, l_start) == core::mem::offset_of!(libc::flock, l_start)
+    );
+    assert!(core::mem::offset_of!(KernelFlock, l_len) == core::mem::offset_of!(libc::flock, l_len));
+    assert!(core::mem::offset_of!(KernelFlock, l_pid) == core::mem::offset_of!(libc::flock, l_pid));
+};
+
+#[cfg(target_os = "linux")]
 mod linux {
     use core::ffi::c_int;
     use linux_raw_sys::general as k;
@@ -187,7 +252,7 @@ fn record_lock(fd: c_int, command: u32, pointer: *mut libc::flock) -> c_int {
     if let Err(errno) = crate::fdget(fd) {
         return super::error(errno);
     }
-    let original = match crate::uaccess::read::<libc::flock>(pointer as usize) {
+    let original = match crate::uaccess::read::<KernelFlock>(pointer as usize) {
         Ok(lock) => lock,
         Err(errno) => return super::error(errno),
     };

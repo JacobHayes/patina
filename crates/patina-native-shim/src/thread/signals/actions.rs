@@ -1,6 +1,51 @@
 //! Signal actions, masks, pending sets, and alternate stacks.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KernelStack {
+    base: usize,
+    flags: i32,
+    pad: u32,
+    size: usize,
+}
+
+impl From<KernelStack> for Stack {
+    fn from(stack: KernelStack) -> Self {
+        Self {
+            base: stack.base,
+            flags: stack.flags,
+            size: stack.size,
+        }
+    }
+}
+
+#[allow(dead_code)]
+mod plain_impls {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::KernelStack {
+        base: usize,
+        flags: i32,
+        pad: u32,
+        size: usize,
+    });
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<KernelStack>() == core::mem::size_of::<libc::stack_t>());
+    assert!(
+        core::mem::offset_of!(KernelStack, base) == core::mem::offset_of!(libc::stack_t, ss_sp)
+    );
+    assert!(
+        core::mem::offset_of!(KernelStack, flags) == core::mem::offset_of!(libc::stack_t, ss_flags)
+    );
+    assert!(
+        core::mem::offset_of!(KernelStack, size) == core::mem::offset_of!(libc::stack_t, ss_size)
+    );
+};
 
 #[unsafe(no_mangle)]
 /// Libc-layout marshalling supplies glibc's init-time restorer; raw callers keep
@@ -16,6 +61,8 @@ pub unsafe extern "C" fn patina_signal_action_libc(
     let converted = if action.is_null() {
         None
     } else {
+        // SAFETY: the branch checks non-null and this entry's caller contract
+        // requires a readable action record.
         Some(unsafe { *action })
     };
     #[cfg(target_arch = "x86_64")]
@@ -29,6 +76,8 @@ pub unsafe extern "C" fn patina_signal_action_libc(
         }
         action
     });
+    // SAFETY: the converted input is a live local record and `old` retains
+    // the readable/writable contract of this entry.
     unsafe {
         patina_signal_action(
             sig,
@@ -205,8 +254,8 @@ pub unsafe extern "C" fn patina_signal_altstack(stack: *const Stack, old: *mut S
     let stack = if stack.is_null() {
         None
     } else {
-        match crate::uaccess::read::<Stack>(stack as usize) {
-            Ok(stack) => Some(stack),
+        match crate::uaccess::read::<KernelStack>(stack as usize) {
+            Ok(stack) => Some(Stack::from(stack)),
             Err(_) => return -i64::from(EFAULT),
         }
     };

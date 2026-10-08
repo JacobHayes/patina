@@ -1,4 +1,5 @@
 //! Linux epoll readiness model.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::{BlockClass, Wait};
 use std::collections::{BTreeMap, VecDeque};
@@ -49,15 +50,56 @@ pub(crate) struct EpollEvent {
     data: u64,
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "x86_64"))]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KernelEpollEvent {
+    events: u32,
+    pad: u32,
+    data: u64,
+}
+
 #[allow(dead_code)]
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
 
+    #[cfg(target_arch = "x86_64")]
     crate::plain!(super::EpollEvent {
         events: u32,
         data: u64
     });
+
+    #[cfg(not(target_arch = "x86_64"))]
+    crate::plain!(super::KernelEpollEvent {
+        events: u32,
+        pad: u32,
+        data: u64,
+    });
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+const _: () = {
+    assert!(core::mem::size_of::<KernelEpollEvent>() == core::mem::size_of::<libc::epoll_event>());
+    assert!(
+        core::mem::offset_of!(KernelEpollEvent, events)
+            == core::mem::offset_of!(libc::epoll_event, events)
+    );
+    assert!(
+        core::mem::offset_of!(KernelEpollEvent, data)
+            == core::mem::offset_of!(libc::epoll_event, u64)
+    );
+};
+
+#[cfg(target_arch = "x86_64")]
+fn read_event(address: usize) -> Result<(u32, u64), c_int> {
+    let event = crate::uaccess::read::<EpollEvent>(address)?;
+    Ok((event.events, event.data))
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn read_event(address: usize) -> Result<(u32, u64), c_int> {
+    let event = crate::uaccess::read::<KernelEpollEvent>(address)?;
+    Ok((event.events, event.data))
 }
 
 /// The poll bits a read-direction wakeup carries (`EPOLLIN`, `EPOLLPRI`,
@@ -327,8 +369,8 @@ pub unsafe extern "C" fn patina_epoll_ctl(
     let (events, data) = if op == EPOLL_CTL_DEL {
         (0, 0)
     } else {
-        match crate::uaccess::read::<EpollEvent>(event as usize) {
-            Ok(event) => (event.events & !EPOLLWAKEUP, event.data),
+        match read_event(event as usize) {
+            Ok((events, data)) => (events & !EPOLLWAKEUP, data),
             Err(errno) => return fail(errno),
         }
     };
