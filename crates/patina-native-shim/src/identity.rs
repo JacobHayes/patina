@@ -35,6 +35,8 @@
 //! under the kernel's rules; init's never change. Init has no signal
 //! handlers and sleeps (see `registry::INIT_PID`).
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use crate::SpinMutex;
 use crate::neg_errno as errno;
 use crate::registry::{Capability, IDENTITY_GID, IDENTITY_PID, IDENTITY_UID, INIT_PID};
@@ -710,9 +712,11 @@ pub(crate) struct Sysinfo {
     freeswap: u64,
     procs: u16,
     pad: u16,
+    pad1: u32,
     totalhigh: u64,
     freehigh: u64,
     mem_unit: u32,
+    tail: u32,
 }
 
 /// `sysinfo(2)`: the uptime is the boot clock's seconds rounded up; the

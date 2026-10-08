@@ -33,6 +33,8 @@
 //! signal (`SI_MESGQ`) through the signal model and consumes the
 //! registration.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 use crate::mem::{PROT_EXEC, PROT_READ, PROT_WRITE};
 use crate::registry::{IDENTITY_PID, KERNEL_CONFIG};
@@ -135,6 +137,7 @@ pub(crate) struct IpcPerm {
     mode: u32,
     seq: u16,
     pad: u16,
+    pad2: u32,
     unused: [u64; 2],
 }
 

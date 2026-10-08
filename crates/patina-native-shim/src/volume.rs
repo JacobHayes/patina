@@ -15,6 +15,8 @@
 //! is derived from the filesystem's device. Linux only: the C `statfs` family
 //! is the Linux one.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use std::ffi::{c_char, c_int};
 
 use crate::fdtable::FdKind;
@@ -704,9 +706,11 @@ pub(crate) fn sysfs(option: u64, arg1: u64, arg2: u64) -> i64 {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct KernelUstat {
     pub f_tfree: i32,
+    pub pad1: u32,
     pub f_tinode: u64,
     pub f_fname: [u8; 6],
     pub f_fpack: [u8; 6],
+    pub tail: u32,
 }
 
 #[unsafe(no_mangle)]
@@ -815,8 +819,8 @@ mod tests {
             assert_eq!(mount.parent().unique, ROOT_MOUNT.unique, "{mount:?}");
             let mut out = KernelStatfs::default();
             let point = std::ffi::CString::new(mount.point).unwrap();
-            // SAFETY: a valid path and a writable buffer.
             if mount.filesystem != Filesystem::Volume {
+                // SAFETY: `point` is NUL-terminated and `out` is writable.
                 assert_eq!(unsafe { patina_statfs(point.as_ptr(), &mut out) }, 0);
                 assert_eq!(out, mount.filesystem.describe(), "{mount:?}");
             }

@@ -644,6 +644,8 @@ macro_rules! for_each_scenario {
             sys_nss => sys::nss,
             sys_perf => sys::perf,
             sys_personality => sys::personality,
+        #[cfg(target_arch = "x86_64")]
+            sys_padding => sys::padding,
             sys_quota => sys::quota,
             sys_rlimit => sys::rlimit,
             sys_rlimit64 => sys::rlimit64,

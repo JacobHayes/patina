@@ -22,6 +22,17 @@ impl From<KernelStack> for Stack {
     }
 }
 
+impl From<Stack> for KernelStack {
+    fn from(stack: Stack) -> Self {
+        Self {
+            base: stack.base,
+            flags: stack.flags,
+            pad: 0,
+            size: stack.size,
+        }
+    }
+}
+
 #[allow(dead_code)]
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
@@ -291,8 +302,11 @@ pub unsafe extern "C" fn patina_signal_altstack(stack: *const Stack, old: *mut S
     {
         fault::registered(stack);
     }
-    if !old.is_null() && crate::uaccess::write(old as usize, &previous).is_err() {
-        return -i64::from(EFAULT);
+    if !old.is_null() {
+        let old_value = KernelStack::from(previous);
+        if crate::uaccess::write(old as usize, &old_value).is_err() {
+            return -i64::from(EFAULT);
+        }
     }
     0
 }

@@ -8,6 +8,8 @@ pub mod keys_session;
 pub mod landlock;
 pub mod lsm;
 pub mod nss;
+#[cfg(target_arch = "x86_64")]
+pub mod padding;
 pub mod perf;
 pub mod personality;
 pub mod quota;
