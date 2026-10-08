@@ -23,10 +23,7 @@ mod time;
 pub(crate) use crate::variadic::{error, model_result};
 
 pub(crate) fn size_result(result: isize) -> isize {
-    if result < 0 {
-        error(crate::patina_errno());
-    }
-    result
+    crate::abi::libc_result(crate::abi::from_model(result), result)
 }
 
 pub(crate) fn cancel(name: &CStr) {
@@ -41,12 +38,7 @@ pub(crate) fn cancel(name: &CStr) {
 /// A raw model result as libc's: pending signals delivered before errno.
 #[cfg(target_os = "linux")]
 pub(crate) fn signal_result(result: i64) -> c_int {
-    crate::thread::signals::patina_signal_deliver();
-    if result < 0 {
-        error(-result as c_int)
-    } else {
-        result as c_int
-    }
+    crate::abi::libc_delivered(crate::abi::from_neg(result), -1) as c_int
 }
 
 pub(crate) use crate::variadic::errno;

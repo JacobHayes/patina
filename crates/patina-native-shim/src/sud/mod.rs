@@ -397,20 +397,12 @@ use crate::registry::Syscall;
 /// caller reads `-errno` from the return register (there is no libc `errno`
 /// step), on success the value itself.
 fn ret_i32(result: c_int) -> i64 {
-    if result < 0 {
-        -(crate::environment::patina_errno() as i64)
-    } else {
-        result as i64
-    }
+    crate::abi::raw(crate::abi::from_model(result).map(i64::from))
 }
 
 /// As [`ret_i32`] for an `intptr_t`-returning entry point (`read`/`write`).
 fn ret_isize(result: isize) -> i64 {
-    if result < 0 {
-        -(crate::environment::patina_errno() as i64)
-    } else {
-        result as i64
-    }
+    crate::abi::raw(crate::abi::from_model(result).map(|value| value as i64))
 }
 
 #[unsafe(no_mangle)]

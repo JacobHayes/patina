@@ -7,14 +7,7 @@ mod gai;
 mod interfaces;
 
 fn socket_result(rc: i64) -> isize {
-    #[cfg(target_os = "linux")]
-    crate::thread::signals::patina_signal_deliver();
-    if rc < 0 {
-        super::errno(-rc as c_int);
-        -1
-    } else {
-        rc as isize
-    }
+    crate::abi::libc_delivered(crate::abi::from_neg(rc), -1) as isize
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int {

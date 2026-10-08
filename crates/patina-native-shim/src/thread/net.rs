@@ -285,10 +285,7 @@ pub(crate) enum Dir {
 }
 
 fn errno_result(result: Result<i64, c_int>) -> i64 {
-    match result {
-        Ok(value) => value,
-        Err(errno) => -i64::from(errno),
-    }
+    crate::abi::raw(result.map_err(crate::abi::Errno::new))
 }
 
 /// The unrecorded virtual now: a function of the recorded sleeps, so a

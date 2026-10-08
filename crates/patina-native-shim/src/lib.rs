@@ -25,6 +25,8 @@ mod variadic;
 #[cfg(all(patina_posix_exports, target_os = "linux"))]
 include!(concat!(env!("OUT_DIR"), "/route_aliases.rs"));
 
+mod abi;
+
 mod bundle;
 mod coverage;
 mod entropy;

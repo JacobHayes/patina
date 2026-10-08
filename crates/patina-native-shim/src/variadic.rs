@@ -18,27 +18,17 @@ pub extern "C" fn patina_variadic_link() {
 mod memory;
 
 pub(crate) fn errno(value: c_int) {
-    // SAFETY: libc provides the current thread's errno cell on both platforms.
-    unsafe {
-        #[cfg(target_os = "linux")]
-        {
-            *libc::__errno_location() = value;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            *libc::__error() = value;
-        }
-    }
+    crate::abi::set_host_errno(value);
 }
 
 #[cfg(target_os = "linux")]
 fn raw_result(value: i64) -> i64 {
-    if (-4095..=-1).contains(&value) {
-        errno(-value as c_int);
-        -1
-    } else {
-        value
-    }
+    crate::abi::libc_result(
+        crate::abi::LinuxReturn::new(value)
+            .decode()
+            .map(|value| value as i64),
+        -1,
+    )
 }
 
 #[cfg(feature = "test-panic")]
@@ -70,15 +60,12 @@ pub(crate) fn fault(family: u32) -> bool {
 }
 
 pub(crate) fn error(value: c_int) -> c_int {
-    errno(value);
+    crate::abi::set_host_errno(value);
     -1
 }
 
 pub(crate) fn model_result(result: c_int) -> c_int {
-    if result < 0 {
-        errno(crate::patina_errno());
-    }
-    result
+    crate::abi::libc_result(crate::abi::from_model(result), result)
 }
 
 fn cancel(name: &CStr) {

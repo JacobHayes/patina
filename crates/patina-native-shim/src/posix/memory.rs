@@ -2,12 +2,10 @@
 use core::ffi::{c_char, c_int, c_void};
 
 fn failed(result: i64) -> bool {
-    if (-4095..=-1).contains(&result) {
-        super::error(-result as c_int);
-        true
-    } else {
-        false
-    }
+    crate::abi::libc_result(
+        crate::abi::LinuxReturn::new(result).decode().map(|_| false),
+        true,
+    )
 }
 fn address(result: i64) -> *mut c_void {
     if failed(result) {
