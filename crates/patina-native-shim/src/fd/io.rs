@@ -1,4 +1,5 @@
 //! Universal and positional descriptor I/O entry points.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
 
@@ -8,14 +9,18 @@ use super::*;
 // the kernel answers for it. These are the entries the C `read`/`write`/... and
 // the SUD rows call, so the two doors share one decode.
 
-fn fs_read(fd: Fd, destination: *mut c_void, length: usize) -> isize {
+/// Read a filesystem description directly into the caller's buffer.
+///
+/// # Safety
+/// `destination` must be writable for `length` bytes when nonzero.
+unsafe fn fs_read(fd: Fd, destination: *mut c_void, length: usize) -> isize {
     #[cfg(target_os = "linux")]
     mem::reading(fd.0);
     match with_context(|context| context.fs_read(fd, length)) {
         Ok(bytes) => {
             if !bytes.is_empty() {
-                // SAFETY: the caller's C ABI contract makes `destination`
-                // writable for `length` bytes, and `bytes.len() <= length`.
+                // SAFETY: the caller upholds this function's buffer contract,
+                // and the filesystem returns at most `length` bytes.
                 unsafe {
                     slice::from_raw_parts_mut(destination.cast::<u8>(), length)[..bytes.len()]
                         .copy_from_slice(&bytes);
@@ -105,7 +110,9 @@ pub(crate) unsafe fn read_resolved(
         #[cfg(target_os = "linux")]
         FdKind::File if mem::secret(resolved.handle) => fail(EINVAL) as isize,
         FdKind::File | FdKind::Dir | FdKind::OPath => {
-            fs_read(Fd(resolved.handle), destination, length)
+            // SAFETY: `read_resolved`'s caller contract keeps `destination`
+            // writable for `length` bytes; this file path accesses it directly.
+            unsafe { fs_read(Fd(resolved.handle), destination, length) }
         }
         FdKind::Urandom => {
             // SAFETY: forwarded from this function's own contract.
@@ -130,6 +137,7 @@ pub(crate) unsafe fn read_resolved(
             thread::signals::fd::read(resolved.handle, nonblocking, destination, length)
         },
         #[cfg(target_os = "linux")]
+        // SAFETY: forwarded from `read_resolved`'s destination-buffer contract.
         FdKind::EventFd => unsafe {
             thread::eventfd_read(resolved.handle, nonblocking, destination, length)
         },
@@ -182,12 +190,15 @@ pub(crate) unsafe fn read_resolved(
     }
 }
 
-fn fs_write(fd: Fd, source: *const c_void, length: usize) -> isize {
+/// Write a filesystem description directly from the caller's buffer.
+///
+/// # Safety
+/// `source` must be readable for `length` bytes when nonzero.
+unsafe fn fs_write(fd: Fd, source: *const c_void, length: usize) -> isize {
     let bytes = if length == 0 {
         &[]
     } else {
-        // SAFETY: the caller's C ABI contract makes `source` readable for
-        // `length` bytes.
+        // SAFETY: the caller upholds this function's buffer contract.
         unsafe { slice::from_raw_parts(source.cast::<u8>(), length) }
     };
     match with_context(|context| context.fs_write(fd, bytes)) {
@@ -244,7 +255,11 @@ pub(crate) unsafe fn write_resolved(
         // Secret memory has no write operation (`FMODE_CAN_WRITE`).
         #[cfg(target_os = "linux")]
         FdKind::File if mem::secret(resolved.handle) => fail(EINVAL) as isize,
-        FdKind::File | FdKind::Dir | FdKind::OPath => fs_write(Fd(resolved.handle), source, length),
+        FdKind::File | FdKind::Dir | FdKind::OPath => {
+            // SAFETY: `write_resolved`'s caller contract keeps `source`
+            // readable for `length` bytes; this file path accesses it directly.
+            unsafe { fs_write(Fd(resolved.handle), source, length) }
+        }
         // SAFETY: forwarded from this function's own contract.
         FdKind::Socket => unsafe {
             thread::net::socket_write(resolved.handle, nonblocking, source, length)
@@ -253,8 +268,8 @@ pub(crate) unsafe fn write_resolved(
         FdKind::Pipe => unsafe {
             thread::pipe_write(resolved.handle, nonblocking, source, length, false)
         },
-        // SAFETY: as above.
         #[cfg(target_os = "linux")]
+        // SAFETY: forwarded from `write_resolved`'s source-buffer contract.
         FdKind::EventFd => unsafe { thread::eventfd_write(resolved.handle, source, length) },
         #[cfg(target_os = "linux")]
         FdKind::Epoll

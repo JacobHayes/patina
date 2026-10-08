@@ -1,4 +1,5 @@
 //! Filesystem open resolution and descriptor binding.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
 
@@ -236,7 +237,8 @@ pub(crate) unsafe fn open_at(
     {
         return fail(EWOULDBLOCK);
     }
-    let path = match path_from_c(path) {
+    // SAFETY: `open_at`'s contract requires a readable NUL-terminated string.
+    let path = match unsafe { path_from_c(path) } {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };

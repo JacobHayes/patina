@@ -387,7 +387,8 @@ fn copy_out(description: KernelStatfs, out: *mut KernelStatfs) -> c_int {
 /// non-null, to a writable `struct statfs`.
 pub unsafe extern "C" fn patina_statfs(path: *const c_char, out: *mut KernelStatfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let path = match path_from_c(path) {
+    // SAFETY: This export's C ABI contract guarantees a readable path string.
+    let path = match unsafe { path_from_c(path) } {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };

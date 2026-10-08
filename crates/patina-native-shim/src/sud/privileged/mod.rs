@@ -18,6 +18,7 @@
 //! and the declared configuration, which replay reproduces, and from the
 //! filesystem's and descriptor table's own lookups, which are recorded and
 //! replayed as every other row's are.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use crate::identity::{Credential, credential};
 use crate::registry::Capability;
@@ -73,7 +74,9 @@ fn refuse(code: impl Into<i64>) -> Answer {
 /// [`super::guest_path`]), then the shim's one decode of a C path.
 fn guest_path(address: u64) -> Result<String, c_int> {
     let pointer = super::guest_path(address).map_err(|code| -code as c_int)?;
-    crate::path_from_c(pointer)
+    // SAFETY: This SUD path row directly reads its non-null syscall path
+    // operand as before; invalid non-null guest pointers retain that fault path.
+    unsafe { crate::path_from_c(pointer) }
 }
 
 /// `user_path_at(AT_FDCWD, path, …)`; see [`lookup_at`].

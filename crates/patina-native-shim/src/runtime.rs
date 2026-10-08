@@ -1,4 +1,5 @@
 //! Control-plane parsing, runtime installation, and boundary error handling.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
 
@@ -1122,11 +1123,16 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     0
 }
 
-pub(crate) fn path_from_c(path: *const c_char) -> Result<String, c_int> {
+/// Decode a NUL-terminated C path as UTF-8.
+///
+/// # Safety
+/// When non-null, `path` must be readable through its terminating NUL byte.
+/// A null pointer is accepted and returns `EINVAL`.
+pub(crate) unsafe fn path_from_c(path: *const c_char) -> Result<String, c_int> {
     if path.is_null() {
         return Err(EINVAL);
     }
-    // SAFETY: The C ABI contract requires a valid NUL-terminated string.
+    // SAFETY: The caller guarantees a readable NUL-terminated string when non-null.
     unsafe { CStr::from_ptr(path) }
         .to_str()
         .map(str::to_owned)

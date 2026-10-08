@@ -1,4 +1,5 @@
 //! Filesystem metadata, ownership, allocation, and directory iteration.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
 
@@ -330,7 +331,8 @@ pub unsafe extern "C" fn patina_metadata_at(
     if flags & !paths::RESOLVE_AT_FLAGS != 0 {
         return fail(EINVAL);
     }
-    let path = match path_from_c(path) {
+    // SAFETY: This export's C ABI contract guarantees a readable path string.
+    let path = match unsafe { path_from_c(path) } {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
@@ -622,7 +624,8 @@ pub unsafe extern "C" fn patina_chmod(
     if flags & !paths::RESOLVE_AT_FLAGS != 0 {
         return fail(EINVAL);
     }
-    let path = match path_from_c(path) {
+    // SAFETY: This export's C ABI contract guarantees a readable path string.
+    let path = match unsafe { path_from_c(path) } {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
@@ -787,7 +790,8 @@ pub unsafe extern "C" fn patina_utimensat(
     if flags & !paths::RESOLVE_AT_FLAGS != 0 {
         return fail(EINVAL);
     }
-    let path = match path_from_c(path) {
+    // SAFETY: This export's C ABI contract guarantees a readable path string.
+    let path = match unsafe { path_from_c(path) } {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
@@ -969,7 +973,8 @@ pub unsafe extern "C" fn patina_chown(
     if flags & !paths::RESOLVE_AT_FLAGS != 0 {
         return fail(EINVAL);
     }
-    let path = match path_from_c(path) {
+    // SAFETY: This export's C ABI contract guarantees a readable path string.
+    let path = match unsafe { path_from_c(path) } {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
@@ -1078,7 +1083,8 @@ pub unsafe extern "C" fn patina_truncate(dirfd: c_int, path: *const c_char, leng
     let Ok(length) = u64::try_from(length) else {
         return fail(EINVAL);
     };
-    let path = match path_from_c(path) {
+    // SAFETY: This export's C ABI contract guarantees a readable path string.
+    let path = match unsafe { path_from_c(path) } {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };

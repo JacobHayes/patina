@@ -16,6 +16,7 @@
 //! it is kept — is the filesystem's business; a descriptor on no filesystem
 //! entry (an anonymous pipe, a socket, an eventfd) is on a pseudo-filesystem
 //! with no attribute handlers.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::slice;
@@ -76,11 +77,14 @@ enum Node {
 
 /// The node a path names: resolved with or without following a final
 /// symlink (the `l*` rows), and it must exist.
-fn path_node(path: *const c_char, follow: bool) -> Result<Node, c_int> {
+/// # Safety
+/// When non-null, `path` must be readable through its terminating NUL byte.
+unsafe fn path_node(path: *const c_char, follow: bool) -> Result<Node, c_int> {
     if path.is_null() {
         return Err(EFAULT);
     }
-    let path = path_from_c(path)?;
+    // SAFETY: This function's contract guarantees a readable string when non-null.
+    let path = unsafe { path_from_c(path)? };
     let flags = if follow { 0 } else { paths::RESOLVE_NOFOLLOW };
     let resolved = match paths::resolve(paths::AT_FDCWD, &path, flags)? {
         paths::Resolution::Volume(resolved) => resolved,
@@ -195,11 +199,15 @@ fn copy_out(bytes: &[u8], buffer: *mut c_void, size: usize) -> isize {
 }
 
 /// The node `(fd, path, by)` names.
-fn node(raw_fd: c_int, path: *const c_char, by: c_int) -> Result<Node, c_int> {
+/// # Safety
+/// If `by` is not [`XATTR_BY_FD`], a non-null `path` must be readable through
+/// its terminating NUL byte.
+unsafe fn node(raw_fd: c_int, path: *const c_char, by: c_int) -> Result<Node, c_int> {
     if by == XATTR_BY_FD {
         descriptor_node(raw_fd)
     } else {
-        path_node(path, by == XATTR_BY_PATH)
+        // SAFETY: forwarded from this function's path-pointer contract.
+        unsafe { path_node(path, by == XATTR_BY_PATH) }
     }
 }
 
@@ -219,7 +227,8 @@ pub unsafe extern "C" fn patina_getxattr(
     size: usize,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let node = match node(raw_fd, path, by) {
+    // SAFETY: This export's contract guarantees a NUL-terminated path when used.
+    let node = match unsafe { node(raw_fd, path, by) } {
         Ok(node) => node,
         Err(errno) => return fail(errno) as isize,
     };
@@ -256,7 +265,8 @@ pub unsafe extern "C" fn patina_listxattr(
     size: usize,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let target = match node(raw_fd, path, by) {
+    // SAFETY: This export's contract guarantees a NUL-terminated path when used.
+    let target = match unsafe { node(raw_fd, path, by) } {
         Ok(Node::Volume(target)) => target,
         Ok(Node::Pseudo { .. }) => return copy_out(&[], list, size),
         Err(errno) => return fail(errno) as isize,
@@ -313,7 +323,8 @@ pub unsafe extern "C" fn patina_setxattr(
     };
     let node = match descriptor {
         Some(node) => node,
-        None => match path_node(path, by == XATTR_BY_PATH) {
+        // SAFETY: This export's contract guarantees a NUL-terminated path when used.
+        None => match unsafe { path_node(path, by == XATTR_BY_PATH) } {
             Ok(node) => node,
             Err(errno) => return fail(errno),
         },
@@ -365,7 +376,8 @@ pub unsafe extern "C" fn patina_removexattr(
     };
     let node = match descriptor {
         Some(node) => node,
-        None => match path_node(path, by == XATTR_BY_PATH) {
+        // SAFETY: This export's contract guarantees a NUL-terminated path when used.
+        None => match unsafe { path_node(path, by == XATTR_BY_PATH) } {
             Ok(node) => node,
             Err(errno) => return fail(errno),
         },
