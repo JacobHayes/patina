@@ -6,10 +6,16 @@ impl Probe {
     // ---- descriptors --------------------------------------------------------
 
     pub fn pipe2(&self, flags: i32) -> (i64, [i32; 2]) {
+        self.pipe2_wide(i64::from(flags))
+    }
+
+    /// `pipe2` with the full syscall register width, for kernel parameters
+    /// whose declared prototype is narrower than the register.
+    pub fn pipe2_wide(&self, flags: i64) -> (i64, [i32; 2]) {
         let mut fds = [-1i32; 2];
         let result = self.call(
             Syscall::N_pipe2,
-            [fds.as_mut_ptr() as i64, flags as i64, 0, 0, 0, 0],
+            [fds.as_mut_ptr() as i64, flags, 0, 0, 0, 0],
         );
         let builder = self.event(Syscall::N_pipe2, result).arg("flags", flags);
         let builder = if result >= 0 {
@@ -23,6 +29,17 @@ impl Probe {
         };
         builder.emit();
         (result, fds)
+    }
+
+    /// `pipe2` to a caller-named output address, including NULL and protected
+    /// mappings used by the fd copyout conformance cases.
+    pub fn pipe2_to(&self, fds: &At, flags: i64) -> i64 {
+        let result = self.call(Syscall::N_pipe2, [fds.raw as i64, flags, 0, 0, 0, 0]);
+        self.event(Syscall::N_pipe2, result)
+            .arg("fds", fds.label.as_str())
+            .arg("flags", flags)
+            .emit();
+        result
     }
 
     /// `pipe(fds)`, or a NULL array (`null`). An x86_64 legacy row; the

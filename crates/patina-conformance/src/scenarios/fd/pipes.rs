@@ -4,7 +4,7 @@
 use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 use patina_dst_syscalls::Syscall;
 
-use crate::probe::{AT_FDCWD, Probe, neg};
+use crate::probe::{AT_FDCWD, At, Probe, Shown, neg, page_size};
 use libc::*;
 
 /// uapi/asm-generic/fcntl.h LOCK_MAND (the libc crate does not export it).
@@ -125,6 +125,89 @@ pub fn run(p: &Probe) {
             p.close(unexpected[1]);
         });
     }
+    let (direct_and_unknown, unexpected) = p.pipe2(O_DIRECT | 0x1);
+    p.check(
+        "pipe2 rejects unknown bits before its O_DIRECT refusal",
+        direct_and_unknown == neg(EINVAL),
+    );
+    if direct_and_unknown == 0 {
+        p.rec.quiet(|| {
+            p.close(unexpected[0]);
+            p.close(unexpected[1]);
+        });
+    }
+
+    let invalid_and_direct = i64::from(O_DIRECT | 0x1);
+    p.check(
+        "pipe2(NULL, bad flags) checks invalid bits before O_DIRECT",
+        p.pipe2_to(&At::null(), invalid_and_direct) == neg(EINVAL),
+    );
+    p.check(
+        "pipe2(NULL, 0) is EFAULT",
+        p.pipe2_to(&At::null(), 0) == neg(EFAULT),
+    );
+
+    let (wide_flags, wide_fds) = p.pipe2_wide((1_i64 << 32) | i64::from(O_CLOEXEC));
+    p.check(
+        "pipe2 keeps O_CLOEXEC when high register bits are set",
+        wide_flags == 0
+            && p.fcntl(wide_fds[0], F_GETFD, 0) == i64::from(FD_CLOEXEC)
+            && p.fcntl(wide_fds[1], F_GETFD, 0) == i64::from(FD_CLOEXEC),
+    );
+    if wide_flags == 0 {
+        p.close(wide_fds[0]);
+        p.close(wide_fds[1]);
+    }
+
+    let (limit_result, soft, hard) = p.getrlimit(RLIMIT_NOFILE as i32, Shown::Soft);
+    p.require(
+        "read RLIMIT_NOFILE before the full-table pipe2 case",
+        limit_result == 0 && soft >= 3,
+    );
+    p.require(
+        "lower RLIMIT_NOFILE to the three occupied standard descriptors",
+        p.setrlimit_kept(RLIMIT_NOFILE as i32, 3, hard) == 0,
+    );
+    let full_table_null = p.pipe2_to(&At::null(), 0);
+    let restored_limit = p.setrlimit_kept(RLIMIT_NOFILE as i32, soft, hard);
+    p.check(
+        "pipe2 checks allocation before copying a NULL output",
+        full_table_null == neg(EMFILE) && restored_limit == 0,
+    );
+
+    let (baseline, lowest) = p.pipe2(0);
+    p.require("baseline pipe for copyout rollback", baseline == 0);
+    p.close(lowest[0]);
+    p.close(lowest[1]);
+    let (mapping_result, inaccessible) = p.mmap(
+        "pipefd-no-access",
+        &At::null(),
+        page_size(),
+        PROT_NONE,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    p.require(
+        "map a PROT_NONE pipefd page",
+        mapping_result >= 0 && inaccessible.is_some(),
+    );
+    let inaccessible = inaccessible.unwrap();
+    let copy_fault = p.pipe2_to(&inaccessible.at(0), 0);
+    let (after_fault, reused) = p.pipe2(0);
+    p.check(
+        "pipe2 copies a protected output as EFAULT",
+        copy_fault == neg(EFAULT),
+    );
+    p.check(
+        "pipe2 closes both ends after EFAULT and reuses the same lowest fds",
+        after_fault == 0 && reused == lowest,
+    );
+    if after_fault == 0 {
+        p.close(reused[0]);
+        p.close(reused[1]);
+    }
+    p.munmap(&inaccessible.at(0), inaccessible.len);
 
     let file = format!("{root}/lock");
     let fa = p.openat(AT_FDCWD, &file, O_RDWR | O_CREAT | O_EXCL, 0o640);

@@ -242,28 +242,29 @@ pub extern "C" fn ftruncate64(fd: c_int, length: libc::off64_t) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pipe2(pipefd: *mut c_int, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: non-null `pipefd` is writable for two descriptors by pipe2's
-    // caller contract.
-    unsafe {
-        if pipefd.is_null() {
-            return error(libc::EFAULT);
+    let invalid = flags & !(libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_DIRECT);
+    if invalid != 0 {
+        return error(libc::EINVAL);
+    }
+    if flags & libc::O_DIRECT != 0 {
+        return error(libc::ENOSYS);
+    }
+    let nonblocking = c_int::from(flags & libc::O_NONBLOCK != 0);
+    let cloexec = c_int::from(flags & libc::O_CLOEXEC != 0);
+    let mut fds = [0; 2];
+    // SAFETY: `fds` is local writable storage for the two pipe descriptors.
+    let result =
+        unsafe { crate::thread::patina_pipe(&mut fds[0], &mut fds[1], nonblocking, cloexec) };
+    if result != 0 {
+        return model_result(result);
+    }
+    match crate::uaccess::write(pipefd as usize, &fds) {
+        Ok(()) => 0,
+        Err(errno) => {
+            let _ = crate::fd::value::close(fds[0]);
+            let _ = crate::fd::value::close(fds[1]);
+            crate::abi::libc_result(Err(crate::abi::failed(errno)), -1)
         }
-        let nonblocking = c_int::from(flags & libc::O_NONBLOCK != 0);
-        let cloexec = c_int::from(flags & libc::O_CLOEXEC != 0);
-        let mut remaining = flags & !(libc::O_NONBLOCK | libc::O_CLOEXEC);
-        if remaining & libc::O_DIRECT != 0 {
-            return error(libc::ENOSYS);
-        }
-        remaining &= !libc::O_DIRECT;
-        if remaining != 0 {
-            return error(libc::EINVAL);
-        }
-        model_result(crate::thread::patina_pipe(
-            pipefd,
-            pipefd.add(1),
-            nonblocking,
-            cloexec,
-        ))
     }
 }
 

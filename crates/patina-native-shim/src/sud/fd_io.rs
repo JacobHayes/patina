@@ -355,31 +355,28 @@ pub(super) fn sys_ioctl(fd: i64, request: u64, arg: u64) -> i64 {
 /// (packet mode) is not modeled (a soft `ENOSYS`, as the C `pipe2` answers), and
 /// any other flag is `EINVAL` — byte-identical to the C interposer.
 pub(super) fn sys_pipe2(fds_out: u64, flags: u64) -> i64 {
-    if fds_out == 0 {
-        return -EFAULT;
-    }
-    let remaining = flags & !(O_NONBLOCK | O_CLOEXEC);
-    if remaining & O_DIRECT != 0 {
-        return -ENOSYS;
-    }
-    if remaining != 0 {
+    let flags = crate::abi::reg::int(flags) as u32 as u64;
+    let invalid = flags & !(O_NONBLOCK | O_CLOEXEC | O_DIRECT);
+    if invalid != 0 {
         return -EINVAL;
+    }
+    if flags & O_DIRECT != 0 {
+        return -ENOSYS;
     }
     let nonblocking = (flags & O_NONBLOCK != 0) as c_int;
     let cloexec = (flags & O_CLOEXEC != 0) as c_int;
-    let mut read_fd: c_int = 0;
-    let mut write_fd: c_int = 0;
-    // SAFETY: local writable storage for the pair.
-    let rc =
-        unsafe { crate::thread::patina_pipe(&mut read_fd, &mut write_fd, nonblocking, cloexec) };
+    let mut fds = [0; 2];
+    // SAFETY: `fds` is local writable storage for the two pipe descriptors.
+    let rc = unsafe { crate::thread::patina_pipe(&mut fds[0], &mut fds[1], nonblocking, cloexec) };
     if rc != 0 {
-        return -(crate::environment::patina_errno() as i64);
+        return ret_i32(rc);
     }
-    // SAFETY: `fds_out` is the guest's `int[2]`.
-    unsafe {
-        let out = fds_out as *mut c_int;
-        out.write(read_fd);
-        out.add(1).write(write_fd);
+    match crate::uaccess::write(fds_out as usize, &fds) {
+        Ok(()) => 0,
+        Err(errno) => {
+            let _ = crate::fd::value::close(fds[0]);
+            let _ = crate::fd::value::close(fds[1]);
+            crate::abi::raw(Err(crate::abi::failed(errno)))
+        }
     }
-    0
 }

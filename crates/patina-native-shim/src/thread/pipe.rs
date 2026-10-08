@@ -371,6 +371,9 @@ pub unsafe extern "C" fn patina_pipe(
     if let Err(error) = state.ensure_active() {
         return super::fail(c_int::from(error.into_posix()));
     }
+    if let Err(errno) = super::fd_table().lock().ensure_free(2) {
+        return super::fail(errno);
+    }
     let inode = mint_pipe_inode(&mut state, false, now, 2);
     let channel = state.net.next_channel;
     state.net.next_channel = state.net.next_channel.wrapping_add(1);
@@ -443,11 +446,29 @@ unsafe fn bind_pipe_pair(
             0
         }
         Err(errno) => {
-            let _ = state;
-            // The ends are unreachable from any guest number, so their
-            // release wakes nobody; drop them through the shared path.
-            let _ = pipe_close_locked(first.0 as u64);
-            let _ = pipe_close_locked(second.0 as u64);
+            // The fresh ends were never installed in the descriptor table.
+            // Remove them under this existing ThreadRuntime guard; the normal
+            // close helper would reacquire the same non-recursive lock.
+            let first_end = state.net.pipe_ends.remove(&(first.0 as c_int));
+            let second_end = state.net.pipe_ends.remove(&(second.0 as c_int));
+            if let Some(channel) = first_end
+                .as_ref()
+                .and_then(|end| end.read_channel.or(end.write_channel))
+                .or_else(|| {
+                    second_end
+                        .as_ref()
+                        .and_then(|end| end.read_channel.or(end.write_channel))
+                })
+            {
+                state.net.pipe_channels.remove(&channel);
+            }
+            if let Some(ino) = first_end
+                .as_ref()
+                .and_then(|end| end.inode)
+                .or_else(|| second_end.as_ref().and_then(|end| end.inode))
+            {
+                state.net.pipe_inodes.remove(&ino);
+            }
             super::fail(errno)
         }
     }
