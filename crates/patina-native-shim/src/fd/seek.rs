@@ -1,5 +1,7 @@
 //! Descriptor seek, synchronization, and length entry points.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 
 fn no_position(whence: u32) -> c_int {
@@ -19,15 +21,19 @@ fn no_position(whence: u32) -> c_int {
 /// doors read and move (`crate::sud::seek_dir_iteration`).
 pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    seek(raw_fd, offset, whence).unwrap_or(-1)
+}
+
+pub(crate) fn seek(raw_fd: c_int, offset: i64, whence: u32) -> crate::abi::SysResult<i64> {
     let handle = match resolve_fd(raw_fd) {
         #[cfg(target_os = "linux")]
         Ok(resolved) if resolved.kind == FdKind::Dir => {
             return match crate::sud::seek_dir_iteration(raw_fd, offset, whence) {
                 Some(position) => {
                     set_errno(0);
-                    position as i64
+                    Ok(position as i64)
                 }
-                None => i64::from(fail(EINVAL)),
+                None => Err(crate::abi::failed(EINVAL)),
             };
         }
         #[cfg(target_os = "linux")]
@@ -35,34 +41,38 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
             return match thread::ipc::mq_seek(resolved.handle, offset, whence) {
                 Ok(position) => {
                     set_errno(0);
-                    position
+                    Ok(position)
                 }
-                Err(errno) => i64::from(fail(errno)),
+                Err(errno) => Err(crate::abi::failed(errno)),
             };
         }
         // Secret memory has no position (`FMODE_LSEEK`).
         #[cfg(target_os = "linux")]
         Ok(resolved) if resolved.kind == FdKind::File && mem::secret(resolved.handle) => {
-            return i64::from(fail(no_position(whence)));
+            return Err(crate::abi::failed(no_position(whence)));
         }
         // An `O_PATH` descriptor opened nothing to seek in (`fdget_pos`).
         Ok(resolved)
             if resolved.kind == FdKind::OPath && matches!(whence, SEEK_DATA | SEEK_HOLE) =>
         {
-            return i64::from(fail(EBADF));
+            return Err(crate::abi::failed(EBADF));
         }
         #[cfg(target_os = "linux")]
         Ok(resolved) if resolved.kind == FdKind::NamespacePath => {
-            return i64::from(fail(EBADF));
+            return Err(crate::abi::failed(EBADF));
         }
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
         // `noop_llseek`: the position stays where it is, 0, for any whence
         // `ksys_lseek` passes on.
         Ok(resolved) if resolved.kind.seeks_nowhere() => {
-            return i64::from(if whence > SEEK_HOLE { fail(EINVAL) } else { 0 });
+            return if whence > SEEK_HOLE {
+                Err(crate::abi::failed(EINVAL))
+            } else {
+                Ok(0)
+            };
         }
-        Ok(_) => return i64::from(fail(no_position(whence))),
-        Err(errno) => return i64::from(fail(errno)),
+        Ok(_) => return Err(crate::abi::failed(no_position(whence))),
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     let whence = match whence {
         0 => SeekWhence::Start,
@@ -70,15 +80,18 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
         2 => SeekWhence::End,
         SEEK_DATA => SeekWhence::Data,
         SEEK_HOLE => SeekWhence::Hole,
-        _ => return i64::from(fail(EINVAL)),
+        _ => return Err(crate::abi::failed(EINVAL)),
     };
     #[cfg(target_os = "linux")]
     if matches!(whence, SeekWhence::Data | SeekWhence::Hole) {
         mem::inspecting(handle.0);
     }
     match with_context(|context| context.fs_seek(handle, offset, whence)) {
-        Ok(position) => i64::try_from(position).unwrap_or_else(|_| i64::from(fail(EOVERFLOW))),
-        Err(errno) => i64::from(fail(errno)),
+        Ok(position) => match i64::try_from(position) {
+            Ok(position) => Ok(position),
+            Err(_) => Err(crate::abi::failed(EOVERFLOW)),
+        },
+        Err(errno) => Err(crate::abi::failed(errno)),
     }
 }
 
@@ -92,19 +105,23 @@ const SEEK_HOLE: u32 = 4;
 /// a pipe or a socket.
 pub extern "C" fn patina_fsync(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    fsync(raw_fd).unwrap_or(-1)
+}
+
+pub(crate) fn fsync(raw_fd: c_int) -> crate::abi::SysResult<c_int> {
     let handle = match fdget(raw_fd) {
         // Secret memory has nothing to write back (no `fsync` operation).
         #[cfg(target_os = "linux")]
         Ok(resolved) if resolved.kind == FdKind::File && mem::secret(resolved.handle) => {
-            return fail(EINVAL);
+            return Err(crate::abi::failed(EINVAL));
         }
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
-        Ok(_) => return fail(EINVAL),
-        Err(errno) => return fail(errno),
+        Ok(_) => return Err(crate::abi::failed(EINVAL)),
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     match fs_sync_handle(handle) {
-        Ok(()) => 0,
-        Err(errno) => fail(errno),
+        Ok(()) => Ok(0),
+        Err(errno) => Err(crate::abi::failed(errno)),
     }
 }
 
@@ -128,15 +145,19 @@ pub(crate) fn fs_sync_volume() -> Result<(), c_int> {
 /// `ftruncate(2)`: a file's length; every other kind is `EINVAL`.
 pub extern "C" fn patina_set_len(raw_fd: c_int, length: u64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    set_len(raw_fd, length).unwrap_or(-1)
+}
+
+pub(crate) fn set_len(raw_fd: c_int, length: u64) -> crate::abi::SysResult<c_int> {
     let handle = match fdget(raw_fd) {
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
-        Ok(_) => return fail(EINVAL),
-        Err(errno) => return fail(errno),
+        Ok(_) => return Err(crate::abi::failed(EINVAL)),
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     // `secretmem_setattr`: secret memory is sized once, while it is empty.
     #[cfg(target_os = "linux")]
     if !mem::secret_resizable(handle.0) {
-        return fail(EINVAL);
+        return Err(crate::abi::failed(EINVAL));
     }
     match with_context(|context| context.fs_set_len(handle, length)) {
         Ok(()) => {
@@ -146,8 +167,8 @@ pub extern "C" fn patina_set_len(raw_fd: c_int, length: u64) -> c_int {
                 mem::secret_resized(handle.0, length);
                 fsnotify::on_handle(handle, fsnotify::IN_MODIFY);
             }
-            0
+            Ok(0)
         }
-        Err(errno) => fail(errno),
+        Err(errno) => Err(crate::abi::failed(errno)),
     }
 }

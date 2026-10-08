@@ -1,4 +1,6 @@
 //! Descriptor I/O adapters over the same model entries as raw syscalls.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::{cancel, error, model_result, size_result};
 use core::ffi::{c_int, c_void};
 #[cfg(target_os = "linux")]
@@ -27,6 +29,7 @@ pub extern "C" fn isatty(fd: c_int) -> c_int {
 pub unsafe extern "C" fn read(fd: c_int, destination: *mut c_void, length: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"read");
+    // SAFETY: the caller's read-buffer contract is forwarded to the model entry.
     unsafe { size_result(crate::patina_read(fd, destination, length)) }
 }
 /// # Safety
@@ -35,6 +38,7 @@ pub unsafe extern "C" fn read(fd: c_int, destination: *mut c_void, length: usize
 pub unsafe extern "C" fn write(fd: c_int, source: *const c_void, length: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"write");
+    // SAFETY: the caller's write-buffer contract is forwarded to the model entry.
     unsafe { size_result(crate::patina_write(fd, source, length)) }
 }
 /// # Safety
@@ -48,6 +52,7 @@ pub unsafe extern "C" fn pread(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"pread");
+    // SAFETY: the caller's pread-buffer contract is forwarded to the model entry.
     unsafe { size_result(crate::patina_pread(fd, destination, length, offset)) }
 }
 /// # Safety
@@ -61,12 +66,13 @@ pub unsafe extern "C" fn pwrite(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"pwrite");
+    // SAFETY: the caller's pwrite-buffer contract is forwarded to the model entry.
     unsafe { size_result(crate::patina_pwrite(fd, source, length, offset)) }
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn flock(fd: c_int, operation: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    model_result(crate::patina_flock(fd, operation))
+    crate::abi::libc_result(crate::fd::flock(fd, operation), -1)
 }
 /// # Safety
 /// `fd` is closed following the libc descriptor contract.
@@ -74,17 +80,17 @@ pub extern "C" fn flock(fd: c_int, operation: c_int) -> c_int {
 pub unsafe extern "C" fn close(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"close");
-    model_result(crate::patina_close(fd))
+    crate::abi::libc_result(crate::fd::value::close(fd), -1)
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn dup(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    model_result(crate::patina_dup(fd))
+    crate::abi::libc_result(crate::fd::value::dup(fd), -1)
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn dup2(oldfd: c_int, newfd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    model_result(crate::patina_dup2(oldfd, newfd))
+    crate::abi::libc_result(crate::fd::value::dup2(oldfd, newfd), -1)
 }
 /// # Safety
 /// `vectors` follows writev's buffer contract.
@@ -92,6 +98,7 @@ pub extern "C" fn dup2(oldfd: c_int, newfd: c_int) -> c_int {
 pub unsafe extern "C" fn writev(fd: c_int, vectors: *const libc::iovec, count: c_int) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"writev");
+    // SAFETY: the caller's writev vector contract is forwarded to the model entry.
     unsafe {
         size_result(crate::iov::patina_writev(
             fd,
@@ -107,6 +114,7 @@ pub unsafe extern "C" fn writev(fd: c_int, vectors: *const libc::iovec, count: c
 pub unsafe extern "C" fn readv(fd: c_int, vectors: *const libc::iovec, count: c_int) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"readv");
+    // SAFETY: the caller's readv vector contract is forwarded to the model entry.
     unsafe {
         size_result(crate::iov::patina_readv(
             fd,
@@ -127,6 +135,7 @@ pub unsafe extern "C" fn preadv(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"preadv");
+    // SAFETY: the caller's preadv vector contract is forwarded to the model entry.
     unsafe {
         size_result(crate::iov::patina_preadv(
             fd,
@@ -148,6 +157,7 @@ pub unsafe extern "C" fn pwritev(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"pwritev");
+    // SAFETY: the caller's pwritev vector contract is forwarded to the model entry.
     unsafe {
         size_result(crate::iov::patina_pwritev(
             fd,
@@ -172,17 +182,13 @@ fn seek_impl(fd: c_int, offset: i64, whence: c_int) -> i64 {
         libc::SEEK_HOLE => 4,
         _ => return i64::from(error(libc::EINVAL)),
     };
-    let result = crate::patina_seek(fd, offset, whence);
-    if result < 0 {
-        super::errno(crate::patina_errno());
-    }
-    result
+    crate::abi::libc_result(crate::fd::seek(fd, offset, whence), -1)
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn fsync(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"fsync");
-    model_result(crate::patina_fsync(fd))
+    crate::abi::libc_result(crate::fd::fsync(fd), -1)
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn ftruncate(fd: c_int, length: libc::off_t) -> c_int {
@@ -193,7 +199,7 @@ fn truncate_impl(fd: c_int, length: i64) -> c_int {
     if length < 0 {
         return error(libc::EINVAL);
     }
-    model_result(crate::patina_set_len(fd, length as u64))
+    crate::abi::libc_result(crate::fd::set_len(fd, length as u64), -1)
 }
 /// # Safety
 /// `fildes` is null or writable for two descriptor numbers.
@@ -203,5 +209,6 @@ pub unsafe extern "C" fn pipe(fildes: *mut c_int) -> c_int {
     if fildes.is_null() {
         return error(libc::EFAULT);
     }
+    // SAFETY: non-null `fildes` is writable for two descriptors by the pipe contract.
     unsafe { model_result(crate::thread::patina_pipe(fildes, fildes.add(1), 0, 0)) }
 }

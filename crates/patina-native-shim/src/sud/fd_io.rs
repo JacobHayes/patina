@@ -1,10 +1,9 @@
 //! SUD rows — descriptor I/O: `read`/`write`/`close`/`lseek`, positional and
 //! vectored I/O, `fsync`/`ftruncate`/`flock`, `dup*`/`close_range`,
-//! `fcntl`/`ioctl`, `pipe2`. Every row is thin marshaling over the SAME
-//! universal `patina_*` entry the C interposer calls: the guest number is
-//! resolved once, in that entry, against the shim's descriptor table, and the
-//! entry dispatches on what it names — so nothing here (and nothing in the C
-//! layer) decides by descriptor class, and the two doors cannot drift.
+//! `fcntl`/`ioctl`, `pipe2`. Rows share the same model operation as the C
+//! doors: existing prefixed entries remain where needed, and typed fd-value
+//! cores are called directly. Descriptor kind and validity stay with those
+//! operations, so neither door decides by descriptor class.
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
@@ -40,20 +39,18 @@ pub(super) fn sys_close(fd: i64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    ret_i32(crate::fd::patina_close(fd as c_int))
+    crate::abi::raw(crate::fd::value::close(fd as c_int).map(i64::from))
 }
 
 pub(super) fn sys_lseek(fd: i64, offset: i64, whence: u64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    // patina_seek returns the new offset or -1; shape it to the raw convention.
-    let result = crate::fd::patina_seek(fd as c_int, offset, whence as u32);
-    if result < 0 {
-        -(crate::environment::patina_errno() as i64)
-    } else {
-        result
-    }
+    crate::abi::raw(crate::fd::seek(
+        fd as c_int,
+        offset,
+        crate::abi::reg::uint(whence),
+    ))
 }
 
 // ---- Positional & vectored I/O ----
@@ -164,7 +161,7 @@ pub(super) fn sys_fsync(fd: i64) -> i64 {
     }
     // A directory fd IS an ordinary deterministic-filesystem fd, so `fsync` on it
     // is the crash model's namespace-durability barrier with no special case.
-    ret_i32(crate::fd::patina_fsync(fd as c_int))
+    crate::abi::raw(crate::fd::fsync(fd as c_int).map(i64::from))
 }
 
 pub(super) fn sys_ftruncate(fd: i64, length: i64) -> i64 {
@@ -174,14 +171,20 @@ pub(super) fn sys_ftruncate(fd: i64, length: i64) -> i64 {
     if length < 0 {
         return -EINVAL;
     }
-    ret_i32(crate::fd::patina_set_len(fd as c_int, length as u64))
+    crate::abi::raw(crate::fd::set_len(fd as c_int, length as u64).map(i64::from))
 }
 
 pub(super) fn sys_flock(fd: i64, operation: i64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    ret_i32(crate::fd::patina_flock(fd as c_int, operation as c_int))
+    crate::abi::raw(
+        crate::fd::flock(
+            fd as c_int,
+            crate::abi::reg::uint(operation as u64) as c_int,
+        )
+        .map(i64::from),
+    )
 }
 
 // ---- Duplication and closing ----
@@ -190,7 +193,7 @@ pub(super) fn sys_dup(fd: i64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    ret_i32(crate::fd::patina_dup(fd as c_int))
+    crate::abi::raw(crate::fd::value::dup(fd as c_int).map(i64::from))
 }
 
 /// `dup3(2)`: the kernel refuses a flag other than `O_CLOEXEC` before it looks
@@ -204,11 +207,10 @@ pub(super) fn sys_dup3(oldfd: i64, newfd: i64, flags: u64) -> i64 {
         return err;
     }
     let newfd = c_int::try_from(newfd).unwrap_or(-1);
-    ret_i32(crate::fd::patina_dup3(
-        oldfd as c_int,
-        newfd,
-        c_int::from(flags & O_CLOEXEC != 0),
-    ))
+    crate::abi::raw(
+        crate::fd::value::dup3(oldfd as c_int, newfd, c_int::from(flags & O_CLOEXEC != 0))
+            .map(i64::from),
+    )
 }
 
 /// `close_range(2)`: the kernel reads `first`/`last` as unsigned ints.

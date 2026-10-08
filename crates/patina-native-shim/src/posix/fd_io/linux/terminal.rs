@@ -26,6 +26,7 @@ const IBAUD0: libc::tcflag_t = 0o20000000000;
 pub(in crate::posix) fn isatty_impl(fd: c_int) -> c_int {
     let mut kernel = MaybeUninit::<KernelTermios>::uninit();
     c_int::from(
+        // SAFETY: `kernel` is a writable local output buffer for TCGETS and is not read here.
         unsafe {
             model_result(crate::ioctl::patina_ioctl(
                 fd,
@@ -40,6 +41,7 @@ pub(in crate::posix) fn isatty_impl(fd: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcgetattr(fd: c_int, termios_p: *mut libc::termios) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the C contract requires `termios_p` writable; TCGETS initializes `kernel` before it is read.
     unsafe {
         let mut kernel = MaybeUninit::<KernelTermios>::uninit();
         if model_result(crate::ioctl::patina_ioctl(
@@ -78,6 +80,7 @@ unsafe fn setattr_impl(
     optional_actions: c_int,
     termios_p: *const libc::termios,
 ) -> c_int {
+    // SAFETY: the caller guarantees `termios_p` points to a readable termios; ioctl buffers are local and writable.
     unsafe {
         let mut old = MaybeUninit::<KernelTermios>::uninit();
         let old_result = model_result(crate::ioctl::patina_ioctl(
@@ -148,11 +151,13 @@ pub unsafe extern "C" fn tcsetattr(
     termios_p: *const libc::termios,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this forwards the caller's documented readable `termios_p` contract to the implementation.
     unsafe { setattr_impl(fd, optional_actions, termios_p) }
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn tcflush(fd: c_int, queue_selector: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: TCFLSH consumes this integer as a scalar ioctl argument and does not dereference it.
     unsafe {
         model_result(crate::ioctl::patina_ioctl(
             fd,
@@ -165,6 +170,7 @@ pub extern "C" fn tcflush(fd: c_int, queue_selector: c_int) -> c_int {
 pub extern "C" fn tcdrain(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"tcdrain");
+    // SAFETY: TCSBRK consumes the nonzero sentinel as a scalar ioctl argument and does not dereference it.
     unsafe {
         model_result(crate::ioctl::patina_ioctl(
             fd,
@@ -176,11 +182,13 @@ pub extern "C" fn tcdrain(fd: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn posix_openpt(flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the path is a static NUL-terminated string and openat reads it for the duration of the call.
     unsafe {
         crate::variadic::open::patina_openat_impl(libc::AT_FDCWD, c"/dev/ptmx".as_ptr(), flags, 0)
     }
 }
 unsafe fn master_request(fd: c_int, request: u64, arg: *mut c_void) -> c_int {
+    // SAFETY: callers pass the valid argument buffer required by each PTY ioctl request.
     unsafe {
         if crate::ioctl::patina_ioctl(fd, request, arg) == 0 {
             return 0;
@@ -197,12 +205,14 @@ unsafe fn master_request(fd: c_int, request: u64, arg: *mut c_void) -> c_int {
 pub extern "C" fn grantpt(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut index = MaybeUninit::<libc::c_uint>::uninit();
+    // SAFETY: TIOCGPTN writes its result to this local output slot.
     unsafe { master_request(fd, libc::TIOCGPTN, index.as_mut_ptr().cast()) }
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn unlockpt(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut unlock: c_int = 0;
+    // SAFETY: TIOCSPTLCK reads this initialized local integer argument.
     unsafe { master_request(fd, libc::TIOCSPTLCK, (&raw mut unlock).cast()) }
 }
 fn ioctl_error() -> c_int {
@@ -211,6 +221,7 @@ fn ioctl_error() -> c_int {
     value
 }
 unsafe fn ptsname_into(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
+    // SAFETY: callers guarantee `buf` is writable for `buflen`; this function checks the needed length before writing.
     unsafe {
         let saved = get_errno();
         let mut index = MaybeUninit::<libc::c_uint>::uninit();
@@ -247,6 +258,7 @@ unsafe fn ptsname_into(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ptsname_r(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this forwards the caller's documented writable buffer and length to the implementation.
     unsafe { ptsname_into(fd, buf, buflen) }
 }
 static mut PTS_NAME: [c_char; 30] = [0; 30];
@@ -254,6 +266,7 @@ static mut PTS_NAME: [c_char; 30] = [0; 30];
 pub extern "C" fn ptsname(fd: c_int) -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let name = (&raw mut PTS_NAME).cast::<c_char>();
+    // SAFETY: `name` points to the 30-byte static return buffer; ptsname_into writes only after checking its length.
     if unsafe { ptsname_into(fd, name, 30) } == 0 {
         name
     } else {
@@ -261,6 +274,7 @@ pub extern "C" fn ptsname(fd: c_int) -> *mut c_char {
     }
 }
 unsafe fn ttyname_into(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
+    // SAFETY: callers guarantee writable storage for `buflen`; null and minimum length are checked before writing.
     unsafe {
         if buf.is_null() {
             errno(libc::EINVAL);
@@ -292,6 +306,7 @@ unsafe fn ttyname_into(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ttyname_r(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this forwards the caller's documented writable buffer and length to the implementation.
     unsafe { ttyname_into(fd, buf, buflen) }
 }
 /// # Safety
@@ -307,6 +322,7 @@ pub unsafe extern "C" fn __ptsname_r_chk(
     if buflen > nreal {
         crate::posix::chk_fail();
     }
+    // SAFETY: the caller guarantees `nreal` writable bytes and the check ensures `buflen` fits that allocation.
     unsafe { ptsname_into(fd, buf, buflen) }
 }
 /// # Safety
@@ -322,6 +338,7 @@ pub unsafe extern "C" fn __ttyname_r_chk(
     if buflen > nreal {
         crate::posix::chk_fail();
     }
+    // SAFETY: the caller guarantees `nreal` writable bytes and the check ensures `buflen` fits that allocation.
     unsafe { ttyname_into(fd, buf, buflen) }
 }
 static mut TTY_NAME: [c_char; 4096] = [0; 4096];
@@ -329,6 +346,7 @@ static mut TTY_NAME: [c_char; 4096] = [0; 4096];
 pub extern "C" fn ttyname(fd: c_int) -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let name = (&raw mut TTY_NAME).cast::<c_char>();
+    // SAFETY: `name` points to the 4096-byte static return buffer and ttyname_into writes no more than buflen bytes.
     if unsafe { ttyname_into(fd, name, 4096) } == 0 {
         name
     } else {
@@ -346,6 +364,7 @@ pub unsafe extern "C" fn openpty(
     winp: *const libc::winsize,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller supplies writable output pointers and readable optional settings; local ioctl buffers are valid.
     unsafe {
         let mut path = [0 as c_char; 30];
         let master = crate::variadic::open::patina_openat_impl(

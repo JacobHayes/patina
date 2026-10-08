@@ -12,10 +12,6 @@
 
 use super::*;
 
-unsafe extern "C" {
-    fn patina_dup2(oldfd: c_int, newfd: c_int) -> c_int;
-}
-
 /// `ustat(2)`: the kernel reads the device as an `unsigned int`.
 pub(super) fn sys_ustat(dev: u64, ubuf: u64) -> i64 {
     // SAFETY: `ubuf` is the guest's `struct ustat` storage (or NULL, EFAULT).
@@ -34,8 +30,7 @@ pub(super) fn sys_dup2(oldfd: i64, newfd: i64) -> i64 {
         return err;
     }
     let newfd = c_int::try_from(newfd).unwrap_or(-1);
-    // SAFETY: no pointers.
-    ret_i32(unsafe { patina_dup2(oldfd as c_int, newfd) })
+    crate::abi::raw(crate::fd::value::dup2(oldfd as c_int, newfd).map(i64::from))
 }
 
 /// `epoll_create(size)`. The `size` hint has been ignored since Linux 2.6.8,

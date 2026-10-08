@@ -1,4 +1,6 @@
 //! Linux large-file, fortify, transfer, and pipe adapters.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::{cancel, error, model_result, size_result};
 use core::ffi::{c_int, c_void};
 mod terminal;
@@ -13,6 +15,7 @@ pub unsafe extern "C" fn pread64(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"pread64");
+    // SAFETY: the caller's buffer contract is forwarded to the model entry.
     unsafe { size_result(crate::patina_pread(fd, buffer, length, offset)) }
 }
 /// # Safety
@@ -26,6 +29,7 @@ pub unsafe extern "C" fn pwrite64(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"pwrite64");
+    // SAFETY: the caller's buffer contract is forwarded to the model entry.
     unsafe { size_result(crate::patina_pwrite(fd, buffer, length, offset)) }
 }
 /// # Safety
@@ -33,6 +37,7 @@ pub unsafe extern "C" fn pwrite64(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __read(fd: c_int, buffer: *mut c_void, length: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller's read-buffer contract is forwarded to the model entry.
     unsafe { size_result(crate::patina_read(fd, buffer, length)) }
 }
 /// # Safety
@@ -40,6 +45,7 @@ pub unsafe extern "C" fn __read(fd: c_int, buffer: *mut c_void, length: usize) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __write(fd: c_int, buffer: *const c_void, length: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller's write-buffer contract is forwarded to the model entry.
     unsafe { size_result(crate::patina_write(fd, buffer, length)) }
 }
 /// # Safety
@@ -53,6 +59,7 @@ pub unsafe extern "C" fn __read_chk(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"__read_chk");
+    // SAFETY: the caller's read-buffer contract is forwarded after fortify checks.
     unsafe {
         if length > buflen {
             crate::posix::chk_fail();
@@ -72,6 +79,7 @@ pub unsafe extern "C" fn __pread_chk(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"__pread_chk");
+    // SAFETY: the caller's pread-buffer contract is forwarded after fortify checks.
     unsafe {
         if length > buflen {
             crate::posix::chk_fail();
@@ -91,6 +99,7 @@ pub unsafe extern "C" fn __pread64_chk(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"__pread64_chk");
+    // SAFETY: the caller's pread64-buffer contract is forwarded after fortify checks.
     unsafe {
         if length > buflen {
             crate::posix::chk_fail();
@@ -111,6 +120,7 @@ pub unsafe extern "C" fn copy_file_range(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"copy_file_range");
+    // SAFETY: offset pointers are forwarded under copy_file_range's caller contract.
     unsafe {
         size_result(crate::transfer::patina_copy_file_range(
             fd_in, off_in, fd_out, off_out, length, flags,
@@ -127,6 +137,7 @@ pub unsafe extern "C" fn sendfile(
     count: usize,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the offset pointer is forwarded under sendfile's caller contract.
     unsafe {
         size_result(crate::transfer::patina_sendfile(
             out_fd, in_fd, offset, count,
@@ -143,6 +154,7 @@ pub unsafe extern "C" fn sendfile64(
     count: usize,
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the offset pointer is forwarded under sendfile64's caller contract.
     unsafe {
         size_result(crate::transfer::patina_sendfile(
             out_fd, in_fd, offset, count,
@@ -155,11 +167,10 @@ pub extern "C" fn dup3(oldfd: c_int, newfd: c_int, flags: c_int) -> c_int {
     if flags & !libc::O_CLOEXEC != 0 {
         return error(libc::EINVAL);
     }
-    model_result(crate::patina_dup3(
-        oldfd,
-        newfd,
-        c_int::from(flags & libc::O_CLOEXEC != 0),
-    ))
+    crate::abi::libc_result(
+        crate::fd::value::dup3(oldfd, newfd, c_int::from(flags & libc::O_CLOEXEC != 0)),
+        -1,
+    )
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn close_range(first: libc::c_uint, last: libc::c_uint, flags: c_int) -> c_int {
@@ -177,6 +188,7 @@ pub unsafe extern "C" fn preadv64(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"preadv64");
+    // SAFETY: the caller's preadv64 vector contract is forwarded to the model entry.
     unsafe {
         size_result(crate::iov::patina_preadv(
             fd,
@@ -198,6 +210,7 @@ pub unsafe extern "C" fn pwritev64(
 ) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"pwritev64");
+    // SAFETY: the caller's pwritev64 vector contract is forwarded to the model entry.
     unsafe {
         size_result(crate::iov::patina_pwritev(
             fd,
@@ -212,7 +225,7 @@ pub unsafe extern "C" fn pwritev64(
 pub extern "C" fn fdatasync(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"fdatasync");
-    model_result(crate::patina_fsync(fd))
+    crate::abi::libc_result(crate::fd::fsync(fd), -1)
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn lseek64(fd: c_int, offset: libc::off64_t, whence: c_int) -> libc::off64_t {
@@ -229,6 +242,8 @@ pub extern "C" fn ftruncate64(fd: c_int, length: libc::off64_t) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pipe2(pipefd: *mut c_int, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: non-null `pipefd` is writable for two descriptors by pipe2's
+    // caller contract.
     unsafe {
         if pipefd.is_null() {
             return error(libc::EFAULT);

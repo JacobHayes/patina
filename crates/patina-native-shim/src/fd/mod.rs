@@ -5,10 +5,16 @@ use crate::*;
 mod io;
 mod locks;
 mod seek;
+pub(crate) mod value;
 
 pub use io::*;
+#[cfg(any(target_os = "linux", patina_posix_exports))]
+pub(crate) use locks::flock;
 pub use locks::*;
 pub use seek::*;
+#[cfg(any(target_os = "linux", patina_posix_exports))]
+pub(crate) use seek::{fsync, seek, set_len};
+pub use value::{patina_close, patina_dup, patina_dup2, patina_dup3, patina_dupfd};
 
 // ---------------------------------------------------------------------------
 // The descriptor table's C face. `patina_fd_kind` is the ONE kind oracle the C
@@ -124,69 +130,6 @@ pub extern "C" fn patina_fd_set_nonblocking(raw_fd: c_int, nonblocking: c_int) -
     }
 }
 
-#[unsafe(no_mangle)]
-/// `dup(2)`: the lowest free number, sharing `fd`'s description, without
-/// `FD_CLOEXEC`.
-pub extern "C" fn patina_dup(raw_fd: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    patina_dupfd(raw_fd, 0, 0)
-}
-
-#[unsafe(no_mangle)]
-/// `fcntl(F_DUPFD)` / `F_DUPFD_CLOEXEC`: the lowest free number at or above
-/// `minimum`. `EINVAL` for a minimum outside the table, `EMFILE` when nothing
-/// at or above it is free.
-pub extern "C" fn patina_dupfd(raw_fd: c_int, minimum: c_int, cloexec: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    match fd_table().lock().dup(raw_fd, minimum, cloexec != 0) {
-        Ok(number) => {
-            set_errno(0);
-            number
-        }
-        Err(errno) => fail(errno),
-    }
-}
-
-#[unsafe(no_mangle)]
-/// `dup2(2)`: `dup3(old, new, 0)`, except that equal numbers validate `old`
-/// and return it unchanged (where `dup3` is `EINVAL`).
-pub extern "C" fn patina_dup2(oldfd: c_int, newfd: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if oldfd == newfd {
-        return match resolve_fd(oldfd) {
-            Ok(_) => {
-                set_errno(0);
-                newfd
-            }
-            Err(errno) => fail(errno),
-        };
-    }
-    patina_dup3(oldfd, newfd, 0)
-}
-
-#[unsafe(no_mangle)]
-/// `dup3(2)`: bind `newfd` to `oldfd`'s description, closing whatever `newfd`
-/// named first. Equal numbers are `EINVAL`; a target outside the table is
-/// `EBADF`. An error from closing the old target is not reported, as the kernel
-/// does not report it.
-pub extern "C" fn patina_dup3(oldfd: c_int, newfd: c_int, cloexec: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // Binding over an open `newfd` closes it, which releases POSIX locks.
-    if oldfd != newfd && resolve_fd(oldfd).is_ok() {
-        release_posix_locks(newfd);
-    }
-    let released = match fd_table().lock().dup3(oldfd, newfd, cloexec != 0) {
-        Ok(released) => released,
-        Err(errno) => return fail(errno),
-    };
-    retire_number(newfd);
-    if let Some(release) = released {
-        let _ = release_description(release);
-    }
-    set_errno(0);
-    newfd
-}
-
 /// Per-NUMBER teardown when a slot is vacated (close, dup2/dup3 over it,
 /// close_range): the state the two doors key by guest number rather than by
 /// description — the SUD `getdents64` snapshot on Linux, the kqueue knotes
@@ -199,30 +142,6 @@ fn retire_number(raw_fd: c_int) {
     thread::kqueue_forget_number(raw_fd);
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = raw_fd;
-}
-
-#[unsafe(no_mangle)]
-/// `close(2)`: free the number; the description is freed with its last number.
-/// `EBADF` for a number that names nothing.
-pub extern "C" fn patina_close(raw_fd: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    release_posix_locks(raw_fd);
-    let released = match fd_table().lock().close(raw_fd) {
-        Ok(released) => released,
-        Err(errno) => return fail(errno),
-    };
-    retire_number(raw_fd);
-    let result = match released {
-        Some(release) => release_description(release),
-        None => Ok(()),
-    };
-    match result {
-        Ok(()) => {
-            set_errno(0);
-            0
-        }
-        Err(errno) => fail(errno),
-    }
 }
 
 #[unsafe(no_mangle)]

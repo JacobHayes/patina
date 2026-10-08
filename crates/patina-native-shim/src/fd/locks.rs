@@ -35,30 +35,34 @@ const LOCK_UN: c_int = 8;
 /// and an empty slot or an `O_PATH` descriptor is `EBADF` (`fdget`).
 pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    flock(raw_fd, operation).unwrap_or(-1)
+}
+
+pub(crate) fn flock(raw_fd: c_int, operation: c_int) -> crate::abi::SysResult<c_int> {
     #[cfg(target_os = "linux")]
     if operation & linux_raw_sys::general::LOCK_MAND as c_int != 0 {
         set_errno(0);
-        return 0;
+        return Ok(0);
     }
     let non_blocking = operation & LOCK_NB != 0;
     let mode = match operation & !LOCK_NB {
         LOCK_UN => None,
         LOCK_SH => Some(FlockMode::Shared),
         LOCK_EX => Some(FlockMode::Exclusive),
-        _ => return fail(EINVAL),
+        _ => return Err(crate::abi::failed(EINVAL)),
     };
     let resolved = match fdget(raw_fd) {
         Ok(resolved) => resolved,
-        Err(errno) => return fail(errno),
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     let Some(mode) = mode else {
         flock_release(resolved.desc);
         set_errno(0);
-        return 0;
+        return Ok(0);
     };
     let identity = match lock_identity(&resolved) {
         Ok(identity) => identity,
-        Err(errno) => return fail(errno),
+        Err(errno) => return Err(crate::abi::failed(errno)),
     };
     let mut table = flock_table().lock();
     let conflict = table.iter().any(|(&holder, &(held_identity, held_mode))| {
@@ -69,14 +73,14 @@ pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
     if conflict {
         drop(table);
         return if non_blocking {
-            fail(EWOULDBLOCK)
+            Err(crate::abi::failed(EWOULDBLOCK))
         } else {
-            fail(EDEADLK)
+            Err(crate::abi::failed(EDEADLK))
         };
     }
     table.insert(resolved.desc, (identity, mode));
     set_errno(0);
-    0
+    Ok(0)
 }
 
 /// The record-lock commands of `patina_record_lock`, in Linux's numbering
