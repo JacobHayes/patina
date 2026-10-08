@@ -44,6 +44,7 @@ pub mod openat2;
 pub mod owner;
 pub mod paths;
 pub mod posix_fadvise;
+pub mod readlink_width;
 pub mod realpath;
 pub mod renameat2;
 pub mod rw;

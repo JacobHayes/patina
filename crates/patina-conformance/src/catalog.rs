@@ -514,6 +514,7 @@ macro_rules! for_each_scenario {
             fs_inotify => fs::inotify,
             fs_ioctl => fs::ioctl,
             fs_legacy_paths => fs::legacy_paths,
+            fs_readlink_width => fs::readlink_width,
             fs_lfs64 => fs::lfs64,
             fs_libc_io => fs::libc_io,
             fs_libc_times => fs::libc_times,

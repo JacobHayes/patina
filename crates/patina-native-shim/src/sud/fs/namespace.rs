@@ -153,17 +153,25 @@ pub(in crate::sud) fn sys_linkat(
 /// answer is the kernel's own for an empty path naming a non-symlink:
 /// `ENOENT`. `bufsiz <= 0` is `EINVAL` before anything is resolved.
 pub(in crate::sud) fn sys_readlinkat(dirfd: i64, path: u64, buf: u64, bufsize: u64) -> i64 {
-    if (bufsize as i64) <= 0 {
+    let kernel_len = crate::abi::reg::int(bufsize);
+    if kernel_len <= 0 {
         return -EINVAL;
     }
     let path = match guest_path(path) {
         Ok(path) => path,
         Err(errno) => return errno,
     };
-    // SAFETY: `path` is valid; `buf` is writable for `bufsize`.
+    // SAFETY: `path` is valid; `buf` is writable for the positive kernel `int` length.
     crate::abi::raw(
-        unsafe { crate::fs::read_link(dirfd as c_int, path, buf as *mut c_char, bufsize as usize) }
-            .map(|result| result as i64),
+        unsafe {
+            crate::fs::read_link(
+                dirfd as c_int,
+                path,
+                buf as *mut c_char,
+                kernel_len as usize,
+            )
+        }
+        .map(|result| result as i64),
     )
 }
 

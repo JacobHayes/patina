@@ -554,7 +554,19 @@ pub(crate) unsafe fn read_link(
     if in_shim_bootstrap() {
         return Err(crate::abi::failed(ENOENT));
     }
-    if len == 0 || buf.is_null() {
+    #[cfg(target_os = "linux")]
+    let len = {
+        let kernel_len = crate::abi::kernel_int(len);
+        if kernel_len <= 0 {
+            return Err(crate::abi::failed(EINVAL));
+        }
+        kernel_len as usize
+    };
+    #[cfg(target_os = "macos")]
+    if len == 0 {
+        return Err(crate::abi::failed(EINVAL));
+    }
+    if buf.is_null() {
         return Err(crate::abi::failed(EINVAL));
     }
     // SAFETY: This export's C ABI contract guarantees a readable path string.

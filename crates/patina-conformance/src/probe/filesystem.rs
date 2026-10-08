@@ -337,8 +337,20 @@ impl Probe {
     }
 
     pub fn readlinkat(&self, dirfd: i32, path: &str, bufsize: usize) -> (i64, String) {
+        self.readlinkat_with_buffer(dirfd, path, bufsize, bufsize)
+    }
+
+    /// `readlinkat` with a register-sized argument and a separately bounded
+    /// backing buffer, for kernel ABIs that narrow `bufsize` before copying.
+    pub fn readlinkat_with_buffer(
+        &self,
+        dirfd: i32,
+        path: &str,
+        bufsize: usize,
+        buffer_size: usize,
+    ) -> (i64, String) {
         let c = cstr(path);
-        let mut buf = vec![0u8; bufsize.max(1)];
+        let mut buf = vec![0u8; buffer_size.max(1)];
         let result = self.call(
             Syscall::N_readlinkat,
             [
@@ -742,8 +754,19 @@ impl Probe {
     }
 
     pub fn readlink(&self, path: &str, bufsize: usize) -> (i64, String) {
+        self.readlink_with_buffer(path, bufsize, bufsize)
+    }
+
+    /// `readlink` with a register-sized argument and a separately bounded
+    /// backing buffer.
+    pub fn readlink_with_buffer(
+        &self,
+        path: &str,
+        bufsize: usize,
+        buffer_size: usize,
+    ) -> (i64, String) {
         let c = cstr(path);
-        let mut buf = vec![0u8; bufsize.max(1)];
+        let mut buf = vec![0u8; buffer_size.max(1)];
         #[cfg(target_arch = "x86_64")]
         let result = self.call(
             Syscall::N_readlink,

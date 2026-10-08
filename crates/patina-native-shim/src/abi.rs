@@ -138,3 +138,51 @@ pub(crate) fn from_neg(result: i64) -> SysResult<i64> {
         Ok(result)
     }
 }
+
+/// Decode raw Linux syscall registers using the kernel parameter widths.
+#[allow(dead_code)]
+pub(crate) mod reg {
+    use core::ffi::c_int;
+
+    #[inline]
+    pub(crate) const fn int(value: u64) -> c_int {
+        value as i32
+    }
+
+    #[inline]
+    pub(crate) const fn fd(value: u64) -> c_int {
+        int(value)
+    }
+
+    #[inline]
+    pub(crate) const fn uint(value: u64) -> u32 {
+        value as u32
+    }
+
+    #[inline]
+    pub(crate) const fn ushort(value: u64) -> u16 {
+        value as u16
+    }
+
+    #[inline]
+    pub(crate) const fn long(value: u64) -> i64 {
+        value as i64
+    }
+
+    #[inline]
+    pub(crate) const fn size(value: u64) -> usize {
+        value as usize
+    }
+
+    #[inline]
+    pub(crate) fn ptr<T>(value: u64) -> *mut T {
+        core::ptr::with_exposed_provenance_mut(value as usize)
+    }
+}
+
+/// A libc door's `size_t` narrowed to the kernel `int` glibc forwards.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[inline]
+pub(crate) const fn kernel_int(value: usize) -> c_int {
+    value as c_int
+}
