@@ -61,6 +61,14 @@ mod plain_impls {
         f_flags: i64,
         f_spare: [i64; 4],
     });
+    crate::plain!(super::KernelUstat {
+        f_tfree: i32,
+        pad1: u32,
+        f_tinode: u64,
+        f_fname: [u8; 6],
+        f_fpack: [u8; 6],
+        tail: u32,
+    });
 }
 
 /// linux/magic.h.
@@ -374,7 +382,7 @@ fn copy_out(description: KernelStatfs, out: *mut KernelStatfs) -> crate::abi::Sy
         return Err(crate::abi::failed(EFAULT));
     }
     // SAFETY: `out` is non-null and writable per the C ABI contract.
-    unsafe { out.write(description) };
+    unsafe { crate::plain::store(out, description) };
     set_errno(0);
     Ok(())
 }
@@ -768,11 +776,14 @@ pub(crate) unsafe fn ustat(dev: u32, out: *mut KernelUstat) -> crate::abi::SysRe
     let description = filesystem.describe();
     // SAFETY: `out` is non-null and writable per the C ABI contract.
     unsafe {
-        out.write(KernelUstat {
-            f_tfree: description.f_bfree as i32,
-            f_tinode: description.f_ffree,
-            ..KernelUstat::default()
-        })
+        crate::plain::store(
+            out,
+            KernelUstat {
+                f_tfree: description.f_bfree as i32,
+                f_tinode: description.f_ffree,
+                ..KernelUstat::default()
+            },
+        )
     };
     set_errno(0);
     Ok(())

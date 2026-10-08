@@ -1,4 +1,5 @@
 //! Terminal ioctl requests and termios updates.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
 
@@ -35,7 +36,7 @@ pub(super) fn stop(request: u64) -> ! {
     ))
 }
 
-pub(super) fn put<T: Copy>(arg: usize, value: T) -> c_int {
+pub(super) fn put<T: crate::plain::Plain>(arg: usize, value: T) -> c_int {
     match uaccess::write(arg, &value) {
         Ok(()) => {
             set_errno(0);

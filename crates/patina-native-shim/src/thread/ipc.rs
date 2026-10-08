@@ -143,6 +143,7 @@ pub(crate) struct IpcPerm {
 
 /// `struct shmid64_ds` (asm-generic/shmbuf.h, 64-bit).
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct ShmidDs {
     perm: IpcPerm,
     segsz: u64,
@@ -158,6 +159,7 @@ pub(crate) struct ShmidDs {
 /// `struct semid64_ds`: x86_64 pads each time (arch/x86 sembuf.h).
 #[cfg(target_arch = "x86_64")]
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct SemidDs {
     perm: IpcPerm,
     otime: i64,
@@ -171,6 +173,7 @@ pub(crate) struct SemidDs {
 /// `struct semid64_ds` (asm-generic/sembuf.h, 64-bit).
 #[cfg(not(target_arch = "x86_64"))]
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct SemidDs {
     perm: IpcPerm,
     otime: i64,
@@ -181,6 +184,7 @@ pub(crate) struct SemidDs {
 
 /// `struct msqid64_ds` (64-bit).
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct MsqidDs {
     perm: IpcPerm,
     stime: i64,
@@ -211,6 +215,59 @@ mod plain_impls {
         num: u16,
         op: i16,
         flg: i16,
+    });
+    crate::plain!(super::IpcPerm {
+        key: i32,
+        uid: u32,
+        gid: u32,
+        cuid: u32,
+        cgid: u32,
+        mode: u32,
+        seq: u16,
+        pad: u16,
+        pad2: u32,
+        unused: [u64; 2],
+    });
+    crate::plain!(super::ShmidDs {
+        perm: super::IpcPerm,
+        segsz: u64,
+        atime: i64,
+        dtime: i64,
+        ctime: i64,
+        cpid: i32,
+        lpid: i32,
+        nattch: u64,
+        unused: [u64; 2],
+    });
+    #[cfg(target_arch = "x86_64")]
+    crate::plain!(super::SemidDs {
+        perm: super::IpcPerm,
+        otime: i64,
+        otime_pad: u64,
+        ctime: i64,
+        ctime_pad: u64,
+        nsems: u64,
+        unused: [u64; 2],
+    });
+    #[cfg(not(target_arch = "x86_64"))]
+    crate::plain!(super::SemidDs {
+        perm: super::IpcPerm,
+        otime: i64,
+        ctime: i64,
+        nsems: u64,
+        unused: [u64; 2],
+    });
+    crate::plain!(super::MsqidDs {
+        perm: super::IpcPerm,
+        stime: i64,
+        rtime: i64,
+        ctime: i64,
+        cbytes: u64,
+        qnum: u64,
+        qbytes: u64,
+        lspid: i32,
+        lrpid: i32,
+        unused: [u64; 2],
     });
 }
 
@@ -618,12 +675,12 @@ fn removed(mut state: SpinGuard<'static, ThreadRuntime>, woken: Vec<TaskId>) -> 
 ///
 /// # Safety
 /// `buf` must be NULL or valid for a `T` write.
-unsafe fn copy_out<T>(buf: *mut T, stat: T) -> i64 {
+unsafe fn copy_out<T: crate::plain::Plain>(buf: *mut T, stat: T) -> i64 {
     if buf.is_null() {
         return fail(EFAULT);
     }
     // SAFETY: per this function's contract.
-    unsafe { buf.write(stat) };
+    unsafe { crate::plain::store(buf, stat) };
     0
 }
 

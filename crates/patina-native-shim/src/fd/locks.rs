@@ -1,4 +1,5 @@
 //! Whole-file and record-lock entry points.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
 
@@ -267,6 +268,7 @@ pub unsafe extern "C" fn patina_record_lock(
             },
         };
         // SAFETY: as above; the test writes its answer back.
+        // TODO(plain): `PatinaFlock` has implicit ABI padding; retain this concrete Copy store.
         unsafe { lock.write_unaligned(reported) };
         set_errno(0);
         return 0;

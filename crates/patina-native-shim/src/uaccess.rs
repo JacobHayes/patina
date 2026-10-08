@@ -25,10 +25,10 @@
 //! table (`-Wl,--wrap=dlsym`), passes the runtime its own memory, which is
 //! then copied directly.
 
-use std::ffi::c_int;
-use std::mem::MaybeUninit;
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use crate::EFAULT;
+use std::ffi::c_int;
 
 /// One contiguous range of this process's address space, as the kernel's
 /// `struct iovec` describes it.
@@ -557,39 +557,25 @@ pub(crate) fn read_bytes(addr: usize, len: usize) -> Result<Vec<u8>, c_int> {
 }
 
 /// A plain-data value of type `T` at the guest's `addr`.
-pub(crate) fn read<T: Copy>(addr: usize) -> Result<T, c_int> {
-    let mut value = MaybeUninit::<T>::uninit();
-    // SAFETY: the byte view covers exactly the uninitialized value, and a
-    // successful copy initializes every byte of a plain-data `T`.
-    let bytes =
-        unsafe { std::slice::from_raw_parts_mut(value.as_mut_ptr().cast::<u8>(), size_of::<T>()) };
-    read_into(addr, bytes)?;
-    // SAFETY: fully written above; `T: Copy` carries no invariants beyond its
-    // bytes for the plain C structures this module is used with.
-    Ok(unsafe { value.assume_init() })
+pub(crate) fn read<T: crate::plain::Plain>(addr: usize) -> Result<T, c_int> {
+    let mut value = crate::plain::zeroed::<T>();
+    read_into(addr, crate::plain::bytes_mut(&mut value))?;
+    Ok(value)
 }
 
 /// `count` plain-data values of type `T` from the guest array at `addr`.
 #[cfg(target_os = "linux")]
-pub(crate) fn read_vec<T: Copy + Default>(addr: usize, count: usize) -> Result<Vec<T>, c_int> {
-    let mut values = vec![T::default(); count];
-    // SAFETY: the byte view covers exactly the vector's initialized values.
-    let bytes = unsafe {
-        std::slice::from_raw_parts_mut(
-            values.as_mut_ptr().cast::<u8>(),
-            count.checked_mul(size_of::<T>()).ok_or(EFAULT)?,
-        )
-    };
+pub(crate) fn read_vec<T: crate::plain::Plain>(addr: usize, count: usize) -> Result<Vec<T>, c_int> {
+    let mut values = vec![crate::plain::zeroed::<T>(); count];
+    let bytes = crate::plain::bytes_mut_slice(&mut values);
     read_into(addr, bytes)?;
     Ok(values)
 }
 
 /// Copy `values` to the guest array at `addr`.
 #[cfg(target_os = "linux")]
-pub(crate) fn write_slice<T: Copy>(addr: usize, values: &[T]) -> Result<(), c_int> {
-    // SAFETY: plain-data values viewed as their own bytes.
-    let bytes =
-        unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), size_of_val(values)) };
+pub(crate) fn write_slice<T: crate::plain::Plain>(addr: usize, values: &[T]) -> Result<(), c_int> {
+    let bytes = crate::plain::bytes_slice(values);
     write_bytes(addr, bytes)
 }
 
@@ -605,10 +591,8 @@ pub(crate) fn write_bytes(addr: usize, bytes: &[u8]) -> Result<(), c_int> {
 }
 
 /// Copy a plain-data value to the guest's `addr`.
-pub(crate) fn write<T: Copy>(addr: usize, value: &T) -> Result<(), c_int> {
-    // SAFETY: a plain-data value viewed as its own bytes.
-    let bytes =
-        unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>()) };
+pub(crate) fn write<T: crate::plain::Plain>(addr: usize, value: &T) -> Result<(), c_int> {
+    let bytes = crate::plain::bytes(value);
     write_bytes(addr, bytes)
 }
 

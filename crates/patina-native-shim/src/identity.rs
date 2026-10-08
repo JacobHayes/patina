@@ -414,7 +414,7 @@ pub(crate) unsafe fn capget(header: *mut CapHeader, data: *mut CapData) -> i64 {
             inheritable: word(credential.inheritable),
         };
         // SAFETY: as above.
-        unsafe { data.add(index).write_unaligned(sets) };
+        unsafe { crate::plain::store_unaligned(data.add(index), sets) };
     }
     0
 }
@@ -615,6 +615,23 @@ mod plain_impls {
         permitted: u32,
         inheritable: u32,
     });
+    crate::plain!(super::Sysinfo {
+        uptime: i64,
+        loads: [u64; 3],
+        totalram: u64,
+        freeram: u64,
+        sharedram: u64,
+        bufferram: u64,
+        totalswap: u64,
+        freeswap: u64,
+        procs: u16,
+        pad: u16,
+        pad1: u32,
+        totalhigh: u64,
+        freehigh: u64,
+        mem_unit: u32,
+        tail: u32,
+    });
 }
 const UTS_LEN: usize = 65;
 
@@ -694,13 +711,13 @@ pub(crate) unsafe fn uname(out: *mut Utsname, persona: u32) -> i64 {
         field[..bytes.len()].copy_from_slice(bytes);
     }
     // SAFETY: per this function's contract.
-    unsafe { out.write_unaligned(name) };
+    unsafe { crate::plain::store_unaligned(out, name) };
     0
 }
 
 /// `struct sysinfo` on the 64-bit targets.
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Sysinfo {
     uptime: i64,
     loads: [u64; 3],
@@ -747,7 +764,7 @@ pub(crate) unsafe fn sysinfo(out: *mut Sysinfo) -> i64 {
         ..Sysinfo::default()
     };
     // SAFETY: per this function's contract.
-    unsafe { out.write_unaligned(info) };
+    unsafe { crate::plain::store_unaligned(out, info) };
     0
 }
 

@@ -149,7 +149,7 @@ pub(in crate::sud) fn write_kernel_stat(values: &StatValues, out: u64) -> i64 {
         return -EINVAL;
     }
     // SAFETY: `out` is the guest's `struct stat` storage.
-    unsafe { (out as *mut KernelStat).write(KernelStat::from_values(values)) };
+    unsafe { crate::plain::store(out as *mut KernelStat, KernelStat::from_values(values)) };
     0
 }
 
@@ -377,7 +377,7 @@ pub(in crate::sud) fn sys_statx(
         stx.stx_btime = timestamp(values.btime);
     }
     // SAFETY: `statxbuf` is the guest's `struct statx` storage.
-    unsafe { (statxbuf as *mut Statx).write(stx) };
+    unsafe { crate::plain::store(statxbuf as *mut Statx, stx) };
     0
 }
 

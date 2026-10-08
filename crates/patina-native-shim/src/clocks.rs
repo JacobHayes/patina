@@ -32,6 +32,8 @@
 //! a pointer it cannot write faults in the caller as the guest's own
 //! `SIGSEGV`.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use crate::thread;
 use crate::{EFAULT, EINVAL, EOPNOTSUPP, EPERM, uaccess, with_context};
 use patina_dst_abi::ClockKind;
@@ -329,13 +331,13 @@ pub(crate) fn resolution(clock: Clock) -> Result<u64, c_int> {
 
 /// Copy `value` out to the caller's `out`: `EFAULT` where it cannot be
 /// written (`put_user`/`copy_to_user`).
-fn copy_out<T: Copy>(out: usize, value: &T) -> Result<(), i64> {
+fn copy_out<T: crate::plain::Plain>(out: usize, value: &T) -> Result<(), i64> {
     uaccess::write(out, value).map_err(|_| -i64::from(EFAULT))
 }
 
 /// Copy a `T` in from the caller's `from`: `EFAULT` where it cannot be
 /// read (`get_user`/`copy_from_user`).
-fn copy_in<T: Copy>(from: usize) -> Result<T, i64> {
+fn copy_in<T: crate::plain::Plain>(from: usize) -> Result<T, i64> {
     uaccess::read(from).map_err(|_| -i64::from(EFAULT))
 }
 
@@ -654,11 +656,13 @@ pub(crate) fn clock_settime(id: c_int, ts: *const Timespec) -> i64 {
 #[derive(Clone, Copy)]
 pub(crate) struct Timex {
     modes: u32,
+    pad0: u32,
     offset: i64,
     freq: i64,
     maxerror: i64,
     esterror: i64,
     status: i32,
+    pad1: u32,
     constant: i64,
     precision: i64,
     tolerance: i64,
@@ -667,6 +671,7 @@ pub(crate) struct Timex {
     ppsfreq: i64,
     jitter: i64,
     shift: i32,
+    pad2: u32,
     stabil: i64,
     jitcnt: i64,
     calcnt: i64,
@@ -674,6 +679,69 @@ pub(crate) struct Timex {
     stbcnt: i64,
     tai: i32,
     reserved: [i32; 11],
+}
+
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    // Kernel `__kernel_timex` offsets; the named fields account for its
+    // three alignment gaps so every wire byte has a field.
+    assert!(size_of::<Timex>() == 208);
+    assert!(offset_of!(Timex, modes) == 0);
+    assert!(offset_of!(Timex, pad0) == 4);
+    assert!(offset_of!(Timex, offset) == 8);
+    assert!(offset_of!(Timex, freq) == 16);
+    assert!(offset_of!(Timex, maxerror) == 24);
+    assert!(offset_of!(Timex, esterror) == 32);
+    assert!(offset_of!(Timex, status) == 40);
+    assert!(offset_of!(Timex, pad1) == 44);
+    assert!(offset_of!(Timex, constant) == 48);
+    assert!(offset_of!(Timex, precision) == 56);
+    assert!(offset_of!(Timex, tolerance) == 64);
+    assert!(offset_of!(Timex, time) == 72);
+    assert!(offset_of!(Timex, tick) == 88);
+    assert!(offset_of!(Timex, ppsfreq) == 96);
+    assert!(offset_of!(Timex, jitter) == 104);
+    assert!(offset_of!(Timex, shift) == 112);
+    assert!(offset_of!(Timex, pad2) == 116);
+    assert!(offset_of!(Timex, stabil) == 120);
+    assert!(offset_of!(Timex, jitcnt) == 128);
+    assert!(offset_of!(Timex, calcnt) == 136);
+    assert!(offset_of!(Timex, errcnt) == 144);
+    assert!(offset_of!(Timex, stbcnt) == 152);
+    assert!(offset_of!(Timex, tai) == 160);
+    assert!(offset_of!(Timex, reserved) == 164);
+};
+
+#[allow(dead_code)]
+mod timex_plain {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    crate::plain!(super::Timex {
+        modes: u32,
+        pad0: u32,
+        offset: i64,
+        freq: i64,
+        maxerror: i64,
+        esterror: i64,
+        status: i32,
+        pad1: u32,
+        constant: i64,
+        precision: i64,
+        tolerance: i64,
+        time: [i64; 2],
+        tick: i64,
+        ppsfreq: i64,
+        jitter: i64,
+        shift: i32,
+        pad2: u32,
+        stabil: i64,
+        jitcnt: i64,
+        calcnt: i64,
+        errcnt: i64,
+        stbcnt: i64,
+        tai: i32,
+        reserved: [i32; 11],
+    });
 }
 
 // The kernel's `ADJ_*` mode bits (the uapi's, not glibc's: glibc spells

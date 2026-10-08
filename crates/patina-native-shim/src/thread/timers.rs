@@ -25,6 +25,8 @@
 //! that line the way an absolute realtime sleep does
 //! (`Context::monotonic_deadline`).
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::signals::{Info, SIGALRM, SIGPROF, SIGVTALRM};
 use super::*;
 use crate::clocks::{Clock, CpuOf, NANOS, TICK_NSEC, Timespec, Timeval};
@@ -514,7 +516,7 @@ fn get_itimer(state: &ThreadRuntime, which: i32, now: u64, replacing: bool) -> (
 
 /// Copy `value` out to the caller's `out` (`EFAULT` where it cannot be
 /// written).
-fn copy_out<T: Copy>(out: usize, value: &T) -> i64 {
+fn copy_out<T: crate::plain::Plain>(out: usize, value: &T) -> i64 {
     match uaccess::write(out, value) {
         Ok(()) => 0,
         Err(_) => errno(EFAULT),

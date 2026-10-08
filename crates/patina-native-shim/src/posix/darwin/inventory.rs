@@ -1,5 +1,7 @@
 //! Empty trust roots, UTC timezone, and fixed process/host inventory.
 //! CF objects are distinct address tokens, never real framework objects.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 static mut EMPTY_ARRAY: u8 = 0;
 static mut SYSTEM_TIMEZONE: u8 = 0;
@@ -13,6 +15,7 @@ pub(super) fn native_trap(class: &core::ffi::CStr, symbol: &core::ffi::CStr) -> 
         symbol.to_bytes(),
         b"; not interposed by the deterministic runtime; failing closed\n",
     ] {
+        // SAFETY: `bytes` is a live slice for the duration of this synchronous host write.
         unsafe {
             crate::patina_stdio_write(2, bytes.as_ptr().cast(), bytes.len());
         }
@@ -88,6 +91,8 @@ pub unsafe extern "C" fn proc_listallpids(buffer: *mut c_void, buffersize: c_int
         return 2;
     }
     let count = (buffersize as usize / size_of::<c_int>()).min(2);
+    // SAFETY: the ABI contract makes `buffer` writable for `buffersize` bytes, and `count`
+    // is bounded by that capacity.
     unsafe {
         ptr::copy_nonoverlapping(pids.as_ptr(), buffer.cast(), count);
     }
@@ -115,6 +120,7 @@ pub unsafe extern "C" fn proc_pidpath(pid: c_int, buffer: *mut c_void, size: u32
     if (size as usize) < path.len() {
         return super::super::error(libc::ENOMEM);
     }
+    // SAFETY: the caller supplied `size` writable bytes and the size check covers `path`.
     unsafe {
         ptr::copy_nonoverlapping(path.as_ptr(), buffer.cast(), path.len());
     }
@@ -150,6 +156,7 @@ pub unsafe extern "C" fn proc_pid_rusage(
         return super::super::error(libc::EFAULT);
     }
     if flavor == libc::RUSAGE_INFO_V2 {
+        // SAFETY: the caller's flavor contract provides writable rusage-info storage here.
         unsafe {
             ptr::write_bytes(buffer.cast::<u8>(), 0, size_of::<libc::rusage_info_v2>());
         }
@@ -188,13 +195,15 @@ pub unsafe extern "C" fn host_statistics64(
     count: *mut u32,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if flavor != libc::HOST_VM_INFO64
-        || output.is_null()
-        || count.is_null()
-        || unsafe { count.read() } < VM_INFO_COUNT
-    {
+    if flavor != libc::HOST_VM_INFO64 || output.is_null() || count.is_null() {
         return libc::KERN_INVALID_ARGUMENT;
     }
+    // SAFETY: `count` is non-null and readable under the HOST_VM_INFO64 buffer contract.
+    if unsafe { count.read() } < VM_INFO_COUNT {
+        return libc::KERN_INVALID_ARGUMENT;
+    }
+    // SAFETY: the caller supplied output/count storage of the validated size; the local `stat`
+    // is initialized before its bytes are copied, and every written output is non-null.
     unsafe {
         let mut stat: VmStatistics64 = core::mem::zeroed();
         stat.free_count = 524288;
@@ -228,6 +237,8 @@ pub unsafe extern "C" fn host_processor_info(
     {
         return libc::KERN_INVALID_ARGUMENT;
     }
+    // SAFETY: all output pointers are non-null; the mapping is checked before use and the
+    // CPU-state indices fit its one-page allocation.
     unsafe {
         // Real host mapping: consumers either munmap this page or call the
         // no-op vm_deallocate below. Never give munmap a static data address.

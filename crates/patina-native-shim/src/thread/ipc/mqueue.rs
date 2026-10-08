@@ -1,4 +1,5 @@
 //! POSIX message-queue state and operations.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
 
@@ -721,7 +722,7 @@ pub(crate) unsafe fn mq_getsetattr(fd: c_int, new: *const MqAttr, old: *mut MqAt
     }
     if !old.is_null() {
         // SAFETY: per this function's contract.
-        unsafe { old.write(attr) };
+        unsafe { crate::plain::store(old, attr) };
     }
     0
 }

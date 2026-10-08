@@ -1,4 +1,6 @@
 //! Mach task CPU-time fields; other accounting remains zero as before.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 use core::mem::{offset_of, size_of};
 #[repr(C)]
@@ -42,6 +44,8 @@ pub unsafe extern "C" fn task_info(
     if output.is_null() || count.is_null() {
         return libc::KERN_SUCCESS;
     }
+    // SAFETY: caller contract supplies the count word and an output buffer of that many words;
+    // flavor-specific checks below ensure the CPU-time field is in bounds.
     unsafe {
         let count = count.read() as usize;
         ptr::write_bytes(output, 0, count);

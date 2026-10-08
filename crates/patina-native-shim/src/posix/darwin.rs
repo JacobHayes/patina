@@ -1,4 +1,5 @@
 //! Darwin clocks, synchronization and fixed host identity over existing models.
+#![deny(clippy::undocumented_unsafe_blocks)]
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::ptr;
 mod inventory;
@@ -7,6 +8,7 @@ const MONOTONIC: u32 = 1;
 const REALTIME: u32 = 0;
 const PHYSICAL_MEMORY_BYTES: i64 = 8 * 1024 * 1024 * 1024;
 fn trap() -> ! {
+    // SAFETY: this deliberately executes an architecture trap and never returns.
     unsafe {
         #[cfg(target_arch = "aarch64")]
         core::arch::asm!("brk #1", options(noreturn));
@@ -19,6 +21,7 @@ fn trap() -> ! {
 pub extern "C" fn mach_absolute_time() -> u64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut nanos = 0;
+    // SAFETY: `nanos` is writable local storage for the clock bridge.
     if unsafe { crate::patina_clock_now(MONOTONIC, &mut nanos) } != 0 {
         trap()
     }
@@ -33,6 +36,7 @@ pub unsafe extern "C" fn mach_timebase_info(info: *mut libc::mach_timebase_info)
     if info.is_null() {
         return libc::KERN_INVALID_ARGUMENT;
     }
+    // SAFETY: the ABI contract supplies a writable object and NULL was rejected above.
     unsafe {
         (*info).numer = 1;
         (*info).denom = 1;
@@ -59,6 +63,7 @@ pub extern "C" fn clock_gettime_nsec_np(clock: libc::clockid_t) -> u64 {
         }
     };
     let mut nanos = 0;
+    // SAFETY: `nanos` is writable local storage for the clock bridge.
     if unsafe { crate::patina_clock_now(clock, &mut nanos) } != 0 {
         super::errno(crate::patina_errno());
         return 0;
@@ -70,6 +75,7 @@ pub extern "C" fn clock_gettime_nsec_np(clock: libc::clockid_t) -> u64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn os_unfair_lock_lock(lock: *mut c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller supplies a live unfair-lock identity per this ABI.
     unsafe {
         crate::thread::patina_os_unfair_lock_lock(lock);
     }
@@ -79,6 +85,7 @@ pub unsafe extern "C" fn os_unfair_lock_lock(lock: *mut c_void) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn os_unfair_lock_trylock(lock: *mut c_void) -> bool {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller supplies a live unfair-lock identity per this ABI.
     unsafe { crate::thread::patina_os_unfair_lock_trylock(lock) != 0 }
 }
 /// # Safety
@@ -86,6 +93,7 @@ pub unsafe extern "C" fn os_unfair_lock_trylock(lock: *mut c_void) -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn os_unfair_lock_unlock(lock: *mut c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller supplies a live unfair-lock identity per this ABI.
     unsafe {
         crate::thread::patina_os_unfair_lock_unlock(lock);
     }
@@ -127,6 +135,7 @@ pub unsafe extern "C" fn confstr(name: c_int, buf: *mut c_char, len: usize) -> u
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if name != libc::_CS_DARWIN_USER_TEMP_DIR {
         if !buf.is_null() && len > 0 {
+            // SAFETY: `buf` is non-null and writable for at least one byte.
             unsafe {
                 buf.write(0);
             }
@@ -135,6 +144,7 @@ pub unsafe extern "C" fn confstr(name: c_int, buf: *mut c_char, len: usize) -> u
     }
     let value = c"/tmp/".to_bytes_with_nul();
     if !buf.is_null() && len > 0 {
+        // SAFETY: `buf` is writable for `len`; `copy <= len`, and `copy >= 1`.
         unsafe {
             let copy = value.len().min(len);
             ptr::copy_nonoverlapping(value.as_ptr(), buf.cast(), copy);
@@ -154,6 +164,8 @@ pub unsafe extern "C" fn __assert_rtn(
 ) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut message = [0 as c_char; 512];
+    // SAFETY: each optional string is null or readable and NUL-terminated by the ABI contract;
+    // the diagnostic buffer is writable local storage.
     unsafe {
         let needed = crate::variadic::stdio::diagnostic(
             message.as_mut_ptr(),
@@ -183,7 +195,9 @@ pub unsafe extern "C" fn __assert_rtn(
     crate::patina_flush_captured_stdio();
     crate::host_abort()
 }
-unsafe fn emit<T>(value: T, oldp: *mut c_void, oldlenp: *mut usize) -> c_int {
+unsafe fn emit<T: crate::plain::Plain>(value: T, oldp: *mut c_void, oldlenp: *mut usize) -> c_int {
+    // SAFETY: the caller supplies writable output and length storage; the null checks and length
+    // read below validate the exact range before copying.
     unsafe {
         if !oldp.is_null() {
             if oldlenp.is_null() {
@@ -192,7 +206,8 @@ unsafe fn emit<T>(value: T, oldp: *mut c_void, oldlenp: *mut usize) -> c_int {
             if oldlenp.read() < size_of::<T>() {
                 return super::error(libc::ENOMEM);
             }
-            ptr::copy_nonoverlapping((&raw const value).cast::<u8>(), oldp.cast(), size_of::<T>());
+            let bytes = crate::plain::bytes(&value);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), oldp.cast(), bytes.len());
             oldlenp.write(size_of::<T>());
         } else if !oldlenp.is_null() {
             oldlenp.write(size_of::<T>());
@@ -218,6 +233,8 @@ pub unsafe extern "C" fn sysctl(
     if name.is_null() || namelen < 2 {
         return super::error(libc::ENOENT);
     }
+    // SAFETY: the caller's MIB contract makes `namelen` integers readable; the checks above
+    // guarantee the first two entries exist.
     unsafe {
         if name.read() == libc::CTL_HW {
             match name.add(1).read() {
@@ -247,7 +264,10 @@ pub unsafe extern "C" fn sysctlbyname(
     if name.is_null() {
         return super::error(libc::EINVAL);
     }
+    // SAFETY: NULL was rejected and the caller's name contract requires a readable C string.
     let name = unsafe { core::ffi::CStr::from_ptr(name) }.to_bytes();
+    // SAFETY: the caller's sysctlbyname contract governs the output pointers; `emit` validates
+    // their nullness and capacity before writing.
     unsafe {
         match name {
             b"hw.memsize" => emit(PHYSICAL_MEMORY_BYTES, oldp, oldlenp),

@@ -86,6 +86,16 @@ pub(crate) fn bytes<T: Plain>(value: &T) -> &[u8] {
     }
 }
 
+/// View a slice of plain values as its complete byte representation.
+#[allow(dead_code)]
+pub(crate) fn bytes_slice<T: Plain>(values: &[T]) -> &[u8] {
+    // SAFETY: `Plain` guarantees initialized elements with no padding, and the
+    // slice's pointer and length describe exactly those contiguous elements.
+    unsafe {
+        core::slice::from_raw_parts(values.as_ptr().cast::<u8>(), core::mem::size_of_val(values))
+    }
+}
+
 /// View a plain value as its complete mutable byte representation.
 #[allow(dead_code)]
 pub(crate) fn bytes_mut<T: Plain>(value: &mut T) -> &mut [u8] {
@@ -93,6 +103,19 @@ pub(crate) fn bytes_mut<T: Plain>(value: &mut T) -> &mut [u8] {
     // lies within the value's representation; `&mut T` uniquely borrows it.
     unsafe {
         core::slice::from_raw_parts_mut((value as *mut T).cast::<u8>(), core::mem::size_of::<T>())
+    }
+}
+
+/// View a mutable slice of plain values as its complete byte representation.
+#[allow(dead_code)]
+pub(crate) fn bytes_mut_slice<T: Plain>(values: &mut [T]) -> &mut [u8] {
+    // SAFETY: `Plain` guarantees initialized elements with no padding; the
+    // mutable slice uniquely borrows the contiguous elements for this view.
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            values.as_mut_ptr().cast::<u8>(),
+            core::mem::size_of_val(values),
+        )
     }
 }
 
