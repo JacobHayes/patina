@@ -162,15 +162,53 @@ fn pipe_entry(guest_fd: c_int) -> Result<(c_int, bool), c_int> {
     }
 }
 
-/// Mint the next class handle. Handles are internal identities (never a
-/// guest number) shared by every class table in this module, so a handle
-/// is a socket XOR a pipe end XOR an eventfd; the descriptor table's kind
-/// says which.
-fn next_handle(state: &mut ThreadRuntime) -> c_int {
-    let handle = state.net.next_handle;
-    state.net.next_handle = state.net.next_handle.wrapping_add(1);
-    handle
+mod handle_allocator {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    use super::{ThreadRuntime, c_int, fatal};
+
+    /// Mint the next class handle. Handles are internal identities (never a
+    /// guest number) shared by every class table in this module, so a handle
+    /// is a socket XOR a pipe end XOR an eventfd; the descriptor table's kind
+    /// says which. The socket table includes embryos queued for `accept`.
+    pub(super) fn next_handle(state: &mut ThreadRuntime) -> c_int {
+        let net = &mut state.net;
+        let (next, sockets, pipe_ends) = (&mut net.next_handle, &net.sockets.table, &net.pipe_ends);
+        #[cfg(target_os = "linux")]
+        let eventfds = &net.eventfds;
+        next_free_handle(next, |handle| {
+            sockets.contains_key(&handle) || pipe_ends.contains_key(&handle) || {
+                #[cfg(target_os = "linux")]
+                {
+                    eventfds.contains_key(&handle)
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    false
+                }
+            }
+        })
+    }
+
+    pub(super) fn next_free_handle(
+        next: &mut c_int,
+        mut is_live: impl FnMut(c_int) -> bool,
+    ) -> c_int {
+        let start = *next;
+        loop {
+            let handle = *next;
+            *next = handle.wrapping_add(1);
+            if !is_live(handle) {
+                return handle;
+            }
+            if *next == start {
+                fatal("endpoint handle space exhausted");
+            }
+        }
+    }
 }
+
+use handle_allocator::next_handle;
 
 /// A guest thread body: `void *start_routine(void *arg)`.
 type StartRoutine = extern "C" fn(*mut c_void) -> *mut c_void;
