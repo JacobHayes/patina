@@ -1,10 +1,12 @@
 //! libc open spellings share one flag/mode adapter with fixed C callers.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use core::ffi::{VaList, c_char, c_int};
 
 /// # Safety
 /// `path` is a C string; creation flags supply the promoted mode argument.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, args: ...) -> c_int {
+unsafe extern "C" fn open(path: *const c_char, flags: c_int, args: ...) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::cancel(c"open");
     // SAFETY: the variadic contract supplies a creation mode when required.
@@ -14,12 +16,7 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, args: ...) -> c
 /// # Safety
 /// `path` is a C string; creation flags supply the promoted mode argument.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn openat(
-    dirfd: c_int,
-    path: *const c_char,
-    flags: c_int,
-    args: ...
-) -> c_int {
+unsafe extern "C" fn openat(dirfd: c_int, path: *const c_char, flags: c_int, args: ...) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::cancel(c"openat");
     // SAFETY: the variadic contract supplies a creation mode when required.
@@ -30,7 +27,7 @@ pub unsafe extern "C" fn openat(
 /// # Safety
 /// `path` is a C string; creation flags supply the promoted mode argument.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn open64(path: *const c_char, flags: c_int, args: ...) -> c_int {
+unsafe extern "C" fn open64(path: *const c_char, flags: c_int, args: ...) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::cancel(c"open64");
     // SAFETY: the variadic contract supplies a creation mode when required.
@@ -41,12 +38,7 @@ pub unsafe extern "C" fn open64(path: *const c_char, flags: c_int, args: ...) ->
 /// # Safety
 /// `path` is a C string; creation flags supply the promoted mode argument.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn openat64(
-    dirfd: c_int,
-    path: *const c_char,
-    flags: c_int,
-    args: ...
-) -> c_int {
+unsafe extern "C" fn openat64(dirfd: c_int, path: *const c_char, flags: c_int, args: ...) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::cancel(c"openat64");
     // SAFETY: the variadic contract supplies a creation mode when required.
@@ -57,7 +49,7 @@ pub unsafe extern "C" fn openat64(
 /// # Safety
 /// `path` is a C string; creation flags supply the promoted mode argument.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __open(path: *const c_char, flags: c_int, args: ...) -> c_int {
+unsafe extern "C" fn __open(path: *const c_char, flags: c_int, args: ...) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::cancel(c"__open");
     // SAFETY: the variadic contract supplies a creation mode when required.
@@ -68,7 +60,7 @@ pub unsafe extern "C" fn __open(path: *const c_char, flags: c_int, args: ...) ->
 /// # Safety
 /// `path` is a C string; creation flags supply the promoted mode argument.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __open64(path: *const c_char, flags: c_int, args: ...) -> c_int {
+unsafe extern "C" fn __open64(path: *const c_char, flags: c_int, args: ...) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::cancel(c"__open64");
     // SAFETY: the variadic contract supplies a creation mode when required.
@@ -85,20 +77,28 @@ unsafe fn decode(dirfd: c_int, path: *const c_char, flags: c_int, mut args: VaLi
         // SAFETY: Linux mode_t is unsigned int; Darwin's u16 promotes to int.
         #[cfg(target_os = "linux")]
         {
+            // SAFETY: O_CREAT/O_TMPFILE requires a promoted `mode_t` operand.
             mode = unsafe { args.next_arg::<core::ffi::c_uint>() };
         }
         #[cfg(target_os = "macos")]
         {
+            // SAFETY: creation flags require the promoted Darwin mode operand.
             mode = unsafe { args.next_arg::<c_int>() } as u32;
         }
     }
     if mutated {
+        // SAFETY: the armed variadic acceptance caller supplies the sentinel
+        // mode operand consumed by this mutation path.
         #[cfg(target_os = "linux")]
         {
+            // SAFETY: the armed acceptance caller supplies a promoted `mode_t`
+            // sentinel operand for this mutation path.
             mode = unsafe { args.next_arg::<core::ffi::c_uint>() };
         }
         #[cfg(target_os = "macos")]
         {
+            // SAFETY: the armed acceptance caller supplies the promoted Darwin
+            // mode sentinel operand for this mutation path.
             mode = unsafe { args.next_arg::<c_int>() } as u32;
         }
     }

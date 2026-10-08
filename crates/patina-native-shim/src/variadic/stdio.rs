@@ -1,10 +1,12 @@
 //! Variadic formatting doors into the private Rust stream engine.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use core::ffi::{VaList, c_char, c_int};
 
 /// # Safety
 /// Format and arguments obey printf's contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn printf(format: *const c_char, args: ...) -> c_int {
+unsafe extern "C" fn printf(format: *const c_char, args: ...) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the Rust engine owns the stdout sentinel and clones VaList.
     unsafe { format_to(core::ptr::null_mut(), format, args, 1) }
@@ -13,11 +15,7 @@ pub unsafe extern "C" fn printf(format: *const c_char, args: ...) -> c_int {
 /// # Safety
 /// Stream, format and arguments obey fprintf's contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fprintf(
-    stream: *mut libc::FILE,
-    format: *const c_char,
-    args: ...
-) -> c_int {
+unsafe extern "C" fn fprintf(stream: *mut libc::FILE, format: *const c_char, args: ...) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the engine validates the sentinel before formatting.
     unsafe { format_to(stream, format, args, 0) }
@@ -62,5 +60,7 @@ pub(crate) unsafe extern "C" fn diagnostic(
     args: ...
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this private C bridge forwards the caller's vsnprintf pointers
+    // and variadic list unchanged to the matching format_buffer contract.
     unsafe { crate::posix::stdio::format_buffer(buffer, length, format, args) }
 }

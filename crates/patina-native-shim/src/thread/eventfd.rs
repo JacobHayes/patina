@@ -31,19 +31,6 @@ pub(crate) struct EventFd {
     pub(crate) read_waiters: VecDeque<TaskId>,
 }
 
-#[unsafe(no_mangle)]
-/// eventfd(2) / eventfd2. Syscall-shaped (`eventfd2(initval, flags)`) so a
-/// future syscall-user-dispatch SIGSYS dispatcher can call it with raw
-/// register arguments; the C interposer is thin marshaling over this.
-/// EFD_CLOEXEC is accepted as a no-op (no exec under the runtime); unknown
-/// flags are `EINVAL`. Activates the thread subsystem so a later blocking
-/// read or epoll park can reach the baton.
-#[cfg(target_os = "linux")]
-pub extern "C" fn patina_eventfd(initval: u32, flags: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    create(initval, flags).unwrap_or(-1)
-}
-
 #[cfg(target_os = "linux")]
 pub(crate) fn create(initval: u32, flags: c_int) -> SysResult<c_int> {
     const EFD_SEMAPHORE: c_int = 0o1;

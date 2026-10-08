@@ -89,7 +89,7 @@ struct Directory {
 /// # Safety
 /// `path` satisfies opendir's libc string contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut libc::DIR {
+unsafe extern "C" fn opendir(path: *const c_char) -> *mut libc::DIR {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `path` is readable per opendir's contract; allocated directory
     // storage is checked before any field access.
@@ -135,7 +135,7 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut libc::DIR {
 /// # Safety
 /// Adopts the descriptor on success, as libc fdopendir does.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fdopendir(fd: c_int) -> *mut libc::DIR {
+unsafe extern "C" fn fdopendir(fd: c_int) -> *mut libc::DIR {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `fd` is validated before the metadata read, and allocated
     // directory storage is checked before any field access.
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn fdopendir(fd: c_int) -> *mut libc::DIR {
 /// # Safety
 /// `dirp` is a live stream owned by this adapter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn readdir64(dirp: *mut libc::DIR) -> *mut libc::dirent64 {
+unsafe extern "C" fn readdir64(dirp: *mut libc::DIR) -> *mut libc::dirent64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `dirp` is a live stream per readdir64's contract; `next` writes
     // its error result into this local integer.
@@ -207,7 +207,7 @@ pub unsafe extern "C" fn readdir64(dirp: *mut libc::DIR) -> *mut libc::dirent64 
 /// # Safety
 /// `dirp` is a live stream owned by this adapter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn readdir(dirp: *mut libc::DIR) -> *mut libc::dirent {
+unsafe extern "C" fn readdir(dirp: *mut libc::DIR) -> *mut libc::dirent {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `dirp` is a live stream per readdir's contract; the macOS branch
     // writes its entry only after the snapshot core returns an entry.
@@ -286,7 +286,7 @@ unsafe fn readdir_copy(
 /// # Safety
 /// The stream and writable outputs satisfy libc readdir_r's contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn readdir_r(
+unsafe extern "C" fn readdir_r(
     dirp: *mut libc::DIR,
     entry: *mut libc::dirent,
     result: *mut *mut libc::dirent,
@@ -322,7 +322,7 @@ pub unsafe extern "C" fn readdir_r(
 /// # Safety
 /// The stream and writable outputs satisfy libc readdir64_r's contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn readdir64_r(
+unsafe extern "C" fn readdir64_r(
     dirp: *mut libc::DIR,
     entry: *mut libc::dirent64,
     result: *mut *mut libc::dirent64,
@@ -337,11 +337,7 @@ pub unsafe extern "C" fn readdir64_r(
 /// # Safety
 /// The guest buffer is copied through the dispatcher model's uaccess.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn getdents64(
-    fd: c_int,
-    buffer: *mut core::ffi::c_void,
-    length: usize,
-) -> isize {
+unsafe extern "C" fn getdents64(fd: c_int, buffer: *mut core::ffi::c_void, length: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `dirp` and its output buffer satisfy getdents64's libc contract;
     // the dispatcher writes only the requested guest range.
@@ -367,7 +363,7 @@ pub unsafe extern "C" fn getdents64(
 /// # Safety
 /// Releases a live directory stream created by this adapter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn closedir(dirp: *mut libc::DIR) -> c_int {
+unsafe extern "C" fn closedir(dirp: *mut libc::DIR) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `dirp` is an owned live stream per closedir's contract.
     unsafe {
@@ -406,7 +402,7 @@ unsafe fn seek(dirp: *mut libc::DIR, position: libc::c_long) {
 /// # Safety
 /// `dirp` is a live stream owned by this adapter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rewinddir(dirp: *mut libc::DIR) {
+unsafe extern "C" fn rewinddir(dirp: *mut libc::DIR) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `dirp` is a live stream per rewinddir's contract.
     unsafe {
@@ -432,7 +428,7 @@ pub unsafe extern "C" fn rewinddir(dirp: *mut libc::DIR) {
 /// # Safety
 /// `dirp` is a live stream and position was answered by telldir.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn seekdir(dirp: *mut libc::DIR, position: libc::c_long) {
+unsafe extern "C" fn seekdir(dirp: *mut libc::DIR, position: libc::c_long) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `dirp` is a live stream per seekdir's contract.
     unsafe {
@@ -444,7 +440,7 @@ pub unsafe extern "C" fn seekdir(dirp: *mut libc::DIR, position: libc::c_long) {
 /// # Safety
 /// `dirp` is a live stream owned by this adapter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn telldir(dirp: *mut libc::DIR) -> libc::c_long {
+unsafe extern "C" fn telldir(dirp: *mut libc::DIR) -> libc::c_long {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `dirp` is a live stream per telldir's contract.
     unsafe { (*dirp.cast::<Directory>()).filepos }
@@ -453,7 +449,7 @@ pub unsafe extern "C" fn telldir(dirp: *mut libc::DIR) -> libc::c_long {
 /// # Safety
 /// `dirp` is a live stream owned by this adapter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dirfd(dirp: *mut libc::DIR) -> c_int {
+unsafe extern "C" fn dirfd(dirp: *mut libc::DIR) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `dirp` is a live stream per dirfd's contract.
     unsafe {

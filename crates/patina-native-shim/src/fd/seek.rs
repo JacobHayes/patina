@@ -141,13 +141,7 @@ pub(crate) fn fs_sync_volume() -> Result<(), c_int> {
     with_context(|context| context.fs_sync_all())
 }
 
-#[unsafe(no_mangle)]
-/// `ftruncate(2)`: a file's length; every other kind is `EINVAL`.
-pub extern "C" fn patina_set_len(raw_fd: c_int, length: u64) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    set_len(raw_fd, length).unwrap_or(-1)
-}
-
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) fn set_len(raw_fd: c_int, length: u64) -> crate::abi::SysResult<c_int> {
     let handle = match fdget(raw_fd) {
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),

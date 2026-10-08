@@ -176,7 +176,7 @@ impl DirentFormat {
 }
 
 /// Fill the guest buffer with directory records from the fd's snapshot,
-/// advancing `patina_read_dir_next` past every entry that fits. Returns the
+/// advancing `crate::fs::read_dir_next` past every entry that fits. Returns the
 /// number of bytes written (0 at end-of-directory) or `-errno`.
 pub(in crate::sud) fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
     getdents(fd, dirp, count, DirentFormat::Dirent64)
@@ -199,7 +199,7 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
     // The kernel reads the length as an unsigned int.
     let cap = count as u32 as usize;
     // The snapshot is taken by the FIRST getdents on the descriptor (and after
-    // a seek), through the same `patina_read_dir` entry the interposed
+    // a seek), through the same `crate::fs::read_dir` model the interposed
     // `opendir` uses — a second caller, never a second directory model.
     let Ok(fd) = c_int::try_from(fd) else {
         return -EBADF;
@@ -248,7 +248,7 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
     let mut written = 0usize;
     loop {
         // Next entry: the pushed-back one first, else consume from the snapshot.
-        // `patina_read_dir_next` only advances (no peek), so an entry that does
+        // `crate::fs::read_dir_next` only advances (no peek), so an entry that does
         // not fit is stashed in `dir.pending` and never dropped.
         let record = if let Some(entry) = dir.pending.take() {
             entry

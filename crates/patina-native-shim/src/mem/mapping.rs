@@ -25,20 +25,6 @@ pub(crate) fn mmap(
         .map(|address| address as usize)
 }
 
-/// `mmap(2)`: the address, or `-errno`.
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_mmap(
-    addr: usize,
-    len: usize,
-    prot: c_int,
-    flags: c_int,
-    fd: c_int,
-    offset: i64,
-) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(mmap(addr, len, prot, flags, fd, offset).map(|address| address as i64))
-}
-
 /// An anonymous mapping: host address space. Linux ignores its descriptor,
 /// and a guest number means nothing to the host kernel, so it never gets one.
 fn map_anonymous(addr: usize, len: usize, prot: c_int, flags: c_int, offset: i64) -> i64 {
@@ -431,17 +417,6 @@ fn cache_for(ino: u64, handle: u64, size: u64) -> Result<c_int, i64> {
     Ok(fd)
 }
 
-/// `mprotect(2)`: 0, or `-errno`. A range reaching a view that may not be
-/// written (a shared view of a description not open for writing or of a
-/// write-sealed file, a `SHM_RDONLY` attachment) cannot gain `PROT_WRITE`
-/// (`EACCES`, `!VM_MAYWRITE`); the mappings before it are changed first, as
-/// the kernel walks them. The rest is the host's.
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_mprotect(addr: usize, len: usize, prot: c_int) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(mprotect(addr, len, prot))
-}
-
 pub(crate) fn mprotect(addr: usize, len: usize, prot: c_int) -> crate::abi::SysResult<i64> {
     'result: {
         if prot & (PROT_WRITE | PROT_EXEC) != 0
@@ -479,13 +454,6 @@ pub(crate) fn mprotect(addr: usize, len: usize, prot: c_int) -> crate::abi::SysR
         .decode()
         .map(|result| result as i64)
     }
-}
-
-/// `munmap(2)`: 0, or `-errno`.
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_munmap(addr: usize, len: usize) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(munmap(addr, len))
 }
 
 pub(crate) fn munmap(addr: usize, len: usize) -> crate::abi::SysResult<i64> {

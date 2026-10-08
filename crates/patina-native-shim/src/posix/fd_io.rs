@@ -8,13 +8,13 @@ pub(super) mod linux;
 
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn isatty(fd: c_int) -> c_int {
+extern "C" fn isatty(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     linux::isatty_impl(fd)
 }
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
-pub extern "C" fn isatty(fd: c_int) -> c_int {
+extern "C" fn isatty(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::errno(if crate::patina_fd_kind(fd) < 0 {
         libc::EBADF
@@ -26,7 +26,7 @@ pub extern "C" fn isatty(fd: c_int) -> c_int {
 /// # Safety
 /// `destination` follows read's buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn read(fd: c_int, destination: *mut c_void, length: usize) -> isize {
+unsafe extern "C" fn read(fd: c_int, destination: *mut c_void, length: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"read");
     // SAFETY: the caller's read-buffer contract is forwarded to the model entry.
@@ -36,7 +36,7 @@ pub unsafe extern "C" fn read(fd: c_int, destination: *mut c_void, length: usize
 /// # Safety
 /// `source` follows write's buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn write(fd: c_int, source: *const c_void, length: usize) -> isize {
+unsafe extern "C" fn write(fd: c_int, source: *const c_void, length: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"write");
     // SAFETY: the caller's write-buffer contract is forwarded to the model entry.
@@ -46,7 +46,7 @@ pub unsafe extern "C" fn write(fd: c_int, source: *const c_void, length: usize) 
 /// # Safety
 /// `destination` follows pread's buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pread(
+unsafe extern "C" fn pread(
     fd: c_int,
     destination: *mut c_void,
     length: usize,
@@ -60,7 +60,7 @@ pub unsafe extern "C" fn pread(
 /// # Safety
 /// `source` follows pwrite's buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pwrite(
+unsafe extern "C" fn pwrite(
     fd: c_int,
     source: *const c_void,
     length: usize,
@@ -72,32 +72,32 @@ pub unsafe extern "C" fn pwrite(
     unsafe { size_result(crate::patina_pwrite(fd, source, length, offset)) }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn flock(fd: c_int, operation: c_int) -> c_int {
+extern "C" fn flock(fd: c_int, operation: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::abi::libc_result(crate::fd::flock(fd, operation), -1)
 }
 /// # Safety
 /// `fd` is closed following the libc descriptor contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn close(fd: c_int) -> c_int {
+unsafe extern "C" fn close(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"close");
     crate::abi::libc_result(crate::fd::value::close(fd), -1)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn dup(fd: c_int) -> c_int {
+extern "C" fn dup(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::abi::libc_result(crate::fd::value::dup(fd), -1)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn dup2(oldfd: c_int, newfd: c_int) -> c_int {
+extern "C" fn dup2(oldfd: c_int, newfd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::abi::libc_result(crate::fd::value::dup2(oldfd, newfd), -1)
 }
 /// # Safety
 /// `vectors` follows writev's buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn writev(fd: c_int, vectors: *const libc::iovec, count: c_int) -> isize {
+unsafe extern "C" fn writev(fd: c_int, vectors: *const libc::iovec, count: c_int) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"writev");
     // SAFETY: the caller's writev vector contract is forwarded to the model entry.
@@ -113,7 +113,7 @@ pub unsafe extern "C" fn writev(fd: c_int, vectors: *const libc::iovec, count: c
 /// # Safety
 /// `vectors` follows readv's buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn readv(fd: c_int, vectors: *const libc::iovec, count: c_int) -> isize {
+unsafe extern "C" fn readv(fd: c_int, vectors: *const libc::iovec, count: c_int) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"readv");
     // SAFETY: the caller's readv vector contract is forwarded to the model entry.
@@ -129,7 +129,7 @@ pub unsafe extern "C" fn readv(fd: c_int, vectors: *const libc::iovec, count: c_
 /// # Safety
 /// `vectors` follows preadv's buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn preadv(
+unsafe extern "C" fn preadv(
     fd: c_int,
     vectors: *const libc::iovec,
     count: c_int,
@@ -151,7 +151,7 @@ pub unsafe extern "C" fn preadv(
 /// # Safety
 /// `vectors` follows pwritev's buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pwritev(
+unsafe extern "C" fn pwritev(
     fd: c_int,
     vectors: *const libc::iovec,
     count: c_int,
@@ -171,7 +171,7 @@ pub unsafe extern "C" fn pwritev(
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn lseek(fd: c_int, offset: libc::off_t, whence: c_int) -> libc::off_t {
+extern "C" fn lseek(fd: c_int, offset: libc::off_t, whence: c_int) -> libc::off_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     seek_impl(fd, offset, whence)
 }
@@ -187,13 +187,13 @@ fn seek_impl(fd: c_int, offset: i64, whence: c_int) -> i64 {
     crate::abi::libc_result(crate::fd::seek(fd, offset, whence), -1)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn fsync(fd: c_int) -> c_int {
+extern "C" fn fsync(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"fsync");
     crate::abi::libc_result(crate::fd::fsync(fd), -1)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn ftruncate(fd: c_int, length: libc::off_t) -> c_int {
+extern "C" fn ftruncate(fd: c_int, length: libc::off_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     truncate_impl(fd, length)
 }
@@ -206,7 +206,7 @@ fn truncate_impl(fd: c_int, length: i64) -> c_int {
 /// # Safety
 /// `fildes` is null or writable for two descriptor numbers.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pipe(fildes: *mut c_int) -> c_int {
+unsafe extern "C" fn pipe(fildes: *mut c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if fildes.is_null() {
         return error(libc::EFAULT);

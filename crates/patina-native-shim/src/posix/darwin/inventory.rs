@@ -28,15 +28,12 @@ pub(super) fn native_trap(class: &core::ffi::CStr, symbol: &core::ffi::CStr) -> 
 include!(concat!(env!("OUT_DIR"), "/darwin_traps.rs"));
 
 #[unsafe(no_mangle)]
-pub extern "C" fn SecTrustSettingsCopyCertificates(
-    _domain: c_uint,
-    _out: *mut *mut c_void,
-) -> c_int {
+extern "C" fn SecTrustSettingsCopyCertificates(_domain: c_uint, _out: *mut *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     -25263 // errSecNoTrustSettings: empty iterator, ignored out-parameter.
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn CFArrayCreate(
+extern "C" fn CFArrayCreate(
     _allocator: *const c_void,
     _values: *const *const c_void,
     _count: libc::c_long,
@@ -46,45 +43,42 @@ pub extern "C" fn CFArrayCreate(
     (&raw const EMPTY_ARRAY).cast()
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn CFArrayGetCount(_array: *const c_void) -> libc::c_long {
+extern "C" fn CFArrayGetCount(_array: *const c_void) -> libc::c_long {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     0
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn CFRelease(_object: *const c_void) {
+extern "C" fn CFRelease(_object: *const c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn CFTimeZoneResetSystem() {
+extern "C" fn CFTimeZoneResetSystem() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn CFTimeZoneCopySystem() -> *const c_void {
+extern "C" fn CFTimeZoneCopySystem() -> *const c_void {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     (&raw const SYSTEM_TIMEZONE).cast()
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn CFTimeZoneGetName(_zone: *const c_void) -> *const c_void {
+extern "C" fn CFTimeZoneGetName(_zone: *const c_void) -> *const c_void {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     (&raw const TIMEZONE_NAME).cast()
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn CFStringGetCStringPtr(
-    _string: *const c_void,
-    _encoding: c_uint,
-) -> *const c_char {
+extern "C" fn CFStringGetCStringPtr(_string: *const c_void, _encoding: c_uint) -> *const c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     c"UTC".as_ptr()
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn IOServiceMatching(_name: *const c_char) -> *mut c_void {
+extern "C" fn IOServiceMatching(_name: *const c_char) -> *mut c_void {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     ptr::null_mut()
 }
 /// # Safety
 /// buffer is null or writable for buffersize bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn proc_listallpids(buffer: *mut c_void, buffersize: c_int) -> c_int {
+unsafe extern "C" fn proc_listallpids(buffer: *mut c_void, buffersize: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let pids = [crate::patina_pid(), crate::patina_ppid()];
     if buffer.is_null() || buffersize <= 0 {
@@ -108,7 +102,7 @@ fn refuse(pid: c_int) -> c_int {
 /// # Safety
 /// buffer is null or writable for size bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn proc_pidpath(pid: c_int, buffer: *mut c_void, size: u32) -> c_int {
+unsafe extern "C" fn proc_pidpath(pid: c_int, buffer: *mut c_void, size: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if pid != crate::patina_pid() {
         return refuse(pid);
@@ -127,7 +121,7 @@ pub unsafe extern "C" fn proc_pidpath(pid: c_int, buffer: *mut c_void, size: u32
     (path.len() - 1) as c_int
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn proc_pidinfo(
+extern "C" fn proc_pidinfo(
     pid: c_int,
     _flavor: c_int,
     _arg: u64,
@@ -143,11 +137,7 @@ pub extern "C" fn proc_pidinfo(
 /// # Safety
 /// buffer is null or holds the rusage layout named by flavor.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn proc_pid_rusage(
-    pid: c_int,
-    flavor: c_int,
-    buffer: *mut *mut c_void,
-) -> c_int {
+unsafe extern "C" fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *mut *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if pid != crate::patina_pid() {
         return refuse(pid);
@@ -165,7 +155,7 @@ pub unsafe extern "C" fn proc_pid_rusage(
     super::super::error(libc::EINVAL)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn mach_host_self() -> u32 {
+extern "C" fn mach_host_self() -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     0x484f5354 // HOST, synthetic port consumed only by models.
 }
@@ -188,7 +178,7 @@ const _: () = {
 /// # Safety
 /// output/count follow the HOST_VM_INFO64 buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn host_statistics64(
+unsafe extern "C" fn host_statistics64(
     _host: u32,
     flavor: c_int,
     output: *mut i32,
@@ -222,7 +212,7 @@ pub unsafe extern "C" fn host_statistics64(
 /// # Safety
 /// Each out-parameter is null or writable with its declared layout.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn host_processor_info(
+unsafe extern "C" fn host_processor_info(
     _host: u32,
     flavor: c_int,
     processors: *mut u32,
@@ -265,7 +255,7 @@ pub unsafe extern "C" fn host_processor_info(
     libc::KERN_SUCCESS
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn vm_deallocate(_task: u32, _address: usize, _size: usize) -> c_int {
+extern "C" fn vm_deallocate(_task: u32, _address: usize, _size: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     libc::KERN_SUCCESS
 }

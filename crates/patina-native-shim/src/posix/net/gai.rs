@@ -169,7 +169,7 @@ unsafe fn free_list(mut res: *mut libc::addrinfo) {
 /// # Safety
 /// `res` is null or a complete list returned by getaddrinfo.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn freeaddrinfo(res: *mut libc::addrinfo) {
+unsafe extern "C" fn freeaddrinfo(res: *mut libc::addrinfo) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller guarantees null or a complete list returned by getaddrinfo.
     unsafe {
@@ -212,7 +212,7 @@ fn v4mapped(address: &mut Address) {
 /// # Safety
 /// Strings are null or terminated; hints is null or readable, res writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn getaddrinfo(
+unsafe extern "C" fn getaddrinfo(
     node: *const c_char,
     service: *const c_char,
     hints: *const libc::addrinfo,

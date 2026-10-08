@@ -104,7 +104,7 @@ unsafe fn fd_vfs(fd: c_int, out: *mut libc::statvfs) -> c_int {
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn statfs(path: *const c_char, out: *mut libc::statfs) -> c_int {
+unsafe extern "C" fn statfs(path: *const c_char, out: *mut libc::statfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     crate::abi::libc_result(
@@ -116,7 +116,7 @@ pub unsafe extern "C" fn statfs(path: *const c_char, out: *mut libc::statfs) -> 
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fstatfs(fd: c_int, out: *mut libc::statfs) -> c_int {
+unsafe extern "C" fn fstatfs(fd: c_int, out: *mut libc::statfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     crate::abi::libc_result(
@@ -128,7 +128,7 @@ pub unsafe extern "C" fn fstatfs(fd: c_int, out: *mut libc::statfs) -> c_int {
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn statvfs(path: *const c_char, out: *mut libc::statvfs) -> c_int {
+unsafe extern "C" fn statvfs(path: *const c_char, out: *mut libc::statvfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     unsafe { path_vfs(path, out.cast()) }
@@ -137,7 +137,7 @@ pub unsafe extern "C" fn statvfs(path: *const c_char, out: *mut libc::statvfs) -
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fstatvfs(fd: c_int, out: *mut libc::statvfs) -> c_int {
+unsafe extern "C" fn fstatvfs(fd: c_int, out: *mut libc::statvfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     unsafe { fd_vfs(fd, out.cast()) }
@@ -146,7 +146,7 @@ pub unsafe extern "C" fn fstatvfs(fd: c_int, out: *mut libc::statvfs) -> c_int {
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn statfs64(path: *const c_char, out: *mut libc::statfs64) -> c_int {
+unsafe extern "C" fn statfs64(path: *const c_char, out: *mut libc::statfs64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     crate::abi::libc_result(
@@ -158,7 +158,7 @@ pub unsafe extern "C" fn statfs64(path: *const c_char, out: *mut libc::statfs64)
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fstatfs64(fd: c_int, out: *mut libc::statfs64) -> c_int {
+unsafe extern "C" fn fstatfs64(fd: c_int, out: *mut libc::statfs64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     crate::abi::libc_result(
@@ -170,7 +170,7 @@ pub unsafe extern "C" fn fstatfs64(fd: c_int, out: *mut libc::statfs64) -> c_int
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn statvfs64(path: *const c_char, out: *mut libc::statvfs64) -> c_int {
+unsafe extern "C" fn statvfs64(path: *const c_char, out: *mut libc::statvfs64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     unsafe { path_vfs(path, out.cast()) }
@@ -179,7 +179,7 @@ pub unsafe extern "C" fn statvfs64(path: *const c_char, out: *mut libc::statvfs6
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fstatvfs64(fd: c_int, out: *mut libc::statvfs64) -> c_int {
+unsafe extern "C" fn fstatvfs64(fd: c_int, out: *mut libc::statvfs64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The filesystem path/output pointers satisfy the libc statfs-family contract, and initialized output is read only after success.
     unsafe { fd_vfs(fd, out.cast()) }

@@ -37,7 +37,7 @@ pub(crate) struct NetState {
     // have no Linux counterpart.
     #[cfg(target_os = "macos")]
     pub(super) kqueues: BTreeMap<u64, KqueueSlot>,
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", patina_posix_exports))]
     pub(super) next_kq: u64,
     // Virtual epoll readiness reactors — the Linux mirror of the kqueue
     // table above, keyed by registry id the same way (mio clones its
@@ -69,7 +69,7 @@ impl NetState {
             next_pipe_ino: 1,
             #[cfg(target_os = "macos")]
             kqueues: BTreeMap::new(),
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", patina_posix_exports))]
             next_kq: 0,
             #[cfg(target_os = "linux")]
             epolls: BTreeMap::new(),

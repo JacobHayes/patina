@@ -89,7 +89,7 @@ unsafe fn setbuffer_impl(stream: StreamId, buffer: *mut u8, size: usize) {
 /// # Safety
 /// Caller buffer remains live under setvbuf's borrowing contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn setvbuf(
+unsafe extern "C" fn setvbuf(
     stream: *mut libc::FILE,
     buffer: *mut c_char,
     mode: c_int,
@@ -103,7 +103,7 @@ pub unsafe extern "C" fn setvbuf(
 /// # Safety
 /// Caller buffer remains live under setbuffer's borrowing contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn setbuffer(stream: *mut libc::FILE, buffer: *mut c_char, size: usize) {
+unsafe extern "C" fn setbuffer(stream: *mut libc::FILE, buffer: *mut c_char, size: usize) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: stream_of accepts only sentinels; a non-null buffer remains live
     // under setbuffer's caller-owned storage contract.
@@ -114,7 +114,7 @@ pub unsafe extern "C" fn setbuffer(stream: *mut libc::FILE, buffer: *mut c_char,
 /// # Safety
 /// Caller buffer is null or holds BUFSIZ bytes and remains live.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn setbuf(stream: *mut libc::FILE, buffer: *mut c_char) {
+unsafe extern "C" fn setbuf(stream: *mut libc::FILE, buffer: *mut c_char) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: stream_of accepts only sentinels; a non-null buffer remains live
     // for BUFSIZ bytes under setbuf's caller-owned storage contract.
@@ -123,7 +123,7 @@ pub unsafe extern "C" fn setbuf(stream: *mut libc::FILE, buffer: *mut c_char) {
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn setlinebuf(stream: *mut libc::FILE) {
+extern "C" fn setlinebuf(stream: *mut libc::FILE) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: stream_of accepts only sentinels and null selects an internally
     // managed buffer for line buffering.

@@ -7,28 +7,28 @@ macro_rules! late_rows {
                 $id,
                 Family::Fs,
                 Disposition::Modeled,
-                "Routed by the SUD dispatcher into `patina_listxattr`: the names the filesystem lists for the node (trusted.* hidden without CAP_SYS_ADMIN), under the size protocol.",
+                "The SUD row uses the shared filesystem attribute model: the names the filesystem lists for the node (trusted.* hidden without CAP_SYS_ADMIN), under the size protocol.",
                 None,
             ),
             Syscall::N_removexattr => r(
                 $id,
                 Family::Fs,
                 Disposition::Modeled,
-                "Routed by the SUD dispatcher into `patina_removexattr` over the same attribute store and rules.",
+                "The SUD row uses the shared attribute store and rules.",
                 None,
             ),
             Syscall::N_lremovexattr => r(
                 $id,
                 Family::Fs,
                 Disposition::Modeled,
-                "Routed by the SUD dispatcher into `patina_removexattr` over the same attribute store and rules.",
+                "The SUD row uses the shared attribute store and rules.",
                 None,
             ),
             Syscall::N_fremovexattr => r(
                 $id,
                 Family::Fs,
                 Disposition::Modeled,
-                "Routed by the SUD dispatcher into `patina_removexattr` over the same attribute store and rules.",
+                "The SUD row uses the shared attribute store and rules.",
                 None,
             ),
             Syscall::N_tkill => r(
@@ -640,7 +640,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Net,
                 Disposition::Modeled,
-                "Routed by the SUD dispatcher into the same `patina_sock_*` entry the C interposer calls (`patina_sock_accept`): the pending connection's socket and peer name; SOCK_NONBLOCK/SOCK_CLOEXEC honored, other flags EINVAL.",
+                "The C and SUD doors share the socket model: the pending connection's socket and peer name; SOCK_NONBLOCK/SOCK_CLOEXEC honored, other flags EINVAL.",
                 None,
             )
             .since("2.6.28"),
@@ -655,7 +655,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Readiness,
                 Disposition::Modeled,
-                "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_eventfd`).",
+                "The C and SUD doors share the eventfd descriptor model.",
                 None,
             )
             .since("2.6.27"),
@@ -671,7 +671,7 @@ macro_rules! late_rows {
                 $id,
                 Family::FdIo,
                 Disposition::Modeled,
-                "Binds a chosen number to `oldfd`'s open file description in the shim's descriptor table (`patina_dup3`), closing what it named; equal numbers are EINVAL, a target past RLIMIT_NOFILE is EBADF, O_CLOEXEC lands on the new number only.",
+                "Binds a chosen number to `oldfd`'s open file description in the shim's descriptor table, closing what it named; equal numbers are EINVAL, a target past RLIMIT_NOFILE is EBADF, O_CLOEXEC lands on the new number only.",
                 None,
             ),
             Syscall::N_pipe2 => r(
@@ -722,7 +722,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Net,
                 Disposition::Modeled,
-                "Routed by the SUD dispatcher into the same `patina_sock_*` entry the C interposer calls (`patina_sock_recvmmsg`): `recvmsg` per message, MSG_WAITFORONE, the timeout checked between messages on the virtual clock.",
+                "The C and SUD doors share the socket model: `recvmsg` per message, MSG_WAITFORONE, the timeout checked between messages on the virtual clock.",
                 None,
             ),
             Syscall::N_fanotify_init => r(
@@ -778,7 +778,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Net,
                 Disposition::Modeled,
-                "Routed by the SUD dispatcher into the same `patina_sock_*` entry the C interposer calls (`patina_sock_sendmmsg`): `sendmsg` per message; an error after the first answers the count sent.",
+                "The C and SUD doors share the socket model: `sendmsg` per message; an error after the first answers the count sent.",
                 None,
             ),
             Syscall::N_setns => r(

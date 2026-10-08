@@ -153,7 +153,7 @@ unsafe fn access_impl(directory: c_int, path: *const c_char, mode: c_int) -> c_i
 /// # Safety
 /// `path` satisfies libc's string contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
+unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `path` is valid per this export's libc string contract.
     unsafe { access_impl(AT_FDCWD, path, mode) }
@@ -162,7 +162,7 @@ pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
 /// # Safety
 /// `path` satisfies libc's string contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn faccessat(
+unsafe extern "C" fn faccessat(
     directory: c_int,
     path: *const c_char,
     mode: c_int,
@@ -179,7 +179,7 @@ pub unsafe extern "C" fn faccessat(
 /// # Safety
 /// `path` satisfies libc's string contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fchmodat(
+unsafe extern "C" fn fchmodat(
     directory: c_int,
     path: *const c_char,
     mode: libc::mode_t,
@@ -215,7 +215,7 @@ pub unsafe extern "C" fn fchmodat(
 /// # Safety
 /// `path` satisfies libc's string contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fchownat(
+unsafe extern "C" fn fchownat(
     directory: c_int,
     path: *const c_char,
     owner: libc::uid_t,
@@ -355,7 +355,7 @@ unsafe fn write_statx(values: &PatinaMetadata, mask: u32, status: *mut libc::sta
 /// # Safety
 /// The guest string and output buffer satisfy libc statx's contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn statx(
+unsafe extern "C" fn statx(
     directory: c_int,
     path: *const c_char,
     flags: c_int,
@@ -383,14 +383,14 @@ pub unsafe extern "C" fn statx(
 /// # Safety
 /// Guest pointers obey the corresponding libc contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chmod(path: *const c_char, mode: libc::mode_t) -> c_int {
+unsafe extern "C" fn chmod(path: *const c_char, mode: libc::mode_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `path` is valid per this export's libc string contract.
     unsafe { model_result(crate::patina_chmod(AT_FDCWD, path, mode as libc::c_uint, 0)) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fchmod(fd: c_int, mode: libc::mode_t) -> c_int {
+extern "C" fn fchmod(fd: c_int, mode: libc::mode_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     model_result(crate::patina_fchmod(fd, mode as libc::c_uint))
 }
@@ -398,11 +398,7 @@ pub extern "C" fn fchmod(fd: c_int, mode: libc::mode_t) -> c_int {
 /// # Safety
 /// Guest pointers obey the corresponding libc contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chown(
-    path: *const c_char,
-    owner: libc::uid_t,
-    group: libc::gid_t,
-) -> c_int {
+unsafe extern "C" fn chown(path: *const c_char, owner: libc::uid_t, group: libc::gid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `path` is valid per this export's libc string contract.
     unsafe { model_result(crate::patina_chown(AT_FDCWD, path, 0, owner, group)) }
@@ -411,11 +407,7 @@ pub unsafe extern "C" fn chown(
 /// # Safety
 /// Guest pointers obey the corresponding libc contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lchown(
-    path: *const c_char,
-    owner: libc::uid_t,
-    group: libc::gid_t,
-) -> c_int {
+unsafe extern "C" fn lchown(path: *const c_char, owner: libc::uid_t, group: libc::gid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `path` is valid per this export's libc string contract.
     unsafe {
@@ -430,7 +422,7 @@ pub unsafe extern "C" fn lchown(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fchown(fd: c_int, owner: libc::uid_t, group: libc::gid_t) -> c_int {
+extern "C" fn fchown(fd: c_int, owner: libc::uid_t, group: libc::gid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     model_result(crate::patina_fchown(fd, owner, group))
 }
@@ -438,7 +430,7 @@ pub extern "C" fn fchown(fd: c_int, owner: libc::uid_t, group: libc::gid_t) -> c
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn stat(path: *const c_char, status: *mut libc::stat) -> c_int {
+unsafe extern "C" fn stat(path: *const c_char, status: *mut libc::stat) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `path` and `status` satisfy this export's libc metadata
     // contract; the local metadata is read only after a successful result.
@@ -452,7 +444,7 @@ pub unsafe extern "C" fn stat(path: *const c_char, status: *mut libc::stat) -> c
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lstat(path: *const c_char, status: *mut libc::stat) -> c_int {
+unsafe extern "C" fn lstat(path: *const c_char, status: *mut libc::stat) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `path` and `status` satisfy this export's libc metadata
     // contract; the local metadata is read only after a successful result.
@@ -466,7 +458,7 @@ pub unsafe extern "C" fn lstat(path: *const c_char, status: *mut libc::stat) -> 
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fstat(fd: c_int, status: *mut libc::stat) -> c_int {
+unsafe extern "C" fn fstat(fd: c_int, status: *mut libc::stat) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `status` satisfies this export's libc metadata contract; local
     // metadata is read only after a successful result.
@@ -480,7 +472,7 @@ pub unsafe extern "C" fn fstat(fd: c_int, status: *mut libc::stat) -> c_int {
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fstatat(
+unsafe extern "C" fn fstatat(
     directory: c_int,
     path: *const c_char,
     status: *mut libc::stat,
@@ -500,7 +492,7 @@ pub unsafe extern "C" fn fstatat(
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn stat64(path: *const c_char, status: *mut libc::stat64) -> c_int {
+unsafe extern "C" fn stat64(path: *const c_char, status: *mut libc::stat64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `path` and `status` satisfy this export's libc metadata
     // contract; the local metadata is read only after a successful result.
@@ -515,7 +507,7 @@ pub unsafe extern "C" fn stat64(path: *const c_char, status: *mut libc::stat64) 
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lstat64(path: *const c_char, status: *mut libc::stat64) -> c_int {
+unsafe extern "C" fn lstat64(path: *const c_char, status: *mut libc::stat64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `path` and `status` satisfy this export's libc metadata
     // contract; the local metadata is read only after a successful result.
@@ -530,7 +522,7 @@ pub unsafe extern "C" fn lstat64(path: *const c_char, status: *mut libc::stat64)
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fstat64(fd: c_int, status: *mut libc::stat64) -> c_int {
+unsafe extern "C" fn fstat64(fd: c_int, status: *mut libc::stat64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `status` satisfies this export's libc metadata contract; local
     // metadata is read only after a successful result.
@@ -545,7 +537,7 @@ pub unsafe extern "C" fn fstat64(fd: c_int, status: *mut libc::stat64) -> c_int 
 /// # Safety
 /// Guest pointers obey the corresponding libc metadata contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fstatat64(
+unsafe extern "C" fn fstatat64(
     directory: c_int,
     path: *const c_char,
     status: *mut libc::stat64,

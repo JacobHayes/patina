@@ -1,4 +1,6 @@
 //! Linux terminal/PTY adapters. All requests reach the virtual machine.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use crate::posix::{cancel, errno, error, get_errno, model_result};
 use core::ffi::{c_char, c_int, c_void};
 use core::mem::MaybeUninit;
@@ -39,7 +41,7 @@ pub(in crate::posix) fn isatty_impl(fd: c_int) -> c_int {
 /// # Safety
 /// `termios_p` is writable as tcgetattr requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tcgetattr(fd: c_int, termios_p: *mut libc::termios) -> c_int {
+unsafe extern "C" fn tcgetattr(fd: c_int, termios_p: *mut libc::termios) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the C contract requires `termios_p` writable; TCGETS initializes `kernel` before it is read.
     unsafe {
@@ -145,7 +147,7 @@ unsafe fn setattr_impl(
 /// # Safety
 /// `termios_p` is readable as tcsetattr requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tcsetattr(
+unsafe extern "C" fn tcsetattr(
     fd: c_int,
     optional_actions: c_int,
     termios_p: *const libc::termios,
@@ -155,7 +157,7 @@ pub unsafe extern "C" fn tcsetattr(
     unsafe { setattr_impl(fd, optional_actions, termios_p) }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn tcflush(fd: c_int, queue_selector: c_int) -> c_int {
+extern "C" fn tcflush(fd: c_int, queue_selector: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: TCFLSH consumes this integer as a scalar ioctl argument and does not dereference it.
     unsafe {
@@ -167,7 +169,7 @@ pub extern "C" fn tcflush(fd: c_int, queue_selector: c_int) -> c_int {
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn tcdrain(fd: c_int) -> c_int {
+extern "C" fn tcdrain(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"tcdrain");
     // SAFETY: TCSBRK consumes the nonzero sentinel as a scalar ioctl argument and does not dereference it.
@@ -180,7 +182,7 @@ pub extern "C" fn tcdrain(fd: c_int) -> c_int {
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn posix_openpt(flags: c_int) -> c_int {
+extern "C" fn posix_openpt(flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the path is a static NUL-terminated string and openat reads it for the duration of the call.
     unsafe {
@@ -202,14 +204,14 @@ unsafe fn master_request(fd: c_int, request: u64, arg: *mut c_void) -> c_int {
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn grantpt(fd: c_int) -> c_int {
+extern "C" fn grantpt(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut index = MaybeUninit::<libc::c_uint>::uninit();
     // SAFETY: TIOCGPTN writes its result to this local output slot.
     unsafe { master_request(fd, libc::TIOCGPTN, index.as_mut_ptr().cast()) }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn unlockpt(fd: c_int) -> c_int {
+extern "C" fn unlockpt(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut unlock: c_int = 0;
     // SAFETY: TIOCSPTLCK reads this initialized local integer argument.
@@ -256,14 +258,14 @@ unsafe fn ptsname_into(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
 /// # Safety
 /// `buf` is writable for `buflen` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ptsname_r(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
+unsafe extern "C" fn ptsname_r(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: this forwards the caller's documented writable buffer and length to the implementation.
     unsafe { ptsname_into(fd, buf, buflen) }
 }
 static mut PTS_NAME: [c_char; 30] = [0; 30];
 #[unsafe(no_mangle)]
-pub extern "C" fn ptsname(fd: c_int) -> *mut c_char {
+extern "C" fn ptsname(fd: c_int) -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let name = (&raw mut PTS_NAME).cast::<c_char>();
     // SAFETY: `name` points to the 30-byte static return buffer; ptsname_into writes only after checking its length.
@@ -304,7 +306,7 @@ unsafe fn ttyname_into(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
 /// # Safety
 /// `buf` is writable for `buflen` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ttyname_r(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
+unsafe extern "C" fn ttyname_r(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: this forwards the caller's documented writable buffer and length to the implementation.
     unsafe { ttyname_into(fd, buf, buflen) }
@@ -312,7 +314,7 @@ pub unsafe extern "C" fn ttyname_r(fd: c_int, buf: *mut c_char, buflen: usize) -
 /// # Safety
 /// `buf` is writable for `nreal` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __ptsname_r_chk(
+unsafe extern "C" fn __ptsname_r_chk(
     fd: c_int,
     buf: *mut c_char,
     buflen: usize,
@@ -328,7 +330,7 @@ pub unsafe extern "C" fn __ptsname_r_chk(
 /// # Safety
 /// `buf` is writable for `nreal` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __ttyname_r_chk(
+unsafe extern "C" fn __ttyname_r_chk(
     fd: c_int,
     buf: *mut c_char,
     buflen: usize,
@@ -343,7 +345,7 @@ pub unsafe extern "C" fn __ttyname_r_chk(
 }
 static mut TTY_NAME: [c_char; 4096] = [0; 4096];
 #[unsafe(no_mangle)]
-pub extern "C" fn ttyname(fd: c_int) -> *mut c_char {
+extern "C" fn ttyname(fd: c_int) -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let name = (&raw mut TTY_NAME).cast::<c_char>();
     // SAFETY: `name` points to the 4096-byte static return buffer and ttyname_into writes no more than buflen bytes.
@@ -356,7 +358,7 @@ pub extern "C" fn ttyname(fd: c_int) -> *mut c_char {
 /// # Safety
 /// Out parameters are writable; optional settings are readable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn openpty(
+unsafe extern "C" fn openpty(
     amaster: *mut c_int,
     aslave: *mut c_int,
     name: *mut c_char,

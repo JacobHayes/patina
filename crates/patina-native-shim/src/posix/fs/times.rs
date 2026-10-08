@@ -102,7 +102,7 @@ unsafe fn utimes_impl(
 /// # Safety
 /// Guest pointers satisfy the corresponding libc time/string contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn utimensat(
+unsafe extern "C" fn utimensat(
     directory: c_int,
     path: *const c_char,
     times: *const libc::timespec,
@@ -142,7 +142,7 @@ pub unsafe extern "C" fn utimensat(
 /// # Safety
 /// The guest timestamp array satisfies libc futimens's contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn futimens(fd: c_int, times: *const libc::timespec) -> c_int {
+unsafe extern "C" fn futimens(fd: c_int, times: *const libc::timespec) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn futimens(fd: c_int, times: *const libc::timespec) -> c_
 /// # Safety
 /// Guest pointers satisfy the corresponding libc time/string contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn utimes(path: *const c_char, times: *const libc::timeval) -> c_int {
+unsafe extern "C" fn utimes(path: *const c_char, times: *const libc::timeval) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe { utimes_impl(AT_FDCWD, path, times, 0) }
@@ -176,7 +176,7 @@ pub unsafe extern "C" fn utimes(path: *const c_char, times: *const libc::timeval
 /// # Safety
 /// Guest pointers satisfy the corresponding libc time/string contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lutimes(path: *const c_char, times: *const libc::timeval) -> c_int {
+unsafe extern "C" fn lutimes(path: *const c_char, times: *const libc::timeval) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe { utimes_impl(AT_FDCWD, path, times, RESOLVE_NOFOLLOW) }
@@ -185,7 +185,7 @@ pub unsafe extern "C" fn lutimes(path: *const c_char, times: *const libc::timeva
 /// # Safety
 /// The guest timestamp array satisfies libc futimes's contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn futimes(fd: c_int, times: *const libc::timeval) -> c_int {
+unsafe extern "C" fn futimes(fd: c_int, times: *const libc::timeval) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
@@ -210,7 +210,7 @@ pub unsafe extern "C" fn futimes(fd: c_int, times: *const libc::timeval) -> c_in
 /// # Safety
 /// Guest pointers satisfy the corresponding libc time/string contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn utime(path: *const c_char, times: *const libc::utimbuf) -> c_int {
+unsafe extern "C" fn utime(path: *const c_char, times: *const libc::utimbuf) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
@@ -244,7 +244,7 @@ pub unsafe extern "C" fn utime(path: *const c_char, times: *const libc::utimbuf)
 /// # Safety
 /// Guest pointers satisfy the corresponding libc time/string contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn futimesat(
+unsafe extern "C" fn futimesat(
     directory: c_int,
     path: *const c_char,
     times: *const libc::timeval,

@@ -81,7 +81,7 @@ mod linux {
 /// # Safety
 /// The optional argument has the promoted type required by `command`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fcntl(fd: c_int, command: c_int, args: ...) -> c_int {
+unsafe extern "C" fn fcntl(fd: c_int, command: c_int, args: ...) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::cancel_fcntl(command, c"fcntl");
     // SAFETY: the public fcntl contract supplies the command's argument.
@@ -92,7 +92,7 @@ pub unsafe extern "C" fn fcntl(fd: c_int, command: c_int, args: ...) -> c_int {
 /// The optional argument has the promoted type required by `command`.
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fcntl64(fd: c_int, command: c_int, args: ...) -> c_int {
+unsafe extern "C" fn fcntl64(fd: c_int, command: c_int, args: ...) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::cancel_fcntl(command, c"fcntl64");
     // SAFETY: off_t and off64_t share their 64-bit layout on supported targets.

@@ -352,13 +352,6 @@ pub(crate) fn sendmsg(fd: c_int, msg: usize, flags: c_int) -> crate::abi::SysRes
     .map_err(crate::abi::Errno::new)
 }
 
-#[unsafe(no_mangle)]
-/// `sendmsg(2)`.
-pub extern "C" fn patina_sock_sendmsg(fd: c_int, msg: usize, flags: c_int) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(sendmsg(fd, msg, flags))
-}
-
 /// Lay one control message into the guest's buffer at `*at` (`put_cmsg`):
 /// truncated, with `MSG_CTRUNC`, when it does not fit.
 fn put_cmsg(
@@ -547,13 +540,6 @@ pub(crate) fn recvmsg(fd: c_int, msg: usize, flags: c_int) -> crate::abi::SysRes
     .map_err(crate::abi::Errno::new)
 }
 
-#[unsafe(no_mangle)]
-/// `recvmsg(2)`.
-pub extern "C" fn patina_sock_recvmsg(fd: c_int, msg: usize, flags: c_int) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(recvmsg(fd, msg, flags))
-}
-
 /// `sendmmsg(2)`: up to `UIO_MAXIOV` messages, each's sent length written
 /// back; the count sent, or the first message's error when none was.
 #[cfg(target_os = "linux")]
@@ -591,13 +577,6 @@ pub(crate) fn sendmmsg(
         }
     })()
     .map_err(crate::abi::Errno::new)
-}
-
-#[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_sock_sendmmsg(fd: c_int, vec: usize, vlen: u32, flags: c_int) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(sendmmsg(fd, vec, vlen, flags))
 }
 
 /// `MSG_WAITFORONE`: after the first message a batch receive stops waiting.
@@ -682,19 +661,6 @@ pub(crate) fn recvmmsg(
         }
     })()
     .map_err(crate::abi::Errno::new)
-}
-
-#[cfg(target_os = "linux")]
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_sock_recvmmsg(
-    fd: c_int,
-    vec: usize,
-    vlen: u32,
-    flags: c_int,
-    timeout: usize,
-) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(recvmmsg(fd, vec, vlen, flags, timeout))
 }
 
 #[cfg(test)]

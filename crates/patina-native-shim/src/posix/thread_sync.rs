@@ -28,7 +28,7 @@ fn project_pthread_result(code: c_int) -> c_int {
 /// reference this symbol, and as a host import it would taint the run's
 /// determinism claim: ignore the registration and succeed.
 #[unsafe(no_mangle)]
-pub extern "C" fn pthread_atfork(
+extern "C" fn pthread_atfork(
     _prepare: Option<extern "C" fn()>,
     _parent: Option<extern "C" fn()>,
     _child: Option<extern "C" fn()>,
@@ -45,7 +45,7 @@ pub extern "C" fn pthread_atfork(
 /// # Safety
 /// As pthread_create's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_create(
+unsafe extern "C" fn pthread_create(
     thread: *mut libc::pthread_t,
     attr: *const libc::pthread_attr_t,
     start_routine: Option<extern "C" fn(*mut c_void) -> *mut c_void>,
@@ -62,7 +62,7 @@ pub unsafe extern "C" fn pthread_create(
 /// # Safety
 /// As pthread_join's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_join(thread: libc::pthread_t, retval: *mut *mut c_void) -> c_int {
+unsafe extern "C" fn pthread_join(thread: libc::pthread_t, retval: *mut *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_join's caller contract covers `retval`; the thread
@@ -72,7 +72,7 @@ pub unsafe extern "C" fn pthread_join(thread: libc::pthread_t, retval: *mut *mut
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pthread_detach(thread: libc::pthread_t) -> c_int {
+extern "C" fn pthread_detach(thread: libc::pthread_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: `thread` is the opaque pthread handle used by the model
@@ -84,7 +84,7 @@ pub extern "C" fn pthread_detach(thread: libc::pthread_t) -> c_int {
 /// macOS: thread exit is not modeled and fails closed by name.
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
-pub extern "C" fn pthread_exit(retval: *mut c_void) -> ! {
+extern "C" fn pthread_exit(retval: *mut c_void) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `retval` is passed through under pthread_exit's caller contract.
     unsafe { crate::patina_thread_exit(retval) }
@@ -93,7 +93,7 @@ pub extern "C" fn pthread_exit(retval: *mut c_void) -> ! {
 /// macOS: cancellation is not modeled, and a cancel fails closed.
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
-pub extern "C" fn pthread_cancel(_thread: libc::pthread_t) -> c_int {
+extern "C" fn pthread_cancel(_thread: libc::pthread_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     libc::ENOSYS
 }
@@ -106,7 +106,7 @@ pub extern "C" fn pthread_cancel(_thread: libc::pthread_t) -> c_int {
 /// As pthread_getname_np's.
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_getname_np(
+unsafe extern "C" fn pthread_getname_np(
     thread: libc::pthread_t,
     name: *mut core::ffi::c_char,
     len: usize,
@@ -123,7 +123,7 @@ pub unsafe extern "C" fn pthread_getname_np(
 /// As pthread_setname_np's.
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_setname_np(
+unsafe extern "C" fn pthread_setname_np(
     thread: libc::pthread_t,
     name: *const core::ffi::c_char,
 ) -> c_int {
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn pthread_setname_np(
 /// # Safety
 /// As pthread_mutex_init's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_mutex_init(
+unsafe extern "C" fn pthread_mutex_init(
     mutex: *mut libc::pthread_mutex_t,
     attr: *const libc::pthread_mutexattr_t,
 ) -> c_int {
@@ -153,7 +153,7 @@ pub unsafe extern "C" fn pthread_mutex_init(
 /// # Safety
 /// As pthread_mutex_lock's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut libc::pthread_mutex_t) -> c_int {
+unsafe extern "C" fn pthread_mutex_lock(mutex: *mut libc::pthread_mutex_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_mutex_lock's caller contract keeps `mutex` valid for
@@ -165,7 +165,7 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut libc::pthread_mutex_t) -
 /// # Safety
 /// As pthread_mutex_trylock's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut libc::pthread_mutex_t) -> c_int {
+unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut libc::pthread_mutex_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_mutex_trylock's caller contract keeps `mutex` valid
@@ -177,7 +177,7 @@ pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut libc::pthread_mutex_t
 /// # Safety
 /// As pthread_mutex_unlock's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut libc::pthread_mutex_t) -> c_int {
+unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut libc::pthread_mutex_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_mutex_unlock's caller contract keeps `mutex` valid
@@ -189,7 +189,7 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut libc::pthread_mutex_t)
 /// # Safety
 /// As pthread_mutex_destroy's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_mutex_destroy(mutex: *mut libc::pthread_mutex_t) -> c_int {
+unsafe extern "C" fn pthread_mutex_destroy(mutex: *mut libc::pthread_mutex_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_mutex_destroy's caller contract keeps `mutex` valid
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn pthread_mutex_destroy(mutex: *mut libc::pthread_mutex_t
 /// # Safety
 /// As pthread_cond_init's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_cond_init(
+unsafe extern "C" fn pthread_cond_init(
     cond: *mut libc::pthread_cond_t,
     attr: *const libc::pthread_condattr_t,
 ) -> c_int {
@@ -216,7 +216,7 @@ pub unsafe extern "C" fn pthread_cond_init(
 /// # Safety
 /// As pthread_cond_wait's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_cond_wait(
+unsafe extern "C" fn pthread_cond_wait(
     cond: *mut libc::pthread_cond_t,
     mutex: *mut libc::pthread_mutex_t,
 ) -> c_int {
@@ -232,7 +232,7 @@ pub unsafe extern "C" fn pthread_cond_wait(
 /// # Safety
 /// As pthread_cond_timedwait's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_cond_timedwait(
+unsafe extern "C" fn pthread_cond_timedwait(
     cond: *mut libc::pthread_cond_t,
     mutex: *mut libc::pthread_mutex_t,
     abstime: *const libc::timespec,
@@ -254,7 +254,7 @@ pub unsafe extern "C" fn pthread_cond_timedwait(
 /// As pthread_cond_timedwait_relative_np's.
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_cond_timedwait_relative_np(
+unsafe extern "C" fn pthread_cond_timedwait_relative_np(
     cond: *mut libc::pthread_cond_t,
     mutex: *mut libc::pthread_mutex_t,
     reltime: *const libc::timespec,
@@ -303,7 +303,7 @@ pub unsafe extern "C" fn pthread_cond_timedwait_relative_np(
 /// # Safety
 /// As pthread_cond_signal's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_cond_signal(cond: *mut libc::pthread_cond_t) -> c_int {
+unsafe extern "C" fn pthread_cond_signal(cond: *mut libc::pthread_cond_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_cond_signal's caller contract keeps `cond` valid for
@@ -315,7 +315,7 @@ pub unsafe extern "C" fn pthread_cond_signal(cond: *mut libc::pthread_cond_t) ->
 /// # Safety
 /// As pthread_cond_broadcast's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_cond_broadcast(cond: *mut libc::pthread_cond_t) -> c_int {
+unsafe extern "C" fn pthread_cond_broadcast(cond: *mut libc::pthread_cond_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_cond_broadcast's caller contract keeps `cond` valid
@@ -327,7 +327,7 @@ pub unsafe extern "C" fn pthread_cond_broadcast(cond: *mut libc::pthread_cond_t)
 /// # Safety
 /// As pthread_cond_destroy's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_cond_destroy(cond: *mut libc::pthread_cond_t) -> c_int {
+unsafe extern "C" fn pthread_cond_destroy(cond: *mut libc::pthread_cond_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_cond_destroy's caller contract keeps `cond` valid
@@ -346,7 +346,7 @@ pub unsafe extern "C" fn pthread_cond_destroy(cond: *mut libc::pthread_cond_t) -
 /// # Safety
 /// As pthread_rwlock_init's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_rwlock_init(
+unsafe extern "C" fn pthread_rwlock_init(
     lock: *mut libc::pthread_rwlock_t,
     attr: *const libc::pthread_rwlockattr_t,
 ) -> c_int {
@@ -361,7 +361,7 @@ pub unsafe extern "C" fn pthread_rwlock_init(
 /// # Safety
 /// As pthread_rwlock_destroy's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_rwlock_destroy(lock: *mut libc::pthread_rwlock_t) -> c_int {
+unsafe extern "C" fn pthread_rwlock_destroy(lock: *mut libc::pthread_rwlock_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_rwlock_destroy's caller contract keeps `lock` valid
@@ -373,7 +373,7 @@ pub unsafe extern "C" fn pthread_rwlock_destroy(lock: *mut libc::pthread_rwlock_
 /// # Safety
 /// As pthread_rwlock_rdlock's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_rwlock_rdlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
+unsafe extern "C" fn pthread_rwlock_rdlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_rwlock_rdlock's caller contract keeps `lock` valid
@@ -385,7 +385,7 @@ pub unsafe extern "C" fn pthread_rwlock_rdlock(lock: *mut libc::pthread_rwlock_t
 /// # Safety
 /// As pthread_rwlock_tryrdlock's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_rwlock_tryrdlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
+unsafe extern "C" fn pthread_rwlock_tryrdlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_rwlock_tryrdlock's caller contract keeps `lock`
@@ -397,7 +397,7 @@ pub unsafe extern "C" fn pthread_rwlock_tryrdlock(lock: *mut libc::pthread_rwloc
 /// # Safety
 /// As pthread_rwlock_wrlock's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_rwlock_wrlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
+unsafe extern "C" fn pthread_rwlock_wrlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_rwlock_wrlock's caller contract keeps `lock` valid
@@ -409,7 +409,7 @@ pub unsafe extern "C" fn pthread_rwlock_wrlock(lock: *mut libc::pthread_rwlock_t
 /// # Safety
 /// As pthread_rwlock_trywrlock's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_rwlock_trywrlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
+unsafe extern "C" fn pthread_rwlock_trywrlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_rwlock_trywrlock's caller contract keeps `lock`
@@ -421,7 +421,7 @@ pub unsafe extern "C" fn pthread_rwlock_trywrlock(lock: *mut libc::pthread_rwloc
 /// # Safety
 /// As pthread_rwlock_unlock's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_rwlock_unlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
+unsafe extern "C" fn pthread_rwlock_unlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     project_pthread_result({
         // SAFETY: pthread_rwlock_unlock's caller contract keeps `lock` valid
@@ -589,7 +589,7 @@ core::arch::global_asm!(
 /// `signal_result` does the same, since such a value is never negative.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[unsafe(no_mangle)]
-pub extern "C" fn arch_prctl(code: c_int, addr: libc::c_ulong) -> c_int {
+extern "C" fn arch_prctl(code: c_int, addr: libc::c_ulong) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the libc caller supplies arch_prctl's operands; its syscall row
     // applies the modeled access contract to any guest memory operand.
@@ -611,11 +611,7 @@ pub extern "C" fn arch_prctl(code: c_int, addr: libc::c_ulong) -> c_int {
 /// `ptr` follows modify_ldt's contract; the model copies through uaccess.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn modify_ldt(
-    func: c_int,
-    ptr: *mut c_void,
-    bytecount: libc::c_ulong,
-) -> c_int {
+unsafe extern "C" fn modify_ldt(func: c_int, ptr: *mut c_void, bytecount: libc::c_ulong) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the libc caller supplies modify_ldt's operands; its syscall row
     // copies the guest buffer through the modeled user-access path.

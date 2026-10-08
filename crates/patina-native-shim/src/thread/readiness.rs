@@ -183,21 +183,6 @@ pub(crate) unsafe fn poll_core(
     }
 }
 
-#[unsafe(no_mangle)]
-/// # Safety
-/// Same buffer contract as patina_epoll_wait; optional mask names eight bytes.
-pub unsafe extern "C" fn patina_epoll_wait_masked(
-    ep: i32,
-    events: *mut c_void,
-    capacity: i32,
-    timeout: i32,
-    mask: *const u64,
-) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: this entry forwards its documented event and mask buffers.
-    crate::abi::raw(unsafe { epoll_wait_masked_core(ep, events, capacity, timeout, mask) })
-}
-
 /// Wait on epoll under an optional temporary signal mask.
 ///
 /// # Safety
@@ -333,25 +318,6 @@ pub(crate) unsafe fn select_core(
         }
     }
     Ok(count)
-}
-
-#[unsafe(no_mangle)]
-/// The `select` row (`kern_select`): its `struct timeval` copied in and
-/// normalized — microseconds reaching a second carry into the seconds; only
-/// a time that is still negative is `EINVAL` — and the unslept time written
-/// back where it can be.
-/// # Safety
-/// As [`patina_select`]; a non-null `timeval` names the guest's timeval.
-pub unsafe extern "C" fn patina_select_timeval(
-    nfds: i32,
-    read: *mut u64,
-    write: *mut u64,
-    except: *mut u64,
-    timeval: usize,
-) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: this entry forwards the documented timeval and fd-set contracts.
-    crate::abi::raw(unsafe { select_timeval_core(nfds, read, write, except, timeval) })
 }
 
 /// Select using libc's timeval input and output behavior.

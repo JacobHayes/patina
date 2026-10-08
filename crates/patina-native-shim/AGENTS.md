@@ -34,7 +34,7 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   then does every later operation on it with raw syscalls (→ SUD). Anything a
   descriptor means — its kind, its open file description, its `FD_CLOEXEC`
   bit, where it points — therefore lives in that table, and the universal
-  `patina_*` entries (`patina_read`/`patina_close`/`patina_dup3`/…) resolve the
+  `patina_*` entries (`patina_read`/`patina_close`/`patina_dupfd`/…) resolve the
   number and dispatch on its kind, so neither the C layer nor a SUD row decides
   anything by descriptor class: `patina_fd_kind` is the one oracle for the few
   calls whose meaning depends on the kind. A number-range scheme, a per-class
@@ -124,7 +124,7 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   — and pushed the `r` check onto the LISTING, where a `chmod` after the open
   could still reach a walk already under way. Access is charged where the kernel
   charges it: once, at open. That is also why directory iteration takes a
-  DESCRIPTOR (`patina_read_dir(fd, …)`) rather than a path, and why the libc
+  DESCRIPTOR through the shared directory model rather than a path, and why the libc
   `opendir` mints its own descriptor first instead of reading a name — the fd is
   what the permission decision was made about, and `dirfd()` on the result is
   then a real descriptor rather than a refusal.

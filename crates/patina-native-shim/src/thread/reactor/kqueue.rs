@@ -2,16 +2,23 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use std::collections::{BTreeMap, VecDeque};
-use std::ffi::{c_int, c_void};
+use std::ffi::c_int;
+#[cfg(patina_posix_exports)]
+use std::ffi::c_void;
 
+#[cfg(patina_posix_exports)]
 use crate::abi::{SysResult, failed};
+#[cfg(patina_posix_exports)]
 use patina_dst_abi::ClockKind;
 
+use super::{FdKind, TaskId, ThreadRuntime, fatal, lock_state, wake_all, with_context_raw};
+// The gather path: only the guest archive's `kqueue`/`kevent` doors reach it.
+#[cfg(patina_posix_exports)]
 use super::{
-    BlockClass, FdKind, O_READ, O_WRITE, PatinaKevent, ReadyDir, Step, TaskId, ThreadRuntime, Wait,
-    current_task, fatal, fd_poll, lock_state, register_readiness_waiters, sched_point,
-    switch_and_park, unregister_waiters, wake_all, with_context_raw,
+    BlockClass, O_READ, O_WRITE, PatinaKevent, ReadyDir, Step, Wait, current_task, fd_poll,
+    register_readiness_waiters, sched_point, switch_and_park, unregister_waiters,
 };
+#[cfg(patina_posix_exports)]
 use crate::thread::net::abi::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDHUP};
 
 // macOS <sys/event.h> filter identifiers (the reactor is macOS-only).
@@ -27,6 +34,7 @@ const EV_DELETE: u16 = 0x0002;
 const EV_ENABLE: u16 = 0x0004;
 const EV_DISABLE: u16 = 0x0008;
 const EV_ONESHOT: u16 = 0x0010;
+#[cfg(patina_posix_exports)]
 pub(super) const EV_EOF: u16 = 0x8000;
 
 // EVFILT_USER / EVFILT_TIMER fflags.
@@ -37,8 +45,11 @@ const NOTE_NSECONDS: u32 = 0x0000_0004;
 const NOTE_ABSOLUTE: u32 = 0x0000_0008;
 
 // Gather blocking modes handed down from the C `timeout` argument.
+#[cfg(patina_posix_exports)]
 const MODE_POLL: c_int = 0; // zero timespec: non-blocking poll
+#[cfg(patina_posix_exports)]
 const MODE_FOREVER: c_int = 1; // NULL timeout: block until ready
+#[cfg(patina_posix_exports)]
 const MODE_TIMEOUT: c_int = 2; // non-zero timespec: relative deadline
 
 /// One registered `(ident, filter)` knote.
@@ -97,17 +108,7 @@ fn fatal_filter(filter: i16, fd: c_int, direction: &str) -> ! {
     ));
 }
 
-#[unsafe(no_mangle)]
-/// Allocate a virtual kqueue. Activates the thread subsystem so a later
-/// blocking `kevent` gather can park through the baton.
-///
-/// # Safety
-/// C ABI entry point.
-pub extern "C" fn patina_kqueue() -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    create().unwrap_or(-1)
-}
-
+#[cfg(patina_posix_exports)]
 pub(crate) fn create() -> SysResult<c_int> {
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
@@ -335,6 +336,7 @@ fn timer_nanos(data: i64, fflags: u32) -> u64 {
 }
 
 /// A knote ready to deliver, plus the registry edits its delivery entails.
+#[cfg(patina_posix_exports)]
 struct ReadyEvent {
     event: PatinaKevent,
     key: FilterKey,
@@ -352,6 +354,7 @@ struct ReadyEvent {
 /// events ready to deliver (in `(ident, filter)` order) and the re-arm
 /// edits for knotes observed not-ready. `earliest_timer` returns the
 /// soonest enabled timer deadline so a blocking gather can bound its park.
+#[cfg(patina_posix_exports)]
 fn scan(
     state: &ThreadRuntime,
     id: u64,
@@ -472,6 +475,7 @@ fn scan(
 /// fd)` pairs the shared fan-in primitive parks on, plus whether an
 /// enabled EVFILT_USER knote is present (its wakeup is the kq's own
 /// waiter list, a kqueue-specific source with no descriptor).
+#[cfg(patina_posix_exports)]
 fn watched_sources(state: &ThreadRuntime, id: u64) -> (Vec<(ReadyDir, c_int)>, bool) {
     let kq = &state.net.kqueues.get(&id).expect("kqueue exists").kq;
     let mut has_user = false;
@@ -495,6 +499,7 @@ fn watched_sources(state: &ThreadRuntime, id: u64) -> (Vec<(ReadyDir, c_int)>, b
 /// Apply the registry edits for the events actually delivered this gather:
 /// latch EV_CLEAR edges, clear EVFILT_USER triggers, remove one-shots, and
 /// re-arm periodic timers.
+#[cfg(patina_posix_exports)]
 fn commit_delivered(state: &mut ThreadRuntime, id: u64, delivered: &[ReadyEvent]) {
     let kq = &mut state.net.kqueues.get_mut(&id).expect("kqueue exists").kq;
     for event in delivered {
@@ -517,6 +522,7 @@ fn commit_delivered(state: &mut ThreadRuntime, id: u64, delivered: &[ReadyEvent]
 }
 
 /// Apply the readiness "not-ready" re-arms to the EV_CLEAR edge latches.
+#[cfg(patina_posix_exports)]
 fn commit_rearm(state: &mut ThreadRuntime, id: u64, keys: &[FilterKey]) {
     let kq = &mut state.net.kqueues.get_mut(&id).expect("kqueue exists").kq;
     for key in keys {
@@ -526,29 +532,11 @@ fn commit_rearm(state: &mut ThreadRuntime, id: u64, keys: &[FilterKey]) {
     }
 }
 
-#[unsafe(no_mangle)]
-/// Gather up to `nevents` ready events into `out`, blocking per `mode`.
-/// Applies the changelist beforehand from C via [`patina_kqueue_apply`];
-/// this call is only the readiness gather + deterministic park.
-///
-/// # Safety
-/// `out` must be writable for `nevents` [`PatinaKevent`]s.
-pub unsafe extern "C" fn patina_kevent_gather(
-    kq_fd: c_int,
-    out: *mut c_void,
-    nevents: c_int,
-    mode: c_int,
-    timeout_nanos: u64,
-) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: this export carries the documented output-buffer contract.
-    unsafe { gather_core(kq_fd, out, nevents, mode, timeout_nanos) }.unwrap_or(-1)
-}
-
 /// Gather up to `nevents` ready events and park using the virtual clock.
 ///
 /// # Safety
 /// `out` must be writable for `nevents` [`PatinaKevent`]s.
+#[cfg(patina_posix_exports)]
 pub(crate) unsafe fn gather_core(
     kq_fd: c_int,
     out: *mut c_void,
@@ -664,6 +652,7 @@ pub(crate) unsafe fn gather_core(
 
 /// Unlink `me` from the kq's EVFILT_USER waiter list. Idempotent, so the
 /// gather resume paths call it unconditionally.
+#[cfg(patina_posix_exports)]
 fn detach_user_waiter(state: &mut ThreadRuntime, id: u64, me: TaskId) {
     if let Some(slot) = state.net.kqueues.get_mut(&id)
         && let Some(index) = slot.kq.waiters.iter().position(|task| *task == me)

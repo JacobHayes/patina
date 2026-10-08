@@ -6,7 +6,7 @@ use core::ffi::{c_int, c_ulong, c_void};
 /// # Safety
 /// A modeled consuming request supplies its promoted integer or pointer operand.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ioctl(fd: c_int, request: c_ulong, mut args: ...) -> c_int {
+unsafe extern "C" fn ioctl(fd: c_int, request: c_ulong, mut args: ...) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: a recognized consuming request has the promoted operand type
     // required by ioctl's C contract; unrecognized requests consume no operand.

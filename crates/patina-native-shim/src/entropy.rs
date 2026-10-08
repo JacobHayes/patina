@@ -29,6 +29,7 @@ pub(crate) unsafe fn fill(destination: *mut c_void, length: usize) -> SysResult<
 ///
 /// # Safety
 /// `destination` must be writable for `length` bytes when it is nonzero.
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) unsafe fn getrandom(
     destination: *mut c_void,
     length: usize,
@@ -63,6 +64,7 @@ pub unsafe extern "C" fn patina_entropy(destination: *mut c_void, length: usize)
 /// Does the kernel's `getrandom(2)` accept `flags`? Every bit outside
 /// `GRND_NONBLOCK|GRND_RANDOM|GRND_INSECURE`, and `GRND_INSECURE` with
 /// `GRND_RANDOM`, is `EINVAL` (`drivers/char/random.c`).
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) fn getrandom_flags_accepted(flags: u32) -> bool {
     use linux_raw_sys::general::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM};
     let insecure_random = GRND_INSECURE | GRND_RANDOM;
@@ -71,23 +73,5 @@ pub(crate) fn getrandom_flags_accepted(flags: u32) -> bool {
 
 /// The most one read-like call transfers: `MAX_RW_COUNT`, `INT_MAX` rounded
 /// down to the modeled 4096-byte page.
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 const MAX_RW_COUNT: usize = i32::MAX as usize & !4095;
-
-#[unsafe(no_mangle)]
-/// `getrandom(2)` over the seeded stream: the byte count, -1/`EINVAL` for a
-/// flag word the kernel refuses, or -1/`EFAULT` for a null buffer. The stream
-/// never blocks and has one pool, so the accepted flags change nothing. One
-/// draw is at most `MAX_RW_COUNT` bytes, as on the kernel. The C `getrandom`
-/// and the SUD row both answer here.
-///
-/// # Safety
-/// `destination` must be writable for `length` bytes when `length` is nonzero.
-pub unsafe extern "C" fn patina_getrandom(
-    destination: *mut c_void,
-    length: usize,
-    flags: u32,
-) -> isize {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: this export carries getrandom's documented guest-buffer contract.
-    unsafe { getrandom(destination, length, flags) }.unwrap_or(-1)
-}

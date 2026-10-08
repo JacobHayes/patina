@@ -85,7 +85,7 @@ fn prefix(mask: &mut [u8; 16], mut prefix: u32) {
 /// # Safety
 /// `out` is writable for a list pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn getifaddrs(out: *mut *mut libc::ifaddrs) -> c_int {
+unsafe extern "C" fn getifaddrs(out: *mut *mut libc::ifaddrs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `out` is caller-writable, successful interface queries initialize their entries, and `calloc` holds the counted `Entry` list.
     unsafe {
@@ -188,7 +188,7 @@ pub unsafe extern "C" fn getifaddrs(out: *mut *mut libc::ifaddrs) -> c_int {
 /// # Safety
 /// `list` is null or the allocation returned by getifaddrs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn freeifaddrs(list: *mut libc::ifaddrs) {
+unsafe extern "C" fn freeifaddrs(list: *mut libc::ifaddrs) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller guarantees null or the allocation returned by getifaddrs.
     unsafe {

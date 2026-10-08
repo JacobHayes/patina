@@ -68,7 +68,9 @@ pub(crate) fn abort_if_init_failed() {
 /// The mode a description holds an advisory `flock` in.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FlockMode {
+    #[cfg(any(target_os = "linux", patina_posix_exports))]
     Shared,
+    #[cfg(any(target_os = "linux", patina_posix_exports))]
     Exclusive,
 }
 

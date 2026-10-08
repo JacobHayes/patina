@@ -68,6 +68,7 @@ const _: () = {
 /// `(fd, struct file)` interest key). `None` for a number that names
 /// nothing.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(super) fn fd_poll(
     state: &ThreadRuntime,
     fd: c_int,
@@ -88,6 +89,7 @@ pub(super) fn fd_poll(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 fn poll_description(
     state: &ThreadRuntime,
     kind: FdKind,
@@ -203,6 +205,7 @@ fn poll_description(
 /// up once no writer is left; the write side is writable while there is
 /// room and in error once no reader is left.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 fn pipe_poll(state: &ThreadRuntime, fd: c_int) -> (u32, (u64, u64)) {
     use net::abi::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
     let Some(end) = state.net.pipe_ends.get(&fd) else {
@@ -244,7 +247,7 @@ fn pipe_poll(state: &ThreadRuntime, fd: c_int) -> (u32, (u64, u64)) {
 /// A readiness direction to watch on a virtual descriptor. Deliberately
 /// reactor-neutral (not an `EVFILT_*`/`EPOLL*` value): the OS-agnostic fan-in
 /// core below is shared by the kqueue (macOS) and epoll (Linux) frontends.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReadyDir {
     Read,
@@ -301,6 +304,7 @@ pub(super) enum WaiterLoc {
 /// kind that is always ready) registers no waiter: its readiness is
 /// already decided.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(super) fn register_readiness_waiters(
     state: &mut ThreadRuntime,
     me: TaskId,

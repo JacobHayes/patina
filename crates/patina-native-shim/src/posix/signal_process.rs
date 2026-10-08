@@ -8,7 +8,7 @@ use core::ffi::{CStr, c_char, c_int, c_short};
 /// # Safety
 /// Termination follows libc's process and destructor contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn exit(status: c_int) -> ! {
+unsafe extern "C" fn exit(status: c_int) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_exit(status)
 }
@@ -17,7 +17,7 @@ pub unsafe extern "C" fn exit(status: c_int) -> ! {
 mod linux;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn raise(sig: c_int) -> c_int {
+extern "C" fn raise(sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     {
@@ -56,7 +56,7 @@ fn process_trap(symbol: &CStr) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fork() -> libc::pid_t {
+extern "C" fn fork() -> libc::pid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     process_trap(c"fork")
 }
@@ -64,7 +64,7 @@ pub extern "C" fn fork() -> libc::pid_t {
 /// # Safety
 /// file and argv follow libc's execvp argument contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn execvp(_file: *const c_char, _argv: *const *mut c_char) -> c_int {
+unsafe extern "C" fn execvp(_file: *const c_char, _argv: *const *mut c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     process_trap(c"execvp")
 }
@@ -72,11 +72,7 @@ pub unsafe extern "C" fn execvp(_file: *const c_char, _argv: *const *mut c_char)
 /// # Safety
 /// status is null or a writable wait status buffer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn waitpid(
-    pid: libc::pid_t,
-    status: *mut c_int,
-    options: c_int,
-) -> libc::pid_t {
+unsafe extern "C" fn waitpid(pid: libc::pid_t, status: *mut c_int, options: c_int) -> libc::pid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::cancel(c"waitpid");
     #[cfg(target_os = "linux")]
@@ -97,7 +93,7 @@ pub unsafe extern "C" fn waitpid(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn setsid() -> libc::pid_t {
+extern "C" fn setsid() -> libc::pid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     {
@@ -111,7 +107,7 @@ pub extern "C" fn setsid() -> libc::pid_t {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn setgid(gid: libc::gid_t) -> c_int {
+extern "C" fn setgid(gid: libc::gid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     {
@@ -129,7 +125,7 @@ pub extern "C" fn setgid(gid: libc::gid_t) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn setuid(uid: libc::uid_t) -> c_int {
+extern "C" fn setuid(uid: libc::uid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     {
@@ -147,7 +143,7 @@ pub extern "C" fn setuid(uid: libc::uid_t) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn setpgid(pid: libc::pid_t, pgid: libc::pid_t) -> c_int {
+extern "C" fn setpgid(pid: libc::pid_t, pgid: libc::pid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     {
@@ -173,7 +169,7 @@ pub extern "C" fn setpgid(pid: libc::pid_t, pgid: libc::pid_t) -> c_int {
 /// # Safety
 /// groups follows libc's count-element input contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn setgroups(count: usize, groups: *const libc::gid_t) -> c_int {
+unsafe extern "C" fn setgroups(count: usize, groups: *const libc::gid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the unsafe libc entry contract supplies `groups` for `count` elements when used.
     unsafe { crate::sud::forward(libc::SYS_setgroups, &[count.word(), groups.word()]) }
@@ -182,7 +178,7 @@ pub unsafe extern "C" fn setgroups(count: usize, groups: *const libc::gid_t) -> 
 /// # Safety
 /// groups follows libc's count-element input contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn setgroups(_count: c_int, _groups: *const libc::gid_t) -> c_int {
+unsafe extern "C" fn setgroups(_count: c_int, _groups: *const libc::gid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::error(libc::EPERM)
 }
@@ -190,7 +186,7 @@ pub unsafe extern "C" fn setgroups(_count: c_int, _groups: *const libc::gid_t) -
 /// # Safety
 /// All pointers follow libc's posix_spawnp argument contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn posix_spawnp(
+unsafe extern "C" fn posix_spawnp(
     _pid: *mut libc::pid_t,
     _file: *const c_char,
     _file_actions: *const libc::posix_spawn_file_actions_t,
@@ -204,7 +200,7 @@ pub unsafe extern "C" fn posix_spawnp(
 /// # Safety
 /// acts follows libc's spawn file actions contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn posix_spawn_file_actions_init(
+unsafe extern "C" fn posix_spawn_file_actions_init(
     _acts: *mut libc::posix_spawn_file_actions_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
@@ -213,7 +209,7 @@ pub unsafe extern "C" fn posix_spawn_file_actions_init(
 /// # Safety
 /// acts follows libc's spawn file actions contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn posix_spawn_file_actions_adddup2(
+unsafe extern "C" fn posix_spawn_file_actions_adddup2(
     _acts: *mut libc::posix_spawn_file_actions_t,
     _fd: c_int,
     _newfd: c_int,
@@ -224,7 +220,7 @@ pub unsafe extern "C" fn posix_spawn_file_actions_adddup2(
 /// # Safety
 /// acts follows libc's spawn file actions contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn posix_spawn_file_actions_destroy(
+unsafe extern "C" fn posix_spawn_file_actions_destroy(
     _acts: *mut libc::posix_spawn_file_actions_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
@@ -233,21 +229,21 @@ pub unsafe extern "C" fn posix_spawn_file_actions_destroy(
 /// # Safety
 /// attr follows libc's spawn attributes contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn posix_spawnattr_init(_attr: *mut libc::posix_spawnattr_t) -> c_int {
+unsafe extern "C" fn posix_spawnattr_init(_attr: *mut libc::posix_spawnattr_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     process_trap(c"posix_spawnattr_init")
 }
 /// # Safety
 /// attr follows libc's spawn attributes contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn posix_spawnattr_destroy(_attr: *mut libc::posix_spawnattr_t) -> c_int {
+unsafe extern "C" fn posix_spawnattr_destroy(_attr: *mut libc::posix_spawnattr_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     process_trap(c"posix_spawnattr_destroy")
 }
 /// # Safety
 /// attr follows libc's spawn attributes contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn posix_spawnattr_setflags(
+unsafe extern "C" fn posix_spawnattr_setflags(
     _attr: *mut libc::posix_spawnattr_t,
     _flags: c_short,
 ) -> c_int {
@@ -257,7 +253,7 @@ pub unsafe extern "C" fn posix_spawnattr_setflags(
 /// # Safety
 /// attr follows libc's spawn attributes contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn posix_spawnattr_setpgroup(
+unsafe extern "C" fn posix_spawnattr_setpgroup(
     _attr: *mut libc::posix_spawnattr_t,
     _pgroup: libc::pid_t,
 ) -> c_int {
@@ -267,7 +263,7 @@ pub unsafe extern "C" fn posix_spawnattr_setpgroup(
 /// # Safety
 /// attr and sigdefault follow libc's spawn attributes contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn posix_spawnattr_setsigdefault(
+unsafe extern "C" fn posix_spawnattr_setsigdefault(
     _attr: *mut libc::posix_spawnattr_t,
     _sigdefault: *const libc::sigset_t,
 ) -> c_int {
@@ -276,7 +272,7 @@ pub unsafe extern "C" fn posix_spawnattr_setsigdefault(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kill(pid: libc::pid_t, sig: c_int) -> c_int {
+extern "C" fn kill(pid: libc::pid_t, sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     {
@@ -303,7 +299,7 @@ pub extern "C" fn kill(pid: libc::pid_t, sig: c_int) -> c_int {
 
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
-pub extern "C" fn pause() -> c_int {
+extern "C" fn pause() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::cancel(c"pause");
     super::error(libc::ENOSYS)

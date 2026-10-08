@@ -7,7 +7,7 @@ mod terminal;
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pread64(
+unsafe extern "C" fn pread64(
     fd: c_int,
     buffer: *mut c_void,
     length: usize,
@@ -21,7 +21,7 @@ pub unsafe extern "C" fn pread64(
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pwrite64(
+unsafe extern "C" fn pwrite64(
     fd: c_int,
     buffer: *const c_void,
     length: usize,
@@ -35,7 +35,7 @@ pub unsafe extern "C" fn pwrite64(
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __read(fd: c_int, buffer: *mut c_void, length: usize) -> isize {
+unsafe extern "C" fn __read(fd: c_int, buffer: *mut c_void, length: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller's read-buffer contract is forwarded to the model entry.
     let result = unsafe { crate::fd::patina_read(fd, buffer, length) };
@@ -44,7 +44,7 @@ pub unsafe extern "C" fn __read(fd: c_int, buffer: *mut c_void, length: usize) -
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __write(fd: c_int, buffer: *const c_void, length: usize) -> isize {
+unsafe extern "C" fn __write(fd: c_int, buffer: *const c_void, length: usize) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller's write-buffer contract is forwarded to the model entry.
     let result = unsafe { crate::fd::patina_write(fd, buffer, length) };
@@ -53,7 +53,7 @@ pub unsafe extern "C" fn __write(fd: c_int, buffer: *const c_void, length: usize
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __read_chk(
+unsafe extern "C" fn __read_chk(
     fd: c_int,
     buffer: *mut c_void,
     length: usize,
@@ -73,7 +73,7 @@ pub unsafe extern "C" fn __read_chk(
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __pread_chk(
+unsafe extern "C" fn __pread_chk(
     fd: c_int,
     buffer: *mut c_void,
     length: usize,
@@ -93,7 +93,7 @@ pub unsafe extern "C" fn __pread_chk(
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __pread64_chk(
+unsafe extern "C" fn __pread64_chk(
     fd: c_int,
     buffer: *mut c_void,
     length: usize,
@@ -113,7 +113,7 @@ pub unsafe extern "C" fn __pread64_chk(
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn copy_file_range(
+unsafe extern "C" fn copy_file_range(
     fd_in: c_int,
     off_in: *mut libc::off64_t,
     fd_out: c_int,
@@ -133,7 +133,7 @@ pub unsafe extern "C" fn copy_file_range(
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sendfile(
+unsafe extern "C" fn sendfile(
     out_fd: c_int,
     in_fd: c_int,
     offset: *mut libc::off_t,
@@ -150,7 +150,7 @@ pub unsafe extern "C" fn sendfile(
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sendfile64(
+unsafe extern "C" fn sendfile64(
     out_fd: c_int,
     in_fd: c_int,
     offset: *mut libc::off64_t,
@@ -165,7 +165,7 @@ pub unsafe extern "C" fn sendfile64(
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn dup3(oldfd: c_int, newfd: c_int, flags: c_int) -> c_int {
+extern "C" fn dup3(oldfd: c_int, newfd: c_int, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if flags & !libc::O_CLOEXEC != 0 {
         return error(libc::EINVAL);
@@ -176,14 +176,14 @@ pub extern "C" fn dup3(oldfd: c_int, newfd: c_int, flags: c_int) -> c_int {
     )
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn close_range(first: libc::c_uint, last: libc::c_uint, flags: c_int) -> c_int {
+extern "C" fn close_range(first: libc::c_uint, last: libc::c_uint, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     model_result(crate::fd::patina_close_range(first, last, flags as u32))
 }
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn preadv64(
+unsafe extern "C" fn preadv64(
     fd: c_int,
     vectors: *const libc::iovec,
     count: c_int,
@@ -205,7 +205,7 @@ pub unsafe extern "C" fn preadv64(
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pwritev64(
+unsafe extern "C" fn pwritev64(
     fd: c_int,
     vectors: *const libc::iovec,
     count: c_int,
@@ -225,25 +225,25 @@ pub unsafe extern "C" fn pwritev64(
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn fdatasync(fd: c_int) -> c_int {
+extern "C" fn fdatasync(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"fdatasync");
     crate::abi::libc_result(crate::fd::fsync(fd), -1)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn lseek64(fd: c_int, offset: libc::off64_t, whence: c_int) -> libc::off64_t {
+extern "C" fn lseek64(fd: c_int, offset: libc::off64_t, whence: c_int) -> libc::off64_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::seek_impl(fd, offset, whence)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn ftruncate64(fd: c_int, length: libc::off64_t) -> c_int {
+extern "C" fn ftruncate64(fd: c_int, length: libc::off64_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::truncate_impl(fd, length)
 }
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pipe2(pipefd: *mut c_int, flags: c_int) -> c_int {
+unsafe extern "C" fn pipe2(pipefd: *mut c_int, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let invalid = flags & !(libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_DIRECT);
     if invalid != 0 {

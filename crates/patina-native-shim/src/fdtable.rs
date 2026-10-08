@@ -508,6 +508,7 @@ impl GuestFdTable {
 
     /// The description itself (for callers holding a [`DescId`], such as a
     /// mapping's retained reference).
+    #[cfg(any(target_os = "linux", patina_posix_exports, test))]
     pub(crate) fn description(&self, desc: DescId) -> Option<&Description> {
         self.descriptions.get(&desc)
     }
@@ -532,6 +533,7 @@ impl GuestFdTable {
     /// kernel checks `oldfd` (`EBADF`), then the target range (`EBADF`), then
     /// closes the old target. A closed target's last reference is returned for
     /// the caller to free once the table lock is dropped.
+    #[cfg(any(target_os = "linux", patina_posix_exports, test))]
     pub(crate) fn dup3(
         &mut self,
         oldfd: c_int,

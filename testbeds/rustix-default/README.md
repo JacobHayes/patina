@@ -20,7 +20,7 @@ What it exercises (all via raw syscalls on the default backend):
 - **filesystem** — `openat`/`write`/`read`/`close`/`fstat` over the deterministic FS;
 - **directory iteration** — `rustix::fs::Dir` → raw `getdents64` over a directory fd
   (the SUD layer models the directory fd, snapshotting through the same
-  `patina_read_dir` the interposed `opendir` uses);
+  the same descriptor snapshot the interposed `opendir` uses);
 - **entropy** — `getrandom` returns seed-derived bytes;
 - **network** — a UDP loopback (`socket`/`bind`/`sendto`/`recvfrom`/`getsockname`)
   and a TCP socket lifecycle (`socket`/`setsockopt`/`bind`/`listen`/`close`) over

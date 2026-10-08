@@ -10,17 +10,17 @@ mod gai;
 mod interfaces;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int {
+extern "C" fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::abi::libc_delivered(net::socket(domain, ty, protocol), -1) as c_int
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn socketpair(domain: c_int, ty: c_int, protocol: c_int, sv: *mut c_int) -> c_int {
+extern "C" fn socketpair(domain: c_int, ty: c_int, protocol: c_int, sv: *mut c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::abi::libc_delivered(net::socketpair(domain, ty, protocol, sv as usize), -1) as c_int
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn bind(fd: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> c_int {
+extern "C" fn bind(fd: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::abi::libc_delivered(
         net::bind(
@@ -32,7 +32,7 @@ pub extern "C" fn bind(fd: c_int, addr: *const libc::sockaddr, len: libc::sockle
     ) as c_int
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn connect(fd: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> c_int {
+extern "C" fn connect(fd: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"connect");
     crate::abi::libc_delivered(
@@ -45,19 +45,19 @@ pub extern "C" fn connect(fd: c_int, addr: *const libc::sockaddr, len: libc::soc
     ) as c_int
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn listen(fd: c_int, backlog: c_int) -> c_int {
+extern "C" fn listen(fd: c_int, backlog: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::abi::libc_delivered(net::listen(fd, backlog), -1) as c_int
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn accept(fd: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> c_int {
+extern "C" fn accept(fd: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"accept");
     crate::abi::libc_delivered(net::accept(fd, addr as usize, len as usize, 0), -1) as c_int
 }
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn accept4(
+extern "C" fn accept4(
     fd: c_int,
     addr: *mut libc::sockaddr,
     len: *mut libc::socklen_t,
@@ -68,7 +68,7 @@ pub extern "C" fn accept4(
     crate::abi::libc_delivered(net::accept(fd, addr as usize, len as usize, flags), -1) as c_int
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn getsockname(
+extern "C" fn getsockname(
     fd: c_int,
     addr: *mut libc::sockaddr,
     len: *mut libc::socklen_t,
@@ -77,7 +77,7 @@ pub extern "C" fn getsockname(
     crate::abi::libc_delivered(net::name(fd, addr as usize, len as usize, 0), -1) as c_int
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn getpeername(
+extern "C" fn getpeername(
     fd: c_int,
     addr: *mut libc::sockaddr,
     len: *mut libc::socklen_t,
@@ -86,12 +86,12 @@ pub extern "C" fn getpeername(
     crate::abi::libc_delivered(net::name(fd, addr as usize, len as usize, 1), -1) as c_int
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn shutdown(fd: c_int, how: c_int) -> c_int {
+extern "C" fn shutdown(fd: c_int, how: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::abi::libc_delivered(net::shutdown(fd, how), -1) as c_int
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn setsockopt(
+extern "C" fn setsockopt(
     fd: c_int,
     level: c_int,
     optname: c_int,
@@ -111,7 +111,7 @@ pub extern "C" fn setsockopt(
     ) as c_int
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn getsockopt(
+extern "C" fn getsockopt(
     fd: c_int,
     level: c_int,
     optname: c_int,
@@ -125,7 +125,7 @@ pub extern "C" fn getsockopt(
     ) as c_int
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn sendto(
+extern "C" fn sendto(
     fd: c_int,
     buf: *const c_void,
     len: usize,
@@ -148,13 +148,13 @@ pub extern "C" fn sendto(
     ) as isize
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn send(fd: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize {
+extern "C" fn send(fd: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"send");
     crate::abi::libc_delivered(net::sendto(fd, buf as usize, len, flags, 0, 0), -1) as isize
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn recvfrom(
+extern "C" fn recvfrom(
     fd: c_int,
     buf: *mut c_void,
     len: usize,
@@ -170,26 +170,26 @@ pub extern "C" fn recvfrom(
     ) as isize
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn recv(fd: c_int, buf: *mut c_void, len: usize, flags: c_int) -> isize {
+extern "C" fn recv(fd: c_int, buf: *mut c_void, len: usize, flags: c_int) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"recv");
     crate::abi::libc_delivered(net::recvfrom(fd, buf as usize, len, flags, 0, 0), -1) as isize
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn sendmsg(fd: c_int, msg: *const libc::msghdr, flags: c_int) -> isize {
+extern "C" fn sendmsg(fd: c_int, msg: *const libc::msghdr, flags: c_int) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"sendmsg");
     crate::abi::libc_delivered(net::msg::sendmsg(fd, msg as usize, flags), -1) as isize
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn recvmsg(fd: c_int, msg: *mut libc::msghdr, flags: c_int) -> isize {
+extern "C" fn recvmsg(fd: c_int, msg: *mut libc::msghdr, flags: c_int) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"recvmsg");
     crate::abi::libc_delivered(net::msg::recvmsg(fd, msg as usize, flags), -1) as isize
 }
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn sendmmsg(
+extern "C" fn sendmmsg(
     fd: c_int,
     vec: *mut libc::mmsghdr,
     vlen: libc::c_uint,
@@ -201,7 +201,7 @@ pub extern "C" fn sendmmsg(
 }
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn recvmmsg(
+extern "C" fn recvmmsg(
     fd: c_int,
     vec: *mut libc::mmsghdr,
     vlen: libc::c_uint,
@@ -217,7 +217,7 @@ pub extern "C" fn recvmmsg(
 }
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn __recv_chk(
+extern "C" fn __recv_chk(
     fd: c_int,
     buf: *mut c_void,
     len: usize,
@@ -233,7 +233,7 @@ pub extern "C" fn __recv_chk(
 }
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn __recvfrom_chk(
+extern "C" fn __recvfrom_chk(
     fd: c_int,
     buf: *mut c_void,
     len: usize,
@@ -255,7 +255,7 @@ pub extern "C" fn __recvfrom_chk(
 /// # Safety
 /// Buffers follow the corresponding libc function's valid-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn if_nametoindex(ifname: *const c_char) -> libc::c_uint {
+unsafe extern "C" fn if_nametoindex(ifname: *const c_char) -> libc::c_uint {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: each successful query initializes the output, and the caller supplies a valid C string for this call.
     unsafe {

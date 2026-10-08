@@ -2,7 +2,10 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
+#[cfg(any(target_os = "linux", patina_posix_exports))]
+use patina_dst_abi::FsDirectoryEntry;
 
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 struct ReadDirState {
     entries: Vec<FsDirectoryEntry>,
     position: usize,
@@ -1280,33 +1283,11 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
     }
 }
 
-#[unsafe(no_mangle)]
-/// Capture a deterministic directory snapshot for POSIX readdir iteration.
-///
-/// Iteration is a read OF A DESCRIPTOR, not a fresh lookup of a name: the `r` it
-/// costs was charged when the directory was opened, so a `chmod` afterwards
-/// cannot break a walk already under way, a rename cannot redirect it, and a
-/// descriptor opened `O_PATH` — which never opened the directory — cannot list
-/// at all. Both doors reach it the same way: the libc `opendir` mints its own
-/// descriptor first (which is also what makes `dirfd()` on one meaningful), and
-/// `fdopendir` and the raw `getdents64` row already hold one.
-///
-/// The snapshot lists `.` and `..` first (the driver's `read_directory_fd`):
-/// every directory has both, and the kernel's `getdents64` (so every
-/// `readdir`) reports them, each entry with its inode.
-///
-/// # Safety
-/// `state_out` must be writable.
-pub unsafe extern "C" fn patina_read_dir(raw_fd: c_int, state_out: *mut *mut c_void) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: the prefixed ABI contract requires `state_out` to be writable.
-    unsafe { read_dir(raw_fd, state_out) }.map_or(-1, |_| 0)
-}
-
 /// Capture a directory snapshot and return the owned snapshot pointer.
 ///
 /// # Safety
 /// `state_out` must be writable.
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) unsafe fn read_dir(
     raw_fd: c_int,
     state_out: *mut *mut c_void,
@@ -1345,32 +1326,12 @@ pub(crate) fn dir_accessed(raw_fd: c_int) {
     }
 }
 
-#[unsafe(no_mangle)]
-/// Copy the next directory-snapshot entry (its name, kind and inode) into
-/// caller-owned storage.
-///
-/// Returns 1 for an entry, 0 at end-of-directory, and -1 on error.
-///
-/// # Safety
-/// `state` must be a pointer returned by [`patina_read_dir`], `name_buf` must
-/// be writable for `buf_len` bytes, and `kind` and `ino` must be writable.
-pub unsafe extern "C" fn patina_read_dir_next(
-    state: *mut c_void,
-    name_buf: *mut c_char,
-    buf_len: usize,
-    kind: *mut u32,
-    ino: *mut u64,
-) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: the prefixed ABI contract covers the snapshot and output buffers.
-    unsafe { read_dir_next(state, name_buf, buf_len, kind, ino) }.unwrap_or(-1)
-}
-
 /// Copy the next entry from a captured directory snapshot.
 ///
 /// # Safety
 /// `state` must be a snapshot returned by [`read_dir`], `name_buf` must be
 /// writable for `buf_len` bytes, and `kind` and `ino` must be writable.
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) unsafe fn read_dir_next(
     state: *mut c_void,
     name_buf: *mut c_char,
@@ -1408,22 +1369,11 @@ pub(crate) unsafe fn read_dir_next(
     Ok(1)
 }
 
-#[unsafe(no_mangle)]
-/// Free a directory snapshot returned by [`patina_read_dir`].
-///
-/// # Safety
-/// `state` must be null or a pointer returned by [`patina_read_dir`] not yet
-/// freed.
-pub unsafe extern "C" fn patina_read_dir_free(state: *mut c_void) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: the prefixed ABI contract guarantees null or an owned snapshot.
-    unsafe { free_dir(state) }
-}
-
 /// Free a snapshot produced by [`read_dir`].
 ///
 /// # Safety
 /// `state` must be null or a live, not-yet-freed pointer returned by [`read_dir`].
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) unsafe fn free_dir(state: *mut c_void) {
     if !state.is_null() {
         // SAFETY: Guaranteed by this function's C ABI contract.

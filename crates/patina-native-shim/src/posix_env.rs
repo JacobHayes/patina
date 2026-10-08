@@ -373,7 +373,7 @@ unsafe fn remove(name: *const c_char, length: usize) {
 /// # Safety
 /// `name` is a C string; readers synchronize with mutations as in libc.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn getenv(name: *const c_char) -> *mut c_char {
+unsafe extern "C" fn getenv(name: *const c_char) -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_boundary_symbol(c"getenv".as_ptr());
     // SAFETY: the C contract supplies a terminated name; the read gate returns before access pre-startup.
@@ -383,11 +383,7 @@ pub unsafe extern "C" fn getenv(name: *const c_char) -> *mut c_char {
 /// # Safety
 /// `name` and `value` are C strings (null/invalid names are rejected).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn setenv(
-    name: *const c_char,
-    value: *const c_char,
-    overwrite: c_int,
-) -> c_int {
+unsafe extern "C" fn setenv(name: *const c_char, value: *const c_char, overwrite: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_boundary_symbol(c"setenv".as_ptr());
     // SAFETY: the C contract supplies name/value strings; invalid names are rejected first.
@@ -405,7 +401,7 @@ pub unsafe extern "C" fn setenv(
 /// # Safety
 /// `name` is a C string (null/invalid names are rejected).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn unsetenv(name: *const c_char) -> c_int {
+unsafe extern "C" fn unsetenv(name: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_boundary_symbol(c"unsetenv".as_ptr());
     // SAFETY: the C contract supplies a name string; invalid names are rejected first.
@@ -423,7 +419,7 @@ pub unsafe extern "C" fn unsetenv(name: *const c_char) -> c_int {
 
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn clearenv() -> c_int {
+extern "C" fn clearenv() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_boundary_symbol(c"clearenv".as_ptr());
     if crate::patina_env_write_gate() != 0 {
@@ -445,7 +441,7 @@ pub extern "C" fn clearenv() -> c_int {
 /// # Safety
 /// `string` is writable, terminated, and stays live while present in environ.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn putenv(string: *mut c_char) -> c_int {
+unsafe extern "C" fn putenv(string: *mut c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_boundary_symbol(c"putenv".as_ptr());
     if crate::patina_env_write_gate() != 0 {
@@ -475,7 +471,7 @@ pub unsafe extern "C" fn putenv(string: *mut c_char) -> c_int {
 /// # Safety
 /// Same contract as getenv; the modeled process has no AT_SECURE.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn secure_getenv(name: *const c_char) -> *mut c_char {
+unsafe extern "C" fn secure_getenv(name: *const c_char) -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_boundary_symbol(c"secure_getenv".as_ptr());
     // SAFETY: the C contract supplies a terminated name; the read gate returns before access pre-startup.

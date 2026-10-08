@@ -219,10 +219,6 @@ void patina_assert_teardown_engaged(void);
 int32_t patina_flush_captured_stdio(void);
 int32_t patina_errno(void);
 int32_t patina_entropy(void *destination, size_t length);
-/* getrandom(2) over the seeded stream: the byte count, or -1/EINVAL for a flag
- * word the Linux kernel refuses (GRND_* outside NONBLOCK|RANDOM|INSECURE, or
- * INSECURE with RANDOM). */
-intptr_t patina_getrandom(void *destination, size_t length, uint32_t flags);
 /*
  * localtime_r's conversion (src/localtime.rs): `t` in the zone `tz` (TZ, or
  * NULL when unset) and `tzdir` (TZDIR) name at the FIRST call, as glibc reads
@@ -378,7 +374,6 @@ intptr_t patina_pwritev(int32_t fd, const void *vector, int64_t count, int64_t o
 int32_t patina_close(int32_t fd);
 int64_t patina_seek(int32_t fd, int64_t offset, uint32_t whence);
 int32_t patina_fsync(int32_t fd);
-int32_t patina_set_len(int32_t fd, uint64_t length);
 /*
  * Advisory whole-file lock (flock(2)). `operation` is LOCK_SH/LOCK_EX/LOCK_UN
  * optionally OR'd with LOCK_NB. The lock belongs to the open file DESCRIPTION
@@ -388,7 +383,6 @@ int32_t patina_set_len(int32_t fd, uint64_t length);
  * (LOCK_NB) so a guest that opens the same file twice contends as it would on
  * a real kernel. The lock clears on LOCK_UN and with the description.
  */
-int32_t patina_flock(int32_t fd, int32_t operation);
 /*
  * fcntl(2)'s record locks, in Linux's numbering and the 64-bit kernel's
  * `struct flock` layout (the C fcntl translates its platform's): POSIX locks
@@ -464,26 +458,17 @@ extern const int32_t PATINA_KERNEL_O_LARGEFILE;
  * [first, last] (clamped to the table), or with CLOSE_RANGE_CLOEXEC marks the
  * range close-on-exec instead.
  */
-int32_t patina_dup(int32_t fd);
 int32_t patina_dupfd(int32_t fd, int32_t minimum, int32_t cloexec);
-int32_t patina_dup2(int32_t oldfd, int32_t newfd);
-int32_t patina_dup3(int32_t oldfd, int32_t newfd, int32_t cloexec);
 int32_t patina_close_range(uint32_t first, uint32_t last, uint32_t flags);
 /*
- * Memory mappings (src/mem.rs), the one model the C mmap/mmap64/munmap/mremap/
- * msync interposers and the SUD rows share. Each answers in the raw syscall
- * ABI: the address (or 0) on success, -errno on failure. An anonymous mapping
- * is host address space; a mapping of a deterministic-filesystem file is a
- * view of that file's page cache, coherent with read/write through every
- * descriptor on the file.
+ * Memory mappings share one model across the libc and SUD doors. Each answer
+ * follows the raw syscall ABI: the address (or 0) on success, -errno on
+ * failure. An anonymous mapping is host address space; a mapping of a
+ * deterministic-filesystem file is a view of that file's page cache,
+ * coherent with read/write through every descriptor on the file.
  */
-int64_t patina_mmap(uintptr_t addr, size_t length, int32_t prot, int32_t flags, int32_t fd,
-                    int64_t offset);
-int64_t patina_munmap(uintptr_t addr, size_t length);
 int64_t patina_mremap(uintptr_t old_addr, size_t old_length, size_t new_length, uintptr_t flags,
                       uintptr_t new_addr);
-int64_t patina_msync(uintptr_t addr, size_t length, int32_t flags);
-int64_t patina_mprotect(uintptr_t addr, size_t length, int32_t prot);
 /*
  * Memory locks against the virtual RLIMIT_MEMLOCK (never the host's): mlock
  * and mlock2 (flags: MLOCK_ONFAULT), munlock, mlockall, munlockall.
@@ -628,8 +613,6 @@ int32_t patina_access_answer(const struct patina_metadata *values, int32_t mode)
  * judged; ustat of a device no filesystem is on is EINVAL before the buffer.
  */
 int32_t patina_statfs(const char *path, void *out);
-int32_t patina_fstatfs(int32_t fd, void *out);
-int32_t patina_ustat(uint32_t dev, void *out);
 /*
  * What statx adds to the basic statistics of a node on the PATINA_FS_*
  * filesystem `fs`, asked for `mask`: the returned mask bits (the mount id's,
@@ -638,26 +621,6 @@ int32_t patina_ustat(uint32_t dev, void *out);
  * written to `mount_id`.
  */
 uint32_t patina_statx_extra(uint32_t fs, uint32_t mask, uint64_t *mount_id);
-/*
- * Linux extended attributes. `by` names the node: PATINA_XATTR_BY_PATH the
- * entry at `path` (a final symlink followed), PATINA_XATTR_BY_LINK the entry
- * itself (the l* rows), PATINA_XATTR_BY_FD the descriptor `fd` (O_PATH is
- * EBADF); a NULL `path` is EFAULT where the kernel looks it up. setxattr and
- * removexattr judge flags (XATTR_CREATE/XATTR_REPLACE, EINVAL otherwise), the
- * name (1..=255 bytes, ERANGE) and the value (XATTR_SIZE_MAX, E2BIG) before
- * the path; getxattr/listxattr look the path up first; the f* rows resolve
- * the descriptor first. get/list answer the size protocol: a zero size asks
- * for the length, a short buffer is ERANGE.
- */
-#define PATINA_XATTR_BY_LINK 0
-#define PATINA_XATTR_BY_PATH 1
-#define PATINA_XATTR_BY_FD 2
-intptr_t patina_getxattr(int32_t fd, const char *path, int32_t by, const char *name, void *value,
-                         size_t size);
-intptr_t patina_listxattr(int32_t fd, const char *path, int32_t by, void *list, size_t size);
-int32_t patina_setxattr(int32_t fd, const char *path, int32_t by, const char *name,
-                        const void *value, size_t size, int32_t flags);
-int32_t patina_removexattr(int32_t fd, const char *path, int32_t by, const char *name);
 /*
  * Linux in-kernel copies, each with its syscall's contract and refusal order:
  * copy_file_range between two regular files (offsets read and advanced
@@ -764,22 +727,6 @@ int32_t patina_fallocate(int32_t fd, uint32_t mode, int64_t offset, int64_t leng
  */
 int32_t patina_chmod(int32_t dirfd, const char *path, uint32_t mode, uint32_t flags);
 int32_t patina_fchmod(int32_t fd, uint32_t mode);
-/*
- * Snapshot a directory for readdir/getdents iteration. Takes the open directory
- * DESCRIPTOR, not a name: the `r` it costs was charged when the descriptor was
- * opened, so a later chmod cannot break a walk already under way, a rename
- * cannot redirect it, and an O_PATH descriptor (which opened nothing) cannot
- * iterate at all.
- */
-int32_t patina_read_dir(int32_t fd, void **state);
-/*
- * Return 1 after writing the next entry, 0 at end-of-directory, or -1 with
- * patina_errno set. name_buf receives a NUL-terminated entry name, kind its
- * PATINA_ENTRY_* kind and ino the inode it names.
- */
-int32_t patina_read_dir_next(void *state, char *name_buf, size_t buf_len, uint32_t *kind,
-                             uint64_t *ino);
-void patina_read_dir_free(void *state);
 /*
  * The namespace operations, each on a resolved (dirfd, path). A trailing
  * symlink is never followed by these: the kernel creates, removes and renames
@@ -1032,35 +979,14 @@ int32_t patina_rwlock_unlock(void *lock);
 int32_t patina_rwlock_destroy(void *lock);
 
 /*
- * Sockets (AF_INET, AF_INET6, AF_UNIX, AF_NETLINK) over the runtime's SimNet
- * and the shim's socket model. Each entry is one kernel row, shared with the
- * SUD door: it takes the row's arguments (guest pointers as addresses, an
- * `int` length sign and all), copies guest memory in and out itself (EFAULT
- * for memory it cannot), and answers the row's result or -errno. Blocking
- * calls park the calling managed task through the scheduler baton.
+ * Sockets (AF_INET, AF_INET6, AF_UNIX, AF_NETLINK) use the runtime's SimNet
+ * and the shim's shared socket model. The libc and SUD doors preserve their
+ * kernel argument widths and copy guest memory through the same model.
+ * Blocking calls park the calling managed task through the scheduler baton.
  */
-int64_t patina_sock_socket(int family, int type, int protocol);
 int64_t patina_sock_socketpair(int family, int type, int protocol, uintptr_t sv);
-int64_t patina_sock_bind(int fd, uintptr_t addr, int64_t len);
-int64_t patina_sock_connect(int fd, uintptr_t addr, int64_t len);
-int64_t patina_sock_listen(int fd, int backlog);
-int64_t patina_sock_accept(int fd, uintptr_t addr, uintptr_t len_ptr, int flags);
-/* getsockname (peer 0) / getpeername (peer 1). */
-int64_t patina_sock_name(int fd, uintptr_t addr, uintptr_t len_ptr, int peer);
-int64_t patina_sock_shutdown(int fd, int how);
-int64_t patina_sock_setsockopt(int fd, int level, int name, uintptr_t value, int64_t len);
-int64_t patina_sock_getsockopt(int fd, int level, int name, uintptr_t value, uintptr_t len_ptr);
 int64_t patina_sock_sendto(int fd, uintptr_t buf, size_t len, int flags, uintptr_t addr,
                            int64_t alen);
-int64_t patina_sock_recvfrom(int fd, uintptr_t buf, size_t len, int flags, uintptr_t addr,
-                             uintptr_t alen_ptr);
-int64_t patina_sock_sendmsg(int fd, uintptr_t msg, int flags);
-int64_t patina_sock_recvmsg(int fd, uintptr_t msg, int flags);
-#ifdef __linux__
-int64_t patina_sock_sendmmsg(int fd, uintptr_t vec, unsigned int vlen, int flags);
-int64_t patina_sock_recvmmsg(int fd, uintptr_t vec, unsigned int vlen, int flags,
-                             uintptr_t timeout);
-#endif
 
 /*
  * The virtual interface table (`lo`, `eth0`) one record at a time, in index
@@ -1138,10 +1064,8 @@ int32_t patina_futex_wake(uintptr_t addr, int32_t count);
  * kqueue reactor below, over the same shared readiness core. An epoll instance
  * is a PATINA_FD_EPOLL description, an eventfd a PATINA_FD_EVENTFD one; read/
  * write/close/dup/fcntl reach them through the universal entries.
- * patina_epoll_create1, patina_epoll_ctl, patina_epoll_wait, and patina_eventfd
- * are SYSCALL-SHAPED — they take the raw epoll_create1/epoll_ctl/epoll_wait/
- * eventfd2 argument forms — so the syscall-user-dispatch rows call them with
- * register arguments directly; the C interposers are thin marshaling over them.
+ * The syscall-user-dispatch rows and libc doors share the readiness models;
+ * eventfd is a virtual counter in the same descriptor table.
  * epoll_ctl answers the kernel's errnos (EBADF/EINVAL/EPERM/EEXIST/ENOENT) and
  * models EPOLLET and EPOLLONESHOT. epoll_ctl/epoll_wait take the platform
  * `struct epoll_event` pointers directly: the Rust side reads/writes the kernel
@@ -1154,13 +1078,6 @@ int32_t patina_epoll_ctl(int32_t epfd, int32_t op, int32_t fd, const void *event
 /* timeout_ms: -1 blocks until ready, 0 polls, > 0 is a relative virtual-clock
  * deadline in milliseconds. */
 int32_t patina_epoll_wait(int32_t epfd, void *events, int32_t maxevents, int32_t timeout_ms);
-/*
- * Deterministic in-process eventfd counter (mio's Waker vehicle; the
- * EVFILT_USER analogue). Readable iff the counter is nonzero; always writable —
- * a write that would overflow the kernel's u64-2 bound fails closed loudly
- * instead of modeling a blocked-writer queue.
- */
-int32_t patina_eventfd(uint32_t initval, int32_t flags);
 #endif
 
 /*
@@ -1208,7 +1125,6 @@ struct patina_kevent {
     void *udata;
 };
 
-int32_t patina_kqueue(void);
 /*
  * Apply one changelist entry. Returns 0 on success or a POSIX errno the caller
  * places in an EV_ERROR receipt. An EVFILT_USER NOTE_TRIGGER wakes the kq's
@@ -1216,13 +1132,6 @@ int32_t patina_kqueue(void);
  */
 int32_t patina_kqueue_apply(int32_t kq, uint64_t ident, int16_t filter, uint16_t flags,
                             uint32_t fflags, int64_t data, uintptr_t udata);
-/*
- * Gather up to `nevents` ready events into `out`, blocking per `mode`:
- * 0 = non-blocking poll, 1 = block until ready, 2 = block until `timeout_nanos`
- * of virtual time elapse. Returns the event count (>= 0) or -1 with patina_errno.
- */
-int32_t patina_kevent_gather(int32_t kq, struct patina_kevent *out, int32_t nevents,
-                             int32_t mode, uint64_t timeout_nanos);
 #endif
 
 /*
@@ -1243,11 +1152,7 @@ int64_t patina_signalfd(int fd, const uint64_t *mask, size_t size, int flags);
 
 #ifdef __linux__
 int64_t patina_poll(void *fds, size_t count, int64_t timeout, const uint64_t *mask, uint64_t *remaining);
-int64_t patina_epoll_wait_masked(int ep, void *events, int capacity, int timeout, const uint64_t *mask);
 int64_t patina_select(int nfds, uint64_t *read, uint64_t *write, uint64_t *except, int64_t timeout, const uint64_t *mask, uint64_t *remaining);
-/* The select row: the guest's timeval (0 for none) normalized as the kernel
- * does, and the unslept time written back. */
-int64_t patina_select_timeval(int nfds, uint64_t *read, uint64_t *write, uint64_t *except, uintptr_t timeval);
 #endif
 
 #ifdef __cplusplus
@@ -1255,4 +1160,3 @@ int64_t patina_select_timeval(int nfds, uint64_t *read, uint64_t *write, uint64_
 #endif
 
 #endif
-

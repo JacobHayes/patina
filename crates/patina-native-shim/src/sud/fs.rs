@@ -3,16 +3,15 @@
 //! access rows, and the process state behind them (`getcwd`/`chdir`/`fchdir`/
 //! `umask`).
 //!
-//! Every path-taking row hands its `(dirfd, path)` pair to the SAME `patina_*`
-//! entry the C interposer of that name calls, and that entry resolves it
-//! through the one resolver (`crate::paths`): the working directory for
+//! Every path-taking row hands its `(dirfd, path)` pair to the shared model,
+//! which resolves it through the one resolver (`crate::paths`): the working directory for
 //! `AT_FDCWD`, a directory descriptor's NODE otherwise, `..`, symlink walking,
 //! `ENAMETOOLONG`/`ENOTDIR`/`ELOOP`. There is no second resolution here — only
 //! the decode from kernel flag words onto the runtime's vocabulary.
 //!
 //! Linux directory ITERATION (`getdents64`) is the one thing a plain filesystem
 //! fd cannot answer, so this layer keeps a per-dir-fd position and entry
-//! snapshot on the side, taken through `patina_read_dir`. The snapshot is taken
+//! snapshot on the side, taken through `crate::fs::read_dir`. The snapshot is taken
 //! by the first `getdents64` after an open or a seek, and dropped by a seek and
 //! by `close`. The C `readdir` family reads through this row into its `DIR`'s
 //! buffer, as glibc's does, so a guest mixing `readdir(d)` with a raw
@@ -23,7 +22,7 @@
 use super::*;
 
 /// The directory-iteration snapshot behind a directory fd. The snapshot pointer
-/// is a `Box<ReadDirState>` owned by `patina_read_dir`; it is only ever touched
+/// is a `Box<ReadDirState>` owned by `crate::fs::read_dir`; it is only ever touched
 /// under [`DIR_ITERATIONS`]'s lock, so passing it across threads is sound (the
 /// raw pointer is stored as `usize` to keep the map `Send`).
 pub(super) struct DirIteration {
@@ -35,7 +34,7 @@ pub(super) struct DirIteration {
     position: u64,
     /// An entry read from the snapshot that did not fit the previous
     /// `getdents64` buffer, held so the next call emits it first (the kernel
-    /// never drops an entry it could not return). `patina_read_dir_next` only
+    /// never drops an entry it could not return). `crate::fs::read_dir_next` only
     /// advances, so there is no peek — this is the one-slot push-back.
     pending: Option<DirRecord>,
 }
@@ -321,7 +320,7 @@ pub(super) fn sys_openat(dirfd: i64, path: u64, flags: u64, mode: u64) -> i64 {
 /// share the descriptor, so they must share its teardown.
 pub(crate) fn release_dir_iteration(fd: c_int) {
     if let Some(iteration) = DIR_ITERATIONS.lock().unwrap().remove(&fd) {
-        // SAFETY: `snapshot` is null or the live `patina_read_dir` box for this fd.
+        // SAFETY: `snapshot` is null or the live `read_dir` box for this fd.
         unsafe { crate::fs::free_dir(iteration.snapshot as *mut c_void) };
     }
 }
@@ -351,7 +350,7 @@ pub(crate) fn seek_dir_iteration(fd: c_int, offset: i64, whence: u32) -> Option<
             pending: None,
         },
     ) {
-        // SAFETY: `snapshot` is null or the live `patina_read_dir` box for this fd.
+        // SAFETY: `snapshot` is null or the live `read_dir` box for this fd.
         unsafe { crate::fs::free_dir(dir.snapshot as *mut c_void) };
     }
     Some(target)

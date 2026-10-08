@@ -1,4 +1,6 @@
 //! prctl operands follow the option, including required reserved zero words.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use core::ffi::{c_int, c_ulong, c_void};
 use libc as k;
 const PR_GET_AUXV: c_int = 0x4155_5856;
@@ -6,7 +8,7 @@ const PR_GET_AUXV: c_int = 0x4155_5856;
 /// # Safety
 /// Options supply their documented pointer/unsigned-long operands and reserved words.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn prctl(option: c_int, mut args: ...) -> c_int {
+unsafe extern "C" fn prctl(option: c_int, mut args: ...) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mutated = super::fault(6);
     let mut words = [0u64; 4];

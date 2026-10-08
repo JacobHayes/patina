@@ -19,9 +19,11 @@
 
 use std::ffi::{c_char, c_int};
 
+#[cfg(target_arch = "x86_64")]
+use crate::EINVAL;
 use crate::fdtable::FdKind;
 use crate::{
-    EBADF, EFAULT, EINVAL, ENOENT, PATINA_FS_PIPEFS, PATINA_FS_SOCKFS, PATINA_FS_VOLUME, fs_device,
+    EBADF, EFAULT, ENOENT, PATINA_FS_PIPEFS, PATINA_FS_SOCKFS, PATINA_FS_VOLUME, fs_device,
     path_from_c, paths, resolve_fd, set_errno, thread,
 };
 
@@ -110,6 +112,7 @@ enum Filesystem {
 }
 
 impl Filesystem {
+    #[cfg(any(target_arch = "x86_64", test))]
     const ALL: [Filesystem; 8] = [
         Filesystem::Volume,
         Filesystem::Pipefs,
@@ -440,17 +443,6 @@ pub(crate) unsafe fn statfs(
     }
 }
 
-#[unsafe(no_mangle)]
-/// `fstatfs(2)`: the filesystem a descriptor is on.
-///
-/// # Safety
-/// `out`, when non-null, must point to a writable `struct statfs`.
-pub unsafe extern "C" fn patina_fstatfs(raw_fd: c_int, out: *mut KernelStatfs) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: The prefixed C ABI contract guarantees writable output storage.
-    unsafe { fstatfs(raw_fd, out) }.map_or(-1, |_| 0)
-}
-
 /// Describe the modeled filesystem a descriptor is on.
 ///
 /// # Safety
@@ -744,23 +736,11 @@ pub struct KernelUstat {
     pub tail: u32,
 }
 
-#[unsafe(no_mangle)]
-/// `ustat(2)`: the free-block and free-inode counts of the filesystem mounted
-/// on device `dev` (the kernel's 32-bit `new_encode_dev` word). A device with
-/// no filesystem is `EINVAL`, judged before the buffer (`vfs_ustat`).
-///
-/// # Safety
-/// `out`, when non-null, must point to a writable `struct ustat`.
-pub unsafe extern "C" fn patina_ustat(dev: u32, out: *mut KernelUstat) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: The prefixed C ABI contract guarantees writable output storage.
-    unsafe { ustat(dev, out) }.map_or(-1, |_| 0)
-}
-
 /// Return the legacy free-block/inode view for a modeled block device.
 ///
 /// # Safety
 /// `out`, when non-null, must point to writable `KernelUstat` storage.
+#[cfg(target_arch = "x86_64")]
 pub(crate) unsafe fn ustat(dev: u32, out: *mut KernelUstat) -> crate::abi::SysResult<()> {
     let major = (dev & 0xfff00) >> 8;
     let minor = (dev & 0xff) | ((dev >> 12) & 0xfff00);

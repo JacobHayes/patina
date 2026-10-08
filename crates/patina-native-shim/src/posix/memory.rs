@@ -64,34 +64,34 @@ extern "C" fn mprotect(address: *mut c_void, length: usize, protection: c_int) -
     )
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn mlock(address: *const c_void, length: usize) -> c_int {
+extern "C" fn mlock(address: *const c_void, length: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     result(crate::mem::patina_mlock(address as usize, length, 0))
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn mlock2(address: *const c_void, length: usize, flags: u32) -> c_int {
+extern "C" fn mlock2(address: *const c_void, length: usize, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     result(crate::mem::patina_mlock(address as usize, length, flags))
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn munlock(address: *const c_void, length: usize) -> c_int {
+extern "C" fn munlock(address: *const c_void, length: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     result(crate::mem::patina_munlock(address as usize, length))
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn mlockall(flags: c_int) -> c_int {
+extern "C" fn mlockall(flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     result(crate::mem::patina_mlockall(flags))
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn munlockall() -> c_int {
+extern "C" fn munlockall() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     result(crate::mem::patina_munlockall())
 }
 /// # Safety
 /// name is a guest C string, imported by the model through uaccess.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memfd_create(name: *const c_char, flags: u32) -> c_int {
+unsafe extern "C" fn memfd_create(name: *const c_char, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::model_result({
         // SAFETY: this export's contract guarantees the bounded name scan can read through NUL.

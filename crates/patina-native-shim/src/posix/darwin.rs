@@ -18,7 +18,7 @@ fn trap() -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mach_absolute_time() -> u64 {
+extern "C" fn mach_absolute_time() -> u64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut nanos = 0;
     // SAFETY: `nanos` is writable local storage for the clock bridge.
@@ -31,7 +31,7 @@ pub extern "C" fn mach_absolute_time() -> u64 {
 /// info is null or writable as mach_timebase_info requires.
 #[unsafe(no_mangle)]
 #[allow(deprecated)] // libc retains the SDK layout; its deprecation suggests an unnecessary dependency.
-pub unsafe extern "C" fn mach_timebase_info(info: *mut libc::mach_timebase_info) -> c_int {
+unsafe extern "C" fn mach_timebase_info(info: *mut libc::mach_timebase_info) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if info.is_null() {
         return libc::KERN_INVALID_ARGUMENT;
@@ -44,7 +44,7 @@ pub unsafe extern "C" fn mach_timebase_info(info: *mut libc::mach_timebase_info)
     libc::KERN_SUCCESS
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn mach_wait_until(deadline: u64) -> c_int {
+extern "C" fn mach_wait_until(deadline: u64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if crate::patina_sleep_until(MONOTONIC, deadline) != 0 {
         trap()
@@ -52,7 +52,7 @@ pub extern "C" fn mach_wait_until(deadline: u64) -> c_int {
     libc::KERN_SUCCESS
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn clock_gettime_nsec_np(clock: libc::clockid_t) -> u64 {
+extern "C" fn clock_gettime_nsec_np(clock: libc::clockid_t) -> u64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let clock = match clock {
         libc::CLOCK_REALTIME => REALTIME,
@@ -73,7 +73,7 @@ pub extern "C" fn clock_gettime_nsec_np(clock: libc::clockid_t) -> u64 {
 /// # Safety
 /// lock is a live os_unfair_lock identity.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn os_unfair_lock_lock(lock: *mut c_void) {
+unsafe extern "C" fn os_unfair_lock_lock(lock: *mut c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller supplies a live unfair-lock identity per this ABI.
     unsafe {
@@ -83,7 +83,7 @@ pub unsafe extern "C" fn os_unfair_lock_lock(lock: *mut c_void) {
 /// # Safety
 /// lock is a live os_unfair_lock identity.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn os_unfair_lock_trylock(lock: *mut c_void) -> bool {
+unsafe extern "C" fn os_unfair_lock_trylock(lock: *mut c_void) -> bool {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller supplies a live unfair-lock identity per this ABI.
     unsafe { crate::thread::patina_os_unfair_lock_trylock(lock) != 0 }
@@ -91,7 +91,7 @@ pub unsafe extern "C" fn os_unfair_lock_trylock(lock: *mut c_void) -> bool {
 /// # Safety
 /// lock is a live os_unfair_lock identity.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn os_unfair_lock_unlock(lock: *mut c_void) {
+unsafe extern "C" fn os_unfair_lock_unlock(lock: *mut c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller supplies a live unfair-lock identity per this ABI.
     unsafe {
@@ -99,39 +99,39 @@ pub unsafe extern "C" fn os_unfair_lock_unlock(lock: *mut c_void) {
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn issetugid() -> c_int {
+extern "C" fn issetugid() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     0
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn dispatch_time(when: u64, delta: i64) -> u64 {
+extern "C" fn dispatch_time(when: u64, delta: i64) -> u64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::thread::patina_dispatch_time(when, delta)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn dispatch_semaphore_create(value: isize) -> *mut c_void {
+extern "C" fn dispatch_semaphore_create(value: isize) -> *mut c_void {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::thread::patina_dispatch_semaphore_create(value)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn dispatch_semaphore_wait(sem: *mut c_void, timeout: u64) -> isize {
+extern "C" fn dispatch_semaphore_wait(sem: *mut c_void, timeout: u64) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::thread::patina_dispatch_semaphore_wait(sem, timeout)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn dispatch_semaphore_signal(sem: *mut c_void) -> isize {
+extern "C" fn dispatch_semaphore_signal(sem: *mut c_void) -> isize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::thread::patina_dispatch_semaphore_signal(sem)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn dispatch_release(object: *mut c_void) {
+extern "C" fn dispatch_release(object: *mut c_void) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::thread::patina_dispatch_release(object);
 }
 /// # Safety
 /// buf is null or writable for len bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn confstr(name: c_int, buf: *mut c_char, len: usize) -> usize {
+unsafe extern "C" fn confstr(name: c_int, buf: *mut c_char, len: usize) -> usize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if name != libc::_CS_DARWIN_USER_TEMP_DIR {
         if !buf.is_null() && len > 0 {
@@ -156,7 +156,7 @@ pub unsafe extern "C" fn confstr(name: c_int, buf: *mut c_char, len: usize) -> u
 /// # Safety
 /// Diagnostic strings are null or readable, NUL-terminated strings.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __assert_rtn(
+unsafe extern "C" fn __assert_rtn(
     function: *const c_char,
     file: *const c_char,
     line: c_int,
@@ -218,7 +218,7 @@ unsafe fn emit<T: crate::plain::Plain>(value: T, oldp: *mut c_void, oldlenp: *mu
 /// # Safety
 /// Arguments follow BSD sysctl's MIB and buffer contracts.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sysctl(
+unsafe extern "C" fn sysctl(
     name: *mut c_int,
     namelen: c_uint,
     oldp: *mut c_void,
@@ -250,7 +250,7 @@ pub unsafe extern "C" fn sysctl(
 /// # Safety
 /// Arguments follow sysctlbyname's name and buffer contracts.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sysctlbyname(
+unsafe extern "C" fn sysctlbyname(
     name: *const c_char,
     oldp: *mut c_void,
     oldlenp: *mut usize,
@@ -284,7 +284,7 @@ pub unsafe extern "C" fn sysctlbyname(
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn _NSGetExecutablePath(_buf: *mut c_char, _size: *mut u32) -> c_int {
+extern "C" fn _NSGetExecutablePath(_buf: *mut c_char, _size: *mut u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     -1
 }

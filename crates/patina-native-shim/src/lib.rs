@@ -92,7 +92,7 @@ mod tsc;
 // The guest descriptor table: guest fd numbers → open file descriptions, for
 // every class the shim models. The single global instance and every entry that
 // consults it live below (`fd_table`, `patina_fd_kind`, the universal
-// `patina_read`/`patina_close`/`patina_dup*` entries); the data structure and
+// `patina_read`/`patina_close`/`patina_dupfd` entries); the data structure and
 // its allocation/refcount rules are the module's own. See `fdtable.rs`.
 mod fdtable;
 // `ioctl(2)`'s generic descriptor requests (`FIOCLEX`/`FIONCLEX`/`FIONBIO`/
@@ -163,8 +163,8 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use fdtable::{DescId, FdKind, GuestFdTable, Release, Resolved};
 
 use patina_dst_abi::{
-    ClockKind, EffectError, ErrorCode, Fd, FsAllocateMode, FsDirectoryEntry, FsEntryKind, FsNode,
-    OpenFlags, SeekWhence, TaskId,
+    ClockKind, EffectError, ErrorCode, Fd, FsAllocateMode, FsEntryKind, FsNode, OpenFlags,
+    SeekWhence, TaskId,
 };
 
 use patina_dst_fs_crash::CrashFs;

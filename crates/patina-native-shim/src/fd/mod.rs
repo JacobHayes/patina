@@ -14,7 +14,7 @@ pub use locks::*;
 pub use seek::*;
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) use seek::{fsync, seek, set_len};
-pub use value::{patina_close, patina_dup, patina_dup2, patina_dup3, patina_dupfd};
+pub use value::{patina_close, patina_dupfd};
 
 // ---------------------------------------------------------------------------
 // The descriptor table's C face. `patina_fd_kind` is the ONE kind oracle the C

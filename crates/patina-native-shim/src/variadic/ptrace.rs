@@ -1,11 +1,13 @@
 //! glibc ptrace decoding without reading ignored operands.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use core::ffi::{c_int, c_long, c_void};
 use linux_raw_sys::ptrace as k;
 
 /// # Safety
 /// Each request supplies the arguments it consumes; pointers obey ptrace's ABI.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ptrace(request: c_int, mut args: ...) -> c_long {
+unsafe extern "C" fn ptrace(request: c_int, mut args: ...) -> c_long {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mutated = super::fault(5);
     let mut pid = 0;

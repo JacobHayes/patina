@@ -67,7 +67,7 @@ pub(crate) fn libc_delivered<T>(result: SysResult<T>, failure: T) -> T {
 }
 
 /// Project a result to the positive pthread error-code convention.
-#[allow(dead_code)]
+#[cfg(patina_posix_exports)]
 pub(crate) fn pthread_result(result: SysResult<()>) -> c_int {
     match result {
         Ok(()) => 0,

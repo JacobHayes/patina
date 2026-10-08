@@ -1,9 +1,9 @@
 //! Sockets: the one socket layer behind both doors.
 //!
-//! Every socket syscall has one kernel-shaped typed core here. The prefixed
-//! `patina_sock_*` exports project it to `-errno`; the libc and SUD doors
-//! project the same core to their own result convention, so the doors cannot
-//! disagree. A core resolves the descriptor (`EBADF`, `ENOTSOCK`), copies its
+//! Every socket syscall has one kernel-shaped typed core here, shared by the
+//! libc and SUD doors. The remaining prefixed entries serve `socketpair` and
+//! `sendto`; every door projects its core to its own result convention. A core
+//! resolves the descriptor (`EBADF`, `ENOTSOCK`), copies its
 //! arguments in the way `net/socket.c` does (`move_addr_to_kernel`, the
 //! message header, the iovecs, the control messages; `EFAULT` for what cannot
 //! be read, never a fault in the shim), and hands the family the request:
@@ -24,6 +24,9 @@
 //! it, plus an arrival count for edge-triggered interest. Nothing here reads
 //! host network state.
 
+// Darwin's bare prefixed-ABI archive reaches this model only through
+// `patina_sock_socketpair`/`patina_sock_sendto`; see the merge report.
+#![cfg_attr(not(any(target_os = "linux", patina_posix_exports)), allow(dead_code))]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
@@ -476,13 +479,6 @@ pub(crate) fn socket(family: c_int, ty: c_int, protocol: c_int) -> crate::abi::S
     .map_err(crate::abi::Errno::new)
 }
 
-#[unsafe(no_mangle)]
-/// `socket(2)`.
-pub extern "C" fn patina_sock_socket(family: c_int, ty: c_int, protocol: c_int) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(socket(family, ty, protocol))
-}
-
 /// `socketpair(2)`: the numbers are written to `sv` before the pair exists,
 /// as `__sys_socketpair` does (a bad `sv` is `EFAULT` whatever the family).
 pub(crate) fn socketpair(
@@ -595,13 +591,6 @@ pub(crate) fn bind(fd: c_int, addr: usize, len: i64) -> crate::abi::SysResult<i6
     .map_err(crate::abi::Errno::new)
 }
 
-#[unsafe(no_mangle)]
-/// `bind(2)`.
-pub extern "C" fn patina_sock_bind(fd: c_int, addr: usize, len: i64) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(bind(fd, addr, len))
-}
-
 pub(crate) fn connect(fd: c_int, addr: usize, len: i64) -> crate::abi::SysResult<i64> {
     (|| {
         sched_point()?;
@@ -616,13 +605,6 @@ pub(crate) fn connect(fd: c_int, addr: usize, len: i64) -> crate::abi::SysResult
         .map(|()| 0)
     })()
     .map_err(crate::abi::Errno::new)
-}
-
-#[unsafe(no_mangle)]
-/// `connect(2)`.
-pub extern "C" fn patina_sock_connect(fd: c_int, addr: usize, len: i64) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(connect(fd, addr, len))
 }
 
 /// `net.core.somaxconn`: the most a `listen` backlog is taken as. macOS's
@@ -648,13 +630,6 @@ pub(crate) fn listen(fd: c_int, backlog: c_int) -> crate::abi::SysResult<i64> {
         .map(|()| 0)
     })()
     .map_err(crate::abi::Errno::new)
-}
-
-#[unsafe(no_mangle)]
-/// `listen(2)`.
-pub extern "C" fn patina_sock_listen(fd: c_int, backlog: c_int) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(listen(fd, backlog))
 }
 
 /// `accept4(2)` (`accept` is flags 0).
@@ -690,12 +665,6 @@ pub(crate) fn accept(
     .map_err(crate::abi::Errno::new)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_sock_accept(fd: c_int, addr: usize, len_ptr: usize, flags: c_int) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(accept(fd, addr, len_ptr, flags))
-}
-
 /// `getsockname(2)` (`peer` 0) and `getpeername(2)` (`peer` 1).
 pub(crate) fn name(
     fd: c_int,
@@ -720,12 +689,6 @@ pub(crate) fn name(
     .map_err(crate::abi::Errno::new)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_sock_name(fd: c_int, addr: usize, len_ptr: usize, peer: c_int) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(name(fd, addr, len_ptr, peer))
-}
-
 /// `shutdown(2)`: `SHUT_RD`/`SHUT_WR`/`SHUT_RDWR` as `sk_shutdown` bits.
 pub(crate) fn shutdown(fd: c_int, how: c_int) -> crate::abi::SysResult<i64> {
     (|| {
@@ -744,12 +707,6 @@ pub(crate) fn shutdown(fd: c_int, how: c_int) -> crate::abi::SysResult<i64> {
         .map(|()| 0)
     })()
     .map_err(crate::abi::Errno::new)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_sock_shutdown(fd: c_int, how: c_int) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(shutdown(fd, how))
 }
 
 /// Send one message through `handle` (every send entry and `write`).
@@ -855,19 +812,6 @@ pub(crate) fn recvfrom(
     .map_err(crate::abi::Errno::new)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_sock_recvfrom(
-    fd: c_int,
-    buf: usize,
-    len: usize,
-    flags: c_int,
-    addr: usize,
-    alen_ptr: usize,
-) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(recvfrom(fd, buf, len, flags, addr, alen_ptr))
-}
-
 /// Drop the in-flight references of descriptors that were not installed.
 pub(crate) fn release_rights(rights: &[DescId]) {
     for desc in rights {
@@ -966,18 +910,6 @@ pub(crate) fn setsockopt(
     .map_err(crate::abi::Errno::new)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_sock_setsockopt(
-    fd: c_int,
-    level: c_int,
-    name: c_int,
-    value: usize,
-    len: i64,
-) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(setsockopt(fd, level, name, value, len))
-}
-
 /// `getsockopt(2)`.
 pub(crate) fn getsockopt(
     fd: c_int,
@@ -1006,18 +938,6 @@ pub(crate) fn getsockopt(
         opts::get(socket, facts, level, name, value, len_ptr).map(|()| 0)
     })()
     .map_err(crate::abi::Errno::new)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_sock_getsockopt(
-    fd: c_int,
-    level: c_int,
-    name: c_int,
-    value: usize,
-    len_ptr: usize,
-) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::abi::raw(getsockopt(fd, level, name, value, len_ptr))
 }
 
 /// Free a socket whose description's last reference went (the universal

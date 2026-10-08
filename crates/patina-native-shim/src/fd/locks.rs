@@ -3,41 +3,16 @@
 
 use super::*;
 
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 const LOCK_SH: c_int = 1;
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 const LOCK_EX: c_int = 2;
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 const LOCK_NB: c_int = 4;
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 const LOCK_UN: c_int = 8;
 
-#[unsafe(no_mangle)]
-/// Advisory whole-file lock — the interposed `flock` in the staged `patina_posix.c` and
-/// the SUD `flock` row. A single-opener database (via std `File::try_lock`)
-/// takes one `LOCK_EX | LOCK_NB` on open; a lone opener always acquires it.
-///
-/// The lock belongs to the open file DESCRIPTION and is keyed on the
-/// deterministic-fs inode it is open on, so two independent opens of the *same*
-/// path contend faithfully: a non-blocking request that would collide with an
-/// incompatible lock held on another description reports `EWOULDBLOCK` (a
-/// single-opener database surfaces this as an "already open" error), while a
-/// `dup` of the holder shares the lock and can release it. `LOCK_SH` conflicts
-/// only with a held `LOCK_EX`; `LOCK_EX` conflicts with any held lock.
-/// Re-locking or upgrading on the *same* description is always allowed (it
-/// replaces that description's entry and never self-conflicts). The lock clears
-/// on `LOCK_UN` and when the description's last number closes.
-///
-/// A *blocking* request that would contend fails closed with `EDEADLK` rather
-/// than parking a real thread — the single-baton scheduler does not model
-/// advisory-lock waiting, and no supported guest blocks on a contended `flock`
-/// (std's `File::try_lock*` is always `LOCK_NB`).
-///
-/// The refusals come in the kernel's order (`fs/locks.c`): on Linux a request
-/// carrying `LOCK_MAND` answers 0 and is ignored before anything else is looked
-/// at (Linux 5.19+), an unknown operation is `EINVAL` before the descriptor,
-/// and an empty slot or an `O_PATH` descriptor is `EBADF` (`fdget`).
-pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    flock(raw_fd, operation).unwrap_or(-1)
-}
-
+#[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) fn flock(raw_fd: c_int, operation: c_int) -> crate::abi::SysResult<c_int> {
     #[cfg(target_os = "linux")]
     if operation & linux_raw_sys::general::LOCK_MAND as c_int != 0 {
@@ -97,9 +72,9 @@ pub(crate) const F_RDLCK: i16 = 0;
 pub(crate) const F_WRLCK: i16 = 1;
 pub(crate) const F_UNLCK: i16 = 2;
 
-/// `struct flock` as the 64-bit Linux kernel lays it out (`struct
-/// patina_flock` in `patina_native.h`): what the SUD `fcntl` row reads from
-/// the guest, and what the libc `fcntl` door translates its platform's layout into.
+/// `struct flock` as the 64-bit Linux kernel lays it out (the record-lock
+/// structure in `patina_native.h`): what the SUD `fcntl` row reads from the
+/// guest, and what the libc `fcntl` door translates its platform layout into.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PatinaFlock {

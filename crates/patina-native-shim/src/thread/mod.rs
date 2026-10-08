@@ -33,7 +33,9 @@ use std::sync::{Arc, OnceLock};
 
 use patina_dst_abi::ClockKind;
 
-use super::fdtable::{DescId, FdKind};
+#[cfg(any(target_os = "linux", patina_posix_exports))]
+use super::fdtable::DescId;
+use super::fdtable::FdKind;
 use super::{
     EBADF, EBUSY, EDEADLK, EINVAL, EISCONN, ENOTCONN, ENXIO, EOPNOTSUPP, EOVERFLOW, EPERM, EPIPE,
     ESRCH, ETIMEDOUT, EWOULDBLOCK, O_NONBLOCK, O_READ, O_WRITE, PATINA_ENTRY_FIFO,
@@ -78,14 +80,16 @@ pub(crate) use kqueue::{kqueue_close, kqueue_forget_number};
 #[cfg(target_os = "macos")]
 pub use dispatch::*;
 #[cfg(target_os = "linux")]
-pub use eventfd::*;
+pub(crate) use eventfd::{EventFd, create, eventfd_close, eventfd_read, eventfd_write};
 pub use futex::*;
 pub use lifecycle::*;
 pub use net_state::*;
 pub use pipe::*;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", patina_posix_exports))]
 use reactor::PatinaKevent;
-use reactor::{ReadyDir, WaiterLoc, fd_poll, register_readiness_waiters, unregister_waiters};
+#[cfg(any(target_os = "linux", patina_posix_exports))]
+use reactor::{ReadyDir, fd_poll, register_readiness_waiters};
+use reactor::{WaiterLoc, unregister_waiters};
 pub use sync::*;
 
 /// Where a guest number lands in this module's class tables. Every extern
@@ -522,6 +526,7 @@ enum BlockClass {
     Futex,
     TimedFutex,
     Sleep,
+    #[cfg(any(target_os = "linux", patina_posix_exports))]
     Readiness,
     Sync,
     #[cfg(target_os = "linux")]

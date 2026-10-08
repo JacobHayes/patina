@@ -1,10 +1,12 @@
 //! Linux mremap has a fifth argument only for explicit fixed placement.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use core::ffi::{c_int, c_void};
 
 /// # Safety
 /// Mapping ranges obey mremap's contract; FIXED supplies a pointer argument.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mremap(
+unsafe extern "C" fn mremap(
     address: *mut c_void,
     old_length: usize,
     new_length: usize,
@@ -19,7 +21,8 @@ pub unsafe extern "C" fn mremap(
         destination = unsafe { args.next_arg::<*mut c_void>() };
     }
     if mutated {
-        // The armed acceptance caller supplies a second pointer sentinel.
+        // SAFETY: the armed variadic acceptance caller supplies a second
+        // pointer sentinel for this mutation path.
         destination = unsafe { args.next_arg::<*mut c_void>() };
     }
     super::raw_result(crate::mem::patina_mremap(

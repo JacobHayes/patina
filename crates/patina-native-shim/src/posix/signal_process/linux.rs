@@ -34,7 +34,7 @@ unsafe fn clear_internal_signals(
 /// # Safety
 /// act and old follow libc's optional action input/output contracts.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sigaction(
+unsafe extern "C" fn sigaction(
     sig: c_int,
     act: *const libc::sigaction,
     old: *mut libc::sigaction,
@@ -87,7 +87,7 @@ pub unsafe extern "C" fn sigaction(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn signal(sig: c_int, handler: libc::sighandler_t) -> libc::sighandler_t {
+extern "C" fn signal(sig: c_int, handler: libc::sighandler_t) -> libc::sighandler_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if handler == libc::SIG_ERR
         || !(1..=64).contains(&sig)
@@ -122,7 +122,7 @@ pub extern "C" fn signal(sig: c_int, handler: libc::sighandler_t) -> libc::sigha
 /// # Safety
 /// set and old follow libc's optional signal-mask input/output contracts.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_sigmask(
+unsafe extern "C" fn pthread_sigmask(
     how: c_int,
     set: *const libc::sigset_t,
     old: *mut libc::sigset_t,
@@ -140,7 +140,7 @@ pub unsafe extern "C" fn pthread_sigmask(
 /// # Safety
 /// set and old follow libc's optional signal-mask input/output contracts.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sigprocmask(
+unsafe extern "C" fn sigprocmask(
     how: c_int,
     set: *const libc::sigset_t,
     old: *mut libc::sigset_t,
@@ -158,7 +158,7 @@ pub unsafe extern "C" fn sigprocmask(
 /// # Safety
 /// set follows libc's output contract; only its first eight bytes are written.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sigpending(set: *mut libc::sigset_t) -> c_int {
+unsafe extern "C" fn sigpending(set: *mut libc::sigset_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the unsafe entry contract supplies writable `set` storage for one word.
     crate::posix::signal_result(unsafe {
@@ -184,10 +184,7 @@ const _: () = {
 /// # Safety
 /// stack and old follow libc's alternate-stack input/output contracts.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sigaltstack(
-    stack: *const libc::stack_t,
-    old: *mut libc::stack_t,
-) -> c_int {
+unsafe extern "C" fn sigaltstack(stack: *const libc::stack_t, old: *mut libc::stack_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the unsafe entry contract covers optional input and output stack pointers.
     crate::posix::signal_result(unsafe {
@@ -196,7 +193,7 @@ pub unsafe extern "C" fn sigaltstack(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pause() -> c_int {
+extern "C" fn pause() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::posix::cancel(c"pause");
     // SAFETY: pause passes null for every pointer operand to the signal wait model.
@@ -214,7 +211,7 @@ pub extern "C" fn pause() -> c_int {
 /// # Safety
 /// set follows libc's sigsuspend mask contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sigsuspend(set: *const libc::sigset_t) -> c_int {
+unsafe extern "C" fn sigsuspend(set: *const libc::sigset_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::posix::cancel(c"sigsuspend");
     // SAFETY: the unsafe entry contract supplies the readable mask when `set` is non-null.
@@ -257,7 +254,7 @@ unsafe fn timedwait(
 /// # Safety
 /// set, info and timeout follow libc's signal-wait contracts.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sigtimedwait(
+unsafe extern "C" fn sigtimedwait(
     set: *const libc::sigset_t,
     info: *mut libc::siginfo_t,
     timeout: *const libc::timespec,
@@ -270,10 +267,7 @@ pub unsafe extern "C" fn sigtimedwait(
 /// # Safety
 /// set and info follow libc's signal-wait contracts.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sigwaitinfo(
-    set: *const libc::sigset_t,
-    info: *mut libc::siginfo_t,
-) -> c_int {
+unsafe extern "C" fn sigwaitinfo(set: *const libc::sigset_t, info: *mut libc::siginfo_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::posix::cancel(c"sigwaitinfo");
     // SAFETY: this entry's unsafe contract satisfies timedwait's set/info requirements; timeout is null.
@@ -282,7 +276,7 @@ pub unsafe extern "C" fn sigwaitinfo(
 /// # Safety
 /// set follows libc's input mask contract; sig is a writable c_int.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sigwait(set: *const libc::sigset_t, sig: *mut c_int) -> c_int {
+unsafe extern "C" fn sigwait(set: *const libc::sigset_t, sig: *mut c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::posix::cancel(c"sigwait");
     loop {
@@ -312,7 +306,7 @@ pub unsafe extern "C" fn sigwait(set: *const libc::sigset_t, sig: *mut c_int) ->
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn sigqueue(pid: libc::pid_t, sig: c_int, value: libc::sigval) -> c_int {
+extern "C" fn sigqueue(pid: libc::pid_t, sig: c_int, value: libc::sigval) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut info = Info { words: [0; 16] };
     info.words[0] = u64::from(sig as u32);
@@ -412,7 +406,7 @@ thread_local! {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn strsignal(sig: c_int) -> *mut c_char {
+extern "C" fn strsignal(sig: c_int) -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if let Some(description) = description(sig) {
         return description.as_ptr().cast_mut();
@@ -434,7 +428,7 @@ pub extern "C" fn strsignal(sig: c_int) -> *mut c_char {
 /// # Safety
 /// prefix is null or a readable NUL-terminated string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn psignal(sig: c_int, prefix: *const c_char) {
+unsafe extern "C" fn psignal(sig: c_int, prefix: *const c_char) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut unknown = [0; 32];
     let description = if let Some(description) = description(sig) {
@@ -489,12 +483,12 @@ pub unsafe extern "C" fn psignal(sig: c_int, prefix: *const c_char) {
 // panic=abort into an internal panic and loses healthy trace finalization.
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pthread_kill(thread: libc::pthread_t, sig: c_int) -> c_int {
+extern "C" fn pthread_kill(thread: libc::pthread_t, sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     signals::patina_pthread_kill(thread as usize, sig)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn killpg(group: libc::pid_t, sig: c_int) -> c_int {
+extern "C" fn killpg(group: libc::pid_t, sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if group < 0 {
         return crate::posix::error(libc::EINVAL);
@@ -508,7 +502,7 @@ pub extern "C" fn killpg(group: libc::pid_t, sig: c_int) -> c_int {
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn siginterrupt(sig: c_int, interrupt: c_int) -> c_int {
+extern "C" fn siginterrupt(sig: c_int, interrupt: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if signals::patina_signal_reserved(sig) != 0 {
         return crate::posix::error(libc::EINVAL);
@@ -538,26 +532,26 @@ pub extern "C" fn siginterrupt(sig: c_int, interrupt: c_int) -> c_int {
     })
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn tgkill(tgid: libc::pid_t, tid: libc::pid_t, sig: c_int) -> c_int {
+extern "C" fn tgkill(tgid: libc::pid_t, tid: libc::pid_t, sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: tgkill forwards only scalar process, thread, and signal numbers.
     unsafe { crate::sud::forward(libc::SYS_tgkill, &[tgid.word(), tid.word(), sig.word()]) }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn tkill(tid: libc::pid_t, sig: c_int) -> c_int {
+extern "C" fn tkill(tid: libc::pid_t, sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: tkill forwards only scalar thread and signal numbers.
     unsafe { crate::sud::forward(libc::SYS_tkill, &[tid.word(), sig.word()]) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pidfd_open(pid: libc::pid_t, flags: u32) -> c_int {
+extern "C" fn pidfd_open(pid: libc::pid_t, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: pidfd_open forwards only scalar arguments.
     unsafe { crate::sud::forward(libc::SYS_pidfd_open, &[pid.word(), flags.word()]) }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn pidfd_getfd(pidfd: c_int, targetfd: c_int, flags: u32) -> c_int {
+extern "C" fn pidfd_getfd(pidfd: c_int, targetfd: c_int, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: pidfd_getfd forwards only scalar descriptor and flag values.
     unsafe {
@@ -570,7 +564,7 @@ pub extern "C" fn pidfd_getfd(pidfd: c_int, targetfd: c_int, flags: u32) -> c_in
 /// # Safety
 /// info is null or a readable siginfo_t.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pidfd_send_signal(
+unsafe extern "C" fn pidfd_send_signal(
     pidfd: c_int,
     sig: c_int,
     info: *mut libc::siginfo_t,
@@ -588,7 +582,7 @@ pub unsafe extern "C" fn pidfd_send_signal(
 /// # Safety
 /// iov follows libc's vlen-element input contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn process_madvise(
+unsafe extern "C" fn process_madvise(
     pidfd: c_int,
     iov: *const libc::iovec,
     vlen: usize,
@@ -611,7 +605,7 @@ pub unsafe extern "C" fn process_madvise(
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn process_mrelease(pidfd: c_int, flags: u32) -> c_int {
+extern "C" fn process_mrelease(pidfd: c_int, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: process_mrelease forwards only scalar descriptor and flag values.
     unsafe { crate::sud::forward(libc::SYS_process_mrelease, &[pidfd.word(), flags.word()]) }
@@ -619,7 +613,7 @@ pub extern "C" fn process_mrelease(pidfd: c_int, flags: u32) -> c_int {
 /// # Safety
 /// local and remote follow libc's iovec input contracts.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn process_vm_readv(
+unsafe extern "C" fn process_vm_readv(
     pid: libc::pid_t,
     local: *const libc::iovec,
     liovcnt: libc::c_ulong,
@@ -646,7 +640,7 @@ pub unsafe extern "C" fn process_vm_readv(
 /// # Safety
 /// local and remote follow libc's iovec input contracts.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn process_vm_writev(
+unsafe extern "C" fn process_vm_writev(
     pid: libc::pid_t,
     local: *const libc::iovec,
     liovcnt: libc::c_ulong,
@@ -671,14 +665,14 @@ pub unsafe extern "C" fn process_vm_writev(
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn pidfd_getpid(_pidfd: c_int) -> libc::pid_t {
+extern "C" fn pidfd_getpid(_pidfd: c_int) -> libc::pid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     process_trap(c"pidfd_getpid")
 }
 /// # Safety
 /// Pointers follow libc's pidfd_spawnp argument contracts.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pidfd_spawnp(
+unsafe extern "C" fn pidfd_spawnp(
     _pidfd: *mut c_int,
     _file: *const c_char,
     _file_actions: *const libc::posix_spawn_file_actions_t,
@@ -692,7 +686,7 @@ pub unsafe extern "C" fn pidfd_spawnp(
 /// # Safety
 /// acts and path follow libc's spawn file actions contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn posix_spawn_file_actions_addchdir_np(
+unsafe extern "C" fn posix_spawn_file_actions_addchdir_np(
     _acts: *mut libc::posix_spawn_file_actions_t,
     _path: *const c_char,
 ) -> c_int {
@@ -702,7 +696,7 @@ pub unsafe extern "C" fn posix_spawn_file_actions_addchdir_np(
 /// # Safety
 /// acts and path follow libc's spawn file actions contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn posix_spawn_file_actions_addchdir(
+unsafe extern "C" fn posix_spawn_file_actions_addchdir(
     _acts: *mut libc::posix_spawn_file_actions_t,
     _path: *const c_char,
 ) -> c_int {
@@ -712,7 +706,7 @@ pub unsafe extern "C" fn posix_spawn_file_actions_addchdir(
 /// # Safety
 /// infop follows libc's waitid output contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn waitid(
+unsafe extern "C" fn waitid(
     idtype: libc::idtype_t,
     id: libc::id_t,
     infop: *mut libc::siginfo_t,
@@ -729,14 +723,14 @@ pub unsafe extern "C" fn waitid(
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn __libc_current_sigrtmax() -> c_int {
+extern "C" fn __libc_current_sigrtmax() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     64
 }
 /// # Safety
 /// mask follows libc's signalfd input mask contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn signalfd(fd: c_int, mask: *const libc::sigset_t, flags: c_int) -> c_int {
+unsafe extern "C" fn signalfd(fd: c_int, mask: *const libc::sigset_t, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the unsafe entry contract supplies a readable mask when the model reads it.
     crate::posix::signal_result(unsafe {

@@ -1,4 +1,6 @@
 //! Single-use, per-thread dlerror diagnostic, retaining glibc's shape.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::*;
 use core::cell::{Cell, UnsafeCell};
 thread_local! {
@@ -10,6 +12,9 @@ thread_local! {
 include!(concat!(env!("OUT_DIR"), "/dlsym_routes.rs"));
 
 unsafe fn set_error(symbol: *const c_char) {
+    // SAFETY: the function contract makes `symbol` readable when nonnull;
+    // program_path returns a process-owned C string, and MESSAGE is this
+    // thread's writable buffer whose writes below stay within 512 bytes.
     unsafe {
         let program = super::super::lifecycle::program_path();
         let program = if program.is_null() {
@@ -42,11 +47,14 @@ unsafe fn set_error(symbol: *const c_char) {
 /// # Safety
 /// symbol is null or a readable NUL-terminated name.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __wrap_dlsym(_handle: *mut c_void, symbol: *const c_char) -> *mut c_void {
+unsafe extern "C" fn __wrap_dlsym(_handle: *mut c_void, symbol: *const c_char) -> *mut c_void {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: this door's safety contract requires a readable C symbol name.
     let entry = unsafe { super::patina_dlsym_route(symbol) };
     PENDING.with(|pending| pending.set(entry.is_null()));
     if entry.is_null() {
+        // SAFETY: the function contract makes a nonnull `symbol` readable;
+        // `set_error` also accepts null and bounds writes to its TLS buffer.
         unsafe {
             set_error(symbol);
         }
@@ -54,7 +62,7 @@ pub unsafe extern "C" fn __wrap_dlsym(_handle: *mut c_void, symbol: *const c_cha
     entry
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn dlerror() -> *mut c_char {
+extern "C" fn dlerror() -> *mut c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if !PENDING.with(|pending| pending.replace(false)) {
         return ptr::null_mut();

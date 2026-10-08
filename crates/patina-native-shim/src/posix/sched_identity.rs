@@ -8,34 +8,34 @@ use core::ptr;
 use crate::sud::Word;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn getpid() -> libc::pid_t {
+extern "C" fn getpid() -> libc::pid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_pid()
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn getppid() -> libc::pid_t {
+extern "C" fn getppid() -> libc::pid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_ppid()
 }
 
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn gettid() -> libc::pid_t {
+extern "C" fn gettid() -> libc::pid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_thread_id()
 }
 
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn __res_init() -> c_int {
+extern "C" fn __res_init() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     0
 }
 
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn res_init() -> c_int {
+extern "C" fn res_init() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     __res_init()
 }
@@ -44,10 +44,7 @@ pub extern "C" fn res_init() -> c_int {
 /// # Safety
 /// A nonnull thread_id must point to a writable u64; thread follows pthread's handle contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_threadid_np(
-    thread: libc::pthread_t,
-    thread_id: *mut u64,
-) -> c_int {
+unsafe extern "C" fn pthread_threadid_np(thread: libc::pthread_t, thread_id: *mut u64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if thread_id.is_null() {
         return libc::EINVAL;
@@ -82,21 +79,21 @@ const _: () = assert!(size_of::<libc::utsname>() == 5 * 256);
 /// # Safety
 /// name follows libc's output-buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn uname(name: *mut libc::utsname) -> c_int {
+unsafe extern "C" fn uname(name: *mut libc::utsname) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller's output-buffer contract is forwarded unchanged.
     unsafe { virtual_uname(name) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn sched_yield() -> c_int {
+extern "C" fn sched_yield() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_sched_yield()
 }
 
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn sched_getcpu() -> c_int {
+extern "C" fn sched_getcpu() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     0
 }
@@ -105,7 +102,7 @@ pub extern "C" fn sched_getcpu() -> c_int {
 /// # Safety
 /// mask names the cpusetsize-byte guest input range.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sched_setaffinity(
+unsafe extern "C" fn sched_setaffinity(
     pid: libc::pid_t,
     cpusetsize: usize,
     mask: *const libc::cpu_set_t,
@@ -121,28 +118,28 @@ pub unsafe extern "C" fn sched_setaffinity(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn getuid() -> libc::uid_t {
+extern "C" fn getuid() -> libc::uid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_uid()
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn geteuid() -> libc::uid_t {
+extern "C" fn geteuid() -> libc::uid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_uid()
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn getgid() -> libc::gid_t {
+extern "C" fn getgid() -> libc::gid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_gid()
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn getegid() -> libc::gid_t {
+extern "C" fn getegid() -> libc::gid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_gid()
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn sysconf(name: c_int) -> c_long {
+extern "C" fn sysconf(name: c_int) -> c_long {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if name == libc::_SC_PAGESIZE {
         return 4096;
@@ -165,7 +162,7 @@ pub extern "C" fn sysconf(name: c_int) -> c_long {
 /// # Safety
 /// usage follows libc's rusage output contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn getrusage(who: c_int, usage: *mut libc::rusage) -> c_int {
+unsafe extern "C" fn getrusage(who: c_int, usage: *mut libc::rusage) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     {
@@ -196,7 +193,7 @@ pub unsafe extern "C" fn getrusage(who: c_int, usage: *mut libc::rusage) -> c_in
 /// # Safety
 /// info follows libc's sysinfo output contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sysinfo(info: *mut libc::sysinfo) -> c_int {
+unsafe extern "C" fn sysinfo(info: *mut libc::sysinfo) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `info` is the caller's output pointer for this synchronous syscall.
     unsafe { crate::sud::forward(libc::SYS_sysinfo, &[info.word()]) }
@@ -273,7 +270,7 @@ const _: () = {
 /// # Safety
 /// output is null or a writable libc rlimit.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn getrlimit(
+unsafe extern "C" fn getrlimit(
     resource: libc::__rlimit_resource_t,
     output: *mut libc::rlimit,
 ) -> c_int {
@@ -285,7 +282,7 @@ pub unsafe extern "C" fn getrlimit(
 /// # Safety
 /// input is null or a readable libc rlimit.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn setrlimit(
+unsafe extern "C" fn setrlimit(
     resource: libc::__rlimit_resource_t,
     input: *const libc::rlimit,
 ) -> c_int {
@@ -297,7 +294,7 @@ pub unsafe extern "C" fn setrlimit(
 /// # Safety
 /// output is null or a writable libc rlimit64.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn getrlimit64(
+unsafe extern "C" fn getrlimit64(
     resource: libc::__rlimit_resource_t,
     output: *mut libc::rlimit64,
 ) -> c_int {
@@ -309,7 +306,7 @@ pub unsafe extern "C" fn getrlimit64(
 /// # Safety
 /// input is null or a readable libc rlimit64.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn setrlimit64(
+unsafe extern "C" fn setrlimit64(
     resource: libc::__rlimit_resource_t,
     input: *const libc::rlimit64,
 ) -> c_int {
@@ -322,7 +319,7 @@ pub unsafe extern "C" fn setrlimit64(
 /// # Safety
 /// mask follows libc's cpusetsize-byte output contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sched_getaffinity(
+unsafe extern "C" fn sched_getaffinity(
     pid: libc::pid_t,
     cpusetsize: usize,
     mask: *mut libc::cpu_set_t,
@@ -356,7 +353,7 @@ pub unsafe extern "C" fn sched_getaffinity(
 /// # Safety
 /// name follows libc's len-byte output contract (nonnull on Darwin).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gethostname(name: *mut c_char, len: usize) -> c_int {
+unsafe extern "C" fn gethostname(name: *mut c_char, len: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut buf = core::mem::MaybeUninit::<libc::utsname>::uninit();
     // SAFETY: the local buffer is writable and the model initializes it on success.
@@ -458,7 +455,7 @@ unsafe fn passwd_parse(
 /// # Safety
 /// pwd, buf and result follow libc's passwd lookup buffer contract; result is nonnull.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn getpwuid_r(
+unsafe extern "C" fn getpwuid_r(
     uid: libc::uid_t,
     pwd: *mut libc::passwd,
     buf: *mut c_char,
@@ -511,7 +508,7 @@ static mut PASSWD_BUFFER: [c_char; 256] = [0; 256];
 
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn setpwent() {
+extern "C" fn setpwent() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: this MT-Unsafe API requires callers to serialize access to its shared cursor.
     unsafe {
@@ -520,7 +517,7 @@ pub extern "C" fn setpwent() {
 }
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn endpwent() {
+extern "C" fn endpwent() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: this MT-Unsafe API requires callers to serialize access to its shared cursor.
     unsafe {
@@ -529,7 +526,7 @@ pub extern "C" fn endpwent() {
 }
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
-pub extern "C" fn getpwent() -> *mut libc::passwd {
+extern "C" fn getpwent() -> *mut libc::passwd {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: this MT-Unsafe API requires callers to serialize access to its shared cursor and result.
     unsafe {

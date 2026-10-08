@@ -1,6 +1,8 @@
 //! Clock, sleep and local-time adapters over the shared clock model.
 //! Linux keeps its caller-memory clock stores and acting-cancellation sleeps
 //! in `c/posix/time.c`, which call the returning helpers here.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use core::ffi::c_int;
 use core::ptr::null_mut;
 
@@ -34,6 +36,7 @@ pub unsafe extern "C" fn patina_time_of_day(seconds: *mut i64, micros: *mut i64)
     let Some(nanos) = now(REALTIME) else {
         return -1;
     };
+    // SAFETY: this door's contract requires both aligned outputs to be writable.
     unsafe {
         seconds.write((nanos / NANOS) as i64);
         micros.write((nanos % NANOS / 1000) as i64);
@@ -46,6 +49,8 @@ pub unsafe extern "C" fn patina_time_of_day(seconds: *mut i64, micros: *mut i64)
 /// too) is EFAULT and `remaining` is written only by an interrupted sleep.
 #[cfg(target_os = "linux")]
 unsafe fn sleep_for(duration: *const libc::timespec, remaining: *mut libc::timespec) -> c_int {
+    // SAFETY: the helper's caller contract matches the clock model's pointer
+    // contract; this forwards the original pointers unchanged.
     let result = unsafe {
         crate::clocks::patina_clock_nanosleep(
             libc::CLOCK_REALTIME,
@@ -70,6 +75,8 @@ pub(super) unsafe fn sleep_for(
     if duration.is_null() {
         return error(libc::EINVAL);
     }
+    // SAFETY: nonnull pointers were checked above; the helper contract supplies
+    // aligned, live `timespec` storage for the duration of this call.
     let duration = unsafe { duration.read() };
     if duration.tv_sec < 0 || !(0..NANOS as libc::c_long).contains(&duration.tv_nsec) {
         return error(libc::EINVAL);
@@ -84,10 +91,12 @@ pub(super) unsafe fn sleep_for(
     else {
         return error(libc::EOVERFLOW);
     };
+    // SAFETY: nonnull `remaining` follows nanosleep's writable-output contract.
     if unsafe { crate::patina_sleep_until_remaining(MONOTONIC, deadline, remaining.cast()) } != 0 {
         return error(crate::patina_errno());
     }
     if !remaining.is_null() {
+        // SAFETY: nonnull `remaining` is aligned writable output per the helper contract.
         unsafe {
             remaining.write(libc::timespec {
                 tv_sec: 0,
@@ -109,6 +118,7 @@ pub unsafe extern "C" fn patina_nanosleep(
     remaining: *mut libc::timespec,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the door and helper share nanosleep's pointer contract.
     unsafe { sleep_for(duration, remaining) }
 }
 #[cfg(target_os = "linux")]
@@ -120,11 +130,12 @@ core::arch::global_asm!(".private_extern _patina_time_of_day");
 /// As nanosleep's.
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nanosleep(
+unsafe extern "C" fn nanosleep(
     duration: *const libc::timespec,
     remaining: *mut libc::timespec,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the door and helper share nanosleep's pointer contract.
     unsafe { sleep_for(duration, remaining) }
 }
 
@@ -132,7 +143,7 @@ pub unsafe extern "C" fn nanosleep(
 /// rounds a fractional unslept second up in its unsigned return value.
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
-pub extern "C" fn sleep(seconds: libc::c_uint) -> libc::c_uint {
+extern "C" fn sleep(seconds: libc::c_uint) -> libc::c_uint {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let duration = libc::timespec {
         tv_sec: seconds.into(),
@@ -142,6 +153,7 @@ pub extern "C" fn sleep(seconds: libc::c_uint) -> libc::c_uint {
         tv_sec: 0,
         tv_nsec: 0,
     };
+    // SAFETY: both pointers refer to aligned local timespec values for this call.
     if unsafe { sleep_for(&duration, &mut remaining) } == 0 {
         0
     } else if super::get_errno() == libc::EINTR {
@@ -157,7 +169,7 @@ pub extern "C" fn sleep(seconds: libc::c_uint) -> libc::c_uint {
 /// `time` names writable storage.
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn clock_gettime(
+pub(super) unsafe extern "C" fn clock_gettime(
     clock_id: libc::clockid_t,
     time: *mut libc::timespec,
 ) -> c_int {
@@ -171,6 +183,7 @@ pub unsafe extern "C" fn clock_gettime(
     let Some(nanos) = now(clock) else {
         return -1;
     };
+    // SAFETY: `time` is writable and aligned for one timespec per this door's contract.
     unsafe {
         time.write(libc::timespec {
             tv_sec: (nanos / NANOS) as libc::time_t,
@@ -190,7 +203,7 @@ pub unsafe extern "C" fn clock_gettime(
 /// # Safety
 /// Nonnull pointers follow localtime_r's contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn localtime_r(
+unsafe extern "C" fn localtime_r(
     timep: *const libc::time_t,
     result: *mut libc::tm,
 ) -> *mut libc::tm {
@@ -200,7 +213,11 @@ pub unsafe extern "C" fn localtime_r(
         return null_mut();
     }
     let mut tm = crate::localtime::PatinaTm::default();
+    // SAFETY: env_lookup accepts nullable C strings; each key below is static
+    // and NUL-terminated.
     let lookup = |name: &core::ffi::CStr| unsafe { crate::posix_env::env_lookup(name.as_ptr()) };
+    // SAFETY: null pointers were rejected above, and localtime_r's contract
+    // requires `timep` readable and `result` writable for this call.
     if unsafe {
         crate::localtime::patina_localtime(*timep, lookup(c"TZ"), lookup(c"TZDIR"), &mut tm)
     } != 0
@@ -209,6 +226,8 @@ pub unsafe extern "C" fn localtime_r(
         return null_mut();
     }
     // Field stores through the caller's pointer, never a reference to it.
+    // SAFETY: null pointers were rejected above; localtime_r's contract gives
+    // aligned, live writable storage for every tm field written here.
     unsafe {
         (*result).tm_sec = tm.sec;
         (*result).tm_min = tm.min;

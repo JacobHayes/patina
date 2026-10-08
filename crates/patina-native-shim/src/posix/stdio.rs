@@ -588,7 +588,7 @@ unsafe fn vprintf(stream: StreamId, format: *const c_char, args: VaList<'_>) -> 
 /// # Safety
 /// Stream, format and arguments obey vfprintf's contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vfprintf(
+unsafe extern "C" fn vfprintf(
     stream: *mut libc::FILE,
     format: *const c_char,
     args: VaList<'_>,
@@ -600,7 +600,7 @@ pub unsafe extern "C" fn vfprintf(
 /// # Safety
 /// String is readable and NUL-terminated; stream obeys fputs's contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fputs(string: *const c_char, stream: *mut libc::FILE) -> c_int {
+unsafe extern "C" fn fputs(string: *const c_char, stream: *mut libc::FILE) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let s = stream_of(stream, c"fputs");
     // SAFETY: the C contract supplies a readable NUL-terminated string; locking
@@ -620,7 +620,7 @@ pub unsafe extern "C" fn fputs(string: *const c_char, stream: *mut libc::FILE) -
 /// # Safety
 /// The source holds size*count bytes; stream obeys fwrite's contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fwrite(
+unsafe extern "C" fn fwrite(
     pointer: *const c_void,
     size: usize,
     count: usize,
@@ -647,7 +647,7 @@ pub unsafe extern "C" fn fwrite(
 /// # Safety
 /// String is readable and NUL-terminated.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn puts(string: *const c_char) -> c_int {
+unsafe extern "C" fn puts(string: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the C contract supplies a readable NUL-terminated string; stdout
     // is static and its recursive lock protects both writes.
@@ -678,13 +678,13 @@ unsafe fn put_byte(stream: StreamId, character: c_int) -> c_int {
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn putchar(character: c_int) -> c_int {
+extern "C" fn putchar(character: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: stdout is a process-lifetime stream selected by this fixed door.
     unsafe { put_byte(StreamId::Out, character) }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn fputc(character: c_int, stream: *mut libc::FILE) -> c_int {
+extern "C" fn fputc(character: c_int, stream: *mut libc::FILE) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: stream_of accepts only the two sentinel FILE tokens.
     unsafe { put_byte(stream_of(stream, c"fputc"), character) }
@@ -700,7 +700,7 @@ unsafe fn locked_flush(stream: StreamId) -> c_int {
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn fflush(stream: *mut libc::FILE) -> c_int {
+extern "C" fn fflush(stream: *mut libc::FILE) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: null flushes the two process-lifetime streams; non-null FILE* is
     // checked against their sentinels before its state is accessed.
@@ -715,7 +715,7 @@ pub extern "C" fn fflush(stream: *mut libc::FILE) -> c_int {
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn ferror(stream: *mut libc::FILE) -> c_int {
+extern "C" fn ferror(stream: *mut libc::FILE) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let s = stream_of(stream, c"ferror");
     let state = stream_ptr(s);
@@ -729,7 +729,7 @@ pub extern "C" fn ferror(stream: *mut libc::FILE) -> c_int {
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn clearerr(stream: *mut libc::FILE) {
+extern "C" fn clearerr(stream: *mut libc::FILE) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let s = stream_of(stream, c"clearerr");
     let state = stream_ptr(s);
@@ -742,7 +742,7 @@ pub extern "C" fn clearerr(stream: *mut libc::FILE) {
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn flockfile(stream: *mut libc::FILE) {
+extern "C" fn flockfile(stream: *mut libc::FILE) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: stream_of accepts only sentinel tokens whose static locks live
     // for the process lifetime.
@@ -751,7 +751,7 @@ pub extern "C" fn flockfile(stream: *mut libc::FILE) {
     }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn funlockfile(stream: *mut libc::FILE) {
+extern "C" fn funlockfile(stream: *mut libc::FILE) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: stream_of accepts only sentinels; the teardown check preserves
     // the existing rule about whether this call releases the stream lock.

@@ -34,7 +34,7 @@ const BASIC64: u32 = 5;
 /// # Safety
 /// Output and count obey the task_info flavor's buffer contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn task_info(
+unsafe extern "C" fn task_info(
     _task: u32,
     flavor: u32,
     output: *mut i32,
