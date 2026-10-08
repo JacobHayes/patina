@@ -136,7 +136,10 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
         crate::clocks::times(a[0] as *mut [i64; 4])
     }),
     (Syscall::N_getrusage, |_, a| {
-        crate::clocks::getrusage(a[0] as i32, a[1] as *mut crate::clocks::Rusage)
+        crate::clocks::getrusage(
+            crate::abi::reg::int(a[0]),
+            crate::abi::reg::ptr::<crate::clocks::Rusage>(a[1]),
+        )
     }),
     // ---- identity: the one unprivileged identity (`crate::identity`) ----
     (Syscall::N_getuid, |_, _| {
@@ -366,11 +369,14 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     }),
     // SAFETY: uname writes its guest result through uaccess.
     (Syscall::N_uname, |_, a| unsafe {
-        crate::identity::uname(a[0] as *mut _, crate::thread::sched::persona())
+        crate::identity::uname(
+            crate::abi::reg::ptr::<crate::identity::Utsname>(a[0]),
+            crate::thread::sched::persona(),
+        )
     }),
     // SAFETY: sysinfo writes its guest result through uaccess.
     (Syscall::N_sysinfo, |_, a| unsafe {
-        crate::identity::sysinfo(a[0] as *mut _)
+        crate::identity::sysinfo(crate::abi::reg::ptr::<crate::identity::Sysinfo>(a[0]))
     }),
     // ---- scheduling attributes, affinity and persona (`thread::sched`) ----
     (Syscall::N_personality, |_, a| {
@@ -436,13 +442,23 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_sched_setaffinity, |_, a| {
         // SAFETY: the syscall argument is sched_setaffinity's guest cpu mask input.
         crate::abi::raw(unsafe {
-            crate::thread::sched::setaffinity(a[0] as i32, a[1] as u32, a[2] as *const u8)
+            crate::thread::sched::setaffinity(
+                crate::abi::reg::int(a[0]),
+                crate::abi::reg::uint(a[1]),
+                crate::abi::reg::ptr::<libc::c_ulong>(a[2])
+                    .cast::<u8>()
+                    .cast_const(),
+            )
         })
     }),
     (Syscall::N_sched_getaffinity, |_, a| {
         // SAFETY: the syscall argument is sched_getaffinity's guest cpu mask output.
         crate::abi::raw(unsafe {
-            crate::thread::sched::getaffinity(a[0] as i32, a[1] as u32, a[2] as *mut u8)
+            crate::thread::sched::getaffinity(
+                crate::abi::reg::int(a[0]),
+                crate::abi::reg::uint(a[1]),
+                crate::abi::reg::ptr::<libc::c_ulong>(a[2]).cast::<u8>(),
+            )
         })
     }),
     (Syscall::N_getcpu, |_, a| {
