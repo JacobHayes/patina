@@ -518,36 +518,44 @@ unsafe fn once_settle(entry: *mut Once, state: c_int) {
 }
 
 /// The C pthread_once's claim: 0 with `*entry` the claimed entry (null once
-/// done), or ENOMEM.
+/// done), or ENOMEM. `*call` is the once call's charge state, which the C
+/// frame hands to [`patina_once_done`]: the call goes on through the init
+/// routine to its completion.
 ///
 /// # Safety
-/// `entry` names writable storage.
+/// `entry` and `call` name writable storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_once_begin(
     control: *mut libc::pthread_once_t,
     entry: *mut *mut c_void,
+    call: *mut crate::charge::Began,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     // SAFETY: registry storage is internal; `control` is used only as an
     // opaque key and the registry owns all pointers it dereferences.
     match unsafe { once_begin(control as usize) } {
         Ok(claimed) => {
-            // SAFETY: the C pthread_once seam supplies writable `entry`
-            // storage as required by this function's contract.
-            unsafe { entry.write(claimed.cast()) };
+            // SAFETY: the C pthread_once seam supplies writable `entry` and
+            // `call` storage as required by this function's contract.
+            unsafe {
+                entry.write(claimed.cast());
+                call.write(crate::charge::hold());
+            }
             0
         }
         Err(errno) => errno,
     }
 }
 
-/// The init routine returned: the control is done.
+/// The init routine returned: the control is done. The once call goes on
+/// (`call`, from [`patina_once_begin`]): a wait for the registry here is
+/// still its wait.
 ///
 /// # Safety
 /// `entry` is one [`patina_once_begin`] claimed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_once_done(entry: *mut c_void) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
+pub unsafe extern "C" fn patina_once_done(entry: *mut c_void, call: crate::charge::Began) {
+    let _panic_scope = crate::panic_boundary::PanicScope::resume(call);
     // SAFETY: `entry` is a non-null claim returned by patina_once_begin.
     unsafe { once_settle(entry.cast(), DONE) }
 }

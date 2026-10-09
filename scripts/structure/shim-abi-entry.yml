@@ -53,6 +53,7 @@ rule:
                       - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();'
                       - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_op($OP);'
                       - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_syscall($NR);'
+                      - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::resume($HELD);'
                   - not:
                       follows:
                         all:
@@ -77,5 +78,6 @@ rule:
                         - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();'
                         - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_op($OP);'
                         - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_syscall($NR);'
+                        - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::resume($HELD);'
                       stopBy: neighbor
               stopBy: end

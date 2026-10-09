@@ -99,6 +99,15 @@ impl PanicScope {
     pub(crate) fn enter_glue() -> Self {
         Self::set(true, None)
     }
+    /// A later entry of a guest call its C wrapper makes through several
+    /// ([`crate::charge::hold`]): glue, never charged, that continues the
+    /// held call until it returns.
+    #[cfg(any(test, patina_posix_exports))]
+    pub(crate) fn resume(held: crate::charge::Began) -> Self {
+        let mut scope = Self::set(true, None);
+        scope.call = Some(crate::charge::resume(held));
+        scope
+    }
     /// Hand the thread to guest code the shim calls (a callback, a
     /// delivery's handlers) while this frame stays live beneath it.
     pub(crate) fn suspend() -> Suspended {

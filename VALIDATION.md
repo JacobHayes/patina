@@ -1043,7 +1043,10 @@ charged one system call more, and that a handler run from inside a lock call
 the lock's park its surcharge (RED with the class overwritten per entry, and
 with the class restored only by the abandoned call's own scope: no
 surcharge); `signals::delivery::tests` does the same for handlers the C
-driver releases from a trap's exit (RED without the record's restore). The runtime's `charge_alloc` test charges
+driver releases from a trap's exit (RED without the record's restore); and a
+once call's completion, after an init routine's own calls, still owes the
+once call's surcharge, once (RED with the claim's state ended at its C
+seam). The runtime's `charge_alloc` test charges
 spawned, reserved and unknown tasks under a counting allocator: no charge
 allocates (RED with an entry inserted per new task: the map's node splits),
 and a charge made before its task's reservation stays unreserved, whether or

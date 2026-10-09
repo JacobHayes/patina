@@ -19,6 +19,12 @@ valid:
         let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::ClockRead);
         work();
     }
+  - |
+    #[unsafe(no_mangle)]
+    pub extern "C" fn resumed(call: crate::charge::Began) {
+        let _panic_scope = crate::panic_boundary::PanicScope::resume(call);
+        work();
+    }
 invalid:
   - |
     #[unsafe(no_mangle)]

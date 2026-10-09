@@ -196,6 +196,26 @@ pub(crate) fn begin(class: ChargeClass) -> Began {
     Began::of(CURRENT.with(|current| current.replace(Some(class))))
 }
 
+/// The running call's state, for a C wrapper that makes the call through
+/// several shim entries to hold between them: `pthread_once`, whose init
+/// routine runs from C between its claim and its completion. The first entry
+/// hands it to the C frame and a later one continues the call with it
+/// ([`resume`], [`PanicScope::resume`](crate::panic_boundary::PanicScope::resume)),
+/// so the call's class, and whether its wait has paid the parked surcharge,
+/// last until the C wrapper returns to the guest, whatever the guest code it
+/// ran meanwhile did.
+#[cfg(any(test, patina_posix_exports))]
+pub(crate) fn hold() -> Began {
+    Began::of(CURRENT.with(Cell::get))
+}
+
+/// Continue the held call: it is the running call again until [`end`],
+/// which gives back the call it interrupted.
+#[cfg(any(test, patina_posix_exports))]
+pub(crate) fn resume(held: Began) -> Began {
+    Began::of(CURRENT.with(|current| current.replace(held.outer())))
+}
+
 /// The running call, as guest code the shim calls from inside it (a
 /// callback, a delivery's handlers) interrupts it: [`end`] gives it back
 /// when that code returns.
@@ -363,5 +383,38 @@ mod tests {
         assert_eq!(counts.calls(ChargeClass::Clock), 2);
         // Each lock's surcharge, and the abandoned raise.
         assert_eq!(counts.calls(ChargeClass::Syscall), 3);
+    }
+
+    #[test]
+    fn a_once_call_held_across_its_init_routine_still_owes_its_surcharge() {
+        use crate::charge::Op;
+        use crate::panic_boundary::PanicScope;
+        let _ = take();
+        // `pthread_once`: the claim (a sync door) returns to C, which runs
+        // the init routine (guest calls of its own) and then the completion,
+        // whose wait for the registry is the once call's.
+        let held = {
+            let _claim = PanicScope::enter_op(Op::PthreadSync);
+            hold()
+        };
+        drop(PanicScope::enter_op(Op::ClockGettime));
+        {
+            let _done = PanicScope::resume(held);
+            parked();
+        }
+        // A claim that already paid its wait hands that on too.
+        let held = {
+            let _claim = PanicScope::enter_op(Op::PthreadSync);
+            parked();
+            hold()
+        };
+        {
+            let _done = PanicScope::resume(held);
+            parked();
+        }
+        let counts = take();
+        assert_eq!(counts.calls(ChargeClass::Sync), 2);
+        assert_eq!(counts.calls(ChargeClass::Clock), 1);
+        assert_eq!(counts.calls(ChargeClass::Syscall), 2);
     }
 }

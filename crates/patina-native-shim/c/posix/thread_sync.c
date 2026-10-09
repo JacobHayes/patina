@@ -66,9 +66,11 @@ void pthread_testcancel(void) {
 
 /* The Rust once state (src/posix/thread_sync.rs): a claimed entry, or NULL
  * once done; then done, or (Linux) fresh again when the routine never
- * returns. */
-extern int patina_once_begin(pthread_once_t *once_control, void **entry);
-extern void patina_once_done(void *entry);
+ * returns. The claim also hands out the once call's charge state, which this
+ * frame holds through the init routine for the completion (src/charge.rs,
+ * Began). */
+extern int patina_once_begin(pthread_once_t *once_control, void **entry, uint8_t *call);
+extern void patina_once_done(void *entry, uint8_t call);
 #ifdef __linux__
 extern void patina_once_reset(void *entry);
 #endif
@@ -83,7 +85,8 @@ extern void patina_once_reset(void *entry);
  */
 int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
     void *entry;
-    int rc = patina_once_begin(once_control, &entry);
+    uint8_t call;
+    int rc = patina_once_begin(once_control, &entry, &call);
     if (rc != 0 || entry == NULL) return rc;
 #ifdef __linux__
     struct _pthread_cleanup_buffer reset;
@@ -93,6 +96,6 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
 #ifdef __linux__
     patina_cleanup_pop(&reset, 0);
 #endif
-    patina_once_done(entry);
+    patina_once_done(entry, call);
     return 0;
 }
