@@ -157,7 +157,7 @@ pub(super) fn pair(state: &mut ThreadRuntime, a: c_int, b: c_int) {
         );
         unix.peer = Some(peer);
         unix.state = State::Connected;
-        unix.peer_creds = Creds::PROCESS;
+        unix.peer_creds = Creds::process();
     }
 }
 
@@ -358,7 +358,7 @@ pub(super) fn connect(handle: c_int, bytes: &[u8], nonblocking: bool) -> Result<
         other.name = listener_name;
         other.peer = Some(handle);
         other.state = State::Connected;
-        other.peer_creds = Creds::PROCESS;
+        other.peer_creds = Creds::process();
         state.net.sockets.table.insert(
             embryo,
             Socket::new(AF_UNIX, ty, 0, Proto::Unix(other), inode),
@@ -366,7 +366,7 @@ pub(super) fn connect(handle: c_int, bytes: &[u8], nonblocking: bool) -> Result<
         let me = as_unix_mut(sock_mut(&mut state, handle)?);
         me.peer = Some(embryo);
         me.state = State::Connected;
-        me.peer_creds = Creds::PROCESS;
+        me.peer_creds = Creds::process();
         let listening = as_unix_mut(sock_mut(&mut state, listener)?);
         if let State::Listening { pending, .. } = &mut listening.state {
             pending.push_back(embryo);
@@ -444,7 +444,7 @@ pub(super) fn listen(handle: c_int, backlog: i32) -> Result<(), c_int> {
                 backlog,
                 pending: VecDeque::new(),
             };
-            unix.peer_creds = Creds::PROCESS;
+            unix.peer_creds = Creds::process();
             Ok(())
         }
     }
@@ -637,7 +637,7 @@ fn creds_for(
         return stated;
     }
     let passcred = |handle| live(state, handle).is_some_and(|socket| socket.opts.passcred);
-    (passcred(handle) || passcred(peer)).then_some(Creds::PROCESS)
+    (passcred(handle) || passcred(peer)).then_some(Creds::process())
 }
 
 /// A stream's send; `urgent` for one with `MSG_OOB`, which stops by name

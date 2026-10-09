@@ -223,9 +223,9 @@ fn control(handle: c_int, bytes: &[u8]) -> Result<Control, c_int> {
                         }
                         // `scm_check_creds`: the caller's own pid and ids;
                         // anything else needs capabilities it lacks.
-                        if pid != Creds::PROCESS.pid
-                            || uid != Creds::PROCESS.uid
-                            || gid != Creds::PROCESS.gid
+                        if pid != Creds::process().pid
+                            || uid != Creds::process().uid
+                            || gid != Creds::process().gid
                         {
                             return Err(crate::EPERM);
                         }

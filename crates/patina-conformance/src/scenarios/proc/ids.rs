@@ -112,7 +112,7 @@ pub const SCENARIO: Scenario = Scenario {
     gaps: &[Gap {
         status: Status::ByDesign,
         vehicles: Vehicle::ALL,
-        what: "the virtual pid namespace holds two processes, its init (pid 1) and the guest (pid 2, init's child; registry::INIT_PID/IDENTITY_PID, src/identity.rs): kill(-1, sig) reaches every process but init and the caller, of which there are none, so the kernel's answer for that tree is ESRCH (kill_something_info), where the native oracle's host has other processes of the caller's",
+        what: "the virtual pid namespace holds two processes, its init (pid 1) and the guest (pid 2, init's child; registry::INIT_PID/ROOT_PID, src/identity.rs): kill(-1, sig) reaches every process but init and the caller, of which there are none, so the kernel's answer for that tree is ESRCH (kill_something_info), where the native oracle's host has other processes of the caller's",
         failure: Failure::Differs(&[
             Difference::field(15, "kill", "errno", Observed::Str("ESRCH")),
             Difference::field(15, "kill", "ret", Observed::Int(-1)),

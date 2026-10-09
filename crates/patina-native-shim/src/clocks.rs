@@ -238,7 +238,7 @@ fn cpu_target(
         (0, false) => CpuOf::Process,
         // A thread clock names a thread of the caller's own process.
         (tid, true) if thread::live_tid(tid) => CpuOf::Thread(task(tid)?),
-        (pid, false) if pid == crate::registry::IDENTITY_PID as i32 => CpuOf::Process,
+        (pid, false) if pid == crate::patina_pid() => CpuOf::Process,
         (pid, false) if pid == crate::registry::INIT_PID as i32 => CpuOf::Init,
         // `gettime` finds the process by the calling thread's own pid.
         (tid, false) if gettime && tid == me => CpuOf::Process,
@@ -268,7 +268,7 @@ pub(crate) fn cpu_nanos_unrecorded(context: &patina_dst_runtime::Context, of: Cp
         CpuOf::Thread(task) => {
             // The main thread also holds the startup cost and whatever ran
             // before the thread subsystem first scheduled it.
-            let before = if thread::tid_of(task) == crate::registry::IDENTITY_PID as c_int {
+            let before = if thread::tid_of(task) == crate::patina_pid() {
                 context.task_cpu_time_nanos(None)
             } else {
                 0

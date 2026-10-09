@@ -216,10 +216,11 @@ pub const DARWIN_XNU: &str = "xnu-12377.1.9";
 /// `chown` read; on macOS, which has no credential yet, those read it
 /// directly.
 pub const IDENTITY_UID: u32 = 1000;
-/// The guest process: the child of the pid namespace's init
+/// The guest process a run starts: the child of the pid namespace's init
 /// ([`INIT_PID`]), leading its own process group in init's session, as a
-/// program a container's init started. Its main thread's id is its pid.
-pub const IDENTITY_PID: u32 = 2;
+/// program a container's init started. Its main thread's id is its pid. The
+/// caller's own pid is its process's, which the shim's process table answers.
+pub const ROOT_PID: u32 = 2;
 /// The pid namespace's init: the guest's parent, leader of process group 1
 /// and session 1, running as root (uid and gid 0, every capability) as a
 /// machine's init does, so the guest may not signal it (but for `SIGCONT`

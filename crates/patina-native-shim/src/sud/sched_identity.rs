@@ -1,7 +1,8 @@
 //! SUD rows — scheduling and per-run identity: `futex` (the scheduler park/wake
 //! the libc `syscall(2)` interposer also decodes) and `getrandom` (the seeded
-//! entropy source). The constant identity rows (`getpid`, uids, `gettid`,
-//! `sched_yield`) are answered inline by the dispatcher.
+//! entropy source). The identity rows (`getpid`/`getppid` from the process
+//! table, uids, `gettid`, `sched_yield`) are answered inline by the
+//! dispatcher's bindings.
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 

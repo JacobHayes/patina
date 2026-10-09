@@ -30,7 +30,7 @@ pub(crate) fn abort_through_kernel() {
     let raise = || {
         refresh_handler_mask();
         let target = GenerationTarget::Thread {
-            tgid: Some(crate::registry::IDENTITY_PID as i32),
+            tgid: Some(crate::patina_pid()),
             tid: current_tid(),
         };
         // SAFETY: a thread-directed kill of the caller carries no pointer.
@@ -89,10 +89,13 @@ pub(crate) unsafe fn generate_signal(
                 Some(process) if !crate::identity::may_signal(process, sig) => {
                     return -i64::from(EPERM);
                 }
-                Some(crate::identity::Process::Guest) => SignalTarget::Process,
+                Some(process) if process == crate::identity::Process::current() => {
+                    SignalTarget::Process
+                }
                 // Init has no handlers, and the kernel drops what a member
                 // of its namespace sends it by default.
-                Some(crate::identity::Process::Init) => return 0,
+                Some(process) if process == crate::identity::Process::INIT => return 0,
+                Some(_) => crate::trap_fatal("a signal to another guest process is not modeled"),
                 None => return -i64::from(ESRCH),
             }
         }
@@ -104,7 +107,7 @@ pub(crate) unsafe fn generate_signal(
                 return -i64::from(EPERM);
             }
             let init = crate::registry::INIT_PID as i32;
-            let guest = crate::registry::IDENTITY_PID as i32;
+            let guest = crate::patina_pid();
             if tid == init {
                 // Init's one thread, reached by `tkill` or with its own tgid,
                 // under the permission check; past it init drops the signal.
@@ -112,7 +115,7 @@ pub(crate) unsafe fn generate_signal(
                     -i64::from(ESRCH)
                 } else if !valid {
                     -i64::from(EINVAL)
-                } else if crate::identity::may_signal(crate::identity::Process::Init, sig) {
+                } else if crate::identity::may_signal(crate::identity::Process::INIT, sig) {
                     0
                 } else {
                     -i64::from(EPERM)
@@ -147,6 +150,30 @@ pub(crate) unsafe fn generate_signal(
     0
 }
 
+/// A generation the virtual kernel made, for its caller to record
+/// (`SignalGenerated`). The transition that makes it touches only the
+/// thread runtime, so a caller that cannot reach the runtime context there
+/// records it afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "a generation must be recorded"]
+pub(in crate::thread) struct Generated {
+    seq: u64,
+    sig: u8,
+    target: SignalTarget,
+    code: i32,
+    value: i64,
+}
+
+impl Generated {
+    /// Record the generation, in the order the generations were made.
+    pub(in crate::thread) fn record(self) {
+        with_context_raw(|context| {
+            context.signal_generated(self.seq, self.sig, self.target, self.code, self.value)
+        })
+        .unwrap_or_else(|errno| fatal(&format!("recording signal generation failed ({errno})")));
+    }
+}
+
 impl ThreadRuntime {
     /// Generate `info` for `target` under the runtime lock the caller holds:
     /// queue it (unless discarded), record the generation, count signalfd
@@ -156,6 +183,19 @@ impl ThreadRuntime {
         target: SignalTarget,
         info: Info,
     ) -> Vec<TaskId> {
+        let (generated, wakes) = self.enqueue_generation(target, info);
+        generated.record();
+        wakes
+    }
+
+    /// The generation itself, touching only the thread runtime: queue
+    /// `info` (unless discarded), count signalfd arrivals, and answer the
+    /// generation to record and the tasks to wake once the lock is released.
+    pub(in crate::thread) fn enqueue_generation(
+        &mut self,
+        target: SignalTarget,
+        info: Info,
+    ) -> (Generated, Vec<TaskId>) {
         // No modeled kernel operation raises SIGSYS (seccomp enforcement is
         // refused). Explicit sends and timer notifications must not reach the
         // host containment handler or silently disappear, regardless of the
@@ -164,22 +204,19 @@ impl ThreadRuntime {
             fatal("guest SIGSYS generation is not modeled; SIGSYS is reserved for containment");
         }
         let (instance, wake) = self.signals.enqueue(info.signo(), target, info);
-        with_context_raw(|context| {
-            context.signal_generated(
-                instance.seq,
-                instance.sig,
-                target,
-                info.code(),
-                info.value(),
-            )
-        })
-        .unwrap_or_else(|errno| fatal(&format!("recording signal generation failed ({errno})")));
+        let generated = Generated {
+            seq: instance.seq,
+            sig: instance.sig,
+            target,
+            code: info.code(),
+            value: info.value(),
+        };
         for fd in self.signals.signalfds.values_mut() {
             if fd.mask & bit(instance.sig) != 0 {
                 fd.arrivals += 1;
             }
         }
-        self.prepare_signal_wakes(instance, wake)
+        (generated, self.prepare_signal_wakes(instance, wake))
     }
 
     /// `dequeue_signal`: take the next pending signal in `eligible` (for
@@ -287,7 +324,7 @@ pub extern "C" fn patina_pthread_kill(handle: usize, sig: i32) -> i32 {
     let rc = unsafe {
         generate_signal(
             GenerationTarget::Thread {
-                tgid: Some(crate::registry::IDENTITY_PID as i32),
+                tgid: Some(crate::patina_pid()),
                 tid: tid_of(task),
             },
             sig,

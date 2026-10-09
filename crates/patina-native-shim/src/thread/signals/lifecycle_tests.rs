@@ -180,11 +180,7 @@ fn thread_directed_signal_targets_only_that_task() {
             assert!(parked_class(task).is_some());
             let tid = tid_of(task) as u64;
             let args = if *row == "tgkill" {
-                [
-                    u64::from(crate::registry::IDENTITY_PID),
-                    tid,
-                    SIGUSR1 as u64,
-                ]
+                [u64::from(crate::registry::ROOT_PID), tid, SIGUSR1 as u64]
             } else {
                 [tid, SIGUSR1 as u64, 0]
             };
@@ -263,7 +259,7 @@ fn pending_for_a_blocking_task_is_invisible_to_another_tasks_sigpending() {
             unsafe {
                 generate_signal(
                     GenerationTarget::Thread {
-                        tgid: Some(crate::registry::IDENTITY_PID as i32),
+                        tgid: Some(crate::registry::ROOT_PID as i32),
                         tid: tid_of(task),
                     },
                     SIGUSR1,
@@ -442,7 +438,7 @@ fn generation_validates_typed_targets_before_recording() {
     isolated(|| {
         // The tree: init (1) and the guest (2), whose main thread is 2.
         const INIT: i32 = crate::registry::INIT_PID as i32;
-        const GUEST: i32 = crate::registry::IDENTITY_PID as i32;
+        const GUEST: i32 = crate::registry::ROOT_PID as i32;
         let mut info = Info::new(SIGUSR1 as u8, SI_QUEUE);
         let process = |pid| GenerationTarget::Process { pid };
         let thread = |tgid, tid| GenerationTarget::Thread { tgid, tid };
@@ -553,7 +549,7 @@ fn setpgid_of_zero_from_a_non_main_thread_names_the_process() {
     isolated(|| {
         let worker = spawn(|| {
             let me = crate::thread::current_tid();
-            assert_ne!(me, crate::registry::IDENTITY_PID as i32);
+            assert_ne!(me, crate::registry::ROOT_PID as i32);
             assert_eq!(crate::identity::setpgid(0, 0), 0);
             assert_eq!(crate::identity::setpgid(me, 0), -i64::from(EINVAL));
             assert_eq!(crate::identity::setpgid(0, 77), -i64::from(EPERM));

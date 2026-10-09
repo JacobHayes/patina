@@ -71,7 +71,7 @@ pub(crate) unsafe fn msgsnd(id: i32, msgp: *const u8, size: usize, flags: i32) -
             return fail(EACCES);
         }
         if queue.fits(size) {
-            queue.lspid = PID;
+            queue.lspid = pid();
             queue.stime = now();
             let sent = message.take().expect("sent once");
             let woken = deliver_message(queue, outcomes, sent);
@@ -115,7 +115,7 @@ fn deliver_message(
             outcomes.insert(receiver.task, Outcome::Done(fail(E2BIG)));
             continue;
         }
-        queue.lrpid = PID;
+        queue.lrpid = pid();
         queue.rtime = now();
         outcomes.insert(receiver.task, Outcome::Message(message));
         return woken;
@@ -180,7 +180,7 @@ pub(crate) unsafe fn msgrcv(id: i32, msgp: *mut u8, size: usize, mtype: i64, fla
             let message = queue.messages.remove(index).expect("found above");
             queue.cbytes -= message.text.len();
             queue.rtime = now();
-            queue.lrpid = PID;
+            queue.lrpid = pid();
             let woken = wake_senders(queue);
             drop(state);
             wake_all(woken);

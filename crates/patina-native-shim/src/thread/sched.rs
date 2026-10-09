@@ -17,7 +17,7 @@ use super::*;
 use crate::abi::{Errno, SysResult};
 use crate::identity::Process;
 use crate::limits::{RLIMIT_NICE, RLIMIT_RTPRIO};
-use crate::registry::{IDENTITY_PID, INIT_PID};
+use crate::registry::INIT_PID;
 use crate::{E2BIG, EACCES, EFAULT, ERANGE};
 use std::ffi::CStr;
 
@@ -315,7 +315,7 @@ pub unsafe extern "C" fn patina_thread_setname(handle: usize, name: *const c_cha
 /// The guest's live threads, main first.
 fn threads(state: &ThreadRuntime) -> Vec<i32> {
     if state.signals.is_empty() {
-        return vec![IDENTITY_PID as i32];
+        return vec![crate::patina_pid()];
     }
     state.signals.task_ids().map(tid_of).collect()
 }
@@ -333,9 +333,9 @@ fn find(state: &ThreadRuntime, pid: i32) -> Option<i32> {
 /// The process a thread [`find`] found belongs to.
 fn process_of(tid: i32) -> Process {
     if tid == INIT {
-        Process::Init
+        Process::INIT
     } else {
-        Process::Guest
+        Process::current()
     }
 }
 
@@ -393,10 +393,10 @@ fn targets(
             _ => who as u32,
         };
         let mut members = Vec::new();
-        if Process::Init.credential().uid == uid {
+        if Process::INIT.credential().uid == uid {
             members.push(INIT);
         }
-        if Process::Guest.credential().uid == uid {
+        if Process::current().credential().uid == uid {
             members.extend(threads(state));
         }
         members

@@ -97,7 +97,7 @@ pub(crate) fn shmat(id: i32, addr: usize, flags: i32) -> i64 {
         let mut state = lock_state();
         if let Ok((_, segment)) = state.ipc.shm.get_mut(id) {
             segment.atime = now();
-            segment.lpid = PID;
+            segment.lpid = pid();
         }
     }
     attached
@@ -133,7 +133,7 @@ pub(crate) fn shm_detached(id: i32) {
         return;
     };
     segment.dtime = now();
-    segment.lpid = PID;
+    segment.lpid = pid();
     if perm.mode & SHM_DEST != 0 && crate::mem::attachments(id) == 0 {
         destroy_segment(&mut state, id);
     }
@@ -175,7 +175,7 @@ pub(crate) unsafe fn shmctl(id: i32, cmd: i32, buf: *mut ShmidDs) -> i64 {
                     atime: segment.atime,
                     dtime: segment.dtime,
                     ctime: segment.ctime,
-                    cpid: PID,
+                    cpid: pid(),
                     lpid: segment.lpid,
                     nattch: crate::mem::attachments(id) as u64,
                     unused: [0; 2],

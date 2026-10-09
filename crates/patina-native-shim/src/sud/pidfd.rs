@@ -13,7 +13,6 @@
 use super::*;
 use crate::FdKind;
 use crate::identity::Process;
-use crate::registry::{IDENTITY_PID, INIT_PID};
 use crate::thread::current_tid;
 
 /// `PIDFD_NONBLOCK` (`O_NONBLOCK`, on both architectures): the only flag
@@ -30,11 +29,9 @@ pub(super) fn target(fd: c_int) -> Result<Process, u32> {
     if resolved.kind != FdKind::Pidfd {
         return Err(errno::EBADF);
     }
-    Ok(if resolved.handle == u64::from(INIT_PID) {
-        Process::Init
-    } else {
-        Process::Guest
-    })
+    crate::identity::lookup(resolved.handle as i32)
+        .map(|(process, _)| process)
+        .ok_or(errno::ESRCH)
 }
 
 /// `pidfd_open(pid, flags)`: an unknown flag, then a pid that is no process
@@ -79,8 +76,7 @@ pub(super) fn sys_pidfd_send_signal(a: [u64; 6]) -> i64 {
         return -EINVAL;
     }
     let pid = match target(arg_fd(a[0]) as c_int) {
-        Ok(Process::Init) => INIT_PID as i32,
-        Ok(Process::Guest) => IDENTITY_PID as i32,
+        Ok(process) => process.pid(),
         Err(code) => return -i64::from(code),
     };
     let sig = a[1] as i32;

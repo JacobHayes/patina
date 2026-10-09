@@ -288,8 +288,8 @@ macro_rules! early_rows {
             Syscall::N_getpid => r(
                 $id,
                 Family::Identity,
-                Disposition::Constant(IDENTITY_PID as i64),
-                "The guest is pid 2 (`IDENTITY_PID`), the child of the pid namespace's init; the same value the C `getpid` interposer returns.",
+                Disposition::Modeled,
+                "The caller's process's pid from the virtual pid namespace's process table (`patina_pid`, the same entry the C `getpid` interposer calls): the root process, the child of init, is pid 2.",
                 Some("time+timers+sched+identity"),
             ),
             Syscall::N_sendfile => r(
@@ -801,8 +801,8 @@ macro_rules! early_rows {
             Syscall::N_getppid => r(
                 $id,
                 Family::Identity,
-                Disposition::Constant(INIT_PID as i64),
-                "The guest's parent is the pid namespace's init, pid 1 (`INIT_PID`), which leads group 1 and session 1.",
+                Disposition::Modeled,
+                "The caller's process's parent from the process table (`patina_ppid`, as the C `getppid` interposer): the root process's is the pid namespace's init, pid 1 (`INIT_PID`), which leads group 1 and session 1.",
                 None,
             ),
             #[cfg(target_arch = "x86_64")]

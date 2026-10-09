@@ -131,7 +131,7 @@ fn autobind(state: &mut ThreadRuntime, handle: c_int) -> Result<(), c_int> {
         return Ok(());
     }
     let ports = &mut state.net.sockets.netlink;
-    let mut port = IDENTITY_PID;
+    let mut port = crate::patina_pid() as u32;
     while ports.taken.contains(&port) {
         if ports.rover >= -4096 {
             ports.rover = -4097;

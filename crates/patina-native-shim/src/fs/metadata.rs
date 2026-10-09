@@ -194,18 +194,26 @@ fn write_metadata(metadata: patina_dst_abi::FsMetadata, out: *mut PatinaMetadata
 }
 
 #[unsafe(no_mangle)]
-/// The guest's pid (`registry::IDENTITY_PID`): the one value `getpid`
-/// answers on both doors.
+/// The caller's pid, what `getpid` answers on both doors: its process's in
+/// the pid namespace's table on Linux (`identity::Process`); on macOS, the
+/// one process the run starts.
 pub extern "C" fn patina_pid() -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    registry::IDENTITY_PID as i32
+    #[cfg(target_os = "linux")]
+    return crate::identity::Process::current().pid();
+    #[cfg(not(target_os = "linux"))]
+    return registry::ROOT_PID as i32;
 }
 
 #[unsafe(no_mangle)]
-/// The guest's parent, the pid namespace's init (`registry::INIT_PID`).
+/// The caller's parent, what `getppid` answers: the root process's is the
+/// pid namespace's init (`registry::INIT_PID`).
 pub extern "C" fn patina_ppid() -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    registry::INIT_PID as i32
+    #[cfg(target_os = "linux")]
+    return crate::identity::Process::current().parent();
+    #[cfg(not(target_os = "linux"))]
+    return registry::INIT_PID as i32;
 }
 
 /// Who the caller is, to the rows both OSes answer (the owner `stat`
@@ -229,7 +237,7 @@ impl Caller {
 }
 
 /// The caller; see [`Caller`].
-pub(crate) const fn caller() -> Caller {
+pub(crate) fn caller() -> Caller {
     #[cfg(target_os = "linux")]
     {
         let credential = identity::credential();

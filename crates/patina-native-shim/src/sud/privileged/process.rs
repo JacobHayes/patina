@@ -57,7 +57,7 @@ pub(in crate::sud) fn ptrace(credential: &Credential, a: &[u64; 6]) -> Answer {
             return refuse(errno::EPERM);
         }
     }
-    if process == Process::Guest {
+    if process == Process::current() {
         return refuse(errno::EPERM);
     }
     if !ptrace_may_access(credential, process)
@@ -266,10 +266,12 @@ pub(super) fn getfd_from(
     }
     match target() {
         Err(code) => refuse(code),
-        Ok(Process::Guest) => Ok(match crate::fd_table().lock().dup(a[1] as c_int, 0, true) {
-            Ok(fd) => i64::from(fd),
-            Err(code) => -i64::from(code),
-        }),
+        Ok(process) if process == Process::current() => {
+            Ok(match crate::fd_table().lock().dup(a[1] as c_int, 0, true) {
+                Ok(fd) => i64::from(fd),
+                Err(code) => -i64::from(code),
+            })
+        }
         Ok(process) => other_process(credential, process, errno::EPERM),
     }
 }
@@ -281,7 +283,8 @@ pub(super) fn getfd_from(
 /// caller's own threads, or `ESRCH`.
 pub(in crate::sud) fn get_robust_list(credential: &Credential, a: &[u64; 6]) -> Answer {
     let pid = a[0] as i32;
-    if let Some((process, _)) = find_process(pid).filter(|(process, _)| *process != Process::Guest)
+    if let Some((process, _)) =
+        find_process(pid).filter(|(process, _)| *process != Process::current())
     {
         return other_process(credential, process, errno::EPERM);
     }
@@ -375,7 +378,9 @@ fn remote_pages(remote: &[[u64; 2]]) -> bool {
 /// `EACCES`, reported `EPERM`).
 fn process_vm(credential: &Credential, a: &[u64; 6], write: bool) -> Answer {
     let found = find_process(a[0] as i32);
-    if let Some((Process::Guest, leader)) = found {
+    if let Some((process, leader)) = found
+        && process == Process::current()
+    {
         return Ok(crate::uaccess::guest_process_vm(write, leader, a));
     }
     if a[5] != 0 {
@@ -510,7 +515,7 @@ pub(in crate::sud) fn kcmp(credential: &Credential, a: &[u64; 6]) -> Answer {
     if !ptrace_may_access(credential, one) || !ptrace_may_access(credential, other) {
         return refuse(errno::EPERM);
     }
-    if one != Process::Guest || other != Process::Guest {
+    if one != Process::current() || other != Process::current() {
         return Err(Unmodeled::Granted(Capability::SysPtrace));
     }
     match a[2] as i32 {

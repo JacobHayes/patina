@@ -483,7 +483,8 @@ fn notify_signal(signo: i32, value: u64) {
         words: [
             signo as u64,
             u64::from(SI_MESGQ as u32),
-            u64::from(IDENTITY_PID) | (u64::from(crate::identity::credential().uid) << 32),
+            u64::from(crate::patina_pid() as u32)
+                | (u64::from(crate::identity::credential().uid) << 32),
             value,
             0,
             0,
@@ -502,7 +503,7 @@ fn notify_signal(signo: i32, value: u64) {
     // SAFETY: `info` is a whole kernel-layout siginfo that outlives the call.
     unsafe {
         signals::generate_signal(
-            signals::GenerationTarget::Process { pid: PID },
+            signals::GenerationTarget::Process { pid: pid() },
             signo,
             signals::GenerationInfo::Queued(&info),
         );
@@ -723,7 +724,7 @@ fn status_line(queue: &Mqueue) -> String {
         Some((kind, signo, _)) => (kind, if kind == SIGEV_SIGNAL { signo } else { 0 }),
         None => (0, 0),
     };
-    let owner = if queue.notify.is_some() { PID } else { 0 };
+    let owner = if queue.notify.is_some() { pid() } else { 0 };
     format!(
         "QSIZE:{:<10} NOTIFY:{notify:<5} SIGNO:{signo:<5} NOTIFY_PID:{owner:<6}\n",
         queue.qsize

@@ -442,7 +442,7 @@ mod tests {
             Case {
                 row: Syscall::N_process_madvise,
                 check: |credential, a| {
-                    madvise_from(credential, a, || Ok(crate::identity::Process::Guest))
+                    madvise_from(credential, a, || Ok(crate::identity::Process::current()))
                 },
                 args: [0, 0, 0, u64::from(linux_raw_sys::general::MADV_COLD), 0, 0],
                 refusal: errno::EPERM,
@@ -450,7 +450,7 @@ mod tests {
             Case {
                 row: Syscall::N_process_madvise,
                 check: |credential, a| {
-                    madvise_from(credential, a, || Ok(crate::identity::Process::Init))
+                    madvise_from(credential, a, || Ok(crate::identity::Process::INIT))
                 },
                 args: [0, 0, 0, u64::from(linux_raw_sys::general::MADV_COLD), 0, 0],
                 refusal: errno::EACCES,
@@ -458,7 +458,7 @@ mod tests {
             Case {
                 row: Syscall::N_pidfd_getfd,
                 check: |credential, a| {
-                    getfd_from(credential, a, || Ok(crate::identity::Process::Init))
+                    getfd_from(credential, a, || Ok(crate::identity::Process::INIT))
                 },
                 args: [0; 6],
                 refusal: errno::EPERM,
@@ -466,7 +466,7 @@ mod tests {
             Case {
                 row: Syscall::N_setns,
                 check: |credential, a| {
-                    join_namespaces(credential, a[1], crate::identity::Process::Init)
+                    join_namespaces(credential, a[1], crate::identity::Process::INIT)
                 },
                 args: [
                     0,
@@ -658,7 +658,7 @@ mod tests {
     fn a_granted_option_still_meets_the_thread_group_check() {
         const PTRACE_SEIZE: u64 = 0x4206;
         const SUSPEND_SECCOMP: u64 = 1 << 21;
-        let own = crate::registry::IDENTITY_PID as u64;
+        let own = crate::patina_pid() as u64;
         let seize = [PTRACE_SEIZE, own, 0, SUSPEND_SECCOMP, 0, 0];
         assert_eq!(ptrace(&holding(0), &seize), refuse(errno::EPERM));
         assert_eq!(

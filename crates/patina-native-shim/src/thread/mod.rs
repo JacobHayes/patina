@@ -371,13 +371,13 @@ fn current_task() -> TaskId {
 
 /// How far thread ids sit above task ids: the main thread is
 /// [`MAIN_TASK`], and its id is the guest's pid.
-const TID_OFFSET: u64 = crate::registry::IDENTITY_PID as u64 - 1;
+const TID_OFFSET: u64 = crate::registry::ROOT_PID as u64 - 1;
 
 /// The thread id of `task`: the guest's pid for the main thread (and for
 /// the unmanaged main thread before the thread subsystem activates).
 pub(crate) fn tid_of(task: TaskId) -> c_int {
     if task == UNMANAGED_TASK {
-        crate::registry::IDENTITY_PID as c_int
+        crate::patina_pid()
     } else {
         c_int::try_from(task.0 + TID_OFFSET).unwrap_or(c_int::MAX)
     }
@@ -416,7 +416,7 @@ pub(crate) fn live_tid(tid: i32) -> bool {
 #[cfg(target_os = "linux")]
 fn live_tid_locked(state: &ThreadRuntime, tid: i32) -> bool {
     if state.signals.is_empty() {
-        return tid == crate::registry::IDENTITY_PID as i32;
+        return tid == crate::patina_pid();
     }
     task_of(tid).is_some_and(|task| state.signals.has_task(task))
 }

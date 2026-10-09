@@ -27,7 +27,7 @@
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-use super::signals::{Info, SIGALRM, SIGPROF, SIGVTALRM};
+use super::signals::{Generated, Info, SIGALRM, SIGPROF, SIGVTALRM};
 use super::*;
 use crate::clocks::{Clock, CpuOf, NANOS, TICK_NSEC, Timespec, Timeval};
 use crate::neg_errno as errno;
@@ -288,16 +288,45 @@ impl ThreadRuntime {
         // An idle advance in this section may have expired timed parks: settle
         // them before an expiry can signal or wake the same task.
         self.settle_expired();
-        let mut wakes = Vec::new();
         if !self.timers.any_armed() {
-            return Ok(wakes);
+            return Ok(Vec::new());
         }
-        let monotonic = now_on(Line::Monotonic)?;
+        let (generated, wakes) = self.fire_timers_at(&mut now_on)?;
+        for generation in generated {
+            generation.record();
+        }
+        self.publish_alarm();
+        Ok(wakes)
+    }
+
+    /// The expiries themselves: every armed timer whose line `now` has
+    /// reached fires. Every clock is read before anything changes, so an
+    /// error leaves the timers and signals as they were; past the reads the
+    /// transition cannot fail. Answers the generations to record, in order,
+    /// and the tasks to wake once the lock is released. A closed timer
+    /// descriptor its last reader's wake frees still republishes the alarm
+    /// through the runtime context.
+    fn fire_timers_at(
+        &mut self,
+        now: &mut impl FnMut(Line) -> Result<u64, c_int>,
+    ) -> Result<(Vec<Generated>, Vec<TaskId>), c_int> {
+        let monotonic = now(Line::Monotonic)?;
+        let process = now(Line::Cpu(CpuOf::Process))?;
+        let mut due = Vec::new();
+        for (id, timer) in self.timers.posix.iter().filter(|(_, timer)| timer.active) {
+            due.push((*id, timer.expires, now(timer.line)?));
+        }
+        let mut generated = Vec::new();
+        let mut wakes = Vec::new();
+        let mut generate = |runtime: &mut Self, target, info| {
+            let (generation, woken) = runtime.enqueue_generation(target, info);
+            generated.push(generation);
+            woken
+        };
         if self.timers.real.queued && monotonic >= self.timers.real.expires {
             self.timers.real.queued = false;
-            wakes.extend(self.generate_locked(SignalTarget::Process, Info::kernel(SIGALRM)));
+            wakes.extend(generate(self, SignalTarget::Process, Info::kernel(SIGALRM)));
         }
-        let process = now_on(Line::Cpu(CpuOf::Process))?;
         for (index, sig) in [SIGVTALRM, SIGPROF].into_iter().enumerate() {
             let timer = &mut self.timers.cpu[index];
             if timer.expires != 0 && process >= timer.expires {
@@ -306,24 +335,16 @@ impl ThreadRuntime {
                 } else {
                     timer.expires + timer.incr
                 };
-                wakes.extend(self.generate_locked(SignalTarget::Process, Info::kernel(sig)));
+                wakes.extend(generate(self, SignalTarget::Process, Info::kernel(sig)));
             }
         }
-        let due: Vec<i32> = self
-            .timers
-            .posix
-            .iter()
-            .filter(|(_, timer)| timer.active)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in due {
-            let timer = &self.timers.posix[&id];
-            let (line, expires) = (timer.line, timer.expires);
-            let now = now_on(line)?;
-            if now < expires {
+        for (id, expires, at) in due {
+            if at < expires {
                 continue;
             }
-            wakes.extend(self.fire_posix(id, now));
+            if let Some((target, info)) = self.fire_posix(id, at) {
+                wakes.extend(generate(self, target, info));
+            }
         }
         let mut readers = Vec::new();
         for fd in self.timers.fds.values_mut() {
@@ -341,7 +362,6 @@ impl ThreadRuntime {
             self.remove_wait(task);
             wakes.push(task);
         }
-        self.publish_alarm();
         // One wake per task, whichever expiries woke it.
         let mut once = Vec::with_capacity(wakes.len());
         for task in wakes {
@@ -349,18 +369,19 @@ impl ThreadRuntime {
                 once.push(task);
             }
         }
-        Ok(once)
+        Ok((generated, once))
     }
 
-    /// One POSIX timer's expiry (`posix_timer_fn`, `cpu_timer_fire`).
-    fn fire_posix(&mut self, id: i32, now: u64) -> Vec<TaskId> {
+    /// One POSIX timer's expiry (`posix_timer_fn`, `cpu_timer_fire`): the
+    /// signal to generate, if any.
+    fn fire_posix(&mut self, id: i32, now: u64) -> Option<(SignalTarget, Info)> {
         let timer = self.timers.posix.get_mut(&id).expect("a due timer");
         timer.active = false;
         let Notify::Signal { sig, value, target } = timer.notify else {
             // Only a CPU timer is queued without a signal: `cpu_timer_fire`
             // clears its expiry.
             timer.expires = 0;
-            return Vec::new();
+            return None;
         };
         let generation = if timer.interval != 0 {
             timer.requeue = timer.requeue.wrapping_add(1);
@@ -376,12 +397,12 @@ impl ThreadRuntime {
         if let SignalTarget::Task(task) = target
             && !self.signals.has_task(task)
         {
-            return Vec::new();
+            return None;
         }
         if let Some(queued) = self.signals.queued_timer(sig, id) {
             // Its record is still pending: one more overrun.
             queued.set_overrun(queued.overrun().saturating_add(1));
-            return Vec::new();
+            return None;
         }
         if self.signals.discards(sig, target) {
             // Nothing queued, so no dequeue will rearm it: a periodic timer
@@ -397,9 +418,9 @@ impl ThreadRuntime {
                 timer.requeue = timer.requeue.wrapping_add(1);
                 timer.active = true;
             }
-            return Vec::new();
+            return None;
         }
-        self.generate_locked(target, Info::timer(sig, id, value, generation))
+        Some((target, Info::timer(sig, id, value, generation)))
     }
 
     /// Let the runtime's advance-on-spin rescue stop at the earliest
@@ -939,10 +960,9 @@ pub(crate) fn timer_settime(
             value != 0 && now >= expires
         }
     };
-    let wakes = if due_now {
-        state.fire_posix(id, now)
-    } else {
-        Vec::new()
+    let wakes = match due_now.then(|| state.fire_posix(id, now)).flatten() {
+        Some((target, info)) => state.generate_locked(target, info),
+        None => Vec::new(),
     };
     state.publish_alarm();
     drop(state);

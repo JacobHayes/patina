@@ -877,7 +877,7 @@ pub(crate) fn broken_pipe_signal() {
         let rc = unsafe {
             signals::generate_signal(
                 signals::GenerationTarget::Thread {
-                    tgid: Some(crate::registry::IDENTITY_PID as i32),
+                    tgid: Some(crate::patina_pid()),
                     tid: tid_of(current_task()),
                 },
                 signals::SIGPIPE,

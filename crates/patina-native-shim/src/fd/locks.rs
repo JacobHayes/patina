@@ -272,7 +272,7 @@ pub unsafe extern "C" fn patina_record_lock(
     let owner = if ofd {
         Owner::Description(resolved.desc)
     } else {
-        Owner::Process
+        Owner::Process(patina_pid())
     };
     let file = match lock_identity(&resolved) {
         Ok(file) => file,
@@ -304,7 +304,7 @@ pub unsafe extern "C" fn patina_record_lock(
                     (held.end - held.start + 1) as i64
                 },
                 l_pid: match held.owner {
-                    Owner::Process => patina_pid(),
+                    Owner::Process(pid) => pid,
                     Owner::Description(_) => -1,
                 },
             },

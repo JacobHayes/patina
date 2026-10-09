@@ -84,7 +84,7 @@ pub(super) fn perform(set: &mut SemSet, ops: &[Sembuf]) -> Result<(), Refused> {
         values[num] = result;
     }
     for op in ops {
-        set.sems[op.num as usize] = (values[op.num as usize], PID);
+        set.sems[op.num as usize] = (values[op.num as usize], pid());
     }
     set.adjust = adjust;
     Ok(())
@@ -261,7 +261,7 @@ pub(crate) fn exit_sem() {
         set.undo = false;
         for (slot, adjust) in set.sems.iter_mut().zip(set.adjust.iter_mut()) {
             if *adjust != 0 {
-                *slot = ((slot.0 + *adjust).clamp(0, SEMVMX), PID);
+                *slot = ((slot.0 + *adjust).clamp(0, SEMVMX), pid());
                 *adjust = 0;
             }
         }
@@ -323,7 +323,7 @@ pub(crate) unsafe fn semctl(id: i32, num: i32, cmd: i32, arg: usize) -> i64 {
             if !perm.allows(S_IWUGO) {
                 return fail(EACCES);
             }
-            set.sems[num as usize] = (value, PID);
+            set.sems[num as usize] = (value, pid());
             set.adjust[num as usize] = 0;
             set.ctime = now();
             let woken = update_queue(set, outcomes);
@@ -432,7 +432,7 @@ unsafe fn sem_values(id: i32, num: i32, cmd: i32, arg: usize) -> i64 {
                 return fail(ERANGE);
             }
             for (slot, value) in set.sems.iter_mut().zip(values) {
-                *slot = (i32::from(value), PID);
+                *slot = (i32::from(value), pid());
             }
             set.adjust.iter_mut().for_each(|adjust| *adjust = 0);
             set.ctime = now();

@@ -44,7 +44,6 @@ mod opts;
 mod unix;
 
 use crate::fdtable::DescId;
-use crate::registry::IDENTITY_PID;
 use crate::uaccess;
 use abi::*;
 
@@ -63,12 +62,15 @@ pub(crate) struct Creds {
 }
 
 impl Creds {
-    /// The one virtual process's.
-    pub(crate) const PROCESS: Creds = Creds {
-        pid: IDENTITY_PID as i32,
-        uid: crate::caller().uid,
-        gid: crate::caller().gid,
-    };
+    /// The caller's process's.
+    pub(crate) fn process() -> Creds {
+        let caller = crate::caller();
+        Creds {
+            pid: crate::patina_pid(),
+            uid: caller.uid,
+            gid: caller.gid,
+        }
+    }
     /// `cred_to_ucred` with no peer: pid 0 and the overflow ids.
     pub(crate) const NONE: Creds = Creds {
         pid: 0,

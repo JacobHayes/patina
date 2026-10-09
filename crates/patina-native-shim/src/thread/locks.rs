@@ -43,9 +43,9 @@ const MAX_DEADLK_ITERATIONS: usize = 10;
 /// Who holds a lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Owner {
-    /// A POSIX lock: the process (`current->files`), whichever thread and
-    /// descriptor took it.
-    Process,
+    /// A POSIX lock: the process (`current->files`), by pid, whichever
+    /// thread and descriptor took it.
+    Process(i32),
     /// An OFD lock: the open file description it was taken through.
     Description(DescId),
 }
@@ -319,7 +319,7 @@ impl Locks {
     /// would close a cycle — the blocker's owner waits on a lock whose owner
     /// waits … on a lock of the caller. OFD requests are never checked.
     fn deadlock(&self, caller: Owner, blocker: Lock) -> bool {
-        if caller != Owner::Process {
+        if !matches!(caller, Owner::Process(_)) {
             return false;
         }
         let mut block = blocker;
@@ -329,7 +329,7 @@ impl Locks {
             // lock or request, then what heads its queue.
             let Some(waiter) = self.waiters.iter().rev().find(|waiter| {
                 let on = waiter.behind.map_or(waiter.blocker, |(_, request)| request);
-                waiter.request.owner == block.owner && on.owner == Owner::Process
+                waiter.request.owner == block.owner && matches!(on.owner, Owner::Process(_))
             }) else {
                 return false;
             };
@@ -456,13 +456,17 @@ pub(crate) fn set(file: LockIdentity, request: Lock, wait: bool) -> Result<(), c
 /// Whether the process holds a POSIX lock anywhere: only then does a close
 /// have locks to release.
 pub(crate) fn process_holds_locks() -> bool {
-    lock_state().locks.holds(Owner::Process)
+    lock_state()
+        .locks
+        .holds(Owner::Process(crate::patina_pid()))
 }
 
 /// A close of any descriptor of `file` releases the process's POSIX locks on
 /// it (`locks_remove_posix`).
 pub(crate) fn release_process_locks(file: LockIdentity) {
-    let woken = lock_state().locks.release(file, Owner::Process);
+    let woken = lock_state()
+        .locks
+        .release(file, Owner::Process(crate::patina_pid()));
     wake_all(woken);
 }
 
@@ -516,7 +520,7 @@ mod tests {
         })
     }
 
-    const P: Owner = Owner::Process;
+    const P: Owner = Owner::Process(2);
 
     fn ofd(id: DescId) -> Owner {
         Owner::Description(id)

@@ -106,7 +106,7 @@ impl Info {
         let mut info = Self { words: [0; 16] };
         info.words[0] = u64::from(sig);
         info.words[1] = u64::from(code as u32);
-        info.words[2] = u64::from(crate::registry::IDENTITY_PID)
+        info.words[2] = u64::from(crate::patina_pid() as u32)
             | (u64::from(crate::identity::credential().uid) << 32);
         info
     }
@@ -451,6 +451,7 @@ pub(crate) use delivery::patina_signal_deliver;
 pub(crate) use delivery::{deliver, deliver_saving, refresh_handler_mask};
 use delivery::{fault_entered, install_host_action};
 use delivery::{file_restart, file_temporary_mask, plan_pending};
+pub(super) use generation::Generated;
 #[cfg(any(test, patina_posix_exports))]
 pub(crate) use generation::patina_pthread_kill;
 pub use generation::patina_raw_exit_group;

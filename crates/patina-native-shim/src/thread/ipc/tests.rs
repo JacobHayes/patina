@@ -64,7 +64,7 @@ fn semaphore_operations_apply_all_or_none_in_order() {
     ));
     // Operations on one semaphore apply in sequence.
     assert!(perform(&mut sems, &[op(1, 2, 0), op(1, -1, 0)]).is_ok());
-    assert_eq!(sems.sems[1], (1, PID));
+    assert_eq!(sems.sems[1], (1, pid()));
     assert!(matches!(
         perform(&mut sems, &[op(0, SEMVMX as i16, 0)]),
         Err(Refused::Errno(ERANGE))

@@ -235,7 +235,7 @@ pub(in crate::thread) fn generate(sig: i32) {
         unsafe {
             generate_signal(
                 GenerationTarget::Process {
-                    pid: crate::registry::IDENTITY_PID as i32,
+                    pid: crate::registry::ROOT_PID as i32,
                 },
                 sig,
                 GenerationInfo::User,
@@ -1121,7 +1121,7 @@ fn signalfd_readable_iff_matching_pending() {
         // `ssi_pid`: the sender, the guest itself.
         assert_eq!(
             u32::from_ne_bytes(record[12..16].try_into().unwrap()),
-            crate::registry::IDENTITY_PID
+            crate::registry::ROOT_PID
         );
         assert!(!ready());
         assert_eq!(HANDLERS.load(Ordering::SeqCst), 0);
@@ -1217,7 +1217,7 @@ fn signalfd_watchers_wake_once_only_for_visible_pending() {
             unsafe {
                 generate_signal(
                     GenerationTarget::Thread {
-                        tgid: Some(crate::registry::IDENTITY_PID as i32),
+                        tgid: Some(crate::registry::ROOT_PID as i32),
                         tid: tid_of(ids[0]),
                     },
                     SIGUSR1,

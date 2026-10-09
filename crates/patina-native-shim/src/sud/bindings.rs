@@ -502,6 +502,8 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_gettid, |_, _| {
         crate::process::patina_thread_id() as i64
     }),
+    (Syscall::N_getpid, |_, _| i64::from(crate::patina_pid())),
+    (Syscall::N_getppid, |_, _| i64::from(crate::patina_ppid())),
     // SAFETY: the guest keeps clear_child_tid writable until its task exits.
     (Syscall::N_set_tid_address, |_, a| unsafe {
         crate::thread::signals::patina_set_tid_address(a[0] as *mut i32)

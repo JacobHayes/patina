@@ -355,7 +355,7 @@ fn memory_of(pid: i32) -> Result<(), c_int> {
     match pid {
         0 => Ok(()),
         pid => match crate::identity::lookup(pid) {
-            Some((crate::identity::Process::Guest, _)) => Ok(()),
+            Some((process, _)) if process == crate::identity::Process::current() => Ok(()),
             Some((process, _)) => {
                 if crate::identity::ptrace_may_access(crate::identity::credential(), process) {
                     crate::trap_fatal(&format!(

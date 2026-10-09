@@ -3,7 +3,7 @@
 //! its actual runtime disposition is reviewed. Never infer ENOSYS from novelty.
 
 use super::{Capability, TRAP_PRIVILEGED, TRAP_PROCESS, TRAP_UNMODELED};
-use super::{Disposition, Family, IDENTITY_PID, INIT_PID, Syscall, SyscallRow};
+use super::{Disposition, Family, Syscall, SyscallRow};
 
 use super::linux_row::r;
 

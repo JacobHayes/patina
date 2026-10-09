@@ -1,7 +1,8 @@
 //! The virtual processes' credentials, their place in the process tree, and
 //! the virtual kernel's self-description (`kernel/sys.c`, `kernel/groups.c`,
 //! `kernel/capability.c`): the rows both doors answer from the identities
-//! the runtime models (`registry::IDENTITY_*`, `registry::INIT_PID`).
+//! the runtime models (`registry::IDENTITY_*`, `registry::INIT_PID`,
+//! `registry::ROOT_PID`).
 //!
 //! Each process holds its own credential ([`Credential`], looked up by pid
 //! through [`lookup`] and [`Process::credential`]). The guest's
@@ -27,19 +28,22 @@
 //! `CAP_SETUID`/`CAP_SETGID`), which changes nothing; anything else is
 //! `EPERM`.
 //!
-//! The process tree is a pid namespace of two processes: its init
-//! ([`INIT_PID`], leader of process group 1 and session 1) and the guest
-//! ([`IDENTITY_PID`]), init's child, starting as the leader of its own group
-//! inside init's session, as a program a container's init started. The
-//! guest's group and session are process state its `setpgid`/`setsid` change
-//! under the kernel's rules; init's never change. Init has no signal
-//! handlers and sleeps (see `registry::INIT_PID`).
+//! The process tree is a pid namespace held in one table ([`Process`]): its
+//! init ([`INIT_PID`], leader of process group 1 and session 1) and the guest
+//! processes, today the one the run starts ([`ROOT_PID`]), init's child,
+//! starting as the leader of its own group inside init's session, as a
+//! program a container's init started. A process is named by its pid, and
+//! the caller's is [`Process::current`]; no other code names the root's pid.
+//! A guest process's group and session are process state its
+//! `setpgid`/`setsid` change under the kernel's rules; init's never change.
+//! Init has no signal handlers and sleeps (see `registry::INIT_PID`).
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use crate::SpinMutex;
+use crate::host::hostcoll::HostVec;
 use crate::neg_errno as errno;
-use crate::registry::{Capability, IDENTITY_GID, IDENTITY_PID, IDENTITY_UID, INIT_PID};
+use crate::registry::{Capability, IDENTITY_GID, IDENTITY_UID, INIT_PID, ROOT_PID};
 use crate::{EFAULT, EINVAL, EPERM, ESRCH};
 use std::ffi::c_int;
 
@@ -91,7 +95,7 @@ const CREDENTIAL: Credential = Credential {
 /// Init's credential, root's (`init_cred`): uid/gid 0, no supplementary
 /// group, every capability effective and permitted and in the bounding set,
 /// none inheritable or ambient. It is fixed for the run.
-const ROOT: Credential = Credential {
+const ROOT_CREDENTIAL: Credential = Credential {
     uid: 0,
     gid: 0,
     groups: &[],
@@ -102,39 +106,145 @@ const ROOT: Credential = Credential {
     ambient: 0,
 };
 
-/// The caller's credential (`current_cred`): every caller is a thread of the
-/// guest, so the guest's ([`CREDENTIAL`]).
-pub(crate) const fn credential() -> &'static Credential {
-    Process::Guest.credential()
+/// The caller's credential (`current_cred`): its process's.
+pub(crate) fn credential() -> &'static Credential {
+    Process::current().credential()
 }
 
-const GUEST: i32 = IDENTITY_PID as i32;
 const INIT: i32 = INIT_PID as i32;
 
-/// A process of the virtual pid namespace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Process {
-    Init,
-    Guest,
-}
+/// A process of the virtual pid namespace, named by its pid (its main
+/// thread's id): init or a guest process. Only this module makes one, from
+/// the table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Process(i32);
 
 impl Process {
+    /// The pid namespace's init.
+    pub(crate) const INIT: Process = Process(INIT);
+    /// The guest process the run starts.
+    const ROOT: Process = Process(ROOT_PID as i32);
+
+    /// The process the calling thread belongs to: the run's one guest
+    /// process, until a guest can create another.
+    pub(crate) fn current() -> Process {
+        Process::ROOT
+    }
+
+    /// The process's pid.
+    pub(crate) const fn pid(self) -> i32 {
+        self.0
+    }
+
     /// The process's credential (`__task_cred`): init's is root's
-    /// ([`ROOT`]), the guest's the unprivileged user's ([`CREDENTIAL`]).
+    /// ([`ROOT_CREDENTIAL`]), a guest process's the unprivileged user's
+    /// ([`CREDENTIAL`]).
     pub(crate) const fn credential(self) -> &'static Credential {
-        match self {
-            Process::Init => &ROOT,
-            Process::Guest => &CREDENTIAL,
+        if self.0 == INIT {
+            &ROOT_CREDENTIAL
+        } else {
+            &CREDENTIAL
         }
+    }
+
+    /// The process's parent (`getppid`): init's is none (0), a guest
+    /// process's the one recorded when it was made.
+    pub(crate) fn parent(self) -> i32 {
+        with_table(|table| table.record(self).parent)
+    }
+
+    /// The process's group and session.
+    fn membership(self) -> Membership {
+        with_table(|table| table.record(self).membership)
     }
 
     /// The process's session (`task_session`).
     fn session(self) -> i32 {
-        match self {
-            Process::Init => INIT,
-            Process::Guest => MEMBERSHIP.lock().sid,
-        }
+        self.membership().sid
     }
+}
+
+/// A process's group and session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Membership {
+    pgid: i32,
+    sid: i32,
+}
+
+/// One process of the table.
+struct Record {
+    process: Process,
+    parent: i32,
+    membership: Membership,
+}
+
+/// The pid namespace's processes, in pid order: init and the root process
+/// in fixed storage, so the table is whole before any guest code runs and a
+/// read of it never allocates (an identity row may run in a handler that
+/// interrupted the allocator); later processes in host-allocated storage
+/// (`crate::host::hostcoll`), never the guest's allocator.
+struct Table {
+    first: [Record; 2],
+    later: HostVec<Record>,
+}
+
+impl Table {
+    fn records(&self) -> impl Iterator<Item = &Record> {
+        self.first.iter().chain(self.later.as_slice())
+    }
+
+    fn record(&self, process: Process) -> &Record {
+        self.records()
+            .find(|record| record.process == process)
+            .unwrap_or_else(|| crate::trap_fatal(&format!("no process {} in the table", process.0)))
+    }
+
+    fn record_mut(&mut self, process: Process) -> &mut Record {
+        if let Some(record) = self
+            .first
+            .iter_mut()
+            .find(|record| record.process == process)
+        {
+            return record;
+        }
+        let index = self
+            .later
+            .as_slice()
+            .iter()
+            .position(|record| record.process == process)
+            .unwrap_or_else(|| {
+                crate::trap_fatal(&format!("no process {} in the table", process.0))
+            });
+        self.later.get_mut(index)
+    }
+}
+
+/// Init, and the root process: init's child, leading its own group inside
+/// init's session.
+static TABLE: SpinMutex<Table> = SpinMutex::new(Table {
+    first: [
+        Record {
+            process: Process::INIT,
+            parent: 0,
+            membership: Membership {
+                pgid: INIT,
+                sid: INIT,
+            },
+        },
+        Record {
+            process: Process::ROOT,
+            parent: INIT,
+            membership: Membership {
+                pgid: ROOT_PID as i32,
+                sid: INIT,
+            },
+        },
+    ],
+    later: HostVec::new(),
+});
+
+fn with_table<T>(f: impl FnOnce(&mut Table) -> T) -> T {
+    f(&mut TABLE.lock())
 }
 
 /// `SIGCONT`, which `check_kill_permission` lets through within a session.
@@ -163,14 +273,15 @@ fn kill_permitted(
 }
 
 /// Whether the caller may send `sig` (valid, from user space) to `target`
-/// (`check_kill_permission`): always to its own thread group, the guest;
-/// to init, root's, only a `SIGCONT` while the guest is in init's session
-/// (it starts there, and leaves by `setsid`).
+/// (`check_kill_permission`): always to its own thread group; to init,
+/// root's, only a `SIGCONT` while the caller is in init's session (the root
+/// process starts there, and leaves by `setsid`).
 pub(crate) fn may_signal(target: Process, sig: i32) -> bool {
-    target == Process::Guest
+    let caller = Process::current();
+    target == caller
         || kill_permitted(
-            credential(),
-            Process::Guest.session(),
+            caller.credential(),
+            caller.session(),
             target.credential(),
             target.session(),
             sig,
@@ -178,41 +289,31 @@ pub(crate) fn may_signal(target: Process, sig: i32) -> bool {
 }
 
 /// `__ptrace_may_access` (kernel/ptrace.c) of a caller holding `caller` to
-/// `target`, in any mode: the caller's own thread group, the guest, always;
+/// `target`, in any mode: the caller's own thread group always;
 /// another process when its real, effective and saved ids all equal the
 /// caller's (each credential holds one uid and one gid), or with
 /// `CAP_SYS_PTRACE`. Init is root's, so the guest reaches it only through
 /// the capability (the kernel's further refusal of a non-dumpable target
 /// passes with the capability too, so it never decides an answer here).
 pub(crate) fn ptrace_may_access(caller: &Credential, target: Process) -> bool {
-    target == Process::Guest
+    target == Process::current()
         || caller.same_ids(target.credential())
         || caller.capable(Capability::SysPtrace)
 }
-
-/// The guest's process group and session.
-struct Membership {
-    pgid: i32,
-    sid: i32,
-}
-
-static MEMBERSHIP: SpinMutex<Membership> = SpinMutex::new(Membership {
-    pgid: GUEST,
-    sid: INIT,
-});
 
 /// `find_task_by_vpid`: the process a pid (or one of its thread ids) names,
 /// and whether it names the process's main thread (its thread-group leader).
 pub(crate) fn lookup(pid: i32) -> Option<(Process, bool)> {
     if pid == INIT {
-        return Some((Process::Init, true));
+        return Some((Process::INIT, true));
     }
-    crate::thread::live_tid(pid).then_some((Process::Guest, pid == GUEST))
+    let caller = Process::current();
+    crate::thread::live_tid(pid).then_some((caller, pid == caller.0))
 }
 
-/// The guest's process group.
+/// The caller's process group.
 pub(crate) fn pgid() -> i32 {
-    MEMBERSHIP.lock().pgid
+    Process::current().membership().pgid
 }
 
 /// The processes `kill(pid, …)` reaches that a signal can be delivered to
@@ -231,9 +332,9 @@ pub(crate) fn signal_target(pid: i32, groups: bool) -> Option<Process> {
         // The caller's group holds the caller (and init, when the guest
         // joined group 1: a group's signal succeeds when any member takes
         // it, and the caller always does).
-        0 => Some(Process::Guest),
+        0 => Some(Process::current()),
         -1 => None,
-        group => (group.checked_neg() == Some(pgid())).then_some(Process::Guest),
+        group => (group.checked_neg() == Some(pgid())).then_some(Process::current()),
     }
 }
 
@@ -514,12 +615,13 @@ pub(crate) fn getpgrp() -> i64 {
 /// (`ESRCH`) and be named by its main thread (`EINVAL`); the caller has no
 /// children, so any process but itself is `ESRCH`; a session leader cannot
 /// move (`EPERM`); and a group other than its own pid must exist in the
-/// caller's session (`EPERM`) — group 1 does while the guest is in init's
-/// session, and the guest's current group always does.
+/// caller's session (`EPERM`) — group 1 does while the caller is in init's
+/// session, and the caller's current group always does.
 pub(crate) fn setpgid(pid: i32, group: i32) -> i64 {
+    let caller = Process::current();
     // 0 is the caller's process, named by its leader's pid
     // (`task_pid_vnr(group_leader)`), whichever thread calls.
-    let pid = if pid == 0 { GUEST } else { pid };
+    let pid = if pid == 0 { caller.0 } else { pid };
     let group = if group == 0 { pid } else { group };
     if group < 0 {
         return errno(EINVAL);
@@ -530,64 +632,67 @@ pub(crate) fn setpgid(pid: i32, group: i32) -> i64 {
     if !leader {
         return errno(EINVAL);
     }
-    if process != Process::Guest {
+    if process != caller {
         return errno(ESRCH);
     }
-    let mut membership = MEMBERSHIP.lock();
-    if membership.sid == GUEST {
-        return errno(EPERM);
-    }
-    let exists_in_session = group == membership.pgid || (group == INIT && membership.sid == INIT);
-    if group != GUEST && !exists_in_session {
-        return errno(EPERM);
-    }
-    membership.pgid = group;
-    0
+    with_table(|table| {
+        let membership = &mut table.record_mut(caller).membership;
+        if membership.sid == caller.0 {
+            return errno(EPERM);
+        }
+        let exists_in_session =
+            group == membership.pgid || (group == INIT && membership.sid == INIT);
+        if group != caller.0 && !exists_in_session {
+            return errno(EPERM);
+        }
+        membership.pgid = group;
+        0
+    })
 }
 
 /// The group and session of `pid` (0: the caller), or `ESRCH`.
-fn membership_of(pid: i32) -> Result<(i32, i32), i64> {
+fn membership_of(pid: i32) -> Result<Membership, i64> {
     let process = if pid == 0 {
-        Process::Guest
+        Process::current()
     } else {
         lookup(pid).ok_or(errno(ESRCH))?.0
     };
-    Ok(match process {
-        Process::Init => (INIT, INIT),
-        Process::Guest => {
-            let membership = MEMBERSHIP.lock();
-            (membership.pgid, membership.sid)
-        }
-    })
+    Ok(process.membership())
 }
 
 /// `getpgid(pid)`: the group of any process (0: the caller).
 pub(crate) fn getpgid(pid: i32) -> i64 {
-    membership_of(pid).map_or_else(|errno| errno, |(pgid, _)| i64::from(pgid))
+    membership_of(pid).map_or_else(|errno| errno, |membership| i64::from(membership.pgid))
 }
 
 /// `getsid(pid)`: the session of any process (0: the caller).
 pub(crate) fn getsid(pid: i32) -> i64 {
-    membership_of(pid).map_or_else(|errno| errno, |(_, sid)| i64::from(sid))
+    membership_of(pid).map_or_else(|errno| errno, |membership| i64::from(membership.sid))
 }
 
-/// Whether the guest leads its session (`current->signal->leader`): what
+/// Whether the caller leads its session (`current->signal->leader`): what
 /// decides whether opening a terminal could make it the controlling one.
 pub(crate) fn session_leader() -> bool {
-    MEMBERSHIP.lock().sid == GUEST
+    let caller = Process::current();
+    caller.session() == caller.0
 }
 
 /// `setsid` (`ksys_setsid`): a session leader, or a process whose pid names
-/// a group (a group leader), is `EPERM`; otherwise the guest leads a new
+/// a group (a group leader), is `EPERM`; otherwise the caller leads a new
 /// session and group, both its pid, which it answers.
 pub(crate) fn setsid() -> i64 {
-    let mut membership = MEMBERSHIP.lock();
-    if membership.sid == GUEST || membership.pgid == GUEST {
-        return errno(EPERM);
-    }
-    membership.sid = GUEST;
-    membership.pgid = GUEST;
-    i64::from(GUEST)
+    let caller = Process::current();
+    with_table(|table| {
+        let membership = &mut table.record_mut(caller).membership;
+        if membership.sid == caller.0 || membership.pgid == caller.0 {
+            return errno(EPERM);
+        }
+        *membership = Membership {
+            pgid: caller.0,
+            sid: caller.0,
+        };
+        i64::from(caller.0)
+    })
 }
 
 /// `struct new_utsname`: six 65-byte fields.
@@ -772,6 +877,8 @@ pub(crate) unsafe fn sysinfo(out: *mut Sysinfo) -> i64 {
 mod tests {
     use super::*;
 
+    const GUEST: i32 = ROOT_PID as i32;
+
     #[test]
     fn set_ids_succeed_only_for_the_ids_held() {
         let own = IDENTITY_UID;
@@ -901,7 +1008,7 @@ mod tests {
         }
 
         let guest = credential();
-        let root = Process::Init.credential();
+        let root = Process::INIT.credential();
         let with = |capability: Capability| Credential {
             effective: capability.bit(),
             permitted: capability.bit(),
@@ -921,16 +1028,28 @@ mod tests {
             usr1
         ));
         assert!(kill_permitted(guest, GUEST, guest, INIT, usr1));
-        assert!(may_signal(Process::Guest, usr1));
+        assert!(may_signal(Process::ROOT, usr1));
 
-        assert!(ptrace_may_access(guest, Process::Guest));
-        assert!(!ptrace_may_access(guest, Process::Init));
-        assert!(!ptrace_may_access(&with(Capability::Kill), Process::Init));
+        assert!(ptrace_may_access(guest, Process::ROOT));
+        assert!(!ptrace_may_access(guest, Process::INIT));
+        assert!(!ptrace_may_access(&with(Capability::Kill), Process::INIT));
         assert!(ptrace_may_access(
             &with(Capability::SysPtrace),
-            Process::Init
+            Process::INIT
         ));
-        assert!(ptrace_may_access(root, Process::Init));
+        assert!(ptrace_may_access(root, Process::INIT));
+    }
+
+    #[test]
+    fn the_table_holds_init_and_the_root_process() {
+        let root = Process::current();
+        assert_eq!((root.pid(), root.parent()), (GUEST, INIT));
+        assert_eq!((Process::INIT.pid(), Process::INIT.parent()), (INIT, 0));
+        assert_eq!(lookup(INIT), Some((Process::INIT, true)));
+        assert_eq!(root.credential(), &CREDENTIAL);
+        assert_eq!(Process::INIT.credential(), &ROOT_CREDENTIAL);
+        assert_eq!(crate::patina_pid(), GUEST);
+        assert_eq!(crate::patina_ppid(), INIT);
     }
 
     /// The one test that moves the guest's group and session: the tree's
@@ -961,12 +1080,14 @@ mod tests {
         assert_eq!(setpgid(0, 0), errno(EPERM));
         assert_eq!(setsid(), errno(EPERM));
         assert_eq!(signal_target(-1, true), None);
-        assert_eq!(signal_target(-GUEST, true), Some(Process::Guest));
-        assert_eq!(signal_target(INIT, false), Some(Process::Init));
-        *MEMBERSHIP.lock() = Membership {
-            pgid: GUEST,
-            sid: INIT,
-        };
+        assert_eq!(signal_target(-GUEST, true), Some(Process::ROOT));
+        assert_eq!(signal_target(INIT, false), Some(Process::INIT));
+        with_table(|table| {
+            table.record_mut(Process::ROOT).membership = Membership {
+                pgid: GUEST,
+                sid: INIT,
+            };
+        });
     }
 
     #[test]

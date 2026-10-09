@@ -37,7 +37,7 @@
 
 use super::*;
 use crate::mem::{PROT_EXEC, PROT_READ, PROT_WRITE};
-use crate::registry::{IDENTITY_PID, KERNEL_CONFIG};
+use crate::registry::KERNEL_CONFIG;
 use crate::{E2BIG, EEXIST, EFAULT, EFBIG, EINTR, ENOENT, ERANGE};
 
 const IPC_PRIVATE: i32 = 0;
@@ -419,7 +419,10 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-const PID: i32 = IDENTITY_PID as i32;
+/// The caller's pid, which the IPC objects record as their last user.
+fn pid() -> i32 {
+    crate::patina_pid()
+}
 
 /// Where a task waits on an IPC object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

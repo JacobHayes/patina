@@ -141,13 +141,13 @@ pub unsafe extern "C" fn patina_prlimit(
     // SAFETY: per this function's contract.
     let new = (!new.is_null()).then(|| unsafe { new.read_unaligned() });
     let process = match pid {
-        0 => Process::Guest,
+        0 => Process::current(),
         pid => match crate::identity::lookup(pid) {
             Some((process, _)) => process,
             None => return -i64::from(crate::ESRCH),
         },
     };
-    if process != Process::Guest {
+    if process != Process::current() {
         let caller = crate::identity::credential();
         if !caller.same_ids(process.credential()) && !caller.capable(Capability::SysResource) {
             return -i64::from(crate::EPERM);
