@@ -31,6 +31,7 @@
 #include <time.h>
 
 #ifdef __linux__
+#include <link.h>
 #include <linux/if_link.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>

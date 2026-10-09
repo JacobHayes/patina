@@ -1,5 +1,6 @@
 //! Native import auditing and inert undefined-weak bindings.
 
+use crate::early_init::early_init_escapes;
 use crate::import_policy::{
     NativeFormat, NativeImportDecision, UNKNOWN_IMPORT_CATEGORY, native_import_decision,
     normalize_native_symbol,
@@ -24,6 +25,9 @@ impl NativeAudit {
     pub fn audit(bytes: &[u8], allow: &BTreeSet<String>) -> Result<Self, TargetError> {
         let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
         let format = NativeFormat::from_binary(file.format())?;
+        if unauditable_elf(&file) {
+            return Err(TargetError::UnauditableNativeElf);
+        }
         let mut imports = file
             .imports()
             .map_err(TargetError::NativeParse)?
@@ -69,6 +73,7 @@ impl NativeAudit {
                 .into_iter()
                 .filter(|escape| !native_escape_is_host_identity(escape)),
         );
+        denied.extend(early_init_escapes(&file, &provenance));
         if !denied.is_empty() {
             return Err(TargetError::UnsupportedNativeImports(denied));
         }
@@ -77,6 +82,25 @@ impl NativeAudit {
             inert_weak_imports,
         })
     }
+}
+
+/// Whether an ELF lacks what the audit reads: imports come from the dynamic
+/// symbol table and code ranges from the section headers, while the loader
+/// needs neither. A binary whose section headers were removed would otherwise
+/// pass with no imports and no scanned code. An `ET_REL` object is refused
+/// later, by name, and a Mach-O is never judged here.
+fn unauditable_elf(file: &object::File<'_>) -> bool {
+    use object::read::elf::ProgramHeader;
+    let object::File::Elf64(elf) = file else {
+        return false;
+    };
+    let endian = elf.endian();
+    let dynamic = elf
+        .elf_program_headers()
+        .iter()
+        .any(|header| header.p_type(endian) == object::elf::PT_DYNAMIC);
+    file.kind() != object::ObjectKind::Relocatable
+        && (file.sections().next().is_none() || dynamic && file.dynamic_symbol_table().is_none())
 }
 
 /// The normalized names this binary references *only* through undefined weak

@@ -837,6 +837,253 @@ mod linux {
     }
 }
 
+// Code that runs before `__libc_start_main`: a shared library's constructor
+// (from `_dl_init`, before the executable's own constructors) and a guest's
+// own `.preinit_array` entry. Containment is armed from the shim's preinit
+// entry, which must be the executable's only one.
+#[cfg(target_os = "linux")]
+mod early_init {
+    use super::*;
+    use std::process::Command;
+    use std::time::Duration;
+
+    fn dso_guest(link: CLink) -> (tempfile::TempDir, Guest) {
+        let libs = tempfile::tempdir().unwrap();
+        let library = assert_build_c_library("dso_ctor_escape.c", libs.path());
+        let rpath = format!("-Wl,-rpath,{}", libs.path().display());
+        let flags = [library.to_str().unwrap(), rpath.as_str()];
+        let guest = assert_build_c_guest_with_flags("dso_ctor_probe.c", link, &flags);
+        (libs, guest)
+    }
+
+    // An inline syscall or counter read in a library constructor lies outside
+    // the main executable's text: a named stop, never a host effect.
+    #[test]
+    fn library_constructor_escapes_stop_by_name() {
+        let (_libs, g) = dso_guest(CLink::PosixShim);
+        if kernel_supports(KernelFeature::Sud) {
+            g.assert_internal_fatal(
+                &["syscall"],
+                &["SUD: trapped a syscall outside the main executable text"],
+            );
+        }
+        if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Tsc) {
+            g.assert_internal_fatal(
+                &["rdtsc"],
+                &["timestamp-counter read the trap does not answer"],
+            );
+        }
+    }
+
+    // Without syscall-user-dispatch nothing traps a library's inline syscall,
+    // and the pre-run scan reads only the executable: the documented residual
+    // (ESCAPE-CLASSES, residual 11). The host answers, where the virtual
+    // kernel's getppid would answer init's pid, 1.
+    #[test]
+    fn library_syscall_without_sud_is_the_documented_residual() {
+        let (_libs, g) = dso_guest(CLink::PosixShimWithoutSud);
+        let (out, _trace) = g.record_standalone(&["syscall"]);
+        let out = assert_success(out);
+        // The guest replaced the launching shell, so its host parent is this
+        // test process.
+        let expected = format!(
+            "DSO_CTOR_RESULT mode=syscall ran=1 value={} ",
+            std::process::id()
+        );
+        let line = text(&out.stdout);
+        assert!(line.starts_with(&expected), "{line}");
+    }
+
+    /// A CPU other than the virtual CPU 0 this process may run on.
+    fn allowed_cpu_other_than_zero() -> Option<usize> {
+        // SAFETY: an all-zero cpu_set_t is empty; sched_getaffinity fills it.
+        let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::cpu_set_t>();
+        // SAFETY: `set` is a writable cpu_set_t of `size` bytes.
+        if unsafe { libc::sched_getaffinity(0, size, &mut set) } != 0 {
+            return None;
+        }
+        // SAFETY: `set` is initialized and every index is within CPU_SETSIZE.
+        (1..libc::CPU_SETSIZE as usize).find(|&cpu| unsafe { libc::CPU_ISSET(cpu, &set) })
+    }
+
+    // A library constructor already reads the virtual CPU from glibc's rseq
+    // area, even on a host CPU other than 0.
+    #[test]
+    fn library_constructor_reads_the_virtual_cpu() {
+        let Some(cpu) = allowed_cpu_other_than_zero() else {
+            eprintln!("library_constructor_reads_the_virtual_cpu: no allowed CPU but 0, not run");
+            return;
+        };
+        let (_libs, g) = dso_guest(CLink::PosixShim);
+        let mut command = Command::new("taskset");
+        command
+            .env_clear()
+            .arg("-c")
+            .arg(cpu.to_string())
+            .arg(&g.binary)
+            .arg("rseq")
+            .envs([("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")]);
+        let out = common::output_with_deadline(&mut command, Duration::from_secs(20))
+            .expect("rseq probe exceeded 20s");
+        let out = assert_success(out);
+        assert_eq!(
+            text(&out.stdout),
+            "DSO_CTOR_RESULT mode=rseq ran=1 value=0 main_cpu=0\n"
+        );
+    }
+
+    // The C++ runtime's own constructor runs before the runtime is installed,
+    // through interposed calls; the program then runs on it.
+    #[test]
+    fn cxx_guest_runs_on_shared_libstdcxx() {
+        let g = assert_build_cxx_guest("cxx_iostream_probe.cc");
+        let out = assert_standalone_success(
+            &g.binary,
+            &[],
+            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")],
+        );
+        assert_eq!(text(&out.stdout), "CXX_IOSTREAM_RESULT word=patina-42\n");
+        assert!(
+            text(&out.stderr).contains("CXX_IOSTREAM_STDERR ok"),
+            "{}",
+            text(&out.stderr)
+        );
+    }
+
+    // A guest's own preinit entry would run before the shim's (link order):
+    // the audit refuses it before anything runs.
+    #[test]
+    fn guest_preinit_entry_is_refused() {
+        let g = Guest::assert_build("preinit_entry_probe.rs");
+        let out = g.assert_run_refused(1, &["early-init"]);
+        assert!(!text(&out.stdout).contains("PREINIT_ENTRY_RAN"));
+        assert_refused(g.command("audit", &[]), &["early-init"]);
+        // The loader finds the array through the dynamic table, whatever its
+        // section is named, and so does the audit.
+        let renamed = g.dir.path().join("renamed");
+        assert_success(
+            Command::new("objcopy")
+                .arg("--rename-section")
+                .arg(".preinit_array=.renamed_init")
+                .arg(&g.binary)
+                .arg(&renamed)
+                .output()
+                .unwrap(),
+        );
+        let renamed = Guest {
+            dir: tempfile::tempdir().unwrap(),
+            binary: renamed,
+        };
+        assert_refused(renamed.command("audit", &[]), &["early-init"]);
+    }
+
+    // Stripping the symbol table leaves the marker the shim keeps beside its
+    // entry: the shim's entry is still attributed (also through a collecting
+    // link), and a guest's own entry is still refused.
+    #[test]
+    fn stripped_guests_keep_their_attribution() {
+        let clean = assert_build_c_guest_with_flags(
+            "envp_probe.c",
+            CLink::PosixShim,
+            &["-s", "-Wl,--gc-sections"],
+        );
+        let audit = clean.command("audit", &["--raw"]);
+        let report = format!("{}{}", text(&audit.stdout), text(&audit.stderr));
+        assert!(!report.contains("early-init"), "{report}");
+        let entry = guest_source("preinit_entry_probe.c");
+        let foreign = assert_build_c_guest_with_flags(
+            "envp_probe.c",
+            CLink::PosixShim,
+            &["-s", entry.to_str().unwrap()],
+        );
+        // Linked after the shim's object here, so the second entry.
+        assert_refused(
+            foreign.command("audit", &["--raw"]),
+            &["preinit_array[1] (early-init)"],
+        );
+    }
+
+    // The shim proves its entry's place at run time from its own loaded code,
+    // trusting nothing the binary says: an entry beside it stops the run
+    // before that entry runs.
+    #[test]
+    fn an_entry_beside_the_shims_stops_the_run() {
+        let entry = guest_source("preinit_entry_probe.c");
+        let g = assert_build_c_guest_with_flags(
+            "envp_probe.c",
+            CLink::PosixShim,
+            &[entry.to_str().unwrap()],
+        );
+        g.assert_internal_fatal(
+            &[],
+            &["early-init: the executable's preinit array holds an entry beside the shim's"],
+        );
+    }
+
+    /// Set a linked ELF's `DT_PREINIT_ARRAYSZ` to 0: the loader then runs no
+    /// preinit entry, and the audit, reading the same table, sees none.
+    fn empty_the_preinit_array(binary: &std::path::Path) {
+        use object::read::elf::{Dyn, FileHeader, ProgramHeader};
+        let mut bytes = std::fs::read(binary).unwrap();
+        let header = object::elf::FileHeader64::<object::Endianness>::parse(&*bytes).unwrap();
+        let endian = header.endian().unwrap();
+        let dynamic = header
+            .program_headers(endian, &*bytes)
+            .unwrap()
+            .iter()
+            .find(|segment| segment.p_type(endian) == object::elf::PT_DYNAMIC)
+            .expect("a dynamically linked guest");
+        let start = dynamic.p_offset(endian) as usize;
+        let entries = dynamic.dynamic(endian, &*bytes).unwrap().unwrap();
+        let index = entries
+            .iter()
+            .position(|entry| entry.d_tag(endian) == object::elf::DT_PREINIT_ARRAYSZ)
+            .expect("DT_PREINIT_ARRAYSZ");
+        let value = start + index * 16 + 8;
+        bytes[value..value + 8].fill(0);
+        std::fs::write(binary, bytes).unwrap();
+    }
+
+    // A crafted image the audit cannot see through (its preinit array emptied,
+    // so the shim's entry never runs) still stops at the door, by name.
+    #[test]
+    fn a_shim_entry_the_loader_never_ran_stops_the_run() {
+        let g = assert_build_c_guest("envp_probe.c", CLink::PosixShim);
+        empty_the_preinit_array(&g.binary);
+        let audit = g.command("audit", &[]);
+        let report = format!("{}{}", text(&audit.stdout), text(&audit.stderr));
+        assert!(!report.contains("early-init"), "{report}");
+        g.assert_internal_fatal(
+            &[],
+            &["early-init: the loader ran the executable's preinit array without the shim's entry"],
+        );
+    }
+
+    /// Remove a linked ELF's section-header table, which the loader never
+    /// reads: the image still runs.
+    fn drop_section_headers(binary: &std::path::Path) {
+        let mut bytes = std::fs::read(binary).unwrap();
+        bytes[0x28..0x30].fill(0); // e_shoff
+        bytes[0x3c..0x40].fill(0); // e_shnum, e_shstrndx
+        std::fs::write(binary, bytes).unwrap();
+    }
+
+    // Without section headers the audit would see no imports and scan no
+    // code: refused before anything runs, the shim's guests and a stock
+    // program alike.
+    #[test]
+    fn an_elf_without_section_headers_is_refused() {
+        for link in [CLink::PosixShim, CLink::Unlinked] {
+            let g = assert_build_c_guest("envp_probe.c", link);
+            drop_section_headers(&g.binary);
+            let out = g.assert_run_refused(1, &["without section headers"]);
+            assert!(!text(&out.stdout).contains("NATIVE_ENVP_RESULT"));
+            assert_refused(g.command("audit", &["--raw"]), &["without section headers"]);
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod darwin {
     use super::*;

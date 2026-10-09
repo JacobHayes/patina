@@ -2,12 +2,16 @@
 //! (`c/posix/init.c`), and the glibc cleanup records its main wrapper and
 //! pthread_once keep in their own frames.
 //!
-//! The executable's strong `__libc_start_main` runs before glibc gets control,
-//! so it sees the natural main-return path that glibc's hidden `exit` alias
-//! hides from the `exit` interposer. Everything here runs before the
-//! constructors: no guest allocator has initialized, so nothing here allocates
-//! through Rust's global allocator, and host vehicles are resolved through the
-//! private `__real_dlsym` resolver, never interposed names.
+//! The process is prepared from the main executable's `.preinit_array`
+//! (`c/posix/init.c`), which glibc's `_dl_init` runs before every shared
+//! library's constructor; a static binary, whose preinit array glibc runs
+//! later, is prepared by the strong `__libc_start_main` instead. That door runs
+//! before glibc gets control, so it sees the natural main-return path that
+//! glibc's hidden `exit` alias hides from the `exit` interposer. Everything
+//! here runs before any constructor: no guest allocator has initialized, so
+//! nothing here allocates through Rust's global allocator, and host vehicles
+//! are resolved through the private `__real_dlsym` resolver, never interposed
+//! names.
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -45,14 +49,16 @@ pub(super) unsafe fn env_has(envp: *const *const c_char, name: &[u8]) -> bool {
     false
 }
 
-/// Prepare the process for guest code, in this order: the saved host envp,
-/// panic containment, the program name, syscall-user-dispatch, the counter
-/// trap, the fault front handler, transparent huge pages off and the host's
-/// descriptor budget. Answers glibc's own `__libc_start_main`.
+/// Prepare the process for guest code, once, before any constructor, in this
+/// order: the saved host envp, panic containment, the program name,
+/// syscall-user-dispatch, the counter trap, the fault front handler,
+/// transparent huge pages off and the host's descriptor budget. Answers
+/// glibc's own `__libc_start_main`.
 ///
 /// # Safety
-/// The kernel's argc/argv, from the C door; `sud_probe` 0 only in the
-/// acceptance object that exercises the unavailable-kernel branch.
+/// The kernel's argc/argv, from the C preinit entry (or the door, for a static
+/// binary); `sud_probe` 0 only in the acceptance object that exercises the
+/// unavailable-kernel branch.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_start_prepare(
     argc: c_int,
@@ -123,6 +129,26 @@ pub unsafe extern "C" fn patina_start_prepare(
     }
     // SAFETY: glibc's __libc_start_main.
     unsafe { core::mem::transmute::<*mut c_void, LibcStartMain>(real) }
+}
+
+/// A preinit array the shim's entry does not own, found at run time from the
+/// image itself (`c/posix/init.c`): 1, the loader ran the array and the shim's
+/// entry was not in it; 2, the entry ran beside another. The pre-run audit
+/// refuses both (`early-init`); a binary reaching this crafted what the audit
+/// read. Containment is armed either way (the door or the entry prepared it).
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_startup_refusal(reason: c_int) -> ! {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::trap_fatal(match reason {
+        1 => {
+            "early-init: the loader ran the executable's preinit array without the shim's entry, \
+             so shared-library constructors ran before containment was armed"
+        }
+        _ => {
+            "early-init: the executable's preinit array holds an entry beside the shim's, which \
+             runs outside containment"
+        }
+    })
 }
 
 type CleanupPush =
@@ -198,4 +224,5 @@ core::arch::global_asm!(
     ".hidden patina_cleanup_push",
     ".hidden patina_cleanup_pop",
     ".hidden patina_main_exited",
+    ".hidden patina_startup_refusal",
 );
