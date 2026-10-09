@@ -15,7 +15,9 @@
 //! finished (flushed just before, dropped after): teardown runs in host
 //! order.
 //!
-//! Inert for now: the runtime totals them, and nothing reads them.
+//! The runtime moves virtual time by what they cost, and the CPU clocks,
+//! resource usage and CPU-time timers read the totals. An escalation a
+//! call's poll earns is applied as that call ends ([`finish_call`]).
 
 use std::cell::Cell;
 
@@ -142,6 +144,9 @@ thread_local! {
     /// The class the innermost live guest call was counted as, until it
     /// parks ([`parked`]) or returns.
     static CURRENT: Cell<Option<ChargeClass>> = const { Cell::new(None) };
+    /// An escalation the running call's poll earned, applied as the call
+    /// ends ([`finish_call`]).
+    static ESCALATION: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The call a door's entry began ([`begin`]), handed back when it returns
@@ -234,6 +239,10 @@ pub(crate) fn end(began: Began) {
 /// natively (a futex wait), so it is charged one system call more, once per
 /// call; every other call's charge already covers its wait.
 pub(crate) fn parked() {
+    // The call's escalation first, while it is still the running call.
+    if let Some(class) = CURRENT.with(Cell::get) {
+        finish_call(class);
+    }
     if CURRENT.with(|current| current.replace(None)) == Some(ChargeClass::Sync) {
         count(ChargeClass::Syscall);
     }
@@ -264,17 +273,54 @@ fn pending() -> bool {
     OWED.with(|owed| owed.iter().any(|counter| counter.get() != 0))
 }
 
-/// Hand this thread's counted calls to the runtime, charged to its task.
-/// Calls a thread counts once its task (or `main`) has finished are teardown
-/// in host order: they are dropped here, never charged. Allocation-free on
-/// the runtime side (`Context::charge_calls`), since the counter trap
-/// reaches it from a signal handler.
+/// Whether this thread's calls are teardown, never charged: its task (or
+/// `main`) has finished.
+pub(crate) fn silenced() -> bool {
+    crate::thread::charges_silenced()
+}
+
+/// Hand this thread's counted calls to the runtime, charged to its task
+/// (`Context::accrue_calls`), their time carried: a gateway may sit between
+/// a wake decision and the wake, which an expiry would make stale. The door's
+/// own gateway (`with_context`) shows the carried time before the door's
+/// work. Calls a thread counts once its task (or `main`) has finished are
+/// teardown in host order: they are dropped here, never charged.
+/// Allocation-free on the runtime side, since the counter trap reaches it
+/// from a signal handler.
 pub(crate) fn flush(context: &mut Context) {
     let counts = take();
-    if counts.is_empty() || crate::thread::charges_silenced() {
+    if counts.is_empty() || silenced() {
         return;
     }
-    context.charge_calls(crate::thread::charge_task(), counts);
+    context.accrue_calls(crate::thread::charge_task(), counts);
+}
+
+/// After a gateway's Context call: an escalation the call's poll earned
+/// (`Context::take_poll_streak`) is this thread's to apply, as the guest
+/// call that made the poll ends ([`finish_call`]).
+pub(crate) fn note_streak(context: &mut Context) {
+    if context.take_poll_streak() {
+        ESCALATION.with(|owed| owed.set(true));
+    }
+}
+
+/// Whether the running guest call owes an escalation ([`finish_call`]).
+pub(crate) fn escalation_owed() -> bool {
+    ESCALATION.with(Cell::get)
+}
+
+/// The running guest call, of `class`, ends (it returns, parks, or is the
+/// counter trap's read): apply an escalation one of its polls earned, to
+/// this thread's task, as the call's class, after all its reads
+/// (`Context::escalate_call`).
+pub(crate) fn finish_call(class: ChargeClass) {
+    if !ESCALATION.with(|owed| owed.replace(false)) || silenced() {
+        return;
+    }
+    // A refusal (frozen-clock churn) is fatal in the gateway itself.
+    let _ = crate::with_context_raw(|context| {
+        context.escalate_call(crate::thread::charge_task(), class)
+    });
 }
 
 /// Hand this thread's counted calls over now, before it goes silent. The

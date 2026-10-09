@@ -184,11 +184,13 @@ unsafe extern "C" fn getrusage(who: c_int, usage: *mut libc::rusage) -> c_int {
         unsafe {
             ptr::write_bytes(usage, 0, 1);
             if who == libc::RUSAGE_SELF {
-                let mut nanos = 0;
-                if crate::patina_cpu_time_nanos(&mut nanos) == 0 {
-                    (*usage).ru_utime.tv_sec = (nanos / 1_000_000_000) as libc::time_t;
-                    (*usage).ru_utime.tv_usec = (nanos % 1_000_000_000 / 1000) as libc::suseconds_t;
-                }
+                let time = crate::time_abi::cpu_time();
+                let value = |nanos: u64| libc::timeval {
+                    tv_sec: (nanos / 1_000_000_000) as libc::time_t,
+                    tv_usec: (nanos % 1_000_000_000 / 1000) as libc::suseconds_t,
+                };
+                (*usage).ru_utime = value(time.user_ns);
+                (*usage).ru_stime = value(time.system_ns);
             }
         }
         0

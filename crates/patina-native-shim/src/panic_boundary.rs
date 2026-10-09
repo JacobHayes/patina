@@ -71,6 +71,9 @@ pub(crate) struct PanicScope {
     /// The guest call this entry began, if it took the thread from guest
     /// code as one.
     call: Option<crate::charge::Began>,
+    /// The class of that call, whose end applies an escalation its polls
+    /// earned (`crate::charge::finish_call`).
+    charged: Option<ChargeClass>,
     #[cfg(not(test))]
     panicking_on_entry: bool,
     // Ownership belongs to the calling host thread, never another thread.
@@ -142,9 +145,8 @@ impl PanicScope {
         // or the first one a trap holder makes for it (a trapped system call,
         // a libc door its C thunk holds the thread around): the holder's own
         // C is glue.
-        let call = charge
-            .filter(|_| value && matches!(previous, Owner::Guest | Owner::Exit))
-            .map(crate::charge::begin);
+        let charged = charge.filter(|_| value && matches!(previous, Owner::Guest | Owner::Exit));
+        let call = charged.map(crate::charge::begin);
         #[cfg(target_os = "linux")]
         let (previous_sp, previous_entry) = (GUEST_SP.get(), ENTRY.get().0);
         #[cfg(target_os = "linux")]
@@ -169,6 +171,7 @@ impl PanicScope {
         Self {
             previous,
             call,
+            charged,
             #[cfg(target_os = "linux")]
             previous_sp,
             #[cfg(target_os = "linux")]
@@ -210,6 +213,13 @@ impl Drop for PanicScope {
                 b"patina native shim panic: unwinding an owned boundary\n",
             );
             crate::host_abort();
+        }
+        // The guest call ends here: an escalation its polls earned is
+        // applied first, while it is still the running call.
+        if let Some(class) = self.charged
+            && crate::charge::escalation_owed()
+        {
+            crate::charge::finish_call(class);
         }
         if let Some(call) = self.call {
             crate::charge::end(call);

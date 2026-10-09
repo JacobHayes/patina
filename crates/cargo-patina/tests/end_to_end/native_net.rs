@@ -216,8 +216,17 @@ fn main() {
             line.contains(r#"defined=Ok("10.0.0.5")"#) && line.contains("undefined=Err"),
             "host table did not drive resolution: {line}"
         );
+        // Only the resolution's own calls' charges (under a microsecond each).
+        let elapsed_in = |line: &str| -> u64 {
+            line.rsplit_once("elapsed_nanos=")
+                .unwrap()
+                .1
+                .parse()
+                .unwrap()
+        };
+        let charged = elapsed_in(&line);
         assert!(
-            line.contains("elapsed_nanos=0"),
+            charged < 10_000,
             "a knob-free resolution must cost no virtual time: {line}"
         );
 
@@ -269,8 +278,9 @@ fn main() {
             ],
         );
         let delayed_line = stdout_line_with(&delayed, "DNS_RESULT");
+        // The latency, and the calls' charges it does not already cover.
         assert!(
-            delayed_line.contains("elapsed_nanos=1000000"),
+            (1_000_000..1_000_000 + 10_000).contains(&elapsed_in(&delayed_line)),
             "the DNS latency knob was not observable in the guest: {delayed_line}"
         );
 
@@ -372,9 +382,10 @@ fn main() {
                 .expect("elapsed nanos")
         };
 
-        // Control: a zero-latency link completes the round trip in no virtual time.
+        // Control: a zero-latency link completes the round trip in the calls'
+        // own charges (under a microsecond each).
         let clean = invoke(workspace, &["run", &bin, "--seed", "5"]);
-        assert_eq!(elapsed_of(&clean), 0);
+        assert!(elapsed_of(&clean) < 10_000);
 
         // MUST delay: each of the two segments (request and reply) carries the base
         // latency, so the round trip costs at least twice it.

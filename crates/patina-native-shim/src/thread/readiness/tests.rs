@@ -37,7 +37,7 @@ fn poll_ppoll_select_pselect_never_restart_and_restore_temporary_masks() {
                     0,
                 ],
                 true,
-                Some([0, 999_999_990]),
+                Some((999_000_000, 10_000)),
             ),
             #[cfg(target_arch = "x86_64")]
             (
@@ -51,7 +51,7 @@ fn poll_ppoll_select_pselect_never_restart_and_restore_temporary_masks() {
                     0,
                 ],
                 false,
-                Some([0, 999_999]),
+                Some((999_000, 10)),
             ),
             (
                 "pselect6",
@@ -64,7 +64,7 @@ fn poll_ppoll_select_pselect_never_restart_and_restore_temporary_masks() {
                     sigarg.as_ptr() as u64,
                 ],
                 true,
-                Some([0, 999_999_990]),
+                Some((999_000_000, 10_000)),
             ),
         ];
         for (name, args, temporary, expected_timeout) in cases {
@@ -101,8 +101,14 @@ fn poll_ppoll_select_pselect_never_restart_and_restore_temporary_masks() {
             assert_eq!(read_mask(), original, "{name}");
             assert_eq!(parked_class(me), None);
             assert!(!on_any_waiter_list(me));
-            if let Some(expected) = expected_timeout {
-                assert_eq!(timeout, expected);
+            if let Some((latest, slack)) = expected_timeout {
+                // The second less the helper's delay and the calls charged
+                // meanwhile (in the call's unit).
+                assert_eq!(timeout[0], 0, "{name}");
+                assert!(
+                    (latest - slack..=latest).contains(&timeout[1]),
+                    "{name}: {timeout:?}"
+                );
             }
             // EINTR leaves the select descriptor sets unchanged.
             assert_eq!(read, 1u64 << rd);

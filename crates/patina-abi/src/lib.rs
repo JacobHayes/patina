@@ -132,4 +132,9 @@ pub const STARTUP_CPU_NANOS: u64 = 1_000_000;
 /// - 2: progress is classified by an operation's outcome: an empty network
 ///   poll (`net_recv`, `net_tcp_recv` or `net_tcp_accept` with nothing
 ///   available) is not progress.
-pub const TIME_MODEL: u32 = 2;
+/// - 3: guest calls cost time ([`ChargeClass`]): the monotonic clock follows
+///   every charge, stopping at the earliest pending deadline and carrying the
+///   rest; the CPU clocks, resource usage and CPU-time timers read the user
+///   and system totals; a poll loop is escalated by charging the iterations it
+///   would spend, not by a recorded advance.
+pub const TIME_MODEL: u32 = 3;

@@ -328,9 +328,9 @@ pub(crate) fn write_compute_bound_facts(
     )
 }
 
-/// The frozen-clock-churn finding: advance-on-spin fed a spinning guest
-/// `rescues` token advances totalling `advanced_ns` of virtual time and it still
-/// made no genuine progress. Carries the same fields as the
+/// The frozen-clock-churn finding: poll escalation charged a polling guest
+/// `rescues` escalations totalling `advanced_ns` of CPU time and it still made
+/// no genuine progress. Carries the same fields as the
 /// `PATINA_VIOLATION liveness detail=frozen-clock-churn` line.
 pub(crate) fn frozen_clock_churn_finding(
     vtime_ns: u64,

@@ -34,8 +34,10 @@ int main(void) {
     assert(clock_gettime(CLOCK_MONOTONIC, &before) == 0);
     assert(sleep(2) == 0);
     assert(clock_gettime(CLOCK_MONOTONIC, &after) == 0);
-    assert(after.tv_sec - before.tv_sec == 2);
-    assert(after.tv_nsec == before.tv_nsec);
+    /* The sleep, and the calls charged around it. */
+    const int64_t slept = (int64_t)(after.tv_sec - before.tv_sec) * 1000000000 +
+                          (after.tv_nsec - before.tv_nsec);
+    assert(slept >= 2000000000 && slept < 2001000000);
     puts("PROCESS_SLEEP_OK");
     return 0;
 }

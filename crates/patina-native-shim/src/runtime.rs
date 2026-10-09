@@ -250,11 +250,18 @@ pub(crate) fn runtime_errno(error: &RuntimeError) -> c_int {
             abort_after_flushing_output()
         }
         // Frozen-clock churn is the same fail-closed shape: the guest is in a
-        // loop that ignores the clock it reads, so advance-on-spin cannot free
+        // loop that ignores the clock it reads, so escalation cannot free
         // it and an errno it could swallow would just resume the spin. The
         // runtime has already emitted the classifiable marker and flushed the
         // truncated trace.
         RuntimeError::FrozenClockChurn { .. } => abort_after_flushing_output(),
+        // A time-model divergence means the replay no longer describes the
+        // run: every later clock read and expiry would answer from a different
+        // timeline. Name it and stop, as a refused custom operation does.
+        RuntimeError::TimeModel { .. } => {
+            eprintln!("patina: {error}");
+            abort_after_flushing_output()
+        }
         RuntimeError::ComputeBound { .. } => {
             watchdog::report_synchronous(error);
             abort_after_flushing_output()
@@ -505,6 +512,7 @@ pub(crate) fn with_context_raw<T>(
     } else {
         invoke(context)
     };
+    crate::charge::note_streak(context);
     thread::note_expiries(context);
     match result {
         Ok(value) => Ok(value),
@@ -623,6 +631,7 @@ pub(crate) fn with_context_msg<T>(
     } else {
         invoke(context)
     };
+    crate::charge::note_streak(context);
     thread::note_expiries(context);
     result.map_err(|error| match &error {
         // A classified yield divergence gains the one fact only the shim knows:
@@ -655,6 +664,8 @@ pub(crate) fn with_context<T>(
     BOUNDARY_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
     ensure_runtime()?;
     thread::sched_point()?;
+    // The scheduling point showed the time the thread's calls carried, so
+    // the door observes their cost.
     with_context_raw(invoke)
 }
 

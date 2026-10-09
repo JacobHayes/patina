@@ -39,11 +39,15 @@ fn main() {
     // A realtime read also routes through the virtual clock.
     let real = clock_gettime(ClockId::Realtime);
     assert!(t0 < VIRTUAL_BOUND, "monotonic clock must be virtual: {t0}");
+    let t_after = mono_nanos();
     let real_nanos = real.tv_sec as u64 * 1_000_000_000 + real.tv_nsec as u64;
-    assert_eq!(
-        real_nanos,
-        DEFAULT_REALTIME_EPOCH_NANOS + t0,
-        "realtime clock must be virtual: the default epoch plus monotonic time"
+    // Calls cost virtual time, so the realtime read lies between the
+    // monotonic reads around it, on the default epoch.
+    let real_mono = real_nanos - DEFAULT_REALTIME_EPOCH_NANOS;
+    assert!(
+        (t0..=t_after).contains(&real_mono),
+        "realtime clock must be virtual: the default epoch plus monotonic time \
+({t0} <= {real_mono} <= {t_after})"
     );
 
     // ---- sleep (raw clock_nanosleep) advances virtual time ----

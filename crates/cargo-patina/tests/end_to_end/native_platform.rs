@@ -420,9 +420,10 @@ fn main() {
     }
 
     // `getrusage(RUSAGE_SELF)` reports the virtual CPU time, never the host's
-    // accounting: the modeled startup cost (1 ms, `STARTUP_CPU_NANOS`), then what
-    // the advance-on-spin rescues charge. A sleep advances the clock but is not
-    // charged; a busy-wait on the clock is charged every rescue. Under the earlier model (CPU time = elapsed monotonic time) the sleep
+    // accounting: its user time is the modeled startup's (half of
+    // `STARTUP_CPU_NANOS`), then what the guest's calls charge. A sleep
+    // advances the clock but is not charged; a busy-wait on the clock is
+    // charged every read and every escalation. Under the earlier model (CPU time = elapsed monotonic time) the sleep
     // moved ru_utime by five seconds — the RED this pins. `struct rusage` begins with
     // ru_utime (`time_t` seconds, then microseconds, 8 bytes each on both platforms).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -488,7 +489,7 @@ fn main() {
         assert!(
             out.contains(&format!(
                 "RU before={startup} slept={startup} spun_200ms=true",
-                startup = patina_dst_abi::STARTUP_CPU_NANOS / 1000
+                startup = patina_dst_abi::STARTUP_CPU_CHARGE.user_ns / 1000
             )),
             "getrusage did not report the virtual CPU time:\nstdout:\n{out}\nstderr:\n{}",
             String::from_utf8_lossy(&ran.stderr)
@@ -498,8 +499,8 @@ fn main() {
         assert_eq!(ran.stdout, again.stdout, "getrusage run is not seed-stable");
     }
 
-    // task_info(MACH_TASK_BASIC_INFO) reports the same virtual CPU time as getrusage
-    // (patina_cpu_time_nanos): the startup cost, unmoved by a sleep, advanced by a
+    // task_info(MACH_TASK_BASIC_INFO) reports the same virtual user time as getrusage
+    // (`time_abi::cpu_time`): the startup's, unmoved by a sleep, advanced by a
     // busy-wait on the clock, byte-identically across same-seed runs. macOS only (task_info is Mach).
     // user_time sits at byte offset 24 of `struct mach_task_basic_info` (after three
     // 8-byte vm sizes) as two `integer_t`s, seconds then microseconds; the flavor is
@@ -570,7 +571,7 @@ fn main() {
         assert!(
             out.contains(&format!(
                 "TI before={startup} slept={startup} spun_200ms=true",
-                startup = patina_dst_abi::STARTUP_CPU_NANOS / 1000
+                startup = patina_dst_abi::STARTUP_CPU_CHARGE.user_ns / 1000
             )),
             "task_info did not report the virtual CPU time:\nstdout:\n{out}\nstderr:\n{}",
             String::from_utf8_lossy(&ran.stderr)

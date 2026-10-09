@@ -251,6 +251,11 @@ fn resume_policy(restartable: bool, before_delivery: impl FnOnce(Resumed)) -> Re
         return outcome;
     }
     deliver();
+    if outcome == Resumed::Restart {
+        // The kernel rewinds to the system call, which enters it again: a
+        // new call, charged as the trap's exit charges one it runs again.
+        crate::charge::count(patina_dst_abi::ChargeClass::Syscall);
+    }
     outcome
 }
 

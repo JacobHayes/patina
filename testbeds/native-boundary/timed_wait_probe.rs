@@ -2,6 +2,12 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Whether `elapsed` is the virtual `deadline`, give or take the calls charged
+/// around it (each costs nanoseconds of virtual time).
+fn at(elapsed: Duration, deadline: Duration) -> bool {
+    elapsed >= deadline && elapsed < deadline + Duration::from_millis(1)
+}
+
 fn main() {
     let signal_delay = Duration::from_millis(25);
     let signal_deadline = Duration::from_millis(100);
@@ -32,7 +38,7 @@ fn main() {
         eprintln!("signalled condvar wait timed out unexpectedly");
         std::process::exit(10);
     }
-    if signal_elapsed != signal_delay {
+    if !at(signal_elapsed, signal_delay) {
         eprintln!(
             "signalled condvar elapsed {:?}, expected {:?}",
             signal_elapsed, signal_delay
@@ -53,7 +59,7 @@ fn main() {
         eprintln!("unsignalled condvar wait did not time out");
         std::process::exit(12);
     }
-    if timeout_elapsed != timeout {
+    if !at(timeout_elapsed, timeout) {
         eprintln!(
             "timeout condvar elapsed {:?}, expected {:?}",
             timeout_elapsed, timeout
@@ -62,8 +68,8 @@ fn main() {
     }
 
     println!(
-        "NATIVE_TIMED_WAIT_RESULT signalled_elapsed_ns={} timeout_elapsed_ns={}",
-        signal_elapsed.as_nanos(),
-        timeout_elapsed.as_nanos()
+        "NATIVE_TIMED_WAIT_RESULT signalled_elapsed_ms={} timeout_elapsed_ms={}",
+        signal_elapsed.as_millis(),
+        timeout_elapsed.as_millis()
     );
 }

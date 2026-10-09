@@ -14,16 +14,24 @@ fn guest_clock_origins_and_uptime_are_coherent() {
     let out = assert_standalone_success(&g.binary, &[], &[]).stdout;
     assert_eq!(out, assert_standalone_success(&g.binary, &[], &[]).stdout);
     let fields = assert_fields(&out, "BOOT_ORIGIN ", &["start", "realtime", "cpu"]);
-    let start: u64 = fields["start"].parse().unwrap();
-    assert_eq!(start, patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS);
-    assert_eq!(
-        fields["realtime"].parse::<u64>().unwrap() - start,
-        patina_dst_runtime::DEFAULT_REALTIME_EPOCH_NANOS
+    // The defaults, and the few calls charged since the guest started.
+    let soon_after = |value: &str, origin: u64| {
+        let value: u64 = value.parse().unwrap();
+        assert!(
+            (origin..origin + 100_000).contains(&value),
+            "{value} {origin}"
+        );
+        value
+    };
+    let start = soon_after(
+        fields["start"],
+        patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS,
     );
-    assert_eq!(
-        fields["cpu"].parse::<u64>().unwrap(),
-        patina_dst_abi::STARTUP_CPU_NANOS
+    soon_after(
+        fields["realtime"],
+        start + patina_dst_runtime::DEFAULT_REALTIME_EPOCH_NANOS,
     );
+    soon_after(fields["cpu"], patina_dst_abi::STARTUP_CPU_NANOS);
 }
 
 #[test]
@@ -41,9 +49,13 @@ fn prefixed_c_abi_preserves_crash_checkpoint() {
     );
     assert_eq!(fields["seed"], "123");
     assert_lower_hex(fields["random"], 32);
+    // The default origin and a 5 ms sleep, each with the calls charged
+    // before it.
     let before: u64 = fields["before"].parse().unwrap();
-    assert_eq!(before, patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS);
-    assert_eq!(fields["after"].parse::<u64>().unwrap() - before, 5_000_000);
+    let origin = patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS;
+    assert!((origin..origin + 100_000).contains(&before), "{before}");
+    let slept = fields["after"].parse::<u64>().unwrap() - before;
+    assert!((5_000_000..5_100_000).contains(&slept), "{slept}");
     assert_eq!(fields["contents"], "stable");
     let other = assert_standalone_success(&g.binary, &["124"], &[]).stdout;
     let other = assert_fields(

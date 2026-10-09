@@ -1,15 +1,16 @@
-//! Tests for progress watchdogs, spin rescue, cpu time, and compute stops.
+//! Tests for progress watchdogs, poll escalation, charged time, and compute
+//! stops.
 
 use crate::config::{LivenessConfig, RuntimeConfig};
 use crate::custom_op::CustomOpMode;
 use crate::liveness::{
-    LivenessKind, Progress, SPIN_CHURN_ABORT_RESCUES, SPIN_RESCUE_CLOCK_OPS,
-    SPIN_RESCUE_TOKEN_MIN_NANOS, WatchdogArm, outcome_is_progress, progress_of,
+    CHURN_ABORT_ESCALATIONS, ESCALATION_POLLS, ESCALATION_TOKEN_MIN_NANOS, LivenessKind, Progress,
+    WatchdogArm, outcome_is_progress, progress_of,
 };
-use crate::{Context, DEFAULT_BOOT_ORIGIN_NANOS, FACTS_SCHEMA, RuntimeError};
+use crate::{Context, CpuAlarms, DEFAULT_BOOT_ORIGIN_NANOS, FACTS_SCHEMA, RuntimeError};
 use patina_dst_abi::{
-    ClockKind, Datagram, EffectError, ErrorCode, Fd, Operation, Outcome, SocketId, TaskId,
-    TcpAccepted,
+    ChargeClass, ChargeCounts, ClockKind, CpuCharge, Datagram, EffectError, ErrorCode, Fd,
+    Operation, Outcome, STARTUP_CPU_CHARGE, SocketId, TaskId, TcpAccepted,
 };
 
 use patina_dst_trace::{BranchSession, Replayer, TraceBundle};
@@ -21,7 +22,8 @@ use tempfile::tempdir;
 /// clock in a loop until `window` nanoseconds of it have gone by, doing
 /// nothing else. This is the shape `fastant`/`minstant`/`quanta` run in a
 /// pre-`main` constructor to measure the timestamp counter, and the shape
-/// that hangs forever without advance-on-spin. Returns (reads, elapsed).
+/// that hangs forever without escalation (this embedder charges no calls of
+/// its own). Returns (reads, elapsed).
 fn calibration_spin(context: &mut Context, window: u64) -> Result<(u64, u64), RuntimeError> {
     let start = context.now(ClockKind::Monotonic)?;
     let mut reads = 1u64;
@@ -34,59 +36,68 @@ fn calibration_spin(context: &mut Context, window: u64) -> Result<(u64, u64), Ru
     }
 }
 
+/// `calls` calls of `class`.
+fn calls(class: ChargeClass, calls: u64) -> ChargeCounts {
+    let mut counts = ChargeCounts::new();
+    counts.add(class, calls);
+    counts
+}
+
 #[test]
-fn advance_on_spin_converges_a_clock_busy_wait_in_tens_of_rescues() {
-    // RED before advance-on-spin: this call never returns — virtual time only
-    // moved through a recorded `SleepUntil`, and the loop issues none.
+fn escalation_converges_a_clock_busy_wait_in_tens_of_escalations() {
+    // RED without escalation: this call never returns. The loop makes no
+    // call that is charged, so nothing else moves the clock.
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
     let (reads, elapsed) = calibration_spin(&mut context, 10_000_000).unwrap();
 
     // The token schedule pinned exactly (1 µs doubling to the 1 ms ceiling):
-    // ten escalating rescues sum to 1_023_000 ns, then nine at the ceiling
-    // carry the rest — 19 rescues for a 10 ms window, which is the brief's
-    // "tens of rescues, not millions of loop iterations".
-    assert_eq!(context.spin.rescues, 19);
+    // ten escalating tokens sum to 1_023_000 ns, then nine at the ceiling
+    // carry the rest: 19 escalations for a 10 ms window, tens of them, not
+    // millions of loop iterations.
+    assert_eq!(context.spin.escalations, 19);
     assert_eq!(elapsed, 10_023_000);
-    assert_eq!(context.spin.advanced_nanos, 10_023_000);
-    // Each rescue costs exactly `SPIN_RESCUE_CLOCK_OPS` reads, and the read
-    // that observes the escaped deadline is the one that triggers the last.
-    assert_eq!(reads, 19 * SPIN_RESCUE_CLOCK_OPS + 1);
-    // Trace-size sanity: the recorded stream is one op per read plus one
-    // `SleepUntil` per rescue, three orders of magnitude under the cap.
-    assert!(reads + context.spin.rescues < patina_dst_trace::MAX_TIMELINE_EVENTS as u64);
+    assert_eq!(context.spin.charged_nanos, 10_023_000);
+    // Each escalation takes exactly `ESCALATION_POLLS` reads, and the read
+    // after the last observes the escaped window.
+    assert_eq!(reads, 19 * ESCALATION_POLLS + 1);
+    // The escalated reads are clock calls: user time, charged to the main
+    // thread before any task.
+    let charged = context.cpu_charge(None);
+    assert_eq!(charged.user_ns - STARTUP_CPU_CHARGE.user_ns, elapsed);
+    assert_eq!(charged.system_ns, STARTUP_CPU_CHARGE.system_ns);
+    // Nothing is recorded but the reads themselves.
+    assert!(reads < patina_dst_trace::MAX_TIMELINE_EVENTS as u64);
     context.finish().unwrap();
 }
 
 #[test]
-fn advance_on_spin_leaves_virtual_time_alone_below_the_trigger() {
-    // The non-vacuity guard for the constant: one read short of the streak
-    // must not move the clock by a nanosecond. This is what keeps every
-    // existing recorded artifact byte-identical.
+fn escalation_leaves_virtual_time_alone_below_the_trigger() {
+    // The non-vacuity guard for the constant: the polls of one streak all
+    // observe the same time, and only the poll that completes it is
+    // escalated, after its own observation.
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
-    for _ in 0..SPIN_RESCUE_CLOCK_OPS {
+    for _ in 0..ESCALATION_POLLS {
         assert_eq!(
             context.now(ClockKind::Monotonic).unwrap(),
             DEFAULT_BOOT_ORIGIN_NANOS
         );
     }
-    assert_eq!(context.spin.rescues, 0);
-    // One more read crosses the streak and rescues.
+    assert_eq!(context.spin.escalations, 1);
     assert_eq!(
         context.now(ClockKind::Monotonic).unwrap(),
-        DEFAULT_BOOT_ORIGIN_NANOS + SPIN_RESCUE_TOKEN_MIN_NANOS
+        DEFAULT_BOOT_ORIGIN_NANOS + ESCALATION_TOKEN_MIN_NANOS
     );
-    assert_eq!(context.spin.rescues, 1);
     context.finish().unwrap();
 }
 
 #[test]
-fn a_progress_op_ends_the_spin_episode_so_a_working_run_never_rescues() {
+fn a_progress_op_ends_the_poll_episode_so_a_working_run_never_escalates() {
     // A guest that reads the clock hard but keeps doing real work: the
     // streak is broken by every genuine effect, so it never accumulates and
-    // the clock never moves. An unbounded number of reads, zero rescues.
+    // the clock never moves. An unbounded number of reads, no escalation.
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
     for _ in 0..8 {
-        for _ in 0..SPIN_RESCUE_CLOCK_OPS {
+        for _ in 0..ESCALATION_POLLS - 1 {
             assert_eq!(
                 context.now(ClockKind::Monotonic).unwrap(),
                 DEFAULT_BOOT_ORIGIN_NANOS
@@ -94,7 +105,7 @@ fn a_progress_op_ends_the_spin_episode_so_a_working_run_never_rescues() {
         }
         context.write_file("/work", b"x").unwrap();
     }
-    assert_eq!(context.spin.rescues, 0);
+    assert_eq!(context.spin.escalations, 0);
     assert_eq!(
         context.now(ClockKind::Monotonic).unwrap(),
         DEFAULT_BOOT_ORIGIN_NANOS
@@ -103,21 +114,19 @@ fn a_progress_op_ends_the_spin_episode_so_a_working_run_never_rescues() {
 }
 
 #[test]
-fn a_guest_sleep_ends_the_spin_episode_so_a_polling_loop_never_rescues() {
-    // The other reset arm: virtual time moving for a reason the rescue did
-    // not cause. A poll loop that sleeps between reads walks the clock on its
-    // own and must never be rescued, however many reads it takes.
+fn a_guest_sleep_ends_the_poll_episode_so_a_sleeping_loop_never_escalates() {
+    // The other reset arm: an idle advance. A loop that sleeps between reads
+    // waits for time itself and must never be escalated, however many reads
+    // it takes.
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
     for _ in 0..4 {
-        // One short of the streak, leaving room for `sleep_for`'s own
-        // clock read: 1023 reads plus that one is exactly at the trigger,
-        // not past it.
-        for _ in 0..(SPIN_RESCUE_CLOCK_OPS - 1) {
+        // Short of the streak with `sleep_for`'s own clock read.
+        for _ in 0..(ESCALATION_POLLS - 2) {
             context.now(ClockKind::Monotonic).unwrap();
         }
         context.sleep_for(1).unwrap();
     }
-    assert_eq!(context.spin.rescues, 0);
+    assert_eq!(context.spin.escalations, 0);
     // Exactly the four nanoseconds the guest itself slept.
     assert_eq!(
         context.now(ClockKind::Monotonic).unwrap(),
@@ -127,40 +136,154 @@ fn a_guest_sleep_ends_the_spin_episode_so_a_polling_loop_never_rescues() {
 }
 
 #[test]
-fn cpu_time_is_the_spin_rescues_charged_to_the_baton_holder() {
-    // A sleep moves virtual time but computes nothing; a busy-wait computes
-    // through every advance-on-spin rescue.
-    // The process starts at its modeled startup cost, and a sleep moves
-    // virtual time without charging it.
-    const STARTUP: u64 = patina_dst_abi::STARTUP_CPU_NANOS;
+fn cpu_time_is_the_charged_calls_and_a_sleep_charges_none() {
+    // The process starts at its modeled startup work; a sleep moves virtual
+    // time without charging it; charged calls move both.
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
-    assert_eq!(context.cpu_time_nanos(), STARTUP);
+    assert_eq!(context.cpu_time(), STARTUP_CPU_CHARGE);
+    let start = context.current_monotonic().unwrap();
     context.sleep_for(5_000_000).unwrap();
-    assert_eq!(context.cpu_time_nanos(), STARTUP);
-    let (_, elapsed) = calibration_spin(&mut context, 10_000_000).unwrap();
-    assert_eq!(context.cpu_time_nanos(), STARTUP + elapsed);
-    // Before the embedder schedules a task, the main thread is `None`.
-    assert_eq!(context.task_cpu_time_nanos(None), STARTUP + elapsed);
+    assert_eq!(context.cpu_time(), STARTUP_CPU_CHARGE);
+    assert_eq!(context.current_monotonic().unwrap() - start, 5_000_000);
+    // Two system calls: user and system time, and the clock moves by both.
+    context
+        .charge_calls(None, calls(ChargeClass::Syscall, 2))
+        .unwrap();
+    assert_eq!(
+        context.cpu_time(),
+        CpuCharge::new(
+            STARTUP_CPU_CHARGE.user_ns + 100,
+            STARTUP_CPU_CHARGE.system_ns + 400
+        )
+    );
+    assert_eq!(context.current_monotonic().unwrap() - start, 5_000_500);
+    // Before the embedder schedules a task the main thread is `None`; once
+    // it does, an escalation charges the task it selected.
     let task = context.task_spawn("main").unwrap();
     assert_eq!(context.scheduler_next().unwrap(), Some(task));
-    let (_, more) = calibration_spin(&mut context, 1_000_000).unwrap();
-    assert_eq!(context.task_cpu_time_nanos(Some(task)), more);
-    assert_eq!(context.cpu_time_nanos(), STARTUP + elapsed + more);
+    let (_, elapsed) = calibration_spin(&mut context, 1_000_000).unwrap();
+    assert_eq!(context.cpu_charge(Some(task)).user_ns, elapsed);
+    assert_eq!(
+        context.cpu_time().total_ns(),
+        STARTUP_CPU_CHARGE.total_ns() + 500 + elapsed
+    );
     context.finish().unwrap();
 }
 
 #[test]
-fn the_spin_rescue_stops_at_an_alarm() {
+fn a_charge_stops_at_the_earliest_deadline_and_carries_the_rest() {
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
-    context.set_alarm(Some(DEFAULT_BOOT_ORIGIN_NANOS + 1_500));
-    // 1 µs, then the doubled 2 µs token is clamped to the alarm at 1.5 µs.
-    let (_, elapsed) = calibration_spin(&mut context, 1_000).unwrap();
-    assert_eq!(elapsed, 1_500);
+    let origin = DEFAULT_BOOT_ORIGIN_NANOS;
+    let sleeper = context.task_spawn("sleeper").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(sleeper));
+    context
+        .task_park_timed(sleeper, "sleep", ClockKind::Monotonic, origin + 300)
+        .unwrap();
+    let worker = context.task_spawn("worker").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(worker));
+    // 500 ns of work crosses the sleeper's deadline: the clock stops there,
+    // the park expires, and the rest is carried.
+    context
+        .charge_calls(Some(worker), calls(ChargeClass::Syscall, 2))
+        .unwrap();
+    assert_eq!(context.current_monotonic().unwrap(), origin + 300);
+    assert_eq!(context.take_expired_timeouts(), vec![sleeper]);
+    assert_eq!(context.cpu_charge(Some(worker)).total_ns(), 500);
+    // The next charge shows the carried 200 ns and its own.
+    context
+        .charge_calls(Some(worker), calls(ChargeClass::Clock, 1))
+        .unwrap();
+    assert_eq!(context.current_monotonic().unwrap(), origin + 525);
+    // An embedder's alarm stops the clock the same way, and stays a barrier
+    // until its owner settles it: later charges wait behind it, so the owner
+    // fires it at its own time and the timers after it at theirs.
+    context.set_alarm(Some(origin + 600));
+    context
+        .charge_calls(Some(worker), calls(ChargeClass::Syscall, 1))
+        .unwrap();
+    assert_eq!(context.current_monotonic().unwrap(), origin + 600);
+    context
+        .charge_calls(Some(worker), calls(ChargeClass::Syscall, 1))
+        .unwrap();
+    assert_eq!(context.current_monotonic().unwrap(), origin + 600);
+    // Settled: the owner publishes its next alarm, past the carry.
+    context.set_alarm(Some(origin + 10_000));
+    context
+        .charge_calls(Some(worker), calls(ChargeClass::Sync, 1))
+        .unwrap();
+    assert_eq!(context.current_monotonic().unwrap(), origin + 1_045);
+    context.finish().unwrap();
+}
+
+#[test]
+fn time_stands_still_where_a_charge_is_carried() {
+    // Inside an embedder section, and for an embedder that charges where it
+    // may hold a wake decision (accrue_calls), nothing moves and nothing
+    // expires until the carry is shown at a point that can settle it.
+    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+    let origin = DEFAULT_BOOT_ORIGIN_NANOS;
+    let sleeper = context.task_spawn("sleeper").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(sleeper));
+    context
+        .task_park_timed(sleeper, "sleep", ClockKind::Monotonic, origin + 300)
+        .unwrap();
+    let worker = context.task_spawn("worker").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(worker));
+    context.accrue_calls(Some(worker), calls(ChargeClass::Syscall, 2));
+    context.in_embedder_section(|context| {
+        context
+            .charge_calls(Some(worker), calls(ChargeClass::Syscall, 1))
+            .unwrap();
+        assert_eq!(context.current_monotonic().unwrap(), origin);
+        assert!(context.take_expired_timeouts().is_empty());
+    });
+    assert_eq!(context.current_monotonic().unwrap(), origin);
+    assert!(context.take_expired_timeouts().is_empty());
+    // Shown: the clock stops at the deadline, the park expires there, and
+    // the next show carries on past it.
+    context.show_carry().unwrap();
+    assert_eq!(context.current_monotonic().unwrap(), origin + 300);
+    assert_eq!(context.take_expired_timeouts(), vec![sleeper]);
+    context.show_carry().unwrap();
+    assert_eq!(context.current_monotonic().unwrap(), origin + 750);
+    context.finish().unwrap();
+}
+
+#[test]
+fn an_idle_wait_covers_the_charged_time_still_to_show() {
+    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+    let origin = DEFAULT_BOOT_ORIGIN_NANOS;
+    context.set_alarm(Some(origin + 100));
+    context
+        .charge_calls(None, calls(ChargeClass::Syscall, 2))
+        .unwrap();
+    assert_eq!(context.current_monotonic().unwrap(), origin + 100);
+    // 400 ns carried; a 1 µs sleep from the observed time covers it.
+    context.set_alarm(None);
+    context
+        .sleep_until(ClockKind::Monotonic, origin + 1_100)
+        .unwrap();
+    context
+        .charge_calls(None, calls(ChargeClass::Clock, 1))
+        .unwrap();
+    assert_eq!(context.current_monotonic().unwrap(), origin + 1_125);
+    context.finish().unwrap();
+}
+
+#[test]
+fn escalation_reaches_an_alarm_in_one_step() {
+    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+    context.set_alarm(Some(DEFAULT_BOOT_ORIGIN_NANOS + 1_500_000));
+    // The first escalation charges the reads up to the alarm.
+    let (reads, elapsed) = calibration_spin(&mut context, 1_000).unwrap();
+    assert_eq!(elapsed, 1_500_000);
+    assert_eq!(reads, ESCALATION_POLLS + 1);
+    assert_eq!(context.spin.escalations, 1);
     context.finish().unwrap();
 }
 
 /// Class detector: every clock advance drains due timers through the shared
-/// sleep-until path, even with a runnable task. Selection stays policy-driven.
+/// expiry path, even with a runnable task. Selection stays policy-driven.
 fn spin_until_sleepers_run(context: &mut Context) {
     let deadline = DEFAULT_BOOT_ORIGIN_NANOS + 1_500;
     let mut sleepers = Vec::new();
@@ -175,8 +298,9 @@ fn spin_until_sleepers_run(context: &mut Context) {
     let spinner = context.task_spawn("spinner").unwrap();
     assert_eq!(context.scheduler_next().unwrap(), Some(spinner));
     while context.now(ClockKind::Monotonic).unwrap() < deadline {}
-    // The rescue lands exactly on the deadline and wakes in registration order,
-    // before another clock observation or scheduling decision can step past it.
+    // The escalation lands exactly on the deadline and wakes in registration
+    // order, before another clock observation or scheduling decision can step
+    // past it.
     assert_eq!(context.current_monotonic().unwrap(), deadline);
     assert_eq!(context.take_expired_timeouts(), sleepers);
     assert!(context.take_expired_timeouts().is_empty());
@@ -199,12 +323,12 @@ fn spin_until_sleepers_run(context: &mut Context) {
     assert_eq!(context.scheduler_next().unwrap(), None);
 }
 
-/// A poller that alternates an empty non-blocking receive with a clock read,
-/// waiting on a sleeping peer: the empty receives are no progress, so the
-/// clock reads keep the advance-on-spin streak and the rescue brings virtual
-/// time to the sleeper's deadline. Answers how many polls that took.
-fn poll_until_the_sleeper_expires(context: &mut Context) -> u64 {
-    let deadline = DEFAULT_BOOT_ORIGIN_NANOS + 1_000;
+/// A poller of empty non-blocking receives waiting on a sleeping peer,
+/// reading the clock between them when `read_clock`: the empty receives are
+/// polls too, and the escalation brings virtual time to the sleeper's
+/// deadline. Answers how many polls that took.
+fn poll_until_the_sleeper_expires(context: &mut Context, read_clock: bool) -> u64 {
+    let deadline = DEFAULT_BOOT_ORIGIN_NANOS + 1_000_000;
     let sleeper = context.task_spawn("sleeper").unwrap();
     assert_eq!(context.scheduler_next().unwrap(), Some(sleeper));
     context
@@ -216,7 +340,9 @@ fn poll_until_the_sleeper_expires(context: &mut Context) -> u64 {
     let mut polls = 0;
     while context.take_expired_timeouts().is_empty() {
         assert!(context.net_recv(socket).unwrap().is_none());
-        context.now(ClockKind::Monotonic).unwrap();
+        if read_clock {
+            context.now(ClockKind::Monotonic).unwrap();
+        }
         polls += 1;
         assert!(
             polls < 100_000,
@@ -228,19 +354,27 @@ fn poll_until_the_sleeper_expires(context: &mut Context) -> u64 {
 }
 
 #[test]
-fn an_empty_poll_loop_keeps_the_spin_streak_and_replays() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("poll.patina");
-    let mut record = Context::from_config(RuntimeConfig::record(3, &path, "poll-v1")).unwrap();
-    let polls = poll_until_the_sleeper_expires(&mut record);
-    record.finish().unwrap();
-    let mut replay = Context::from_config(RuntimeConfig::replay(&path, "poll-v1")).unwrap();
-    assert_eq!(poll_until_the_sleeper_expires(&mut replay), polls);
-    replay.finish().unwrap();
+fn an_empty_poll_loop_is_escalated_to_its_peers_deadline_and_replays() {
+    for read_clock in [true, false] {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("poll.patina");
+        let mut record = Context::from_config(RuntimeConfig::record(3, &path, "poll-v1")).unwrap();
+        let polls = poll_until_the_sleeper_expires(&mut record, read_clock);
+        // One streak: the first escalation reaches the sleeper's deadline.
+        assert!(polls <= ESCALATION_POLLS / 2, "{polls}");
+        assert_eq!(record.spin.escalations, 1);
+        record.finish().unwrap();
+        let mut replay = Context::from_config(RuntimeConfig::replay(&path, "poll-v1")).unwrap();
+        assert_eq!(
+            poll_until_the_sleeper_expires(&mut replay, read_clock),
+            polls
+        );
+        replay.finish().unwrap();
+    }
 }
 
 #[test]
-fn spin_rescue_wakes_due_sleepers_and_replays_their_turns() {
+fn escalation_wakes_due_sleepers_and_replays_their_turns() {
     let directory = tempdir().unwrap();
     let first = directory.path().join("sleepers-a.patina");
     let second = directory.path().join("sleepers-b.patina");
@@ -256,32 +390,77 @@ fn spin_rescue_wakes_due_sleepers_and_replays_their_turns() {
     replay.finish().unwrap();
 }
 
-/// Spin on the clock until `cpu` nanoseconds of CPU time are charged;
-/// the rescues it took.
-fn spin_for_cpu(context: &mut Context, cpu: u64) -> u64 {
-    let start = context.cpu_time_nanos();
-    while context.cpu_time_nanos() - start < cpu {
+/// Spin on the clock until `cpu` nanoseconds of the process's CPU time
+/// (`which` of it) are charged; the escalations it took.
+fn spin_for_cpu(context: &mut Context, cpu: u64, which: fn(CpuCharge) -> u64) -> u64 {
+    let start = which(context.cpu_time());
+    while which(context.cpu_time()) - start < cpu {
         context.now(ClockKind::Monotonic).unwrap();
     }
-    context.spin.rescues
+    context.spin.escalations
 }
 
 #[test]
-fn a_cpu_alarm_is_reached_in_whole_rescues_without_the_ramp() {
+fn escalation_reaches_a_cpu_alarm_in_one_step_without_the_ramp() {
     // An 11 ms CPU-time timer. Without an alarm the ramp takes ten
-    // escalating rescues (1.023 ms) and ten more at the ceiling; toward a
-    // declared CPU deadline each rescue is the ceiling or what is left,
-    // and the last lands on the deadline exactly.
+    // escalating tokens (1.023 ms) and ten more at the ceiling; toward a
+    // published CPU deadline, on either line, one escalation lands on it.
     const DEADLINE: u64 = 11_000_000;
+    let total: fn(CpuCharge) -> u64 = |time| time.total_ns();
+    let user: fn(CpuCharge) -> u64 = |time| time.user_ns;
     let mut ramp = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
-    assert_eq!(spin_for_cpu(&mut ramp, DEADLINE), 20);
+    assert_eq!(spin_for_cpu(&mut ramp, DEADLINE, total), 20);
     ramp.finish().unwrap();
-    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
-    let start = context.cpu_time_nanos();
-    context.set_cpu_alarm(Some(DEADLINE - 500_000));
-    assert_eq!(spin_for_cpu(&mut context, DEADLINE - 500_000), 11);
-    assert_eq!(context.cpu_time_nanos() - start, DEADLINE - 500_000);
-    context.finish().unwrap();
+    for (line, alarms) in [
+        (
+            total,
+            CpuAlarms {
+                user_ns: None,
+                total_ns: Some(STARTUP_CPU_CHARGE.total_ns() + DEADLINE),
+            },
+        ),
+        (
+            user,
+            CpuAlarms {
+                user_ns: Some(STARTUP_CPU_CHARGE.user_ns + DEADLINE),
+                total_ns: None,
+            },
+        ),
+    ] {
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        context.set_cpu_alarms(alarms);
+        assert_eq!(spin_for_cpu(&mut context, DEADLINE, line), 1);
+        assert_eq!(
+            line(context.cpu_time()) - line(STARTUP_CPU_CHARGE),
+            DEADLINE
+        );
+        context.finish().unwrap();
+    }
+}
+
+#[test]
+fn replay_names_a_charge_the_recording_did_not_make() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("charges.patina");
+    let mut record = Context::from_config(RuntimeConfig::record(1, &path, "charges-v1")).unwrap();
+    record
+        .charge_calls(None, calls(ChargeClass::Syscall, 1))
+        .unwrap();
+    record.now(ClockKind::Monotonic).unwrap();
+    record.finish().unwrap();
+    // The same calls replay; a missed charge is a time-model divergence at
+    // the first monotonic read.
+    let mut replay = Context::from_config(RuntimeConfig::replay(&path, "charges-v1")).unwrap();
+    replay
+        .charge_calls(None, calls(ChargeClass::Syscall, 1))
+        .unwrap();
+    replay.now(ClockKind::Monotonic).unwrap();
+    replay.finish().unwrap();
+    let mut missed = Context::from_config(RuntimeConfig::replay(&path, "charges-v1")).unwrap();
+    assert!(matches!(
+        missed.now(ClockKind::Monotonic),
+        Err(RuntimeError::TimeModel { .. })
+    ));
 }
 
 #[test]
@@ -307,7 +486,7 @@ fn idle_time_advances_to_an_alarm_ahead_of_every_parked_deadline() {
 }
 
 #[test]
-fn advance_on_spin_records_and_replays_byte_identically() {
+fn escalation_records_and_replays_byte_identically() {
     let directory = tempdir().unwrap();
     let first = directory.path().join("spin-a.patina");
     let second = directory.path().join("spin-b.patina");
@@ -319,12 +498,14 @@ fn advance_on_spin_records_and_replays_byte_identically() {
     }
     // Same seed, two independent record runs: identical answers and bytes.
     assert_eq!(recorded[0], recorded[1]);
-    assert_eq!(recorded[0].0, 7 * SPIN_RESCUE_CLOCK_OPS + 1);
+    assert_eq!(recorded[0].0, 7 * ESCALATION_POLLS + 1);
     assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
-
-    // Replay consumes the recorded `SleepUntil`/`ClockNow` stream in order:
-    // the rescue re-fires at the same point because the spin state is a pure
-    // function of that stream, not of anything the record run measured.
+    // Nothing but the reads is recorded: the escalations replay with them.
+    let bundle = TraceBundle::load(&first).unwrap();
+    assert_eq!(
+        bundle.resolved_timeline("main").unwrap().len() as u64,
+        recorded[0].0
+    );
     let mut replay = Context::from_config(RuntimeConfig::replay(&first, "spin-v1")).unwrap();
     assert_eq!(calibration_spin(&mut replay, 100_000).unwrap(), recorded[0]);
     replay.finish().unwrap();
@@ -566,8 +747,8 @@ fn compute_stop_replay_cannot_cross_the_recorded_prefix_or_finish_successfully()
 #[test]
 fn frozen_clock_churn_aborts_a_loop_that_ignores_the_clock() {
     // A loop whose exit condition never depends on the clock value it reads:
-    // no amount of advancing frees it, so the backstop must name it rather
-    // than rescue it forever.
+    // no amount of charging frees it, so the backstop must name it rather
+    // than escalate it forever.
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
     let mut reads = 0u64;
     let error = loop {
@@ -580,35 +761,27 @@ fn frozen_clock_churn_aborts_a_loop_that_ignores_the_clock() {
         panic!("expected a frozen-clock-churn abort, got {error:?}");
     };
     // The marker rides the established liveness interface contract, so a
-    // campaign consumer classifies it without a new rule, and names the
-    // pattern and what the guest was doing.
+    // campaign consumer classifies it without a new rule.
     assert!(detail.starts_with("PATINA_VIOLATION liveness detail=frozen-clock-churn "));
-    assert!(detail.contains(&format!("rescues={SPIN_CHURN_ABORT_RESCUES}")));
+    assert_eq!(context.spin.escalations, CHURN_ABORT_ESCALATIONS);
     // Ten escalating tokens (1_023_000 ns) plus 246 at the 1 ms ceiling.
-    assert!(
-        detail.contains("advanced_ns=247023000"),
-        "marker was: {detail}"
-    );
-    assert_eq!(context.spin.rescues, SPIN_CHURN_ABORT_RESCUES);
-    // The abort fires only once the spin PERSISTS past the last rescue:
-    // a full further streak of reads bought nothing.
-    assert_eq!(
-        reads,
-        (SPIN_CHURN_ABORT_RESCUES + 1) * SPIN_RESCUE_CLOCK_OPS
-    );
+    assert_eq!(context.spin.charged_nanos, 247_023_000);
+    // The abort fires only once the poll PERSISTS past the last escalation:
+    // a full further streak of reads bought nothing. The read that completes
+    // it is the one refused.
+    assert_eq!(reads, (CHURN_ABORT_ESCALATIONS + 1) * ESCALATION_POLLS - 1);
     // The facts document carries the same finding as the line.
     let finding = &context.run_facts()["runtime_findings"][0];
     assert_eq!(finding["detail"], "frozen-clock-churn");
-    assert_eq!(finding["rescues"], SPIN_CHURN_ABORT_RESCUES);
+    assert_eq!(finding["rescues"], CHURN_ABORT_ESCALATIONS);
+    assert_eq!(finding["advanced_ns"], 247_023_000);
 }
 
 #[test]
-fn the_liveness_watchdog_fires_first_on_a_spin_that_advance_on_spin_feeds() {
-    // Before this slice the watchdog structurally could not fire on a clock
-    // spin: its no-progress window is measured in virtual nanoseconds, and
-    // virtual time did not move. Now the rescue feeds it, so a budget the
-    // rescues walk past trips it — and it trips FIRST, long before the
-    // frozen-clock backstop's 256 rescues. One mechanism, cleanly.
+fn the_liveness_watchdog_fires_first_on_a_poll_that_escalation_feeds() {
+    // The watchdog's no-progress window is measured in virtual nanoseconds,
+    // which escalation moves, so a budget the escalations walk past trips it,
+    // and it trips FIRST, long before the frozen-clock backstop's 256.
     let mut context =
         Context::from_config(RuntimeConfig::seeded(1).with_liveness(LivenessConfig {
             no_progress_budget_nanos: Some(5_000),
@@ -626,10 +799,9 @@ fn the_liveness_watchdog_fires_first_on_a_spin_that_advance_on_spin_feeds() {
     };
     assert_eq!(kind, LivenessKind::NoProgress);
     assert!(detail.starts_with("PATINA_VIOLATION liveness detail=no-progress "));
-    // Fired at the third rescue (1+2+4 = 7 µs past a 5 µs budget), so the
-    // churn backstop was nowhere near its own trigger.
-    assert_eq!(context.spin.rescues, 3);
-    assert!(context.spin.rescues < SPIN_CHURN_ABORT_RESCUES);
+    // Fired after the third escalation (1+2+4 = 7 µs past a 5 µs budget).
+    assert_eq!(context.spin.escalations, 3);
+    assert!(context.spin.escalations < CHURN_ABORT_ESCALATIONS);
 }
 
 // -- Liveness watchdog --------------------------------------------------

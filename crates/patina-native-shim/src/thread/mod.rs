@@ -1225,6 +1225,15 @@ pub(crate) fn sched_point() -> Result<(), c_int> {
     if task_completed() || main_returned() {
         return Ok(());
     }
+    // A scheduling point holds no wake decision and no section: the time
+    // the thread's calls carried moves the clock here (stopping at each
+    // deadline and at an unsettled alarm), what that expires is settled as
+    // the thread runtime is taken below, and a timer it reaches is delivered.
+    match crate::with_context_raw(|context| context.show_carry()) {
+        // No runtime installed yet: nothing was charged.
+        Ok(()) | Err(crate::ENOSYS) => {}
+        Err(errno) => return Err(errno),
+    }
     #[cfg(target_os = "linux")]
     signals::deliver();
     let mut state = lock_state();

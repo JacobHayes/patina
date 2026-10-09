@@ -27,9 +27,13 @@ fn main() {
         };
         assert_eq!(clock_gettime(CLOCK_MONOTONIC, &mut ts), 0);
         let mono_gt = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
-        assert_eq!(
-            mono_ns, mono_gt,
-            "clock_gettime_nsec_np disagreed with clock_gettime on the virtual monotonic clock"
+        // Calls cost virtual time: the clock_gettime read lies between the
+        // clock_gettime_nsec_np reads around it, on the same clock.
+        let mono_after = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        assert!(
+            (mono_ns..=mono_after).contains(&mono_gt),
+            "clock_gettime_nsec_np disagreed with clock_gettime on the virtual monotonic clock: \
+{mono_ns} <= {mono_gt} <= {mono_after}"
         );
         let real_ns = clock_gettime_nsec_np(CLOCK_REALTIME);
         println!("CLOCK_NSEC_RESULT mono_ns={mono_ns} real_ns={real_ns}");

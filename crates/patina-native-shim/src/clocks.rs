@@ -12,13 +12,13 @@
 //! last tick of the virtual kernel's `HZ`. The virtual machine has an RTC, so
 //! the alarm clocks read `CLOCK_REALTIME`/`CLOCK_BOOTTIME`; arming or sleeping
 //! on them needs `CAP_WAKE_ALARM` (`EPERM`). The CPU-time clocks read the
-//! runtime's virtual CPU time (`Context::cpu_time_nanos`): the modeled
-//! startup cost (`patina_dst_abi::STARTUP_CPU_NANOS`), then only what the
-//! advance-on-spin rescue charges — a task reading the clock again and again
-//! at frozen virtual time. A loop that computes without reading the clock
-//! accrues nothing. All of it is user time: the runtime does not split guest
-//! work into user and kernel phases. Init's CPU time is its startup's (it
-//! sleeps).
+//! runtime's virtual CPU time (`Context::cpu_time`, `Context::cpu_charge`):
+//! the modeled startup work (`patina_dst_abi::STARTUP_CPU_CHARGE`), then the
+//! charge of every guest call (`patina_dst_abi::ChargeClass`), split as user
+//! and system time. `CPUCLOCK_VIRT` reads the user time, `CPUCLOCK_PROF` and
+//! `CPUCLOCK_SCHED` both. A loop that computes without calling anything
+//! accrues nothing, and neither does time spent waiting. Init's CPU time is
+//! its startup's (it sleeps).
 //!
 //! The clock-setting rows answer as they answer an unprivileged caller:
 //! validation first, then `EPERM` (no `CAP_SYS_TIME`); `adjtimex` reads the
@@ -36,8 +36,8 @@
 
 use crate::thread;
 use crate::{EFAULT, EINVAL, EOPNOTSUPP, EPERM, uaccess, with_context};
-use patina_dst_abi::ClockKind;
 use patina_dst_abi::TaskId;
+use patina_dst_abi::{ClockKind, CpuCharge};
 use std::ffi::c_int;
 
 /// The virtual kernel's `CONFIG_HZ`.
@@ -85,6 +85,16 @@ pub(crate) enum CpuWhich {
     Virt,
     /// The scheduler's runtime.
     Sched,
+}
+
+impl CpuWhich {
+    /// What this clock reads of `time`.
+    pub(crate) fn read(self, time: CpuCharge) -> u64 {
+        match self {
+            CpuWhich::Virt => time.user_ns,
+            CpuWhich::Prof | CpuWhich::Sched => time.total_ns(),
+        }
+    }
 }
 
 /// Whose CPU time a CPU clock reads.
@@ -247,35 +257,34 @@ fn cpu_target(
     Ok((of, which))
 }
 
-/// The CPU time of `of`, in nanoseconds, observed through a recorded
-/// monotonic reading (so a loop that polls a CPU clock is a clock spin the
-/// runtime's advance-on-spin rescue can see). Like that reading, it answers
-/// the shim-bootstrap window: 0 before the runtime is installed.
-pub(crate) fn cpu_nanos(of: CpuOf) -> Result<u64, c_int> {
+/// The CPU time of `of`, observed through a recorded monotonic reading (so
+/// a loop that polls a CPU clock is a clock poll the runtime can escalate).
+/// Like that reading, it answers the shim-bootstrap window: 0 before the
+/// runtime is installed.
+pub(crate) fn cpu_time(of: CpuOf) -> Result<CpuCharge, c_int> {
     let mut monotonic = 0;
     // SAFETY: `monotonic` is local, writable storage.
     if unsafe { crate::patina_clock_now(1, &mut monotonic) } != 0 {
         return Err(crate::patina_errno());
     }
-    Ok(crate::with_context_raw(|context| Ok(cpu_nanos_unrecorded(context, of))).unwrap_or(0))
+    Ok(crate::with_context_raw(|context| Ok(cpu_time_unrecorded(context, of))).unwrap_or_default())
 }
 
-/// [`cpu_nanos`] without the clock observation, for a caller already
+/// [`cpu_time`] without the clock observation, for a caller already
 /// holding the context.
-pub(crate) fn cpu_nanos_unrecorded(context: &patina_dst_runtime::Context, of: CpuOf) -> u64 {
+pub(crate) fn cpu_time_unrecorded(context: &patina_dst_runtime::Context, of: CpuOf) -> CpuCharge {
     match of {
-        CpuOf::Process => context.cpu_time_nanos(),
+        CpuOf::Process => context.cpu_time(),
         CpuOf::Thread(task) => {
-            // The main thread also holds the startup cost and whatever ran
+            // The main thread also holds the startup work and whatever ran
             // before the thread subsystem first scheduled it.
-            let before = if thread::tid_of(task) == crate::patina_pid() {
-                context.task_cpu_time_nanos(None)
-            } else {
-                0
-            };
-            context.task_cpu_time_nanos(Some(task)) + before
+            let mut time = context.cpu_charge(Some(task));
+            if thread::tid_of(task) == crate::patina_pid() {
+                time.add(context.cpu_charge(None));
+            }
+            time
         }
-        CpuOf::Init => patina_dst_abi::STARTUP_CPU_NANOS,
+        CpuOf::Init => patina_dst_abi::STARTUP_CPU_CHARGE,
     }
 }
 
@@ -305,8 +314,8 @@ pub(crate) fn read(clock: Clock) -> Result<u64, c_int> {
         return Ok(now.saturating_sub(monotonic % TICK_NSEC));
     }
     if let Some(target) = clock.cpu(true) {
-        let (of, _) = target?;
-        return cpu_nanos(of);
+        let (of, which) = target?;
+        return cpu_time(of).map(|time| which.read(time));
     }
     // The virtual machine has no clock device for a descriptor to name.
     Err(EINVAL)
@@ -542,7 +551,7 @@ const RUSAGE_CHILDREN: i32 = -1;
 const RUSAGE_THREAD: i32 = 1;
 
 /// `getrusage(2)`: an unknown `who` is `EINVAL`; the process's (or the
-/// calling thread's) CPU time is all user time; the process has waited for
+/// calling thread's) CPU time is its user and system time; the process has waited for
 /// no child, so `RUSAGE_CHILDREN` is all zero, and it models no memory
 /// high-water mark, faults, I/O blocks or context switches (zero). The
 /// usage is copied out last (`EFAULT`).
@@ -555,8 +564,11 @@ pub(crate) fn getrusage(who: i32, out: *mut Rusage) -> i64 {
     };
     let mut usage = Rusage::default();
     if let Some(of) = of {
-        match cpu_nanos(of) {
-            Ok(nanos) => usage.utime = Timeval::from_nanos(nanos),
+        match cpu_time(of) {
+            Ok(time) => {
+                usage.utime = Timeval::from_nanos(time.user_ns);
+                usage.stime = Timeval::from_nanos(time.system_ns);
+            }
             Err(errno) => return -i64::from(errno),
         }
     }
@@ -571,21 +583,24 @@ pub(crate) fn getrusage(who: i32, out: *mut Rusage) -> i64 {
 /// since boot.
 const INITIAL_JIFFIES: u64 = (-300i64 * HZ as i64) as u32 as u64;
 
-/// `times(2)`: the process's CPU time in `USER_HZ` ticks (all user time; no
+/// `times(2)`: the process's user and system time in `USER_HZ` ticks (no
 /// child ever waited for) into a non-NULL buffer, and the tick count since
 /// an arbitrary point (`jiffies_64_to_clock_t(get_jiffies_64())`); a
 /// buffer that cannot be written is `EFAULT`.
 pub(crate) fn times(out: *mut [i64; 4]) -> i64 {
     let (uptime, cpu) = match with_context(|context| {
         let uptime = context.now(ClockKind::Monotonic)?;
-        Ok((uptime, cpu_nanos_unrecorded(context, CpuOf::Process)))
+        Ok((uptime, cpu_time_unrecorded(context, CpuOf::Process)))
     }) {
         Ok(read) => read,
         Err(errno) => return -i64::from(errno),
     };
     if !out.is_null() {
-        let ticks = (cpu / (NANOS / USER_HZ)) as i64;
-        if let Err(errno) = copy_out(out as usize, &[ticks, 0, 0, 0]) {
+        let ticks = |nanos: u64| (nanos / (NANOS / USER_HZ)) as i64;
+        if let Err(errno) = copy_out(
+            out as usize,
+            &[ticks(cpu.user_ns), ticks(cpu.system_ns), 0, 0],
+        ) {
             return errno;
         }
     }

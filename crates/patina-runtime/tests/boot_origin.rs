@@ -13,7 +13,7 @@ fn workload(ctx: &mut Context) -> (u64, u64) {
     let start = ctx.now(ClockKind::Monotonic).unwrap();
     let real = ctx.now(ClockKind::Realtime).unwrap();
     assert_eq!(real - start, DEFAULT_REALTIME_EPOCH_NANOS);
-    let cpu = ctx.cpu_time_nanos();
+    let cpu = ctx.cpu_time().total_ns();
     assert_eq!(
         ctx.buggify_evaluate("fault", "origin-test", None).unwrap(),
         SiteOutcome::Fire
@@ -28,11 +28,11 @@ fn workload(ctx: &mut Context) -> (u64, u64) {
         SiteOutcome::Ok
     );
     assert!(ctx.buggify_diagnostics().cutoff_reached);
-    assert_eq!(ctx.cpu_time_nanos(), cpu, "sleep is not CPU time");
+    assert_eq!(ctx.cpu_time().total_ns(), cpu, "sleep is not CPU time");
     let before_spin = ctx.now(ClockKind::Monotonic).unwrap();
     while ctx.now(ClockKind::Monotonic).unwrap() == before_spin {}
     let elapsed = ctx.now(ClockKind::Monotonic).unwrap() - start;
-    let charge = ctx.cpu_time_nanos() - cpu;
+    let charge = ctx.cpu_time().total_ns() - cpu;
     assert_eq!(elapsed, 20 + charge);
     assert!(charge > 0);
     (elapsed, charge)

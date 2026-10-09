@@ -252,8 +252,22 @@ pub(in crate::thread) fn pipe() -> [i32; 2] {
     );
     fds
 }
+/// How long [`delay`] sleeps: longer than the calls the other tasks make
+/// before they park cost (each is charged, and moves the clock).
+pub(in crate::thread) const DELAY: u64 = 1_000_000;
+
+/// A sleep whose remaining time a handler interrupts after [`DELAY`].
+pub(in crate::thread) const SLEEP: u64 = 1_000_000_000;
+
+/// Whether `remaining` is what a [`SLEEP`] interrupted after [`DELAY`] has
+/// left, give or take the calls charged around the two.
+pub(in crate::thread) fn left_after_delay(remaining: u64) -> bool {
+    (SLEEP - DELAY - 10_000..=SLEEP - DELAY + 10_000).contains(&remaining)
+}
+
+/// Let every other task run until it parks.
 pub(in crate::thread) fn delay() {
-    delay_for(10);
+    delay_for(DELAY);
 }
 fn delay_for(nanos: u64) {
     let now = with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap();
@@ -285,16 +299,27 @@ fn wakes_after(ops: &[Operation], index: usize) -> Vec<TaskId> {
         .collect()
 }
 
-/// Spin on the recorded clock until virtual time reaches `deadline`: the
-/// advance-on-spin rescue stops exactly there and expires the timed parks due.
+/// Compute until virtual time reaches `deadline`, a timed park's, with no
+/// scheduling point on the way: this thread's work is charged straight to
+/// the runtime, which stops the clock exactly there and expires the parks due
+/// (left for the next thread-runtime acquisition to settle).
 pub(in crate::thread) fn spin_to(deadline: u64) {
-    let mut now = 0;
-    while now < deadline {
-        assert_eq!(
-            unsafe { crate::patina_clock_now(CLOCK_MONOTONIC, &mut now) },
-            0
-        );
-    }
+    let task = Some(current_task());
+    let now = with_context_raw(|context| {
+        let mut now = context.monotonic_now_unrecorded()?;
+        while now < deadline {
+            let mut calls = patina_dst_abi::ChargeCounts::new();
+            let cost = patina_dst_abi::ChargeClass::Syscall.cost().total_ns();
+            calls.add(
+                patina_dst_abi::ChargeClass::Syscall,
+                (deadline - now).div_ceil(cost),
+            );
+            context.charge_calls(task, calls)?;
+            now = context.monotonic_now_unrecorded()?;
+        }
+        Ok(now)
+    })
+    .unwrap();
     assert_eq!(now, deadline);
 }
 
@@ -396,8 +421,17 @@ fn pipe_read_case(restart: bool) {
             );
         }
     });
+    let charged = || with_context_raw(|c| Ok(c.cpu_charge(Some(me)))).unwrap();
+    let before = charged();
     let mut byte = 0u8;
     let rc = unsafe { crate::patina_read(rd, (&mut byte as *mut u8).cast(), 1) };
+    // A restart enters the kernel again, natively: a second system call.
+    let calls = 1 + u64::from(restart);
+    let syscall = patina_dst_abi::ChargeClass::Syscall.cost();
+    assert_eq!(
+        charged().system_ns - before.system_ns,
+        calls * syscall.system_ns
+    );
     if restart {
         assert_eq!(rc, 1);
         assert_eq!(byte, b'x');
@@ -609,7 +643,7 @@ fn nanosleep_interrupted_reports_remaining_and_never_restarts() {
                 generate(SIGUSR1);
             });
             let now = with_context_raw(|c| c.now(ClockKind::Monotonic)).unwrap();
-            let req = Timespec { sec: 0, nsec: 100 };
+            let req = Timespec { sec: 1, nsec: 0 };
             let mut rem = [99i64; 2];
             let rc = if raw {
                 unsafe {
@@ -628,7 +662,7 @@ fn nanosleep_interrupted_reports_remaining_and_never_restarts() {
                 let rc = unsafe {
                     crate::patina_sleep_until_remaining(
                         CLOCK_MONOTONIC,
-                        now + 100,
+                        now + SLEEP,
                         rem.as_mut_ptr(),
                     )
                 };
@@ -636,7 +670,8 @@ fn nanosleep_interrupted_reports_remaining_and_never_restarts() {
                 -i64::from(crate::patina_errno())
             };
             assert_eq!(rc, -i64::from(EINTR));
-            assert_eq!(rem, [0, 90]);
+            assert_eq!(rem[0], 0);
+            assert!(left_after_delay(rem[1] as u64), "{rem:?}");
             join(helper);
         }
         assert_eq!(HANDLERS.load(Ordering::SeqCst), 2);
@@ -652,7 +687,8 @@ fn absolute_clock_nanosleep_leaves_rem_untouched() {
             assert_eq!(after_others_park(me), BlockClass::Sleep);
             generate(SIGUSR1);
         });
-        let deadline = with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap() + 100;
+        let deadline =
+            with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap() + SLEEP;
         let req = Timespec {
             sec: (deadline / 1_000_000_000) as i64,
             nsec: (deadline % 1_000_000_000) as i64,
@@ -742,7 +778,7 @@ fn timed_futex_wait_is_eintr_under_a_handler() {
                 }
             });
             let rc = if timed {
-                patina_futex_wait_timed(word, 0, CLOCK_MONOTONIC, 0, 100)
+                patina_futex_wait_timed(word, 0, CLOCK_MONOTONIC, 0, SLEEP)
             } else {
                 patina_futex_wait(word, 0)
             };
@@ -829,7 +865,7 @@ fn interrupted_waiter_is_unlinked_before_wake() {
                 },
                 BlockClass::Sleep => {
                     let now = with_context_raw(|c| c.now(ClockKind::Monotonic)).unwrap();
-                    crate::patina_sleep_until(CLOCK_MONOTONIC, now + 100)
+                    crate::patina_sleep_until(CLOCK_MONOTONIC, now + SLEEP)
                 }
                 _ => unreachable!(),
             };
@@ -840,10 +876,9 @@ fn interrupted_waiter_is_unlinked_before_wake() {
             // select this task before its new, later deadline.
             let now = with_context_raw(|c| c.now(ClockKind::Monotonic)).unwrap();
             assert_eq!(crate::patina_sleep_until(CLOCK_MONOTONIC, now + 200), 0);
-            assert_eq!(
-                with_context_raw(|c| c.now(ClockKind::Monotonic)).unwrap(),
-                now + 200
-            );
+            // The deadline, and the read's own charge.
+            let woke = with_context_raw(|c| c.now(ClockKind::Monotonic)).unwrap();
+            assert!((now + 200..now + 200 + 1_000).contains(&woke), "{woke}");
             if let Some(word) = word {
                 unsafe {
                     drop(Box::from_raw(word as *mut u32));
@@ -867,7 +902,7 @@ fn interrupted_waiter_is_unlinked_before_wake() {
 }
 
 #[test]
-fn pthread_kill_after_spin_rescue_preserves_the_timed_futex_timeout() {
+fn pthread_kill_after_an_escalation_preserves_the_timed_futex_timeout() {
     // Class pairing: `lock_state` settles the runtime's timer expiries before
     // signal generation can plan a wake from a registration they ended.
     isolated(|| {
@@ -875,27 +910,18 @@ fn pthread_kill_after_spin_rescue_preserves_the_timed_futex_timeout() {
         let word = Box::into_raw(Box::new(0u32)) as usize;
         let me = current_task();
         let handle = crate::watchdog::host_thread_self();
+        // Past the helper's start and its delay.
         let deadline =
-            with_context_raw(|context| context.monotonic_now_unrecorded()).unwrap() + 100;
+            with_context_raw(|context| context.monotonic_now_unrecorded()).unwrap() + 10 * DELAY;
         let helper = spawn(move || {
             assert_eq!(after_others_park(me), BlockClass::TimedFutex);
-            let mut now = 0;
-            loop {
-                assert_eq!(
-                    unsafe { crate::patina_clock_now(CLOCK_MONOTONIC, &mut now) },
-                    0
-                );
-                if now >= deadline {
-                    break;
-                }
-            }
-            assert_eq!(now, deadline);
+            spin_to(deadline);
             assert!(expired_unsettled(me));
             assert_eq!(patina_pthread_kill(handle, SIGUSR1), 0);
             assert!(!lock_state().signals.interrupted.contains_key(&me));
         });
         assert_eq!(
-            patina_futex_wait_timed(word, 0, CLOCK_MONOTONIC, 0, 100),
+            patina_futex_wait_timed(word, 0, CLOCK_MONOTONIC, 1, deadline),
             -1
         );
         assert_eq!(crate::patina_errno(), ETIMEDOUT);
@@ -906,12 +932,12 @@ fn pthread_kill_after_spin_rescue_preserves_the_timed_futex_timeout() {
             .iter()
             .position(|op| matches!(op, Operation::SignalGenerated { target: SignalTarget::Task(task), .. } if *task == me))
             .unwrap();
-        let rescue = ops[..generated]
+        let parked = ops[..generated]
             .iter()
-            .rposition(|op| matches!(op, Operation::SleepUntil { deadline_nanos, .. } if *deadline_nanos == deadline))
+            .rposition(|op| matches!(op, Operation::TaskParkTimed { task, deadline_nanos, .. } if *task == me && *deadline_nanos == deadline))
             .unwrap();
         assert_eq!(
-            ops[rescue..generated]
+            ops[parked..generated]
                 .iter()
                 .filter(|op| matches!(op, Operation::TaskWake { task } if *task == me))
                 .count(),
@@ -923,12 +949,14 @@ fn pthread_kill_after_spin_rescue_preserves_the_timed_futex_timeout() {
     });
 }
 
-/// A timed futex waiter the spin rescue expired, then a wake path reached
+/// A timed futex waiter an escalation expired, then a wake path reached
 /// before any scheduling point: the settled queue no longer holds it.
-fn wake_after_spin_rescue(wake: fn(usize) -> c_int) {
+fn wake_after_an_escalation(wake: fn(usize) -> c_int) {
     let word = Box::into_raw(Box::new(0u32)) as usize;
     let me = current_task();
-    let deadline = with_context_raw(|context| context.monotonic_now_unrecorded()).unwrap() + 100;
+    // Past the helper's start and its delay.
+    let deadline =
+        with_context_raw(|context| context.monotonic_now_unrecorded()).unwrap() + 10 * DELAY;
     let helper = spawn(move || {
         assert_eq!(after_others_park(me), BlockClass::TimedFutex);
         spin_to(deadline);
@@ -937,7 +965,7 @@ fn wake_after_spin_rescue(wake: fn(usize) -> c_int) {
         assert_eq!(wake(word), 0);
     });
     assert_eq!(
-        patina_futex_wait_timed(word, 0, CLOCK_MONOTONIC, 0, 100),
+        patina_futex_wait_timed(word, 0, CLOCK_MONOTONIC, 1, deadline),
         -1
     );
     assert_eq!(crate::patina_errno(), ETIMEDOUT);
@@ -947,16 +975,16 @@ fn wake_after_spin_rescue(wake: fn(usize) -> c_int) {
 }
 
 #[test]
-fn futex_wake_after_spin_rescue_finds_the_expired_waiter_gone() {
+fn futex_wake_after_an_escalation_finds_the_expired_waiter_gone() {
     // Class pairing: `lock_state` settles timer expiries before any wake path
-    // reads a wait queue (see `pthread_kill_after_spin_rescue_...`).
-    isolated(|| wake_after_spin_rescue(|word| patina_futex_wake(word, 1)));
+    // reads a wait queue (see `pthread_kill_after_an_escalation_...`).
+    isolated(|| wake_after_an_escalation(|word| patina_futex_wake(word, 1)));
 }
 
 #[test]
-fn futex_requeue_after_spin_rescue_finds_the_expired_waiter_gone() {
+fn futex_requeue_after_an_escalation_finds_the_expired_waiter_gone() {
     isolated(|| {
-        wake_after_spin_rescue(|word| {
+        wake_after_an_escalation(|word| {
             let other = word + 4;
             crate::thread::futex2::multiplexed_requeue(word, other, false, (1, 1), None) as c_int
         })
@@ -1326,18 +1354,20 @@ fn sleep_remaining_is_snapshotted_before_handler_time() {
             unsafe {
                 crate::patina_sleep_until_remaining(
                     CLOCK_MONOTONIC,
-                    now + 100,
+                    now + SLEEP,
                     remaining.as_mut_ptr(),
                 )
             },
             -1
         );
         assert_eq!(crate::patina_errno(), EINTR);
-        assert_eq!(remaining, [0, 90]);
-        assert_eq!(
-            with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap(),
-            now + 30
-        );
+        assert_eq!(remaining[0], 0);
+        assert!(left_after_delay(remaining[1] as u64), "{remaining:?}");
+        // The handler's 20 ns came after the snapshot: the time the sleep
+        // spent is what it reports, the handler's on top.
+        let after = with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap();
+        let spent = SLEEP - remaining[1] as u64;
+        assert!(after - now >= spent + 20, "{} {spent}", after - now);
         join(helper);
     });
 }

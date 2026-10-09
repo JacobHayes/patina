@@ -217,6 +217,8 @@ pub unsafe extern "C" fn patina_tsc_dispatch(
     IN_DISPATCH.with(|cell| cell.set(true));
     let value = counter_now();
     IN_DISPATCH.with(|cell| cell.set(false));
+    // The read is the whole call: it ends here.
+    crate::charge::finish_call(crate::charge::Op::ClockRead.class());
     let Some(value) = value else {
         crate::trap_fatal(
             "TSC: the virtual clock refused a timestamp-counter read; refusing to fabricate a \

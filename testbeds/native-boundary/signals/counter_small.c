@@ -19,6 +19,14 @@
 static stack_t registered;
 static volatile sig_atomic_t on_stack, read_in_handler, check_in_handler;
 static volatile uint64_t handler_tsc, handler_tscp;
+
+/* The virtual monotonic clock. Calls cost virtual time, so a counter read
+ * lies between the clock readings around it. */
+static uint64_t monotonic(void) {
+    struct timespec now;
+    assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+    return (uint64_t)now.tv_sec * 1000000000 + (uint64_t)now.tv_nsec;
+}
 static volatile uint32_t handler_aux;
 static volatile int handler_stack_flags;
 extern unsigned char PATINA_SUD_ARMED __attribute__((weak));
@@ -89,7 +97,9 @@ int main(int argc, char **argv) {
         if (check_in_handler)
             assert(handler_stack_flags == (autodisarm ? SS_DISABLE : SS_ONSTACK));
         if (strstr(argv[1], "native") == NULL) {
-            assert(handler_tsc == expected && handler_tscp == expected && handler_aux == 0);
+            const uint64_t after = monotonic();
+            assert(expected <= handler_tsc && handler_tsc <= handler_tscp &&
+                   handler_tscp <= after && handler_aux == 0);
         }
         stack_t now;
         assert(sigaltstack(NULL, &now) == 0);
@@ -100,12 +110,15 @@ int main(int argc, char **argv) {
     }
     assert(autodisarm || strcmp(argv[1], "read-fault") == 0 ||
            strcmp(argv[1], "read-fault-nosud") == 0);
+    uint64_t last = expected;
     for (int i = 0; i < 3; ++i) {
         uint32_t lo, hi, aux;
         __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-        assert((((uint64_t)hi << 32) | lo) == expected);
+        const uint64_t tsc = ((uint64_t)hi << 32) | lo;
         __asm__ volatile("rdtscp" : "=a"(lo), "=d"(hi), "=c"(aux));
-        assert((((uint64_t)hi << 32) | lo) == expected && aux == 0);
+        const uint64_t tscp = ((uint64_t)hi << 32) | lo;
+        assert(last <= tsc && tsc <= tscp && tscp <= monotonic() && aux == 0);
+        last = tscp;
         stack_t now;
         assert(sigaltstack(NULL, &now) == 0);
         assert(now.ss_sp == registered.ss_sp && now.ss_size == registered.ss_size &&

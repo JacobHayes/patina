@@ -14,10 +14,13 @@
 //! moves on, counting the periods it skipped as overruns, when its signal is
 //! dequeued — `posixtimer_rearm`), and a timer descriptor counts expirations
 //! its readers take. The CPU-time timers run on the virtual CPU time
-//! (`Context::cpu_time_nanos`), which only the advance-on-spin rescue moves:
-//! a task reading the clock again and again at frozen virtual time. A loop
-//! that computes without reading the clock accrues no CPU time and fires no
-//! CPU-time timer, and idle time never reaches one.
+//! (`Context::cpu_time`), the charge of every guest call: `ITIMER_VIRTUAL`
+//! and a `CPUCLOCK_VIRT` timer on user time, `ITIMER_PROF` and the other CPU
+//! clocks on user plus system time. A loop that computes without calling
+//! anything accrues no CPU time and fires no CPU-time timer, and idle time
+//! never reaches one. A CPU-time timer fires at the first expiry check after
+//! its time is reached, so it can be late by the calls charged in between,
+//! as the kernel's fires at the next tick.
 //!
 //! Timers on `CLOCK_REALTIME`/`CLOCK_TAI` are kept on the monotonic line:
 //! nothing ever sets the virtual clock, so the realtime clock is the
@@ -29,7 +32,7 @@
 
 use super::signals::{Generated, Info, SIGALRM, SIGPROF, SIGVTALRM};
 use super::*;
-use crate::clocks::{Clock, CpuOf, NANOS, TICK_NSEC, Timespec, Timeval};
+use crate::clocks::{Clock, CpuOf, CpuWhich, NANOS, TICK_NSEC, Timespec, Timeval};
 use crate::neg_errno as errno;
 use crate::{EBADF, EFAULT, uaccess};
 use patina_dst_abi::SignalTarget;
@@ -50,15 +53,25 @@ fn forward(expires: &mut u64, now: u64, interval: u64) -> u64 {
 enum Line {
     /// The monotonic line (every clock but the CPU clocks).
     Monotonic,
-    /// A CPU clock: the process's or one thread's CPU time.
-    Cpu(CpuOf),
+    /// A CPU clock: the process's or one thread's CPU time, the part of it
+    /// the clock reads.
+    Cpu(CpuOf, CpuWhich),
+}
+
+/// The line interval timer `which` runs on.
+fn itimer_line(which: i32) -> Line {
+    match which {
+        ITIMER_REAL => Line::Monotonic,
+        ITIMER_VIRTUAL => Line::Cpu(CpuOf::Process, CpuWhich::Virt),
+        _ => Line::Cpu(CpuOf::Process, CpuWhich::Prof),
+    }
 }
 
 /// A reading of `line`, unrecorded: the time expiry is judged at.
 fn now_on(line: Line) -> Result<u64, c_int> {
     with_context_raw(|context| match line {
         Line::Monotonic => context.monotonic_now_unrecorded(),
-        Line::Cpu(of) => Ok(crate::clocks::cpu_nanos_unrecorded(context, of)),
+        Line::Cpu(of, which) => Ok(which.read(crate::clocks::cpu_time_unrecorded(context, of))),
     })
 }
 
@@ -67,7 +80,7 @@ fn now_on(line: Line) -> Result<u64, c_int> {
 fn observe(line: Line) -> Result<u64, c_int> {
     match line {
         Line::Monotonic => crate::with_context(|context| context.now(ClockKind::Monotonic)),
-        Line::Cpu(of) => crate::clocks::cpu_nanos(of),
+        Line::Cpu(of, which) => crate::clocks::cpu_time(of).map(|time| which.read(time)),
     }
 }
 
@@ -213,28 +226,31 @@ impl Timers {
             .min()
     }
 
-    /// The CPU time the earliest armed CPU-time timer still needs: the
-    /// process's interval timers and CPU-line POSIX timers against the
-    /// process's CPU time, and the calling task's thread-clock timers against
-    /// its own (the task the advance-on-spin rescue charges while it spins).
-    fn cpu_alarm(&self, process: u64, own: (TaskId, u64)) -> Option<u64> {
-        let itimers = self
-            .cpu
-            .iter()
-            .filter(|timer| timer.expires != 0)
-            .map(|timer| timer.expires.saturating_sub(process));
-        let posix =
-            self.posix
-                .values()
-                .filter(|timer| timer.active)
-                .filter_map(|timer| match timer.line {
-                    Line::Cpu(CpuOf::Process) => Some(timer.expires.saturating_sub(process)),
-                    Line::Cpu(CpuOf::Thread(task)) if task == own.0 => {
-                        Some(timer.expires.saturating_sub(own.1))
-                    }
-                    _ => None,
-                });
-        itimers.chain(posix).min()
+    /// The earliest armed CPU-time timer deadlines on the process's user
+    /// and user-plus-system lines: its interval timers and process-clock
+    /// POSIX timers. A thread-clock timer is not published: the runtime's
+    /// escalation reaches it by its token instead.
+    fn cpu_alarms(&self) -> patina_dst_runtime::CpuAlarms {
+        let itimers = [ITIMER_VIRTUAL, ITIMER_PROF]
+            .into_iter()
+            .zip(self.cpu)
+            .filter(|(_, timer)| timer.expires != 0)
+            .map(|(which, timer)| (itimer_line(which), timer.expires));
+        let posix = self
+            .posix
+            .values()
+            .filter(|timer| timer.active)
+            .map(|timer| (timer.line, timer.expires));
+        let mut alarms = patina_dst_runtime::CpuAlarms::default();
+        for (line, expires) in itimers.chain(posix) {
+            let slot = match line {
+                Line::Cpu(CpuOf::Process, CpuWhich::Virt) => &mut alarms.user_ns,
+                Line::Cpu(CpuOf::Process, _) => &mut alarms.total_ns,
+                _ => continue,
+            };
+            *slot = Some(slot.map_or(expires, |earliest| earliest.min(expires)));
+        }
+        alarms
     }
 
     /// `dequeue_signal`'s timer half. A `SIGALRM` restarts an `ITIMER_REAL`
@@ -311,7 +327,12 @@ impl ThreadRuntime {
         now: &mut impl FnMut(Line) -> Result<u64, c_int>,
     ) -> Result<(Vec<Generated>, Vec<TaskId>), c_int> {
         let monotonic = now(Line::Monotonic)?;
-        let process = now(Line::Cpu(CpuOf::Process))?;
+        // `ITIMER_VIRTUAL` runs on the process's user time, `ITIMER_PROF`
+        // on its user plus system time.
+        let cpu = [
+            now(itimer_line(ITIMER_VIRTUAL))?,
+            now(itimer_line(ITIMER_PROF))?,
+        ];
         let mut due = Vec::new();
         for (id, timer) in self.timers.posix.iter().filter(|(_, timer)| timer.active) {
             due.push((*id, timer.expires, now(timer.line)?));
@@ -328,8 +349,9 @@ impl ThreadRuntime {
             wakes.extend(generate(self, SignalTarget::Process, Info::kernel(SIGALRM)));
         }
         for (index, sig) in [SIGVTALRM, SIGPROF].into_iter().enumerate() {
+            let now = cpu[index];
             let timer = &mut self.timers.cpu[index];
-            if timer.expires != 0 && process >= timer.expires {
+            if timer.expires != 0 && now >= timer.expires {
                 timer.expires = if timer.incr == 0 {
                     0
                 } else {
@@ -387,7 +409,7 @@ impl ThreadRuntime {
             timer.requeue = timer.requeue.wrapping_add(1);
             timer.requeue
         } else {
-            if let Line::Cpu(_) = timer.line {
+            if let Line::Cpu(..) = timer.line {
                 // A one-shot CPU timer clears as it fires.
                 timer.expires = 0;
             }
@@ -423,17 +445,16 @@ impl ThreadRuntime {
         Some((target, Info::timer(sig, id, value, generation)))
     }
 
-    /// Let the runtime's advance-on-spin rescue stop at the earliest
-    /// monotonic deadline, and advance toward the earliest CPU-time timer in
-    /// whole steps (`Context::set_cpu_alarm`).
+    /// Publish the earliest monotonic deadline, which a charge never moves
+    /// the clock past (`Context::set_alarm`), and the earliest CPU-time
+    /// deadlines, which an escalated poll charges up to
+    /// (`Context::set_cpu_alarms`).
     fn publish_alarm(&self) {
         let alarm = self.timers.alarm(&self.signals);
-        let me = current_task();
+        let cpu = self.timers.cpu_alarms();
         let _ = with_context_raw(|context| {
             context.set_alarm(alarm);
-            let process = crate::clocks::cpu_nanos_unrecorded(context, CpuOf::Process);
-            let own = crate::clocks::cpu_nanos_unrecorded(context, CpuOf::Thread(me));
-            context.set_cpu_alarm(self.timers.cpu_alarm(process, (me, own)));
+            context.set_cpu_alarms(cpu);
             Ok(())
         });
     }
@@ -560,12 +581,7 @@ pub(crate) fn getitimer(which: i32, out: *mut Itimerval) -> i64 {
         return errno(EINVAL);
     }
     fire_due();
-    let line = if which == ITIMER_REAL {
-        Line::Monotonic
-    } else {
-        Line::Cpu(CpuOf::Process)
-    };
-    let now = match observe(line) {
+    let now = match observe(itimer_line(which)) {
         Ok(now) => now,
         Err(code) => return errno(code),
     };
@@ -615,12 +631,7 @@ pub(crate) fn setitimer(which: i32, new: *const Itimerval, old: *mut Itimerval) 
 fn set_itimer(which: i32, value: u64, interval: u64) -> Result<(u64, u64), c_int> {
     super::signals::activate();
     fire_due();
-    let line = if which == ITIMER_REAL {
-        Line::Monotonic
-    } else {
-        Line::Cpu(CpuOf::Process)
-    };
-    let now = observe(line)?;
+    let now = observe(itimer_line(which))?;
     let mut state = lock_state();
     let previous = get_itimer(&state, which, now, true);
     if which == ITIMER_REAL {
@@ -753,8 +764,8 @@ fn timer_line(clock: Clock) -> Result<(Line, bool), c_int> {
         Clock::Realtime | Clock::Tai => Ok((Line::Monotonic, true)),
         Clock::Monotonic | Clock::Boottime => Ok((Line::Monotonic, false)),
         Clock::ProcessCpu | Clock::ThreadCpu | Clock::Cpu { .. } => {
-            let (of, _) = clock.cpu(false).expect("a CPU clock")?;
-            Ok((Line::Cpu(of), false))
+            let (of, which) = clock.cpu(false).expect("a CPU clock")?;
+            Ok((Line::Cpu(of, which), false))
         }
         // `alarm_timer_create`: the RTC is there; `CAP_WAKE_ALARM` is not.
         Clock::RealtimeAlarm | Clock::BoottimeAlarm => Err(EPERM),
@@ -860,7 +871,7 @@ pub(crate) fn timer_create(clock: i32, event: *const Sigevent, id_out: *mut i32)
 /// overrun).
 fn posix_get(timer: &mut PosixTimer, now: u64, replacing: bool) -> (u64, u64) {
     let quiet = timer.notify == Notify::Quiet;
-    if let Line::Cpu(_) = timer.line {
+    if let Line::Cpu(..) = timer.line {
         if replacing && timer.expires != 0 {
             timer.overrun += forward(&mut timer.expires, now, timer.interval) as i64;
         }
@@ -934,8 +945,8 @@ pub(crate) fn timer_settime(
             Ok(expires) => expires,
             Err(code) => return errno(code),
         },
-        (_, Line::Cpu(_)) if absolute => value,
-        (_, Line::Cpu(_)) => now.saturating_add(value),
+        (_, Line::Cpu(..)) if absolute => value,
+        (_, Line::Cpu(..)) => now.saturating_add(value),
     };
     let timer = state.timers.posix.get_mut(&id).expect("looked up above");
     let previous = posix_get(timer, now, true);
@@ -954,7 +965,7 @@ pub(crate) fn timer_settime(
         // `posix_cpu_timer_set`: the reload is stored either way, every
         // armed timer is queued (a `SIGEV_NONE` one clears as it fires), and
         // one already due fires at once.
-        Line::Cpu(_) => {
+        Line::Cpu(..) => {
             timer.interval = interval;
             timer.active = value != 0;
             value != 0 && now >= expires

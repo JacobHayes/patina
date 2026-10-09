@@ -121,6 +121,24 @@ pub fn guest_source(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// The stdout of a single-file Rust testbed built with plain `rustc` and run
+/// natively, without Patina: the oracle its Patina run must match.
+#[allow(dead_code)]
+pub fn native_stdout(name: &str) -> Vec<u8> {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("native");
+    let built = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2024", "-o"])
+        .arg(&binary)
+        .arg(guest_source(name))
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{}", text(&built.stderr));
+    let output = std::process::Command::new(&binary).output().unwrap();
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    output.stdout
+}
+
 /// Built binary and scratch directory kept alive for a test's lifetime.
 pub struct Guest {
     pub dir: TempDir,

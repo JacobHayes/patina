@@ -79,7 +79,7 @@
 
 use crate::buggify::Buggify;
 use crate::custom_op::PendingCustomOp;
-use crate::liveness::{CpuTime, LivenessWatchdog, SpinRescue};
+use crate::liveness::{Escalation, LivenessWatchdog};
 use crate::recording::Execution;
 use crate::schedule::ScheduleTracker;
 use patina_dst_abi::{EffectError, Operation, Outcome, TaskId};
@@ -114,6 +114,7 @@ pub use config::{
 };
 
 pub use builder::RuntimeBuilder;
+pub use charge::CpuAlarms;
 pub use recording::TraceTransport;
 
 pub use config_env::trace_fd_from_env;
@@ -122,7 +123,7 @@ pub use fs_crash::{CrashCounts, CrashOp, CrashPoint};
 
 pub use schedule::{ScheduleDiagnostics, TaskCompletionCause, TaskScheduleStat};
 
-pub use liveness::LivenessKind;
+pub use liveness::{ESCALATION_POLLS, LivenessKind};
 
 pub use buggify::{
     BuggifyDeclaredSiteReport, BuggifyDiagnostics, BuggifyKind, BuggifySiteReport, SiteOutcome,
@@ -734,24 +735,17 @@ pub struct Context {
     /// watchdog aborts the process before `finish` on the interposed families,
     /// so that path emits it early — this flag keeps it at exactly one write.
     facts_emitted: bool,
-    /// Advance-on-spin state. See [`SpinRescue`]; inert until a guest actually
-    /// churns on the clock, so a run that never spins is byte-for-byte unchanged.
-    spin: SpinRescue,
-    /// Virtual CPU time. See [`CpuTime`].
-    cpu: CpuTime,
-    /// The CPU time guest calls are charged, per task (inert: no clock reads
-    /// it yet).
+    /// Poll escalation state. See [`Escalation`]; inert until a guest polls
+    /// without progress, so a run that never does is unchanged by it.
+    spin: Escalation,
+    /// The CPU time guest calls are charged, per task, and the monotonic
+    /// time they have yet to move (see [`charge`]).
     charges: charge::Charges,
     /// The earliest monotonic deadline of the embedder's process timers (the
     /// native shim's interval timers, POSIX timers and timer descriptors), set
-    /// through [`Context::set_alarm`]. The advance-on-spin rescue never steps
-    /// over it, as it never steps over a parked task's deadline.
+    /// through [`Context::set_alarm`]. A charge never moves the clock over
+    /// it, as it never moves it over a parked task's deadline.
     alarm: Option<u64>,
-    /// The CPU time the embedder's earliest CPU-time timer still needs, as
-    /// published through [`Context::set_cpu_alarm`], with the process CPU
-    /// time it was published at: the advance-on-spin rescue advances toward
-    /// it in whole steps.
-    cpu_alarm: Option<(u64, u64)>,
     /// Whether the recording has already been written out by
     /// [`Context::flush_recording`] on a runtime-initiated stop. The trace
     /// transport is an append-only descriptor in the interposed families, so a
@@ -846,6 +840,13 @@ pub enum RuntimeError {
     FrozenClockChurn {
         detail: String,
     },
+    /// Replay derived a different monotonic time than the recording read:
+    /// the guest's calls were charged differently (a missed or extra
+    /// charge), so the time model diverged. `detail` names the operation and
+    /// both values.
+    TimeModel {
+        detail: String,
+    },
     /// Native compute-only starvation: a runtime limit, never a guest verdict.
     ComputeBound {
         task: TaskId,
@@ -903,6 +904,7 @@ impl fmt::Display for RuntimeError {
             Self::FrozenClockChurn { detail } => {
                 write!(f, "Patina frozen-clock churn: {detail}")
             }
+            Self::TimeModel { detail } => write!(f, "Patina time-model divergence: {detail}"),
             Self::ComputeStopExport => f.write_str("PATINA_INFRA compute_stop_export_failed"),
             Self::ComputeStopOverflow => {
                 f.write_str("PATINA_INFRA compute_stop_export_failed reason=trace-overflow")

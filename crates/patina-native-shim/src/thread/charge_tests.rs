@@ -98,3 +98,34 @@ fn teardown_calls_are_not_charged() {
         assert_eq!(charged(me), before);
     });
 }
+
+#[test]
+fn an_escalation_is_charged_to_the_thread_whose_call_earned_it() {
+    // A worker completes a poll streak with its last clock read and ends
+    // its thread; the main thread then reads the clock. The escalation goes
+    // to the worker, as its read ends (a clock call: user time), never to
+    // the main thread's next call.
+    isolated(|| {
+        let me = Some(current_task());
+        let worker = spawn(|| {
+            // The spawn was progress: a streak starts here.
+            for _ in 0..patina_dst_runtime::ESCALATION_POLLS {
+                read_clock();
+            }
+        });
+        let task = Some(task_of(worker));
+        join(worker);
+        let before = charged(me);
+        read_clock();
+        assert_eq!(charged(me), plus(before, ChargeClass::Clock, 1));
+        let worker_charge = charged(task);
+        let reads = plus(
+            CpuCharge::default(),
+            ChargeClass::Clock,
+            patina_dst_runtime::ESCALATION_POLLS,
+        );
+        // The reads, and an escalation of clock calls on top.
+        assert_eq!(worker_charge.system_ns, 0);
+        assert!(worker_charge.user_ns > reads.user_ns, "{worker_charge:?}");
+    });
+}

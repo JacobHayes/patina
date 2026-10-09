@@ -148,7 +148,8 @@ fn a_woken_futex2_wait_keeps_its_outcome_across_a_handler() {
             generate(SIGUSR1);
         });
         let now = with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap();
-        let deadline = timespec(now + 1_000_000);
+        // Past the helper's delay.
+        let deadline = timespec(now + 10_000_000);
         let words = [waitv(first), waitv(second)];
         let outer = [words.as_ptr() as u64, 2, 0, deadline.as_ptr() as u64, 1, 0];
         assert_eq!(futex_waitv(outer), 1);

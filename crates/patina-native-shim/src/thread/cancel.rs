@@ -395,7 +395,7 @@ pub unsafe extern "C" fn patina_cancel_point(name: *const std::ffi::c_char) {
 mod tests {
     use super::*;
     use crate::thread::signals::tests::{
-        after_others_park, expired_unsettled, isolated, join, spawn, spin_to, task_of,
+        DELAY, after_others_park, expired_unsettled, isolated, join, spawn, spin_to, task_of,
     };
     use std::sync::atomic::{AtomicBool, AtomicU64};
 
@@ -433,12 +433,13 @@ mod tests {
             assert_eq!(patina_thread_cancel(worker as usize), 0);
             CANCELED.store(true, Ordering::SeqCst);
             join(worker);
-            assert_eq!(SLEPT.load(Ordering::SeqCst), 0, "the sleep waited");
+            // Only the calls' own charges, nothing of the hour.
+            assert!(SLEPT.load(Ordering::SeqCst) < 10_000, "the sleep waited");
             assert_eq!(LEFT.load(Ordering::SeqCst), ACT as usize);
         });
     }
 
-    /// A cancel that reaches a sleeper after the spin rescue expired its
+    /// A cancel that reaches a sleeper after a charge expired its
     /// sleep, before any scheduling point: the sleep ended at its deadline, so
     /// the cancel waits for the thread's next point (the sleep's wrapper),
     /// never waking the already-runnable thread a second time.
@@ -448,7 +449,9 @@ mod tests {
         static LEFT: AtomicUsize = AtomicUsize::new(0);
         isolated(|| {
             let start = monotonic();
-            let deadline = start + 100;
+            // Past the calls the worker makes before it sleeps, and the main
+            // thread's delay.
+            let deadline = start + 10 * DELAY;
             let worker = spawn(move || {
                 let outer = patina_cancel_enter();
                 assert_eq!(crate::patina_sleep_until(1, deadline), 0);
@@ -461,10 +464,11 @@ mod tests {
             assert!(expired_unsettled(task));
             assert_eq!(patina_thread_cancel(worker as usize), 0);
             join(worker);
-            assert_eq!(
-                SLEPT.load(Ordering::SeqCst),
-                100,
-                "the sleep reached its deadline"
+            // The deadline, and the calls the worker made after it.
+            let slept = SLEPT.load(Ordering::SeqCst);
+            assert!(
+                (10 * DELAY..10 * DELAY + 10_000).contains(&slept),
+                "the sleep reached its deadline: {slept}"
             );
             assert_eq!(LEFT.load(Ordering::SeqCst), ACT as usize);
         });

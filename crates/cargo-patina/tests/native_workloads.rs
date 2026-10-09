@@ -571,11 +571,15 @@ fn std_runs_seeded_and_replayable_but_not_standalone() {
         "NATIVE_STD_RESULT ",
         &["epoch_ns", "first_hash", "second_hash", "fs"],
     );
-    assert_eq!(
+    // The guest-start realtime, and the calls charged before the read.
+    let soon_after = |value: &str, start: u64| {
+        let value: u64 = value.parse().unwrap();
+        assert!((start..start + 100_000).contains(&value), "{value} {start}");
+    };
+    soon_after(
         fields["epoch_ns"],
-        (patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS
-            + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS)
-            .to_string()
+        patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS
+            + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS,
     );
     assert_lower_hex(fields["first_hash"], 16);
     assert_lower_hex(fields["second_hash"], 16);
@@ -594,11 +598,15 @@ fn realtime_epoch_defaults_overrides_and_replays_flag_free() {
         "NATIVE_REALTIME_EPOCH_RESULT ",
         &["epoch_ns", "mtime_ns"],
     );
-    assert_eq!(
+    // The guest-start realtime, and the calls charged before the read.
+    let soon_after = |value: &str, start: u64| {
+        let value: u64 = value.parse().unwrap();
+        assert!((start..start + 100_000).contains(&value), "{value} {start}");
+    };
+    soon_after(
         fields["epoch_ns"],
-        (patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS
-            + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS)
-            .to_string()
+        patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS
+            + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS,
     );
 
     // The flag moves the guest's wall clock, is recorded into the trace, and a
@@ -610,9 +618,9 @@ fn realtime_epoch_defaults_overrides_and_replays_flag_free() {
         "NATIVE_REALTIME_EPOCH_RESULT ",
         &["epoch_ns", "mtime_ns"],
     );
-    assert_eq!(
-        fields["epoch_ns"].parse::<u64>().unwrap(),
-        1_000_000_000_000_000_000 + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS
+    soon_after(
+        fields["epoch_ns"],
+        1_000_000_000_000_000_000 + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS,
     );
     let trace = g.assert_record_replay_identity(3, &flags, &baseline);
     assert_eq!(
@@ -857,8 +865,7 @@ fn urandom_device_is_seeded_and_replayable() {
 fn condvar_waits_use_exact_virtual_deadlines() {
     let g = Guest::assert_build("timed_wait_probe.rs");
     g.assert_audit_clean();
-    let expected =
-        "NATIVE_TIMED_WAIT_RESULT signalled_elapsed_ns=25000000 timeout_elapsed_ns=100000000\n";
+    let expected = "NATIVE_TIMED_WAIT_RESULT signalled_elapsed_ms=25 timeout_elapsed_ms=100\n";
     for seed in [5, 6] {
         let baseline = g.assert_seed_repeatability(seed, 2, &[]);
         assert_eq!(text(&baseline), expected);
@@ -920,6 +927,75 @@ fn syscall_is_charged_as_the_call_it_makes() {
     assert_eq!(system_ns("getuid") - system_ns("getpid"), 10_000 * syscall);
 }
 
+/// A blocking receive that completes a poll streak, with only a CPU-time
+/// timer pending: the escalation it earned is charged as it ends, before it
+/// parks, so the timer fires and interrupts it. RED with the escalation
+/// deferred to the next call: the receive parks with the timer out of reach
+/// and the run stops as a deadlock for every poll count.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_blocking_receive_that_earns_an_escalation_reaches_its_cpu_timer() {
+    let g = Guest::assert_build("prof_park_probe.rs");
+    // Some count of nonblocking receives (each makes two polls, near 512 of
+    // them to a streak) makes the blocking receive's poll the streak's last:
+    // a smaller one leaves it short of the streak, a larger one fires the
+    // one-shot timer during the polls.
+    let interrupted: Vec<u32> = (480..560)
+        .filter(|polls| {
+            let output = g.command("run", &["--seed", "5", "--", &polls.to_string()]);
+            output.status.success()
+                && text(&output.stdout)
+                    .contains("PROF_PARK fired_before=false interrupted=true fired=true")
+        })
+        .collect();
+    assert!(!interrupted.is_empty());
+    // Recorded and replayed alike.
+    let polls = interrupted[0].to_string();
+    let trace = g.dir.path().join("prof-park.patina");
+    let record = g.command(
+        "run",
+        &[
+            "--seed",
+            "5",
+            "--record",
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "prof-park-v1",
+            "--",
+            &polls,
+        ],
+    );
+    assert!(record.status.success(), "{}", text(&record.stderr));
+    let replay = g.command(
+        "replay",
+        &[trace.to_str().unwrap(), "--fingerprint", "prof-park-v1"],
+    );
+    assert!(replay.status.success(), "{}", text(&replay.stderr));
+    assert_eq!(record.stdout, replay.stdout);
+}
+
+/// A loop that only yields, waiting on a 10 µs sleeper and then on a 10 µs
+/// ITIMER_REAL: each yield is a charged call, and its scheduling point shows
+/// the time charged, so both arrive. RED with charged time shown only at a
+/// door's gateway: time stays frozen through every yield and the run hits
+/// its budget.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_yield_loop_reaches_a_sleeping_peer_and_a_real_timer() {
+    let g = Guest::assert_build("yield_wait_probe.rs");
+    g.assert_audit_clean();
+    let expected = native_stdout("yield_wait_probe.rs");
+    assert_exact_line(
+        &expected,
+        "NATIVE_YIELD_WAIT_RESULT sleeper_woke=true alarm_fired=true",
+    );
+    let budget = ["--budget", "2000000"];
+    for seed in [1, 7] {
+        assert_eq!(g.assert_seed_repeatability(seed, 2, &budget), expected);
+    }
+    g.assert_record_replay_identity(1, &budget, &expected);
+}
+
 #[test]
 fn an_empty_udp_poll_on_a_sleeping_peer_lets_virtual_time_reach_it() {
     // Class pairing: the runtime's outcome classifier
@@ -936,6 +1012,42 @@ fn an_empty_udp_poll_on_a_sleeping_peer_lets_virtual_time_reach_it() {
         assert_eq!(text(&baseline), expected);
     }
     g.assert_record_replay_identity(5, &budget, expected.as_bytes());
+}
+
+#[test]
+fn a_poll_that_never_reads_the_clock_reaches_its_sleeping_peer() {
+    // Class pairing: the runtime's escalation
+    // (`liveness::tests::an_empty_poll_loop_is_escalated_to_its_peers_deadline_and_replays`).
+    // RED before calls were charged: no call the poll made moved virtual time,
+    // so the run hit the budget.
+    let g = Guest::assert_build("poll_sleeper.rs");
+    g.assert_audit_clean();
+    let budget = ["--budget", "2000000"];
+    let expected = native_stdout("poll_sleeper.rs");
+    assert_exact_line(
+        &expected,
+        "NATIVE_POLL_SLEEPER_RESULT first_empty=true payload=ping polled=true",
+    );
+    for seed in [5, 6] {
+        assert_eq!(g.assert_seed_repeatability(seed, 2, &budget), expected);
+    }
+    g.assert_record_replay_identity(5, &budget, &expected);
+}
+
+/// The CPU clocks, resource usage and CPU-time timers read the charged
+/// calls, as they read the CPU a native run burns: the same result line.
+#[cfg(target_os = "linux")]
+#[test]
+fn cpu_time_is_the_charge_of_the_guests_calls() {
+    let g = Guest::assert_build("cpu_charge_probe.rs");
+    g.assert_audit_clean();
+    let expected = native_stdout("cpu_charge_probe.rs");
+    assert_exact_line(
+        &expected,
+        "NATIVE_CPU_CHARGE_RESULT slept=true idle_cpu_under_1ms=true rises=true \
+rusage_is_cpu_clock=true prof_fired=true virtual_fired=true",
+    );
+    assert_eq!(g.assert_seeded_record_replay_identity(5, &[]), expected);
 }
 
 #[test]
@@ -962,8 +1074,7 @@ fn sleep_only_advances_when_idle() {
         let out = g.assert_seed_repeatability(seed, 2, &[]);
         assert!(matches!(
             assert_unique_line_payload(&out, "NATIVE_SLEEP_ORDER_RESULT "),
-            "order=AB a_elapsed_ns=100000000 work=4950"
-                | "order=BA a_elapsed_ns=100000000 work=4950"
+            "order=AB a_elapsed_ms=100 work=4950" | "order=BA a_elapsed_ms=100 work=4950"
         ));
     }
 }
@@ -975,10 +1086,10 @@ fn udp_latency_is_recorded_for_flag_free_replay() {
     let out = g.assert_seeded_record_replay_identity(5, &["--net-latency-nanos", "250000000"]);
     assert_exact_line(
         &out,
-        "NATIVE_UDP_LATENCY_RESULT elapsed_ns=250000000 payload=ping",
+        "NATIVE_UDP_LATENCY_RESULT elapsed_us=250000 payload=ping",
     );
     let zero = g.assert_seed_repeatability(5, 2, &["--net-latency-nanos", "0"]);
-    assert_exact_line(&zero, "NATIVE_UDP_LATENCY_RESULT elapsed_ns=0 payload=ping");
+    assert_exact_line(&zero, "NATIVE_UDP_LATENCY_RESULT elapsed_us=0 payload=ping");
 }
 
 #[test]

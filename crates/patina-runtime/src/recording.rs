@@ -1,6 +1,6 @@
 //! Trace transport, recording lifecycle, effect reconciliation, and outcome decoding.
 
-use crate::liveness::SPIN_RESCUE_CLOCK_OPS;
+use crate::liveness::ESCALATION_POLLS;
 use crate::{Context, RuntimeError, facts};
 
 use crate::reports::{
@@ -404,9 +404,9 @@ impl Context {
         if let Some(vtime) = self.spin.churn_vtime_nanos {
             findings.push(facts::frozen_clock_churn_finding(
                 vtime,
-                self.spin.rescues,
-                self.spin.advanced_nanos,
-                SPIN_RESCUE_CLOCK_OPS,
+                self.spin.escalations,
+                self.spin.charged_nanos,
+                ESCALATION_POLLS,
             ));
         }
         if !schedule.vacuous.is_empty() {
@@ -715,10 +715,15 @@ a recorded result or a replay fetch",
                 _ => {}
             }
             self.track_outcome(&operation, &recorded)?;
+            self.escalate_due()?;
             Ok(recorded)
         } else {
             self.track_outcome(&operation, &actual)?;
-            Ok(self.complete(operation, actual))
+            let outcome = self.complete(operation, actual);
+            // An empty poll that completes a streak is escalated once it is
+            // recorded, so the escalation's own expiries follow it.
+            self.escalate_due()?;
+            Ok(outcome)
         }
     }
 }

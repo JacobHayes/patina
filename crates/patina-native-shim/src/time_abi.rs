@@ -118,12 +118,9 @@ pub unsafe extern "C" fn patina_sleep_until_remaining(
 }
 
 #[unsafe(no_mangle)]
-/// The process's virtual CPU time in nanoseconds, backing the Darwin resource
-/// accounting interposers (`getrusage`/`task_info`): the modeled startup cost
-/// plus what the advance-on-spin rescue charged its tasks
-/// (`Context::cpu_time_nanos`; the Linux rows read it through `clocks`). Read UNRECORDED, so this read
-/// emits no trace op and takes no scheduling point; the value is a pure
-/// function of the recorded stream.
+/// The process's virtual CPU time in nanoseconds, user plus system
+/// ([`cpu_time`]). Read UNRECORDED, so this read emits no trace op and takes
+/// no scheduling point.
 ///
 /// Always succeeds writing a value. Before the runtime is installed (a custom
 /// allocator's bootstrap timing, or a binary run outside the supervisor) it
@@ -140,16 +137,23 @@ pub unsafe extern "C" fn patina_cpu_time_nanos(nanos: *mut u64) -> c_int {
     if nanos.is_null() {
         return fail(EINVAL);
     }
-    // Bootstrap window / no runtime installed: CPU time is zero, independent
-    // of the uptime origin. Never routes through `ensure_runtime`, so an
-    // accounting probe cannot trip an auto-install or abort.
-    let value = if in_shim_bootstrap() {
-        0
-    } else {
-        with_context_raw(|context| Ok(context.cpu_time_nanos())).unwrap_or(0)
-    };
+    let value = cpu_time().total_ns();
     // SAFETY: `nanos` was checked non-null and is writable per the C ABI.
     unsafe { nanos.write(value) };
     set_errno(0);
     0
+}
+
+/// The process's virtual CPU time, backing the Darwin resource accounting
+/// interposers (`getrusage`/`task_info`): the modeled startup work plus the
+/// charge of every guest call (`Context::cpu_time`; the Linux rows read it
+/// through `clocks`). Unrecorded. Before the runtime is installed (a custom
+/// allocator's bootstrap timing, or a binary run outside the supervisor) it
+/// is a deterministic 0 rather than an auto-install: a resource read must
+/// never be the thing that forces runtime init.
+pub(crate) fn cpu_time() -> patina_dst_abi::CpuCharge {
+    if in_shim_bootstrap() {
+        return patina_dst_abi::CpuCharge::default();
+    }
+    with_context_raw(|context| Ok(context.cpu_time())).unwrap_or_default()
 }

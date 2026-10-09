@@ -4,7 +4,7 @@ use crate::ENV_FACTS;
 use crate::buggify::Buggify;
 use crate::config::{BuggifyConfig, ExecutionMode, FaultConfig, RuntimeConfig, validate_guest_env};
 use crate::fs_crash::CrashCounts;
-use crate::liveness::{CpuTime, LivenessWatchdog, SpinRescue, resolve_heal_after};
+use crate::liveness::{Escalation, LivenessWatchdog, resolve_heal_after};
 use crate::recording::{Execution, RecordReservation, RecordSink, TraceTransport};
 use crate::replay::{
     buggify_record, dns_record, fault_record, guest_env_record, installed_clock_epoch,
@@ -730,14 +730,9 @@ impl RuntimeBuilder {
             reports: self.config.reports,
             facts,
             facts_emitted: false,
-            spin: SpinRescue {
-                baseline_nanos: boot_origin_nanos,
-                ..SpinRescue::default()
-            },
-            cpu: CpuTime::default(),
+            spin: Escalation::default(),
             charges: Default::default(),
             alarm: None,
-            cpu_alarm: None,
             recording_flushed: false,
         })
     }
