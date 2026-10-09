@@ -212,6 +212,8 @@ pub unsafe extern "C" fn patina_tsc_dispatch(
              cannot happen — a reentry means the containment invariant is broken)",
         );
     }
+    // The trap answers a guest counter read: one clock call.
+    crate::charge::count(crate::charge::Op::ClockRead.class());
     IN_DISPATCH.with(|cell| cell.set(true));
     let value = counter_now();
     IN_DISPATCH.with(|cell| cell.set(false));

@@ -344,7 +344,7 @@ pub extern "C" fn patina_cancel_test() -> c_int {
 /// handler's sleep runs inside another's), which [`patina_cancel_leave`]
 /// restores: 0 for none, else its depth plus one.
 pub extern "C" fn patina_cancel_enter() -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     let me = current_task();
     let mut state = lock_state();
     let depth = state.signals.depth(me);
@@ -361,7 +361,7 @@ pub extern "C" fn patina_cancel_enter() -> c_int {
 /// The C wrapper leaves the cancellation point [`patina_cancel_enter`]
 /// entered: [`ACT`] when a cancel arrived while the thread was in it.
 pub extern "C" fn patina_cancel_leave(outer: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     let me = current_task();
     let mut state = lock_state();
     let cancel = state.cancels.entry(me);

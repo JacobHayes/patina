@@ -154,7 +154,7 @@ unsafe extern "C" fn pthread_mutex_init(
 /// As pthread_mutex_lock's.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn pthread_mutex_lock(mutex: *mut libc::pthread_mutex_t) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     project_pthread_result({
         // SAFETY: pthread_mutex_lock's caller contract keeps `mutex` valid for
         // the operation forwarded to the model entry.
@@ -166,7 +166,7 @@ unsafe extern "C" fn pthread_mutex_lock(mutex: *mut libc::pthread_mutex_t) -> c_
 /// As pthread_mutex_trylock's.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut libc::pthread_mutex_t) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     project_pthread_result({
         // SAFETY: pthread_mutex_trylock's caller contract keeps `mutex` valid
         // for the operation forwarded to the model entry.
@@ -178,7 +178,7 @@ unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut libc::pthread_mutex_t) ->
 /// As pthread_mutex_unlock's.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut libc::pthread_mutex_t) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     project_pthread_result({
         // SAFETY: pthread_mutex_unlock's caller contract keeps `mutex` valid
         // for the operation forwarded to the model entry.
@@ -304,7 +304,7 @@ unsafe extern "C" fn pthread_cond_timedwait_relative_np(
 /// As pthread_cond_signal's.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn pthread_cond_signal(cond: *mut libc::pthread_cond_t) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     project_pthread_result({
         // SAFETY: pthread_cond_signal's caller contract keeps `cond` valid for
         // the operation forwarded to the model entry.
@@ -316,7 +316,7 @@ unsafe extern "C" fn pthread_cond_signal(cond: *mut libc::pthread_cond_t) -> c_i
 /// As pthread_cond_broadcast's.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn pthread_cond_broadcast(cond: *mut libc::pthread_cond_t) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     project_pthread_result({
         // SAFETY: pthread_cond_broadcast's caller contract keeps `cond` valid
         // for the operation forwarded to the model entry.
@@ -374,7 +374,7 @@ unsafe extern "C" fn pthread_rwlock_destroy(lock: *mut libc::pthread_rwlock_t) -
 /// As pthread_rwlock_rdlock's.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn pthread_rwlock_rdlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     project_pthread_result({
         // SAFETY: pthread_rwlock_rdlock's caller contract keeps `lock` valid
         // for the operation forwarded to the model entry.
@@ -386,7 +386,7 @@ unsafe extern "C" fn pthread_rwlock_rdlock(lock: *mut libc::pthread_rwlock_t) ->
 /// As pthread_rwlock_tryrdlock's.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn pthread_rwlock_tryrdlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     project_pthread_result({
         // SAFETY: pthread_rwlock_tryrdlock's caller contract keeps `lock`
         // valid for the operation forwarded to the model entry.
@@ -398,7 +398,7 @@ unsafe extern "C" fn pthread_rwlock_tryrdlock(lock: *mut libc::pthread_rwlock_t)
 /// As pthread_rwlock_wrlock's.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn pthread_rwlock_wrlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     project_pthread_result({
         // SAFETY: pthread_rwlock_wrlock's caller contract keeps `lock` valid
         // for the operation forwarded to the model entry.
@@ -410,7 +410,7 @@ unsafe extern "C" fn pthread_rwlock_wrlock(lock: *mut libc::pthread_rwlock_t) ->
 /// As pthread_rwlock_trywrlock's.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn pthread_rwlock_trywrlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     project_pthread_result({
         // SAFETY: pthread_rwlock_trywrlock's caller contract keeps `lock`
         // valid for the operation forwarded to the model entry.
@@ -422,7 +422,7 @@ unsafe extern "C" fn pthread_rwlock_trywrlock(lock: *mut libc::pthread_rwlock_t)
 /// As pthread_rwlock_unlock's.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn pthread_rwlock_unlock(lock: *mut libc::pthread_rwlock_t) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     project_pthread_result({
         // SAFETY: pthread_rwlock_unlock's caller contract keeps `lock` valid
         // for the operation forwarded to the model entry.
@@ -527,7 +527,7 @@ pub unsafe extern "C" fn patina_once_begin(
     control: *mut libc::pthread_once_t,
     entry: *mut *mut c_void,
 ) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     // SAFETY: registry storage is internal; `control` is used only as an
     // opaque key and the registry owns all pointers it dereferences.
     match unsafe { once_begin(control as usize) } {
@@ -547,7 +547,7 @@ pub unsafe extern "C" fn patina_once_begin(
 /// `entry` is one [`patina_once_begin`] claimed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_once_done(entry: *mut c_void) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     // SAFETY: `entry` is a non-null claim returned by patina_once_begin.
     unsafe { once_settle(entry.cast(), DONE) }
 }
@@ -563,7 +563,7 @@ pub unsafe extern "C" fn patina_once_done(entry: *mut c_void) {
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_once_reset(entry: *mut c_void) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     // SAFETY: `entry` is a non-null claim returned by patina_once_begin.
     unsafe { once_settle(entry.cast(), FRESH) }
 }

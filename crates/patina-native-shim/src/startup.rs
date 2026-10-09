@@ -4,7 +4,7 @@ use super::*;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_note_boundary_symbol(symbol: *const c_char) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     LAST_BOUNDARY_SYMBOL.store(symbol.cast_mut(), Ordering::Relaxed);
 }
 
@@ -13,7 +13,7 @@ pub extern "C" fn patina_note_boundary_symbol(symbol: *const c_char) {
 /// runtime. Bare prefixed-C embedders have no guest abort interposer or required
 /// host aliases and deliberately do not call this startup control-plane entry.
 pub extern "C" fn patina_init_panic_policy() {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     crate::panic_boundary::install();
 }
 

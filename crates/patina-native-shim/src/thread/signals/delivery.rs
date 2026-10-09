@@ -583,7 +583,7 @@ fn releasing_from_trap_exit() {
 /// from C would run handlers over them as one from Rust does: the delivery
 /// is made here, as that delivery makes it, and the driver releases nothing.
 pub extern "C" fn patina_exit_begin() -> i32 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     from_trap_exit();
     if crate::panic_boundary::frames_suspended() {
         deliver_from_rust();
@@ -598,7 +598,7 @@ pub extern "C" fn patina_exit_begin() -> i32 {
 /// # Safety
 /// `exit` is the C driver's `struct patina_exit`, writable for the call.
 pub unsafe extern "C" fn patina_exit_next(exit: *mut Exit) -> i32 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     releasing_from_trap_exit();
     // SAFETY: the C driver's own record, per this function's contract.
     i32::from(next(unsafe { &mut *exit }))
@@ -610,7 +610,7 @@ pub unsafe extern "C" fn patina_exit_next(exit: *mut Exit) -> i32 {
 /// # Safety
 /// `exit` is the C driver's `struct patina_exit`, writable for the call.
 pub unsafe extern "C" fn patina_exit_released(exit: *mut Exit) -> i32 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     releasing_from_trap_exit();
     // SAFETY: the C driver's own record, per this function's contract.
     i32::from(released(unsafe { &mut *exit }))

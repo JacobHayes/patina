@@ -57,6 +57,9 @@ pub extern "C" fn patina_shutdown() -> c_int {
 /// Finalize the runtime without flushing the guest's stdio buffers (see
 /// [`patina_shutdown`]).
 pub(crate) fn shutdown_run() -> c_int {
+    // The run's last guest calls (a direct `exit_group` included) are charged
+    // before the runtime is taken away to be finalized.
+    crate::charge::flush_now();
     thread::deactivate();
     let context = {
         let mut guard = slot().lock();
@@ -194,7 +197,7 @@ static GUEST_EXIT_STATUS: std::sync::atomic::AtomicI32 =
 /// returning is the guest's verdict, and glibc's own later `exit()` of that same
 /// code must not be mistaken for a second, independent one.
 pub extern "C" fn patina_note_guest_exit_status(status: c_int) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     let _ = GUEST_EXIT_STATUS.compare_exchange(
         GUEST_EXIT_UNKNOWN,
         status,

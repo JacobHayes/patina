@@ -9,20 +9,20 @@ use crate::sud::Word;
 
 #[unsafe(no_mangle)]
 extern "C" fn getpid() -> libc::pid_t {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::Getpid);
     crate::patina_pid()
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn getppid() -> libc::pid_t {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::Getppid);
     crate::patina_ppid()
 }
 
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 extern "C" fn gettid() -> libc::pid_t {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::Gettid);
     crate::patina_thread_id()
 }
 

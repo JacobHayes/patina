@@ -48,7 +48,11 @@ rule:
               field: body
               has:
                 all:
-                  - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter();'
+                  - any:
+                      - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter();'
+                      - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();'
+                      - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_op($OP);'
+                      - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_syscall($NR);'
                   - not:
                       follows:
                         all:
@@ -68,6 +72,10 @@ rule:
                 - regex: '^_panic_scope$'
                 - not:
                     inside:
-                      pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter();'
+                      any:
+                        - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter();'
+                        - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();'
+                        - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_op($OP);'
+                        - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_syscall($NR);'
                       stopBy: neighbor
               stopBy: end

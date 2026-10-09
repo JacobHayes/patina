@@ -59,7 +59,7 @@ pub unsafe extern "C" fn patina_start_prepare(
     argv: *mut *mut c_char,
     sud_probe: c_int,
 ) -> LibcStartMain {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     let envp = unsafe { argv.add(argc as usize + 1) };
     unsafe { crate::posix_env::save_host(envp) };
     // The POSIX link supplies host aliases; install panic containment before
@@ -168,7 +168,7 @@ pub unsafe extern "C" fn patina_cleanup_push(
     routine: unsafe extern "C" fn(*mut c_void),
     arg: *mut c_void,
 ) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     unsafe { (cleanup_vehicles().0)(buffer, routine, arg) }
 }
 
@@ -176,7 +176,7 @@ pub unsafe extern "C" fn patina_cleanup_push(
 /// `buffer` is the innermost record [`patina_cleanup_push`] pushed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_cleanup_pop(buffer: *mut c_void, execute: c_int) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     unsafe { (cleanup_vehicles().1)(buffer, execute) }
 }
 
@@ -188,7 +188,7 @@ pub unsafe extern "C" fn patina_cleanup_pop(buffer: *mut c_void, execute: c_int)
 /// the last thread).
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_main_exited(_unused: *mut c_void) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     crate::thread::patina_main_thread_exited();
 }
 

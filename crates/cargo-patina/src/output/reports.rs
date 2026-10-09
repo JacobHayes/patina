@@ -167,6 +167,7 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
                 .and_then(serde_json::Value::as_array)
                 .cloned()
                 .unwrap_or_default();
+            env.cpu_charges = facts.get("cpu_charges").cloned();
         }
         // Refusal attribution is the PARENT's job: a fail-closed abort kills the
         // child before it can write anything structured, so what it already

@@ -32,7 +32,7 @@ fn now(clock: u32) -> Option<u64> {
 /// Both pointers name writable storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_time_of_day(seconds: *mut i64, micros: *mut i64) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::TimeOfDay);
     let Some(nanos) = now(REALTIME) else {
         return -1;
     };
@@ -173,7 +173,7 @@ pub(super) unsafe extern "C" fn clock_gettime(
     clock_id: libc::clockid_t,
     time: *mut libc::timespec,
 ) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::ClockGettime);
     crate::patina_note_boundary_symbol(c"clock_gettime".as_ptr());
     let clock = match clock_id {
         libc::CLOCK_REALTIME => REALTIME,

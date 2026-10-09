@@ -11,7 +11,7 @@ pub(crate) mod stdio;
 /// even when an earlier libc/libSystem already offered the public symbols.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_variadic_link() {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
 }
 
 #[cfg(target_os = "linux")]

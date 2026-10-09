@@ -396,6 +396,7 @@ impl Context {
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
         let task = decode_task(&operation, outcome)?;
+        self.charges.reserve(Some(task));
         self.scheduler_tasks.insert(task);
         self.schedule.on_spawn(task);
         Ok(task)
