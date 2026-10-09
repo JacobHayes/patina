@@ -63,7 +63,7 @@ mod linux {
 
     #[test]
     fn ppoll_timeout_writes_back_zero_after_virtual_sleep() {
-        assert_ppoll_output("timeout", "PPOLL_TIMEOUT elapsed=5000000 remaining=0");
+        assert_ppoll_output("timeout", "PPOLL_TIMEOUT elapsed_ms=5 remaining=0");
     }
 
     #[test]

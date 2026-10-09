@@ -1,11 +1,9 @@
-//! Progress watchdogs, spin rescue, CPU time, and compute stops.
+//! Progress watchdogs, poll escalation, and compute stops.
 
 use crate::config::{LivenessConfig, RuntimeConfig};
 use crate::recording::{Execution, RecordSink};
 use crate::{Context, RuntimeError, facts};
-use patina_dst_abi::{ClockKind, Operation, Outcome, TaskId};
-
-use std::collections::BTreeMap;
+use patina_dst_abi::{ChargeClass, ChargeCounts, ClockKind, Operation, Outcome, TaskId};
 
 /// Minimum number of consecutive non-progress operations a no-progress window must
 /// contain before the watchdog may fire, so a single long-but-legitimate sleep
@@ -271,180 +269,157 @@ impl LivenessWatchdog {
     }
 }
 
-/// Consecutive clock-observation boundary ops — at unchanged virtual time and
-/// with no intervening progress op — that the runtime treats as a spin.
+/// Consecutive polls without progress after which a poll is escalated:
+/// 1024.
 ///
-/// Why 1024. The streak is only broken by a *progress* op (see
-/// [`progress_of`]) or by virtual time actually moving, so real code
-/// cannot accumulate it: any effect, entropy draw, spawn, or sleep resets it,
-/// and a clock read is nearly always followed by one of those. 1024 puts the
-/// trigger an order of magnitude beyond even a pathological polling loop that
-/// re-reads the clock a few dozen times per decision, which is what keeps the
-/// rescue invisible to every existing workload (the acceptance constraint: no
-/// recorded artifact anywhere in the tree may change). It is simultaneously
-/// cheap for a genuine spin: the canonical calibration loop issues two clock
-/// ops per iteration, so 1024 is 512 iterations — microseconds of host time.
-pub(super) const SPIN_RESCUE_CLOCK_OPS: u64 = 1_024;
+/// A poll is a clock observation or an operation whose outcome found nothing
+/// to take (see [`outcome_is_progress`]); a progress operation ends the
+/// count, and the scheduling and wait operations between polls neither count
+/// nor end it, so a polling thread in a multi-task run still accumulates.
+/// Real code cannot accumulate it by accident: any effect, entropy draw,
+/// spawn or idle wait ends it, and a poll is nearly always followed by one of
+/// those. 1024 is an order of magnitude beyond even a pathological loop that
+/// re-reads the clock a few dozen times per decision, and still cheap for a
+/// genuine spin: the canonical calibration loop issues two clock reads per
+/// iteration, so 1024 is 512 iterations, microseconds of host time.
+pub const ESCALATION_POLLS: u64 = 1_024;
 
-/// The first rescue's advance within a spin episode: 1 µs, deliberately tiny.
-/// A guest that is merely polling hard — a 100 µs busy-wait, say — must see a
-/// nudge rather than a jump, so the elapsed time it eventually derives is close
-/// to what it asked for instead of being rounded up to the rescue granularity.
-const SPIN_RESCUE_TOKEN_MIN_NANOS: u64 = 1_000;
+/// The first escalation's CPU time within an episode with no deadline
+/// pending: 1 µs, deliberately tiny. A guest merely polling hard (a 100 µs
+/// busy-wait) sees a nudge rather than a jump, so the elapsed time it derives
+/// stays close to what it asked for.
+const ESCALATION_TOKEN_MIN_NANOS: u64 = 1_000;
 
-/// The per-rescue ceiling the token escalates to: 1 ms. The escalation (doubling
-/// per rescue) is what makes a real wedge converge in tens of rescues instead of
-/// millions of loop iterations; the ceiling is what bounds the resulting
-/// overshoot. The calibration pattern in the wild measures a 10 ms window, so a
-/// 1 ms ceiling caps the overshoot on that window at 10%.
+/// The ceiling the token doubles to: 1 ms. The doubling is what makes a
+/// calibration loop with no deadline converge in tens of escalations instead
+/// of millions of iterations; the ceiling bounds the overshoot (10% of the
+/// 10 ms window the calibration pattern measures).
 ///
 /// Worked example (the fastant calibration loop, 10 ms window): tokens
-/// 1, 2, 4, … 512 µs sum to ~1.02 ms over ten rescues, then the ceiling carries
-/// the remaining ~9 ms in nine more — ~19 rescues, ~19 × 1024 ≈ 20k recorded
-/// clock ops per window. Well under [`patina_dst_trace::MAX_TIMELINE_EVENTS`].
-const SPIN_RESCUE_TOKEN_MAX_NANOS: u64 = 1_000_000;
+/// 1, 2, 4, … 512 µs sum to ~1.02 ms over ten escalations, then the ceiling
+/// carries the remaining ~9 ms in nine more: ~19 escalations, ~19 × 1024 ≈
+/// 20k recorded clock reads per window, well under
+/// [`patina_dst_trace::MAX_TIMELINE_EVENTS`].
+const ESCALATION_TOKEN_MAX_NANOS: u64 = 1_000_000;
 
-/// Rescues within one spin episode after which the run is aborted as
+/// Escalations within one episode after which the run is aborted as
 /// frozen-clock churn: 256.
 ///
-/// Why 256. At the token ceiling this is >250 ms of virtual time advanced with
-/// zero genuine progress — 25× the 10 ms window the calibration pattern uses,
-/// and ~5× the longest window (50 ms) seen in the crates that use it. A loop
-/// still spinning after that is not *waiting* for time, it is *ignoring* it, and
-/// no amount of further advancing will unwedge it. Bounded trace cost: at most
-/// 256 × 1024 ≈ 262k recorded clock ops before the named abort, so the trace
-/// that explains the wedge is still writable and loadable.
-const SPIN_CHURN_ABORT_RESCUES: u64 = 256;
+/// At the token ceiling this is >250 ms of CPU time charged with zero genuine
+/// progress, 25× the 10 ms window the calibration pattern uses and ~5× the
+/// longest (50 ms) seen in the crates that use it, and with a deadline pending
+/// it is 256 deadlines passed. A loop still polling after that is not waiting
+/// for time, it ignores it, and no further charging will free it. Bounded
+/// trace cost: at most 256 × 1024 ≈ 262k recorded polls before the named
+/// abort, so the trace that explains the wedge is still writable and loadable.
+const CHURN_ABORT_ESCALATIONS: u64 = 256;
 
-/// Advance-on-spin state: the runnable-churn counterpart to the deadlock rescue.
+/// Whether an operation that made no progress is a poll: a clock observation,
+/// or an operation whose outcome found nothing to take.
+fn is_poll(operation: &Operation) -> bool {
+    matches!(operation, Operation::ClockNow { .. }) || progress_of(operation) == Progress::ByOutcome
+}
+
+/// The class of call a poll operation stands for: a clock read, or a system
+/// call.
+fn poll_class(operation: &Operation) -> ChargeClass {
+    match operation {
+        Operation::ClockNow { .. } => ChargeClass::Clock,
+        _ => ChargeClass::Syscall,
+    }
+}
+
+/// Poll escalation: a loop that polls for something only time can bring.
 ///
-/// The deadlock rescue advances virtual time when the guest *waits* — every task
-/// parked with a timer pending. The gap it leaves is a guest that is *runnable*
-/// and doing nothing but reading the clock: virtual time only moves through a
-/// recorded `SleepUntil`, so a loop whose exit condition is "10 ms of monotonic
-/// progress" and whose body performs no wait never terminates. That is the
-/// pre-`main` calibration shape (`fastant`/`minstant`/`quanta` measure the
-/// timestamp counter against the OS clock over a fixed window at startup), and
-/// it is common in exactly the crates a DST user wants to instrument.
+/// Natively a busy poller burns CPU for the whole wait, and that CPU time
+/// moves the clock. The simulation charges only the iterations it executes,
+/// so a loop waiting for a 1 ms deadline would take thousands of them. Every
+/// [`ESCALATION_POLLS`] polls without progress, one poll is escalated: it is
+/// charged as `k` more calls of its class, standing for the iterations the
+/// simulation did not run, so the user/system split stays the poller's own.
+/// With a deadline pending (a timed park's, the embedder's alarm, or a
+/// published CPU-time timer's), `k` reaches the earliest exactly; otherwise
+/// it is the escalating token's worth.
 ///
 /// Two levels of state, deliberately distinct:
 ///
-/// - The **streak** (`clock_ops` measured from `baseline_nanos`) is the trigger.
-///   It counts consecutive clock observations at unchanged virtual time; it is
-///   reset by a genuine progress op, and by virtual time moving for any reason
-///   other than this rescue's own advance.
-/// - The **episode** (`rescues`, `advanced_nanos`) survives across rescues and
-///   drives both the token escalation and the frozen-clock-churn backstop. Only
-///   a progress op — or a time move the guest itself caused — ends an episode.
+/// - The **streak** (`polls`) is the trigger. It counts polls since the
+///   episode began or the last escalation.
+/// - The **episode** (`escalations`, `charged_nanos`) survives escalations
+///   and drives the token and the frozen-clock-churn backstop. A progress
+///   operation or an idle advance (the guest waited) ends it.
 ///
-/// Every input is a recorded boundary op or the driver's monotonic value, both
-/// maintained identically on record and replay, so the rescue re-executes at the
-/// same point on replay and the trace is byte-identical.
+/// Escalation is charged after the escalated poll's outcome, so the poll
+/// itself observes the time before it. Every input is a recorded operation,
+/// its outcome, or the charges the guest's calls make, all identical on
+/// record and replay, and nothing is recorded: the escalated charge replays
+/// with the poll that triggers it.
 #[derive(Debug, Default)]
-pub(super) struct SpinRescue {
-    /// Consecutive clock-observation ops since `baseline_nanos`.
-    pub(super) clock_ops: u64,
-    /// The virtual time the current streak is measured at. A clock op observing
-    /// a different time means time moved, which ends the streak (and, unless
-    /// this rescue moved it, the episode).
-    pub(super) baseline_nanos: u64,
-    /// Rescues performed in the current episode; drives the token escalation and
-    /// is what [`SPIN_CHURN_ABORT_RESCUES`] bounds.
-    pub(super) rescues: u64,
-    /// Virtual nanoseconds this episode's rescues have advanced in total, for
-    /// the churn diagnostic.
-    pub(super) advanced_nanos: u64,
-    /// Set while the rescue emits its own `SleepUntil`, so that op does not
-    /// disturb the state the rescue is about to update itself.
-    pub(super) rescuing: bool,
+pub(super) struct Escalation {
+    /// Polls since the episode began or the last escalation.
+    pub(super) polls: u64,
+    /// Escalations in the current episode; drives the token and is what
+    /// [`CHURN_ABORT_ESCALATIONS`] bounds.
+    pub(super) escalations: u64,
+    /// CPU time the episode's escalations charged, for the churn diagnostic.
+    pub(super) charged_nanos: u64,
+    /// An escalation a completed streak earned, with the class of the poll
+    /// that completed it. Taken at once: by the operation's own outcome, or
+    /// by the embedder's gateway for the guest call that made it.
+    due: Option<ChargeClass>,
+    /// Whether the embedder charges each guest call ([`Context::accrue_calls`]):
+    /// it then applies an escalation at the end of the call that earned it,
+    /// in that call's task and class ([`Context::take_poll_streak`],
+    /// [`Context::escalate_call`]), once all its reads are done. Without one,
+    /// each operation is a call and is escalated at its outcome.
+    pub(super) paced: bool,
     /// The virtual time the frozen-clock-churn backstop fired at, so the facts
     /// document can carry the same finding the marker line carries.
     pub(super) churn_vtime_nanos: Option<u64>,
 }
 
-impl SpinRescue {
-    /// The next rescue's advance: [`SPIN_RESCUE_TOKEN_MIN_NANOS`] doubled once
-    /// per rescue already taken in this episode, saturating at
-    /// [`SPIN_RESCUE_TOKEN_MAX_NANOS`].
+impl Escalation {
+    /// The next token: [`ESCALATION_TOKEN_MIN_NANOS`] doubled once per
+    /// escalation already taken in this episode, saturating at
+    /// [`ESCALATION_TOKEN_MAX_NANOS`].
     fn token_nanos(&self) -> u64 {
-        // The shift is clamped to the last doubling that can matter (ten of them
-        // take the token past the ceiling). Leaving it unclamped is a trap:
-        // `1_000 << rescues` overflows u64 around rescue 55 and WRAPS to a
-        // SMALLER token, silently slowing convergence at exactly the point the
-        // churn backstop is counting on it.
-        const MAX_SHIFT: u32 = SPIN_RESCUE_TOKEN_MAX_NANOS.ilog2() + 1;
-        let shift = u32::try_from(self.rescues)
+        // The shift is clamped to the last doubling that can matter (ten of
+        // them take the token past the ceiling): `1_000 << escalations`
+        // would overflow u64 around escalation 55 and WRAP to a smaller token.
+        const MAX_SHIFT: u32 = ESCALATION_TOKEN_MAX_NANOS.ilog2() + 1;
+        let shift = u32::try_from(self.escalations)
             .unwrap_or(MAX_SHIFT)
             .min(MAX_SHIFT);
-        (SPIN_RESCUE_TOKEN_MIN_NANOS << shift).min(SPIN_RESCUE_TOKEN_MAX_NANOS)
+        (ESCALATION_TOKEN_MIN_NANOS << shift).min(ESCALATION_TOKEN_MAX_NANOS)
     }
 
-    /// End the episode entirely: the guest made genuine progress, or time moved
-    /// without this rescue moving it.
-    fn end_episode(&mut self, now: u64) {
-        self.clock_ops = 0;
-        self.baseline_nanos = now;
-        self.rescues = 0;
-        self.advanced_nanos = 0;
+    /// End the episode: the guest made progress or waited.
+    pub(super) fn end_episode(&mut self) {
+        self.polls = 0;
+        self.escalations = 0;
+        self.charged_nanos = 0;
+        self.due = None;
     }
 
-    /// Record one completed rescue: the streak restarts at the new virtual time
-    /// while the episode carries on.
-    fn on_rescued(&mut self, target: u64, token: u64) {
-        self.clock_ops = 0;
-        self.baseline_nanos = target;
-        self.rescues += 1;
-        self.advanced_nanos = self.advanced_nanos.saturating_add(token);
+    /// Record one escalation: the streak restarts while the episode carries
+    /// on.
+    fn on_escalated(&mut self, nanos: u64) {
+        self.polls = 0;
+        self.escalations += 1;
+        self.charged_nanos = self.charged_nanos.saturating_add(nanos);
     }
 
     /// The loud, machine-parseable line the frozen-clock-churn abort emits. It
-    /// reuses the established `PATINA_VIOLATION liveness …` interface contract —
-    /// this IS a liveness failure, and a downstream campaign consumer already
-    /// classifies that prefix — with its own `detail=` reason and its own facts.
+    /// reuses the established `PATINA_VIOLATION liveness …` interface contract
+    /// (this IS a liveness failure, and a downstream campaign consumer already
+    /// classifies that prefix) with its own `detail=` reason; `rescues` counts
+    /// escalations and `advanced_ns` the CPU time they charged.
     fn churn_marker_line(&self, vtime_nanos: u64) -> String {
         format!(
             "PATINA_VIOLATION liveness detail=frozen-clock-churn vtime_ns={} rescues={} \
 advanced_ns={} clock_ops_per_rescue={}",
-            vtime_nanos, self.rescues, self.advanced_nanos, SPIN_RESCUE_CLOCK_OPS,
+            vtime_nanos, self.escalations, self.charged_nanos, ESCALATION_POLLS,
         )
-    }
-}
-
-/// Virtual CPU time. The process and its main thread start at
-/// [`patina_dst_abi::STARTUP_CPU_NANOS`], the modeled cost of the exec, loader
-/// and libc startup a Linux process has run before `main`. From there, CPU
-/// time is charged by one thing only: the advance-on-spin rescue, i.e. a task
-/// observing the clock again and again at frozen virtual time. Virtual time
-/// also moves on a guest sleep or wait, the deadlock rescue, and injected
-/// latency, but no task computes through those. A loop that computes without
-/// reading the clock (a hash, a compression pass, a spin on a flag) is not
-/// charged, because virtual time does not move under it. Each rescue is
-/// charged to the task the scheduler last selected, or to `None`, the main
-/// thread before the embedder first schedules a task. Every input is a
-/// recorded op or the rescue that replays with it, so the figures are
-/// identical on record and replay.
-#[derive(Debug)]
-pub(super) struct CpuTime {
-    pub(super) running: Option<TaskId>,
-    by_task: BTreeMap<Option<TaskId>, u64>,
-    pub(super) total: u64,
-}
-
-impl Default for CpuTime {
-    fn default() -> Self {
-        CpuTime {
-            running: None,
-            by_task: BTreeMap::from([(None, patina_dst_abi::STARTUP_CPU_NANOS)]),
-            total: patina_dst_abi::STARTUP_CPU_NANOS,
-        }
-    }
-}
-
-impl CpuTime {
-    fn charge(&mut self, nanos: u64) {
-        self.total = self.total.saturating_add(nanos);
-        let task = self.by_task.entry(self.running).or_default();
-        *task = task.saturating_add(nanos);
     }
 }
 
@@ -472,13 +447,13 @@ impl Context {
         if !matches!(self.execution, Execution::Seeded | Execution::Record { .. }) {
             return None;
         }
-        let running = self.cpu.running?;
+        let running = self.charges.running?;
         self.compute_starves_peer(running)
             .then_some((self.steps, running))
     }
 
     fn compute_starves_peer(&self, running: TaskId) -> bool {
-        self.cpu.running == Some(running)
+        self.charges.running == Some(running)
             && self.scheduler_tasks.contains(&running)
             && !self.parked_tasks.contains(&running)
             && self.scheduler_tasks.iter().any(|task| {
@@ -546,29 +521,12 @@ impl Context {
         RuntimeError::ComputeBound { task, steps }
     }
 
-    /// The virtual CPU time charged to `task`; `None` is the main thread
-    /// before the embedder first scheduled a task, and holds the startup
-    /// cost.
-    pub fn task_cpu_time_nanos(&self, task: Option<TaskId>) -> u64 {
-        self.cpu.by_task.get(&task).copied().unwrap_or(0)
-    }
-
     /// Set the earliest monotonic deadline of the embedder's process timers
     /// (`None`: none armed). Unrecorded bookkeeping the embedder derives from
-    /// the guest's own calls, so it is identical on record and replay; the
-    /// advance-on-spin rescue does not step over it.
+    /// the guest's own calls, so it is identical on record and replay; a
+    /// charge stops the clock at it ([`Context::charge`]).
     pub fn set_alarm(&mut self, deadline: Option<u64>) {
         self.alarm = deadline;
-    }
-
-    /// Set the CPU time the embedder's earliest CPU-time timer still needs
-    /// (`None`: none armed). Unrecorded bookkeeping the embedder derives from
-    /// the guest's own calls, like [`Context::set_alarm`]. While it is set,
-    /// the advance-on-spin rescue's token is what the timer still needs, up
-    /// to the token ceiling, from the first rescue: the task computes toward a
-    /// deadline it declared, so the rescue lands on it instead of ramping.
-    pub fn set_cpu_alarm(&mut self, remaining: Option<u64>) {
-        self.cpu_alarm = remaining.map(|remaining| (remaining, self.cpu.total));
     }
 
     /// Idle time up to a process timer's deadline: when every task is parked
@@ -660,108 +618,117 @@ impl Context {
         Ok(())
     }
 
-    /// Advance the spin tracker for one boundary op, on both record and replay.
-    /// Pure bookkeeping over the recorded op stream and the driver's monotonic
-    /// value — it records nothing and reads no host state — so the trigger point
-    /// is reproduced exactly on replay.
-    ///
-    /// Three cases, in the order the trigger is defined (K consecutive clock
-    /// observations, zero virtual-time advance, no intervening progress op):
-    /// a progress op ends the episode; a scheduling/wait op is neutral (it
-    /// neither counts nor breaks the streak, so a spinning thread in a
-    /// multi-task run still accumulates); a clock op counts, unless virtual time
-    /// has moved since the streak began, which ends the episode instead.
+    /// Advance the poll streak for one boundary op, on both record and
+    /// replay. Pure bookkeeping over the recorded op stream: a progress op
+    /// ends the episode; a poll counts, and the one that completes the
+    /// streak makes an escalation due, of the class of the guest call that
+    /// polled ([`Context::escalate_due`], [`Context::accrue_calls`]); any
+    /// other op is neutral.
     fn spin_track(&mut self, operation: &Operation, progress: bool) -> Result<(), RuntimeError> {
-        // The rescue's own `SleepUntil`: the rescue updates the state itself.
-        if self.spin.rescuing {
-            return Ok(());
-        }
         if progress {
-            // Genuine state advancement. Whatever this guest is doing, it is not
-            // churning on the clock — drop the whole episode, escalation included.
-            self.spin.end_episode(self.spin.baseline_nanos);
+            self.spin.end_episode();
             return Ok(());
         }
-        if !matches!(operation, Operation::ClockNow { .. }) {
+        if !is_poll(operation) {
             return Ok(());
         }
+        self.spin.polls += 1;
+        if self.spin.polls >= ESCALATION_POLLS {
+            // The streak is spent as it completes, whenever its escalation
+            // is applied: the polls after it start the next one.
+            self.spin.polls = 0;
+            self.spin.due = Some(poll_class(operation));
+        }
+        Ok(())
+    }
+
+    /// For an embedder that does not charge its calls, where each operation
+    /// is a call: charge the escalation the op just completed is due, if
+    /// any, once its outcome is settled (and recorded), so the poll observed
+    /// the time before it. A no-op for every op that does not complete a
+    /// streak, which is why a run that never polls is unchanged by it.
+    pub(super) fn escalate_due(&mut self) -> Result<(), RuntimeError> {
+        if self.spin.paced {
+            return Ok(());
+        }
+        let Some(class) = self.spin.due.take() else {
+            return Ok(());
+        };
+        self.escalate(self.charges.running, class)?;
+        self.show_carry()
+    }
+
+    /// Whether the operation just made completed a poll streak, earning an
+    /// escalation, which the embedder that charges its calls takes here, at
+    /// the gateway of the guest call that made it, and applies at that
+    /// call's end ([`Context::escalate_call`]).
+    pub fn take_poll_streak(&mut self) -> bool {
+        self.spin.paced && self.spin.due.take().is_some()
+    }
+
+    /// Apply an escalation [`Context::take_poll_streak`] handed out: charge
+    /// it to `task`, the task whose call earned it, as `class`, that call's
+    /// class. The embedder calls this at the end of that call (as it
+    /// returns, parks, or ends its thread), after all its reads.
+    pub fn escalate_call(
+        &mut self,
+        task: Option<TaskId>,
+        class: ChargeClass,
+    ) -> Result<(), RuntimeError> {
+        self.escalate(task, class)?;
+        self.show_carry()
+    }
+
+    /// Charge one escalation of `class` to `task`. Its time is carried like
+    /// any charge.
+    fn escalate(&mut self, task: Option<TaskId>, class: ChargeClass) -> Result<(), RuntimeError> {
         if self.clock.is_none() {
             return Ok(());
         }
         let now = self.current_monotonic()?;
-        if now != self.spin.baseline_nanos {
-            // Virtual time moved and this rescue did not move it, so the guest
-            // waited: that is the wait the rescue exists to substitute for.
-            self.spin.end_episode(now);
-        }
-        self.spin.clock_ops += 1;
-        Ok(())
-    }
-
-    /// The advance-on-spin rescue itself, invoked from [`Context::now`] before
-    /// the clock observation is recorded. A no-op until the streak reaches
-    /// [`SPIN_RESCUE_CLOCK_OPS`], which is why a run that never spins is
-    /// byte-for-byte unchanged.
-    ///
-    /// It rides the same mechanism as the deadlock rescue: a recorded
-    /// `SleepUntil` on the monotonic clock, replayed from the trace like any
-    /// other. The advance is clamped so it never steps over a pending timer
-    /// deadline. Reaching it expires the due timed parks (the advance runs the
-    /// single expiry path), so their tasks are runnable at the next decision.
-    pub(super) fn spin_rescue(&mut self) -> Result<(), RuntimeError> {
-        if self.spin.clock_ops < SPIN_RESCUE_CLOCK_OPS {
-            return Ok(());
-        }
-        let now = self.current_monotonic()?;
-        // The streak counts reads; this is the trigger's other half — that
-        // virtual time did not move across them. It is enforced HERE and not
-        // only in `spin_track` because the op between the streak's last read and
-        // this one may have been the guest's own sleep: `sleep_for` reads the
-        // clock (counted) and only then advances it. Without this check a
-        // poll-and-sleep loop would be rescued on its very next read.
-        if now != self.spin.baseline_nanos {
-            self.spin.end_episode(now);
-            return Ok(());
-        }
         // Backstop first: a loop that ignores time rather than waiting for it
-        // must become a named abort, not an unbounded stream of rescues.
-        if self.spin.rescues >= SPIN_CHURN_ABORT_RESCUES {
+        // must become a named abort, not an unbounded stream of escalations.
+        if self.spin.escalations >= CHURN_ABORT_ESCALATIONS {
             return Err(self.frozen_clock_churn(now));
         }
-        // Toward a CPU-time timer, the time it still needs (charged since it
-        // was published counts), up to the ceiling; otherwise the escalating
-        // token.
-        let token = match self.cpu_alarm {
-            Some((remaining, at)) => {
-                match remaining.saturating_sub(self.cpu.total.saturating_sub(at)) {
-                    0 => self.spin.token_nanos(),
-                    remaining => remaining.min(SPIN_RESCUE_TOKEN_MAX_NANOS),
-                }
-            }
-            None => self.spin.token_nanos(),
-        };
-        let target = now.saturating_add(token);
-        // Never advance past the earliest still-future timer deadline, a
-        // parked task's or the embedder's process timers'.
-        let task_deadline = self.timers.keys().next().map(|(deadline, _)| *deadline);
-        let target = [task_deadline, self.alarm]
-            .into_iter()
-            .flatten()
-            .filter(|deadline| *deadline > now)
-            .fold(target, u64::min);
-        self.spin.rescuing = true;
-        let result = self.sleep_until(ClockKind::Monotonic, target);
-        self.spin.rescuing = false;
-        result?;
-        // The baton holder observed the clock through this advance: CPU time.
-        self.cpu.charge(target.saturating_sub(now));
-        self.spin.on_rescued(target, target.saturating_sub(now));
+        let mut calls = ChargeCounts::new();
+        calls.add(class, self.escalation_calls(class, now));
+        self.spin.on_escalated(calls.charge().total_ns());
+        self.charges.charge(task, calls);
         Ok(())
     }
 
-    /// The frozen-clock churn abort: [`SPIN_CHURN_ABORT_RESCUES`] token advances
-    /// bought no genuine progress, so the guest is in a loop that ignores the
-    /// clock it is reading. Loud (a `PATINA_VIOLATION liveness` line naming the
+    /// How many more calls of `class` an escalation at monotonic `now`
+    /// charges: enough to reach the earliest pending deadline (a monotonic
+    /// one, past the time charges have yet to show, or a published CPU-time
+    /// timer's), or else the episode's token.
+    fn escalation_calls(&self, class: ChargeClass, now: u64) -> u64 {
+        let cost = class.cost();
+        let per_call = cost.total_ns().max(1);
+        let shown = now.saturating_add(self.charges.carry());
+        let cpu = self.charges.total();
+        let alarms = self.charges.alarms;
+        let monotonic = self
+            .earliest_deadline_after(shown)
+            .map(|deadline| (deadline - shown).div_ceil(per_call));
+        let user = alarms
+            .user_ns
+            .filter(|deadline| *deadline > cpu.user_ns && cost.user_ns > 0)
+            .map(|deadline| (deadline - cpu.user_ns).div_ceil(cost.user_ns));
+        let total = alarms
+            .total_ns
+            .filter(|deadline| *deadline > cpu.total_ns())
+            .map(|deadline| (deadline - cpu.total_ns()).div_ceil(per_call));
+        [monotonic, user, total]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or_else(|| self.spin.token_nanos().div_ceil(per_call))
+    }
+
+    /// The frozen-clock churn abort: [`CHURN_ABORT_ESCALATIONS`] escalations
+    /// bought no genuine progress, so the guest is in a loop that time cannot
+    /// free. Loud (a `PATINA_VIOLATION liveness` line naming the
     /// pattern and what the guest was doing) and fail-closed, in the shape the
     /// liveness watchdog established.
     fn frozen_clock_churn(&mut self, now: u64) -> RuntimeError {
@@ -769,13 +736,12 @@ impl Context {
         let marker = self.spin.churn_marker_line(now);
         eprintln!("{marker}");
         eprintln!(
-            "patina: frozen-clock churn — the guest has issued {} clock observations per rescue \
-across {} advance-on-spin rescues ({} ns of virtual time) without one genuine boundary effect \
-in between. It is not waiting for the clock it is reading, it is ignoring it: a busy-wait whose \
-exit condition never depends on the value, or one waiting on state only another task can \
-publish. Give the loop a wait the runtime can see (sleep/yield/park), or bound the run with \
---budget.",
-            SPIN_RESCUE_CLOCK_OPS, self.spin.rescues, self.spin.advanced_nanos,
+            "patina: frozen-clock churn — the guest has polled {} times per escalation across {} \
+escalations ({} ns of CPU time charged) without one genuine boundary effect in between. It is not \
+waiting for time, it is ignoring it: a busy-wait whose exit condition never depends on the clock \
+or the poll, or one waiting on state only another task can publish. Give the loop a wait the \
+runtime can see (sleep/yield/park), or bound the run with --budget.",
+            ESCALATION_POLLS, self.spin.escalations, self.spin.charged_nanos,
         );
         // The interposed families abort on this without reaching `finish`, so
         // the artifacts that explain the wedge have to be written here.

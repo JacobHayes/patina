@@ -70,9 +70,15 @@ plants a false-negative probe, a duplicate receipt and a failed child.
 ### Polling on a sleeping peer
 
 `poll_clock_probe.rs` polls a non-blocking UDP socket, reading the clock between
-attempts, while its peer sleeps 1 ms and then sends. Its result line is the same
-natively and under Patina, where the empty receives are no progress and the
-advance-on-spin rescue brings virtual time to the peer's deadline.
+attempts, while its peer sleeps 1 ms and then sends. `poll_sleeper.rs` polls the
+same way without reading the clock. Their result lines are the same natively and
+under Patina, where every receive is charged and the empty ones are escalated,
+so virtual time reaches the peer's deadline.
+`yield_wait_probe.rs` only yields, waiting on a 10 µs sleeper and then on a 10 µs
+`ITIMER_REAL`: each yield's scheduling point shows the time the yields cost.
+`prof_park_probe.rs` (Patina only) blocks on the receive that completes a poll
+streak with only an `ITIMER_PROF` pending: the escalation that receive earned
+reaches the timer before it parks, and the signal interrupts it.
 
 ### Call-free compute
 

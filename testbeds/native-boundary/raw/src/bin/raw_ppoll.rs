@@ -49,14 +49,15 @@ fn main() {
                 unsafe { sc5(PPOLL, 0, 0, &mut tmo as *mut Ts as i64, 0, 0) },
                 0
             );
+            // The timeout, and the calls charged around it.
             let delta = mono_ns() - before;
-            assert_eq!(delta, 5_000_000);
+            assert!((5_000_000..5_100_000).contains(&delta), "{delta}");
             assert_eq!(
                 (tmo.sec, tmo.nsec),
                 (0, 0),
                 "raw ppoll writes remaining timeout"
             );
-            println!("PPOLL_TIMEOUT elapsed={delta} remaining=0");
+            println!("PPOLL_TIMEOUT elapsed_ms={} remaining=0", delta / 1_000_000);
         }
         Some("readiness") => {
             let mut fds = [-1i32; 2];

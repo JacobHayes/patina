@@ -51,14 +51,12 @@ pub(crate) struct PipeChannel {
     pub(crate) fifo_ino: Option<u64>,
     /// Read-direction arrival sequence: bumped on every event that could
     /// newly satisfy a reader (bytes written, writer close). The epoll
-    /// frontend's EPOLLET latch compares sequences so an edge re-fires per
-    /// arrival — the kernel's semantics — even when readiness never dropped
-    /// (a partially drained buffer). Linux-only: the kqueue frontend's
-    /// EV_CLEAR latch re-arms only on a readiness drop.
-    #[cfg(target_os = "linux")]
+    /// frontend's EPOLLET latch and the kqueue frontend's EV_CLEAR latch
+    /// compare sequences so an edge re-fires per arrival — the kernel's
+    /// semantics — even when readiness never dropped (a partially drained
+    /// buffer).
     pub(crate) read_events: u64,
     /// Write-direction sequence: bumped on space creation / reader close.
-    #[cfg(target_os = "linux")]
     pub(crate) write_events: u64,
 }
 
@@ -101,9 +99,7 @@ impl PipeChannel {
             read_opens: 1,
             write_opens: 1,
             fifo_ino: None,
-            #[cfg(target_os = "linux")]
             read_events: 0,
-            #[cfg(target_os = "linux")]
             write_events: 0,
         }
     }
@@ -143,10 +139,7 @@ impl PipeChannel {
             for (slot, byte) in dst[..count].iter_mut().zip(self.buffer.drain(..count)) {
                 *slot = byte;
             }
-            #[cfg(target_os = "linux")]
-            {
-                self.write_events = self.write_events.wrapping_add(1);
-            }
+            self.write_events = self.write_events.wrapping_add(1);
             PipeRead::Read(count)
         } else if self.write_closed() {
             PipeRead::Eof
@@ -170,10 +163,7 @@ impl PipeChannel {
         }
         let count = src.len().min(space);
         self.buffer.extend(&src[..count]);
-        #[cfg(target_os = "linux")]
-        {
-            self.read_events = self.read_events.wrapping_add(1);
-        }
+        self.read_events = self.read_events.wrapping_add(1);
         PipeWrite::Wrote(count)
     }
 }
@@ -1040,10 +1030,7 @@ pub(crate) fn pipe_take(handle: u64, max: usize) -> Vec<u8> {
     let count = max.min(ch.buffer.len());
     let bytes: Vec<u8> = ch.buffer.drain(..count).collect();
     if !bytes.is_empty() {
-        #[cfg(target_os = "linux")]
-        {
-            ch.write_events = ch.write_events.wrapping_add(1);
-        }
+        ch.write_events = ch.write_events.wrapping_add(1);
     }
     let waiters = drain_channel_send_waiters(&mut state, channel);
     drop(state);
@@ -1121,10 +1108,7 @@ pub(crate) fn pipe_to_pipe(
     let count = len.min(available).min(room);
     let bytes: Vec<u8> = match state.net.pipe_channels.get_mut(&from) {
         Some(ch) if consume => {
-            #[cfg(target_os = "linux")]
-            {
-                ch.write_events = ch.write_events.wrapping_add(1);
-            }
+            ch.write_events = ch.write_events.wrapping_add(1);
             ch.buffer.drain(..count).collect()
         }
         Some(ch) => ch.buffer.iter().take(count).copied().collect(),
@@ -1174,10 +1158,7 @@ fn pipe_close_locked(handle: u64) -> Result<(), c_int> {
     {
         channel.read_refs -= 1;
         if channel.read_refs == 0 {
-            #[cfg(target_os = "linux")]
-            {
-                channel.write_events = channel.write_events.wrapping_add(1);
-            }
+            channel.write_events = channel.write_events.wrapping_add(1);
             waiters.extend(channel.send_waiters.drain());
         }
     }
@@ -1188,10 +1169,7 @@ fn pipe_close_locked(handle: u64) -> Result<(), c_int> {
     {
         channel.write_refs -= 1;
         if channel.write_refs == 0 {
-            #[cfg(target_os = "linux")]
-            {
-                channel.read_events = channel.read_events.wrapping_add(1);
-            }
+            channel.read_events = channel.read_events.wrapping_add(1);
             waiters.extend(channel.recv_waiters.drain());
         }
     }

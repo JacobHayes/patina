@@ -131,7 +131,9 @@ fn interrupted_timed_cond_keeps_its_original_deadline() {
         assert_eq!(patina_mutex_lock(mutex), 0);
         let main = current_task();
         let worker = spawn(move || signal_parked_sync(main, false));
-        let deadline = with_context_raw(|context| context.now(ClockKind::Realtime)).unwrap() + 100;
+        // Past the worker's delay, so the signal interrupts the wait first.
+        let deadline =
+            with_context_raw(|context| context.now(ClockKind::Realtime)).unwrap() + 10 * DELAY;
         let time = CTimespec {
             tv_sec: (deadline / 1_000_000_000) as i64,
             tv_nsec: (deadline % 1_000_000_000) as i64,
@@ -140,9 +142,11 @@ fn interrupted_timed_cond_keeps_its_original_deadline() {
             patina_cond_timedwait(cond, mutex, (&time as *const CTimespec).cast()),
             ETIMEDOUT
         );
-        assert_eq!(
-            with_context_raw(|context| context.now(ClockKind::Realtime)).unwrap(),
-            deadline
+        // The original deadline, and the calls charged since it woke.
+        let woke = with_context_raw(|context| context.now(ClockKind::Realtime)).unwrap();
+        assert!(
+            (deadline..deadline + 10_000).contains(&woke),
+            "{woke} {deadline}"
         );
         assert_eq!(patina_mutex_unlock(mutex), 0);
         join(worker);
@@ -206,7 +210,8 @@ fn nested_pthread_wait_is_a_named_fatal_before_reparking() {
         unsafe {
             assert_eq!(patina_mutex_lock((&mut mutex as *mut u64).cast()), 0);
             if TIMED.load(Ordering::SeqCst) != 0 {
-                let deadline = with_context_raw(|c| c.now(ClockKind::Realtime)).unwrap() + 100;
+                // Past the calls the wait makes before it would park.
+                let deadline = with_context_raw(|c| c.now(ClockKind::Realtime)).unwrap() + SLEEP;
                 let time = CTimespec {
                     tv_sec: (deadline / 1_000_000_000) as i64,
                     tv_nsec: (deadline % 1_000_000_000) as i64,
@@ -281,19 +286,6 @@ fn a_clock_read_under_the_thread_runtime_never_expires_a_waiter_its_holder_grant
         let far = to_timespec(
             with_context_raw(|context| context.now(ClockKind::Realtime)).unwrap() + 1_000_000_000,
         );
-        // The advance-on-spin cadence, measured: reads from one rescue to the next.
-        let start = read();
-        let mut first = read();
-        while first == start {
-            first = read();
-        }
-        let mut cadence = 0;
-        loop {
-            cadence += 1;
-            if read() != first {
-                break;
-            }
-        }
         let mutex = Box::into_raw(Box::new(0u64)) as usize;
         let cond = Box::into_raw(Box::new(0u64)) as usize;
         let other = Box::into_raw(Box::new(0u64)) as usize;
@@ -302,11 +294,10 @@ fn a_clock_read_under_the_thread_runtime_never_expires_a_waiter_its_holder_grant
             patina_cond_init(cond as *mut _, (&monotonic as *const c_int).cast()),
             0
         );
-        // The spawn is progress: the spin streak restarts from zero.
+        // Past the calls made before the signal.
+        let deadline = read() + 1_000_000;
         let waiter = spawn(move || {
             assert_eq!(patina_mutex_lock(mutex as *mut _), 0);
-            let deadline =
-                with_context_raw(|context| context.monotonic_now_unrecorded()).unwrap() + 1;
             let time = CTimespec {
                 tv_sec: (deadline / 1_000_000_000) as i64,
                 tv_nsec: (deadline % 1_000_000_000) as i64,
@@ -325,15 +316,30 @@ fn a_clock_read_under_the_thread_runtime_never_expires_a_waiter_its_holder_grant
         }
         assert_eq!(patina_mutex_lock(mutex as *mut _), 0);
         // The signal moves the timed waiter to the held mutex's queue; it stays
-        // parked with its timer, 1 ns ahead.
+        // parked with its timer.
         assert_eq!(patina_cond_signal(cond as *mut _), 0);
-        let before = read();
-        for _ in 1..cadence {
-            assert_eq!(read(), before, "no rescue is due yet");
-        }
-        // The rescue is due at the next read: the one this timed wait makes,
-        // under the thread runtime, converting its realtime deadline. The wait
-        // then releases the mutex to the queued waiter.
+        // Compute (clock-class work, 25 ns a call) until the timed wait's own
+        // system call (250 ns, charged as it enters) lands just short of the
+        // deadline.
+        let syscall = patina_dst_abi::ChargeClass::Syscall.cost().total_ns();
+        let clock = patina_dst_abi::ChargeClass::Clock;
+        let now = with_context_raw(|context| {
+            let mut now = context.monotonic_now_unrecorded()?;
+            while now + syscall + clock.cost().total_ns() < deadline {
+                let mut calls = patina_dst_abi::ChargeCounts::new();
+                calls.count(clock);
+                context.charge_calls(Some(current_task()), calls)?;
+                now = context.monotonic_now_unrecorded()?;
+            }
+            Ok(now)
+        })
+        .unwrap();
+        assert!(now + syscall < deadline, "the deadline is still ahead");
+        assert!(now + syscall + 25 >= deadline, "the wait's reads cross it");
+        // The rest of the wait runs under the thread runtime: its clock reads
+        // (converting its realtime deadline) cross the waiter's deadline, but
+        // charges there are carried, so the wait releases the mutex to the
+        // queued waiter before anything expires it.
         assert_eq!(
             patina_cond_timedwait(
                 other as *mut _,

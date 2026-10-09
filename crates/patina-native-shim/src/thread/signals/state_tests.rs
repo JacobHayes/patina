@@ -911,3 +911,63 @@ fn startup_queries_do_not_install_the_scheduler() {
     assert!(!lock_state().active);
     assert!(!crate::BOUNDARY_SEEN.load(Ordering::Relaxed));
 }
+
+/// A scheduling point taken before the runtime is installed (a lock or a
+/// write the host's or the harness's own startup makes before
+/// `patina_harness_install`) has no charged time to show and marks no
+/// boundary, so the harness can still install.
+#[test]
+fn a_scheduling_point_before_install_marks_no_boundary() {
+    let name = test_name();
+    if std::env::var("PATINA_SIGNAL_UNIT_CHILD").as_deref() != Ok(&name) {
+        let output = reexec(&name, &[]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    assert!(crate::slot().lock().is_none());
+    assert!(!crate::BOUNDARY_SEEN.load(Ordering::Relaxed));
+    assert_eq!(crate::thread::sched_point(), Ok(()));
+    crate::charge::flush_now();
+    assert!(crate::slot().lock().is_none());
+    assert!(!crate::BOUNDARY_SEEN.load(Ordering::Relaxed));
+}
+
+/// Shim code holding the Context lock reaches a door that takes a
+/// scheduling point (a diagnostic under the lock initialising std's stderr
+/// mutex, on macOS): the point shows nothing and takes no second Context
+/// lock.
+#[test]
+fn a_scheduling_point_under_the_context_lock_takes_it_no_second_time() {
+    let name = test_name();
+    if std::env::var("PATINA_SIGNAL_UNIT_CHILD").as_deref() != Ok(&name) {
+        let output = reexec(&name, &[]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let held = crate::slot().lock();
+    assert_eq!(crate::thread::sched_point(), Ok(()));
+    drop(held);
+}
+
+/// With the runtime installed, a scheduling point's charge bookkeeping
+/// (handing calls over, showing their time) is no boundary effect: a
+/// harness guest the supervisor already installed a runtime for still
+/// learns, at its own install, that one is installed.
+#[test]
+fn charge_bookkeeping_marks_no_boundary() {
+    isolated(|| {
+        crate::BOUNDARY_SEEN.store(false, Ordering::Relaxed);
+        crate::charge::count(patina_dst_abi::ChargeClass::Syscall);
+        assert_eq!(crate::thread::sched_point(), Ok(()));
+        crate::charge::flush_now();
+        assert!(!crate::BOUNDARY_SEEN.load(Ordering::Relaxed));
+    });
+}

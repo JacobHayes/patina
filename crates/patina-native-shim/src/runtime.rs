@@ -250,11 +250,18 @@ pub(crate) fn runtime_errno(error: &RuntimeError) -> c_int {
             abort_after_flushing_output()
         }
         // Frozen-clock churn is the same fail-closed shape: the guest is in a
-        // loop that ignores the clock it reads, so advance-on-spin cannot free
+        // loop that ignores the clock it reads, so escalation cannot free
         // it and an errno it could swallow would just resume the spin. The
         // runtime has already emitted the classifiable marker and flushed the
         // truncated trace.
         RuntimeError::FrozenClockChurn { .. } => abort_after_flushing_output(),
+        // A time-model divergence means the replay no longer describes the
+        // run: every later clock read and expiry would answer from a different
+        // timeline. Name it and stop, as a refused custom operation does.
+        RuntimeError::TimeModel { .. } => {
+            eprintln!("patina: {error}");
+            abort_after_flushing_output()
+        }
         RuntimeError::ComputeBound { .. } => {
             watchdog::report_synchronous(error);
             abort_after_flushing_output()
@@ -330,6 +337,13 @@ pub(crate) static SHUTDOWN: std::sync::atomic::AtomicBool =
 /// `install` does not route through those functions, so it never self-trips this.
 pub(crate) static BOUNDARY_SEEN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// A guest boundary effect that answers with no context installed (a captured
+/// stdout or stderr write, a read of stdin's EOF), marked at its own entry
+/// ([`BOUNDARY_SEEN`]): a harness that installs after it refuses.
+pub(crate) fn mark_boundary() {
+    BOUNDARY_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Set once [`patina_harness_install`] has installed the runtime. Monotonic: it
 /// stays set for the rest of the process, including the teardown window after
@@ -496,7 +510,22 @@ pub(crate) fn abort_preinit_interposed_call() -> ! {
 pub(crate) fn with_context_raw<T>(
     invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
 ) -> Result<T, c_int> {
-    BOUNDARY_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
+    mark_boundary();
+    gateway(invoke)
+}
+
+/// [`with_context_raw`] for the shim's charge bookkeeping, which is no
+/// boundary effect of its own and marks none ([`BOUNDARY_SEEN`]): handing
+/// counted calls over, and a scheduling point showing the time they carried.
+/// A harness's startup takes scheduling points (its locks and writes) before
+/// it installs the runtime.
+pub(crate) fn with_context_bookkeeping<T>(
+    invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
+) -> Result<T, c_int> {
+    gateway(invoke)
+}
+
+fn gateway<T>(invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>) -> Result<T, c_int> {
     let mut guard = slot().lock();
     let context = guard.as_mut().ok_or(ENOSYS)?;
     crate::charge::flush(context);
@@ -505,7 +534,10 @@ pub(crate) fn with_context_raw<T>(
     } else {
         invoke(context)
     };
+    crate::charge::note_streak(context);
     thread::note_expiries(context);
+    #[cfg(target_os = "linux")]
+    crate::charge::note_room(context);
     match result {
         Ok(value) => Ok(value),
         Err(error @ RuntimeError::InjectedFsCrash(_)) => terminate_for_injected_fs_crash(error),
@@ -623,7 +655,10 @@ pub(crate) fn with_context_msg<T>(
     } else {
         invoke(context)
     };
+    crate::charge::note_streak(context);
     thread::note_expiries(context);
+    #[cfg(target_os = "linux")]
+    crate::charge::note_room(context);
     result.map_err(|error| match &error {
         // A classified yield divergence gains the one fact only the shim knows:
         // the instrumented guest site of the in-flight guard hit (if any).
@@ -655,6 +690,8 @@ pub(crate) fn with_context<T>(
     BOUNDARY_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
     ensure_runtime()?;
     thread::sched_point()?;
+    // The scheduling point showed the time the thread's calls carried, so
+    // the door observes their cost.
     with_context_raw(invoke)
 }
 

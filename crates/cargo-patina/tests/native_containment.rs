@@ -652,17 +652,40 @@ mod linux {
             if kernel_supports(KernelFeature::Tsc) {
                 let ran = g.assert_run_success(7, &[]);
                 assert!(text(&ran.stderr).contains("timestamp-counter instruction site(s)"));
-                assert_eq!(
-                    text(&ran.stdout),
-                    (0..3)
-                        .map(|step| {
-                            let ticks =
-                                patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS + step * 5_000_000;
-                            format!("TSC step={step} rdtsc={ticks} rdtscp={ticks} aux=0\n")
-                        })
-                        .collect::<String>()
-                        + "TSC total_ticks=15000000\n"
-                );
+                // The virtual monotonic clock: each step's counter reads lie
+                // between the monotonic readings around them (calls cost
+                // virtual time, so no read equals another), and a step's
+                // reads lie at least the 5 ms sleep before the next's.
+                let out = text(&ran.stdout);
+                let field = |line: &str, key: &str| -> u64 {
+                    let start = line.find(key).unwrap() + key.len();
+                    line[start..]
+                        .split_whitespace()
+                        .next()
+                        .unwrap()
+                        .parse()
+                        .unwrap()
+                };
+                let steps: Vec<[u64; 4]> = out
+                    .lines()
+                    .filter(|line| line.starts_with("TSC step="))
+                    .map(|line| {
+                        assert!(line.ends_with(" aux=0"), "{out}");
+                        ["before=", "rdtsc=", "rdtscp=", "after="].map(|key| field(line, key))
+                    })
+                    .collect();
+                assert_eq!(steps.len(), 3, "{out}");
+                for [before, plain, with_aux, after] in &steps {
+                    assert!(
+                        before <= plain && plain <= with_aux && with_aux <= after,
+                        "{out}"
+                    );
+                }
+                for pair in steps.windows(2) {
+                    assert!(pair[1][1] >= pair[0][2] + 5_000_000, "{out}");
+                }
+                let total = field(out.lines().last().unwrap(), "total_ticks=");
+                assert!(total >= 15_000_000, "{out}");
                 assert_eq!(ran.stdout, g.assert_run_success(7, &[]).stdout);
                 let trace = g.assert_record_replay_identity(7, &[], &ran.stdout);
                 let trace = std::fs::read_to_string(trace).unwrap();

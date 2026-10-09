@@ -147,12 +147,13 @@ mod tests {
                 .expect("elapsed nanos")
         };
 
-        // Control: a knob-free run advances no virtual time across the operation.
+        // Control: a knob-free run advances virtual time across the operation
+        // by the calls' own charges alone (well under a microsecond each).
         let clean = invoke(workspace, &["run", &bin, "--seed", "4", "--", "latency"]);
-        assert_eq!(
-            elapsed_of(&clean),
-            0,
-            "a knob-free run must not delay fs ops"
+        let charged = elapsed_of(&clean);
+        assert!(
+            charged < 10_000,
+            "a knob-free run must not delay fs ops: {charged}"
         );
 
         // MUST delay: the same fixed 1ms latency the WASI leg asserts, seen by the
@@ -174,8 +175,10 @@ mod tests {
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let delayed = invoke(workspace, &refs);
         let elapsed = elapsed_of(&delayed);
+        // The same calls, each fs op now 1 ms later.
+        let delayed_by = elapsed - charged;
         assert!(
-            elapsed >= 1_000_000 && elapsed % 1_000_000 == 0,
+            delayed_by >= 1_000_000 && delayed_by % 1_000_000 == 0,
             "native guest saw {elapsed}ns across the fs op, not whole 1ms latencies"
         );
         let stderr = String::from_utf8_lossy(&delayed.stderr);

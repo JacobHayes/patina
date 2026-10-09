@@ -22,6 +22,8 @@ use super::{
 };
 #[cfg(patina_posix_exports)]
 use crate::thread::net::abi::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDHUP};
+#[cfg(patina_posix_exports)]
+use crate::thread::pipe::PIPE_BUF;
 
 // macOS <sys/event.h> filter identifiers (the reactor is macOS-only).
 pub(super) const EVFILT_READ: i16 = -1;
@@ -36,6 +38,7 @@ const EV_DELETE: u16 = 0x0002;
 const EV_ENABLE: u16 = 0x0004;
 const EV_DISABLE: u16 = 0x0008;
 const EV_ONESHOT: u16 = 0x0010;
+const EV_CLEAR: u16 = 0x0020;
 #[cfg(patina_posix_exports)]
 pub(super) const EV_EOF: u16 = 0x8000;
 
@@ -65,9 +68,16 @@ pub(super) struct KFilterState {
     timer_deadline: u64,
     /// EVFILT_TIMER: repeat interval in nanoseconds; 0 = one-shot.
     timer_interval: u64,
-    /// EVFILT_READ/WRITE edge latch: readiness already delivered, awaiting
-    /// a not-ready observation before it may fire again (models EV_CLEAR).
-    delivered: bool,
+    /// EVFILT_READ/WRITE: registered with EV_CLEAR.
+    clear: bool,
+    /// EVFILT_READ/WRITE delivery latch: the direction's arrival sequence
+    /// when readiness was last delivered, `None` once a scan saw it not
+    /// ready. Every knote fires again on readiness returning after a drop;
+    /// an EV_CLEAR knote also fires on a new arrival (the kernel activates
+    /// a knote on every append, whether or not the reader drained it in
+    /// between). Other modes keep the latch (not the kernel's level or
+    /// EV_DISPATCH semantics).
+    delivered: Option<u64>,
 }
 
 /// A registered knote sorts by `(ident, filter)`, giving deterministic
@@ -269,8 +279,10 @@ pub extern "C" fn patina_kqueue_apply(
                 user_triggered: false,
                 timer_deadline,
                 timer_interval,
-                delivered: false,
+                clear: flags & EV_CLEAR != 0,
+                delivered: None,
             });
+            entry.clear = flags & EV_CLEAR != 0;
             entry.udata = udata;
             entry.enabled = flags & EV_DISABLE == 0;
             entry.oneshot = flags & EV_ONESHOT != 0;
@@ -278,7 +290,7 @@ pub extern "C" fn patina_kqueue_apply(
                 // Re-adding a timer restarts it from now.
                 entry.timer_deadline = timer_deadline;
                 entry.timer_interval = timer_interval;
-                entry.delivered = false;
+                entry.delivered = None;
             }
         } else if flags & (EV_ENABLE | EV_DISABLE) != 0 {
             let Some(entry) = state
@@ -342,8 +354,9 @@ fn timer_nanos(data: i64, fflags: u32) -> u64 {
 struct ReadyEvent {
     event: PatinaKevent,
     key: FilterKey,
-    /// Latch EV_CLEAR edge state after delivering a READ/WRITE event.
-    set_delivered: bool,
+    /// Latch EV_CLEAR edge state after delivering a READ/WRITE event: the
+    /// arrival sequence it was delivered at.
+    set_delivered: Option<u64>,
     /// Clear the EVFILT_USER trigger after delivery.
     clear_user: bool,
     /// One-shot: remove the knote after delivery.
@@ -376,19 +389,31 @@ fn scan(
                 // The filters read the poll mask: a number that names
                 // nothing any more is ready with EOF, so the reactor
                 // wakes and the next operation surfaces the error.
-                let mask = fd_poll(state, fd, None).map_or(POLLERR | POLLHUP, |(mask, _)| mask);
-                let (ready_now, eof) = if key.filter == EVFILT_READ {
+                let (mask, (reads, writes)) =
+                    fd_poll(state, fd, None).unwrap_or((POLLERR | POLLHUP, (0, 0)));
+                let (ready_now, eof, arrivals) = if key.filter == EVFILT_READ {
                     (
                         mask & (POLLIN | POLLRDHUP | POLLHUP | POLLERR) != 0,
                         mask & (POLLRDHUP | POLLHUP) != 0,
+                        reads,
                     )
                 } else {
+                    // `filt_pipewrite_common`: a pipe is writable once a
+                    // whole `PIPE_BUF` fits, not at its first free byte.
+                    let room = mask & (POLLHUP | POLLERR) != 0
+                        || !st.clear
+                        || pipe_room(state, fd).is_none_or(|room| room >= PIPE_BUF);
                     (
-                        mask & (POLLOUT | POLLHUP | POLLERR) != 0,
+                        mask & (POLLOUT | POLLHUP | POLLERR) != 0 && room,
                         mask & (POLLHUP | POLLERR) != 0,
+                        writes,
                     )
                 };
-                if ready_now && !st.delivered {
+                let fires = match st.delivered {
+                    None => true,
+                    Some(seen) => st.clear && seen != arrivals,
+                };
+                if ready_now && fires {
                     let mut flags = 0u16;
                     if eof {
                         flags |= EV_EOF;
@@ -403,14 +428,14 @@ fn scan(
                             udata: st.udata,
                         },
                         key: *key,
-                        set_delivered: true,
+                        set_delivered: Some(arrivals),
                         clear_user: false,
                         remove: st.oneshot,
                         rearm_timer: 0,
                     });
-                } else if !ready_now && st.delivered {
-                    // Readiness dropped: re-arm the EV_CLEAR edge latch so
-                    // the next rising edge fires again.
+                } else if !ready_now && st.delivered.is_some() {
+                    // Readiness dropped: re-arm the latch so the next
+                    // rising edge fires again.
                     rearm_not_ready.push(*key);
                 }
             }
@@ -426,7 +451,7 @@ fn scan(
                             udata: st.udata,
                         },
                         key: *key,
-                        set_delivered: false,
+                        set_delivered: None,
                         clear_user: true,
                         remove: st.oneshot,
                         rearm_timer: 0,
@@ -456,7 +481,7 @@ fn scan(
                             udata: st.udata,
                         },
                         key: *key,
-                        set_delivered: false,
+                        set_delivered: None,
                         clear_user: false,
                         remove: st.oneshot || st.timer_interval == 0,
                         rearm_timer: rearm,
@@ -471,6 +496,19 @@ fn scan(
         }
     }
     (ready, rearm_not_ready, earliest_timer)
+}
+
+/// The free space of the pipe `fd` names, `None` for a number that names
+/// no pipe's write end.
+#[cfg(patina_posix_exports)]
+fn pipe_room(state: &ThreadRuntime, fd: c_int) -> Option<usize> {
+    let resolved = super::super::fd_table().lock().resolve(fd)?;
+    if resolved.kind != FdKind::Pipe {
+        return None;
+    }
+    let end = state.net.pipe_ends.get(&(resolved.handle as c_int))?;
+    let channel = state.net.pipe_channels.get(&end.write_channel?)?;
+    Some(channel.capacity.saturating_sub(channel.buffer.len()))
 }
 
 /// The enabled EVFILT_READ/WRITE knotes as reactor-neutral `(direction,
@@ -510,8 +548,8 @@ fn commit_delivered(state: &mut ThreadRuntime, id: u64, delivered: &[ReadyEvent]
             continue;
         }
         if let Some(st) = kq.filters.get_mut(&event.key) {
-            if event.set_delivered {
-                st.delivered = true;
+            if event.set_delivered.is_some() {
+                st.delivered = event.set_delivered;
             }
             if event.clear_user {
                 st.user_triggered = false;
@@ -529,7 +567,7 @@ fn commit_rearm(state: &mut ThreadRuntime, id: u64, keys: &[FilterKey]) {
     let kq = &mut state.net.kqueues.get_mut(&id).expect("kqueue exists").kq;
     for key in keys {
         if let Some(st) = kq.filters.get_mut(key) {
-            st.delivered = false;
+            st.delivered = None;
         }
     }
 }

@@ -15,13 +15,23 @@
 //! finished (flushed just before, dropped after): teardown runs in host
 //! order.
 //!
-//! Inert for now: the runtime totals them, and nothing reads them.
+//! The runtime moves virtual time by what they cost, and the CPU clocks,
+//! resource usage and CPU-time timers read the totals. An escalation a
+//! call's poll earns is applied as that call ends ([`finish_call`]).
 
 use std::cell::Cell;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+#[cfg(target_os = "linux")]
+use patina_dst_abi::TaskId;
 use patina_dst_abi::{ChargeClass, ChargeCounts};
+#[cfg(target_os = "linux")]
+use patina_dst_runtime::CpuAlarms;
 
 use crate::Context;
+#[cfg(target_os = "linux")]
+use crate::SpinMutex;
 
 /// The guest operations not charged as a plain system call, and the class
 /// each is charged as. Doors name their operation
@@ -142,6 +152,9 @@ thread_local! {
     /// The class the innermost live guest call was counted as, until it
     /// parks ([`parked`]) or returns.
     static CURRENT: Cell<Option<ChargeClass>> = const { Cell::new(None) };
+    /// An escalation the running call's poll earned, applied as the call
+    /// ends ([`finish_call`]).
+    static ESCALATION: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The call a door's entry began ([`begin`]), handed back when it returns
@@ -234,6 +247,10 @@ pub(crate) fn end(began: Began) {
 /// natively (a futex wait), so it is charged one system call more, once per
 /// call; every other call's charge already covers its wait.
 pub(crate) fn parked() {
+    // The call's escalation first, while it is still the running call.
+    if let Some(class) = CURRENT.with(Cell::get) {
+        finish_call(class);
+    }
     if CURRENT.with(|current| current.replace(None)) == Some(ChargeClass::Sync) {
         count(ChargeClass::Syscall);
     }
@@ -264,17 +281,192 @@ fn pending() -> bool {
     OWED.with(|owed| owed.iter().any(|counter| counter.get() != 0))
 }
 
-/// Hand this thread's counted calls to the runtime, charged to its task.
-/// Calls a thread counts once its task (or `main`) has finished are teardown
-/// in host order: they are dropped here, never charged. Allocation-free on
-/// the runtime side (`Context::charge_calls`), since the counter trap
-/// reaches it from a signal handler.
+/// Whether this thread's calls are teardown, never charged: its task (or
+/// `main`) has finished.
+pub(crate) fn silenced() -> bool {
+    crate::thread::charges_silenced()
+}
+
+/// Hand this thread's counted calls to the runtime, charged to its task
+/// (`Context::accrue_calls`), their time carried: a gateway may sit between
+/// a wake decision and the wake, which an expiry would make stale. The door's
+/// own gateway (`with_context`) shows the carried time before the door's
+/// work. Calls a thread counts once its task (or `main`) has finished are
+/// teardown in host order: they are dropped here, never charged.
+/// Allocation-free on the runtime side, since the counter trap reaches it
+/// from a signal handler.
 pub(crate) fn flush(context: &mut Context) {
     let counts = take();
-    if counts.is_empty() || crate::thread::charges_silenced() {
+    if counts.is_empty() || silenced() {
         return;
     }
-    context.charge_calls(crate::thread::charge_task(), counts);
+    context.accrue_calls(crate::thread::charge_task(), counts);
+}
+
+/// After a gateway's Context call: an escalation the call's poll earned
+/// (`Context::take_poll_streak`) is this thread's to apply, as the guest
+/// call that made the poll ends ([`finish_call`]).
+pub(crate) fn note_streak(context: &mut Context) {
+    if context.take_poll_streak() {
+        ESCALATION.with(|owed| owed.set(true));
+    }
+}
+
+/// Whether the running guest call owes an escalation ([`finish_call`]).
+pub(crate) fn escalation_owed() -> bool {
+    ESCALATION.with(Cell::get)
+}
+
+/// The running guest call, of `class`, ends (it returns, parks, or is the
+/// counter trap's read): apply an escalation one of its polls earned, to
+/// this thread's task, as the call's class, after all its reads
+/// (`Context::escalate_call`).
+pub(crate) fn finish_call(class: ChargeClass) {
+    if !ESCALATION.with(|owed| owed.replace(false)) || silenced() {
+        return;
+    }
+    // A refusal (frozen-clock churn) is fatal in the gateway itself.
+    let _ = crate::with_context_raw(|context| {
+        context.escalate_call(crate::thread::charge_task(), class)
+    });
+}
+
+/// What a guest call may still be charged before a CPU-time timer is due, as
+/// the last Context gateway left it ([`note_room`]): the process's user and
+/// user-plus-system time to its earliest CPU-time deadlines, and the gateway
+/// thread's own CPU clock to its thread-clock ones. Only the running thread
+/// has calls not yet flushed (each switch passes a gateway), so a door's
+/// return compares that thread's own count with it ([`timers_due`]).
+#[cfg(target_os = "linux")]
+struct Room {
+    /// The gateway thread's task ([`tag`]); [`NO_GATEWAY`] before the first.
+    task: AtomicU64,
+    user_ns: AtomicU64,
+    total_ns: AtomicU64,
+}
+
+#[cfg(target_os = "linux")]
+const NO_GATEWAY: u64 = u64::MAX;
+
+#[cfg(target_os = "linux")]
+static ROOM: Room = Room {
+    task: AtomicU64::new(NO_GATEWAY),
+    user_ns: AtomicU64::new(u64::MAX),
+    total_ns: AtomicU64::new(u64::MAX),
+};
+
+/// The earliest thread-clock timer deadlines of each thread that has one,
+/// published with the process's (`publish_alarm`) under the Context lock,
+/// which [`note_room`] holds too.
+#[cfg(target_os = "linux")]
+static THREAD_ALARMS: SpinMutex<Vec<(TaskId, CpuAlarms)>> = SpinMutex::new(Vec::new());
+
+/// Whether [`THREAD_ALARMS`] holds any: most runs arm none.
+#[cfg(target_os = "linux")]
+static ANY_THREAD_ALARM: AtomicBool = AtomicBool::new(false);
+
+/// [`Room::task`]'s value for `task` (a task id is never 0).
+#[cfg(target_os = "linux")]
+fn tag(task: Option<TaskId>) -> u64 {
+    task.map_or(0, |task| task.0)
+}
+
+/// Replace the published thread-clock timer deadlines with what `fill`
+/// writes (into a cleared list).
+#[cfg(target_os = "linux")]
+pub(crate) fn set_thread_alarms(fill: impl FnOnce(&mut Vec<(TaskId, CpuAlarms)>)) {
+    let mut threads = THREAD_ALARMS.lock();
+    fill(&mut threads);
+    ANY_THREAD_ALARM.store(!threads.is_empty(), Ordering::Relaxed);
+}
+
+/// After a gateway's Context call, every call flushed: note the calling
+/// thread's [`Room`].
+#[cfg(target_os = "linux")]
+pub(crate) fn note_room(context: &Context) {
+    fn room(deadline: Option<u64>, now: u64) -> u64 {
+        deadline.map_or(u64::MAX, |deadline| deadline.saturating_sub(now))
+    }
+    let task = crate::thread::charge_task();
+    let process = context.cpu_alarms();
+    let (mut user, mut total) = (u64::MAX, u64::MAX);
+    if process != CpuAlarms::default() {
+        let time = context.cpu_time();
+        user = room(process.user_ns, time.user_ns);
+        total = room(process.total_ns, time.total_ns());
+    }
+    if let Some(task) = task
+        && ANY_THREAD_ALARM.load(Ordering::Relaxed)
+    {
+        let alarms = THREAD_ALARMS
+            .lock()
+            .iter()
+            .find(|(owner, _)| *owner == task)
+            .map(|(_, alarms)| *alarms);
+        if let Some(alarms) = alarms {
+            let time =
+                crate::clocks::cpu_time_unrecorded(context, crate::clocks::CpuOf::Thread(task));
+            user = user.min(room(alarms.user_ns, time.user_ns));
+            total = total.min(room(alarms.total_ns, time.total_ns()));
+        }
+    }
+    ROOM.user_ns.store(user, Ordering::Relaxed);
+    ROOM.total_ns.store(total, Ordering::Relaxed);
+    ROOM.task.store(tag(task), Ordering::Relaxed);
+}
+
+/// Whether this thread's calls since the last gateway reached a CPU-time
+/// timer's deadline ([`Room`]), or the room is another thread's to say.
+#[cfg(target_os = "linux")]
+pub(crate) fn timers_due() -> bool {
+    let task = ROOM.task.load(Ordering::Relaxed);
+    if task == NO_GATEWAY {
+        return false;
+    }
+    if task != tag(crate::thread::charge_task()) {
+        return true;
+    }
+    let (user, total) = (
+        ROOM.user_ns.load(Ordering::Relaxed),
+        ROOM.total_ns.load(Ordering::Relaxed),
+    );
+    if user == u64::MAX && total == u64::MAX {
+        return false;
+    }
+    // The unflushed calls' cost read straight off the counters (the class
+    // costs are constants; no thread holds 2^56 calls unflushed).
+    const CLOCK: patina_dst_abi::CpuCharge = ChargeClass::Clock.cost();
+    const SYNC: patina_dst_abi::CpuCharge = ChargeClass::Sync.cost();
+    const SYSCALL: patina_dst_abi::CpuCharge = ChargeClass::Syscall.cost();
+    let [clock, sync, syscall] = OWED.with(|owed| {
+        [ChargeClass::Clock, ChargeClass::Sync, ChargeClass::Syscall]
+            .map(|class| owed[slot(class)].get())
+    });
+    let owed_user = clock * CLOCK.user_ns + sync * SYNC.user_ns + syscall * SYSCALL.user_ns;
+    let owed_system = clock * CLOCK.system_ns + sync * SYNC.system_ns + syscall * SYSCALL.system_ns;
+    owed_user >= user || owed_user + owed_system >= total
+}
+
+/// A guest call that is no delivery point of its own returns with
+/// [`timers_due`]: hand its calls over and, if they reached a CPU-time
+/// timer, fire and deliver it, as a delivery point does on its return. The
+/// call's errno is what it set, written again after the handlers ran, as a
+/// trap exit writes the errno its door owes.
+#[cfg(target_os = "linux")]
+pub(crate) fn service_timers() {
+    if silenced() || crate::in_shim_bootstrap() {
+        return;
+    }
+    // The gateway notes this thread's room, every call flushed; with no
+    // context installed (the runtime shut down) there is none to note and
+    // nothing to fire.
+    flush_now();
+    if ROOM.task.load(Ordering::Relaxed) != tag(crate::thread::charge_task()) || !timers_due() {
+        return;
+    }
+    let errno = crate::abi::host_errno();
+    crate::thread::signals::deliver();
+    crate::abi::restore_host_errno(errno);
 }
 
 /// Hand this thread's counted calls over now, before it goes silent. The
@@ -282,7 +474,7 @@ pub(crate) fn flush(context: &mut Context) {
 /// the run's last calls are in the totals; a call counted after that is
 /// teardown, like one after `main` returned, and is not charged.
 pub(crate) fn flush_now() {
-    let _ = crate::with_context_raw(|_| Ok(()));
+    let _ = crate::with_context_bookkeeping(|_| Ok(()));
 }
 
 /// Drop what this thread counted before the runtime was installed (the

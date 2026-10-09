@@ -62,6 +62,13 @@ pub(crate) fn restore_host_errno(code: c_int) {
     }
 }
 
+/// The host errno cell's value.
+#[cfg(target_os = "linux")]
+pub(crate) fn host_errno() -> c_int {
+    // SAFETY: libc exposes the current thread's errno cell.
+    unsafe { *libc::__errno_location() }
+}
+
 /// Project a model result to libc's failure value, writing host errno on errors.
 #[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) fn libc_result<T>(result: SysResult<T>, failure: T) -> T {

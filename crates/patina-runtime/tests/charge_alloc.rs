@@ -56,18 +56,21 @@ fn charging_a_spawned_reserved_or_unknown_task_never_allocates() {
     context.reserve_charge(reserved);
     for task in [None, Some(spawned), reserved, Some(TaskId(99))] {
         assert_eq!(
-            allocations(|| context.charge_calls(task, calls())),
+            allocations(|| context.charge_calls(task, calls()).unwrap()),
             0,
             "charging {task:?} allocated"
         );
         // Again, now that the first charge has landed.
-        assert_eq!(allocations(|| context.charge_calls(task, calls())), 0);
+        assert_eq!(
+            allocations(|| context.charge_calls(task, calls()).unwrap()),
+            0
+        );
     }
     // Many tasks the runtime does not know: a map that grew an entry per
     // task would outgrow its node and allocate.
     for id in 100..140 {
         assert_eq!(
-            allocations(|| context.charge_calls(Some(TaskId(id)), calls())),
+            allocations(|| context.charge_calls(Some(TaskId(id)), calls()).unwrap()),
             0,
             "charging unknown task {id} allocated"
         );
@@ -91,12 +94,12 @@ fn a_charge_before_its_tasks_reservation_stays_unreserved() {
     for between in [false, true] {
         let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
         let early = Some(TaskId(7));
-        context.charge_calls(early, calls());
+        context.charge_calls(early, calls()).unwrap();
         if between {
-            context.charge_calls(None, calls());
+            context.charge_calls(None, calls()).unwrap();
         }
         context.reserve_charge(early);
-        context.charge_calls(early, calls());
+        context.charge_calls(early, calls()).unwrap();
         assert_eq!(
             context.cpu_charge(early),
             calls().charge(),

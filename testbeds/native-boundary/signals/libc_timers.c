@@ -31,6 +31,11 @@ extern int ___timer_gettime64(timer_t, struct itimerspec *);
 #endif
 #endif
 
+/* A timer's remaining time read back soon after arming it for `full`: that,
+ * less the calls charged in between (each costs virtual time). */
+#define LEFT_NS(left, full) ((left) <= (full) && (left) > (full) - 100000)
+#define LEFT_US(left, full) ((left) <= (full) && (left) > (full) - 100)
+
 static volatile sig_atomic_t alarms;
 #ifdef __linux__
 static int payload;
@@ -75,7 +80,7 @@ int main(int argc, char **argv) {
     struct itimerval setting = { .it_value = { .tv_usec = 1000 } }, current;
     assert(setitimer(ITIMER_REAL, &setting, NULL) == 0);
     assert(getitimer(ITIMER_REAL, &current) == 0);
-    assert(current.it_value.tv_sec == 0 && current.it_value.tv_usec == 1000);
+    assert(current.it_value.tv_sec == 0 && LEFT_US(current.it_value.tv_usec, 1000));
     await_alarm();
     assert(ualarm(1000, 0) == 0);
     await_alarm();
@@ -90,18 +95,18 @@ int main(int argc, char **argv) {
     struct itimerspec spec = { .it_value = { .tv_nsec = 1000000 } }, got;
     assert(timer_settime(timer, 0, &spec, NULL) == 0);
     assert(timer_gettime(timer, &got) == 0);
-    assert(got.it_value.tv_nsec == 1000000);
+    assert(LEFT_NS(got.it_value.tv_nsec, 1000000));
     await_alarm();
     assert(timer_getoverrun(timer) == 0);
     assert(timer_delete(timer) == 0);
     /* Static-archive aliases and the public/raw doors share the same state. */
     assert(__setitimer(ITIMER_REAL, &setting, NULL) == 0);
-    assert(__getitimer(ITIMER_REAL, &current) == 0 && current.it_value.tv_usec == 1000);
-    assert(syscall(SYS_getitimer, ITIMER_REAL, &current) == 0 && current.it_value.tv_usec == 1000);
+    assert(__getitimer(ITIMER_REAL, &current) == 0 && LEFT_US(current.it_value.tv_usec, 1000));
+    assert(syscall(SYS_getitimer, ITIMER_REAL, &current) == 0 && LEFT_US(current.it_value.tv_usec, 1000));
     await_alarm();
     assert(___timer_create(CLOCK_MONOTONIC, NULL, &timer) == 0);
     assert(archive_settime(timer, 0, &spec, NULL) == 0);
-    assert(archive_gettime(timer, &got) == 0 && got.it_value.tv_nsec == 1000000);
+    assert(archive_gettime(timer, &got) == 0 && LEFT_NS(got.it_value.tv_nsec, 1000000));
     await_alarm();
     assert(___timer_getoverrun(timer) == 0);
     assert(___timer_delete(timer) == 0);
@@ -121,13 +126,13 @@ int main(int argc, char **argv) {
     int fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     assert(fd >= 0);
     assert(timerfd_settime(fd, 0, &spec, NULL) == 0);
-    assert(timerfd_gettime(fd, &got) == 0 && got.it_value.tv_nsec == 1000000);
+    assert(timerfd_gettime(fd, &got) == 0 && LEFT_NS(got.it_value.tv_nsec, 1000000));
     struct timespec delay = { .tv_nsec = 2000000 };
     assert(nanosleep(&delay, NULL) == 0);
     uint64_t ticks;
     assert(read(fd, &ticks, sizeof(ticks)) == sizeof(ticks) && ticks == 1);
     assert(__timerfd_settime(fd, 0, &spec, NULL) == 0);
-    assert(__timerfd_gettime(fd, &got) == 0 && got.it_value.tv_nsec == 1000000);
+    assert(__timerfd_gettime(fd, &got) == 0 && LEFT_NS(got.it_value.tv_nsec, 1000000));
     assert(nanosleep(&delay, NULL) == 0);
     assert(read(fd, &ticks, sizeof(ticks)) == sizeof(ticks) && ticks == 1);
     assert(close(fd) == 0);

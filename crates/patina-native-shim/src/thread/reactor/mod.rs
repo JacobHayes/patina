@@ -18,10 +18,13 @@ use super::*;
 // NO trace events of its own; only the scheduler parks/wakes are recorded.
 //
 // Event delivery is edge-triggered (mio always registers with EV_CLEAR): a
-// READ/WRITE knote fires on the not-ready -> ready transition and re-arms once
-// readiness drops, so a level condition (e.g. a peer-closed EV_EOF that stays
-// set) fires exactly once rather than busy-looping the reactor. Returned
-// events are ordered by `(ident, filter)` — the `BTreeMap` key order — so the
+// READ/WRITE knote fires on the not-ready -> ready transition and, registered
+// with EV_CLEAR, on every arrival in its direction since its last delivery,
+// as the kernel activates a knote on each append (a reader that drained the
+// bytes before the next scan saw them still gets the next arrival's event);
+// an EV_CLEAR pipe writer waits for a whole `PIPE_BUF` of room. A level
+// condition (e.g. a peer-closed EV_EOF that stays set) fires exactly once
+// rather than busy-looping the reactor. Returned events are ordered by `(ident, filter)` — the `BTreeMap` key order — so the
 // gathered slice is a pure function of the registry and the schedule.
 /// The C-facing kqueue event, matching `struct patina_kevent` in the header
 /// (a platform-neutral projection of the macOS `struct kevent` the C layer
@@ -234,13 +237,10 @@ fn pipe_poll(state: &ThreadRuntime, fd: c_int) -> (u32, (u64, u64)) {
             mask |= POLLERR;
         }
     }
-    #[cfg(target_os = "linux")]
     let seqs = (
         read.map_or(0, |channel| channel.read_events),
         write.map_or(0, |channel| channel.write_events),
     );
-    #[cfg(target_os = "macos")]
-    let seqs = (0, 0);
     (mask, seqs)
 }
 

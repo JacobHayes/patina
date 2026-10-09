@@ -36,6 +36,7 @@ unsafe fn fs_read(fd: Fd, destination: *mut c_void, length: usize) -> isize {
 /// (a scheduling point), as a captured-stdio write is. A `--stdin` knob feeding
 /// bytes here is a later slice; the registry row's reasoning names it.
 fn stdin_read() -> isize {
+    crate::mark_boundary();
     if let Err(errno) = thread::sched_point() {
         return fail(errno) as isize;
     }

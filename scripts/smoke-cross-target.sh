@@ -68,13 +68,16 @@ fn main() {
         std::process::exit(20);
     }
 
-    let epoch_ns = SystemTime::now()
+    let epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_nanos();
+        .as_millis();
     let started = Instant::now();
     std::thread::sleep(Duration::from_millis(7));
-    let slept_ns = started.elapsed().as_nanos();
+    // In milliseconds: a native guest's calls cost virtual time (nanoseconds
+    // each), a WASI guest's hostcalls do not yet, so the two agree to the
+    // millisecond, not the nanosecond.
+    let slept_ms = started.elapsed().as_millis();
 
     let mut hasher = RandomState::new().build_hasher();
     hasher.write(b"patina-smoke");
@@ -99,7 +102,7 @@ fn main() {
     std::fs::remove_dir("/smoke").unwrap();
 
     println!(
-        "SMOKE_RESULT epoch_ns={epoch_ns} slept_ns={slept_ns} \
+        "SMOKE_RESULT epoch_ms={epoch_ms} slept_ms={slept_ms} \
 entropy_hash={entropy_hash:016x} tail={tail} len={len}"
     );
 

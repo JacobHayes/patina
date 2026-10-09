@@ -49,8 +49,7 @@ unsafe extern "C" fn task_info(
     unsafe {
         let count = count.read() as usize;
         ptr::write_bytes(output, 0, count);
-        let mut nanos = 0;
-        crate::patina_cpu_time_nanos(&mut nanos);
+        let time = crate::time_abi::cpu_time();
         let user_time = match flavor {
             libc::MACH_TASK_BASIC_INFO if count >= libc::MACH_TASK_BASIC_INFO_COUNT as usize => {
                 &raw mut (*output.cast::<libc::mach_task_basic_info>()).user_time
@@ -68,10 +67,13 @@ unsafe extern "C" fn task_info(
             }
             _ => return libc::KERN_SUCCESS,
         };
-        user_time.write_unaligned(libc::time_value_t {
+        let value = |nanos: u64| libc::time_value_t {
             seconds: (nanos / 1_000_000_000) as i32,
             microseconds: ((nanos % 1_000_000_000) / 1000) as i32,
-        });
+        };
+        user_time.write_unaligned(value(time.user_ns));
+        // Every flavor above stores `system_time` right after `user_time`.
+        user_time.add(1).write_unaligned(value(time.system_ns));
     }
     libc::KERN_SUCCESS
 }

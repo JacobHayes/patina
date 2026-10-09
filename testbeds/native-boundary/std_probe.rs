@@ -22,7 +22,9 @@ fn main() {
     };
     let started = std::time::Instant::now();
     std::thread::sleep(std::time::Duration::from_millis(2));
-    if started.elapsed() != std::time::Duration::from_millis(2) {
+    // The sleep, and the few calls charged around it.
+    let slept = started.elapsed();
+    if slept < std::time::Duration::from_millis(2) || slept > std::time::Duration::from_micros(2_100) {
         std::process::exit(31);
     }
     if std::fs::create_dir("/state").is_err() {

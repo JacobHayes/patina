@@ -78,7 +78,10 @@ int main(int argc, char **argv) {
         /* libc ppoll/pselect never write the caller's timeout, unlike raw rows. */
         assert(ts.tv_sec == 1 && ts.tv_nsec == 0);
         if (cases[row].call == WAIT_SELECT)
-            assert(tv.tv_sec == 0 && tv.tv_usec == 1000000 - WAKE_DELAY_NS / 1000);
+            /* The second less the helper's delay and the calls charged
+             * meanwhile. */
+            assert(tv.tv_sec == 0 && tv.tv_usec <= 1000000 - WAKE_DELAY_NS / 1000 &&
+                   tv.tv_usec > 1000000 - WAKE_DELAY_NS / 1000 - 100);
         assert(sigprocmask(SIG_SETMASK, NULL, &after) == 0);
         assert(sigismember(&after, SIGUSR1) == sigismember(&original, SIGUSR1));
         assert(pthread_join(helper, NULL) == 0);

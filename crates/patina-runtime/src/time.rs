@@ -73,33 +73,44 @@ impl Context {
         if self.clock.is_none() {
             return Err(EffectError::missing_driver("clock").into());
         }
-        // Advance-on-spin: a guest that has done nothing but read the clock for
-        // `SPIN_RESCUE_CLOCK_OPS` ops at frozen virtual time gets a recorded
-        // token advance BEFORE this observation, so the value it is about to
-        // read has moved. Ordered here, ahead of the `ClockNow`, so the recorded
-        // stream for a rescued read is `SleepUntil` then `ClockNow`. Inside an
-        // embedder's locked section the rescue waits for the next read outside
-        // it, so no clock read can expire a park the embedder cannot settle.
-        if !self.embedder_section {
-            self.spin_rescue()?;
-        }
         let operation = Operation::ClockNow { clock };
-        if let Some((_, recorded)) = self.replay_expected(&operation)? {
-            return decode_u64(&operation, recorded);
-        }
-
-        let result = self.clock.as_mut().expect("driver was checked").now(clock);
-        let outcome = match result {
-            Ok(nanos) => {
-                let nanos = match clock {
-                    ClockKind::Realtime => self.apply_epoch_jump(nanos),
-                    ClockKind::Monotonic => nanos,
-                };
-                Outcome::U64(nanos)
+        let outcome = match self.replay_expected(&operation)? {
+            // The time model cross-check: replay re-derives the monotonic
+            // clock from the same charges and idle advances, so its value
+            // must be the recorded one. A difference is a charge one side
+            // made and the other did not, named here rather than surfacing
+            // later as a different expiry.
+            Some((sequence, recorded)) if clock == ClockKind::Monotonic => {
+                let derived = self.current_monotonic()?;
+                if recorded != Outcome::U64(derived) {
+                    return Err(RuntimeError::TimeModel {
+                        detail: format!(
+                            "replay diverged from the time model at operation {sequence}: the \
+recording read the monotonic clock as {recorded:?}, the replay's charges and idle advances derive \
+{derived}"
+                        ),
+                    });
+                }
+                recorded
             }
-            Err(error) => Outcome::Error(error),
+            Some((_, recorded)) => recorded,
+            None => {
+                let result = self.clock.as_mut().expect("driver was checked").now(clock);
+                let outcome = match result {
+                    Ok(nanos) => {
+                        let nanos = match clock {
+                            ClockKind::Realtime => self.apply_epoch_jump(nanos),
+                            ClockKind::Monotonic => nanos,
+                        };
+                        Outcome::U64(nanos)
+                    }
+                    Err(error) => Outcome::Error(error),
+                };
+                self.complete(operation.clone(), outcome)
+            }
         };
-        let outcome = self.complete(operation.clone(), outcome);
+        // A poll that completes a streak is escalated after its observation.
+        self.escalate_due()?;
         decode_u64(&operation, outcome)
     }
 
@@ -165,6 +176,7 @@ impl Context {
             deadline_nanos,
         };
         let expected = self.replay_expected(&operation)?;
+        let before = self.current_monotonic()?;
         let result = self
             .clock
             .as_mut()
@@ -176,6 +188,14 @@ impl Context {
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
         decode_unit(&operation, outcome)?;
+        // An idle advance: no task computes through it. It covers charged
+        // time the clock had yet to show (that work came before the wait),
+        // and a guest that waited ends its poll episode.
+        let idle = self.current_monotonic()?.saturating_sub(before);
+        if idle > 0 {
+            self.charges.absorb_idle(idle);
+            self.spin.end_episode();
+        }
         self.expire_due_timers()
     }
 
@@ -210,8 +230,9 @@ impl Context {
     /// readiness reactor (the native shim's `kqueue`/`kevent`) compares
     /// `EVFILT_TIMER` deadlines against it every scan; recording those reads
     /// would emit a `ClockNow` op per poll and diverge record from replay. Safe
-    /// because virtual time only advances through recorded `SleepUntil`/rescue,
-    /// so a bare read reproduces identically (see [`Self::current_monotonic`]).
+    /// because virtual time only advances through recorded `SleepUntil`s and
+    /// the charges of the guest's own calls, so a bare read reproduces
+    /// identically (see [`Self::current_monotonic`]).
     pub fn monotonic_now_unrecorded(&mut self) -> Result<u64, RuntimeError> {
         self.current_monotonic()
     }

@@ -531,7 +531,11 @@ fn detached_handles_live_until_completion_then_are_removed() {
             EINVAL
         );
         let now = with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap();
-        assert_eq!(crate::patina_sleep_until(CLOCK_MONOTONIC, now + 100), 0);
+        // Past the worker's delay: it has completed.
+        assert_eq!(
+            crate::patina_sleep_until(CLOCK_MONOTONIC, now + 10 * DELAY),
+            0
+        );
         assert_eq!(patina_pthread_kill(worker as usize, 0), ESRCH);
         assert_eq!(
             unsafe { patina_thread_join(worker, std::ptr::null_mut()) },

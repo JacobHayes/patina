@@ -689,14 +689,8 @@ impl Context {
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
         let selected = decode_optional_task(&operation, outcome)?;
-        self.cpu.running = selected;
+        self.charges.running = selected;
         Ok(selected)
-    }
-
-    /// The process's virtual CPU time in nanoseconds (see [`CpuTime`]).
-    /// Unrecorded: a pure function of the recorded stream.
-    pub fn cpu_time_nanos(&self) -> u64 {
-        self.cpu.total
     }
 
     fn scheduler_unit(
