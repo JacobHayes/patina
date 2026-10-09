@@ -396,9 +396,59 @@ static int patina_main_wrapper(int argc, char **argv, char **envp) {
 #define PATINA_SUD_PROBE 1
 #endif
 
+/* The preparation runs from the main executable's `.preinit_array`: glibc's
+ * `_dl_init` calls it before any shared library's constructor (libstdc++'s,
+ * a guest's own library's) and before the executable's `.init_array`, so
+ * containment is armed for all of them. It must be the array's only entry
+ * (entries run in link order, the guest's objects first): the pre-run audit
+ * refuses another (`patina-target`), and the image proves it at run time,
+ * trusting nothing the binary says about itself: the entry finds itself the
+ * array's only member (the linker's bounds of the array glibc runs), and the
+ * door refuses a dynamically linked image whose entry never ran. A static
+ * binary runs its preinit array from inside glibc's `__libc_start_main`,
+ * after this door: the door prepares then, and the entry finds the work
+ * done. */
+static patina_libc_start_main_fn patina_prepared;
+extern _Noreturn void patina_startup_refusal(int reason);
+extern void (*__preinit_array_start[])(int, char **, char **) __attribute__((visibility("hidden")));
+extern void (*__preinit_array_end[])(int, char **, char **) __attribute__((visibility("hidden")));
+extern const ElfW(Ehdr) __ehdr_start __attribute__((visibility("hidden")));
+
+__attribute__((visibility("hidden"))) void patina_preinit(int argc, char **argv, char **envp);
+/* The entry's address again, in a section of its own that `strip` keeps with
+ * the image (unlike the symbol table): the audit's attribution of the entry
+ * when the symbols are gone. A hint for the pre-run refusal, not a proof: the
+ * run-time checks are. The entry reads it, so no section collection drops it. */
+__attribute__((section(".patina.preinit"), used)) static void (*const volatile patina_preinit_marker)(
+    int, char **, char **) = patina_preinit;
+
+void patina_preinit(int argc, char **argv, char **envp) {
+    (void)envp;
+    (void)patina_preinit_marker;
+    if (!patina_prepared) patina_prepared = patina_start_prepare(argc, argv, PATINA_SUD_PROBE);
+    if (__preinit_array_end - __preinit_array_start != 1 || __preinit_array_start[0] != patina_preinit)
+        patina_startup_refusal(2);
+}
+__attribute__((section(".preinit_array"), used)) static void (*const patina_preinit_entry)(
+    int, char **, char **) = patina_preinit;
+
+/* Whether the loader runs this image's preinit array (it has an
+ * interpreter), rather than glibc's static startup after the door. */
+static int patina_loader_runs_preinit(void) {
+    const ElfW(Phdr) *headers = (const ElfW(Phdr) *)((const char *)&__ehdr_start + __ehdr_start.e_phoff);
+    for (int i = 0; i < __ehdr_start.e_phnum; i++)
+        if (headers[i].p_type == PT_INTERP) return 1;
+    return 0;
+}
+
 int __libc_start_main(patina_main_fn main_fn, int argc, char **argv, void *init,
                       void *fini, void *rtld_fini, void *stack_end) {
-    patina_libc_start_main_fn real = patina_start_prepare(argc, argv, PATINA_SUD_PROBE);
+    if (!patina_prepared) {
+        patina_prepared = patina_start_prepare(argc, argv, PATINA_SUD_PROBE);
+        /* The loader ran the preinit array, and the shim's entry was not in it. */
+        if (patina_loader_runs_preinit()) patina_startup_refusal(1);
+    }
+    patina_libc_start_main_fn real = patina_prepared;
     patina_real_main = main_fn;
     return real(patina_main_wrapper, argc, argv, init, fini, rtld_fini, stack_end);
 }

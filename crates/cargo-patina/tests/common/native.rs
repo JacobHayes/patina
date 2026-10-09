@@ -339,21 +339,47 @@ pub fn assert_build_c_guest(name: &str, link: CLink) -> Guest {
 
 /// Supply linker/compiler flags for a C guest without changing other probes.
 pub fn assert_build_c_guest_with_flags(name: &str, link: CLink, flags: &[&str]) -> Guest {
+    let mut cc = super::c_compiler();
+    cc.args(["-std=c11", "-D_POSIX_C_SOURCE=200809L"]);
+    build_native_guest(cc, name, link, flags)
+}
+
+/// Compile a C++ guest over the POSIX layer, linking the system's shared
+/// libstdc++ as a C++ program ordinarily does.
+pub fn assert_build_cxx_guest(name: &str) -> Guest {
+    let mut cxx = Command::new(std::env::var("CXX").unwrap_or_else(|_| "c++".into()));
+    cxx.arg("-std=c++17");
+    build_native_guest(cxx, name, CLink::PosixShim, &[])
+}
+
+/// Compile a native-boundary C source as a shared library in `dir`, for a
+/// guest to link against; returns its path.
+pub fn assert_build_c_library(name: &str, dir: &Path) -> PathBuf {
+    let stem = Path::new(name).file_stem().unwrap().to_str().unwrap();
+    let library = dir.join(format!("lib{stem}.so"));
+    assert_success(
+        super::c_compiler()
+            .args([
+                "-std=c11", "-O2", "-fPIC", "-shared", "-Wall", "-Wextra", "-Werror",
+            ])
+            .arg(guest_source(name))
+            .arg("-o")
+            .arg(&library)
+            .output()
+            .unwrap(),
+    );
+    library
+}
+
+fn build_native_guest(mut cc: Command, name: &str, link: CLink, flags: &[&str]) -> Guest {
     static ARCHIVE: OnceLock<PathBuf> = OnceLock::new();
     static POSIX: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("c-guest");
-    let mut cc = super::c_compiler();
-    cc.args([
-        "-std=c11",
-        "-D_POSIX_C_SOURCE=200809L",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-    ])
-    .arg("-I")
-    .arg(native_workspace().join("crates/patina-native-shim/include"))
-    .arg(guest_source(name));
+    cc.args(["-Wall", "-Wextra", "-Werror"])
+        .arg("-I")
+        .arg(native_workspace().join("crates/patina-native-shim/include"))
+        .arg(guest_source(name));
     match link {
         CLink::Unlinked => {}
         CLink::Shim => {

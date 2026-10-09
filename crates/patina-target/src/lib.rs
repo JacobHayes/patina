@@ -14,6 +14,7 @@ use object::{Architecture, BinaryFormat};
 use std::fmt;
 
 mod code_ranges;
+mod early_init;
 mod import_policy;
 mod import_xrefs;
 mod instruction_scan;
@@ -210,6 +211,10 @@ pub enum TargetError {
     UnsupportedImports(Vec<WasmImport>),
     UnsupportedNativeFormat(BinaryFormat),
     RelocatableNativeElf,
+    /// A linked ELF whose section headers (or dynamic symbol table) are gone:
+    /// the import audit and the instruction scan read them, so nothing could
+    /// be certified.
+    UnauditableNativeElf,
     UnsupportedNativeArchitecture(Architecture),
     UnsupportedNativeImports(Vec<NativeEscape>),
 }
@@ -239,6 +244,9 @@ impl fmt::Display for TargetError {
             Self::RelocatableNativeElf => f.write_str(
                 "refusing relocatable ELF (ET_REL): an object file is not a runnable guest; link an executable before audit/run",
             ),
+            Self::UnauditableNativeElf => f.write_str(
+                "refusing an ELF without section headers or a dynamic symbol table: the import audit and the instruction scan read them, so the binary cannot be certified; link it without stripping its section headers",
+            ),
             Self::UnsupportedNativeArchitecture(architecture) => {
                 write!(
                     f,
@@ -265,6 +273,7 @@ impl std::error::Error for TargetError {
             | Self::UnsupportedImports(_)
             | Self::UnsupportedNativeFormat(_)
             | Self::RelocatableNativeElf
+            | Self::UnauditableNativeElf
             | Self::UnsupportedNativeArchitecture(_)
             | Self::UnsupportedNativeImports(_) => None,
         }
