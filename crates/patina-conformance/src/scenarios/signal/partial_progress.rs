@@ -51,12 +51,15 @@ pub fn run(p: &Probe) {
 
     let (r, [rd, wr]) = p.pipe2(0);
     p.require("pipe", r == 0);
-    let capacity = p.fcntl(wr, F_GETPIPE_SZ, 0);
-    p.require("the pipe's capacity is below the write", (1..100_000).contains(&capacity));
+    let capacity = p.rec.quiet(|| p.fcntl(wr, F_GETPIPE_SZ, 0));
+    p.require(
+        "the pipe's capacity is below the write",
+        (1..100_000).contains(&capacity),
+    );
     let returned = AtomicBool::new(false);
     let wrote = thread::scope(|scope| {
         scope.spawn(|| interrupt_then(p, main_tid, pid, &returned, || drain(rd)));
-        let wrote = p.write(wr, &big[..100_000]);
+        let wrote = p.rec.quiet(|| p.write(wr, &big[..100_000]));
         returned.store(true, Ordering::SeqCst);
         p.close(wr);
         wrote
