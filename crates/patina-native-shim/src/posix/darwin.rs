@@ -115,12 +115,14 @@ extern "C" fn dispatch_semaphore_create(value: isize) -> *mut c_void {
 }
 #[unsafe(no_mangle)]
 extern "C" fn dispatch_semaphore_wait(sem: *mut c_void, timeout: u64) -> isize {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope =
+        crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::DispatchSemaphore);
     crate::thread::patina_dispatch_semaphore_wait(sem, timeout)
 }
 #[unsafe(no_mangle)]
 extern "C" fn dispatch_semaphore_signal(sem: *mut c_void) -> isize {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope =
+        crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::DispatchSemaphore);
     crate::thread::patina_dispatch_semaphore_signal(sem)
 }
 #[unsafe(no_mangle)]

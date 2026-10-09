@@ -1032,10 +1032,23 @@ thread's only call meanwhile (RED with thread start and completion charged
 as doors: two extra system calls on the worker); calls after `main` returns
 are not charged (RED without the silence: one more clock read); every charge
 lands on a reserved task. `charge::tests` pins that a trapped call and the
-door for its operation share one class, and that a sync call that parks is
-charged one system call more. The runtime's `charge_alloc` test charges
+door for its operation share one class, that the first entry a trap holder
+makes is the one call charged (RED with only entries from guest code
+counted: trapped calls and held libc doors go uncharged; natively,
+`syscall_is_charged_as_the_call_it_makes` runs 10 000 `syscall(2)` identity
+queries and system calls, RED with `syscall(2)` charged as a plain door: the
+same system time), that a sync call that parks is
+charged one system call more, and that a handler run from inside a lock call
+(a door and a trapped clock read, or a call a `siglongjmp` abandons) leaves
+the lock's park its surcharge (RED with the class overwritten per entry, and
+with the class restored only by the abandoned call's own scope: no
+surcharge); `signals::delivery::tests` does the same for handlers the C
+driver releases from a trap's exit (RED without the record's restore). The runtime's `charge_alloc` test charges
 spawned, reserved and unknown tasks under a counting allocator: no charge
-allocates (RED with an entry inserted per new task: the map's node splits). Natively, `every_guest_call_is_charged_to_a_reserved_task` runs a
+allocates (RED with an entry inserted per new task: the map's node splits),
+and a charge made before its task's reservation stays unreserved, whether or
+not another task was charged between (RED without settling first: the
+reservation adopts it). Natively, `every_guest_call_is_charged_to_a_reserved_task` runs a
 single-threaded guest whose calls precede thread numbering: nothing lands
 unreserved (RED reserving the installing thread's unnumbered task instead of
 the main task).

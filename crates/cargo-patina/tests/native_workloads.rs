@@ -898,6 +898,28 @@ fn every_guest_call_is_charged_to_a_reserved_task() {
     );
 }
 
+/// syscall(2) is charged as the call it makes, like the trap for the raw
+/// instruction: 10 000 identity queries cost no system time, where 10 000
+/// system calls cost theirs. RED with syscall(2) charged as a plain door:
+/// the two runs' system time is the same.
+#[cfg(target_os = "linux")]
+#[test]
+fn syscall_is_charged_as_the_call_it_makes() {
+    let g = Guest::assert_build("syscall_class_probe.rs");
+    let system_ns = |which: &str| {
+        let output = g.command("run", &["--seed", "5", "--format", "json", "--", which]);
+        assert!(output.status.success(), "{}", text(&output.stderr));
+        let envelope: serde_json::Value =
+            serde_json::from_slice(text(&output.stdout).lines().last().unwrap().as_bytes())
+                .unwrap();
+        envelope["cpu_charges"]["task1"]["system_ns"]
+            .as_u64()
+            .unwrap()
+    };
+    let syscall = patina_dst_abi::ChargeClass::Syscall.cost().system_ns;
+    assert_eq!(system_ns("getuid") - system_ns("getpid"), 10_000 * syscall);
+}
+
 #[test]
 fn an_empty_udp_poll_on_a_sleeping_peer_lets_virtual_time_reach_it() {
     // Class pairing: the runtime's outcome classifier

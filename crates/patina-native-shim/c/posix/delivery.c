@@ -42,6 +42,7 @@ struct patina_exit {
     uint64_t plan_segv;
     uint64_t plan_word;
     uint8_t plan;
+    uint8_t call; /* the interrupted call's charge state, while the handlers run */
     int32_t plan_errno;
 };
 _Static_assert(sizeof(struct patina_exit) == 224, "Rust signals::delivery::Exit layout");

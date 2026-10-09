@@ -83,3 +83,30 @@ fn charging_a_spawned_reserved_or_unknown_task_never_allocates() {
     );
     assert!(facts["cpu_charges"].get("task99").is_none());
 }
+
+#[test]
+fn a_charge_before_its_tasks_reservation_stays_unreserved() {
+    // Whether or not another task was charged in between, a reservation
+    // does not adopt what was charged before it.
+    for between in [false, true] {
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        let early = Some(TaskId(7));
+        context.charge_calls(early, calls());
+        if between {
+            context.charge_calls(None, calls());
+        }
+        context.reserve_charge(early);
+        context.charge_calls(early, calls());
+        assert_eq!(
+            context.cpu_charge(early),
+            calls().charge(),
+            "between={between}"
+        );
+        let facts = context.run_facts();
+        assert_eq!(
+            facts["cpu_charges"]["unreserved"]["system_ns"].as_u64(),
+            Some(calls().charge().system_ns),
+            "between={between}: {facts}"
+        );
+    }
+}

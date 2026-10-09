@@ -68,6 +68,9 @@ pub(crate) struct PanicScope {
     previous_sp: usize,
     #[cfg(target_os = "linux")]
     previous_entry: u64,
+    /// The guest call this entry began, if it took the thread from guest
+    /// code as one.
+    call: Option<crate::charge::Began>,
     #[cfg(not(test))]
     panicking_on_entry: bool,
     // Ownership belongs to the calling host thread, never another thread.
@@ -105,8 +108,13 @@ impl PanicScope {
         // the suspended frame uncounted.
         SUSPENDED.with(|suspended| suspended.set(suspended.get() + 1));
         std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+        let mut scope = Self::set(false, None);
+        // The call this frame belongs to gets its class back when the guest
+        // code returns, whatever that code's own calls left behind (one a
+        // handler's `siglongjmp` abandoned never ends itself).
+        scope.call = Some(crate::charge::interrupted());
         Suspended {
-            scope: std::mem::ManuallyDrop::new(Self::set(false, None)),
+            scope: std::mem::ManuallyDrop::new(scope),
         }
     }
     fn set(value: bool, charge: Option<ChargeClass>) -> Self {
@@ -121,12 +129,13 @@ impl PanicScope {
             });
             previous
         });
-        if value
-            && previous == Owner::Guest
-            && let Some(class) = charge
-        {
-            crate::charge::count(class);
-        }
+        // A guest call is the entry that takes the thread from guest code,
+        // or the first one a trap holder makes for it (a trapped system call,
+        // a libc door its C thunk holds the thread around): the holder's own
+        // C is glue.
+        let call = charge
+            .filter(|_| value && matches!(previous, Owner::Guest | Owner::Exit))
+            .map(crate::charge::begin);
         #[cfg(target_os = "linux")]
         let (previous_sp, previous_entry) = (GUEST_SP.get(), ENTRY.get().0);
         #[cfg(target_os = "linux")]
@@ -150,6 +159,7 @@ impl PanicScope {
         }
         Self {
             previous,
+            call,
             #[cfg(target_os = "linux")]
             previous_sp,
             #[cfg(target_os = "linux")]
@@ -191,6 +201,9 @@ impl Drop for PanicScope {
                 b"patina native shim panic: unwinding an owned boundary\n",
             );
             crate::host_abort();
+        }
+        if let Some(call) = self.call {
+            crate::charge::end(call);
         }
         IN_SHIM.with(|scope| scope.set(self.previous));
         count(u64::MAX);

@@ -85,6 +85,10 @@ pub struct Exit {
     plan_segv: u64,
     plan_word: u64,
     plan: u8,
+    /// The charge state of the call the handlers interrupt, given back when
+    /// they return to the trap exit ([`patina_trap_take_back`]), whatever
+    /// their own calls left (one a `siglongjmp` abandoned never ends itself).
+    call: crate::charge::Began,
     /// [`PLAN_ERRNO`]'s value.
     plan_errno: i32,
 }
@@ -189,6 +193,7 @@ impl Exit {
             plan_segv: 0,
             plan_word: 0,
             plan: 0,
+            call: crate::charge::Began::NONE,
             plan_errno: 0,
         }
     }
@@ -842,7 +847,10 @@ pub unsafe extern "C" fn patina_exit_released(exit: *mut Exit) -> i32 {
 /// `exit` is the C driver's `struct patina_exit`, writable for the call.
 pub unsafe extern "C" fn patina_trap_hand_over(exit: *mut Exit) {
     // SAFETY: the C driver's own record, per this function's contract.
-    unsafe { (*exit).held = crate::panic_boundary::hand_over() };
+    unsafe {
+        (*exit).held = crate::panic_boundary::hand_over();
+        (*exit).call = crate::charge::interrupted();
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -853,7 +861,10 @@ pub unsafe extern "C" fn patina_trap_hand_over(exit: *mut Exit) {
 /// `exit` is the C driver's `struct patina_exit`, readable for the call.
 pub unsafe extern "C" fn patina_trap_take_back(exit: *const Exit) {
     // SAFETY: the C driver's own record, per this function's contract.
-    crate::panic_boundary::take_back(unsafe { (*exit).held });
+    unsafe {
+        crate::panic_boundary::take_back((*exit).held);
+        crate::charge::end((*exit).call);
+    }
 }
 
 /// A delivery driven from under a shim Rust frame (for the detectors' must-fail
@@ -1017,4 +1028,34 @@ pub(super) fn fault_entered(sig: u8, sent: bool) {
         }
     }
     current_action(swapped);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::charge::Op;
+    use crate::panic_boundary::PanicScope;
+    use patina_dst_abi::ChargeClass;
+
+    #[test]
+    fn handlers_a_trap_exit_releases_give_the_interrupted_call_its_class_back() {
+        let _ = crate::charge::taken();
+        {
+            // A lock call's handlers are released from a trap exit; one
+            // raises a signal whose handler `siglongjmp`s back, so the raise
+            // never returns. The lock still parks as itself.
+            let _lock = PanicScope::enter_op(Op::PthreadSync);
+            let mut exit = Exit::new();
+            // SAFETY: the record is local and writable.
+            unsafe { patina_trap_hand_over(&mut exit) };
+            std::mem::forget(PanicScope::enter());
+            // SAFETY: as above.
+            unsafe { patina_trap_take_back(&exit) };
+            crate::charge::parked();
+        }
+        let counts = crate::charge::taken();
+        assert_eq!(counts.calls(ChargeClass::Sync), 1);
+        // The abandoned raise, and the lock's surcharge.
+        assert_eq!(counts.calls(ChargeClass::Syscall), 2);
+    }
 }

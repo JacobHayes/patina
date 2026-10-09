@@ -192,7 +192,7 @@ pub unsafe extern "C" fn patina_tsc_dispatch(
     aux_out: *mut c_uint,
     length_out: *mut usize,
 ) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     if bytes.is_null() || available == 0 {
         return PATINA_TSC_NONE;
     }

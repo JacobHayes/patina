@@ -32,7 +32,7 @@ pub unsafe extern "C" fn patina_mutex_init(mutex: *mut c_void, attr: *const c_vo
 /// # Safety
 /// `mutex` must reference a valid `pthread_mutex_t`.
 pub unsafe extern "C" fn patina_mutex_lock(mutex: *mut c_void) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     managed_op!({
         let key = mutex as usize;
         // SAFETY: a valid `pthread_mutex_t`, per this function's contract.
@@ -54,7 +54,7 @@ pub unsafe extern "C" fn patina_mutex_lock(mutex: *mut c_void) -> c_int {
 /// # Safety
 /// `mutex` must reference a valid `pthread_mutex_t`.
 pub unsafe extern "C" fn patina_mutex_trylock(mutex: *mut c_void) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     managed_op!({
         // SAFETY: a valid `pthread_mutex_t`, per this function's contract.
         let kind = unsafe { MutexKind::of_static(mutex) };
@@ -68,7 +68,7 @@ pub unsafe extern "C" fn patina_mutex_trylock(mutex: *mut c_void) -> c_int {
 /// # Safety
 /// `mutex` must reference a valid `pthread_mutex_t`.
 pub unsafe extern "C" fn patina_mutex_unlock(mutex: *mut c_void) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     managed_op!({
         let me = current_task();
         let mut state = lock_state();
@@ -115,7 +115,7 @@ pub unsafe extern "C" fn patina_mutex_destroy(mutex: *mut c_void) -> c_int {
 /// `lock` must reference a valid `os_unfair_lock`.
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn patina_os_unfair_lock_lock(lock: *mut c_void) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::UnfairLock);
     // Run the lock natively — never through the deterministic model — for an
     // allocator-internal `os_unfair_lock` in either of the two windows where
     // one appears: (1) the bootstrap window, where a custom global allocator's
@@ -162,7 +162,7 @@ pub unsafe extern "C" fn patina_os_unfair_lock_lock(lock: *mut c_void) {
 /// `lock` must reference a valid `os_unfair_lock`.
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn patina_os_unfair_lock_trylock(lock: *mut c_void) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::UnfairLock);
     // Allocator-internal lock: run natively (see `patina_os_unfair_lock_lock`).
     // The real `os_unfair_lock_trylock` returns a C `bool`.
     if super::in_shim_critical() || super::in_shim_bootstrap() {
@@ -188,7 +188,7 @@ pub unsafe extern "C" fn patina_os_unfair_lock_trylock(lock: *mut c_void) -> c_i
 /// `lock` must reference a valid `os_unfair_lock` the caller holds.
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn patina_os_unfair_lock_unlock(lock: *mut c_void) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::UnfairLock);
     // Allocator-internal lock: run natively (see `patina_os_unfair_lock_lock`).
     // A lock taken natively (bootstrap, or reentrant under a held spinlock) is
     // released natively too; the allocator's lock/unlock pair is balanced
@@ -244,7 +244,7 @@ pub unsafe extern "C" fn patina_rwlock_init(lock: *mut c_void, attr: *const c_vo
 /// # Safety
 /// `lock` must reference a valid `pthread_rwlock_t`.
 pub unsafe extern "C" fn patina_rwlock_rdlock(lock: *mut c_void) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     managed_op!({
         let key = lock as usize;
         // SAFETY: a valid `pthread_rwlock_t`, per this function's contract.
@@ -266,7 +266,7 @@ pub unsafe extern "C" fn patina_rwlock_rdlock(lock: *mut c_void) -> c_int {
 /// # Safety
 /// `lock` must reference a valid `pthread_rwlock_t`.
 pub unsafe extern "C" fn patina_rwlock_wrlock(lock: *mut c_void) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     managed_op!({
         let key = lock as usize;
         // SAFETY: a valid `pthread_rwlock_t`, per this function's contract.
@@ -288,7 +288,7 @@ pub unsafe extern "C" fn patina_rwlock_wrlock(lock: *mut c_void) -> c_int {
 /// # Safety
 /// `lock` must reference a valid `pthread_rwlock_t`.
 pub unsafe extern "C" fn patina_rwlock_tryrdlock(lock: *mut c_void) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     managed_op!({
         // SAFETY: a valid `pthread_rwlock_t`, per this function's contract.
         let kind = unsafe { RwLockKind::of_static(lock) };
@@ -301,7 +301,7 @@ pub unsafe extern "C" fn patina_rwlock_tryrdlock(lock: *mut c_void) -> c_int {
 /// # Safety
 /// `lock` must reference a valid `pthread_rwlock_t`.
 pub unsafe extern "C" fn patina_rwlock_trywrlock(lock: *mut c_void) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     managed_op!({
         // SAFETY: a valid `pthread_rwlock_t`, per this function's contract.
         let kind = unsafe { RwLockKind::of_static(lock) };
@@ -315,7 +315,7 @@ pub unsafe extern "C" fn patina_rwlock_trywrlock(lock: *mut c_void) -> c_int {
 /// # Safety
 /// `lock` must reference a valid `pthread_rwlock_t` the caller holds.
 pub unsafe extern "C" fn patina_rwlock_unlock(lock: *mut c_void) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     managed_op!({
         let me = current_task();
         let mut state = lock_state();
@@ -510,7 +510,7 @@ pub unsafe extern "C" fn patina_cond_timedwait(
 /// # Safety
 /// `cond` must reference a valid `pthread_cond_t`.
 pub unsafe extern "C" fn patina_cond_signal(cond: *mut c_void) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     managed_op!({
         let mut state = lock_state();
         let mut scheduler = RealScheduler;
@@ -525,7 +525,7 @@ pub unsafe extern "C" fn patina_cond_signal(cond: *mut c_void) -> c_int {
 /// # Safety
 /// `cond` must reference a valid `pthread_cond_t`.
 pub unsafe extern "C" fn patina_cond_broadcast(cond: *mut c_void) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     managed_op!({
         let mut state = lock_state();
         let mut scheduler = RealScheduler;

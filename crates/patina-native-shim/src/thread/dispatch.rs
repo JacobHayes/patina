@@ -107,7 +107,8 @@ pub extern "C" fn patina_dispatch_release(object: *mut c_void) {
 /// [`patina_dispatch_semaphore_create`].
 #[cfg(target_os = "macos")]
 pub extern "C" fn patina_dispatch_semaphore_wait(sem: *mut c_void, timeout: u64) -> isize {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope =
+        crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::DispatchSemaphore);
     let key = sem as usize;
     if sched_point().is_err() {
         fatal("scheduler error entering dispatch_semaphore_wait");
@@ -194,7 +195,8 @@ pub extern "C" fn patina_dispatch_semaphore_wait(sem: *mut c_void, timeout: u64)
 /// [`patina_dispatch_semaphore_create`].
 #[cfg(target_os = "macos")]
 pub extern "C" fn patina_dispatch_semaphore_signal(sem: *mut c_void) -> isize {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope =
+        crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::DispatchSemaphore);
     let key = sem as usize;
     if sched_point().is_err() {
         fatal("scheduler error entering dispatch_semaphore_signal");

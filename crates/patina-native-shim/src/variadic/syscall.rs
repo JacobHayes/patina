@@ -93,7 +93,8 @@ pub unsafe extern "C" fn patina_libc_syscall_fixed(
     number: c_long,
     words: *const [u64; 6],
 ) -> c_long {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // Charged as the call it makes, as the trap for the raw instruction is.
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_syscall(number);
     let mutated = super::fault(8);
     // SAFETY: both assembly producers store every word in aligned live storage.
     let mut args = unsafe { *words };
