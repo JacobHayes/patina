@@ -140,12 +140,15 @@ jobs:
       - run: scripts/check-flag-drift.sh
       - run: scripts/validate-wasi.sh
       - run: scripts/check-native-testbeds.sh
+      - if: matrix.runner == 'ubuntu-latest'
+        run: testbeds/multiproc/run-patina.sh
       - run: scripts/smoke-cross-target.sh
       # Fast, build-free classifier selftests (pure functions over canned tuples;
       # ~1.4s + ~0.5s locally). The fuzz-sweep bash classifier is NOT otherwise
       # covered by a Rust test; the campaign selftest is ALSO exercised by the
       # `campaign_selftest_passes` integration test but kept here as a direct
       # CLI-level gate against the shipped subcommand.
+      - run: testbeds/multiproc/run-patina.sh --selftest
       - run: testbeds/workq/fuzz-sweep.sh --selftest
       - run: cargo run -p cargo-patina --quiet -- campaign --selftest
       # The flagship durable-work-queue testbed's full self-checking gate
