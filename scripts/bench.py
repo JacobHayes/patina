@@ -87,6 +87,12 @@ WORKLOADS = (
     Workload('condvar', 'bench', ('condvar', '--iters', '{n}'), 'BENCH_RESULT', count=50_000),
     Workload('pipe', 'bench', ('pipe', '--iters', '{n}'), 'BENCH_RESULT', count=40_000),
     Workload('tcp', 'bench', ('tcp', '--iters', '{n}'), 'BENCH_RESULT', count=25_000),
+    *(Workload(f'doors-{kind}', 'bench',
+               ('doors', '--class', kind, '--iters', '{n}', '--dir', '{dir}'),
+               'BENCH_RESULT', count={'sync': 5_000_000, 'pread': 32_000}.get(kind, 100_000), hot_path=True)
+      for kind in ('sync', 'clock', 'mutex', 'pipe', 'pread')),
+    Workload('context', 'context', ('2000', '1'), 'CONTEXT_RESULT',
+             native_unsupported='explicit Context benchmark; compare Patina builds', hot_path=True),
     Workload('workq', 'workq',
              ('--seed', '7', '--jobs', '{n}', '--workers', '3', '--producers', '2',
               '--base-port', '5701', '--data-dir', '{dir}', '--timeout-secs', '300'),
@@ -313,7 +319,7 @@ def resolve_rev(rev: str) -> str:
     raise BuildError(f'--baseline {rev!r} is neither a file nor a single revision of this checkout')
 
 
-def build_baseline(spec: str, base: Path, *, refresh: bool = False) -> Tuple[Path, dict, Path]:
+def build_baseline(spec: str, base: Path, context: bool = False, *, refresh: bool = False) -> Tuple[Path, dict, Path]:
     """A cargo-patina for `spec` (an existing binary, or a revision), its
     identity for the records, and the directory its guests build under.
 
@@ -324,14 +330,21 @@ def build_baseline(spec: str, base: Path, *, refresh: bool = False) -> Tuple[Pat
     """
     as_path = Path(spec)
     if as_path.is_file():
+        if context and not as_path.with_name('patina-dst-bench').is_file():
+            raise BuildError('Context comparison requires patina-dst-bench beside baseline CLI')
         digest = hashlib.sha256(as_path.read_bytes()).hexdigest()
         return as_path.resolve(), {'binary_sha256': digest}, base / 'baseline' / digest
     sha = resolve_rev(spec)
     home = base / 'baseline' / sha
     binary = home / 'cargo-patina'
     source = home / 'source'
-    if not refresh and binary.is_file() and source.is_dir():
-        return binary, {'rev': sha}, home
+    info_path = home / 'build-info.json'
+    if (not refresh and source.is_dir() and binary.is_file() and info_path.is_file()
+            and (not context or (home / 'patina-dst-bench').is_file())):
+        info = json.loads(info_path.read_text())
+        if (info.get('rev') == sha and info.get('toolchain')
+                and info.get('binary_sha256') == hashlib.sha256(binary.read_bytes()).hexdigest()):
+            return binary, info, home
     home.mkdir(parents=True, exist_ok=True)
     build = Path(tempfile.mkdtemp(prefix='build.', dir=home))
     try:
@@ -347,11 +360,19 @@ def build_baseline(spec: str, base: Path, *, refresh: bool = False) -> Tuple[Pat
         if source.exists():
             shutil.rmtree(source)
         os.replace(exported, source)
+        toolchain = subprocess.run(['rustc', '-vV'], cwd=source, capture_output=True,
+                                   text=True, check=True).stdout.strip()
         print(f'==> building baseline cargo-patina at {sha[:12]}', flush=True)
         built = build_cargo_patina(source, build / 'artifacts', build / 'logs')
+        if context:
+            cargo_binary(source, 'patina-dst-bench', home / 'patina-dst-bench',
+                         build / 'logs' / 'context.log')
         staged = build / 'cargo-patina'
         shutil.copy2(built, staged)
         os.replace(staged, binary)
+        info = {'rev': sha, 'toolchain': toolchain,
+                'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}
+        info_path.write_text(json.dumps(info, sort_keys=True) + '\n')
     except BuildError:
         # Kept for its logs; without a binary in place no later run uses it.
         raise
@@ -359,7 +380,7 @@ def build_baseline(spec: str, base: Path, *, refresh: bool = False) -> Tuple[Pat
         shutil.rmtree(build, ignore_errors=True)
         raise
     shutil.rmtree(build, ignore_errors=True)
-    return binary, {'rev': sha}, home
+    return binary, info, home
 
 
 # ------------------------------------------------------------------- legs
@@ -367,9 +388,17 @@ def build_baseline(spec: str, base: Path, *, refresh: bool = False) -> Tuple[Pat
 def verify_artifacts(identity, opts, base, selected):
     """Rebuild actual products; revisions alone cannot identify build settings."""
     current = build_cargo_patina(ROOT, base / 'verify', base / 'verify' / 'logs')
-    baseline, _, _ = build_baseline(opts.baseline, base, refresh=True)
-    return (identity['candidate']['binary_sha256'] == hashlib.sha256(current.read_bytes()).hexdigest()
-            and identity['base']['binary_sha256'] == hashlib.sha256(baseline.read_bytes()).hexdigest())
+    context = any(w.testbed == 'context' for w in selected)
+    baseline, _, home = build_baseline(opts.baseline, base, context, refresh=True)
+    cli_matches = (identity['candidate']['binary_sha256'] == hashlib.sha256(current.read_bytes()).hexdigest()
+                   and identity['base']['binary_sha256'] == hashlib.sha256(baseline.read_bytes()).hexdigest())
+    if context:
+        candidate_context = cargo_binary(ROOT, 'patina-dst-bench', base / 'verify' / 'context',
+                                         base / 'verify' / 'logs' / 'context.log')
+        actual = {'patina': hashlib.sha256(candidate_context.read_bytes()).hexdigest(),
+                  'baseline': hashlib.sha256((home / 'patina-dst-bench').read_bytes()).hexdigest()}
+        return cli_matches and identity.get('context_binary_sha256') == actual
+    return cli_matches
 
 
 def verify_verdict(opts, base, selected):
@@ -483,13 +512,27 @@ class Leg:
     cargo_patina: Optional[Path]
     home: Path
     seed: int = 1
+    context_binary: Optional[Path] = None
+    context_json: bool = True
 
     def binary(self, testbed: str) -> Path:
+        if testbed == 'context' and self.context_binary:
+            return self.context_binary
         if self.cargo_patina is None:
             return self.home / 'release' / testbed
         return self.home / 'guests' / testbed
 
     def build(self, testbed: str) -> None:
+        if testbed == 'context':
+            if not self.context_binary:
+                cargo_binary(ROOT, 'patina-dst-bench', self.binary(testbed),
+                             self.home / 'logs' / 'context.log')
+            help_result = subprocess.run([str(self.binary(testbed)), '--help'],
+                                         capture_output=True, text=True, timeout=30)
+            if help_result.returncode:
+                raise BuildError('Context artifact could not describe its report interface')
+            self.context_json = '--json' in help_result.stdout.split()
+            return
         source = ROOT / 'testbeds' / testbed
         log = self.home / 'logs' / f'{testbed}.log'
         if self.cargo_patina is None:
@@ -502,6 +545,9 @@ class Leg:
 
     def command(self, workload: Workload, n: int, directory: str) -> List[str]:
         binary = str(self.binary(workload.testbed))
+        if workload.testbed == 'context':
+            args = expand(workload.args, n, directory)
+            return [binary] + (['--json'] if self.context_json else []) + args
         if self.cargo_patina is None:
             return [binary] + expand(workload.args, n, directory)
         return ([str(self.cargo_patina), 'patina', 'run', binary, '--seed', str(self.seed), '--']
@@ -514,6 +560,9 @@ class Sample:
     cpu_s: float
     rss_kib: int
     result: str
+    hot_ns_per_op: Optional[float] = None
+    ops: Optional[int] = None
+    slope_result: Optional[str] = None
 
 
 def parse_launch_report(text: str, darwin: bool) -> Tuple[float, float, int]:
@@ -533,8 +582,34 @@ def build_launcher(base: Path) -> Path:
     return launcher
 
 
+def context_report(stdout, json_mode):
+    """Normalize seeded-loop timings from the artifact's advertised interface.
+
+    Older revisions report ns/op rounded to two decimals. Keep that precision;
+    never substitute process elapsed time or infer a boundary count from inputs.
+    """
+    try:
+        if json_mode:
+            report = json.loads(stdout)
+        else:
+            fields = {name.strip(): value.strip() for line in stdout.splitlines()
+                      for name, separator, value in [line.partition(':')] if separator}
+            ops = int(fields['boundary ops per run'])
+            per_op = float(fields['seeded ns/op'])
+            report = dict(iterations=int(fields['workload iterations']), boundary_ops=ops,
+                          seeded_ns_per_op=per_op, seeded_nanos=per_op * ops)
+        if (type(report['iterations']) is not int or report['iterations'] <= 0
+                or type(report['boundary_ops']) is not int or report['boundary_ops'] <= 0
+                or not all(math.isfinite(report[k]) and report[k] > 0
+                           for k in ('seeded_nanos', 'seeded_ns_per_op'))):
+            raise ValueError('invalid Context timing/count')
+        return report
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
+        raise BenchError('Context artifact report unreadable') from error
+
+
 def measure(leg: Leg, workload: Workload, n: int, scratch: Path, launcher: Path,
-            timeout: float) -> Sample:
+            timeout: float, hot_probe: bool = True) -> Sample:
     directory = Path(tempfile.mkdtemp(prefix=f'{workload.name}-', dir=scratch))
     report = directory.with_name(directory.name + '.report')
     cmd = leg.command(workload, n, str(directory))
@@ -560,7 +635,10 @@ def measure(leg: Leg, workload: Workload, n: int, scratch: Path, launcher: Path,
         shutil.rmtree(directory, ignore_errors=True)
         if report.exists():
             report.unlink()
-    result = parse_result(stdout, workload.result, workload.drop)
+    context = (context_report(stdout, leg.context_json)
+               if workload.testbed == 'context' and code == 0 else None)
+    result = (f'CONTEXT_RESULT iterations={context["iterations"]}' if context else
+              parse_result(stdout, workload.result, workload.drop))
     if code != 0 or result is None or not usage:
         why = f'timed out after {timeout:g}s' if timed_out else f'exit {code}'
         tail = '\n'.join((stdout + stderr).splitlines()[-20:])
@@ -568,7 +646,18 @@ def measure(leg: Leg, workload: Workload, n: int, scratch: Path, launcher: Path,
                 f'{"present" if result else "missing"})')
         raise BenchError(f'{what}: {" ".join(cmd)}\n{tail}', reason=what)
     wall, cpu, rss = parse_launch_report(usage, sys.platform == 'darwin')
-    return Sample(wall, cpu, rss, result)
+    if context:
+        return Sample(context['seeded_nanos'] / 1e9, cpu, rss, result,
+                      context['seeded_ns_per_op'], context['boundary_ops'])
+    fields = dict(tok.split('=', 1) for tok in result.split()[1:] if '=' in tok)
+    ops = int(fields['ops']) if 'ops' in fields else None
+    hot = None
+    slope_result = None
+    if ops and hot_probe:
+        doubled = measure(leg, workload, n * 2, scratch, launcher, timeout, hot_probe=False)
+        hot = (doubled.wall_s - wall) * 1e9 / ops
+        slope_result = doubled.result
+    return Sample(wall, cpu, rss, result, hot, ops, slope_result)
 
 
 # ------------------------------------------------------------------- run
@@ -596,6 +685,10 @@ def probe_op_count(leg, workload, n, scratch, opts, check):
     Keeping recording out of the timed leg measures seeded execution. The
     counting run must complete and agree with the same result-line oracle.
     """
+    if workload.testbed == 'context':
+        sample = measure(leg, workload, n, scratch, opts.launcher, opts.timeout)
+        check(leg, sample)
+        return sample.ops
     with tempfile.TemporaryDirectory(prefix='ops-', dir=scratch) as directory:
         trace = Path(directory) / 'ops.trace'
         command = leg.command(workload, n, directory)
@@ -606,7 +699,15 @@ def probe_op_count(leg, workload, n, scratch, opts, check):
         result = parse_result(run.stdout, workload.result, workload.drop)
         if run.returncode or result is None:
             raise BenchError(f'{workload.name}: operation-count run failed')
-        check(leg, Sample(0, 0, 0, result))
+        if workload.hot_path:
+            # Counting is a separate recorded N run; compare both seeded inputs
+            # through their regular cross-leg oracle, and this N result alone.
+            seeded = measure(leg, workload, n, scratch, opts.launcher, opts.timeout)
+            check(leg, seeded)
+            if result != seeded.result:
+                raise BenchError(f'{workload.name}: counting run result differs')
+        else:
+            check(leg, Sample(0, 0, 0, result))
         stats = subprocess.run([str(leg.cargo_patina), 'patina', 'trace', 'stats',
                                 str(trace), '--format', 'json'], capture_output=True,
                                text=True, timeout=opts.timeout)
@@ -622,14 +723,14 @@ def workload_identity(opts, selected):
     return rows, digest
 
 
-
 def gate_identity(opts, selected, current, host):
     rows, digest = workload_identity(opts, selected)
     return {'candidate': {'rev': opts.commit,
                           'binary_sha256': hashlib.sha256(current.read_bytes()).hexdigest()},
             'base': opts.baseline_info, 'toolchain': output(['rustc', '-vV']),
             'host': host, 'pin': opts.pin, 'seed': opts.seed,
-            'workloads': rows, 'workload_set_sha256': digest}
+            'workloads': rows, 'workload_set_sha256': digest,
+            'context_binary_sha256': getattr(opts, 'context_hashes', {})}
 
 
 def base_record(workload: Workload, opts, host: dict) -> dict:
@@ -656,13 +757,14 @@ def run_workload(workload: Workload, legs: List[Leg], opts, host: dict, order_rn
     active = [leg for leg in legs if not (leg.cargo_patina is None and workload.native_unsupported)]
     if len(active) < len(legs):
         record['native_unsupported'] = workload.native_unsupported
-    reference: Optional[Tuple[str, str]] = None
+    reference: Optional[Tuple[str, str, Optional[str]]] = None
 
     def check(leg: Leg, sample: Sample) -> None:
         nonlocal reference
         if reference is None:
-            reference = (leg.name, sample.result)
-        elif sample.result != reference[1]:
+            reference = (leg.name, sample.result, sample.slope_result)
+        elif (sample.result != reference[1] or (sample.slope_result is not None
+                                               and sample.slope_result != reference[2])):
             raise BenchError(f'RESULT MISMATCH in {workload.name}:\n  {reference[0]}: '
                              f'{reference[1]}\n  {leg.name}: {sample.result}',
                              reason=f'result mismatch: {reference[0]} printed '
@@ -709,7 +811,7 @@ def run_workload(workload: Workload, legs: List[Leg], opts, host: dict, order_rn
         record['op_counts'] = {leg.name: probe_op_count(leg, workload, n, scratch, opts, check)
                                for leg in active}
         record['hot_path'] = workload.hot_path
-        record['op_count_source'] = 'trace.events'
+        record['op_count_source'] = 'context.steps' if workload.testbed == 'context' else 'trace.events'
     else:
         order = [leg for leg in active for _ in range(opts.runs)]
         order_rng.shuffle(order)
@@ -723,6 +825,8 @@ def run_workload(workload: Workload, legs: List[Leg], opts, host: dict, order_rn
     for name, runs in samples.items():
         series = {'wall_s': [s.wall_s for s in runs], 'cpu_s': [s.cpu_s for s in runs],
                   'rss_kib': [s.rss_kib for s in runs]}
+        if runs and runs[0].hot_ns_per_op is not None:
+            series['hot_ns_per_op'] = [s.hot_ns_per_op for s in runs]
         record['legs'][name] = dict(series, stats={k: summarize(v) for k, v in series.items()})
     if len(active) == 2:
         base, subject = (leg.name for leg in active)
@@ -914,9 +1018,12 @@ def main(argv: Sequence[str]) -> int:
         current = build_cargo_patina(ROOT, base, base / 'logs')
         opts.baseline_info = None
         if opts.baseline:
-            binary, opts.baseline_info, home = build_baseline(opts.baseline, base)
+            binary, opts.baseline_info, home = build_baseline(opts.baseline, base, any(w.testbed == 'context' for w in selected))
             opts.baseline_info['binary_sha256'] = hashlib.sha256(binary.read_bytes()).hexdigest()
-            first = Leg('baseline', binary, home, opts.seed)
+            context_binary = ((Path(opts.baseline).resolve().with_name('patina-dst-bench')
+                               if Path(opts.baseline).is_file() else home / 'patina-dst-bench')
+                              if any(w.testbed == 'context' for w in selected) else None)
+            first = Leg('baseline', binary, home, opts.seed, context_binary)
         else:
             first = Leg('native', None, base / 'native')
         legs = [first, Leg('patina', current, base / 'patina', opts.seed)]
@@ -927,6 +1034,9 @@ def main(argv: Sequence[str]) -> int:
             for testbed in testbeds:
                 print(f'==> building {testbed} [{leg.name}]', flush=True)
                 leg.build(testbed)
+        opts.context_hashes = {leg.name: hashlib.sha256(leg.binary('context').read_bytes()).hexdigest()
+                               for leg in legs if any(w.testbed == 'context' for w in selected)
+                               and leg.binary('context').is_file()}
         order_rng = random.Random(opts.order_seed)
         for workload in selected:
             print(f'==> {workload.name}', flush=True)

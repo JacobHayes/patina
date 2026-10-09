@@ -33,17 +33,29 @@ def paired_ratio(blocks, metric='wall_s', rounds=4000):
     pairs = []
     for block in blocks:
         a1, b1, b2, a2 = [sample[metric] for sample in block]
-        if not all(math.isfinite(v) and v > 0 for v in (a1, b1, b2, a2)):
+        if not all(math.isfinite(v) and (metric == 'hot_ns_per_op' or v > 0)
+                   for v in (a1, b1, b2, a2)):
             return None
         pairs.append(((a1, a2), (b1, b2)))
     def estimate(draw):
         a = [v for pair in draw for v in pair[0]]
         b = [v for pair in draw for v in pair[1]]
-        return statistics.median(b) / statistics.median(a)
+        am, bm = statistics.median(a), statistics.median(b)
+        # A differenced timing may be negative. Retain it in every paired draw;
+        # uncertain/nonpositive medians have unbounded ratio uncertainty, rather
+        # than making one noisy observation poison all subsequent extensions.
+        if bm <= 0:
+            return -math.inf
+        if am <= 0:
+            return math.inf
+        return bm / am
     rng = random.Random(0)
     boot = sorted(estimate(rng.choices(pairs, k=len(pairs))) for _ in range(rounds))
-    return {'median': estimate(pairs),
-            'ci95': [boot[int(rounds * .025)], boot[int(rounds * .975) - 1]]}
+    point = estimate(pairs)
+    interval = [boot[int(rounds * .025)], boot[int(rounds * .975) - 1]]
+    if not all(math.isfinite(v) and v > 0 for v in [point, *interval]):
+        return None
+    return {'median': point, 'ci95': interval}
 
 
 def noise_ok(noise, threshold):

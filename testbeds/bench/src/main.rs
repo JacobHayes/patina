@@ -25,6 +25,8 @@
 //! - `pipe`: two threads bounce a counter through a pair of pipes.
 //! - `tcp`: a loopback TCP echo of a fixed-size message per iteration.
 
+mod doors;
+
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -36,7 +38,8 @@ use std::thread;
 
 use patina_dst::VerdictKind;
 
-const USAGE: &str = "usage: bench <compute|fileio|condvar|pipe|tcp> --iters N [--dir PATH]
+const USAGE: &str = "usage: bench <compute|fileio|condvar|pipe|tcp|doors> --iters N [--dir PATH]
+  doors requires --class <sync|clock|mutex|pipe|pread>.
   --dir is required by fileio: the directory its files live under.";
 
 const GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -48,6 +51,10 @@ const TCP_MESSAGE_BYTES: usize = 64;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
     let options = match parse(&args) {
         Ok(options) => options,
         Err(message) => {
@@ -55,7 +62,17 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let mut ops = None;
     let outcome = match options.workload.as_str() {
+        "doors" => doors::run(
+            options.class.as_deref().unwrap_or(""),
+            options.iters,
+            options.dir.as_deref(),
+        )
+        .map(|(digest, count)| {
+            ops = Some(count);
+            digest
+        }),
         "compute" => compute(options.iters),
         "fileio" => fileio(options.iters, options.dir.as_deref()),
         "condvar" => condvar(options.iters),
@@ -68,10 +85,16 @@ fn main() -> ExitCode {
     };
     match outcome {
         Ok(digest) => {
-            let detail = format!(
+            let mut detail = format!(
                 "workload={} iters={} digest={digest:016x}",
                 options.workload, options.iters
             );
+            if let Some(ops) = ops {
+                detail.push_str(&format!(
+                    " class={} ops={ops}",
+                    options.class.as_deref().unwrap()
+                ));
+            }
             println!("BENCH_RESULT {detail}");
             patina_dst::verdict(VerdictKind::Pass, "bench-outcome", &detail);
             ExitCode::SUCCESS
@@ -88,6 +111,7 @@ struct Options {
     workload: String,
     iters: u64,
     dir: Option<PathBuf>,
+    class: Option<String>,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -95,6 +119,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let workload = args.next().ok_or("missing workload")?.clone();
     let mut iters = None;
     let mut dir = None;
+    let mut class = None;
     while let Some(flag) = args.next() {
         let value = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
@@ -105,6 +130,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 }
                 iters = Some(n);
             }
+            "--class" => class = Some(value.clone()),
             "--dir" => dir = Some(PathBuf::from(value)),
             other => return Err(format!("unknown option {other}")),
         }
@@ -113,6 +139,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         workload,
         iters: iters.ok_or("--iters is required")?,
         dir,
+        class,
     })
 }
 

@@ -374,6 +374,7 @@ version = "0.1.0"
 dependencies = [
  "patina-dst-abi",
  "patina-dst-runtime",
+ "serde_json",
 ]
 
 [[package]]

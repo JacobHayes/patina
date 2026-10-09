@@ -11,3 +11,4 @@ repository.workspace = true
 [dependencies]
 patina-dst-abi.workspace = true
 patina-dst-runtime.workspace = true
+serde_json.workspace = true
