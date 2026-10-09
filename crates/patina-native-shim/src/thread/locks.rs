@@ -108,7 +108,7 @@ struct Waiter {
 #[derive(Default)]
 pub(crate) struct Locks {
     files: BTreeMap<LockIdentity, Vec<Lock>>,
-    waiters: Vec<Waiter>,
+    waiters: WaitQueue<Vec<Waiter>>,
 }
 
 impl Locks {
@@ -216,7 +216,7 @@ impl Locks {
                 woken = self.detach(task);
             } else {
                 // A new lock takes over its queue (`locks_move_blocks`).
-                for waiter in &mut self.waiters {
+                for waiter in self.waiters.iter_mut() {
                     if waiter.behind.is_some_and(|(behind, _)| behind == task) {
                         waiter.behind = None;
                         waiter.blocker = granted;
@@ -227,7 +227,7 @@ impl Locks {
         // The lock the request merged into was extended in place: its
         // waiters stay parked on it.
         if let (Some(survivor), Some(granted)) = (survivor, granted) {
-            for waiter in &mut self.waiters {
+            for waiter in self.waiters.iter_mut() {
                 if waiter.file == file && waiter.behind.is_none() && waiter.blocker == survivor {
                     waiter.blocker = granted;
                 }
@@ -258,7 +258,14 @@ impl Locks {
     /// Park `task`'s `request` on `blocker`, behind the first earlier waiter
     /// there that it conflicts with, and so on down that waiter's queue
     /// (`__locks_insert_block`).
-    fn enqueue(&mut self, task: TaskId, file: LockIdentity, request: Lock, blocker: Lock) {
+    fn enqueue(
+        &mut self,
+        task: TaskId,
+        file: LockIdentity,
+        request: Lock,
+        blocker: Lock,
+        wait: &mut Wait,
+    ) {
         let mut behind = None;
         while let Some(earlier) = self.waiters.iter().find(|waiter| {
             waiter.file == file
@@ -270,13 +277,14 @@ impl Locks {
         }) {
             behind = Some((earlier.task, earlier.request));
         }
-        self.waiters.push(Waiter {
+        let waiter = Waiter {
             task,
             file,
             request,
             blocker,
             behind,
-        });
+        };
+        wait.enqueue(&mut self.waiters, waiter, WaiterLoc::RecordLock);
     }
 
     /// Free the waiters queued directly behind `task`, to retry
@@ -414,12 +422,9 @@ pub(crate) fn set(file: LockIdentity, request: Lock, wait: bool) -> Result<(), c
         if state.locks.deadlock(request.owner, blocker) {
             return Err(crate::EDEADLK);
         }
-        state.locks.enqueue(me, file, request, blocker);
-        let step = state.block(
-            me,
-            "record-lock",
-            Wait::new(BlockClass::Io, vec![WaiterLoc::RecordLock]),
-        );
+        let mut wait = Wait::new(BlockClass::Io, vec![]);
+        state.locks.enqueue(me, file, request, blocker, &mut wait);
+        let step = state.block(me, "record-lock", wait);
         let interrupted = match step {
             Ok(Step::Switch(picked)) => {
                 switch_and_park(state, picked, me);
@@ -579,7 +584,13 @@ mod tests {
         locks.apply(FILE, lock(a, Type::Write, 0, 9), None);
         let request = lock(P, Type::Write, 0, 9);
         let blocker = locks.blocker(FILE, &request).unwrap();
-        locks.enqueue(TaskId(5), FILE, request, blocker);
+        locks.enqueue(
+            TaskId(5),
+            FILE,
+            request,
+            blocker,
+            &mut Wait::new(BlockClass::Io, vec![]),
+        );
         // A lock elsewhere leaves the blocker as it was, and extending it in
         // place (the owner's touching lock of its type) keeps its waiters.
         assert!(
@@ -607,9 +618,27 @@ mod tests {
         let blocker = lock(a, Type::Write, 0, 9);
         // c conflicts with b, which came first, and queues behind it; d
         // conflicts only with a.
-        locks.enqueue(TaskId(1), FILE, lock(b, Type::Write, 0, 4), blocker);
-        locks.enqueue(TaskId(2), FILE, lock(c, Type::Write, 0, 4), blocker);
-        locks.enqueue(TaskId(3), FILE, lock(d, Type::Read, 5, 9), blocker);
+        locks.enqueue(
+            TaskId(1),
+            FILE,
+            lock(b, Type::Write, 0, 4),
+            blocker,
+            &mut Wait::new(BlockClass::Io, vec![]),
+        );
+        locks.enqueue(
+            TaskId(2),
+            FILE,
+            lock(c, Type::Write, 0, 4),
+            blocker,
+            &mut Wait::new(BlockClass::Io, vec![]),
+        );
+        locks.enqueue(
+            TaskId(3),
+            FILE,
+            lock(d, Type::Read, 5, 9),
+            blocker,
+            &mut Wait::new(BlockClass::Io, vec![]),
+        );
         assert_eq!(
             locks.apply(FILE, lock(a, Type::Unlock, 0, 9), None),
             [TaskId(1), TaskId(3)]
@@ -638,7 +667,13 @@ mod tests {
         let ofd_blocker = locks.blocker(FILE, &ofd_request).unwrap();
         // An OFD request is never judged a deadlock.
         assert!(!locks.deadlock(d, ofd_blocker));
-        locks.enqueue(TaskId(2), FILE, ofd_request, ofd_blocker);
+        locks.enqueue(
+            TaskId(2),
+            FILE,
+            ofd_request,
+            ofd_blocker,
+            &mut Wait::new(BlockClass::Io, vec![]),
+        );
         // The process now waits on D's lock: D waits on the process.
         let blocker = locks.blocker(FILE, &lock(P, Type::Write, 20, 29)).unwrap();
         assert!(locks.deadlock(P, blocker));
@@ -649,12 +684,19 @@ mod tests {
         let x = ofd(2);
         locks.apply(FILE, lock(x, Type::Write, 40, 49), None);
         let on_x = lock(d, Type::Write, 40, 49);
-        locks.enqueue(TaskId(2), FILE, on_x, locks.blocker(FILE, &on_x).unwrap());
+        locks.enqueue(
+            TaskId(2),
+            FILE,
+            on_x,
+            locks.blocker(FILE, &on_x).unwrap(),
+            &mut Wait::new(BlockClass::Io, vec![]),
+        );
         locks.enqueue(
             TaskId(3),
             FILE,
             lock(x, Type::Write, 0, 9),
             lock(P, Type::Write, 0, 9),
+            &mut Wait::new(BlockClass::Io, vec![]),
         );
         assert!(!locks.deadlock(P, blocker));
     }

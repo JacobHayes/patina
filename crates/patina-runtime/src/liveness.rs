@@ -647,8 +647,8 @@ impl Context {
     /// It rides the same mechanism as the deadlock rescue: a recorded
     /// `SleepUntil` on the monotonic clock, replayed from the trace like any
     /// other. The advance is clamped so it never steps over a pending timer
-    /// deadline — the deadlock rescue owns that boundary, and jumping past it
-    /// here would deliver a sleeping task's wake later than its deadline.
+    /// deadline. Reaching it expires the due timed parks (the advance runs the
+    /// single expiry path), so their tasks are runnable at the next decision.
     pub(super) fn spin_rescue(&mut self) -> Result<(), RuntimeError> {
         if self.spin.clock_ops < SPIN_RESCUE_CLOCK_OPS {
             return Ok(());

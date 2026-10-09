@@ -448,11 +448,13 @@ impl Context {
 
     /// Park `task` with a virtual-clock deadline. The scheduler parks it exactly
     /// like [`Context::task_park`]; the runtime additionally registers a timer
-    /// so the deadlock-rescue in [`Context::scheduler_next`] wakes it when
-    /// virtual time reaches the deadline. `deadline_nanos` is interpreted in the
-    /// `clock` domain and converted to monotonic at registration through
-    /// recorded clock reads, so the registry key is stable across record and
-    /// replay.
+    /// that expires when virtual time reaches the deadline (see
+    /// [`Context::expire_due_timers`]). A deadline already reached expires at
+    /// registration, so the task is woken before this returns: an absolute wait
+    /// whose time has passed never stays parked beside a runnable peer.
+    /// `deadline_nanos` is interpreted in the `clock` domain and converted to
+    /// monotonic at registration through recorded clock reads, so the registry
+    /// key is stable across record and replay.
     pub fn task_park_timed(
         &mut self,
         task: TaskId,
@@ -462,6 +464,11 @@ impl Context {
     ) -> Result<(), RuntimeError> {
         if self.scheduler.is_none() {
             return Err(EffectError::missing_driver("scheduler").into());
+        }
+        // Registration expires a reached deadline, which reads the clock: a
+        // missing clock fails here, before the task is parked.
+        if self.clock.is_none() {
+            return Err(EffectError::missing_driver("clock").into());
         }
         // Reserve the registration sequence up front so an exhausted counter
         // fails closed before the task is parked with no way to wake it.
@@ -473,6 +480,10 @@ impl Context {
             )
         })?;
         let monotonic_deadline = self.monotonic_deadline(clock, deadline_nanos)?;
+        // Every read that can fail precedes the park: the registration-time
+        // expiry below judges against this reading, so a failing clock leaves
+        // the task as it was, never parked with its timer inserted.
+        let now = self.current_monotonic()?;
         let operation = Operation::TaskParkTimed {
             task,
             reason: reason.into(),
@@ -498,7 +509,7 @@ impl Context {
             self.timers.remove(&previous);
         }
         self.timers.insert(key, task);
-        Ok(())
+        self.expire_due_at(now)
     }
 
     pub fn task_wake(&mut self, task: TaskId) -> Result<(), RuntimeError> {
@@ -574,11 +585,62 @@ impl Context {
                 .all(|task| self.parked_tasks.contains(task))
     }
 
-    /// Drain the tasks woken by the most recent deadlock-rescue so an embedder
-    /// (the native shim) can resolve their timed waits as timeouts. Deterministic
-    /// and unrecorded: the rescue populates this identically on record/replay.
-    pub fn take_rescued_timeouts(&mut self) -> Vec<TaskId> {
-        std::mem::take(&mut self.rescued)
+    /// Drain the tasks whose timed parks expired since the last drain, in
+    /// expiry order, so an embedder can settle their waits as timeouts
+    /// (unlink them from its own wait queues) before anything else can wake
+    /// them. Deterministic and unrecorded: expiry populates it identically on
+    /// record and replay.
+    pub fn take_expired_timeouts(&mut self) -> Vec<TaskId> {
+        std::mem::take(&mut self.expired)
+    }
+
+    /// Whether expired timed parks await [`Context::take_expired_timeouts`].
+    pub fn has_expired_timeouts(&self) -> bool {
+        !self.expired.is_empty()
+    }
+
+    /// Run `body` as part of an embedder's locked section: a stretch in which
+    /// the embedder holds its own wait state (the native shim's thread
+    /// runtime) and so cannot settle expiries until it lets go. Inside it a
+    /// clock read observes virtual time but never advances it: the
+    /// advance-on-spin rescue waits for the first read outside (the streak
+    /// keeps counting). The only expiries a section can then produce are the
+    /// scheduling ones (a timed park, a pick, an idle advance), which the
+    /// embedder settles before it goes on. Sections nest.
+    pub fn in_embedder_section<T>(&mut self, body: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = std::mem::replace(&mut self.embedder_section, true);
+        let result = body(self);
+        self.embedder_section = outer;
+        result
+    }
+
+    /// The single expiry authority: wake every timed park whose deadline
+    /// virtual time has reached, in `(deadline, registration)` order, and queue
+    /// it for the embedder's settlement. Called after every clock advance (the
+    /// only one is [`Context::sleep_until`]) and at every timed-park
+    /// registration, so the registry never holds a reached deadline.
+    pub(super) fn expire_due_timers(&mut self) -> Result<(), RuntimeError> {
+        if self.timers.is_empty() {
+            return Ok(());
+        }
+        let now = self.current_monotonic()?;
+        self.expire_due_at(now)
+    }
+
+    /// [`Context::expire_due_timers`] against a monotonic reading `now`
+    /// already taken.
+    fn expire_due_at(&mut self, now: u64) -> Result<(), RuntimeError> {
+        let due: Vec<TaskId> = self
+            .timers
+            .iter()
+            .take_while(|((deadline, _), _)| *deadline <= now)
+            .map(|(_, task)| *task)
+            .collect();
+        for task in due {
+            self.task_wake(task)?;
+            self.expired.push(task);
+        }
+        Ok(())
     }
 
     pub fn scheduler_next(&mut self) -> Result<Option<TaskId>, RuntimeError> {
@@ -600,17 +662,6 @@ impl Context {
                 .next()
                 .expect("timer registry is non-empty");
             self.sleep_until(ClockKind::Monotonic, earliest_deadline)?;
-            let now = self.current_monotonic()?;
-            let due: Vec<TaskId> = self
-                .timers
-                .iter()
-                .take_while(|((deadline, _), _)| *deadline <= now)
-                .map(|(_, task)| *task)
-                .collect();
-            for task in due {
-                self.task_wake(task)?;
-                self.rescued.push(task);
-            }
         }
         let operation = Operation::SchedulerNext;
         let expected = self.replay_expected(&operation)?;

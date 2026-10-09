@@ -291,6 +291,28 @@ pub(super) enum WaiterLoc {
     /// Linux: parked on an inotify instance's readers.
     #[cfg(target_os = "linux")]
     InotifyRecv(u64),
+    /// macOS: parked on a kqueue's `EVFILT_USER` waiter list.
+    #[cfg(all(target_os = "macos", patina_posix_exports))]
+    KqueueUser(u64),
+    /// macOS: parked on a libdispatch semaphore, which the waiter decremented
+    /// on entry. Unlinking it (only an expiry does) restores that count.
+    #[cfg(target_os = "macos")]
+    Dispatch(usize),
+}
+
+impl WaiterLoc {
+    /// Whether a wait parked here answers its expiry as a timeout
+    /// (`ETIMEDOUT`): a condition, futex, IPC or dispatch-semaphore wait.
+    pub(super) fn times_out(&self) -> bool {
+        match self {
+            WaiterLoc::Cond(..) | WaiterLoc::Futex(..) => true,
+            #[cfg(target_os = "linux")]
+            WaiterLoc::Ipc(..) => true,
+            #[cfg(target_os = "macos")]
+            WaiterLoc::Dispatch(..) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Register `me` on the waiter queue of every watched `(direction, fd)`
@@ -309,8 +331,8 @@ pub(super) fn register_readiness_waiters(
     state: &mut ThreadRuntime,
     me: TaskId,
     watched: &[(ReadyDir, c_int)],
-) -> Vec<WaiterLoc> {
-    let mut locs = Vec::new();
+) -> Wait {
+    let mut wait = Wait::new(BlockClass::Readiness, Vec::new());
     for &(dir, guest_fd) in watched {
         let Some(resolved) = super::fd_table().lock().resolve(guest_fd) else {
             continue;
@@ -323,29 +345,30 @@ pub(super) fn register_readiness_waiters(
             if dir == ReadyDir::Read
                 && let Some(fd) = state.signals.signalfds.get_mut(&resolved.handle)
             {
-                fd.waiters.push_back(me);
-                locs.push(WaiterLoc::SignalFdRecv(resolved.handle));
+                wait.enqueue(
+                    &mut fd.waiters,
+                    me,
+                    WaiterLoc::SignalFdRecv(resolved.handle),
+                );
             }
             continue;
         }
         #[cfg(target_os = "linux")]
         if resolved.kind == FdKind::MessageQueue {
-            if let Some(loc) = ipc::mq_watch(state, resolved.handle, me, dir == ReadyDir::Read) {
-                locs.push(loc);
-            }
+            ipc::mq_watch(state, resolved.handle, me, dir == ReadyDir::Read, &mut wait);
             continue;
         }
         #[cfg(target_os = "linux")]
         if resolved.kind == FdKind::TimerFd {
             if dir == ReadyDir::Read {
-                locs.extend(timers::timerfd_watch(state, resolved.handle, me));
+                timers::timerfd_watch(state, resolved.handle, me, &mut wait);
             }
             continue;
         }
         #[cfg(target_os = "linux")]
         if resolved.kind == FdKind::Inotify {
             if dir == ReadyDir::Read {
-                locs.extend(inotify::watch(state, resolved.handle, me));
+                inotify::watch(state, resolved.handle, me, &mut wait);
             }
             continue;
         }
@@ -353,7 +376,7 @@ pub(super) fn register_readiness_waiters(
         // One queue per side: a pair wakes its writers too (an
         // edge-triggered interest in output waits for that).
         if let Some(side) = pty::Side::of(resolved.kind) {
-            locs.extend(pty::watch(state, side, resolved.handle as u32, me));
+            pty::watch(state, side, resolved.handle as u32, me, &mut wait);
             continue;
         }
         #[cfg(target_os = "linux")]
@@ -361,8 +384,7 @@ pub(super) fn register_readiness_waiters(
             if dir == ReadyDir::Read
                 && let Some(efd) = state.net.eventfds.get_mut(&fd)
             {
-                efd.read_waiters.push_back(me);
-                locs.push(WaiterLoc::EventFdRecv(fd));
+                wait.enqueue(&mut efd.read_waiters, me, WaiterLoc::EventFdRecv(fd));
             }
             continue;
         }
@@ -379,12 +401,10 @@ pub(super) fn register_readiness_waiters(
             {
                 match dir {
                     ReadyDir::Read => {
-                        ch.recv_waiters.push_back(me);
-                        locs.push(WaiterLoc::PipeRecv(channel));
+                        wait.enqueue(&mut ch.recv_waiters, me, WaiterLoc::PipeRecv(channel));
                     }
                     ReadyDir::Write => {
-                        ch.send_waiters.push_back(me);
-                        locs.push(WaiterLoc::PipeSend(channel));
+                        wait.enqueue(&mut ch.send_waiters, me, WaiterLoc::PipeSend(channel));
                     }
                 }
             }
@@ -394,24 +414,22 @@ pub(super) fn register_readiness_waiters(
             };
             match dir {
                 ReadyDir::Read => {
-                    socket.recv_waiters.push_back(me);
-                    locs.push(WaiterLoc::SockRecv(fd));
+                    wait.enqueue(&mut socket.recv_waiters, me, WaiterLoc::SockRecv(fd));
                 }
                 ReadyDir::Write => {
-                    socket.send_waiters.push_back(me);
-                    locs.push(WaiterLoc::SockSend(fd));
+                    wait.enqueue(&mut socket.send_waiters, me, WaiterLoc::SockSend(fd));
                 }
             }
         }
     }
-    locs
+    wait
 }
 
 /// Unlink `me` from every queue [`register_readiness_waiters`] enqueued it on,
 /// so a later wake of that queue never targets an already-resumed task.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(super) fn unregister_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[WaiterLoc]) {
-    let remove = |queue: &mut VecDeque<TaskId>| {
+    let remove = |queue: &mut WaitQueue<VecDeque<TaskId>>| {
         if let Some(index) = queue.iter().position(|task| *task == me) {
             queue.remove(index);
         }
@@ -462,9 +480,9 @@ pub(super) fn unregister_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[
             }
             WaiterLoc::Join(target) => {
                 if let Some(entry) = state.table.threads.get_mut(&target)
-                    && entry.joiner == Some(me)
+                    && *entry.joiner == Some(me)
                 {
-                    entry.joiner = None;
+                    entry.joiner.take();
                 }
             }
             WaiterLoc::PipeRecv(channel) => {
@@ -508,6 +526,18 @@ pub(super) fn unregister_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[
             WaiterLoc::RecordLock => locks::unwait(state, me),
             #[cfg(target_os = "linux")]
             WaiterLoc::InotifyRecv(handle) => inotify::unwatch(state, handle, me),
+            #[cfg(all(target_os = "macos", patina_posix_exports))]
+            WaiterLoc::KqueueUser(id) => kqueue::unwait_user(state, id, me),
+            #[cfg(target_os = "macos")]
+            WaiterLoc::Dispatch(key) => {
+                if let Some(sem) = state.dispatch.get_mut(&key)
+                    && let Some(index) = sem.waiters.iter().position(|task| *task == me)
+                {
+                    sem.waiters.remove(index);
+                    // Keep a negative count equal to the live waiter total.
+                    sem.count += 1;
+                }
+            }
         }
     }
 }

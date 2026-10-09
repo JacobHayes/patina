@@ -76,7 +76,11 @@ pub use replay::Replayer;
 ///   error; `fs_allocate`'s `mode` (`reserve`, `punch_hole`, `zero_range`) in
 ///   place of its `zero` flag.
 /// - 15: required boot origin (machine uptime at guest start).
-pub const TRACE_FORMAT_VERSION: u32 = 15;
+/// - 16: timed parks expire at registration and at every clock advance, not
+///   only when every task has parked: a past or reached deadline records its
+///   `task_wake` where earlier formats recorded none. No field changed; the
+///   events a run records did.
+pub const TRACE_FORMAT_VERSION: u32 = 16;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 

@@ -476,19 +476,14 @@ pub unsafe extern "C" fn patina_cond_timedwait(
         Err(errno) => return errno,
     }
     // Release the mutex and enqueue on the condition, exactly as cond_wait.
+    let mut wait = Wait::new(BlockClass::Sync, vec![]);
     if let Err(error) = state
         .table
-        .cond_wait(&mut scheduler, me, cond_key, mutex_key)
+        .cond_wait(&mut scheduler, me, cond_key, mutex_key, &mut wait)
     {
         return c_int::from(error.into_posix());
     }
-    match state.block_timed(
-        me,
-        "cond-timedwait",
-        Wait::new(BlockClass::Sync, vec![WaiterLoc::Cond(cond_key, mutex_key)]),
-        clock,
-        deadline,
-    ) {
+    match state.block_timed(me, "cond-timedwait", wait, clock, deadline) {
         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
         Ok(Step::Continue) => drop(state),
         Err(error) => return c_int::from(error.into_posix()),

@@ -499,7 +499,13 @@ pub(crate) fn with_context_raw<T>(
     BOUNDARY_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut guard = slot().lock();
     let context = guard.as_mut().ok_or(ENOSYS)?;
-    match invoke(context) {
+    let result = if thread::in_state_section() {
+        context.in_embedder_section(invoke)
+    } else {
+        invoke(context)
+    };
+    thread::note_expiries(context);
+    match result {
         Ok(value) => Ok(value),
         Err(error @ RuntimeError::InjectedFsCrash(_)) => terminate_for_injected_fs_crash(error),
         Err(error) => Err(runtime_errno(&error)),
@@ -610,7 +616,13 @@ pub(crate) fn with_context_msg<T>(
     let context = guard
         .as_mut()
         .ok_or_else(|| "Patina context is not installed".to_string())?;
-    invoke(context).map_err(|error| match &error {
+    let result = if thread::in_state_section() {
+        context.in_embedder_section(invoke)
+    } else {
+        invoke(context)
+    };
+    thread::note_expiries(context);
+    result.map_err(|error| match &error {
         // A classified yield divergence gains the one fact only the shim knows:
         // the instrumented guest site of the in-flight guard hit (if any).
         RuntimeError::ScheduleDivergence { .. } => {

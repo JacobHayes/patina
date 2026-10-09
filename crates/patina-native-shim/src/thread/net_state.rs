@@ -94,7 +94,7 @@ pub(crate) fn wake_all(waiters: Vec<TaskId>) {
     let mut scheduler = RealScheduler;
     for task in waiters {
         #[cfg(target_os = "linux")]
-        lock_state().remove_signal_wait(task);
+        lock_state().remove_wait(task);
         if let Err(message) = scheduler.wake(task) {
             fatal(&message);
         }

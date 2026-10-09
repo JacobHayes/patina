@@ -221,7 +221,7 @@ pub(in crate::thread) fn spawn(body: impl FnOnce() + Send + 'static) -> *mut c_v
     );
     thread
 }
-fn task_of(thread: *mut c_void) -> TaskId {
+pub(in crate::thread) fn task_of(thread: *mut c_void) -> TaskId {
     lock_state().handles[&(thread as usize)]
 }
 pub(in crate::thread) fn join(thread: *mut c_void) {
@@ -285,6 +285,28 @@ fn wakes_after(ops: &[Operation], index: usize) -> Vec<TaskId> {
         .collect()
 }
 
+/// Spin on the recorded clock until virtual time reaches `deadline`: the
+/// advance-on-spin rescue stops exactly there and expires the timed parks due.
+pub(in crate::thread) fn spin_to(deadline: u64) {
+    let mut now = 0;
+    while now < deadline {
+        assert_eq!(
+            unsafe { crate::patina_clock_now(CLOCK_MONOTONIC, &mut now) },
+            0
+        );
+    }
+    assert_eq!(now, deadline);
+}
+
+/// Non-vacuity for the settlement regressions: the runtime has expired
+/// `task`'s timed park, and no thread-runtime acquisition has settled its
+/// native wait registration yet.
+pub(in crate::thread) fn expired_unsettled(task: TaskId) -> bool {
+    let registered = unsettled_state().signals.blocked.contains_key(&task);
+    let expired = with_context_raw(|context| Ok(context.has_expired_timeouts())).unwrap();
+    registered && expired
+}
+
 pub(in crate::thread) fn after_others_park(task: TaskId) -> BlockClass {
     delay();
     parked_class(task).expect("target must actually be parked before generation")
@@ -313,7 +335,7 @@ pub(in crate::thread) fn on_any_waiter_list(task: TaskId) -> bool {
             .table
             .threads
             .values()
-            .any(|entry| entry.joiner == Some(task))
+            .any(|entry| *entry.joiner == Some(task))
         || state.net.sockets.table.values().any(|socket| {
             socket.recv_waiters.contains(&task) || socket.send_waiters.contains(&task)
         })
@@ -734,7 +756,7 @@ fn timed_futex_wait_is_eintr_under_a_handler() {
                 lock_state()
                     .futexes
                     .get(&word)
-                    .is_none_or(VecDeque::is_empty)
+                    .is_none_or(|queue| queue.is_empty())
             );
             join(helper);
         }
@@ -841,6 +863,139 @@ fn interrupted_waiter_is_unlinked_before_wake() {
                 assert_eq!(wakes_after(&ops, index), vec![me]);
             }
         }
+    });
+}
+
+#[test]
+fn pthread_kill_after_spin_rescue_preserves_the_timed_futex_timeout() {
+    // Class pairing: `lock_state` settles the runtime's timer expiries before
+    // signal generation can plan a wake from a registration they ended.
+    isolated(|| {
+        action(false);
+        let word = Box::into_raw(Box::new(0u32)) as usize;
+        let me = current_task();
+        let handle = crate::watchdog::host_thread_self();
+        let deadline =
+            with_context_raw(|context| context.monotonic_now_unrecorded()).unwrap() + 100;
+        let helper = spawn(move || {
+            assert_eq!(after_others_park(me), BlockClass::TimedFutex);
+            let mut now = 0;
+            loop {
+                assert_eq!(
+                    unsafe { crate::patina_clock_now(CLOCK_MONOTONIC, &mut now) },
+                    0
+                );
+                if now >= deadline {
+                    break;
+                }
+            }
+            assert_eq!(now, deadline);
+            assert!(expired_unsettled(me));
+            assert_eq!(patina_pthread_kill(handle, SIGUSR1), 0);
+            assert!(!lock_state().signals.interrupted.contains_key(&me));
+        });
+        assert_eq!(
+            patina_futex_wait_timed(word, 0, CLOCK_MONOTONIC, 0, 100),
+            -1
+        );
+        assert_eq!(crate::patina_errno(), ETIMEDOUT);
+        assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
+        join(helper);
+        let ops = operations();
+        let generated = ops
+            .iter()
+            .position(|op| matches!(op, Operation::SignalGenerated { target: SignalTarget::Task(task), .. } if *task == me))
+            .unwrap();
+        let rescue = ops[..generated]
+            .iter()
+            .rposition(|op| matches!(op, Operation::SleepUntil { deadline_nanos, .. } if *deadline_nanos == deadline))
+            .unwrap();
+        assert_eq!(
+            ops[rescue..generated]
+                .iter()
+                .filter(|op| matches!(op, Operation::TaskWake { task } if *task == me))
+                .count(),
+            1
+        );
+        assert!(wakes_after(&ops, generated).is_empty());
+        // SAFETY: the managed waiter has returned and its helper has joined.
+        unsafe { drop(Box::from_raw(word as *mut u32)) };
+    });
+}
+
+/// A timed futex waiter the spin rescue expired, then a wake path reached
+/// before any scheduling point: the settled queue no longer holds it.
+fn wake_after_spin_rescue(wake: fn(usize) -> c_int) {
+    let word = Box::into_raw(Box::new(0u32)) as usize;
+    let me = current_task();
+    let deadline = with_context_raw(|context| context.monotonic_now_unrecorded()).unwrap() + 100;
+    let helper = spawn(move || {
+        assert_eq!(after_others_park(me), BlockClass::TimedFutex);
+        spin_to(deadline);
+        assert!(expired_unsettled(me));
+        // Natively the deadline ended the wait first: nobody is left to wake.
+        assert_eq!(wake(word), 0);
+    });
+    assert_eq!(
+        patina_futex_wait_timed(word, 0, CLOCK_MONOTONIC, 0, 100),
+        -1
+    );
+    assert_eq!(crate::patina_errno(), ETIMEDOUT);
+    join(helper);
+    // SAFETY: the managed waiter has returned and its helper has joined.
+    unsafe { drop(Box::from_raw(word as *mut u32)) };
+}
+
+#[test]
+fn futex_wake_after_spin_rescue_finds_the_expired_waiter_gone() {
+    // Class pairing: `lock_state` settles timer expiries before any wake path
+    // reads a wait queue (see `pthread_kill_after_spin_rescue_...`).
+    isolated(|| wake_after_spin_rescue(|word| patina_futex_wake(word, 1)));
+}
+
+#[test]
+fn futex_requeue_after_spin_rescue_finds_the_expired_waiter_gone() {
+    isolated(|| {
+        wake_after_spin_rescue(|word| {
+            let other = word + 4;
+            crate::thread::futex2::multiplexed_requeue(word, other, false, (1, 1), None) as c_int
+        })
+    });
+}
+
+#[test]
+fn a_timed_futex_wait_already_past_its_deadline_times_out_beside_a_runnable_peer() {
+    // Class pairing: a timed park whose deadline has passed expires at
+    // registration, not when every task has parked (the runtime's
+    // `a_timed_park_whose_deadline_passed_expires_beside_a_runnable_peer`).
+    static DONE: AtomicUsize = AtomicUsize::new(0);
+    static GAVE_UP: AtomicUsize = AtomicUsize::new(0);
+    isolated(|| {
+        let word = Box::into_raw(Box::new(0u32)) as usize;
+        let peer = spawn(|| {
+            for _ in 0..1000 {
+                if DONE.load(Ordering::SeqCst) != 0 {
+                    return;
+                }
+                crate::patina_sched_yield();
+            }
+            GAVE_UP.store(1, Ordering::SeqCst);
+        });
+        let now = with_context_raw(|context| context.monotonic_now_unrecorded()).unwrap();
+        assert_eq!(
+            patina_futex_wait_timed(word, 0, CLOCK_MONOTONIC, 1, now),
+            -1
+        );
+        assert_eq!(crate::patina_errno(), ETIMEDOUT);
+        DONE.store(1, Ordering::SeqCst);
+        join(peer);
+        assert_eq!(
+            GAVE_UP.load(Ordering::SeqCst),
+            0,
+            "the expired waiter stayed parked while its peer ran"
+        );
+        // SAFETY: the waiter has returned and its peer has joined.
+        unsafe { drop(Box::from_raw(word as *mut u32)) };
     });
 }
 

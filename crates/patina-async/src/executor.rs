@@ -111,18 +111,10 @@ impl<'ctx> Executor<'ctx> {
         let mut main_output = None;
 
         loop {
+            self.settle_expired();
             self.drain_wake_queue()?;
             let selected = self.context.scheduler_next()?;
-            // The deadlock rescue inside `scheduler_next` woke every timer-due
-            // task (they are now Runnable in the scheduler and gone from the
-            // runtime's parked set). Reconcile the executor's own shadow state
-            // to match before the next drain/park decision, otherwise a rescued
-            // task left in `self.parked` or a net-waiter registry could be woken
-            // again — `task_wake` on an already-Runnable task fails closed.
-            for rescued in self.context.take_rescued_timeouts() {
-                self.parked.remove(&rescued);
-                self.purge_task_from_waiters(rescued);
-            }
+            self.settle_expired();
             let Some(task) = selected else {
                 break;
             };
@@ -247,7 +239,21 @@ impl<'ctx> Executor<'ctx> {
             self.context.task_park(task, reason)?;
         }
         self.parked.insert(task);
+        // A deadline already reached expires at registration.
+        self.settle_expired();
         Ok(())
+    }
+
+    /// Reconcile the executor's shadow state with the runtime's timer expiries
+    /// (every clock advance and timed park can expire timers, waking their
+    /// tasks): an expired task leaves `self.parked` and every net-waiter
+    /// registry before anything can wake it again, since `task_wake` on an
+    /// already-Runnable task fails closed.
+    fn settle_expired(&mut self) {
+        for expired in self.context.take_expired_timeouts() {
+            self.parked.remove(&expired);
+            self.purge_task_from_waiters(expired);
+        }
     }
 
     fn drain_wake_queue(&mut self) -> Result<(), RuntimeError> {

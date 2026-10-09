@@ -77,8 +77,12 @@ impl Context {
         // `SPIN_RESCUE_CLOCK_OPS` ops at frozen virtual time gets a recorded
         // token advance BEFORE this observation, so the value it is about to
         // read has moved. Ordered here, ahead of the `ClockNow`, so the recorded
-        // stream for a rescued read is `SleepUntil` then `ClockNow`.
-        self.spin_rescue()?;
+        // stream for a rescued read is `SleepUntil` then `ClockNow`. Inside an
+        // embedder's locked section the rescue waits for the next read outside
+        // it, so no clock read can expire a park the embedder cannot settle.
+        if !self.embedder_section {
+            self.spin_rescue()?;
+        }
         let operation = Operation::ClockNow { clock };
         if let Some((_, recorded)) = self.replay_expected(&operation)? {
             return decode_u64(&operation, recorded);
@@ -171,7 +175,8 @@ impl Context {
             Err(error) => Outcome::Error(error),
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
-        decode_unit(&operation, outcome)
+        decode_unit(&operation, outcome)?;
+        self.expire_due_timers()
     }
 
     /// Add the configured seeded sleep-latency jitter to an absolute sleep

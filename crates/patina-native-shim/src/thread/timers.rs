@@ -137,7 +137,7 @@ pub(super) struct TimerFd {
     fires: u64,
     /// The timer fired and has not been forwarded since.
     expired: bool,
-    waiters: VecDeque<TaskId>,
+    waiters: WaitQueue<VecDeque<TaskId>>,
     /// A descriptor still names it. A reader blocked when the last one
     /// closed holds the file, as the kernel's `read` does, so the timer
     /// lives on until the last waiter leaves.
@@ -279,6 +279,9 @@ impl ThreadRuntime {
     /// Fire every timer virtual time has reached, under the runtime lock the
     /// caller holds: the tasks to wake once it is released.
     pub(super) fn fire_timers(&mut self) -> Result<Vec<TaskId>, c_int> {
+        // An idle advance in this section may have expired timed parks: settle
+        // them before an expiry can signal or wake the same task.
+        self.settle_expired();
         let mut wakes = Vec::new();
         if !self.timers.any_armed() {
             return Ok(wakes);
@@ -323,13 +326,13 @@ impl ThreadRuntime {
                 fd.expired = true;
                 fd.ticks += 1;
                 fd.fires += 1;
-                readers.extend(fd.waiters.drain(..));
+                readers.extend(fd.waiters.drain());
             }
         }
         for task in readers {
             // A reader or a readiness wait: its registration ends with the
             // wake, as `wake_all` ends it.
-            self.remove_signal_wait(task);
+            self.remove_wait(task);
             wakes.push(task);
         }
         self.publish_alarm();
@@ -1019,7 +1022,7 @@ pub(crate) fn timerfd_create(clock: i32, flags: c_int) -> i64 {
                 ticks: 0,
                 fires: 0,
                 expired: false,
-                waiters: VecDeque::new(),
+                waiters: WaitQueue::new(),
                 open: true,
             },
         );
@@ -1206,12 +1209,9 @@ pub(crate) fn timerfd_read(handle: u64, nonblocking: bool, buf: usize, len: usiz
         if nonblocking {
             return crate::fail(EWOULDBLOCK) as isize;
         }
-        timer.waiters.push_back(me);
-        let step = state.block(
-            me,
-            "timerfd-read",
-            Wait::new(BlockClass::Io, vec![WaiterLoc::TimerFdRecv(handle)]),
-        );
+        let mut wait = Wait::new(BlockClass::Io, vec![]);
+        wait.enqueue(&mut timer.waiters, me, WaiterLoc::TimerFdRecv(handle));
+        let step = state.block(me, "timerfd-read", wait);
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
@@ -1236,14 +1236,10 @@ pub(super) fn timerfd_poll(state: &ThreadRuntime, handle: u64) -> (bool, u64) {
 }
 
 /// Park `me` on a timer descriptor's readers, for a readiness wait.
-pub(super) fn timerfd_watch(
-    state: &mut ThreadRuntime,
-    handle: u64,
-    me: TaskId,
-) -> Option<WaiterLoc> {
-    let timer = state.timers.fds.get_mut(&handle)?;
-    timer.waiters.push_back(me);
-    Some(WaiterLoc::TimerFdRecv(handle))
+pub(super) fn timerfd_watch(state: &mut ThreadRuntime, handle: u64, me: TaskId, wait: &mut Wait) {
+    if let Some(timer) = state.timers.fds.get_mut(&handle) {
+        wait.enqueue(&mut timer.waiters, me, WaiterLoc::TimerFdRecv(handle));
+    }
 }
 
 /// Unlink `me` from a timer descriptor's readers.

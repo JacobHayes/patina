@@ -34,7 +34,7 @@ pub(crate) fn semget(key: i32, nsems: i32, flags: i32) -> i64 {
                 undo: false,
                 otime: 0,
                 ctime: now(),
-                pending: VecDeque::new(),
+                pending: WaitQueue::new(),
             })
         },
     );
@@ -113,7 +113,11 @@ pub(super) fn update_queue(
                 }
             }
             Err(Refused::Block(blocking)) => {
-                set.pending[index].blocking = blocking;
+                set.pending
+                    .iter_mut()
+                    .nth(index)
+                    .expect("a pending waiter")
+                    .blocking = blocking;
                 index += 1;
             }
             Err(Refused::Errno(errno)) => {
@@ -210,12 +214,14 @@ pub(crate) fn semtimedop(
             Err(Refused::Errno(errno)) => return fail(errno),
             Err(Refused::Block(blocking)) => blocking,
         };
-        set.pending.push_back(SemWaiter {
+        let mut wait = Wait::new(BlockClass::Ipc, vec![]);
+        let waiter = SemWaiter {
             task: me,
             ops: ops.clone(),
             blocking,
             alter,
-        });
+        };
+        wait.enqueue(&mut set.pending, waiter, WaiterLoc::Ipc(IpcWait::Sem(id)));
         let timed = match (relative, deadline) {
             (None, _) => None,
             (Some(_), Some(at)) => Some((ClockKind::Monotonic, at)),
@@ -230,7 +236,7 @@ pub(crate) fn semtimedop(
             }
         };
         let loc = IpcWait::Sem(id);
-        match wait_on(state, me, "semop", BlockClass::Ipc, loc, timed, EAGAIN) {
+        match wait_on(state, me, "semop", wait, loc, timed, EAGAIN) {
             Ok(Some(Outcome::Done(result))) => return result,
             Ok(_) => {}
             Err(result) => return result,

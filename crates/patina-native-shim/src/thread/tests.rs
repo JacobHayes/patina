@@ -165,3 +165,205 @@ fn pipe_channel_write_to_closed_reader_is_broken_pipe() {
     channel.read_refs = 0;
     assert_eq!(channel.try_write(b"x"), PipeWrite::BrokenPipe);
 }
+
+/// A scheduler for pure wait-state tests: any transition is a test failure.
+struct NoTransitions;
+
+impl Scheduler for NoTransitions {
+    fn spawn(&mut self, _: &str) -> Result<TaskId, String> {
+        Err("unexpected spawn".into())
+    }
+    fn yield_task(&mut self, _: TaskId) -> Result<(), String> {
+        Err("unexpected yield".into())
+    }
+    fn park(&mut self, _: TaskId, _: &str) -> Result<(), String> {
+        Err("unexpected park".into())
+    }
+    fn park_timed(&mut self, _: TaskId, _: &str, _: ClockKind, _: u64) -> Result<(), String> {
+        Err("unexpected timed park".into())
+    }
+    fn wake(&mut self, task: TaskId) -> Result<(), String> {
+        Err(format!("unexpected wake of task {}", task.0))
+    }
+    fn complete(&mut self, _: TaskId) -> Result<(), String> {
+        Err("unexpected complete".into())
+    }
+    fn next(&mut self) -> Result<Option<TaskId>, String> {
+        Err("unexpected pick".into())
+    }
+}
+
+// Class pairing: timer settlement unlinks a wait through its one registration
+// (`ThreadRuntime::register_wait`) on every platform, so it reaches every
+// queue the wait has moved to. A condition waiter a signal moved onto its held
+// mutex's queue is the case a per-queue scan misses: the owner's unlock would
+// grant, and wake, a task its timer already woke.
+#[test]
+fn an_expired_condition_waiter_leaves_the_held_mutex_queue_a_signal_moved_it_to() {
+    const MUTEX: usize = 0x1000;
+    const COND: usize = 0x2000;
+    let (owner, waiter) = (TaskId(1), TaskId(2));
+    let mut state = ThreadRuntime::new();
+    state.table.register(owner);
+    state.table.register(waiter);
+    state.table.init_mutex(MUTEX, MutexKind::Normal);
+    state.table.init_cond(COND, ClockKind::Monotonic);
+    // The waiter's `pthread_cond_timedwait`: it released the mutex and waits
+    // on the condition, registered as `block_timed` registers it.
+    assert!(matches!(
+        state
+            .table
+            .lock(
+                waiter,
+                MUTEX,
+                MutexKind::Normal,
+                &mut Wait::new(BlockClass::Sync, vec![])
+            )
+            .unwrap(),
+        LockStep::Acquired
+    ));
+    let mut wait = Wait::new(BlockClass::Sync, vec![]);
+    state
+        .table
+        .cond_wait(&mut NoTransitions, waiter, COND, MUTEX, &mut wait)
+        .unwrap();
+    state.register_wait(
+        waiter,
+        "cond-timedwait",
+        wait,
+        Some((ClockKind::Monotonic, 1)),
+    );
+    // The owner takes the mutex and signals: the waiter moves to its queue.
+    assert!(matches!(
+        state
+            .table
+            .lock(
+                owner,
+                MUTEX,
+                MutexKind::Normal,
+                &mut Wait::new(BlockClass::Sync, vec![])
+            )
+            .unwrap(),
+        LockStep::Acquired
+    ));
+    state.table.cond_signal(&mut NoTransitions, COND).unwrap();
+    assert!(
+        state.table.mutexes[&MUTEX]
+            .waiters
+            .iter()
+            .any(|task| *task == waiter)
+    );
+    // The timer expires the wait.
+    state.mark_timed_out(waiter);
+    assert!(state.timed_out.contains(&waiter));
+    assert!(
+        !state.table.mutexes[&MUTEX]
+            .waiters
+            .iter()
+            .any(|task| *task == waiter)
+    );
+    assert!(state.table.conds[&COND].waiters.is_empty());
+    // The owner's unlock grants nobody (a grant would wake the waiter).
+    state
+        .table
+        .unlock(&mut NoTransitions, owner, MUTEX)
+        .unwrap();
+    assert_eq!(state.table.mutexes[&MUTEX].owner, None);
+}
+
+// Class pairing: a wait registration has one removal path,
+// `ThreadRuntime::remove_wait`, which a resume (`switch_and_park` through
+// `resumed`), an expiry and thread exit (`thread_finish` through
+// `finish_wait`) all take, on every platform; none may outlive its wait.
+#[test]
+fn a_wait_registration_ends_with_its_wait_and_with_its_thread() {
+    const WORD: usize = 0x3000;
+    let task = TaskId(1);
+    let mut state = ThreadRuntime::new();
+    // A normal wake: `FUTEX_WAKE` unqueues the waiter, which resumes.
+    let mut wait = Wait::new(BlockClass::TimedFutex, vec![]);
+    let waiter = FutexWaiter::multiplexed(task, false, u32::MAX);
+    state.queue_futex_waiter(WORD, waiter, &mut wait);
+    state.register_wait(task, "futex-wait", wait, Some((ClockKind::Monotonic, 1)));
+    assert_eq!(state.take_futex_waiters(WORD, 1, |_| true).len(), 1);
+    assert!(!state.resumed(task), "a futex wait is no pthread wait");
+    assert!(!state.has_wait(task));
+    // Thread exit drops a registration the thread left, and its queue entry.
+    let mut wait = Wait::new(BlockClass::TimedFutex, vec![]);
+    let waiter = FutexWaiter::multiplexed(task, false, u32::MAX);
+    state.queue_futex_waiter(WORD, waiter, &mut wait);
+    state.register_wait(task, "futex-wait", wait, None);
+    state.finish_wait(task);
+    assert!(!state.has_wait(task));
+    assert!(!state.futexes.contains_key(&WORD));
+}
+
+// Class pairing: a queue entry can only come from `Wait::enqueue`, which
+// records the queue in the wait `block`/`block_timed` registers, so ending
+// the wait (`remove_wait`: a wake, resume, expiry or exit) empties every queue
+// the task joined. One waiter on several kinds of queue at once, each entered
+// the only way there is; the kqueue `EVFILT_USER` list is the case that once
+// sat outside the registration (macOS, guest-archive builds).
+#[test]
+fn ending_a_wait_empties_every_queue_it_entered() {
+    const WORD: usize = 0x4000;
+    const MUTEX: usize = 0x5000;
+    const RWLOCK: usize = 0x6000;
+    let (owner, waiter, target) = (TaskId(1), TaskId(2), TaskId(3));
+    let mut state = ThreadRuntime::new();
+    for task in [owner, waiter, target] {
+        state.table.register(task);
+    }
+    let mut wait = Wait::new(BlockClass::Sync, vec![]);
+    // A futex word.
+    let futex = FutexWaiter::multiplexed(waiter, false, u32::MAX);
+    state.queue_futex_waiter(WORD, futex, &mut wait);
+    // A held mutex and a write-held rwlock.
+    state.table.init_mutex(MUTEX, MutexKind::Normal);
+    let mut held = Wait::new(BlockClass::Sync, vec![]);
+    assert!(matches!(
+        state
+            .table
+            .lock(owner, MUTEX, MutexKind::Normal, &mut held)
+            .unwrap(),
+        LockStep::Acquired
+    ));
+    assert!(matches!(
+        state
+            .table
+            .lock(waiter, MUTEX, MutexKind::Normal, &mut wait)
+            .unwrap(),
+        LockStep::MustBlock
+    ));
+    let kind = RwLockKind::default();
+    assert!(matches!(
+        state
+            .table
+            .rwlock_wrlock(owner, RWLOCK, kind, &mut held)
+            .unwrap(),
+        LockStep::Acquired
+    ));
+    assert!(matches!(
+        state
+            .table
+            .rwlock_rdlock(waiter, RWLOCK, kind, &mut wait)
+            .unwrap(),
+        LockStep::MustBlock
+    ));
+    // A thread's join slot.
+    assert!(matches!(
+        state.table.begin_join(waiter, target, &mut wait).unwrap(),
+        JoinStep::MustBlock
+    ));
+    // A pipe's readers.
+    state.net.pipe_channels.insert(7, pipe::PipeChannel::new(1));
+    let channel = state.net.pipe_channels.get_mut(&7).unwrap();
+    wait.enqueue(&mut channel.recv_waiters, waiter, WaiterLoc::PipeRecv(7));
+    state.register_wait(waiter, "many", wait, None);
+    assert!(state.remove_wait(waiter).is_some());
+    assert!(!state.futexes.contains_key(&WORD));
+    assert!(state.table.mutexes[&MUTEX].waiters.is_empty());
+    assert!(state.table.rwlocks[&RWLOCK].read_waiters.is_empty());
+    assert_eq!(*state.table.threads[&target].joiner, None);
+    assert!(state.net.pipe_channels[&7].recv_waiters.is_empty());
+}

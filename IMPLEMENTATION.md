@@ -768,9 +768,12 @@ constructor) and hung before `main` at 100% CPU.
    uses), the runtime advances the monotonic clock through a recorded
    `SleepUntil` — the deadlock rescue's mechanism — by a token that starts at
    1 µs and doubles per rescue to a 1 ms ceiling. The advance is clamped so it
-   never steps over a still-future timer deadline. Scheduling/wait ops are
-   neutral (they neither count toward the streak nor break it), so a spinning
-   thread in a multi-task run still accumulates; a progress op, or virtual time
+   never steps over a still-future timer deadline; reaching it expires the due
+   timed parks through the runtime's single expiry path, even with runnable
+   peers. The native shim settles those timeouts on its next thread-runtime
+   acquisition, before any wake path can see the expired waiters.
+   Scheduling/wait ops are neutral (they neither count toward the streak nor
+   break it), so a spinning thread in a multi-task run still accumulates; a progress op, or virtual time
    moving for any reason the rescue did not cause, ends the episode and its
    escalation. The trigger is a pure function of the recorded op stream and the
    driver's monotonic value, so it re-fires at the same operation on replay and

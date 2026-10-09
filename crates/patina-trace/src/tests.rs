@@ -18,7 +18,7 @@ pub(super) fn operation() -> Operation {
 fn a_current_bundle_must_state_its_run_facts() {
     // Epoch, boot origin and node name are required: a bundle missing
     // either does not parse.
-    let bytes = include_bytes!("../tests/fixtures/format-15.patina");
+    let bytes = include_bytes!("../tests/fixtures/format-16.patina");
     for field in ["realtime_epoch_nanos", "boot_origin_nanos", "hostname"] {
         let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         assert!(
@@ -43,7 +43,7 @@ fn a_current_bundle_must_state_its_run_facts() {
 fn memory_operations_fixture_decodes_and_replays() {
     // Checked-in feature fixture pins the page cache's and anonymous
     // files' operations and one of the filesystem family's.
-    let bytes = include_bytes!("../tests/fixtures/format-15-memory.patina");
+    let bytes = include_bytes!("../tests/fixtures/format-16-memory.patina");
     let bundle = TraceBundle::from_slice(bytes).unwrap();
     bundle.validate().unwrap();
     assert_eq!(bundle.to_bytes().unwrap(), bytes);
@@ -97,7 +97,7 @@ fn sparse_file_operations_fixture_decodes_and_replays() {
     use patina_dst_abi::{
         EffectError, ErrorCode, FsAllocateMode, FsEntryKind, FsMetadata, SeekWhence,
     };
-    let bytes = include_bytes!("../tests/fixtures/format-15-sparse.patina");
+    let bytes = include_bytes!("../tests/fixtures/format-16-sparse.patina");
     let bundle = TraceBundle::from_slice(bytes).unwrap();
     bundle.validate().unwrap();
     assert_eq!(bundle.to_bytes().unwrap(), bytes);
@@ -155,7 +155,7 @@ fn sparse_file_operations_fixture_decodes_and_replays() {
 fn network_operations_fixture_decodes_and_replays() {
     // Checked-in feature fixture pins the network family's operations and
     // a marked datagram's encoding.
-    let bytes = include_bytes!("../tests/fixtures/format-15-network.patina");
+    let bytes = include_bytes!("../tests/fixtures/format-16-network.patina");
     let expected = [
         (
             Operation::NetBindShared {
@@ -241,7 +241,7 @@ fn signal_operations_fixture_decodes_and_replays() {
     const SIGUSR2: u8 = 12;
     const SI_USER: i32 = 0;
     const SI_TKILL: i32 = -6;
-    let bytes = include_bytes!("../tests/fixtures/format-15-signals.patina");
+    let bytes = include_bytes!("../tests/fixtures/format-16-signals.patina");
     let bundle = TraceBundle::from_slice(bytes).unwrap();
     bundle.validate().unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);

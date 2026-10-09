@@ -618,9 +618,13 @@ pub struct Context {
     /// `scheduler.next()` would deadlock and a timer rescue is warranted.
     scheduler_tasks: std::collections::BTreeSet<TaskId>,
     parked_tasks: std::collections::BTreeSet<TaskId>,
-    /// Tasks woken by the most recent deadlock-rescue (their timers fired), for
-    /// an embedder to drain and resolve as timeouts.
-    rescued: Vec<TaskId>,
+    /// Tasks whose timed parks expired (their timers fired and woke them), in
+    /// expiry order, for an embedder to drain and settle as timeouts. Only
+    /// [`Context::expire_due_timers`] appends to it.
+    expired: Vec<TaskId>,
+    /// Set inside [`Context::in_embedder_section`]: clock reads do not run the
+    /// advance-on-spin rescue.
+    embedder_section: bool,
     /// Configured filesystem crash point, or `None` when crash injection is off.
     /// Consulted after each matching boundary operation; the crash fires exactly
     /// once. The op sequence is identical on record and replay, so the injected

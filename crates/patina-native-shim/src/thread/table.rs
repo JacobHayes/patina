@@ -95,7 +95,7 @@ pub(super) struct MutexEntry {
     /// mutex.
     count: u32,
     kind: MutexKind,
-    pub(super) waiters: HostDeque<TaskId>,
+    pub(super) waiters: WaitQueue<HostDeque<TaskId>>,
 }
 
 impl MutexEntry {
@@ -114,7 +114,7 @@ impl MutexEntry {
 }
 
 pub(super) struct CondEntry {
-    pub(super) waiters: HostDeque<(TaskId, usize)>,
+    pub(super) waiters: WaitQueue<HostDeque<(TaskId, usize)>>,
     /// The clock its timed waits judge their deadline on: its attribute's
     /// (`pthread_condattr_setclock`), `CLOCK_REALTIME` by default.
     clock: ClockKind,
@@ -123,7 +123,7 @@ pub(super) struct CondEntry {
 impl Default for CondEntry {
     fn default() -> Self {
         Self {
-            waiters: HostDeque::default(),
+            waiters: WaitQueue::new(),
             clock: ClockKind::Realtime,
         }
     }
@@ -245,8 +245,8 @@ pub(super) struct RwLockEntry {
     readers: usize,
     /// The task currently holding the write lock, if any.
     writer: Option<TaskId>,
-    pub(super) write_waiters: HostDeque<TaskId>,
-    pub(super) read_waiters: HostDeque<TaskId>,
+    pub(super) write_waiters: WaitQueue<HostDeque<TaskId>>,
+    pub(super) read_waiters: WaitQueue<HostDeque<TaskId>>,
 }
 
 impl RwLockEntry {
@@ -267,7 +267,7 @@ impl RwLockEntry {
 pub(super) struct ThreadEntry {
     pub(super) finished: bool,
     retval: usize,
-    pub(super) joiner: Option<TaskId>,
+    pub(super) joiner: WaitQueue<Option<TaskId>>,
     pub(super) detached: bool,
     // Some(false): temporarily runnable for a signal, still semantically
     // waiting. Some(true): an ordinary grant/notification arrived meanwhile.
@@ -333,7 +333,7 @@ impl ThreadTable {
             ThreadEntry {
                 finished: false,
                 retval: 0,
-                joiner: None,
+                joiner: WaitQueue::new(),
                 detached: false,
                 #[cfg(target_os = "linux")]
                 signal_resume: None,
@@ -365,7 +365,7 @@ impl ThreadTable {
             WaiterLoc::Join(target) => self
                 .threads
                 .get(&target)
-                .is_some_and(|entry| !entry.finished && entry.joiner == Some(task)),
+                .is_some_and(|entry| !entry.finished && *entry.joiner == Some(task)),
             _ => false,
         }
     }
@@ -401,6 +401,7 @@ impl ThreadTable {
         me: TaskId,
         key: usize,
         kind: MutexKind,
+        wait: &mut Wait,
     ) -> Result<LockStep, ThreadError> {
         let interrupted = self.sync_interrupted(me);
         let entry = self.mutex(key, kind);
@@ -422,7 +423,7 @@ impl ThreadTable {
             // Another owner, or a normal mutex's owner relocking: wait.
             Some(_) => {
                 refuse_nested_sync_wait(interrupted);
-                entry.waiters.push_back(me);
+                wait.enqueue(&mut entry.waiters, me, WaiterLoc::Mutex(key));
                 Ok(LockStep::MustBlock)
             }
         }
@@ -513,6 +514,7 @@ impl ThreadTable {
         me: TaskId,
         key: usize,
         kind: RwLockKind,
+        wait: &mut Wait,
     ) -> Result<LockStep, ThreadError> {
         let interrupted = self.sync_interrupted(me);
         let entry = self.rwlock(key, kind);
@@ -524,7 +526,7 @@ impl ThreadTable {
             Ok(LockStep::Acquired)
         } else {
             refuse_nested_sync_wait(interrupted);
-            entry.read_waiters.push_back(me);
+            wait.enqueue(&mut entry.read_waiters, me, WaiterLoc::RwRead(key));
             Ok(LockStep::MustBlock)
         }
     }
@@ -536,6 +538,7 @@ impl ThreadTable {
         me: TaskId,
         key: usize,
         kind: RwLockKind,
+        wait: &mut Wait,
     ) -> Result<LockStep, ThreadError> {
         let interrupted = self.sync_interrupted(me);
         let entry = self.rwlock(key, kind);
@@ -547,7 +550,7 @@ impl ThreadTable {
             Ok(LockStep::Acquired)
         } else {
             refuse_nested_sync_wait(interrupted);
-            entry.write_waiters.push_back(me);
+            wait.enqueue(&mut entry.write_waiters, me, WaiterLoc::RwWrite(key));
             Ok(LockStep::MustBlock)
         }
     }
@@ -673,13 +676,16 @@ impl ThreadTable {
         me: TaskId,
         cond_key: usize,
         mutex_key: usize,
+        wait: &mut Wait,
     ) -> Result<(), ThreadError> {
         refuse_nested_sync_wait(self.sync_interrupted(me));
         self.unlock(scheduler, me, mutex_key)?;
-        self.conds
-            .entry_or_default(cond_key)
-            .waiters
-            .push_back((me, mutex_key));
+        let cond = self.conds.entry_or_default(cond_key);
+        wait.enqueue(
+            &mut cond.waiters,
+            (me, mutex_key),
+            WaiterLoc::Cond(cond_key, mutex_key),
+        );
         Ok(())
     }
 
@@ -706,7 +712,7 @@ impl ThreadTable {
                     entry.count += 1;
                     self.notify(scheduler, task)?;
                 }
-                Some(_) => entry.waiters.push_back(task),
+                Some(_) => entry.waiters.requeue(task, Covered::CondMutex),
             }
         }
         Ok(())
@@ -745,6 +751,7 @@ impl ThreadTable {
         &mut self,
         me: TaskId,
         target: TaskId,
+        wait: &mut Wait,
     ) -> Result<JoinStep, ThreadError> {
         let interrupted = self.sync_interrupted(me);
         if self
@@ -757,7 +764,7 @@ impl ThreadTable {
         let joins_me = self
             .threads
             .get(&me)
-            .is_some_and(|entry| !entry.finished && entry.joiner == Some(target));
+            .is_some_and(|entry| !entry.finished && *entry.joiner == Some(target));
         if target == me || joins_me {
             return Err(ThreadError::Posix(EDEADLK));
         }
@@ -777,7 +784,7 @@ impl ThreadTable {
             return Err(ThreadError::Posix(EINVAL));
         }
         refuse_nested_sync_wait(interrupted);
-        entry.joiner = Some(me);
+        wait.enqueue(&mut entry.joiner, me, WaiterLoc::Join(target));
         Ok(JoinStep::MustBlock)
     }
 
@@ -809,7 +816,7 @@ impl ThreadTable {
         let entry = self.threads.get_mut(&me).ok_or(ThreadError::Posix(ESRCH))?;
         entry.finished = true;
         entry.retval = retval;
-        let joiner = entry.joiner;
+        let joiner = *entry.joiner;
         let detached = entry.detached;
         if let Some(joiner) = joiner {
             self.notify(scheduler, joiner)?;

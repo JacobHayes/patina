@@ -265,7 +265,7 @@ pub extern "C" fn patina_thread_cancel(handle: usize) -> c_int {
     ) {
         Reach::Pending => 0,
         Reach::Wake => {
-            state.remove_signal_wait(target);
+            state.remove_wait(target);
             drop(state);
             RealScheduler
                 .wake(target)
@@ -394,7 +394,9 @@ pub unsafe extern "C" fn patina_cancel_point(name: *const std::ffi::c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::thread::signals::tests::{isolated, join, spawn};
+    use crate::thread::signals::tests::{
+        after_others_park, expired_unsettled, isolated, join, spawn, spin_to, task_of,
+    };
     use std::sync::atomic::{AtomicBool, AtomicU64};
 
     fn monotonic() -> u64 {
@@ -432,6 +434,38 @@ mod tests {
             CANCELED.store(true, Ordering::SeqCst);
             join(worker);
             assert_eq!(SLEPT.load(Ordering::SeqCst), 0, "the sleep waited");
+            assert_eq!(LEFT.load(Ordering::SeqCst), ACT as usize);
+        });
+    }
+
+    /// A cancel that reaches a sleeper after the spin rescue expired its
+    /// sleep, before any scheduling point: the sleep ended at its deadline, so
+    /// the cancel waits for the thread's next point (the sleep's wrapper),
+    /// never waking the already-runnable thread a second time.
+    #[test]
+    fn a_cancel_after_a_sleep_expired_acts_at_the_next_point() {
+        static SLEPT: AtomicU64 = AtomicU64::new(u64::MAX);
+        static LEFT: AtomicUsize = AtomicUsize::new(0);
+        isolated(|| {
+            let start = monotonic();
+            let deadline = start + 100;
+            let worker = spawn(move || {
+                let outer = patina_cancel_enter();
+                assert_eq!(crate::patina_sleep_until(1, deadline), 0);
+                SLEPT.store(monotonic() - start, Ordering::SeqCst);
+                LEFT.store(patina_cancel_leave(outer) as usize, Ordering::SeqCst);
+            });
+            let task = task_of(worker);
+            assert_eq!(after_others_park(task), BlockClass::Sleep);
+            spin_to(deadline);
+            assert!(expired_unsettled(task));
+            assert_eq!(patina_thread_cancel(worker as usize), 0);
+            join(worker);
+            assert_eq!(
+                SLEPT.load(Ordering::SeqCst),
+                100,
+                "the sleep reached its deadline"
+            );
             assert_eq!(LEFT.load(Ordering::SeqCst), ACT as usize);
         });
     }

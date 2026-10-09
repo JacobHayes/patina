@@ -456,7 +456,7 @@ struct SemSet {
     otime: i64,
     ctime: i64,
     /// Blocked operations, oldest first.
-    pending: VecDeque<SemWaiter>,
+    pending: WaitQueue<VecDeque<SemWaiter>>,
 }
 
 struct SemWaiter {
@@ -508,8 +508,8 @@ struct MsgQueue {
     ctime: i64,
     lspid: i32,
     lrpid: i32,
-    receivers: VecDeque<Receiver>,
-    senders: VecDeque<TaskId>,
+    receivers: WaitQueue<VecDeque<Receiver>>,
+    senders: WaitQueue<VecDeque<TaskId>>,
 }
 
 impl MsgQueue {
@@ -627,16 +627,15 @@ impl Ipc {
 /// or the errno — `timeout` when the deadline passed, `EINTR` after a handler
 /// that does not restart the call.
 fn wait_on(
-    state: SpinGuard<'static, ThreadRuntime>,
+    state: StateGuard,
     me: TaskId,
     reason: &'static str,
-    class: BlockClass,
+    wait: Wait,
     loc: IpcWait,
     deadline: Option<(ClockKind, u64)>,
     timeout: c_int,
 ) -> Result<Option<Outcome>, i64> {
     let mut state = state;
-    let wait = Wait::new(class, vec![WaiterLoc::Ipc(loc)]);
     let step = match deadline {
         None => state.block(me, reason, wait),
         Some((clock, at)) => state.block_timed(me, reason, wait, clock, at),
@@ -662,7 +661,7 @@ fn wait_on(
 }
 
 /// `IPC_RMID` of an object tasks wait on: each wakes to `EIDRM`.
-fn removed(mut state: SpinGuard<'static, ThreadRuntime>, woken: Vec<TaskId>) -> i64 {
+fn removed(mut state: StateGuard, woken: Vec<TaskId>) -> i64 {
     for task in &woken {
         state.ipc.outcomes.insert(*task, Outcome::Done(fail(EIDRM)));
     }

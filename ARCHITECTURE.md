@@ -242,6 +242,25 @@ skip scheduling while shim locks are held, without bypassing the captured sink.
 Every interruptible park registers its class, queue locations and optional
 virtual deadline. A signal removes only its recipient's registrations before
 waking it; an ordinary wake or timer rescue removes those registrations too.
+Timer expiry is settled the same way: the runtime expires a timed park when
+virtual time reaches it, and every acquisition of the shim's thread runtime
+first settles those expiries, unlinking each expired waiter through its wait's
+one registration (the signal model's on Linux, the same per-task record on
+macOS), which reaches every queue the wait has moved to, and flagging its
+timeout. That registration has one removal path, taken by every wake, resume,
+expiry and thread exit, and it knows every queue: each waiter queue (futex
+words, mutexes, rwlocks, conditions, joins, pipes, sockets, descriptor readers,
+kqueue `EVFILT_USER` lists, IPC objects, record locks, dispatch semaphores) is
+a `WaitQueue` that only `Wait::enqueue` can add to, recording the queue in the
+wait that is then registered. No signal, futex wake or requeue, or cancellation can find, and wake
+again, a waiter whose deadline has already ended its wait. While the thread
+runtime is held, every Context call runs as an embedder section whose clock
+reads never advance virtual time (the advance-on-spin rescue waits for the next
+read outside), so the holder cannot expire a waiter and then grant it a mutex
+or a wake from a now-stale queue. The scheduling expiries a section can still
+produce (a timed park, a pick, an idle advance) are settled before it wakes
+anyone, and the wake funnel refuses, by name, a wake that meets unsettled
+expiries.
 Resumed I/O and untimed futex waits obey `SA_RESTART`; timed futex waits, sleeps
 and readiness waits return `EINTR` after delivery. Relative sleeps report the
 virtual unslept time; absolute sleeps leave the remaining-time pointer untouched.
@@ -843,7 +862,9 @@ The virtual clock runs at exactly one tick per nanosecond and moves only when th
 
 - **A guest wait.** A sleep is a recorded advance to its deadline.
 - **The deadlock rescue.** When every task is parked and a timer pends, `scheduler_next` advances to the single earliest deadline and wakes the tasks due there, in `(deadline, registration)` order.
-- **Advance-on-spin.** The two above cover a guest that *waits*. A guest that is *runnable* and does nothing but read the clock would otherwise observe frozen time forever — the shape of a startup calibration loop, which measures a counter against the OS clock over a fixed window and performs no wait while it does. After 1024 consecutive clock observations at unchanged virtual time with no intervening progress operation, the runtime advances the clock by a token amount through the same recorded `SleepUntil`. The token starts at 1 µs and doubles per rescue up to a 1 ms ceiling, so a hard poll is barely perturbed while a real wedge converges in tens of rescues. The advance never steps over a still-future timer deadline; that boundary belongs to the deadlock rescue.
+- **Advance-on-spin.** The two above cover a guest that *waits*. A guest that is *runnable* and does nothing but read the clock would otherwise observe frozen time forever — the shape of a startup calibration loop, which measures a counter against the OS clock over a fixed window and performs no wait while it does. After 1024 consecutive clock observations at unchanged virtual time with no intervening progress operation, the runtime advances the clock by a token amount through the same recorded `SleepUntil`. The token starts at 1 µs and doubles per rescue up to a 1 ms ceiling, so a hard poll is barely perturbed while a real wedge converges in tens of rescues. The advance stops at a still-future timer deadline.
+
+One authority expires timed parks: after every clock advance (`sleep_until` is the only one) and at every timed-park registration, the runtime wakes each task whose deadline virtual time has reached, in `(deadline, registration)` order, even when another task remains runnable. A park whose deadline has already passed therefore expires as it registers, and the timer registry never holds a reached deadline. Woken tasks take part in the next selection under the run's scheduling policy. Embedders drain the expired tasks (`take_expired_timeouts`) and settle their own wait state before anything else can wake them: the native shim on every acquisition of its thread runtime, the async executor before each drain, after each pick and after each timed park. An embedder that holds its own wait state across Context calls runs them in `Context::in_embedder_section`, where a clock read does not take the advance-on-spin rescue; the rescue fires at the first read outside. A timed park reads the clock before it parks, so a missing or failing clock leaves the task as it was. Format 16 traces record these expiries; format 15 traces, which predate them, are refused.
 
 Realtime is monotonic time plus a fixed **realtime epoch**: the Unix time `ClockKind::Realtime` reads at monotonic zero. It defaults to Patina's first commit, 2026-07-22T23:00:09Z (`DEFAULT_REALTIME_EPOCH_NANOS` in `patina-dst-abi`, re-exported by `patina-dst-time-virtual` and the runtime), so the default guest-start realtime is **2026-07-23T02:25:54.678901234Z** (epoch plus boot origin), a plausible date identical on every run, and `run --realtime-epoch <RFC 3339 UTC>` moves it on every family. The epoch is semantic run configuration: every trace records it, replay rebuilds the clock on it without the flag, and a conflicting explicit epoch — or an explicitly installed clock on another epoch — is refused. It must be restored rather than re-derived because the filesystem stamps its times from the realtime clock without a recorded read. The process's CPU clocks start from a model constant beside it, `STARTUP_CPU_NANOS` (`patina-dst-abi`): the CPU time a Linux process has already spent in `exec`, the loader and libc setup when `main` starts. Unlike the epoch it is not recorded; like the virtual kernel's `HZ` it is part of the model.
 

@@ -41,7 +41,7 @@ fn set(values: &[i32]) -> SemSet {
         undo: false,
         otime: 0,
         ctime: 0,
-        pending: VecDeque::new(),
+        pending: WaitQueue::new(),
     }
 }
 
@@ -78,12 +78,14 @@ fn semaphore_operations_apply_all_or_none_in_order() {
 #[test]
 fn a_blocked_operation_is_completed_by_the_one_that_allows_it() {
     let mut sems = set(&[0]);
-    sems.pending.push_back(SemWaiter {
+    let waiter = SemWaiter {
         task: TaskId(7),
         ops: vec![op(0, -1, 0)],
         blocking: 0,
         alter: true,
-    });
+    };
+    let loc = WaiterLoc::Ipc(IpcWait::Sem(0));
+    Wait::new(BlockClass::Ipc, vec![]).enqueue(&mut sems.pending, waiter, loc);
     let mut outcomes = BTreeMap::new();
     assert!(update_queue(&mut sems, &mut outcomes).is_empty());
     sems.sems[0].0 = 1;
@@ -104,8 +106,8 @@ fn a_receive_selects_by_type_as_find_msg_does() {
         ctime: 0,
         lspid: 0,
         lrpid: 0,
-        receivers: VecDeque::new(),
-        senders: VecDeque::new(),
+        receivers: WaitQueue::new(),
+        senders: WaitQueue::new(),
     };
     for mtype in [3, 2, 1, 2] {
         queue.messages.push_back(Message {

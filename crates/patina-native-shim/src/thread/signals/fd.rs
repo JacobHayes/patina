@@ -3,7 +3,7 @@ use super::*;
 
 pub(in crate::thread) struct SignalFd {
     pub mask: u64,
-    pub waiters: VecDeque<TaskId>,
+    pub(in crate::thread) waiters: WaitQueue<VecDeque<TaskId>>,
     pub arrivals: u64,
 }
 
@@ -79,7 +79,7 @@ pub unsafe extern "C" fn patina_signalfd(
                 handle,
                 SignalFd {
                     mask,
-                    waiters: VecDeque::new(),
+                    waiters: WaitQueue::new(),
                     arrivals: 0,
                 },
             );
@@ -94,7 +94,7 @@ pub(crate) fn close(handle: u64) {
         .signals
         .signalfds
         .remove(&handle)
-        .map(|fd| fd.waiters.into_iter().collect())
+        .map(|mut fd| fd.waiters.take().into_iter().collect())
         .unwrap_or_default();
     wake_all(waiters);
 }
@@ -155,22 +155,10 @@ pub(crate) unsafe fn read(handle: u64, nonblocking: bool, buf: *mut c_void, len:
         if nonblocking {
             return crate::fail(EAGAIN) as isize;
         }
-        state
-            .signals
-            .signalfds
-            .get_mut(&handle)
-            .unwrap()
-            .waiters
-            .push_back(me);
-        let step = state.block(
-            me,
-            "signalfd-read",
-            Wait::new(
-                BlockClass::SignalfdRead,
-                vec![WaiterLoc::SignalFdRecv(handle)],
-            )
-            .signals(mask),
-        );
+        let mut wait = Wait::new(BlockClass::SignalfdRead, vec![]).signals(mask);
+        let fd = state.signals.signalfds.get_mut(&handle).unwrap();
+        wait.enqueue(&mut fd.waiters, me, WaiterLoc::SignalFdRecv(handle));
+        let step = state.block(me, "signalfd-read", wait);
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),

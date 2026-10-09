@@ -687,7 +687,8 @@ impl RuntimeBuilder {
             timer_seq: 0,
             scheduler_tasks: std::collections::BTreeSet::new(),
             parked_tasks: std::collections::BTreeSet::new(),
-            rescued: Vec::new(),
+            expired: Vec::new(),
+            embedder_section: false,
             crash_at: self.config.faults.fs.crash_at,
             crash_counts: CrashCounts::default(),
             // A run has one crash selector and incarnation 0 is the one it

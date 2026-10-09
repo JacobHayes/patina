@@ -29,6 +29,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_char;
 use std::ffi::{c_int, c_void};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use patina_dst_abi::ClockKind;
@@ -64,9 +65,16 @@ mod net_state;
 mod pipe;
 mod posix_error;
 mod reactor;
+mod state_lock;
 mod sync;
 mod table;
+mod wait_queue;
+#[cfg(all(test, target_os = "linux"))]
+use state_lock::unsettled_state;
+use state_lock::{EXPIRIES_PENDING, StateGuard, lock_state};
+pub(crate) use state_lock::{in_state_section, note_expiries, watchdog_observe};
 use table::*;
+use wait_queue::{Covered, WaitQueue};
 
 #[cfg(target_os = "linux")]
 use epoll::EpollSlot;
@@ -508,6 +516,16 @@ impl Scheduler for RealScheduler {
     }
 
     fn wake(&mut self, task: TaskId) -> Result<(), String> {
+        // Every native wake funnels here. A timer expiry the native wait state
+        // has not settled means the waker chose from queues that may still
+        // hold the expired waiter: refuse by name rather than wake it twice.
+        if EXPIRIES_PENDING.load(Ordering::Acquire) {
+            return Err(format!(
+                "a wake of task {} met timer expiries the native wait state has not settled: \
+                 a section advanced virtual time and then woke without settling",
+                task.0
+            ));
+        }
         with_context_msg(|context| context.task_wake(task))
     }
 
@@ -714,7 +732,7 @@ mod baton {
 
 /// Release the state lock, hand the baton to `picked` by signaling its
 /// semaphore, then park on `me`'s semaphore until it is handed back.
-fn handoff(state: SpinGuard<'_, ThreadRuntime>, picked: TaskId, me: TaskId) {
+fn handoff(state: StateGuard, picked: TaskId, me: TaskId) {
     let picked_sem = state.task_sem(picked);
     let my_sem = state.task_sem(me);
     drop(state);
@@ -722,7 +740,7 @@ fn handoff(state: SpinGuard<'_, ThreadRuntime>, picked: TaskId, me: TaskId) {
     my_sem.wait();
 }
 
-fn switch_and_park(state: SpinGuard<'_, ThreadRuntime>, picked: TaskId, me: TaskId) {
+fn switch_and_park(state: StateGuard, picked: TaskId, me: TaskId) {
     handoff(state, picked, me);
     #[cfg(target_os = "linux")]
     {
@@ -740,7 +758,7 @@ fn switch_and_park(state: SpinGuard<'_, ThreadRuntime>, picked: TaskId, me: Task
                 .take()
                 .unwrap_or_else(|| fatal("signal-woken pthread waiter lost resume state"));
             if notified {
-                state.remove_signal_wait(me);
+                state.remove_wait(me);
                 return;
             }
             let wait = Wait::new(blocked.class, blocked.locs);
@@ -759,18 +777,14 @@ fn switch_and_park(state: SpinGuard<'_, ThreadRuntime>, picked: TaskId, me: Task
                 )),
             }
         }
-        let mut resumed = lock_state();
-        let sync = resumed
-            .signals
-            .blocked
-            .get(&me)
-            .is_some_and(|wait| wait.class == BlockClass::Sync);
-        resumed.remove_signal_wait(me);
-        drop(resumed);
-        if sync {
-            signals::deliver();
-        }
     }
+    let sync = lock_state().resumed(me);
+    #[cfg(target_os = "linux")]
+    if sync {
+        signals::deliver();
+    }
+    #[cfg(target_os = "macos")]
+    let _ = sync;
 }
 
 /// Baton-guarded state shared by every managed host thread. Only the current
@@ -812,17 +826,22 @@ struct ThreadRuntime {
     /// Rust std on Linux lowers `Mutex`/`Condvar`/thread parking to raw
     /// `SYS_futex` through libc's `syscall` wrapper rather than pthread, so
     /// the interposed `syscall` routes those waits/wakes here.
-    futexes: BTreeMap<usize, VecDeque<FutexWaiter>>,
+    futexes: BTreeMap<usize, WaitQueue<VecDeque<FutexWaiter>>>,
     /// The futex2 index a wake unqueued, per woken task: the highest, as
     /// `futex_unqueue_multiple` reports it. The task takes it on resume.
     #[cfg(target_os = "linux")]
     futex_woken: BTreeMap<TaskId, u32>,
     /// Timed waiters (`cond_timedwait`, timed futex waits) whose deadline
-    /// fired: the runtime's deadlock-rescue woke them, and this shim purged
-    /// them from their primitive's waiter list. On resume they return
-    /// `ETIMEDOUT` instead of the signalled `0`. Populated by
-    /// [`ThreadRuntime::settle_rescued`] from the runtime's rescued set.
+    /// fired: the runtime's timer expiry woke them, and this shim purged them
+    /// from their primitive's waiter list. On resume they return `ETIMEDOUT`
+    /// instead of the signalled `0`. Populated by
+    /// [`ThreadRuntime::settle_expired`] from the runtime's expired set.
     timed_out: std::collections::BTreeSet<TaskId>,
+    /// macOS: each blocked task's wait locations, the registration timer
+    /// settlement unlinks it through (on Linux the signal model's `blocked`
+    /// registration is the same record, see [`ThreadRuntime::register_wait`]).
+    #[cfg(target_os = "macos")]
+    waits: BTreeMap<TaskId, Vec<WaiterLoc>>,
     /// libdispatch semaphores modeled deterministically, keyed by the opaque
     /// handle the interposed `dispatch_semaphore_create` hands out. std's
     /// Darwin thread `Parker` (and everything built on it: `mpsc`/`mpmc`
@@ -846,7 +865,7 @@ struct ThreadRuntime {
 #[derive(Default)]
 struct DispatchSem {
     count: isize,
-    waiters: VecDeque<TaskId>,
+    waiters: WaitQueue<VecDeque<TaskId>>,
 }
 
 /// One waiter queued on a futex word (the kernel's `futex_q`).
@@ -882,9 +901,20 @@ impl FutexWaiter {
 }
 
 impl ThreadRuntime {
-    /// Queue a waiter on the futex word at `addr` (`futex_queue`).
-    fn queue_futex_waiter(&mut self, addr: usize, waiter: FutexWaiter) {
-        self.futexes.entry(addr).or_default().push_back(waiter);
+    /// Queue a waiter on the futex word at `addr` (`futex_queue`), as part
+    /// of its task's `wait`.
+    fn queue_futex_waiter(&mut self, addr: usize, waiter: FutexWaiter, wait: &mut Wait) {
+        let queue = self.futexes.entry(addr).or_default();
+        wait.enqueue(queue, waiter, WaiterLoc::Futex(addr));
+    }
+
+    /// Queue a requeued waiter on `addr`, whose wait was relocated there.
+    #[cfg(target_os = "linux")]
+    fn requeue_futex_waiter(&mut self, addr: usize, waiter: FutexWaiter) {
+        self.futexes
+            .entry(addr)
+            .or_default()
+            .requeue(waiter, Covered::Relocated);
     }
 
     /// Unqueue, in queue order, up to `limit` of the waiters on `addr`
@@ -928,8 +958,7 @@ impl ThreadRuntime {
         }
         let mut scheduler = RealScheduler;
         for task in tasks {
-            #[cfg(target_os = "linux")]
-            self.remove_signal_wait(task);
+            self.remove_wait(task);
             if let Err(message) = scheduler.wake(task) {
                 fatal(&message);
             }
@@ -987,7 +1016,9 @@ impl ThreadRuntime {
             RealScheduler.wake(task)?;
         }
         let next = RealScheduler.next()?;
-        self.settle_rescued()?;
+        // The pick may have run the deadlock rescue, and the park before it a
+        // registration-time expiry: settle both before this section goes on.
+        self.settle_expired();
         #[cfg(target_os = "linux")]
         for task in self.fire_timers().map_err(ThreadError::Posix)? {
             RealScheduler.wake(task)?;
@@ -1002,13 +1033,10 @@ impl ThreadRuntime {
     }
 
     fn begin_lock(&mut self, me: TaskId, key: usize, kind: MutexKind) -> Result<Step, ThreadError> {
-        match self.table.lock(me, key, kind)? {
+        let mut wait = Wait::new(BlockClass::Sync, vec![]);
+        match self.table.lock(me, key, kind, &mut wait)? {
             LockStep::Acquired => Ok(Step::Continue),
-            LockStep::MustBlock => self.block(
-                me,
-                "mutex-contended",
-                Wait::new(BlockClass::Sync, vec![WaiterLoc::Mutex(key)]),
-            ),
+            LockStep::MustBlock => self.block(me, "mutex-contended", wait),
         }
     }
 
@@ -1018,13 +1046,10 @@ impl ThreadRuntime {
         key: usize,
         kind: RwLockKind,
     ) -> Result<Step, ThreadError> {
-        match self.table.rwlock_rdlock(me, key, kind)? {
+        let mut wait = Wait::new(BlockClass::Sync, vec![]);
+        match self.table.rwlock_rdlock(me, key, kind, &mut wait)? {
             LockStep::Acquired => Ok(Step::Continue),
-            LockStep::MustBlock => self.block(
-                me,
-                "rwlock-read-contended",
-                Wait::new(BlockClass::Sync, vec![WaiterLoc::RwRead(key)]),
-            ),
+            LockStep::MustBlock => self.block(me, "rwlock-read-contended", wait),
         }
     }
 
@@ -1034,13 +1059,10 @@ impl ThreadRuntime {
         key: usize,
         kind: RwLockKind,
     ) -> Result<Step, ThreadError> {
-        match self.table.rwlock_wrlock(me, key, kind)? {
+        let mut wait = Wait::new(BlockClass::Sync, vec![]);
+        match self.table.rwlock_wrlock(me, key, kind, &mut wait)? {
             LockStep::Acquired => Ok(Step::Continue),
-            LockStep::MustBlock => self.block(
-                me,
-                "rwlock-write-contended",
-                Wait::new(BlockClass::Sync, vec![WaiterLoc::RwWrite(key)]),
-            ),
+            LockStep::MustBlock => self.block(me, "rwlock-write-contended", wait),
         }
     }
 
@@ -1051,23 +1073,17 @@ impl ThreadRuntime {
         mutex_key: usize,
     ) -> Result<Step, ThreadError> {
         let mut scheduler = RealScheduler;
+        let mut wait = Wait::new(BlockClass::Sync, vec![]);
         self.table
-            .cond_wait(&mut scheduler, me, cond_key, mutex_key)?;
-        self.block(
-            me,
-            "cond-wait",
-            Wait::new(BlockClass::Sync, vec![WaiterLoc::Cond(cond_key, mutex_key)]),
-        )
+            .cond_wait(&mut scheduler, me, cond_key, mutex_key, &mut wait)?;
+        self.block(me, "cond-wait", wait)
     }
 
     fn begin_join(&mut self, me: TaskId, target: TaskId) -> Result<JoinResolve, ThreadError> {
-        match self.table.begin_join(me, target)? {
+        let mut wait = Wait::new(BlockClass::Sync, vec![]);
+        match self.table.begin_join(me, target, &mut wait)? {
             JoinStep::Done(retval) => Ok(JoinResolve::Ready(retval)),
-            JoinStep::MustBlock => Ok(JoinResolve::Blocked(self.block(
-                me,
-                "join",
-                Wait::new(BlockClass::Sync, vec![WaiterLoc::Join(target)]),
-            )?)),
+            JoinStep::MustBlock => Ok(JoinResolve::Blocked(self.block(me, "join", wait)?)),
         }
     }
 
@@ -1080,10 +1096,7 @@ impl ThreadRuntime {
         // A wait before the first thread (a normal mutex's owner relocking
         // it) parks the main task, so the scheduler must know it.
         self.ensure_active()?;
-        #[cfg(target_os = "linux")]
-        self.register_signal_wait(me, reason, wait, None);
-        #[cfg(not(target_os = "linux"))]
-        let _ = (wait.class, wait.locs);
+        self.register_wait(me, reason, wait, None);
         let mut scheduler = RealScheduler;
         scheduler.park(me, reason)?;
         let next = self.next_task()?;
@@ -1116,10 +1129,7 @@ impl ThreadRuntime {
         // As in `block`: the main task may wait before the first thread.
         self.ensure_active()?;
         let mut scheduler = RealScheduler;
-        #[cfg(target_os = "linux")]
-        self.register_signal_wait(me, reason, wait, Some((clock, deadline)));
-        #[cfg(not(target_os = "linux"))]
-        let _ = (wait.class, wait.locs);
+        self.register_wait(me, reason, wait, Some((clock, deadline)));
         scheduler.park_timed(me, reason, clock, deadline)?;
         let next = self.next_task()?;
         match next {
@@ -1129,138 +1139,6 @@ impl ThreadRuntime {
                 "scheduler returned no runnable task after timed park".into(),
             )),
         }
-    }
-
-    /// After a `scheduler.next()` that may have run the runtime's deadlock
-    /// rescue, unlink every rescued task from the primitive it was waiting on
-    /// and flag cond/futex timeouts. Doing this before the baton is handed
-    /// off keeps a later signal (`cond_broadcast`, `FUTEX_WAKE`) from trying
-    /// to re-wake an already timer-woken task.
-    fn settle_rescued(&mut self) -> Result<(), ThreadError> {
-        let rescued = with_context_raw(|context| Ok(context.take_rescued_timeouts()))
-            .map_err(ThreadError::Posix)?;
-        for task in rescued {
-            self.mark_timed_out(task);
-        }
-        Ok(())
-    }
-
-    /// Unlink `task` from whichever wait queue holds it. A cond or futex
-    /// waiter also enters `timed_out` so its wait returns `ETIMEDOUT`; a
-    /// socket waiter simply retries (the packet is now due, or its timeout
-    /// has passed), and a bare timed sleep is on no queue at all.
-    fn mark_timed_out(&mut self, task: TaskId) {
-        #[cfg(target_os = "linux")]
-        {
-            if self.signals.blocked.get(&task).is_some_and(|blocked| {
-                blocked.locs.iter().any(|loc| {
-                    matches!(
-                        loc,
-                        WaiterLoc::Cond(..) | WaiterLoc::Ipc(..) | WaiterLoc::Futex(..)
-                    )
-                })
-            }) {
-                self.timed_out.insert(task);
-            }
-            self.remove_signal_wait(task);
-        }
-        #[cfg(target_os = "macos")]
-        {
-            for cond in self.table.conds.values_mut() {
-                if let Some(index) = cond.waiters.iter().position(|(waiter, _)| *waiter == task) {
-                    cond.waiters.remove(index);
-                    self.timed_out.insert(task);
-                    return;
-                }
-            }
-            for waiters in self.futexes.values_mut() {
-                if let Some(index) = waiters.iter().position(|waiter| waiter.task == task) {
-                    waiters.remove(index);
-                    self.timed_out.insert(task);
-                    return;
-                }
-            }
-            #[cfg(target_os = "macos")]
-            for sem in self.dispatch.values_mut() {
-                if let Some(index) = sem.waiters.iter().position(|waiter| *waiter == task) {
-                    sem.waiters.remove(index);
-                    // The waiter eagerly decremented on entry; restore it so a
-                    // negative `count` keeps equaling the live waiter total.
-                    sem.count += 1;
-                    self.timed_out.insert(task);
-                    return;
-                }
-            }
-            for socket in self.net.sockets.table.values_mut() {
-                for waiters in [&mut socket.recv_waiters, &mut socket.send_waiters] {
-                    if let Some(index) = waiters.iter().position(|waiter| *waiter == task) {
-                        waiters.remove(index);
-                        return;
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn thread_runtime() -> &'static SpinMutex<ThreadRuntime> {
-    static RUNTIME: OnceLock<SpinMutex<ThreadRuntime>> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        SpinMutex::new(ThreadRuntime {
-            table: ThreadTable::default(),
-            #[cfg(target_os = "linux")]
-            signals: signals::SignalRuntime::default(),
-            #[cfg(target_os = "linux")]
-            ipc: ipc::Ipc::default(),
-            #[cfg(target_os = "linux")]
-            ptys: pty::Ptys::default(),
-            locks: locks::Locks::default(),
-            #[cfg(target_os = "linux")]
-            sched: sched::SchedRuntime::default(),
-            #[cfg(target_os = "linux")]
-            registrations: registrations::RegistrationRuntime::default(),
-            #[cfg(target_os = "linux")]
-            timers: timers::Timers::default(),
-            #[cfg(target_os = "linux")]
-            cancels: cancel::Cancels::default(),
-            #[cfg(target_os = "linux")]
-            inotify: inotify::Inotify::default(),
-            handles: BTreeMap::new(),
-            sems: BTreeMap::new(),
-            net: NetState::new(),
-            futexes: BTreeMap::new(),
-            #[cfg(target_os = "linux")]
-            futex_woken: BTreeMap::new(),
-            timed_out: std::collections::BTreeSet::new(),
-            #[cfg(target_os = "macos")]
-            dispatch: BTreeMap::new(),
-            #[cfg(target_os = "macos")]
-            next_dispatch_handle: 1,
-            active: false,
-        })
-    })
-}
-
-fn lock_state() -> SpinGuard<'static, ThreadRuntime> {
-    thread_runtime().lock()
-}
-
-/// Observer lock order is the ordinary ThreadRuntime -> Context order.
-/// Never wait for the guest: a busy shim is not compute-only starvation.
-pub(super) fn watchdog_observe(
-    observe: impl FnOnce(&mut super::Context, &BTreeMap<usize, TaskId>),
-) {
-    let Some(state) = thread_runtime().try_lock() else {
-        return;
-    };
-    if !state.active || main_returned() {
-        return;
-    }
-    let Some(mut slot) = super::slot().try_lock() else {
-        return;
-    };
-    if let Some(context) = slot.as_mut() {
-        observe(context, &state.handles);
     }
 }
 

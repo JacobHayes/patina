@@ -156,6 +156,63 @@ fn the_spin_rescue_stops_at_an_alarm() {
     context.finish().unwrap();
 }
 
+/// Class detector: every clock advance drains due timers through the shared
+/// sleep-until path, even with a runnable task. Selection stays policy-driven.
+fn spin_until_sleepers_run(context: &mut Context) {
+    let deadline = DEFAULT_BOOT_ORIGIN_NANOS + 1_500;
+    let mut sleepers = Vec::new();
+    for _ in 0..2 {
+        let sleeper = context.task_spawn("sleeper").unwrap();
+        assert_eq!(context.scheduler_next().unwrap(), Some(sleeper));
+        context
+            .task_park_timed(sleeper, "sleep", ClockKind::Monotonic, deadline)
+            .unwrap();
+        sleepers.push(sleeper);
+    }
+    let spinner = context.task_spawn("spinner").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(spinner));
+    while context.now(ClockKind::Monotonic).unwrap() < deadline {}
+    // The rescue lands exactly on the deadline and wakes in registration order,
+    // before another clock observation or scheduling decision can step past it.
+    assert_eq!(context.current_monotonic().unwrap(), deadline);
+    assert_eq!(context.take_expired_timeouts(), sleepers);
+    assert!(context.take_expired_timeouts().is_empty());
+    let mut remaining = sleepers;
+    let mut running = spinner;
+    for _ in 0..100 {
+        context.task_yield(running).unwrap();
+        running = context.scheduler_next().unwrap().unwrap();
+        if running != spinner {
+            remaining.retain(|task| *task != running);
+            context.task_complete(running).unwrap();
+            running = context.scheduler_next().unwrap().unwrap();
+        }
+        if remaining.is_empty() {
+            break;
+        }
+    }
+    assert!(remaining.is_empty(), "timer-woken tasks must get a turn");
+    context.task_complete(spinner).unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), None);
+}
+
+#[test]
+fn spin_rescue_wakes_due_sleepers_and_replays_their_turns() {
+    let directory = tempdir().unwrap();
+    let first = directory.path().join("sleepers-a.patina");
+    let second = directory.path().join("sleepers-b.patina");
+    for path in [&first, &second] {
+        let mut context =
+            Context::from_config(RuntimeConfig::record(9, path, "sleepers-v1")).unwrap();
+        spin_until_sleepers_run(&mut context);
+        context.finish().unwrap();
+    }
+    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
+    let mut replay = Context::from_config(RuntimeConfig::replay(&first, "sleepers-v1")).unwrap();
+    spin_until_sleepers_run(&mut replay);
+    replay.finish().unwrap();
+}
+
 /// Spin on the clock until `cpu` nanoseconds of CPU time are charged;
 /// the rescues it took.
 fn spin_for_cpu(context: &mut Context, cpu: u64) -> u64 {

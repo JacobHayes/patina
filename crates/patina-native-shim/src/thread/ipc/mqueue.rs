@@ -95,10 +95,10 @@ pub(super) struct Mqueue {
     opens: usize,
     /// The registration: `(sigev_notify, sigev_signo, sigev_value)`.
     pub(super) notify: Option<(i32, i32, u64)>,
-    pub(super) receivers: VecDeque<TaskId>,
-    pub(super) senders: VecDeque<MqSender>,
-    pub(super) readable_watchers: VecDeque<TaskId>,
-    pub(super) writable_watchers: VecDeque<TaskId>,
+    pub(super) receivers: WaitQueue<VecDeque<TaskId>>,
+    pub(super) senders: WaitQueue<VecDeque<MqSender>>,
+    pub(super) readable_watchers: WaitQueue<VecDeque<TaskId>>,
+    pub(super) writable_watchers: WaitQueue<VecDeque<TaskId>>,
     /// Arrival and departure counts: the epoll edge sequences.
     pub(super) arrivals: u64,
     departures: u64,
@@ -272,10 +272,10 @@ pub(crate) unsafe fn mq_open(
                     named: true,
                     opens: 0,
                     notify: None,
-                    receivers: VecDeque::new(),
-                    senders: VecDeque::new(),
-                    readable_watchers: VecDeque::new(),
-                    writable_watchers: VecDeque::new(),
+                    receivers: WaitQueue::new(),
+                    senders: WaitQueue::new(),
+                    readable_watchers: WaitQueue::new(),
+                    writable_watchers: WaitQueue::new(),
                     arrivals: 0,
                     departures: 0,
                     charge,
@@ -422,7 +422,7 @@ pub(crate) unsafe fn mq_timedsend(
         // SAFETY: per this function's contract.
         let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
         if queue.messages.len() < queue.maxmsg {
-            let mut woken: Vec<TaskId> = queue.readable_watchers.drain(..).collect();
+            let mut woken: Vec<TaskId> = queue.readable_watchers.drain().collect();
             let mut notify = None;
             if let Some(receiver) = queue.receivers.pop_front() {
                 // `pipelined_send`: the waiting receiver takes it directly.
@@ -456,22 +456,16 @@ pub(crate) unsafe fn mq_timedsend(
             Ok(false) => {}
             Err(errno) => return fail(errno),
         }
-        queue.senders.push_back(MqSender {
+        let loc = IpcWait::MqSend(queue_id);
+        let mut wait = Wait::new(BlockClass::Io, vec![]);
+        let sender = MqSender {
             task: me,
             prio,
             data: bytes,
-        });
-        let loc = IpcWait::MqSend(queue_id);
+        };
+        wait.enqueue(&mut queue.senders, sender, WaiterLoc::Ipc(loc));
         let timed = deadline.map(|at| (ClockKind::Realtime, at));
-        match wait_on(
-            state,
-            me,
-            "mq_timedsend",
-            BlockClass::Io,
-            loc,
-            timed,
-            ETIMEDOUT,
-        ) {
+        match wait_on(state, me, "mq_timedsend", wait, loc, timed, ETIMEDOUT) {
             Ok(Some(Outcome::Done(result))) => return result,
             Ok(_) => {}
             Err(result) => return result,
@@ -561,11 +555,11 @@ pub(crate) unsafe fn mq_timedreceive(
         if let Some((priority, message)) = queue.messages.pop_front() {
             queue.qsize -= message.len();
             queue.departures += 1;
-            let mut woken: Vec<TaskId> = queue.writable_watchers.drain(..).collect();
+            let mut woken: Vec<TaskId> = queue.writable_watchers.drain().collect();
             // `pipelined_receive`: a waiting sender's message takes the room.
             if let Some(sender) = queue.senders.pop_front() {
                 queue.insert(sender.prio, sender.data);
-                woken.extend(queue.readable_watchers.drain(..));
+                woken.extend(queue.readable_watchers.drain());
                 ipc.outcomes.insert(sender.task, Outcome::Done(0));
                 woken.push(sender.task);
             }
@@ -581,18 +575,11 @@ pub(crate) unsafe fn mq_timedreceive(
             Ok(false) => {}
             Err(errno) => return fail(errno),
         }
-        queue.receivers.push_back(me);
         let loc = IpcWait::MqRecv(queue_id);
+        let mut wait = Wait::new(BlockClass::Io, vec![]);
+        wait.enqueue(&mut queue.receivers, me, WaiterLoc::Ipc(loc));
         let timed = deadline.map(|at| (ClockKind::Realtime, at));
-        match wait_on(
-            state,
-            me,
-            "mq_timedreceive",
-            BlockClass::Io,
-            loc,
-            timed,
-            ETIMEDOUT,
-        ) {
+        match wait_on(state, me, "mq_timedreceive", wait, loc, timed, ETIMEDOUT) {
             Ok(Some(Outcome::Message(message))) => break (message.mtype as u32, message.text),
             Ok(Some(Outcome::Done(result))) | Err(result) => return result,
             Ok(None) => {}
@@ -851,14 +838,19 @@ pub(in crate::thread) fn mq_watch(
     handle: u64,
     me: TaskId,
     readable: bool,
-) -> Option<WaiterLoc> {
-    let queue_id = state.ipc.mq_opens.get(&handle)?.queue;
-    let queue = state.ipc.mqueues.get_mut(&queue_id)?;
+    wait: &mut Wait,
+) {
+    let Some(queue_id) = state.ipc.mq_opens.get(&handle).map(|open| open.queue) else {
+        return;
+    };
+    let Some(queue) = state.ipc.mqueues.get_mut(&queue_id) else {
+        return;
+    };
     if readable {
-        queue.readable_watchers.push_back(me);
-        Some(WaiterLoc::Ipc(IpcWait::MqReadable(queue_id)))
+        let loc = WaiterLoc::Ipc(IpcWait::MqReadable(queue_id));
+        wait.enqueue(&mut queue.readable_watchers, me, loc);
     } else {
-        queue.writable_watchers.push_back(me);
-        Some(WaiterLoc::Ipc(IpcWait::MqWritable(queue_id)))
+        let loc = WaiterLoc::Ipc(IpcWait::MqWritable(queue_id));
+        wait.enqueue(&mut queue.writable_watchers, me, loc);
     }
 }

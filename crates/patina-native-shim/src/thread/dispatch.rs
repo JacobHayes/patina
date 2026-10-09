@@ -77,7 +77,7 @@ pub extern "C" fn patina_dispatch_semaphore_create(value: isize) -> *mut c_void 
         handle,
         DispatchSem {
             count: value,
-            waiters: VecDeque::new(),
+            waiters: WaitQueue::new(),
         },
     );
     handle as *mut c_void
@@ -135,14 +135,14 @@ pub extern "C" fn patina_dispatch_semaphore_wait(sem: *mut c_void, timeout: u64)
         }
         return DISPATCH_TIMED_OUT;
     }
-    state
+    let mut wait = Wait::new(BlockClass::Sync, vec![]);
+    let sem = state
         .dispatch
         .get_mut(&key)
-        .expect("semaphore was just decremented")
-        .waiters
-        .push_back(me);
+        .expect("semaphore was just decremented");
+    wait.enqueue(&mut sem.waiters, me, WaiterLoc::Dispatch(key));
     if timeout == DISPATCH_TIME_FOREVER {
-        match state.block(me, "dispatch-sem-wait", Wait::new(BlockClass::Sync, vec![])) {
+        match state.block(me, "dispatch-sem-wait", wait) {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => {
                 fatal("dispatch semaphore wait parked without transferring the baton")
@@ -163,7 +163,7 @@ pub extern "C" fn patina_dispatch_semaphore_wait(sem: *mut c_void, timeout: u64)
         match state.block_timed(
             me,
             "dispatch-sem-timedwait",
-            Wait::new(BlockClass::Sync, vec![]),
+            wait,
             ClockKind::Monotonic,
             deadline,
         ) {

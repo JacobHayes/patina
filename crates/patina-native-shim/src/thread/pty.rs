@@ -196,7 +196,7 @@ struct Pair {
     /// The slave's output column (`ldata->column`).
     column: usize,
     /// Tasks waiting to read each side, or watching it for readiness.
-    waiters: [VecDeque<TaskId>; 2],
+    waiters: [WaitQueue<VecDeque<TaskId>>; 2],
     /// Each side's wakeups as an edge-triggered epoll interest sees them
     /// (`ep_poll_callback` drops a keyed wakeup whose key the interest does
     /// not ask for): those that reach an interest in input, and those that
@@ -404,7 +404,7 @@ pub(crate) fn open_master(flags: u32, cloexec: bool) -> c_int {
                 canon: 0,
                 to_master: VecDeque::new(),
                 column: 0,
-                waiters: [VecDeque::new(), VecDeque::new()],
+                waiters: [WaitQueue::new(), WaitQueue::new()],
                 edges: [(0, 0); 2],
             },
         );

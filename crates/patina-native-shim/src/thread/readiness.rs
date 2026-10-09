@@ -100,16 +100,11 @@ fn poll_sources(
         }) {
             return Ok(0);
         }
-        let locs = register_readiness_waiters(&mut state, me, &watched);
+        let wait = register_readiness_waiters(&mut state, me, &watched);
+        let locs = wait.locs.clone();
         let step = match deadline {
-            Some(deadline) => state.block_timed(
-                me,
-                "poll",
-                Wait::new(BlockClass::Readiness, locs.clone()),
-                ClockKind::Monotonic,
-                deadline,
-            ),
-            None => state.block(me, "poll", Wait::new(BlockClass::Readiness, locs.clone())),
+            Some(deadline) => state.block_timed(me, "poll", wait, ClockKind::Monotonic, deadline),
+            None => state.block(me, "poll", wait),
         };
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),

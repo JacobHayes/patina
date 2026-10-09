@@ -387,6 +387,7 @@ pub(crate) fn thread_finish(task: TaskId, retval: usize, exit_status: i32) {
     if let Err(ThreadError::Fatal(message)) = state.table.exit(&mut scheduler, task, retval) {
         fatal(&message);
     }
+    state.finish_wait(task);
     #[cfg(target_os = "linux")]
     state.signals.finish(task);
     #[cfg(target_os = "linux")]

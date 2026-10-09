@@ -23,7 +23,7 @@ fn recv_deadline(handle: c_int, flags: c_int) -> Result<(Option<u64>, bool), c_i
 /// Park a receive until the next delivery SimNet has for `sid`, the
 /// deadline, or a wake.
 fn park_recv(
-    state: SpinGuard<'_, ThreadRuntime>,
+    state: StateGuard,
     handle: c_int,
     sid: Option<SocketId>,
     deadline: Option<u64>,

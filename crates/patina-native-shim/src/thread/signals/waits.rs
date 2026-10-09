@@ -48,7 +48,7 @@ impl ThreadRuntime {
             wakes.insert(task);
         }
         for fd in self.signals.signalfds.values() {
-            for &task in &fd.waiters {
+            for &task in fd.waiters.iter() {
                 if self
                     .signals
                     .blocked
@@ -75,16 +75,10 @@ impl ThreadRuntime {
                 self.table.threads.get_mut(&task).unwrap().signal_resume = Some(false);
                 self.signals.blocked.remove(&task);
             } else {
-                self.remove_signal_wait(task);
+                self.remove_wait(task);
             }
         }
         wakes.into_iter().collect()
-    }
-
-    pub(in crate::thread) fn remove_signal_wait(&mut self, task: TaskId) {
-        if let Some(blocked) = self.signals.blocked.remove(&task) {
-            unregister_waiters(self, task, &blocked.locs);
-        }
     }
 
     pub(in crate::thread) fn register_signal_wait(
@@ -143,7 +137,7 @@ pub(in crate::thread) fn resume_with(before_delivery: impl FnOnce(Resumed)) -> R
     let me = current_task();
     let outcome = {
         let mut state = lock_state();
-        state.remove_signal_wait(me);
+        state.remove_wait(me);
         let Some(interrupt) = state.signals.interrupted.remove(&me) else {
             drop(state);
             before_delivery(Resumed::Normal);

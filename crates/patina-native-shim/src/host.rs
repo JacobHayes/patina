@@ -663,16 +663,6 @@ pub(crate) mod hostcoll {
             }
         }
 
-        #[cfg(target_os = "macos")]
-        pub fn as_mut_slice(&mut self) -> &mut [T] {
-            if self.ptr.is_null() {
-                &mut []
-            } else {
-                // SAFETY: as above; `&mut self` guarantees exclusive access.
-                unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
-            }
-        }
-
         /// Remove the element at `index`, moving the last element into its place
         /// (order not preserved). Used where iteration order is irrelevant.
         pub fn swap_remove(&mut self, index: usize) -> T {
@@ -823,14 +813,6 @@ pub(crate) mod hostcoll {
         #[cfg(all(test, target_os = "linux"))]
         pub fn values(&self) -> impl Iterator<Item = &V> {
             self.entries.as_slice().iter().map(|(_, value)| value)
-        }
-
-        #[cfg(target_os = "macos")]
-        pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
-            self.entries
-                .as_mut_slice()
-                .iter_mut()
-                .map(|(_, value)| value)
         }
     }
 

@@ -18,7 +18,10 @@ fn store(word: usize, value: u32) {
 }
 
 fn queued(word: usize) -> usize {
-    lock_state().futexes.get(&word).map_or(0, VecDeque::len)
+    lock_state()
+        .futexes
+        .get(&word)
+        .map_or(0, |queue| queue.len())
 }
 
 fn timespec(nanos: u64) -> [i64; 2] {

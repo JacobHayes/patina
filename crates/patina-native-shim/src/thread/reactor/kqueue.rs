@@ -11,11 +11,13 @@ use crate::abi::{SysResult, failed};
 #[cfg(patina_posix_exports)]
 use patina_dst_abi::ClockKind;
 
-use super::{FdKind, TaskId, ThreadRuntime, fatal, lock_state, wake_all, with_context_raw};
+use super::{
+    FdKind, TaskId, ThreadRuntime, WaitQueue, fatal, lock_state, wake_all, with_context_raw,
+};
 // The gather path: only the guest archive's `kqueue`/`kevent` doors reach it.
 #[cfg(patina_posix_exports)]
 use super::{
-    BlockClass, O_READ, O_WRITE, PatinaKevent, ReadyDir, Step, Wait, current_task, fd_poll,
+    O_READ, O_WRITE, PatinaKevent, ReadyDir, Step, WaiterLoc, current_task, fd_poll,
     register_readiness_waiters, sched_point, switch_and_park, unregister_waiters,
 };
 #[cfg(patina_posix_exports)]
@@ -81,7 +83,7 @@ pub(super) struct FilterKey {
 #[derive(Default)]
 struct Kqueue {
     filters: BTreeMap<FilterKey, KFilterState>,
-    waiters: VecDeque<TaskId>,
+    waiters: WaitQueue<VecDeque<TaskId>>,
 }
 
 /// A kqueue registry. The descriptor table refcounts the description
@@ -140,10 +142,10 @@ pub(crate) fn create() -> SysResult<c_int> {
 /// waking any task parked in `kevent` on it.
 pub(crate) fn kqueue_close(handle: u64) {
     let mut state = lock_state();
-    let Some(slot) = state.net.kqueues.remove(&handle) else {
+    let Some(mut slot) = state.net.kqueues.remove(&handle) else {
         return;
     };
-    let waiters: Vec<TaskId> = slot.kq.waiters.into_iter().collect();
+    let waiters: Vec<TaskId> = slot.kq.waiters.take().into_iter().collect();
     drop(state);
     wake_all(waiters);
 }
@@ -311,7 +313,7 @@ pub extern "C" fn patina_kqueue_apply(
             if let Some(entry) = kq.filters.get_mut(&key) {
                 entry.user_triggered = true;
             }
-            me_wake = kq.waiters.drain(..).collect();
+            me_wake = kq.waiters.drain().collect();
         } else {
             me_wake = Vec::new();
         }
@@ -611,26 +613,15 @@ pub(crate) unsafe fn gather_core(
         // plus the kqueue-specific EVFILT_USER trigger, whose wakeup is
         // the kq's own waiter list rather than a descriptor.
         let (watched, has_user) = watched_sources(&state, id);
-        let locs = register_readiness_waiters(&mut state, me, &watched);
+        let mut wait = register_readiness_waiters(&mut state, me, &watched);
         if has_user {
-            state
-                .net
-                .kqueues
-                .get_mut(&id)
-                .expect("kqueue exists")
-                .kq
-                .waiters
-                .push_back(me);
+            let kq = &mut state.net.kqueues.get_mut(&id).expect("kqueue exists").kq;
+            wait.enqueue(&mut kq.waiters, me, WaiterLoc::KqueueUser(id));
         }
+        let locs = wait.locs.clone();
         let step = match park_deadline {
-            Some(deadline) => state.block_timed(
-                me,
-                "kevent",
-                Wait::new(BlockClass::Readiness, locs.clone()),
-                ClockKind::Monotonic,
-                deadline,
-            ),
-            None => state.block(me, "kevent", Wait::new(BlockClass::Readiness, locs.clone())),
+            Some(deadline) => state.block_timed(me, "kevent", wait, ClockKind::Monotonic, deadline),
+            None => state.block(me, "kevent", wait),
         };
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
@@ -638,22 +629,20 @@ pub(crate) unsafe fn gather_core(
             Err(error) => {
                 let mut state = lock_state();
                 unregister_waiters(&mut state, me, &locs);
-                detach_user_waiter(&mut state, id, me);
                 return Err(failed(c_int::from(error.into_posix())));
             }
         }
         let mut state = lock_state();
         unregister_waiters(&mut state, me, &locs);
-        detach_user_waiter(&mut state, id, me);
         state.timed_out.remove(&me);
         drop(state);
     }
 }
 
-/// Unlink `me` from the kq's EVFILT_USER waiter list. Idempotent, so the
-/// gather resume paths call it unconditionally.
+/// Unlink `me` from a kqueue's `EVFILT_USER` waiter list (the
+/// `WaiterLoc::KqueueUser` registration).
 #[cfg(patina_posix_exports)]
-fn detach_user_waiter(state: &mut ThreadRuntime, id: u64, me: TaskId) {
+pub(in crate::thread) fn unwait_user(state: &mut ThreadRuntime, id: u64, me: TaskId) {
     if let Some(slot) = state.net.kqueues.get_mut(&id)
         && let Some(index) = slot.kq.waiters.iter().position(|task| *task == me)
     {

@@ -97,8 +97,8 @@ pub(crate) struct Socket {
     /// `sk_err`: the pending error `SO_ERROR` and the next call report.
     pub(crate) error: c_int,
     pub(crate) proto: Proto,
-    pub(crate) recv_waiters: VecDeque<TaskId>,
-    pub(crate) send_waiters: VecDeque<TaskId>,
+    pub(in crate::thread) recv_waiters: WaitQueue<VecDeque<TaskId>>,
+    pub(in crate::thread) send_waiters: WaitQueue<VecDeque<TaskId>>,
     /// Write-space arrivals: bumped whenever a receive frees room this
     /// socket's sends go into (`sk_write_space`), the write-direction edge an
     /// edge-triggered `EPOLLOUT` interest fires on.
@@ -124,8 +124,8 @@ impl Socket {
             shutdown: 0,
             error: 0,
             proto,
-            recv_waiters: VecDeque::new(),
-            send_waiters: VecDeque::new(),
+            recv_waiters: WaitQueue::new(),
+            send_waiters: WaitQueue::new(),
             write_space: 0,
             inode,
         }
@@ -299,7 +299,7 @@ pub(crate) fn now() -> Result<u64, c_int> {
 /// the virtual-clock `deadline` (the socket's timeout) passes, or a signal
 /// interrupts it (`EINTR`). The caller decided to wait while holding `state`.
 pub(super) fn park(
-    state: SpinGuard<'_, ThreadRuntime>,
+    state: StateGuard,
     handle: c_int,
     dir: Dir,
     deadline: Option<u64>,
@@ -311,7 +311,7 @@ pub(super) fn park(
 /// [`park`] until `until`, which may be earlier than the socket's timeout
 /// (a delivery the network has scheduled); `timed`: the socket has one.
 pub(super) fn park_until(
-    mut state: SpinGuard<'_, ThreadRuntime>,
+    mut state: StateGuard,
     handle: c_int,
     dir: Dir,
     until: Option<u64>,
@@ -322,17 +322,19 @@ pub(super) fn park_until(
     let Some(socket) = state.net.sockets.table.get_mut(&handle) else {
         return Err(crate::EBADF);
     };
+    let mut wait = Wait::new(BlockClass::Io, vec![]);
     let loc = match dir {
         Dir::Recv => {
-            socket.recv_waiters.push_back(me);
-            WaiterLoc::SockRecv(handle)
+            let loc = WaiterLoc::SockRecv(handle);
+            wait.enqueue(&mut socket.recv_waiters, me, loc);
+            loc
         }
         Dir::Send => {
-            socket.send_waiters.push_back(me);
-            WaiterLoc::SockSend(handle)
+            let loc = WaiterLoc::SockSend(handle);
+            wait.enqueue(&mut socket.send_waiters, me, loc);
+            loc
         }
     };
-    let wait = Wait::new(BlockClass::Io, vec![loc]);
     let step = match until {
         Some(until) => state.block_timed(me, reason, wait, ClockKind::Monotonic, until),
         None => state.block(me, reason, wait),
@@ -398,7 +400,7 @@ pub(super) fn room_freed(state: &mut ThreadRuntime, writer: c_int) -> Vec<TaskId
     match state.net.sockets.table.get_mut(&writer) {
         Some(socket) => {
             socket.write_space = socket.write_space.wrapping_add(1);
-            socket.send_waiters.drain(..).collect()
+            socket.send_waiters.drain().collect()
         }
         None => Vec::new(),
     }
@@ -412,8 +414,8 @@ pub(super) fn waiters(state: &mut ThreadRuntime, handle: c_int, dir: Dir) -> Vec
         .table
         .get_mut(&handle)
         .map(|socket| match dir {
-            Dir::Recv => socket.recv_waiters.drain(..).collect(),
-            Dir::Send => socket.send_waiters.drain(..).collect(),
+            Dir::Recv => socket.recv_waiters.drain().collect(),
+            Dir::Send => socket.send_waiters.drain().collect(),
         })
         .unwrap_or_default()
 }

@@ -406,6 +406,120 @@ fn a_timed_park_with_no_other_runnable_task_rescues_itself() {
         context.now(ClockKind::Monotonic).unwrap(),
         DEFAULT_BOOT_ORIGIN_NANOS + 4_096
     );
-    assert!(context.take_rescued_timeouts().contains(&task));
+    assert!(context.take_expired_timeouts().contains(&task));
     context.task_complete(task).unwrap();
+}
+
+#[test]
+fn a_timed_park_whose_deadline_passed_expires_beside_a_runnable_peer() {
+    // Class pairing: `expire_due_timers` runs at registration as well as at
+    // every clock advance, so the registry never holds a reached deadline and
+    // no expiry waits for every task to park (the deadlock rescue).
+    let mut context = Context::from_config(RuntimeConfig::seeded(5)).unwrap();
+    let peer = context.task_spawn("peer").unwrap();
+    let waiter = context.task_spawn("waiter").unwrap();
+    while context.scheduler_next().unwrap() != Some(waiter) {
+        context.task_yield(peer).unwrap();
+    }
+    let now = context.now(ClockKind::Monotonic).unwrap();
+    for deadline in [now, now - 1] {
+        context
+            .task_park_timed(waiter, "sleep", ClockKind::Monotonic, deadline)
+            .unwrap();
+        // The runnable peer does not hold the expiry back: the waiter is
+        // selectable again without virtual time moving.
+        let mut picked = Vec::new();
+        for _ in 0..64 {
+            let task = context.scheduler_next().unwrap().unwrap();
+            picked.push(task);
+            if task == waiter {
+                break;
+            }
+            context.task_yield(task).unwrap();
+        }
+        assert_eq!(
+            picked.last(),
+            Some(&waiter),
+            "expired waiter never ran: {picked:?}"
+        );
+        assert_eq!(context.now(ClockKind::Monotonic).unwrap(), now);
+        assert_eq!(context.take_expired_timeouts(), vec![waiter]);
+    }
+    // A future deadline stays registered until virtual time reaches it.
+    context
+        .task_park_timed(waiter, "sleep", ClockKind::Monotonic, now + 10)
+        .unwrap();
+    assert!(context.take_expired_timeouts().is_empty());
+}
+
+#[test]
+fn a_timed_park_without_a_clock_fails_before_parking() {
+    // Registration expiry reads the clock, so the missing driver must refuse
+    // the park before any scheduler state changes, not after it.
+    let mut context = RuntimeBuilder::new(RuntimeConfig::seeded(1))
+        .with_scheduler(patina_dst_sched_det::DetScheduler::new(1))
+        .build()
+        .unwrap();
+    let task = context.task_spawn("sleeper").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(task));
+    assert!(
+        context
+            .task_park_timed(task, "sleep", ClockKind::Monotonic, 1)
+            .is_err()
+    );
+    // Still runnable: the scheduler selects it again.
+    context.task_yield(task).unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(task));
+}
+
+/// A virtual clock whose reads fail while `failing` is set.
+struct FlakyClock {
+    inner: VirtualClock,
+    failing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl patina_dst_driver_api::ClockDriver for FlakyClock {
+    fn now(&mut self, clock: ClockKind) -> patina_dst_driver_api::DriverResult<u64> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(patina_dst_abi::EffectError::new(
+                patina_dst_abi::ErrorCode::Io,
+                "clock read failed",
+            ));
+        }
+        self.inner.now(clock)
+    }
+    fn sleep_until(
+        &mut self,
+        clock: ClockKind,
+        deadline_nanos: u64,
+    ) -> patina_dst_driver_api::DriverResult<()> {
+        self.inner.sleep_until(clock, deadline_nanos)
+    }
+}
+
+#[test]
+fn a_timed_park_whose_clock_read_fails_leaves_the_task_runnable() {
+    // All or nothing: registration expiry reads the clock, and that read
+    // precedes the park, so a failing driver changes no scheduler state.
+    let failing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut context = RuntimeBuilder::new(RuntimeConfig::seeded(1))
+        .with_default_drivers()
+        .with_clock(FlakyClock {
+            inner: VirtualClock::new(0),
+            failing: failing.clone(),
+        })
+        .build()
+        .unwrap();
+    let task = context.task_spawn("sleeper").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(task));
+    failing.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        context
+            .task_park_timed(task, "sleep", ClockKind::Monotonic, u64::MAX)
+            .is_err()
+    );
+    failing.store(false, std::sync::atomic::Ordering::SeqCst);
+    // Still runnable, with no timer: the scheduler selects it again.
+    context.task_yield(task).unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(task));
 }

@@ -89,7 +89,14 @@ fn uncontended_lock_and_unlock_round_trips() {
     let mut scheduler = DetAdapter::new(1);
     let a = TaskId(1);
     assert!(matches!(
-        table.lock(a, MUTEX, MutexKind::Normal).unwrap(),
+        table
+            .lock(
+                a,
+                MUTEX,
+                MutexKind::Normal,
+                &mut Wait::new(BlockClass::Sync, vec![])
+            )
+            .unwrap(),
         LockStep::Acquired
     ));
     assert_eq!(table.mutexes[&MUTEX].owner, Some(a));
@@ -105,20 +112,46 @@ fn an_owner_relock_follows_the_mutex_kind() {
     let b = TaskId(2);
 
     table.init_mutex(MUTEX, MutexKind::ErrorCheck);
-    table.lock(a, MUTEX, MutexKind::Normal).unwrap();
+    table
+        .lock(
+            a,
+            MUTEX,
+            MutexKind::Normal,
+            &mut Wait::new(BlockClass::Sync, vec![]),
+        )
+        .unwrap();
     assert!(matches!(
-        table.lock(a, MUTEX, MutexKind::Normal),
+        table.lock(
+            a,
+            MUTEX,
+            MutexKind::Normal,
+            &mut Wait::new(BlockClass::Sync, vec![])
+        ),
         Err(ThreadError::Posix(EDEADLK))
     ));
     assert_eq!(table.trylock(a, MUTEX, MutexKind::Normal), EBUSY);
 
     // First touched here: registered with the kind the call names.
     assert!(matches!(
-        table.lock(a, MUTEX + 1, MutexKind::Recursive).unwrap(),
+        table
+            .lock(
+                a,
+                MUTEX + 1,
+                MutexKind::Recursive,
+                &mut Wait::new(BlockClass::Sync, vec![])
+            )
+            .unwrap(),
         LockStep::Acquired
     ));
     assert!(matches!(
-        table.lock(a, MUTEX + 1, MutexKind::Normal).unwrap(),
+        table
+            .lock(
+                a,
+                MUTEX + 1,
+                MutexKind::Normal,
+                &mut Wait::new(BlockClass::Sync, vec![])
+            )
+            .unwrap(),
         LockStep::Acquired
     ));
     assert_eq!(table.trylock(a, MUTEX + 1, MutexKind::Normal), 0);
@@ -130,10 +163,24 @@ fn an_owner_relock_follows_the_mutex_kind() {
     assert_eq!(table.trylock(b, MUTEX + 1, MutexKind::Normal), 0);
 
     // A normal mutex's owner waits behind itself.
-    table.lock(a, MUTEX + 2, MutexKind::Normal).unwrap();
+    table
+        .lock(
+            a,
+            MUTEX + 2,
+            MutexKind::Normal,
+            &mut Wait::new(BlockClass::Sync, vec![]),
+        )
+        .unwrap();
     assert_eq!(table.trylock(a, MUTEX + 2, MutexKind::Normal), EBUSY);
     assert!(matches!(
-        table.lock(a, MUTEX + 2, MutexKind::Normal).unwrap(),
+        table
+            .lock(
+                a,
+                MUTEX + 2,
+                MutexKind::Normal,
+                &mut Wait::new(BlockClass::Sync, vec![])
+            )
+            .unwrap(),
         LockStep::MustBlock
     ));
 }
@@ -149,7 +196,14 @@ fn a_normal_mutex_unlock_checks_no_owner() {
     }
 
     // Another thread's unlock frees it; an unlocked one stays so.
-    table.lock(a, MUTEX, MutexKind::Normal).unwrap();
+    table
+        .lock(
+            a,
+            MUTEX,
+            MutexKind::Normal,
+            &mut Wait::new(BlockClass::Sync, vec![]),
+        )
+        .unwrap();
     table.unlock(&mut scheduler, b, MUTEX).unwrap();
     assert_eq!(table.mutexes[&MUTEX].owner, None);
     table.unlock(&mut scheduler, a, MUTEX).unwrap();
@@ -158,9 +212,23 @@ fn a_normal_mutex_unlock_checks_no_owner() {
     // The owner parked on its own relock resumes holding it once
     // another thread unlocks (a binary-semaphore hand-off).
     scheduler.scheduler.select(Some(a)).unwrap();
-    table.lock(a, MUTEX + 1, MutexKind::Normal).unwrap();
+    table
+        .lock(
+            a,
+            MUTEX + 1,
+            MutexKind::Normal,
+            &mut Wait::new(BlockClass::Sync, vec![]),
+        )
+        .unwrap();
     assert!(matches!(
-        table.lock(a, MUTEX + 1, MutexKind::Normal).unwrap(),
+        table
+            .lock(
+                a,
+                MUTEX + 1,
+                MutexKind::Normal,
+                &mut Wait::new(BlockClass::Sync, vec![])
+            )
+            .unwrap(),
         LockStep::MustBlock
     ));
     scheduler.park(a, "mutex").unwrap();
@@ -174,7 +242,9 @@ fn a_normal_mutex_unlock_checks_no_owner() {
         (MUTEX + 3, MutexKind::Recursive),
         (MUTEX + 4, MutexKind::NormalOwned),
     ] {
-        table.lock(a, key, kind).unwrap();
+        table
+            .lock(a, key, kind, &mut Wait::new(BlockClass::Sync, vec![]))
+            .unwrap();
         assert!(matches!(
             table.unlock(&mut scheduler, b, key),
             Err(ThreadError::Posix(EPERM))
@@ -211,11 +281,31 @@ fn a_recursive_mutex_held_twice_survives_a_cond_wait() {
     table.init_mutex(MUTEX, MutexKind::Recursive);
     table.init_cond(COND, ClockKind::Realtime);
 
-    table.lock(waiter, MUTEX, MutexKind::Recursive).unwrap();
-    table.lock(waiter, MUTEX, MutexKind::Recursive).unwrap();
+    table
+        .lock(
+            waiter,
+            MUTEX,
+            MutexKind::Recursive,
+            &mut Wait::new(BlockClass::Sync, vec![]),
+        )
+        .unwrap();
+    table
+        .lock(
+            waiter,
+            MUTEX,
+            MutexKind::Recursive,
+            &mut Wait::new(BlockClass::Sync, vec![]),
+        )
+        .unwrap();
     scheduler.scheduler.select(Some(waiter)).unwrap();
     table
-        .cond_wait(&mut scheduler, waiter, COND, MUTEX)
+        .cond_wait(
+            &mut scheduler,
+            waiter,
+            COND,
+            MUTEX,
+            &mut Wait::new(BlockClass::Sync, vec![]),
+        )
         .unwrap();
     // One unlock of two: the waiter still holds it.
     assert_eq!(table.mutexes[&MUTEX].owner, Some(waiter));
@@ -245,21 +335,42 @@ fn contended_mutex_wakes_waiters_in_fifo_order() {
     // parking after selection so the scheduler transitions stay valid.
     scheduler.scheduler.select(Some(a)).unwrap();
     assert!(matches!(
-        table.lock(a, MUTEX, MutexKind::Normal).unwrap(),
+        table
+            .lock(
+                a,
+                MUTEX,
+                MutexKind::Normal,
+                &mut Wait::new(BlockClass::Sync, vec![])
+            )
+            .unwrap(),
         LockStep::Acquired
     ));
     scheduler.yield_task(a).unwrap();
 
     scheduler.scheduler.select(Some(b)).unwrap();
     assert!(matches!(
-        table.lock(b, MUTEX, MutexKind::Normal).unwrap(),
+        table
+            .lock(
+                b,
+                MUTEX,
+                MutexKind::Normal,
+                &mut Wait::new(BlockClass::Sync, vec![])
+            )
+            .unwrap(),
         LockStep::MustBlock
     ));
     scheduler.park(b, "mutex").unwrap();
 
     scheduler.scheduler.select(Some(c)).unwrap();
     assert!(matches!(
-        table.lock(c, MUTEX, MutexKind::Normal).unwrap(),
+        table
+            .lock(
+                c,
+                MUTEX,
+                MutexKind::Normal,
+                &mut Wait::new(BlockClass::Sync, vec![])
+            )
+            .unwrap(),
         LockStep::MustBlock
     ));
     scheduler.park(c, "mutex").unwrap();
@@ -286,18 +397,20 @@ fn rwlock_trylock_and_deadlock_reporting() {
     // A write hold excludes both a reader and another writer; the
     // holder's blocking re-acquire is a deadlock, its tries are busy.
     assert!(matches!(
-        table.rwlock_wrlock(a, RWLOCK, kind).unwrap(),
+        table
+            .rwlock_wrlock(a, RWLOCK, kind, &mut Wait::new(BlockClass::Sync, vec![]))
+            .unwrap(),
         LockStep::Acquired
     ));
     assert_eq!(table.rwlock_trywrlock(b, RWLOCK, kind), EBUSY);
     assert_eq!(table.rwlock_tryrdlock(RWLOCK, kind), EBUSY);
     assert_eq!(table.rwlock_trywrlock(a, RWLOCK, kind), EBUSY);
     assert!(matches!(
-        table.rwlock_rdlock(a, RWLOCK, kind),
+        table.rwlock_rdlock(a, RWLOCK, kind, &mut Wait::new(BlockClass::Sync, vec![])),
         Err(ThreadError::Posix(EDEADLK))
     ));
     assert!(matches!(
-        table.rwlock_wrlock(a, RWLOCK, kind),
+        table.rwlock_wrlock(a, RWLOCK, kind, &mut Wait::new(BlockClass::Sync, vec![])),
         Err(ThreadError::Posix(EDEADLK))
     ));
 
@@ -341,7 +454,14 @@ fn rwlock_preference(kind: RwLockKind) {
     for reader in [r1, r2] {
         scheduler.scheduler.select(Some(reader)).unwrap();
         assert!(matches!(
-            table.rwlock_rdlock(reader, RWLOCK, kind).unwrap(),
+            table
+                .rwlock_rdlock(
+                    reader,
+                    RWLOCK,
+                    kind,
+                    &mut Wait::new(BlockClass::Sync, vec![])
+                )
+                .unwrap(),
             LockStep::Acquired
         ));
         scheduler.yield_task(reader).unwrap();
@@ -351,7 +471,9 @@ fn rwlock_preference(kind: RwLockKind) {
     // A writer arrives and blocks behind the active readers.
     scheduler.scheduler.select(Some(w1)).unwrap();
     assert!(matches!(
-        table.rwlock_wrlock(w1, RWLOCK, kind).unwrap(),
+        table
+            .rwlock_wrlock(w1, RWLOCK, kind, &mut Wait::new(BlockClass::Sync, vec![]))
+            .unwrap(),
         LockStep::MustBlock
     ));
     scheduler.park(w1, "rwlock-write").unwrap();
@@ -359,7 +481,9 @@ fn rwlock_preference(kind: RwLockKind) {
     // A new reader barges past the waiting writer only when readers
     // are preferred.
     scheduler.scheduler.select(Some(r3)).unwrap();
-    let step = table.rwlock_rdlock(r3, RWLOCK, kind).unwrap();
+    let step = table
+        .rwlock_rdlock(r3, RWLOCK, kind, &mut Wait::new(BlockClass::Sync, vec![]))
+        .unwrap();
     if readers_barge {
         assert!(matches!(step, LockStep::Acquired));
         scheduler.yield_task(r3).unwrap();
@@ -382,13 +506,17 @@ fn rwlock_preference(kind: RwLockKind) {
     // With the writer holding it, a reader and a second writer wait.
     scheduler.scheduler.select(Some(r4)).unwrap();
     assert!(matches!(
-        table.rwlock_rdlock(r4, RWLOCK, kind).unwrap(),
+        table
+            .rwlock_rdlock(r4, RWLOCK, kind, &mut Wait::new(BlockClass::Sync, vec![]))
+            .unwrap(),
         LockStep::MustBlock
     ));
     scheduler.park(r4, "rwlock-read").unwrap();
     scheduler.scheduler.select(Some(w2)).unwrap();
     assert!(matches!(
-        table.rwlock_wrlock(w2, RWLOCK, kind).unwrap(),
+        table
+            .rwlock_wrlock(w2, RWLOCK, kind, &mut Wait::new(BlockClass::Sync, vec![]))
+            .unwrap(),
         LockStep::MustBlock
     ));
     scheduler.park(w2, "rwlock-write").unwrap();
@@ -441,16 +569,18 @@ fn a_join_that_could_never_end_is_edeadlk() {
     table.register(a);
     table.register(b);
     assert!(matches!(
-        table.begin_join(a, a),
+        table.begin_join(a, a, &mut Wait::new(BlockClass::Sync, vec![])),
         Err(ThreadError::Posix(EDEADLK))
     ));
     assert!(matches!(
-        table.begin_join(a, b).unwrap(),
+        table
+            .begin_join(a, b, &mut Wait::new(BlockClass::Sync, vec![]))
+            .unwrap(),
         JoinStep::MustBlock
     ));
     // b joining a, which waits to join b.
     assert!(matches!(
-        table.begin_join(b, a),
+        table.begin_join(b, a, &mut Wait::new(BlockClass::Sync, vec![])),
         Err(ThreadError::Posix(EDEADLK))
     ));
     // A detached thread joining itself: not joinable, before the
@@ -459,7 +589,7 @@ fn a_join_that_could_never_end_is_edeadlk() {
     table.register(c);
     table.detach(c).unwrap();
     assert!(matches!(
-        table.begin_join(c, c),
+        table.begin_join(c, c, &mut Wait::new(BlockClass::Sync, vec![])),
         Err(ThreadError::Posix(EINVAL))
     ));
 }
@@ -473,7 +603,9 @@ fn join_delivers_exit_value_after_target_finishes() {
     table.register(worker);
 
     assert!(matches!(
-        table.begin_join(main, worker).unwrap(),
+        table
+            .begin_join(main, worker, &mut Wait::new(BlockClass::Sync, vec![]))
+            .unwrap(),
         JoinStep::MustBlock
     ));
     // The joiner parks; hand the baton to the worker.
@@ -499,12 +631,25 @@ fn cond_wait_reacquires_mutex_on_signal_without_spurious_wakeups() {
 
     // The waiter owns the mutex, then waits on the condition.
     assert!(matches!(
-        table.lock(waiter, MUTEX, MutexKind::Normal).unwrap(),
+        table
+            .lock(
+                waiter,
+                MUTEX,
+                MutexKind::Normal,
+                &mut Wait::new(BlockClass::Sync, vec![])
+            )
+            .unwrap(),
         LockStep::Acquired
     ));
     scheduler.scheduler.select(Some(waiter)).unwrap();
     table
-        .cond_wait(&mut scheduler, waiter, COND, MUTEX)
+        .cond_wait(
+            &mut scheduler,
+            waiter,
+            COND,
+            MUTEX,
+            &mut Wait::new(BlockClass::Sync, vec![]),
+        )
         .unwrap();
     assert_eq!(table.mutexes[&MUTEX].owner, None);
     scheduler.scheduler.park(waiter, "cond").unwrap();

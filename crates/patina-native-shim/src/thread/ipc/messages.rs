@@ -25,8 +25,8 @@ pub(crate) fn msgget(key: i32, flags: i32) -> i64 {
                 ctime: now(),
                 lspid: 0,
                 lrpid: 0,
-                receivers: VecDeque::new(),
-                senders: VecDeque::new(),
+                receivers: WaitQueue::new(),
+                senders: WaitQueue::new(),
             })
         },
     );
@@ -82,9 +82,10 @@ pub(crate) unsafe fn msgsnd(id: i32, msgp: *const u8, size: usize, flags: i32) -
         if flags & IPC_NOWAIT != 0 {
             return fail(EAGAIN);
         }
-        queue.senders.push_back(me);
         let loc = IpcWait::MsgSend(id);
-        match wait_on(state, me, "msgsnd", BlockClass::Ipc, loc, None, EAGAIN) {
+        let mut wait = Wait::new(BlockClass::Ipc, vec![]);
+        wait.enqueue(&mut queue.senders, me, WaiterLoc::Ipc(loc));
+        match wait_on(state, me, "msgsnd", wait, loc, None, EAGAIN) {
             Ok(Some(Outcome::Done(result))) => return result,
             Ok(_) => {}
             Err(result) => return result,
@@ -126,7 +127,7 @@ fn deliver_message(
 
 /// Wake every sender waiting for room (`ss_wakeup`): each re-judges.
 fn wake_senders(queue: &mut MsgQueue) -> Vec<TaskId> {
-    queue.senders.drain(..).collect()
+    queue.senders.drain().collect()
 }
 
 /// `msgrcv(2)`: the text length, or `-errno`.
@@ -188,7 +189,9 @@ pub(crate) unsafe fn msgrcv(id: i32, msgp: *mut u8, size: usize, mtype: i64, fla
         if flags & IPC_NOWAIT != 0 {
             return fail(ENOMSG);
         }
-        queue.receivers.push_back(Receiver {
+        let loc = IpcWait::MsgRecv(id);
+        let mut wait = Wait::new(BlockClass::Ipc, vec![]);
+        let receiver = Receiver {
             task: me,
             wanted,
             mode,
@@ -197,9 +200,9 @@ pub(crate) unsafe fn msgrcv(id: i32, msgp: *mut u8, size: usize, mtype: i64, fla
             } else {
                 size
             },
-        });
-        let loc = IpcWait::MsgRecv(id);
-        match wait_on(state, me, "msgrcv", BlockClass::Ipc, loc, None, EAGAIN) {
+        };
+        wait.enqueue(&mut queue.receivers, receiver, WaiterLoc::Ipc(loc));
+        match wait_on(state, me, "msgrcv", wait, loc, None, EAGAIN) {
             Ok(Some(Outcome::Message(message))) => break message,
             Ok(Some(Outcome::Done(result))) | Err(result) => return result,
             Ok(None) => {}
@@ -275,7 +278,7 @@ pub(crate) unsafe fn msgctl(id: i32, cmd: i32, buf: *mut MsqidDs) -> i64 {
             queue.qbytes = qbytes as usize;
             queue.ctime = now();
             // Receivers re-judge the permissions, senders the room.
-            let mut woken: Vec<TaskId> = queue.receivers.drain(..).map(|r| r.task).collect();
+            let mut woken: Vec<TaskId> = queue.receivers.drain().map(|r| r.task).collect();
             woken.extend(wake_senders(queue));
             drop(state);
             wake_all(woken);

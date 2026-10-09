@@ -28,14 +28,14 @@ pub(crate) struct PipeChannel {
     /// "closed" — `write_closed`, drained reads return EOF — only at 0.
     pub(crate) write_refs: usize,
     /// Tasks parked in a blocking read, waiting for bytes to arrive.
-    pub(crate) recv_waiters: VecDeque<TaskId>,
+    pub(in crate::thread) recv_waiters: WaitQueue<VecDeque<TaskId>>,
     /// Tasks parked in a blocking write, waiting for buffer space.
-    pub(crate) send_waiters: VecDeque<TaskId>,
+    pub(in crate::thread) send_waiters: WaitQueue<VecDeque<TaskId>>,
     /// Tasks parked in a blocking FIFO `open`, waiting for the opposite-end
     /// opener to arrive. One queue for both directions, as the kernel keeps
     /// one wait queue per pipe: a woken task re-checks its own condition.
     /// Always empty for an anonymous pipe, whose two ends exist at birth.
-    pub(crate) open_waiters: VecDeque<TaskId>,
+    pub(in crate::thread) open_waiters: WaitQueue<VecDeque<TaskId>>,
     /// How many times this channel has been opened for reading / for
     /// writing — Linux's `r_counter`/`w_counter`. A blocking open waits for
     /// the PARTNER COUNTER to move, not for the partner to still be there,
@@ -95,9 +95,9 @@ impl PipeChannel {
             // one writer endpoint; `dup` raises the matching side later.
             read_refs: 1,
             write_refs: 1,
-            recv_waiters: VecDeque::new(),
-            send_waiters: VecDeque::new(),
-            open_waiters: VecDeque::new(),
+            recv_waiters: WaitQueue::new(),
+            send_waiters: WaitQueue::new(),
+            open_waiters: WaitQueue::new(),
             read_opens: 1,
             write_opens: 1,
             fifo_ino: None,
@@ -333,7 +333,7 @@ fn drain_channel_recv_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<Ta
         .net
         .pipe_channels
         .get_mut(&channel)
-        .map(|channel| channel.recv_waiters.drain(..).collect())
+        .map(|channel| channel.recv_waiters.drain().collect())
         .unwrap_or_default()
 }
 
@@ -342,7 +342,7 @@ fn drain_channel_send_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<Ta
         .net
         .pipe_channels
         .get_mut(&channel)
-        .map(|channel| channel.send_waiters.drain(..).collect())
+        .map(|channel| channel.send_waiters.drain().collect())
         .unwrap_or_default()
 }
 
@@ -576,7 +576,7 @@ pub(crate) fn fifo_open(
         // The non-blocking case already returned `ENXIO` above.
         (channel.read_refs == 0).then_some((false, channel.read_opens))
     };
-    let woken: Vec<TaskId> = channel.open_waiters.drain(..).collect();
+    let woken: Vec<TaskId> = channel.open_waiters.drain().collect();
     let end = next_handle(&mut state);
     state.net.pipe_ends.insert(
         end,
@@ -639,17 +639,18 @@ pub(crate) fn fifo_open(
             if satisfied {
                 break;
             }
-            channel.open_waiters.push_back(me);
+            let mut wait = Wait::new(BlockClass::Io, vec![]);
+            wait.enqueue(
+                &mut channel.open_waiters,
+                me,
+                WaiterLoc::PipeOpen(channel_id),
+            );
             let reason = if for_writer {
                 "fifo-open-read"
             } else {
                 "fifo-open-write"
             };
-            let step = state.block(
-                me,
-                reason,
-                Wait::new(BlockClass::Io, vec![WaiterLoc::PipeOpen(channel_id)]),
-            );
+            let step = state.block(me, reason, wait);
             match step {
                 Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                 Ok(Step::Continue) => drop(state),
@@ -759,14 +760,11 @@ pub(crate) unsafe fn pipe_read(
                 if nonblocking {
                     return super::fail(EWOULDBLOCK) as isize;
                 }
-                if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
-                    channel.recv_waiters.push_back(me);
+                let mut wait = Wait::new(BlockClass::Io, vec![]);
+                if let Some(queued) = state.net.pipe_channels.get_mut(&channel) {
+                    wait.enqueue(&mut queued.recv_waiters, me, WaiterLoc::PipeRecv(channel));
                 }
-                let step = state.block(
-                    me,
-                    "pipe-read",
-                    Wait::new(BlockClass::Io, vec![WaiterLoc::PipeRecv(channel)]),
-                );
+                let step = state.block(me, "pipe-read", wait);
                 match step {
                     Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                     Ok(Step::Continue) => drop(state),
@@ -847,14 +845,11 @@ pub(crate) unsafe fn pipe_write(
                 if nonblocking {
                     return super::fail(EWOULDBLOCK) as isize;
                 }
-                if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
-                    channel.send_waiters.push_back(me);
+                let mut wait = Wait::new(BlockClass::Io, vec![]);
+                if let Some(queued) = state.net.pipe_channels.get_mut(&channel) {
+                    wait.enqueue(&mut queued.send_waiters, me, WaiterLoc::PipeSend(channel));
                 }
-                let step = state.block(
-                    me,
-                    "pipe-write",
-                    Wait::new(BlockClass::Io, vec![WaiterLoc::PipeSend(channel)]),
-                );
+                let step = state.block(me, "pipe-write", wait);
                 match step {
                     Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                     Ok(Step::Continue) => drop(state),
@@ -967,22 +962,23 @@ fn pipe_await(wants: &[PipeWant], nonblocking: bool) -> Result<bool, c_int> {
         if nonblocking {
             return Err(EWOULDBLOCK);
         }
+        let mut wait = Wait::new(BlockClass::Io, vec![]);
         for loc in &locs {
             match *loc {
                 WaiterLoc::PipeRecv(channel) => {
                     if let Some(ch) = state.net.pipe_channels.get_mut(&channel) {
-                        ch.recv_waiters.push_back(me);
+                        wait.enqueue(&mut ch.recv_waiters, me, *loc);
                     }
                 }
                 WaiterLoc::PipeSend(channel) => {
                     if let Some(ch) = state.net.pipe_channels.get_mut(&channel) {
-                        ch.send_waiters.push_back(me);
+                        wait.enqueue(&mut ch.send_waiters, me, *loc);
                     }
                 }
                 _ => {}
             }
         }
-        let step = state.block(me, "pipe-splice", Wait::new(BlockClass::Io, locs.clone()));
+        let step = state.block(me, "pipe-splice", wait);
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
@@ -1182,7 +1178,7 @@ fn pipe_close_locked(handle: u64) -> Result<(), c_int> {
             {
                 channel.write_events = channel.write_events.wrapping_add(1);
             }
-            waiters.extend(channel.send_waiters.drain(..));
+            waiters.extend(channel.send_waiters.drain());
         }
     }
     // Dropping a WRITER reference: readers see EOF (once drained) only after
@@ -1196,7 +1192,7 @@ fn pipe_close_locked(handle: u64) -> Result<(), c_int> {
             {
                 channel.read_events = channel.read_events.wrapping_add(1);
             }
-            waiters.extend(channel.recv_waiters.drain(..));
+            waiters.extend(channel.recv_waiters.drain());
         }
     }
     // Reclaim any channel with no references left on either side. Channel ids

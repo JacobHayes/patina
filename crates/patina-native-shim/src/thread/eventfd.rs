@@ -28,7 +28,7 @@ pub(crate) struct EventFd {
     /// mio's `Waker` writes without reading back, relying on the kernel's
     /// per-arrival edge semantics.
     pub(crate) write_events: u64,
-    pub(crate) read_waiters: VecDeque<TaskId>,
+    pub(in crate::thread) read_waiters: WaitQueue<VecDeque<TaskId>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -50,7 +50,7 @@ pub(crate) fn create(initval: u32, flags: c_int) -> SysResult<c_int> {
             value: u64::from(initval),
             semaphore: flags & EFD_SEMAPHORE != 0,
             write_events: 0,
-            read_waiters: VecDeque::new(),
+            read_waiters: WaitQueue::new(),
         },
     );
     let nonblock = if flags & EFD_NONBLOCK != 0 {
@@ -120,12 +120,9 @@ pub(crate) unsafe fn eventfd_read(
         if nonblocking {
             return super::fail(EWOULDBLOCK) as isize;
         }
-        efd.read_waiters.push_back(me);
-        let step = state.block(
-            me,
-            "eventfd-read",
-            Wait::new(BlockClass::Io, vec![WaiterLoc::EventFdRecv(fd)]),
-        );
+        let mut wait = Wait::new(BlockClass::Io, vec![]);
+        wait.enqueue(&mut efd.read_waiters, me, WaiterLoc::EventFdRecv(fd));
+        let step = state.block(me, "eventfd-read", wait);
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
@@ -184,7 +181,7 @@ pub(crate) unsafe fn eventfd_write(handle: u64, buf: *const c_void, len: usize) 
     }
     efd.value = sum;
     efd.write_events = efd.write_events.wrapping_add(1);
-    let waiters: Vec<TaskId> = efd.read_waiters.drain(..).collect();
+    let waiters: Vec<TaskId> = efd.read_waiters.drain().collect();
     drop(state);
     wake_all(waiters);
     8
@@ -196,10 +193,10 @@ pub(crate) unsafe fn eventfd_write(handle: u64, buf: *const c_void, len: usize) 
 #[cfg(target_os = "linux")]
 pub(crate) fn eventfd_close(handle: u64) {
     let mut state = lock_state();
-    let Some(efd) = state.net.eventfds.remove(&(handle as c_int)) else {
+    let Some(mut efd) = state.net.eventfds.remove(&(handle as c_int)) else {
         return;
     };
-    let waiters: Vec<TaskId> = efd.read_waiters.into_iter().collect();
+    let waiters: Vec<TaskId> = efd.read_waiters.take().into_iter().collect();
     drop(state);
     wake_all(waiters);
 }

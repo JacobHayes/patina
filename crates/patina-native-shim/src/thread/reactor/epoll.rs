@@ -1,7 +1,6 @@
 //! Linux epoll readiness model.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-use super::{BlockClass, Wait};
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{c_int, c_void};
 
@@ -630,22 +629,13 @@ pub(crate) unsafe fn wait_core(
         }
         // Nothing ready: park with multi-fd fan-in on the shared core.
         let watched = watched_sources(&state, id);
-        let locs = register_readiness_waiters(&mut state, me, &watched);
+        let wait = register_readiness_waiters(&mut state, me, &watched);
+        let locs = wait.locs.clone();
         let step = if timeout_ms > 0 {
             let deadline = timeout_deadline.expect("timeout deadline fixed above");
-            state.block_timed(
-                me,
-                "epoll-wait",
-                Wait::new(BlockClass::Readiness, locs.clone()),
-                ClockKind::Monotonic,
-                deadline,
-            )
+            state.block_timed(me, "epoll-wait", wait, ClockKind::Monotonic, deadline)
         } else {
-            state.block(
-                me,
-                "epoll-wait",
-                Wait::new(BlockClass::Readiness, locs.clone()),
-            )
+            state.block(me, "epoll-wait", wait)
         };
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),

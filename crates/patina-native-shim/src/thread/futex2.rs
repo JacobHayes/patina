@@ -195,19 +195,16 @@ fn wait_on(
             }
         }
         let me = current_task();
+        let mut wait = Wait::new(BlockClass::Futex, vec![]);
         for (slot, word) in (0..).zip(words) {
-            state.queue_futex_waiter(
-                word.addr,
-                FutexWaiter {
-                    task: me,
-                    bitset,
-                    private: word.private,
-                    slot: Some(slot),
-                },
-            );
+            let waiter = FutexWaiter {
+                task: me,
+                bitset,
+                private: word.private,
+                slot: Some(slot),
+            };
+            state.queue_futex_waiter(word.addr, waiter, &mut wait);
         }
-        let locs = words.iter().map(|word| WaiterLoc::Futex(word.addr));
-        let wait = Wait::new(BlockClass::Futex, locs.collect());
         let step = match deadline {
             Some((clock, at)) => state.block_timed(me, reason, wait, clock, at),
             None => state.block(me, reason, wait),
@@ -216,7 +213,7 @@ fn wait_on(
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
             Err(error) => {
-                state.remove_signal_wait(me);
+                state.remove_wait(me);
                 return -i64::from(c_int::from(error.into_posix()));
             }
         }
@@ -444,7 +441,7 @@ impl ThreadRuntime {
         {
             *loc = WaiterLoc::Futex(to.addr);
         }
-        self.queue_futex_waiter(
+        self.requeue_futex_waiter(
             to.addr,
             FutexWaiter {
                 private: to.private,

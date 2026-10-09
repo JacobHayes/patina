@@ -175,7 +175,7 @@ struct Instance {
     cursor: i32,
     /// Every queued event: the arrivals an edge-triggered interest fires on.
     arrivals: u64,
-    waiters: VecDeque<TaskId>,
+    waiters: WaitQueue<VecDeque<TaskId>>,
     /// A descriptor still names it. A reader blocked when the last one
     /// closed holds the file, as the kernel's `read` does, so the instance
     /// and its watches live until the last waiter leaves.
@@ -315,7 +315,7 @@ impl Inotify {
                 }
             }
             if woken {
-                wake.extend(instance.waiters.drain(..));
+                wake.extend(instance.waiters.drain());
             }
         }
         wake
@@ -329,7 +329,7 @@ impl Inotify {
             if let Some(&wd) = instance.by_ino.get(&ino)
                 && instance.destroy(wd)
             {
-                wake.extend(instance.waiters.drain(..));
+                wake.extend(instance.waiters.drain());
             }
         }
         wake
@@ -533,7 +533,7 @@ pub(crate) fn rm_watch(fd: c_int, wd: i32) -> i64 {
             return errno(EINVAL);
         }
         if instance.destroy(wd) {
-            instance.waiters.drain(..).collect()
+            instance.waiters.drain().collect()
         } else {
             Vec::new()
         }
@@ -582,12 +582,9 @@ pub(crate) fn read(handle: u64, nonblocking: bool, buf: usize, len: usize) -> is
         if nonblocking {
             return crate::fail(EWOULDBLOCK) as isize;
         }
-        instance.waiters.push_back(me);
-        let step = state.block(
-            me,
-            "inotify-read",
-            Wait::new(BlockClass::Io, vec![WaiterLoc::InotifyRecv(handle)]),
-        );
+        let mut wait = Wait::new(BlockClass::Io, vec![]);
+        wait.enqueue(&mut instance.waiters, me, WaiterLoc::InotifyRecv(handle));
+        let step = state.block(me, "inotify-read", wait);
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
@@ -635,10 +632,10 @@ pub(super) fn poll(state: &ThreadRuntime, handle: u64) -> (bool, u64) {
 }
 
 /// Park `me` on an instance's readers, for a readiness wait.
-pub(super) fn watch(state: &mut ThreadRuntime, handle: u64, me: TaskId) -> Option<WaiterLoc> {
-    let instance = state.inotify.instances.get_mut(&handle)?;
-    instance.waiters.push_back(me);
-    Some(WaiterLoc::InotifyRecv(handle))
+pub(super) fn watch(state: &mut ThreadRuntime, handle: u64, me: TaskId, wait: &mut Wait) {
+    if let Some(instance) = state.inotify.instances.get_mut(&handle) {
+        wait.enqueue(&mut instance.waiters, me, WaiterLoc::InotifyRecv(handle));
+    }
 }
 
 /// Unlink `me` from an instance's readers.

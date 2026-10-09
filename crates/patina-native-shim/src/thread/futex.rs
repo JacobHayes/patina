@@ -45,12 +45,10 @@ pub(crate) fn futex_wait(addr: usize, expected: u32, private: bool, bitset: u32)
             return super::fail(EWOULDBLOCK);
         }
 
-        state.queue_futex_waiter(addr, FutexWaiter::multiplexed(me, private, bitset));
-        match state.block(
-            me,
-            "futex-wait",
-            Wait::new(BlockClass::Futex, vec![WaiterLoc::Futex(addr)]),
-        ) {
+        let mut wait = Wait::new(BlockClass::Futex, vec![]);
+        let waiter = FutexWaiter::multiplexed(me, private, bitset);
+        state.queue_futex_waiter(addr, waiter, &mut wait);
+        match state.block(me, "futex-wait", wait) {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => fatal("futex wait parked without transferring the baton"),
             Err(error) => return c_int::from(error.into_posix()),
@@ -139,14 +137,10 @@ pub(crate) fn futex_wait_timed(
             Err(errno) => return super::fail(errno),
         }
     };
-    state.queue_futex_waiter(addr, FutexWaiter::multiplexed(me, private, bitset));
-    match state.block_timed(
-        me,
-        "futex-wait",
-        Wait::new(BlockClass::TimedFutex, vec![WaiterLoc::Futex(addr)]),
-        clock,
-        deadline,
-    ) {
+    let mut wait = Wait::new(BlockClass::TimedFutex, vec![]);
+    let waiter = FutexWaiter::multiplexed(me, private, bitset);
+    state.queue_futex_waiter(addr, waiter, &mut wait);
+    match state.block_timed(me, "futex-wait", wait, clock, deadline) {
         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
         Ok(Step::Continue) => drop(state),
         Err(error) => return c_int::from(error.into_posix()),

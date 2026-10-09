@@ -205,12 +205,13 @@ pub(crate) unsafe fn read(
             }
             Pass::Wait => {}
         }
-        pair.waiters[side.slot()].push_back(me);
-        let step = state.block(
+        let mut wait = Wait::new(BlockClass::Io, vec![]);
+        wait.enqueue(
+            &mut pair.waiters[side.slot()],
             me,
-            "pty-read",
-            Wait::new(BlockClass::Io, vec![WaiterLoc::Pty(index, side)]),
+            WaiterLoc::Pty(index, side),
         );
+        let step = state.block(me, "pty-read", wait);
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
@@ -357,13 +358,14 @@ pub(in crate::thread) fn watch(
     side: Side,
     index: u32,
     me: TaskId,
-) -> Option<WaiterLoc> {
-    let pair = state.ptys.pairs.get_mut(&index)?;
-    let waiters = &mut pair.waiters[side.slot()];
-    if !waiters.contains(&me) {
-        waiters.push_back(me);
+    wait: &mut Wait,
+) {
+    if let Some(pair) = state.ptys.pairs.get_mut(&index) {
+        let waiters = &mut pair.waiters[side.slot()];
+        if !waiters.contains(&me) {
+            wait.enqueue(waiters, me, WaiterLoc::Pty(index, side));
+        }
     }
-    Some(WaiterLoc::Pty(index, side))
 }
 
 /// Unlink `me` from a side's queue.

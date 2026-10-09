@@ -404,7 +404,7 @@ impl Pair {
         if output {
             edges.1 = edges.1.wrapping_add(1);
         }
-        self.waiters[side.slot()].drain(..).collect()
+        self.waiters[side.slot()].drain().collect()
     }
 
     /// n_tty's `flush_buffer` of a side: its unread input goes.
