@@ -248,6 +248,7 @@ run_full() {
   # include/exclude). --no-verify skips the per-crate verify build; the release
   # dry run (scripts/publish.sh) covers that and the license-text audit.
   run_rung 'crate packaging' cargo package --workspace --no-verify --locked --allow-dirty || return $?
+  run_rung 'multiproc classifier selftest' testbeds/multiproc/run-patina.sh --selftest || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
 
@@ -260,6 +261,7 @@ run_full() {
   run_rung 'pinned workspace tests (includes e2e)' cargo test --quiet --workspace --locked || return $?
 
   start_rung 'native ecosystem testbeds' scripts/check-native-testbeds.sh
+  start_rung 'multiproc pending-gap testbed' testbeds/multiproc/run-patina.sh
   start_rung 'macro adopter testbed' testbeds/patina-macro-adopter/run.sh
   start_rung 'pubsub testbed' testbeds/pubsub/run-patina.sh
   start_rung 'workq testbed' testbeds/workq/run-patina.sh
@@ -289,6 +291,7 @@ run_fast() {
   # Run it alone, then group the short independent smoke/selftest rungs.
   run_rung 'workspace tests (no e2e/native execution targets)' run_fast_workspace_tests || return $?
   run_rung 'CLI flag drift' scripts/check-flag-drift.sh || return $?
+  run_rung 'multiproc classifier selftest' testbeds/multiproc/run-patina.sh --selftest || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
 

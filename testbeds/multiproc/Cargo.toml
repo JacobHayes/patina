@@ -1,0 +1,80 @@
+[workspace]
+
+[package]
+name = "multiproc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[dependencies]
+patina-dst = { path = "../../crates/patina" }
+
+[[bin]]
+name = "spawn-wait"
+path = "src/rust_guest.rs"
+
+[[bin]]
+name = "fanout"
+path = "src/rust_guest.rs"
+
+[[bin]]
+name = "pipeline"
+path = "src/rust_guest.rs"
+
+[[bin]]
+name = "buildlike"
+path = "src/rust_guest.rs"
+
+[[bin]]
+name = "forkwait-c"
+path = "src/c_guest.rs"
+
+[[bin]]
+name = "sigchld"
+path = "src/c_guest.rs"
+
+[[bin]]
+name = "failed-exec-enoent"
+path = "src/c_guest.rs"
+
+[[bin]]
+name = "failed-exec-eacces"
+path = "src/c_guest.rs"
+
+[[bin]]
+name = "failed-exec-e2big"
+path = "src/c_guest.rs"
+
+[[bin]]
+name = "early-death"
+path = "src/c_guest.rs"
+
+[[bin]]
+name = "atfork-lock"
+path = "src/c_guest.rs"
+
+[[bin]]
+name = "fd-sharing"
+path = "src/c_guest.rs"
+
+[[bin]]
+name = "last-writer-eof"
+path = "src/c_guest.rs"
+
+[[bin]]
+name = "epipe-sigpipe"
+path = "src/c_guest.rs"
+
+[[bin]]
+name = "queued-signals"
+path = "src/c_guest.rs"
+
+[[bin]]
+name = "shared-futex"
+path = "src/c_guest.rs"
+
+[[bin]]
+name = "forkwait-cxx"
+path = "src/c_guest.rs"
+

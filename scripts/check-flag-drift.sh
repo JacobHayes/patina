@@ -81,7 +81,7 @@ DOCS=(README.md TUTORIAL.md USAGE-MODES.md ARCHITECTURE.md IMPLEMENTATION.md
       testbeds/AGENTS.md testbeds/README.md testbeds/workq/README.md testbeds/pubsub/README.md
       testbeds/audit-corpus/README.md testbeds/rustix-default/README.md
       testbeds/cap-std-dirfd/README.md testbeds/fifo-ipc/README.md testbeds/bench/README.md
-      testbeds/native-boundary/README.md
+      testbeds/native-boundary/README.md testbeds/multiproc/README.md
       crates/patina-conformance/README.md
       testbeds/buggify-wasi/README.md testbeds/checkout-retry-idempotency/README.md
       testbeds/patina-macro-adopter/README.md)

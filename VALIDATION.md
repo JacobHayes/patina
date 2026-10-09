@@ -889,6 +889,26 @@ Every run writes one JSON record per workload (schema `patina.bench/v1`) to `tar
 
 CI runs the benchmark nightly and on manual dispatch. The `bench` job in `.github/workflows/ci.yml` runs ten timed runs per side on Linux x86_64 and aarch64, writes the table to the job summary and uploads its records as an artifact, including after a failure. It builds and runs repository code, so it holds only a read-only token, which it does not persist. When every `bench` job has succeeded on main, the `bench-publish` job, which holds a write token and builds nothing, runs `scripts/bench-publish.sh` to append each platform's records to `data/<os>-<arch>.jsonl` on the `bench-data` branch. That branch holds these data files and nothing else. The script refuses to publish outside a GitHub Actions run of main, and it refuses any record whose commit is not the run's own, so no developer machine's data can land there. When a concurrent job has moved the branch, git refuses the push, so the script fetches the new tip, appends again and retries; nothing is force-pushed. A dispatch with `bench_only` set runs only these jobs; from any other ref the records are computed and nothing is published. Hosted runners are shared machines, so read the series as a trend rather than judging a single night.
 
+## Multi-process pending gaps
+
+[`testbeds/multiproc`](testbeds/multiproc/) supplies the self-contained workload
+evidence required by [SCOPE](docs/SCOPE.md): spawn/wait, fanout, a three-stage
+pipeline, C/C++ fork/wait, build waves and SIGCHLD, plus lifecycle adversaries.
+On x86_64 Linux its native oracles pass; Patina must reach each documented first
+refusal. Success or a different refusal is drift, not an automatic feature pass.
+Failed-exec oracles are the class detector for destructive exec preparation:
+each errno case preserves CLOEXEC descriptors and their payloads, a caught
+signal's handler/mask/flags, and a sibling parked before exec that completes
+after failure. Native injected closure, disposition reset and sibling
+cancellation each fire this detector. Timeout regression pins pair with the
+runner's bounded capture/reap authority and pinned command-session membership,
+including an orphaned child in a different process group.
+The classifier selftest pairs each refusal rule with planted success, wrong
+boundary and unrelated-failure controls. The fast ladder runs that detector;
+the full ladder and x86_64 Linux CI run the native/pending-gap battery. These
+are process-support foundations, not acceptance evidence for multi-process
+execution. Arm64 and Darwin refusal baselines remain pending host evidence.
+
 ## Current boundary of confidence
 
 Passing V0-V2 proves the CLI-to-runtime-to-driver-to-trace loop for explicit `patina_dst_runtime::Context` effects. V3 proves the entire audited Preview 1 surface with preopen policy and resource limits, within the documented semantic limitations. The named native tests above prove a controlled slice of ordinary `std` behavior — filesystem (including directory listing and symlinks), time, sleep, entropy, stdio, threads, and UDP datagrams — and mixed C ABI calls, built through the packaged `build`/`run` path with auto-initialization and record/replay over the descriptor trace channel — for single Rust sources and whole Cargo packages (path dependencies and build scripts included), though not yet a packaged native target with a recompiled deterministic `std`. Containment is enforced from two directions: the strict import allowlist fails closed on any unknown symbol, and the Linux `strace` pass shows the probe's guest section performing zero host syscalls over the whole run. Platform execution evidence is platform-local: the Linux matrix covers both architectures; the macOS job covers pthread/kqueue/Darwin lowering. A Linux-only local run does not verify the Darwin legs. The cross-target smoke script proves one ordinary-`std` program behaves identically under seeds, record, and replay on wasm32-wasip1, native macOS, and native Linux. Low-level storage rollback, native crash→fresh-incarnation restart (seeded, and record→replay across both incarnations with the handoff checked against its recorded digest), trace format-version refusal, host capture, minimization reducers, and performance budgets have focused evidence. The crash-restart confidence boundary is native only: WASI and cargo-family `--fs-crash-at` refuse by name.
