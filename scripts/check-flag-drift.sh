@@ -108,6 +108,8 @@ ALLOWED_FLAGS='
 --max-runs
 --verify
 --verify-landing
+--json
+--class
 --all
 --all-targets
 --check

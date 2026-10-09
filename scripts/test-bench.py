@@ -131,6 +131,21 @@ class GateTests(unittest.TestCase):
         self.assertEqual(self.evaluate(dict(self.record(1.03), hot_path=True))['exit_code'], 0)
         self.assertEqual(self.evaluate(dict(self.record(1.06), hot_path=True))['exit_code'], 5)
 
+    def test_signed_slope_noise_can_resolve_without_discarding_observations(self):
+        record = dict(self.record(), hot_path=True)
+        for name in ('blocks', 'noise_blocks'):
+            record[name] = [[dict(sample, hot_ns_per_op=-10) for sample in block]
+                            for block in record[name]]
+        self.assertEqual(self.evaluate(record)['exit_code'], 4)
+        for name in ('blocks', 'noise_blocks'):
+            quiet = [[dict(sample, hot_ns_per_op=10) for sample in block]
+                     for block in self.record()['blocks']]
+            record[name] += quiet * 10
+        self.assertEqual(self.evaluate(record)['exit_code'], 0)
+        for name in ('blocks', 'noise_blocks'):
+            record[name][0][0]['hot_ns_per_op'] = float('nan')
+        self.assertEqual(self.evaluate(record)['exit_code'], 4)
+
     def test_missing_commit_or_toolchain_cannot_pass(self):
         proof = self.evaluate(self.record())
         for change in ({'toolchain': None}, {'base': {}}, {'workload_set_sha256': 'stale'}):
@@ -231,6 +246,30 @@ class VerificationTests(unittest.TestCase):
             path.write_bytes(b'rebuilt with different optimization')
             self.assertEqual(self.verify(), 4)
             path.write_bytes(original)
+
+    def test_context_hashes_are_verified_for_both_actual_artifacts(self):
+        workload = next(w for w in bench.WORKLOADS if w.name == 'context')
+        opts = bench.parse_args(['--baseline', 'main', '--workload', 'context'])
+        rows, digest = bench.workload_identity(opts, [workload])
+        self.identity['workloads'], self.identity['workload_set_sha256'] = rows, digest
+        candidate = self.home / 'context'
+        baseline = self.base / 'patina-dst-bench'
+        candidate.write_bytes(b'candidate Context')
+        baseline.write_bytes(b'baseline Context')
+        self.identity['context_binary_sha256'] = {'patina': self.hash(candidate),
+                                                 'baseline': self.hash(baseline)}
+        path = self.home / 'verdict.json'
+        def verify():
+            path.write_text(json.dumps(self.verdict))
+            return bench.main(['--verify', str(path), '--baseline', 'main',
+                               '--workload', 'context', '--scratch-dir', str(self.home)])
+        with patch.object(bench, 'cargo_binary', return_value=candidate):
+            self.assertEqual(verify(), 0)
+            for artifact in (candidate, baseline):
+                original = artifact.read_bytes()
+                artifact.write_bytes(b'changed Context artifact')
+                self.assertEqual(verify(), 4)
+                artifact.write_bytes(original)
 
     def test_landing_requires_shim_and_exercised_driver_changes(self):
         for path in ('crates/patina-native-shim/c/posix/core.c',
@@ -420,6 +459,41 @@ class ResultCheckTests(unittest.TestCase):
         self.assertEqual(record['result'], 'R digest=1')
         self.assertEqual({len(leg['wall_s']) for leg in record['legs'].values()}, {3})
         self.assertIsNotNone(record['comparison']['wall_min_ratio'])
+
+
+class ContextInterfaceTests(unittest.TestCase):
+    def test_text_only_baseline_and_json_candidate_measure_the_same_op_mix(self):
+        # Class pairing: detect each artifact's report interface before timing;
+        # both interfaces measure the seeded loop, excluding qualification setup.
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            launcher = bench.build_launcher(home)
+            samples = []
+            workload = next(w for w in bench.WORKLOADS if w.testbed == 'context')
+            for supports_json in (False, True):
+                binary = home / ('json-context' if supports_json else 'text-context')
+                binary.write_text(f'#!{sys.executable}\n' + f'json_mode={supports_json!r}\n' + '''
+import json,sys
+if '--help' in sys.argv:
+ print('Usage: context --json iterations campaign' if json_mode else 'Usage: context iterations campaign')
+ sys.exit(0)
+if '--json' in sys.argv and not json_mode: sys.exit(2)
+iterations=int(next(arg for arg in sys.argv[1:] if arg != '--json'))
+ops=iterations*12
+if json_mode:
+ print(json.dumps(dict(iterations=iterations,boundary_ops=ops,seeded_nanos=ops*13.25,seeded_ns_per_op=13.25)))
+else:
+ print(f'workload iterations      : {iterations}\\nboundary ops per run     : {ops}\\nseeded ns/op             : 13.25')
+''')
+                binary.chmod(0o755)
+                leg = bench.Leg('patina' if supports_json else 'baseline', Path('unused'),
+                                home, context_binary=binary)
+                leg.build('context')
+                samples.append(bench.measure(leg, workload, 1, home, launcher, 5))
+            self.assertEqual(samples[0].result, samples[1].result)
+            for sample in samples:
+                self.assertAlmostEqual(sample.hot_ns_per_op, 13.25)
+                self.assertAlmostEqual(sample.wall_s * 1e9 / sample.ops, sample.hot_ns_per_op)
 
 
 class WorkloadTableTests(unittest.TestCase):

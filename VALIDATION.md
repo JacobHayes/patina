@@ -796,21 +796,36 @@ The table shows, per workload and side, the median and p90 wall time, the median
 the native side is replaced by the baseline, either an exact binary (identified
 by SHA-256) or an exported revision (also identified by commit hash). Native guests
 come from the current tree, including its SDK; this does not compare SDK source
-changes. Cargo's executable receipts locate builds; the benchmark copies each
+changes. The Context benchmark is built from each revision itself. Its help
+selects the supported report interface before timing: JSON where advertised,
+otherwise the existing text report. Both measure the same seeded op mix with
+identical positional inputs and the artifact's actual boundary count. Text-only
+baselines retain their reported ns/op precision (two decimal places), rather
+than substituting process wall time or inferring operations. Cargo's
+executable receipts locate builds; the benchmark copies each
 artifact into its private leg before building the next one. Local records and
 build copies are never committed.
 
-`--gate` requires a baseline and an even run count of at least twenty per side (ten ABBA blocks)
-(thirty for hot paths; the gate defaults to thirty).
+`--gate` requires a baseline and an even run count of at least twenty per side
+(ten ABBA blocks; thirty for hot paths; the gate defaults to thirty).
 Each workload first gets an A/A noise run using the baseline, then an A/B run.
 Both use ABBA blocks, resampling whole blocks with a deterministic paired
 bootstrap of the ratio of medians. Inconclusive intervals or excessive A/A
-noise extend the run up to `--max-runs` (default 120 per side), then return 4. Blocking comparisons require repository revisions; binary paths remain advisory
+noise extend the run up to `--max-runs` (default 120 per side), then return 4. Blocking comparisons require repository revisions; binary paths
+remain advisory
 only, since they cannot establish baseline commit identity.
 
 End-to-end workloads measure elapsed wall time, including start/stop overhead.
-Hot-path records use ns/op when provided by the workload. Fixed-work runs use
-un-normalized elapsed time. The three-way rule is:
+Each `doors` class measures ns per logical call from the difference between
+N and 2N elapsed runs, removing fixed launch/setup/teardown cost; `context` uses seeded
+ns per actual boundary op from `patina-dst-bench --json`, separately from its
+record/replay qualification timings. Signed slopes remain in paired resampling;
+nonpositive draw medians contribute unbounded ratio uncertainty, so an isolated
+negative difference can resolve with more evidence without discarding samples.
+The slope regression pin pairs with this estimator's must-refuse undefined
+confidence interval. Context artifact verification checks both rebuilt role
+hashes in addition to both CLI hashes. Both N and 2N runs must match native/Patina result lines; Context reports only its fixed op mix loop. Fixed-work runs compare
+un-normalized elapsed time instead. The three-way rule is:
 pass only when the 95% interval's upper bound is at most 1.02 (1.05 for each
 hot-path class); regress when its lower bound exceeds that budget; otherwise
 inconclusive. Missing workloads, unsupported legs, unreadable counts or an A/A
