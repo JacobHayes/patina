@@ -13,14 +13,18 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
 check_target_base="$root/target/check"
-export CARGO_TARGET_DIR="$check_target_base/serial"
 
 usage() {
   cat <<'EOF'
 Usage: scripts/check.sh <full|fast>
        scripts/check.sh --selftest
 
-  full  Full local pre-landing gate. Cheap checks run first, the e2e-heavy
+  full  Full local pre-landing gate. Production shim/runtime/hot-path driver
+        changes versus main require PATINA_BENCH_VERDICT for the stack tip;
+        one verdict covers the whole landing batch. Inconclusive refuses:
+        pause builds and re-run the benchmark gate. Tests/benches/examples,
+        Markdown and paths outside protected packages are exempt.
+        Cheap checks run first, the e2e-heavy
         workspace test rung runs alone, then independent runtime/testbed gates
         run concurrently.
   fast  Inner-loop gate; excludes cargo-patina end_to_end and the seven native execution targets
@@ -222,6 +226,9 @@ output_selftest() (
 
 run_full() {
   # Cheap, high-signal failures stay serial and stop before expensive work.
+  # Verify the measured build environment before selecting functional-check targets.
+  run_rung 'benchmark landing verdict' mise run gate:verify || return $?
+  export CARGO_TARGET_DIR="$check_target_base/serial"
   run_rung 'output contract selftest' output_selftest || return $?
   run_rung 'toolchain pin drift' python3 -B scripts/check-toolchain.py || return $?
   run_rung 'toolchain pin drift selftest' python3 -B scripts/check-toolchain.py --selftest || return $?
@@ -262,6 +269,7 @@ run_full() {
 }
 
 run_fast() {
+  export CARGO_TARGET_DIR="$check_target_base/serial"
   run_rung 'output contract selftest' output_selftest || return $?
   run_rung 'toolchain pin drift' python3 -B scripts/check-toolchain.py || return $?
   run_rung 'toolchain pin drift selftest' python3 -B scripts/check-toolchain.py --selftest || return $?

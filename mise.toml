@@ -74,8 +74,18 @@ run = [
 ]
 
 [tasks.bench]
-description = "Native-versus-Patina overhead benchmark over halting workloads (measurement, not a gate)"
+description = "Native-versus-Patina overhead benchmark over halting workloads (measurement or blocking paired gate)"
 run = "python3 -B scripts/bench.py"
+
+[tasks."bench:gate"]
+description = "Blocking paired benchmark against --baseline, with A/A noise evidence"
+run = "python3 -B scripts/bench.py --gate"
+
+[tasks."gate:verify"]
+description = "Verify a benchmark verdict for the exact candidate/base/toolchain/workloads"
+run = "python3 -B scripts/bench.py --verify-landing"
+
+
 
 [tasks."audit-corpus"]
 description = "Ecosystem symbol-audit corpus: build+audit 20 MREs, strict-xfail vs committed per-platform expectations"
