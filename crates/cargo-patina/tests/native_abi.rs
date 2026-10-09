@@ -545,3 +545,39 @@ mod stdio_lifecycle {
         assert_eq!(text(&output.stdout), "progress before the refusal\n");
     }
 }
+
+/// Class pairing: timer imports must be refused and their registry rows must
+/// match compiled definitions (syscall_registry); raw/libc share one model.
+#[cfg(target_os = "linux")]
+#[test]
+fn libc_timers_follow_virtual_time_and_replay() {
+    let g = assert_build_c_guest_with_flags(
+        "signals/libc_timers.c",
+        CLink::PosixShim,
+        &["-Wl,--gc-sections"],
+    );
+    let output = assert_standalone_success(
+        &g.binary,
+        &[],
+        &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+    );
+    assert_eq!(output.stdout, b"LIBC_TIMERS_OK\n");
+    g.assert_audit_clean();
+    g.assert_no_imports(&["setitimer", "getitimer", "alarm", "timer_", "timerfd_"]);
+    assert_eq!(
+        g.assert_seeded_record_replay_identity(7, &[]),
+        output.stdout
+    );
+    g.assert_internal_fatal(&["thread"], &["SIGEV_THREAD callbacks are not modeled"]);
+}
+
+/// Class pairing: named timer import refusal; Darwin has no scheduled signal
+/// model, so even direct execution must never fall through to libSystem.
+#[cfg(target_os = "macos")]
+#[test]
+fn darwin_interval_timer_doors_refuse_by_name() {
+    let g = assert_build_c_guest("signals/libc_timers.c", CLink::PosixShim);
+    for name in ["setitimer", "getitimer", "alarm", "ualarm"] {
+        g.assert_internal_fatal(&[name], &[&format!("Darwin {name} is not modeled")]);
+    }
+}

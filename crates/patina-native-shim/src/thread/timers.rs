@@ -618,7 +618,7 @@ fn set_itimer(which: i32, value: u64, interval: u64) -> Result<(u64, u64), c_int
 /// the nearest second (a remainder under a second with a nonzero
 /// microsecond count rounds up to 1). A row of the x86_64 table only (glibc
 /// spells it `setitimer` on the generic table).
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", patina_posix_exports))]
 pub(crate) fn alarm(seconds: u32) -> i64 {
     match set_itimer(ITIMER_REAL, u64::from(seconds) * NANOS, 0) {
         Ok((remaining, _)) => {
@@ -631,6 +631,57 @@ pub(crate) fn alarm(seconds: u32) -> i64 {
         }
         Err(code) => errno(code),
     }
+}
+
+/// glibc's ualarm puts both operands in tv_usec (not normalized seconds).
+#[cfg(patina_posix_exports)]
+pub(crate) fn ualarm(micros: u32, interval: u32) -> crate::abi::SysResult<u32> {
+    if micros >= 1_000_000 || interval >= 1_000_000 {
+        return Err(crate::abi::Errno::new(EINVAL));
+    }
+    set_itimer(
+        ITIMER_REAL,
+        u64::from(micros) * 1000,
+        u64::from(interval) * 1000,
+    )
+    .map(|(remaining, _)| (remaining / 1000) as u32)
+    .map_err(crate::abi::Errno::new)
+}
+
+/// libc timer_t is pointer-sized; the kernel timer id is i32. libc's NULL
+/// event requests SIGALRM carrying NULL, whereas the raw row carries its id.
+/// SIGEV_THREAD is libc's callback/helper-thread contract, not a raw signal.
+#[cfg(patina_posix_exports)]
+pub(crate) fn libc_timer_create(clock: i32, event: *const Sigevent, out: usize) -> i64 {
+    let event = if event.is_null() {
+        Sigevent {
+            value: 0,
+            signo: i32::from(SIGALRM),
+            notify: SIGEV_SIGNAL,
+            thread_id: 0,
+            pad: [0; 11],
+        }
+    } else {
+        match uaccess::read::<Sigevent>(event as usize) {
+            Ok(event) => event,
+            Err(_) => return errno(EFAULT),
+        }
+    };
+    if event.notify == SIGEV_THREAD {
+        crate::trap_fatal("libc timer_create SIGEV_THREAD callbacks are not modeled");
+    }
+    let mut id = 0;
+    let result = timer_create(clock, &event, &mut id);
+    if result < 0 {
+        return result;
+    }
+    // Store the entire libc handle, including zero's upper bytes. The allocation
+    // precedes libc's output store; a failed copy must not leak a live timer.
+    if uaccess::write(out, &(id as usize)).is_err() {
+        timer_delete(id);
+        return errno(EFAULT);
+    }
+    0
 }
 
 /// `struct sigevent`: the members `timer_create` reads.

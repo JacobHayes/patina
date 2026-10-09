@@ -7,7 +7,7 @@ pub struct Symbol {
     pub linux: bool,
     pub routed: bool,
     pub deny_class: Option<String>,
-    pub only_x86: bool,
+    pub architecture: Option<String>,
 }
 
 pub fn read(path: &Path) -> Vec<Symbol> {
@@ -48,9 +48,9 @@ pub fn read(path: &Path) -> Vec<Symbol> {
                 "deny(macos-framework)" => (false, Some("macos-framework".to_owned())),
                 _ => panic!("unknown symbol metadata status: {status}"),
             };
-            let only_x86 = match *architecture {
-                "all" => false,
-                "x86_64" => true,
+            let architecture = match *architecture {
+                "all" => None,
+                arch @ ("x86_64" | "aarch64") => Some(arch.to_owned()),
                 _ => panic!("unknown symbol metadata architecture: {architecture}"),
             };
             Symbol {
@@ -58,7 +58,7 @@ pub fn read(path: &Path) -> Vec<Symbol> {
                 linux,
                 routed,
                 deny_class,
-                only_x86,
+                architecture,
             }
         })
         .collect();

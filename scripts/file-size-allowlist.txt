@@ -5,5 +5,5 @@
 # The legitimately large: generated code, and exhaustive one-row-per-item tables
 # that read as a single reviewed list.
 crates/patina-syscalls/src/generated.rs generated # emitted by scripts/refresh-syscalls.py
-crates/patina-syscalls/src/symbols.rs 2804 # exhaustive shim-symbol-to-syscall table
+crates/patina-syscalls/src/symbols.rs 2769 # exhaustive shim-symbol-to-syscall table
 # Pending splits.

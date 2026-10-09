@@ -16,19 +16,20 @@ fn main() {
         "src/symbol_types.rs",
         "src/symbols.rs",
         "src/symbol_inventory.rs",
+        "src/symbol_time.rs",
     ] {
         println!("cargo:rerun-if-changed={source}");
     }
     println!("cargo:src_dir={}", env!("CARGO_MANIFEST_DIR"));
     let mut metadata = String::from("patina.symbols/v1\n");
-    for (row, only_x86) in symbols::ALL_SYMBOLS_WITH_ARCH {
+    for (row, architecture) in symbols::ALL_SYMBOLS_WITH_ARCH {
         writeln!(
             metadata,
             "{}\t{}\t{}\t{}",
             row.name,
             row.platform.name(),
             row.status.render(),
-            if *only_x86 { "x86_64" } else { "all" }
+            architecture.unwrap_or("all")
         )
         .unwrap();
     }

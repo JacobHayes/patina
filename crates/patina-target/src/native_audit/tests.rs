@@ -291,3 +291,26 @@ fn the_aws_lc_import_residual_audits_clean_with_no_allowance() {
         "the five weak hooks are inert; the glibc symbol is known-safe, not inert"
     );
 }
+
+/// Class pairing: named timer classification prevents the inert-weak rule
+/// from admitting host effects even when a future libc timer has no shim door.
+#[test]
+fn weak_timer_imports_are_never_inert() {
+    for name in [
+        "timer_gettime",
+        "timer_getoverrun",
+        "timerfd_create",
+        "timerfd_settime",
+        "timerfd_gettime",
+        "___timer_gettime_new",
+        "___timer_settime64",
+        "timer_future",
+    ] {
+        let bytes = elf_with_symbol_bindings(&[(name, true, false)], &[]);
+        let error = NativeAudit::audit(&bytes, &BTreeSet::new()).expect_err("host timer import");
+        let TargetError::UnsupportedNativeImports(denied) = error else {
+            panic!("{error:?}")
+        };
+        assert_eq!(denied[0].category, "signals-timers");
+    }
+}

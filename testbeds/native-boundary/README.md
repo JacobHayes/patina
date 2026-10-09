@@ -117,6 +117,15 @@ and a missing interposer leaves an import. Darwin additionally refuses deferred,
 siginfo and reserved delivery; no host sender information is admitted. The
 watchdog's `raise(6)` registration probe remains unchanged on both platforms.
 
+### Libc timers
+
+`signals/libc_timers.c` exercises Linux interval timers, POSIX timers and
+timerfds through public libc names and the static glibc archive aliases. The
+`native_abi` test requires virtual SIGALRM delivery, timerfd expiry, byte-identical
+same-seed traces and replay. SIGEV_THREAD callbacks refuse by name. On Darwin
+the same guest drives named refusals for setitimer, getitimer, alarm and ualarm;
+there is no claim of virtual scheduled signal delivery there.
+
 ### Small signal stacks
 
 The shim's signal frames are private (ARCHITECTURE, Private signal frames): a

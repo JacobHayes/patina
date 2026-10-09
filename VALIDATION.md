@@ -1161,6 +1161,27 @@ and verify libc timeout preservation. These detectors
 pair with the scenarios' recorded-trace facts; none substitutes for the
 conformance tests or for cross-platform execution evidence.
 
+### Timer libc containment
+
+`native_abi::libc_timers_follow_virtual_time_and_replay` builds a C guest using
+all Linux timer libc doors and the glibc static-archive aliases for the compiled
+architecture. It pins virtual SIGALRM delivery, pointer-sized timer handles,
+libc's NULL-event payload, error projection, timerfd readiness, libc/raw interval
+state sharing, byte-identical same-seed records and replay. SIGEV_THREAD is a
+named refusal; Darwin's four interval-timer doors are independently named
+refusals (`darwin_interval_timer_doors_refuse_by_name`), not a scheduled signal
+claim. The original signal-stack guest uses libc setitimer too.
+
+The class pairing is `syscall_registry`'s compiled export/row bijection and
+`timer_rows_never_allow_host_imports`, with the nm ownership matrix discovering
+the new Rust definitions and their hidden lookup routes. The standalone
+`weak_timer_imports_are_never_inert` detector plants weak host-timer imports,
+including a future timer spelling: named family classification keeps them out
+of the unknown-import exception. Before the doors, a direct shim-linked C guest
+can arm a real host timer; the CLI already refuses setitimer imports. Direct
+acceptance harness execution bypasses that pre-run audit and therefore needs
+both the door tests and the independent import gate.
+
 ### Signals evidence and residual scope
 
 The family's 22 recorded-trace facts are scenario declarations checked on every

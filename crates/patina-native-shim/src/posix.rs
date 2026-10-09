@@ -19,6 +19,7 @@ mod signal_process;
 pub(crate) mod stdio;
 mod thread_sync;
 mod time;
+mod timers;
 
 pub(crate) use crate::variadic::{error, model_result};
 

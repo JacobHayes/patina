@@ -21,51 +21,16 @@ use super::{Platform, Serves, SymbolRow, SymbolStatus};
 mod inventory;
 use inventory::s;
 
-pub const SYMBOLS: &[SymbolRow] = ROWS;
+#[path = "symbol_time.rs"]
+mod time;
+
+pub const SYMBOLS: &[SymbolRow] =
+    &inventory::concat::<_, { ROWS.len() + time::ROWS.len() }>(ROWS, time::ROWS);
+#[doc(hidden)]
+pub const ALL_SYMBOLS_WITH_ARCH: &[(SymbolRow, Option<&str>)] =
+    &inventory::concat::<_, { METADATA.len() + time::METADATA.len() }>(METADATA, time::METADATA);
 
 symbol_rows! {
-    s(
-        "clock_gettime",
-        Platform::Both,
-        Serves::Syscalls(&["clock_gettime"]),
-        SymbolStatus::Partial,
-    ),
-    s(
-        "time",
-        Platform::Both,
-        Serves::Syscalls(&["time", "clock_gettime"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "gettimeofday",
-        Platform::Both,
-        Serves::Syscalls(&["gettimeofday"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "nanosleep",
-        Platform::Both,
-        Serves::Syscalls(&["nanosleep"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "clock_nanosleep",
-        Platform::Linux,
-        Serves::Syscalls(&["clock_nanosleep"]),
-        SymbolStatus::Partial,
-    ),
-    s(
-        "sleep",
-        Platform::Both,
-        Serves::Syscalls(&["nanosleep"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "localtime_r",
-        Platform::Both,
-        Serves::LibcOnly,
-        SymbolStatus::Partial,
-    ),
     s(
         "getenv",
         Platform::Both,

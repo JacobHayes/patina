@@ -300,3 +300,27 @@ fn cancellation_refusal_detector_rejects_planted_allowance() {
     );
     assert!(unprotected_cancellation_imports(&defined, |_| false).is_empty());
 }
+
+/// Class pairing: compiled symbol/row bijection plus named timer-family refusal.
+/// A lost door is either caught by the object gate or refused as an import;
+/// changing the safe allowlist cannot silently make timer rows host-reaching.
+#[test]
+fn timer_rows_never_allow_host_imports() {
+    let timers: Vec<_> = SYMBOLS
+        .iter()
+        .filter(|row| {
+            let name = row.name.trim_start_matches('_');
+            matches!(name, "setitimer" | "getitimer" | "alarm" | "ualarm")
+                || name.starts_with("timer_")
+                || name.starts_with("timerfd_")
+        })
+        .collect();
+    assert!(!timers.is_empty(), "timer contracts must be inventoried");
+    for row in timers {
+        assert!(
+            !patina_dst_target::native_elf_import_allowed(row.name),
+            "host-reaching timer import allowed: {}",
+            row.name
+        );
+    }
+}

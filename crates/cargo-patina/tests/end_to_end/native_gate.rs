@@ -531,6 +531,18 @@ fn main() {
     // `semaphore_wait` stays uninterposed (the shim's baton reaches the real Mach
     // semaphore through the host-alias `dlsym`, never a public strong def), so it
     // remains an undefined import the gate must flag as `unmanaged-sync`.
+    // Linux interposes every public signal-wait representative; Darwin does
+    // not interpose sigsuspend. glibc's exported __sigsuspend alias remains an
+    // import and normalizes to the same signals-timers classifier entry.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const SIGNALS_TIMERS_IMPORT: &str = r#"
+unsafe extern "C" {
+    #[cfg_attr(target_os = "linux", link_name = "__sigsuspend")]
+    #[cfg_attr(target_os = "macos", link_name = "sigsuspend")]
+    fn signals_timers_escape(mask: *const u8) -> i32;
+}
+"#;
+
     #[cfg(target_os = "macos")]
     const ESCAPE_CLASSES_SOURCE: &str = r#"
 unsafe extern "C" {
@@ -548,7 +560,6 @@ unsafe extern "C" {
     fn killpg(pgrp: i32, sig: i32) -> i32;
     fn dlopen(path: *const u8, mode: i32) -> *mut u8;
     fn shm_open(name: *const u8, oflag: i32) -> i32;
-    fn setitimer(which: i32, nv: *const u8, ov: *mut u8) -> i32;
     fn syscall(number: i64) -> i64;
 }
 fn main() {
@@ -556,7 +567,7 @@ fn main() {
         acct as *const (), gethostbyname as *const (), select as *const (),
         semaphore_wait as *const (), tzset as *const (), arc4random as *const (),
         killpg as *const (), dlopen as *const (), shm_open as *const (),
-        setitimer as *const (), syscall as *const (),
+        signals_timers_escape as *const (), syscall as *const (),
     ];
     let mut acc = 0usize;
     for p in ptrs { acc ^= *p as usize; }
@@ -572,7 +583,11 @@ fn main() {
     fn native_run_prerun_gate_refuses_every_escape_class() {
         let directory = tempdir().unwrap();
         let source = directory.path().join("escape_classes.rs");
-        fs::write(&source, ESCAPE_CLASSES_SOURCE).unwrap();
+        fs::write(
+            &source,
+            format!("{SIGNALS_TIMERS_IMPORT}{ESCAPE_CLASSES_SOURCE}"),
+        )
+        .unwrap();
         let workspace = native_workspace();
         let bin = directory.path().join("escape-classes");
         invoke(
@@ -617,6 +632,47 @@ fn main() {
             !String::from_utf8_lossy(&refused.stdout).contains("escape"),
             "the guest must not run"
         );
+    }
+
+    // Class pairing: the default-deny import gate and symbol normalization.
+    // Shares the signal-family representative with the macOS per-class guest.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_run_prerun_gate_refuses_signals_timers_escape() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("signals_escape.rs");
+        fs::write(
+            &source,
+            format!(
+                "{SIGNALS_TIMERS_IMPORT}\nfn main() {{\n\
+                 std::hint::black_box(signals_timers_escape as *const ());\n\
+                 println!(\"guest ran\");\n}}\n"
+            ),
+        )
+        .unwrap();
+        let workspace = native_workspace();
+        let bin = directory.path().join("signals-escape");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        let refused = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &["run", bin.to_str().unwrap(), "--seed", "1"],
+        );
+        assert!(
+            !refused.status.success(),
+            "the import gate must refuse the guest"
+        );
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(stderr.contains("sigsuspend (signals-timers)"), "{stderr}");
+        assert!(!String::from_utf8_lossy(&refused.stdout).contains("guest ran"));
     }
 
     // Part B: the pre-run default-deny gate refuses to run a binary reaching an

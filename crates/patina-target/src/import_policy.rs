@@ -45,6 +45,11 @@ pub(super) fn native_import_decision(
     if allow.contains(symbol) || allow.contains(normalized) {
         return NativeImportDecision::Allowed;
     }
+    // Host timer effects cannot ride a known-safe allowance or an inert weak
+    // binding. Only an explicit caller allowance can bypass this refusal.
+    if timer_symbol(normalized) {
+        return NativeImportDecision::Denied("signals-timers");
+    }
     if native_allowlisted_import(normalized, format) {
         return NativeImportDecision::Allowed;
     }
@@ -553,6 +558,13 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
         || RSEQ_LAYOUT.contains(&symbol)
 }
 
+/// Timer names are host effects even if a future spelling is not inventoried.
+fn timer_symbol(symbol: &str) -> bool {
+    matches!(symbol, "setitimer" | "getitimer" | "alarm" | "ualarm")
+        || symbol.starts_with("timer_")
+        || symbol.starts_with("timerfd_")
+}
+
 /// Classify a denied import into a guest-escape *class* for error quality and
 /// for the per-class detection proof. Purely a labeling function: it never
 /// gates (allow and the effect-free allowlist are consulted first, so a symbol
@@ -569,6 +581,9 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
 /// one unresolved is reported as its escape class rather than a bare unknown
 /// import (defense in depth).
 fn native_escape_category(symbol: &str) -> Option<&'static str> {
+    if timer_symbol(symbol) {
+        return Some("signals-timers");
+    }
     // (f) Filesystem: path and descriptor I/O. Routed through the deterministic
     // filesystem when interposed; a raw import is a host filesystem escape.
     const FILESYSTEM: &[&str] = &[
@@ -829,13 +844,6 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
     // registration stays on the allowlist — Patina delivers no ambient signals —
     // but timer-arming and signal-*waiting* are escapes.)
     const SIGNALS_TIMERS: &[&str] = &[
-        "setitimer",
-        "getitimer",
-        "alarm",
-        "ualarm",
-        "timer_create",
-        "timer_settime",
-        "timer_delete",
         "sigsuspend",
         "sigwait",
         "sigwaitinfo",

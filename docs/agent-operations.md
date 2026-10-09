@@ -341,3 +341,10 @@ assertions for uniqueness. Keep behavioral checks for parsing, wire encoding,
 round trips and draw order. Cache tests should inspect Cargo's typed artifact freshness receipts, never
 compiler progress wording. Cargo's uplift can rewrite even fresh executables,
 so published inode/mtime alone is not a cache-hit discriminator.
+
+A syscall row marked Modeled does not contain a libc wrapper that makes its
+syscall inside libc's SUD-allowed text. Verify the libc symbol inventory and
+compiled definitions independently of the raw row. Direct C acceptance-harness
+execution also bypasses the CLI import audit; exercise the same guest through
+audit, seeded record and replay before claiming containment. Timer imports are
+always named effects so an undefined weak reference cannot hide a missing door.

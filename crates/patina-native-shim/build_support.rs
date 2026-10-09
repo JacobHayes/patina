@@ -72,9 +72,13 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         if !C_ROUTED.contains(&row.name.as_str()) {
             continue;
         }
-        if row.only_x86 {
+        if row.architecture.as_deref() == Some("x86_64") {
             x86.push(row.name.as_str());
         } else {
+            assert!(
+                row.architecture.is_none(),
+                "retained C route needs architecture support"
+            );
             ordinary.push(row.name.as_str());
         }
     }
@@ -100,12 +104,13 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         String::from("// Hidden route aliases generated from the symbol registry.\n");
     let mut ordinary_aliases = Vec::new();
     let mut x86_aliases = Vec::new();
+    let mut arm_aliases = Vec::new();
     for row in symbols {
         if !row.linux || !row.routed || row.name == "__wrap_dlsym" {
             continue;
         }
-        if row.only_x86 {
-            rust_routes.push_str("#[cfg(target_arch = \"x86_64\")]\n");
+        if let Some(arch) = &row.architecture {
+            writeln!(rust_routes, "#[cfg(target_arch = \"{arch}\")]").unwrap();
         }
         writeln!(rust_routes, "static patina_route_{}: u8;", row.name).unwrap();
     }
@@ -121,10 +126,11 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
             None
         };
         let Some(alias) = alias else { continue };
-        if row.only_x86 {
-            x86_aliases.push(alias);
-        } else {
-            ordinary_aliases.push(alias);
+        match row.architecture.as_deref() {
+            Some("x86_64") => x86_aliases.push(alias),
+            Some("aarch64") => arm_aliases.push(alias),
+            None => ordinary_aliases.push(alias),
+            _ => unreachable!("metadata validates architecture"),
         }
     }
     for (cfg, aliases) in [
@@ -132,6 +138,10 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         (
             Some("#[cfg(target_arch = \"x86_64\")]\n"),
             x86_aliases.as_mut_slice(),
+        ),
+        (
+            Some("#[cfg(target_arch = \"aarch64\")]\n"),
+            arm_aliases.as_mut_slice(),
         ),
     ] {
         aliases.sort_unstable();
@@ -156,8 +166,8 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         if !row.linux || !row.routed || row.name == "__wrap_dlsym" {
             continue;
         }
-        if row.only_x86 {
-            rust_routes.push_str("#[cfg(target_arch = \"x86_64\")]\n");
+        if let Some(arch) = &row.architecture {
+            writeln!(rust_routes, "#[cfg(target_arch = \"{arch}\")]").unwrap();
         }
         writeln!(
             rust_routes,
