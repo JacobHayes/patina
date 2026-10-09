@@ -861,12 +861,14 @@ pub(crate) unsafe fn pipe_write(
                     Err(error) => return super::fail(c_int::from(error.into_posix())) as isize,
                 }
                 lock_state().timed_out.remove(&me);
+                // `pipe_write`: a write a handler interrupts answers what it
+                // wrote; only one that wrote nothing fails or restarts.
                 #[cfg(target_os = "linux")]
-                if signals::resume() == signals::Resumed::Eintr {
-                    if written > 0 {
-                        return isize::try_from(written).unwrap_or(isize::MAX);
-                    }
-                    return super::fail(super::EINTR) as isize;
+                match signals::resume() {
+                    signals::Resumed::Normal => {}
+                    _ if written > 0 => return isize::try_from(written).unwrap_or(isize::MAX),
+                    signals::Resumed::Eintr => return super::fail(super::EINTR) as isize,
+                    signals::Resumed::Restart => {}
                 }
             }
         }

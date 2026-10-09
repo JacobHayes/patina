@@ -10,6 +10,7 @@ pub mod fault;
 pub mod handler_flags;
 pub mod mask;
 pub mod one_wake;
+pub mod partial_progress;
 pub mod per_thread;
 pub mod pipe_term;
 pub mod queue;

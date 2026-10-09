@@ -627,6 +627,7 @@ macro_rules! for_each_scenario {
             signal_handler_flags => signal::handler_flags,
             signal_mask => signal::mask,
             signal_one_wake => signal::one_wake,
+            signal_partial_progress => signal::partial_progress,
             signal_per_thread => signal::per_thread,
             signal_pipe_term => signal::pipe_term,
             signal_queue => signal::queue,
