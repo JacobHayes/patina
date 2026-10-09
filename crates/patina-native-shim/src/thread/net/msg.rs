@@ -305,8 +305,14 @@ fn inet_socket_control(datagram: bool, kind: i32) -> Result<(), c_int> {
 }
 
 /// One `___sys_sendmsg` on a socket already looked up: the header at `msg`
-/// sent through `handle`.
-fn send_one(handle: c_int, nonblocking: bool, msg: usize, flags: c_int) -> Result<usize, c_int> {
+/// sent through `handle`. Answers the bytes sent and whether that was all
+/// of them (`msg_data_left`).
+fn send_one(
+    handle: c_int,
+    nonblocking: bool,
+    msg: usize,
+    flags: c_int,
+) -> Result<(usize, bool), c_int> {
     let header = header(msg)?;
     let namelen = if header.name == 0 { 0 } else { header.namelen };
     if namelen < 0 {
@@ -332,6 +338,9 @@ fn send_one(handle: c_int, nonblocking: bool, msg: usize, flags: c_int) -> Resul
         Vec::new()
     };
     let (rights, creds, protocol) = control(handle, &control_bytes)?;
+    let total = segments
+        .iter()
+        .fold(0usize, |total, (_, len)| total.saturating_add(*len));
     let message = Outgoing {
         protocol,
         data: Payload::gathered(segments),
@@ -340,15 +349,15 @@ fn send_one(handle: c_int, nonblocking: bool, msg: usize, flags: c_int) -> Resul
         creds,
         flags: with_nonblock(flags, nonblocking),
     };
-    send_message(handle, message)
+    send_message(handle, message).map(|sent| (sent, sent >= total))
 }
 
 pub(crate) fn sendmsg(fd: c_int, msg: usize, flags: c_int) -> crate::abi::SysResult<i64> {
-    (|| {
+    super::restarting(|| {
         sched_point()?;
         let (handle, nonblocking) = lookup(fd)?;
-        send_one(handle, nonblocking, msg, flags).map(|sent| sent as i64)
-    })()
+        send_one(handle, nonblocking, msg, flags).map(|(sent, _)| sent as i64)
+    })
     .map_err(crate::abi::Errno::new)
 }
 
@@ -532,16 +541,18 @@ fn cmsg_flags(_flags: c_int) -> c_int {
 }
 
 pub(crate) fn recvmsg(fd: c_int, msg: usize, flags: c_int) -> crate::abi::SysResult<i64> {
-    (|| {
+    super::restarting(|| {
         sched_point()?;
         let (handle, nonblocking) = lookup(fd)?;
         recv_one(handle, nonblocking, msg, flags).map(|len| len as i64)
-    })()
+    })
     .map_err(crate::abi::Errno::new)
 }
 
 /// `sendmmsg(2)`: up to `UIO_MAXIOV` messages, each's sent length written
-/// back; the count sent, or the first message's error when none was.
+/// back; the count sent, or the first message's error when none was. A
+/// message sent only in part (a handler interrupted it) ends the batch
+/// (`msg_data_left`).
 #[cfg(target_os = "linux")]
 pub(crate) fn sendmmsg(
     fd: c_int,
@@ -549,7 +560,7 @@ pub(crate) fn sendmmsg(
     vlen: u32,
     flags: c_int,
 ) -> crate::abi::SysResult<i64> {
-    (|| {
+    super::restarting(|| {
         sched_point()?;
         let vlen = (vlen as usize).min(UIO_MAXIOV);
         let (handle, nonblocking) = lookup(fd)?;
@@ -558,12 +569,15 @@ pub(crate) fn sendmmsg(
         while sent < vlen {
             let entry = vec + sent * MMSGHDR;
             match send_one(handle, nonblocking, entry, flags) {
-                Ok(len) => {
+                Ok((len, whole)) => {
                     if let Err(errno) = uaccess::write(entry + MSGHDR, &(len as u32)) {
                         error = Some(errno);
                         break;
                     }
                     sent += 1;
+                    if !whole {
+                        break;
+                    }
                 }
                 Err(errno) => {
                     error = Some(errno);
@@ -575,7 +589,7 @@ pub(crate) fn sendmmsg(
             Some(errno) if sent == 0 => Err(errno),
             _ => Ok(sent as i64),
         }
-    })()
+    })
     .map_err(crate::abi::Errno::new)
 }
 
@@ -586,7 +600,8 @@ const MSG_WAITFORONE_FLAG: c_int = MSG_WAITFORONE;
 /// `recvmmsg(2)` (`do_recvmmsg`): the messages received, each's length
 /// written back. An invalid timeout is refused before anything; the
 /// timeout is checked after each message; an error after the first is left
-/// pending on the socket (unless it is `EAGAIN`).
+/// pending on the socket (unless it is `EAGAIN`), a handler's interruption
+/// among them; with none received an interruption settles the whole call.
 #[cfg(target_os = "linux")]
 pub(crate) fn recvmmsg(
     fd: c_int,
@@ -595,7 +610,7 @@ pub(crate) fn recvmmsg(
     flags: c_int,
     timeout: usize,
 ) -> crate::abi::SysResult<i64> {
-    (|| {
+    super::restarting(|| {
         let end = if timeout == 0 {
             None
         } else {
@@ -650,6 +665,10 @@ pub(crate) fn recvmmsg(
         match error {
             Some(errno) if received == 0 => Err(errno),
             Some(errno) => {
+                let errno = match errno {
+                    super::RESTART | super::INTERRUPTED => crate::EINTR,
+                    errno => errno,
+                };
                 if errno != EWOULDBLOCK
                     && let Some(socket) = lock_state().net.sockets.table.get_mut(&handle)
                 {
@@ -659,7 +678,7 @@ pub(crate) fn recvmmsg(
             }
             None => Ok(received as i64),
         }
-    })()
+    })
     .map_err(crate::abi::Errno::new)
 }
 

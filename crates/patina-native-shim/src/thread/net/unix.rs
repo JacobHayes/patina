@@ -691,8 +691,10 @@ fn send_stream(handle: c_int, mut message: Outgoing, urgent: bool) -> Result<usi
             if nonblocking || expired(deadline)? {
                 return if sent > 0 { Ok(sent) } else { Err(EWOULDBLOCK) };
             }
-            park(state, handle, Dir::Send, deadline, "unix-send")
-                .or_else(|errno| if sent > 0 { Ok(()) } else { Err(errno) })?;
+            // `unix_stream_sendmsg`: `sent ? : err`.
+            if let Err(errno) = park(state, handle, Dir::Send, deadline, "unix-send") {
+                return if sent > 0 { Ok(sent) } else { Err(errno) };
+            }
             continue;
         }
         let creds = creds_for(&state, handle, peer, message.creds);
@@ -967,8 +969,15 @@ fn recv_stream(
             };
         }
         wake_all(wakes);
-        park(state, handle, Dir::Recv, deadline, "unix-recv")
-            .or_else(|errno| if got > 0 { Ok(()) } else { Err(errno) })?;
+        // `unix_stream_read_generic`: `copied ? : err`.
+        if let Err(errno) = park(state, handle, Dir::Recv, deadline, "unix-recv") {
+            if got == 0 {
+                return Err(errno);
+            }
+            incoming.len = got;
+            incoming.creds = reported(passcred, first_creds.flatten());
+            return Ok(incoming);
+        }
     }
 }
 

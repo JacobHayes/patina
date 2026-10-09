@@ -254,8 +254,10 @@ fn send_stream_bytes(handle: c_int, message: &Outgoing) -> Result<usize, c_int> 
                          (an urgent mark at each wait) is not modeled; failing closed",
                     );
                 }
-                park(state, handle, Dir::Send, deadline, "tcp-send")
-                    .or_else(|errno| if sent > 0 { Ok(()) } else { Err(errno) })?;
+                // `tcp_sendmsg_locked`: `copied` once anything went.
+                if let Err(errno) = park(state, handle, Dir::Send, deadline, "tcp-send") {
+                    return if sent > 0 { Ok(sent) } else { Err(errno) };
+                }
             }
             Ok(written) => {
                 sent += written;

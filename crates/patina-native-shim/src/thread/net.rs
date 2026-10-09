@@ -348,16 +348,41 @@ pub(super) fn park_until(
         state.timed_out.remove(&me);
     }
     // `sock_intr_errno`: a wait with a timeout is `EINTR` whatever the
-    // handler's `SA_RESTART`; only one that waits forever restarts.
+    // handler's `SA_RESTART`; one that waits forever is `ERESTARTSYS`, which
+    // the call's end settles ([`restarting`]).
     #[cfg(target_os = "linux")]
     match signals::resume() {
-        signals::Resumed::Eintr => return Err(crate::EINTR),
-        signals::Resumed::Restart if timed => return Err(crate::EINTR),
-        signals::Resumed::Restart | signals::Resumed::Normal => {}
+        signals::Resumed::Normal => {}
+        _ if timed => return Err(crate::EINTR),
+        signals::Resumed::Restart => return Err(RESTART),
+        signals::Resumed::Eintr => return Err(INTERRUPTED),
     }
     #[cfg(not(target_os = "linux"))]
     let _ = timed;
     Ok(())
+}
+
+/// A socket wait that a handler interrupted, with no timeout: the kernel's
+/// `-ERESTARTSYS`, here with the handler's verdict on it, `SA_RESTART`
+/// ([`RESTART`]) or not ([`INTERRUPTED`]). A wait answers it only before
+/// its call moved anything (one that did answers what moved), and the
+/// call's end settles it ([`restarting`]). Negative, so never an errno.
+pub(crate) const RESTART: c_int = -1;
+/// [`RESTART`] under a handler without `SA_RESTART`: the call fails `EINTR`.
+pub(crate) const INTERRUPTED: c_int = -2;
+
+/// Run one socket call to its end, settling an interrupted wait as the
+/// kernel settles `ERESTARTSYS` at the syscall's return: under
+/// `SA_RESTART` the call runs again from its arguments, otherwise it fails
+/// `EINTR`.
+pub(crate) fn restarting<T>(mut call: impl FnMut() -> Result<T, c_int>) -> Result<T, c_int> {
+    loop {
+        match call() {
+            Err(RESTART) => continue,
+            Err(INTERRUPTED) => return Err(crate::EINTR),
+            result => return result,
+        }
+    }
 }
 
 /// A receive freed room for `writer`'s sends: a write-space arrival, and its
@@ -611,7 +636,7 @@ pub(crate) fn bind(fd: c_int, addr: usize, len: i64) -> crate::abi::SysResult<i6
 }
 
 pub(crate) fn connect(fd: c_int, addr: usize, len: i64) -> crate::abi::SysResult<i64> {
-    (|| {
+    restarting(|| {
         sched_point()?;
         let (handle, nonblocking) = lookup(fd)?;
         let address = addr::copy_in(addr, len)?;
@@ -622,7 +647,7 @@ pub(crate) fn connect(fd: c_int, addr: usize, len: i64) -> crate::abi::SysResult
             Family::Netlink => netlink::connect(handle, &address),
         }
         .map(|()| 0)
-    })()
+    })
     .map_err(crate::abi::Errno::new)
 }
 
@@ -658,7 +683,7 @@ pub(crate) fn accept(
     len_ptr: usize,
     flags: c_int,
 ) -> crate::abi::SysResult<i64> {
-    (|| {
+    restarting(|| {
         let (nonblocking_new, cloexec) = creation_flags(flags)?;
         sched_point()?;
         let (handle, nonblocking) = lookup(fd)?;
@@ -680,7 +705,7 @@ pub(crate) fn accept(
             return Err(errno);
         }
         Ok(i64::from(new_fd))
-    })()
+    })
     .map_err(crate::abi::Errno::new)
 }
 
@@ -773,7 +798,7 @@ pub(crate) fn sendto(
     addr: usize,
     alen: i64,
 ) -> crate::abi::SysResult<i64> {
-    (|| {
+    restarting(|| {
         sched_point()?;
         let (handle, nonblocking) = lookup(fd)?;
         let to = if addr != 0 {
@@ -787,7 +812,7 @@ pub(crate) fn sendto(
             with_nonblock(flags, nonblocking),
         );
         send_message(handle, message).map(|sent| sent as i64)
-    })()
+    })
     .map_err(crate::abi::Errno::new)
 }
 
@@ -813,7 +838,7 @@ pub(crate) fn recvfrom(
     addr: usize,
     alen_ptr: usize,
 ) -> crate::abi::SysResult<i64> {
-    (|| {
+    restarting(|| {
         sched_point()?;
         let (handle, nonblocking) = lookup(fd)?;
         let want = Want {
@@ -827,7 +852,7 @@ pub(crate) fn recvfrom(
             addr::copy_out(incoming.from.as_deref().unwrap_or(&[]), addr, alen_ptr)?;
         }
         Ok(incoming.len as i64)
-    })()
+    })
     .map_err(crate::abi::Errno::new)
 }
 
@@ -858,7 +883,7 @@ pub(crate) unsafe fn socket_read(
         capacity: len.min(MAX_RW_COUNT),
         flags: with_nonblock(0, nonblocking),
     };
-    match recv_message(handle as c_int, want) {
+    match restarting(|| recv_message(handle as c_int, want)) {
         Ok(incoming) => {
             release_rights(&incoming.rights);
             match uaccess::write_bytes(buf as usize, &incoming.data) {
@@ -883,14 +908,16 @@ pub(crate) unsafe fn socket_write(
     if let Err(errno) = sched_point() {
         return crate::fail(errno) as isize;
     }
-    match send_message(
-        handle as c_int,
-        Outgoing::plain(
-            Payload::contiguous(buf as usize, len),
-            None,
-            with_nonblock(0, nonblocking),
-        ),
-    ) {
+    match restarting(|| {
+        send_message(
+            handle as c_int,
+            Outgoing::plain(
+                Payload::contiguous(buf as usize, len),
+                None,
+                with_nonblock(0, nonblocking),
+            ),
+        )
+    }) {
         Ok(sent) => sent as isize,
         Err(errno) => crate::fail(errno) as isize,
     }

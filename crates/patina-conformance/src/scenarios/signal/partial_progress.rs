@@ -1,15 +1,20 @@
 //! signal/partial_progress — a blocking transfer that a handler interrupts
 //! after part of it moved answers what moved, even under `SA_RESTART`: the
 //! kernel restarts only a call that transferred nothing (`pipe_write`'s
-//! `if (!ret) ret = -ERESTARTSYS`).
+//! `if (!ret) ret = -ERESTARTSYS`, `unix_stream_sendmsg`'s `sent ? : err`,
+//! `unix_stream_read_generic`'s `copied ? : err` for `MSG_WAITALL`). A
+//! `sendmmsg` whose message went only in part answers that message and
+//! ends there (`msg_data_left`).
 //!
-//! The helper, after its kill, waits for the call to return and then keeps
-//! the other side moving (it drains the pipe to end-of-file); its wait is
-//! bounded, so a call that wrongly restarts completes with the whole length
-//! instead of hanging.
+//! Each helper, after its kill, waits for the call to return and then keeps
+//! the other side moving (it drains the pipe or socket to end-of-file, or
+//! sends the rest of what `MSG_WAITALL` waits for); its wait is bounded, so a
+//! call that wrongly restarts completes with the whole length instead of
+//! hanging. A stream send's partial count depends on the host's socket
+//! buffer, so only its relation to the length is observed.
 
 use crate::catalog::{DEFAULTS, Generation, Scenario, TraceFacts};
-use crate::probe::Probe;
+use crate::probe::{Outgoing, Probe};
 use crate::signals as support;
 use libc::*;
 use patina_dst_syscalls::Syscall;
@@ -42,7 +47,7 @@ pub fn run(p: &Probe) {
     support::install(SIGUSR1, SA_RESTART, false);
     let pid = p.getpid() as pid_t;
     let main_tid = support::gettid();
-    let big = vec![0x5a_u8; 100_000];
+    let big = vec![0x5a_u8; 1 << 20];
 
     let (r, [rd, wr]) = p.pipe2(0);
     p.require("pipe", r == 0);
@@ -51,7 +56,7 @@ pub fn run(p: &Probe) {
     let returned = AtomicBool::new(false);
     let wrote = thread::scope(|scope| {
         scope.spawn(|| interrupt_then(p, main_tid, pid, &returned, || drain(rd)));
-        let wrote = p.write(wr, &big);
+        let wrote = p.write(wr, &big[..100_000]);
         returned.store(true, Ordering::SeqCst);
         p.close(wr);
         wrote
@@ -62,9 +67,72 @@ pub fn run(p: &Probe) {
     );
     p.close(rd);
 
+    let (r, [a, b]) = p.socketpair(AF_UNIX, SOCK_STREAM, 0);
+    p.require("stream socketpair", r == 0);
+    let returned = AtomicBool::new(false);
+    let sent = thread::scope(|scope| {
+        scope.spawn(|| interrupt_then(p, main_tid, pid, &returned, || drain(b)));
+        let sent = p.rec.quiet(|| p.send(a, &big, 0));
+        returned.store(true, Ordering::SeqCst);
+        p.shutdown(a, SHUT_WR);
+        sent
+    });
     p.check(
-        "the interrupted write ran the handler once",
-        support::count() == 1,
+        "a stream send a handler interrupts after it filled the buffer answers the bytes sent",
+        sent > 0 && (sent as usize) < big.len(),
+    );
+    p.close(a);
+    p.close(b);
+
+    let (r, [a, b]) = p.socketpair(AF_UNIX, SOCK_STREAM, 0);
+    p.require("stream socketpair", r == 0);
+    p.check("queue three bytes", p.send(b, b"xyz", 0) == 3);
+    let returned = AtomicBool::new(false);
+    let (n, data) = thread::scope(|scope| {
+        scope.spawn(|| {
+            interrupt_then(p, main_tid, pid, &returned, || unsafe {
+                send(b, b"4567890".as_ptr().cast(), 7, 0);
+            })
+        });
+        let received = p.recv(a, 10, MSG_WAITALL);
+        returned.store(true, Ordering::SeqCst);
+        received
+    });
+    p.check(
+        "a MSG_WAITALL receive a handler interrupts answers the bytes it had",
+        n == 3 && data == b"xyz",
+    );
+    p.close(a);
+    p.close(b);
+    let (r, [a, b]) = p.socketpair(AF_UNIX, SOCK_STREAM, 0);
+    p.require("stream socketpair", r == 0);
+    let returned = AtomicBool::new(false);
+    let (n, lens) = thread::scope(|scope| {
+        scope.spawn(|| interrupt_then(p, main_tid, pid, &returned, || drain(b)));
+        let batch = [
+            Outgoing {
+                data: &big,
+                to: None,
+            },
+            Outgoing {
+                data: b"tail",
+                to: None,
+            },
+        ];
+        let sent = p.rec.quiet(|| p.sendmmsg(a, &batch, 0));
+        returned.store(true, Ordering::SeqCst);
+        p.shutdown(a, SHUT_WR);
+        sent
+    });
+    p.check(
+        "a sendmmsg whose first message a handler interrupted answers that message alone",
+        n == 1 && lens[0] > 0 && (lens[0] as usize) < big.len(),
+    );
+    p.close(a);
+    p.close(b);
+    p.check(
+        "every interrupted transfer ran the handler once",
+        support::count() == 4,
     );
     support::install_disposition(SIGUSR1, SIG_DFL);
 }
@@ -78,11 +146,34 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_write,
         Syscall::N_close,
         Syscall::N_fcntl,
+        Syscall::N_socketpair,
+        Syscall::N_sendto,
+        Syscall::N_recvfrom,
+        Syscall::N_sendmmsg,
+        Syscall::N_shutdown,
         Syscall::N_kill,
     ],
-    symbols: &["getpid", "pipe2", "write", "close", "fcntl", "kill", "sigaction"],
+    symbols: &[
+        "getpid",
+        "pipe2",
+        "write",
+        "close",
+        "fcntl",
+        "socketpair",
+        "send",
+        "recv",
+        "sendmmsg",
+        "shutdown",
+        "kill",
+        "sigaction",
+    ],
     trace: Some(TraceFacts {
-        generations: &[Generation::process(SIGUSR1)],
+        generations: &[
+            Generation::process(SIGUSR1),
+            Generation::process(SIGUSR1),
+            Generation::process(SIGUSR1),
+            Generation::process(SIGUSR1),
+        ],
         max_wakes_per_generation: Some(1),
     }),
     ..DEFAULTS

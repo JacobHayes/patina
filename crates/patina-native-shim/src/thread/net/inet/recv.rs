@@ -267,8 +267,14 @@ pub(super) fn recv_stream(handle: c_int, want: Want) -> Result<Incoming, c_int> 
                 Ok(done(got, want))
             };
         }
-        park_recv(state, handle, Some(sid), deadline, "tcp-recv")
-            .or_else(|errno| if got.is_empty() { Err(errno) } else { Ok(()) })?;
+        // `tcp_recvmsg_locked`: `copied` once anything came.
+        if let Err(errno) = park_recv(state, handle, Some(sid), deadline, "tcp-recv") {
+            return if got.is_empty() {
+                Err(errno)
+            } else {
+                Ok(done(got, want))
+            };
+        }
     }
 }
 
