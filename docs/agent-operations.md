@@ -78,8 +78,8 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
 
 - `scripts/publish.sh` is the release path. Its default is a dry run: it prints
   every publishable crate's packaged file list, asserts each package carries
-  both license texts (the root `LICENSE-MIT`/`LICENSE-APACHE` reach a package
-  through per-crate symlinks, so a new crate needs both), and runs
+  the license text (the root `LICENSE-APACHE` reaches a package through a
+  per-crate symlink, so a new crate needs one), and runs
   `cargo publish --workspace --dry-run`. Nothing is uploaded.
 - `scripts/publish.sh --execute` uploads, and refuses — naming everything that
   is missing — unless the working tree is clean and the commit carries the git

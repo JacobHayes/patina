@@ -4,7 +4,7 @@
 # The default mode is a DRY RUN and uploads nothing: it prints the packaged file
 # list of every publishable member (so a missing license, readme, C source, or
 # test fixture is visible before it is missing on crates.io), asserts each
-# package carries both license texts, and runs `cargo publish --workspace
+# package carries the license text, and runs `cargo publish --workspace
 # --dry-run`, which packages and verify-builds every member in dependency order.
 #
 # `--execute` performs the real upload, and only when BOTH hold:
@@ -25,7 +25,7 @@ usage() {
 usage: scripts/publish.sh [--execute]
 
   (no flag)  Dry run. Prints every publishable crate's packaged file list,
-             checks each carries LICENSE-MIT and LICENSE-APACHE, then runs
+             checks each carries LICENSE-APACHE, then runs
              `cargo publish --workspace --dry-run`. Nothing is uploaded.
   --execute  Publish the workspace to crates.io. Refuses, naming what is
              missing, unless the working tree is clean and the current commit
@@ -97,8 +97,8 @@ fi
 
 # (2) Package listing audit. Publishable members are the workspace crates whose
 # manifest does not opt out with `publish = false`. Cargo does not fail a
-# package that lacks its license texts, so that is asserted here: the root
-# LICENSE-* files reach each package through per-crate symlinks, which cargo
+# package that lacks its license text, so that is asserted here: the root
+# LICENSE-APACHE reaches each package through a per-crate symlink, which cargo
 # dereferences into real files in the .crate.
 audit_failures=0
 publishable=()
@@ -117,13 +117,12 @@ for manifest in crates/*/Cargo.toml; do
   printf '== %s (%s)\n' "$name" "$manifest"
   files=$(cargo package -p "$name" --no-verify --allow-dirty --list)
   printf '%s\n' "$files" | sed 's/^/   /'
-  for license in LICENSE-MIT LICENSE-APACHE; do
-    if ! printf '%s\n' "$files" | grep -qx "$license"; then
-      printf '   MISSING %s (add the symlink: ln -s ../../%s %s/%s)\n' \
-        "$license" "$license" "$(dirname "$manifest")" "$license" >&2
-      audit_failures=$((audit_failures + 1))
-    fi
-  done
+  license=LICENSE-APACHE
+  if ! printf '%s\n' "$files" | grep -qx "$license"; then
+    printf '   MISSING %s (add the symlink: ln -s ../../%s %s/%s)\n' \
+      "$license" "$license" "$(dirname "$manifest")" "$license" >&2
+    audit_failures=$((audit_failures + 1))
+  fi
 done
 if [ ${#publishable[@]} -eq 0 ]; then
   printf 'publish.sh: found no publishable crates under crates/\n' >&2
@@ -135,7 +134,7 @@ if [ ${#skipped[@]} -gt 0 ]; then
 fi
 printf '\n'
 if [ "$audit_failures" -gt 0 ]; then
-  printf 'publish.sh: %d package(s) lack a license text; see MISSING lines above\n' "$audit_failures" >&2
+  printf 'publish.sh: %d package(s) lack the license text; see MISSING lines above\n' "$audit_failures" >&2
   exit 1
 fi
 
