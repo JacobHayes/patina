@@ -27,6 +27,13 @@
  *   counter       a timer expires during timestamp-counter reads (x86_64;
  *                 clock reads elsewhere);
  *   raw-tgkill    a raw tgkill instruction (x86_64, under SUD);
+ *   raw-read      a second thread signals the main thread blocked in a raw
+ *                 read (x86_64, under SUD);
+ *   raw-sigsuspend a pending SIGUSR1 released by a raw rt_sigsuspend's mask
+ *                 (x86_64, under SUD);
+ *   forward-nested glibc's syscall(2) sends SIGUSR2, whose handler sends
+ *                 SIGUSR1 with a raw tgkill (x86_64, under SUD): SIGUSR1 runs
+ *                 over the frames the libc door's delivery left suspended;
  *   raise-counter raise(SIGUSR1) runs a handler that reads the counter until
  *                 a timer expires (x86_64): the timer's delivery, at a
  *                 counter read, is over the frames raise left suspended;
@@ -136,20 +143,30 @@ static void counter_read(void) {
 #endif
 }
 
-static long raw_tgkill(int sig) {
+/* A raw system call instruction (x86_64), which SUD traps. */
+static long raw3(long nr, long a0, long a1, long a2) {
 #if defined(__x86_64__)
     long result;
     __asm__ volatile("syscall"
                      : "=a"(result)
-                     : "a"((long)SYS_tgkill), "D"((long)getpid()), "S"((long)gettid()),
-                       "d"((long)sig)
+                     : "a"(nr), "D"(a0), "S"(a1), "d"(a2)
                      : "rcx", "r11", "memory");
     return result;
 #else
-    (void)sig;
-    assert(!"raw-tgkill is an x86_64 case");
+    (void)nr, (void)a0, (void)a1, (void)a2;
+    assert(!"raw cases are x86_64 cases");
     return -1;
 #endif
+}
+
+static long raw_tgkill(int sig) {
+    return raw3(SYS_tgkill, getpid(), gettid(), sig);
+}
+
+/* forward-nested's SIGUSR2 handler. */
+static void raw_send_usr1(int sig) {
+    (void)sig;
+    assert(raw_tgkill(SIGUSR1) == 0);
 }
 
 static void report(uint64_t over_before) {
@@ -186,12 +203,21 @@ static void deliver(const char *name) {
         sigemptyset(&none);
         assert(raise(SIGUSR1) == 0);
         sigsuspend(&none);
-    } else if (strcmp(name, "pipe-read") == 0 || strcmp(name, "handoff") == 0) {
-        int reading = name[0] == 'p';
+    } else if (strcmp(name, "raw-sigsuspend") == 0) {
+        sigset_t none;
+        sigemptyset(&none);
+        assert(raise(SIGUSR1) == 0);
+        raw3(SYS_rt_sigsuspend, (long)&none, 8, 0);
+    } else if (strcmp(name, "pipe-read") == 0 || strcmp(name, "handoff") == 0 ||
+               strcmp(name, "raw-read") == 0) {
+        int reading = name[0] != 'h';
         assert(pipe(fds) == 0);
         assert(pthread_create(&helper, NULL, signal_main, reading ? &helper : NULL) == 0);
         helping = 1;
-        if (reading) {
+        if (strcmp(name, "raw-read") == 0) {
+            char byte;
+            raw3(SYS_read, fds[0], (long)&byte, 1);
+        } else if (reading) {
             char byte;
             (void)read(fds[0], &byte, 1);
         } else {
@@ -206,6 +232,8 @@ static void deliver(const char *name) {
         for (;;) counter_read();
     } else if (strcmp(name, "raise-counter") == 0) {
         assert(raise(SIGUSR1) == 0);
+    } else if (strcmp(name, "forward-nested") == 0) {
+        assert(syscall(SYS_tgkill, getpid(), gettid(), SIGUSR2) == 0);
     } else if (strcmp(name, "raw-tgkill") == 0) {
         assert(raw_tgkill(SIGUSR1) == 0);
     } else if (strcmp(name, "abort") == 0) {
@@ -229,13 +257,16 @@ int main(int argc, char **argv) {
     }
     if (strcmp(name, "fault-escape") == 0) install(SIGSEGV, leave, 0);
     else if (strcmp(name, "held-back") == 0) install(SIGSEGV, segv_holding_usr1, SIGUSR1);
+    if (strcmp(name, "forward-nested") == 0) install(SIGUSR2, raw_send_usr1, 0);
     if (strcmp(name, "raise-counter") == 0) {
         install(SIGUSR1, count_until_alarm, 0);
         install(SIGALRM, leave, 0);
     } else if (strcmp(name, "counter") == 0) install(SIGALRM, leave, 0);
     else if (strcmp(name, "abort") == 0) install(SIGABRT, leave, 0);
     else install(SIGUSR1, leave, 0);
-    if (strcmp(name, "unblock") == 0 || strcmp(name, "sigsuspend") == 0) block(SIGUSR1);
+    if (strcmp(name, "unblock") == 0 || strcmp(name, "sigsuspend") == 0 ||
+        strcmp(name, "raw-sigsuspend") == 0)
+        block(SIGUSR1);
     for (int run = 0; run < RUNS; run++) {
         entered = 0;
         int jumped = sigsetjmp(escape, 1);

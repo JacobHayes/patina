@@ -15,6 +15,8 @@ pub mod per_thread;
 pub mod pipe_term;
 pub mod queue;
 pub mod raw_action;
+pub mod raw_restart_reexecutes_original_args;
+pub mod raw_sigsuspend_frame_saved_mask;
 pub mod recvmmsg_interrupted;
 pub mod restart;
 pub mod restorer;

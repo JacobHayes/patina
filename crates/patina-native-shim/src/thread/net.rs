@@ -353,7 +353,7 @@ pub(super) fn park_until(
     // handler's `SA_RESTART`; one that waits forever is `ERESTARTSYS`, which
     // the call's end settles ([`restarting`]).
     #[cfg(target_os = "linux")]
-    match signals::resume() {
+    match signals::resume_timed(timed) {
         signals::Resumed::Normal => {}
         _ if timed => return Err(crate::EINTR),
         signals::Resumed::Restart => return Err(RESTART),

@@ -317,7 +317,15 @@ fn handlers_leaving_shim_calls_leave_no_shim_frames() {
         cases.push(("raise-counter", Gap));
     }
     if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Sud) {
-        cases.push(("raw-tgkill", Gap));
+        // Raw system calls are delivered from the syscall trap's exit.
+        cases.push(("raw-tgkill", Clean));
+        cases.push(("raw-read", Clean));
+        cases.push(("raw-sigsuspend", Clean));
+        // A raw syscall inside a handler a libc door's delivery ran: what its
+        // exit delivers runs over the frames that delivery left suspended,
+        // as anything the handler meets does, until libc doors deliver from
+        // C exits too.
+        cases.push(("forward-nested", Gap));
     }
     let native = assert_build_c_guest("signals/frame_abandon.c", CLink::Unlinked);
     let patina = assert_build_c_guest("signals/frame_abandon.c", CLink::PosixShimPlanted);
@@ -363,6 +371,38 @@ fn a_held_back_signal_survives_a_jump_out_of_its_handler() {
     let oracle = assert_standalone_success(&native.binary, &[], &[]);
     let output = assert_standalone_success(&patina.binary, &[], &env);
     assert_eq!(text(&output.stdout), text(&oracle.stdout));
+}
+
+/// A delivery batch's frames are built as 6.8 builds them: two realtime
+/// signals of one number under `SA_NODEFER` run last sent first, a handler
+/// that leaves the top frame by `siglongjmp` loses the one below, without
+/// `SA_NODEFER` the second runs after the jump, and of two signals a
+/// sigsuspend releases the frame built first saves the mask from before it.
+/// So too when the batch is released from a libc door or from the syscall
+/// trap's exit (`-raw`, x86_64), and a signal a handler a libc door ran sends
+/// itself with a raw syscall runs before that syscall returns.
+#[cfg(target_os = "linux")]
+#[test]
+fn delivery_batches_build_their_frames_as_the_kernel_does() {
+    let native = assert_build_c_guest("signals/batch_order.c", CLink::Unlinked);
+    let patina = assert_build_c_guest("signals/batch_order.c", CLink::PosixShim);
+    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "4")];
+    let mut cases = vec![
+        "nodefer".to_owned(),
+        "nodefer-jump".to_owned(),
+        "defer-jump".to_owned(),
+        "sigsuspend-two".to_owned(),
+    ];
+    if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Sud) {
+        let raw: Vec<String> = cases.iter().map(|case| format!("{case}-raw")).collect();
+        cases.extend(raw);
+        cases.push("forward-nested".to_owned());
+    }
+    for case in &cases {
+        let oracle = assert_standalone_success(&native.binary, &[case], &[]);
+        let output = assert_standalone_success(&patina.binary, &[case], &env);
+        assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");
+    }
 }
 
 /// A delivery's steps refuse a caller with a shim Rust frame beneath them:

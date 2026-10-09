@@ -28,9 +28,11 @@ extern void patina_cleanup_pop(struct _pthread_cleanup_buffer *buffer, int execu
 /* ==========================================================================
  * The SIGSYS handler for syscall-user-dispatch (SUD-DESIGN.md): Rust decodes
  * the trap (provenance, a guest restorer's rt_sigreturn, the registers) and
- * completes it (frame fixups, the return register) around the dispatch, whose
- * signal delivery may leave this frame by siglongjmp. Raw-syscall callers read
- * the return register, not errno, but the guest's live errno is restored.
+ * completes it (frame fixups, the return register) around the dispatch and
+ * the deliveries of this handler's exit (delivery.c), which a handler may
+ * leave by siglongjmp. Raw-syscall callers read the return register, not
+ * errno: the guest's errno is restored before the deliveries, and what a
+ * handler leaves in it stands.
  * ========================================================================== */
 struct patina_sud_trap {
     long nr;
@@ -43,7 +45,8 @@ extern void patina_sud_complete(ucontext_t *uc, long ret);
 extern long patina_sud_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned long a2,
                                 unsigned long a3, unsigned long a4, unsigned long a5,
                                 uintptr_t call_addr);
-void patina_note_guest_sp(uintptr_t sp, stack_t *stack);
+extern int patina_trap_enter(uintptr_t sp, stack_t *stack);
+extern void patina_trap_leave(void);
 _Static_assert(offsetof(siginfo_t, si_call_addr) == 16 && offsetof(siginfo_t, si_syscall) == 24 &&
                    offsetof(siginfo_t, si_arch) == 28,
                "Rust SIGSYS siginfo words");
@@ -54,13 +57,27 @@ __attribute__((visibility("hidden"))) void patina_sud_sigsys(int sig, siginfo_t 
     ucontext_t *uc = (ucontext_t *)ucontext;
     int saved_errno = errno;
     struct patina_sud_trap trap;
-    if (patina_sud_decode(info, uc, &trap)) {
-        patina_note_guest_sp(trap.sp, &uc->uc_stack);
-        long ret = patina_sud_dispatch(trap.nr, trap.args[0], trap.args[1], trap.args[2],
-                                       trap.args[3], trap.args[4], trap.args[5], trap.call_addr);
-        patina_sud_complete(uc, ret);
+    if (!patina_sud_decode(info, uc, &trap)) {
+        errno = saved_errno;
+        return;
     }
-    errno = saved_errno;
+    /* The handler holds the thread while the call runs: what the call makes
+     * deliverable, and what it leaves to do (a temporary mask to restore), is
+     * delivered from its exit (delivery.c), every Rust frame returned. A
+     * call a handler with SA_RESTART interrupted runs again from its
+     * registers, as the kernel's restart does. The guest's errno is the
+     * handlers' from the deliveries on. */
+    (void)patina_trap_enter(trap.sp, &uc->uc_stack);
+    long ret;
+    do {
+        ret = patina_sud_dispatch(trap.nr, trap.args[0], trap.args[1], trap.args[2],
+                                  trap.args[3], trap.args[4], trap.args[5], trap.call_addr);
+        errno = saved_errno;
+    } while (patina_trap_exit_drive(uc, ret));
+    int handled_errno = errno;
+    patina_sud_complete(uc, ret);
+    patina_trap_leave();
+    errno = handled_errno;
 }
 
 /* Every shim handler's side of the boundary with the Rust signal state (see
@@ -70,8 +87,6 @@ enum {
     PATINA_FAULT_DEFAULT = 0,
     PATINA_FAULT_HANDLER = 1,
 };
-extern int patina_trap_enter(uintptr_t sp, stack_t *stack);
-extern void patina_trap_leave(void);
 _Noreturn void patina_trap_shim_fault(const siginfo_t *info, uintptr_t pc);
 _Noreturn void patina_trap_take_default(int sig);
 
@@ -229,7 +244,7 @@ static int patina_guest_signal(int sig, siginfo_t *info, ucontext_t *uc, patina_
     errno = saved_errno;
     /* The signals the handler's mask held back are delivered as its return
      * unblocks them, from here (delivery.c): a later handler's errno stands. */
-    patina_trap_exit_drive(uc);
+    (void)patina_trap_exit_drive(uc, 0);
     patina_trap_leave();
     return routed;
 }
@@ -313,7 +328,7 @@ void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
             /* What the read's scheduling point left pending (a timer it
              * fired, a signal a peer sent meanwhile) is delivered here, with
              * every Rust frame returned (delivery.c). */
-            patina_trap_exit_drive(uc);
+            (void)patina_trap_exit_drive(uc, 0);
             patina_trap_leave();
             return;
         }

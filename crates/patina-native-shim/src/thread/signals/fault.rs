@@ -140,7 +140,10 @@ pub unsafe extern "C" fn patina_fault_route(
     if scoped() {
         blocked();
     }
-    let sent = take_sent(sig, &info);
+    let (sent, saves) = match take_sent(sig, &info) {
+        Some((action, saves)) => (Some(action), saves),
+        None => (None, None),
+    };
     if sent.is_none() && SYNCHRONOUS & bit(sig) == 0 {
         crate::trap_fatal(
             "a signal sent from outside the run (another process's kill) reached a guest \
@@ -178,6 +181,10 @@ pub unsafe extern "C" fn patina_fault_route(
                 segv.current = SegvBlock::Yes;
             }
         });
+    }
+    if let Some(saves) = saves {
+        // SAFETY: the frame's `uc_sigmask`, which its return installs.
+        unsafe { frame.mask.write(saves) };
     }
     unsafe { handler.write(action) };
     guest_handler_runs();
@@ -292,6 +299,11 @@ pub extern "C" fn patina_trap_enter(sp: usize, stack: *mut Stack) -> i32 {
     let private = frames::private_contains(sp);
     let sp = if private { entry_sp } else { sp };
     let owned = crate::panic_boundary::claim(sp) || crate::in_shim_critical();
+    if !owned && plan_pending() {
+        crate::trap_fatal(
+            "a call left its trap's exit a delivery plan that no exit carried out: not modeled",
+        );
+    }
     if !owned && !private {
         frames::resync(stack);
     }
@@ -302,15 +314,6 @@ pub extern "C" fn patina_trap_enter(sp: usize, stack: *mut Stack) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_trap_leave() {
     crate::panic_boundary::release();
-}
-
-/// The SIGSYS door's interrupted stack pointer, for the entry it calls next,
-/// and its frame's `uc_stack`: the handlers guest code has provably left
-/// are dropped ([`frames::resync`]).
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_note_guest_sp(sp: usize, stack: *mut Stack) {
-    crate::panic_boundary::note_guest_sp(sp);
-    frames::resync(stack);
 }
 
 #[unsafe(no_mangle)]
@@ -461,7 +464,7 @@ thread_local! {
     /// about to queue captured at its dequeue, with the instance's siginfo:
     /// its frame runs that one, as the kernel's does, whatever a sibling
     /// handler of the same batch installs meanwhile.
-    static SENT: [Cell<Option<(Action, Info)>>; SENT_SLOTS] =
+    static SENT: [Cell<Option<Sent>>; SENT_SLOTS] =
         const { [const { Cell::new(None) }; SENT_SLOTS] };
     static SEGV: RefCell<SegvMask> = const {
         RefCell::new(SegvMask {
@@ -478,8 +481,11 @@ thread_local! {
 
 /// The next `sig` (one an instruction raises) this thread takes is the one
 /// [`deliver`] queues, with the action captured at its dequeue.
-pub(super) fn send(sig: u8, action: Action, info: &Info) {
-    SENT.with(|sent| sent[usize::from(sig)].set(Some((action, *info))));
+///
+/// `saves`: the mask the frame saves instead of the one the host built it
+/// under (a temporary-mask wait's first frame, `sigmask_to_save`).
+pub(super) fn send(sig: u8, action: Action, info: &Info, saves: Option<u64>) {
+    SENT.with(|sent| sent[usize::from(sig)].set(Some((action, *info, saves))));
 }
 /// The action captured for the `sig` this thread takes with `info`, if it is
 /// the one [`deliver`] queued, taken by that frame only. The frame's siginfo
@@ -487,17 +493,22 @@ pub(super) fn send(sig: u8, action: Action, info: &Info) {
 /// first 48 bytes; the rest it zeroes), which a genuine fault's never is,
 /// whatever code the record has (a guest may queue itself one with a
 /// fault's positive code).
-fn take_sent(sig: u8, info: &Info) -> Option<Action> {
+fn take_sent(sig: u8, info: &Info) -> Option<(Action, Option<u64>)> {
     const CARRIED: usize = 6;
     SENT.with(|sent| {
         let slot = &sent[usize::from(sig)];
-        let (action, sent) = slot.get()?;
+        let (action, sent, saves) = slot.get()?;
         (sent.words[..CARRIED] == info.words[..CARRIED]).then(|| {
             slot.set(None);
-            action
+            (action, saves)
         })
     })
 }
+
+/// A frame [`deliver`] queued: the action its dequeue captured, its
+/// siginfo, and the mask it saves when that is not the one it was built
+/// under ([`send`]).
+type Sent = (Action, Info, Option<u64>);
 
 /// One slot per signal number: every signal a guest handler runs for is
 /// queued through the front handler.
@@ -955,7 +966,10 @@ pub unsafe extern "C" fn patina_signal_fault(
         sp: frames::guest_position(frame.sp),
         entry: crate::panic_boundary::guest_entry().1,
     };
-    let sent = take_sent(SIGSEGV, &info);
+    let (sent, saves) = match take_sent(SIGSEGV, &info) {
+        Some((action, saves)) => (Some(action), saves),
+        None => (None, None),
+    };
     fault_entered(SIGSEGV, sent.is_some());
     let action = match sent {
         Some(action) => action,
@@ -1006,6 +1020,10 @@ pub unsafe extern "C" fn patina_signal_fault(
     }
     if running != before {
         install_mask(running);
+    }
+    if let Some(saves) = saves {
+        // SAFETY: the frame's `uc_sigmask`, which its return installs.
+        unsafe { frame.mask.write(saves) };
     }
     unsafe { handler.write(action) };
     FAULT_HANDLER

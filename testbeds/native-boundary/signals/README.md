@@ -93,12 +93,13 @@ under the shim, and requires the same output.
 control), `raise`, an unblocking `pthread_sigmask`, `sigsuspend`, a blocked
 `read` and a yield that another thread signals, a signal a returning SIGSEGV
 handler held back, a timer expiring during counter reads, a raw `tgkill`,
+a raw `read` another thread signals, a raw `rt_sigsuspend`,
 `abort`, and a SIGSEGV handler inside an `atexit` handler. Each reports the
 shim scopes still counted beneath guest code after the jumps and the handlers
 that ran over a shim Rust frame (`docs/arcs/signal-frame-safety.md`).
 `native_signals` requires 0 for both natively, for the control, and for the
-cases the exit of a trap handler delivers (the counter reads on x86_64, the
-held-back signal: `c/posix/delivery.c`), and pins every other case as a gap
+cases the exit of a trap handler delivers (the raw system calls and counter
+reads on x86_64, the held-back signal: `c/posix/delivery.c`), and pins every other case as a gap
 until its delivery returns to C first, among them a timer due at a counter
 read inside a handler `raise` ran: its delivery is made as `raise`'s own,
 over the frames `raise` left suspended, never released from C over them.
@@ -108,6 +109,16 @@ fault handler whose mask blocks SIGUSR2 raise it and leave by `siglongjmp`
 to a context that unblocks it (glibc restores that mask with its own system
 call): `native_signals` requires SIGUSR2's handler to have run by the next
 delivery point, where natively it ran at the restore.
+
+`batch_order.c` checks a delivery batch's frames against 6.8: two realtime
+signals of one number under `SA_NODEFER` run last sent first, a handler that
+leaves the top frame by `siglongjmp` loses the one below (natively the frame
+is gone with the jump), without `SA_NODEFER` the second runs after the jump,
+and of two signals a sigsuspend releases, the frame built first (the lower
+signal's, which runs last) saves the mask from before the suspension; through
+libc doors and (`-raw`, x86_64) the syscall trap's exit. `forward-nested`
+has a raw syscall inside a handler a libc door ran deliver before it returns.
+`native_signals` requires the native output.
 
 `thread_registrations.c` holds the per-thread kernel registration cases:
 `robust-exit` has a thread register a robust list and exit, and requires the

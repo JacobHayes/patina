@@ -3,8 +3,14 @@
 ## Decision
 
 Status: in progress. The trap handlers that take the thread from guest code
-(the counter trap, the fault front's return) deliver from the C driver
-(`c/posix/delivery.c`), between returning Rust steps. Until the port lands
+(the syscall trap, the counter trap, the fault front's return) deliver from
+the C driver (`c/posix/delivery.c`), between returning Rust steps. Under such
+a trap a wait does not park on a signal already deliverable to it; a wait
+`SA_RESTART` restarts answers `EINTR` and the syscall trap runs the call again
+from its registers after delivering; a temporary-mask wait (`rt_sigsuspend`,
+`ppoll`, `pselect6`, `epoll_pwait`) returns with its mask still installed, its
+first frame saving the mask from before it, and the exit restores that mask.
+Libc doors still deliver from Rust. Until the port lands
 everywhere else, a guest handler that leaves by `siglongjmp` or `setcontext`
 while it interrupts a shim call skips live shim Rust frames; that path is
 unsupported. The detector is in place:

@@ -343,12 +343,18 @@ pub(in crate::thread) fn with_mask<T>(
     install_mask(temporary);
     let pending = lock_state().signals.has_deliverable(me);
     let rc = if pending {
-        deliver();
+        deliver_saving(old);
         Err(Errno::new(EINTR))
     } else {
         body()
     };
     scope.close();
+    if crate::panic_boundary::exit_owned() {
+        // The trap's exit delivers under the temporary mask, has the first
+        // frame save `old`, and restores it.
+        file_temporary_mask(old, requested);
+        return rc;
+    }
     lock_state().signals.tasks.get_mut(&me).unwrap().mask = old;
     install_mask(old);
     rc

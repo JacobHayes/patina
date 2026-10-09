@@ -1097,6 +1097,11 @@ impl ThreadRuntime {
         // it) parks the main task, so the scheduler must know it.
         self.ensure_active()?;
         self.register_wait(me, reason, wait, None);
+        // Handing the baton to itself: the wait ends at once.
+        #[cfg(target_os = "linux")]
+        if self.interrupt_before_park(me) {
+            return Ok(Step::Switch(me));
+        }
         let mut scheduler = RealScheduler;
         scheduler.park(me, reason)?;
         let next = self.next_task()?;
@@ -1130,6 +1135,10 @@ impl ThreadRuntime {
         self.ensure_active()?;
         let mut scheduler = RealScheduler;
         self.register_wait(me, reason, wait, Some((clock, deadline)));
+        #[cfg(target_os = "linux")]
+        if self.interrupt_before_park(me) {
+            return Ok(Step::Continue);
+        }
         scheduler.park_timed(me, reason, clock, deadline)?;
         let next = self.next_task()?;
         match next {

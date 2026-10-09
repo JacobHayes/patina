@@ -41,7 +41,7 @@ rule:
     - not:
         has:
           field: name
-          regex: '^(patina_abort|patina_trap_enter|patina_trap_leave|patina_trap_hand_over|patina_trap_take_back|patina_note_guest_sp|__real_dlsym)$'
+          regex: '^(patina_abort|patina_trap_enter|patina_trap_leave|patina_trap_hand_over|patina_trap_take_back|__real_dlsym)$'
     - any:
         - not:
             has:

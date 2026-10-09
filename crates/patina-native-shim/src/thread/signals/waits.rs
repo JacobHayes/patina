@@ -101,6 +101,60 @@ impl ThreadRuntime {
     }
 }
 
+impl ThreadRuntime {
+    /// Under a trap handler's hold delivery waits for its exit, so a wait
+    /// must not park on a signal already deliverable to it (the kernel's
+    /// `signal_pending` before it sleeps). Answers whether `me`'s wait, just
+    /// registered, ends at once instead: interrupted as a signal would
+    /// interrupt it, for its resume to settle.
+    pub(in crate::thread) fn interrupt_before_park(&mut self, me: TaskId) -> bool {
+        if !crate::panic_boundary::exit_owned() {
+            return false;
+        }
+        // What comes due by now is pending before the wait parks, as a
+        // delivery point before it would have found it. A timer that
+        // interrupts this wait already ended it.
+        let wakes = self
+            .fire_timers()
+            .unwrap_or_else(|errno| fatal(&format!("firing the timers failed ({errno})")));
+        let mut scheduler = RealScheduler;
+        for task in wakes.into_iter().filter(|task| *task != me) {
+            self.remove_wait(task);
+            if let Err(message) = scheduler.wake(task) {
+                fatal(&message);
+            }
+        }
+        if self.signals.interrupted.contains_key(&me) {
+            return true;
+        }
+        let Some(blocked) = self.signals.blocked.get(&me) else {
+            return false;
+        };
+        // Pthread waits keep their registration while a handler runs.
+        if blocked.class == BlockClass::Sync {
+            return false;
+        }
+        let class = blocked.class;
+        let Some(sig) = self.signals.first_deliverable(me, blocked.wanted) else {
+            return false;
+        };
+        self.signals.interrupted.insert(
+            me,
+            Interrupt {
+                instance: Instance {
+                    seq: 0,
+                    sig,
+                    info: Info::kernel(sig),
+                },
+                class,
+                sync_wait: None,
+            },
+        );
+        self.remove_wait(me);
+        true
+    }
+}
+
 pub(in crate::thread) fn take_sync_resume(task: TaskId) -> Option<Blocked> {
     let mut state = lock_state();
     if state
@@ -127,6 +181,29 @@ pub(crate) fn resume() -> Resumed {
     resume_with(|_| {})
 }
 
+/// [`resume`] for a wait with a timeout when `timed` (a socket's
+/// `SO_RCVTIMEO`/`SO_SNDTIMEO`, `sock_intr_errno`): never restarted.
+pub(crate) fn resume_timed(timed: bool) -> Resumed {
+    resume_policy(!timed, |_| {})
+}
+
+/// A signal wait a deliverable signal ended (`EINTR`): delivered here, or
+/// under a trap handler's hold by its exit; a suspension's mask is restored
+/// after, and its first frame saves the mask it restores (`old`, the mask
+/// `wanted` stood in for).
+fn interrupted(me: TaskId, mode: WaitMode, old: u64, wanted: u64) -> i64 {
+    if mode != WaitMode::Suspend {
+        deliver();
+    } else if crate::panic_boundary::exit_owned() {
+        file_temporary_mask(old, wanted);
+    } else {
+        deliver_saving(old);
+        install_mask(old);
+        lock_state().signals.tasks.get_mut(&me).unwrap().mask = old;
+    }
+    -i64::from(EINTR)
+}
+
 /// The resume of a blocking call is a delivery point: a signal that came
 /// pending while the task waited without interrupting it (one generated as
 /// its own deadline ended the wait, or after a wake) is delivered before the
@@ -134,6 +211,14 @@ pub(crate) fn resume() -> Resumed {
 /// call's result is settled first: `before_delivery` reads it, given the
 /// resume's outcome, before any handler runs.
 pub(in crate::thread) fn resume_with(before_delivery: impl FnOnce(Resumed)) -> Resumed {
+    resume_policy(true, before_delivery)
+}
+
+/// [`resume_with`], where `restartable` says whether `SA_RESTART` may restart
+/// the wait at all. Under a trap handler's hold nothing is delivered here: a
+/// restart is asked of the trap's exit ([`file_restart`]) and the call answers
+/// `EINTR` meanwhile, which the exit runs again once it delivered.
+fn resume_policy(restartable: bool, before_delivery: impl FnOnce(Resumed)) -> Resumed {
     let me = current_task();
     let outcome = {
         let mut state = lock_state();
@@ -149,13 +234,20 @@ pub(in crate::thread) fn resume_with(before_delivery: impl FnOnce(Resumed)) -> R
                 interrupt.class,
                 BlockClass::Io | BlockClass::Futex | BlockClass::SignalfdRead
             ) && state.signals.actions[interrupt.instance.sig as usize].flags & SA_RESTART != 0;
-        if restart {
+        if restart && restartable {
             Resumed::Restart
         } else {
             Resumed::Eintr
         }
     };
     before_delivery(outcome);
+    if crate::panic_boundary::exit_owned() {
+        if outcome == Resumed::Restart {
+            file_restart();
+            return Resumed::Eintr;
+        }
+        return outcome;
+    }
     deliver();
     outcome
 }
@@ -262,12 +354,7 @@ pub unsafe extern "C" fn patina_signal_wait(
         }
         if state.signals.has_deliverable(me) {
             drop(state);
-            deliver();
-            if mode == WaitMode::Suspend {
-                install_mask(old);
-                lock_state().signals.tasks.get_mut(&me).unwrap().mask = old;
-            }
-            return -i64::from(EINTR);
+            return interrupted(me, mode, old, wanted);
         }
         let reason = match mode {
             WaitMode::Suspend => "sigsuspend",
@@ -301,12 +388,7 @@ pub unsafe extern "C" fn patina_signal_wait(
             })
         };
         if matched == Some(false) {
-            deliver();
-            if mode == WaitMode::Suspend {
-                install_mask(old);
-                lock_state().signals.tasks.get_mut(&me).unwrap().mask = old;
-            }
-            return -i64::from(EINTR);
+            return interrupted(me, mode, old, wanted);
         }
     }
 }

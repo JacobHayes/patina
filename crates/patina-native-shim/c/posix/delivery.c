@@ -38,8 +38,12 @@ struct patina_exit {
     uint8_t scope_open;
     uint8_t was_releasing;
     uint8_t outer_dirty;
+    uint64_t plan_old; /* what the trapped call left its exit to do */
+    uint64_t plan_segv;
+    uint64_t plan_word;
+    uint8_t plan;
 };
-_Static_assert(sizeof(struct patina_exit) == 192, "Rust signals::delivery::Exit layout");
+_Static_assert(sizeof(struct patina_exit) == 224, "Rust signals::delivery::Exit layout");
 
 enum {
     PATINA_RELEASE_UNBLOCK = 1, /* install `mask`: the queued batch is built at once */
@@ -60,7 +64,8 @@ struct patina_trap_exit {
     int mode;
 };
 
-extern int patina_exit_begin(void);
+extern int patina_exit_begin(struct patina_exit *delivery);
+extern int patina_exit_end(struct patina_exit *delivery, long ret);
 extern int patina_exit_next(struct patina_exit *delivery);
 extern int patina_exit_released(struct patina_exit *delivery);
 extern void patina_trap_hand_over(struct patina_exit *delivery);
@@ -83,22 +88,29 @@ static void patina_release(const struct patina_exit *delivery) {
     }
 }
 
-/* Deliver what is pending. Called only from a C frame whose caller is the
- * trap's kernel frame, while the trap handler holds the thread: the steps
- * refuse any other caller by name. The handlers run with the thread theirs. */
-__attribute__((visibility("hidden"))) void patina_exit_drive(struct patina_exit *delivery) {
-    if (!patina_exit_begin()) return;
-    while (patina_exit_next(delivery)) {
-        do {
-            patina_trap_hand_over(delivery);
-            patina_release(delivery);
-            patina_trap_take_back(delivery);
-        } while (patina_exit_released(delivery));
+/* Deliver what is pending, then carry out what the trapped call left its
+ * exit to do (a temporary mask to restore); answers whether the call, which
+ * answered `ret`, runs again (a restart SA_RESTART asked for). Called only
+ * from a C frame whose caller is the trap's kernel frame, while the trap
+ * handler holds the thread: the steps refuse any other caller by name. The
+ * handlers run with the thread theirs. */
+__attribute__((visibility("hidden"))) int patina_exit_drive(struct patina_exit *delivery,
+                                                            long ret) {
+    int begun = patina_exit_begin(delivery);
+    if (begun & 1) {
+        while (patina_exit_next(delivery)) {
+            do {
+                patina_trap_hand_over(delivery);
+                patina_release(delivery);
+                patina_trap_take_back(delivery);
+            } while (patina_exit_released(delivery));
+        }
     }
+    return (begun & 2) ? patina_exit_end(delivery, ret) : 0;
 }
 
-static void patina_trap_exit_drive(ucontext_t *uc) {
+static int patina_trap_exit_drive(ucontext_t *uc, long ret) {
     struct patina_trap_exit trap = {.uc = uc, .mode = PATINA_EXIT_IN_FRAME};
-    patina_exit_drive(&trap.exit);
+    return patina_exit_drive(&trap.exit, ret);
 }
 #endif

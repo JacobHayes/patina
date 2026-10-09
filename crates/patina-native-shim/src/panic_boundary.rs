@@ -45,12 +45,10 @@ thread_local! {
     /// and no run abandons enough of them to wrap it to zero.
     static SUSPENDED: Cell<u64> = const { Cell::new(0) };
     /// Where the guest's stack stood when the shim last took the thread from
-    /// it: the address below which guest code was running. A door that knows
-    /// the interrupted stack pointer exactly (a trap frame's) notes it first.
+    /// it: the address below which guest code was running. A trap handler
+    /// that holds the thread ([`claim`]) knows it exactly: its frame's.
     #[cfg(target_os = "linux")]
     static GUEST_SP: Cell<usize> = const { Cell::new(0) };
-    #[cfg(target_os = "linux")]
-    static NOTED_SP: Cell<usize> = const { Cell::new(0) };
     /// Which of this thread's guest-interrupting entries is running: each
     /// time the shim takes the thread from guest code it is a new one.
     #[cfg(target_os = "linux")]
@@ -105,10 +103,6 @@ impl PanicScope {
         });
         #[cfg(target_os = "linux")]
         let (previous_sp, previous_entry) = (GUEST_SP.get(), ENTRY.get().0);
-        // A door's noted stack pointer belongs to the entry it calls next,
-        // whoever owned the thread then: never to a later one.
-        #[cfg(target_os = "linux")]
-        let noted = if value { NOTED_SP.replace(0) } else { 0 };
         #[cfg(target_os = "linux")]
         if value && previous == Owner::Guest {
             // The shim never hands the thread to guest code (a suspended
@@ -126,11 +120,7 @@ impl PanicScope {
                 crate::host_abort();
             }
             let here = 0u8;
-            took(if noted != 0 {
-                noted
-            } else {
-                std::hint::black_box(&here) as *const u8 as usize
-            });
+            took(std::hint::black_box(&here) as *const u8 as usize);
         }
         Self {
             previous,
@@ -273,19 +263,11 @@ pub extern "C" fn patina_planted_live_scopes() -> u64 {
 /// code already owned the thread.
 #[cfg(target_os = "linux")]
 pub(crate) fn claim(sp: usize) -> bool {
-    NOTED_SP.set(0);
     let owned = IN_SHIM.with(|scope| scope.replace(Owner::Exit)) != Owner::Guest;
     if !owned {
         took(sp);
     }
     owned
-}
-
-/// The exact stack pointer of the guest code the next entry interrupts, from
-/// a door that has it (the SIGSYS frame's).
-#[cfg(target_os = "linux")]
-pub(crate) fn note_guest_sp(sp: usize) {
-    NOTED_SP.set(sp);
 }
 
 /// Where the guest's stack stood when the shim took the thread from it, and

@@ -78,9 +78,72 @@ pub struct Exit {
     /// `RELEASING_FRAMES` and `FRAME_DIRTY` as the delivery found them.
     was_releasing: u8,
     outer_dirty: u8,
+    /// The [`Plan`] this delivery carries out: the mask a temporary-mask
+    /// wait restores once its handlers ran, the temporary mask whose SIGSEGV
+    /// block they run under, and its scope's word.
+    plan_old: u64,
+    plan_segv: u64,
+    plan_word: u64,
+    plan: u8,
 }
 
-const _: () = assert!(size_of::<Exit>() == 192 && align_of::<Exit>() == 8);
+const _: () = assert!(size_of::<Exit>() == 224 && align_of::<Exit>() == 8);
+
+/// [`Exit::plan`]: restore `plan_old` once the handlers ran.
+const PLAN_RESTORE: u8 = 1;
+/// The call restarts if it answers `EINTR` (a wait `SA_RESTART` restarts).
+const PLAN_RESTART: u8 = 2;
+/// The first frame the delivery builds saves `plan_old`, not the temporary
+/// mask (`sigmask_to_save`), until it is built.
+const PLAN_SAVED: u8 = 4;
+/// A frame saved `plan_old`: its return restores it.
+const PLAN_CARRIED: u8 = 8;
+/// The scope at `plan_word` is open.
+const PLAN_SCOPE: u8 = 16;
+
+/// What a call under a trap handler's hold leaves its trap's C exit to do
+/// after delivering ([`file_temporary_mask`], [`file_restart`]): one per
+/// thread, taken by the exit's [`patina_exit_begin`] before any handler
+/// runs, so a handler's own calls start from an empty one.
+#[derive(Clone, Copy, Default)]
+struct Plan {
+    flags: u8,
+    old: u64,
+    segv: u64,
+}
+
+thread_local! {
+    static PLAN: Cell<Plan> = const { Cell::new(Plan { flags: 0, old: 0, segv: 0 }) };
+}
+
+/// A temporary-mask wait under a trap handler's hold returns with `requested`
+/// still installed: its exit delivers under it, has the first frame save
+/// `old`, and restores `old` after (unless that frame's return did).
+pub(super) fn file_temporary_mask(old: u64, requested: u64) {
+    PLAN.with(|plan| {
+        let mut filed = plan.get();
+        filed.flags |= PLAN_RESTORE | PLAN_SAVED;
+        filed.old = old;
+        filed.segv = requested;
+        plan.set(filed);
+    });
+}
+
+/// A wait `SA_RESTART` restarts, under a trap handler's hold: answering
+/// `EINTR`, the call runs again from its arguments once its exit delivered.
+pub(super) fn file_restart() {
+    PLAN.with(|plan| {
+        let mut filed = plan.get();
+        filed.flags |= PLAN_RESTART;
+        plan.set(filed);
+    });
+}
+
+/// Whether a call left a plan no exit took: a trap handler taking the
+/// thread from guest code finds none.
+pub(super) fn plan_pending() -> bool {
+    PLAN.with(|plan| plan.get().flags != 0)
+}
 
 impl Exit {
     fn new() -> Self {
@@ -98,7 +161,37 @@ impl Exit {
             scope_open: 0,
             was_releasing: 0,
             outer_dirty: 0,
+            plan_old: 0,
+            plan_segv: 0,
+            plan_word: 0,
+            plan: 0,
         }
+    }
+
+    /// A Rust delivery for a temporary-mask wait: its first frame saves
+    /// `old` ([`PLAN_SAVED`]).
+    fn saving(old: u64) -> Self {
+        let mut exit = Self::new();
+        exit.plan_old = old;
+        exit.plan = PLAN_SAVED;
+        exit
+    }
+
+    /// The mask the first frame built saves instead of the temporary one,
+    /// once: from the next frame on the kernel saves what is blocked.
+    fn first_frame_saves(&mut self) -> Option<u64> {
+        if self.plan & PLAN_SAVED == 0 {
+            return None;
+        }
+        self.plan &= !PLAN_SAVED;
+        self.plan |= PLAN_CARRIED;
+        let old = self.plan_old;
+        let segv = if trap_routed(SIGSEGV) {
+            old & bit(SIGSEGV)
+        } else {
+            0
+        };
+        Some(host_mask(old) | segv)
     }
 }
 
@@ -146,7 +239,19 @@ fn begin() -> bool {
     super::timers::fire_due();
     refresh_handler_mask();
     frames::resync_on_guest_stack();
-    true
+    pending()
+}
+
+/// Whether anything is pending for this thread to deliver. Explicit C-ABI
+/// embedders may have a Context but no managed task or host-alias link: an
+/// inactive delivery point must remain a no-op.
+fn pending() -> bool {
+    let me = current_task();
+    let state = lock_state();
+    let Some(task) = state.signals.tasks.get(&me) else {
+        return false;
+    };
+    task.private.mask() | state.signals.shared.mask() != 0
 }
 
 /// Dequeue the next batch for this thread and put it on the host, every
@@ -154,16 +259,8 @@ fn begin() -> bool {
 /// time: answers whether `exit` holds a release to perform.
 fn next(exit: &mut Exit) -> bool {
     let me = current_task();
-    // Explicit C-ABI embedders may have a Context but no managed task or
-    // host-alias link. An inactive delivery point must remain a no-op.
-    {
-        let state = lock_state();
-        let Some(task) = state.signals.tasks.get(&me) else {
-            return false;
-        };
-        if task.private.mask() | state.signals.shared.mask() == 0 {
-            return false;
-        }
+    if !pending() {
+        return false;
     }
     let segv = segv_blocked();
     let mask = read_mask() | segv_bit(segv);
@@ -286,7 +383,13 @@ fn next(exit: &mut Exit) -> bool {
             queue(exit, instance);
         } else if !one_by_one {
             if fault::front_routed(instance.sig) {
-                fault::send(instance.sig, *action, &instance.info);
+                // The batch's first member's frame is built first.
+                let saves = if std::ptr::eq(instance, &batch[0].0) {
+                    exit.first_frame_saves()
+                } else {
+                    None
+                };
+                fault::send(instance.sig, *action, &instance.info, saves);
             }
             swapped |= dequeued_action(instance.sig, *action, *seen);
             queue(exit, instance);
@@ -391,12 +494,22 @@ fn next_member(exit: &mut Exit) -> bool {
                     remainder.blocks[i - 1]
                 });
                 install_mask(saved);
-                fault::send(SIGSEGV, action, &instance.info);
+                let saves = if i == 0 {
+                    exit.first_frame_saves()
+                } else {
+                    None
+                };
+                fault::send(SIGSEGV, action, &instance.info, saves);
                 SIGSEGV
             } else {
                 fault::set(remainder.blocks[i]);
                 if fault::front_routed(instance.sig) {
-                    fault::send(instance.sig, action, &instance.info);
+                    let saves = if i == 0 {
+                        exit.first_frame_saves()
+                    } else {
+                        None
+                    };
+                    fault::send(instance.sig, action, &instance.info, saves);
                 }
                 install_mask(saved);
                 instance.sig
@@ -534,24 +647,73 @@ fn install_raw_mask(mask: u64) {
 /// the handler's C exit, which delivers once every Rust frame returned.
 pub(crate) fn deliver() {
     if !crate::panic_boundary::exit_owned() {
-        deliver_from_rust();
+        deliver_from_rust(&mut Exit::new());
     }
 }
 
-/// [`deliver`]'s releases, from Rust.
-fn deliver_from_rust() {
+/// [`deliver`] for a temporary-mask wait returning under its mask: the first
+/// frame saves `old`, the mask the wait restores. Under a trap handler's hold
+/// the wait's plan leaves that to the exit ([`file_temporary_mask`]).
+pub(crate) fn deliver_saving(old: u64) {
+    if !crate::panic_boundary::exit_owned() {
+        deliver_from_rust(&mut Exit::saving(old));
+    }
+}
+
+/// [`deliver`]'s releases, from Rust, carrying out `exit`'s plan.
+fn deliver_from_rust(exit: &mut Exit) {
     if !begin() {
         return;
     }
-    let mut exit = Exit::new();
-    while next(&mut exit) {
+    while next(exit) {
         loop {
-            release(&exit);
-            if !released(&mut exit) {
+            release(exit);
+            if !released(exit) {
                 break;
             }
         }
     }
+}
+
+/// Take this thread's [`Plan`] into `exit`: open the temporary mask's SIGSEGV
+/// scope in `exit` (where it stays until [`end`]) and block SIGSEGV as that
+/// mask does.
+fn take_plan(exit: &mut Exit) {
+    let plan = PLAN.with(|plan| plan.replace(Plan::default()));
+    exit.plan = plan.flags;
+    exit.plan_old = plan.old;
+    exit.plan_segv = plan.segv;
+    if exit.plan & PLAN_RESTORE != 0 {
+        if fault::open_scope_at(&mut exit.plan_word) {
+            exit.plan |= PLAN_SCOPE;
+        }
+        set_segv(exit.plan_segv);
+    }
+}
+
+/// After the deliveries: a temporary-mask wait's old mask is back (unless
+/// the first frame's return put it back, or a handler's edit of it), and
+/// answers whether the call runs again: a restart was asked and the call
+/// answered `EINTR` (`ret`, the raw result).
+fn end(exit: &mut Exit, ret: i64) -> bool {
+    if exit.plan & PLAN_SCOPE != 0 {
+        fault::close_scope_at(&exit.plan_word as *const u64 as usize);
+    }
+    if exit.plan & PLAN_RESTORE != 0 {
+        let me = current_task();
+        let mask = if exit.plan & PLAN_CARRIED == 0 {
+            install_mask(exit.plan_old);
+            exit.plan_old
+        } else {
+            with_segv(read_mask())
+        };
+        if let Some(task) = lock_state().signals.tasks.get_mut(&me) {
+            task.mask = mask;
+        }
+    }
+    let restart = exit.plan & PLAN_RESTART != 0 && ret == -i64::from(EINTR);
+    exit.plan = 0;
+    restart
 }
 
 /// A step's entry: called by the C exit of the trap handler holding the
@@ -578,18 +740,40 @@ fn releasing_from_trap_exit() {
 }
 
 #[unsafe(no_mangle)]
-/// [`begin`], for the C driver. Where shim Rust frames are suspended beneath
+/// [`begin`], for the C driver: bit 0 whether anything is pending (the
+/// driver releases it, [`patina_exit_next`]), bit 1 whether the trapped call
+/// left a plan ([`patina_exit_end`] carries it out). Where shim Rust frames are suspended beneath
 /// the trap (a delivery from Rust ran the handler that took it), a release
 /// from C would run handlers over them as one from Rust does: the delivery
 /// is made here, as that delivery makes it, and the driver releases nothing.
-pub extern "C" fn patina_exit_begin() -> i32 {
+///
+/// # Safety
+/// `exit` is the C driver's `struct patina_exit`, writable for the call.
+pub unsafe extern "C" fn patina_exit_begin(exit: *mut Exit) -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     from_trap_exit();
+    // SAFETY: the C driver's own record, per this function's contract.
+    let exit = unsafe { &mut *exit };
+    take_plan(exit);
+    let planned = i32::from(exit.plan != 0) << 1;
     if crate::panic_boundary::frames_suspended() {
-        deliver_from_rust();
-        return 0;
+        deliver_from_rust(exit);
+        return planned;
     }
-    i32::from(begin())
+    i32::from(begin()) | planned
+}
+
+#[unsafe(no_mangle)]
+/// [`end`], for the C driver, whose record `exit` is: whether the trapped
+/// call that answered `ret` runs again.
+///
+/// # Safety
+/// `exit` is the C driver's `struct patina_exit`, writable for the call.
+pub unsafe extern "C" fn patina_exit_end(exit: *mut Exit, ret: i64) -> i32 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    from_trap_exit();
+    // SAFETY: the C driver's own record, per this function's contract.
+    i32::from(end(unsafe { &mut *exit }, ret))
 }
 
 #[unsafe(no_mangle)]
@@ -647,11 +831,11 @@ pub unsafe extern "C" fn patina_trap_take_back(exit: *const Exit) {
 pub extern "C" fn patina_planted_drive_under_scope() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     unsafe extern "C" {
-        fn patina_exit_drive(exit: *mut Exit);
+        fn patina_exit_drive(exit: *mut Exit, ret: i64) -> i32;
     }
     let mut exit = Exit::new();
     // SAFETY: a record of the driver's own layout, writable for the call.
-    unsafe { patina_exit_drive(&mut exit) };
+    unsafe { patina_exit_drive(&mut exit, 0) };
 }
 
 /// Before a batch member's frame is built: the host holds the action `sig`

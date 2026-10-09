@@ -12,7 +12,7 @@ pub(super) use frames::{arm as arm_signal_stack, release as release_signal_stack
 use patina_dst_abi::SignalTarget;
 use std::sync::atomic::Ordering;
 use waits::Blocked;
-pub(crate) use waits::{Resumed, resume};
+pub(crate) use waits::{Resumed, resume, resume_timed};
 pub(crate) use waits::{Timespec, WaitMode, patina_signal_wait};
 pub(super) use waits::{resume_with, take_sync_resume};
 
@@ -299,6 +299,27 @@ impl SignalRuntime {
                         && self.target(sig, SignalTarget::Process) == Some(task)))
         })
     }
+    /// The signal a delivery to `task` would take first (synchronous ones
+    /// first, then the lowest number), of those `wanted` leaves to a dequeue.
+    fn first_deliverable(&self, task: TaskId, wanted: u64) -> Option<u8> {
+        let private = self.tasks[&task].private.mask();
+        let shared = self.shared.mask();
+        let ready = (1..=64u8)
+            .filter(|sig| {
+                wanted & bit(*sig) == 0
+                    && self.handles(task, *sig)
+                    && (private & bit(*sig) != 0
+                        || (shared & bit(*sig) != 0
+                            && self.target(*sig, SignalTarget::Process) == Some(task)))
+            })
+            .fold(0u64, |ready, sig| ready | bit(sig));
+        let pick = if ready & SYNCHRONOUS != 0 {
+            ready & SYNCHRONOUS
+        } else {
+            ready
+        };
+        (pick != 0).then(|| pick.trailing_zeros() as u8 + 1)
+    }
     fn dequeue_delivery(&mut self, task: TaskId, eligible: u64) -> Option<Instance> {
         if let Some(instance) = self.tasks.get_mut(&task).unwrap().private.take(eligible) {
             return Some(instance);
@@ -422,8 +443,9 @@ pub use actions::{
 };
 #[cfg(any(test, patina_posix_exports))]
 pub(crate) use delivery::patina_signal_deliver;
-pub(crate) use delivery::{deliver, refresh_handler_mask};
+pub(crate) use delivery::{deliver, deliver_saving, refresh_handler_mask};
 use delivery::{fault_entered, install_host_action};
+use delivery::{file_restart, file_temporary_mask, plan_pending};
 #[cfg(any(test, patina_posix_exports))]
 pub(crate) use generation::patina_pthread_kill;
 pub use generation::patina_raw_exit_group;
