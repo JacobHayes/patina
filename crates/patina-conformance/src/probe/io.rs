@@ -136,6 +136,18 @@ impl Probe {
         result
     }
 
+    /// `dup3` with register-width operands. Syscall vehicles pass all bits;
+    /// the libc vehicle narrows them at its fixed-width C signature.
+    pub fn dup3_wide(&self, oldfd: i64, newfd: i64, flags: i64) -> i64 {
+        let result = self.call(Syscall::N_dup3, [oldfd, newfd, flags, 0, 0, 0]);
+        self.event(Syscall::N_dup3, result)
+            .arg("oldfd", oldfd)
+            .arg("newfd", newfd)
+            .arg("flags", flags)
+            .emit();
+        result
+    }
+
     /// `close_range(first, last, flags)`: the bounds are numbers the scenario
     /// chose, recorded raw. The comparison's `fd` namespace retires nothing here
     /// (it retires on `close` events), so a scenario closes the range's members

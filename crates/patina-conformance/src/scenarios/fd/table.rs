@@ -104,6 +104,18 @@ pub fn run(p: &Probe) {
             && p.fcntl(50, F_GETFD, 0) == i64::from(FD_CLOEXEC)
             && p.fcntl(e, F_GETFD, 0) == 0,
     );
+    let high_register_bit = 1_i64 << 32;
+    let wide_dup3 = p.dup3_wide(
+        i64::from(a) + high_register_bit,
+        60 + high_register_bit,
+        i64::from(O_CLOEXEC) + high_register_bit,
+    );
+    let wide_cloexec = p.fcntl(60, F_GETFD, 0);
+    let wide_close = p.close(60);
+    p.check(
+        "dup3 narrows oldfd, newfd, and flags to kernel widths",
+        wide_dup3 == 60 && wide_cloexec == i64::from(FD_CLOEXEC) && wide_close == 0,
+    );
     p.check(
         "dup2 to a number past RLIMIT_NOFILE is EBADF",
         p.dup2(a, 1024) == neg(EBADF),

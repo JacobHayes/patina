@@ -199,20 +199,26 @@ pub(super) fn sys_dup(fd: i64) -> i64 {
     crate::abi::raw(crate::fd::value::dup(fd as c_int).map(i64::from))
 }
 
-/// `dup3(2)`: the kernel refuses a flag other than `O_CLOEXEC` before it looks
-/// at either descriptor. `newfd` is passed through unclamped so a number outside
-/// the table is the entry's `EBADF`, not a wrapped one.
-pub(super) fn sys_dup3(oldfd: i64, newfd: i64, flags: u64) -> i64 {
-    if flags & !O_CLOEXEC != 0 {
+/// `dup3(2)`: the kernel narrows descriptors to unsigned ints and flags to an
+/// int, then refuses invalid flags and equal descriptors before `EBADF`.
+pub(super) fn sys_dup3(oldfd: u32, newfd: u32, flags: c_int) -> i64 {
+    if flags & !(O_CLOEXEC as c_int) != 0 {
         return -EINVAL;
     }
-    if let Some(err) = fd_out_of_range(oldfd) {
+    if oldfd == newfd {
+        // Model errno records the refusal, as the descriptor table's does.
+        return crate::abi::raw(Err(crate::abi::failed(libc::EINVAL)));
+    }
+    if let Some(err) = fd_out_of_range(i64::from(oldfd)) {
         return err;
     }
-    let newfd = c_int::try_from(newfd).unwrap_or(-1);
     crate::abi::raw(
-        crate::fd::value::dup3(oldfd as c_int, newfd, c_int::from(flags & O_CLOEXEC != 0))
-            .map(i64::from),
+        crate::fd::value::dup3(
+            oldfd as c_int,
+            newfd as c_int,
+            c_int::from(flags & O_CLOEXEC as c_int != 0),
+        )
+        .map(i64::from),
     )
 }
 

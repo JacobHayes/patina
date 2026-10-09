@@ -18,8 +18,8 @@ type Handler = fn(i64, [u64; 6]) -> i64;
 /// no row; `tests::bindings_match_the_registry_rows` reports the same
 /// conditions by name.
 ///
-/// Most fd/dirfd registers go through [`arg_fd`]; socket rows use the checked
-/// kernel-width decoders in `abi::reg` before calling their typed cores.
+/// Most fd/dirfd registers go through [`arg_fd`]; fd-value and socket rows use
+/// the checked kernel-width decoders in `abi::reg` before calling their cores.
 use crate::registry::Syscall;
 
 pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
@@ -860,9 +860,11 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     // ---- fd I/O ----
     (Syscall::N_read, |_, a| sys_read(arg_fd(a[0]), a[1], a[2])),
     (Syscall::N_write, |_, a| sys_write(arg_fd(a[0]), a[1], a[2])),
-    (Syscall::N_close, |_, a| sys_close(arg_fd(a[0]))),
+    (Syscall::N_close, |_, a| {
+        sys_close(i64::from(crate::abi::reg::uint(a[0])))
+    }),
     (Syscall::N_lseek, |_, a| {
-        sys_lseek(arg_fd(a[0]), a[1] as i64, a[2])
+        sys_lseek(i64::from(crate::abi::reg::uint(a[0])), a[1] as i64, a[2])
     }),
     (Syscall::N_pread64, |_, a| {
         sys_pread(arg_fd(a[0]), a[1], a[2], a[3] as i64)
@@ -888,20 +890,30 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_pwritev2, |_, a| {
         sys_pwritev2(arg_fd(a[0]), a[1], a[2], a[3] as i64, a[5])
     }),
-    (Syscall::N_fsync, |_, a| sys_fsync(arg_fd(a[0]))),
-    (Syscall::N_fdatasync, |_, a| sys_fsync(arg_fd(a[0]))),
+    (Syscall::N_fsync, |_, a| {
+        sys_fsync(i64::from(crate::abi::reg::uint(a[0])))
+    }),
+    (Syscall::N_fdatasync, |_, a| {
+        sys_fsync(i64::from(crate::abi::reg::uint(a[0])))
+    }),
     (Syscall::N_ftruncate, |_, a| {
-        sys_ftruncate(arg_fd(a[0]), a[1] as i64)
+        sys_ftruncate(i64::from(crate::abi::reg::uint(a[0])), a[1] as i64)
     }),
     (Syscall::N_fallocate, |_, a| {
         sys_fallocate(arg_fd(a[0]), a[1], a[2] as i64, a[3] as i64)
     }),
     (Syscall::N_flock, |_, a| {
-        sys_flock(arg_fd(a[0]), a[1] as i64)
+        sys_flock(i64::from(crate::abi::reg::uint(a[0])), a[1] as i64)
     }),
-    (Syscall::N_dup, |_, a| sys_dup(arg_fd(a[0]))),
+    (Syscall::N_dup, |_, a| {
+        sys_dup(i64::from(crate::abi::reg::uint(a[0])))
+    }),
     (Syscall::N_dup3, |_, a| {
-        sys_dup3(arg_fd(a[0]), arg_fd(a[1]), a[2])
+        sys_dup3(
+            crate::abi::reg::uint(a[0]),
+            crate::abi::reg::uint(a[1]),
+            crate::abi::reg::int(a[2]),
+        )
     }),
     (Syscall::N_close_range, |_, a| {
         sys_close_range(a[0], a[1], a[2])
@@ -1362,7 +1374,12 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
         sys_futimesat(arg_fd(a[0]), a[1], a[2])
     }),
     #[cfg(target_arch = "x86_64")]
-    (Syscall::N_dup2, |_, a| sys_dup2(arg_fd(a[0]), arg_fd(a[1]))),
+    (Syscall::N_dup2, |_, a| {
+        sys_dup2(
+            i64::from(crate::abi::reg::uint(a[0])),
+            i64::from(crate::abi::reg::uint(a[1])),
+        )
+    }),
     #[cfg(target_arch = "x86_64")]
     (Syscall::N_ustat, |_, a| sys_ustat(a[0], a[1])),
     #[cfg(target_arch = "x86_64")]
