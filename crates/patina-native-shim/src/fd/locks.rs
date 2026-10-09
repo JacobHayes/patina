@@ -85,6 +85,69 @@ pub struct PatinaFlock {
     pub l_pid: i32,
 }
 
+const _: () = {
+    assert!(core::mem::size_of::<PatinaFlock>() == 32);
+    assert!(core::mem::offset_of!(PatinaFlock, l_type) == 0);
+    assert!(core::mem::offset_of!(PatinaFlock, l_whence) == 2);
+    assert!(core::mem::offset_of!(PatinaFlock, l_start) == 8);
+    assert!(core::mem::offset_of!(PatinaFlock, l_len) == 16);
+    assert!(core::mem::offset_of!(PatinaFlock, l_pid) == 24);
+};
+
+#[cfg(target_os = "linux")]
+const _: () = {
+    assert!(core::mem::size_of::<PatinaFlock>() == core::mem::size_of::<libc::flock>());
+    assert!(
+        core::mem::offset_of!(PatinaFlock, l_type) == core::mem::offset_of!(libc::flock, l_type)
+    );
+    assert!(
+        core::mem::offset_of!(PatinaFlock, l_whence)
+            == core::mem::offset_of!(libc::flock, l_whence)
+    );
+    assert!(
+        core::mem::offset_of!(PatinaFlock, l_start) == core::mem::offset_of!(libc::flock, l_start)
+    );
+    assert!(core::mem::offset_of!(PatinaFlock, l_len) == core::mem::offset_of!(libc::flock, l_len));
+    assert!(core::mem::offset_of!(PatinaFlock, l_pid) == core::mem::offset_of!(libc::flock, l_pid));
+};
+
+/// Read the named fields of a caller's `struct patina_flock`. Its padding may
+/// be uninitialised, so it is never read.
+///
+/// # Safety
+/// `lock` is non-null and readable for one `PatinaFlock`, at any alignment.
+unsafe fn read_fields(lock: *const PatinaFlock) -> PatinaFlock {
+    // SAFETY: per this function's contract; each field pointer stays inside
+    // `*lock` and is read unaligned.
+    unsafe {
+        PatinaFlock {
+            l_type: (&raw const (*lock).l_type).read_unaligned(),
+            l_whence: (&raw const (*lock).l_whence).read_unaligned(),
+            l_start: (&raw const (*lock).l_start).read_unaligned(),
+            l_len: (&raw const (*lock).l_len).read_unaligned(),
+            l_pid: (&raw const (*lock).l_pid).read_unaligned(),
+        }
+    }
+}
+
+/// Store `value`'s named fields, leaving the caller's padding bytes as they
+/// were: Linux copies the whole `struct flock` in and back, so padding
+/// round-trips.
+///
+/// # Safety
+/// `lock` is non-null and writable for one `PatinaFlock`, at any alignment.
+unsafe fn write_fields(lock: *mut PatinaFlock, value: &PatinaFlock) {
+    // SAFETY: per this function's contract; each field pointer stays inside
+    // `*lock` and is written unaligned.
+    unsafe {
+        (&raw mut (*lock).l_type).write_unaligned(value.l_type);
+        (&raw mut (*lock).l_whence).write_unaligned(value.l_whence);
+        (&raw mut (*lock).l_start).write_unaligned(value.l_start);
+        (&raw mut (*lock).l_len).write_unaligned(value.l_len);
+        (&raw mut (*lock).l_pid).write_unaligned(value.l_pid);
+    }
+}
+
 /// `flock_to_posix_lock`: the byte range a `struct flock` names, from the
 /// start (`SEEK_SET`), the description's offset (`SEEK_CUR`) or the file's
 /// size (`SEEK_END`). `l_len` 0 runs to the end of the file, a negative one
@@ -171,7 +234,7 @@ pub unsafe extern "C" fn patina_record_lock(
     }
     // SAFETY: non-null, and a `struct patina_flock` per this entry's contract
     // (at any alignment, as `copy_from_user` reads it).
-    let request = unsafe { lock.read_unaligned() };
+    let request = unsafe { read_fields(lock) };
     let ofd = matches!(command, F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW);
     let testing = matches!(command, F_GETLK | F_OFD_GETLK);
     let kind = match request.l_type {
@@ -246,9 +309,9 @@ pub unsafe extern "C" fn patina_record_lock(
                 },
             },
         };
-        // SAFETY: as above; the test writes its answer back.
-        // TODO(plain): `PatinaFlock` has implicit ABI padding; retain this concrete Copy store.
-        unsafe { lock.write_unaligned(reported) };
+        // SAFETY: `lock` is non-null and writable for one `PatinaFlock` by this
+        // entry's contract, at any alignment.
+        unsafe { write_fields(lock, &reported) };
         set_errno(0);
         return 0;
     }
