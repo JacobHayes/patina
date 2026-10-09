@@ -3,7 +3,7 @@
 use crate::config::{LivenessConfig, RuntimeConfig};
 use crate::recording::{Execution, RecordSink};
 use crate::{Context, RuntimeError, facts};
-use patina_dst_abi::{ClockKind, Operation, TaskId};
+use patina_dst_abi::{ClockKind, Operation, Outcome, TaskId};
 
 use std::collections::BTreeMap;
 
@@ -13,35 +13,63 @@ use std::collections::BTreeMap;
 /// issuing many scheduling ops) does.
 const LIVENESS_MIN_STALL_OPS: u64 = 4;
 
-/// Whether a boundary operation represents *genuine progress* (guest-driven state
-/// advancement) rather than pure scheduling/time housekeeping. The liveness
-/// watchdog resets its no-progress clock on a progress op and accumulates only on
-/// non-progress ops.
+/// What one boundary operation contributes to the progress trackers (the
+/// liveness watchdog and the advance-on-spin streak).
 ///
-/// Non-progress = the pure scheduling/time/wait ops the runtime uses to rotate
-/// tasks and advance virtual time without any guest state change: reading the
-/// clock, sleeping, yielding, parking (timed or not), waking, the scheduler
-/// decision itself, and the park-until-delivery probe. Everything else — every
-/// filesystem effect, entropy draw, task spawn/completion, and network data
-/// movement — is genuine progress.
+/// Progress is genuine guest-visible state change. Not progress: the pure
+/// scheduling/time/wait operations the runtime uses to rotate tasks and move
+/// virtual time — reading the clock, sleeping, yielding, parking (timed or
+/// not), waking, the scheduler decision itself, the park-until-delivery probe
+/// — and an empty poll: a non-blocking network receive or accept that found
+/// nothing to take (`EAGAIN`), which a polling loop repeats while it waits for
+/// a peer. Everything else — every filesystem effect, entropy draw, task
+/// spawn/completion, network data movement, and every failed operation — is
+/// progress, as before outcomes were classified.
 ///
-/// Consequence (documented): a system that keeps doing real I/O (e.g. exchanging
-/// network messages) but never reaches an application-level goal is NOT caught by
-/// this generic detector, because its I/O counts as progress; that requires an
-/// application-level oracle. The watchdog catches the *pure-churn wedge* — a run
-/// that has stopped issuing genuine effects and only spins on timers/parks while
-/// virtual time marches on.
-fn operation_is_progress(operation: &Operation) -> bool {
-    !matches!(
-        operation,
+/// Consequence (documented): a system that keeps doing real I/O (e.g.
+/// exchanging network messages) but never reaches an application-level goal is
+/// NOT caught by this generic detector, because its I/O counts as progress; that
+/// requires an application-level oracle. The watchdog catches the *pure-churn
+/// wedge* — a run that has stopped issuing genuine effects and only spins on
+/// timers, parks and empty polls while virtual time marches on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Progress {
+    /// Genuine progress, whatever the outcome.
+    Always,
+    /// Never progress.
+    Never,
+    /// Decided by the outcome ([`outcome_is_progress`]): the trackers see the
+    /// operation when its outcome is settled (`Context::reconcile`), on record
+    /// and replay alike.
+    ByOutcome,
+}
+
+pub(super) fn progress_of(operation: &Operation) -> Progress {
+    match operation {
         Operation::ClockNow { .. }
-            | Operation::SleepUntil { .. }
-            | Operation::TaskYield { .. }
-            | Operation::TaskPark { .. }
-            | Operation::TaskParkTimed { .. }
-            | Operation::TaskWake { .. }
-            | Operation::SchedulerNext
-            | Operation::NetNextDelivery { .. }
+        | Operation::SleepUntil { .. }
+        | Operation::TaskYield { .. }
+        | Operation::TaskPark { .. }
+        | Operation::TaskParkTimed { .. }
+        | Operation::TaskWake { .. }
+        | Operation::SchedulerNext
+        | Operation::NetNextDelivery { .. } => Progress::Never,
+        Operation::NetRecv { .. }
+        | Operation::NetTcpRecv { .. }
+        | Operation::NetTcpAccept { .. } => Progress::ByOutcome,
+        _ => Progress::Always,
+    }
+}
+
+/// Whether a [`Progress::ByOutcome`] operation's outcome is progress: anything
+/// but an empty poll. A stream's end of file (`Some(empty)`) and every error
+/// are outcomes the guest acts on, so they count.
+pub(super) fn outcome_is_progress(operation: &Operation, outcome: &Outcome) -> bool {
+    !matches!(
+        (operation, outcome),
+        (Operation::NetRecv { .. }, Outcome::Datagram(None))
+            | (Operation::NetTcpRecv { .. }, Outcome::OptionalBytes(None))
+            | (Operation::NetTcpAccept { .. }, Outcome::TcpAccepted(None))
     )
 }
 
@@ -247,7 +275,7 @@ impl LivenessWatchdog {
 /// with no intervening progress op — that the runtime treats as a spin.
 ///
 /// Why 1024. The streak is only broken by a *progress* op (see
-/// [`operation_is_progress`]) or by virtual time actually moving, so real code
+/// [`progress_of`]) or by virtual time actually moving, so real code
 /// cannot accumulate it: any effect, entropy draw, spawn, or sleep resets it,
 /// and a clock read is nearly always followed by one of those. 1024 puts the
 /// trigger an order of magnitude beyond even a pathological polling loop that
@@ -566,20 +594,47 @@ impl Context {
         Ok(true)
     }
 
+    /// Feed one beginning boundary operation to the progress trackers, unless
+    /// its progress waits on its outcome ([`Context::track_outcome`]).
+    pub(super) fn track_begin(&mut self, operation: &Operation) -> Result<(), RuntimeError> {
+        let progress = match progress_of(operation) {
+            Progress::Always => true,
+            Progress::Never => false,
+            Progress::ByOutcome => return Ok(()),
+        };
+        self.liveness_track(progress)?;
+        self.spin_track(operation, progress)
+    }
+
+    /// Feed a [`Progress::ByOutcome`] operation to the progress trackers once
+    /// its outcome is settled. Called with the outcome replay returns (the
+    /// recorded one) and record keeps, at the same point of both.
+    pub(super) fn track_outcome(
+        &mut self,
+        operation: &Operation,
+        outcome: &Outcome,
+    ) -> Result<(), RuntimeError> {
+        if progress_of(operation) != Progress::ByOutcome {
+            return Ok(());
+        }
+        let progress = outcome_is_progress(operation, outcome);
+        self.liveness_track(progress)?;
+        self.spin_track(operation, progress)
+    }
+
     /// Advance the liveness watchdog for one boundary op. Reads virtual time and
     /// the scheduler's policy-deferral state WITHOUT recording anything or
     /// perturbing selection; returns a [`RuntimeError::Liveness`] (after emitting
     /// the loud, classifiable `PATINA_VIOLATION` line) when a no-progress budget is
     /// exceeded. Inert unless the watchdog is active (record/seeded with a budget
     /// configured), so a plain run and every replay are unaffected.
-    pub(super) fn liveness_track(&mut self, operation: &Operation) -> Result<(), RuntimeError> {
+    fn liveness_track(&mut self, progress: bool) -> Result<(), RuntimeError> {
         if !self.liveness.active || self.clock.is_none() {
             return Ok(());
         }
         // Arm offsets were anchored to run start at construction; observations
         // and diagnostic timestamps stay in the trace's monotonic domain.
         let now = self.current_monotonic()?;
-        let progress = operation_is_progress(operation);
         let deferring = self
             .scheduler
             .as_ref()
@@ -616,12 +671,12 @@ impl Context {
     /// neither counts nor breaks the streak, so a spinning thread in a
     /// multi-task run still accumulates); a clock op counts, unless virtual time
     /// has moved since the streak began, which ends the episode instead.
-    pub(super) fn spin_track(&mut self, operation: &Operation) -> Result<(), RuntimeError> {
+    fn spin_track(&mut self, operation: &Operation, progress: bool) -> Result<(), RuntimeError> {
         // The rescue's own `SleepUntil`: the rescue updates the state itself.
         if self.spin.rescuing {
             return Ok(());
         }
-        if operation_is_progress(operation) {
+        if progress {
             // Genuine state advancement. Whatever this guest is doing, it is not
             // churning on the clock — drop the whole episode, escalation included.
             self.spin.end_episode(self.spin.baseline_nanos);

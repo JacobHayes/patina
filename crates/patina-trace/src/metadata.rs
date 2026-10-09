@@ -439,6 +439,10 @@ pub struct RunMetadata {
     /// Authoritative on replay; a conflicting explicit name is refused.
     /// Not a fingerprint input.
     pub hostname: String,
+    /// The virtual-time model the run was recorded under
+    /// ([`patina_dst_abi::TIME_MODEL`]). Required; a bundle recorded under any
+    /// other model is refused when it is decoded.
+    pub time_model: u32,
 }
 
 /// A native compute-bound refusal at a boundary-operation prefix. PCs and host
@@ -478,6 +482,7 @@ impl RunMetadata {
             tsc: None,
             realtime_epoch_nanos,
             boot_origin_nanos: patina_dst_abi::DEFAULT_BOOT_ORIGIN_NANOS,
+            time_model: patina_dst_abi::TIME_MODEL,
             hostname: hostname.into(),
         }
     }

@@ -133,7 +133,8 @@ fn buggify_fingerprint_requires_buggify_metadata() {
             "fingerprint": "fingerprint+buggify",
             "realtime_epoch_nanos": 0,
             "boot_origin_nanos": 1000,
-            "hostname": "patina"
+            "hostname": "patina",
+            "time_model": patina_dst_abi::TIME_MODEL
         },
         "timelines": [{
             "id": MAIN_TIMELINE,

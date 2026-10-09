@@ -80,7 +80,9 @@ pub use replay::Replayer;
 ///   only when every task has parked: a past or reached deadline records its
 ///   `task_wake` where earlier formats recorded none. No field changed; the
 ///   events a run records did.
-pub const TRACE_FORMAT_VERSION: u32 = 16;
+/// - 17: the required [`RunMetadata::time_model`]; a bundle recorded under
+///   another time model is refused ([`TraceError::UnsupportedTimeModel`]).
+pub const TRACE_FORMAT_VERSION: u32 = 17;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 
@@ -175,6 +177,11 @@ pub enum TraceError {
     UnsupportedVersion {
         found: u32,
     },
+    /// The bundle was recorded under a virtual-time model other than
+    /// [`patina_dst_abi::TIME_MODEL`].
+    UnsupportedTimeModel {
+        found: u32,
+    },
     Invalid(String),
     /// A *budget* refusal: the trace is larger than a configured limit allows.
     /// Distinct in kind from every other variant here — nothing is broken or
@@ -248,6 +255,12 @@ impl fmt::Display for TraceError {
             Self::UnsupportedVersion { found } => write!(
                 f,
                 "trace format version {found} is not supported; this runtime reads format {TRACE_FORMAT_VERSION}"
+            ),
+            Self::UnsupportedTimeModel { found } => write!(
+                f,
+                "trace was recorded under virtual-time model {found}; this runtime implements model {}, \
+                 so the recorded clock and timer behaviour cannot replay; re-record the run",
+                patina_dst_abi::TIME_MODEL
             ),
             Self::Invalid(message) => write!(f, "invalid trace: {message}"),
             Self::ResourceLimit { message, .. } => {

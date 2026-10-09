@@ -16,10 +16,15 @@ pub(super) fn operation() -> Operation {
 
 #[test]
 fn a_current_bundle_must_state_its_run_facts() {
-    // Epoch, boot origin and node name are required: a bundle missing
-    // either does not parse.
-    let bytes = include_bytes!("../tests/fixtures/format-16.patina");
-    for field in ["realtime_epoch_nanos", "boot_origin_nanos", "hostname"] {
+    // Epoch, boot origin, node name and time model are required: a bundle
+    // missing any does not parse.
+    let bytes = include_bytes!("../tests/fixtures/format-17.patina");
+    for field in [
+        "realtime_epoch_nanos",
+        "boot_origin_nanos",
+        "hostname",
+        "time_model",
+    ] {
         let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         assert!(
             value["metadata"]
@@ -40,10 +45,28 @@ fn a_current_bundle_must_state_its_run_facts() {
 }
 
 #[test]
+fn a_bundle_from_another_time_model_is_refused() {
+    let bytes = include_bytes!("../tests/fixtures/format-17.patina");
+    for model in [
+        0,
+        patina_dst_abi::TIME_MODEL - 1,
+        patina_dst_abi::TIME_MODEL + 1,
+    ] {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        value["metadata"]["time_model"] = model.into();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(matches!(
+            TraceBundle::from_slice(&bytes),
+            Err(TraceError::UnsupportedTimeModel { found }) if found == model
+        ));
+    }
+}
+
+#[test]
 fn memory_operations_fixture_decodes_and_replays() {
     // Checked-in feature fixture pins the page cache's and anonymous
     // files' operations and one of the filesystem family's.
-    let bytes = include_bytes!("../tests/fixtures/format-16-memory.patina");
+    let bytes = include_bytes!("../tests/fixtures/format-17-memory.patina");
     let bundle = TraceBundle::from_slice(bytes).unwrap();
     bundle.validate().unwrap();
     assert_eq!(bundle.to_bytes().unwrap(), bytes);
@@ -97,7 +120,7 @@ fn sparse_file_operations_fixture_decodes_and_replays() {
     use patina_dst_abi::{
         EffectError, ErrorCode, FsAllocateMode, FsEntryKind, FsMetadata, SeekWhence,
     };
-    let bytes = include_bytes!("../tests/fixtures/format-16-sparse.patina");
+    let bytes = include_bytes!("../tests/fixtures/format-17-sparse.patina");
     let bundle = TraceBundle::from_slice(bytes).unwrap();
     bundle.validate().unwrap();
     assert_eq!(bundle.to_bytes().unwrap(), bytes);
@@ -155,7 +178,7 @@ fn sparse_file_operations_fixture_decodes_and_replays() {
 fn network_operations_fixture_decodes_and_replays() {
     // Checked-in feature fixture pins the network family's operations and
     // a marked datagram's encoding.
-    let bytes = include_bytes!("../tests/fixtures/format-16-network.patina");
+    let bytes = include_bytes!("../tests/fixtures/format-17-network.patina");
     let expected = [
         (
             Operation::NetBindShared {
@@ -241,7 +264,7 @@ fn signal_operations_fixture_decodes_and_replays() {
     const SIGUSR2: u8 = 12;
     const SI_USER: i32 = 0;
     const SI_TKILL: i32 = -6;
-    let bytes = include_bytes!("../tests/fixtures/format-16-signals.patina");
+    let bytes = include_bytes!("../tests/fixtures/format-17-signals.patina");
     let bundle = TraceBundle::from_slice(bytes).unwrap();
     bundle.validate().unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);

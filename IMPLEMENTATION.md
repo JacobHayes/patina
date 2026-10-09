@@ -766,8 +766,9 @@ constructor) and hung before `main` at 100% CPU.
 
 1. **Advance-on-spin** (`patina-dst-runtime`): after 1024 consecutive
    clock-observation boundary ops at unchanged virtual time with no intervening
-   progress op (`operation_is_progress`, the same predicate the liveness watchdog
-   uses), the runtime advances the monotonic clock through a recorded
+   progress op (`progress_of`, and for a non-blocking network receive or accept
+   `outcome_is_progress` once its outcome is settled: an empty poll is not
+   progress; the same classification the liveness watchdog uses), the runtime advances the monotonic clock through a recorded
    `SleepUntil` — the deadlock rescue's mechanism — by a token that starts at
    1 µs and doubles per rescue to a 1 ms ceiling. The advance is clamped so it
    never steps over a still-future timer deadline; reaching it expires the due

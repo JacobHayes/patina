@@ -287,6 +287,11 @@ impl TraceBundle {
                 found: self.format_version,
             });
         }
+        if self.metadata.time_model != patina_dst_abi::TIME_MODEL {
+            return Err(TraceError::UnsupportedTimeModel {
+                found: self.metadata.time_model,
+            });
+        }
         if self.metadata.fingerprint.is_empty() {
             return Err(TraceError::Invalid(
                 "trace compatibility fingerprint is empty".into(),

@@ -665,8 +665,7 @@ a recorded result or a replay fetch",
             });
         }
         self.steps += 1;
-        self.liveness_track(operation)?;
-        self.spin_track(operation)?;
+        self.track_begin(operation)?;
         match &mut self.execution {
             Execution::Replay(replayer) => {
                 let sequence = replayer.consumed();
@@ -711,8 +710,10 @@ a recorded result or a replay fetch",
                 }
                 _ => {}
             }
+            self.track_outcome(&operation, &recorded)?;
             Ok(recorded)
         } else {
+            self.track_outcome(&operation, &actual)?;
             Ok(self.complete(operation, actual))
         }
     }

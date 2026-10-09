@@ -880,6 +880,24 @@ fn recv_timeout_delivers_five_messages_and_five_timeouts() {
 }
 
 #[test]
+fn an_empty_udp_poll_on_a_sleeping_peer_lets_virtual_time_reach_it() {
+    // Class pairing: the runtime's outcome classifier
+    // (`liveness::tests::an_empty_poll_loop_keeps_the_spin_streak_and_replays`).
+    // The budget turns the old failure, a poll that never let time move, into
+    // a bounded refusal.
+    let g = Guest::assert_build("poll_clock_probe.rs");
+    g.assert_audit_clean();
+    let budget = ["--budget", "2000000"];
+    let expected =
+        "NATIVE_POLL_CLOCK_RESULT first_empty=true payload=ping polled=true waited_1ms=true\n";
+    for seed in [5, 6] {
+        let baseline = g.assert_seed_repeatability(seed, 2, &budget);
+        assert_eq!(text(&baseline), expected);
+    }
+    g.assert_record_replay_identity(5, &budget, expected.as_bytes());
+}
+
+#[test]
 fn pthread_rwlock_ffi_orders_are_repeatable_and_seeded() {
     let g = Guest::assert_build("rwlock_ffi_probe.rs");
     g.assert_audit_clean();

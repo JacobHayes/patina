@@ -67,6 +67,13 @@ requires live SUD in both Rust tests and the wrapper, and is set on x86_64 Linux
 CI rows; a filtered capability probe is a failure, not a green refusal. The wrapper's selftest
 plants a false-negative probe, a duplicate receipt and a failed child.
 
+### Polling on a sleeping peer
+
+`poll_clock_probe.rs` polls a non-blocking UDP socket, reading the clock between
+attempts, while its peer sleeps 1 ms and then sends. Its result line is the same
+natively and under Patina, where the empty receives are no progress and the
+advance-on-spin rescue brings virtual time to the peer's deadline.
+
 ### Call-free compute
 
 `compute_watchdog.rs` plants main- and worker-thread atomic spins with a runnable

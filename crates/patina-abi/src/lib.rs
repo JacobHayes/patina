@@ -117,3 +117,17 @@ pub const DEFAULT_BOOT_ORIGIN_NANOS: u64 = 12_345_678_901_234;
 /// `HZ` or its memory size), not a recorded run fact: no trace carries it, so
 /// changing it changes what every earlier recording's guest read.
 pub const STARTUP_CPU_NANOS: u64 = 1_000_000;
+
+/// The version of the virtual-time model a trace was recorded under: what
+/// moves the clock, what expires a timer, and what counts as progress for the
+/// advance-on-spin rescue and the liveness watchdog. Every trace states it
+/// (`RunMetadata::time_model`), and a trace recorded under another model is
+/// refused by name instead of replaying into a divergence. Bump it for every
+/// semantic change to time; no field needs to change.
+///
+/// - 1: timed parks expire at registration and at every clock advance
+///   (trace format 16, which predates this field).
+/// - 2: progress is classified by an operation's outcome: an empty network
+///   poll (`net_recv`, `net_tcp_recv` or `net_tcp_accept` with nothing
+///   available) is not progress.
+pub const TIME_MODEL: u32 = 2;

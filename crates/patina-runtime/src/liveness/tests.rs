@@ -3,11 +3,14 @@
 use crate::config::{LivenessConfig, RuntimeConfig};
 use crate::custom_op::CustomOpMode;
 use crate::liveness::{
-    LivenessKind, SPIN_CHURN_ABORT_RESCUES, SPIN_RESCUE_CLOCK_OPS, SPIN_RESCUE_TOKEN_MIN_NANOS,
-    WatchdogArm, operation_is_progress,
+    LivenessKind, Progress, SPIN_CHURN_ABORT_RESCUES, SPIN_RESCUE_CLOCK_OPS,
+    SPIN_RESCUE_TOKEN_MIN_NANOS, WatchdogArm, outcome_is_progress, progress_of,
 };
 use crate::{Context, DEFAULT_BOOT_ORIGIN_NANOS, FACTS_SCHEMA, RuntimeError};
-use patina_dst_abi::{ClockKind, Fd, Operation, TaskId};
+use patina_dst_abi::{
+    ClockKind, Datagram, EffectError, ErrorCode, Fd, Operation, Outcome, SocketId, TaskId,
+    TcpAccepted,
+};
 
 use patina_dst_trace::{BranchSession, Replayer, TraceBundle};
 use std::fs;
@@ -194,6 +197,46 @@ fn spin_until_sleepers_run(context: &mut Context) {
     assert!(remaining.is_empty(), "timer-woken tasks must get a turn");
     context.task_complete(spinner).unwrap();
     assert_eq!(context.scheduler_next().unwrap(), None);
+}
+
+/// A poller that alternates an empty non-blocking receive with a clock read,
+/// waiting on a sleeping peer: the empty receives are no progress, so the
+/// clock reads keep the advance-on-spin streak and the rescue brings virtual
+/// time to the sleeper's deadline. Answers how many polls that took.
+fn poll_until_the_sleeper_expires(context: &mut Context) -> u64 {
+    let deadline = DEFAULT_BOOT_ORIGIN_NANOS + 1_000;
+    let sleeper = context.task_spawn("sleeper").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(sleeper));
+    context
+        .task_park_timed(sleeper, "sleep", ClockKind::Monotonic, deadline)
+        .unwrap();
+    let poller = context.task_spawn("poller").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(poller));
+    let socket = context.net_bind("poller").unwrap();
+    let mut polls = 0;
+    while context.take_expired_timeouts().is_empty() {
+        assert!(context.net_recv(socket).unwrap().is_none());
+        context.now(ClockKind::Monotonic).unwrap();
+        polls += 1;
+        assert!(
+            polls < 100_000,
+            "empty polls kept virtual time from reaching the sleeper"
+        );
+    }
+    assert_eq!(context.current_monotonic().unwrap(), deadline);
+    polls
+}
+
+#[test]
+fn an_empty_poll_loop_keeps_the_spin_streak_and_replays() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("poll.patina");
+    let mut record = Context::from_config(RuntimeConfig::record(3, &path, "poll-v1")).unwrap();
+    let polls = poll_until_the_sleeper_expires(&mut record);
+    record.finish().unwrap();
+    let mut replay = Context::from_config(RuntimeConfig::replay(&path, "poll-v1")).unwrap();
+    assert_eq!(poll_until_the_sleeper_expires(&mut replay), polls);
+    replay.finish().unwrap();
 }
 
 #[test]
@@ -593,28 +636,95 @@ fn the_liveness_watchdog_fires_first_on_a_spin_that_advance_on_spin_feeds() {
 
 #[test]
 fn operation_progress_classification_is_correct() {
-    // Pure scheduling/time/wait ops are non-progress; genuine effects are.
-    assert!(!operation_is_progress(&Operation::SchedulerNext));
-    assert!(!operation_is_progress(&Operation::ClockNow {
-        clock: ClockKind::Monotonic
-    }));
-    assert!(!operation_is_progress(&Operation::SleepUntil {
-        clock: ClockKind::Monotonic,
-        deadline_nanos: 1
-    }));
-    assert!(!operation_is_progress(&Operation::TaskParkTimed {
-        task: TaskId(1),
-        reason: "x".into(),
-        deadline_nanos: 1
-    }));
-    assert!(operation_is_progress(&Operation::FsWrite {
-        fd: Fd(1),
-        bytes: vec![1]
-    }));
-    assert!(operation_is_progress(&Operation::TaskComplete {
-        task: TaskId(1)
-    }));
-    assert!(operation_is_progress(&Operation::EntropyFill { len: 4 }));
+    // Pure scheduling/time/wait ops are never progress; genuine effects
+    // always are; a non-blocking network poll is decided by its outcome.
+    for operation in [
+        Operation::SchedulerNext,
+        Operation::ClockNow {
+            clock: ClockKind::Monotonic,
+        },
+        Operation::SleepUntil {
+            clock: ClockKind::Monotonic,
+            deadline_nanos: 1,
+        },
+        Operation::TaskParkTimed {
+            task: TaskId(1),
+            reason: "x".into(),
+            deadline_nanos: 1,
+        },
+    ] {
+        assert_eq!(progress_of(&operation), Progress::Never, "{operation:?}");
+    }
+    for operation in [
+        Operation::FsWrite {
+            fd: Fd(1),
+            bytes: vec![1],
+        },
+        Operation::TaskComplete { task: TaskId(1) },
+        Operation::EntropyFill { len: 4 },
+    ] {
+        assert_eq!(progress_of(&operation), Progress::Always, "{operation:?}");
+    }
+}
+
+#[test]
+fn an_empty_network_poll_is_not_progress_and_every_other_outcome_is() {
+    let socket = SocketId(3);
+    let recv = Operation::NetRecv {
+        socket,
+        now_nanos: 0,
+    };
+    let tcp_recv = Operation::NetTcpRecv {
+        socket,
+        max_len: 8,
+        now_nanos: 0,
+    };
+    let accept = Operation::NetTcpAccept {
+        listener: socket,
+        now_nanos: 0,
+    };
+    for operation in [&recv, &tcp_recv, &accept] {
+        assert_eq!(progress_of(operation), Progress::ByOutcome, "{operation:?}");
+    }
+    let refused = Outcome::Error(EffectError::new(ErrorCode::ConnectionReset, "reset"));
+    let datagram = Datagram {
+        packet_id: 1,
+        from: "127.0.0.1:1".into(),
+        to: "127.0.0.1:2".into(),
+        bytes: b"ping".to_vec(),
+        delivery_nanos: 0,
+        dialed: String::new(),
+        tos: 0,
+    };
+    let accepted = TcpAccepted {
+        socket,
+        peer: "127.0.0.1:1".into(),
+    };
+    let cases = [
+        // Nothing to take: the poll changed nothing.
+        (&recv, Outcome::Datagram(None), false),
+        (&tcp_recv, Outcome::OptionalBytes(None), false),
+        (&accept, Outcome::TcpAccepted(None), false),
+        // Data, a stream's end of file, a connection, an error: progress.
+        (&recv, Outcome::Datagram(Some(datagram)), true),
+        (
+            &tcp_recv,
+            Outcome::OptionalBytes(Some(b"ok".to_vec())),
+            true,
+        ),
+        (&tcp_recv, Outcome::OptionalBytes(Some(Vec::new())), true),
+        (&accept, Outcome::TcpAccepted(Some(accepted)), true),
+        (&recv, refused.clone(), true),
+        (&tcp_recv, refused.clone(), true),
+        (&accept, refused, true),
+    ];
+    for (operation, outcome, progress) in cases {
+        assert_eq!(
+            outcome_is_progress(operation, &outcome),
+            progress,
+            "{operation:?} -> {outcome:?}"
+        );
+    }
 }
 
 #[test]
