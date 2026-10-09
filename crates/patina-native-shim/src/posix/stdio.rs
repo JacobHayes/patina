@@ -231,7 +231,7 @@ unsafe fn allocate(stream: StreamId) {
                     {
                         (*s).line = true;
                     }
-                    super::errno(before);
+                    crate::abi::restore_host_errno(before);
                 }
                 if status.st_blksize > 0 && (status.st_blksize as usize) < size {
                     size = status.st_blksize as usize;
@@ -242,7 +242,7 @@ unsafe fn allocate(stream: StreamId) {
             if kind == crate::fdtable::FdKind::Stdout.wire()
                 || kind == crate::fdtable::FdKind::Stderr.wire()
             {
-                super::errno(saved);
+                crate::abi::restore_host_errno(saved);
             }
         }
         (*s).buffer = Buffer::Inline;
@@ -531,7 +531,7 @@ pub(crate) unsafe fn format_buffer(
 ) -> c_int {
     let saved = super::get_errno();
     let formatter = formatter();
-    super::errno(saved);
+    crate::abi::restore_host_errno(saved);
     // SAFETY: the caller supplies writable `length` bytes and printf-compatible
     // format arguments, as required by this internal formatter entry.
     unsafe { formatter(buffer, length, format, args) }
@@ -559,7 +559,7 @@ unsafe fn vprintf(stream: StreamId, format: *const c_char, args: VaList<'_>) -> 
     unsafe {
         let saved = super::get_errno();
         let formatter = formatter();
-        super::errno(saved);
+        crate::abi::restore_host_errno(saved);
         let second = args.clone();
         let mut stack = [0 as c_char; 512];
         let mut message = stack.as_mut_ptr();

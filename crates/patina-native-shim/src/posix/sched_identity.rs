@@ -78,7 +78,8 @@ const _: () = assert!(size_of::<libc::utsname>() == 5 * 256);
 
 /// # Safety
 /// name follows libc's output-buffer contract.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_uname"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn uname(name: *mut libc::utsname) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller's output-buffer contract is forwarded unchanged.
@@ -101,7 +102,11 @@ extern "C" fn sched_getcpu() -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// mask names the cpusetsize-byte guest input range.
-#[unsafe(no_mangle)]
+#[cfg_attr(
+    target_os = "linux",
+    unsafe(export_name = "patina_door_sched_setaffinity")
+)]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn sched_setaffinity(
     pid: libc::pid_t,
     cpusetsize: usize,
@@ -161,7 +166,8 @@ extern "C" fn sysconf(name: c_int) -> c_long {
 
 /// # Safety
 /// usage follows libc's rusage output contract.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_getrusage"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn getrusage(who: c_int, usage: *mut libc::rusage) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
@@ -192,7 +198,8 @@ unsafe extern "C" fn getrusage(who: c_int, usage: *mut libc::rusage) -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// info follows libc's sysinfo output contract.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_sysinfo"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn sysinfo(info: *mut libc::sysinfo) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: `info` is the caller's output pointer for this synchronous syscall.
@@ -318,7 +325,11 @@ unsafe extern "C" fn setrlimit64(
 #[cfg(target_os = "linux")]
 /// # Safety
 /// mask follows libc's cpusetsize-byte output contract.
-#[unsafe(no_mangle)]
+#[cfg_attr(
+    target_os = "linux",
+    unsafe(export_name = "patina_door_sched_getaffinity")
+)]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn sched_getaffinity(
     pid: libc::pid_t,
     cpusetsize: usize,
@@ -352,7 +363,8 @@ unsafe extern "C" fn sched_getaffinity(
 
 /// # Safety
 /// name follows libc's len-byte output contract (nonnull on Darwin).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_gethostname"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn gethostname(name: *mut c_char, len: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut buf = core::mem::MaybeUninit::<libc::utsname>::uninit();

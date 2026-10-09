@@ -31,8 +31,24 @@ pub(crate) fn failed(code: c_int) -> Errno {
     Errno::new(code)
 }
 
+/// A door's failure errno. Under a hold (a door whose C exit delivers) it is
+/// only owed: the exit writes it once the handlers ran, and only if the call
+/// does not run again, as glibc's wrapper writes errno after the kernel's
+/// return delivered them. A handler meanwhile sees the errno the call met.
 #[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) fn set_host_errno(code: c_int) {
+    #[cfg(target_os = "linux")]
+    if crate::panic_boundary::exit_owned() {
+        crate::thread::signals::owe_errno(code);
+        return;
+    }
+    restore_host_errno(code);
+}
+
+/// Write the host errno cell as it is, owing nothing: a value a door saved
+/// and puts back, or the one an exit owes.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub(crate) fn restore_host_errno(code: c_int) {
     // SAFETY: libc exposes the current thread's errno cell on both supported hosts.
     unsafe {
         #[cfg(target_os = "linux")]

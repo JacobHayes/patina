@@ -114,14 +114,16 @@ impl ThreadRuntime {
         // What comes due by now is pending before the wait parks, as a
         // delivery point before it would have found it. A timer that
         // interrupts this wait already ended it.
-        let wakes = self
-            .fire_timers()
-            .unwrap_or_else(|errno| fatal(&format!("firing the timers failed ({errno})")));
-        let mut scheduler = RealScheduler;
-        for task in wakes.into_iter().filter(|task| *task != me) {
-            self.remove_wait(task);
-            if let Err(message) = scheduler.wake(task) {
-                fatal(&message);
+        if self.timers_armed() {
+            let wakes = self
+                .fire_timers()
+                .unwrap_or_else(|errno| fatal(&format!("firing the timers failed ({errno})")));
+            let mut scheduler = RealScheduler;
+            for task in wakes.into_iter().filter(|task| *task != me) {
+                self.remove_wait(task);
+                if let Err(message) = scheduler.wake(task) {
+                    fatal(&message);
+                }
             }
         }
         if self.signals.interrupted.contains_key(&me) {

@@ -98,11 +98,13 @@ a raw `read` another thread signals, a raw `rt_sigsuspend`,
 shim scopes still counted beneath guest code after the jumps and the handlers
 that ran over a shim Rust frame (`docs/arcs/signal-frame-safety.md`).
 `native_signals` requires 0 for both natively, for the control, and for the
-cases the exit of a trap handler delivers (the raw system calls and counter
-reads on x86_64, the held-back signal: `c/posix/delivery.c`), and pins every other case as a gap
+cases a C exit delivers (the raw system calls and counter reads on x86_64,
+the held-back signal, `raise` and the other libc doors that forward to the
+syscall model: `c/posix/delivery.c`), and pins every other case as a gap
 until its delivery returns to C first, among them a timer due at a counter
-read inside a handler `raise` ran: its delivery is made as `raise`'s own,
-over the frames `raise` left suspended, never released from C over them.
+read inside a handler `pthread_sigmask` ran: its delivery is made as
+`pthread_sigmask`'s own, over the frames that delivery left suspended, never
+released from C over them.
 `drive_under_scope.c` drives a delivery from inside a shim entry (a planted
 control): its first step stops the run by name. `held_back_escape.c` has a
 fault handler whose mask blocks SIGUSR2 raise it and leave by `siglongjmp`
@@ -119,6 +121,10 @@ signal's, which runs last) saves the mask from before the suspension; through
 libc doors and (`-raw`, x86_64) the syscall trap's exit. `forward-nested`
 has a raw syscall inside a handler a libc door ran deliver before it returns.
 `native_signals` requires the native output.
+
+`errno_order.c` interrupts `syscall(SYS_read)`: the handler sees the errno the
+call met, and after an `SA_RESTART` read that succeeds the handler's errno
+stands; `native_signals` requires the native output.
 
 `thread_registrations.c` holds the per-thread kernel registration cases:
 `robust-exit` has a thread register a robust list and exit, and requires the

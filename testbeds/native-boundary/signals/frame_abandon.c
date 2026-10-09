@@ -32,11 +32,11 @@
  *   raw-sigsuspend a pending SIGUSR1 released by a raw rt_sigsuspend's mask
  *                 (x86_64, under SUD);
  *   forward-nested glibc's syscall(2) sends SIGUSR2, whose handler sends
- *                 SIGUSR1 with a raw tgkill (x86_64, under SUD): SIGUSR1 runs
- *                 over the frames the libc door's delivery left suspended;
- *   raise-counter raise(SIGUSR1) runs a handler that reads the counter until
- *                 a timer expires (x86_64): the timer's delivery, at a
- *                 counter read, is over the frames raise left suspended;
+ *                 SIGUSR1 with a raw tgkill (x86_64, under SUD);
+ *   unblock-counter a pending SIGUSR1 pthread_sigmask releases runs a
+ *                 handler that reads the counter until a timer expires
+ *                 (x86_64): the timer's delivery, at a counter read, is over
+ *                 the frames pthread_sigmask's delivery left suspended;
  *   abort         abort() to a SIGABRT handler;
  *   atexit-fault  a SIGSEGV handler runs inside an atexit handler (beneath
  *                 counts exit's own frames there, so only `over` speaks).
@@ -122,7 +122,7 @@ static void segv_holding_usr1(int sig) {
 
 static void counter_read(void);
 
-/* raise-counter's SIGUSR1 handler: a timer expires during its counter reads,
+/* unblock-counter's SIGUSR1 handler: a timer expires during its counter reads,
  * and SIGALRM's handler leaves by siglongjmp. */
 static void count_until_alarm(int sig) {
     (void)sig;
@@ -230,8 +230,12 @@ static void deliver(const char *name) {
         struct itimerval once = {{0, 0}, {0, 1000}};
         assert(syscall(SYS_setitimer, ITIMER_REAL, &once, NULL) == 0);
         for (;;) counter_read();
-    } else if (strcmp(name, "raise-counter") == 0) {
+    } else if (strcmp(name, "unblock-counter") == 0) {
+        sigset_t set;
+        sigemptyset(&set);
+        sigaddset(&set, SIGUSR1);
         assert(raise(SIGUSR1) == 0);
+        assert(pthread_sigmask(SIG_UNBLOCK, &set, NULL) == 0);
     } else if (strcmp(name, "forward-nested") == 0) {
         assert(syscall(SYS_tgkill, getpid(), gettid(), SIGUSR2) == 0);
     } else if (strcmp(name, "raw-tgkill") == 0) {
@@ -258,14 +262,14 @@ int main(int argc, char **argv) {
     if (strcmp(name, "fault-escape") == 0) install(SIGSEGV, leave, 0);
     else if (strcmp(name, "held-back") == 0) install(SIGSEGV, segv_holding_usr1, SIGUSR1);
     if (strcmp(name, "forward-nested") == 0) install(SIGUSR2, raw_send_usr1, 0);
-    if (strcmp(name, "raise-counter") == 0) {
+    if (strcmp(name, "unblock-counter") == 0) {
         install(SIGUSR1, count_until_alarm, 0);
         install(SIGALRM, leave, 0);
     } else if (strcmp(name, "counter") == 0) install(SIGALRM, leave, 0);
     else if (strcmp(name, "abort") == 0) install(SIGABRT, leave, 0);
     else install(SIGUSR1, leave, 0);
     if (strcmp(name, "unblock") == 0 || strcmp(name, "sigsuspend") == 0 ||
-        strcmp(name, "raw-sigsuspend") == 0)
+        strcmp(name, "raw-sigsuspend") == 0 || strcmp(name, "unblock-counter") == 0)
         block(SIGUSR1);
     for (int run = 0; run < RUNS; run++) {
         entered = 0;

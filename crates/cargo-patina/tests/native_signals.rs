@@ -288,7 +288,7 @@ fn handlers_leaving_shim_calls_leave_no_shim_frames() {
     use Expect::*;
     let mut cases = vec![
         ("fault-escape", Clean),
-        ("raise", Gap),
+        ("raise", Clean),
         ("unblock", Gap),
         ("sigsuspend", Gap),
         ("pipe-read", Gap),
@@ -310,22 +310,20 @@ fn handlers_leaving_shim_calls_leave_no_shim_frames() {
             },
         ));
     }
-    // A delivery at a counter read inside a handler raise's delivery ran is
-    // over the frames raise left suspended: made as raise's own, so a gap
-    // until raise's is C, never a release from C over them.
+    // A delivery at a counter read inside a handler pthread_sigmask's
+    // delivery ran is over the frames that delivery left suspended: made as
+    // its own, so a gap until pthread_sigmask's is C, never a release from C
+    // over them.
     if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Tsc) {
-        cases.push(("raise-counter", Gap));
+        cases.push(("unblock-counter", Gap));
     }
     if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Sud) {
         // Raw system calls are delivered from the syscall trap's exit.
         cases.push(("raw-tgkill", Clean));
         cases.push(("raw-read", Clean));
         cases.push(("raw-sigsuspend", Clean));
-        // A raw syscall inside a handler a libc door's delivery ran: what its
-        // exit delivers runs over the frames that delivery left suspended,
-        // as anything the handler meets does, until libc doors deliver from
-        // C exits too.
-        cases.push(("forward-nested", Gap));
+        // A raw syscall inside a handler syscall(2)'s exit ran.
+        cases.push(("forward-nested", Clean));
     }
     let native = assert_build_c_guest("signals/frame_abandon.c", CLink::Unlinked);
     let patina = assert_build_c_guest("signals/frame_abandon.c", CLink::PosixShimPlanted);
@@ -399,6 +397,24 @@ fn delivery_batches_build_their_frames_as_the_kernel_does() {
         cases.push("forward-nested".to_owned());
     }
     for case in &cases {
+        let oracle = assert_standalone_success(&native.binary, &[case], &[]);
+        let output = assert_standalone_success(&patina.binary, &[case], &env);
+        assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");
+    }
+}
+
+/// A libc door's errno is written after the handlers its call ran, and only
+/// for the call's final outcome, as glibc's syscall(2) writes it after the
+/// kernel's return delivered them: a handler interrupting syscall(SYS_read)
+/// sees the errno the call met, and one whose SA_RESTART read then succeeds
+/// leaves its own errno standing.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_door_writes_its_errno_after_its_handlers() {
+    let native = assert_build_c_guest("signals/errno_order.c", CLink::Unlinked);
+    let patina = assert_build_c_guest("signals/errno_order.c", CLink::PosixShim);
+    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "6")];
+    for case in ["entry", "restart"] {
         let oracle = assert_standalone_success(&native.binary, &[case], &[]);
         let output = assert_standalone_success(&patina.binary, &[case], &env);
         assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");

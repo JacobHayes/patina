@@ -276,6 +276,12 @@ impl Timers {
 }
 
 impl ThreadRuntime {
+    /// Whether any timer is armed: [`Self::fire_timers`] has nothing to fire
+    /// otherwise.
+    pub(super) fn timers_armed(&self) -> bool {
+        self.timers.any_armed()
+    }
+
     /// Fire every timer virtual time has reached, under the runtime lock the
     /// caller holds: the tasks to wake once it is released.
     pub(super) fn fire_timers(&mut self) -> Result<Vec<TaskId>, c_int> {

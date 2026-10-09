@@ -305,7 +305,8 @@ unsafe extern "C" fn sigwait(set: *const libc::sigset_t, sig: *mut c_int) -> c_i
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_sigqueue"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn sigqueue(pid: libc::pid_t, sig: c_int, value: libc::sigval) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut info = Info { words: [0; 16] };
@@ -487,7 +488,8 @@ extern "C" fn pthread_kill(thread: libc::pthread_t, sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     signals::patina_pthread_kill(thread as usize, sig)
 }
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_killpg"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn killpg(group: libc::pid_t, sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if group < 0 {
@@ -531,26 +533,30 @@ extern "C" fn siginterrupt(sig: c_int, interrupt: c_int) -> c_int {
         signals::patina_signal_action_libc(sig, &act, ptr::null_mut())
     })
 }
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_tgkill"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn tgkill(tgid: libc::pid_t, tid: libc::pid_t, sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: tgkill forwards only scalar process, thread, and signal numbers.
     unsafe { crate::sud::forward(libc::SYS_tgkill, &[tgid.word(), tid.word(), sig.word()]) }
 }
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_tkill"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn tkill(tid: libc::pid_t, sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: tkill forwards only scalar thread and signal numbers.
     unsafe { crate::sud::forward(libc::SYS_tkill, &[tid.word(), sig.word()]) }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_pidfd_open"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn pidfd_open(pid: libc::pid_t, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: pidfd_open forwards only scalar arguments.
     unsafe { crate::sud::forward(libc::SYS_pidfd_open, &[pid.word(), flags.word()]) }
 }
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_pidfd_getfd"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn pidfd_getfd(pidfd: c_int, targetfd: c_int, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: pidfd_getfd forwards only scalar descriptor and flag values.
@@ -563,7 +569,11 @@ extern "C" fn pidfd_getfd(pidfd: c_int, targetfd: c_int, flags: u32) -> c_int {
 }
 /// # Safety
 /// info is null or a readable siginfo_t.
-#[unsafe(no_mangle)]
+#[cfg_attr(
+    target_os = "linux",
+    unsafe(export_name = "patina_door_pidfd_send_signal")
+)]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn pidfd_send_signal(
     pidfd: c_int,
     sig: c_int,
@@ -581,7 +591,11 @@ unsafe extern "C" fn pidfd_send_signal(
 }
 /// # Safety
 /// iov follows libc's vlen-element input contract.
-#[unsafe(no_mangle)]
+#[cfg_attr(
+    target_os = "linux",
+    unsafe(export_name = "patina_door_process_madvise")
+)]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn process_madvise(
     pidfd: c_int,
     iov: *const libc::iovec,
@@ -604,7 +618,11 @@ unsafe extern "C" fn process_madvise(
         ) as isize
     }
 }
-#[unsafe(no_mangle)]
+#[cfg_attr(
+    target_os = "linux",
+    unsafe(export_name = "patina_door_process_mrelease")
+)]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn process_mrelease(pidfd: c_int, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: process_mrelease forwards only scalar descriptor and flag values.
@@ -612,7 +630,11 @@ extern "C" fn process_mrelease(pidfd: c_int, flags: u32) -> c_int {
 }
 /// # Safety
 /// local and remote follow libc's iovec input contracts.
-#[unsafe(no_mangle)]
+#[cfg_attr(
+    target_os = "linux",
+    unsafe(export_name = "patina_door_process_vm_readv")
+)]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn process_vm_readv(
     pid: libc::pid_t,
     local: *const libc::iovec,
@@ -639,7 +661,11 @@ unsafe extern "C" fn process_vm_readv(
 }
 /// # Safety
 /// local and remote follow libc's iovec input contracts.
-#[unsafe(no_mangle)]
+#[cfg_attr(
+    target_os = "linux",
+    unsafe(export_name = "patina_door_process_vm_writev")
+)]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn process_vm_writev(
     pid: libc::pid_t,
     local: *const libc::iovec,
@@ -705,7 +731,8 @@ unsafe extern "C" fn posix_spawn_file_actions_addchdir(
 }
 /// # Safety
 /// infop follows libc's waitid output contract.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_waitid"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn waitid(
     idtype: libc::idtype_t,
     id: libc::id_t,

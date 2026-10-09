@@ -10,7 +10,8 @@ use core::ffi::{c_ulong, c_void};
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_mount"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn mount(
     source: *const c_char,
     target: *const c_char,
@@ -37,7 +38,8 @@ unsafe extern "C" fn mount(
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_umount2"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn umount2(target: *const c_char, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The caller's guest-pointer contract keeps `target` live for the synchronous row dispatch.
@@ -47,7 +49,8 @@ unsafe extern "C" fn umount2(target: *const c_char, flags: c_int) -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_pivot_root"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn pivot_root(new_root: *const c_char, put_old: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The caller's guest-pointer contract keeps both paths live for the synchronous row dispatch.
@@ -57,7 +60,8 @@ unsafe extern "C" fn pivot_root(new_root: *const c_char, put_old: *const c_char)
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_open_tree"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn open_tree(dirfd: c_int, path: *const c_char, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The caller's guest-pointer contract keeps `path` live for the synchronous row dispatch.
@@ -72,7 +76,8 @@ unsafe extern "C" fn open_tree(dirfd: c_int, path: *const c_char, flags: u32) ->
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_move_mount"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn move_mount(
     from_dirfd: c_int,
     from_path: *const c_char,
@@ -99,7 +104,8 @@ unsafe extern "C" fn move_mount(
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_fsopen"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn fsopen(fs_name: *const c_char, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The caller's guest-pointer contract keeps `fs_name` live for the synchronous row dispatch.
@@ -109,7 +115,8 @@ unsafe extern "C" fn fsopen(fs_name: *const c_char, flags: u32) -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_fsconfig"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn fsconfig(
     fd: c_int,
     cmd: u32,
@@ -130,7 +137,8 @@ unsafe extern "C" fn fsconfig(
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_fsmount"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn fsmount(fd: c_int, flags: u32, attr_flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
@@ -145,7 +153,8 @@ unsafe extern "C" fn fsmount(fd: c_int, flags: u32, attr_flags: u32) -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_fspick"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn fspick(dirfd: c_int, path: *const c_char, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The caller's guest-pointer contract keeps `path` live for the synchronous row dispatch.
@@ -155,7 +164,8 @@ unsafe extern "C" fn fspick(dirfd: c_int, path: *const c_char, flags: u32) -> c_
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_mount_setattr"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn mount_setattr(
     dirfd: c_int,
     path: *const c_char,
@@ -182,7 +192,8 @@ unsafe extern "C" fn mount_setattr(
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_acct"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn acct(path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The caller's guest-pointer contract keeps `path` live for the synchronous row dispatch.
@@ -192,7 +203,8 @@ unsafe extern "C" fn acct(path: *const c_char) -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_vhangup"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn vhangup() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
@@ -202,7 +214,8 @@ unsafe extern "C" fn vhangup() -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_swapon"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn swapon(path: *const c_char, flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The caller's guest-pointer contract keeps `path` live for the synchronous row dispatch.
@@ -212,7 +225,8 @@ unsafe extern "C" fn swapon(path: *const c_char, flags: c_int) -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_swapoff"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn swapoff(path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The caller's guest-pointer contract keeps `path` live for the synchronous row dispatch.
@@ -222,7 +236,8 @@ unsafe extern "C" fn swapoff(path: *const c_char) -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_reboot"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn reboot(howto: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
@@ -237,7 +252,8 @@ unsafe extern "C" fn reboot(howto: c_int) -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_init_module"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn init_module(
     image: *mut c_void,
     length: c_ulong,
@@ -256,7 +272,8 @@ unsafe extern "C" fn init_module(
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_delete_module"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn delete_module(name: *const c_char, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The caller's guest-pointer contract keeps `name` live for the synchronous row dispatch.
@@ -266,7 +283,8 @@ unsafe extern "C" fn delete_module(name: *const c_char, flags: u32) -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_quotactl"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn quotactl(
     cmd: c_int,
     special: *const c_char,
@@ -286,7 +304,8 @@ unsafe extern "C" fn quotactl(
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_iopl"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn iopl(level: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
@@ -296,7 +315,8 @@ unsafe extern "C" fn iopl(level: c_int) -> c_int {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_ioperm"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn ioperm(from: c_ulong, count: c_ulong, turn_on: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
@@ -311,7 +331,8 @@ unsafe extern "C" fn ioperm(from: c_ulong, count: c_ulong, turn_on: c_int) -> c_
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_unshare"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn unshare(flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
@@ -321,7 +342,8 @@ unsafe extern "C" fn unshare(flags: c_int) -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_setns"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn setns(fd: c_int, nstype: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: This row has no pointer operands, so `forward`'s pointer precondition is vacuous.
@@ -331,7 +353,8 @@ unsafe extern "C" fn setns(fd: c_int, nstype: c_int) -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// Pointer arguments are guest addresses imported by the modeled syscall.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_chroot"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn chroot(path: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The caller's guest-pointer contract keeps `path` live for the synchronous row dispatch.

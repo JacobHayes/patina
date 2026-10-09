@@ -24,7 +24,8 @@ syscall:
   movq %r9, 32(%rsp)
   movq %rax, 40(%rsp)
   movq %rsp, %rsi
-  call patina_libc_syscall_fixed
+  leaq 64(%rsp), %rdx
+  call patina_libc_syscall_door
   addq $56, %rsp
   .cfi_def_cfa_offset 8
   ret
@@ -63,7 +64,8 @@ syscall:
   str x30, [sp, #48]
   .cfi_offset 30, -16
   mov x1, sp
-  bl patina_libc_syscall_fixed
+  add x2, sp, #64
+  bl patina_libc_syscall_door
   ldr x30, [sp, #48]
   .cfi_restore 30
   add sp, sp, #64

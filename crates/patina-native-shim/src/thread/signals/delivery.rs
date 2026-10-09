@@ -85,6 +85,8 @@ pub struct Exit {
     plan_segv: u64,
     plan_word: u64,
     plan: u8,
+    /// [`PLAN_ERRNO`]'s value.
+    plan_errno: i32,
 }
 
 const _: () = assert!(size_of::<Exit>() == 224 && align_of::<Exit>() == 8);
@@ -100,6 +102,10 @@ const PLAN_SAVED: u8 = 4;
 const PLAN_CARRIED: u8 = 8;
 /// The scope at `plan_word` is open.
 const PLAN_SCOPE: u8 = 16;
+/// A libc door failed with `plan_errno`: written after the handlers ran
+/// unless the call runs again, as glibc's wrapper writes it after the
+/// kernel's return delivered them.
+const PLAN_ERRNO: u8 = 32;
 
 /// What a call under a trap handler's hold leaves its trap's C exit to do
 /// after delivering ([`file_temporary_mask`], [`file_restart`]): one per
@@ -110,10 +116,28 @@ struct Plan {
     flags: u8,
     old: u64,
     segv: u64,
+    errno: i32,
 }
 
 thread_local! {
-    static PLAN: Cell<Plan> = const { Cell::new(Plan { flags: 0, old: 0, segv: 0 }) };
+    static PLAN: Cell<Plan> = const {
+        Cell::new(Plan {
+            flags: 0,
+            old: 0,
+            segv: 0,
+            errno: 0,
+        })
+    };
+}
+
+/// A libc door under a hold fails with `errno` ([`PLAN_ERRNO`]).
+pub(crate) fn owe_errno(errno: i32) {
+    PLAN.with(|plan| {
+        let mut filed = plan.get();
+        filed.flags |= PLAN_ERRNO;
+        filed.errno = errno;
+        plan.set(filed);
+    });
 }
 
 /// A temporary-mask wait under a trap handler's hold returns with `requested`
@@ -165,6 +189,7 @@ impl Exit {
             plan_segv: 0,
             plan_word: 0,
             plan: 0,
+            plan_errno: 0,
         }
     }
 
@@ -683,6 +708,7 @@ fn take_plan(exit: &mut Exit) {
     exit.plan = plan.flags;
     exit.plan_old = plan.old;
     exit.plan_segv = plan.segv;
+    exit.plan_errno = plan.errno;
     if exit.plan & PLAN_RESTORE != 0 {
         if fault::open_scope_at(&mut exit.plan_word) {
             exit.plan |= PLAN_SCOPE;
@@ -711,7 +737,14 @@ fn end(exit: &mut Exit, ret: i64) -> bool {
             task.mask = mask;
         }
     }
-    let restart = exit.plan & PLAN_RESTART != 0 && ret == -i64::from(EINTR);
+    // A raw call answers `-EINTR`; a libc door owes errno `EINTR`.
+    let eintr = ret == -i64::from(EINTR) || exit.plan & PLAN_ERRNO != 0 && exit.plan_errno == EINTR;
+    let restart = exit.plan & PLAN_RESTART != 0 && eintr;
+    // Only a final outcome writes the errno it owes; a call that runs again
+    // owes nothing yet.
+    if exit.plan & PLAN_ERRNO != 0 && !restart {
+        crate::abi::restore_host_errno(exit.plan_errno);
+    }
     exit.plan = 0;
     restart
 }

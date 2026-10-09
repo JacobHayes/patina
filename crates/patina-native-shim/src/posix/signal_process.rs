@@ -16,7 +16,8 @@ unsafe extern "C" fn exit(status: c_int) -> ! {
 #[cfg(target_os = "linux")]
 mod linux;
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_raise"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn raise(sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
@@ -71,7 +72,8 @@ unsafe extern "C" fn execvp(_file: *const c_char, _argv: *const *mut c_char) -> 
 
 /// # Safety
 /// status is null or a writable wait status buffer.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_waitpid"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn waitpid(pid: libc::pid_t, status: *mut c_int, options: c_int) -> libc::pid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     super::cancel(c"waitpid");
@@ -92,7 +94,8 @@ unsafe extern "C" fn waitpid(pid: libc::pid_t, status: *mut c_int, options: c_in
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_setsid"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn setsid() -> libc::pid_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
@@ -106,7 +109,8 @@ extern "C" fn setsid() -> libc::pid_t {
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_setgid"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn setgid(gid: libc::gid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
@@ -124,7 +128,8 @@ extern "C" fn setgid(gid: libc::gid_t) -> c_int {
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_setuid"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn setuid(uid: libc::uid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
@@ -142,7 +147,8 @@ extern "C" fn setuid(uid: libc::uid_t) -> c_int {
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_setpgid"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn setpgid(pid: libc::pid_t, pgid: libc::pid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
@@ -168,7 +174,8 @@ extern "C" fn setpgid(pid: libc::pid_t, pgid: libc::pid_t) -> c_int {
 #[cfg(target_os = "linux")]
 /// # Safety
 /// groups follows libc's count-element input contract.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_setgroups"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 unsafe extern "C" fn setgroups(count: usize, groups: *const libc::gid_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the unsafe libc entry contract supplies `groups` for `count` elements when used.
@@ -271,7 +278,8 @@ unsafe extern "C" fn posix_spawnattr_setsigdefault(
     process_trap(c"posix_spawnattr_setsigdefault")
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_kill"))]
+#[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn kill(pid: libc::pid_t, sig: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]

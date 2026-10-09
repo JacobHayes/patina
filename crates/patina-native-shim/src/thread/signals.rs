@@ -304,15 +304,19 @@ impl SignalRuntime {
     fn first_deliverable(&self, task: TaskId, wanted: u64) -> Option<u8> {
         let private = self.tasks[&task].private.mask();
         let shared = self.shared.mask();
-        let ready = (1..=64u8)
-            .filter(|sig| {
-                wanted & bit(*sig) == 0
-                    && self.handles(task, *sig)
-                    && (private & bit(*sig) != 0
-                        || (shared & bit(*sig) != 0
-                            && self.target(*sig, SignalTarget::Process) == Some(task)))
-            })
-            .fold(0u64, |ready, sig| ready | bit(sig));
+        // Only the signals pending at all, of those a dequeue does not take.
+        let mut candidates = (private | shared) & !wanted;
+        let mut ready = 0u64;
+        while candidates != 0 {
+            let sig = candidates.trailing_zeros() as u8 + 1;
+            candidates &= candidates - 1;
+            if self.handles(task, sig)
+                && (private & bit(sig) != 0
+                    || self.target(sig, SignalTarget::Process) == Some(task))
+            {
+                ready |= bit(sig);
+            }
+        }
         let pick = if ready & SYNCHRONOUS != 0 {
             ready & SYNCHRONOUS
         } else {
@@ -441,6 +445,7 @@ pub use actions::{
     patina_signal_action, patina_signal_action_libc, patina_signal_altstack, patina_signal_mask,
     patina_signal_pending,
 };
+pub(crate) use delivery::owe_errno;
 #[cfg(any(test, patina_posix_exports))]
 pub(crate) use delivery::patina_signal_deliver;
 pub(crate) use delivery::{deliver, deliver_saving, refresh_handler_mask};

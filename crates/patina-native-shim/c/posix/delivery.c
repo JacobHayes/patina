@@ -42,6 +42,7 @@ struct patina_exit {
     uint64_t plan_segv;
     uint64_t plan_word;
     uint8_t plan;
+    int32_t plan_errno;
 };
 _Static_assert(sizeof(struct patina_exit) == 224, "Rust signals::delivery::Exit layout");
 
@@ -112,5 +113,54 @@ __attribute__((visibility("hidden"))) int patina_exit_drive(struct patina_exit *
 static int patina_trap_exit_drive(ucontext_t *uc, long ret) {
     struct patina_trap_exit trap = {.uc = uc, .mode = PATINA_EXIT_IN_FRAME};
     return patina_exit_drive(&trap.exit, ret);
+}
+
+/*
+ * The libc doors that forward to the syscall model (src/posix/door_thunks.rs)
+ * and syscall(2) hold the thread around the Rust door as a trap handler
+ * does: what the door makes deliverable is left pending for its exit, which
+ * delivers once the door returned. A door's errno is written after the
+ * handlers ran, as glibc's wrapper writes it after the kernel's return
+ * delivered them; a door that failed EINTR from a wait SA_RESTART restarts
+ * runs again from the same registers.
+ */
+extern int patina_trap_enter(uintptr_t sp, stack_t *stack);
+extern void patina_trap_leave(void);
+
+/* The errno the held door's call met: its handlers see it, as the kernel's
+ * return delivers them before glibc's wrapper writes errno. */
+static __thread int patina_door_errno;
+
+/* The door's caller's stack pointer is `sp`. */
+__attribute__((visibility("hidden"))) void patina_door_hold(uintptr_t sp) {
+    patina_door_errno = errno;
+    (void)patina_trap_enter(sp, NULL);
+}
+
+/* After the Rust door returned: answers whether it runs again (still held).
+ * The exit writes the errno the door owes once its handlers ran, if the door
+ * does not run again; the next run meets what they left. */
+__attribute__((visibility("hidden"))) int patina_door_exit(void) {
+    struct patina_exit delivery;
+    memset(&delivery, 0, sizeof delivery);
+    errno = patina_door_errno;
+    if (patina_exit_drive(&delivery, 0)) {
+        patina_door_errno = errno;
+        return 1;
+    }
+    patina_trap_leave();
+    return 0;
+}
+
+/* syscall(2): its assembly entry (src/variadic/syscall.rs) captured the six
+ * argument words; the door is the fixed Rust entry. */
+extern long patina_libc_syscall_fixed(long number, const uint64_t (*words)[6]);
+__attribute__((visibility("hidden"))) long patina_libc_syscall_door(
+    long number, const uint64_t (*words)[6], uintptr_t sp) {
+    patina_door_hold(sp);
+    long ret;
+    do ret = patina_libc_syscall_fixed(number, words);
+    while (patina_door_exit());
+    return ret;
 }
 #endif

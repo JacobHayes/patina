@@ -5,6 +5,8 @@ use core::ffi::c_int;
 #[cfg(target_os = "macos")]
 mod darwin;
 mod dlsym;
+#[cfg(target_os = "linux")]
+mod door_thunks;
 mod entropy;
 mod fd_io;
 mod fs;
