@@ -261,6 +261,79 @@ fn handlers_run_on_the_stacks_they_ask_for() {
     }
 }
 
+/// A guest handler that leaves by `siglongjmp` discards every frame beneath
+/// it up to the jump's target, so none of those may be a shim Rust frame:
+/// its destructors (its panic scope among them) would never run. Each case
+/// delivers a signal three times and the handler leaves every time; the
+/// guest then reports the shim scopes still counted beneath it and how many
+/// handlers ran over a shim Rust frame. Natively both are 0. Under the shim
+/// a handler run from a fault in guest code has only C beneath it, so it
+/// stays clean; every delivery the shim makes from inside a Rust entry is a
+/// gap (both counts above 0) until that origin returns to C before
+/// delivering. A gap that stops reproducing fails here, to be marked clean.
+#[cfg(target_os = "linux")]
+#[test]
+fn handlers_leaving_shim_calls_leave_no_shim_frames() {
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Expect {
+        /// No shim Rust frame beneath any handler.
+        Clean,
+        /// A shim Rust frame beneath every handler, and discarded by its jump.
+        Gap,
+        /// As `Gap`, inside `exit`, whose own frames are still live there.
+        GapInsideExit,
+    }
+    use Expect::*;
+    let mut cases = vec![
+        ("fault-escape", Clean),
+        ("raise", Gap),
+        ("unblock", Gap),
+        ("sigsuspend", Gap),
+        ("pipe-read", Gap),
+        ("handoff", Gap),
+        ("held-back", Gap),
+        ("abort", Gap),
+        ("atexit-fault", GapInsideExit),
+    ];
+    // Timestamp-counter reads trap only where the host can arm the trap;
+    // elsewhere the case reads the clock through libc, an entry too.
+    if !cfg!(target_arch = "x86_64") || kernel_supports(KernelFeature::Tsc) {
+        cases.push(("counter", Gap));
+    }
+    if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Sud) {
+        cases.push(("raw-tgkill", Gap));
+    }
+    let native = assert_build_c_guest("signals/frame_abandon.c", CLink::Unlinked);
+    let patina = assert_build_c_guest("signals/frame_abandon.c", CLink::PosixShimPlanted);
+    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "5")];
+    let keys = ["handled", "beneath", "over"];
+    for (case, expect) in cases {
+        let oracle = assert_standalone_success(&native.binary, &[case], &[]);
+        let oracle = assert_fields(&oracle.stdout, "FRAME_ABANDON ", &keys);
+        assert_eq!(
+            (oracle["handled"], oracle["beneath"], oracle["over"]),
+            ("3", "0", "0"),
+            "{case}: native oracle"
+        );
+        let output = standalone_output(&patina.binary, &[case], &env);
+        assert!(output.status.success(), "{case}: {output:?}");
+        let fields = assert_fields(&output.stdout, "FRAME_ABANDON ", &keys);
+        let count = |key: &str| -> u64 { fields[key].parse().unwrap() };
+        assert_eq!(
+            count("handled"),
+            3,
+            "{case}: every delivery ran its handler"
+        );
+        let observed = match (count("beneath"), count("over")) {
+            (0, 0) => Clean,
+            (beneath, over) if beneath > 0 && over > 0 && expect != GapInsideExit => Gap,
+            (_, over) if over > 0 && expect == GapInsideExit => GapInsideExit,
+            other => panic!("{case}: inconsistent counts (beneath, over) = {other:?}"),
+        };
+        assert_eq!(observed, expect, "{case}: {}", text(&output.stdout));
+    }
+}
+
 /// A synchronous signal an instruction raises (SIGBUS, SIGFPE, SIGILL,
 /// SIGTRAP) meets the action the kernel would give it: after a delivery
 /// batch's handler leaves by `siglongjmp` from a frame that ran the action

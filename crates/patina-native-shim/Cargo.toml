@@ -13,8 +13,10 @@ crate-type = ["rlib", "staticlib"]
 
 [features]
 # A shim export that faults in shim code on demand, for the containment tests
-# (`patina_planted_fault`), and the private signal stack's bounds for its
-# budget detector (`patina_planted_private_stack`); never in a guest's build.
+# (`patina_planted_fault`), the private signal stack's bounds for its budget
+# detector (`patina_planted_private_stack`), and the signal-frame detectors'
+# counts (`patina_planted_live_scopes`, `patina_planted_handlers_over_shim`);
+# never in a guest's build.
 planted-faults = []
 # Clock and variadic boundary failpoints used only by native acceptance tests.
 test-panic = []

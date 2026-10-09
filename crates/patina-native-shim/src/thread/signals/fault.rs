@@ -180,7 +180,32 @@ pub unsafe extern "C" fn patina_fault_route(
         });
     }
     unsafe { handler.write(action) };
+    guest_handler_runs();
     FAULT_HANDLER
+}
+
+/// Guest handlers that ran with a shim Rust frame beneath them, owning or
+/// suspended (a shim built with `planted-faults`). A nonlocal exit from such
+/// a handler discards that frame; none should ever run.
+#[cfg(feature = "planted-faults")]
+static OVER_SHIM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The calling route answers [`FAULT_HANDLER`]: its C handler runs the
+/// guest handler once the route's own scope (the one the caller holds) ends.
+fn guest_handler_runs() {
+    #[cfg(feature = "planted-faults")]
+    if crate::panic_boundary::scopes_beneath(1) != 0 {
+        OVER_SHIM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[unsafe(no_mangle)]
+/// How many guest handlers ran with a shim Rust frame beneath them
+/// ([`OVER_SHIM`]), for the signal-frame detectors.
+#[cfg(feature = "planted-faults")]
+pub extern "C" fn patina_planted_handlers_over_shim() -> u64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    OVER_SHIM.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A guest handler with `flags` runs from `frame`: where ([`frames::enter`]),
@@ -889,7 +914,11 @@ pub unsafe extern "C" fn patina_tsc_route(
         let pc = unsafe { (*context).uc_mcontext.gregs[libc::REG_RIP as usize] } as usize;
         crate::tsc::patina_tsc_declined(pc);
     }
-    unsafe { patina_signal_fault(info, frame, handler) }
+    let routed = unsafe { patina_signal_fault(info, frame, handler) };
+    if routed == FAULT_HANDLER {
+        guest_handler_runs();
+    }
+    routed
 }
 
 #[unsafe(no_mangle)]

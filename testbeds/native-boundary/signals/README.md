@@ -88,6 +88,17 @@ blocks every signal, and the handler's own first counter read and raw syscall
 must be answered while it runs. `native_signals` runs it natively as the oracle and
 under the shim, and requires the same output.
 
+`frame_abandon.c` (over a `planted-faults` shim) has handlers leave by
+`siglongjmp` from every kind of delivery: a fault in guest code (the clean
+control), `raise`, an unblocking `pthread_sigmask`, `sigsuspend`, a blocked
+`read` and a yield that another thread signals, a signal a returning SIGSEGV
+handler held back, a timer expiring during counter reads, a raw `tgkill`,
+`abort`, and a SIGSEGV handler inside an `atexit` handler. Each reports the
+shim scopes still counted beneath guest code after the jumps and the handlers
+that ran over a shim Rust frame (`docs/arcs/signal-frame-safety.md`).
+`native_signals` requires 0 for both natively and for the control, and pins
+every other case as a gap until its delivery returns to C first.
+
 `thread_registrations.c` holds the per-thread kernel registration cases:
 `robust-exit` has a thread register a robust list and exit, and requires the
 exit walk to mark only the word the thread owned `FUTEX_OWNER_DIED`;

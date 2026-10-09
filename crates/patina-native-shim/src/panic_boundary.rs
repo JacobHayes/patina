@@ -1,9 +1,23 @@
 //! Panic ownership follows Rust ABI entries, not panic source paths. Guest
 //! callbacks temporarily suspend ownership and can still catch their panics.
 use std::cell::Cell;
+#[cfg(any(test, feature = "planted-faults"))]
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 thread_local! {
     static IN_SHIM: Cell<bool> = const { Cell::new(false) };
+    /// How many scopes, owning or suspended, this thread holds: every Rust
+    /// frame of the shim's ABI entries (and the guest callbacks they suspend
+    /// for) that is still on the stack. A frame a nonlocal exit discards
+    /// never gives its scope back, so a count above the frames really live
+    /// is the trace such an exit leaves. Only this thread updates it, each
+    /// time in one read-modify-write ([`count`]), so a signal handler that
+    /// interrupts an update (and leaves frames of its own behind) cannot
+    /// erase its count; 64 bits never wrap, whatever a run abandons. Kept
+    /// only for the detectors (a shim built with `planted-faults`, and the
+    /// unit tests): every entry pays for it.
+    #[cfg(any(test, feature = "planted-faults"))]
+    static LIVE: AtomicU64 = const { AtomicU64::new(0) };
     /// Where the guest's stack stood when the shim last took the thread from
     /// it: the address below which guest code was running. A door that knows
     /// the interrupted stack pointer exactly (a trap frame's) notes it first.
@@ -42,6 +56,7 @@ impl PanicScope {
         Self::set(false)
     }
     fn set(value: bool) -> Self {
+        count(1);
         let previous = IN_SHIM.with(|scope| scope.replace(value));
         #[cfg(target_os = "linux")]
         let (previous_sp, previous_entry) = (GUEST_SP.get(), ENTRY.get().0);
@@ -101,6 +116,7 @@ impl Drop for PanicScope {
             crate::host_abort();
         }
         IN_SHIM.with(|scope| scope.set(self.previous));
+        count(u64::MAX);
         #[cfg(target_os = "linux")]
         {
             GUEST_SP.set(self.previous_sp);
@@ -117,8 +133,51 @@ fn took(sp: usize) {
     ENTRY.set((next + 1, next + 1));
 }
 
+/// Add `delta` (wrapping: `u64::MAX` takes one away) to this thread's
+/// [`LIVE`] in one read-modify-write a signal cannot split. No other thread
+/// touches the count, so on x86-64 that is one plain `add`: a `lock`ed one
+/// costs a full barrier on every entry. Elsewhere it is a relaxed atomic add.
+#[inline(always)]
+fn count(delta: u64) {
+    #[cfg(not(any(test, feature = "planted-faults")))]
+    let _ = delta;
+    #[cfg(any(test, feature = "planted-faults"))]
+    LIVE.with(|live| {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: `live` is this thread's own, live for the thread; one
+        // `add` to it is a single instruction, which a signal cannot split.
+        unsafe {
+            core::arch::asm!(
+                "add qword ptr [{live}], {delta}",
+                live = in(reg) live.as_ptr(),
+                delta = in(reg) delta,
+                options(nostack),
+            );
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        live.fetch_add(delta, Relaxed);
+    });
+}
+
 pub(crate) fn in_shim() -> bool {
     IN_SHIM.with(Cell::get)
+}
+
+/// The scopes this thread holds besides the caller's `own`: the shim Rust
+/// frames, owning or suspended, beneath the caller (see [`LIVE`]).
+#[cfg(any(test, feature = "planted-faults"))]
+pub(crate) fn scopes_beneath(own: u64) -> u64 {
+    LIVE.with(|live| live.load(Relaxed)) - own
+}
+
+/// The scopes the calling guest code has beneath it: none, unless a shim
+/// frame below it is still live or was discarded without giving its scope
+/// back. For the signal-frame detectors (a shim built with `planted-faults`).
+#[cfg(feature = "planted-faults")]
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_planted_live_scopes() -> u64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    scopes_beneath(1)
 }
 
 /// A fault handler takes the thread for the shim before it does anything
@@ -194,8 +253,9 @@ mod tests {
     // fatal policy; this checks nesting/callback ownership on every platform.
     #[test]
     fn panic_scopes_restore_ownership_across_callbacks_and_threads() {
-        use super::{PanicScope, in_shim};
+        use super::{PanicScope, in_shim, scopes_beneath};
         assert!(!in_shim());
+        assert_eq!(scopes_beneath(0), 0);
         let outer = PanicScope::enter();
         assert!(in_shim());
         {
@@ -204,12 +264,28 @@ mod tests {
             {
                 let _entry = PanicScope::enter();
                 assert!(in_shim());
+                // Owning and suspended scopes alike are live frames.
+                assert_eq!(scopes_beneath(1), 2);
             }
             assert!(!in_shim());
         }
         assert!(in_shim());
-        std::thread::spawn(|| assert!(!in_shim())).join().unwrap();
+        std::thread::spawn(|| {
+            assert!(!in_shim());
+            assert_eq!(scopes_beneath(0), 0);
+        })
+        .join()
+        .unwrap();
         drop(outer);
         assert!(!in_shim());
+        assert_eq!(scopes_beneath(0), 0);
+        // A scope a nonlocal exit discards stays counted: its drop is what
+        // gives it back. (On a thread of its own, which it leaves owned.)
+        std::thread::spawn(|| {
+            std::mem::forget(PanicScope::enter());
+            assert_eq!(scopes_beneath(0), 1);
+        })
+        .join()
+        .unwrap();
     }
 }

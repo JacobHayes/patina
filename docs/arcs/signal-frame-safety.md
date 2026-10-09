@@ -4,7 +4,11 @@
 
 Status: designed, not implemented. Until the port lands, a guest handler that
 leaves by `siglongjmp` or `setcontext` while it interrupts a shim call skips
-live shim Rust frames; that path is unsupported.
+live shim Rust frames; that path is unsupported. The detector is in place:
+in a `planted-faults` shim `PanicScope` counts the scopes each thread holds,
+and `native_signals`
+(`testbeds/native-boundary/signals/frame_abandon.c`) pins every delivery
+origin that still runs a handler over a shim Rust frame as a gap.
 
 Retain `PanicScope` and its destructor. A C driver owns each interval in which a
 guest handler may run. Rust preparation returns a result or a delivery request,
