@@ -811,23 +811,37 @@ impl Scoped {
     /// Open the scope. The guard stays where it is until it closes: its word
     /// is what tells a scope still running from one left.
     pub(super) fn open(&mut self) {
-        if !trap_routed(SIGSEGV) {
-            return;
+        if open_scope_at(&mut self.canary) {
+            self.at = &self.canary as *const u64 as usize;
         }
-        let canary = &mut self.canary as *mut u64;
-        let stack = current_altstack();
-        let stack = (stack.flags & SS_DISABLE == 0).then_some((stack.base, stack.size));
-        let sp = frames::guest_position(canary as usize);
-        SEGV.with_borrow_mut(|segv| segv.open(canary, sp, stack, true));
-        self.at = canary as usize;
     }
     /// The scope returned: the block is again what it opened under.
     pub(super) fn close(&mut self) {
         let at = std::mem::take(&mut self.at);
         if at != 0 {
-            SEGV.with_borrow_mut(|segv| segv.close(at));
+            close_scope_at(at);
         }
     }
+}
+
+/// Open a scope whose word is `*word`, in a frame that stays where it is
+/// until [`close_scope_at`] (a [`Scoped`] guard's, or a delivery driver's
+/// record): answers whether one opened, which it does only where the trap is
+/// armed.
+pub(super) fn open_scope_at(word: *mut u64) -> bool {
+    if !trap_routed(SIGSEGV) {
+        return false;
+    }
+    let stack = current_altstack();
+    let stack = (stack.flags & SS_DISABLE == 0).then_some((stack.base, stack.size));
+    let sp = frames::guest_position(word as usize);
+    SEGV.with_borrow_mut(|segv| segv.open(word, sp, stack, true));
+    true
+}
+
+/// The scope whose word was at `word` returned ([`open_scope_at`]).
+pub(super) fn close_scope_at(word: usize) {
+    SEGV.with_borrow_mut(|segv| segv.close(word));
 }
 impl Drop for Scoped {
     fn drop(&mut self) {
@@ -1033,6 +1047,9 @@ pub unsafe extern "C" fn patina_signal_fault_return(frame: *const Frame) {
         unsafe { frame.stack.write(host) };
     }
     restored(left_as);
+    // The timers due by now are judged against the mask the return
+    // installs, as everything pending is.
+    super::timers::fire_due();
     let me = current_task();
     let deliverable = {
         let mut state = lock_state();
@@ -1042,9 +1059,11 @@ pub unsafe extern "C" fn patina_signal_fault_return(frame: *const Frame) {
         task.mask = with_segv(kept);
         state.signals.has_deliverable(me)
     };
+    // The signals the handler's mask held back are delivered as its return
+    // unblocks them: from the front's C exit (`patina_trap_exit_drive`), once
+    // this has returned.
     if deliverable {
         install_mask(kept);
-        deliver();
     }
 }
 

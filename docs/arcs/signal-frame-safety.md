@@ -2,9 +2,12 @@
 
 ## Decision
 
-Status: designed, not implemented. Until the port lands, a guest handler that
-leaves by `siglongjmp` or `setcontext` while it interrupts a shim call skips
-live shim Rust frames; that path is unsupported. The detector is in place:
+Status: in progress. The trap handlers that take the thread from guest code
+(the counter trap, the fault front's return) deliver from the C driver
+(`c/posix/delivery.c`), between returning Rust steps. Until the port lands
+everywhere else, a guest handler that leaves by `siglongjmp` or `setcontext`
+while it interrupts a shim call skips live shim Rust frames; that path is
+unsupported. The detector is in place:
 in a `planted-faults` shim `PanicScope` counts the scopes each thread holds,
 and `native_signals`
 (`testbeds/native-boundary/signals/frame_abandon.c`) pins every delivery
@@ -87,6 +90,13 @@ Darwin retains its synchronous, unblocked self-signal contract and its existing
 refusals for deferred/siginfo delivery. Rust records and validates generation,
 then returns the private current-thread vehicle to C. Uncontrolled asynchronous
 host signals remain outside this modeled contract.
+
+A signal a handler's own mask held back, when that handler leaves by
+`siglongjmp` to a context that unblocks it, is delivered at the next
+delivery point: glibc restores the mask with its own system call, which the
+shim does not see (natively the restore delivers it). Delivering at the
+restore itself needs `siglongjmp` interposed; it is a documented timing
+difference, not a lost signal.
 
 ## Enforcement
 

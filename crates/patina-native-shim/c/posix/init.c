@@ -226,8 +226,11 @@ static int patina_guest_signal(int sig, siginfo_t *info, ucontext_t *uc, patina_
     frame.resume = patina_frame_sp(uc);
     (void)patina_trap_enter(frame.resume, NULL);
     patina_signal_fault_return(&frame);
-    patina_trap_leave();
     errno = saved_errno;
+    /* The signals the handler's mask held back are delivered as its return
+     * unblocks them, from here (delivery.c): a later handler's errno stands. */
+    patina_trap_exit_drive(uc);
+    patina_trap_leave();
     return routed;
 }
 
@@ -298,7 +301,6 @@ void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
                 static const char message[] = "patina: C and Rust counter classifiers disagree\n";
                 patina_fault_stop(message, sizeof message - 1);
             }
-            patina_trap_leave();
             errno = saved_errno;
             /* Both instructions write 32-bit halves, which zero-extend into
              * the full 64-bit registers exactly as the hardware's do. */
@@ -308,6 +310,11 @@ void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
                 r[REG_RCX] = (greg_t)aux;
             }
             r[REG_RIP] = (greg_t)(rip + length);
+            /* What the read's scheduling point left pending (a timer it
+             * fired, a signal a peer sent meanwhile) is delivered here, with
+             * every Rust frame returned (delivery.c). */
+            patina_trap_exit_drive(uc);
+            patina_trap_leave();
             return;
         }
     }

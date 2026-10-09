@@ -4,8 +4,28 @@ use std::cell::Cell;
 #[cfg(any(test, feature = "planted-faults"))]
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
+/// Who owns the thread ([`IN_SHIM`]): guest code, a shim entry, or a trap
+/// handler that delivers at its own C exit (see [`Owner::Exit`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum Owner {
+    Guest,
+    /// A shim entry that took the thread from guest code, and everything it
+    /// calls.
+    Shim,
+    /// A trap handler (`c/posix/init.c`) holds the thread and delivers at its
+    /// own C exit: no Rust frame of the shim is between it and guest code.
+    Exit,
+    /// A shim entry the [`Owner::Exit`] holder called itself.
+    ExitEntry,
+    /// Whatever an [`Owner::ExitEntry`] calls. Under all three the C exit
+    /// delivers what a delivery point leaves pending.
+    ExitCalled,
+}
+
 thread_local! {
-    static IN_SHIM: Cell<bool> = const { Cell::new(false) };
+    static IN_SHIM: Cell<Owner> = const { Cell::new(Owner::Guest) };
     /// How many scopes, owning or suspended, this thread holds: every Rust
     /// frame of the shim's ABI entries (and the guest callbacks they suspend
     /// for) that is still on the stack. A frame a nonlocal exit discards
@@ -18,6 +38,12 @@ thread_local! {
     /// unit tests): every entry pays for it.
     #[cfg(any(test, feature = "planted-faults"))]
     static LIVE: AtomicU64 = const { AtomicU64::new(0) };
+    /// How many suspended scopes this thread holds: shim Rust frames, live
+    /// beneath the guest code they called (a callback, a delivery's
+    /// handlers), that a delivery from there would run handlers over.
+    /// 64 bits: suspended scopes a nonlocal exit discards stay counted,
+    /// and no run abandons enough of them to wrap it to zero.
+    static SUSPENDED: Cell<u64> = const { Cell::new(0) };
     /// Where the guest's stack stood when the shim last took the thread from
     /// it: the address below which guest code was running. A door that knows
     /// the interrupted stack pointer exactly (a trap frame's) notes it first.
@@ -38,7 +64,7 @@ static POLICY_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 
 #[must_use]
 pub(crate) struct PanicScope {
-    previous: bool,
+    previous: Owner,
     #[cfg(target_os = "linux")]
     previous_sp: usize,
     #[cfg(target_os = "linux")]
@@ -52,12 +78,31 @@ impl PanicScope {
     pub(crate) fn enter() -> Self {
         Self::set(true)
     }
-    pub(crate) fn suspend() -> Self {
-        Self::set(false)
+    /// Hand the thread to guest code the shim calls (a callback, a
+    /// delivery's handlers) while this frame stays live beneath it.
+    pub(crate) fn suspend() -> Suspended {
+        // Counted before the thread is the guest's, and (in [`Suspended`]'s
+        // drop) uncounted only once it is the shim's again: a signal
+        // arriving at any point between never finds guest ownership with
+        // the suspended frame uncounted.
+        SUSPENDED.with(|suspended| suspended.set(suspended.get() + 1));
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+        Suspended {
+            scope: std::mem::ManuallyDrop::new(Self::set(false)),
+        }
     }
     fn set(value: bool) -> Self {
         count(1);
-        let previous = IN_SHIM.with(|scope| scope.replace(value));
+        let previous = IN_SHIM.with(|scope| {
+            let previous = scope.get();
+            scope.set(match (value, previous) {
+                (false, _) => Owner::Guest,
+                (true, Owner::Guest | Owner::Shim) => Owner::Shim,
+                (true, Owner::Exit) => Owner::ExitEntry,
+                (true, Owner::ExitEntry | Owner::ExitCalled) => Owner::ExitCalled,
+            });
+            previous
+        });
         #[cfg(target_os = "linux")]
         let (previous_sp, previous_entry) = (GUEST_SP.get(), ENTRY.get().0);
         // A door's noted stack pointer belongs to the entry it calls next,
@@ -65,7 +110,7 @@ impl PanicScope {
         #[cfg(target_os = "linux")]
         let noted = if value { NOTED_SP.replace(0) } else { 0 };
         #[cfg(target_os = "linux")]
-        if value && !previous {
+        if value && previous == Owner::Guest {
             // The shim never hands the thread to guest code (a suspended
             // scope) while it holds a shim lock. A handler that interrupted
             // shim code runs, and leaves by `siglongjmp`, with the thread still
@@ -99,6 +144,22 @@ impl PanicScope {
         }
     }
 }
+/// A suspended scope ([`PanicScope::suspend`]), counted in [`SUSPENDED`]
+/// while it lives; only these pay for the count.
+#[must_use]
+pub(crate) struct Suspended {
+    scope: std::mem::ManuallyDrop<PanicScope>,
+}
+
+impl Drop for Suspended {
+    fn drop(&mut self) {
+        // SAFETY: dropped once, here; the field is never used again.
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.scope) };
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+        SUSPENDED.with(|suspended| suspended.set(suspended.get() - 1));
+    }
+}
+
 impl Drop for PanicScope {
     fn drop(&mut self) {
         // A guest may replace the process-global hook. Unwinding out of shim
@@ -160,7 +221,33 @@ fn count(delta: u64) {
 }
 
 pub(crate) fn in_shim() -> bool {
-    IN_SHIM.with(Cell::get)
+    IN_SHIM.with(Cell::get) != Owner::Guest
+}
+
+/// Whether the thread's holder delivers at its own C exit: a delivery
+/// point under it leaves the signal pending for that exit.
+#[cfg(target_os = "linux")]
+pub(crate) fn exit_owned() -> bool {
+    matches!(
+        IN_SHIM.with(Cell::get),
+        Owner::Exit | Owner::ExitEntry | Owner::ExitCalled
+    )
+}
+
+/// Whether shim Rust frames are suspended beneath the running code (a
+/// delivery from Rust whose handlers run, a guest callback): a trap exit
+/// there would deliver over them.
+#[cfg(target_os = "linux")]
+pub(crate) fn frames_suspended() -> bool {
+    SUSPENDED.with(Cell::get) != 0
+}
+
+/// Whether the running entry was called by the C exit of the trap handler
+/// holding the thread itself, with no shim Rust frame between: the only
+/// caller a delivery's steps may have.
+#[cfg(target_os = "linux")]
+pub(crate) fn entered_by_trap_exit() -> bool {
+    IN_SHIM.with(Cell::get) == Owner::ExitEntry
 }
 
 /// The scopes this thread holds besides the caller's `own`: the shim Rust
@@ -187,7 +274,7 @@ pub extern "C" fn patina_planted_live_scopes() -> u64 {
 #[cfg(target_os = "linux")]
 pub(crate) fn claim(sp: usize) -> bool {
     NOTED_SP.set(0);
-    let owned = IN_SHIM.with(|scope| scope.replace(true));
+    let owned = IN_SHIM.with(|scope| scope.replace(Owner::Exit)) != Owner::Guest;
     if !owned {
         took(sp);
     }
@@ -211,7 +298,35 @@ pub(crate) fn guest_entry() -> (usize, u64) {
 /// Hand the thread back to the guest code a fault handler interrupted.
 #[cfg(target_os = "linux")]
 pub(crate) fn release() {
-    IN_SHIM.with(|scope| scope.set(false));
+    IN_SHIM.with(|scope| scope.set(Owner::Guest));
+}
+
+/// The entry a trap exit hands the thread to guest handlers from, and takes
+/// it back into ([`hand_over`], [`take_back`]): as a suspended scope keeps it.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Held {
+    sp: usize,
+    entry: u64,
+}
+
+/// The trap exit's release runs guest handlers: the thread is theirs until
+/// [`take_back`], and the entry it served is kept for then.
+#[cfg(target_os = "linux")]
+pub(crate) fn hand_over() -> Held {
+    let (sp, entry) = guest_entry();
+    IN_SHIM.with(|scope| scope.set(Owner::Guest));
+    Held { sp, entry }
+}
+
+/// The handlers returned: the trap exit holds the thread again, serving the
+/// entry it served before [`hand_over`].
+#[cfg(target_os = "linux")]
+pub(crate) fn take_back(held: Held) {
+    IN_SHIM.with(|scope| scope.set(Owner::Exit));
+    GUEST_SP.set(held.sp);
+    ENTRY.set((held.entry, ENTRY.get().1));
 }
 
 // The library test harness owns its hook and deliberately catches test panics.
@@ -279,6 +394,32 @@ mod tests {
         drop(outer);
         assert!(!in_shim());
         assert_eq!(scopes_beneath(0), 0);
+        // A trap handler's hold (`claim`) delivers at its own C exit: entries
+        // under it leave delivery points pending, and only one it called
+        // itself is a delivery step's caller.
+        #[cfg(target_os = "linux")]
+        std::thread::spawn(|| {
+            use super::{claim, entered_by_trap_exit, exit_owned, hand_over, release, take_back};
+            assert!(!claim(0x1000) && exit_owned());
+            {
+                let _step = PanicScope::enter();
+                assert!(exit_owned() && entered_by_trap_exit());
+                let _inner = PanicScope::enter();
+                assert!(exit_owned() && !entered_by_trap_exit());
+            }
+            let held = hand_over();
+            assert!(!in_shim() && !exit_owned());
+            {
+                let _door = PanicScope::enter();
+                assert!(in_shim() && !exit_owned() && !entered_by_trap_exit());
+            }
+            take_back(held);
+            assert!(exit_owned());
+            release();
+            assert!(!in_shim());
+        })
+        .join()
+        .unwrap();
         // A scope a nonlocal exit discards stays counted: its drop is what
         // gives it back. (On a thread of its own, which it leaves owned.)
         std::thread::spawn(|| {

@@ -8,6 +8,7 @@ use crate::symbol_metadata::Symbol;
 // the slices share static helpers in one translation unit.
 const FAMILIES: &[&str] = &[
     "core",
+    "delivery",
     "init",
     "time",
     "thread_sync",

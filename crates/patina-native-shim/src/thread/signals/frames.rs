@@ -435,6 +435,12 @@ pub(super) fn resync(stack: *mut Stack) {
 /// has provably left and install at once the registration the rest leave.
 /// A delivery whose handlers leave by `siglongjmp` never returns through a
 /// trap that would.
+/// Whether a guest handler a shim handler ran from a private frame may still
+/// be running: one is, or one left without proof yet ([`resync`]).
+pub(super) fn handlers_running() -> bool {
+    LIVE.with_borrow(|live| live.depth) != 0
+}
+
 pub(super) fn resync_on_guest_stack() {
     if !armed() || LIVE.with_borrow(|live| live.depth) == 0 {
         return;

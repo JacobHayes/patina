@@ -96,8 +96,18 @@ handler held back, a timer expiring during counter reads, a raw `tgkill`,
 `abort`, and a SIGSEGV handler inside an `atexit` handler. Each reports the
 shim scopes still counted beneath guest code after the jumps and the handlers
 that ran over a shim Rust frame (`docs/arcs/signal-frame-safety.md`).
-`native_signals` requires 0 for both natively and for the control, and pins
-every other case as a gap until its delivery returns to C first.
+`native_signals` requires 0 for both natively, for the control, and for the
+cases the exit of a trap handler delivers (the counter reads on x86_64, the
+held-back signal: `c/posix/delivery.c`), and pins every other case as a gap
+until its delivery returns to C first, among them a timer due at a counter
+read inside a handler `raise` ran: its delivery is made as `raise`'s own,
+over the frames `raise` left suspended, never released from C over them.
+`drive_under_scope.c` drives a delivery from inside a shim entry (a planted
+control): its first step stops the run by name. `held_back_escape.c` has a
+fault handler whose mask blocks SIGUSR2 raise it and leave by `siglongjmp`
+to a context that unblocks it (glibc restores that mask with its own system
+call): `native_signals` requires SIGUSR2's handler to have run by the next
+delivery point, where natively it ran at the restore.
 
 `thread_registrations.c` holds the per-thread kernel registration cases:
 `robust-exit` has a thread register a robust list and exit, and requires the

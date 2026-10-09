@@ -27,6 +27,9 @@
  *   counter       a timer expires during timestamp-counter reads (x86_64;
  *                 clock reads elsewhere);
  *   raw-tgkill    a raw tgkill instruction (x86_64, under SUD);
+ *   raise-counter raise(SIGUSR1) runs a handler that reads the counter until
+ *                 a timer expires (x86_64): the timer's delivery, at a
+ *                 counter read, is over the frames raise left suspended;
  *   abort         abort() to a SIGABRT handler;
  *   atexit-fault  a SIGSEGV handler runs inside an atexit handler (beneath
  *                 counts exit's own frames there, so only `over` speaks).
@@ -110,6 +113,17 @@ static void segv_holding_usr1(int sig) {
     assert(raise(SIGUSR1) == 0);
 }
 
+static void counter_read(void);
+
+/* raise-counter's SIGUSR1 handler: a timer expires during its counter reads,
+ * and SIGALRM's handler leaves by siglongjmp. */
+static void count_until_alarm(int sig) {
+    (void)sig;
+    struct itimerval once = {{0, 0}, {0, 1000}};
+    assert(syscall(SYS_setitimer, ITIMER_REAL, &once, NULL) == 0);
+    for (;;) counter_read();
+}
+
 static void counter_read(void) {
 #if defined(__x86_64__)
     uint32_t lo, hi;
@@ -190,6 +204,8 @@ static void deliver(const char *name) {
         struct itimerval once = {{0, 0}, {0, 1000}};
         assert(syscall(SYS_setitimer, ITIMER_REAL, &once, NULL) == 0);
         for (;;) counter_read();
+    } else if (strcmp(name, "raise-counter") == 0) {
+        assert(raise(SIGUSR1) == 0);
     } else if (strcmp(name, "raw-tgkill") == 0) {
         assert(raw_tgkill(SIGUSR1) == 0);
     } else if (strcmp(name, "abort") == 0) {
@@ -213,7 +229,10 @@ int main(int argc, char **argv) {
     }
     if (strcmp(name, "fault-escape") == 0) install(SIGSEGV, leave, 0);
     else if (strcmp(name, "held-back") == 0) install(SIGSEGV, segv_holding_usr1, SIGUSR1);
-    if (strcmp(name, "counter") == 0) install(SIGALRM, leave, 0);
+    if (strcmp(name, "raise-counter") == 0) {
+        install(SIGUSR1, count_until_alarm, 0);
+        install(SIGALRM, leave, 0);
+    } else if (strcmp(name, "counter") == 0) install(SIGALRM, leave, 0);
     else if (strcmp(name, "abort") == 0) install(SIGABRT, leave, 0);
     else install(SIGUSR1, leave, 0);
     if (strcmp(name, "unblock") == 0 || strcmp(name, "sigsuspend") == 0) block(SIGUSR1);

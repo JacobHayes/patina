@@ -267,10 +267,12 @@ fn handlers_run_on_the_stacks_they_ask_for() {
 /// delivers a signal three times and the handler leaves every time; the
 /// guest then reports the shim scopes still counted beneath it and how many
 /// handlers ran over a shim Rust frame. Natively both are 0. Under the shim
-/// a handler run from a fault in guest code has only C beneath it, so it
-/// stays clean; every delivery the shim makes from inside a Rust entry is a
-/// gap (both counts above 0) until that origin returns to C before
-/// delivering. A gap that stops reproducing fails here, to be marked clean.
+/// a handler run from a fault in guest code has only C beneath it, and so
+/// does one the exit of a trap handler delivers (the counter trap's, the
+/// fault front's return: `c/posix/delivery.c`), so those stay clean; every
+/// delivery the shim makes from inside a Rust entry is a gap (both counts
+/// above 0) until that origin returns to C before delivering. A gap that
+/// stops reproducing fails here, to be marked clean.
 #[cfg(target_os = "linux")]
 #[test]
 fn handlers_leaving_shim_calls_leave_no_shim_frames() {
@@ -291,14 +293,28 @@ fn handlers_leaving_shim_calls_leave_no_shim_frames() {
         ("sigsuspend", Gap),
         ("pipe-read", Gap),
         ("handoff", Gap),
-        ("held-back", Gap),
+        ("held-back", Clean),
         ("abort", Gap),
         ("atexit-fault", GapInsideExit),
     ];
     // Timestamp-counter reads trap only where the host can arm the trap;
-    // elsewhere the case reads the clock through libc, an entry too.
+    // elsewhere the case reads the clock through libc, a Rust entry that
+    // still delivers itself.
     if !cfg!(target_arch = "x86_64") || kernel_supports(KernelFeature::Tsc) {
-        cases.push(("counter", Gap));
+        cases.push((
+            "counter",
+            if cfg!(target_arch = "x86_64") {
+                Clean
+            } else {
+                Gap
+            },
+        ));
+    }
+    // A delivery at a counter read inside a handler raise's delivery ran is
+    // over the frames raise left suspended: made as raise's own, so a gap
+    // until raise's is C, never a release from C over them.
+    if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Tsc) {
+        cases.push(("raise-counter", Gap));
     }
     if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Sud) {
         cases.push(("raw-tgkill", Gap));
@@ -332,6 +348,37 @@ fn handlers_leaving_shim_calls_leave_no_shim_frames() {
         };
         assert_eq!(observed, expect, "{case}: {}", text(&output.stdout));
     }
+}
+
+/// A signal a fault handler's mask held back stays deliverable when the
+/// handler leaves by `siglongjmp` to a context that unblocks it, though glibc
+/// restores that mask with a system call the shim does not see: its handler
+/// has run by the next delivery point (natively, at the restore itself).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_held_back_signal_survives_a_jump_out_of_its_handler() {
+    let native = assert_build_c_guest("signals/held_back_escape.c", CLink::Unlinked);
+    let patina = assert_build_c_guest("signals/held_back_escape.c", CLink::PosixShim);
+    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "2")];
+    let oracle = assert_standalone_success(&native.binary, &[], &[]);
+    let output = assert_standalone_success(&patina.binary, &[], &env);
+    assert_eq!(text(&output.stdout), text(&oracle.stdout));
+}
+
+/// A delivery's steps refuse a caller with a shim Rust frame beneath them:
+/// a delivery driven from inside a shim entry (the planted control) stops
+/// the run by name, before anything after the call runs, instead of running
+/// a handler over that frame.
+#[cfg(target_os = "linux")]
+#[test]
+fn delivery_under_rust_scope_stops_by_name() {
+    use std::os::unix::process::ExitStatusExt;
+    let g = assert_build_c_guest("signals/drive_under_scope.c", CLink::PosixShimPlanted);
+    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")];
+    let output = standalone_output(&g.binary, &[], &env);
+    assert_eq!(output.status.signal(), Some(6), "{output:?}");
+    assert!(text(&output.stderr).contains("not modeled"), "{output:?}");
+    assert!(!text(&output.stderr).contains("DRIVEN"), "{output:?}");
 }
 
 /// A synchronous signal an instruction raises (SIGBUS, SIGFPE, SIGILL,

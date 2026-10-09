@@ -455,7 +455,11 @@ dequeued one, both as natively. For a signal an instruction raises the shim's
 fault handler gives the host the current action back as that frame enters, so
 a genuine fault never meets the dequeued one; any other signal's stays on the
 host until the member's handler returns (after a `siglongjmp`, until the next
-delivery point), and nothing but a delivery raises it there. A handler that edits its frame's saved mask while frames of its batch
+delivery point), and nothing but a delivery raises it there. A handler that
+leaves by `siglongjmp` to a context that unblocks a signal its own mask held
+back has glibc restore that mask with its own system call, which the shim
+does not see: the signal is delivered at the next delivery point, where
+natively it is delivered at the restore itself. A handler that edits its frame's saved mask while frames of its batch
 are still to run is a named stop: natively the next handler starts under the
 edit. A counter read is answered on the private stack wherever the guest
 read it, a handler's own stack included, and a handler a delivery point inside
