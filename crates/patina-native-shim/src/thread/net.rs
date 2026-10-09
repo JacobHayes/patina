@@ -371,6 +371,13 @@ pub(crate) const RESTART: c_int = -1;
 /// [`RESTART`] under a handler without `SA_RESTART`: the call fails `EINTR`.
 pub(crate) const INTERRUPTED: c_int = -2;
 
+/// The kernel's `ERESTARTSYS` itself (`include/linux/errno.h`), as an
+/// interrupted receive leaves it pending on its socket after a `recvmmsg`
+/// that had received (`do_recvmmsg` stores the error in `sk_err`): 6.8
+/// hands it to the next receive as errno 512.
+#[cfg(target_os = "linux")]
+pub(crate) const ERESTARTSYS: c_int = 512;
+
 /// Run one socket call to its end, settling an interrupted wait as the
 /// kernel settles `ERESTARTSYS` at the syscall's return: under
 /// `SA_RESTART` the call runs again from its arguments, otherwise it fails

@@ -45,6 +45,11 @@ fn recv_datagram(handle: c_int, want: Want) -> Result<Incoming, c_int> {
     loop {
         let mut state = lock_state();
         let socket = sock_mut(&mut state, handle)?;
+        // `__skb_recv_udp`: a pending error comes before any queued
+        // datagram.
+        if let Some(error) = socket.take_error() {
+            return Err(error);
+        }
         let v6 = as_inet(socket).v6;
         let udp = as_inet(socket).udp;
         let datagram = match udp {
@@ -77,9 +82,6 @@ fn recv_datagram(handle: c_int, want: Want) -> Result<Incoming, c_int> {
             });
         }
         let socket = sock_mut(&mut state, handle)?;
-        if let Some(error) = socket.take_error() {
-            return Err(error);
-        }
         if socket.shutdown & RCV_SHUTDOWN != 0 {
             return Ok(Incoming::default());
         }

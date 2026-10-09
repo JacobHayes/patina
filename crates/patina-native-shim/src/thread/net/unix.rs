@@ -996,6 +996,11 @@ fn recv_record(
         if ty == SOCK_SEQPACKET && !matches!(as_unix(socket).state, State::Connected) {
             return Err(ENOTCONN);
         }
+        // `__skb_try_recv_datagram`: a pending error comes before any
+        // queued datagram.
+        if let Some(error) = socket.take_error() {
+            return Err(error);
+        }
         let unix = as_unix_mut(socket);
         if let Some(message) = unix.queue.front() {
             let whole = message.data.len();
@@ -1043,9 +1048,6 @@ fn recv_record(
             return Ok(incoming);
         }
         let socket = sock_mut(&mut state, handle)?;
-        if let Some(error) = socket.take_error() {
-            return Err(error);
-        }
         if socket.shutdown & RCV_SHUTDOWN != 0 && (ty == SOCK_SEQPACKET || !nonblocking) {
             return Ok(Incoming::default());
         }

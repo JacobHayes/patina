@@ -632,6 +632,7 @@ macro_rules! for_each_scenario {
             signal_pipe_term => signal::pipe_term,
             signal_queue => signal::queue,
             signal_raw_action => signal::raw_action,
+            signal_recvmmsg_interrupted => signal::recvmmsg_interrupted,
             signal_restart => signal::restart,
             signal_restorer => signal::restorer,
             signal_sock_timeout_eintr => signal::sock_timeout_eintr,

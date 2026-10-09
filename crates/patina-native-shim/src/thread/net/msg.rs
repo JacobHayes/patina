@@ -665,8 +665,11 @@ pub(crate) fn recvmmsg(
         match error {
             Some(errno) if received == 0 => Err(errno),
             Some(errno) => {
+                // The receive's own error, `ERESTARTSYS` for an interrupted
+                // wait with no timeout whatever `SA_RESTART` says: nothing
+                // settles it, so the next receive reports it as is.
                 let errno = match errno {
-                    super::RESTART | super::INTERRUPTED => crate::EINTR,
+                    super::RESTART | super::INTERRUPTED => super::ERESTARTSYS,
                     errno => errno,
                 };
                 if errno != EWOULDBLOCK
