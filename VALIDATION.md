@@ -215,6 +215,13 @@ individual proof. The guest/build/gate map is in
 live in `crates/patina-conformance`; a scenario that is not run on a host, or a
 declared gap, does not substitute for native acceptance on that platform.
 
+`liveness::tests::compute_watchdog_stops_timed_peer_starvation_and_replays`
+is the runtime class detector for call-free compute blocking a timed peer.
+The shared eligibility predicate pairs observation with terminal export; the
+stop leaves virtual time unchanged and replays its exact task and boundary
+count. RED: excluding every parked peer returns no candidate. The untimed-park
+and lone-task controls remain exempt.
+
 `native_workloads::compute_watchdog_stops_starvation_and_replays_its_terminal_prefix`
 is the native call-free starvation class detector. A main-thread atomic spin,
 a worker-thread spin, and a spin while holding the guest allocator all leave a
@@ -256,8 +263,8 @@ signed offsets, loader symbol-range edges and real exported-symbol lookup, plus
 missed-lock timer retention versus confirmed progress/ineligibility resets. RED evidence: the pre-watchdog guest needs an outer
 kill; a watchdog that formats/clones through the guest allocator also needs an
 outer kill on the allocator-held leg. Runtime unit tests separately prove
-runnable-versus-parked eligibility, exact replay exhaustion, no successful finish,
-malformed-terminal rejection and branch refusal; the borrowed-prefix serializer
+eligibility of runnable and timed peers versus untimed parks, exact replay
+exhaustion, no successful finish, malformed-terminal rejection and branch refusal; the borrowed-prefix serializer
 is compared against ordinary bundles, including empty and nonzero-incarnation
 prefixes, and must propagate a planted writer failure. These cases run on both
 OS families in the normal native-workloads target; cross-clippy alone is not

@@ -535,9 +535,9 @@ mask/frame restoration; neither case carries a reproducibility claim.
 ### Native compute-only starvation
 
 A call-free loop cannot hand over the native execution baton. When another
-managed task is runnable, a private host observer stops the run with
-`PATINA_VIOLATION liveness detail=compute-bound`, the task id, boundary count,
-and `known_limit=true`. This is a limitation of cooperative execution, not a
+managed task is runnable or in a timed park, a private host observer stops
+the run with `PATINA_VIOLATION liveness detail=compute-bound`, the task id,
+boundary count, and `known_limit=true`. This is a limitation of cooperative execution, not a
 verdict that the guest is buggy. Campaigns retain the finding but classify its
 `known_limit` bit as infrastructure, not a novel guest bug (an independent
 safety verdict still counts). It never preempts, wakes a task, advances
@@ -552,14 +552,18 @@ through the scrubbed control plane. Campaigns persist the explicit flag as
 `compute_watchdog_ms` and carry it into both reproduction forms. An env-only
 setting remains inherited host configuration, not a portable campaign input. Ten seconds tolerates ordinary
 compute bursts and host contention while bounding an otherwise infinite wedge;
-raise it for deliberately longer compute with runnable peers. This is wall time,
-not a CPU-time claim: host descheduling counts. A baton holder blocked in an
-untracked host call with the shim locks released can also exceed this window;
+raise it for deliberately longer compute with runnable or timed parked peers.
+This is wall time, not a CPU-time claim: host descheduling counts. A baton
+holder blocked in an untracked host call with the shim locks released can also exceed this window;
 the diagnostic means **no scheduling point**, not proven CPU computation. Such
 host blocking is not currently excluded. Polling adds up to two sampling
 periods (each at most 100 ms), plus host dispatch/export time; it is not a
-real-time deadline. A lone compute task and compute with every peer parked are
-exempt regardless of duration.
+real-time deadline. A lone compute task and compute with every peer in an
+untimed park are exempt regardless of duration. A timed park is eligible: its
+deadline requires virtual time to advance, and call-free compute prevents
+that advance. Only future deadlines count, and the expiry authority keeps no
+other kind registered: a reached deadline has already woken its task. The observer reports the same `compute-bound` known limit
+without waking the peer or advancing time.
 
 The observer starts on first managed thread creation, uses the single HostApi
 alias table (Linux private futex waits; Darwin dispatch semaphore waits), and

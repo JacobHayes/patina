@@ -558,8 +558,10 @@ vacuous-starvation detection.
 
 Native call-free starvation also has an independent host-time terminal watchdog
 (`patina-native-shim/src/watchdog.rs`). It observes existing scheduler state,
-exempts lone compute and parked peers, and exports a `compute-bound` known-limit
-stop without using the guest allocator. The default is 10 seconds;
+exempts lone compute and compute with only untimed parked peers, and exports a
+`compute-bound` known-limit stop without using the guest allocator. Timed peers
+qualify because call-free compute prevents their virtual deadlines from arriving.
+The default is 10 seconds;
 `--compute-watchdog-ms MS` overrides `PATINA_COMPUTE_WATCHDOG_MS` and the default.
 The registry covers native run/replay/harness and campaign forwarding. Terminal trace metadata makes replay
 stop at the exact recorded boundary rather than re-evaluate host time. The

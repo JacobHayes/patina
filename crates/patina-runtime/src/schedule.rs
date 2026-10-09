@@ -512,6 +512,14 @@ impl Context {
         self.expire_due_at(now)
     }
 
+    /// Whether `task` is parked with a timer still in the future. The timer
+    /// registry holds only future deadlines: registration and every clock
+    /// advance expire the due ones ([`Context::expire_due_timers`]), so a
+    /// registered timer is a wake that virtual time has yet to reach.
+    pub(super) fn has_future_deadline(&self, task: TaskId) -> bool {
+        self.timer_by_task.contains_key(&task)
+    }
+
     pub fn task_wake(&mut self, task: TaskId) -> Result<(), RuntimeError> {
         self.scheduler_unit(Operation::TaskWake { task }, |scheduler| {
             scheduler.wake(task)

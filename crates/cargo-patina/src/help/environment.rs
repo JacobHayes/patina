@@ -157,7 +157,7 @@ pub const ENVIRONMENT: &[EnvVar] = &[
     EnvVar {
         name: "PATINA_COMPUTE_WATCHDOG_MS",
         scope: "protocol",
-        doc: "Native compute-only starvation stop: host milliseconds without boundary progress while another managed task is runnable (default 10000; 1..=86400000). Forwarded by native run/replay; --compute-watchdog-ms takes precedence. Replay follows the recorded terminal boundary, not this timeout. This is a known runtime limit, not a guest bug.",
+        doc: "Native compute-only starvation stop: host milliseconds without boundary progress while another managed task is runnable or in a timed park (default 10000; 1..=86400000). Forwarded by native run/replay; --compute-watchdog-ms takes precedence. Replay follows the recorded terminal boundary, not this timeout. This is a known runtime limit, not a guest bug.",
     },
     EnvVar {
         name: "CARGO / RUSTC / CC",

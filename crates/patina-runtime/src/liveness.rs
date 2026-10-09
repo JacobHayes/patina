@@ -434,7 +434,11 @@ pub(super) fn resolve_heal_after(config: &RuntimeConfig) -> u64 {
 impl Context {
     /// Read-only native watchdog observation. The embedder must hold its
     /// context AND thread-transition locks. Existing scheduler bookkeeping is
-    /// the authority; parked peers and a lone running task never qualify.
+    /// the authority; untimed parked peers and a lone running task never qualify.
+    /// A peer parked until a future deadline qualifies: call-free code keeps
+    /// that deadline from arriving, since only a boundary operation advances
+    /// virtual time. The expiry authority answers which deadlines are future;
+    /// a reached one has already expired and left its task runnable.
     /// Host-time detection is disabled on replay: its recorded stop is final.
     pub fn compute_watchdog_candidate(&self) -> Option<(u64, TaskId)> {
         if !matches!(self.execution, Execution::Seeded | Execution::Record { .. }) {
@@ -449,10 +453,10 @@ impl Context {
         self.cpu.running == Some(running)
             && self.scheduler_tasks.contains(&running)
             && !self.parked_tasks.contains(&running)
-            && self
-                .scheduler_tasks
-                .iter()
-                .any(|task| *task != running && !self.parked_tasks.contains(task))
+            && self.scheduler_tasks.iter().any(|task| {
+                *task != running
+                    && (!self.parked_tasks.contains(task) || self.has_future_deadline(*task))
+            })
     }
 
     /// A replay terminal boundary already reached, without asking the guest for

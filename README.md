@@ -221,12 +221,13 @@ paths are wired.
   `campaign --guided` work without paying for preemption at all.
 - **Liveness oracles**: `--liveness-watchdog` (virtual-time no-progress
   detector) and `--converge-within` (heal-then-converge budget).
-  Native call-free compute that starves another runnable managed thread stops
-  by name after 10 host seconds (`--compute-watchdog-ms MS` overrides
-  `PATINA_COMPUTE_WATCHDOG_MS` and the default).
-  Lone compute and compute with parked peers remain unlimited. This is a known
-  cooperative-runtime limit, not a guest bug; its terminal trace replays the
-  same boundary prefix and stop. See [the design and limits](ARCHITECTURE.md#native-compute-only-starvation).
+  Native call-free compute that starves another managed thread, runnable or
+  waiting on a timed park, stops by name after 10 host seconds
+  (`--compute-watchdog-ms MS` overrides `PATINA_COMPUTE_WATCHDOG_MS` and the default).
+  Lone compute and compute with only untimed parked peers remain unlimited.
+  Timed parks need virtual time to advance, which call-free compute prevents.
+  This is a known cooperative-runtime limit, not a guest bug; its terminal trace
+  replays the same boundary prefix and stop. See [the design and limits](ARCHITECTURE.md#native-compute-only-starvation).
 
 ### The buggify SDK
 

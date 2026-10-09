@@ -313,6 +313,52 @@ fn compute_watchdog_uses_runnable_peers_not_live_tasks() {
 }
 
 #[test]
+fn compute_watchdog_stops_timed_peer_starvation_and_replays() {
+    // Class pairing: the shared compute_starves_peer predicate validates both
+    // observer eligibility and terminal export. A timed park needs virtual time
+    // to move; a call-free baton holder prevents that just as it blocks a
+    // runnable peer. Untimed parks remain exempt (the eligibility control above).
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("timed-compute.patina");
+    let setup = |context: &mut Context| {
+        let sleeper = context.task_spawn("sleeper").unwrap();
+        assert_eq!(context.scheduler_next().unwrap(), Some(sleeper));
+        context
+            .task_park_timed(
+                sleeper,
+                "sleep",
+                ClockKind::Monotonic,
+                DEFAULT_BOOT_ORIGIN_NANOS + 1_000_000,
+            )
+            .unwrap();
+        let computing = context.task_spawn("computing").unwrap();
+        assert_eq!(context.scheduler_next().unwrap(), Some(computing));
+        computing
+    };
+    let mut record =
+        Context::from_config(RuntimeConfig::record(1, &path, "timed-compute-v1")).unwrap();
+    let task = setup(&mut record);
+    let steps = record.steps();
+    assert_eq!(record.compute_watchdog_candidate(), Some((steps, task)));
+    assert!(matches!(
+        record.stop_compute_bound(task),
+        RuntimeError::ComputeBound { task: stopped, steps: at } if stopped == task && at == steps
+    ));
+    assert_eq!(
+        record.current_monotonic().unwrap(),
+        DEFAULT_BOOT_ORIGIN_NANOS
+    );
+    let mut replay =
+        Context::from_config(RuntimeConfig::replay(&path, "timed-compute-v1")).unwrap();
+    assert_eq!(setup(&mut replay), task);
+    assert_eq!(replay.compute_watchdog_candidate(), None);
+    assert!(matches!(
+        replay.finish(),
+        Err(RuntimeError::ComputeBound { task: stopped, steps: at }) if stopped == task && at == steps
+    ));
+}
+
+#[test]
 fn compute_stop_emits_a_structured_runtime_limit() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("compute-facts.json");

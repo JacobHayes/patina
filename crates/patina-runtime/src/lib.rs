@@ -908,7 +908,7 @@ impl fmt::Display for RuntimeError {
             }
             Self::ComputeBound { task, steps } => write!(
                 f,
-                "PATINA_VIOLATION liveness detail=compute-bound task={} steps={} known_limit=true: no scheduling point within the host-time bound while another managed thread is runnable; host blocking and descheduling are not distinguished from computation; this is a known Patina limit, not a guest bug",
+                "PATINA_VIOLATION liveness detail=compute-bound task={} steps={} known_limit=true: no scheduling point within the host-time bound while another managed thread is runnable or in a timed park; host blocking and descheduling are not distinguished from computation; this is a known Patina limit, not a guest bug",
                 task.0, steps
             ),
         }

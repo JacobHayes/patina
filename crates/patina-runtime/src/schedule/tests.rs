@@ -444,12 +444,14 @@ fn a_timed_park_whose_deadline_passed_expires_beside_a_runnable_peer() {
         );
         assert_eq!(context.now(ClockKind::Monotonic).unwrap(), now);
         assert_eq!(context.take_expired_timeouts(), vec![waiter]);
+        assert!(!context.has_future_deadline(waiter));
     }
     // A future deadline stays registered until virtual time reaches it.
     context
         .task_park_timed(waiter, "sleep", ClockKind::Monotonic, now + 10)
         .unwrap();
     assert!(context.take_expired_timeouts().is_empty());
+    assert!(context.has_future_deadline(waiter));
 }
 
 #[test]
