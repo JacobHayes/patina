@@ -29,6 +29,7 @@ mod abi;
 mod plain;
 
 mod bundle;
+mod charge;
 mod coverage;
 mod entropy;
 mod environment;

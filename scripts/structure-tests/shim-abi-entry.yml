@@ -7,6 +7,18 @@ valid:
         let _panic_scope = crate::panic_boundary::PanicScope::enter();
         work();
     }
+  - |
+    #[unsafe(no_mangle)]
+    pub extern "C" fn glue() {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
+        work();
+    }
+  - |
+    #[unsafe(no_mangle)]
+    pub extern "C" fn classed() {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::ClockRead);
+        work();
+    }
 invalid:
   - |
     #[unsafe(no_mangle)]

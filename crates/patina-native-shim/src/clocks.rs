@@ -215,7 +215,7 @@ impl Clock {
 /// ([`Clock::in_vdso`]): the C door then stores the answer in user space
 /// itself.
 pub extern "C" fn patina_clock_in_vdso(id: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     c_int::from(Clock::decode(id).is_some_and(Clock::in_vdso))
 }
 
@@ -348,7 +348,7 @@ fn copy_in<T: crate::plain::Plain>(from: usize) -> Result<T, i64> {
 /// # Safety
 /// None beyond the ABI: `out` is copied to as the kernel copies.
 pub unsafe extern "C" fn patina_clock_gettime(id: c_int, out: *mut Timespec) -> i64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::ClockGettime);
     let Some(clock) = Clock::decode(id) else {
         return -i64::from(EINVAL);
     };

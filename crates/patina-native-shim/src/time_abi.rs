@@ -19,7 +19,7 @@ pub extern "C" fn patina_test_arm_clock_panic() {
 /// # Safety
 /// `nanos` must point to writable `uint64_t` storage.
 pub unsafe extern "C" fn patina_clock_now(clock_id: u32, nanos: *mut u64) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::ClockRead);
     #[cfg(feature = "test-panic")]
     if CLOCK_PANIC_ARMED.swap(false, std::sync::atomic::Ordering::AcqRel) {
         panic!("planted internal Rust panic");

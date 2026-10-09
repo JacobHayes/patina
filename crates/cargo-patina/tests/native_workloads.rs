@@ -880,6 +880,25 @@ fn recv_timeout_delivers_five_messages_and_five_timeouts() {
 }
 
 #[test]
+fn every_guest_call_is_charged_to_a_reserved_task() {
+    // Class pairing: the runtime's `charge_alloc` (charging never allocates,
+    // so it never creates a task's entry). A single-threaded guest's calls,
+    // made before the thread runtime numbers the main thread, still land on
+    // its reserved task, never in the unreserved total.
+    let g = Guest::assert_build("std_probe.rs");
+    let output = g.command("run", &["--seed", "5", "--format", "json"]);
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let envelope: serde_json::Value =
+        serde_json::from_slice(text(&output.stdout).lines().last().unwrap().as_bytes()).unwrap();
+    let charges = &envelope["cpu_charges"];
+    assert!(charges.get("unreserved").is_none(), "{charges}");
+    assert!(
+        charges["task1"]["system_ns"].as_u64().unwrap() > 0,
+        "{charges}"
+    );
+}
+
+#[test]
 fn an_empty_udp_poll_on_a_sleeping_peer_lets_virtual_time_reach_it() {
     // Class pairing: the runtime's outcome classifier
     // (`liveness::tests::an_empty_poll_loop_keeps_the_spin_streak_and_replays`).

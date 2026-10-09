@@ -69,7 +69,7 @@ fn register_coverage_range(ranges: &mut Vec<CoverageRange>, start: usize, len: u
 /// `__sanitizer_cov_trace_pc_guard_init` once per codegen unit. The guard words
 /// are the counters themselves, so registration records only the live range.
 pub extern "C" fn patina_coverage_register(start: *mut u32, stop: *mut u32) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     let len = coverage_len(start.cast_const(), stop.cast_const());
     let mut state = coverage_state().lock();
     register_coverage_range(&mut state.guard_ranges, start as usize, len);
@@ -81,7 +81,7 @@ pub extern "C" fn patina_coverage_register(start: *mut u32, stop: *mut u32) {
 /// pc delta per guard. The flags are intentionally not serialized in wave A's
 /// `patina.covmap/v1` format (12 bytes per edge: u32 count + i64 delta).
 pub extern "C" fn patina_coverage_register_pcs(start: *const usize, stop: *const usize) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     let words = coverage_len(start, stop);
     let entries = words / 2;
     let mut state = coverage_state().lock();

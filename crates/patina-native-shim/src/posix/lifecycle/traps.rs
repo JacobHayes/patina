@@ -436,7 +436,7 @@ pub unsafe extern "C" fn patina_sud_decode(
     uc: *mut libc::ucontext_t,
     trap: *mut SudTrap,
 ) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     // `si_call_addr`, `si_syscall` and `si_arch` (offsets 16, 24 and 28).
     let words = unsafe { info.cast::<crate::thread::signals::Info>().read() }.words;
     let code = words[1] as i32;
@@ -517,7 +517,7 @@ pub unsafe extern "C" fn patina_sud_decode(
 /// The SIGSYS frame's own ucontext.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_sud_complete(uc: *mut libc::ucontext_t, ret: c_long) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     unsafe {
         patina_signal_frame(
             (&raw mut (*uc).uc_sigmask).cast(),

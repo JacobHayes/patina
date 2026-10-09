@@ -19,7 +19,7 @@ fn trap() -> ! {
 
 #[unsafe(no_mangle)]
 extern "C" fn mach_absolute_time() -> u64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::ClockRead);
     let mut nanos = 0;
     // SAFETY: `nanos` is writable local storage for the clock bridge.
     if unsafe { crate::patina_clock_now(MONOTONIC, &mut nanos) } != 0 {
@@ -53,7 +53,7 @@ extern "C" fn mach_wait_until(deadline: u64) -> c_int {
 }
 #[unsafe(no_mangle)]
 extern "C" fn clock_gettime_nsec_np(clock: libc::clockid_t) -> u64 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::ClockGettime);
     let clock = match clock {
         libc::CLOCK_REALTIME => REALTIME,
         libc::CLOCK_MONOTONIC | libc::CLOCK_MONOTONIC_RAW | libc::CLOCK_UPTIME_RAW => MONOTONIC,
@@ -74,7 +74,7 @@ extern "C" fn clock_gettime_nsec_np(clock: libc::clockid_t) -> u64 {
 /// lock is a live os_unfair_lock identity.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn os_unfair_lock_lock(lock: *mut c_void) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::UnfairLock);
     // SAFETY: the caller supplies a live unfair-lock identity per this ABI.
     unsafe {
         crate::thread::patina_os_unfair_lock_lock(lock);
@@ -84,7 +84,7 @@ unsafe extern "C" fn os_unfair_lock_lock(lock: *mut c_void) {
 /// lock is a live os_unfair_lock identity.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn os_unfair_lock_trylock(lock: *mut c_void) -> bool {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::UnfairLock);
     // SAFETY: the caller supplies a live unfair-lock identity per this ABI.
     unsafe { crate::thread::patina_os_unfair_lock_trylock(lock) != 0 }
 }
@@ -92,7 +92,7 @@ unsafe extern "C" fn os_unfair_lock_trylock(lock: *mut c_void) -> bool {
 /// lock is a live os_unfair_lock identity.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn os_unfair_lock_unlock(lock: *mut c_void) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::UnfairLock);
     // SAFETY: the caller supplies a live unfair-lock identity per this ABI.
     unsafe {
         crate::thread::patina_os_unfair_lock_unlock(lock);

@@ -62,7 +62,7 @@ fn thread_prelude(raw: *mut c_void) -> (StartRoutine, *mut c_void) {
 /// unit tests, and macOS, where no `pthread_exit` reaches the model): the
 /// prelude, the guest routine, then the completion.
 extern "C" fn thread_trampoline(raw: *mut c_void) -> *mut c_void {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     let (routine, arg) = thread_prelude(raw);
     let ret = {
         let _guest = crate::panic_boundary::PanicScope::suspend();
@@ -128,7 +128,7 @@ pub unsafe extern "C" fn patina_thread_prelude(
     raw: *mut c_void,
     arg: *mut *mut c_void,
 ) -> StartRoutine {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     let (routine, argument) = thread_prelude(raw);
     // SAFETY: writable, per this function's contract.
     unsafe { arg.write(argument) };
@@ -159,7 +159,7 @@ fn thread_returned(value: *mut c_void) {
 /// the thread's.
 #[cfg(target_os = "linux")]
 pub extern "C" fn patina_thread_returned(value: *mut c_void) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     thread_returned(value);
 }
 
@@ -183,7 +183,7 @@ pub extern "C" fn patina_thread_returned(value: *mut c_void) {
 pub extern "C" fn patina_thread_exiting(
     value: *mut c_void,
 ) -> unsafe extern "C" fn(*mut c_void) -> ! {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     if lock_state().signals.in_handler(current_task()) {
         fatal(
             "pthread_exit, or a cancellation acting, inside a signal handler is not \
@@ -231,7 +231,7 @@ struct ThreadExit {
 #[cfg(target_os = "linux")]
 fn finish_after_destructors(task: TaskId) -> *mut ThreadExit {
     unsafe extern "C" fn complete(record: *mut c_void) {
-        let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
         // SAFETY: the record leaked below, consumed exactly once here.
         let ThreadExit { task, retval } = *unsafe { Box::from_raw(record.cast::<ThreadExit>()) };
         EXIT_RECORD.with(|cell| cell.set(core::ptr::null_mut()));
@@ -299,7 +299,7 @@ fn thread_returns(task: TaskId, retval: usize) {
 /// `exit(0)` follows on it.
 #[cfg(target_os = "linux")]
 pub extern "C" fn patina_main_thread_exited() {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     MAIN_EXITED.store(true, std::sync::atomic::Ordering::SeqCst);
     let others = {
         let state = lock_state();

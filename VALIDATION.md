@@ -1021,6 +1021,29 @@ Cross-clippy for Linux arm64 is compile-time evidence,
 not runtime evidence on that architecture. The full landing battery is separate
 from these focused acceptance checks.
 
+### Per-call CPU charges
+
+`thread::charge_tests` checks the attribution rules under the real baton: the
+startup work stays with the pre-task thread; a door is charged once by its
+class (a clock read inside it, a scheduling point and a recorded runtime
+read, are not further calls), and an hour asleep is one system call; a
+worker thread's calls are charged to its own task, with the join the main
+thread's only call meanwhile (RED with thread start and completion charged
+as doors: two extra system calls on the worker); calls after `main` returns
+are not charged (RED without the silence: one more clock read); every charge
+lands on a reserved task. `charge::tests` pins that a trapped call and the
+door for its operation share one class, and that a sync call that parks is
+charged one system call more. The runtime's `charge_alloc` test charges
+spawned, reserved and unknown tasks under a counting allocator: no charge
+allocates (RED with an entry inserted per new task: the map's node splits). Natively, `every_guest_call_is_charged_to_a_reserved_task` runs a
+single-threaded guest whose calls precede thread numbering: nothing lands
+unreserved (RED reserving the installing thread's unnumbered task instead of
+the main task).
+Record,
+record and replay of four native testbeds (`rsleep`, `poll_clock_probe`,
+`recv_timeout_probe`, `std_probe`) report identical `cpu_charges`. The totals
+are inert: no clock reads them.
+
 ### Timer expiry and settlement
 
 The runtime class detector

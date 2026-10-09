@@ -307,6 +307,7 @@ fn set_current_task(task: TaskId) {
 
 /// Mark this host thread's task as completed. Idempotent.
 fn mark_task_completed() {
+    crate::charge::flush_now();
     TASK_COMPLETED.with(|cell| cell.set(true));
 }
 
@@ -336,6 +337,7 @@ static MAIN_RETURNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// Mark the process as having entered post-`main` teardown. Idempotent.
 /// Called only by the `exit` interposer at the main-return/`exit` boundary.
 pub(crate) fn note_main_returned() {
+    crate::charge::flush_now();
     MAIN_RETURNED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
@@ -359,6 +361,11 @@ const UNMANAGED_TASK: TaskId = TaskId(0);
 /// wait or any signal-state call) never changes who the main thread is.
 const MAIN_TASK: TaskId = TaskId(1);
 
+/// The main thread's task, [`MAIN_TASK`].
+pub(crate) const fn main_task() -> TaskId {
+    MAIN_TASK
+}
+
 /// Claim [`MAIN_TASK`] for the calling thread. Called once, by the POSIX
 /// startup constructor, which the loader runs on the main thread.
 pub(crate) fn claim_main_thread() {
@@ -367,6 +374,19 @@ pub(crate) fn claim_main_thread() {
 
 fn current_task() -> TaskId {
     CURRENT_TASK.with(Cell::get).unwrap_or(UNMANAGED_TASK)
+}
+
+/// Whether this thread's guest calls go uncharged: its task, or `main`, has
+/// finished, and what runs now is teardown in host order.
+pub(crate) fn charges_silenced() -> bool {
+    task_completed() || main_returned()
+}
+
+/// The task this thread's guest calls are charged to: its own, or `None` for a
+/// thread the runtime does not run.
+pub(crate) fn charge_task() -> Option<TaskId> {
+    let task = current_task();
+    (task != UNMANAGED_TASK).then_some(task)
 }
 
 /// How far thread ids sit above task ids: the main thread is
@@ -1102,6 +1122,7 @@ impl ThreadRuntime {
         if self.interrupt_before_park(me) {
             return Ok(Step::Switch(me));
         }
+        crate::charge::parked();
         let mut scheduler = RealScheduler;
         scheduler.park(me, reason)?;
         let next = self.next_task()?;
@@ -1139,6 +1160,7 @@ impl ThreadRuntime {
         if self.interrupt_before_park(me) {
             return Ok(Step::Continue);
         }
+        crate::charge::parked();
         scheduler.park_timed(me, reason, clock, deadline)?;
         let next = self.next_task()?;
         match next {
@@ -1302,5 +1324,7 @@ pub(crate) unsafe fn managed_sleep(
     Some(0)
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod charge_tests;
 #[cfg(test)]
 mod tests;

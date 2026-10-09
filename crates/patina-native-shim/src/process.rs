@@ -26,7 +26,7 @@ pub extern "C" fn patina_sched_yield() -> c_int {
 /// record/replay yield divergence can name the exact guest location that took
 /// the extra scheduling point. Otherwise identical to [`patina_sched_yield`].
 pub extern "C" fn patina_yield_point(site: *const c_void) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     thread::yield_point_from(site as usize);
 }
 
@@ -120,7 +120,7 @@ pub extern "C" fn patina_abort() -> ! {
 /// flag here silences the root task's `--yield-points` teardown yields on that
 /// natural path (see `thread::sched_point`).
 pub extern "C" fn patina_note_main_returned() {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     thread::note_main_returned();
 }
 

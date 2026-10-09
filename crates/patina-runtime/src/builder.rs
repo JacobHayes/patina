@@ -735,6 +735,7 @@ impl RuntimeBuilder {
                 ..SpinRescue::default()
             },
             cpu: CpuTime::default(),
+            charges: Default::default(),
             alarm: None,
             cpu_alarm: None,
             recording_flushed: false,

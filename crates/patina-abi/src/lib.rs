@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 /// always write, and only read, a base64 string. Decoding is fail-closed: a
 /// malformed base64 string is a hard deserialization error.
 mod bytes_base64;
+mod charge;
 mod effect;
 mod error;
 mod filesystem;
@@ -50,6 +51,7 @@ mod verdict;
 /// a newline and forge a second marker line.
 pub mod verdict_line;
 
+pub use charge::{ChargeClass, ChargeCounts, CpuCharge, STARTUP_CPU_CHARGE};
 pub use effect::{Operation, Outcome};
 pub use error::{EffectError, ErrorCode};
 pub use filesystem::{

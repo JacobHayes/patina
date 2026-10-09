@@ -417,7 +417,11 @@ impl Context {
         {
             findings.push(facts::vacuous_starvation_finding(report.starve_vacuous));
         }
-        facts::document(planes, findings)
+        let mut document = facts::document(planes, findings);
+        if let serde_json::Value::Object(root) = &mut document {
+            root.insert("cpu_charges".into(), self.charges.facts());
+        }
+        document
     }
 
     /// Write the facts document to the installed channel, at most once per run.

@@ -499,6 +499,7 @@ pub(crate) fn with_context_raw<T>(
     BOUNDARY_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut guard = slot().lock();
     let context = guard.as_mut().ok_or(ENOSYS)?;
+    crate::charge::flush(context);
     let result = if thread::in_state_section() {
         context.in_embedder_section(invoke)
     } else {
@@ -616,6 +617,7 @@ pub(crate) fn with_context_msg<T>(
     let context = guard
         .as_mut()
         .ok_or_else(|| "Patina context is not installed".to_string())?;
+    crate::charge::flush(context);
     let result = if thread::in_state_section() {
         context.in_embedder_section(invoke)
     } else {
@@ -1111,6 +1113,10 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
         record_init_error(message);
         return fail(ENOSYS);
     }
+    // The main thread's calls are charged to its task (fixed before the thread
+    // runtime numbers it), whose entry must exist before a charge can come
+    // from a signal handler (the counter trap): charging never allocates.
+    context.reserve_charge(Some(crate::thread::main_task()));
     let mut guard = slot().lock();
     if guard.is_some() {
         return fail(EALREADY);
@@ -1134,6 +1140,9 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     std::hint::black_box(probe.as_ref());
     drop(probe);
     finish_shim_bootstrap();
+    // What this thread counted until now ran before the modeled run began.
+    crate::charge::discard();
+
     0
 }
 

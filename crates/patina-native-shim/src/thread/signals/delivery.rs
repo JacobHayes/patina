@@ -783,7 +783,7 @@ fn releasing_from_trap_exit() {
 /// # Safety
 /// `exit` is the C driver's `struct patina_exit`, writable for the call.
 pub unsafe extern "C" fn patina_exit_begin(exit: *mut Exit) -> i32 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     from_trap_exit();
     // SAFETY: the C driver's own record, per this function's contract.
     let exit = unsafe { &mut *exit };
@@ -803,7 +803,7 @@ pub unsafe extern "C" fn patina_exit_begin(exit: *mut Exit) -> i32 {
 /// # Safety
 /// `exit` is the C driver's `struct patina_exit`, writable for the call.
 pub unsafe extern "C" fn patina_exit_end(exit: *mut Exit, ret: i64) -> i32 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     from_trap_exit();
     // SAFETY: the C driver's own record, per this function's contract.
     i32::from(end(unsafe { &mut *exit }, ret))
@@ -815,7 +815,7 @@ pub unsafe extern "C" fn patina_exit_end(exit: *mut Exit, ret: i64) -> i32 {
 /// # Safety
 /// `exit` is the C driver's `struct patina_exit`, writable for the call.
 pub unsafe extern "C" fn patina_exit_next(exit: *mut Exit) -> i32 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     releasing_from_trap_exit();
     // SAFETY: the C driver's own record, per this function's contract.
     i32::from(next(unsafe { &mut *exit }))
@@ -827,7 +827,7 @@ pub unsafe extern "C" fn patina_exit_next(exit: *mut Exit) -> i32 {
 /// # Safety
 /// `exit` is the C driver's `struct patina_exit`, writable for the call.
 pub unsafe extern "C" fn patina_exit_released(exit: *mut Exit) -> i32 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     releasing_from_trap_exit();
     // SAFETY: the C driver's own record, per this function's contract.
     i32::from(released(unsafe { &mut *exit }))

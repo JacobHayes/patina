@@ -132,7 +132,7 @@ pub unsafe extern "C" fn patina_fault_route(
     frame: *mut Frame,
     handler: *mut Action,
 ) -> i32 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     let sig = sig as u8;
     let (info, frame) = unsafe { (*info, &mut *frame) };
     // Scopes the guest left before this fault are found left from where it
@@ -933,7 +933,7 @@ pub unsafe extern "C" fn patina_tsc_route(
     frame: *mut Frame,
     handler: *mut Action,
 ) -> i32 {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     if unsafe { (*info).code() } == SI_KERNEL {
         let context = context.cast::<libc::ucontext_t>();
         let pc = unsafe { (*context).uc_mcontext.gregs[libc::REG_RIP as usize] } as usize;
@@ -1042,7 +1042,7 @@ pub unsafe extern "C" fn patina_signal_fault(
 /// `frame` describes the frame [`patina_signal_fault`] or
 /// [`patina_fault_route`] was given.
 pub unsafe extern "C" fn patina_signal_fault_return(frame: *const Frame) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     let frame = unsafe { &*frame };
     let saved = unsafe { *frame.mask };
     let kept = host_mask(saved);

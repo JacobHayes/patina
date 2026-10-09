@@ -92,6 +92,7 @@ use std::fmt;
 
 mod buggify;
 mod builder;
+mod charge;
 mod config;
 mod config_env;
 mod custom_op;
@@ -738,6 +739,9 @@ pub struct Context {
     spin: SpinRescue,
     /// Virtual CPU time. See [`CpuTime`].
     cpu: CpuTime,
+    /// The CPU time guest calls are charged, per task (inert: no clock reads
+    /// it yet).
+    charges: charge::Charges,
     /// The earliest monotonic deadline of the embedder's process timers (the
     /// native shim's interval timers, POSIX timers and timer descriptors), set
     /// through [`Context::set_alarm`]. The advance-on-spin rescue never steps

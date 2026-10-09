@@ -1,5 +1,6 @@
 //! Panic ownership follows Rust ABI entries, not panic source paths. Guest
 //! callbacks temporarily suspend ownership and can still catch their panics.
+use patina_dst_abi::ChargeClass;
 use std::cell::Cell;
 #[cfg(any(test, feature = "planted-faults"))]
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -73,8 +74,27 @@ pub(crate) struct PanicScope {
     _thread: std::marker::PhantomData<*mut ()>,
 }
 impl PanicScope {
+    /// A door's entry: a guest call, charged as a system call when it takes
+    /// the thread from guest code.
     pub(crate) fn enter() -> Self {
-        Self::set(true)
+        Self::set(true, Some(ChargeClass::Syscall))
+    }
+    /// A door's entry for `op`, charged as that operation's class when it
+    /// takes the thread from guest code.
+    pub(crate) fn enter_op(op: crate::charge::Op) -> Self {
+        Self::set(true, Some(op.class()))
+    }
+    /// The trapped system call `nr`'s entry, charged as its operation's
+    /// class ([`crate::charge::syscall_class`]).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn enter_syscall(nr: i64) -> Self {
+        Self::set(true, Some(crate::charge::syscall_class(nr)))
+    }
+    /// An entry the C side calls around a guest call (glue: a boundary note,
+    /// a cancellation bracket, trap decode or completion, thread start): it
+    /// takes the thread but is no guest call of its own, so it is not charged.
+    pub(crate) fn enter_glue() -> Self {
+        Self::set(true, None)
     }
     /// Hand the thread to guest code the shim calls (a callback, a
     /// delivery's handlers) while this frame stays live beneath it.
@@ -86,10 +106,10 @@ impl PanicScope {
         SUSPENDED.with(|suspended| suspended.set(suspended.get() + 1));
         std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
         Suspended {
-            scope: std::mem::ManuallyDrop::new(Self::set(false)),
+            scope: std::mem::ManuallyDrop::new(Self::set(false, None)),
         }
     }
-    fn set(value: bool) -> Self {
+    fn set(value: bool, charge: Option<ChargeClass>) -> Self {
         count(1);
         let previous = IN_SHIM.with(|scope| {
             let previous = scope.get();
@@ -101,6 +121,12 @@ impl PanicScope {
             });
             previous
         });
+        if value
+            && previous == Owner::Guest
+            && let Some(class) = charge
+        {
+            crate::charge::count(class);
+        }
         #[cfg(target_os = "linux")]
         let (previous_sp, previous_entry) = (GUEST_SP.get(), ENTRY.get().0);
         #[cfg(target_os = "linux")]

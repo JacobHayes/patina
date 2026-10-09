@@ -33,6 +33,9 @@ pub struct Envelope {
     /// Runtime-detected findings with a `source` attribution (liveness/converge
     /// watchdog, schedule diagnostics).
     pub(super) runtime_findings: Vec<serde_json::Value>,
+    /// The CPU time the run's guest calls were charged, per task
+    /// (`patina.runfacts/v1`'s `cpu_charges`), carried through verbatim.
+    pub(super) cpu_charges: Option<serde_json::Value>,
     /// Native crash-restart facts, if the supervisor performed a modeled restart.
     pub(super) crash_restart: Option<serde_json::Value>,
     /// Patina's own fail-closed refusal, when patina refused. Absent on a guest's
@@ -69,6 +72,7 @@ impl Envelope {
             result_line: None,
             fault_reports: None,
             runtime_findings: Vec::new(),
+            cpu_charges: None,
             crash_restart: None,
             refusal: None,
             guest_exit: None,
@@ -182,6 +186,9 @@ impl Envelope {
                 "runtime_findings".into(),
                 Value::Array(self.runtime_findings.clone()),
             );
+        }
+        if let Some(v) = &self.cpu_charges {
+            m.insert("cpu_charges".into(), v.clone());
         }
         if let Some(v) = &self.crash_restart {
             m.insert("crash_restart".into(), v.clone());

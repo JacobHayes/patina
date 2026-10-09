@@ -417,7 +417,7 @@ pub unsafe extern "C" fn patina_sud_dispatch(
     a5: u64,
     call_addr: usize,
 ) -> c_long {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_syscall(nr);
     let _ = call_addr;
     // `c_long` is `i64` on the LP64 Linux targets this module compiles for, so it
     // matches the `i64` syscall-number table and dispatch signature directly.
