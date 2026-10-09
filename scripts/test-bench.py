@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Offline tests for scripts/bench.py's statistics and record parsing."""
 import importlib.util
+import hashlib
+import json
 from pathlib import Path
 import random
 import sys
+import tempfile
 import types
 import unittest
+from contextlib import ExitStack
+from unittest.mock import patch
 
 # Importing the benchmark module must not leave source-tree bytecode artifacts.
 sys.dont_write_bytecode = True
@@ -60,7 +65,282 @@ class StatisticsTests(unittest.TestCase):
         self.assertAlmostEqual(bench.ratio_of_minima([1.0, 5.0, 1.1], [2.0, 2.2, 9.0]), 2.0)
 
 
+class GateTests(unittest.TestCase):
+    def record(self, ratio=1.0, counts=(100, 100)):
+        block = lambda r: [{'wall_s': v} for v in (1.0, r, r, 1.0)]
+        return {'workload': 'w', 'status': 'ok', 'blocks': [block(ratio)] * 10,
+                'noise_blocks': [block(1.0)] * 10,
+                'op_counts': dict(zip(('baseline', 'patina'), counts))}
+
+    def evaluate(self, record, **kwargs):
+        identity = {'candidate': {'rev': 'c' * 40, 'binary_sha256': 'c' * 64},
+                    'base': {'rev': 'b' * 40, 'binary_sha256': 'b' * 64},
+                    'toolchain': 'rustc pinned', 'workloads': [{'name': 'w'}]}
+        identity['workload_set_sha256'] = hashlib.sha256(
+            json.dumps(identity['workloads'], sort_keys=True).encode()).hexdigest()
+        return bench.bench_gate.evaluate([record], identity, **kwargs)
+
+    def test_interval_straddling_budget_is_inconclusive_exit_four(self):
+        verdict = bench.bench_gate.interval_verdict([1.00, 1.06], 1.02)
+        self.assertEqual(bench.bench_gate.EXIT[verdict], 4)
+
+    def test_planted_three_percent_regression_exits_five(self):
+        self.assertEqual(self.evaluate(self.record(1.03))['exit_code'], 5)
+
+    def test_tight_aa_passes_exit_zero(self):
+        self.assertEqual(self.evaluate(self.record())['exit_code'], 0)
+
+    def test_changed_ops_requires_separate_fixed_work_pass_and_explanation(self):
+        changed = self.record(counts=(100, 110))
+        self.assertEqual(self.evaluate(changed)['exit_code'], 4)
+        proof = self.evaluate(changed, fixed_work_run=True, explanation='extra clock door')
+        self.assertEqual(proof['exit_code'], 0)
+        self.assertEqual(self.evaluate(changed, fixed_work=proof)['exit_code'], 0)
+        proof['identity']['candidate']['rev'] = 'stale'
+        self.assertEqual(self.evaluate(changed, fixed_work=proof)['exit_code'], 4)
+        failed = self.evaluate(self.record(1.03, (100, 110)), fixed_work_run=True,
+                               explanation='extra clock door')
+        self.assertEqual(self.evaluate(changed, fixed_work=failed)['exit_code'], 4)
+        # Fixed-work does not waive the ordinary elapsed-time budget.
+        self.assertEqual(failed['exit_code'], 5)
+
+    def test_pairing_cancels_linear_block_drift(self):
+        blocks = [[{'wall_s': scale * v} for v in (1, 2, 3, 4)]
+                  for scale in [1] * 10]
+        result = bench.bench_gate.paired_ratio(blocks)
+        self.assertEqual(result['ci95'], [1.0, 1.0])
+
+    def test_bootstrap_preserves_the_median_estimand(self):
+        record = self.record()
+        record['blocks'] = (self.record(1.03)['blocks'][:6] +
+                            self.record(.8)['blocks'][:4])
+        verdict = self.evaluate(record)
+        self.assertEqual(verdict['workloads'][0]['ratio']['median'], 1.03)
+        self.assertNotEqual(verdict['exit_code'], 0)
+
+    def test_missing_noisy_or_unsupported_evidence_cannot_pass(self):
+        for change in ({'noise_blocks': []}, {'blocks': []}, {'op_counts': {}},
+                       {'status': 'unsupported'}):
+            self.assertEqual(self.evaluate(dict(self.record(), **change))['exit_code'], 4)
+        record = self.record()
+        record['noise_blocks'] = (self.record(.94)['blocks'][:5] +
+                                  self.record(1.04)['blocks'][:5])
+        self.assertEqual(self.evaluate(record)['exit_code'], 4)
+
+    def test_hot_path_has_its_own_five_percent_gate(self):
+        self.assertEqual(self.evaluate(dict(self.record(1.03), hot_path=True))['exit_code'], 0)
+        self.assertEqual(self.evaluate(dict(self.record(1.06), hot_path=True))['exit_code'], 5)
+
+    def test_missing_commit_or_toolchain_cannot_pass(self):
+        proof = self.evaluate(self.record())
+        for change in ({'toolchain': None}, {'base': {}}, {'workload_set_sha256': 'stale'}):
+            identity = dict(proof['identity'], **change)
+            self.assertEqual(bench.bench_gate.evaluate([self.record()], identity)['exit_code'], 4)
+
+    def test_per_op_speedup_does_not_exempt_extra_work(self):
+        record = dict(self.record(1.03, (100, 200)), hot_path=True)
+        for block in record['blocks']:
+            for sample, value in zip(block, (10, 5, 5, 10)):
+                sample['hot_ns_per_op'] = value
+        for block in record['noise_blocks']:
+            for sample in block:
+                sample['hot_ns_per_op'] = 10
+        self.assertEqual(self.evaluate(record)['exit_code'], 4)
+        # Fixed-work retains elapsed time even if normalization looks faster.
+        record['blocks'] = [[dict(sample, wall_s=sample['wall_s'] *
+                                (1.1 if index in (1, 2) else 1))
+                            for index, sample in enumerate(block)] for block in record['blocks']]
+        self.assertEqual(self.evaluate(record, fixed_work_run=True,
+                                       explanation='extra ops')['exit_code'], 5)
+
+    def test_invalid_gate_invocations_are_usage_errors(self):
+        for args in (['--gate'], ['--gate', '--baseline', '@', '--runs', '9']):
+            with self.assertRaises(SystemExit) as caught:
+                bench.parse_args(args)
+            self.assertEqual(caught.exception.code, 2)
+
+
+class VerificationTests(unittest.TestCase):
+    """Class pairing: one verifier owns comparison, source and artifact checks."""
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.home = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.cli = self.home / 'candidate'
+        self.cli.write_bytes(b'candidate artifact')
+        self.base = self.home / 'base'
+        self.base.mkdir()
+        self.base_cli = self.base / 'cargo-patina'
+        self.base_cli.write_bytes(b'base artifact')
+        opts = bench.parse_args(['--baseline', 'main', '--workload', 'startup'])
+        rows, digest = bench.workload_identity(opts, [bench.WORKLOADS[0]])
+        self.identity = {'candidate': {'rev': 'c' * 40, 'binary_sha256': self.hash(self.cli)},
+                         'base': {'rev': 'b' * 40, 'binary_sha256': self.hash(self.base_cli)},
+                         'toolchain': 'rustc pinned', 'seed': 1,
+                         'workloads': rows, 'workload_set_sha256': digest}
+        self.verdict = {'schema': bench.bench_gate.SCHEMA, 'mode': 'comparison',
+                        'verdict': 'pass', 'exit_code': 0, 'identity': self.identity}
+        self.stack.enter_context(patch.object(bench, 'commit_id', return_value='c' * 40))
+        self.stack.enter_context(patch.object(bench, 'resolve_rev', return_value='b' * 40))
+        self.stack.enter_context(patch.object(bench, 'build_cargo_patina', return_value=self.cli))
+        self.stack.enter_context(patch.object(bench, 'build_baseline',
+            return_value=(self.base_cli, self.identity['base'], self.base)))
+        self.stack.enter_context(patch.object(bench, 'vcs', return_value='jj'))
+        names = ('patina-dst-native-shim', 'patina-dst-runtime', 'patina-dst-bench',
+                 'patina-dst-driver-api', 'patina-dst-time-virtual', 'patina-dst-sched-det')
+        self.metadata = {'packages': [dict(id=name, name=name,
+            manifest_path=str(bench.ROOT / 'crates' / name.replace('patina-dst-', 'patina-')
+                              / 'Cargo.toml')) for name in names],
+            'resolve': {'nodes': [dict(id=name, deps=[]) for name in names]}}
+        def dependency(name, kind=None):
+            return dict(pkg=name, dep_kinds=[dict(kind=kind)])
+        self.metadata['resolve']['nodes'][0]['deps'] = [dependency(names[1])]
+        self.metadata['resolve']['nodes'][1]['deps'] = [dependency(name) for name in names[3:]]
+        self.metadata['resolve']['nodes'][2]['deps'] = [dependency(names[1])]
+        self.stack.enter_context(patch.object(bench, 'cargo_metadata', return_value=self.metadata))
+        self.stack.enter_context(patch.object(bench, 'output', side_effect=lambda cmd:
+            json.dumps('crates/patina-runtime/src/lib.rs') if 'diff' in cmd else 'rustc pinned'))
+
+    @staticmethod
+    def hash(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def verify(self):
+        path = self.home / 'verdict.json'
+        path.write_text(json.dumps(self.verdict))
+        return bench.main(['--verify', str(path), '--baseline', 'main',
+                           '--workload', 'startup', '--scratch-dir', str(self.home)])
+
+    def test_fixed_work_alone_cannot_verify_a_hot_path_regression(self):
+        record = dict(GateTests().record(1.01), hot_path=True)
+        for blocks, values in ((record['blocks'], (10, 12, 12, 10)),
+                               (record['noise_blocks'], (10, 10, 10, 10))):
+            for block in blocks:
+                for sample, value in zip(block, values): sample['hot_ns_per_op'] = value
+        gate = GateTests()
+        self.assertEqual(gate.evaluate(record)['exit_code'], 5)
+        self.verdict = gate.evaluate(record, fixed_work_run=True, explanation='changed doors')
+        self.assertEqual(self.verdict['exit_code'], 0)
+        self.verdict['identity'] = self.identity
+        self.assertEqual(self.verify(), 4)
+
+    def test_changed_cli_artifact_cannot_reuse_the_same_revision_verdict(self):
+        self.assertEqual(self.verify(), 0)
+        for path in (self.cli, self.base_cli):
+            original = path.read_bytes()
+            path.write_bytes(b'rebuilt with different optimization')
+            self.assertEqual(self.verify(), 4)
+            path.write_bytes(original)
+
+    def test_landing_requires_shim_and_exercised_driver_changes(self):
+        for path in ('crates/patina-native-shim/c/posix/core.c',
+                     'crates/patina-runtime/src/lib.rs',
+                     'crates/patina-time-virtual/src/lib.rs',
+                     'crates/patina-driver-api/src/filesystem.rs'):
+            with self.subTest(path=path), patch.dict(bench.os.environ, {}, clear=True), \
+                    patch.object(bench, 'output', return_value=json.dumps(path)):
+                self.assertEqual(bench.main(['--verify-landing']), 4)
+
+    def test_landing_requires_compiled_build_module(self):
+        with patch.dict(bench.os.environ, {}, clear=True), patch.object(bench, 'output',
+                return_value=json.dumps('crates/patina-native-shim/symbol_metadata.rs')):
+            self.assertEqual(bench.main(['--verify-landing']), 4)
+
+    def test_landing_requires_local_path_dependency_in_any_layout(self):
+        package = dict(id='helper', name='helper', manifest_path='')
+        self.metadata['packages'].append(package)
+        self.metadata['resolve']['nodes'].append(dict(id='helper', deps=[]))
+        self.metadata['resolve']['nodes'][0]['deps'].append(
+            dict(pkg='helper', dep_kinds=[dict(kind='build')]))
+        for directory in ('crates/vendor/helper', 'support/helper'):
+            package['manifest_path'] = str(bench.ROOT / directory / 'Cargo.toml')
+            with self.subTest(directory=directory), patch.dict(bench.os.environ, {}, clear=True), \
+                    patch.object(bench, 'output',
+                        return_value=json.dumps(directory + '/src/lib.rs')):
+                self.assertEqual(bench.main(['--verify-landing']), 4)
+
+    def test_landing_exempts_cli_build_and_test_only_changes(self):
+        paths = ('crates/cargo-patina/src/cli.rs', 'Cargo.toml', '.cargo/config.toml',
+                 'crates/patina-wasi-host/src/lib.rs', 'scripts/bench.py',
+                 'crates/patina-native-shim/README.md',
+                 'crates/patina-runtime/tests/boot_origin.rs',
+                 'crates/patina-runtime/benches/dispatch.rs',
+                 'crates/patina-runtime/examples/deterministic.rs')
+        for stack in ((paths[0],), paths[1:]):
+            with self.subTest(paths=stack), patch.dict(bench.os.environ, {}, clear=True), \
+                    patch.object(bench, 'output',
+                        return_value='\n'.join(json.dumps(path) for path in stack)):
+                self.assertEqual(bench.main(['--verify-landing']), 0)
+
+    def test_landing_follows_new_transitive_driver_edges_but_not_dev_edges(self):
+        name = 'new-driver'
+        self.metadata['packages'].append(dict(id=name, name=name,
+            manifest_path=str(bench.ROOT / 'crates' / name / 'Cargo.toml')))
+        self.metadata['resolve']['nodes'].append(dict(id=name, deps=[]))
+        edge = dict(pkg=name, dep_kinds=[dict(kind='dev')])
+        self.metadata['resolve']['nodes'][3]['deps'].append(edge)
+        with patch.dict(bench.os.environ, {}, clear=True), patch.object(bench, 'output',
+                return_value=json.dumps('crates/new-driver/src/lib.rs')):
+            self.assertEqual(bench.main(['--verify-landing']), 0)
+            edge['dep_kinds'][0]['kind'] = None  # shared driver's production dependency
+            self.assertEqual(bench.main(['--verify-landing']), 4)
+
+    def test_landing_tip_verdict_covers_batch_but_parent_or_inconclusive_does_not(self):
+        opts = bench.parse_args([])
+        rows, digest = bench.workload_identity(opts, list(bench.WORKLOADS))
+        self.identity['workloads'], self.identity['workload_set_sha256'] = rows, digest
+        path = self.home / 'batch-verdict.json'
+        paths = ('crates/patina-native-shim/src/clocks.rs',
+                 'crates/patina-runtime/src/filesystem.rs',
+                 'crates/patina-sched-det/src/lib.rs')
+        def output(cmd):
+            return '\n'.join(json.dumps(p) for p in paths) if 'diff' in cmd else 'rustc pinned'
+        with patch.dict(bench.os.environ, {'PATINA_BENCH_VERDICT': str(path)}), \
+                patch.object(bench, 'output', side_effect=output), \
+                patch.object(bench, 'verify_artifacts', return_value=True):
+            path.write_text(json.dumps(self.verdict))
+            self.assertEqual(bench.main(['--verify-landing']), 0)
+            self.identity['candidate']['rev'] = 'd' * 40  # verdict for a parent, not the tip
+            path.write_text(json.dumps(self.verdict))
+            self.assertEqual(bench.main(['--verify-landing']), 4)
+            self.identity['candidate']['rev'] = 'c' * 40
+            self.verdict.update(verdict='inconclusive', exit_code=4)
+            path.write_text(json.dumps(self.verdict))
+            self.assertEqual(bench.main(['--verify-landing']), 4)
+
+    def test_landing_skips_docs_but_refuses_unknown_diff_or_stale_evidence(self):
+        with patch.object(bench, 'output', return_value=json.dumps('docs/notes.md')):
+            self.assertEqual(bench.main(['--verify-landing']), 0)
+        with patch.object(bench, 'output', return_value=None):
+            self.assertEqual(bench.main(['--verify-landing']), 4)
+        path = self.home / 'verdict.json'
+        path.write_text(json.dumps(self.verdict))  # a startup-only pass cannot cover all workloads
+        with patch.dict(bench.os.environ, {'PATINA_BENCH_VERDICT': str(path)}):
+            self.assertEqual(bench.main(['--verify-landing']), 4)
+
+
 class ParsingTests(unittest.TestCase):
+    def test_count_probe_reads_structured_trace_stats_and_refuses_missing_counts(self):
+        # Class-level pairing: the gate refuses missing/invalid operation counts.
+        workload = bench.Workload('w', 'bench', ('compute', '--iters', '1'), 'R')
+        leg = bench.Leg('patina', Path('cli'), Path('home'))
+        payload = {'schema': 'patina.result/v1', 'verb': 'trace', 'subcommand': 'stats',
+                   'exit_code': 0, 'trace_stats': {'schema': 'patina.trace.stats/v1',
+                                                 'totals': {'events': 17}}}
+        def probe(stats):
+            outputs = [bench.subprocess.CompletedProcess([], 0, 'R digest=1\n', ''),
+                       bench.subprocess.CompletedProcess([], 0, json.dumps(stats), '')]
+            with patch.object(bench.tempfile, 'TemporaryDirectory') as temp, \
+                    patch.object(bench.subprocess, 'run', side_effect=outputs):
+                temp.return_value.__enter__.return_value = '/virtual-count-probe'
+                return bench.probe_op_count(leg, workload, 1, Path('scratch'),
+                                            types.SimpleNamespace(timeout=1), lambda *_: None)
+        observed = probe(payload)
+        gate = GateTests()
+        self.assertEqual(gate.evaluate(gate.record(counts=(observed, observed)))['exit_code'], 0)
+        with self.assertRaises(bench.BenchError):
+            probe(payload['trace_stats'])
+
     def test_result_is_the_last_prefixed_line_minus_dropped_fields(self):
         stdout = ('noise\nWORKQ_RESULT a=1 attempts=9 hash=x\n'
                   'WORKQ_RESULTS lookalike=1\nWORKQ_RESULT a=2 attempts=3 hash=y\n')
@@ -108,6 +388,25 @@ class ResultCheckTests(unittest.TestCase):
         finally:
             bench.measure = real
 
+    def test_gate_extends_an_inconclusive_interval_before_passing(self):
+        workload = bench.Workload('w', 'bench', (), 'R')
+        legs = [bench.Leg('baseline', Path('base'), Path('base-home')),
+                bench.Leg('patina', Path('candidate'), Path('candidate-home'))]
+        opts = types.SimpleNamespace(scale=1.0, commit='c', date='d', seed=1, runs=20,
+                                     max_runs=40, warmup=0, order_seed=0,
+                                     baseline_info={}, sud=True, gate=True,
+                                     launcher=None, timeout=1.0)
+        candidate = iter([.98] * 10 + [1.06] * 10 + [1.0] * 100)
+        def measure(leg, *_):
+            return bench.Sample(next(candidate) if leg.name == 'patina' else 1.0,
+                                1.0, 1024, 'R digest=1')
+        with patch.object(bench, 'measure', measure), patch.object(bench, 'probe_op_count',
+                                                                return_value=100):
+            record = bench.run_workload(workload, legs, opts, {}, random.Random(0), Path('scratch'))
+        initial = bench.bench_gate.paired_ratio(record['blocks'][:10])
+        self.assertEqual(bench.bench_gate.interval_verdict(initial['ci95'], 1.02), 'inconclusive')
+        self.assertEqual(GateTests().evaluate(record)['exit_code'], 0)
+
     def test_differing_results_fail_the_workload(self):
         with self.assertRaises(bench.BenchError) as caught:
             self.run_stubbed({'native': 'R digest=1', 'patina': 'R digest=2'})
@@ -130,7 +429,8 @@ class WorkloadTableTests(unittest.TestCase):
         for workload in bench.WORKLOADS:
             # A size placeholder needs a size, and a size needs a placeholder.
             self.assertEqual('{n}' in ' '.join(workload.args), workload.count > 0, workload.name)
-            self.assertTrue((bench.ROOT / 'testbeds' / workload.testbed / 'Cargo.toml').is_file())
+            self.assertTrue((bench.ROOT / ('crates/patina-bench' if workload.testbed == 'context'
+                                     else 'testbeds/' + workload.testbed) / 'Cargo.toml').is_file())
 
 
 if __name__ == '__main__':

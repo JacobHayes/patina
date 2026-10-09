@@ -9,6 +9,12 @@ launcher (scripts/bench-launch.c) whose wait4 usage includes the Patina guest
 the CLI spawns, then reports per-workload medians, p90s, and the Patina/native
 ratio with a bootstrap 95% interval.
 
+`--gate --baseline` applies a blocking 2% end-to-end / 5% hot-path policy
+using paired ABBA blocks and an A/A noise run (exit 4 inconclusive, 5 regress).
+`--pin` pins the entire process tree on Linux. Gate verdicts bind exact build
+hashes, toolchain and fixed workload inputs; changed trace-event counts require
+a separately passing fixed-work run with an explanation.
+
 `--baseline` swaps the native leg for a second Patina build (a git rev or a
 cargo-patina binary) so two builds are compared on identical inputs.
 
@@ -22,6 +28,7 @@ import argparse
 import ctypes
 import hashlib
 import json
+import math
 import os
 import platform
 import random
@@ -37,12 +44,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bench_gate
+
 SCHEMA = 'patina.bench/v1'
 ROOT = Path(__file__).resolve().parent.parent
 # The guest-visible directory `{dir}` stands for under Patina: its filesystem
 # is virtual, so every run starts from an empty one.
 VIRTUAL_DIR = '/bench-work'
 BOOTSTRAP_ROUNDS = 2000
+GATE_RETRY = 'pause builds and re-run the benchmark gate for the stack tip versus main'
 
 
 @dataclass(frozen=True)
@@ -62,6 +73,7 @@ class Workload:
     needs_sud: bool = False
     # Sleeps on a clock: natively the real one, under Patina the virtual one.
     timer_bound: bool = False
+    hot_path: bool = False
 
 
 PATINA_ONLY = 'patina-only guest: it writes at the filesystem root and asserts Patina semantics'
@@ -144,8 +156,8 @@ def ratio_of_medians(base: Sequence[float], subject: Sequence[float],
 
 
 def ratio_of_minima(base: Sequence[float], subject: Sequence[float]) -> Optional[float]:
-    """min(subject) / min(base): each side's least-disturbed run, the steadier
-    figure for gating one build against another. None when min(base) is 0."""
+    """min(subject) / min(base): an advisory least-disturbed-run reference.
+    Blocking gates use paired medians. None when min(base) is 0."""
     if min(base) <= 0:
         return None
     return min(subject) / min(base)
@@ -220,8 +232,8 @@ def output(cmd: List[str]) -> Optional[str]:
 def vcs() -> Optional[str]:
     """'git' or 'jj' when ROOT is the root of that tool's checkout. A repository
     that merely encloses an exported tree does not count."""
-    for tool, cmd in (('git', ['git', 'rev-parse', '--show-toplevel']),
-                      ('jj', ['jj', '--ignore-working-copy', 'workspace', 'root'])):
+    for tool, cmd in (('jj', ['jj', 'workspace', 'root']),
+                      ('git', ['git', 'rev-parse', '--show-toplevel'])):
         top = output(cmd)
         if top and Path(top).resolve() == ROOT:
             return tool
@@ -229,13 +241,13 @@ def vcs() -> Optional[str]:
 
 
 def commit_id() -> str:
-    if os.environ.get('GITHUB_SHA'):
-        return os.environ['GITHUB_SHA']
     tool = vcs()
     if tool == 'git':
+        if output(['git', 'status', '--porcelain']) != '':
+            return 'unknown'  # a dirty source tree is not the named commit
         return output(['git', 'rev-parse', 'HEAD']) or 'unknown'
     if tool == 'jj':
-        return output(['jj', '--ignore-working-copy', 'log', '--no-graph', '-r', '@',
+        return output(['jj', 'log', '--no-graph', '-r', 'latest(::@ & ~empty())',
                        '-T', 'commit_id']) or 'unknown'
     return 'unknown'
 
@@ -253,14 +265,27 @@ def run_build(cmd: List[str], cwd: Path, env: Dict[str, str], log: Path) -> None
                          reason=f'build failed (exit {status}); its log is {log.name}')
 
 
-def cargo_env(target_dir: Path) -> Dict[str, str]:
-    return dict(os.environ, CARGO_TARGET_DIR=str(target_dir))
+def cargo_binary(source: Path, package: str, destination: Path, log: Path) -> Path:
+    run_build(['cargo', 'build', '--release', '--locked', '--message-format=json',
+               '-p', package], source, dict(os.environ), log)
+    artifacts = []
+    for line in log.read_text().splitlines():
+        try:
+            receipt = json.loads(line)
+        except ValueError:
+            continue
+        if receipt.get('reason') == 'compiler-artifact' and receipt.get('executable'):
+            artifacts.append(Path(receipt['executable']))
+    if len(artifacts) != 1:
+        raise BuildError(f'{package}: expected one Cargo executable receipt')
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(artifacts[0], destination)
+    return destination
 
 
 def build_cargo_patina(source: Path, target_dir: Path, logs: Path) -> Path:
-    run_build(['cargo', 'build', '--release', '--locked', '-p', 'cargo-patina'],
-              source, cargo_env(target_dir), logs / 'cargo-patina.log')
-    return target_dir / 'release' / 'cargo-patina'
+    return cargo_binary(source, 'cargo-patina', target_dir / 'cargo-patina',
+                        logs / 'cargo-patina.log')
 
 
 def git_dir() -> Optional[str]:
@@ -279,7 +304,7 @@ def resolve_rev(rev: str) -> str:
     tool = vcs()
     sha = None
     if tool == 'jj':
-        sha = output(['jj', '--ignore-working-copy', 'log', '--no-graph', '-r', rev,
+        sha = output(['jj', 'log', '--no-graph', '-r', rev,
                       '-T', 'commit_id'])
     elif tool == 'git':
         sha = output(['git', 'rev-parse', '--verify', '--quiet', f'{rev}^{{commit}}'])
@@ -288,16 +313,15 @@ def resolve_rev(rev: str) -> str:
     raise BuildError(f'--baseline {rev!r} is neither a file nor a single revision of this checkout')
 
 
-def build_baseline(spec: str, base: Path) -> Tuple[Path, dict, Path]:
+def build_baseline(spec: str, base: Path, *, refresh: bool = False) -> Tuple[Path, dict, Path]:
     """A cargo-patina for `spec` (an existing binary, or a revision), its
     identity for the records, and the directory its guests build under.
 
-    A revision is exported with `git archive` into a private build directory,
-    built there, and only its binary is kept: it is moved into place
-    atomically, then the build directory is deleted (a failed build keeps it
-    for its logs). So the repository's own
-    checkout is never touched, an interrupted build leaves nothing a later
-    run would trust, and concurrent runs never delete each other's files."""
+    Revision exports live at a stable private source path so generated source
+    locations do not change artifact identity on verification. Refresh rebuilds
+    through Cargo with the current environment rather than trusting a rev-only
+    artifact cache. This scratch directory has one writer, like the run's legs.
+    """
     as_path = Path(spec)
     if as_path.is_file():
         digest = hashlib.sha256(as_path.read_bytes()).hexdigest()
@@ -305,12 +329,13 @@ def build_baseline(spec: str, base: Path) -> Tuple[Path, dict, Path]:
     sha = resolve_rev(spec)
     home = base / 'baseline' / sha
     binary = home / 'cargo-patina'
-    if binary.is_file():
+    source = home / 'source'
+    if not refresh and binary.is_file() and source.is_dir():
         return binary, {'rev': sha}, home
     home.mkdir(parents=True, exist_ok=True)
     build = Path(tempfile.mkdtemp(prefix='build.', dir=home))
     try:
-        source = build / 'src'
+        exported = build / 'source'
         archive = build / 'src.tar'
         run_build(['git', f'--git-dir={git_dir()}', 'archive', '-o', str(archive), sha], ROOT,
                   dict(os.environ), build / 'logs' / 'archive.log')
@@ -318,9 +343,12 @@ def build_baseline(spec: str, base: Path) -> Tuple[Path, dict, Path]:
             # The 'data' filter (Python >= 3.12, and security releases before
             # it) refuses members that would land outside `source`.
             safe = {'filter': 'data'} if hasattr(tarfile, 'data_filter') else {}
-            tar.extractall(source, **safe)
+            tar.extractall(exported, **safe)
+        if source.exists():
+            shutil.rmtree(source)
+        os.replace(exported, source)
         print(f'==> building baseline cargo-patina at {sha[:12]}', flush=True)
-        built = build_cargo_patina(source, build / 'target', build / 'logs')
+        built = build_cargo_patina(source, build / 'artifacts', build / 'logs')
         staged = build / 'cargo-patina'
         shutil.copy2(built, staged)
         os.replace(staged, binary)
@@ -335,6 +363,118 @@ def build_baseline(spec: str, base: Path) -> Tuple[Path, dict, Path]:
 
 
 # ------------------------------------------------------------------- legs
+
+def verify_artifacts(identity, opts, base, selected):
+    """Rebuild actual products; revisions alone cannot identify build settings."""
+    current = build_cargo_patina(ROOT, base / 'verify', base / 'verify' / 'logs')
+    baseline, _, _ = build_baseline(opts.baseline, base, refresh=True)
+    return (identity['candidate']['binary_sha256'] == hashlib.sha256(current.read_bytes()).hexdigest()
+            and identity['base']['binary_sha256'] == hashlib.sha256(baseline.read_bytes()).hexdigest())
+
+
+def verify_verdict(opts, base, selected):
+    try:
+        verdict = json.loads(opts.verify.read_text())
+        identity = verdict.get('identity', {})
+        rows, digest = workload_identity(opts, selected)
+        matches = (bench_gate.valid_identity(identity) and verdict.get('schema') == bench_gate.SCHEMA
+                   and verdict.get('mode') == 'comparison'
+                   and verdict.get('verdict') == 'pass' and verdict.get('exit_code') == 0
+                   and identity.get('candidate', {}).get('rev') == commit_id()
+                   and identity.get('base', {}).get('rev') == resolve_rev(opts.baseline)
+                   and identity.get('toolchain') == output(['rustc', '-vV'])
+                   and identity.get('workloads') == rows
+                   and identity.get('workload_set_sha256') == digest
+                   and identity.get('seed') == opts.seed
+                   and verify_artifacts(identity, opts, base, selected)
+                   and identity['candidate']['rev'] == commit_id())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, BenchError) as error:
+        print(f'gate verification: inconclusive ({error})')
+        return 4
+    print('gate verification: ' + ('pass' if matches else 'inconclusive (stale or failing verdict)'))
+    return 0 if matches else 4
+
+
+def cargo_metadata():
+    raw = output(['cargo', 'metadata', '--offline', '--locked', '--format-version', '1'])
+    if raw is None:
+        raise BenchError('cannot establish the hot-path dependency closure')
+    return json.loads(raw)
+
+
+def landing_hot_path_packages():
+    """Cargo's normal/build dependency closure of the measured effect paths.
+
+    Native doors enter the shim; Context enters runtime and the dependencies of
+    patina-bench's fixed mix. The workload harness itself is exempt. Following
+    resolved edges includes shared trait defaults and future drivers without a
+    second hand-maintained driver list. Dev-only dependencies stay exempt.
+    """
+    metadata = cargo_metadata()
+    packages = {p['id']: p for p in metadata['packages']}
+    names = {p['name']: p['id'] for p in metadata['packages']}
+    nodes = {n['id']: n for n in metadata['resolve']['nodes']}
+    def dependencies(package):
+        return [d['pkg'] for d in nodes[package]['deps']
+                if any(k['kind'] != 'dev' for k in d['dep_kinds'])]
+    pending = [names['patina-dst-native-shim'], names['patina-dst-runtime']]
+    pending += dependencies(names['patina-dst-bench'])
+    visited = set()
+    while pending:
+        package = pending.pop()
+        if package not in visited:
+            visited.add(package)
+            pending += dependencies(package)
+    return {Path(packages[package]['manifest_path']).parent for package in visited}
+
+
+def landing_protected_path(path, packages):
+    """Protect each package directory, with only explicit non-production exceptions."""
+    changed = ROOT / path
+    for directory in packages:
+        if changed.is_relative_to(directory):
+            relative = changed.relative_to(directory)
+            if (relative.suffix != '.md'
+                    and not {'tests', 'benches', 'examples'}.intersection(relative.parts)):
+                return True
+    return False
+
+
+def landing_verification(opts):
+    """One tip-versus-main verdict admits the whole hot-path landing batch."""
+    try:
+        main_rev = resolve_rev('main')
+        tool = vcs()
+        if tool == 'jj':
+            raw = output(['jj', 'diff', '--from', main_rev, '--to', '@', '-T',
+                          'json(source.path()) ++ "\n" ++ json(target.path()) ++ "\n"'])
+            paths = [json.loads(line) for line in raw.splitlines()] if raw is not None else None
+        elif tool == 'git':
+            raw = output(['git', 'diff', '--name-only', '--no-renames', '-z', main_rev, '--'])
+            untracked = output(['git', 'ls-files', '--others', '--exclude-standard', '-z'])
+            paths = (raw + '\0' + untracked).split('\0') if raw is not None and untracked is not None else None
+        else:
+            paths = None
+        if paths is None:
+            raise BenchError('cannot establish changes versus main')
+        packages = landing_hot_path_packages()
+        protected = any(landing_protected_path(path, packages) for path in paths)
+        if not protected:
+            print('benchmark landing verification: no production hot-path changes versus main')
+            return 0
+        verdict = os.environ.get('PATINA_BENCH_VERDICT')
+        if not verdict:
+            raise BenchError('shim/runtime/driver changes require PATINA_BENCH_VERDICT for the stack tip versus main')
+        opts.verify, opts.baseline = Path(verdict), main_rev
+        opts.workload, opts.scale, opts.seed = None, 1.0, 1
+        base = Path(os.environ.get('PATINA_BENCH_SCRATCH', ROOT / 'target' / 'bench')).resolve()
+        status = verify_verdict(opts, base, list(WORKLOADS))
+        if status == 4:
+            print(f'benchmark landing verification: inconclusive is not a pass; {GATE_RETRY}')
+        return status
+    except (ValueError, KeyError, TypeError, AttributeError, BenchError) as error:
+        print(f'benchmark landing verification: inconclusive ({error}); {GATE_RETRY}')
+        return 4
 
 @dataclass
 class Leg:
@@ -353,13 +493,12 @@ class Leg:
         source = ROOT / 'testbeds' / testbed
         log = self.home / 'logs' / f'{testbed}.log'
         if self.cargo_patina is None:
-            run_build(['cargo', 'build', '--release', '--locked'], source,
-                      cargo_env(self.home), log)
+            cargo_binary(source, testbed, self.binary(testbed), log)
         else:
             (self.home / 'guests').mkdir(parents=True, exist_ok=True)
             run_build([str(self.cargo_patina), 'patina', 'build', str(source), '--output',
                        str(self.binary(testbed)), '--release'],
-                      ROOT, cargo_env(self.home / 'cargo'), log)
+                      ROOT, dict(os.environ), log)
 
     def command(self, workload: Workload, n: int, directory: str) -> List[str]:
         binary = str(self.binary(workload.testbed))
@@ -401,7 +540,7 @@ def measure(leg: Leg, workload: Workload, n: int, scratch: Path, launcher: Path,
     cmd = leg.command(workload, n, str(directory))
     timed_out = False
     try:
-        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        with tempfile.TemporaryFile(dir=scratch) as out, tempfile.TemporaryFile(dir=scratch) as err:
             # A new session, so a timeout kills the launcher, the CLI and its guest.
             proc = subprocess.Popen([str(launcher), str(report)] + cmd, cwd=directory,
                                     stdin=subprocess.DEVNULL, stdout=out, stderr=err,
@@ -434,13 +573,72 @@ def measure(leg: Leg, workload: Workload, n: int, scratch: Path, launcher: Path,
 
 # ------------------------------------------------------------------- run
 
+def trace_op_count(stdout):
+    """The emitted result envelope is the only source of recorded counts."""
+    try:
+        envelope = json.loads(stdout)
+        payload = envelope['trace_stats']
+        count = payload['totals']['events']
+        if (envelope.get('schema') != 'patina.result/v1'
+                or envelope.get('verb') != 'trace' or envelope.get('subcommand') != 'stats'
+                or envelope.get('exit_code') != 0
+                or payload.get('schema') != 'patina.trace.stats/v1'
+                or type(count) is not int or count <= 0):
+            raise ValueError('invalid count envelope')
+        return count
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
+        raise BenchError('operation-count trace unreadable') from error
+
+
+def probe_op_count(leg, workload, n, scratch, opts, check):
+    """Untimed recorded run: count real trace events, never inferred iterations.
+
+    Keeping recording out of the timed leg measures seeded execution. The
+    counting run must complete and agree with the same result-line oracle.
+    """
+    with tempfile.TemporaryDirectory(prefix='ops-', dir=scratch) as directory:
+        trace = Path(directory) / 'ops.trace'
+        command = leg.command(workload, n, directory)
+        split = command.index('--')
+        command[split:split] = ['--record', str(trace)]
+        run = subprocess.run(command, cwd=directory, capture_output=True, text=True,
+                             timeout=opts.timeout)
+        result = parse_result(run.stdout, workload.result, workload.drop)
+        if run.returncode or result is None:
+            raise BenchError(f'{workload.name}: operation-count run failed')
+        check(leg, Sample(0, 0, 0, result))
+        stats = subprocess.run([str(leg.cargo_patina), 'patina', 'trace', 'stats',
+                                str(trace), '--format', 'json'], capture_output=True,
+                               text=True, timeout=opts.timeout)
+        if stats.returncode:
+            raise BenchError(f'{workload.name}: operation-count trace unreadable')
+        return trace_op_count(stats.stdout)
+
+
+def workload_identity(opts, selected):
+    rows = [{'name': w.name, 'args': expand(w.args, scaled_count(w, opts.scale), VIRTUAL_DIR),
+             'hot_path': w.hot_path} for w in selected]
+    digest = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
+    return rows, digest
+
+
+
+def gate_identity(opts, selected, current, host):
+    rows, digest = workload_identity(opts, selected)
+    return {'candidate': {'rev': opts.commit,
+                          'binary_sha256': hashlib.sha256(current.read_bytes()).hexdigest()},
+            'base': opts.baseline_info, 'toolchain': output(['rustc', '-vV']),
+            'host': host, 'pin': opts.pin, 'seed': opts.seed,
+            'workloads': rows, 'workload_set_sha256': digest}
+
+
 def base_record(workload: Workload, opts, host: dict) -> dict:
     n = scaled_count(workload, opts.scale)
     record = dict(host, schema=SCHEMA, commit=opts.commit, date=opts.date,
                   workload=workload.name, testbed=workload.testbed, args=list(workload.args),
                   n=n if workload.count else None, seed=opts.seed, runs=opts.runs,
                   warmup=opts.warmup, scale=opts.scale, order_seed=opts.order_seed,
-                  timer_bound=workload.timer_bound)
+                  timer_bound=workload.timer_bound, hot_path=workload.hot_path)
     if opts.baseline_info:
         record['baseline'] = opts.baseline_info
     return record
@@ -473,13 +671,52 @@ def run_workload(workload: Workload, legs: List[Leg], opts, host: dict, order_rn
     for leg in active:
         for _ in range(opts.warmup):
             check(leg, measure(leg, workload, n, scratch, opts.launcher, opts.timeout))
-    order = [leg for leg in active for _ in range(opts.runs)]
-    order_rng.shuffle(order)
     samples: Dict[str, List[Sample]] = {leg.name: [] for leg in active}
-    for leg in order:
-        sample = measure(leg, workload, n, scratch, opts.launcher, opts.timeout)
-        check(leg, sample)
-        samples[leg.name].append(sample)
+    if getattr(opts, 'gate', False):
+        if len(active) != 2:
+            raise BenchError('gate requires both Patina builds')
+        def blocks(a: Leg, b: Leg, count: int) -> list:
+            measured = []
+            for _ in range(count):
+                block = []
+                for leg in (a, b, b, a):
+                    sample = measure(leg, workload, n, scratch, opts.launcher, opts.timeout)
+                    check(leg, sample)
+                    block.append(vars(sample))
+                measured.append(block)
+            return measured
+        # Two labels, identical build and guest: A/A tests the same measurement
+        # path as A/B, immediately before it, on each workload.
+        record['noise_blocks'] = blocks(active[0], active[0], opts.runs // 2)
+        record['blocks'] = blocks(*active, opts.runs // 2)
+        threshold = 1.05 if workload.hot_path else 1.02
+        metric = 'hot_ns_per_op' if workload.hot_path else 'wall_s'
+        if getattr(opts, 'fixed_work_run', False):
+            metric = 'wall_s'
+        while len(record['blocks']) * 2 < opts.max_runs:
+            ratio = bench_gate.paired_ratio(record['blocks'], metric)
+            noise = bench_gate.paired_ratio(record['noise_blocks'], metric)
+            if (bench_gate.interval_verdict(ratio and ratio['ci95'], threshold)
+                    != 'inconclusive' and bench_gate.noise_ok(noise, threshold)):
+                break
+            extra = min(len(record['blocks']), opts.max_runs // 2 - len(record['blocks']))
+            record['noise_blocks'] += blocks(active[0], active[0], extra)
+            record['blocks'] += blocks(*active, extra)
+        record['runs'] = len(record['blocks']) * 2
+        for block in record['blocks']:
+            for leg, sample in zip((active[0], active[1], active[1], active[0]), block):
+                samples[leg.name].append(Sample(**sample))
+        record['op_counts'] = {leg.name: probe_op_count(leg, workload, n, scratch, opts, check)
+                               for leg in active}
+        record['hot_path'] = workload.hot_path
+        record['op_count_source'] = 'trace.events'
+    else:
+        order = [leg for leg in active for _ in range(opts.runs)]
+        order_rng.shuffle(order)
+        for leg in order:
+            sample = measure(leg, workload, n, scratch, opts.launcher, opts.timeout)
+            check(leg, sample)
+            samples[leg.name].append(sample)
     record['status'] = 'ok'
     record['result'] = reference[1]
     record['legs'] = {}
@@ -499,6 +736,9 @@ def run_workload(workload: Workload, legs: List[Leg], opts, host: dict, order_rn
             'cpu_ratio': ratio_of_medians(record['legs'][base]['cpu_s'],
                                           record['legs'][subject]['cpu_s'], boot),
         }
+    if getattr(opts, 'gate', False):
+        record['comparison']['wall_ratio'] = bench_gate.paired_ratio(record['blocks'])
+        record['comparison']['cpu_ratio'] = bench_gate.paired_ratio(record['blocks'], 'cpu_s')
     return record
 
 
@@ -592,8 +832,26 @@ def parse_args(argv: Sequence[str]):
     names = [w.name for w in WORKLOADS]
     parser = argparse.ArgumentParser(
         prog='scripts/bench.py', description=__doc__.split('\n\n')[0])
+    parser.add_argument('--gate', action='store_true',
+                        help='blocking paired ABBA comparison; requires --baseline (0/4/5)')
+    parser.add_argument('--pin', type=int, metavar='CPU',
+                        help='pin this process and all children to one allowed Linux CPU')
+    parser.add_argument('--scratch-dir', type=Path,
+                        help='build copies, logs and temporary data (default target/bench)')
+    parser.add_argument('--fixed-work', type=Path,
+                        help='passing fixed-work gate verdict for changed operation counts')
+    parser.add_argument('--fixed-work-run', action='store_true',
+                        help='produce separate elapsed-time proof at identical fixed inputs')
+    parser.add_argument('--op-count-explanation', default='',
+                        help='required explanation for --fixed-work-run')
+    parser.add_argument('--max-runs', type=int, default=120,
+                        help='gate cap per side when a CI/noise run is inconclusive (default 120)')
+    parser.add_argument('--verify', type=Path,
+                        help='verify a passing verdict against this candidate, --baseline and workload set')
+    parser.add_argument('--verify-landing', action='store_true',
+                        help='require one tip-versus-main comparison for production shim/runtime/driver changes')
     parser.add_argument('--runs', type=int,
-                        help=f'timed runs per leg (default 5, or {STEADY_RUNS} with --baseline)')
+                        help=f'timed runs per leg (default 5, {STEADY_RUNS} with --baseline, 30 with --gate)')
     parser.add_argument('--warmup', type=int, default=1,
                         help='untimed runs per leg first (default 1)')
     parser.add_argument('--workload', action='append', choices=names,
@@ -609,16 +867,37 @@ def parse_args(argv: Sequence[str]):
     parser.add_argument('--timeout', type=float, default=600, help='per-run timeout seconds')
     opts = parser.parse_args(argv)
     if opts.runs is None:
-        opts.runs = STEADY_RUNS if opts.baseline else 5
-    if opts.runs < 1 or opts.warmup < 0 or opts.scale <= 0:
+        opts.runs = 30 if opts.gate else (STEADY_RUNS if opts.baseline else 5)
+    if opts.gate and (not opts.baseline or opts.runs < 20 or opts.runs % 2):
+        parser.error('--gate requires --baseline and an even --runs >= 20')
+    if opts.gate and (opts.max_runs < opts.runs or opts.max_runs % 2):
+        parser.error('--max-runs must be even and >= --runs')
+    if (opts.gate or opts.verify) and (not opts.baseline or Path(opts.baseline).is_file()):
+        parser.error('blocking gates require an exact repository revision as --baseline')
+    if opts.gate and opts.runs < 30 and any(
+            w.hot_path and (not opts.workload or w.name in opts.workload) for w in WORKLOADS):
+        parser.error('hot-path gates require --runs >= 30')
+    if (opts.fixed_work or opts.fixed_work_run) and not opts.gate:
+        parser.error('fixed-work evidence requires --gate')
+    if opts.fixed_work_run and (not opts.op_count_explanation or opts.fixed_work):
+        parser.error('--fixed-work-run requires an explanation and no --fixed-work input')
+    if opts.runs < 1 or opts.warmup < 0 or not math.isfinite(opts.scale) or opts.scale <= 0:
         parser.error('--runs must be >= 1, --warmup >= 0 and --scale > 0')
     return opts
 
 
 def main(argv: Sequence[str]) -> int:
     opts = parse_args(argv)
-    base = Path(os.environ.get('CARGO_TARGET_DIR') or ROOT / 'target' / 'bench').resolve()
+    if opts.verify_landing:
+        return landing_verification(opts)
+    if opts.pin is not None:
+        if not hasattr(os, 'sched_setaffinity') or opts.pin not in os.sched_getaffinity(0):
+            raise BenchError('--pin needs an allowed Linux CPU')
+        os.sched_setaffinity(0, {opts.pin})
+    base = (opts.scratch_dir or ROOT / 'target' / 'bench').resolve()
     selected = [w for w in WORKLOADS if not opts.workload or w.name in opts.workload]
+    if opts.verify:
+        return verify_verdict(opts, base, selected)
     host = host_facts()
     opts.sud = sud_available()
     opts.commit = commit_id()
@@ -636,6 +915,7 @@ def main(argv: Sequence[str]) -> int:
         opts.baseline_info = None
         if opts.baseline:
             binary, opts.baseline_info, home = build_baseline(opts.baseline, base)
+            opts.baseline_info['binary_sha256'] = hashlib.sha256(binary.read_bytes()).hexdigest()
             first = Leg('baseline', binary, home, opts.seed)
         else:
             first = Leg('native', None, base / 'native')
@@ -654,12 +934,12 @@ def main(argv: Sequence[str]) -> int:
                 record = run_workload(workload, legs, opts, host, order_rng, scratch)
             except BuildError:
                 raise
-            except BenchError as error:
+            except (BenchError, subprocess.TimeoutExpired) as error:
                 # Loud now, and the run exits 1, but the other workloads still
                 # run and every completed record is still written.
                 print(f'bench: FAILED: {error}', file=sys.stderr, flush=True)
                 record = dict(base_record(workload, opts, host), status='failed',
-                              reason=error.reason)
+                              reason=error.reason if isinstance(error, BenchError) else 'operation-count timeout')
             if record['status'] == 'unsupported':
                 print(f'    unsupported here: {record["reason"]}', flush=True)
             records.append(record)
@@ -669,11 +949,24 @@ def main(argv: Sequence[str]) -> int:
             with opts.summary_md.open('a') as fh:
                 fh.write(f'### Patina benchmark: FAILED to build\n\n{error.reason}\n\n')
         return 3
+    gate = None
+    if opts.gate:
+        if commit_id() != opts.commit:
+            raise BenchError('candidate tree changed during measurement; rerun on a frozen tree')
+        fixed_work = json.loads(opts.fixed_work.read_text()) if opts.fixed_work else None
+        gate = bench_gate.evaluate(records, gate_identity(opts, selected, current, host),
+                                   fixed_work, opts.fixed_work_run, opts.op_count_explanation)
     failed = [r['workload'] for r in records if r['status'] == 'failed']
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open('w') as fh:
         for record in records:
             fh.write(json.dumps(record, sort_keys=True) + '\n')
+    if gate is not None:
+        verdict_path = output_path.with_suffix('.verdict.json')
+        verdict_path.write_text(json.dumps(gate, sort_keys=True, indent=2) + '\n')
+        print(f'gate: {gate["verdict"]}; verdict: {verdict_path}')
+        if gate['verdict'] == 'inconclusive':
+            print(f'gate: inconclusive is not a pass; {GATE_RETRY}')
     verdict = f'FAILED ({", ".join(failed)}): ' if failed else ''
     header = (f'### Patina benchmark: {verdict}{host["os"]}-{host["arch"]}, {host["cpu_model"]}, '
               f'kernel {host["kernel"]}, commit {opts.commit[:12]}, {opts.runs} runs + '
@@ -687,7 +980,7 @@ def main(argv: Sequence[str]) -> int:
         print(f'bench: FAILED: {len(failed)} workload(s) failed: {", ".join(failed)}',
               file=sys.stderr)
         return 1
-    return 0
+    return gate['exit_code'] if gate else 0
 
 
 if __name__ == '__main__':
