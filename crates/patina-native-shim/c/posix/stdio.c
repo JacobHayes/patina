@@ -1,6 +1,11 @@
 /* The assertion abort door stays C: formatting returns before guest SIGABRT
  * delivery, and guest panic ownership must reach patina_abort unchanged. */
 #ifndef __APPLE__
+/* The shim's stdout and stderr objects (src/posix/stdio.rs `Sentinel`) are
+ * FILE-sized, so a guest's inline putc_unlocked/getc_unlocked bodies read
+ * zeroed buffer pointers inside them and fall to __overflow/__uflow. */
+_Static_assert(sizeof(FILE) == 216, "the stream sentinels are sized for glibc's FILE");
+
 extern int patina_stream_printf(FILE *stream, const char *format, ...);
 /* The program's argv[0] (src/posix/lifecycle/linux.rs). */
 extern __attribute__((visibility("hidden"))) const char *patina_program_path;

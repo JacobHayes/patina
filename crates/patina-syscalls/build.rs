@@ -17,6 +17,7 @@ fn main() {
         "src/symbols.rs",
         "src/symbol_inventory.rs",
         "src/symbol_time.rs",
+        "src/symbol_stdio.rs",
     ] {
         println!("cargo:rerun-if-changed={source}");
     }

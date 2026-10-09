@@ -24,11 +24,23 @@ use inventory::s;
 #[path = "symbol_time.rs"]
 mod time;
 
+#[path = "symbol_stdio.rs"]
+mod stdio;
+
 pub const SYMBOLS: &[SymbolRow] =
-    &inventory::concat::<_, { ROWS.len() + time::ROWS.len() }>(ROWS, time::ROWS);
+    &inventory::concat::<_, { ROWS.len() + time::ROWS.len() + stdio::ROWS.len() }>(
+        ROWS,
+        &inventory::concat::<_, { time::ROWS.len() + stdio::ROWS.len() }>(time::ROWS, stdio::ROWS),
+    );
 #[doc(hidden)]
 pub const ALL_SYMBOLS_WITH_ARCH: &[(SymbolRow, Option<&str>)] =
-    &inventory::concat::<_, { METADATA.len() + time::METADATA.len() }>(METADATA, time::METADATA);
+    &inventory::concat::<_, { METADATA.len() + time::METADATA.len() + stdio::METADATA.len() }>(
+        METADATA,
+        &inventory::concat::<_, { time::METADATA.len() + stdio::METADATA.len() }>(
+            time::METADATA,
+            stdio::METADATA,
+        ),
+    );
 
 symbol_rows! {
     s(
@@ -1439,108 +1451,6 @@ symbol_rows! {
         "eventfd",
         Platform::Linux,
         Serves::Syscalls(&["eventfd2"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "fputs",
-        Platform::Both,
-        Serves::Syscalls(&["write"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "fwrite",
-        Platform::Both,
-        Serves::Syscalls(&["write"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "vfprintf",
-        Platform::Both,
-        Serves::Syscalls(&["write"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "fprintf",
-        Platform::Both,
-        Serves::Syscalls(&["write"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "printf",
-        Platform::Both,
-        Serves::Syscalls(&["write"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "puts",
-        Platform::Both,
-        Serves::Syscalls(&["write"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "putchar",
-        Platform::Both,
-        Serves::Syscalls(&["write"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "fputc",
-        Platform::Both,
-        Serves::Syscalls(&["write"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "fflush",
-        Platform::Both,
-        Serves::Syscalls(&["write"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "setvbuf",
-        Platform::Linux,
-        Serves::Syscalls(&["write"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "setbuf",
-        Platform::Linux,
-        Serves::Syscalls(&["write"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "setbuffer",
-        Platform::Linux,
-        Serves::Syscalls(&["write"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "setlinebuf",
-        Platform::Linux,
-        Serves::Syscalls(&["write"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "ferror",
-        Platform::Both,
-        Serves::LibcOnly,
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "clearerr",
-        Platform::Both,
-        Serves::LibcOnly,
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "flockfile",
-        Platform::Both,
-        Serves::LibcOnly,
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "funlockfile",
-        Platform::Both,
-        Serves::LibcOnly,
         SymbolStatus::Modeled,
     ),
     s(

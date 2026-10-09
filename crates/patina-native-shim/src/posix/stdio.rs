@@ -13,9 +13,34 @@ const BUFSIZ: usize = 8192;
 const BUFSIZ: usize = 1024;
 const EOF: c_int = -1;
 
-// Distinct writable addresses; neither guest nor host dereferences these tokens.
-static mut OUT_TOKEN: u8 = 0;
-static mut ERR_TOKEN: u8 = 0;
+/// The object `stdout`/`stderr` point at. Only its address names the stream,
+/// but it is FILE-sized and zeroed (glibc's `struct _IO_FILE` is 216 bytes on
+/// both Linux architectures, checked in `c/posix/stdio.c`; Darwin's is
+/// smaller): the inline `putc_unlocked`/`getc_unlocked` bodies a guest compiles
+/// read its buffer pointers, find them equal, and take their slow path into the
+/// shim (`__overflow`/`__uflow`), and `ferror_unlocked`'s inline reads its
+/// flags, where the stream's error indicator is mirrored (Linux).
+#[repr(C, align(8))]
+struct Sentinel {
+    flags: c_int,
+    rest: [u8; 212],
+}
+impl Sentinel {
+    const fn new() -> Self {
+        Self {
+            flags: 0,
+            rest: [0; 212],
+        }
+    }
+}
+// glibc's `sizeof(FILE)`, which `c/posix/stdio.c` asserts beside it.
+#[cfg(target_os = "linux")]
+const _: () = assert!(size_of::<Sentinel>() == 216);
+static mut OUT_TOKEN: Sentinel = Sentinel::new();
+static mut ERR_TOKEN: Sentinel = Sentinel::new();
+/// glibc's `_IO_ERR_SEEN`, the error indicator bit of `_flags`.
+#[cfg(target_os = "linux")]
+const ERR_SEEN: c_int = 0x20;
 #[cfg_attr(target_os = "linux", unsafe(export_name = "stdout"))]
 #[cfg_attr(target_os = "macos", unsafe(export_name = "__stdoutp"))]
 pub static mut STDOUT: *mut libc::FILE = (&raw mut OUT_TOKEN).cast();
@@ -49,6 +74,9 @@ struct Stream {
     lock: libc::pthread_mutex_t,
     storage: [u8; 8192],
     shortbuf: u8,
+    /// `fclose` closed it: any later call on it is undefined natively, and
+    /// stops here.
+    closed: bool,
 }
 #[derive(Clone, Copy)]
 enum StreamId {
@@ -93,6 +121,7 @@ impl Stream {
             lock: darwin_lock(),
             storage: [0; 8192],
             shortbuf: 0,
+            closed: false,
         }
     }
 }
@@ -136,6 +165,25 @@ unsafe fn buffer_len(stream: StreamId) -> usize {
     }
 }
 
+/// Set a stream's error indicator, in its state and in its sentinel's flags.
+unsafe fn set_error(stream: StreamId, error: bool) {
+    let (state, token) = match stream {
+        StreamId::Out => (&raw mut OUT, &raw mut OUT_TOKEN),
+        StreamId::Err => (&raw mut ERR, &raw mut ERR_TOKEN),
+    };
+    // SAFETY: both are process-lifetime statics the caller serializes.
+    unsafe {
+        (*state).error = error;
+        // Darwin's FILE keeps its flags elsewhere; its inline bodies never
+        // reach them through a sentinel.
+        #[cfg(target_os = "linux")]
+        {
+            (*token).flags = if error { ERR_SEEN } else { 0 };
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = token;
+    }
+}
 pub(crate) fn sentinel_fd(stream: *mut libc::FILE) -> c_int {
     if stream == (&raw mut OUT_TOKEN).cast() {
         1
@@ -147,9 +195,10 @@ pub(crate) fn sentinel_fd(stream: *mut libc::FILE) -> c_int {
 }
 pub(crate) fn trap(symbol: &CStr) -> ! {
     for bytes in [
-        b"patina: stdio call on a non-sentinel FILE* reached under patina: ".as_slice(),
+        b"patina: stdio call on a FILE* that is not the shim's stdout or stderr: ".as_slice(),
         symbol.to_bytes(),
-        b"; a host FILE* means an un-interposed fopen leaked through; failing closed\n",
+        b"; glibc's own streams (its stdin, one fopen or fdopen made) are not modeled; failing \
+closed\n",
     ] {
         // SAFETY: each static diagnostic slice is readable for its exact length
         // and the synchronous captured-stdio entry consumes it before return.
@@ -160,12 +209,24 @@ pub(crate) fn trap(symbol: &CStr) -> ! {
     crate::patina_flush_captured_stdio();
     crate::host_abort()
 }
+/// The shim's stream a call names: every stdio door's one way to its stream.
+/// Any other `FILE*` (glibc's own stdin, stdout or stderr, or one `fopen` or
+/// `fdopen` made) stops the run by name, as does a stream `fclose` closed.
 fn stream_of(stream: *mut libc::FILE, symbol: &CStr) -> StreamId {
-    match sentinel_fd(stream) {
+    let id = match sentinel_fd(stream) {
         1 => StreamId::Out,
         2 => StreamId::Err,
         _ => trap(symbol),
+    };
+    // SAFETY: the selected stream is a process-lifetime static; the flag is
+    // set once, by fclose under the stream's lock.
+    if unsafe { (*stream_ptr(id)).closed } {
+        crate::trap_fatal(&format!(
+            "{} on a standard stream after fclose closed it",
+            symbol.to_string_lossy()
+        ));
     }
+    id
 }
 unsafe fn lock(stream: StreamId) -> bool {
     if crate::patina_in_teardown() != 0 {
@@ -198,7 +259,7 @@ unsafe fn write_out(stream: StreamId, data: *const u8, length: usize) -> usize {
             let written = crate::patina_write((*s).fd, data.add(done).cast(), length - done);
             if written < 0 {
                 super::errno(crate::patina_errno());
-                (*s).error = !crate::variadic::fault(9);
+                set_error(stream, !crate::variadic::fault(9));
                 break;
             }
             done += written as usize;
@@ -732,12 +793,11 @@ extern "C" fn ferror(stream: *mut libc::FILE) -> c_int {
 extern "C" fn clearerr(stream: *mut libc::FILE) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let s = stream_of(stream, c"clearerr");
-    let state = stream_ptr(s);
     // SAFETY: stream_of selects a static state, and locking protects the error
     // bit update from concurrent stream operations.
     unsafe {
         let held = lock(s);
-        (*state).error = false;
+        set_error(s, false);
         unlock(s, held);
     }
 }

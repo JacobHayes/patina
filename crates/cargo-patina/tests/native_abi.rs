@@ -535,6 +535,106 @@ mod stdio_lifecycle {
         assert_eq!(text(&patina.stdout), text(&native.stdout));
     }
 
+    /// The character and positioning calls a C++ runtime makes on the standard
+    /// streams (`putc`, `getc`, `fread`, `ungetc`, `fileno`, `fseeko64`,
+    /// `ftello64`), on a pipe and on a regular file: the same report natively
+    /// and under patina.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn character_and_position_calls_match_the_host() {
+        let source = "stdio_chars_probe.c";
+        let native = assert_success(standalone_output(
+            &assert_build_c_guest(source, CLink::Unlinked).binary,
+            &[],
+            &[],
+        ));
+        let g = assert_build_c_guest(source, CLink::PosixShim);
+        let patina = assert_success(seeded(&g.binary, "", 1));
+        assert!(!native.stdout.is_empty());
+        assert_eq!(text(&patina.stdout), text(&native.stdout));
+    }
+
+    /// Every character entry point glibc gives the standard streams beside
+    /// putc/getc (the `_unlocked` and `_IO_` spellings, `fgetc`, and the
+    /// `__overflow`/`__uflow` slow paths of the inline bodies), called (-O0) and
+    /// inlined (-O2), glibc's internal lock spellings and `fclose`: the same
+    /// report natively and under patina. `getchar` (glibc's own stdin),
+    /// `freopen` of a standard stream and any other `FILE*` stop by name.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_character_entry_point_matches_the_host() {
+        let source = "stdio_entry_probe.c";
+        for flags in [&["-O0"][..], &["-O2"][..]] {
+            let native = assert_success(standalone_output(
+                &assert_build_c_guest_with_flags(source, CLink::Unlinked, flags).binary,
+                &[],
+                &[],
+            ));
+            let g = assert_build_c_guest_with_flags(source, CLink::PosixShim, flags);
+            let patina = assert_success(seeded(&g.binary, "", 1));
+            assert!(!native.stdout.is_empty());
+            assert_eq!(text(&patina.stdout), text(&native.stdout), "{flags:?}");
+        }
+        use std::os::unix::process::ExitStatusExt;
+        let g = assert_build_c_guest(source, CLink::PosixShim);
+        for (case, stop) in [
+            ("getchar", "getchar reads glibc's own stdin"),
+            ("freopen", "freopen of a standard stream"),
+            ("foreign", "not the shim's stdout or stderr: fputc"),
+        ] {
+            let stopped = seeded(&g.binary, case, 1);
+            let stderr = text(&stopped.stderr);
+            assert_eq!(stopped.status.signal(), Some(6), "{case}: {stderr}");
+            assert!(stderr.contains(stop), "{case}: {stderr}");
+        }
+    }
+
+    /// A C++ guest on the system's shared libstdc++, natively or over the shim.
+    #[cfg(target_os = "linux")]
+    fn cxx_guest(link: CLink) -> Guest {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("cxx-guest");
+        let mut cxx =
+            std::process::Command::new(std::env::var("CXX").unwrap_or_else(|_| "c++".into()));
+        cxx.args(["-std=c++17", "-Wall", "-Wextra", "-Werror"])
+            .arg(guest_source("cxx_stdio_probe.cc"));
+        if matches!(link, CLink::PosixShim) {
+            cxx.arg(common::compile_posix_object(dir.path()))
+                .arg(common::shim_archive())
+                .arg("-Wl,--wrap=dlsym");
+        }
+        assert_success(cxx.arg("-o").arg(&binary).output().unwrap());
+        Guest { dir, binary }
+    }
+
+    /// libstdc++ binds `stdout` and `stderr` to the shim's streams, so every
+    /// call it makes on them must be the shim's: `std::endl` and `put` (putc),
+    /// `tellp` (fseeko64/ftello64) give the host's output. `cin` reads glibc's
+    /// own `stdin`, which the shim does not model: a named stop, never a host
+    /// read.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cxx_standard_streams_match_the_host() {
+        use std::os::unix::process::ExitStatusExt;
+        let native = assert_success(standalone_output(
+            &cxx_guest(CLink::Unlinked).binary,
+            &[""],
+            &[],
+        ));
+        let g = cxx_guest(CLink::PosixShim);
+        let patina = assert_success(seeded(&g.binary, "", 1));
+        assert!(text(&native.stdout).contains("CXX_STDIO_ENDL"));
+        assert_eq!(text(&patina.stdout), text(&native.stdout));
+        assert_eq!(text(&patina.stderr), text(&native.stderr));
+        let cin = seeded(&g.binary, "cin", 1);
+        assert_eq!(cin.status.signal(), Some(6), "{}", text(&cin.stderr));
+        let refusal = text(&cin.stderr);
+        assert!(
+            refusal.contains("not the shim's stdout or stderr: getc"),
+            "{refusal}"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     fn assert_refusal_keeps_output(case: &str) {
         use std::os::unix::process::ExitStatusExt;

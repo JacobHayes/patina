@@ -168,8 +168,11 @@ mod tests {
             &cargo,
             r#"#!/bin/sh
 [ "$1" = rustc ] || exec "$PATINA_TEST_REAL_CARGO" "$@"
-"$PATINA_TEST_REAL_CARGO" "$@" > "$PATINA_TEST_CARGO_RECEIPTS"
+CARGO_LOG=cargo::core::compiler::fingerprint=info \
+    "$PATINA_TEST_REAL_CARGO" "$@" > "$PATINA_TEST_CARGO_RECEIPTS" \
+    2> "$PATINA_TEST_CARGO_RECEIPTS.log"
 status=$?
+cat "$PATINA_TEST_CARGO_RECEIPTS.log" >&2
 cat "$PATINA_TEST_CARGO_RECEIPTS"
 exit "$status"
 "#,
@@ -202,9 +205,13 @@ exit "$status"
             invoke_in_with_env(workspace, flags, &envs);
             invoke_in_with_env(workspace, flags, &envs);
             let artifacts = cargo_artifact_receipts(&receipts);
+            // Cargo's own account of why a unit was dirty, for a failure.
+            let log = fs::read_to_string(receipts.with_extension("jsonl.log")).unwrap_or_default();
+            let reasons: Vec<_> = log.lines().filter(|line| line.contains("dirty")).collect();
             assert!(
                 artifacts.iter().all(|row| row["fresh"] == true),
-                "unchanged build recompiled guest artifacts: {artifacts:?}"
+                "unchanged build ({flags:?}) recompiled guest artifacts: {artifacts:?}\n\
+                 Cargo's fingerprint log: {reasons:#?}"
             );
         }
 
