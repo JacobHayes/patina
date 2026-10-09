@@ -37,7 +37,7 @@ fn park_recv(
         (Some(delivery), Some(deadline)) => Some(delivery.min(deadline)),
         (delivery, deadline) => delivery.or(deadline),
     };
-    park(state, handle, Dir::Recv, until, reason)
+    park_until(state, handle, Dir::Recv, until, deadline.is_some(), reason)
 }
 
 fn recv_datagram(handle: c_int, want: Want) -> Result<Incoming, c_int> {

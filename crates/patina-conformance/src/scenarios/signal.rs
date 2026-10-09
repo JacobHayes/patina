@@ -17,5 +17,6 @@ pub mod queue;
 pub mod raw_action;
 pub mod restart;
 pub mod restorer;
+pub mod sock_timeout_eintr;
 pub mod wait;
 pub mod wrappers;

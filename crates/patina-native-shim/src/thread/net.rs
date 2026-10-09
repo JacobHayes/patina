@@ -296,13 +296,26 @@ pub(crate) fn now() -> Result<u64, c_int> {
 }
 
 /// Park the calling task on `handle`'s `dir` queue until something wakes it,
-/// the virtual-clock `deadline` passes, or a signal interrupts it (`EINTR`).
-/// The caller decided to wait while holding `state`.
+/// the virtual-clock `deadline` (the socket's timeout) passes, or a signal
+/// interrupts it (`EINTR`). The caller decided to wait while holding `state`.
 pub(super) fn park(
-    mut state: SpinGuard<'_, ThreadRuntime>,
+    state: SpinGuard<'_, ThreadRuntime>,
     handle: c_int,
     dir: Dir,
     deadline: Option<u64>,
+    reason: &'static str,
+) -> Result<(), c_int> {
+    park_until(state, handle, dir, deadline, deadline.is_some(), reason)
+}
+
+/// [`park`] until `until`, which may be earlier than the socket's timeout
+/// (a delivery the network has scheduled); `timed`: the socket has one.
+pub(super) fn park_until(
+    mut state: SpinGuard<'_, ThreadRuntime>,
+    handle: c_int,
+    dir: Dir,
+    until: Option<u64>,
+    timed: bool,
     reason: &'static str,
 ) -> Result<(), c_int> {
     let me = current_task();
@@ -320,8 +333,8 @@ pub(super) fn park(
         }
     };
     let wait = Wait::new(BlockClass::Io, vec![loc]);
-    let step = match deadline {
-        Some(deadline) => state.block_timed(me, reason, wait, ClockKind::Monotonic, deadline),
+    let step = match until {
+        Some(until) => state.block_timed(me, reason, wait, ClockKind::Monotonic, until),
         None => state.block(me, reason, wait),
     };
     match step {
@@ -334,10 +347,16 @@ pub(super) fn park(
         unregister_waiters(&mut state, me, &[loc]);
         state.timed_out.remove(&me);
     }
+    // `sock_intr_errno`: a wait with a timeout is `EINTR` whatever the
+    // handler's `SA_RESTART`; only one that waits forever restarts.
     #[cfg(target_os = "linux")]
-    if signals::resume() == signals::Resumed::Eintr {
-        return Err(crate::EINTR);
+    match signals::resume() {
+        signals::Resumed::Eintr => return Err(crate::EINTR),
+        signals::Resumed::Restart if timed => return Err(crate::EINTR),
+        signals::Resumed::Restart | signals::Resumed::Normal => {}
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = timed;
     Ok(())
 }
 

@@ -634,6 +634,7 @@ macro_rules! for_each_scenario {
             signal_raw_action => signal::raw_action,
             signal_restart => signal::restart,
             signal_restorer => signal::restorer,
+            signal_sock_timeout_eintr => signal::sock_timeout_eintr,
             signal_wait => signal::wait,
             signal_wrappers => signal::wrappers,
             sys_admin => sys::admin,
