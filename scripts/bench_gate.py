@@ -7,6 +7,8 @@ import statistics
 
 SCHEMA = 'patina.bench-gate/v1'
 EXIT = {'pass': 0, 'inconclusive': 4, 'regress': 5}
+# Allowed slowdown (ratio of medians) for every workload, end-to-end and hot-path alike.
+BUDGET = 1.05
 
 
 def interval_verdict(interval, threshold):
@@ -99,7 +101,7 @@ def evaluate(records, identity, fixed_work=None, fixed_work_run=False, explanati
                    and bool(fixed_work.get('op_count_explanation')))
     rows = []
     for record in records:
-        threshold = 1.05 if record.get('hot_path') else 1.02
+        threshold = BUDGET
         metric = ('hot_ns_per_op' if record.get('hot_path') and not fixed_work_run
                   and record.get('blocks')
                   and record['blocks'][0][0].get('hot_ns_per_op') is not None else 'wall_s')

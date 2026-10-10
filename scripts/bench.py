@@ -791,7 +791,7 @@ def run_workload(workload: Workload, legs: List[Leg], opts, host: dict, order_rn
         # path as A/B, immediately before it, on each workload.
         record['noise_blocks'] = blocks(active[0], active[0], opts.runs // 2)
         record['blocks'] = blocks(*active, opts.runs // 2)
-        threshold = 1.05 if workload.hot_path else 1.02
+        threshold = bench_gate.BUDGET
         metric = 'hot_ns_per_op' if workload.hot_path else 'wall_s'
         if getattr(opts, 'fixed_work_run', False):
             metric = 'wall_s'

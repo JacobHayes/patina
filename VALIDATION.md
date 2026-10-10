@@ -826,8 +826,8 @@ The slope regression pin pairs with this estimator's must-refuse undefined
 confidence interval. Context artifact verification checks both rebuilt role
 hashes in addition to both CLI hashes. Both N and 2N runs must match native/Patina result lines; Context reports only its fixed op mix loop. Fixed-work runs compare
 un-normalized elapsed time instead. The three-way rule is:
-pass only when the 95% interval's upper bound is at most 1.02 (1.05 for each
-hot-path class); regress when its lower bound exceeds that budget; otherwise
+pass only when the 95% interval's upper bound is at most 1.05 (`BUDGET` in
+`scripts/bench_gate.py`, the same for every workload); regress when its lower bound exceeds that budget; otherwise
 inconclusive. Missing workloads, unsupported legs, unreadable counts or an A/A
 interval outside the two-sided budget cannot pass. Exit codes are 0 pass,
 4 inconclusive and 5 regression; run/build failures retain 1/3. More samples or

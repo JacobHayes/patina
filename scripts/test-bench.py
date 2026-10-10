@@ -66,6 +66,9 @@ class StatisticsTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
+    # A planted slowdown just over the gate's budget.
+    OVER = bench.bench_gate.BUDGET + 0.01
+
     def record(self, ratio=1.0, counts=(100, 100)):
         block = lambda r: [{'wall_s': v} for v in (1.0, r, r, 1.0)]
         return {'workload': 'w', 'status': 'ok', 'blocks': [block(ratio)] * 10,
@@ -84,8 +87,8 @@ class GateTests(unittest.TestCase):
         verdict = bench.bench_gate.interval_verdict([1.00, 1.06], 1.02)
         self.assertEqual(bench.bench_gate.EXIT[verdict], 4)
 
-    def test_planted_three_percent_regression_exits_five(self):
-        self.assertEqual(self.evaluate(self.record(1.03))['exit_code'], 5)
+    def test_planted_regression_over_budget_exits_five(self):
+        self.assertEqual(self.evaluate(self.record(self.OVER))['exit_code'], 5)
 
     def test_tight_aa_passes_exit_zero(self):
         self.assertEqual(self.evaluate(self.record())['exit_code'], 0)
@@ -98,7 +101,7 @@ class GateTests(unittest.TestCase):
         self.assertEqual(self.evaluate(changed, fixed_work=proof)['exit_code'], 0)
         proof['identity']['candidate']['rev'] = 'stale'
         self.assertEqual(self.evaluate(changed, fixed_work=proof)['exit_code'], 4)
-        failed = self.evaluate(self.record(1.03, (100, 110)), fixed_work_run=True,
+        failed = self.evaluate(self.record(self.OVER, (100, 110)), fixed_work_run=True,
                                explanation='extra clock door')
         self.assertEqual(self.evaluate(changed, fixed_work=failed)['exit_code'], 4)
         # Fixed-work does not waive the ordinary elapsed-time budget.
@@ -112,10 +115,10 @@ class GateTests(unittest.TestCase):
 
     def test_bootstrap_preserves_the_median_estimand(self):
         record = self.record()
-        record['blocks'] = (self.record(1.03)['blocks'][:6] +
+        record['blocks'] = (self.record(self.OVER)['blocks'][:6] +
                             self.record(.8)['blocks'][:4])
         verdict = self.evaluate(record)
-        self.assertEqual(verdict['workloads'][0]['ratio']['median'], 1.03)
+        self.assertAlmostEqual(verdict['workloads'][0]['ratio']['median'], self.OVER)
         self.assertNotEqual(verdict['exit_code'], 0)
 
     def test_missing_noisy_or_unsupported_evidence_cannot_pass(self):
