@@ -97,19 +97,7 @@ SOURCES=("${DOCS[@]}" ${SCRIPTS[@]+"${SCRIPTS[@]}"})
 # if the gate flags one, fix the doc/script or the registry, don't allowlist it.
 # --rule, --config, --skip-snapshot-tests, --no-ignore and --globs belong to
 # ast-grep; --fixture-dir belongs to the registry-derived structural rule emitter.
-# Benchmark harness options (scripts/bench.py), never cargo-patina flags.
 ALLOWED_FLAGS='
---gate
---pin
---scratch-dir
---fixed-work
---fixed-work-run
---op-count-explanation
---max-runs
---verify
---verify-landing
---json
---class
 --all
 --all-targets
 --check

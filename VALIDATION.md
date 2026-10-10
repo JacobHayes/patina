@@ -782,7 +782,7 @@ A failure report must retain the command, seed, trace bundle when one exists, Pa
 
 ## Overhead benchmark
 
-`mise run bench` (`scripts/bench.py`) measures what Patina costs relative to a native run, for tracking over time. Without `--gate` it reports measurements: a slowdown fails nothing. It fails only when a run fails or when two runs of a workload disagree on its result. A failed workload is reported loudly and recorded as failed, the remaining workloads still run, and the benchmark then exits 1 with every completed record and the table written.
+`mise run bench` (`scripts/bench.py`) measures what Patina costs relative to a native run, for tracking over time. It is measurement, not a gate: a slowdown fails nothing. It fails only when a run fails or when two runs of a workload disagree on its result. A failed workload is reported loudly and recorded as failed, the remaining workloads still run, and the benchmark then exits 1 with every completed record and the table written.
 
 The workloads halt and check themselves. They are the five microworkloads of [`testbeds/bench`](testbeds/bench/) (compute, small-file I/O, a condvar hand-off, and pipe and loopback-TCP round trips), `startup` (one compute iteration, which is Patina's fixed cost per run), and clean fixed-input runs of the `workq`, `pubsub`, `fifo-ipc`, `cap-std-dirfd` and `rustix-default` testbeds. Each workload runs natively and under `cargo patina run --seed 1` with no faults. Each side gets one warmup run, then five timed runs, with the two sides' runs shuffled together. Every run must print the same result line (the guest's digest, minus schedule-sensitive fields such as workq's `attempts`), so a native and a Patina run that disagree fail the benchmark. `mise run bench -- --runs 10 --workload tcp` changes the run count and selects workloads; `scripts/bench.py --help` lists the other options.
 
@@ -792,98 +792,10 @@ The table shows, per workload and side, the median and p90 wall time, the median
 - `fifo-ipc`, `cap-std-dirfd` and `rustix-default` write at the filesystem root and assert Patina's virtual clock and filesystem, so they cannot run natively. They are timed under Patina only (‡), which still serves a comparison of two Patina builds. `cap-std-dirfd` and `rustix-default` need syscall-user-dispatch and report "unsupported here" on any other host.
 - A ratio below 1 on `fileio` is real: Patina serves files from its in-memory filesystem.
 
-`mise run bench -- --baseline <REV|PATH>` compares two Patina builds instead:
-the native side is replaced by the baseline, either an exact binary (identified
-by SHA-256) or an exported revision (also identified by commit hash). Native guests
-come from the current tree, including its SDK; this does not compare SDK source
-changes. The Context benchmark is built from each revision itself. Its help
-selects the supported report interface before timing: JSON where advertised,
-otherwise the existing text report. Both measure the same seeded op mix with
-identical positional inputs and the artifact's actual boundary count. Text-only
-baselines retain their reported ns/op precision (two decimal places), rather
-than substituting process wall time or inferring operations. Cargo's
-executable receipts locate builds; the benchmark copies each
-artifact into its private leg before building the next one. Local records and
-build copies are never committed.
+`mise run bench -- --baseline <REV|PATH>` compares two Patina builds instead: the native side is replaced by the baseline, either a `cargo-patina` binary or a revision of this checkout (a jj revision in a jj workspace, a git one otherwise). A revision is exported with `git archive`, built in a private directory under `target/bench/baseline/<commit>/`, and only its `cargo-patina` is kept, so a later comparison against the same revision reuses it. The table then shows each metric's relative change with its 95% interval, and `~` marks a change whose interval includes zero. This mode defaults to ten runs per side; for a refactor's no-regression check, read the wall-min change next to the median's interval. Its limits:
 
-`--gate` requires a baseline and an even run count of at least twenty per side
-(ten ABBA blocks; thirty for hot paths; the gate defaults to thirty).
-Each workload first gets an A/A noise run using the baseline, then an A/B run.
-Both use ABBA blocks, resampling whole blocks with a deterministic paired
-bootstrap of the ratio of medians. Inconclusive intervals or excessive A/A
-noise extend the run up to `--max-runs` (default 120 per side), then return 4. Blocking comparisons require repository revisions; binary paths
-remain advisory
-only, since they cannot establish baseline commit identity.
-
-End-to-end workloads measure elapsed wall time, including start/stop overhead.
-Each `doors` class measures ns per logical call from the difference between
-N and 2N elapsed runs, removing fixed launch/setup/teardown cost; `context` uses seeded
-ns per actual boundary op from `patina-dst-bench --json`, separately from its
-record/replay qualification timings. Signed slopes remain in paired resampling;
-nonpositive draw medians contribute unbounded ratio uncertainty, so an isolated
-negative difference can resolve with more evidence without discarding samples.
-The slope regression pin pairs with this estimator's must-refuse undefined
-confidence interval. Context artifact verification checks both rebuilt role
-hashes in addition to both CLI hashes. Both N and 2N runs must match native/Patina result lines; Context reports only its fixed op mix loop. Fixed-work runs compare
-un-normalized elapsed time instead. The three-way rule is:
-pass only when the 95% interval's upper bound is at most 1.05 (`BUDGET` in
-`scripts/bench_gate.py`, the same for every workload); regress when its lower bound exceeds that budget; otherwise
-inconclusive. Missing workloads, unsupported legs, unreadable counts or an A/A
-interval outside the two-sided budget cannot pass. Exit codes are 0 pass,
-4 inconclusive and 5 regression; run/build failures retain 1/3. More samples or
-a quieter host can resolve an inconclusive result. Hosted CI remains advisory.
-
-`--pin CPU` pins the harness and its children to an allowed Linux CPU.
-`--scratch-dir PATH` places all benchmark copies, logs and scratch there.
-Untimed record runs verify the same result and count actual trace events. A
-structured trace-stats envelope is required; its parser regression test pairs
-with the gate's refusal of missing or invalid counts. A
-changed count requires an explanation and a separate passing fixed-work gate:
-produce it with `--fixed-work-run --op-count-explanation TEXT`, then supply its
-verdict through `--fixed-work PATH`. Fixed-work compares elapsed time at the
-same guest inputs, without normalizing away extra operations; its budget still
-applies. The verdict (`patina.bench-gate/v1`, beside the JSONL output) binds
-candidate/base commit and binary hashes, compiler identity, host, affinity,
-seed, exact workload inputs and their SHA-256 digest. A stale or failing fixed-work verdict cannot
-satisfy the rule. Only a passing **comparison** verdict can satisfy verification;
-fixed-work evidence supplements it and never replaces its per-op gates.
-`python3 scripts/bench.py --verify PATH --baseline REV` rebuilds candidate and
-baseline artifacts with the current Cargo environment and compares their hashes,
-compiler and selected workload inputs. Private baseline exports have stable
-revision-keyed paths so repeated builds retain source-location identity.
-
-The first rung of `mise run check` runs `mise run gate:verify`. It compares the
-stack tip's source snapshot with exact `main` and requires `PATINA_BENCH_VERDICT`
-only for production changes in the hot-path dependency closure.
-`landing_hot_path_packages` in `scripts/bench.py` derives that set from pinned,
-offline Cargo metadata: native doors enter the shim; Context enters runtime and
-the library dependencies of its fixed-mix benchmark. Resolved normal/build edges
-protect their transitive local dependencies, including shared driver trait
-defaults, configured drivers and future driver additions. Dev-only edges are
-excluded. This conservative dependency closure includes drivers installed by
-default even when that specific workload does not issue their effects; it needs
-no separately maintained driver list. The workload harness itself stays exempt.
-Each protected package's directory is its Cargo metadata `manifest_path` parent,
-regardless of layout: nested packages and path dependencies outside `crates/`
-are included. Every changed path under it triggers verification, including build
-modules and data files, except `tests/`, `benches/`, `examples/` directories and
-`*.md` files. Paths outside protected packages are exempt. Both rename endpoints
-and uncommitted changes are included; an unreadable diff or missing main refuses
-verification.
-
-One verdict covers the whole landing batch, whether it contains one commit or
-many: its candidate is the stack tip, its base is exact main, and it covers the
-full default workload set at scale 1, seed 1. Intermediate commits need no
-separate verdict; a parent commit's verdict cannot admit the tip.
-Use `PATINA_BENCH_SCRATCH` to select its private build cache. Missing, stale,
-fixed-work-only, failing or inconclusive evidence stops the landing ladder before
-expensive checks. Inconclusive never passes: pause builds and re-run the benchmark
-gate for the stack tip versus main, as the refusal message directs.
-Verification builds artifacts but never runs benchmarks; `check:fast` retains
-offline behavior tests.
-The full workload gate presently needs an x86_64 Linux SUD host; unsupported
-series remain inconclusive. New verifier regression pins pair with this single
-source/artifact admission point and its must-refuse cases.
+- Only the CLI and runtime differ between the two sides. Both compile the guests from the current tree, so both link the current tree's `patina-dst` SDK; a change inside the SDK itself is not compared.
+- `target/bench/baseline/` keeps one binary and its guest builds per revision and grows with each new one. Delete it whenever you like.
 
 Every run writes one JSON record per workload (schema `patina.bench/v1`) to `target/bench/results/`, or to `--output`. A record holds the commit, date, OS, arch, CPU model and kernel, the workload and its arguments, every run's samples, and the statistics and ratios. It never holds a hostname, a username or a host path. Local records are never committed.
 

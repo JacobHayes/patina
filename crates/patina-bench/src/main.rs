@@ -22,7 +22,6 @@ Arguments:
 
 Options:
   -h, --help      Print this help and exit.
-      --json      Emit patina.context-bench/v1 with seeded/record/replay ns per op.
 
 Both positionals must be positive integers; a non-numeric, zero, or negative value
 is a hard error (exit 2). There is no silent fallback to the defaults.";
@@ -36,14 +35,9 @@ fn main() -> ExitCode {
         Ok(Invocation::Run {
             iterations,
             campaign_runs,
-            json,
         }) => match patina_dst_bench::qualify(iterations, campaign_runs) {
             Ok(report) => {
-                if json {
-                    println!("{}", report.json());
-                } else {
-                    println!("{}", report.render());
-                }
+                println!("{}", report.render());
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -68,7 +62,6 @@ enum Invocation {
     Run {
         iterations: usize,
         campaign_runs: usize,
-        json: bool,
     },
     Help,
 }
@@ -81,16 +74,11 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let mut json = false;
     let mut positionals: Vec<String> = Vec::new();
     for arg in args {
         let arg = arg.as_ref();
         if arg == "-h" || arg == "--help" {
             return Ok(Invocation::Help);
-        }
-        if arg == "--json" {
-            json = true;
-            continue;
         }
         // A leading `-` is a flag UNLESS it is a (negative) number, which we want
         // to reach positional parsing so it errors as "must be positive" rather
@@ -115,7 +103,6 @@ where
     Ok(Invocation::Run {
         iterations,
         campaign_runs,
-        json,
     })
 }
 
@@ -142,27 +129,7 @@ mod tests {
         Invocation::Run {
             iterations,
             campaign_runs,
-            json: false,
         }
-    }
-
-    #[test]
-    fn json_selects_machine_readable_report() {
-        assert_eq!(
-            parse_args(["--json", "10", "1"]).unwrap(),
-            Invocation::Run {
-                iterations: 10,
-                campaign_runs: 1,
-                json: true,
-            }
-        );
-        let report = patina_dst_bench::qualify(10, 1).unwrap();
-        let value = report.json();
-        assert!(value["seeded_ns_per_op"].as_f64().unwrap() > 0.0);
-        assert_eq!(
-            value["seeded_ns_per_op"].as_f64().unwrap(),
-            value["seeded_nanos"].as_f64().unwrap() / report.boundary_ops as f64
-        );
     }
 
     #[test]

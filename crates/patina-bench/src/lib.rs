@@ -147,26 +147,6 @@ impl Report {
             / (self.campaign_nanos.max(1) as f64 / 1e9)
     }
 
-    /// Machine-readable timing per boundary operation in the fixed Context mix.
-    pub fn json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "schema": "patina.context-bench/v1",
-            "iterations": self.iterations,
-            "boundary_ops": self.boundary_ops,
-            "seeded_nanos": self.seeded_nanos,
-            "record_nanos": self.record_nanos,
-            "replay_nanos": self.replay_nanos,
-            "seeded_ns_per_op": self.seeded_nanos_per_op(),
-            "record_ns_per_op": self.record_nanos_per_op(),
-            "replay_ns_per_op": self.replay_nanos_per_op(),
-            "trace_bytes": self.trace_bytes,
-            "events": self.events,
-            "bytes_per_event": self.bytes_per_event(),
-            "campaign_runs": self.campaign_runs,
-            "campaign_ops_per_sec": self.campaign_ops_per_sec(),
-        })
-    }
-
     /// Render the report as a fixed, human-readable block.
     pub fn render(&self) -> String {
         format!(
