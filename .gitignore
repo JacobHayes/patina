@@ -8,3 +8,4 @@ target
 
 # Trace-format migration fixtures are hand-built test inputs, not run outputs.
 !crates/patina-trace/tests/fixtures/*.patina
+__pycache__/
