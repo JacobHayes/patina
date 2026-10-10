@@ -89,7 +89,7 @@ WORKLOADS = (
     Workload('tcp', 'bench', ('tcp', '--iters', '{n}'), 'BENCH_RESULT', count=25_000),
     *(Workload(f'doors-{kind}', 'bench',
                ('doors', '--class', kind, '--iters', '{n}', '--dir', '{dir}'),
-               'BENCH_RESULT', count={'sync': 5_000_000, 'pread': 32_000}.get(kind, 100_000), hot_path=True)
+               'BENCH_RESULT', count={'sync': 5_000_000, 'pread': 128_000}.get(kind, 100_000), hot_path=True)
       for kind in ('sync', 'clock', 'mutex', 'pipe', 'pread')),
     Workload('context', 'context', ('2000', '1'), 'CONTEXT_RESULT',
              native_unsupported='explicit Context benchmark; compare Patina builds', hot_path=True),
