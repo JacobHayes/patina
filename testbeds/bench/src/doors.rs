@@ -82,10 +82,12 @@ pub fn run(class: &str, iters: u64, dir: Option<&Path>) -> Result<(u64, u64), St
             let dir = dir.ok_or("cached pread needs --dir")?;
             fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             let path = dir.join("doors-cache");
-            let expected = [0xa5; 4096];
+            // Small reads keep the class about the door, not the copy, and keep
+            // the recorded operation-count trace within its size budget.
+            let expected = [0xa5; 512];
             fs::write(&path, expected).map_err(|e| e.to_string())?;
             let file = File::open(&path).map_err(|e| e.to_string())?;
-            let mut buffer = [0; 4096];
+            let mut buffer = [0; 512];
             // Prime the cache outside the loop.
             file.read_exact_at(&mut buffer, 0)
                 .map_err(|e| e.to_string())?;

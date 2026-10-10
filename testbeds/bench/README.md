@@ -35,7 +35,7 @@ under the workload's name, echoes it as `BENCH_VIOLATION`, and exits 1.
 hot-path class per invocation. Sync calls `getpid` (checking identity without
 hashing it); clock checks monotonic `clock_gettime`; mutex does uncontended
 pthread lock/unlock; pipe writes then reads eight bytes on the same thread;
-pread repeatedly reads and checks a primed 4 KiB file. Setup runs before the
+pread repeatedly reads and checks a primed 512-byte file. Setup runs before the
 loop. Each result also includes its class and logical libc call count (`ops`);
 mutex and pipe count both doors per iteration. Every class gets its own gated
 series, so another class cannot dilute a regression. `--help` prints usage.
