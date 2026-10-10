@@ -530,6 +530,8 @@ fn gateway<T>(invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>) -> R
     let context = guard.as_mut().ok_or(ENOSYS)?;
     crate::charge::flush(context);
     let result = if thread::in_state_section() {
+        #[cfg(target_os = "linux")]
+        thread::timers::apply_parked_alarm(context);
         context.in_embedder_section(invoke)
     } else {
         invoke(context)
@@ -651,6 +653,8 @@ pub(crate) fn with_context_msg<T>(
         .ok_or_else(|| "Patina context is not installed".to_string())?;
     crate::charge::flush(context);
     let result = if thread::in_state_section() {
+        #[cfg(target_os = "linux")]
+        thread::timers::apply_parked_alarm(context);
         context.in_embedder_section(invoke)
     } else {
         invoke(context)

@@ -40,6 +40,11 @@ use crate::neg_errno as errno;
 use crate::{EBADF, EFAULT, uaccess};
 use patina_dst_abi::SignalTarget;
 
+mod alarm;
+pub(crate) use alarm::apply_parked_alarm;
+pub(super) use alarm::flush_parked_alarm;
+use alarm::{AlarmUpdate, park_alarm};
+
 /// `hrtimer_forward`: move `expires` by whole `interval`s until it lies
 /// after `now`, answering how many it moved (0 when it already does).
 fn forward(expires: &mut u64, now: u64, interval: u64) -> u64 {
@@ -347,9 +352,9 @@ impl ThreadRuntime {
     /// reached fires. Every clock is read before anything changes, so an
     /// error leaves the timers and signals as they were; past the reads the
     /// transition cannot fail. Answers the generations to record, in order,
-    /// and the tasks to wake once the lock is released. A closed timer
-    /// descriptor its last reader's wake frees still republishes the alarm
-    /// through the runtime context.
+    /// and the tasks to wake once the lock is released. Touches no runtime
+    /// context: a closed timer descriptor its last reader's wake frees parks
+    /// its alarm change ([`park_alarm`]).
     fn fire_timers_at(
         &mut self,
         now: &mut impl FnMut(Line) -> Result<u64, c_int>,
@@ -473,6 +478,15 @@ impl ThreadRuntime {
         Some((target, Info::timer(sig, id, value, generation)))
     }
 
+    /// What the runtime context should hold for the timers as they are now
+    /// ([`AlarmUpdate`]). Touches no context.
+    fn alarm_update(&self) -> AlarmUpdate {
+        AlarmUpdate {
+            deadline: self.timers.alarm(&self.signals),
+            cpu: self.timers.cpu_alarms(),
+        }
+    }
+
     /// Publish the earliest monotonic deadline, which a charge never moves
     /// the clock past (`Context::set_alarm`), and the earliest CPU-time
     /// deadlines, which an escalated poll charges up to
@@ -480,14 +494,18 @@ impl ThreadRuntime {
     /// a door's return checks its thread's charge against
     /// (`crate::charge::timers_due`).
     fn publish_alarm(&self) {
-        let alarm = self.timers.alarm(&self.signals);
-        let cpu = self.timers.cpu_alarms();
+        let update = self.alarm_update();
         let _ = with_context_raw(|context| {
-            context.set_alarm(alarm);
-            context.set_cpu_alarms(cpu);
-            crate::charge::set_thread_alarms(|threads| self.timers.thread_cpu_alarms(threads));
+            update.apply(context);
+            self.publish_thread_alarms();
             Ok(())
         });
+    }
+
+    /// Publish the thread-clock deadlines, which the shim keeps
+    /// (`crate::charge::set_thread_alarms`) and only a gateway reads.
+    fn publish_thread_alarms(&self) {
+        crate::charge::set_thread_alarms(|threads| self.timers.thread_cpu_alarms(threads));
     }
 
     /// Before the scheduler picks the next task: fire what is due, and while
@@ -1328,7 +1346,8 @@ impl ThreadRuntime {
             .is_some_and(|timer| !timer.open && timer.waiters.is_empty())
         {
             self.timers.fds.remove(&handle);
-            self.publish_alarm();
+            self.publish_thread_alarms();
+            park_alarm(self.alarm_update());
         }
     }
 }

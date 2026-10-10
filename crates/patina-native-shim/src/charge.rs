@@ -357,7 +357,9 @@ static ROOM: Room = Room {
 
 /// The earliest thread-clock timer deadlines of each thread that has one,
 /// published with the process's (`publish_alarm`) under the Context lock,
-/// which [`note_room`] holds too.
+/// which [`note_room`] holds too, or ahead of them by a transition that parks
+/// the process's for the thread runtime holder's next gateway, which applies
+/// them before its [`note_room`].
 #[cfg(target_os = "linux")]
 static THREAD_ALARMS: SpinMutex<Vec<(TaskId, CpuAlarms)>> = SpinMutex::new(Vec::new());
 

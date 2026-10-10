@@ -214,6 +214,9 @@ impl std::ops::DerefMut for StateGuard {
 
 impl Drop for StateGuard {
     fn drop(&mut self) {
+        // Still a section, so the gateway runs it as one.
+        #[cfg(target_os = "linux")]
+        super::timers::flush_parked_alarm();
         SECTION.with(|depth| depth.set(depth.get() - 1));
     }
 }
