@@ -71,6 +71,9 @@ pub(super) struct Baseline {
     /// like a mode: a surviving entry keeps its live attributes, a resurrected
     /// one the durable baseline's.
     pub(super) xattrs: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
+    /// The node each name held, by path, for every entry: a crash asks whether
+    /// a name still holds the SAME node, never just whether the name exists.
+    pub(super) inodes: BTreeMap<String, u64>,
 }
 
 /// Snapshot a filesystem into a durable baseline: directories, file contents,
@@ -95,6 +98,7 @@ pub(super) fn enumerate(fs: &MemFs) -> Baseline {
                 btime_nanos: metadata.btime_nanos,
             },
         );
+        baseline.inodes.insert(path.clone(), metadata.ino);
         // A symlink leaf has no mode of its own; every other kind does.
         if metadata.kind != FsEntryKind::Symlink {
             baseline.modes.insert(path.clone(), metadata.mode);

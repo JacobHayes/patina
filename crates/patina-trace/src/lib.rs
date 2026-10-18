@@ -33,8 +33,8 @@ pub use crash_restart::CrashRestartSegments;
 pub use digest::Sha256Digest;
 pub use file_lock::{create_scratch, lock_exclusive, lock_shared, path_names, remove_dead_scratch};
 pub use handoff::{
-    HandoffConsumedState, HandoffError, HandoffSealKey, IncarnationHandoff,
-    MAX_HANDOFF_PAYLOAD_BYTES, VerifiedIncarnationHandoff,
+    CrashReport, HandoffConsumedState, HandoffError, HandoffSealKey, IncarnationHandoff,
+    MAX_CRASH_REPORT_REASON_BYTES, MAX_HANDOFF_PAYLOAD_BYTES, VerifiedIncarnationHandoff,
 };
 pub use lifecycle::{LifecycleEvent, LifecycleEventKind};
 pub use metadata::{

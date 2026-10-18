@@ -110,6 +110,14 @@ impl From<patina_dst_trace::CrashPointRecord> for CrashPoint {
     }
 }
 
+/// An embedder's channel for telling its supervisor that the selected crash
+/// point was reached. [`Context::maybe_inject_crash`] calls it before anything
+/// that carries the crash out (the export, the recording flush), so a
+/// supervisor learns of the attempt even when one of those kills the process.
+pub trait CrashAttemptSink: Send {
+    fn attempting(&mut self, selector: CrashPoint);
+}
+
 /// Per-operation-kind occurrence counters used to fire a crash at the Nth
 /// boundary op of a chosen kind.
 #[derive(Clone, Copy, Debug, Default)]
@@ -128,7 +136,8 @@ impl Context {
     /// boundary operation is the selected Nth occurrence. The triggering guest
     /// call must never return: reaching the selected point produces an internal
     /// incarnation-termination control carrying the recovered durable snapshot
-    /// for the native shim/supervisor handoff. Manual [`Context::fs_crash`] keeps
+    /// for the native shim/supervisor handoff, or [`RuntimeError::FsCrashFailed`]
+    /// when the crash cannot be carried out. Manual [`Context::fs_crash`] keeps
     /// its explicit rollback-in-place semantics and does not route here.
     pub(super) fn maybe_inject_crash(&mut self, op: CrashOp) -> Result<(), RuntimeError> {
         if self.crash_fired {
@@ -159,21 +168,22 @@ impl Context {
             return Ok(());
         }
 
+        // The crash is spent whether or not it can be carried out: a failed
+        // one ends the run as `FsCrashFailed`.
         self.crash_fired = true;
-        let snapshot_bytes = self
-            .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .crash_and_export_restart_snapshot()?;
-        let snapshot = FsSnapshot::decode(&snapshot_bytes).map_err(|error| {
-            RuntimeError::Config(format!(
-                "filesystem driver exported an invalid crash-restart snapshot: {error}"
-            ))
-        })?;
-        // The crash ends this incarnation's process without finalization, so its
-        // recording (which ends with the triggering operation) is written now;
-        // the supervisor joins it with the next incarnation's.
+        if let Some(sink) = self.crash_attempt_sink.as_mut() {
+            sink.attempting(point);
+        }
+        let snapshot = self.crash_restart_snapshot();
+        // The crash, carried out or not, ends this incarnation's process
+        // without finalization, so its recording (which ends with the
+        // triggering operation) is written now: the supervisor joins it with
+        // the next incarnation's, or keeps it as the failed crash's replay.
         self.flush_recording();
+        let snapshot = snapshot.map_err(|reason| RuntimeError::FsCrashFailed {
+            selector: point,
+            reason,
+        })?;
         Err(RuntimeError::InjectedFsCrash(Box::new(InjectedFsCrash {
             compatibility_fingerprint: self.execution_fingerprint().to_string(),
             from_incarnation: self.incarnation,
@@ -185,6 +195,22 @@ impl Context {
             },
             snapshot,
         })))
+    }
+
+    /// Crash the filesystem and export the recovered durable image. The error
+    /// is a bare reason, not an [`EffectError`], so no caller can hand it to
+    /// the guest as an errno: [`Context::maybe_inject_crash`] makes it the
+    /// run's [`RuntimeError::FsCrashFailed`].
+    fn crash_restart_snapshot(&mut self) -> Result<FsSnapshot, String> {
+        let bytes = self
+            .filesystem
+            .as_mut()
+            .ok_or_else(|| EffectError::missing_driver("filesystem").to_string())?
+            .crash_and_export_restart_snapshot()
+            .map_err(|error| error.to_string())?;
+        FsSnapshot::decode(&bytes).map_err(|error| {
+            format!("filesystem driver exported an invalid crash-restart snapshot: {error}")
+        })
     }
 }
 

@@ -40,7 +40,27 @@ The current seal is deliberately exposed as a `seal` / `open` API with a `Handof
 
 ## Native supervision
 
-The runtime turns a reached selector into an internal uncatchable termination control after the selected successful boundary operation. The shim seals the handoff and terminates with `_exit`; the supervisor validates the handoff and starts exactly one fresh incarnation with the snapshot as its base image and clean descriptor state. Both incarnations get the same configuration and seed; a run has one crash selector, and incarnation 0 is the one it fires in, so every later incarnation starts with the selector already consumed. An armed selector that is never reached is a named runtime error (`PATINA_FS_CRASH_SELECTOR_UNREACHED`), and a corrupt handoff is a named supervisor error (`PATINA_FS_CRASH_INVALID_HANDOFF`). When swarm deselects the crash class the selector is not armed, and the run is an ordinary single-incarnation run.
+The runtime turns a reached selector into an internal uncatchable termination control after the selected successful boundary operation. The shim seals the handoff and terminates with `_exit`; the supervisor validates the handoff and starts exactly one fresh incarnation with the snapshot as its base image and clean descriptor state. Both incarnations get the same configuration and seed; a run has one crash selector, and incarnation 0 is the one it fires in, so every later incarnation starts with the selector already consumed. When swarm deselects the crash class the selector is not armed, and the run is an ordinary single-incarnation run.
+
+An armed selector that is never reached is a named runtime error (`PATINA_FS_CRASH_SELECTOR_UNREACHED`), and a corrupt handoff is a named supervisor error (`PATINA_FS_CRASH_INVALID_HANDOFF`).
+
+### Crash reports
+
+Incarnation 0 reports its crash on a supervisor-owned pipe (`PATINA_CRASH_REPORT_FD`) as framed `CrashReport` records, and the supervisor decides from these reports alone whether a crash was attempted, never from an exit status the guest could also produce. A pipe write is subject to neither a file size limit nor `SIGXFSZ`.
+
+- `Attempting` goes out as soon as the runtime selects the crash point, before the snapshot export and before any recording I/O.
+- `HandedOver` follows once the sealed handoff is written in full.
+- `Failed(reason)` follows when recovery, the snapshot export or the handoff fails. The shim then aborts; when the pipe cannot take the report it names the failure on stderr instead.
+
+### A crash that fails
+
+A reached selector whose crash cannot be carried out is an infra refusal, never an errno handed to the guest. `Attempting` followed by `Failed`, `Attempting` with no outcome (the incarnation died carrying the crash out), and bytes that are not whole reports all count as a failed crash. The supervisor:
+
+- names the refusal (`PATINA_INFRA fs_crash_failed`, refusal class `fs_crash_failed`, campaign class `INFRA`);
+- reports `crash_restart.attempted = true`, `reached = false` and `terminal_outcome.kind = "crash_failed"`;
+- keeps a recorded run's trace, which incarnation 0 writes as it would for a crash that succeeds.
+
+The trace records the guest's operations, not the outcome of the crash. A replay reaches the same refusal when the failure follows from the run itself, such as a snapshot over the export limit. A failure caused by a host condition, such as a handoff write under a file size limit, recurs only under the same condition. Replayed without it, the crash succeeds where the recording's did not, and the replay reports `replay_diverged`.
 
 ## Record and replay
 

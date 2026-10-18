@@ -35,7 +35,12 @@
 //!   creation, unlink, or rename that has not been committed by a
 //!   `sync_directory` of the governing directory may be lost on crash per
 //!   `directory_loss_probability` — the classic "you must fsync the directory"
-//!   bug class.
+//!   bug class. A lost change changes nothing: a lost unlink leaves the name
+//!   holding the node it removed, so the name comes back only where the crash
+//!   kept it (its durable entry, or a creation that survived), and a lost
+//!   creation leaves whatever the name held before it. A temp file whose
+//!   creation was lost too stays gone; a reused journal name whose unlink and
+//!   re-creation were both lost holds the first journal.
 //!
 //! Files, directories, symlinks, named pipes, socket nodes and whiteouts are all
 //! carried through the durable baseline and recomputed on crash with the same
@@ -44,9 +49,13 @@
 //! so a crash drops them exactly as a real one does. Timestamps are restored
 //! from the last durability point (an fsync of the node, or the baseline).
 //! Permission bits and extended attributes are taken to be durable the moment
-//! they change: a surviving entry keeps its live mode and attributes, and only
-//! an entry the crash brought back (a lost rename, exchange or removal) gets
-//! the baseline's. Hard-link groups — of any
+//! they change, and belong to the node, not the name: a rebuilt name whose
+//! node the live image still holds (through any name, or only a descriptor)
+//! gets that node's live mode and attributes, and only a node the live image
+//! no longer holds gets what was last recorded for it (its removal's record,
+//! else the baseline's). Every name of one node therefore restores the same
+//! metadata, and a name is matched to the baseline by node identity, never by
+//! the name alone. Hard-link groups — of any
 //! non-directory kind, a symlink's included — are reconstructed as one inode
 //! per surviving source inode, so shared `nlink` identity survives crash
 //! recovery.

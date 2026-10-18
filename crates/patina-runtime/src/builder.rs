@@ -16,7 +16,7 @@ use crate::replay::{
 };
 use crate::schedule::ScheduleTracker;
 use crate::swarm::apply_swarm_mask;
-use crate::{Context, FactsSink, RuntimeError, TornGranularity, facts};
+use crate::{Context, CrashAttemptSink, FactsSink, RuntimeError, TornGranularity, facts};
 use patina_dst_abi::ClockKind;
 use patina_dst_driver_api::{ClockDriver, EntropyDriver, FsDriver, NetDriver, SchedulerDriver};
 use patina_dst_fs_crash::CrashFs;
@@ -59,6 +59,7 @@ pub struct RuntimeBuilder {
     /// Byte channel for the run's structured facts document, for embedders whose
     /// guest cannot write a host file directly (the native shim).
     facts_sink: Option<Box<dyn FactsSink>>,
+    crash_attempt_sink: Option<Box<dyn CrashAttemptSink>>,
 }
 
 impl RuntimeBuilder {
@@ -75,6 +76,7 @@ impl RuntimeBuilder {
             scheduler: None,
             network: None,
             facts_sink: None,
+            crash_attempt_sink: None,
         }
     }
 
@@ -83,6 +85,13 @@ impl RuntimeBuilder {
     /// destinations would mean one silently wins, so `build` refuses both.
     pub fn with_facts_sink(mut self, sink: impl FactsSink + 'static) -> Self {
         self.facts_sink = Some(Box::new(sink));
+        self
+    }
+
+    /// Install the channel told when the selected `--fs-crash-at` point is
+    /// reached, before the crash is carried out (see [`CrashAttemptSink`]).
+    pub fn with_crash_attempt_sink(mut self, sink: impl CrashAttemptSink + 'static) -> Self {
+        self.crash_attempt_sink = Some(Box::new(sink));
         self
     }
 
@@ -694,6 +703,7 @@ impl RuntimeBuilder {
             // A run has one crash selector and incarnation 0 is the one it
             // fires in; every later incarnation starts after it has fired.
             crash_fired: self.config.incarnation > 0,
+            crash_attempt_sink: self.crash_attempt_sink.take(),
             incarnation: self.config.incarnation,
             require_crash_selector_reached: self.config.require_crash_selector_reached,
             sleep_jitter_nanos: self.config.faults.clock.sleep_jitter_nanos,

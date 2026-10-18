@@ -1,8 +1,8 @@
 //! Namespace journaling, directory durability, and survivor paths.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use patina_dst_abi::{EffectError, ErrorCode, FsEntryKind};
+use patina_dst_abi::{EffectError, ErrorCode, FsEntryKind, FsMetadata};
 use patina_dst_driver_api::{DriverResult, FsDriver};
 
 use crate::CrashFs;
@@ -19,7 +19,7 @@ pub(super) enum PendingKind {
     },
     Remove {
         path: String,
-        kind: FsEntryKind,
+        removed: Box<Removed>,
     },
     Rename {
         from: String,
@@ -34,6 +34,23 @@ pub(super) enum PendingKind {
         first: String,
         second: String,
     },
+}
+
+/// The node a name held when it was removed. A crash that loses the removal
+/// leaves the name holding this node, which the live image no longer has, so
+/// reconstruction reads the node off this record.
+#[derive(Clone, Debug)]
+pub(super) struct Removed {
+    pub(super) metadata: FsMetadata,
+    pub(super) xattrs: BTreeMap<String, Vec<u8>>,
+    /// A symlink's target; `None` for every other kind.
+    pub(super) target: Option<String>,
+}
+
+impl Removed {
+    pub(super) fn kind(&self) -> FsEntryKind {
+        self.metadata.kind
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -131,27 +148,62 @@ impl Survivors {
     }
 }
 
-/// Names whose DURABLE entry a crash brought back: the source and destination
-/// of a rename or an exchange the crash lost, a removal it lost. The live image
-/// may hold a different node at such a name (the moved one, a replacement), so
-/// reconstruction reads the name's entry off the durable baseline — until a
-/// later surviving change puts a live entry there again.
+/// Names whose live entry a crash overruled. A lost rename, exchange or
+/// removal brings back a name's DURABLE entry: the live image may hold a
+/// different node at such a name (the moved one, a replacement), so
+/// reconstruction reads the entry off the durable baseline. A lost removal of
+/// a node the baseline does not hold at that name keeps the node it took
+/// away. Either holds until a later surviving change puts a live entry there
+/// again.
 #[derive(Default)]
-pub(super) struct Reverted(BTreeSet<String>);
+pub(super) struct Reverted {
+    durable: BTreeSet<String>,
+    /// The node a lost removal left at each name, by inode.
+    kept: BTreeMap<String, u64>,
+    /// The last [`Removed`] record of each removed node: what the node was
+    /// when its last name went, for a node the live image no longer holds.
+    records: BTreeMap<u64, Removed>,
+}
 
 impl Reverted {
     pub(super) fn bring_back(&mut self, root: &str) {
-        self.0.insert(root.to_owned());
+        self.durable.insert(root.to_owned());
+    }
+
+    /// A lost removal left `path` holding the node it took away, which the
+    /// durable baseline does not hold there.
+    pub(super) fn keep(&mut self, path: &str, removed: &Removed) {
+        self.kept.insert(path.to_owned(), removed.metadata.ino);
+        self.remember(removed);
+    }
+
+    /// A removal took `removed`'s node, whether or not the removal or the
+    /// name survives the crash: its record is the node's last known state,
+    /// for whichever name brings back a node the live image no longer holds.
+    pub(super) fn remember(&mut self, removed: &Removed) {
+        self.records.insert(removed.metadata.ino, removed.clone());
     }
 
     /// A surviving change put a live entry at `root`: nothing at or beneath it
-    /// is the durable entry any more.
+    /// is the durable or a kept entry any more.
     pub(super) fn forget(&mut self, root: &str) {
-        self.0.retain(|path| !within(path, root));
+        self.durable.retain(|path| !within(path, root));
+        self.kept.retain(|path, _| !within(path, root));
     }
 
+    /// Whether the live entry at `path` is not the one that survived.
     pub(super) fn covers(&self, path: &str) -> bool {
-        self.0.iter().any(|root| within(path, root))
+        self.kept.contains_key(path) || self.durable.iter().any(|root| within(path, root))
+    }
+
+    /// The node a lost removal left at `path`.
+    pub(super) fn kept(&self, path: &str) -> Option<&Removed> {
+        self.kept.get(path).and_then(|ino| self.records.get(ino))
+    }
+
+    /// What node `ino` was when a removal last took it.
+    pub(super) fn record(&self, ino: u64) -> Option<&Removed> {
+        self.records.get(&ino)
     }
 }
 

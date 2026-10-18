@@ -419,6 +419,13 @@ liveness-safe."
                 .env(patina_dst_runtime::ENV_HANDOFF_KEY, key);
             fds.push(file.as_raw_fd());
         }
+        if let Some(pipe) = launch.crash_report {
+            command.env(
+                patina_dst_runtime::ENV_CRASH_REPORT_FD,
+                pipe.as_raw_fd().to_string(),
+            );
+            fds.push(pipe.as_raw_fd());
+        }
         // A restarted incarnation boots from the recovered filesystem instead of
         // the run's base image.
         match (launch.restart_snapshot, &image_file) {
@@ -473,6 +480,7 @@ liveness-safe."
             incarnation: 0,
             trace,
             handoff: None,
+            crash_report: None,
             restart_snapshot: None,
         })?;
         // Starvation stall backstop (diagnostic, NOT a liveness guarantee; armed only

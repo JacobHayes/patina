@@ -27,6 +27,78 @@ const MAX_FINGERPRINT_BYTES: u64 = 64 * 1024;
 const DIGEST_LEN: usize = 32;
 const SEAL_LEN: usize = 32;
 
+const REPORT_MAGIC: &[u8; 12] = b"PATINA-CR-v1";
+const REPORT_HEADER_LEN: usize = REPORT_MAGIC.len() + 1 + 8;
+
+/// The longest failure reason a [`CrashReport`] carries: every report of one
+/// incarnation fits a pipe's buffer, so the reporter never blocks on a
+/// supervisor that reads only after it exits.
+pub const MAX_CRASH_REPORT_REASON_BYTES: usize = 4096;
+
+/// What an incarnation reports about its selected crash, in order, on the
+/// crash-report channel: a pipe its supervisor gives it, which neither a file
+/// size limit nor `SIGXFSZ` reaches. `Attempting` goes out before anything
+/// that can fail; the supervisor decides from these reports alone whether a
+/// crash was attempted and how it ended, never from an exit status the guest
+/// could also produce.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CrashReport {
+    /// The selected crash point was reached.
+    Attempting,
+    /// The sealed handoff was written in full.
+    HandedOver,
+    /// The crash could not be carried out, and why.
+    Failed(String),
+}
+
+impl CrashReport {
+    /// The framed record: magic, tag, length, and the reason for `Failed`
+    /// (cut to [`MAX_CRASH_REPORT_REASON_BYTES`] at a character boundary).
+    pub fn encode(&self) -> Vec<u8> {
+        let (tag, payload) = match self {
+            Self::Attempting => (0_u8, ""),
+            Self::HandedOver => (1, ""),
+            Self::Failed(reason) => {
+                let mut end = reason.len().min(MAX_CRASH_REPORT_REASON_BYTES);
+                while !reason.is_char_boundary(end) {
+                    end -= 1;
+                }
+                (2, &reason[..end])
+            }
+        };
+        let mut bytes = Vec::with_capacity(REPORT_HEADER_LEN + payload.len());
+        bytes.extend_from_slice(REPORT_MAGIC);
+        bytes.push(tag);
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(payload.as_bytes());
+        bytes
+    }
+
+    /// Every report on a channel, in order, or `None` when its bytes are not
+    /// exactly a sequence of whole reports.
+    pub fn decode_all(mut bytes: &[u8]) -> Option<Vec<Self>> {
+        let mut reports = Vec::new();
+        while !bytes.is_empty() {
+            let rest = bytes.strip_prefix(REPORT_MAGIC.as_slice())?;
+            let (&tag, rest) = rest.split_first()?;
+            let (len, rest) = rest.split_first_chunk::<8>()?;
+            let len = usize::try_from(u64::from_le_bytes(*len)).ok()?;
+            if len > MAX_CRASH_REPORT_REASON_BYTES || len > rest.len() {
+                return None;
+            }
+            let (payload, rest) = rest.split_at(len);
+            reports.push(match (tag, payload.is_empty()) {
+                (0, true) => Self::Attempting,
+                (1, true) => Self::HandedOver,
+                (2, _) => Self::Failed(std::str::from_utf8(payload).ok()?.to_owned()),
+                _ => return None,
+            });
+            bytes = rest;
+        }
+        Some(reports)
+    }
+}
+
 /// Supervisor key for the handoff seal.
 ///
 /// This is a domain-separated keyed SHA-256 integrity check, not an HMAC and not
@@ -518,5 +590,36 @@ mod tests {
             IncarnationHandoff::open(&encoded, &key()),
             Err(HandoffError::Snapshot(_))
         ));
+    }
+
+    /// Reports read back in order only when the channel holds whole ones:
+    /// a report cut short, or bytes that are no report, read as nothing.
+    #[test]
+    fn crash_reports_read_back_only_whole() {
+        let mut channel = CrashReport::Attempting.encode();
+        channel.extend(CrashReport::Failed("export failed".into()).encode());
+        assert_eq!(
+            CrashReport::decode_all(&channel),
+            Some(vec![
+                CrashReport::Attempting,
+                CrashReport::Failed("export failed".into())
+            ])
+        );
+        assert_eq!(CrashReport::decode_all(&[]), Some(Vec::new()));
+        assert_eq!(CrashReport::decode_all(&channel[..channel.len() - 1]), None);
+        let mut after_garbage = MAGIC.to_vec();
+        after_garbage.extend_from_slice(&channel);
+        assert_eq!(CrashReport::decode_all(&after_garbage), None);
+    }
+
+    /// A long reason is cut so one incarnation's reports fit a pipe buffer.
+    #[test]
+    fn a_crash_report_reason_is_bounded() {
+        let encoded = CrashReport::Failed("é".repeat(MAX_CRASH_REPORT_REASON_BYTES)).encode();
+        let reports = CrashReport::decode_all(&encoded);
+        let Some([CrashReport::Failed(reason)]) = reports.as_deref() else {
+            panic!("the bounded report did not read back: {reports:?}");
+        };
+        assert!(reason.len() <= MAX_CRASH_REPORT_REASON_BYTES);
     }
 }

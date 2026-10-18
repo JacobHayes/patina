@@ -817,4 +817,296 @@ fn main() {
             "directory-fsync trace replay diverged"
         );
     }
+
+    /// Build the native guest `source` into `directory` as `name`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn build_native_guest(directory: &Path, name: &str, source: &str) -> PathBuf {
+        let source_path = directory.join(format!("{name}.rs"));
+        fs::write(&source_path, source).unwrap();
+        let bin = directory.join(name);
+        invoke(
+            native_workspace(),
+            &[
+                "build",
+                source_path.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        bin
+    }
+
+    /// The `--format json` envelope of a run that may fail.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn run_envelope(arguments: &[&str]) -> serde_json::Value {
+        let output = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            native_workspace(),
+            arguments,
+        );
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "no JSON envelope: {error}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+    }
+
+    // A log fsynced record by record around one removal step: a temp file
+    // or a temp directory created and removed, as a dropped `TempDir` does.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const REMOVAL_THEN_CRASH_SOURCE: &str = r#"
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+
+fn append(log: &mut File, n: u32) {
+    log.write_all(format!("record {n}\n").as_bytes()).unwrap();
+    log.sync_all().unwrap();
+}
+
+fn main() {
+    if let Ok(log) = fs::read_to_string("log") {
+        println!("RESTARTED records={}", log.lines().count());
+        return;
+    }
+    let step = std::env::args().nth(1).unwrap_or_default();
+    let mut log = OpenOptions::new().create(true).append(true).open("log").unwrap();
+    for n in 0..5 { append(&mut log, n); }
+    match step.as_str() {
+        "empty-dir" => { fs::create_dir("scratch").unwrap(); fs::remove_dir("scratch").unwrap(); }
+        "dir-with-file" => { fs::create_dir("scratch").unwrap(); File::create("scratch/f").unwrap(); fs::remove_dir_all("scratch").unwrap(); }
+        "file" => { File::create("f").unwrap(); fs::remove_file("f").unwrap(); }
+        _ => {}
+    }
+    for n in 5..10 { append(&mut log, n); }
+    println!("NO_CRASH");
+}
+"#;
+
+    /// A crash point after a removal still fires: whatever the guest removed
+    /// before it, the run crashes at the eighth fsync and restarts holding the
+    /// eight records fsynced by then.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_fs_crash_point_after_a_removal_fires_and_restarts() {
+        let directory = tempdir().unwrap();
+        let bin = build_native_guest(directory.path(), "removal", REMOVAL_THEN_CRASH_SOURCE);
+        for step in ["none", "empty-dir", "dir-with-file", "file"] {
+            let envelope = run_envelope(&[
+                "run",
+                bin.to_str().unwrap(),
+                "--seed",
+                "1",
+                "--fs-crash-at",
+                "sync:8",
+                "--format",
+                "json",
+                "--",
+                step,
+            ]);
+            let crash = &envelope["crash_restart"];
+            assert_eq!(crash["reached"], true, "{step}: {envelope:#}");
+            assert_eq!(
+                crash["terminal_outcome"]["kind"], "completed_after_restart",
+                "{step}: {envelope:#}"
+            );
+            let stdout = envelope["stdout"].as_str().unwrap();
+            assert!(stdout.contains("RESTARTED records=8"), "{step}: {stdout}");
+        }
+    }
+
+    // A fsynced file one block past the restart snapshot's 64 MiB field
+    // limit: the crash at that fsync cannot export the recovered image.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const UNEXPORTABLE_CRASH_SOURCE: &str = r#"
+use std::fs::File;
+use std::io::Write;
+
+fn main() {
+    if File::open("/big").is_ok() {
+        println!("RESTARTED");
+        return;
+    }
+    let mut big = File::create("/big").unwrap();
+    big.write_all(&vec![7_u8; (64 << 20) + 4096]).unwrap();
+    let synced = big.sync_all();
+    println!("SYNC_RETURNED {synced:?}");
+}
+"#;
+
+    /// A crash point reached but not carried out fails closed: the run is an
+    /// infra refusal naming the driver error, the crash is attempted and not
+    /// reached, and the guest is never handed an errno for it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_fs_crash_that_cannot_be_exported_is_an_infra_refusal() {
+        let directory = tempdir().unwrap();
+        let bin = build_native_guest(directory.path(), "unexportable", UNEXPORTABLE_CRASH_SOURCE);
+        let envelope = run_envelope(&[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--fs-crash-at",
+            "sync:1",
+            "--format",
+            "json",
+        ]);
+        let stdout = envelope["stdout"].as_str().unwrap();
+        assert!(!stdout.contains("SYNC_RETURNED"), "{envelope:#}");
+        assert!(!stdout.contains("RESTARTED"), "{envelope:#}");
+        assert_eq!(envelope["result"], "infra", "{envelope:#}");
+        assert_eq!(
+            envelope["refusal"]["class"], "fs_crash_failed",
+            "{envelope:#}"
+        );
+        let refusal = envelope["refusal"]["message"].as_str().unwrap();
+        assert!(refusal.contains("sync:1"), "{refusal}");
+        let crash = &envelope["crash_restart"];
+        assert_eq!(crash["attempted"], true, "{envelope:#}");
+        assert_eq!(crash["reached"], false, "{envelope:#}");
+        assert_eq!(
+            crash["terminal_outcome"]["kind"], "crash_failed",
+            "{envelope:#}"
+        );
+    }
+
+    /// A crash that cannot be exported still leaves the record run's trace,
+    /// and replaying it reaches the same refusal.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_fs_crash_that_cannot_be_exported_records_a_replayable_refusal() {
+        let directory = tempdir().unwrap();
+        let bin = build_native_guest(directory.path(), "unexportable", UNEXPORTABLE_CRASH_SOURCE);
+        let trace = directory.path().join("unexportable.patina");
+        let recorded = run_envelope(&[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--fs-crash-at",
+            "sync:1",
+            "--record",
+            trace.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+        assert_eq!(
+            recorded["refusal"]["class"], "fs_crash_failed",
+            "{recorded:#}"
+        );
+        assert!(trace.exists(), "no trace was committed: {recorded:#}");
+        let replayed = run_envelope(&[
+            "replay",
+            bin.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+        assert_eq!(
+            replayed["refusal"]["class"], "fs_crash_failed",
+            "{replayed:#}"
+        );
+        assert_eq!(
+            replayed["crash_restart"]["terminal_outcome"]["kind"], "crash_failed",
+            "{replayed:#}"
+        );
+    }
+
+    /// A crash whose handoff cannot be written at all (the supervisor's file
+    /// size limit is zero) is still reported as a failed crash attempt,
+    /// whether the write fails with `SIGXFSZ` ignored, or `SIGXFSZ` kills the
+    /// incarnation mid-handoff or, for a record, in its trace flush.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_fs_crash_with_an_unwritable_handoff_is_an_infra_refusal() {
+        let directory = tempdir().unwrap();
+        let bin = build_native_guest(directory.path(), "removal", REMOVAL_THEN_CRASH_SOURCE);
+        let trace = directory.path().join("unwritable.patina");
+        for (xfsz, record) in [("trap '' XFSZ;", false), ("", false), ("", true)] {
+            let case = format!("{xfsz:?} record={record}");
+            let mut arguments = vec![
+                "run",
+                bin.to_str().unwrap(),
+                "--seed",
+                "1",
+                "--fs-crash-at",
+                "sync:8",
+                "--format",
+                "json",
+            ];
+            if record {
+                arguments.extend(["--record", trace.to_str().unwrap()]);
+            }
+            let output = Command::new("bash")
+                .current_dir(native_workspace())
+                .args([
+                    "-c",
+                    &format!("ulimit -f 0; {xfsz} exec \"$0\" \"$@\""),
+                    env!("CARGO_BIN_EXE_cargo-patina"),
+                ])
+                .args(&arguments)
+                .output()
+                .unwrap();
+            let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{case}: no JSON envelope: {error}\nstderr:\n{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    )
+                });
+            assert_eq!(
+                envelope["refusal"]["class"], "fs_crash_failed",
+                "{case}: {envelope:#}"
+            );
+            let crash = &envelope["crash_restart"];
+            assert_eq!(crash["attempted"], true, "{case}: {envelope:#}");
+            assert_eq!(crash["reached"], false, "{case}: {envelope:#}");
+            assert_eq!(
+                crash["terminal_outcome"]["kind"], "crash_failed",
+                "{case}: {envelope:#}"
+            );
+        }
+    }
+
+    // A guest that exits on its own with a status patina once used for a
+    // failed crash, before it reaches any crash point.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const EARLY_EXIT_SOURCE: &str = r#"
+unsafe extern "C" {
+    fn _exit(status: i32) -> !;
+}
+
+fn main() {
+    unsafe { _exit(113) }
+}
+"#;
+
+    /// Whether a crash was attempted never rests on the guest's exit status:
+    /// a guest that exits before its crash point is a run that exited
+    /// without a crash, whatever status it chose.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_fs_crash_attempt_does_not_rest_on_the_guests_exit_status() {
+        let directory = tempdir().unwrap();
+        let bin = build_native_guest(directory.path(), "early_exit", EARLY_EXIT_SOURCE);
+        let envelope = run_envelope(&[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--fs-crash-at",
+            "sync:1",
+            "--format",
+            "json",
+        ]);
+        let crash = &envelope["crash_restart"];
+        assert_eq!(crash["attempted"], false, "{envelope:#}");
+        assert_eq!(
+            crash["terminal_outcome"]["kind"], "exited_without_crash",
+            "{envelope:#}"
+        );
+        assert!(envelope["refusal"].is_null(), "{envelope:#}");
+    }
 }

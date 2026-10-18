@@ -97,6 +97,12 @@ impl MemFs {
             .unwrap_or_default()
     }
 
+    /// The extended attributes of node `ino`, named or not, WITHOUT permission
+    /// enforcement: [`MemFs::entry_xattrs`] addressed by node.
+    pub fn inode_xattrs(&self, ino: u64) -> BTreeMap<String, Vec<u8>> {
+        self.xattrs.get(&ino).cloned().unwrap_or_default()
+    }
+
     /// Write the extended attributes of the entry at `path` back verbatim —
     /// the storage layer's own setter, the mirror of [`MemFs::entry_xattrs`]
     /// for a rebuild. It stamps nothing.

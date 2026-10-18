@@ -254,6 +254,10 @@ const SHUTDOWN_FAILURE_CLASS: &str = "shutdown_failure";
 /// open, read, or rename the recorder's own scratch file. An operational
 /// condition of the host, in the same family as a timeout or an OOM kill.
 pub(super) const TRACE_UNAVAILABLE_CLASS: &str = "trace_unavailable";
+/// The refusal class for a run whose `--fs-crash-at` point was reached and
+/// whose crash patina could not carry out (recovery, snapshot export or the
+/// handoff failed). Patina's own limit, never a result about the guest.
+pub(super) const FS_CRASH_FAILED_CLASS: &str = "fs_crash_failed";
 
 /// One verdict the generation reported through the verdict ABI, reduced to what
 /// classification, signatures and `minimize`'s auto-target need. Lifted from the
@@ -602,6 +606,12 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
         // own death — so rather than naming a class outright, a guest that
         // failed falls THROUGH to the rules below, which read the exit status
         // and signal that are still its own.
+        // A crash patina could not carry out stopped the guest before it
+        // could reach a verdict of its own: the harness failing, like a
+        // timeout.
+        if class == FS_CRASH_FAILED_CLASS {
+            return CampaignClass::Infra;
+        }
         if class == TRACE_UNAVAILABLE_CLASS {
             match facts.refusal_guest_exit_code {
                 None | Some(0) => return CampaignClass::Infra,
@@ -1007,6 +1017,19 @@ mod tests {
             "CampaignClass::ALL must be in `Ord` (severity) order"
         );
         assert_eq!(CampaignClass::parse("NOT_A_CLASS"), None);
+    }
+
+    /// A crash patina could not carry out is the harness failing: INFRA, and
+    /// so no finding and no novel signature.
+    #[test]
+    fn a_failed_fs_crash_is_infra() {
+        let generation = planted(
+            RunFacts::ok().exit(113).refusal(FS_CRASH_FAILED_CLASS),
+            "PATINA_INFRA fs_crash_failed selector=sync:1 reason=\"export failed\"\n",
+        );
+        let class = classify(&generation, &ClassifyRules::default());
+        assert_eq!(class, CampaignClass::Infra);
+        assert!(!class.is_finding());
     }
 
     #[test]

@@ -116,6 +116,10 @@ const REFUSAL_CLASSES: &[(&str, &str)] = &[
     // guest's status attached. That is what lets a whole campaign's worth of
     // them collapse onto one INFRA signature instead of one finding each.
     (crate::TRACE_CHANNEL_UNAVAILABLE, "trace_unavailable"),
+    // The run reached its `--fs-crash-at` point and patina could not carry out
+    // the crash (recovering or exporting the durable image failed). The
+    // supervisor names it; the shim's abort that follows is not the guest's.
+    ("PATINA_INFRA fs_crash_failed", "fs_crash_failed"),
 ];
 
 /// Patina's own refusal for this run, or `None` when patina did not fail closed.

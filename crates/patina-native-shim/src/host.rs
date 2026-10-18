@@ -927,6 +927,20 @@ impl patina_dst_runtime::FactsSink for FdFactsSink {
     }
 }
 
+/// The supervisor's crash-report pipe (`PATINA_CRASH_REPORT_FD`), told that
+/// the selected crash point was reached. A pipe write is subject to neither a
+/// file size limit nor `SIGXFSZ`; a failed one leaves the supervisor no
+/// report, and the shim's own failure path then names the crash on stderr.
+pub(crate) struct FdCrashAttemptSink {
+    pub(crate) fd: c_int,
+}
+
+impl patina_dst_runtime::CrashAttemptSink for FdCrashAttemptSink {
+    fn attempting(&mut self, _selector: patina_dst_runtime::CrashPoint) {
+        let _ = host_write_all(self.fd, &patina_dst_trace::CrashReport::Attempting.encode());
+    }
+}
+
 /// Trace channel over a supervisor-provided host descriptor (`PATINA_TRACE_FD`).
 pub(crate) struct FdTraceTransport {
     pub(crate) fd: c_int,

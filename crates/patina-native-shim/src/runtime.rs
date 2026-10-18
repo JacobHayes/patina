@@ -223,6 +223,12 @@ pub(crate) fn runtime_errno(error: &RuntimeError) -> c_int {
         RuntimeError::ComputeStopExport
         | RuntimeError::ComputeStopOverflow
         | RuntimeError::ComputeStopState => watchdog::report_and_abort(error, None, None),
+        // The selected crash point was reached and the crash could not be
+        // carried out. That is patina's failure: an errno would hand the
+        // guest a fault it never had and let the run go on without its crash.
+        RuntimeError::FsCrashFailed { selector, reason } => {
+            refuse_failed_fs_crash(*selector, reason)
+        }
         _ if report_run_stop(error) => abort_after_flushing_output(),
         _ => error_errno(error),
     }
@@ -283,6 +289,10 @@ pub(crate) fn report_run_stop(error: &RuntimeError) -> bool {
         | RuntimeError::ComputeStopOverflow
         | RuntimeError::ComputeStopState => watchdog::report(error),
         RuntimeError::InjectedFsCrash(_) => {}
+        // Mid-run, [`runtime_errno`] refuses this before it gets here; at
+        // shutdown it is only named, and the supervisor reads the crash
+        // report's missing outcome as the failed crash it is.
+        RuntimeError::FsCrashFailed { .. } => line(format!("patina: {error}\n")),
         RuntimeError::Effect(_)
         | RuntimeError::CrashSelectorUnreached { .. }
         | RuntimeError::Config(_)
@@ -590,6 +600,32 @@ fn handoff_key_from_control() -> Result<HandoffSealKey, String> {
     Ok(HandoffSealKey::from_bytes(bytes))
 }
 
+/// Report on the supervisor's crash-report pipe, when it gave one. A pipe
+/// write is subject to neither a file size limit nor `SIGXFSZ`.
+fn report_crash(report: &patina_dst_trace::CrashReport) -> bool {
+    matches!(
+        control_crash_report_fd(),
+        Ok(Some(fd)) if host_write_all(fd, &report.encode()).is_ok()
+    )
+}
+
+/// End a run whose selected crash could not be carried out. The reason goes
+/// on the crash-report pipe, after the `Attempting` the runtime reported, for
+/// the supervisor to report the crash attempted and not reached and to name
+/// the refusal in the run's stderr. When the pipe cannot take it, the refusal
+/// goes to stderr here.
+fn refuse_failed_fs_crash(selector: patina_dst_runtime::CrashPoint, reason: &str) -> ! {
+    let _ = flush_before_refusal();
+    if !report_crash(&patina_dst_trace::CrashReport::Failed(reason.to_owned())) {
+        let error = RuntimeError::FsCrashFailed {
+            selector,
+            reason: reason.to_owned(),
+        };
+        let _ = host_write_all(2, format!("{error}\n").as_bytes());
+    }
+    crate::host_abort();
+}
+
 fn terminate_for_injected_fs_crash(error: RuntimeError) -> ! {
     let RuntimeError::InjectedFsCrash(control) = error else {
         unreachable!("caller passes only InjectedFsCrash")
@@ -602,6 +638,7 @@ fn terminate_for_injected_fs_crash(error: RuntimeError) -> ! {
         consumed,
         snapshot,
     } = *control;
+    let point = patina_dst_runtime::CrashPoint::from(selector);
     let result = (|| -> Result<(), String> {
         let fd = control_handoff_fd()
             .map_err(|error| error.to_string())?
@@ -622,12 +659,10 @@ fn terminate_for_injected_fs_crash(error: RuntimeError) -> ! {
             .map_err(|error| format!("failed to write crash-restart handoff: {error}"))?;
         Ok(())
     })();
-    if let Err(message) = result {
-        let _ = flush_captured_stdio();
-        let line = format!("PATINA_FS_CRASH_HANDOFF_ERROR {message}\n");
-        let _ = host_write_all(2, line.as_bytes());
-        crate::host_abort();
+    if let Err(reason) = result {
+        refuse_failed_fs_crash(point, &reason);
     }
+    report_crash(&patina_dst_trace::CrashReport::HandedOver);
     let _ = flush_captured_stdio();
     // SAFETY: `_exit` is the host process termination primitive. It skips guest
     // atexit handlers and Patina's normal finalization, which is exactly the
@@ -768,6 +803,20 @@ pub(crate) fn control_facts_fd() -> Result<Option<i32>, RuntimeError> {
                 RuntimeError::Config(format!(
                     "{} must be a non-negative descriptor number",
                     patina_dst_runtime::ENV_FACTS_FD
+                ))
+            })
+        })
+        .transpose()
+}
+
+pub(crate) fn control_crash_report_fd() -> Result<Option<i32>, RuntimeError> {
+    control_env(patina_dst_runtime::ENV_CRASH_REPORT_FD)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value.parse().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{} must be a non-negative descriptor number",
+                    patina_dst_runtime::ENV_CRASH_REPORT_FD
                 ))
             })
         })

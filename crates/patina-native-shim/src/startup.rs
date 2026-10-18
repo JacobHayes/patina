@@ -91,6 +91,9 @@ pub(crate) fn init_from_env() -> c_int {
         if let Some(fd) = control_facts_fd()? {
             builder = builder.with_facts_sink(FdFactsSink { fd });
         }
+        if let Some(fd) = control_crash_report_fd()? {
+            builder = builder.with_crash_attempt_sink(FdCrashAttemptSink { fd });
+        }
         builder.build()
     });
     if let Err(error) = &context {

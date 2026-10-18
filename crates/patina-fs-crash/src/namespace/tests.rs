@@ -551,3 +551,64 @@ fn a_whiteout_rename_is_all_or_nothing_across_a_crash() {
         ])
     );
 }
+
+/// Create, fsync and remove `path`: a temp file's whole life.
+fn create_and_remove(fs: &mut CrashFs, path: &str, bytes: &[u8]) {
+    let fd = write(fs, path, bytes);
+    fs.sync(fd).unwrap();
+    fs.close(fd).unwrap();
+    fs.remove_file(FsClock::EPOCH, path).unwrap();
+}
+
+/// A lost removal leaves the name holding the node it took away, so a file
+/// created and removed since the last durability point comes back exactly
+/// when its creation survived and its removal did not, with the bytes it
+/// fsynced. Nothing else brings it back, and no outcome fails the crash.
+#[test]
+fn a_removed_file_comes_back_only_where_its_creation_survived() {
+    let states = crash_states(
+        |fs| create_and_remove(fs, "/d/f", b"F"),
+        |fs| bytes_at(fs, "/d/f"),
+    );
+    assert_eq!(states, BTreeSet::from([None, Some(b"F".to_vec())]));
+}
+
+/// `remove_dir_all` of a directory holding a file, as a dropped temp
+/// directory does. With nothing committed every change is lost and nothing
+/// comes back. With both creations committed, each name comes back exactly
+/// when its own removal was lost, and a directory that comes back keeps the
+/// mode it was made with.
+#[test]
+fn a_removed_directory_with_a_file_comes_back_only_where_its_creations_survived() {
+    let temp_dir = |fs: &mut CrashFs, commit: bool| {
+        fs.create_directory(FsClock::EPOCH, "/d/s", 0o750).unwrap();
+        let fd = write(fs, "/d/s/f", b"F");
+        fs.sync(fd).unwrap();
+        fs.close(fd).unwrap();
+        if commit {
+            fs.sync_directory("/d").unwrap();
+            fs.sync_directory("/d/s").unwrap();
+        }
+        fs.remove_file(FsClock::EPOCH, "/d/s/f").unwrap();
+        fs.remove_directory(FsClock::EPOCH, "/d/s").unwrap();
+    };
+    let observe = |fs: &mut CrashFs| {
+        let mode = fs.metadata("/d/s").ok().map(|metadata| metadata.mode);
+        (mode, bytes_at(fs, "/d/s/f"))
+    };
+
+    let mut fs = lossy();
+    temp_dir(&mut fs, false);
+    fs.crash().unwrap();
+    assert_eq!(observe(&mut fs), (None, None));
+
+    let states = crash_states(|fs| temp_dir(fs, true), observe);
+    assert_eq!(
+        states,
+        BTreeSet::from([
+            (None, None),
+            (Some(0o750), None),
+            (Some(0o750), Some(b"F".to_vec())),
+        ])
+    );
+}

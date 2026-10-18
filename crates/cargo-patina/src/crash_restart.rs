@@ -2,10 +2,10 @@
 
 use crate::native_run::{NATIVE_FS_CRASH_RESTART_EXIT, TRACE_CHANNEL_UNAVAILABLE};
 use crate::{CliError, NativeRunInvocation, NativeRunMode, hex, output};
-use patina_dst_runtime::{CrashPoint, FaultKnob};
+use patina_dst_runtime::{CrashPoint, FaultKnob, RuntimeError};
 use patina_dst_trace::{
-    CrashRestartSegments, HandoffSealKey, IncarnationHandoff, Sha256Digest, TraceBundle,
-    abandoned_trace_marker, resource_limit_infra_line,
+    CrashReport, CrashRestartSegments, HandoffSealKey, IncarnationHandoff, Sha256Digest,
+    TraceBundle, abandoned_trace_marker, resource_limit_infra_line,
 };
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -115,6 +115,8 @@ pub(super) struct IncarnationLaunch<'a> {
     pub(super) trace: Option<&'a fs::File>,
     /// Incarnation 0's crash handoff channel and its seal key (hex).
     pub(super) handoff: Option<(&'a fs::File, &'a str)>,
+    /// Incarnation 0's crash-report pipe (`ENV_CRASH_REPORT_FD`).
+    pub(super) crash_report: Option<&'a std::io::PipeWriter>,
     /// The recovered filesystem a restarted incarnation boots from, in place of
     /// the run's base image.
     pub(super) restart_snapshot: Option<&'a fs::File>,
@@ -150,6 +152,7 @@ fn crash_replay_divergence(
     }
     let report = serde_json::json!({
         "selector": selector_json(selector),
+        "attempted": reached,
         "reached": reached,
         "crash_count": u8::from(reached),
         "restart_count": 0,
@@ -160,6 +163,100 @@ fn crash_replay_divergence(
         captured: first,
         report,
         trace: None,
+    }
+}
+
+/// Incarnation 0 reached its crash point and could not carry out the crash:
+/// patina's failure, so the run is an infra refusal naming `reason`, with the
+/// crash attempted and not reached, and incarnation 1 never runs.
+#[cfg(unix)]
+fn crash_failed(
+    mut first: output::Captured,
+    first_host_pid: u32,
+    selector: CrashPoint,
+    reason: &str,
+    trace: Option<Vec<u8>>,
+) -> CrashRestartRun {
+    let error = RuntimeError::FsCrashFailed {
+        selector,
+        reason: reason.to_owned(),
+    };
+    append_supervisor_line(&mut first, &error.to_string());
+    if first.exit_code == 0 {
+        first.exit_code = 2;
+    }
+    let report = serde_json::json!({
+        "selector": selector_json(selector),
+        "attempted": true,
+        "reached": false,
+        "crash_count": 0,
+        "restart_count": 0,
+        "incarnations": [{"id": 0, "host_pid": first_host_pid}],
+        "terminal_outcome": {"kind": "crash_failed", "exit_code": first.exit_code, "signal": first.signal},
+    });
+    CrashRestartRun {
+        captured: first,
+        report,
+        trace,
+    }
+}
+
+/// Everything incarnation 0 wrote to its crash-report pipe.
+#[cfg(unix)]
+fn read_crash_reports(mut reader: std::io::PipeReader) -> Result<Vec<u8>, CliError> {
+    use std::io::Read;
+
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|error| CliError(format!("failed to read the crash-report pipe: {error}")))?;
+    Ok(bytes)
+}
+
+/// Whether incarnation 0 attempted its crash, decided from its crash reports
+/// alone: `None` when it never reached the selected point, `Some(Ok(()))`
+/// when it handed over, and `Some(Err(reason))` when the crash failed. An
+/// attempt with no outcome (the incarnation died in the handoff), and bytes
+/// that are not whole reports, are failed crashes too.
+#[cfg(unix)]
+fn crash_attempt(bytes: Vec<u8>, first: &output::Captured) -> Option<Result<(), String>> {
+    let Some(reports) = CrashReport::decode_all(&bytes) else {
+        return Some(Err(format!(
+            "the crash-report pipe holds {} bytes that are not whole reports",
+            bytes.len()
+        )));
+    };
+    match reports.as_slice() {
+        [] => None,
+        [CrashReport::Attempting, CrashReport::HandedOver] => Some(Ok(())),
+        [CrashReport::Attempting, CrashReport::Failed(reason)] => Some(Err(reason.clone())),
+        [CrashReport::Attempting] => Some(Err(match first.signal {
+            Some(signal) => format!(
+                "incarnation 0 was killed by signal {signal} before reporting how its crash ended"
+            ),
+            None => format!(
+                "incarnation 0 exited with status {} before reporting how its crash ended",
+                first.exit_code
+            ),
+        })),
+        reports => Some(Err(format!(
+            "incarnation 0 reported its crash out of order: {reports:?}"
+        ))),
+    }
+}
+
+/// What a record's incarnation 0 wrote to its trace channel, for a run that
+/// ends with that incarnation.
+#[cfg(unix)]
+fn read_record_segment(
+    trace: &CrashRestartTrace,
+    channel: Option<&fs::File>,
+) -> Result<Option<Vec<u8>>, CliError> {
+    match (trace, channel) {
+        (CrashRestartTrace::Record, Some(file)) => {
+            read_scratch_file(file, "incarnation 0 trace channel").map(Some)
+        }
+        _ => Ok(None),
     }
 }
 
@@ -191,18 +288,29 @@ pub(super) fn supervise_crash_restart(
             })?,
         )?),
     };
+    let (report_reader, report_writer) = std::io::pipe()
+        .map_err(|error| CliError(format!("failed to create the crash-report pipe: {error}")))?;
     let (first, first_host_pid) = launch(IncarnationLaunch {
         incarnation: 0,
         trace: crashed_trace.as_ref(),
         handoff: Some((&handoff, &key_hex)),
+        crash_report: Some(&report_writer),
         restart_snapshot: None,
     })?;
+    // Incarnation 0 has exited: with the supervisor's own write end closed,
+    // the pipe holds everything it reported.
+    drop(report_writer);
+    let attempt = crash_attempt(read_crash_reports(report_reader)?, &first);
     let recorded_crash = match &plan.trace {
         CrashRestartTrace::Replay { crashed, restarted } => Some((crashed, restarted.as_ref())),
         CrashRestartTrace::Seeded | CrashRestartTrace::Record => None,
     };
 
-    if first.exit_code != NATIVE_FS_CRASH_RESTART_EXIT {
+    if let Some(Err(reason)) = &attempt {
+        let trace = read_record_segment(&plan.trace, crashed_trace.as_ref())?;
+        return Ok(crash_failed(first, first_host_pid, selector, reason, trace));
+    }
+    if attempt.is_none() {
         if let Some((_, Some(_))) = recorded_crash {
             let detail = format!(
                 "incarnation 0 exited with status {} before the recorded crash",
@@ -218,18 +326,14 @@ pub(super) fn supervise_crash_restart(
         }
         let report = serde_json::json!({
             "selector": selector_json(selector),
+            "attempted": false,
             "reached": false,
             "crash_count": 0,
             "restart_count": 0,
             "incarnations": [{"id": 0, "host_pid": first_host_pid}],
             "terminal_outcome": {"kind": "exited_without_crash", "exit_code": first.exit_code, "signal": first.signal},
         });
-        let trace = match (&plan.trace, &crashed_trace) {
-            (CrashRestartTrace::Record, Some(file)) => {
-                Some(read_scratch_file(file, "incarnation 0 trace channel")?)
-            }
-            _ => None,
-        };
+        let trace = read_record_segment(&plan.trace, crashed_trace.as_ref())?;
         return Ok(CrashRestartRun {
             captured: first,
             report,
@@ -314,6 +418,7 @@ pub(super) fn supervise_crash_restart(
         incarnation: 1,
         trace: restarted_trace.as_ref(),
         handoff: None,
+        crash_report: None,
         restart_snapshot: Some(&snapshot),
     })?;
 
@@ -324,6 +429,7 @@ pub(super) fn supervise_crash_restart(
     };
     let report = serde_json::json!({
         "selector": selector_json(selector),
+        "attempted": true,
         "reached": true,
         "crash_count": 1,
         "restart_count": 1,

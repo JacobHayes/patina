@@ -9,7 +9,7 @@ use patina_dst_fs_mem::BLOCK_SIZE;
 
 use crate::CrashFs;
 use crate::baseline::DurableTimes;
-use crate::namespace::{PendingKind, normalize_entry_path, swapped};
+use crate::namespace::{PendingKind, Removed, normalize_entry_path, swapped};
 
 /// The page `cachestat` counts dirty pages in: the virtual machine's.
 const DIRTY_PAGE: u64 = 4096;
@@ -184,17 +184,17 @@ impl FsDriver for CrashFs {
     }
 
     fn remove_file(&mut self, clock: FsClock, path: &str) -> DriverResult<()> {
-        // A symlink is removed through this call too, so capture the kind before
-        // it disappears to journal the correct survival set.
-        let before = self.live.metadata(path).ok();
-        let kind = before.map_or(FsEntryKind::File, |metadata| metadata.kind);
+        // A symlink is removed through this call too, so capture the node
+        // before it disappears to journal the correct survival set.
+        let removed = self.removed(path);
         self.live.remove_file(clock, path)?;
-        let normalized = normalize_entry_path(path).expect("remove normalized the path already");
+        let removed = removed.expect("the live image removed an entry that existed");
+        let ino = removed.metadata.ino;
         self.journal(PendingKind::Remove {
-            path: normalized,
-            kind,
+            path: normalize_entry_path(path).expect("remove normalized the path already"),
+            removed: Box::new(removed),
         });
-        self.forget_if_gone(before.map(|metadata| metadata.ino));
+        self.forget_if_gone(Some(ino));
         Ok(())
     }
 
@@ -279,12 +279,12 @@ impl FsDriver for CrashFs {
     }
 
     fn remove_directory(&mut self, clock: FsClock, path: &str) -> DriverResult<()> {
+        let removed = self.removed(path);
         self.live.remove_directory(clock, path)?;
-        let normalized =
-            normalize_entry_path(path).expect("remove_directory normalized the path already");
+        let removed = removed.expect("the live image removed a directory that existed");
         self.journal(PendingKind::Remove {
-            path: normalized,
-            kind: FsEntryKind::Directory,
+            path: normalize_entry_path(path).expect("remove_directory normalized the path already"),
+            removed: Box::new(removed),
         });
         Ok(())
     }
@@ -557,6 +557,16 @@ impl CrashFs {
             self.dirty.remove(&metadata.ino);
         }
         Ok(())
+    }
+
+    /// The node at `path`, as a removal about to take it would leave it.
+    fn removed(&self, path: &str) -> Option<Removed> {
+        let metadata = self.live.entry_metadata(path).ok()?;
+        Some(Removed {
+            metadata,
+            xattrs: self.live.entry_xattrs(path),
+            target: self.live.symlink_target(path),
+        })
     }
 
     /// `ino` may have lost its last name or reference: once it is gone, its

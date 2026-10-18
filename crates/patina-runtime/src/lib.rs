@@ -119,7 +119,7 @@ pub use recording::TraceTransport;
 
 pub use config_env::trace_fd_from_env;
 pub use filesystem::FsTime;
-pub use fs_crash::{CrashCounts, CrashOp, CrashPoint};
+pub use fs_crash::{CrashAttemptSink, CrashCounts, CrashOp, CrashPoint};
 
 pub use schedule::{ScheduleDiagnostics, TaskCompletionCause, TaskScheduleStat};
 
@@ -200,6 +200,12 @@ pub const ENV_FS_IMAGE_FD: &str = "PATINA_FS_IMAGE_FD";
 /// when `--fs-crash-at` fires. Only the native supervisor sets it; ordinary
 /// guest code never sees it after the startup scrub.
 pub const ENV_HANDOFF_FD: &str = "PATINA_HANDOFF_FD";
+
+/// Supervisor-owned pipe the native shim reports its selected crash on
+/// (`patina_dst_trace::CrashReport`): that it was reached, then whether the
+/// handoff went out or why the crash failed. Only the native supervisor sets
+/// it, for the incarnation the crash fires in.
+pub const ENV_CRASH_REPORT_FD: &str = "PATINA_CRASH_REPORT_FD";
 
 /// Hex-encoded 32-byte supervisor key used by the native shim to seal the
 /// crash-restart handoff written to [`ENV_HANDOFF_FD`].
@@ -634,6 +640,9 @@ pub struct Context {
     crash_at: Option<CrashPoint>,
     crash_counts: CrashCounts,
     crash_fired: bool,
+    /// Told when the selected crash point is reached, before the crash is
+    /// carried out.
+    crash_attempt_sink: Option<Box<dyn CrashAttemptSink>>,
     incarnation: u64,
     require_crash_selector_reached: bool,
     /// Inclusive `[min, max]` nanoseconds of seeded latency added to each guest
@@ -791,6 +800,15 @@ pub enum RuntimeError {
     /// filesystem image has been recovered, and no value may be returned to guest
     /// code in this incarnation.
     InjectedFsCrash(Box<InjectedFsCrash>),
+    /// A run reached its automatic crash boundary but could not carry out the
+    /// crash: recovering or exporting the durable filesystem failed. Patina's
+    /// own failure, never the guest's: it ends the run as an infra refusal with
+    /// the crash attempted and not reached, and no embedder hands the guest an
+    /// errno for it. `reason` names the driver error.
+    FsCrashFailed {
+        selector: CrashPoint,
+        reason: String,
+    },
     /// A run ended without reaching its requested automatic crash boundary.
     CrashSelectorUnreached {
         selector: CrashPoint,
@@ -876,6 +894,10 @@ impl fmt::Display for RuntimeError {
                 control.consumed.operations,
                 control.from_incarnation,
                 control.to_incarnation
+            ),
+            Self::FsCrashFailed { selector, reason } => write!(
+                f,
+                "PATINA_INFRA fs_crash_failed selector={selector} reason={reason:?}"
             ),
             Self::CrashSelectorUnreached { selector, counts } => write!(
                 f,

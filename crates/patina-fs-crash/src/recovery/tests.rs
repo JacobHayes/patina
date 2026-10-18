@@ -446,3 +446,168 @@ fn attributes_survive_a_crash_with_their_node() {
         b"v"
     );
 }
+
+fn set_xattr(fs: &mut impl FsDriver, path: &str, value: &[u8]) {
+    fs.set_xattr(
+        FsClock::EPOCH,
+        &XattrTarget::Path(path.into()),
+        "user.v",
+        value,
+        0,
+    )
+    .unwrap();
+}
+
+fn xattr(fs: &mut CrashFs, path: &str) -> Vec<u8> {
+    fs.get_xattr(&XattrTarget::Path(path.into()), "user.v")
+        .unwrap()
+}
+
+/// A journal name reused before its directory is fsynced again: the first
+/// journal's creation is durable, its unlink and the second creation are
+/// not, so the crash leaves the first journal at the name.
+#[test]
+fn a_lost_creation_leaves_the_node_a_lost_removal_kept() {
+    let mut fs = CrashFs::default();
+    let first = write(&mut fs, "/journal", b"first");
+    fs.sync(first).unwrap();
+    fs.sync_directory("/").unwrap();
+    fs.close(first).unwrap();
+    fs.remove_file(FsClock::EPOCH, "/journal").unwrap();
+    let second = write(&mut fs, "/journal", b"second");
+    fs.sync(second).unwrap();
+    fs.close(second).unwrap();
+
+    fs.crash().unwrap();
+
+    assert_eq!(fs.contents("/journal").unwrap(), b"first");
+}
+
+/// A directory removed durably, recreated, and removed again without the
+/// parent fsynced: the lost last removal leaves the recreated directory, with
+/// its own mode and attributes, not the first one's that shared its name.
+#[test]
+fn a_recreated_directory_comes_back_with_its_own_metadata() {
+    let mut base = MemFs::new();
+    base.create_directory(FsClock::EPOCH, "/d", 0o700).unwrap();
+    set_xattr(&mut base, "/d", b"old");
+    let mut fs = CrashFs::new(base);
+    fs.remove_directory(FsClock::EPOCH, "/d").unwrap();
+    fs.sync_directory("/").unwrap();
+    fs.create_directory(FsClock::EPOCH, "/d", 0o750).unwrap();
+    set_xattr(&mut fs, "/d", b"new");
+    fs.sync_directory("/").unwrap();
+    fs.sync_directory("/d").unwrap();
+    fs.remove_directory(FsClock::EPOCH, "/d").unwrap();
+
+    fs.crash().unwrap();
+
+    assert_eq!(fs.metadata("/d").unwrap().mode, 0o750);
+    assert_eq!(xattr(&mut fs, "/d"), b"new");
+}
+
+/// A lost unlink of one hard link restores the name onto the node its other
+/// link still holds, and that node's fsynced metadata wins over what the
+/// unlinked name carried when it went.
+#[test]
+fn a_restored_hard_link_keeps_its_nodes_fsynced_metadata() {
+    let mut fs = CrashFs::default();
+    let z = write(&mut fs, "/z", b"Z");
+    fs.sync(z).unwrap();
+    fs.close(z).unwrap();
+    set_xattr(&mut fs, "/z", b"old");
+    fs.link(FsClock::EPOCH, "/z", "/a").unwrap();
+    fs.sync_directory("/").unwrap();
+    fs.remove_file(FsClock::EPOCH, "/z").unwrap();
+    set_xattr(&mut fs, "/a", b"new");
+    let a = fs
+        .open(FsClock::EPOCH, "/a", OpenFlags::read_only())
+        .unwrap();
+    fs.sync(a).unwrap();
+    fs.close(a).unwrap();
+
+    fs.crash().unwrap();
+
+    assert_eq!(
+        fs.metadata("/z").unwrap().ino,
+        fs.metadata("/a").unwrap().ino
+    );
+    assert_eq!(xattr(&mut fs, "/a"), b"new");
+    assert_eq!(xattr(&mut fs, "/z"), b"new");
+}
+
+/// A lost unlink of one hard link restores the name onto a node whose
+/// timestamps were changed through the other link and never fsynced: the
+/// node's durable timestamps come back, whichever name restores them.
+#[test]
+fn a_restored_hard_link_rolls_its_nodes_timestamps_back() {
+    let mut fs = CrashFs::new(MemFs::new().with_file("/a", b"A").unwrap());
+    fs.set_times_by_path(FsClock::EPOCH, "/a", None, Some(10))
+        .unwrap();
+    fs.checkpoint();
+    fs.link(FsClock::EPOCH, "/a", "/z").unwrap();
+    fs.sync_directory("/").unwrap();
+    fs.remove_file(FsClock::EPOCH, "/z").unwrap();
+    fs.set_times_by_path(FsClock::EPOCH, "/a", None, Some(99))
+        .unwrap();
+
+    fs.crash().unwrap();
+
+    assert_eq!(
+        fs.metadata("/z").unwrap().ino,
+        fs.metadata("/a").unwrap().ino
+    );
+    assert_eq!(fs.metadata("/a").unwrap().mtime_nanos, 10);
+}
+
+/// A baseline file whose mode and attributes changed and were fsynced, then
+/// was unlinked without its parent fsynced: it comes back with them, not
+/// with the baseline's.
+#[test]
+fn a_restored_baseline_file_keeps_the_metadata_it_was_removed_with() {
+    let mut base = MemFs::new().with_file("/f", b"F").unwrap();
+    base.set_mode(FsClock::EPOCH, "/f", 0o600).unwrap();
+    set_xattr(&mut base, "/f", b"old");
+    let mut fs = CrashFs::new(base);
+    fs.set_mode(FsClock::EPOCH, "/f", 0o640).unwrap();
+    set_xattr(&mut fs, "/f", b"new");
+    let fd = fs
+        .open(FsClock::EPOCH, "/f", OpenFlags::read_only())
+        .unwrap();
+    fs.sync(fd).unwrap();
+    fs.close(fd).unwrap();
+    fs.remove_file(FsClock::EPOCH, "/f").unwrap();
+
+    fs.crash().unwrap();
+
+    assert_eq!(fs.metadata("/f").unwrap().mode, 0o640);
+    assert_eq!(xattr(&mut fs, "/f"), b"new");
+}
+
+/// A baseline file renamed, its mode and attributes changed and fsynced,
+/// then unlinked under its new name, all without the parent fsynced: the
+/// lost rename brings back the old name, and it carries the node's
+/// metadata from when the node was removed, though the name it was removed
+/// under does not survive.
+#[test]
+fn a_node_brought_back_under_another_name_keeps_its_removal_metadata() {
+    let mut base = MemFs::new().with_file("/a", b"A").unwrap();
+    base.set_mode(FsClock::EPOCH, "/a", 0o600).unwrap();
+    set_xattr(&mut base, "/a", b"old");
+    let mut fs = CrashFs::new(base);
+    fs.rename(FsClock::EPOCH, "/a", "/b").unwrap();
+    fs.set_mode(FsClock::EPOCH, "/b", 0o640).unwrap();
+    set_xattr(&mut fs, "/b", b"new");
+    let fd = fs
+        .open(FsClock::EPOCH, "/b", OpenFlags::read_only())
+        .unwrap();
+    fs.sync(fd).unwrap();
+    fs.close(fd).unwrap();
+    fs.remove_file(FsClock::EPOCH, "/b").unwrap();
+
+    fs.crash().unwrap();
+
+    assert_eq!(fs.metadata("/b").unwrap_err().code, ErrorCode::NotFound);
+    assert_eq!(fs.metadata("/a").unwrap().mode, 0o640);
+    assert_eq!(xattr(&mut fs, "/a"), b"new");
+}

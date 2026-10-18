@@ -27,6 +27,13 @@ fn is_special(kind: FsEntryKind) -> bool {
     )
 }
 
+/// What reconstruction restores onto one rebuilt name.
+struct NodeMetadata {
+    mode: Option<u32>,
+    xattrs: BTreeMap<String, Vec<u8>>,
+    times: Option<DurableTimes>,
+}
+
 impl CrashFs {
     pub(super) fn recompute_after_crash(&mut self) -> DriverResult<()> {
         let pending = self.pending.clone();
@@ -40,26 +47,34 @@ impl CrashFs {
 
         for op in &pending {
             match &op.kind {
+                // A lost creation changes nothing: whatever the
+                // reconstruction holds at the name (nothing, or a node a lost
+                // removal or rename left there) stays.
                 PendingKind::Create { path, kind } => {
-                    let survive = self.entry_survives(op.committed);
-                    let set = sets.of(*kind);
-                    if survive {
-                        set.insert(path.clone());
+                    if self.entry_survives(op.committed) {
+                        sets.of(*kind).insert(path.clone());
                         reverted.forget(path);
-                    } else {
-                        set.remove(path);
                     }
                 }
-                PendingKind::Remove { path, kind } => {
-                    // A surviving unlink persists the removal; a lost unlink
-                    // resurrects the durable entry.
+                PendingKind::Remove { path, removed } => {
+                    // A surviving unlink persists the removal. A lost one
+                    // changes nothing: a name the reconstruction has keeps the
+                    // node the removal took away (the durable entry, when the
+                    // baseline holds that node there), and a name it does not
+                    // have, a lost creation's, stays gone.
+                    // Whatever happens to the name, the record is its node's
+                    // last known state.
+                    reverted.remember(removed);
                     let persist = self.entry_survives(op.committed);
-                    let set = sets.of(*kind);
+                    let set = sets.of(removed.kind());
                     if persist {
                         set.remove(path);
-                    } else {
-                        set.insert(path.clone());
-                        reverted.bring_back(path);
+                    } else if set.contains(path) && !reverted.covers(path) {
+                        if self.durable.inodes.get(path) == Some(&removed.metadata.ino) {
+                            reverted.bring_back(path);
+                        } else {
+                            reverted.keep(path, removed);
+                        }
                     }
                 }
                 PendingKind::Rename {
@@ -294,55 +309,44 @@ impl CrashFs {
                 next.link(FsClock::EPOCH, first, path)?;
             }
         }
-        // Restore durable timestamps for the surviving baseline entries so
-        // crash reconstruction does not silently reset metadata to zero. All
-        // four are written back through the storage layer's own setter: a
+        // Restore each rebuilt node's metadata: durable timestamps, extended
+        // attributes and permission bits. All are read per NODE (see
+        // `node_metadata`), so every name of one node restores the same
+        // values. Timestamps go through the storage layer's own setter: a
         // guest-facing `set_times` would stamp `ctime` with the rebuild instant
-        // and could not restore a birth time at all.
+        // and could not restore a birth time at all. Permission bits go last,
+        // deepest name first, so a directory clamped to `0o500` cannot lock the
+        // walk out of the names beneath it.
+        let durable_times: BTreeMap<u64, DurableTimes> = self
+            .durable
+            .inodes
+            .iter()
+            .filter_map(|(path, ino)| Some((*ino, *self.durable.times.get(path)?)))
+            .collect();
+        let live_nodes: BTreeMap<u64, FsMetadata> = self
+            .live
+            .inventory()
+            .into_iter()
+            .map(|(_, metadata)| (metadata.ino, metadata))
+            .collect();
+        let mut restored_modes: BTreeMap<String, u32> = BTreeMap::new();
         // enumerate includes symlinks, unlike paths_with_modes.
-        for path in enumerate(&next).times.keys() {
-            let live = self.live_entry(path, &reverted);
-            let source_ino = live
-                .map(|m| m.ino)
-                .or_else(|| self.durable.files.get(path).map(|f| f.inode))
-                .or_else(|| self.durable.symlinks.get(path).map(|link| link.inode))
-                .or_else(|| self.durable.specials.get(path).map(|(ino, _)| *ino));
-            let times = source_ino
-                .and_then(|ino| self.staged_times.get(&ino).copied())
-                .or_else(|| self.durable.times.get(path).copied())
-                .or_else(|| live.map(DurableTimes::from));
-            if let Some(times) = times {
+        for (path, metadata) in next.inventory() {
+            let node = self.node_metadata(&path, &reverted, &live_nodes, &durable_times);
+            if let Some(times) = node.times {
                 next.restore_times(
-                    path,
+                    &path,
                     times.atime_nanos,
                     times.mtime_nanos,
                     times.ctime_nanos,
                     times.btime_nanos,
                 )?;
             }
-            // Extended attributes are metadata like a mode: the live set if the
-            // entry is still there, else the durable baseline's.
-            let xattrs = if live.is_some() {
-                self.live.entry_xattrs(path)
-            } else {
-                self.durable.xattrs.get(path).cloned().unwrap_or_default()
-            };
-            next.restore_xattrs(path, xattrs)?;
-        }
-        // Permission bits last, and deepest name first. A mode is metadata like
-        // a symlink's target — the live value if the entry is still there, else
-        // the durable baseline — and rebuilding at a per-kind constant would
-        // silently revert a `chmod`, or a `0o400` creation mode, that a real
-        // crash has no way to undo. Restrictive modes are written from the
-        // leaves up so a directory clamped to `0o500` cannot lock the walk out
-        // of the names beneath it.
-        let mut restored_modes: BTreeMap<String, u32> = BTreeMap::new();
-        for path in next.paths_with_modes() {
-            let mode = self
-                .live_entry(&path, &reverted)
-                .map(|metadata| metadata.mode)
-                .or_else(|| self.durable.modes.get(&path).copied());
-            if let Some(mode) = mode {
+            next.restore_xattrs(&path, node.xattrs)?;
+            // A symlink leaf has no mode of its own.
+            if metadata.kind != FsEntryKind::Symlink
+                && let Some(mode) = node.mode
+            {
                 restored_modes.insert(path, mode);
             }
         }
@@ -379,7 +383,7 @@ impl CrashFs {
     /// baseline's. The mirror of [`CrashFs::file_source_inode`], and for the
     /// same reason — two names of one node must come back as one node.
     fn special_source(&mut self, path: &str, reverted: &Reverted) -> Option<(u64, FsEntryKind)> {
-        self.live_entry(path, reverted)
+        self.entry_at(path, reverted)
             .filter(|metadata| is_special(metadata.kind))
             .map(|metadata| (metadata.ino, metadata.kind))
             .or_else(|| self.durable.specials.get(path).copied())
@@ -388,6 +392,12 @@ impl CrashFs {
     /// The link node and target a surviving symlink name has: the live link
     /// if it is still there, else the durable baseline's.
     fn symlink_source(&mut self, path: &str, reverted: &Reverted) -> Option<(u64, String)> {
+        if let Some(kept) = reverted.kept(path) {
+            return kept
+                .target
+                .clone()
+                .map(|target| (kept.metadata.ino, target));
+        }
         let live = self
             .live_entry(path, reverted)
             .filter(|metadata| metadata.kind == FsEntryKind::Symlink)
@@ -405,10 +415,74 @@ impl CrashFs {
     }
 
     fn file_source_inode(&mut self, path: &str, reverted: &Reverted) -> Option<u64> {
-        self.live_entry(path, reverted)
+        self.entry_at(path, reverted)
             .filter(|metadata| metadata.kind == FsEntryKind::File)
             .map(|metadata| metadata.ino)
             .or_else(|| self.durable.files.get(path).map(|file| file.inode))
+    }
+
+    /// The metadata a rebuilt name restores, decided by the node it holds,
+    /// never by the name alone. Permission bits and extended attributes are
+    /// durable the moment they change, so a node still in the live image —
+    /// through any name, or only a descriptor — restores its live values; a
+    /// node the live image no longer holds restores what was last recorded
+    /// for it: its removal's record, else the durable baseline's. Timestamps
+    /// roll back: they are the node's last fsynced ones, else the baseline's
+    /// for this node (under whichever name the baseline held it), and only a
+    /// node neither ever made durable takes that same fallback.
+    fn node_metadata(
+        &mut self,
+        path: &str,
+        reverted: &Reverted,
+        live_nodes: &BTreeMap<u64, FsMetadata>,
+        durable_times: &BTreeMap<u64, DurableTimes>,
+    ) -> NodeMetadata {
+        let ino = reverted
+            .kept(path)
+            .map(|kept| kept.metadata.ino)
+            .or_else(|| self.live_entry(path, reverted).map(|metadata| metadata.ino))
+            .or_else(|| self.durable.inodes.get(path).copied());
+        let durable = NodeMetadata {
+            mode: self.durable.modes.get(path).copied(),
+            xattrs: self.durable.xattrs.get(path).cloned().unwrap_or_default(),
+            times: self.durable.times.get(path).copied(),
+        };
+        let Some(ino) = ino else {
+            return durable;
+        };
+        let live = live_nodes
+            .get(&ino)
+            .copied()
+            .or_else(|| FsDriver::inode_metadata(&mut self.live, ino).ok());
+        let mut node = match (live, reverted.record(ino)) {
+            (Some(metadata), _) => NodeMetadata {
+                mode: Some(metadata.mode),
+                xattrs: self.live.inode_xattrs(ino),
+                times: Some(DurableTimes::from(metadata)),
+            },
+            (None, Some(removed)) => NodeMetadata {
+                mode: Some(removed.metadata.mode),
+                xattrs: removed.xattrs.clone(),
+                times: Some(DurableTimes::from(removed.metadata)),
+            },
+            (None, None) => durable,
+        };
+        node.times = self
+            .staged_times
+            .get(&ino)
+            .or_else(|| durable_times.get(&ino))
+            .copied()
+            .or(node.times);
+        node
+    }
+
+    /// The node a surviving name holds, when it is not the durable
+    /// baseline's: the one a lost removal left there, else the live entry.
+    fn entry_at(&self, path: &str, reverted: &Reverted) -> Option<FsMetadata> {
+        reverted
+            .kept(path)
+            .map(|kept| kept.metadata)
+            .or_else(|| self.live_entry(path, reverted))
     }
 
     /// The live entry at a surviving name — unless the crash brought the
