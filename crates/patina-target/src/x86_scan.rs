@@ -298,9 +298,21 @@ fn decode_one(b: &[u8]) -> Step {
             None => return Step::Undecodable,
         }
     } else if op == 0x62 {
-        // EVEX P0/P1/P2, opcode, then a mandatory ModRM. The module comment
-        // explains the format-level refusals; operand lengths below are the
-        // same as VEX, including compressed displacement's one-byte disp8.
+        // EVEX P0/P1/P2, opcode, then a mandatory ModRM. Operand lengths are
+        // the same as VEX, including compressed displacement's one-byte
+        // disp8. The format-level refusals, each a field no AVX-512 or
+        // AVX512-FP16 encoding sets:
+        // - a legacy `66`/`f0`/`f2`/`f3` or REX prefix before `62` (#UD);
+        // - P0 bit 3, which APX reuses as a register-extension bit, and P1
+        //   bit 2, fixed at one outside APX;
+        // - a map other than 1-3 (`0f`, `0f 38`, `0f 3a`) and 5-6 (AVX512-FP16
+        //   and AVX10.2): map 4 is APX's promoted legacy space and map 7 its
+        //   imm32 forms, whose lengths these rules do not describe;
+        // - map-1 opcodes with no EVEX form, whose legacy rows carry an imm8 or
+        //   no ModRM;
+        // - zeroing-masking with no mask register;
+        // - vector length L'L=3, unless it is the rounding-control field of a
+        //   register-form instruction with EVEX.b set.
         let Some(&[p0, p1, p2, opc, modrm]) = b.get(p..p + 5) else {
             return Step::Undecodable;
         };
@@ -308,7 +320,7 @@ fn decode_one(b: &[u8]) -> Step {
         if evex_incompatible_prefix
             || p0 & 0x08 != 0
             || p1 & 0x04 == 0
-            || !matches!(map, 1..=3)
+            || !matches!(map, 1..=3 | 5 | 6)
             || (map == 1 && matches!(opc, 0x0F | 0x77 | 0xA4 | 0xAC | 0xBA))
             || (p2 & 0x80 != 0 && p2 & 0x07 == 0)
             || (p2 & 0x60 == 0x60 && (p2 & 0x10 == 0 || modrm >> 6 != 3))
@@ -316,7 +328,7 @@ fn decode_one(b: &[u8]) -> Step {
             return Step::Undecodable;
         }
         p += 4; // ModRM is consumed by the common operand decoder.
-        match vex_body(map, opc) {
+        match evex_body(map, opc) {
             Some((modrm, imm)) => OpAttr {
                 modrm,
                 imm,
@@ -758,6 +770,22 @@ fn vex_body(map: u8, op: u8) -> Option<(bool, Imm)> {
         2 => Some((true, Imm::None)),     // 0f 38: ModRM, no immediate
         3 => Some((true, Imm::Fixed(1))), // 0f 3a: ModRM + imm8
         _ => Option::None,                // reserved VEX map: fail closed
+    }
+}
+
+/// EVEX instruction body attributes `(modrm, imm)`. Maps 1-3 follow the VEX
+/// rules of [`vex_body`]. Maps 5 and 6 (AVX512-FP16's half-precision
+/// arithmetic, conversions and FMAs, and AVX10.2's additions there) have no
+/// VEX or legacy counterpart, and every opcode in them is ModRM with no
+/// immediate: the FP16 forms that take an imm8 (`vcmpph`, `vfpclassph`,
+/// `vgetmantph`, `vreduceph`, `vrndscaleph`) are encoded in map 3. GNU
+/// objdump 2.42 and LLVM 21 agree on that length for every opcode either
+/// decodes in both maps. No opcode in any EVEX map is forbidden, so no
+/// category is returned.
+fn evex_body(map: u8, op: u8) -> Option<(bool, Imm)> {
+    match map {
+        5 | 6 => Some((true, Imm::None)),
+        _ => vex_body(map, op),
     }
 }
 

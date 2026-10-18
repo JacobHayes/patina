@@ -558,7 +558,8 @@ unsafe extern "C" {
     fn tzset();
     fn arc4random() -> u32;
     fn killpg(pgrp: i32, sig: i32) -> i32;
-    fn dlopen(path: *const u8, mode: i32) -> *mut u8;
+    // dlopen/dlclose are deny-traps; dlopen_preflight stays a refused import.
+    fn dlopen_preflight(path: *const u8) -> bool;
     fn shm_open(name: *const u8, oflag: i32) -> i32;
     fn syscall(number: i64) -> i64;
 }
@@ -566,7 +567,7 @@ fn main() {
     let ptrs: &[*const ()] = &[
         acct as *const (), gethostbyname as *const (), select as *const (),
         semaphore_wait as *const (), tzset as *const (), arc4random as *const (),
-        killpg as *const (), dlopen as *const (), shm_open as *const (),
+        killpg as *const (), dlopen_preflight as *const (), shm_open as *const (),
         signals_timers_escape as *const (), syscall as *const (),
     ];
     let mut acc = 0usize;
@@ -837,5 +838,88 @@ fn main() {
             !stdout.contains("after spawn"),
             "the guest must not continue past the deny-trap"
         );
+    }
+
+    // The dynamic-loading surface an extension loader links (`libloading`:
+    // `dlopen`, `dlerror`, `dlclose`), reached only when the guest is asked to
+    // load something.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const EXTENSION_LOADER_SOURCE: &str = r#"
+use std::ffi::{c_char, c_int, c_void};
+unsafe extern "C" {
+    fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
+    fn dlerror() -> *mut c_char;
+    fn dlclose(handle: *mut c_void) -> c_int;
+}
+fn main() {
+    println!("BEFORE_LOAD");
+    if std::env::args().any(|arg| arg == "--load") {
+        let handle = unsafe { dlopen(c"libpatina-extension.so".as_ptr(), 2) };
+        if handle.is_null() {
+            let _ = unsafe { dlerror() };
+        } else {
+            unsafe { dlclose(handle) };
+        }
+    }
+    println!("AFTER_LOAD");
+}
+"#;
+
+    // `dlopen`/`dlclose` are deny-traps: a guest that links them runs, and one
+    // that calls `dlopen` aborts deterministically, naming it. Paired with the
+    // registry gate `deny_rows_agree_with_patina_target`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_run_dlopen_is_a_deny_trap_not_a_refusal() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("extension_loader.rs");
+        fs::write(&source, EXTENSION_LOADER_SOURCE).unwrap();
+        let workspace = native_workspace();
+        let bin = directory.path().join("extension-loader");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+
+        let dormant = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &["run", bin.to_str().unwrap(), "--seed", "1"],
+        );
+        assert!(
+            dormant.status.success(),
+            "a guest that only links dlopen must run:\nstderr:\n{}",
+            String::from_utf8_lossy(&dormant.stderr)
+        );
+        assert!(String::from_utf8_lossy(&dormant.stdout).contains("AFTER_LOAD"));
+
+        let load = || {
+            invoke_unchecked(
+                env!("CARGO_BIN_EXE_cargo-patina"),
+                workspace,
+                &["run", bin.to_str().unwrap(), "--seed", "1", "--", "--load"],
+            )
+        };
+        let first = load();
+        assert!(
+            !first.status.success(),
+            "a guest that calls dlopen must abort"
+        );
+        let stderr = String::from_utf8_lossy(&first.stderr);
+        assert!(
+            stderr.contains("reached under patina: dlopen"),
+            "the deny-trap must name dlopen:\n{stderr}"
+        );
+        let stdout = String::from_utf8_lossy(&first.stdout);
+        assert!(stdout.contains("BEFORE_LOAD"), "{stdout}");
+        assert!(!stdout.contains("AFTER_LOAD"), "{stdout}");
+        let second = load();
+        assert_eq!(first.stdout, second.stdout);
+        assert_eq!(first.stderr, second.stderr);
     }
 }

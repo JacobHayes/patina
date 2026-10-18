@@ -1,12 +1,12 @@
 //! Every public symbol the shim's C slices and Rust interposers define — the libc/pthread/Darwin
-//! face of the runtime — mapped onto the syscall rows it serves, plus the
-//! known ABI spellings the shim deliberately does NOT define (`Absent`), so the
-//! gap is enumerated and gated rather than discovered by a guest.
+//! face of the runtime — mapped onto the syscall rows it serves. A spelling
+//! the shim does not define has no row: a guest importing it meets the
+//! pre-run audit.
 //!
 //! Excluded by rule: the runtime's own C ABI (`patina_*` / `PATINA_*`,
 //! declared in `include/patina_native.h`), which `is_control_plane_abi`
 //! recognizes. Everything else the objects define needs a row here, and every
-//! non-`Absent` row must be defined on its platform
+//! row must be defined on its platform
 //! (`cargo-patina/tests/syscall_registry.rs`).
 //!
 //! `Serves::Syscalls` names Linux rows (the semantic operation a wrapper is the
@@ -2434,15 +2434,15 @@ symbol_rows! {
     ),
     s(
         "dlopen",
-        Platform::Linux,
+        Platform::Both,
         Serves::LibcOnly,
-        SymbolStatus::Absent,
+        SymbolStatus::Deny("dynamic-loading"),
     ),
     s(
         "dlclose",
-        Platform::Linux,
+        Platform::Both,
         Serves::LibcOnly,
-        SymbolStatus::Absent,
+        SymbolStatus::Deny("dynamic-loading"),
     ),
     s(
         "getpwent",

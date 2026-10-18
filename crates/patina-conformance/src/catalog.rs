@@ -35,10 +35,6 @@ pub struct Scenario {
     pub asserts_absent: &'static [Syscall],
     /// libc symbols the `libc` vehicle goes through.
     pub symbols: &'static [&'static str],
-    /// Those of `symbols` the scenario reaches through `dlsym`
-    /// (`Probe::resolve`) rather than importing: exactly the registry's
-    /// `Absent` ones, which the pre-run audit would refuse as imports.
-    pub resolves: &'static [&'static str],
     /// Host capabilities beyond the covered rows the native oracle needs
     /// (detected live on the run directory; see [`crate::host::need_unmet`]).
     pub needs: &'static [Need],
@@ -68,7 +64,6 @@ pub const DEFAULTS: Scenario = Scenario {
     covers: &[],
     asserts_absent: &[],
     symbols: &[],
-    resolves: &[],
     needs: &[],
     kernel_floor: None,
     gaps: &[],
@@ -764,7 +759,7 @@ fn planted_escape(p: &Probe) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patina_dst_syscalls::{Disposition, Os, SYMBOLS, SYSCALLS, SymbolStatus};
+    use patina_dst_syscalls::{Disposition, Os, SYMBOLS, SYSCALLS};
     use std::collections::BTreeSet;
 
     fn disposition(row: Syscall) -> Disposition {
@@ -837,56 +832,6 @@ mod tests {
                     "{} names symbol {symbol}, which has no registry row",
                     scenario.name
                 );
-            }
-        }
-    }
-
-    fn symbol_status(symbol: &str) -> Option<SymbolStatus> {
-        SYMBOLS
-            .iter()
-            .find(|row| row.name == symbol && row.platform.defines_on(Os::host()))
-            .map(|row| row.status)
-    }
-
-    /// A symbol reached through `dlsym` is one the shim leaves `Absent`. Once
-    /// the shim defines it (the registry row moves off `Absent`), the
-    /// scenario imports it directly instead: under patina `dlsym` still
-    /// answers NULL for it (`__wrap_dlsym` routes only its entropy names), so
-    /// the scenario would keep stopping at the lookup and never judge the
-    /// new definition.
-    #[test]
-    fn resolved_symbols_are_absent_from_the_shim() {
-        for scenario in SCENARIOS {
-            for symbol in scenario.resolves {
-                assert!(
-                    scenario.symbols.contains(symbol),
-                    "{} resolves {symbol} without naming it in `symbols`",
-                    scenario.name
-                );
-                assert_eq!(
-                    symbol_status(symbol),
-                    Some(SymbolStatus::Absent),
-                    "{} reaches {symbol} through dlsym, but the shim now defines it: \
-                     import it directly in the scenario and drop it from `resolves`",
-                    scenario.name
-                );
-            }
-        }
-    }
-
-    /// An `Absent` symbol a scenario names is one it resolves: imported, the
-    /// pre-run audit would refuse the whole probe binary.
-    #[test]
-    fn absent_symbols_are_resolved() {
-        for scenario in SCENARIOS {
-            for symbol in scenario.symbols {
-                if symbol_status(symbol) == Some(SymbolStatus::Absent) {
-                    assert!(
-                        scenario.resolves.contains(symbol),
-                        "{} names {symbol}, which the shim leaves Absent, without resolving it",
-                        scenario.name
-                    );
-                }
             }
         }
     }

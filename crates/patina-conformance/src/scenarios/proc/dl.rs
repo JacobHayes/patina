@@ -17,8 +17,8 @@
 //!
 //! Under patina the probe's `dlsym` is the shim's `__wrap_dlsym` (the
 //! shim-linked build links `--wrap=dlsym`), the registry row this scenario
-//! covers. `dlopen` and `dlclose` are `Absent` from the shim, reached through
-//! `dlsym`, both lookups recorded before either is needed. libc only.
+//! covers. `dlopen` and `dlclose` are the shim's dynamic-loading deny-traps.
+//! libc only.
 
 use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
 use crate::compare::{Difference, Ending, Failure, Observed};
@@ -29,8 +29,6 @@ use patina_dst_syscalls::Syscall;
 use std::ffi::{CStr, CString};
 
 type Getentropy = unsafe extern "C" fn(*mut c_void, size_t) -> c_int;
-type Dlopen = unsafe extern "C" fn(*const c_char, c_int) -> *mut c_void;
-type Dlclose = unsafe extern "C" fn(*mut c_void) -> c_int;
 
 const MISSING: &str = "patina_conformance_no_such_symbol";
 
@@ -56,12 +54,6 @@ fn lookup(
         .field("same_as_linked", same)
         .emit();
     (!address.is_null()).then_some(address)
-}
-
-/// `address`, which the scenario cannot continue without.
-fn required(p: &Probe, symbol: &str, address: Option<*mut c_void>) -> *mut c_void {
-    p.require(&format!("glibc's {symbol} resolves"), address.is_some());
-    address.unwrap_or(std::ptr::null_mut())
 }
 
 /// `dlerror()`: whether it answered a message, and whether that message
@@ -166,15 +158,6 @@ pub fn run(p: &Probe) {
     p.check("dlerror answers once", !error(p, "").0);
 
     // ---- dlopen, dlclose -----------------------------------------------------------
-    let [dlopen, dlclose] = ["dlopen", "dlclose"].map(|symbol| p.resolve(symbol));
-
-    // SAFETY: glibc's definitions of these prototypes.
-    let (dlopen, dlclose): (Dlopen, Dlclose) = unsafe {
-        (
-            std::mem::transmute::<*mut c_void, Dlopen>(required(p, "dlopen", dlopen)),
-            std::mem::transmute::<*mut c_void, Dlclose>(required(p, "dlclose", dlclose)),
-        )
-    };
     let libc_name = CString::new("libc.so.6").unwrap();
     // SAFETY: a NUL-terminated name; RTLD_NOLOAD loads nothing.
     let handle = unsafe { dlopen(libc_name.as_ptr(), RTLD_NOW | RTLD_NOLOAD) };
@@ -229,7 +212,6 @@ pub const SCENARIO: Scenario = Scenario {
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_getrandom, Syscall::N_openat],
     symbols: &["__wrap_dlsym", "dlerror", "dlopen", "dlclose"],
-    resolves: &["dlopen", "dlclose"],
     gaps: &[
         Gap {
             status: Status::ByDesign,
@@ -243,20 +225,11 @@ pub const SCENARIO: Scenario = Scenario {
         Gap {
             status: Status::ByDesign,
             vehicles: &[Vehicle::Libc],
-            what: "the shim defines neither dlopen nor dlclose (registry Absent: loading a host object escapes the runtime, crates/patina-target/ESCAPE-CLASSES.md) and its dlsym answers NULL for them",
-            failure: Failure::Differs(&[
-                Difference::field(19, "dlsym", "fields.resolved", Observed::Bool(false)),
-                Difference::field(20, "dlsym", "fields.resolved", Observed::Bool(false)),
-            ]),
-        },
-        Gap {
-            status: Status::ByDesign,
-            vehicles: &[Vehicle::Libc],
-            what: "with dlopen refused the scenario stops before opening an object",
+            what: "dlopen and dlclose are dynamic-loading deny-traps (loading a host object escapes the runtime, crates/patina-target/ESCAPE-CLASSES.md): the first dlopen aborts the run, so opening, searching and closing an object are judged natively only",
             failure: Failure::Stops {
-                events: 21,
-                ending: Ending::Exit(101),
-                diagnostic: "proc/dl: cannot continue: glibc's dlopen resolves",
+                events: 19,
+                ending: Ending::Signal(SIGABRT),
+                diagnostic: "patina: dynamic-loading reached under patina: dlopen",
             },
         },
     ],

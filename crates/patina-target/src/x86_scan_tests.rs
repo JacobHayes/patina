@@ -292,6 +292,18 @@ fn measures_evex_lengths_and_reaches_following_forbidden_opcodes() {
         &[0x62, 0xf1, 0x74, 0x48, 0xc6, 0xc2, 0x05], // vshufps imm8
         &[0x62, 0xf2, 0x75, 0x48, 0x8d, 0xc2], // vpermb (map 2)
         &[0x62, 0xf3, 0x75, 0x48, 0x0f, 0x44, 0x24, 0x01, 0x05], // vpalignr (map 3)
+        // AVX512-FP16 maps 5 and 6, the encodings of simsimd's `*_sapphire`
+        // kernels (as linked into a turso guest).
+        &[0x62, 0xf5, 0x7c, 0x48, 0x5c, 0xc2], // vsubph zmm (map 5)
+        &[0x62, 0xf5, 0x7e, 0x48, 0x7d, 0xff], // vcvtw2ph zmm
+        &[0x62, 0xf5, 0x7d, 0x08, 0x7e, 0xc0], // vmovw eax, xmm
+        &[0x62, 0xf5, 0x4c, 0x48, 0x5c, 0x44, 0x46, 0xff], // vsubph SIB + disp8*N
+        &[0x62, 0xf5, 0x7e, 0x08, 0x10, 0x05, 0x0f, 0x05, 0, 0], // vmovsh RIP-relative
+        &[0x62, 0xf6, 0x6d, 0x48, 0xb8, 0xc1], // vfmadd231ph zmm (map 6)
+        &[0x62, 0xf6, 0x6d, 0xc9, 0xb8, 0xc1], // vfmadd231ph {k1}{z}
+        &[0x62, 0xf6, 0x45, 0x48, 0xb8, 0x44, 0x41, 0xff], // vfmadd231ph SIB + disp8*N
+        &[0x62, 0xf6, 0x75, 0x48, 0xb8, 0x80, 0x0f, 0x05, 0, 0], // vfmadd231ph disp32
+        &[0x62, 0xf6, 0x7d, 0x58, 0x4c, 0x18], // vrcpph broadcast
     ];
     for &bytes in cases {
         assert_eq!(decode_full(bytes), (bytes.len(), None), "{bytes:02x?}");
@@ -363,7 +375,7 @@ fn evex_does_not_drop_legacy_map1_immediates() {
 #[test]
 fn evex_rejects_unsupported_maps_and_invalid_prefix_fields() {
     let valid = [0x62, 0xf1, 0x74, 0x48, 0x58, 0xc2]; // vaddps
-    for map in (0..=15).filter(|map| !matches!(map, 1..=3)) {
+    for map in (0..=15).filter(|map| !matches!(map, 1..=3 | 5 | 6)) {
         let mut bytes = valid;
         bytes[1] = 0xf0 | map;
         assert!(matches!(decode_one(&bytes), Step::Undecodable));
@@ -567,7 +579,7 @@ fn x86_decoder_matches_objdump_corpus() {
         data.extend(bytes);
     }
     assert!(evex_count > 0, "corpus must exercise EVEX decoding");
-    assert_eq!(maps, [1, 2, 3].into_iter().collect());
+    assert_eq!(maps, [1, 2, 3, 5, 6].into_iter().collect());
     let mut offset = 0;
     for &(start, length) in &boundaries {
         assert_eq!(offset, start);

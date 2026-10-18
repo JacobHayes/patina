@@ -143,15 +143,17 @@ pub fn native_escape_is_tsc_manageable(escape: &NativeEscape) -> bool {
 /// import-table audit because the whole point of the deny-trap is to leave the
 /// import table clean. `(symbol, class)`, where `class` is the same escape
 /// category the pre-run gate prints for the equivalent un-interposed surface
-/// (`process`/`macos-framework`/`host-introspection`).
+/// (`process`/`dynamic-loading`/`macos-framework`/`host-introspection`).
 pub type NativeDenyTrapSymbol = (&'static str, &'static str);
 
-/// The enumerated deny-trap-armed symbols the native shim (`c/patina_posix.c`)
-/// strong-defines: the process-spawn/identity family (`patina_process_trap`), the
-/// macOS CoreFoundation/Security framework helpers left unreachable by the honest
-/// empty-trust-store / UTC-timezone models (`PATINA_FRAMEWORK_TRAP`), and the
-/// IOKit registry walk left unreachable by `IOServiceMatching` returning NULL
-/// (`PATINA_INTROSPECTION_TRAP`).
+/// The enumerated deny-trap-armed symbols the native shim strong-defines: the
+/// process-spawn/identity family (`posix/signal_process.rs` `process_trap`),
+/// `dlopen`/`dlclose` (loading host code is never modeled, yet extension
+/// loaders such as `libloading` link them), the macOS CoreFoundation/Security
+/// framework helpers left unreachable by the honest empty-trust-store /
+/// UTC-timezone models, and the IOKit registry walk left unreachable by
+/// `IOServiceMatching` returning NULL. The shim generates the last three
+/// classes from their registry rows (`posix.rs` `native_trap`).
 ///
 /// This is the UNION across platforms. A given binary only *defines* the members
 /// its target actually compiles — the framework/introspection set is
@@ -166,10 +168,10 @@ pub type NativeDenyTrapSymbol = (&'static str, &'static str);
 ///
 /// SINGLE SOURCE OF TRUTH: the native shim's symbol registry
 /// (`patina_dst_native_shim::registry::SYMBOLS`) carries one `Deny(class)` row
-/// per trap, and `cargo-patina/tests/syscall_registry.rs` asserts three-way
-/// agreement — this list, those rows, and the trap-calling definitions parsed
-/// from the shim's C — so a trap converted to a real model (or a new one) must
-/// move all three in lockstep or the gate fails closed.
+/// per trap, and `cargo-patina/tests/syscall_registry.rs` asserts that this list
+/// equals those rows and that the compiled shim defines every row on its
+/// platform, so a trap converted to a real model (or a new one) must move the
+/// row, this list and the definition in lockstep or the gate fails closed.
 const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
     // process (patina_process_trap): spawn/exec/wait.
     ("execvp", "process"),
@@ -187,14 +189,19 @@ const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
     ("posix_spawnattr_setpgroup", "process"),
     ("posix_spawnattr_setsigdefault", "process"),
     ("posix_spawnp", "process"),
-    // host-introspection (patina_native_trap explicit sites + PATINA_INTROSPECTION_TRAP):
-    // IOKit registry walk, unreachable while IOServiceMatching returns NULL.
+    // dynamic-loading: linked by extension loaders, never modeled. glibc's own
+    // loads (NSS, iconv, the unwinder) go through its internal entry points,
+    // never these interposable names.
+    ("dlclose", "dynamic-loading"),
+    ("dlopen", "dynamic-loading"),
+    // host-introspection: IOKit registry walk, unreachable while
+    // IOServiceMatching returns NULL.
     ("IOIteratorNext", "host-introspection"),
     ("IOObjectRelease", "host-introspection"),
     ("IORegistryEntryCreateCFProperty", "host-introspection"),
     ("IORegistryEntryGetName", "host-introspection"),
     ("IOServiceGetMatchingServices", "host-introspection"),
-    // macos-framework (PATINA_FRAMEWORK_TRAP): CoreFoundation/Security helpers
+    // macos-framework: CoreFoundation/Security helpers
     // downstream of the honest empty-trust-store / UTC-timezone models.
     ("CFArrayGetValueAtIndex", "macos-framework"),
     ("CFDataGetBytePtr", "macos-framework"),

@@ -25,6 +25,29 @@ mod timers;
 
 pub(crate) use crate::variadic::{error, model_result};
 
+/// The deny-trap diagnostic: names the class and the symbol a guest reached,
+/// then aborts. A trap never reads its arguments and never returns.
+fn native_trap(class: &CStr, symbol: &CStr) -> ! {
+    for bytes in [
+        b"patina: ".as_slice(),
+        class.to_bytes(),
+        b" reached under patina: ",
+        symbol.to_bytes(),
+        b"; not interposed by the deterministic runtime; failing closed\n",
+    ] {
+        // SAFETY: `bytes` is a live slice for the duration of this synchronous host write.
+        unsafe {
+            crate::patina_stdio_write(2, bytes.as_ptr().cast(), bytes.len());
+        }
+    }
+    crate::patina_flush_captured_stdio();
+    crate::host_abort()
+}
+// The registry's deny rows outside the process family (dynamic loading, the
+// macOS framework and host-introspection helpers), generated with the
+// arity-free trap ABI: callers cannot return from any of them.
+include!(concat!(env!("OUT_DIR"), "/deny_traps.rs"));
+
 pub(crate) fn size_result(result: isize) -> isize {
     crate::abi::libc_result(crate::abi::from_model(result), result)
 }

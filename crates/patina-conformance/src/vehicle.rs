@@ -843,8 +843,8 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_get_kernel_syms
             | Syscall::N_uselib => syscall_door(row, a),
             // fchmodat2, whose flags glibc's fchmodat emulates over it, and
-            // rows whose glibc wrapper the shim does not define (a symbol row
-            // that is `Absent`, or none): the probe binary importing such a wrapper
+            // rows whose glibc wrapper the shim does not define (no symbol
+            // row): the probe binary importing such a wrapper
             // would be refused whole by the pre-run import audit, so until the
             // shim defines it the libc spelling is glibc's own `syscall(2)`,
             // and the symbol stays in the coverage report.
@@ -890,8 +890,9 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             // wrapper the shim does not define (importing it would make the
             // pre-run import audit refuse the whole probe binary) or that
             // glibc does not wrap (`timer_*` ids and `getpriority`'s raw
-            // answer differ from glibc's wrappers; `clock_getres`'s symbol row
-            // is `Absent`): the libc spelling is glibc's own `syscall(2)`.
+            // answer differ from glibc's wrappers), and `clock_getres`, whose
+            // wrapper the shim defines but this table does not yet call: the
+            // libc spelling is glibc's own `syscall(2)`.
             Syscall::N_clock_getres
             | Syscall::N_getitimer
             | Syscall::N_setitimer

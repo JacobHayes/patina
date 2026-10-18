@@ -24,4 +24,16 @@ Disassembly of section .text:
   8c:	62 f1 74 48 c6 c2 05                            	vshufps $0x5,%zmm2,%zmm1,%zmm0
   93:	62 f2 75 48 8d c2                               	vpermb %zmm2,%zmm1,%zmm0
   99:	62 f3 75 48 0f 44 24 01 05                      	vpalignr $0x5,0x40(%rsp),%zmm1,%zmm0
-  a2:	c3                                              	ret
+  a2:	62 f5 74 48 58 c2                               	vaddph %zmm2,%zmm1,%zmm0
+  a8:	62 f5 4c 48 5c 44 46 ff                         	vsubph -0x40(%rsi,%rax,2),%zmm6,%zmm0
+  b0:	62 f5 74 18 59 c2                               	vmulph {rn-sae},%zmm2,%zmm1,%zmm0
+  b6:	62 f5 7e 48 7d ff                               	vcvtw2ph %zmm7,%zmm7
+  bc:	62 f5 7e 08 10 05 0f 05 00 00                   	vmovsh 0x50f(%rip),%xmm0        # 5d5 <patina_evex_corpus+0x5d5>
+  c6:	62 f5 7d 08 7e c0                               	vmovw  %xmm0,%eax
+  cc:	62 f6 6d c9 b8 c1                               	vfmadd231ph %zmm1,%zmm2,%zmm0{%k1}{z}
+  d2:	62 f6 45 48 b8 44 41 ff                         	vfmadd231ph -0x40(%rcx,%rax,2),%zmm7,%zmm0
+  da:	62 f6 75 48 b8 80 0f 05 00 00                   	vfmadd231ph 0x50f(%rax),%zmm1,%zmm0
+  e4:	62 f6 7c 08 13 c0                               	vcvtsh2ss %xmm0,%xmm0,%xmm0
+  ea:	62 f6 7d 58 4c 18                               	vrcpph (%rax){1to32},%zmm3
+  f0:	62 f3 74 48 c2 ca 05                            	vcmpnltph %zmm2,%zmm1,%k1
+  f7:	c3                                              	ret

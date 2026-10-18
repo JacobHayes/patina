@@ -476,6 +476,11 @@ fn macho_native_allowlisted_import(symbol: &str) -> bool {
     // so `std::env::args()` reading them stays deterministic. These accessors
     // only hand back those pointers — no host effect.
     const ARGV_ENV_STORAGE: &[&str] = &["NSGetEnviron", "NSGetArgc", "NSGetArgv"];
+    // `dlerror` reads the calling thread's message from the last failed dl
+    // call. `dlopen`/`dlclose` are deny-traps, so only the host `dlsym` (the
+    // control-plane primitive) can set it, and it reads no other host state.
+    // Linux defines it in the shim beside its interposed `dlsym`.
+    const DL_ERROR: &[&str] = &["dlerror"];
 
     ERRNO.contains(&symbol)
         || MEMORY_FILL.contains(&symbol)
@@ -485,6 +490,7 @@ fn macho_native_allowlisted_import(symbol: &str) -> bool {
         || STACK_EXTENT_HELPERS.contains(&symbol)
         || STACK_PROBE.contains(&symbol)
         || ARGV_ENV_STORAGE.contains(&symbol)
+        || DL_ERROR.contains(&symbol)
 }
 
 fn elf_native_allowlisted_import(symbol: &str) -> bool {
@@ -899,8 +905,11 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "putenv",
         "clearenv",
     ];
-    // Dynamic loading can pull in arbitrary uninterposed host code.
-    const DYNAMIC: &[&str] = &["dlopen", "dlsym", "dlclose", "dlmopen"];
+    // Dynamic loading can pull in arbitrary uninterposed host code. A
+    // shim-linked guest never imports `dlopen`/`dlclose` (they are deny-traps)
+    // nor `dlsym` (interposed on Linux, the control plane on macOS); the rest
+    // stay refused imports.
+    const DYNAMIC: &[&str] = &["dlopen", "dlsym", "dlclose", "dlmopen", "dlopen_preflight"];
     // (d) Thread lifecycle: anything that mints a new runnable host context must
     // go through the managed `pthread_create` vehicle, not these.
     const THREADING: &[&str] = &[

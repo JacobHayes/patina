@@ -25,5 +25,17 @@ patina_evex_corpus:
     vshufps $5, %zmm2, %zmm1, %zmm0
     vpermb %zmm2, %zmm1, %zmm0
     vpalignr $5, 64(%rsp), %zmm1, %zmm0
+    vaddph %zmm2, %zmm1, %zmm0
+    vsubph -64(%rsi,%rax,2), %zmm6, %zmm0
+    vmulph {rn-sae}, %zmm2, %zmm1, %zmm0
+    vcvtw2ph %zmm7, %zmm7
+    vmovsh 0x050f(%rip), %xmm0
+    vmovw %xmm0, %eax
+    vfmadd231ph %zmm1, %zmm2, %zmm0{%k1}{z}
+    vfmadd231ph -64(%rcx,%rax,2), %zmm7, %zmm0
+    vfmadd231ph 0x050f(%rax), %zmm1, %zmm0
+    vcvtsh2ss %xmm0, %xmm0, %xmm0
+    vrcpph (%rax){1to32}, %zmm3
+    vcmpph $5, %zmm2, %zmm1, %k1
     ret
 .size patina_evex_corpus, .-patina_evex_corpus

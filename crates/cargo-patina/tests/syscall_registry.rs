@@ -6,8 +6,7 @@
 //! inventories. This test retains the independent object/symbol surface gates.
 //!
 //! * (d) every symbol row names a symbol the compiled shim objects define on
-//!   this platform — or, for `Absent`, provably do NOT define — and every
-//!   defined public symbol has a row (the `patina_*` runtime ABI is excluded
+//!   this platform, and every defined public symbol has a row (the `patina_*` runtime ABI is excluded
 //!   by the prefix rule, and Rust libc definitions obey the same registry);
 //! * (e) `patina-target`'s classification lists agree with the rows: the
 //!   deny-trap list is exactly the `Deny(class)` rows, which are exactly the
@@ -20,7 +19,7 @@
 
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use patina_dst_native_shim::registry::{Os, Platform, SYMBOLS, SymbolStatus, is_control_plane_abi};
 use patina_dst_target::{NATIVE_LINUX_LIVE_INTERPOSERS, native_deny_trap_symbols};
@@ -33,36 +32,28 @@ use common::{compile_posix_object, defined_public_symbols, for_each_shim_member,
 struct Gaps {
     /// Defined by the objects, no row (and not the `patina_*` ABI).
     unlisted: Vec<String>,
-    /// A non-`Absent` row for this OS the objects do not define.
+    /// A row for this OS the objects do not define.
     undefined: Vec<String>,
-    /// An `Absent` row the objects DO define.
-    absent_but_defined: Vec<String>,
 }
 
 fn gaps(defined: &BTreeSet<String>, os: Os) -> Gaps {
-    let mut gaps = Gaps::default();
-    let mut rows: BTreeMap<&str, SymbolStatus> = BTreeMap::new();
-    for symbol in SYMBOLS {
-        if symbol.platform.defines_on(os) || symbol.status == SymbolStatus::Absent {
-            rows.insert(symbol.name, symbol.status);
-        }
+    let rows: BTreeSet<&str> = SYMBOLS
+        .iter()
+        .filter(|symbol| symbol.platform.defines_on(os))
+        .map(|symbol| symbol.name)
+        .collect();
+    Gaps {
+        unlisted: defined
+            .iter()
+            .filter(|name| !is_control_plane_abi(name) && !rows.contains(name.as_str()))
+            .cloned()
+            .collect(),
+        undefined: rows
+            .into_iter()
+            .filter(|name| !defined.contains(*name))
+            .map(str::to_owned)
+            .collect(),
     }
-    for name in defined {
-        if is_control_plane_abi(name) {
-            continue;
-        }
-        match rows.get(name.as_str()) {
-            None => gaps.unlisted.push(name.clone()),
-            Some(SymbolStatus::Absent) => gaps.absent_but_defined.push(name.clone()),
-            Some(_) => {}
-        }
-    }
-    for (name, status) in rows {
-        if status != SymbolStatus::Absent && !defined.contains(name) {
-            gaps.undefined.push(name.to_owned());
-        }
-    }
-    gaps
 }
 
 fn host_os() -> Os {
@@ -74,7 +65,7 @@ fn host_os() -> Os {
 }
 
 /// (d) The C object's public definitions are exactly the rows for this OS
-/// (minus the runtime ABI), and no `Absent` row is defined anywhere.
+/// (minus the runtime ABI).
 #[test]
 fn every_defined_public_symbol_has_a_row_and_every_row_is_defined() {
     let dir = tempfile::tempdir().unwrap();
@@ -131,12 +122,10 @@ fn every_defined_public_symbol_has_a_row_and_every_row_is_defined() {
         Gaps::default(),
         "the symbol registry and the compiled shim objects disagree on {}:\n  \
          defined but no row (add a SymbolRow): {:?}\n  \
-         row but not defined (a stale row, or a definition lost from the link): {:?}\n  \
-         Absent row that IS defined (flip it to a real status): {:?}",
+         row but not defined (a stale row, or a definition lost from the link): {:?}",
         host_os().name(),
         gaps.unlisted,
-        gaps.undefined,
-        gaps.absent_but_defined
+        gaps.undefined
     );
 }
 
@@ -169,7 +158,6 @@ fn planted_gaps_are_reported() {
     let mut defined: BTreeSet<String> = SYMBOLS
         .iter()
         .filter(|symbol| symbol.platform.defines_on(Os::Linux))
-        .filter(|symbol| symbol.status != SymbolStatus::Absent)
         .map(|symbol| symbol.name.to_owned())
         .collect();
     assert_eq!(
@@ -177,23 +165,12 @@ fn planted_gaps_are_reported() {
         Gaps::default(),
         "the control set is clean"
     );
-    // An Absent row, now defined: any one the registry still lists.
-    let absent = SYMBOLS
-        .iter()
-        .find(|symbol| {
-            symbol.status == SymbolStatus::Absent && symbol.platform.defines_on(Os::Linux)
-        })
-        .expect("the registry lists an Absent Linux symbol")
-        .name
-        .to_owned();
-    defined.insert(absent.clone());
     defined.insert("nonesuch".to_owned()); // defined, no row
     defined.remove("read"); // a row the objects lost
     defined.insert("patina_planted".to_owned()); // runtime ABI: excluded by rule
     let gaps = gaps(&defined, Os::Linux);
     assert_eq!(gaps.unlisted, vec!["nonesuch".to_owned()]);
     assert_eq!(gaps.undefined, vec!["read".to_owned()]);
-    assert_eq!(gaps.absent_but_defined, vec![absent]);
 }
 
 /// (e) Registry agreement on the deny-trap surface, and the interposed rows
@@ -244,7 +221,6 @@ fn deny_rows_agree_with_patina_target() {
             !SYMBOLS.iter().any(|symbol| {
                 symbol.name == *name
                     && symbol.platform != Platform::Darwin
-                    && symbol.status != SymbolStatus::Absent
                     && !matches!(symbol.status, SymbolStatus::Deny(_))
             })
         })

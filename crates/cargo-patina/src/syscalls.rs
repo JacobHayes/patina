@@ -104,14 +104,11 @@ impl Report {
     }
 
     /// The defined symbols that serve a row on this OS. The libc `syscall(2)`
-    /// vehicle serves every row and is reported once, under `vehicles`; the
-    /// `Absent` spellings are reported in their own section, never beside a
-    /// real definition.
+    /// vehicle serves every row and is reported once, under `vehicles`.
     fn symbols_for(&self, row: &SyscallRow) -> Vec<&'static SymbolRow> {
         self.symbols
             .iter()
             .copied()
-            .filter(|symbol| symbol.status != SymbolStatus::Absent)
             .filter(|symbol| match symbol.serves {
                 Serves::Syscalls(names) => names.contains(&row.name),
                 Serves::Darwin(_) | Serves::Dispatcher | Serves::LibcOnly => false,
@@ -256,15 +253,11 @@ impl Report {
             }
         };
         group(
-            "absent — known ABI spellings the shim does not define (a guest importing one reaches the host or is audit-refused)",
-            &|symbol| symbol.status == SymbolStatus::Absent,
-        );
-        group(
             "deny-trap — linking is inert, the first call aborts by name",
             &|symbol| matches!(symbol.status, SymbolStatus::Deny(_)),
         );
         group("libc-only — no kernel row", &|symbol| {
-            symbol.serves == Serves::LibcOnly && symbol.status != SymbolStatus::Absent
+            symbol.serves == Serves::LibcOnly
         });
         group(
             "vehicles — serve every row through the dispatcher",
@@ -558,28 +551,6 @@ mod tests {
             fork["linux"]["disposition"],
             json!({ "kind": "trap", "class": "process" })
         );
-        let absent: Vec<&Value> = report["symbols"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|symbol| symbol["status"] == "absent")
-            .collect();
-        // The report lists exactly the registry's Absent Linux rows.
-        let registry_absent: Vec<&str> = registry::SYMBOLS
-            .iter()
-            .filter(|symbol| {
-                symbol.status == SymbolStatus::Absent && symbol.platform.defines_on(Os::Linux)
-            })
-            .map(|symbol| symbol.name)
-            .collect();
-        assert!(!registry_absent.is_empty());
-        assert_eq!(
-            absent
-                .iter()
-                .map(|symbol| symbol["name"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            registry_absent
-        );
         assert_eq!(report["vehicles"], json!(["syscall"]));
         assert_eq!(report["metadata"]["linux"]["virtual_abi"], VIRTUAL_ABI);
         assert_eq!(read["linux"]["since"], Value::Null);
@@ -595,14 +566,13 @@ mod tests {
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
-    fn human_report_lists_rows_and_absent_symbols() {
+    fn human_report_lists_rows_and_symbol_groups() {
         let text = Report::linux().render();
         assert!(text.contains("386 numbers"));
         assert!(text.contains(&format!("virtual ABI {VIRTUAL_ABI}")));
         assert!(text.contains("   0  read"));
         assert!(text.contains(" 472  fchroot                  privileged  absent"));
         assert!(text.contains("trap(process)"));
-        assert!(text.contains("absent — known ABI spellings"));
         assert!(text.contains("__open64_2"));
     }
 }

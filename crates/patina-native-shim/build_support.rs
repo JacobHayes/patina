@@ -54,16 +54,25 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         println!("cargo:rerun-if-changed=c/posix/{family}.c");
     }
     sources.push_str("];\n");
-    let mut darwin_traps = String::from("// Deny wrappers generated from the symbol registry.\n");
+    // Every deny row except the hand-written process family (whose spawn
+    // signatures and diagnostic live in posix/signal_process.rs) becomes an
+    // arity-free trap on the platforms its row names.
+    let mut deny_traps = String::from("// Deny wrappers generated from the symbol registry.\n");
     for row in symbols {
         let class = match row.deny_class.as_deref() {
-            Some(class @ ("macos-framework" | "host-introspection")) => class,
-            _ => continue,
+            Some("process") | None => continue,
+            Some(class) => class,
         };
-        writeln!(darwin_traps,
-            "#[unsafe(no_mangle)]\npub extern \"C\" fn {}() -> ! {{\n    let _panic_scope = crate::panic_boundary::PanicScope::enter();\n    native_trap(c\"{class}\", c\"{}\")\n}}", row.name, row.name).unwrap();
+        let platform = match (row.linux, row.darwin) {
+            (true, true) => "",
+            (true, false) => "#[cfg(target_os = \"linux\")]\n",
+            (false, true) => "#[cfg(target_os = \"macos\")]\n",
+            (false, false) => unreachable!("metadata validates platform"),
+        };
+        writeln!(deny_traps,
+            "{platform}#[unsafe(no_mangle)]\npub extern \"C\" fn {}() -> ! {{\n    let _panic_scope = crate::panic_boundary::PanicScope::enter();\n    native_trap(c\"{class}\", c\"{}\")\n}}", row.name, row.name).unwrap();
     }
-    std::fs::write(out.join("darwin_traps.rs"), darwin_traps).unwrap();
+    std::fs::write(out.join("deny_traps.rs"), deny_traps).unwrap();
     let mut ordinary = Vec::new();
     let mut x86 = Vec::new();
     for row in symbols {
@@ -121,7 +130,7 @@ pub fn generate(out: &Path, symbols: &[Symbol]) {
         }
         let alias = if row.name == "__wrap_dlsym" {
             Some(("dlsym", "__wrap_dlsym"))
-        } else if row.routed || row.deny_class.as_deref() == Some("process") {
+        } else if row.routed || row.deny_class.is_some() {
             Some((row.name.as_str(), row.name.as_str()))
         } else {
             None

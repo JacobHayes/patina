@@ -260,14 +260,6 @@ fn symbol_rows_reference_real_rows() {
             ),
             Serves::LibcOnly => {}
         }
-        if let SymbolStatus::Absent = symbol.status {
-            assert_eq!(
-                symbol.platform,
-                Platform::Linux,
-                "{}: Absent rows enumerate the glibc ABI",
-                symbol.name
-            );
-        }
         assert!(
             !is_control_plane_abi(symbol.name),
             "{}: the patina_* ABI is excluded by rule, not listed",

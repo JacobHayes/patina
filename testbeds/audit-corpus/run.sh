@@ -201,10 +201,11 @@ if [[ "${1:-}" == "--selftest" ]]; then
   work="$(mktemp -d "${TMPDIR:-/tmp}/audit-corpus-selftest.XXXXXX")"
   trap 'rm -rf "$work"' EXIT
 
-  # Use the dedicated probe (NOT in CORPUS): it imports `dlopen`, refused by
-  # design forever (dynamic loading defeats symbol-reachability auditing), so it
-  # can never drift to CLEAN the way real corpus crates do as support grows.
-  probe=selftest-dlopen
+  # Use the dedicated probe (NOT in CORPUS): it imports a dynamic loader the
+  # shim never defines, refused by design forever (dynamic loading defeats
+  # symbol-reachability auditing), so it can never drift to CLEAN the way real
+  # corpus crates do as support grows.
+  probe=selftest-dynamic-loading
   actual="$work/actual.txt"
   log="$work/audit.log"
   if ! audit_normalized "$probe" "$log" >"$actual"; then

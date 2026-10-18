@@ -1079,9 +1079,9 @@ See the escape taxonomy for the per-class runtime backstops and their limits.
 Runtime checks catch effects that cannot be rejected statically:
 
 - missing drivers and denied capabilities;
-- deny-trap interposers (e.g. the process-spawn family) that abort
-  deterministically if a dormant escape path is actually reached;
-- dynamic library loading (`dlopen` refused; on Linux `dlsym` resolves every name the shim defines as a libc contract, to that definition — its routing table, `src/posix/dlsym.rs` — and NULL for every other name);
+- deny-trap interposers (the process-spawn family, `dlopen`/`dlclose`) that
+  abort deterministically if a dormant escape path is actually reached;
+- dynamic library loading (`dlopen`/`dlclose` deny-trapped, the rest of the family refused; on Linux `dlsym` resolves every name the shim defines as a libc contract, to that definition — its routing table, `src/posix/dlsym.rs` — and NULL for every other name);
 - SUD-trapped syscalls whose registry row is a `Trap` (a named, deterministic
   abort carrying the row's class and reasoning), and numbers the vendored
   kernel table does not list at all (a distinct abort);

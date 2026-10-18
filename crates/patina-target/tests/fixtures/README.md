@@ -4,9 +4,10 @@
 `x86-avx512.objdump` records its bytes and golden boundaries, generated with
 GNU as/objdump 2.42. It is never executed.
 
-It exercises EVEX maps 1/2/3, register and memory ModRM, disp32 with and without
-SIB, RIP-relative disp32, compressed disp8, segment/address-size prefixes,
-broadcast, masking, embedded rounding, and map-1/map-3 immediates. VEX
+It exercises EVEX maps 1/2/3 and the AVX512-FP16 maps 5/6, register and memory
+ModRM, disp32 with and without SIB, RIP-relative disp32, compressed disp8,
+segment/address-size prefixes, broadcast, masking, embedded rounding, and
+map-1/map-3 immediates (including FP16's map-3 `vcmpph`). VEX
 `vpinsrw`/`vpextrw` cover the shared map-1 insert/extract immediate rules. The
 unit tests additionally check truncation, reserved fields and exact
 forbidden-opcode sentinels after each instruction.

@@ -5,6 +5,7 @@ use std::path::Path;
 pub struct Symbol {
     pub name: String,
     pub linux: bool,
+    pub darwin: bool,
     pub routed: bool,
     pub deny_class: Option<String>,
     pub architecture: Option<String>,
@@ -26,9 +27,10 @@ pub fn read(path: &Path) -> Vec<Symbol> {
                 panic!("symbol metadata row must contain exactly four fields");
             };
             assert!(names.insert(*name), "duplicate symbol metadata row: {name}");
-            let linux = match *platform {
-                "linux" | "both" => true,
-                "darwin" => false,
+            let (linux, darwin) = match *platform {
+                "linux" => (true, false),
+                "both" => (true, true),
+                "darwin" => (false, true),
                 _ => panic!("unknown symbol metadata platform: {platform}"),
             };
             // Darwin's exported linker spellings include $DARWIN_EXTSN;
@@ -42,8 +44,9 @@ pub fn read(path: &Path) -> Vec<Symbol> {
             );
             let (routed, deny_class) = match *status {
                 "modeled" | "partial" => (true, None),
-                "absent" | "control-plane" => (false, None),
+                "control-plane" => (false, None),
                 "deny(process)" => (false, Some("process".to_owned())),
+                "deny(dynamic-loading)" => (false, Some("dynamic-loading".to_owned())),
                 "deny(host-introspection)" => (false, Some("host-introspection".to_owned())),
                 "deny(macos-framework)" => (false, Some("macos-framework".to_owned())),
                 _ => panic!("unknown symbol metadata status: {status}"),
@@ -56,6 +59,7 @@ pub fn read(path: &Path) -> Vec<Symbol> {
             Symbol {
                 name: (*name).to_owned(),
                 linux,
+                darwin,
                 routed,
                 deny_class,
                 architecture,

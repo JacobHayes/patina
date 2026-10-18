@@ -87,16 +87,11 @@ pub enum SymbolStatus {
     Partial,
     /// A deny-trap: linking is inert, the first call aborts naming the symbol.
     /// The class is the audit's escape category for the surface
-    /// (`process`, `macos-framework`, `host-introspection`).
+    /// (`process`, `dynamic-loading`, `macos-framework`, `host-introspection`).
     Deny(&'static str),
     /// Shim control plane: not a libc contract (startup, the trace channel,
     /// the SUD/TSC arming entries, weak-hook stubs, sentinel data).
     ControlPlane,
-    /// A known ABI spelling the shim does NOT define (a fortified or
-    /// large-file alias, a wrapper with a raw row but no C face). A guest
-    /// importing it reaches the host or is audit-refused; enumerated so the
-    /// gap is visible, and gated so a definition cannot appear unnoticed.
-    Absent,
 }
 
 impl SymbolStatus {
@@ -106,13 +101,12 @@ impl SymbolStatus {
             SymbolStatus::Partial => "partial".to_string(),
             SymbolStatus::Deny(class) => format!("deny({class})"),
             SymbolStatus::ControlPlane => "control-plane".to_string(),
-            SymbolStatus::Absent => "absent".to_string(),
         }
     }
 }
 
-/// One public symbol the shim objects define (or, for `Absent`, deliberately
-/// do not), mapped onto the syscall rows it serves.
+/// One public symbol the shim objects define, mapped onto the syscall rows it
+/// serves.
 #[derive(Clone, Copy, Debug)]
 pub struct SymbolRow {
     pub name: &'static str,

@@ -7,26 +7,6 @@ static mut EMPTY_ARRAY: u8 = 0;
 static mut SYSTEM_TIMEZONE: u8 = 0;
 static mut TIMEZONE_NAME: u8 = 0;
 
-pub(super) fn native_trap(class: &core::ffi::CStr, symbol: &core::ffi::CStr) -> ! {
-    for bytes in [
-        b"patina: ".as_slice(),
-        class.to_bytes(),
-        b" reached under patina: ",
-        symbol.to_bytes(),
-        b"; not interposed by the deterministic runtime; failing closed\n",
-    ] {
-        // SAFETY: `bytes` is a live slice for the duration of this synchronous host write.
-        unsafe {
-            crate::patina_stdio_write(2, bytes.as_ptr().cast(), bytes.len());
-        }
-    }
-    crate::patina_flush_captured_stdio();
-    crate::host_abort()
-}
-// The existing registry generator emits guarded functions, with the original
-// arity-free trap ABI: callers cannot return from any of these dormant helpers.
-include!(concat!(env!("OUT_DIR"), "/darwin_traps.rs"));
-
 #[unsafe(no_mangle)]
 extern "C" fn SecTrustSettingsCopyCertificates(_domain: c_uint, _out: *mut *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();

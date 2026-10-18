@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "mre_selftest_dlopen"
+name = "mre_selftest_dynamic_loading"
 version = "0.0.0"

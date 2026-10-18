@@ -74,13 +74,8 @@ The network scenarios (`net/*`, `readiness/*`) use the host's loopback stack
 only — loopback addresses, AF_UNIX paths in the run directory and abstract
 names derived from it, the kernel's rtnetlink — and compare host-allocated or
 host-configured values (ports, buffer sizes, MTUs, interfaces other than `lo`)
-by relation; IPv6 on `lo` and an unprivileged fanotify group are their needs. A libc symbol the shim leaves undefined cannot be imported by the
-probe binary (the pre-run audit would refuse all of it), so its scenario
-reaches glibc's definition through `dlsym` (`Probe::resolve`) and names it in
-`resolves` (a scenario whose rows glibc has no wrapper for runs through
-`Vehicle::KERNEL` only, not `syscall(2)` twice). Under patina that lookup
-answers NULL: the shim's `__wrap_dlsym` answers only the names the shim
-defines (`src/posix/dlsym.rs` `patina_dlsym_route`), so such a scenario's gap
-lifts once the shim defines the symbol. A catalog
-test fails once a `resolves` name stops being registry-`Absent`: the
-scenario then imports it directly.
+by relation; IPv6 on `lo` and an unprivileged fanotify group are their needs. A scenario whose
+rows glibc has no wrapper for runs through `Vehicle::KERNEL` only, not
+`syscall(2)` twice. `Probe::resolve` reaches a symbol through `dlsym`, a
+program's other way to it than linking; under patina that lookup answers only
+the names the shim defines (`src/posix/dlsym.rs` `patina_dlsym_route`).

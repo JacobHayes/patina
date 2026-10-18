@@ -415,10 +415,12 @@ Rules that follow:
   `sud::tests::bindings_match_the_registry_rows`.
 - A new C or Rust interposer needs a `SymbolRow` (platform, the rows it serves, a
   status); the object-scan gate (`cargo-patina/tests/syscall_registry.rs`)
-  fails on an unlisted definition, a stale row, or an `Absent` row that gained
-  a definition. A deny-trap needs a `Deny(class)` row AND its entry in
-  `patina-target`'s deny-trap list; the gate holds the C sites, the rows, and
-  that list in three-way agreement.
+  fails on an unlisted definition or a row the objects do not define. A
+  deny-trap needs a `Deny(class)` row AND its entry in `patina-target`'s
+  deny-trap list; the gate holds the definitions, the rows,
+  and that list in agreement. Every class but `process` is generated from its
+  row (`build_support.rs`, `posix.rs` `native_trap`), so a new trap of those
+  classes is the row and the list entry alone.
 - The libc `syscall(2)` interposer (`src/variadic/`) forwards EVERY ordinary number into
   `patina_sud_dispatch`: never add a number-specific branch there; add the row
   and binding instead, so the three vehicles cannot disagree.

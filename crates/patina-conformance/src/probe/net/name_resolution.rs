@@ -89,14 +89,12 @@ impl Probe {
         (code, results)
     }
 
-    // ---- symbols the shim leaves undefined -----------------------------------
+    // ---- dynamic lookup ------------------------------------------------------
 
     /// Resolve `symbol` through `dlsym(RTLD_DEFAULT, …)` and record whether
-    /// it resolved. The door of a symbol the registry lists `Absent`: the
-    /// probe binary cannot import it (the pre-run audit would refuse the
-    /// whole binary), so the libc vehicle reaches glibc's definition
-    /// dynamically, and under patina `dlsym` answers only what the shim
-    /// defines (src/posix/dlsym.rs `__wrap_dlsym`).
+    /// it resolved: a program's other way to a symbol than linking it. Under
+    /// patina `dlsym` answers only what the shim defines (src/posix/dlsym.rs
+    /// `__wrap_dlsym`).
     pub fn resolve(&self, symbol: &str) -> Option<*mut libc::c_void> {
         let c = cstr(symbol);
         // SAFETY: a NUL-terminated name looked up in the global scope.
