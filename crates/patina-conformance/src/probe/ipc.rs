@@ -139,9 +139,14 @@ pub fn perm_mode(perm: &libc::ipc_perm) -> u32 {
     perm.mode
 }
 
-/// Whole seconds of `CLOCK_REALTIME` read before and after an operation: the
-/// kernel stamps IPC times with the realtime seconds at the moment it acts
-/// (`ktime_get_real_seconds`), so a stamp the operation set lies within.
+/// The whole seconds an IPC stamp set by an operation must lie within. The
+/// kernel stamps IPC times with `ktime_get_real_seconds`, the timekeeper's
+/// seconds as of its last tick, which trail the fine clock by up to a tick:
+/// near a second boundary a fine reading before the operation can already
+/// show second N while the stamp is still N-1. So `from` is the coarse
+/// realtime second ([`Probe::stamp_floor_seconds`], never ahead of a later
+/// stamp) and `to` the fine one ([`Probe::realtime_seconds`], never behind
+/// one).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Window {
     pub from: i64,
@@ -187,17 +192,29 @@ impl Probe {
     }
 
     /// The whole seconds of `CLOCK_REALTIME`, read through this probe's own
-    /// door (unrecorded): the clock the kernel, or patina, stamps IPC times
-    /// with.
+    /// door (unrecorded). No stamp set before this reading lies above it, so
+    /// it closes a [`Window`].
     pub fn realtime_seconds(&self) -> i64 {
-        let (_, ns) = self.rec.quiet(|| self.clock_gettime(libc::CLOCK_REALTIME));
+        self.seconds_of(libc::CLOCK_REALTIME)
+    }
+
+    /// The whole seconds of `CLOCK_REALTIME_COARSE`, read through this probe's
+    /// own door (unrecorded): the timekeeper's seconds the kernel stamps IPC
+    /// times with, which never run ahead of a stamp set after this reading, so
+    /// it opens a [`Window`]. The fine clock can, across a second boundary.
+    pub fn stamp_floor_seconds(&self) -> i64 {
+        self.seconds_of(libc::CLOCK_REALTIME_COARSE)
+    }
+
+    fn seconds_of(&self, clock: i32) -> i64 {
+        let (_, ns) = self.rec.quiet(|| self.clock_gettime(clock));
         ns.div_euclid(1_000_000_000) as i64
     }
 
     /// Run `operation` between two realtime readings; answer its result and
     /// the window a stamp it sets must lie within.
     pub fn stamped<T>(&self, operation: impl FnOnce() -> T) -> (T, Window) {
-        let from = self.realtime_seconds();
+        let from = self.stamp_floor_seconds();
         let value = operation();
         let to = self.realtime_seconds();
         (value, Window { from, to })

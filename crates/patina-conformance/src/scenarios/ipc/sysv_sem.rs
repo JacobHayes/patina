@@ -118,7 +118,7 @@ pub fn run(p: &Probe) {
     undo.removed(removed);
 
     // ---- values ----
-    let from = p.realtime_seconds();
+    let from = p.stamp_floor_seconds();
     let id = p.semget(Key::PRIVATE, 3, IPC_CREAT | 0o600);
     p.require("create a set of three", id >= 0);
     let set = Owned::sysv(Syscall::N_semctl, id);

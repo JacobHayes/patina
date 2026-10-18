@@ -96,7 +96,7 @@ pub fn run(p: &Probe) {
     );
 
     // ---- selection ----
-    let received_from = p.realtime_seconds();
+    let received_from = p.stamp_floor_seconds();
     let (_, got) = p.msgrcv(id, 16, 3, IPC_NOWAIT);
     p.check(
         "a positive type takes the first of that type",
