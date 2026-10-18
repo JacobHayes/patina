@@ -27,20 +27,39 @@ mod time;
 #[path = "symbol_stdio.rs"]
 mod stdio;
 
-pub const SYMBOLS: &[SymbolRow] =
-    &inventory::concat::<_, { ROWS.len() + time::ROWS.len() + stdio::ROWS.len() }>(
-        ROWS,
-        &inventory::concat::<_, { time::ROWS.len() + stdio::ROWS.len() }>(time::ROWS, stdio::ROWS),
-    );
-#[doc(hidden)]
-pub const ALL_SYMBOLS_WITH_ARCH: &[(SymbolRow, Option<&str>)] =
-    &inventory::concat::<_, { METADATA.len() + time::METADATA.len() + stdio::METADATA.len() }>(
-        METADATA,
-        &inventory::concat::<_, { time::METADATA.len() + stdio::METADATA.len() }>(
-            time::METADATA,
-            stdio::METADATA,
+#[path = "symbol_memory.rs"]
+mod memory;
+
+pub const SYMBOLS: &[SymbolRow] = &inventory::concat::<
+    _,
+    { ROWS.len() + time::ROWS.len() + stdio::ROWS.len() + memory::ROWS.len() },
+>(
+    ROWS,
+    &inventory::concat::<_, { time::ROWS.len() + stdio::ROWS.len() + memory::ROWS.len() }>(
+        time::ROWS,
+        &inventory::concat::<_, { stdio::ROWS.len() + memory::ROWS.len() }>(
+            stdio::ROWS,
+            memory::ROWS,
         ),
-    );
+    ),
+);
+#[doc(hidden)]
+pub const ALL_SYMBOLS_WITH_ARCH: &[(SymbolRow, Option<&str>)] = &inventory::concat::<
+    _,
+    { METADATA.len() + time::METADATA.len() + stdio::METADATA.len() + memory::METADATA.len() },
+>(
+    METADATA,
+    &inventory::concat::<
+        _,
+        { time::METADATA.len() + stdio::METADATA.len() + memory::METADATA.len() },
+    >(
+        time::METADATA,
+        &inventory::concat::<_, { stdio::METADATA.len() + memory::METADATA.len() }>(
+            stdio::METADATA,
+            memory::METADATA,
+        ),
+    ),
+);
 
 symbol_rows! {
     s(
@@ -759,84 +778,6 @@ symbol_rows! {
         "pipe2",
         Platform::Linux,
         Serves::Syscalls(&["pipe2"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "mmap",
-        Platform::Linux,
-        Serves::Syscalls(&["mmap"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "mmap64",
-        Platform::Linux,
-        Serves::Syscalls(&["mmap"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "munmap",
-        Platform::Linux,
-        Serves::Syscalls(&["munmap"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "msync",
-        Platform::Linux,
-        Serves::Syscalls(&["msync"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "mremap",
-        Platform::Linux,
-        Serves::Syscalls(&["mremap"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "memfd_create",
-        Platform::Linux,
-        Serves::Syscalls(&["memfd_create"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "mprotect",
-        Platform::Linux,
-        Serves::Syscalls(&["mprotect"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "madvise",
-        Platform::Linux,
-        Serves::Syscalls(&["madvise"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "mlock",
-        Platform::Linux,
-        Serves::Syscalls(&["mlock"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "mlock2",
-        Platform::Linux,
-        Serves::Syscalls(&["mlock2"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "munlock",
-        Platform::Linux,
-        Serves::Syscalls(&["munlock"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "mlockall",
-        Platform::Linux,
-        Serves::Syscalls(&["mlockall"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "munlockall",
-        Platform::Linux,
-        Serves::Syscalls(&["munlockall"]),
         SymbolStatus::Modeled,
     ),
     s(
