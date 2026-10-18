@@ -132,6 +132,7 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
             families: &[Family::Native],
             flags: &[
                 HARNESS_FLAG,
+                CPUS_FLAG,
                 f(
                     "--mount",
                     None,
@@ -398,6 +399,14 @@ child's readable-trace receipt.",
             flags: &[COMPUTE_WATCHDOG_FLAG],
         },
         Group {
+            title: "Virtual machine (native harness mode)",
+            families: &[Family::Harness],
+            flags: &[Flag {
+                doc: "The number of CPUs every seed's guest sees (default 4, at most 1024), re-emitted onto each seed's child run.",
+                ..CPUS_FLAG
+            }],
+        },
+        Group {
             title: "Native address layout (native harness mode)",
             families: &[Family::Harness],
             flags: &[Flag {
@@ -590,7 +599,7 @@ pub(super) const REPLAY: Verb = Verb {
 families: a wasm module replays under WASI, a native binary under the native \
 supervisor, and a directory/Cargo.toml (no --target) under the Cargo package \
 family. Each restores every recorded semantic input (seed, fault knobs, buggify, \
-realtime epoch, boot origin, hostname, guest argv, and native `--env` values) from the trace — the trace is authoritative \
+realtime epoch, boot origin, hostname, native CPU count, guest argv, and native `--env` values) from the trace — the trace is authoritative \
 — so replay exposes no semantic flags; any re-supplied value must match the \
 recording or the replay is refused.\n\
 \n\
@@ -600,8 +609,8 @@ families carry the timeline/branch controls (--timeline, and --branch --from \
 (--fuel/--env/--socket/--preopen and resource limits). Native traces restore \
 `run --env` values from metadata and reject re-supplied native `--env`; native \
 traces are single-timeline (native runs cannot branch), so native replay accepts \
-only --fingerprint, --mount, --coverage-out, --harness, --compute-watchdog-ms, and the \
---allow/--allow-unsupported-symbols audit surface.",
+only --fingerprint, --mount, --coverage-out, --harness, --compute-watchdog-ms, the \
+--allow/--allow-unsupported-symbols audit surface, and a --cpus that must match the recording's.",
     families: &[
         fam(Family::Cargo, "`replay` of a Cargo package", None),
         fam(Family::Wasi, "`replay` of a WASI module", None),
@@ -643,6 +652,10 @@ only --fingerprint, --mount, --coverage-out, --harness, --compute-watchdog-ms, a
                 Flag {
                     doc: "Replay a trace recorded with --allow-randomized-address-layout, keeping the host's address-space randomization; required exactly when the recording used it.",
                     ..ALLOW_RANDOMIZED_LAYOUT_FLAG
+                },
+                Flag {
+                    doc: "The trace's CPU count, which replay restores without it; a count that differs from the recording's is refused.",
+                    ..CPUS_FLAG
                 },
             ],
         },

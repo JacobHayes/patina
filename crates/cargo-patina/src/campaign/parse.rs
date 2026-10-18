@@ -162,6 +162,9 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     if args.flag("--allow-randomized-address-layout") {
         spec.address_layout = Some(patina_dst_trace::AddressLayout::Randomized);
     }
+    if let Some(cpus) = args.u32("--cpus") {
+        spec.cpus = Some(cpus);
+    }
     if let Some(value) = args.u64("--compute-watchdog-ms") {
         spec.compute_watchdog_ms = Some(value);
     }

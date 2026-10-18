@@ -345,6 +345,26 @@ pub(super) fn reconcile_replay_hostname(
     Ok(recorded.to_owned())
 }
 
+/// Reconcile the trace's recorded CPU count against this run's. The trace is
+/// authoritative: an explicitly configured count (`--cpus` /
+/// [`crate::ENV_GUEST_CPUS`]) that differs is refused; an unconfigured run adopts the
+/// recorded one.
+pub(super) fn reconcile_replay_cpus(
+    config: &RuntimeConfig,
+    recorded: u32,
+) -> Result<u32, RuntimeError> {
+    if let Some(supplied) = config.cpus
+        && supplied != recorded
+    {
+        return Err(RuntimeError::Config(format!(
+            "replay --cpus ({supplied}) conflicts with the trace's recorded CPU count \
+                 ({recorded}); the trace is authoritative, so omit the flag (or supply the \
+                 matching value)"
+        )));
+    }
+    Ok(recorded)
+}
+
 /// The deterministic guest environment recorded into a trace. `None` when no
 /// values were supplied, so env-free runs keep compact old-shape metadata.
 pub(super) fn guest_env_record(config: &RuntimeConfig) -> Option<BTreeMap<String, String>> {

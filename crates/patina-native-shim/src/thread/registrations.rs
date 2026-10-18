@@ -20,10 +20,12 @@
 //!   mutexes, so glibc never links one into it;
 //! * glibc's rseq area is unregistered from the host, which would otherwise
 //!   keep writing host CPU ids into it (a determinism leak through
-//!   `__rseq_offset`), and registered virtually instead. The virtual machine
-//!   has one CPU, 0, on one node, so the area reads `cpu_id` and
-//!   `cpu_id_start` 0 (what `getcpu` answers), `node_id` 0 and `mm_cid` 0,
-//!   written once at registration: nothing ever moves a task off that CPU.
+//!   `__rseq_offset`), and registered virtually instead. The area reads
+//!   `cpu_id` and `cpu_id_start` as the CPU the task runs on (what `getcpu`
+//!   answers, `thread::sched`), `node_id` 0 (the one node) and `mm_cid` 0,
+//!   written at registration and again whenever a `sched_setaffinity` moves
+//!   the task to another CPU, as the kernel's notify-resume writes it after a
+//!   migration ([`migrated`]); nothing else moves a task.
 //!   Tasks run one at a time and are switched only at a boundary call, which
 //!   a restartable sequence never contains, so no sequence is ever preempted,
 //!   migrated or interrupted by a handler, and no abort is ever due.
@@ -66,9 +68,15 @@ struct Rseq {
 
 /// The fields of `struct rseq` the kernel keeps current, at their offsets:
 /// `cpu_id_start`, `cpu_id`, then (past `rseq_cs` and `flags`) `node_id` and
-/// `mm_cid`.
-fn write_cpu(area: usize, cpu_id: u32) -> Result<(), c_int> {
-    crate::uaccess::write(area, &[0u32, cpu_id])?;
+/// `mm_cid`. A registered task's area names its CPU in both CPU fields.
+fn write_cpu(area: usize, cpu: u32) -> Result<(), c_int> {
+    write_fields(area, cpu, cpu)
+}
+
+/// Write the area's CPU fields: `cpu_id_start`, `cpu_id`, and node and mm
+/// cid 0.
+fn write_fields(area: usize, cpu_id_start: u32, cpu_id: u32) -> Result<(), c_int> {
+    crate::uaccess::write(area, &[cpu_id_start, cpu_id])?;
     crate::uaccess::write(area + 20, &[0u32, 0])
 }
 
@@ -145,7 +153,7 @@ fn thread_pointer() -> usize {
 /// glibc's own registration failed; any other refusal (another length than
 /// this glibc registers with, say) would leave the host writing host CPU ids
 /// into the area, so it stops the run by name.
-fn adopt_rseq() -> Option<Rseq> {
+fn adopt_rseq(cpu: u32) -> Option<Rseq> {
     let (offset, size) = glibc_rseq();
     if size == 0 {
         return None;
@@ -176,7 +184,7 @@ fn adopt_rseq() -> Option<Rseq> {
              host would keep writing host CPU ids into it (rseq takeover)",
         );
     }
-    if write_cpu(rseq.area, 0).is_err() {
+    if write_cpu(rseq.area, cpu).is_err() {
         fatal("glibc's rseq area is not writable");
     }
     Some(rseq)
@@ -192,7 +200,7 @@ fn registration_failed(cpu_id: Option<u32>) -> bool {
 /// Take over the calling thread's host registrations as `task`'s: called on
 /// the thread itself, once, before the guest runs on it (the main thread
 /// from `__libc_start_main`, a managed thread from its trampoline).
-pub(super) fn adopt(task: TaskId) {
+pub(super) fn adopt(task: TaskId, cpu: u32) {
     let mut head = 0usize;
     let mut len = 0usize;
     // glibc registered the head from its own text; read it back.
@@ -203,7 +211,7 @@ pub(super) fn adopt(task: TaskId) {
     {
         fatal("host robust-list query failed (get_robust_list)");
     }
-    let rseq = adopt_rseq();
+    let rseq = adopt_rseq(cpu);
     lock_state()
         .registrations
         .tasks
@@ -239,7 +247,9 @@ pub(crate) fn rseq(area: usize, len: u32, flags: i32, sig: u32) -> i64 {
         if current.sig != sig {
             return -i64::from(errno::EPERM);
         }
-        if write_cpu(area, RSEQ_CPU_ID_UNINITIALIZED).is_err() {
+        // `rseq_reset_rseq_cpu_node_id`: `cpu_id_start` 0, `cpu_id`
+        // uninitialized.
+        if write_fields(area, 0, RSEQ_CPU_ID_UNINITIALIZED).is_err() {
             return -i64::from(errno::EFAULT);
         }
         set_rseq(me, None);
@@ -263,7 +273,7 @@ pub(crate) fn rseq(area: usize, len: u32, flags: i32, sig: u32) -> i64 {
     if !crate::uaccess::access_ok(area, len as usize) {
         return -i64::from(errno::EFAULT);
     }
-    if write_cpu(area, 0).is_err() {
+    if write_cpu(area, super::sched::current_cpu()).is_err() {
         // The kernel's notify-resume would force SIGSEGV on this thread.
         crate::trap_fatal(
             "rseq registered an area the CPU fields cannot be written to: the kernel's \
@@ -272,6 +282,27 @@ pub(crate) fn rseq(area: usize, len: u32, flags: i32, sig: u32) -> i64 {
     }
     set_rseq(me, Some(Rseq { area, len, sig }));
     0
+}
+
+/// A `sched_setaffinity` moved `task` to `cpu`: its rseq area, if it has one,
+/// names the CPU from now on, as the kernel's notify-resume writes it on the
+/// task's return to user space after the migration.
+pub(super) fn migrated(task: TaskId, cpu: u32) {
+    let area = lock_state()
+        .registrations
+        .tasks
+        .get(&task)
+        .and_then(|registrations| registrations.rseq)
+        .map(|rseq| rseq.area);
+    if let Some(area) = area
+        && write_cpu(area, cpu).is_err()
+    {
+        // The kernel's notify-resume would force SIGSEGV on the task.
+        crate::trap_fatal(
+            "a migrated task's rseq area cannot be written: the kernel's forced SIGSEGV is not \
+             modeled",
+        );
+    }
 }
 
 fn set_rseq(task: TaskId, rseq: Option<Rseq>) {
@@ -288,7 +319,9 @@ fn set_rseq(task: TaskId, rseq: Option<Rseq>) {
 /// managed run, before guest constructors.
 pub extern "C" fn patina_thread_registrations_adopt_main() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    adopt(MAIN_TASK);
+    // The first task's CPU, 0, whatever the count: nothing has set the main
+    // thread's affinity before its constructors run.
+    adopt(MAIN_TASK, 0);
 }
 
 /// `set_robust_list(head, len)`: exactly a head's length, else `EINVAL`; the

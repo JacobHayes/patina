@@ -197,6 +197,11 @@ unsafe extern "C" fn __assert_rtn(
     crate::patina_flush_captured_stdio();
     crate::host_abort()
 }
+/// The virtual machine's CPU count, as the `hw.*cpu` integers carry it:
+/// every CPU is a logical, physical, available and active one.
+fn cpus() -> c_int {
+    crate::cpus::count() as c_int
+}
 unsafe fn emit<T: crate::plain::Plain>(value: T, oldp: *mut c_void, oldlenp: *mut usize) -> c_int {
     // SAFETY: the caller supplies writable output and length storage; the null checks and length
     // read below validate the exact range before copying.
@@ -241,7 +246,7 @@ unsafe extern "C" fn sysctl(
         if name.read() == libc::CTL_HW {
             match name.add(1).read() {
                 libc::HW_MEMSIZE => return emit(PHYSICAL_MEMORY_BYTES, oldp, oldlenp),
-                libc::HW_NCPU | libc::HW_AVAILCPU => return emit(1 as c_int, oldp, oldlenp),
+                libc::HW_NCPU | libc::HW_AVAILCPU => return emit(cpus(), oldp, oldlenp),
                 libc::HW_PAGESIZE => return emit(4096 as c_int, oldp, oldlenp),
                 _ => {}
             }
@@ -279,7 +284,7 @@ unsafe extern "C" fn sysctlbyname(
             | b"hw.logicalcpu_max"
             | b"hw.physicalcpu"
             | b"hw.physicalcpu_max"
-            | b"hw.activecpu" => emit(1 as c_int, oldp, oldlenp),
+            | b"hw.activecpu" => emit(cpus(), oldp, oldlenp),
             name if name.starts_with(b"hw.optional.") => emit(0 as c_int, oldp, oldlenp),
             _ => super::error(libc::ENOENT),
         }

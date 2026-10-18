@@ -187,6 +187,13 @@ pub struct CampaignSpec {
     /// always records it; `None` before the campaign starts means fixed, and a
     /// native state without it predates layout control and cannot continue.
     pub address_layout: Option<patina_dst_trace::AddressLayout>,
+    /// The CPU count every generation's guest sees (`--cpus`), forwarded to
+    /// every child `run` and every reproduce command. Invocation shape like
+    /// [`Self::address_layout`]: a native campaign's state always records it
+    /// (the default unless the operator chose one), and a native state without
+    /// it ran its generations on one virtual CPU and cannot continue. Native
+    /// only.
+    pub cpus: Option<u32>,
     /// Generic liveness-watchdog budget (virtual nanoseconds), applied every
     /// generation when set.
     pub watchdog_nanos: Option<u64>,
@@ -242,6 +249,7 @@ impl Default for CampaignSpec {
             allow_symbols: Vec::new(),
             allow_unsupported_symbols: None,
             address_layout: None,
+            cpus: None,
             watchdog_nanos: None,
             compute_watchdog_ms: None,
             converge_nanos: None,
@@ -337,6 +345,15 @@ impl CampaignSpec {
                 }
                 "harness" => self.harness = json_bool(key, val)?,
                 "address_layout" => self.address_layout = Some(json_address_layout(key, val)?),
+                "cpus" => {
+                    let cpus = json_u64(key, val)?;
+                    // A spec file bypasses the CLI value grammar; hold it to the
+                    // same one so a bad count fails here rather than in every
+                    // generation's child run.
+                    crate::values::validate(help::Kind::Cpus, "cpus", &cpus.to_string())
+                        .map_err(|error| CliError(format!("campaign spec {error}")))?;
+                    self.cpus = Some(cpus as u32);
+                }
                 "allow_symbols" => {
                     let array = val
                         .as_array()
@@ -395,7 +412,7 @@ impl CampaignSpec {
                          timeout_secs, guest_args, buggify, swarm, pct, faults, custom_op_faults, \
                          fault_scale_permille, starve, starve_scale_permille, dns_entries, \
                          harness, allow_symbols, allow_unsupported_symbols, address_layout, \
-                         watchdog_nanos, \
+                         cpus, watchdog_nanos, \
                          compute_watchdog_ms, converge_nanos, heal_after_nanos, report, plateau_after, guided, \
                          allow_unmet_sometimes, verify, or classify"
                     )));

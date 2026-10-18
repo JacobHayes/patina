@@ -795,6 +795,7 @@ fn kind_tag(kind: Kind) -> &'static str {
         Kind::KeyValue => "key-value",
         Kind::UtcTimestamp => "utc-timestamp",
         Kind::Hostname => "hostname",
+        Kind::Cpus => "cpus",
         Kind::DnsEntry => "dns-entry",
         Kind::AddressPair => "address-pair",
         Kind::Socket => "socket",

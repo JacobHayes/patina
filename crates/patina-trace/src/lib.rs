@@ -91,7 +91,10 @@ pub use replay::Replayer;
 ///   number, and its realtime carries on from the crashed incarnation's, so
 ///   format 18 traces, whose restart re-drew incarnation 0's streams, are
 ///   refused rather than replayed with different unrecorded draws.
-pub const TRACE_FORMAT_VERSION: u32 = 19;
+/// - 20: the required [`RunMetadata::cpus`], the virtual machine's CPU count.
+///   Earlier formats ran guests on one virtual CPU and recorded no count, so
+///   they are refused rather than replayed on a machine the guest never saw.
+pub const TRACE_FORMAT_VERSION: u32 = 20;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 

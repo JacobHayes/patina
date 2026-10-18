@@ -1,0 +1,154 @@
+//! The virtual machine's CPU count (`--cpus`) as workloads read it: a tokio
+//! runtime sizing its pool from it, every count surface, and an allocator
+//! reading its CPU.
+
+use super::*;
+
+/// The workers a default `new_multi_thread()` runtime reports, after their
+/// threads started.
+fn tokio_workers(out: &[u8]) -> usize {
+    let fields = assert_fields(out, "NATIVE_TOKIO_WORKERS ", &["workers", "started"]);
+    assert_eq!(fields["started"], fields["workers"], "{}", text(out));
+    fields["workers"].parse().unwrap()
+}
+
+/// A tokio runtime built as most programs build it, `new_multi_thread()` with
+/// the default worker count, sizes its pool from the virtual machine's CPU
+/// count: one worker per virtual CPU, so the default machine gives it several
+/// and its cross-worker interleavings are explored; the run replays
+/// identically. `--cpus 1` is the one-CPU machine: one worker.
+#[test]
+fn a_default_multi_thread_tokio_runtime_starts_a_worker_per_virtual_cpu() {
+    let g = Guest::assert_build("tokio-tcp");
+    let default = ["--env", "TOKIO_TCP_MODE=default"];
+    let out = g.assert_seeded_record_replay_identity(3, &default);
+    tokio_tcp_elapsed_us(&out);
+    let workers = tokio_workers(&out);
+    assert!(workers > 1, "{}", text(&out));
+    assert_eq!(workers, patina_dst_abi::DEFAULT_CPUS as usize);
+    let one = ["--env", "TOKIO_TCP_MODE=default", "--cpus", "1"];
+    let out = g.assert_seeded_record_replay_identity(3, &one);
+    tokio_tcp_elapsed_us(&out);
+    assert_eq!(tokio_workers(&out), 1);
+}
+
+#[cfg(target_os = "linux")]
+const CPU_COUNTS: [&str; 5] = ["parallelism", "online", "configured", "early", "affinity"];
+#[cfg(target_os = "linux")]
+const CPU_KEYS: [&str; 8] = [
+    "parallelism",
+    "online",
+    "configured",
+    "early",
+    "affinity",
+    "thread_cpus",
+    "proc_cpuinfo",
+    "sys_cpu_online",
+];
+#[cfg(target_os = "macos")]
+const CPU_COUNTS: [&str; 8] = [
+    "parallelism",
+    "online",
+    "configured",
+    "early",
+    "ncpu",
+    "activecpu",
+    "logicalcpu",
+    "physicalcpu",
+];
+#[cfg(target_os = "macos")]
+const CPU_KEYS: [&str; 8] = CPU_COUNTS;
+
+/// Every CPU count the probe read is the run's, and its threads ran on more
+/// than one CPU exactly when the machine has more than one.
+fn assert_cpu_count(out: &[u8], cpus: u32) {
+    let fields = assert_fields(out, "NATIVE_CPU_RESULT ", &CPU_KEYS);
+    for key in CPU_COUNTS {
+        assert_eq!(fields[key], cpus.to_string(), "{key}: {}", text(out));
+    }
+    if cfg!(target_os = "linux") {
+        let spread: u32 = fields["thread_cpus"].parse().unwrap();
+        assert_eq!(spread > 1, cpus > 1, "{}", text(out));
+        // Patina serves no CPU files: a reader falls back to the affinity mask.
+        assert_eq!(fields["proc_cpuinfo"], "false");
+        assert_eq!(fields["sys_cpu_online"], "false");
+    }
+}
+
+/// Every guest-visible CPU count agrees with the run's `--cpus`: std's
+/// `available_parallelism`, `sysconf`'s online and configured counts (also as
+/// a constructor read them before Patina's startup ran), and the
+/// platform's own (Linux's affinity mask and each thread's CPU, through glibc
+/// and the raw syscalls; macOS's `hw.*cpu` sysctls). The count is recorded,
+/// a flag-free replay restores it, a matching `--cpus` replays, and a
+/// different one is refused by name.
+#[test]
+fn every_cpu_count_surface_agrees_with_the_run() {
+    let g = Guest::assert_build("cpu_probe.rs");
+    g.assert_audit_clean();
+    let default = g.assert_seed_repeatability(1, 2, &[]);
+    assert_cpu_count(&default, patina_dst_abi::DEFAULT_CPUS);
+    for cpus in [1u32, 3] {
+        let count = cpus.to_string();
+        let flags = ["--cpus", count.as_str()];
+        let baseline = g.assert_seed_repeatability(1, 2, &flags);
+        assert_cpu_count(&baseline, cpus);
+        let trace = g.assert_record_replay_identity(1, &flags, &baseline);
+        assert_eq!(
+            patina_dst_trace::TraceBundle::load(&trace)
+                .unwrap()
+                .metadata
+                .cpus,
+            cpus
+        );
+        let replay = |count: &str| {
+            g.command(
+                "replay",
+                &[
+                    trace.to_str().unwrap(),
+                    "--fingerprint",
+                    "native-boundary-v1",
+                    "--cpus",
+                    count,
+                ],
+            )
+        };
+        assert_eq!(assert_success(replay(count.as_str())).stdout, baseline);
+        assert_refused(replay(&(cpus + 1).to_string()), &["--cpus"]);
+    }
+    for refused in ["0", "1025", "four"] {
+        assert_refused(
+            g.command("run", &["--seed", "1", "--cpus", refused]),
+            &["--cpus"],
+        );
+    }
+}
+
+/// A global allocator that reads its CPU and the CPU count on every
+/// allocation, as a per-CPU arena allocator does, runs threads: the runtime
+/// allocates through it while holding its own state, and every CPU surface
+/// the allocator reads answers without that state's lock. Armed from a
+/// constructor that runs before Patina's, its first read lands in Patina's
+/// startup capturing the control plane, and is the run's count. The CPUs it
+/// saw are the run's, repeatably and through a replay.
+#[test]
+fn an_allocator_reading_its_cpu_runs_threads() {
+    let g = Guest::assert_build("cpu_allocator_probe.rs");
+    let cpus = 3u32;
+    let count = cpus.to_string();
+    let flags = ["--cpus", count.as_str()];
+    let out = g.assert_seed_repeatability(1, 2, &flags);
+    g.assert_record_replay_identity(1, &flags, &out);
+    let fields = assert_fields(
+        &out,
+        "NATIVE_CPU_ALLOC_RESULT ",
+        &["total", "read", "cpus_seen", "online"],
+    );
+    assert_eq!(fields["read"], "1", "{}", text(&out));
+    assert_eq!(fields["online"], count, "{}", text(&out));
+    let seen: u32 = fields["cpus_seen"].parse().unwrap();
+    // Linux threads start round robin over the CPUs; macOS has no per-thread
+    // CPU query, so the probe reads none.
+    let expected = if cfg!(target_os = "linux") { cpus } else { 1 };
+    assert_eq!(seen, expected, "{}", text(&out));
+}

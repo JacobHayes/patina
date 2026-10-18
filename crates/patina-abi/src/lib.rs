@@ -115,6 +115,19 @@ pub const DEFAULT_REALTIME_EPOCH_NANOS: u64 = 1_784_761_209_000_000_000;
 /// behind a zero or whole-second origin. CPU clocks do not use this origin.
 pub const DEFAULT_BOOT_ORIGIN_NANOS: u64 = 12_345_678_901_234;
 
+/// The number of CPUs the virtual machine has unless a run configures its own
+/// (`--cpus`): what the guest's affinity mask, `getcpu`,
+/// `sysconf(_SC_NPROCESSORS_*)` and Darwin's `hw.*cpu` report. Enough that a
+/// runtime sizing its pool from the CPU count (tokio's multi-thread default,
+/// rayon) starts several workers. The scheduler still runs one task at a time;
+/// only what the guest sees changes. A recorded run fact: every trace states
+/// its count, and a replay restores it.
+pub const DEFAULT_CPUS: u32 = 4;
+
+/// The most CPUs a run may configure: `CONFIG_NR_CPUS=1024`, the CPUs glibc's
+/// `cpu_set_t` holds.
+pub const MAX_CPUS: u32 = 1024;
+
 /// The modeled machine's soft `RLIMIT_STACK`, `_STK_LIM`: 8 MiB. The virtual
 /// limit table answers it, and the native supervisor pins the host's soft limit
 /// to it for the guest, since Linux sizes the gap below the stack, and glibc a

@@ -52,6 +52,7 @@ pub(crate) fn parse_native_harness_from(
         step_budget: args.u64("--budget"),
         realtime_epoch: args.string("--realtime-epoch"),
         hostname: args.string("--hostname"),
+        cpus: args.u32("--cpus"),
         knobs: knobs_of(&args)?,
         buggify: buggify_of(&args),
         schedule: schedule_of(&args),
@@ -247,6 +248,7 @@ pub(crate) fn parse_native_run_from(
         step_budget: args.u64("--budget"),
         realtime_epoch_nanos: realtime_epoch_of(&args),
         hostname: args.string("--hostname"),
+        cpus: args.u32("--cpus"),
         knobs: knobs_of(&args)?,
         buggify: buggify_of(&args),
         schedule: schedule_of(&args),
@@ -303,6 +305,9 @@ pub(crate) fn parse_native_replay(
         // Nor --realtime-epoch/--hostname: the trace restores both.
         realtime_epoch_nanos: None,
         hostname: None,
+        // The trace restores the CPU count too; a supplied one is only checked
+        // against it.
+        cpus: args.u32("--cpus"),
         // Like the fault knobs, the repeatable semantic knobs come from the
         // trace.
         knobs: KnobValues::default(),

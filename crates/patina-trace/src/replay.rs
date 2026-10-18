@@ -153,6 +153,12 @@ impl Replayer {
         &self.metadata.hostname
     }
 
+    /// The virtual CPU count the trace was recorded under (see
+    /// [`RunMetadata::cpus`]).
+    pub const fn cpus(&self) -> u32 {
+        self.metadata.cpus
+    }
+
     pub fn expect(&mut self, operation: &Operation) -> Result<Outcome, TraceError> {
         let event = self
             .decisions

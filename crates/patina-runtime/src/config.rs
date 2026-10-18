@@ -159,6 +159,11 @@ pub struct RuntimeConfig {
     /// `realtime_epoch_nanos`. Recorded on every run, authoritative on replay,
     /// not a fingerprint input.
     pub(super) hostname: Option<String>,
+    /// The virtual machine's CPU count, or `None` for
+    /// [`patina_dst_abi::DEFAULT_CPUS`]. `Some` only when supplied explicitly
+    /// (or adopted from a replayed trace), exactly like `hostname`. Recorded on
+    /// every run, authoritative on replay, not a fingerprint input.
+    pub(super) cpus: Option<u32>,
     /// The DNS host table: the names this run resolves, and the virtual IPv4
     /// address each resolves to. Semantic configuration rather than a fault knob
     /// (like `params`): an undefined name is NXDOMAIN deterministically, and the
@@ -222,6 +227,7 @@ impl RuntimeConfig {
             guest_cwd: None,
             realtime_epoch_nanos: None,
             hostname: None,
+            cpus: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -251,6 +257,7 @@ impl RuntimeConfig {
             guest_cwd: None,
             realtime_epoch_nanos: None,
             hostname: None,
+            cpus: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -285,6 +292,7 @@ impl RuntimeConfig {
             guest_cwd: None,
             realtime_epoch_nanos: None,
             hostname: None,
+            cpus: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -320,6 +328,7 @@ impl RuntimeConfig {
             guest_cwd: None,
             realtime_epoch_nanos: None,
             hostname: None,
+            cpus: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -356,6 +365,7 @@ impl RuntimeConfig {
             guest_cwd: None,
             realtime_epoch_nanos: None,
             hostname: None,
+            cpus: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -398,6 +408,7 @@ impl RuntimeConfig {
             guest_cwd: None,
             realtime_epoch_nanos: None,
             hostname: None,
+            cpus: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -678,6 +689,21 @@ impl RuntimeConfig {
         Ok(self)
     }
 
+    /// The virtual machine's CPU count: the explicitly configured one, else
+    /// [`patina_dst_abi::DEFAULT_CPUS`].
+    pub fn cpus(&self) -> u32 {
+        self.cpus.unwrap_or(patina_dst_abi::DEFAULT_CPUS)
+    }
+
+    /// Set the virtual machine's CPU count explicitly (tests and embedders),
+    /// validated by [`validate_cpus`]. Recorded into the trace; a replay whose
+    /// trace recorded a different count is refused.
+    pub fn with_cpus(mut self, cpus: u32) -> Result<Self, RuntimeError> {
+        validate_cpus(cpus).map_err(RuntimeError::Config)?;
+        self.cpus = Some(cpus);
+        Ok(self)
+    }
+
     /// Whether syscall-user-dispatch was armed for this run, or `None` when SUD
     /// is not applicable.
     pub const fn sud(&self) -> Option<bool> {
@@ -837,6 +863,20 @@ pub fn validate_hostname(hostname: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The CPU counts a run may configure: 1 to [`patina_dst_abi::MAX_CPUS`].
+/// Shared by the runtime and the CLI registry's value grammar, so the flag and
+/// the control plane accept exactly the same counts.
+pub fn validate_cpus(cpus: u32) -> Result<(), String> {
+    if (1..=patina_dst_abi::MAX_CPUS).contains(&cpus) {
+        Ok(())
+    } else {
+        Err(format!(
+            "a virtual machine has 1 to {} CPUs; got {cpus}",
+            patina_dst_abi::MAX_CPUS
+        ))
+    }
 }
 
 /// Reject a partition the network could not honor: an empty address on either

@@ -20,7 +20,7 @@ use patina_dst_fs_mem::{FsImage, FsImageEntry};
 use patina_dst_runtime::{
     ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION, ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF,
     ENV_COVERAGE_FD, ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_IMAGE_FD, ENV_GUEST_ARGV,
-    ENV_GUEST_CWD, ENV_GUEST_ENV, ENV_GUEST_HOSTNAME, ENV_INITIAL_STACK, ENV_MODE,
+    ENV_GUEST_CPUS, ENV_GUEST_CWD, ENV_GUEST_ENV, ENV_GUEST_HOSTNAME, ENV_INITIAL_STACK, ENV_MODE,
     ENV_REALTIME_EPOCH_NANOS, ENV_SEED, ENV_STEP_BUDGET, ENV_TRACE_FD,
     NATIVE_INITIAL_STACK_TRAILER_SLOTS,
 };
@@ -123,6 +123,25 @@ pub(super) fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32,
         }
         return Err(CliError(message));
     }
+    // The CPU count the guest's virtual machine has: on replay the trace's,
+    // which a supplied `--cpus` must equal, refused here before the guest
+    // starts; otherwise the flag's, or the runtime default.
+    let guest_cpus = match (&invocation.mode, &replay_trace) {
+        (NativeRunMode::Replay { path, .. }, Some(bundle)) => {
+            let recorded = bundle.metadata.cpus;
+            if let Some(supplied) = invocation.cpus
+                && supplied != recorded
+            {
+                return Err(CliError::usage(format!(
+                    "replay --cpus {supplied} conflicts with the CPU count trace {} recorded \
+                     ({recorded}); the trace is authoritative, so omit --cpus or supply {recorded}",
+                    path.display()
+                )));
+            }
+            Some(recorded)
+        }
+        _ => invocation.cpus,
+    };
     let replay_trace = replay_trace.map(withhold_native_identity);
 
     // Pre-run default-deny gate. Before the guest executes, enumerate every
@@ -408,6 +427,9 @@ liveness-safe."
         }
         if let Some(hostname) = &invocation.hostname {
             command.env(ENV_GUEST_HOSTNAME, hostname);
+        }
+        if let Some(cpus) = guest_cpus {
+            command.env(ENV_GUEST_CPUS, cpus.to_string());
         }
         // The boundary-operation budget is a supervisor-side bound, not recorded
         // run semantics, so it is supplied per invocation on every family alike.

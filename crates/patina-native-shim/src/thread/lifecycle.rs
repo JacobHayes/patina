@@ -15,8 +15,12 @@ struct ThreadStart {
 fn thread_prelude(raw: *mut c_void) -> (StartRoutine, *mut c_void) {
     // SAFETY: `raw` is the `Box<ThreadStart>` leaked in patina_thread_create.
     let start = unsafe { Box::from_raw(raw.cast::<ThreadStart>()) };
+    set_current_task(start.task);
+    // Before anything here allocates or frees (the start record's free
+    // first): the guest's allocator may read this thread's CPU.
+    #[cfg(target_os = "linux")]
+    sched::bind_cpu_slot(start.task);
     let ThreadStart { task, routine, arg } = *start;
-    set_current_task(task);
     // The shim's signal handlers build their frames on a private stack
     // of each managed thread's, armed before any trap can be taken on it.
     #[cfg(target_os = "linux")]
@@ -42,7 +46,7 @@ fn thread_prelude(raw: *mut c_void) -> (StartRoutine, *mut c_void) {
     // a query of this thread's registrations answers the same every run.
     #[cfg(target_os = "linux")]
     {
-        registrations::adopt(task);
+        registrations::adopt(task, sched::cpu_of_task(task));
         EXIT_RECORD.with(|cell| cell.set(finish_after_destructors(task)));
         creation_settled().signal();
     }
@@ -391,7 +395,12 @@ pub(crate) fn thread_finish(task: TaskId, retval: usize, exit_status: i32) {
     #[cfg(target_os = "linux")]
     state.signals.finish(task);
     #[cfg(target_os = "linux")]
-    state.sched.finish(task);
+    {
+        if current_task() == task {
+            sched::unbind_cpu_slot();
+        }
+        state.sched.finish(task);
+    }
     #[cfg(target_os = "linux")]
     state.cancels.finish(task);
     // Detached handles remain targetable while live, then disappear with

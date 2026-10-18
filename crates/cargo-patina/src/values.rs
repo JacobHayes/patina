@@ -55,6 +55,12 @@ pub(crate) fn validate(kind: Kind, name: &str, value: &str) -> Result<(), String
         Kind::Hostname => {
             patina_dst_runtime::validate_hostname(value).map_err(|error| format!("{name}: {error}"))
         }
+        Kind::Cpus => value
+            .parse::<u32>()
+            .map_err(|_| format!("{name} must be a CPU count"))
+            .and_then(|cpus| {
+                patina_dst_runtime::validate_cpus(cpus).map_err(|error| format!("{name}: {error}"))
+            }),
         Kind::DnsEntry => dns_entry(name, value).map(drop),
         Kind::AddressPair => address_pair(name, value).map(drop),
         Kind::Socket => socket(name, value).map(drop),

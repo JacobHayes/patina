@@ -20,9 +20,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 use patina_dst_runtime::{
-    ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_FINGERPRINT, ENV_GUEST_HOSTNAME, ENV_MODE,
-    ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS, ENV_SEED, ENV_STEP_BUDGET,
-    ENV_TIMELINE, ENV_TRACE, FaultKnob,
+    ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_FINGERPRINT, ENV_GUEST_CPUS,
+    ENV_GUEST_HOSTNAME, ENV_MODE, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS,
+    ENV_SEED, ENV_STEP_BUDGET, ENV_TIMELINE, ENV_TRACE, FaultKnob,
 };
 use patina_dst_trace::{lock_exclusive, remove_dead_scratch};
 use patina_dst_wasi_host::{MountPolicy, ResourceLimits};
@@ -332,6 +332,8 @@ struct NativeHarnessInvocation {
     realtime_epoch: Option<String>,
     /// The `--hostname` name, re-emitted verbatim onto each seed's child `run`.
     hostname: Option<String>,
+    /// The `--cpus` count, re-emitted onto each seed's child `run`.
+    cpus: Option<u32>,
     /// Every fault knob this invocation set, re-emitted onto each seed's child
     /// `run` command line by [`knob_flag_pairs`].
     knobs: KnobValues,
@@ -508,6 +510,11 @@ struct NativeRunInvocation {
     /// [`ENV_GUEST_HOSTNAME`] for the shim's `uname`/`gethostname`; `None`
     /// leaves the runtime default. Recorded and restored like the epoch.
     hostname: Option<String>,
+    /// The guest's virtual CPU count (`--cpus`), forwarded as
+    /// [`ENV_GUEST_CPUS`]; `None` leaves the runtime default. Recorded and
+    /// restored like the node name; on replay a count is checked against the
+    /// trace's and the trace's is what the guest gets.
+    cpus: Option<u32>,
     /// Fault-injection knobs forwarded to the guest through the `PATINA_*`
     /// control plane. Each is a validated raw value stored verbatim; the runtime
     /// re-parses it identically on record and replay, so a mismatched flag on
@@ -807,6 +814,7 @@ and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)
         .env_remove(ENV_STEP_BUDGET)
         .env_remove(ENV_REALTIME_EPOCH_NANOS)
         .env_remove(ENV_GUEST_HOSTNAME)
+        .env_remove(ENV_GUEST_CPUS)
         .env_remove(ENV_PARAMS_JSON);
     // Scrub the fault-injection control plane so only the flags this invocation
     // parsed reach the child; an ambient `PATINA_FS_CRASH_AT` (or any sibling) in

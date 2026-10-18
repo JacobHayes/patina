@@ -115,6 +115,11 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Node name the guest's virtual kernel reports (mirrors --hostname); recorded and restored on replay.",
     },
     EnvVar {
+        name: "PATINA_GUEST_CPUS",
+        scope: "protocol",
+        doc: "The guest's virtual CPU count (mirrors native --cpus, default 4); recorded, supplied by replay from the trace, and refused when it disagrees.",
+    },
+    EnvVar {
         name: "PATINA_FS_CRASH_AT / PATINA_FS_TORN_GRANULARITY / PATINA_FS_ERROR_PERMILLE / PATINA_FS_SHORT_PERMILLE",
         scope: "protocol",
         doc: "Filesystem crash, error, and short-I/O fault knobs (mirror the --fs-* flags).",

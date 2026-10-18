@@ -61,10 +61,19 @@ pub const PATINA_TSC_RDTSCP: c_int = 2;
 
 /// The deterministic `IA32_TSC_AUX` value `rdtscp` reports in `ECX`. Linux packs
 /// `(numa_node << 12) | cpu_id` there, and it is what `sched_getcpu()` reads on a
-/// vDSO-less path — so it must agree with the rest of the simulation's single-CPU
-/// model: cpu 0, node 0. A host value here would leak the scheduler's real core
-/// placement into the guest.
-const PATINA_TSC_AUX: c_uint = 0;
+/// vDSO-less path — so it must agree with the rest of the virtual machine: the
+/// CPU `getcpu` answers the calling thread (`thread::sched`), on node 0. A host
+/// value here would leak the scheduler's real core placement into the guest.
+#[cfg(target_os = "linux")]
+fn tsc_aux() -> c_uint {
+    crate::thread::sched::current_cpu()
+}
+
+/// Unit-test builds off Linux have no thread model: CPU 0, node 0.
+#[cfg(not(target_os = "linux"))]
+fn tsc_aux() -> c_uint {
+    0
+}
 
 thread_local! {
     /// Set while this thread is inside [`patina_tsc_dispatch`]. A nested trap —
@@ -225,10 +234,16 @@ pub unsafe extern "C" fn patina_tsc_dispatch(
              counter value for rdtsc/rdtscp",
         );
     };
+    // Only `rdtscp` reports `TSC_AUX`.
+    let aux = if kind == PATINA_TSC_RDTSCP {
+        tsc_aux()
+    } else {
+        0
+    };
     // SAFETY: the three out-pointers are the handler's own stack storage.
     unsafe {
         tsc_out.write(value);
-        aux_out.write(PATINA_TSC_AUX);
+        aux_out.write(aux);
         length_out.write(length);
     }
     kind

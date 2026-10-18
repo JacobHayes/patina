@@ -469,6 +469,12 @@ pub struct RunMetadata {
     /// Authoritative on replay; a conflicting explicit name is refused.
     /// Not a fingerprint input.
     pub hostname: String,
+    /// The number of CPUs the virtual machine has (`--cpus`, default
+    /// [`patina_dst_abi::DEFAULT_CPUS`]): the guest's affinity mask, `getcpu`,
+    /// `sysconf(_SC_NPROCESSORS_*)` and Darwin's `hw.*cpu`. Required exactly
+    /// like [`hostname`](RunMetadata::hostname), and authoritative on replay; a
+    /// conflicting explicit count is refused. Not a fingerprint input.
+    pub cpus: u32,
     /// The virtual-time model the run was recorded under
     /// ([`patina_dst_abi::TIME_MODEL`]). Required; a bundle recorded under any
     /// other model is refused when it is decoded.
@@ -485,9 +491,10 @@ pub struct ComputeStop {
 
 impl RunMetadata {
     /// The metadata every recording carries. The realtime epoch and the node
-    /// name are required run facts. The origin defaults to the ABI constant;
-    /// runtime builders set the actual initial reading with `with_boot_origin_nanos`.
-    /// Deserialization requires all three fields; it never fills in defaults.
+    /// name are required run facts. The origin and the CPU count default to the
+    /// ABI constants; runtime builders set the run's own with
+    /// `with_boot_origin_nanos` and `with_cpus`. Deserialization requires every
+    /// one of them; it never fills in defaults.
     pub fn new(
         root_seed: u64,
         fingerprint: impl Into<String>,
@@ -516,7 +523,16 @@ impl RunMetadata {
             boot_origin_nanos: patina_dst_abi::DEFAULT_BOOT_ORIGIN_NANOS,
             time_model: patina_dst_abi::TIME_MODEL,
             hostname: hostname.into(),
+            cpus: patina_dst_abi::DEFAULT_CPUS,
         }
+    }
+
+    /// Record the run's virtual CPU count; [`RunMetadata::new`] starts at
+    /// [`patina_dst_abi::DEFAULT_CPUS`].
+    #[must_use]
+    pub fn with_cpus(mut self, cpus: u32) -> Self {
+        self.cpus = cpus;
+        self
     }
 
     /// Record an explicit clock's or runtime's initial monotonic reading.

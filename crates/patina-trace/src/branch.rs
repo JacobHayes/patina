@@ -150,6 +150,11 @@ impl BranchSession {
         &self.bundle.metadata.hostname
     }
 
+    /// The virtual CPU count inherited from the parent trace.
+    pub const fn cpus(&self) -> u32 {
+        self.bundle.metadata.cpus
+    }
+
     /// The DNS host table inherited from the parent trace.
     pub const fn dns_config(&self) -> Option<&DnsConfigRecord> {
         self.bundle.metadata.dns.as_ref()

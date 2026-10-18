@@ -96,7 +96,7 @@ extern "C" fn sched_yield() -> c_int {
 #[unsafe(no_mangle)]
 extern "C" fn sched_getcpu() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    0
+    crate::thread::sched::current_cpu() as c_int
 }
 
 #[cfg(target_os = "linux")]
@@ -150,7 +150,7 @@ extern "C" fn sysconf(name: c_int) -> c_long {
         return 4096;
     }
     if name == libc::_SC_NPROCESSORS_ONLN || name == libc::_SC_NPROCESSORS_CONF {
-        return 1;
+        return c_long::from(crate::cpus::count());
     }
     if name == libc::_SC_CLK_TCK {
         return 100;

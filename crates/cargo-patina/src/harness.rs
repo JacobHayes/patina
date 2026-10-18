@@ -700,6 +700,10 @@ fn append_native_harness_run_flags(args: &mut Vec<OsString>, invocation: &Native
         args.push(OsString::from("--hostname"));
         args.push(OsString::from(hostname));
     }
+    if let Some(cpus) = invocation.cpus {
+        args.push(OsString::from("--cpus"));
+        args.push(OsString::from(cpus.to_string()));
+    }
     // Every knob the registry defines, from the shared table: a flag the harness
     // parsed but did not re-emit would be silently inert here. That includes the
     // repeatable ones (`--dns-entry`, `--net-partition`), which the harness
@@ -1127,6 +1131,8 @@ mod tests {
         tokens.push(OsString::from("2001-09-09T01:46:40Z"));
         tokens.push(OsString::from("--hostname"));
         tokens.push(OsString::from("db-1"));
+        tokens.push(OsString::from("--cpus"));
+        tokens.push(OsString::from("3"));
         tokens.extend([
             OsString::from("--compute-watchdog-ms"),
             OsString::from("5000"),
@@ -1147,6 +1153,7 @@ mod tests {
             step_budget: Some(9),
             realtime_epoch: args.string("--realtime-epoch"),
             hostname: args.string("--hostname"),
+            cpus: args.u32("--cpus"),
             knobs: knobs_of(&args).expect("harness knob parse"),
             buggify: None,
             schedule: NativeSchedule::default(),
@@ -1183,6 +1190,7 @@ mod tests {
         for (flag, value) in [
             ("--realtime-epoch", "2001-09-09T01:46:40Z"),
             ("--hostname", "db-1"),
+            ("--cpus", "3"),
             ("--compute-watchdog-ms", "5000"),
         ] {
             let at = emitted

@@ -2,8 +2,8 @@
 // Process-environment reads are confined to configuration, before installation.
 #![allow(clippy::disallowed_methods)]
 use crate::config::{
-    RuntimeConfig, validate_dns_entry, validate_guest_cwd, validate_guest_env, validate_hostname,
-    validate_partition,
+    RuntimeConfig, validate_cpus, validate_dns_entry, validate_guest_cwd, validate_guest_env,
+    validate_hostname, validate_partition,
 };
 
 use crate::ENV_FS_TORN_GRANULARITY;
@@ -14,11 +14,12 @@ use crate::{
     DEFAULT_PCT_STEPS, DEFAULT_STARVE_INTERVALS, DEFAULT_STARVE_MAX_LEN, DEFAULT_STARVE_WINDOW,
     ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_FACTS, ENV_FACTS_FD,
-    ENV_FINGERPRINT, ENV_GUEST_ARGV, ENV_GUEST_CWD, ENV_GUEST_ENV, ENV_GUEST_HOSTNAME,
-    ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE,
-    ENV_REALTIME_EPOCH_NANOS, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE,
-    ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_STEP_BUDGET, ENV_SWARM,
-    ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, FaultKnob, Plane, RuntimeError, TornGranularity,
+    ENV_FINGERPRINT, ENV_GUEST_ARGV, ENV_GUEST_CPUS, ENV_GUEST_CWD, ENV_GUEST_ENV,
+    ENV_GUEST_HOSTNAME, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_PARAMS_JSON,
+    ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
+    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_STEP_BUDGET,
+    ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, FaultKnob, Plane, RuntimeError,
+    TornGranularity,
 };
 use patina_dst_sched_det::{PctConfig, StarvationConfig};
 use std::collections::BTreeMap;
@@ -328,6 +329,27 @@ impl RuntimeConfig {
             validate_hostname(&value)
                 .map_err(|error| RuntimeError::Config(format!("{ENV_GUEST_HOSTNAME}: {error}")))?;
             self.hostname = Some(value);
+        }
+        Ok(self)
+    }
+
+    /// Apply the virtual machine's CPU count from a control-plane accessor.
+    /// Presence of [`ENV_GUEST_CPUS`] sets it (a decimal count
+    /// [`validate_cpus`] accepts; anything else fails closed); absence leaves
+    /// the default. Shared by [`RuntimeConfig::from_env`] and the native shim.
+    pub fn apply_cpus_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(value) = get(ENV_GUEST_CPUS) {
+            let cpus = value.parse::<u32>().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{ENV_GUEST_CPUS} must be a decimal CPU count; got {value:?}"
+                ))
+            })?;
+            validate_cpus(cpus)
+                .map_err(|error| RuntimeError::Config(format!("{ENV_GUEST_CPUS}: {error}")))?;
+            self.cpus = Some(cpus);
         }
         Ok(self)
     }
@@ -661,6 +683,7 @@ impl RuntimeConfig {
         let config = config.apply_guest_cwd_env(|name| env::var(name).ok())?;
         let config = config.apply_realtime_epoch_env(|name| env::var(name).ok())?;
         let config = config.apply_hostname_env(|name| env::var(name).ok())?;
+        let config = config.apply_cpus_env(|name| env::var(name).ok())?;
         // The report-suppression knobs are resolved HERE, with every other knob,
         // and never again: finalization must not reach for the process
         // environment (see `ReportConfig`).

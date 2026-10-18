@@ -207,14 +207,18 @@ unsafe extern "C" fn host_processor_info(
     {
         return libc::KERN_INVALID_ARGUMENT;
     }
-    // SAFETY: all output pointers are non-null; the mapping is checked before use and the
-    // CPU-state indices fit its one-page allocation.
+    // One CPU_STATE_MAX-entry tick record per virtual CPU, each idle.
+    let cpus = crate::cpus::count() as usize;
+    let states = libc::CPU_STATE_MAX as usize;
+    let bytes = (cpus * states * size_of::<i32>()).next_multiple_of(4096);
+    // SAFETY: all output pointers are non-null; the mapping is checked before use and every
+    // CPU's state indices fall inside it (`bytes` covers `cpus * states` integers).
     unsafe {
-        // Real host mapping: consumers either munmap this page or call the
+        // Real host mapping: consumers either munmap these pages or call the
         // no-op vm_deallocate below. Never give munmap a static data address.
         let buffer = libc::mmap(
             ptr::null_mut(),
-            4096,
+            bytes,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_ANON | libc::MAP_PRIVATE,
             -1,
@@ -224,13 +228,16 @@ unsafe extern "C" fn host_processor_info(
         if buffer.cast::<c_void>() == libc::MAP_FAILED {
             return libc::KERN_RESOURCE_SHORTAGE;
         }
-        buffer.add(libc::CPU_STATE_USER as usize).write(0);
-        buffer.add(libc::CPU_STATE_SYSTEM as usize).write(0);
-        buffer.add(libc::CPU_STATE_IDLE as usize).write(1000);
-        buffer.add(libc::CPU_STATE_NICE as usize).write(0);
-        processors.write(1);
+        for cpu in 0..cpus {
+            let ticks = buffer.add(cpu * states);
+            ticks.add(libc::CPU_STATE_USER as usize).write(0);
+            ticks.add(libc::CPU_STATE_SYSTEM as usize).write(0);
+            ticks.add(libc::CPU_STATE_IDLE as usize).write(1000);
+            ticks.add(libc::CPU_STATE_NICE as usize).write(0);
+        }
+        processors.write(cpus as u32);
         info.write(buffer);
-        count.write(libc::CPU_STATE_MAX as u32);
+        count.write((cpus * states) as u32);
     }
     libc::KERN_SUCCESS
 }

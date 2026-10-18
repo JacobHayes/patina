@@ -17,6 +17,13 @@ struct EnvironmentState {
     lock: libc::pthread_mutex_t,
 }
 
+/// The complete control-plane snapshot, published once capture has built it
+/// (null until then): what [`control_value`] reads, and before it exists the
+/// host array the snapshot is taken from. `captured` is set as capture begins,
+/// so it cannot tell a reader the snapshot is whole.
+static PUBLISHED: core::sync::atomic::AtomicPtr<*mut c_char> =
+    core::sync::atomic::AtomicPtr::new(null_mut());
+
 static mut STATE: EnvironmentState = EnvironmentState {
     control: null_mut(),
     captured: false,
@@ -87,6 +94,29 @@ fn fatal(message: &'static [u8]) -> ! {
     crate::host_abort()
 }
 
+/// The host's original environment array, the one the control plane is
+/// captured from: on macOS the one past `argv`, on Linux the stack array
+/// startup saved, else the CRT's `environ`.
+/// # Safety
+/// Startup-only, like [`capture_control_plane`].
+unsafe fn host_array() -> *mut *mut c_char {
+    // SAFETY: startup reads the CRT's terminated arrays before guest threads run.
+    unsafe {
+        #[cfg(target_os = "macos")]
+        {
+            let past_argv = (*_NSGetArgv()).add(*_NSGetArgc() as usize + 1);
+            if !past_argv.is_null() {
+                return past_argv;
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if !STATE.host.is_null() {
+            return STATE.host;
+        }
+        array()
+    }
+}
+
 /// Capture once, before startup publishes the deterministic guest map.
 /// # Safety
 /// Called only during single-threaded CRT startup.
@@ -97,13 +127,7 @@ pub(crate) unsafe fn capture_control_plane() {
             return;
         }
         STATE.captured = true;
-        #[cfg(target_os = "macos")]
-        {
-            STATE.host = (*_NSGetArgv()).add(*_NSGetArgc() as usize + 1);
-        }
-        if STATE.host.is_null() {
-            STATE.host = array();
-        }
+        STATE.host = host_array();
         if STATE.host.is_null() {
             return;
         }
@@ -131,6 +155,43 @@ pub(crate) unsafe fn capture_control_plane() {
             entry = entry.add(1);
         }
         STATE.control = snapshot;
+        PUBLISHED.store(snapshot, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// The control plane's `name=value` value (`name` a `PATINA_*` name), read
+/// without allocating or taking a lock: from the startup snapshot once it is
+/// published whole, before that (capture's own allocations included) from
+/// the host array the capture snapshots. For a
+/// reader that may run before Patina's startup constructor (a library's
+/// constructor) or inside the guest's allocator, where neither the control
+/// map's lock nor an allocation is safe.
+pub(crate) fn control_value(name: &str) -> Option<&'static str> {
+    // SAFETY: the snapshot is published once, whole and terminated, and never
+    // freed; before it is, the host array is read in startup, which forbids
+    // environment writes (`patina_env_write_gate`) and scrubs it only after
+    // publishing. Both arrays' strings live for the process.
+    unsafe {
+        let published = PUBLISHED.load(core::sync::atomic::Ordering::Acquire);
+        let mut entry = if published.is_null() {
+            host_array()
+        } else {
+            published
+        };
+        if entry.is_null() {
+            return None;
+        }
+        while !(*entry).is_null() {
+            let bytes = core::ffi::CStr::from_ptr(*entry).to_bytes();
+            if let Some(value) = bytes
+                .strip_prefix(name.as_bytes())
+                .and_then(|rest| rest.strip_prefix(b"="))
+            {
+                return core::str::from_utf8(value).ok();
+            }
+            entry = entry.add(1);
+        }
+        None
     }
 }
 

@@ -381,6 +381,10 @@ mod registry {
                     "a\0b",
                 ],
             ),
+            Kind::Cpus => (
+                vec!["1", "4", "1024"],
+                vec!["0", "1025", "-1", "four", "", "4.0"],
+            ),
             Kind::DnsEntry => (
                 vec!["db.internal=10.0.0.5", "a=0.0.0.0", "x=255.255.255.255"],
                 vec![

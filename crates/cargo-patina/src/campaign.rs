@@ -344,20 +344,26 @@ fn non_native_invocation_flag(spec: &CampaignSpec) -> Option<&'static str> {
     if spec.address_layout == Some(patina_dst_trace::AddressLayout::Randomized) {
         return Some("--allow-randomized-address-layout");
     }
+    if spec.cpus.is_some() {
+        return Some("--cpus");
+    }
     None
 }
 
 /// The child-run flags that are pure INVOCATION SHAPE rather than a seed-derived
 /// draw: `--harness`, the pre-run gate surface (`--allow`,
-/// `--allow-unsupported-symbols`) and `--allow-randomized-address-layout`.
-/// Every generation gets them verbatim.
+/// `--allow-unsupported-symbols`), `--allow-randomized-address-layout` and
+/// `--cpus`. Every generation gets them verbatim.
 ///
 /// Their own function because the reproduce commands need exactly this set and
 /// nothing else. Native replay restores every semantic input from the trace, but
 /// these controls (including the host-time compute bound) are host/build facts a trace cannot carry (see
 /// `parse_native_replay`), so a `cargo patina replay` line that dropped them would
 /// hand the operator a command that fails closed on the guest the campaign just
-/// swept.
+/// swept. `--cpus` is the exception the trace does carry: a replay checks it
+/// against the recording's, so it rides here too, and a minimized or reproduced
+/// generation keeps the machine the campaign swept even where the command is a
+/// seeded `run`.
 ///
 /// Native-only: `--harness` names a native harness binary and the pre-run gate is
 /// the native supervisor's. A non-native campaign carrying one is refused by name
@@ -390,6 +396,9 @@ fn invocation_flags(spec: &CampaignSpec, family: &'static str) -> Vec<String> {
             "--allow-randomized-address-layout",
             RunValue::Switch,
         );
+    }
+    if let Some(cpus) = spec.cpus {
+        push_run_flag(&mut flags, "--cpus", RunValue::Int(u64::from(cpus)));
     }
     flags
 }

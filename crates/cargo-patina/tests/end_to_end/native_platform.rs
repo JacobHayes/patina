@@ -286,7 +286,10 @@ fn main() {
 "#,
         );
         assert!(
-            out.contains("vm=0 cpu=0 ncpu=1 pids=2 iokit_null=true"),
+            out.contains(&format!(
+                "vm=0 cpu=0 ncpu={} pids=2 iokit_null=true",
+                patina_dst_abi::DEFAULT_CPUS
+            )),
             "host-inventory surface did not resolve to the fixed deterministic values:\n{out}"
         );
     }
@@ -824,8 +827,10 @@ fn main() {
         );
         let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
         assert!(
-            String::from_utf8_lossy(&ran.stdout)
-                .contains("MEMSIZE r=0 val=8589934592 NCPU r=0 val=1 UNKNOWN r=-1"),
+            String::from_utf8_lossy(&ran.stdout).contains(&format!(
+                "MEMSIZE r=0 val=8589934592 NCPU r=0 val={} UNKNOWN r=-1",
+                patina_dst_abi::DEFAULT_CPUS
+            )),
             "sysctlbyname did not serve fixed values / fail unknown key deterministically:\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&ran.stdout),
             String::from_utf8_lossy(&ran.stderr)

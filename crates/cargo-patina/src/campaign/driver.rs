@@ -90,6 +90,8 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             if identity.family == "native" {
                 spec.address_layout
                     .get_or_insert(patina_dst_trace::AddressLayout::Fixed);
+                // Likewise its CPU count, so a continuation pins it.
+                spec.cpus.get_or_insert(patina_dst_abi::DEFAULT_CPUS);
             }
             let mut state = CampaignState::fresh(identity, spec);
             state.supervisor_sha256 =
@@ -99,6 +101,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
         CampaignMode::Resume | CampaignMode::Extend { .. } => {
             let state = load_campaign_state(&state_path)?;
             refuse_a_campaign_without_a_layout(&state)?;
+            refuse_a_campaign_without_a_cpu_count(&state)?;
             state
         }
     };
@@ -572,6 +575,20 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
         flush_stdout();
     }
     Ok(exit_code)
+}
+
+/// Refuse to continue a native campaign whose state records no CPU count. It
+/// predates the virtual machine's `--cpus`: its generations ran on one virtual
+/// CPU, and continuing it on another count would mix machines in one campaign.
+pub(super) fn refuse_a_campaign_without_a_cpu_count(state: &CampaignState) -> Result<(), CliError> {
+    if state.artifact.family == "native" && state.spec.cpus.is_none() {
+        return Err(CliError::usage(
+            "this campaign's state records no CPU count: it predates the virtual machine's \
+             --cpus, and its generations ran on one virtual CPU, so continuing it would mix \
+             machines in one campaign. Start a new campaign in a new --out-dir.",
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse to continue a native campaign whose state records no address

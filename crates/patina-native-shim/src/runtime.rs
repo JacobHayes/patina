@@ -1160,6 +1160,7 @@ pub(crate) fn runtime_config_from_control_plane()
     config = config.apply_guest_cwd_env(control_env)?;
     config = config.apply_realtime_epoch_env(control_env)?;
     config = config.apply_hostname_env(control_env)?;
+    config = config.apply_cpus_env(control_env)?;
     // End-of-run report suppression comes from the SAME pre-scrub snapshot, once,
     // and is carried in the config: by finalization the context is out of the slot
     // and the interposed `getenv` returns NULL for everything, so a knob read then
@@ -1276,6 +1277,12 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     if let Err(message) = uaccess::probe() {
         record_init_error(message);
         return fail(ENOSYS);
+    }
+    // Every CPU surface answers the count this process started with; the run's
+    // must be the same.
+    if let Err(message) = cpus::confirm(context.cpus()) {
+        record_init_error(message);
+        return fail(EINVAL);
     }
     // The main thread's calls are charged to its task (fixed before the thread
     // runtime numbers it), whose entry must exist before a charge can come

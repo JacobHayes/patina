@@ -9,10 +9,11 @@ use crate::recording::{Execution, RecordReservation, RecordSink, TraceTransport}
 use crate::replay::{
     buggify_record, dns_record, fault_record, guest_env_record, installed_clock_epoch,
     reconcile_replay_address_layout, reconcile_replay_boot_origin, reconcile_replay_buggify,
-    reconcile_replay_dns, reconcile_replay_faults, reconcile_replay_guest_cwd,
-    reconcile_replay_guest_env, reconcile_replay_hostname, reconcile_replay_realtime_epoch,
-    reconcile_replay_schedule_policy, reconcile_replay_sud, reconcile_replay_tsc,
-    schedule_policy_record, validate_buggify_fingerprint_contract, watchdog_record,
+    reconcile_replay_cpus, reconcile_replay_dns, reconcile_replay_faults,
+    reconcile_replay_guest_cwd, reconcile_replay_guest_env, reconcile_replay_hostname,
+    reconcile_replay_realtime_epoch, reconcile_replay_schedule_policy, reconcile_replay_sud,
+    reconcile_replay_tsc, schedule_policy_record, validate_buggify_fingerprint_contract,
+    watchdog_record,
 };
 use crate::schedule::ScheduleTracker;
 use crate::swarm::apply_swarm_mask;
@@ -260,6 +261,7 @@ impl RuntimeBuilder {
         let mut replay_realtime_epoch_override: Option<u64> = None;
         let mut replay_boot_origin_override = None;
         let mut replay_hostname_override: Option<String> = None;
+        let mut replay_cpus_override: Option<u32> = None;
         let mut replay_dns_override: Option<BTreeMap<String, String>> = None;
         // Same contract for the exploration scheduling policy.
         let mut replay_schedule_override: Option<SchedulePolicy> = None;
@@ -275,6 +277,7 @@ impl RuntimeBuilder {
                             self.config.hostname(),
                         )
                         .with_boot_origin_nanos(recorded_boot_origin)
+                        .with_cpus(self.config.cpus())
                         .with_faults(Some(fault_record(&self.config)))
                         .with_buggify(buggify_record(&self.config))
                         .with_schedule_policy(schedule_policy_record(&self.config))
@@ -306,6 +309,7 @@ impl RuntimeBuilder {
                             self.config.hostname(),
                         )
                         .with_boot_origin_nanos(recorded_boot_origin)
+                        .with_cpus(self.config.cpus())
                         .with_faults(Some(fault_record(&self.config)))
                         .with_buggify(buggify_record(&self.config))
                         .with_schedule_policy(schedule_policy_record(&self.config))
@@ -352,6 +356,7 @@ impl RuntimeBuilder {
                     &self.config,
                     replayer.hostname(),
                 )?);
+                replay_cpus_override = Some(reconcile_replay_cpus(&self.config, replayer.cpus())?);
                 replay_dns_override = reconcile_replay_dns(&self.config, replayer.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
@@ -396,6 +401,7 @@ impl RuntimeBuilder {
                     &self.config,
                     replayer.hostname(),
                 )?);
+                replay_cpus_override = Some(reconcile_replay_cpus(&self.config, replayer.cpus())?);
                 replay_dns_override = reconcile_replay_dns(&self.config, replayer.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
@@ -443,6 +449,7 @@ impl RuntimeBuilder {
                 )?);
                 replay_hostname_override =
                     Some(reconcile_replay_hostname(&self.config, session.hostname())?);
+                replay_cpus_override = Some(reconcile_replay_cpus(&self.config, session.cpus())?);
                 replay_dns_override = reconcile_replay_dns(&self.config, session.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, session.schedule_policy())?;
@@ -511,6 +518,11 @@ impl RuntimeBuilder {
         // the recording's did.
         if let Some(hostname) = replay_hostname_override {
             self.config.hostname = Some(hostname);
+        }
+        // Likewise the CPU count, so a flag-free replay's guest sees the machine
+        // the recording's did.
+        if let Some(cpus) = replay_cpus_override {
+            self.config.cpus = Some(cpus);
         }
         // Likewise the trace's authoritative DNS host table, so a flag-free
         // replay resolves exactly the names the recording could.
@@ -684,6 +696,7 @@ impl RuntimeBuilder {
                     .map_or(stop.steps, |budget| budget.min(stop.steps)),
             );
         }
+        let cpus = self.config.cpus();
         Ok(Context {
             compute_stop,
             boot_origin_nanos,
@@ -694,6 +707,7 @@ impl RuntimeBuilder {
             params: self.config.params,
             guest_env: self.config.guest_env,
             guest_cwd: self.config.guest_cwd,
+            cpus,
             hostname: self
                 .config
                 .hostname

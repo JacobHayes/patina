@@ -11,7 +11,9 @@
 //!   `RSEQ_FLAG_UNREGISTER` is `EINVAL`, and unregistering with the wrong
 //!   signature `EPERM`, so glibc's registration stays;
 //! * the kernel keeps the registered area current: with the thread pinned
-//!   to its CPU, `cpu_id` and `cpu_id_start` name the CPU `getcpu` answers.
+//!   to its CPU, `cpu_id` and `cpu_id_start` name the CPU `getcpu` answers,
+//!   and pinned to another CPU of its mask (the same one on a machine with
+//!   one), they follow it there.
 //!
 //! The host must leave glibc's registration live (`Need::RseqRegistered`:
 //! not so under `GLIBC_TUNABLES=glibc.pthread.rseq=0`). The probe also
@@ -118,9 +120,22 @@ fn registered_area(p: &Probe) -> Result<usize, String> {
     })
 }
 
+/// The area's `cpu_id_start` and `cpu_id`.
+fn area_cpu(area: usize) -> (u32, u32) {
+    // SAFETY: glibc's registered area, alive as long as this thread.
+    unsafe {
+        let area = area as *const Area;
+        (
+            std::ptr::read_volatile(&raw const (*area).cpu_id_start),
+            std::ptr::read_volatile(&raw const (*area).cpu_id),
+        )
+    }
+}
+
 /// Pin the thread to the CPU it runs on, and compare the area's CPU fields
-/// with `getcpu`'s answer there: the kernel writes the area on the return
-/// to user space after a migration. The original affinity is restored.
+/// with `getcpu`'s answer there; then pin it to another CPU of its mask, and
+/// compare again: the kernel writes the area on the return to user space
+/// after a migration. The original affinity is restored.
 fn area_names_the_cpu(p: &Probe, area: usize) {
     let len = buffer_len();
     let (r, original) = p.sched_getaffinity(Who::Caller, len, "sized");
@@ -134,17 +149,27 @@ fn area_names_the_cpu(p: &Probe, area: usize) {
         p.sched_setaffinity(Who::Caller, &one, "sized", "current-cpu") == 0,
     );
     let (r, pinned, _) = p.getcpu(false);
-    // SAFETY: glibc's registered area, alive as long as this thread.
-    let (start, id) = unsafe {
-        let area = area as *const Area;
-        (
-            std::ptr::read_volatile(&raw const (*area).cpu_id_start),
-            std::ptr::read_volatile(&raw const (*area).cpu_id),
-        )
-    };
+    let (start, id) = area_cpu(area);
     p.check(
         "pinned, the area names the CPU getcpu answers (cpu_id and cpu_id_start)",
         r == 0 && pinned == cpu && id == pinned && start == pinned,
+    );
+    let other = (0..(len * 8) as u32)
+        .find(|candidate| {
+            *candidate != cpu && original[*candidate as usize / 8] & (1 << (candidate % 8)) != 0
+        })
+        .unwrap_or(cpu);
+    let mut moved = vec![0u8; len];
+    moved[other as usize / 8] |= 1 << (other % 8);
+    p.require(
+        "pin the thread to another CPU of its mask",
+        p.sched_setaffinity(Who::Caller, &moved, "sized", "another-cpu") == 0,
+    );
+    let (r, now, _) = p.getcpu(false);
+    let (start, id) = area_cpu(area);
+    p.check(
+        "moved, the area follows to the CPU getcpu answers (cpu_id and cpu_id_start)",
+        r == 0 && now == other && id == now && start == now,
     );
     p.require(
         "restore the affinity",

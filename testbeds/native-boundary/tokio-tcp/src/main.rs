@@ -5,11 +5,16 @@
 //            delayed segment reaches it only if the park ends at its delivery;
 //   multi    two workers: the I/O driver parks in the reactor on one worker
 //            while another accepts, registers and drives the sockets;
+//   default  `new_multi_thread()` as most programs build it, sized from the
+//            CPU count: it also reports how many workers the runtime has and
+//            how many of their threads started;
 //   stall    a current-thread server reading a connection its client never
 //            writes to, with no timer armed: nothing can ever wake the reactor.
 // A `current` exchange runs under a 1 s timeout, so a reactor that wakes only
 // on its timers shows up as an exchange that took the whole second. A `multi`
-// one arms no timer, so a wake the reactor misses leaves it parked for good.
+// or `default` one arms no timer, so a wake the reactor misses leaves it parked
+// for good.
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -41,6 +46,21 @@ async fn stall() {
     unreachable!("the client never writes");
 }
 
+/// The runtime threads that started, workers and any blocking-pool thread.
+static STARTED: AtomicUsize = AtomicUsize::new(0);
+
+/// Wait until every worker's thread has started, then report the count.
+async fn report_workers() {
+    let workers = tokio::runtime::Handle::current().metrics().num_workers();
+    while STARTED.load(Ordering::SeqCst) < workers {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    println!(
+        "NATIVE_TOKIO_WORKERS workers={workers} started={}",
+        STARTED.load(Ordering::SeqCst)
+    );
+}
+
 fn main() {
     let mode = std::env::var("TOKIO_TCP_MODE").unwrap_or_default();
     let runtime = match mode.as_str() {
@@ -50,7 +70,14 @@ fn main() {
             builder.worker_threads(2);
             builder
         }
-        other => panic!("unknown mode {other:?}: current, multi or stall"),
+        "default" => {
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.on_thread_start(|| {
+                STARTED.fetch_add(1, Ordering::SeqCst);
+            });
+            builder
+        }
+        other => panic!("unknown mode {other:?}: current, multi, default or stall"),
     }
     .enable_all()
     .build()
@@ -67,7 +94,11 @@ fn main() {
         } else {
             ping_pong().await
         };
-        (reply, start.elapsed())
+        let elapsed = start.elapsed();
+        if mode == "default" {
+            report_workers().await;
+        }
+        (reply, elapsed)
     });
     println!(
         "NATIVE_TOKIO_TCP_RESULT reply={} elapsed_us={}",

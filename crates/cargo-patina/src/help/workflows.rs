@@ -338,6 +338,10 @@ refused by name.",
                     doc: "Run, record and replay every generation with the host's address-space randomization, for a host that forbids turning it off; every generation's determinism is qualified.",
                     ..ALLOW_RANDOMIZED_LAYOUT_FLAG
                 },
+                Flag {
+                    doc: "The number of CPUs every generation's guest sees (default 4, at most 1024); recorded in the campaign's state and pinned on --extend/--resume.",
+                    ..CPUS_FLAG
+                },
             ],
         },
     ],

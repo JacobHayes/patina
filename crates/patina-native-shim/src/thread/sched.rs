@@ -9,8 +9,8 @@
 //! the rows read back and the permission rules an unprivileged caller meets
 //! (no `CAP_SYS_NICE`; `RLIMIT_NICE`/`RLIMIT_RTPRIO` from the virtual limit
 //! table; another user's process, init, root's, is not the caller's to
-//! change: [`same_owner`]). The virtual machine has one CPU: the affinity of
-//! every thread is that CPU, and every thread runs on it.
+//! change: [`same_owner`]). The virtual machine's CPUs, each thread's
+//! affinity and the CPU it runs on are [`affinity`]'s.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
@@ -20,6 +20,12 @@ use crate::limits::{RLIMIT_NICE, RLIMIT_RTPRIO};
 use crate::registry::INIT_PID;
 use crate::{E2BIG, EACCES, EFAULT, ERANGE};
 use std::ffi::CStr;
+
+mod affinity;
+
+use affinity::{CpuMask, CpuSlot};
+pub(in crate::thread) use affinity::{bind_cpu_slot, cpu_of_task, unbind_cpu_slot};
+pub(crate) use affinity::{current_cpu, getaffinity, getcpu, setaffinity};
 
 const SCHED_OTHER: u32 = 0;
 const SCHED_FIFO: u32 = 1;
@@ -99,6 +105,8 @@ pub(super) struct Attrs {
     persona: u32,
     /// The thread's name (`comm`), NUL-padded.
     comm: [u8; COMM_LEN],
+    /// The CPUs it may run on (`cpus_mask`), `None` for every CPU.
+    affinity: Option<CpuMask>,
 }
 
 /// `TASK_COMM_LEN`: a thread name's bytes, its NUL included.
@@ -149,6 +157,7 @@ impl Default for Attrs {
             io_context: None,
             persona: 0,
             comm: PROGRAM_COMM.get().copied().unwrap_or([0; COMM_LEN]),
+            affinity: None,
         }
     }
 }
@@ -179,6 +188,9 @@ pub(super) struct SchedRuntime {
     tasks: BTreeMap<i32, Attrs>,
     /// The I/O contexts made so far, the next one's identity.
     io_contexts: u64,
+    /// Each managed thread's [`CpuSlot`], and the slots of finished ones.
+    slots: BTreeMap<i32, &'static CpuSlot>,
+    free_slots: Vec<&'static CpuSlot>,
 }
 
 impl SchedRuntime {
@@ -232,11 +244,22 @@ impl SchedRuntime {
             }
             attrs.reset_on_fork = false;
         }
-        self.set(tid_of(child), attrs);
+        let tid = tid_of(child);
+        let slot = self
+            .free_slots
+            .pop()
+            .unwrap_or_else(|| Box::leak(Box::new(CpuSlot::new())));
+        self.slots.insert(tid, slot);
+        self.mirror(tid, attrs.affinity);
+        self.set(tid, attrs);
     }
 
     pub(super) fn finish(&mut self, task: TaskId) {
-        self.tasks.remove(&tid_of(task));
+        let tid = tid_of(task);
+        self.tasks.remove(&tid);
+        if let Some(slot) = self.slots.remove(&tid) {
+            self.free_slots.push(slot);
+        }
     }
 }
 
@@ -941,74 +964,6 @@ pub(crate) fn personality(persona: u32) -> SysResult<i64> {
 /// The caller's persona (what `uname` answers under).
 pub(crate) fn persona() -> u32 {
     lock_state().sched.get(current_tid()).persona
-}
-
-/// The CPU mask's size: `cpumask_size()` of one CPU.
-const CPUMASK_BYTES: usize = std::mem::size_of::<u64>();
-
-/// `sched_getaffinity(pid, len, mask)`: the one CPU, `min(len, 8)` bytes
-/// written and answered; a buffer shorter than the kernel's CPU count or not
-/// a whole number of longs is `EINVAL`, a pid no thread has `ESRCH`.
-///
-/// # Safety
-/// `mask` must be NULL or writable for `len` bytes.
-pub(crate) unsafe fn getaffinity(pid: i32, len: u32, mask: *mut u8) -> SysResult<i64> {
-    if (len as usize) * 8 < 1 || !(len as usize).is_multiple_of(CPUMASK_BYTES) {
-        return Err(Errno::new(EINVAL));
-    }
-    if find(&lock_state(), pid).is_none() {
-        return Err(Errno::new(ESRCH));
-    }
-    let written = (len as usize).min(CPUMASK_BYTES);
-    if mask.is_null() {
-        return Err(Errno::new(EFAULT));
-    }
-    let bits = 1u64.to_ne_bytes();
-    // SAFETY: per this function's contract.
-    unsafe { std::ptr::copy_nonoverlapping(bits.as_ptr(), mask, written) };
-    Ok(written as i64)
-}
-
-/// `sched_setaffinity(pid, len, mask)`: the mask is read first (a short one
-/// padded with zeros), then the pid (`ESRCH`), then another user's thread is
-/// `EPERM` ([`same_owner`]); a mask naming no CPU the machine has is
-/// `EINVAL`. The affinity of every thread is the one CPU, so an accepted
-/// mask changes nothing.
-///
-/// # Safety
-/// `mask` must be NULL or readable for `len` bytes.
-pub(crate) unsafe fn setaffinity(pid: i32, len: u32, mask: *const u8) -> SysResult<i64> {
-    let read = (len as usize).min(CPUMASK_BYTES);
-    if read > 0 && mask.is_null() {
-        return Err(Errno::new(EFAULT));
-    }
-    let mut bytes = [0u8; CPUMASK_BYTES];
-    // SAFETY: per this function's contract.
-    unsafe { std::ptr::copy_nonoverlapping(mask, bytes.as_mut_ptr(), read) };
-    let Some(tid) = find(&lock_state(), pid) else {
-        return Err(Errno::new(ESRCH));
-    };
-    if !same_owner(tid) {
-        return Err(Errno::new(EPERM));
-    }
-    if u64::from_ne_bytes(bytes) & 1 == 0 {
-        return Err(Errno::new(EINVAL));
-    }
-    Ok(0)
-}
-
-/// `getcpu(cpu, node, cache)`: CPU 0 on node 0.
-///
-/// # Safety
-/// `cpu` and `node` must be NULL or writable for a `u32`.
-pub(crate) unsafe fn getcpu(cpu: *mut u32, node: *mut u32) -> SysResult<i64> {
-    for out in [cpu, node] {
-        if !out.is_null() {
-            // SAFETY: per this function's contract.
-            unsafe { out.write_unaligned(0) };
-        }
-    }
-    Ok(0)
 }
 
 #[cfg(test)]

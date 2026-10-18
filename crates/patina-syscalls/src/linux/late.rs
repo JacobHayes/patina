@@ -57,14 +57,14 @@ macro_rules! late_rows {
                 $id,
                 Family::Sched,
                 Disposition::Modeled,
-                "The virtual machine has one CPU (`thread::sched`; the C `sched_setaffinity` too): a mask naming it is accepted and changes nothing, a mask naming no CPU the machine has is `EINVAL`, a pid no thread has `ESRCH`, another user's thread (init, root's) `EPERM` (`check_same_owner`).",
+                "The thread's CPUs on the virtual machine's `--cpus` (`thread::sched`; the C `sched_setaffinity` too): at most `cpumask_size()` bytes read, a mask's CPUs past the machine's dropped; a mask naming none of them is `EINVAL`, a pid no thread has `ESRCH`, another user's thread (init, root's) `EPERM` (`check_same_owner`). The thread moves to a CPU the mask names, and its rseq area follows.",
                 None,
             ),
             Syscall::N_sched_getaffinity => r(
                 $id,
                 Family::Sched,
                 Disposition::Modeled,
-                "The one CPU (`thread::sched`; the C `sched_getaffinity` too): `min(len, 8)` bytes written and answered; a buffer shorter than the CPU count or not whole longs is `EINVAL`, a pid no thread has `ESRCH`.",
+                "The thread's CPUs, every CPU of the virtual machine's `--cpus` until it sets its own (`thread::sched`; the C `sched_getaffinity` too): `min(len, cpumask_size())` bytes written and answered; a buffer shorter than the CPU count or not whole longs is `EINVAL`, a pid no thread has `ESRCH`.",
                 None,
             ),
             #[cfg(target_arch = "x86_64")]
@@ -793,7 +793,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Sched,
                 Disposition::Modeled,
-                "CPU 0 on node 0, the virtual machine's one CPU (`thread::sched`).",
+                "The CPU the thread runs on, on node 0 (`thread::sched`): task `n` starts on CPU `(n - 1) mod --cpus`, and one its affinity excludes runs on the next CPU the mask allows.",
                 None,
             ),
             Syscall::N_process_vm_readv => r(

@@ -537,7 +537,7 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
     // `isalpha`/`isdigit`/…) — a read-only table, constant for the C locale, no host
     // state read. `__sched_cpucount` is `CPU_COUNT`: it pops the set bits of a
     // caller-owned `cpu_set_t`, pure arithmetic over caller memory (distinct from
-    // `sched_getcpu`, which reads the live CPU id and IS interposed to a constant).
+    // `sched_getcpu`, which reads the live CPU id and IS interposed to the virtual one).
     const PURE_COMPUTE: &[&str] = &["ctype_b_loc", "sched_cpucount"];
     // glibc-only pthread introspection: reads the current thread's attributes
     // for Rust's stack-overflow guard. The XPG strerror_r alias is the pure

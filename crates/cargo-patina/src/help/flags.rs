@@ -498,6 +498,14 @@ pub(super) const ALLOW_FLAG: Flag = f(
     true,
 );
 
+pub(super) const CPUS_FLAG: Flag = f(
+    "--cpus",
+    None,
+    Value::Required("N", Kind::Cpus),
+    "The number of CPUs the guest's virtual machine has (default 4, at most 1024): its affinity mask, getcpu, sysconf(_SC_NPROCESSORS_*) and macOS's hw.ncpu agree, so a runtime sizing its pool from the CPU count starts that many workers; tasks still run one at a time. Recorded and restored on replay.",
+    false,
+);
+
 pub(super) const ALLOW_RANDOMIZED_LAYOUT_FLAG: Flag = f(
     "--allow-randomized-address-layout",
     None,

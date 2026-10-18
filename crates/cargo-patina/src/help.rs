@@ -46,7 +46,9 @@ use flags::REPLAY_TIMELINE_FLAGS;
 use flags::SOURCE_SELECT;
 use flags::TARGET_FLAG;
 use flags::WASI_HOST_FLAGS;
-use flags::{ALLOW_FLAG, ALLOW_RANDOMIZED_LAYOUT_FLAG, ALLOW_UNSUPPORTED_FLAG, HARNESS_FLAG};
+use flags::{
+    ALLOW_FLAG, ALLOW_RANDOMIZED_LAYOUT_FLAG, ALLOW_UNSUPPORTED_FLAG, CPUS_FLAG, HARNESS_FLAG,
+};
 pub use human::render;
 pub use human::usage_synopsis;
 use workflows::CAMPAIGN;
@@ -97,6 +99,9 @@ pub enum Kind {
     /// A node name under the kernel's rules: at most 64 bytes, no NUL
     /// (`patina_dst_runtime::validate_hostname`).
     Hostname,
+    /// A virtual CPU count: 1 to `patina_dst_abi::MAX_CPUS`
+    /// (`patina_dst_runtime::validate_cpus`).
+    Cpus,
     /// `NAME=IPV4`: a DNS host-table entry. Distinct from [`Kind::KeyValue`]
     /// because the value half must be a dotted-quad address, and a typo there is
     /// worth catching at parse time rather than at the guest's first lookup.
@@ -142,6 +147,7 @@ impl Kind {
             Kind::KeyValue => "key-value",
             Kind::UtcTimestamp => "utc-timestamp",
             Kind::Hostname => "hostname",
+            Kind::Cpus => "cpus",
             Kind::DnsEntry => "dns-entry",
             Kind::AddressPair => "address-pair",
             Kind::Socket => "socket",

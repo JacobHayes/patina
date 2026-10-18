@@ -3,6 +3,9 @@
 mod common;
 use common::native::*;
 
+#[path = "native_workloads/cpus.rs"]
+mod cpus;
+
 /// Class detector: call-free code with a runnable peer is a named terminal
 /// limit, while identical compute with no runnable peer must complete.
 #[test]

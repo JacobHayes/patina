@@ -611,6 +611,9 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
         };
         map.insert("address_layout".into(), layout.into());
     }
+    if let Some(cpus) = spec.cpus {
+        map.insert("cpus".into(), cpus.into());
+    }
     if let Some(value) = spec.watchdog_nanos {
         map.insert("watchdog_nanos".into(), value.into());
     }

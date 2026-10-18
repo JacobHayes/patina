@@ -292,6 +292,13 @@ impl TraceBundle {
                 found: self.metadata.time_model,
             });
         }
+        if !(1..=patina_dst_abi::MAX_CPUS).contains(&self.metadata.cpus) {
+            return Err(TraceError::Invalid(format!(
+                "trace records {} virtual CPUs; a run has 1 to {}",
+                self.metadata.cpus,
+                patina_dst_abi::MAX_CPUS
+            )));
+        }
         if self.metadata.fingerprint.is_empty() {
             return Err(TraceError::Invalid(
                 "trace compatibility fingerprint is empty".into(),

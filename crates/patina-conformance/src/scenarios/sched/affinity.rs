@@ -10,13 +10,15 @@
 //!   glibc's `sched_getcpu` too; `sysconf(_SC_NPROCESSORS_ONLN)` counts at
 //!   least the mask's CPUs, `_SC_NPROCESSORS_CONF` at least the online ones;
 //! * pinned to the current CPU, the mask reads back as that CPU alone and
-//!   the task runs there; an empty mask, and one naming only CPUs past the
+//!   the task runs there; pinned to another CPU of the mask (the same one
+//!   on a machine with one), the task moves there; an empty mask, and one
+//!   naming only CPUs past the
 //!   kernel's, are `EINVAL`; a pid no process has `ESRCH`; init's affinity,
 //!   root's, is not the caller's to set (`EPERM`, `check_same_owner`); the
 //!   original mask restores.
 //!
 //! Which and how many CPUs there are is the host's business (the virtual
-//! kernel's is a model constant): masks and CPU numbers are related, never
+//! kernel's is the run's `--cpus`): masks and CPU numbers are related, never
 //! recorded.
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
@@ -127,6 +129,16 @@ pub fn run(p: &Probe) {
     );
     let (r, now, _) = p.getcpu(false);
     p.check("the task runs there", r == 0 && now == cpu);
+    let other = (0..(len * 8) as u32)
+        .find(|candidate| *candidate != cpu && has(&mask, *candidate))
+        .unwrap_or(cpu);
+    let mut moved = vec![0u8; len];
+    moved[other as usize / 8] |= 1 << (other % 8);
+    p.check(
+        "pinned to another CPU of the mask, the task moves there",
+        p.sched_setaffinity(Who::Caller, &moved, "sized", "another CPU of the mask") == 0
+            && matches!(p.getcpu(false), (0, now, _) if now == other),
+    );
     p.check(
         "an empty mask is EINVAL",
         p.sched_setaffinity(Who::Caller, &vec![0u8; len], "sized", "empty") == neg(EINVAL),

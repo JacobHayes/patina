@@ -110,7 +110,7 @@ mod time;
 pub use config::{
     BuggifyConfig, ClockFaultConfig, CustomOpFaultConfig, DnsFaultConfig, EntropyFaultConfig,
     ExecutionMode, FaultConfig, FsFaultConfig, LivenessConfig, NetFaultConfig, RuntimeConfig,
-    validate_hostname,
+    validate_cpus, validate_hostname,
 };
 
 pub use builder::RuntimeBuilder;
@@ -307,6 +307,13 @@ pub const ENV_REALTIME_EPOCH_NANOS: &str = "PATINA_REALTIME_EPOCH_NANOS";
 /// restored on replay. Absent means `patina_dst_syscalls::IDENTITY_HOSTNAME`.
 /// A value [`validate_hostname`] refuses fails closed.
 pub const ENV_GUEST_HOSTNAME: &str = "PATINA_GUEST_HOSTNAME";
+
+/// The virtual machine's CPU count (decimal, 1 to
+/// [`patina_dst_abi::MAX_CPUS`]). Set by native `run --cpus`; recorded into
+/// trace metadata and restored on replay, where a value that disagrees with the
+/// trace's is refused. Absent means [`patina_dst_abi::DEFAULT_CPUS`]. A value
+/// [`validate_cpus`] refuses fails closed.
+pub const ENV_GUEST_CPUS: &str = "PATINA_GUEST_CPUS";
 
 /// The longest node name the kernel stores, in bytes (`__NEW_UTS_LEN`).
 pub const HOSTNAME_MAX_BYTES: usize = 64;
@@ -626,6 +633,7 @@ pub struct Context {
     guest_env: BTreeMap<String, String>,
     guest_cwd: Option<String>,
     hostname: String,
+    cpus: u32,
     execution: Execution,
     filesystem: Option<Box<dyn FsDriver>>,
     filesystem_is_capture: bool,
@@ -1102,6 +1110,12 @@ impl Context {
     /// else `patina_dst_syscalls::IDENTITY_HOSTNAME`.
     pub fn hostname(&self) -> &str {
         &self.hostname
+    }
+
+    /// The virtual machine's CPU count: the run's configured or replayed
+    /// count, else [`patina_dst_abi::DEFAULT_CPUS`].
+    pub fn cpus(&self) -> u32 {
+        self.cpus
     }
 
     // ---- Cooperative-SUT (buggify) surface -----------------------------------

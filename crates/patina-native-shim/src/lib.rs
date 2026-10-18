@@ -31,6 +31,9 @@ mod plain;
 mod bundle;
 mod charge;
 mod coverage;
+// The virtual machine's CPU count, the one value every CPU surface answers
+// from. See `cpus.rs`.
+mod cpus;
 mod entropy;
 mod environment;
 mod fd;
