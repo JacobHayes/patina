@@ -76,6 +76,23 @@ pub(crate) fn host_abort() -> ! {
     unsafe { (host.host_abort)() }
 }
 
+/// End the run on a finding the guest reached through the shim (an `always!`
+/// violation): finalize it, then stop by [`host_abort`]. Finalization writes
+/// the recorded trace (in replay, checks the trace was consumed to its end)
+/// and flushes the captured output, salvaging what C `stdout` buffered, so the
+/// run ends with the abort status a finding has and with a trace that replays
+/// and minimizes like any other run's. A finalization failure — a replay that
+/// left trace events unconsumed among them — is [`shutdown_run`]'s report and
+/// then a shim fatal, as on the `exit_group` and default-signal paths, so a
+/// divergent replay never passes for the finding it stopped short of.
+pub(crate) fn finalize_then_abort() -> ! {
+    let _ = flush_before_refusal();
+    if shutdown_run() != 0 {
+        thread::fatal("always! violation finalization failed");
+    }
+    host_abort()
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_host_abort() -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();

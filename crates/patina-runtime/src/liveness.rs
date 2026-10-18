@@ -603,7 +603,7 @@ impl Context {
             // Emitted from the runtime so it reaches stderr regardless of the
             // driving surface, exactly like the vacuous-starvation `PATINA WARNING`.
             let marker = violation.marker_line();
-            eprintln!("{marker}");
+            crate::reports::diagnostic!("{marker}");
             // The interposed families abort the process on this error without
             // ever reaching `finish`, so the facts document — which carries this
             // very violation as a `runtime_findings` entry — has to be written
@@ -734,14 +734,16 @@ impl Context {
     fn frozen_clock_churn(&mut self, now: u64) -> RuntimeError {
         self.spin.churn_vtime_nanos = Some(now);
         let marker = self.spin.churn_marker_line(now);
-        eprintln!("{marker}");
-        eprintln!(
+        crate::reports::diagnostic!("{marker}");
+        crate::reports::diagnostic!(
             "patina: frozen-clock churn — the guest has polled {} times per escalation across {} \
 escalations ({} ns of CPU time charged) without one genuine boundary effect in between. It is not \
 waiting for time, it is ignoring it: a busy-wait whose exit condition never depends on the clock \
 or the poll, or one waiting on state only another task can publish. Give the loop a wait the \
 runtime can see (sleep/yield/park), or bound the run with --budget.",
-            ESCALATION_POLLS, self.spin.escalations, self.spin.charged_nanos,
+            ESCALATION_POLLS,
+            self.spin.escalations,
+            self.spin.charged_nanos,
         );
         // The interposed families abort on this without reaching `finish`, so
         // the artifacts that explain the wedge have to be written here.

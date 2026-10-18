@@ -6,9 +6,10 @@ use super::*;
 //
 // The runtime side of the `patina` crate's `buggify!`, `always!`, `sometimes!`,
 // `reachable!`, `buggify_knob!`, `buggify_delay!`, `rng`, and lifecycle macros.
-// Labels and call-site identities arrive as `(ptr, len)` UTF-8 slices. Fatal
-// signals (`always!` violation, duplicate label) flush captured output, emit a
-// distinct marker line to the real stderr, and abort — never a silent escape.
+// Labels and call-site identities arrive as `(ptr, len)` UTF-8 slices. An
+// `always!` violation reports a verdict, finalizes the run and aborts; a
+// duplicate label flushes captured output, emits a distinct marker line to the
+// real stderr, and aborts — never a silent escape.
 
 /// Reborrow a `(ptr, len)` pair as a UTF-8 label. `None` (invalid UTF-8 or a null
 /// non-empty pointer) is a fail-closed error at the call sites below.
@@ -41,15 +42,15 @@ pub(crate) fn abort_with_buggify_marker(marker: &str, label: &str) -> ! {
     crate::host_abort();
 }
 
-/// Flush captured guest output and abort, printing nothing of the shim's own.
+/// Finalize the run and abort, printing nothing of the shim's own.
 ///
 /// The run's finding has already been reported through the verdict ABI and
 /// drained into the captured stderr as a `PATINA_VERDICT` line, so a second
 /// hand-formatted marker would be a duplicate channel — and the classifier reads
-/// the verdict, never a marker (`docs/arcs/outcome-channel.md`).
+/// the verdict, never a marker (`docs/arcs/outcome-channel.md`). The verdict is
+/// the trace's last operation, so the finalized trace replays to it.
 fn abort_after_verdict() -> ! {
-    let _ = flush_before_refusal();
-    crate::host_abort();
+    crate::finalize_then_abort()
 }
 
 /// Move the runtime's queued diagnostic lines (today: `PATINA_VERDICT`) into the

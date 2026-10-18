@@ -199,6 +199,203 @@ fn main() {
         );
     }
 
+    /// A built `always!` guest and its recorded run.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    struct AlwaysRecording {
+        _directory: tempfile::TempDir,
+        bin: PathBuf,
+        trace: PathBuf,
+        recorded: Output,
+    }
+
+    /// Build `main` as an SDK guest and record one seeded run of it, which must
+    /// fail and leave a trace holding exactly one violation verdict.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn record_always_violation(main: &str) -> AlwaysRecording {
+        let directory = tempdir().unwrap();
+        let pkg = directory.path().join("pkg");
+        write_sdk_fixture(&pkg, main);
+        let workspace = native_workspace();
+        let bin = directory.path().join("always-trace");
+        invoke(
+            workspace,
+            &[
+                "build",
+                pkg.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        let trace = directory.path().join("always.patina");
+        let recorded = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "run",
+                bin.to_str().unwrap(),
+                "--seed",
+                "1",
+                "--record",
+                trace.to_str().unwrap(),
+            ],
+        );
+        let stderr = String::from_utf8_lossy(&recorded.stderr);
+        assert!(
+            !recorded.status.success(),
+            "an always! violation must fail the run:\n{stderr}"
+        );
+        let bundle = patina_dst_trace::TraceBundle::load(&trace)
+            .unwrap_or_else(|error| panic!("the violation left no trace: {error}\n{stderr}"));
+        let violations = bundle
+            .resolved_timeline("main")
+            .unwrap()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event.operation,
+                    patina_dst_abi::Operation::Verdict {
+                        verdict_kind: patina_dst_abi::VerdictKind::Violation,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            violations, 1,
+            "the trace must hold the violation verdict:\n{stderr}"
+        );
+        AlwaysRecording {
+            _directory: directory,
+            bin,
+            trace,
+            recorded,
+        }
+    }
+
+    /// A flag-free replay of `recording` ends the way the recording did and
+    /// reproduces its output byte for byte.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn assert_replays_identically(recording: &AlwaysRecording) {
+        let replayed = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            native_workspace(),
+            &[
+                "replay",
+                recording.bin.to_str().unwrap(),
+                recording.trace.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            replayed.status.code(),
+            recording.recorded.status.code(),
+            "replay must end the way the recording did:\n{}",
+            String::from_utf8_lossy(&replayed.stderr)
+        );
+        assert_eq!(recording.recorded.stdout, replayed.stdout);
+        assert_eq!(recording.recorded.stderr, replayed.stderr);
+        assert_eq!(verdict_lines(&replayed).len(), 1);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const ALWAYS_FAILS_MAIN: &str = r#"
+fn main() {
+    println!("GUEST_BEFORE");
+    patina_dst::always!(std::env::args().count() > 64, "never-holds");
+    println!("UNREACHABLE");
+}
+"#;
+
+    // A failing `always!` finalizes the run before it aborts, so the failure the
+    // oracle exists to find leaves a trace: the trace holds the violation as a
+    // recorded verdict, a flag-free replay reproduces the run byte for byte, and
+    // both runs still fail with the same status.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_always_violation_records_a_trace_that_replays() {
+        let recording = record_always_violation(ALWAYS_FAILS_MAIN);
+        assert!(
+            String::from_utf8_lossy(&recording.recorded.stdout).contains("GUEST_BEFORE"),
+            "the guest's output before the violation must reach stdout"
+        );
+        assert_replays_identically(&recording);
+    }
+
+    // Finalization prints the end-of-run reports after the runtime is gone, so
+    // it must not wait on a lock a guest thread can hold: here a worker is
+    // parked holding std's stderr lock when main fails its invariant.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_always_violation_finalizes_while_a_parked_thread_holds_stderr() {
+        let recording = record_always_violation(
+            r#"
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static HOLDING: AtomicBool = AtomicBool::new(false);
+
+fn main() {
+    std::thread::spawn(|| {
+        let _stderr = std::io::stderr().lock();
+        HOLDING.store(true, Ordering::Release);
+        loop {
+            std::thread::yield_now();
+        }
+    });
+    while !HOLDING.load(Ordering::Acquire) {
+        std::thread::yield_now();
+    }
+    patina_dst::always!(std::env::args().count() > 64, "never-holds");
+}
+"#,
+        );
+        assert_replays_identically(&recording);
+    }
+
+    // A replay that stops at the violation with recorded events still unconsumed
+    // has diverged from the recording. That must surface as the shim fatal the
+    // minimizer's divergence check reads, never as the finding alone, or a
+    // reducer would accept a candidate that no longer reproduces the run.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_always_violation_replay_with_unconsumed_events_is_a_shim_fatal() {
+        let recording = record_always_violation(ALWAYS_FAILS_MAIN);
+        let mut bundle = patina_dst_trace::TraceBundle::load(&recording.trace).unwrap();
+        let timeline = &mut bundle.timelines[0];
+        let mut trailing = timeline.decisions.last().unwrap().clone();
+        trailing.sequence += 1;
+        trailing.order += 1;
+        for marker in &mut timeline.lifecycle {
+            if marker.order >= trailing.order {
+                marker.order += 1;
+            }
+        }
+        timeline.decisions.push(trailing);
+        bundle.write_atomic(&recording.trace).unwrap();
+
+        let replayed = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            native_workspace(),
+            &[
+                "replay",
+                recording.bin.to_str().unwrap(),
+                recording.trace.to_str().unwrap(),
+                "--format",
+                "json",
+            ],
+        );
+        let stdout = String::from_utf8_lossy(&replayed.stdout);
+        let envelope: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|error| panic!("envelope was not one JSON object: {error}\n{stdout}"));
+        assert!(!replayed.status.success(), "{envelope:#}");
+        assert_eq!(
+            envelope["verdicts"][0]["kind"], "violation",
+            "the replay must still reach the violation: {envelope:#}"
+        );
+        assert_eq!(
+            envelope["refusal"]["class"], "shim_fatal",
+            "the unconsumed trace must fail the replay as a divergence: {envelope:#}"
+        );
+    }
+
     // The WASI half: the `patina_sdk` `verdict` import is backed by the same runtime
     // entry, so a wasip1 guest's verdicts reach the envelope identically to native.
     // An unknown kind traps rather than being reclassified.

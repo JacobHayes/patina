@@ -85,7 +85,8 @@ Patina so adopters pay nothing in production builds:
 - `buggify!` and friends — FoundationDB-style rare-path activation: a branch that
   fires only sometimes, only under simulation, deterministically per seed. This
   is how you make your own code cooperate with the fuzzer.
-- `always!` — a fatal invariant; a violation aborts the run with a marker.
+- `always!` — a fatal invariant; a violation reports a `violation` verdict and
+  aborts the run, whose recorded trace replays to it.
 - `verdict()` — report a structured outcome (violation / pass / abort-intent)
   under a label, with optional detail. It is the machine-readable channel: each
   call is a recorded trace event and appears in the run's JSON envelope as

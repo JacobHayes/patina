@@ -220,64 +220,79 @@ pub(crate) unsafe fn sud_host_syscall(
 
 pub(crate) fn runtime_errno(error: &RuntimeError) -> c_int {
     match error {
+        RuntimeError::ComputeStopExport
+        | RuntimeError::ComputeStopOverflow
+        | RuntimeError::ComputeStopState => watchdog::report_and_abort(error, None, None),
+        _ if report_run_stop(error) => abort_after_flushing_output(),
+        _ => error_errno(error),
+    }
+}
+
+/// The errno a runtime error that does not stop the run answers with.
+pub(crate) fn error_errno(error: &RuntimeError) -> c_int {
+    match error {
         RuntimeError::Effect(error) => effect_errno(error),
+        _ => EIO,
+    }
+}
+
+/// Whether `error` stops the run rather than answering an errno, after writing
+/// what names it through the runtime's diagnostic writer (never std's stderr,
+/// a lock the guest shares). Mid-run, [`runtime_errno`] then aborts; at
+/// shutdown, [`shutdown_run`] reports the failure to its caller, which ends
+/// the run its own way.
+pub(crate) fn report_run_stop(error: &RuntimeError) -> bool {
+    let line = |text: String| write_runtime_diagnostic(text.as_bytes());
+    match error {
         // An exhausted step budget is a supervisor-imposed stop, not a
         // recoverable I/O error: handing the guest an errno lets it swallow the
         // bound and keep going (every subsequent boundary op failing the same
         // way), so the budget would not actually bound anything. Name it and
         // abort, the way a liveness violation does.
-        RuntimeError::StepBudgetExceeded { budget } => {
-            eprintln!(
-                "patina: step budget of {budget} boundary operations was exhausted; \
-                 the run is stopped"
-            );
-            abort_after_flushing_output()
-        }
+        RuntimeError::StepBudgetExceeded { budget } => line(format!(
+            "patina: step budget of {budget} boundary operations was exhausted; the run is \
+             stopped\n"
+        )),
         // A liveness-watchdog violation is fatal and fail-closed: the run has
         // wedged into a virtual-time no-progress churn. Returning an errno the
         // guest could ignore would let it keep spinning, so abort loudly instead —
         // the runtime has already emitted the classifiable PATINA_LIVENESS marker
         // to the captured stderr.
-        RuntimeError::Liveness { .. } => abort_after_flushing_output(),
+        RuntimeError::Liveness { .. } => {}
         // A refused custom operation has no answer the guest could safely be
         // handed: the recording disagrees with what it asked, or its `perform`
         // did something replay could never reproduce. Returning an errno would
         // let the guest swallow that and carry on against a trace that no longer
         // describes the run, so name it and abort — the same treatment liveness
         // and the step budget get.
-        RuntimeError::CustomOp { label, detail } => {
-            eprintln!("PATINA_CUSTOM_OP_REFUSED label={label}\npatina: {detail}");
-            abort_after_flushing_output()
-        }
+        RuntimeError::CustomOp { label, detail } => line(format!(
+            "PATINA_CUSTOM_OP_REFUSED label={label}\npatina: {detail}\n"
+        )),
         // Frozen-clock churn is the same fail-closed shape: the guest is in a
         // loop that ignores the clock it reads, so escalation cannot free
         // it and an errno it could swallow would just resume the spin. The
         // runtime has already emitted the classifiable marker and flushed the
         // truncated trace.
-        RuntimeError::FrozenClockChurn { .. } => abort_after_flushing_output(),
+        RuntimeError::FrozenClockChurn { .. } => {}
         // A time-model divergence means the replay no longer describes the
         // run: every later clock read and expiry would answer from a different
         // timeline. Name it and stop, as a refused custom operation does.
-        RuntimeError::TimeModel { .. } => {
-            eprintln!("patina: {error}");
-            abort_after_flushing_output()
-        }
-        RuntimeError::ComputeBound { .. } => {
-            watchdog::report_synchronous(error);
-            abort_after_flushing_output()
-        }
+        RuntimeError::TimeModel { .. } => line(format!("patina: {error}\n")),
+        RuntimeError::ComputeBound { .. } => watchdog::report_synchronous(error),
         RuntimeError::ComputeStopExport
         | RuntimeError::ComputeStopOverflow
-        | RuntimeError::ComputeStopState => watchdog::report_and_abort(error, None, None),
-        RuntimeError::InjectedFsCrash(_) => abort_after_flushing_output(),
-        RuntimeError::CrashSelectorUnreached { .. } => EIO,
-        RuntimeError::Config(_)
+        | RuntimeError::ComputeStopState => watchdog::report(error),
+        RuntimeError::InjectedFsCrash(_) => {}
+        RuntimeError::Effect(_)
+        | RuntimeError::CrashSelectorUnreached { .. }
+        | RuntimeError::Config(_)
         | RuntimeError::Io { .. }
         | RuntimeError::Trace(_)
         | RuntimeError::InvalidOutcome { .. }
         | RuntimeError::RunAndFinalize { .. }
-        | RuntimeError::ScheduleDivergence { .. } => EIO,
+        | RuntimeError::ScheduleDivergence { .. } => return false,
     }
+    true
 }
 
 /// Flush the captured guest output — which already carries the marker line
@@ -1131,11 +1146,27 @@ fn fingerprint_declares_component(fingerprint: &str, component: &str) -> bool {
     fingerprint.split('+').skip(1).any(|part| part == component)
 }
 
+/// The runtime's diagnostic writer: the text joins the captured stderr (on
+/// Linux a raw host write through the `host_*` aliases), so it interleaves with
+/// guest output and takes no lock a guest thread can hold. A guest that
+/// exhausted the capture bound does not silence it: what the capture holds is
+/// written first, then the text goes straight to the host's stderr.
+pub(crate) fn write_runtime_diagnostic(text: &[u8]) {
+    let captured = stdio_slot().lock().put(1, &[text]);
+    if !captured {
+        let _ = flush_captured_stdio();
+        let _ = host_write_all(2, text);
+    }
+}
+
 pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     let mut context = match context {
         Ok(context) => context,
         Err(error) => return fail(runtime_errno(&error)),
     };
+    // The runtime's own diagnostics go out beside guest stderr through the
+    // capture, never through std's stderr lock, which the guest shares.
+    let _ = patina_dst_runtime::set_diagnostic_writer(write_runtime_diagnostic);
     if let Err(error) = declare_link_time_sites(&mut context) {
         record_init_error(error.to_string());
         return fail(runtime_errno(&error));

@@ -124,9 +124,15 @@ never called patina_dst::lifecycle::setup_complete()\n",
             set_errno(0);
             0
         }
+        // Reported, never acted on: the caller ends the run (the `always!`,
+        // `exit_group` and signal paths as a shim fatal), so a stop the error
+        // names cannot abort past it.
         (Err(error), _) => {
             report_shutdown_error(&error.to_string());
-            fail(runtime_errno(&error))
+            let _ = report_run_stop(&error);
+            // The capture was flushed above; what the report added goes out too.
+            let _ = flush_captured_stdio();
+            fail(error_errno(&error))
         }
         (Ok(()), Err(error)) => {
             report_shutdown_error(&format!("flush captured stdio: {error}"));

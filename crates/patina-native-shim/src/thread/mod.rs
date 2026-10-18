@@ -455,7 +455,7 @@ pub(crate) fn deactivate() {
     state.active = false;
 }
 
-fn fatal(message: &str) -> ! {
+pub(crate) fn fatal(message: &str) -> ! {
     // Like `trap_fatal`: `host_abort()` skips the shutdown flush, so the guest's
     // captured output goes out first — a probe that dies here (a deadlock,
     // an unmodeled flag) still leaves its event stream for the conformance

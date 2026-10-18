@@ -437,7 +437,9 @@ impl Context {
         let mut bytes = match serde_json::to_vec(&document) {
             Ok(bytes) => bytes,
             Err(error) => {
-                eprintln!("PATINA_INFRA run_facts serialize_failed reason={error:?}");
+                crate::reports::diagnostic!(
+                    "PATINA_INFRA run_facts serialize_failed reason={error:?}"
+                );
                 return;
             }
         };
@@ -445,7 +447,7 @@ impl Context {
         if let Some(output) = self.facts.as_mut()
             && let Err(error) = output.write(&bytes)
         {
-            eprintln!("PATINA_INFRA run_facts write_failed reason={error:?}");
+            crate::reports::diagnostic!("PATINA_INFRA run_facts write_failed reason={error:?}");
         }
     }
 
@@ -489,7 +491,7 @@ a recorded result or a replay fetch",
         // Deliberately not gated by `ReportConfig`: a verdict is the run's
         // result, not a diagnostic, and a suppressible result is a silent hole.
         for line in self.take_pending_diagnostics() {
-            eprintln!("{line}");
+            crate::reports::diagnostic!("{line}");
         }
         emit_schedule_report(self.reports, &self.schedule.diagnostics());
         // Swarm selection diagnostic. Default-on for every masked run so which
@@ -615,7 +617,10 @@ a recorded result or a replay fetch",
             // marker on the transport, so an abandoned trace still reads as
             // abandoned rather than as the empty file a mid-run death leaves.
             Err(error) if error.is_resource_limit() => {
-                eprint!("{}", resource_limit_infra_line(&error));
+                crate::reports::write_diagnostic(format_args!(
+                    "{}",
+                    resource_limit_infra_line(&error)
+                ));
                 if let RecordSink::Transport(transport) = sink {
                     let _ = transport.write_bundle(&abandoned_trace_marker(
                         "resource-limit",
@@ -625,7 +630,7 @@ a recorded result or a replay fetch",
                 return;
             }
             Err(error) => {
-                eprintln!(
+                crate::reports::diagnostic!(
                     "PATINA_INFRA truncated_trace write_failed reason={:?}",
                     format!("snapshot truncated trace: {error}")
                 );
@@ -646,7 +651,9 @@ a recorded result or a replay fetch",
                 }),
         };
         if let Err(reason) = result {
-            eprintln!("PATINA_INFRA truncated_trace write_failed reason={reason:?}");
+            crate::reports::diagnostic!(
+                "PATINA_INFRA truncated_trace write_failed reason={reason:?}"
+            );
         }
     }
 

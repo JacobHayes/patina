@@ -353,6 +353,224 @@ fn main() {
         );
     }
 
+    /// A campaign generation that fails an `always!` classifies VIOLATION, saves a
+    /// trace its reproduce command replays, and minimizes with and without the
+    /// trace phase: the run is finalized before the violation aborts it, so the
+    /// reducer's recording of the reduced knobs is a trace like any other.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn minimize_generation_reduces_an_always_violation() {
+        let workspace = native_workspace();
+        let directory = tempdir().unwrap();
+        let pkg = directory.path().join("pkg");
+        write_sdk_fixture(
+            &pkg,
+            r#"
+fn main() {
+    patina_dst::always!(std::env::args().count() > 64, "never-holds");
+}
+"#,
+        );
+        let guest = directory.path().join("always-guest");
+        invoke(
+            workspace,
+            &[
+                "build",
+                pkg.to_str().unwrap(),
+                "--output",
+                guest.to_str().unwrap(),
+            ],
+        );
+
+        let out = directory.path().join("camp");
+        let campaign = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "campaign",
+                guest.to_str().unwrap(),
+                "--gens",
+                "1",
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--format",
+                "json",
+            ],
+        );
+        let envelope = campaign_json_stdout(&campaign);
+        assert_eq!(
+            envelope["classes"]["VIOLATION"], 1,
+            "an always! failure is a safety finding: {}",
+            envelope["classes"]
+        );
+        let saved = out.join("failures/generation-0.patina");
+        let replayed = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &["replay", guest.to_str().unwrap(), saved.to_str().unwrap()],
+        );
+        let replayed_stderr = String::from_utf8_lossy(&replayed.stderr);
+        assert!(
+            !replayed.status.success()
+                && replayed_stderr
+                    .lines()
+                    .any(|line| line.starts_with("PATINA_VERDICT ")),
+            "the saved generation trace must replay to the violation:\n{replayed_stderr}"
+        );
+
+        for (name, extra) in [
+            ("minimized.patina", &[][..]),
+            ("knobs-only.patina", &["--no-trace-phase"][..]),
+        ] {
+            let output = directory.path().join(name);
+            let mut arguments = vec![
+                "minimize",
+                "--generation",
+                "0",
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+                "--jobs",
+                "1",
+            ];
+            arguments.extend_from_slice(extra);
+            let minimized =
+                invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &arguments);
+            assert!(
+                minimized.status.success(),
+                "minimize --generation {extra:?} failed on an always! violation:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&minimized.stdout),
+                String::from_utf8_lossy(&minimized.stderr)
+            );
+            patina_dst_trace::TraceBundle::load(&output)
+                .unwrap_or_else(|error| panic!("{extra:?}: no minimized trace: {error}"));
+        }
+    }
+
+    /// A replay that reaches the `always!` violation with a custom operation
+    /// still open has diverged from its recording: the shutdown error is a shim
+    /// fatal, so `minimize`'s trace phase refuses the trace instead of reducing
+    /// on the strength of a failure the replay never reproduced. The guest opens
+    /// the operation on both passes but closes it only when recording.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn minimize_refuses_an_always_replay_that_leaves_a_custom_op_open() {
+        let workspace = native_workspace();
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("open_custom_op.rs");
+        fs::write(
+            &source,
+            r#"
+unsafe extern "C" {
+    fn patina_custom_op_begin(
+        label: *const u8,
+        label_len: usize,
+        key: *const u8,
+        key_len: usize,
+        fault_eligible: i32,
+        out_len: *mut usize,
+    ) -> i32;
+    fn patina_custom_op_record(result: *const u8, result_len: usize) -> i32;
+    fn patina_always(
+        condition: i32,
+        label: *const u8,
+        label_len: usize,
+        site: *const u8,
+        site_len: usize,
+    ) -> i32;
+}
+
+fn main() {
+    let label = "lookup";
+    let mut len = 0usize;
+    unsafe {
+        if patina_custom_op_begin(label.as_ptr(), label.len(), [].as_ptr(), 0, 0, &mut len) == 0 {
+            patina_custom_op_record(b"ok".as_ptr(), 2);
+        }
+        let (invariant, site) = ("never-holds", "open_custom_op.rs");
+        patina_always(0, invariant.as_ptr(), invariant.len(), site.as_ptr(), site.len());
+    }
+}
+"#,
+        )
+        .unwrap();
+        let guest = directory.path().join("open-custom-op");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                guest.to_str().unwrap(),
+            ],
+        );
+
+        let out = directory.path().join("camp");
+        let campaign = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "campaign",
+                guest.to_str().unwrap(),
+                "--gens",
+                "1",
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--format",
+                "json",
+            ],
+        );
+        let envelope = campaign_json_stdout(&campaign);
+        assert_eq!(
+            envelope["classes"]["VIOLATION"], 1,
+            "the recording itself is a clean violation: {}",
+            envelope["classes"]
+        );
+
+        let saved = out.join("failures/generation-0.patina");
+        let replayed = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "replay",
+                guest.to_str().unwrap(),
+                saved.to_str().unwrap(),
+                "--format",
+                "json",
+            ],
+        );
+        let stdout = String::from_utf8_lossy(&replayed.stdout);
+        let replay: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|error| panic!("envelope was not one JSON object: {error}\n{stdout}"));
+        assert_eq!(
+            replay["refusal"]["class"], "shim_fatal",
+            "the open custom op must fail the replay as a divergence: {replay:#}"
+        );
+
+        let minimized = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "minimize",
+                "--generation",
+                "0",
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--output",
+                directory.path().join("minimized.patina").to_str().unwrap(),
+                "--jobs",
+                "1",
+            ],
+        );
+        assert!(
+            !minimized.status.success(),
+            "minimize reduced a trace whose replay diverges:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&minimized.stdout),
+            String::from_utf8_lossy(&minimized.stderr)
+        );
+    }
+
     /// `minimize --generation` end to end: a campaign catches the planted
     /// short-write bug under a wide fault vector, and the reducer must strip that
     /// vector down to the knob that matters, hand back a standalone command that

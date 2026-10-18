@@ -126,7 +126,7 @@ mod calls {
         }
     }
 
-    /// `always!`: a fatal invariant under Patina (marker + abort), a
+    /// `always!`: a fatal invariant under Patina (verdict + finalized abort), a
     /// `debug_assert` outside.
     #[inline]
     #[track_caller]
