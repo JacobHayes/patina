@@ -70,8 +70,13 @@ fn poll_sources(
                     fd.revents = (mask & filter) as u16 as i16;
                     // The object's wait queue wakes on any change: watch both
                     // directions.
-                    watched.push((ReadyDir::Read, fd.fd));
-                    watched.push((ReadyDir::Write, fd.fd));
+                    for dir in [ReadyDir::Read, ReadyDir::Write] {
+                        watched.push(Watched {
+                            dir,
+                            fd: fd.fd,
+                            desc: None,
+                        });
+                    }
                 }
             }
             if fd.revents != 0 {
@@ -100,9 +105,11 @@ fn poll_sources(
         }) {
             return Ok(0);
         }
-        let wait = register_readiness_waiters(&mut state, me, &watched);
+        // The park also ends at the next delivery to a watched socket.
+        let (wait, park_deadline) =
+            register_readiness_waiters(&mut state, me, &watched).bounded(deadline);
         let locs = wait.locs.clone();
-        let step = match deadline {
+        let step = match park_deadline {
             Some(deadline) => state.block_timed(me, "poll", wait, ClockKind::Monotonic, deadline),
             None => state.block(me, "poll", wait),
         };

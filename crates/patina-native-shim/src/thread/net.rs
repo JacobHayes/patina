@@ -1056,6 +1056,25 @@ pub(super) fn socket_poll(state: &ThreadRuntime, handle: u64) -> Option<(u32, (u
     Some((mask, (arrivals, socket.write_space)))
 }
 
+/// When the next segment or datagram in flight to socket `handle` is
+/// delivered, for a readiness park: the one readiness change that comes from
+/// virtual time alone rather than from another task's call, which wakes its
+/// waiters. `None` with nothing in flight, for a socket of a family whose
+/// transfers are immediate (AF_UNIX, netlink), or for a number that names no
+/// socket.
+pub(super) fn socket_next_arrival(
+    state: &ThreadRuntime,
+    handle: c_int,
+) -> Result<Option<u64>, c_int> {
+    let Some(socket) = state.net.sockets.table.get(&handle) else {
+        return Ok(None);
+    };
+    match &socket.proto {
+        Proto::Inet(inet) => inet::next_arrival(inet),
+        _ => Ok(None),
+    }
+}
+
 /// `FIONREAD`/`SIOCINQ` on a socket: what a receive would take now.
 pub(crate) fn socket_pending(handle: u64) -> Result<i32, c_int> {
     let state = lock_state();

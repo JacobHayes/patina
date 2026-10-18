@@ -282,6 +282,16 @@ impl Context {
         Ok(self.network()?.readiness(socket, now_nanos)?)
     }
 
+    /// The earliest future delivery to `socket` ([`NetDriver::next_delivery`]),
+    /// for a readiness reactor bounding its park: a wait over a socket whose
+    /// next segment is in flight ends when virtual time reaches it. UNRECORDED
+    /// for the reason [`Self::net_readiness`] is, and read on the same
+    /// unrecorded clock, so a reactor's scan is no clock poll.
+    pub fn net_next_arrival(&mut self, socket: SocketId) -> Result<Option<u64>, RuntimeError> {
+        let now_nanos = self.current_monotonic()?;
+        Ok(self.network()?.next_delivery(socket, now_nanos)?)
+    }
+
     /// The datagram a receive on `socket` would take now, left queued
     /// (`MSG_PEEK`). UNRECORDED for the reason [`Self::net_readiness`] is: what
     /// it answers is a function of the recorded history and the clock.

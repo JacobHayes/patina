@@ -17,7 +17,7 @@ use super::{
 // The gather path: only the guest archive's `kqueue`/`kevent` doors reach it.
 #[cfg(patina_posix_exports)]
 use super::{
-    O_READ, O_WRITE, PatinaKevent, ReadyDir, Step, WaiterLoc, current_task, fd_poll,
+    O_READ, O_WRITE, PatinaKevent, ReadyDir, Step, WaiterLoc, Watched, current_task, fd_poll,
     register_readiness_waiters, sched_point, switch_and_park, unregister_waiters,
 };
 #[cfg(patina_posix_exports)]
@@ -89,7 +89,8 @@ pub(super) struct FilterKey {
 }
 
 /// A virtual kqueue: its registered knotes plus the tasks parked in
-/// `kevent` on it (woken by an EVFILT_USER NOTE_TRIGGER from any thread).
+/// `kevent` on it, woken by an EVFILT_USER NOTE_TRIGGER or a registration
+/// from any thread.
 #[derive(Default)]
 struct Kqueue {
     filters: BTreeMap<FilterKey, KFilterState>,
@@ -176,9 +177,12 @@ pub(crate) fn kqueue_forget_number(fd: c_int) {
 #[unsafe(no_mangle)]
 /// Apply one changelist entry to a kqueue. Returns 0 on success or a
 /// positive errno the C layer places in an EV_ERROR receipt. Registry
-/// mutation only — no scheduling point, no trace event — except an
-/// EVFILT_USER NOTE_TRIGGER, which wakes the kq's parked `kevent` callers
-/// (like a condvar signal).
+/// mutation only — no scheduling point, no trace event — except that an
+/// EVFILT_USER NOTE_TRIGGER, an `EV_ADD` and an `EV_ENABLE` wake the kq's
+/// parked `kevent` callers (like a condvar signal), which rescan: a knote
+/// attached ready activates at once (`knote_attach`), and a park watches
+/// the knotes enabled when it began, so one enabled since, or a timer
+/// added since, must bound it from then on.
 ///
 /// # Safety
 /// C ABI entry point; `ident` for EVFILT_READ/WRITE is a descriptor.
@@ -312,23 +316,24 @@ pub extern "C" fn patina_kqueue_apply(
             }
         }
 
-        // EVFILT_USER NOTE_TRIGGER: latch the trigger and wake every task
-        // parked in `kevent` on this kq. mio's `Waker::wake` sends exactly
-        // this (EV_ADD | NOTE_TRIGGER) from another thread.
-        if filter == EVFILT_USER && fflags & NOTE_TRIGGER != 0 {
-            let kq = &mut state
-                .net
-                .kqueues
-                .get_mut(&id)
-                .expect("kqueue was checked")
-                .kq;
-            if let Some(entry) = kq.filters.get_mut(&key) {
-                entry.user_triggered = true;
-            }
-            me_wake = kq.waiters.drain().collect();
-        } else {
-            me_wake = Vec::new();
+        // EVFILT_USER NOTE_TRIGGER: latch the trigger. mio's `Waker::wake`
+        // sends exactly this (EV_ADD | NOTE_TRIGGER) from another thread.
+        let triggered = filter == EVFILT_USER && fflags & NOTE_TRIGGER != 0;
+        let kq = &mut state
+            .net
+            .kqueues
+            .get_mut(&id)
+            .expect("kqueue was checked")
+            .kq;
+        if triggered && let Some(entry) = kq.filters.get_mut(&key) {
+            entry.user_triggered = true;
         }
+        // Wake every task parked in `kevent` on this kq to rescan.
+        me_wake = if triggered || flags & (EV_ADD | EV_ENABLE) != 0 {
+            kq.waiters.drain().collect()
+        } else {
+            Vec::new()
+        };
     }
     wake_all(me_wake);
     0
@@ -511,29 +516,29 @@ fn pipe_room(state: &ThreadRuntime, fd: c_int) -> Option<usize> {
     Some(channel.capacity.saturating_sub(channel.buffer.len()))
 }
 
-/// The enabled EVFILT_READ/WRITE knotes as reactor-neutral `(direction,
-/// fd)` pairs the shared fan-in primitive parks on, plus whether an
-/// enabled EVFILT_USER knote is present (its wakeup is the kq's own
-/// waiter list, a kqueue-specific source with no descriptor).
+/// The enabled EVFILT_READ/WRITE knotes as the reactor-neutral sources the
+/// shared fan-in primitive parks on. A knote names its NUMBER: closing the
+/// number drops it ([`kqueue_forget_number`]), so what the number names now
+/// is what it watches.
 #[cfg(patina_posix_exports)]
-fn watched_sources(state: &ThreadRuntime, id: u64) -> (Vec<(ReadyDir, c_int)>, bool) {
+fn watched_sources(state: &ThreadRuntime, id: u64) -> Vec<Watched> {
     let kq = &state.net.kqueues.get(&id).expect("kqueue exists").kq;
-    let mut has_user = false;
-    let watched = kq
-        .filters
+    kq.filters
         .iter()
         .filter(|(_, st)| st.enabled)
-        .filter_map(|(key, _)| match key.filter {
-            EVFILT_READ => Some((ReadyDir::Read, c_int::try_from(key.ident).unwrap_or(-1))),
-            EVFILT_WRITE => Some((ReadyDir::Write, c_int::try_from(key.ident).unwrap_or(-1))),
-            EVFILT_USER => {
-                has_user = true;
-                None
-            }
-            _ => None,
+        .filter_map(|(key, _)| {
+            let dir = match key.filter {
+                EVFILT_READ => ReadyDir::Read,
+                EVFILT_WRITE => ReadyDir::Write,
+                _ => return None,
+            };
+            Some(Watched {
+                dir,
+                fd: c_int::try_from(key.ident).unwrap_or(-1),
+                desc: None,
+            })
         })
-        .collect();
-    (watched, has_user)
+        .collect()
 }
 
 /// Apply the registry edits for the events actually delivered this gather:
@@ -648,14 +653,14 @@ pub(crate) unsafe fn gather_core(
             earliest_timer
         };
         // Fan-in on the reactor-neutral readiness sources (shared core),
-        // plus the kqueue-specific EVFILT_USER trigger, whose wakeup is
-        // the kq's own waiter list rather than a descriptor.
-        let (watched, has_user) = watched_sources(&state, id);
-        let mut wait = register_readiness_waiters(&mut state, me, &watched);
-        if has_user {
-            let kq = &mut state.net.kqueues.get_mut(&id).expect("kqueue exists").kq;
-            wait.enqueue(&mut kq.waiters, me, WaiterLoc::KqueueUser(id));
-        }
+        // until the next delivery to a watched socket too, plus the kq's
+        // own waiter list, where an EVFILT_USER trigger and a registration
+        // change wake it.
+        let watched = watched_sources(&state, id);
+        let (mut wait, park_deadline) =
+            register_readiness_waiters(&mut state, me, &watched).bounded(park_deadline);
+        let kq = &mut state.net.kqueues.get_mut(&id).expect("kqueue exists").kq;
+        wait.enqueue(&mut kq.waiters, me, WaiterLoc::KqueueWait(id));
         let locs = wait.locs.clone();
         let step = match park_deadline {
             Some(deadline) => state.block_timed(me, "kevent", wait, ClockKind::Monotonic, deadline),
@@ -665,7 +670,6 @@ pub(crate) unsafe fn gather_core(
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
             Err(error) => {
-                let mut state = lock_state();
                 unregister_waiters(&mut state, me, &locs);
                 return Err(failed(c_int::from(error.into_posix())));
             }
@@ -677,10 +681,10 @@ pub(crate) unsafe fn gather_core(
     }
 }
 
-/// Unlink `me` from a kqueue's `EVFILT_USER` waiter list (the
-/// `WaiterLoc::KqueueUser` registration).
+/// Unlink `me` from a kqueue's waiter list (the `WaiterLoc::KqueueWait`
+/// registration).
 #[cfg(patina_posix_exports)]
-pub(in crate::thread) fn unwait_user(state: &mut ThreadRuntime, id: u64, me: TaskId) {
+pub(in crate::thread) fn unwait(state: &mut ThreadRuntime, id: u64, me: TaskId) {
     if let Some(slot) = state.net.kqueues.get_mut(&id)
         && let Some(index) = slot.kq.waiters.iter().position(|task| *task == me)
     {

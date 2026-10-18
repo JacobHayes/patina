@@ -202,6 +202,20 @@ fn pipe_aliases_keep_channels_alive() {
     );
 }
 
+/// Read interest registered, from another thread, in a socket that is already
+/// readable wakes the task parked in the reactor (`kevent` on macOS,
+/// `epoll_wait` on Linux), which delivers it, as the native run does. Class
+/// pairing: the scheduler's deadlock refusal, which a parked reactor that
+/// missed the registration reaches.
+#[test]
+fn a_registration_wakes_a_parked_reactor() {
+    let g = Guest::assert_build("reactor_register_probe.rs");
+    let expected = native_stdout("reactor_register_probe.rs");
+    assert_exact_line(&expected, "NATIVE_REACTOR_REGISTER_RESULT woke_ready=true");
+    assert_repeated_output(&g, &[1, 2], text(&expected));
+    g.assert_record_replay_identity(1, &[], &expected);
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
@@ -381,6 +395,27 @@ mod linux {
     fn epoll_timeout_advances_exact_virtual_time() {
         let g = Guest::assert_build("epoll_timeout_probe.rs");
         assert_repeated_output(&g, &[1], "NATIVE_EPOLL_TIMEOUT timeout_ms=50\n");
+    }
+
+    /// An interest whose registered number was closed while a `dup` keeps
+    /// its socket open still watches the socket, as the host kernel's does:
+    /// a segment in flight ends a bounded wait at its delivery, not the
+    /// timeout, and wakes a wait with none. Class pairing: every source a
+    /// fan-in park watches resolves through `resolve_source`, the one
+    /// resolution `fd_poll` reads readiness through.
+    #[test]
+    fn an_epoll_interest_outlives_its_registered_number() {
+        let g = Guest::assert_build("epoll_alias_probe.rs");
+        g.assert_audit_clean();
+        let delivered = "NATIVE_EPOLL_ALIAS_RESULT bounded=1 unbounded=1";
+        assert_exact_line(&native_stdout("epoll_alias_probe.rs"), delivered);
+        let latency = ["--net-latency-nanos", "2000000"];
+        let out = g.assert_seeded_record_replay_identity(1, &latency);
+        assert_exact_line(&out, delivered);
+        let fields = assert_fields(&out, "NATIVE_EPOLL_ALIAS_ELAPSED ", &["bounded_us"]);
+        // The 2 ms hop, plus the calls charged around it.
+        let waited: u64 = fields["bounded_us"].parse().unwrap();
+        assert!((2_000..2_100).contains(&waited), "{}", text(&out));
     }
 }
 

@@ -391,7 +391,7 @@ The deny/interposed/known-safe lists are organized by an explicit escape-class t
 
 | Escape class | Detection mechanism | Fixture / test (red-before, green-after) | Residual the symbol audit cannot see |
 |---|---|---|---|
-| Blocking / scheduling (`__ulock`/`__psynch`/dispatch/mach-sem; `poll`/`select`; interposed `os_unfair_lock` and the `kqueue`/`kevent` + `epoll`/`eventfd` readiness reactors) | import audit | `native_run_prerun_gate_refuses_every_escape_class` (`semaphore_wait`, `select`); planted-`semaphore_wait` e2e; `os_unfair_lock` acceptance + misuse-abort legs; `recv_timeout` & `rwlock` determinism; reactor legs (raw kqueue/epoll edge+timeout+waker, tokio ping-pong on both platforms) | an inlined `__ulock_wait` `svc` — Linux `strace`; **honestly absent on macOS** |
+| Blocking / scheduling (`__ulock`/`__psynch`/dispatch/mach-sem; `poll`/`select`; interposed `os_unfair_lock` and the `kqueue`/`kevent` + `epoll`/`eventfd` readiness reactors) | import audit | `native_run_prerun_gate_refuses_every_escape_class` (`semaphore_wait`, `select`); planted-`semaphore_wait` e2e; `os_unfair_lock` acceptance + misuse-abort legs; `recv_timeout` & `rwlock` determinism; reactor legs (raw kqueue/epoll edge+timeout+waker, tokio ping-pong on both platforms, tokio TCP on current-thread and two-worker runtimes, a delayed segment ending a reactor park) | an inlined `__ulock_wait` `svc` — Linux `strace`; **honestly absent on macOS** |
 | Time | import audit **+** instruction scan (aarch64 `mrs CNTVCT_EL0`/`CNTVCTSS_EL0`, x86 `rdtsc`/`rdtscp`; on x86_64 Linux the two x86 forms are trap-managed rather than refused — `prctl(PR_SET_TSC)`, answered from the virtual clock, proved by `native_containment::tsc_reads_answer_from_virtual_clock`) | `native_run_prerun_gate_refuses_every_escape_class` (`time`) | the **Darwin commpage** time path: `mach_absolute_time`/`gettimeofday` fast paths read a kernel-mapped page with an ordinary `ldr`, **not** an `mrs`, so the instruction scan does **not** catch it — coverage comes from *interposing* `mach_absolute_time`/`clock_gettime`/`gettimeofday` (what libc/std actually call); a hand-rolled commpage reader that bypasses libc is an uncaught residual |
 | Entropy | import audit **+** instruction scan (x86 `rdrand`/`rdseed`, aarch64 `mrs RNDR`/`RNDRRS`) | `native_run_prerun_gate_refuses_every_escape_class` (`arc4random`); `classifies_rdtscp_and_rdseed`, `classifies_aarch64_system_register_accesses` (patina-target); `native_containment::rdrand_is_refused_on_every_kernel` proves an `rdrand` guest stays refused on the very x86_64 Linux host where `rdtsc` runs trap-managed | novel entropy instruction encodings (no mechanism traps a hardware entropy read, so these are refuse-only — never downgradable) |
 | Thread lifecycle | import audit | `native_containment::audit_rejects_unlinked_raw_syscall_or_thread_escape` (raw/pthread C refusal) + unmanaged-thread classifier unit | `pthread_create` is interposed, so a shim-linked guest can only reach uninterposed thread creation through non-exported private stubs (not linkable) |
@@ -1159,7 +1159,7 @@ on a futex word, a held mutex, a write-held rwlock, a join slot and a pipe's
 readers, each through `Wait::enqueue`, then ends the wait: every queue is empty
 (RED with an `enqueue` that does not record the queue). The type rule that only
 `Wait::enqueue` adds to a `WaitQueue` covers the rest, the macOS kqueue
-`EVFILT_USER` list included.
+waiter list and the epoll instance's included.
 
 ### Maintenance rule
 

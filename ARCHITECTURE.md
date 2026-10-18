@@ -250,7 +250,8 @@ macOS), which reaches every queue the wait has moved to, and flagging its
 timeout. That registration has one removal path, taken by every wake, resume,
 expiry and thread exit, and it knows every queue: each waiter queue (futex
 words, mutexes, rwlocks, conditions, joins, pipes, sockets, descriptor readers,
-kqueue `EVFILT_USER` lists, IPC objects, record locks, dispatch semaphores) is
+the tasks parked in a kqueue or an epoll instance, IPC objects, record locks,
+dispatch semaphores) is
 a `WaitQueue` that only `Wait::enqueue` can add to, recording the queue in the
 wait that is then registered. No signal, futex wake or requeue, or cancellation can find, and wake
 again, a waiter whose deadline has already ended its wait. While the thread

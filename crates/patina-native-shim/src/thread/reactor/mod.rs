@@ -77,18 +77,27 @@ pub(super) fn fd_poll(
     fd: c_int,
     desc: Option<DescId>,
 ) -> Option<(u32, (u64, u64))> {
-    let (kind, handle, status) = match desc {
+    let (kind, handle, status) = resolve_source(fd, desc)?;
+    Some(poll_description(state, kind, handle, status))
+}
+
+/// The kind, class handle and status flags of what a readiness source names:
+/// the retained description `desc` when given, else what the number `fd`
+/// names now. `None` for either naming nothing.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
+fn resolve_source(fd: c_int, desc: Option<DescId>) -> Option<(FdKind, u64, u32)> {
+    let table = super::fd_table().lock();
+    match desc {
         Some(desc) => {
-            let table = super::fd_table().lock();
             let description = table.description(desc)?;
-            (description.kind, description.handle, description.status)
+            Some((description.kind, description.handle, description.status))
         }
         None => {
-            let resolved = super::fd_table().lock().resolve(fd)?;
-            (resolved.kind, resolved.handle, resolved.status)
+            let resolved = table.resolve(fd)?;
+            Some((resolved.kind, resolved.handle, resolved.status))
         }
-    };
-    Some(poll_description(state, kind, handle, status))
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -244,6 +253,18 @@ fn pipe_poll(state: &ThreadRuntime, fd: c_int) -> (u32, (u64, u64)) {
     (mask, seqs)
 }
 
+/// One source a readiness fan-in park watches: direction `dir` on what guest
+/// number `fd` names, or, for an interest that retains the description it was
+/// registered against (epoll's `(fd, struct file)` key), on `desc` whatever
+/// the number names now, as [`fd_poll`] reads it.
+#[cfg(any(target_os = "linux", patina_posix_exports))]
+#[derive(Clone, Copy)]
+pub(super) struct Watched {
+    pub(super) dir: ReadyDir,
+    pub(super) fd: c_int,
+    pub(super) desc: Option<DescId>,
+}
+
 /// A readiness direction to watch on a virtual descriptor. Deliberately
 /// reactor-neutral (not an `EVFILT_*`/`EPOLL*` value): the OS-agnostic fan-in
 /// core below is shared by the kqueue (macOS) and epoll (Linux) frontends.
@@ -291,9 +312,14 @@ pub(super) enum WaiterLoc {
     /// Linux: parked on an inotify instance's readers.
     #[cfg(target_os = "linux")]
     InotifyRecv(u64),
-    /// macOS: parked on a kqueue's `EVFILT_USER` waiter list.
+    /// macOS: parked in `kevent` on a kqueue, woken by an `EVFILT_USER`
+    /// trigger or a registration change.
     #[cfg(all(target_os = "macos", patina_posix_exports))]
-    KqueueUser(u64),
+    KqueueWait(u64),
+    /// Linux: parked in `epoll_wait` on an epoll instance, woken by a
+    /// registration change.
+    #[cfg(target_os = "linux")]
+    EpollWait(u64),
     /// macOS: parked on a libdispatch semaphore, which the waiter decremented
     /// on entry. Unlinking it (only an expiry does) restores that count.
     #[cfg(target_os = "macos")]
@@ -325,62 +351,70 @@ impl WaiterLoc {
 /// equally neutral. A number that names nothing waitable (closed, or a
 /// kind that is always ready) registers no waiter: its readiness is
 /// already decided.
+///
+/// A waiter queue only hears other tasks' calls. A socket's next in-flight
+/// segment becomes readable when virtual time reaches its delivery, with no
+/// call to wake anyone, so the registration also carries the earliest such
+/// delivery among the watched sockets, and the park ends there
+/// ([`ReadinessWait::bounded`]).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(super) fn register_readiness_waiters(
     state: &mut ThreadRuntime,
     me: TaskId,
-    watched: &[(ReadyDir, c_int)],
-) -> Wait {
+    watched: &[Watched],
+) -> ReadinessWait {
     let mut wait = Wait::new(BlockClass::Readiness, Vec::new());
-    for &(dir, guest_fd) in watched {
-        let Some(resolved) = super::fd_table().lock().resolve(guest_fd) else {
+    let mut next_arrival: Option<u64> = None;
+    for &Watched {
+        dir,
+        fd: guest_fd,
+        desc,
+    } in watched
+    {
+        let Some((kind, handle, _)) = resolve_source(guest_fd, desc) else {
             continue;
         };
-        let fd = resolved.handle as c_int;
+        let fd = handle as c_int;
         // Eventfd (Linux): only the readable direction has a queue; a write
         // watch needs no waiter because an eventfd is always writable.
         #[cfg(target_os = "linux")]
-        if resolved.kind == FdKind::SignalFd {
+        if kind == FdKind::SignalFd {
             if dir == ReadyDir::Read
-                && let Some(fd) = state.signals.signalfds.get_mut(&resolved.handle)
+                && let Some(fd) = state.signals.signalfds.get_mut(&handle)
             {
-                wait.enqueue(
-                    &mut fd.waiters,
-                    me,
-                    WaiterLoc::SignalFdRecv(resolved.handle),
-                );
+                wait.enqueue(&mut fd.waiters, me, WaiterLoc::SignalFdRecv(handle));
             }
             continue;
         }
         #[cfg(target_os = "linux")]
-        if resolved.kind == FdKind::MessageQueue {
-            ipc::mq_watch(state, resolved.handle, me, dir == ReadyDir::Read, &mut wait);
+        if kind == FdKind::MessageQueue {
+            ipc::mq_watch(state, handle, me, dir == ReadyDir::Read, &mut wait);
             continue;
         }
         #[cfg(target_os = "linux")]
-        if resolved.kind == FdKind::TimerFd {
+        if kind == FdKind::TimerFd {
             if dir == ReadyDir::Read {
-                timers::timerfd_watch(state, resolved.handle, me, &mut wait);
+                timers::timerfd_watch(state, handle, me, &mut wait);
             }
             continue;
         }
         #[cfg(target_os = "linux")]
-        if resolved.kind == FdKind::Inotify {
+        if kind == FdKind::Inotify {
             if dir == ReadyDir::Read {
-                inotify::watch(state, resolved.handle, me, &mut wait);
+                inotify::watch(state, handle, me, &mut wait);
             }
             continue;
         }
         #[cfg(target_os = "linux")]
         // One queue per side: a pair wakes its writers too (an
         // edge-triggered interest in output waits for that).
-        if let Some(side) = pty::Side::of(resolved.kind) {
-            pty::watch(state, side, resolved.handle as u32, me, &mut wait);
+        if let Some(side) = pty::Side::of(kind) {
+            pty::watch(state, side, handle as u32, me, &mut wait);
             continue;
         }
         #[cfg(target_os = "linux")]
-        if resolved.kind == FdKind::EventFd {
+        if kind == FdKind::EventFd {
             if dir == ReadyDir::Read
                 && let Some(efd) = state.net.eventfds.get_mut(&fd)
             {
@@ -388,7 +422,7 @@ pub(super) fn register_readiness_waiters(
             }
             continue;
         }
-        if resolved.kind == FdKind::Pipe {
+        if kind == FdKind::Pipe {
             let Some(end) = state.net.pipe_ends.get(&fd) else {
                 continue;
             };
@@ -408,7 +442,16 @@ pub(super) fn register_readiness_waiters(
                     }
                 }
             }
-        } else if resolved.kind == FdKind::Socket {
+        } else if kind == FdKind::Socket {
+            if dir == ReadyDir::Read {
+                let arrival = net::socket_next_arrival(state, fd).unwrap_or_else(|errno| {
+                    fatal(&format!(
+                        "a readiness park could not read when socket {guest_fd}'s next \
+                         delivery arrives (errno {errno}); failing closed"
+                    ))
+                });
+                next_arrival = earliest(next_arrival, arrival);
+            }
             let Some(socket) = state.net.sockets.table.get_mut(&fd) else {
                 continue;
             };
@@ -422,7 +465,38 @@ pub(super) fn register_readiness_waiters(
             }
         }
     }
-    wait
+    ReadinessWait { wait, next_arrival }
+}
+
+/// A readiness fan-in registration ([`register_readiness_waiters`]): the
+/// waiter queues it joined and the earliest delivery in flight to a watched
+/// socket.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
+pub(super) struct ReadinessWait {
+    wait: Wait,
+    next_arrival: Option<u64>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
+impl ReadinessWait {
+    /// The wait to park on and the deadline it parks until: the caller's own
+    /// `deadline` (its timeout, a reactor timer) or the next delivery to a
+    /// watched socket, whichever comes first. A park that ends at a delivery
+    /// is no timeout; the caller rescans and finds the socket ready.
+    pub(super) fn bounded(self, deadline: Option<u64>) -> (Wait, Option<u64>) {
+        (self.wait, earliest(deadline, self.next_arrival))
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "linux", patina_posix_exports))]
+fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Unlink `me` from every queue [`register_readiness_waiters`] enqueued it on,
@@ -527,7 +601,9 @@ pub(super) fn unregister_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[
             #[cfg(target_os = "linux")]
             WaiterLoc::InotifyRecv(handle) => inotify::unwatch(state, handle, me),
             #[cfg(all(target_os = "macos", patina_posix_exports))]
-            WaiterLoc::KqueueUser(id) => kqueue::unwait_user(state, id, me),
+            WaiterLoc::KqueueWait(id) => kqueue::unwait(state, id, me),
+            #[cfg(target_os = "linux")]
+            WaiterLoc::EpollWait(id) => epoll::unwait(state, id, me),
             #[cfg(target_os = "macos")]
             WaiterLoc::Dispatch(key) => {
                 if let Some(sem) = state.dispatch.get_mut(&key)
@@ -550,9 +626,10 @@ pub(super) fn unregister_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[
 // semantics) over every pollable descriptor kind; `epoll_wait` gathers
 // ready events — parking on the scheduler baton with multi-fd fan-in when
 // nothing is ready, bounded by the millisecond timeout on the virtual
-// clock. mio's `Waker` analogue needs no epoll-specific wake path: it is an
-// ordinary watched eventfd whose write drains the shared read-waiter
-// queue.
+// clock and the next delivery in flight to a watched socket, and woken by a
+// registration change as well as by its sources. mio's `Waker` analogue
+// needs no epoll-specific wake path: it is an ordinary watched eventfd
+// whose write drains the shared read-waiter queue.
 //
 // Delivery follows fs/eventpoll.c: a ready list (`ep->rdllist`) that an
 // interest joins at the tail when its source wakes it, from which

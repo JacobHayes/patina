@@ -583,6 +583,6 @@ pub(super) use listener::{accept, close, listen, listening, name, shutdown};
 use listener::{drop_stream, reset};
 #[cfg(target_os = "linux")]
 pub(super) use readiness::at_mark;
-pub(super) use readiness::{pending, poll};
+pub(super) use readiness::{next_arrival, pending, poll};
 pub(super) use recv::recv;
 pub(super) use send::send;

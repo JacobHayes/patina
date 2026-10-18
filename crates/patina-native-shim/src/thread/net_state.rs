@@ -90,10 +90,19 @@ fn parse_addr(addr: &str) -> Option<(u32, u16)> {
     Some((u32::from(ip), port))
 }
 
+/// Wake the tasks drained from one or more wait queues, each once: a task
+/// parked on a readiness fan-in is queued on every source it watches (both
+/// directions of a socket, a reactor's own list), so one event can drain it
+/// from several. Waking ends its wait, unlinking it from every other queue
+/// it is on, so a later drain in the same turn cannot name it again.
 pub(crate) fn wake_all(waiters: Vec<TaskId>) {
     let mut scheduler = RealScheduler;
+    let mut woken = Vec::with_capacity(waiters.len());
     for task in waiters {
-        #[cfg(target_os = "linux")]
+        if woken.contains(&task) {
+            continue;
+        }
+        woken.push(task);
         lock_state().remove_wait(task);
         if let Err(message) = scheduler.wake(task) {
             fatal(&message);

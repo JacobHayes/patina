@@ -91,6 +91,18 @@ pub(in crate::thread::net) fn poll(
     }
 }
 
+/// When SimNet next delivers to this socket: a stream's next in-flight
+/// segment, a datagram socket's next packet. A listener has none, as a
+/// connection is established at once.
+pub(in crate::thread::net) fn next_arrival(inet: &Inet) -> Result<Option<u64>, c_int> {
+    let sid = match (&inet.state, inet.udp) {
+        (State::Established { socket, .. }, _) => *socket,
+        (State::Closed, Some(udp)) => udp,
+        _ => return Ok(None),
+    };
+    with_context_raw(|context| context.net_next_arrival(sid))
+}
+
 /// `SIOCINQ`: the next datagram's length, or a stream's queued bytes.
 /// `SIOCATMARK` (`tcp_ioctl`): whether the urgent byte has arrived and the
 /// next byte a receive would take is it; never for a socket not connected.

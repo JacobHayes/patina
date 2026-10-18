@@ -8,9 +8,9 @@ use crate::abi::{SysResult, failed};
 use patina_dst_abi::ClockKind;
 
 use super::{
-    DescId, EPERM, FdKind, O_READ, O_WRITE, ReadyDir, Step, ThreadRuntime, current_task, fatal,
-    lock_state, register_readiness_waiters, sched_point, switch_and_park, unregister_waiters,
-    with_context_raw,
+    DescId, EPERM, FdKind, O_READ, O_WRITE, ReadyDir, Step, TaskId, ThreadRuntime, WaitQueue,
+    WaiterLoc, Watched, current_task, fatal, lock_state, register_readiness_waiters, sched_point,
+    switch_and_park, unregister_waiters, wake_all, with_context_raw,
 };
 
 // <sys/epoll.h> control ops and event bits (the reactor is Linux-only).
@@ -147,12 +147,13 @@ struct Interest {
     observed: u32,
 }
 
-/// A virtual epoll instance: its per-fd interest table and its ready
-/// list (`ep->rdllist`).
+/// A virtual epoll instance: its per-fd interest table, its ready list
+/// (`ep->rdllist`), and the tasks parked in `epoll_wait` on it (`ep->wq`).
 #[derive(Default)]
 struct Epoll {
     interests: BTreeMap<c_int, Interest>,
     ready: VecDeque<c_int>,
+    waiters: WaitQueue<VecDeque<TaskId>>,
 }
 
 impl Epoll {
@@ -291,6 +292,16 @@ pub(crate) fn epoll_target(handle: u64, tfd: c_int, toff: u32) -> Option<DescId>
     Some(interest.desc)
 }
 
+/// Unlink `me` from an epoll instance's waiters (the
+/// `WaiterLoc::EpollWait` registration).
+pub(in crate::thread) fn unwait(state: &mut ThreadRuntime, id: u64, me: TaskId) {
+    if let Some(slot) = state.net.epolls.get_mut(&id)
+        && let Some(index) = slot.ep.waiters.iter().position(|task| *task == me)
+    {
+        slot.ep.waiters.remove(index);
+    }
+}
+
 /// Drop every interest registered against a description whose last
 /// reference went: the kernel's `eventpoll_release` on the file's final
 /// `fput`.
@@ -373,7 +384,10 @@ pub(crate) fn create1(flags: c_int) -> SysResult<c_int> {
 /// `EEXIST` for a registered fd, DEL and MOD `ENOENT` for an
 /// unregistered one, MOD `EINVAL` for an exclusive interest, and an
 /// unknown op `EINVAL`. A registered interest that is ready joins the
-/// ready list.
+/// ready list. An ADD or MOD wakes the tasks parked in `epoll_wait` on the
+/// instance, which rescan: the item may be ready now (`ep_insert` and
+/// `ep_modify` wake `ep->wq`), and a park watches the sources registered
+/// when it began, so one registered since must be watched from then on.
 ///
 /// # Safety
 /// `event` is the guest's `struct epoll_event` for every op but DEL;
@@ -484,6 +498,9 @@ pub(crate) unsafe fn ctl_core(
     }
     // `ep_insert`/`ep_modify` poll the item once and queue it if ready.
     ep.observe(fd, mask, seqs);
+    let parked: Vec<TaskId> = ep.waiters.drain().collect();
+    drop(state);
+    wake_all(parked);
     Ok(0)
 }
 
@@ -519,16 +536,23 @@ fn scan(state: &mut ThreadRuntime, id: u64) -> BTreeMap<c_int, u32> {
 /// shared fan-in park: every armed interest watches the read side
 /// (where hang-ups and errors arrive too), and the write side when it
 /// asks for it. A wake simply rescans.
-fn watched_sources(state: &ThreadRuntime, id: u64) -> Vec<(ReadyDir, c_int)> {
+fn watched_sources(state: &ThreadRuntime, id: u64) -> Vec<Watched> {
     let ep = &state.net.epolls.get(&id).expect("epoll exists").ep;
     let mut watched = Vec::new();
     for (&fd, interest) in &ep.interests {
         if interest.events & !PRIVATE_BITS == 0 {
             continue;
         }
-        watched.push((ReadyDir::Read, fd));
+        // The interest watches the description it was registered against,
+        // which outlives the number while a `dup` of it is open.
+        let source = |dir| Watched {
+            dir,
+            fd,
+            desc: Some(interest.desc),
+        };
+        watched.push(source(ReadyDir::Read));
         if interest.events & WRITE_BITS != 0 {
-            watched.push((ReadyDir::Write, fd));
+            watched.push(source(ReadyDir::Write));
         }
     }
     watched
@@ -627,21 +651,24 @@ pub(crate) unsafe fn wait_core(
                 return Ok(0);
             }
         }
-        // Nothing ready: park with multi-fd fan-in on the shared core.
+        // Nothing ready: park with multi-fd fan-in on the shared core,
+        // until the timeout or the next delivery to a watched socket.
         let watched = watched_sources(&state, id);
-        let wait = register_readiness_waiters(&mut state, me, &watched);
+        let (mut wait, park_deadline) =
+            register_readiness_waiters(&mut state, me, &watched).bounded(timeout_deadline);
+        let ep = &mut state.net.epolls.get_mut(&id).expect("epoll exists").ep;
+        wait.enqueue(&mut ep.waiters, me, WaiterLoc::EpollWait(id));
         let locs = wait.locs.clone();
-        let step = if timeout_ms > 0 {
-            let deadline = timeout_deadline.expect("timeout deadline fixed above");
-            state.block_timed(me, "epoll-wait", wait, ClockKind::Monotonic, deadline)
-        } else {
-            state.block(me, "epoll-wait", wait)
+        let step = match park_deadline {
+            Some(deadline) => {
+                state.block_timed(me, "epoll-wait", wait, ClockKind::Monotonic, deadline)
+            }
+            None => state.block(me, "epoll-wait", wait),
         };
         match step {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
             Err(error) => {
-                let mut state = lock_state();
                 unregister_waiters(&mut state, me, &locs);
                 return Err(failed(c_int::from(error.into_posix())));
             }

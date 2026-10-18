@@ -96,7 +96,7 @@ pub use pipe::*;
 #[cfg(all(target_os = "macos", patina_posix_exports))]
 use reactor::PatinaKevent;
 #[cfg(any(target_os = "linux", patina_posix_exports))]
-use reactor::{ReadyDir, fd_poll, register_readiness_waiters};
+use reactor::{ReadyDir, Watched, fd_poll, register_readiness_waiters};
 use reactor::{WaiterLoc, unregister_waiters};
 pub use sync::*;
 

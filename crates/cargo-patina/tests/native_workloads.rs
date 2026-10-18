@@ -1125,6 +1125,70 @@ fn tokio_signal_parking_lot_rustix_use_product_backend() {
     );
 }
 
+fn tokio_tcp_elapsed_us(out: &[u8]) -> u64 {
+    let fields = assert_fields(out, "NATIVE_TOKIO_TCP_RESULT ", &["reply", "elapsed_us"]);
+    assert_eq!(fields["reply"], "pong", "{}", text(out));
+    fields["elapsed_us"].parse().unwrap()
+}
+
+/// A segment in flight to a socket the tokio reactor waits on arrives when
+/// virtual time reaches its delivery: the park in `epoll_wait` (`kevent` on
+/// macOS) ends there, not at the reactor's next timer (the 1 s timeout the
+/// guest arms around the exchange). Class pairing: every readiness park
+/// (epoll, kqueue, poll, select) takes its deadline from the one fan-in
+/// registration, `register_readiness_waiters`, which carries the earliest
+/// in-flight delivery among the watched sockets.
+#[test]
+fn a_delayed_tcp_segment_wakes_a_parked_tokio_reactor() {
+    let g = Guest::assert_build("tokio-tcp");
+    g.assert_audit_clean();
+    let latency = [
+        "--env",
+        "TOKIO_TCP_MODE=current",
+        "--net-latency-nanos",
+        "2000000",
+    ];
+    let out = g.assert_seeded_record_replay_identity(1, &latency);
+    // Two 2 ms hops, plus the calls charged around them.
+    let elapsed = tokio_tcp_elapsed_us(&out);
+    assert!((4_000..4_100).contains(&elapsed), "{}", text(&out));
+}
+
+/// On a two-worker runtime the I/O driver parks in the reactor on one worker
+/// while the other accepts, registers and drives the sockets. A registration
+/// wakes the parked reactor to rescan (otherwise the accepted socket's queued
+/// bytes are never seen and, with no timer armed, the run is a deadlock), and
+/// an event that drains one waiter from several of its queues wakes it once
+/// (otherwise the second wake is an invalid scheduler transition). Class
+/// pairing: the scheduler refuses both failures loudly (`deadlock`,
+/// `invalid_state`), on every seed explored.
+#[test]
+fn a_multi_thread_tokio_runtime_drives_tcp_on_every_seed() {
+    let g = Guest::assert_build("tokio-tcp");
+    let multi = ["--env", "TOKIO_TCP_MODE=multi"];
+    for seed in 1..=8 {
+        tokio_tcp_elapsed_us(&g.assert_run_success(seed, &multi).stdout);
+    }
+    g.assert_seeded_record_replay_identity(2, &multi);
+}
+
+/// A reactor wait nothing can end (a server reading a connection its client
+/// never writes to, with no timer armed) is the scheduler's deadlock, naming
+/// the wait.
+#[test]
+fn a_tokio_reactor_wait_nothing_can_end_is_a_deadlock() {
+    let g = Guest::assert_build("tokio-tcp");
+    let wait = if cfg!(target_os = "macos") {
+        "kevent"
+    } else {
+        "epoll-wait"
+    };
+    assert_refused(
+        g.command("run", &["--seed", "1", "--env", "TOKIO_TCP_MODE=stall"]),
+        &["deadlock", wait],
+    );
+}
+
 #[cfg(target_os = "macos")]
 mod darwin {
     use super::*;
