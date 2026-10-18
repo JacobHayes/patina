@@ -172,6 +172,13 @@ pub struct CampaignSpec {
     /// The `--allow-unsupported-symbols` policy (`all` or a symbol list) every
     /// generation runs under.
     pub allow_unsupported_symbols: Option<String>,
+    /// The address layout every generation runs, and every reproduce command
+    /// replays, with. `Randomized` (`--allow-randomized-address-layout`) keeps
+    /// the host's randomization and qualifies each generation's determinism.
+    /// Invocation shape like [`Self::harness`]. A native campaign's state
+    /// always records it; `None` before the campaign starts means fixed, and a
+    /// native state without it predates layout control and cannot continue.
+    pub address_layout: Option<patina_dst_trace::AddressLayout>,
     /// Generic liveness-watchdog budget (virtual nanoseconds), applied every
     /// generation when set.
     pub watchdog_nanos: Option<u64>,
@@ -226,6 +233,7 @@ impl Default for CampaignSpec {
             harness: false,
             allow_symbols: Vec::new(),
             allow_unsupported_symbols: None,
+            address_layout: None,
             watchdog_nanos: None,
             compute_watchdog_ms: None,
             converge_nanos: None,
@@ -320,6 +328,7 @@ impl CampaignSpec {
                         .collect::<Result<_, CliError>>()?;
                 }
                 "harness" => self.harness = json_bool(key, val)?,
+                "address_layout" => self.address_layout = Some(json_address_layout(key, val)?),
                 "allow_symbols" => {
                     let array = val
                         .as_array()
@@ -377,7 +386,8 @@ impl CampaignSpec {
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
                          timeout_secs, guest_args, buggify, swarm, pct, faults, custom_op_faults, \
                          fault_scale_permille, starve, starve_scale_permille, dns_entries, \
-                         harness, allow_symbols, allow_unsupported_symbols, watchdog_nanos, \
+                         harness, allow_symbols, allow_unsupported_symbols, address_layout, \
+                         watchdog_nanos, \
                          compute_watchdog_ms, converge_nanos, heal_after_nanos, report, plateau_after, guided, \
                          allow_unmet_sometimes, verify, or classify"
                     )));
@@ -392,6 +402,19 @@ fn json_u64(key: &str, value: &serde_json::Value) -> Result<u64, CliError> {
     value
         .as_u64()
         .ok_or_else(|| CliError(format!("campaign spec {key:?} must be an unsigned integer")))
+}
+
+fn json_address_layout(
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<patina_dst_trace::AddressLayout, CliError> {
+    match value.as_str() {
+        Some("fixed") => Ok(patina_dst_trace::AddressLayout::Fixed),
+        Some("randomized") => Ok(patina_dst_trace::AddressLayout::Randomized),
+        _ => Err(CliError(format!(
+            "campaign spec {key:?} must be \"fixed\" or \"randomized\""
+        ))),
+    }
 }
 
 fn json_bool(key: &str, value: &serde_json::Value) -> Result<bool, CliError> {
@@ -676,6 +699,7 @@ mod tests {
             harness: true,
             allow_symbols: vec!["dlsym".into()],
             allow_unsupported_symbols: Some("semaphore_wait,semaphore_signal".into()),
+            address_layout: Some(patina_dst_trace::AddressLayout::Randomized),
             ..CampaignSpec::default()
         };
         let json = spec_to_json(&spec);
@@ -683,7 +707,12 @@ mod tests {
         // A campaign that forwards none of it records no key at all, so an out-dir
         // written before the keys existed still resumes.
         let bare = spec_to_json(&CampaignSpec::default());
-        for key in ["harness", "allow_symbols", "allow_unsupported_symbols"] {
+        for key in [
+            "harness",
+            "allow_symbols",
+            "allow_unsupported_symbols",
+            "address_layout",
+        ] {
             assert!(bare.get(key).is_none(), "a bare spec must not record {key}");
         }
         // A spec file bypasses the CLI value grammar, so it is validated here.

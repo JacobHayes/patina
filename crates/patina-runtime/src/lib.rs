@@ -248,6 +248,14 @@ pub const ENV_DEFER_INIT: &str = "PATINA_DEFER_INIT";
 /// Unreserved direct launches may only start with an empty guest map.
 pub const ENV_INITIAL_STACK: &str = "PATINA_INITIAL_STACK";
 
+/// Native supervisor address-layout marker. `fixed`: the guest was exec'd
+/// with address-space randomization off (Linux `ADDR_NO_RANDOMIZE`, Darwin
+/// `_POSIX_SPAWN_DISABLE_ASLR`); the shim verifies at startup that the host
+/// honored it and stops the run by name if it did not. `randomized`: the
+/// operator passed `--allow-randomized-address-layout`, and the run records
+/// that its addresses are the host's. Any other value stops the run.
+pub const ENV_ADDRESS_LAYOUT: &str = "PATINA_ADDRESS_LAYOUT";
+
 /// Extra pointer-sized environment slots the native supervisor reserves for
 /// the platform startup trailer. The shim fails closed if the trailer does not
 /// fit; this is reservation policy, not a claim about a platform's auxv size.

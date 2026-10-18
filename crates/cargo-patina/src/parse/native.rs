@@ -59,6 +59,7 @@ pub(crate) fn parse_native_harness_from(
             compute_watchdog_ms: args.string("--compute-watchdog-ms"),
             ..liveness_of(&args)
         },
+        allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
     })
 }
 
@@ -258,6 +259,7 @@ pub(crate) fn parse_native_run_from(
         coverage_out: args.path("--coverage-out"),
         mount: args.path("--mount"),
         harness: args.flag("--harness"),
+        allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
     })
 }
 
@@ -320,6 +322,7 @@ pub(crate) fn parse_native_replay(
         coverage_out: args.path("--coverage-out"),
         mount: args.path("--mount"),
         harness: args.flag("--harness"),
+        allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
     })
 }
 

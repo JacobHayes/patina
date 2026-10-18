@@ -115,6 +115,12 @@ pub const DEFAULT_REALTIME_EPOCH_NANOS: u64 = 1_784_761_209_000_000_000;
 /// behind a zero or whole-second origin. CPU clocks do not use this origin.
 pub const DEFAULT_BOOT_ORIGIN_NANOS: u64 = 12_345_678_901_234;
 
+/// The modeled machine's soft `RLIMIT_STACK`, `_STK_LIM`: 8 MiB. The virtual
+/// limit table answers it, and the native supervisor pins the host's soft limit
+/// to it for the guest, since Linux sizes the gap below the stack, and glibc a
+/// default thread stack, from the real one.
+pub const STACK_SOFT_LIMIT: u64 = 8 << 20;
+
 /// The modeled CPU time, in nanoseconds, a Linux process has already used when
 /// `main` starts. A real process reaches `main` only after `exec`, the dynamic
 /// loader and libc's own setup have run on its CPU clock; the model runs none

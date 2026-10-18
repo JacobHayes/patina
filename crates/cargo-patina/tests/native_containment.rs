@@ -1,6 +1,8 @@
 //! Patina-only containment, with planted failures beside the positive controls.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 mod common;
+#[path = "native_containment/layout.rs"]
+mod layout;
 use common::native::*;
 
 #[test]

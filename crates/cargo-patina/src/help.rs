@@ -46,7 +46,7 @@ use flags::REPLAY_TIMELINE_FLAGS;
 use flags::SOURCE_SELECT;
 use flags::TARGET_FLAG;
 use flags::WASI_HOST_FLAGS;
-use flags::{ALLOW_FLAG, ALLOW_UNSUPPORTED_FLAG, HARNESS_FLAG};
+use flags::{ALLOW_FLAG, ALLOW_RANDOMIZED_LAYOUT_FLAG, ALLOW_UNSUPPORTED_FLAG, HARNESS_FLAG};
 pub use human::render;
 pub use human::usage_synopsis;
 use workflows::CAMPAIGN;

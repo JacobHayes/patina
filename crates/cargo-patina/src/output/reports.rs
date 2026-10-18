@@ -78,6 +78,19 @@ pub struct RunReport<'a> {
     /// patina's own instead (a replay that diverged after the guest finished).
     /// `guest_exit` reports it; `None` means the exit code is the guest's.
     pub guest_exit_code: Option<i32>,
+    /// What the operator relaxed for this run, each one a reason its
+    /// determinism is not guaranteed. Empty for an unqualified run.
+    pub qualifications: Vec<Qualification>,
+}
+
+/// One operator-accepted relaxation that qualifies a run's determinism.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Qualification {
+    /// Machine-readable name: `randomized_address_layout`,
+    /// `unsupported_symbols`.
+    pub kind: &'static str,
+    /// What was relaxed, for a reader.
+    pub detail: String,
 }
 
 /// Finalize a run/replay after the guest returns: echo captured output for the
@@ -164,6 +177,7 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
             .or_else(|| depth_report_line(&stdout_text, &stderr_text));
         env.crash_restart = report.crash_restart.clone();
         env.native_run_marker = report.native_run_marker.clone();
+        env.qualifications = report.qualifications.clone();
         env.verdicts = extract_verdicts(&stdout_text, &stderr_text);
         // Runtime-owned structured facts, lifted verbatim out of the run's own
         // `patina.runfacts/v1` document. The `PATINA_*_REPORT` lines still print

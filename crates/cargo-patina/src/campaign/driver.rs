@@ -84,9 +84,20 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             // built artifact across every generation — never rebuilt per generation.
             let resolved = crate::resolve_artifact(crate::ArtifactRef::Prebuilt(artifact))?;
             let identity = artifact_identity(&resolved.path)?;
+            let mut spec = spec;
+            // A native campaign records its layout policy from the start, fixed
+            // unless the operator asked otherwise, so a continuation can tell.
+            if identity.family == "native" {
+                spec.address_layout
+                    .get_or_insert(patina_dst_trace::AddressLayout::Fixed);
+            }
             CampaignState::fresh(identity, spec)
         }
-        CampaignMode::Resume | CampaignMode::Extend { .. } => load_campaign_state(&state_path)?,
+        CampaignMode::Resume | CampaignMode::Extend { .. } => {
+            let state = load_campaign_state(&state_path)?;
+            refuse_a_campaign_without_a_layout(&state)?;
+            state
+        }
     };
 
     let mut coverage = match mode {
@@ -558,4 +569,20 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
         flush_stdout();
     }
     Ok(exit_code)
+}
+
+/// Refuse to continue a native campaign whose state records no address
+/// layout. It predates Patina's control of the layout: its generations ran with
+/// the host's randomization, and continuing it under either policy would mix
+/// layouts in one campaign, so it is refused by name instead.
+pub(super) fn refuse_a_campaign_without_a_layout(state: &CampaignState) -> Result<(), CliError> {
+    if state.artifact.family == "native" && state.spec.address_layout.is_none() {
+        return Err(CliError::usage(
+            "this campaign's state records no address layout: it predates Patina's control of \
+             the native guest's layout, and its generations ran with the host's address-space \
+             randomization on, so continuing it would mix layouts in one campaign. Start a new \
+             campaign in a new --out-dir.",
+        ));
+    }
+    Ok(())
 }

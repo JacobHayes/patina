@@ -1,6 +1,8 @@
 // A guest that can read a source patina does not control: the host-randomized
-// (ASLR) address of its own stack. Nothing it calls is unsupported, so the audit
-// passes it; whatever it derives from that address differs from run to run.
+// (ASLR) address of its own stack, under `--allow-randomized-address-layout`
+// (patina fixes the layout otherwise). Nothing it calls is unsupported, so the
+// audit passes it; whatever it derives from that address differs from run to
+// run.
 //
 // The `leak-*` modes let that address decide what the run does; the `det-*`
 // modes are the same shapes with the address left out, the deterministic

@@ -122,6 +122,9 @@ mod identity;
 mod darwin_identity;
 // `localtime_r`'s time zone: glibc's TZ rules over the virtual machine. See
 // `localtime.rs`.
+// The address layout the supervisor promised, checked at startup. See
+// `layout.rs`.
+mod layout;
 #[cfg(target_os = "linux")]
 mod limits;
 mod localtime;

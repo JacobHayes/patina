@@ -337,6 +337,9 @@ struct NativeHarnessInvocation {
     buggify: Option<NativeBuggify>,
     schedule: NativeSchedule,
     liveness: NativeLiveness,
+    /// `--allow-randomized-address-layout`, re-emitted onto each seed's child
+    /// `run` and onto the replay repro.
+    allow_randomized_layout: bool,
 }
 
 /// Cargo feature selection for a native libtest harness build.
@@ -549,6 +552,11 @@ struct NativeRunInvocation {
     /// a harness binary (replay must defer too, or the constructor would install a
     /// context the harness could not own).
     harness: bool,
+    /// `--allow-randomized-address-layout`: launch the guest with the host's
+    /// address-space randomization and inherited stack limit instead of the
+    /// fixed layout, qualifying the run's determinism. Recorded into the trace;
+    /// a replay must pass it exactly when the recording did.
+    allow_randomized_layout: bool,
 }
 
 /// Every fault knob an invocation set, keyed by [`FaultKnob`] and stored as the
@@ -938,6 +946,7 @@ integrates the Patina runtime, or record under the native runtime: cargo patina 
             facts,
             native_run_marker: None,
             guest_exit_code: None,
+            qualifications: Vec::new(),
         },
         captured,
     )

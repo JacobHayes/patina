@@ -9,6 +9,7 @@ use crate::{FINGERPRINT_BUGGIFY, RuntimeError, TornGranularity};
 use patina_dst_abi::ClockKind;
 use patina_dst_driver_api::ClockDriver;
 use patina_dst_sched_det::{PctConfig, SchedulePolicy, StarvationConfig};
+use patina_dst_trace::AddressLayout;
 use std::collections::BTreeMap;
 
 fn torn_granularity_to_record(granularity: TornGranularity) -> patina_dst_trace::TornGranularity {
@@ -512,6 +513,51 @@ pub(super) fn reconcile_replay_tsc(
         ));
     }
     Ok(())
+}
+
+/// Reconcile the trace's address layout against this replay run's, and REFUSE
+/// a mismatch up front. An absent layout, on either side, means no supervisor
+/// laid the guest out, so it ran with the host's randomization: a trace with
+/// none was recorded before Patina controlled the layout (or standalone), and
+/// a replay with none is a standalone launch (or another family, whose traces
+/// record none either). Only a fixed replay matches a fixed recording;
+/// everything else that runs randomized matches a recording that did too.
+pub(super) fn reconcile_replay_address_layout(
+    config: &RuntimeConfig,
+    recorded: Option<AddressLayout>,
+) -> Result<(), RuntimeError> {
+    match (recorded, config.address_layout) {
+        (Some(AddressLayout::Fixed), Some(AddressLayout::Fixed))
+        | (Some(AddressLayout::Randomized) | None, Some(AddressLayout::Randomized) | None) => {
+            Ok(())
+        }
+        (Some(AddressLayout::Fixed), None) => Err(RuntimeError::Config(
+            "this trace was recorded with a fixed address layout, but this replay was launched \
+             without the supervisor, so the host randomized the guest's addresses. Replay it \
+             through `cargo patina replay`."
+                .into(),
+        )),
+        (Some(AddressLayout::Randomized), Some(AddressLayout::Fixed)) => Err(RuntimeError::Config(
+            "this trace was recorded with --allow-randomized-address-layout: the guest ran with \
+             the host's address-space randomization on, so its addresses were not a function of \
+             the seed. Replay it with --allow-randomized-address-layout to accept the same \
+             qualified determinism."
+                .into(),
+        )),
+        (None, Some(AddressLayout::Fixed)) => Err(RuntimeError::Config(
+            "this trace records no address layout: it was recorded before Patina controlled the \
+             native guest's layout (or by a binary launched without the supervisor), so the guest \
+             ran with the host's address-space randomization on and its addresses were not a \
+             function of the seed. Replay it with --allow-randomized-address-layout to accept \
+             that qualified determinism, or record it again."
+                .into(),
+        )),
+        (Some(AddressLayout::Fixed), Some(AddressLayout::Randomized)) => Err(RuntimeError::Config(
+            "this replay runs with --allow-randomized-address-layout, but the trace was recorded \
+             with a fixed address layout. Replay it without the flag."
+                .into(),
+        )),
+    }
 }
 
 /// Reconcile a recorded trace's authoritative DNS host table with any table the

@@ -12,8 +12,15 @@
 //! Enforced: `RLIMIT_NOFILE` (the descriptor table's `EMFILE` bound and the
 //! `poll` size bound), `RLIMIT_MEMLOCK` (page-lock accounting, `src/mem/`) and
 //! `RLIMIT_MSGQUEUE` (POSIX message-queue accounting, `src/thread/ipc.rs`).
+//! `RLIMIT_STACK` is also the host's: the supervisor execs the guest with the
+//! host soft limit at this table's starting value, and every accepted change
+//! to the soft limit is applied to the host too, because the host kernel
+//! grows the main stack against its own soft limit at fault time. The address
+//! layout was fixed at exec and a later change does not move it. A soft limit
+//! above the host's hard limit cannot be applied and stops the run by name,
+//! as a host limit (`PATINA_INFRA host_limit`), never as the guest's abort.
 //! The rest are kept and reported: nothing in the virtual process consumes
-//! CPU time, stack, core dumps or processes against them yet.
+//! CPU time, core dumps or processes against them yet.
 
 use crate::SpinMutex;
 use crate::identity::Process;
@@ -34,8 +41,6 @@ pub(crate) const RLIMIT_RTPRIO: u32 = 14;
 const RLIM_NLIMITS: usize = 16;
 const RLIM_INFINITY: u64 = u64::MAX;
 
-/// `_STK_LIM`: the soft stack limit, 8 MiB.
-const STACK_SOFT: u64 = 8 << 20;
 /// `INR_OPEN_CUR` is the descriptor table's starting bound
 /// (`fdtable::RLIMIT_NOFILE`); `INR_OPEN_MAX` the hard limit.
 const NOFILE_HARD: u64 = 4096;
@@ -75,7 +80,7 @@ const fn limit(cur: u64, max: u64) -> Rlimit {
 /// `INIT_RLIMITS`, indexed by resource.
 const INITIAL: [Rlimit; RLIM_NLIMITS] = {
     let mut limits = [limit(RLIM_INFINITY, RLIM_INFINITY); RLIM_NLIMITS];
-    limits[RLIMIT_STACK as usize] = limit(STACK_SOFT, RLIM_INFINITY);
+    limits[RLIMIT_STACK as usize] = limit(patina_dst_abi::STACK_SOFT_LIMIT, RLIM_INFINITY);
     limits[RLIMIT_CORE as usize] = limit(0, RLIM_INFINITY);
     limits[RLIMIT_NPROC as usize] = limit(THREADS_HALF, THREADS_HALF);
     limits[RLIMIT_NOFILE as usize] = limit(crate::fdtable::RLIMIT_NOFILE as u64, NOFILE_HARD);
@@ -156,11 +161,17 @@ pub unsafe extern "C" fn patina_prlimit(
             "prlimit64 of another process: its limits are not modeled; failing closed",
         );
     }
-    let result = exchange(&mut LIMITS.lock(), resource, new);
-    let previous = match result {
+    let mut limits = LIMITS.lock();
+    let mut changed = *limits;
+    let previous = match exchange(&mut changed, resource, new) {
         Ok(previous) => previous,
         Err(errno) => return -i64::from(errno),
     };
+    if let (Some(new), RLIMIT_STACK) = (new, resource) {
+        apply_host_stack_limit(new.cur);
+    }
+    *limits = changed;
+    drop(limits);
     if let (Some(new), RLIMIT_NOFILE) = (new, resource) {
         crate::set_fd_limit(new.cur);
     }
@@ -169,6 +180,63 @@ pub unsafe extern "C" fn patina_prlimit(
         unsafe { old.write_unaligned(previous) };
     }
     0
+}
+
+/// Stop the run on a stack limit the host cannot apply. The guest's main
+/// stack would not grow to the limit it set, so continuing would fault where
+/// the virtual process says it may not; the failure is the host's, and says
+/// so.
+fn host_limit(reason: &str) -> ! {
+    crate::infra_fatal(
+        "host_limit",
+        &format!(
+            "setrlimit(RLIMIT_STACK): {reason}, so the guest's main stack would not grow to the \
+             limit it set; failing closed"
+        ),
+    )
+}
+
+/// Set the host's soft stack limit to `soft`, under the host's own hard
+/// limit, which stays as it is: the virtual table holds the guest's hard limit.
+fn apply_host_stack_limit(soft: u64) {
+    let prlimit64 = std::ffi::c_long::from(patina_dst_syscalls::Syscall::N_prlimit64.number());
+    let mut host = limit(0, 0);
+    // SAFETY: `prlimit64` of this process with a NULL new limit only writes
+    // the current one into `host`.
+    let read = unsafe {
+        crate::sud_host_syscall(
+            prlimit64,
+            0,
+            std::ffi::c_long::from(RLIMIT_STACK),
+            0,
+            (&raw mut host) as std::ffi::c_long,
+            0,
+            0,
+        )
+    };
+    if read != 0 {
+        host_limit("the host's stack limit could not be read");
+    }
+    if soft > host.max {
+        host_limit("the guest raised its soft stack limit above the host's hard stack limit");
+    }
+    let wanted = limit(soft, host.max);
+    // SAFETY: `wanted` is a valid `struct rlimit64` for the call's duration,
+    // within the hard limit, which needs no privilege.
+    let set = unsafe {
+        crate::sud_host_syscall(
+            prlimit64,
+            0,
+            std::ffi::c_long::from(RLIMIT_STACK),
+            (&raw const wanted) as std::ffi::c_long,
+            0,
+            0,
+            0,
+        )
+    };
+    if set != 0 {
+        host_limit("the host refused the guest's stack limit");
+    }
 }
 
 #[cfg(test)]

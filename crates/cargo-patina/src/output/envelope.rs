@@ -47,6 +47,8 @@ pub struct Envelope {
     pub(super) native_run_marker: Option<String>,
     /// Native crash-restart facts, if the supervisor performed a modeled restart.
     pub(super) crash_restart: Option<serde_json::Value>,
+    /// Operator-accepted relaxations that qualify the run's determinism.
+    pub(super) qualifications: Vec<Qualification>,
     /// Patina's own fail-closed refusal, when patina refused. Absent on a guest's
     /// own abort.
     pub(crate) refusal: Option<Refusal>,
@@ -85,6 +87,7 @@ impl Envelope {
             replay_divergence: None,
             native_run_marker: None,
             crash_restart: None,
+            qualifications: Vec::new(),
             refusal: None,
             guest_exit: None,
             stdout: None,
@@ -209,6 +212,19 @@ impl Envelope {
         }
         if let Some(v) = &self.crash_restart {
             m.insert("crash_restart".into(), v.clone());
+        }
+        if !self.qualifications.is_empty() {
+            let rows: Vec<Value> = self
+                .qualifications
+                .iter()
+                .map(|qualification| {
+                    let mut qm = Map::new();
+                    qm.insert("kind".into(), Value::from(qualification.kind));
+                    qm.insert("detail".into(), Value::from(qualification.detail.clone()));
+                    Value::Object(qm)
+                })
+                .collect();
+            m.insert("qualifications".into(), Value::Array(rows));
         }
         if let Some(v) = &self.refusal {
             let mut rm = Map::new();

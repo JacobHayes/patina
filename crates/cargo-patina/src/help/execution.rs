@@ -180,6 +180,7 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                 ),
                 ALLOW_FLAG,
                 ALLOW_UNSUPPORTED_FLAG,
+                ALLOW_RANDOMIZED_LAYOUT_FLAG,
             ],
         },
         Group {
@@ -395,6 +396,14 @@ child's readable-trace receipt.",
             title: "Native compute liveness (host-time terminal bound)",
             families: &[Family::Harness],
             flags: &[COMPUTE_WATCHDOG_FLAG],
+        },
+        Group {
+            title: "Native address layout (native harness mode)",
+            families: &[Family::Harness],
+            flags: &[Flag {
+                doc: "Run every seed, and its record-on-failure retry, with the host's address-space randomization, for a host that forbids turning it off; each seed's determinism is qualified and the replay repro carries the flag.",
+                ..ALLOW_RANDOMIZED_LAYOUT_FLAG
+            }],
         },
         Group {
             title: "Liveness options (native harness mode)",
@@ -631,6 +640,10 @@ only --fingerprint, --mount, --coverage-out, --harness, --compute-watchdog-ms, a
                 },
                 ALLOW_FLAG,
                 ALLOW_UNSUPPORTED_FLAG,
+                Flag {
+                    doc: "Replay a trace recorded with --allow-randomized-address-layout, keeping the host's address-space randomization; required exactly when the recording used it.",
+                    ..ALLOW_RANDOMIZED_LAYOUT_FLAG
+                },
             ],
         },
         Group {

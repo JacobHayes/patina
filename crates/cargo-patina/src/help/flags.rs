@@ -498,6 +498,14 @@ pub(super) const ALLOW_FLAG: Flag = f(
     true,
 );
 
+pub(super) const ALLOW_RANDOMIZED_LAYOUT_FLAG: Flag = f(
+    "--allow-randomized-address-layout",
+    None,
+    Value::None,
+    "Run the native guest with the host's address-space randomization when the host forbids turning it off (Docker's default seccomp profile does): addresses are then not a function of the seed, and the run's determinism is qualified on stderr, in the result envelope and in the trace. A replay of such a trace needs the flag too.",
+    false,
+);
+
 pub(super) const ALLOW_UNSUPPORTED_FLAG: Flag = f(
     "--allow-unsupported-symbols",
     None,

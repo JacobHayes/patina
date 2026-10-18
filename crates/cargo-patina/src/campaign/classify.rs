@@ -275,6 +275,10 @@ pub(super) const TRACE_UNAVAILABLE_CLASS: &str = "trace_unavailable";
 /// whose crash patina could not carry out (recovery, snapshot export or the
 /// handoff failed). Patina's own limit, never a result about the guest.
 pub(super) const FS_CRASH_FAILED_CLASS: &str = "fs_crash_failed";
+/// The refusal class for a run the host could not give what the virtual
+/// process granted (a stack limit past the host's hard limit). An operational
+/// condition of the host, like a timeout: never a result about the guest.
+pub(super) const HOST_LIMIT_CLASS: &str = "host_limit";
 
 /// One verdict the generation reported through the verdict ABI, reduced to what
 /// classification, signatures and `minimize`'s auto-target need. Lifted from the
@@ -635,7 +639,7 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
         // A crash patina could not carry out stopped the guest before it
         // could reach a verdict of its own: the harness failing, like a
         // timeout.
-        if class == FS_CRASH_FAILED_CLASS {
+        if class == FS_CRASH_FAILED_CLASS || class == HOST_LIMIT_CLASS {
             return CampaignClass::Infra;
         }
         if class == TRACE_UNAVAILABLE_CLASS {
@@ -1087,6 +1091,19 @@ mod tests {
             "CampaignClass::ALL must be in `Ord` (severity) order"
         );
         assert_eq!(CampaignClass::parse("NOT_A_CLASS"), None);
+    }
+
+    /// A stack limit the host could not apply aborts the guest, but the abort
+    /// is the host's: INFRA, never a GUEST_ABORT finding.
+    #[test]
+    fn a_host_limit_is_infra() {
+        let generation = planted(
+            RunFacts::ok().exit(134).signal(6).refusal(HOST_LIMIT_CLASS),
+            "PATINA_INFRA host_limit reason=\"setrlimit(RLIMIT_STACK)\"\n",
+        );
+        let class = classify(&generation, &ClassifyRules::default());
+        assert_eq!(class, CampaignClass::Infra);
+        assert!(!class.is_finding());
     }
 
     /// A crash patina could not carry out is the harness failing: INFRA, and

@@ -131,6 +131,12 @@ impl Replayer {
         self.metadata.tsc
     }
 
+    /// The address layout the trace was recorded with, or `None` when no
+    /// supervisor controlled it (see [`RunMetadata::address_layout`]).
+    pub const fn address_layout(&self) -> Option<crate::AddressLayout> {
+        self.metadata.address_layout
+    }
+
     /// The virtual realtime epoch the trace was recorded on (see
     /// [`RunMetadata::realtime_epoch_nanos`]).
     pub const fn realtime_epoch_nanos(&self) -> u64 {

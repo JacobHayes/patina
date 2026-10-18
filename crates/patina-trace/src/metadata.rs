@@ -277,6 +277,17 @@ impl SwarmConfigRecord {
 /// byte-for-byte identical to one recorded without it (when no violation fires),
 /// and either trace replays against a build with any watchdog configuration.
 /// Recording it keeps the trace self-describing (which budgets were armed).
+/// The address layout a supervised native guest ran with
+/// ([`RunMetadata::address_layout`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AddressLayout {
+    /// Address-space randomization off: the layout is a function of the run.
+    Fixed,
+    /// The host's randomization left on (`--allow-randomized-address-layout`).
+    Randomized,
+}
+
 /// Absent (`None`) in traces recorded with the watchdog disabled or before this
 /// field existed, which the runtime treats as "no watchdog".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,6 +432,16 @@ pub struct RunMetadata {
     /// replayed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tsc: Option<bool>,
+    /// The address layout the native supervisor exec'd the guest with, written
+    /// on every supervised native run. Absent (`None`) means no supervisor
+    /// controlled the layout: a trace recorded before Patina pinned it, a
+    /// standalone native binary, or another family. A native guest in such a
+    /// trace ran with the host's randomization on, so a supervised replay
+    /// treats an absent layout as randomized. Reconciled on replay like
+    /// [`sud`](RunMetadata::sud): a trace whose addresses no seed decided is
+    /// never replayed as though they had been, nor the other way round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_layout: Option<AddressLayout>,
     /// The run's virtual realtime epoch: the Unix time in nanoseconds that
     /// `ClockKind::Realtime` read at monotonic zero (`--realtime-epoch`, default
     /// `patina_dst_abi::DEFAULT_REALTIME_EPOCH_NANOS`). Required, not additive:
@@ -480,6 +501,7 @@ impl RunMetadata {
             compute_stop: None,
             sud: None,
             tsc: None,
+            address_layout: None,
             realtime_epoch_nanos,
             boot_origin_nanos: patina_dst_abi::DEFAULT_BOOT_ORIGIN_NANOS,
             time_model: patina_dst_abi::TIME_MODEL,
@@ -576,6 +598,14 @@ impl RunMetadata {
     #[must_use]
     pub fn with_tsc(mut self, tsc: Option<bool>) -> Self {
         self.tsc = tsc;
+        self
+    }
+
+    /// Record the address layout the guest ran with; `None` records nothing
+    /// (see [`RunMetadata::address_layout`]).
+    #[must_use]
+    pub fn with_address_layout(mut self, layout: Option<AddressLayout>) -> Self {
+        self.address_layout = layout;
         self
     }
 }

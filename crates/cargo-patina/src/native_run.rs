@@ -44,7 +44,11 @@ use std::{env, fs, io};
 mod child;
 mod fs_image;
 mod gate;
+mod layout;
 mod trace;
+
+/// Name prefix of the envp slots reserved for the shim's startup map.
+const ENVP_SLOT_PREFIX: &str = "_PATINA_ENVP_SLOT_";
 
 pub(super) use child::NATIVE_FS_CRASH_RESTART_EXIT;
 #[cfg(unix)]
@@ -103,6 +107,9 @@ pub(super) fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32,
             }
             Err(error) => return Err(error),
         };
+    if invocation.allow_randomized_layout {
+        eprintln!("patina: WARNING: {}", layout::RANDOMIZED_QUALIFICATION);
+    }
 
     // A binary built with `--yield-points` schedules under a different (denser)
     // policy, so its recorded traces must not cross-replay with a plain binary.
@@ -266,6 +273,21 @@ liveness-safe."
     } else {
         invocation.environment.len()
     };
+    // The run's own inputs as the control plane carries them: its environment
+    // map and its arguments, the same size in every mode, so the fixed address
+    // layout can reserve room for them beside the rest of the control plane.
+    let guest_payload = {
+        let environment = replay_trace
+            .as_ref()
+            .and_then(|bundle| bundle.metadata.guest_env.as_ref())
+            .unwrap_or(&invocation.environment);
+        let arguments: Vec<_> = program_args
+            .iter()
+            .map(|argument| argument.to_string_lossy())
+            .collect();
+        serde_json::to_string(environment).map_or(0, |json| json.len())
+            + serde_json::to_string(&arguments).map_or(0, |json| json.len())
+    };
 
     let crash_restart_plan = crash_restart_plan(&invocation, replay_trace)?;
     if crash_restart_plan.is_some() && invocation.schedule.starve.is_some() {
@@ -300,7 +322,7 @@ liveness-safe."
         // control-plane state and is never snapshotted or exposed to the guest.
         command.env(ENV_INITIAL_STACK, "1");
         for slot in 0..startup_env_entries + NATIVE_INITIAL_STACK_TRAILER_SLOTS {
-            command.env(format!("_PATINA_ENVP_SLOT_{slot}"), "");
+            command.env(format!("{ENVP_SLOT_PREFIX}{slot}"), "");
         }
         // A `patina-dst-harness` binary (usage mode 2) defers runtime
         // installation to its `run`/`run_with` call: tell the packaged
@@ -447,6 +469,13 @@ liveness-safe."
             }
             (None, None) => {}
         }
+        layout::pin(
+            &mut command,
+            NATIVE_GUEST_ARGV0,
+            ENVP_SLOT_PREFIX,
+            guest_payload,
+            invocation.allow_randomized_layout,
+        )?;
         Ok((command, fds))
     };
 
@@ -677,6 +706,23 @@ liveness-safe."
         }
     };
     let artifact = resolved.display.display().to_string();
+    let mut qualifications = Vec::new();
+    if invocation.allow_randomized_layout {
+        qualifications.push(output::Qualification {
+            kind: "randomized_address_layout",
+            detail: layout::RANDOMIZED_QUALIFICATION.into(),
+        });
+    }
+    if !downgraded.is_empty() {
+        qualifications.push(output::Qualification {
+            kind: "unsupported_symbols",
+            detail: downgraded
+                .iter()
+                .map(native_escape_summary)
+                .collect::<Vec<_>>()
+                .join("; "),
+        });
+    }
     let exit = output::finalize_run(
         output::RunReport {
             verb: "run",
@@ -692,6 +738,7 @@ liveness-safe."
             facts,
             native_run_marker,
             guest_exit_code: None,
+            qualifications,
         },
         captured,
     )?;

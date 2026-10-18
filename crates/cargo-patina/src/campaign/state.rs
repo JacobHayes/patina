@@ -582,6 +582,13 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     if let Some(value) = &spec.allow_unsupported_symbols {
         map.insert("allow_unsupported_symbols".into(), value.clone().into());
     }
+    if let Some(layout) = spec.address_layout {
+        let layout = match layout {
+            patina_dst_trace::AddressLayout::Fixed => "fixed",
+            patina_dst_trace::AddressLayout::Randomized => "randomized",
+        };
+        map.insert("address_layout".into(), layout.into());
+    }
     if let Some(value) = spec.watchdog_nanos {
         map.insert("watchdog_nanos".into(), value.into());
     }

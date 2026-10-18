@@ -331,14 +331,17 @@ fn the_native_invocation_surface_is_forwarded_to_every_generation_and_never_to_w
         harness: true,
         allow_symbols: vec!["semaphore_wait".into(), "semaphore_signal".into()],
         allow_unsupported_symbols: Some("all".into()),
+        address_layout: Some(patina_dst_trace::AddressLayout::Randomized),
         ..CampaignSpec::default()
     };
     for generation in 0..8 {
         let native = derive_flags(&spec, &generation_hash(0, generation), "native");
-        assert!(
-            native.iter().any(|f| f == "--harness"),
-            "generation {generation} lost --harness: {native:?}"
-        );
+        for flag in ["--harness", "--allow-randomized-address-layout"] {
+            assert!(
+                native.iter().any(|f| f == flag),
+                "generation {generation} lost {flag}: {native:?}"
+            );
+        }
         let allowed: Vec<&String> = native
             .iter()
             .enumerate()
@@ -360,7 +363,12 @@ fn the_native_invocation_surface_is_forwarded_to_every_generation_and_never_to_w
     // refuses all three, so forwarding them would turn every generation into a
     // usage error. The artifact is refused upstream; this is belt and braces.
     let wasi = derive_flags(&spec, &generation_hash(0, 0), "wasi");
-    for flag in ["--harness", "--allow", "--allow-unsupported-symbols"] {
+    for flag in [
+        "--harness",
+        "--allow",
+        "--allow-unsupported-symbols",
+        "--allow-randomized-address-layout",
+    ] {
         assert!(
             !wasi.iter().any(|f| f == flag),
             "the WASI family must never receive {flag}: {wasi:?}"
@@ -368,7 +376,12 @@ fn the_native_invocation_surface_is_forwarded_to_every_generation_and_never_to_w
     }
     // A spec that asks for none of it forwards none of it.
     let bare = derive_flags(&CampaignSpec::default(), &generation_hash(0, 0), "native");
-    for flag in ["--harness", "--allow", "--allow-unsupported-symbols"] {
+    for flag in [
+        "--harness",
+        "--allow",
+        "--allow-unsupported-symbols",
+        "--allow-randomized-address-layout",
+    ] {
         assert!(!bare.iter().any(|f| f == flag), "unasked-for {flag}");
     }
 }

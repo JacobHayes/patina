@@ -516,6 +516,21 @@ is stated plainly:
     whatever the host's loader path resolves, a host-dependent answer, so they
     stay a residual rather than a refusal.
 
+12. **Host addresses.** A pointer's value is host state that no import names.
+    The supervisor removes what the kernel decides (ARCHITECTURE.md, "Address
+    layout"): randomization is off, the Linux stack limit is the modeled one,
+    and the initial stack has one size in every mode, and the shim refuses a
+    run whose host ignored the request
+    (`native_containment::layout`). A host that forbids the request refuses
+    the run unless the operator passes `--allow-randomized-address-layout`,
+    which keeps the host's layout and qualifies the run (see below).
+    What the allocator decides remains. The runtime allocates on the guest's
+    heap, so heap and later mapping addresses differ between a seeded run, a
+    recording and its replay. On Darwin, libmalloc randomizes the heap from
+    exec-time kernel entropy. A guest that branches on a heap address is
+    deterministic within one mode on Linux and not at all on Darwin
+    (VALIDATION.md, the unpaired list).
+
 ## Escape hatch
 
 `native-run --allow-unsupported-symbols <all|name,...>` downgrades matching
@@ -523,3 +538,13 @@ denials to a loud stderr warning and records them in a `<trace>.unsupported-symb
 sidecar next to a `--record` trace, so a run that knowingly tolerates unsupported
 surface (never reached by the scenario) is visibly qualified. A partial list
 still fails closed on the un-listed symbols.
+
+`--allow-randomized-address-layout` (every native verb that launches a guest:
+`run`, `replay`, native `test`, `explore`, and `campaign` with its reproduce
+commands) is the hatch for a host that forbids turning address-space
+randomization off, such as Docker's default seccomp profile. The guest keeps
+the host's layout, so its addresses are host state again (residual 12). The
+run prints a warning, its result envelope carries a `randomized_address_layout`
+qualification, and its trace records `address_layout: randomized`. A replay
+must pass the flag exactly when the recording did, and for a trace that
+predates the field, whose guest also ran randomized.

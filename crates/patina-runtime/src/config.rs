@@ -188,6 +188,11 @@ pub struct RuntimeConfig {
     /// replay for the same reason as `sud`: the two states observe the counter at
     /// different boundaries. `None` on every run that did not arm it.
     pub(super) tsc: Option<bool>,
+    /// The address layout the native supervisor exec'd the guest with.
+    /// Recorded into the trace's [`RunMetadata::address_layout`] and
+    /// reconciled on replay. `None` when no supervisor controlled it
+    /// (standalone launches, other families).
+    pub(super) address_layout: Option<patina_dst_trace::AddressLayout>,
     /// Where the runtime writes this run's structured facts document, or `None`
     /// (the default) to produce none. Presentation-adjacent like `reports`: it
     /// reaches no recorded byte, is never fingerprinted, and is never reconciled
@@ -222,6 +227,7 @@ impl RuntimeConfig {
             reports: ReportConfig::default(),
             sud: None,
             tsc: None,
+            address_layout: None,
             facts_path: None,
             incarnation: Incarnation::First,
             require_crash_selector_reached: false,
@@ -250,6 +256,7 @@ impl RuntimeConfig {
             reports: ReportConfig::default(),
             sud: None,
             tsc: None,
+            address_layout: None,
             facts_path: None,
             incarnation: Incarnation::First,
             require_crash_selector_reached: false,
@@ -283,6 +290,7 @@ impl RuntimeConfig {
             reports: ReportConfig::default(),
             sud: None,
             tsc: None,
+            address_layout: None,
             facts_path: None,
             incarnation: Incarnation::First,
             require_crash_selector_reached: false,
@@ -317,6 +325,7 @@ impl RuntimeConfig {
             reports: ReportConfig::default(),
             sud: None,
             tsc: None,
+            address_layout: None,
             facts_path: None,
             incarnation: Incarnation::First,
             require_crash_selector_reached: false,
@@ -352,6 +361,7 @@ impl RuntimeConfig {
             reports: ReportConfig::default(),
             sud: None,
             tsc: None,
+            address_layout: None,
             facts_path: None,
             incarnation: Incarnation::First,
             require_crash_selector_reached: false,
@@ -393,6 +403,7 @@ impl RuntimeConfig {
             reports: ReportConfig::default(),
             sud: None,
             tsc: None,
+            address_layout: None,
             facts_path: None,
             incarnation: Incarnation::First,
             require_crash_selector_reached: false,
@@ -692,6 +703,19 @@ impl RuntimeConfig {
     #[must_use]
     pub fn with_tsc(mut self, tsc: Option<bool>) -> Self {
         self.tsc = tsc;
+        self
+    }
+
+    /// The address layout the supervisor exec'd the guest with, or `None`
+    /// when none controlled it (see the field docs).
+    pub const fn address_layout(&self) -> Option<patina_dst_trace::AddressLayout> {
+        self.address_layout
+    }
+
+    /// Record the address layout the supervisor exec'd the guest with.
+    #[must_use]
+    pub fn with_address_layout(mut self, layout: Option<patina_dst_trace::AddressLayout>) -> Self {
+        self.address_layout = layout;
         self
     }
 

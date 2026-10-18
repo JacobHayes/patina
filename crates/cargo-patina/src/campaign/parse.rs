@@ -152,6 +152,9 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     if let Some(value) = args.text("--allow-unsupported-symbols") {
         spec.allow_unsupported_symbols = Some(value.to_string());
     }
+    if args.flag("--allow-randomized-address-layout") {
+        spec.address_layout = Some(patina_dst_trace::AddressLayout::Randomized);
+    }
     if let Some(value) = args.u64("--compute-watchdog-ms") {
         spec.compute_watchdog_ms = Some(value);
     }

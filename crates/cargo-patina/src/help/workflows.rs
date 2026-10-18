@@ -44,7 +44,7 @@ pub(super) const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--fault-scale-permille N] [--starve-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [-- GUEST ARGS]",
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--fault-scale-permille N] [--starve-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [-- GUEST ARGS]",
         "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --selftest",
@@ -327,6 +327,10 @@ refused by name.",
                 Flag {
                     doc: "Downgrade matching unsupported-symbol denials to a warning in every generation. An instruction-class finding (`instruction@.text+OFF`) also matches by the containing symbol its provenance names.",
                     ..ALLOW_UNSUPPORTED_FLAG
+                },
+                Flag {
+                    doc: "Run, record and replay every generation with the host's address-space randomization, for a host that forbids turning it off; every generation's determinism is qualified.",
+                    ..ALLOW_RANDOMIZED_LAYOUT_FLAG
                 },
             ],
         },

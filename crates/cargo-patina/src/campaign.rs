@@ -332,12 +332,16 @@ fn non_native_invocation_flag(spec: &CampaignSpec) -> Option<&'static str> {
     if spec.allow_unsupported_symbols.is_some() {
         return Some("--allow-unsupported-symbols");
     }
+    if spec.address_layout == Some(patina_dst_trace::AddressLayout::Randomized) {
+        return Some("--allow-randomized-address-layout");
+    }
     None
 }
 
 /// The child-run flags that are pure INVOCATION SHAPE rather than a seed-derived
-/// draw: `--harness` and the pre-run gate surface (`--allow`,
-/// `--allow-unsupported-symbols`). Every generation gets them verbatim.
+/// draw: `--harness`, the pre-run gate surface (`--allow`,
+/// `--allow-unsupported-symbols`) and `--allow-randomized-address-layout`.
+/// Every generation gets them verbatim.
 ///
 /// Their own function because the reproduce commands need exactly this set and
 /// nothing else. Native replay restores every semantic input from the trace, but
@@ -369,6 +373,13 @@ fn invocation_flags(spec: &CampaignSpec, family: &'static str) -> Vec<String> {
             &mut flags,
             "--allow-unsupported-symbols",
             RunValue::Text(policy.clone()),
+        );
+    }
+    if spec.address_layout == Some(patina_dst_trace::AddressLayout::Randomized) {
+        push_run_flag(
+            &mut flags,
+            "--allow-randomized-address-layout",
+            RunValue::Switch,
         );
     }
     flags

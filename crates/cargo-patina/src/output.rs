@@ -47,6 +47,7 @@ use outcomes::extract_verdicts;
 use outcomes::refusal;
 pub use reports::CoverageReport;
 pub use reports::DepthReport;
+pub use reports::Qualification;
 pub use reports::RunReport;
 pub(crate) use reports::TraceFacts;
 pub use reports::finalize_inprocess;

@@ -158,6 +158,18 @@ pub(crate) fn trap_fatal(message: &str) -> ! {
     crate::host_abort();
 }
 
+/// Fail closed on something the HOST cannot provide, as [`trap_fatal`] does,
+/// but with a `PATINA_INFRA <kind> ...` line the supervisor attributes to the
+/// host (the envelope's `refusal`) rather than to the guest. Linux only: its
+/// one caller is the host stack-limit update.
+#[cfg(target_os = "linux")]
+pub(crate) fn infra_fatal(kind: &str, reason: &str) -> ! {
+    let _ = flush_before_refusal();
+    let text = format!("PATINA_INFRA {kind} reason=\"{reason}\"\n");
+    let _ = host_write_all(2, text.as_bytes());
+    crate::host_abort();
+}
+
 #[unsafe(no_mangle)]
 /// `fcntl(F_SETOWN)`, `F_SETOWN_EX` and `F_SETSIG`: who `SIGIO` and
 /// `SIGURG` go to. Neither signal is delivered, so on an open descriptor
@@ -195,14 +207,14 @@ pub extern "C" fn patina_fcntl_owner_get(raw_fd: c_int, ex: c_int, owner: *mut c
     0
 }
 
-/// Pass a process-local memory syscall through to the host kernel via glibc's
+/// Pass a process-local syscall through to the host kernel via glibc's
 /// `syscall(2)` wrapper, resolved as a host alias (its kernel entry sits in
 /// glibc text, the SUD-allowed region). See [`sud`] `mem_passthrough`.
 ///
 /// # Safety
 /// The arguments are the guest's own for a process-local memory-management
-/// syscall (mmap-anon/munmap/mprotect/madvise/mremap/brk); no other numbers are
-/// routed here.
+/// syscall (mmap-anon/munmap/mprotect/madvise/mremap/brk), or the shim's own
+/// persona query and stack-limit update; no other numbers are routed here.
 #[cfg(target_os = "linux")]
 pub(crate) unsafe fn sud_host_syscall(
     nr: std::ffi::c_long,
@@ -1167,6 +1179,9 @@ pub(crate) fn runtime_config_from_control_plane()
     // and let the runtime refuse the mismatch up front. `None` on every run that
     // did not arm.
     config = config.with_tsc(tsc_armed_metadata());
+    // The layout the supervisor exec'd the guest with goes into the trace, and
+    // a replay must have been exec'd the same way.
+    config = config.with_address_layout(crate::layout::recorded()?);
     Ok((config, trace_fd))
 }
 

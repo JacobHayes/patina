@@ -385,6 +385,81 @@ the routing table on both platforms (the linked `getpid` on Linux, the entropy
 pair on macOS, NULL for host, escape and unmodeled names) and the real
 wrapped-dlsym round trip on Linux.
 
+The guest's address layout is pinned by the supervisor and checked by the shim
+(ARCHITECTURE.md, "Address layout").
+`native_containment::address_layout_is_the_same_in_every_run_of_a_seed` runs
+`testbeds/native-boundary/address_layout_probe.rs` (its code, main and thread
+stacks, thread-local, heap and mapping addresses, and a pointer-hash order)
+twice seeded, twice recorded and once replayed. On Linux the image, main stack
+and thread-local addresses agree across all five runs, and the seeded pair and
+the recorded pair each agree in every line. On macOS the image and thread-stack
+addresses agree across all five. Before the change every address differed
+between two seeded runs on both platforms. With randomization off but no
+initial-stack padding, the Linux main stack moved between the seeded run and the
+recording. The unit test `the_control_plane_never_resizes_the_initial_stack`
+pads two launches that differ in mode, descriptors and exec'd path to one
+initial-stack size; its overflow twin is refused. A host mapping race once moved
+a Linux mapping between same-seed runs, in about one run in twenty: the
+watchdog's thread stacks were mapped while a new guest thread mapped its private
+signal stack. The watchdog now starts before the guest thread exists, and the
+same probe gave one layout in 72 runs, including 32 run eight at a time.
+`a_fixed_layout_the_host_did_not_apply_stops_the_run` gives a directly exec'd,
+randomized guest the supervisor's layout marker, with `ADDR_NO_RANDOMIZE`
+cleared in the child so a parent under `setarch -R` cannot hide the case. The
+shim stops it before `main`, naming the marker. Without the marker the same
+launch runs. The run continued before the check existed, and without the
+clearing the test failed under `setarch -R`.
+`the_inherited_stack_limit_does_not_move_the_layout` runs the probe from
+parents with 8 MiB, 256 MiB and unlimited soft stack limits and requires one
+output. Without the supervisor's stack-limit pin, the 256 MiB parent moved the
+thread stack, thread-local and mapping addresses.
+`a_raised_stack_limit_grows_the_main_stack_and_moves_no_mapping` has the probe
+raise its soft stack limit to 16 MiB and recurse through 11 MiB of main stack.
+It completes with the same output as a run that does not recurse. With the
+raise kept only in the virtual table, the guest died of `SIGSEGV`.
+The mapping race has no deterministic regression leg: forcing each thread
+order would take a planted delay inside the shim's thread start, and the
+72-run count above is the evidence.
+`a_host_that_forbids_a_fixed_layout_refuses_the_run_by_name` runs the
+supervisor under a seccomp filter that allows only the personas Docker's
+default profile allows. The run stops before the guest starts and names
+`--allow-randomized-address-layout`.
+`the_randomized_layout_opt_out_qualifies_the_run_and_binds_its_replay` records
+under the same filter with the flag. The guest runs, the result envelope
+carries the `randomized_address_layout` qualification, and the trace metadata
+records `address_layout: randomized`. Its replay without the flag is refused by
+name, and with the flag it runs. A fixed-layout trace replayed with the flag is
+refused too. With replay reconciliation removed, the unflagged replay ran;
+without the envelope field, the qualification was missing.
+`a_trace_without_a_layout_replays_only_as_randomized` strips `address_layout`
+from a fixed recording, as a trace from before layout control has none. Its
+replay without the flag is refused by name, and with the flag it runs. When an
+absent field counted as fixed, the unflagged replay ran.
+`a_campaign_with_the_opt_out_runs_every_generation_under_it` runs a
+two-generation campaign under the Docker-like filter with the flag and checks
+the spec records it. Without the flag forwarded to the generations, the
+campaign failed. The campaign unit tests require the flag in every
+generation's child flags and in both reproduce commands, and the native
+`test` unit test requires it on each seed's child `run`.
+`a_standalone_replay_refuses_a_fixed_recording` replays a fixed recording by
+launching the guest directly, without the supervisor. The replay is refused
+before `main` and names `cargo patina replay`, while a standalone recording
+replays standalone. When a replay without a layout skipped the check, the
+fixed recording replayed with different addresses.
+`a_campaign_from_before_layout_control_is_not_continued` starts a native
+campaign, checks its state records `address_layout: fixed`, and extends it
+once. It then removes the field, as a state from before layout control lacks
+it, and `--extend` is refused, leaving the state untouched. Without the check
+the extension ran.
+`a_stack_limit_the_host_cannot_apply_is_the_hosts_refusal` runs the probe's
+`deep-stack` under an inherited 8 MiB hard limit. The run stops and the
+envelope carries the `host_limit` refusal, which a campaign files as INFRA.
+With the plain fail-closed trap, the envelope carried no refusal and a
+campaign filed the abort as the guest's.
+`a_randomized_launch_fits_a_small_inherited_stack_limit` runs with the flag
+from a parent with a 1 MiB soft stack limit. With the padding kept on
+randomized launches, the run failed.
+
 `cargo patina audit` is a strict per-format import allowlist over Mach-O/ELF (other formats rejected): after alias normalization (`$NOCANCEL`, underscore prefixes), an import passes only if it is an explicitly listed effect-free host-deferred symbol or `--allow`ed by the caller, and anything unknown fails closed as `unknown-import` — this is what catches the missed-interposer class structurally (a `clock_nanosleep`-style escape now fails the audit instead of passing silently). Known host-effect names keep their categories (filesystem, unmanaged-sync `os_unfair_lock`/`__ulock`/`psynch`, direct-syscall, and so on) for error quality, and instruction scanning still rejects raw syscall/clock/entropy assembly. The shim's control-plane symbols are `--allow`ed per audited binary by the scripts rather than statically allowlisted, so unmanaged binaries importing them still fail; under the host-alias doctrine (ARCHITECTURE.md) the shim resolves its host vehicles at runtime through `dlsym(RTLD_NEXT, ...)`, so on both platforms that set collapses to the single `dlsym` primitive (the trace-fd/baton/thread-creation vehicle names no longer appear in the guest import table at all — on Linux `__read`/`__write`/`sem_*`/`pthread_create` are each interposed by a strong def whose real vehicle is resolved through the same `dlsym(RTLD_NEXT, ...)` table); `native_containment::{audit_rejects_unlinked_raw_syscall_or_thread_escape,audit_rejects_unknown_import,audit_rejects_shared_memory_import}` proves the independent import refusals; `native_workloads::std_runs_seeded_and_replayable_but_not_standalone` audits the shim-linked std guest with AND without an explicit dlsym allowance. `run` enforces the same audit as a **pre-run default-deny gate** before the guest executes — it bakes in the control-plane vehicle so ordinary binaries need no repeated `--allow`, and hard-errors (naming, categorizing, and grouping symbols by recovered provenance — crate and containing symbol, plus the defining archive member on formats that record it (ELF does not, for global symbols; see crates/patina-target/ESCAPE-CLASSES.md)) on any other blocking/time/scheduling/effect symbol that is neither interposed nor known-safe, so a missed interposer becomes a refusal rather than a silent escape. This is what structurally closed the macOS Parker escape: std's `Parker` and the shim's own baton both used `dispatch_semaphore_*`, so the baton's per-binary `--allow` covered the Parker too; the dispatch semaphores are interposed (hence *defined*, not imported) and the baton reaches the *real* libdispatch semaphore through the host-alias table (`dlsym(RTLD_NEXT, ...)`) rather than a named import, so no vehicle symbol sits in the guest import table for a shared allowance to cover — the collision is eliminated structurally, which is exactly why the baton can safely use the same canonical primitive std does rather than one std happens not to use. The escape hatch `--allow-unsupported-symbols <all|name,...>` downgrades matching denials to a loud warning recorded in a sidecar beside a `--record` trace (visibly qualifying the determinism claim); the native gate proves the gate can fail — a planted Mach `semaphore_wait` binary is refused, named, and runs only under the hatch with the warning (`os_unfair_lock` served this role until it gained an interposer; its probe is now an acceptance-plus-misuse leg) — and that a partial allow list still fails closed. Pure libm math (`pow`/`powf`, `exp`/`log`, the trig/hyperbolic families, `sqrt`/`cbrt`/`hypot`, `fma`, the rounding family, `fabs`/`copysign`/`fmin`/`fmax`, ...) is known-safe on both formats — an explicit list, never a prefix match, so an effectful math-adjacent symbol (`random`, `system`) stays denied — because each is a function of its floating-point operands with no boundary effect (errno/FP-flag side effects are not host effects Patina models); this clears the `_pow` `unknown-import` an ordinary numeric guest surfaces, so it no longer needs `--allow` at every run. Because only a *shim-linked* binary shows the post-interposition residual, `audit` is **source-first**: auditing a `SOURCE.rs`/`DIR`/`Cargo.toml` (or a Patina-built artifact) links the shim first and reports the true handful of escapes, whereas a stock `cargo build` output lists the whole libc surface the shim interposes as unsatisfied imports — the opposite of the truth. `cargo patina audit <prebuilt-binary>` therefore **fails closed** on a binary that does not define the shim control-plane marker (`patina_init_from_env`), directing the caller to the source-first form or a Patina-built artifact; `--raw` overrides the gate and runs the full audit anyway (instruction scan and escape categories included) under a loud `PATINA_RAW_AUDIT` stderr banner marking the import findings as pre-interposition; `native_containment::audit_rejects_unlinked_raw_syscall_or_thread_escape` uses it for deliberately-unlinked C fixtures.
 
 The deny/interposed/known-safe lists are organized by an explicit escape-class taxonomy, and every class has a permanent test that proves its detection is not vacuous. The full per-class breakdown with symbol lists lives in `crates/patina-target/ESCAPE-CLASSES.md`; the coverage matrix is:
@@ -893,7 +968,7 @@ unit suite — it is in the handful of **structurally unpaired classes** below
 | Fuzz-sweep classifier + planted selftest (a canned case per class) | `testbeds/workq/fuzz-sweep.sh` (`classify`, `is_infra`, `assert_class`) | A `cargo-patina:` refusal read as an environment failure hid every recorded fs-crash generation as `INFRA_ERROR` | **Class** | Planted findings never downgraded; each class has a canned selftest. Only host resource exhaustion on the tool's own error line is `INFRA_ERROR`; any other `cargo-patina:` error is `TOOL_ERROR`, an unreached crash selector is `VACUOUS_CRASH`, and an exit-2 fail-closed abort is `UNEXPECTED_ABORT` in every generation, fs-crash included, all failures (the same infra rule in `testbeds/pubsub/fuzz-sweep.sh`). Selftest runs per-push in CI (stable job); full sweeps run nightly and local/manual. |
 | Crash-restart record/replay (one lifecycle trace; replay re-derives the handoff and checks its recorded digest) | `patina-trace` `crash_restart::tests`; `patina-runtime` `crash_writes_the_incarnation_recording_ending_with_the_trigger`, `restarted_incarnation_never_fires_the_crash_selector`; `cargo-patina` `crash_restart_replay_plan_refuses_a_crash_lifecycle_without_a_selector`; e2e `native_fs_crash_restart_record_replays_both_incarnations`, `native_fs_crash_restart_records_are_byte_identical`, `native_fs_crash_restart_swarm_dropped_crash_records_and_replays_one_incarnation` and the `native_fs_crash_restart_replay_refuses_*` family (forged handoff digest, crash at a different operation, a crash the recording never had, a divergence in the restarted incarnation) | Native `--fs-crash-at` refused `--record`/`replay`, so every recorded crash generation failed | **Class** | A divergence anywhere across the restart (crash point, recovered filesystem, either incarnation's operations, incarnation metadata) fails closed by name; the snapshot itself is never trusted from the trace. |
 | Campaign classifier (envelope-only) + selftest | `crates/cargo-patina/src/campaign/classify.rs` (`classify`, `built_in_class`, `CampaignClass`, `ClassifyRules`), `campaign/selftest.rs` (`selftest`) | Guest text deciding a built-in class; an abort blamed on patina that the guest performed itself | **Class** | Every class is proven fireable from structured envelope facts, each paired with a RED twin that removes the one deciding fact; a class-coverage gate fails if any `CampaignClass::ALL` member never fires. `built_in_class` takes a text-free `RunFacts`, so guest output structurally cannot classify. UNCLASSIFIED-loud on any unrecognized nonzero exit. CLI-level `--selftest` runs per-push in CI; real campaigns remain local/manual. |
-| Campaign reproduction verification (`NONDETERMINISM`) | `crates/cargo-patina/src/campaign/verify.rs` (`Verification::judge`, `samples_clean_rerun`); `campaign --selftest` verification checks; e2e `campaign_verify` over `testbeds/native-boundary/address_leak_probe.rs` | A novel signature whose printed reproduce command did not reproduce it, reported as an ordinary finding (a guest reading its host-randomized stack address) | **Class** | Every novel finding's reproduce path runs once and a seeded one-in-16 clean sample runs twice, compared exactly rather than by the lossy signature; signature, exit status (with the guest's full WASI exit code), unnormalized finding line, verdict detail, class, trace digest and replay divergence each have a selftest twin that differs there alone, and the e2e planted guest fails the replay path (a lettered token, a token the signature collapses to `#`, a schedule that diverges after a reproducing verdict) and the clean-rerun path while its deterministic twins keep their class, including a segfault whose supervisor marker names each run's own trace (also after a guest line left unterminated) and a guest that spells a divergence in a custom-op label and prints the token; a guest line imitating the marker keeps its evidence (selftest twin and e2e). The divergence bit is typed on the facts channel, never run text: trace-layer kinds and the runtime's own cross-checks (`a_replay_divergence_reaches_the_facts_channel_as_its_kind`, `a_time_model_divergence_reaches_the_facts_channel`; e2e over a leaked-charge clock read and two WASI finalization divergences, whose envelopes keep the guest's output, verdicts and exit status). `minimize --generation` refuses the class by name. Probabilistic for clean-run leaks: an unsampled clean generation, or a leak two runs happen to agree on, passes. A reproduction ending in a non-finding failure class that is not a replay divergence counts as infra, never nondeterminism. |
+| Campaign reproduction verification (`NONDETERMINISM`) | `crates/cargo-patina/src/campaign/verify.rs` (`Verification::judge`, `samples_clean_rerun`); `campaign --selftest` verification checks; e2e `campaign_verify` over `testbeds/native-boundary/address_leak_probe.rs` | A novel signature whose printed reproduce command did not reproduce it, reported as an ordinary finding (a guest reading its host-randomized stack address under `--allow-randomized-address-layout`) | **Class** | Every novel finding's reproduce path runs once and a seeded one-in-16 clean sample runs twice, compared exactly rather than by the lossy signature; signature, exit status (with the guest's full WASI exit code), unnormalized finding line, verdict detail, class, trace digest and replay divergence each have a selftest twin that differs there alone, and the e2e planted guest fails the replay path (a lettered token, a token the signature collapses to `#`, a schedule that diverges after a reproducing verdict) and the clean-rerun path while its deterministic twins keep their class, including a segfault whose supervisor marker names each run's own trace (also after a guest line left unterminated) and a guest that spells a divergence in a custom-op label and prints the token; a guest line imitating the marker keeps its evidence (selftest twin and e2e). The divergence bit is typed on the facts channel, never run text: trace-layer kinds and the runtime's own cross-checks (`a_replay_divergence_reaches_the_facts_channel_as_its_kind`, `a_time_model_divergence_reaches_the_facts_channel`; e2e over a leaked-charge clock read and two WASI finalization divergences, whose envelopes keep the guest's output, verdicts and exit status). `minimize --generation` refuses the class by name. Probabilistic for clean-run leaks: an unsampled clean generation, or a leak two runs happen to agree on, passes. A reproduction ending in a non-finding failure class that is not a replay divergence counts as infra, never nondeterminism. |
 | Buggify SDK classes | `testbeds/buggify-campaign.sh` (`ALWAYS_VIOLATION` per-gen top severity; `SOMETIMES_UNMET` campaign-level) + selftest | — | **Class** | `ALWAYS_VIOLATION` fires even on exit 0, never downgraded. Selftest covered by the per-push fuzz-sweep selftest; real campaigns local. |
 | Campaign aux-store folds (native edge coverage + WASI depth) | `cargo patina campaign --selftest` detectors in `crates/cargo-patina/src/coverage/detectors.rs` and `src/depth.rs` (fingerprint mismatch, plateau exactness at N/not N-1/0-disables, watermark idempotency, missing-depth refusal); e2e `campaign_extend_reproduces_aux_store_bytes_for_sites_and_coverage`, `campaign_extend_reproduces_aux_store_bytes_for_wasi_depth`, `campaign_resume_after_a_depth_checkpoint_tear_does_not_double_fold` | Resume double-folding non-idempotent sums; accumulating onto state from a different binary/policy; a depth report that cannot tell "no data" from "zero depth" | **Class** | Every detector is RED-proven: disabling the watermark skip fails both the selftest and the tear e2e. Per-push in CI via the campaign selftest. |
 | Coverage-guided scheduling (`campaign --guided`) | `cargo patina campaign --selftest` detectors in `crates/cargo-patina/src/guided.rs` (no-ancestors fallback, stream actually changes, exploit inherits ancestor bytes, prefix-determinism, drought decay); e2e `campaign_guided_steers_reproducibly_and_differs_from_unguided`, `campaign_guided_extend_matches_a_fresh_guided_campaign`, `campaign_guided_resume_after_a_tear_re_derives_the_same_generation`, `campaign_guided_refuses_without_a_novelty_signal` | Guidance that silently matches the unguided stream (inert knob); a resumed guided campaign re-deriving a DIFFERENT generation than it is resuming; steering with no signal to steer by | **Class** | RED-proven both ways: replacing the mutation with a fresh hash fails the inertness detector and the e2e; dropping the below-generation truncation fails the prefix-determinism detector and the campaign tear e2e. The tear e2e searches seed bases for a generation that is both novel and exploited, because either condition alone makes the truncation a no-op and the test vacuous. |
@@ -907,15 +982,46 @@ unit suite — it is in the handful of **structurally unpaired classes** below
    sound check). Static instruction scan misses commpage `ldr` time reads and
    novel encodings. Highest structural residual; honestly stated, not closeable
    today.
-2. **Guest-visible host addresses (ASLR) — not determinized, detected only after the fact.** A guest that derives behaviour from its own stack or heap addresses (pointer-keyed ordering, a printed pointer) differs between runs on Linux; campaign reproduction verification classes it `NONDETERMINISM` (`address_leak_probe.rs`), but nothing stops it at run time.
-3. **Vacuous-schedule floor + `SCHEDULE_MIN_BOUNDARIES=5000` are tuned constants.**
+2. **Heap and mapping addresses across modes.** The runtime and the shim
+   allocate on the guest's heap: in-process Rust allocations go through the
+   guest's global allocator, and on Linux the shim's C allocations share
+   glibc's arena with it. A recording grows its trace as it runs, and a replay
+   holds the trace it loaded. So with the layout pinned, a heap block's
+   address, and on Linux a mapping placed after the runtime's large
+   allocations, still differs between a seeded run, a recording and its
+   replay. Each mode repeats its own layout exactly. The probe's first small
+   block sits at `…0a0` seeded, `…1f0` recorded and `…f10` replayed, and the
+   gap widens as a run allocates. A guest whose behaviour depends on a heap
+   address can therefore act differently on replay than in its recording;
+   where that reaches the boundary, replay stops at the first mismatched
+   operation, and campaign reproduction verification classes a finding whose
+   replay differs `NONDETERMINISM`; nothing stops it at run time. Closing this
+   needs a guest
+   heap the runtime never allocates from (a shim-owned allocator behind the
+   guest's `malloc`, over a reserved region), with guest mappings and thread
+   stacks placed there too.
+3. **Darwin heap and main-stack addresses.** libmalloc places its regions at
+   randomized addresses seeded from the exec-time `malloc_entropy` apple
+   string. The kernel generates that string fresh at every exec, libSystem's
+   initializer reads it before any image the guest controls runs, and the
+   loader then zeroes it in place. No launch attribute or environment knob
+   reaches it: `MallocNanoZone=0`, `MallocMaxMagazines=1`,
+   `MallocSpaceEfficient=1`, `MallocXzoneEnabled=0` and `MallocProbGuard=0`
+   leave the addresses varying on macOS 26. `stack_guard` and `ptr_munge` are
+   read in the same window, so the shim cannot reseed them either. A stack
+   canary is also live in every frame above the shim's constructor. Heap blocks,
+   and the main thread's thread-local block that dyld allocates from the heap,
+   therefore differ between same-seed runs. The same random strings vary in
+   length, so the main stack moves by 16 bytes in a minority of runs (6 in 30
+   without Patina). Image and thread-stack addresses are fixed.
+4. **Vacuous-schedule floor + `SCHEDULE_MIN_BOUNDARIES=5000` are tuned constants.**
    The detector mechanism is structural but its calibration is a magic number; a
    std thread-scaffolding cost change could produce silent false negatives. Wants
    a calibration guard that pins the measured scaffolding yield cost.
-4. **macOS guest `dlsym` of a non-deny-trapped blocked symbol** (e.g. `killpg`).
+5. **macOS guest `dlsym` of a non-deny-trapped blocked symbol** (e.g. `killpg`).
    Measured unreachable for any std guest, but no detector — relies on a guest not
    hand-writing `dlsym`. Low risk by measurement, unpaired in principle.
-5. **macOS `mmap(MAP_SHARED)`.** Invisible to the symbol audit (the flag is not
+6. **macOS `mmap(MAP_SHARED)`.** Invisible to the symbol audit (the flag is not
    in the import table); no detector. On Linux `mmap` is interposed and a shared
    mapping is process-local memory or a view of a modeled file's page cache. (`rdseed` no longer belongs here: the TSC
    slice added its decode row, and `classifies_rdtscp_and_rdseed` pins it as a

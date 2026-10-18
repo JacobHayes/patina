@@ -38,9 +38,9 @@ pub use handoff::{
 };
 pub use lifecycle::{LifecycleEvent, LifecycleEventKind};
 pub use metadata::{
-    BuggifyConfigRecord, ComputeStop, CrashPointRecord, DnsConfigRecord, FaultConfigRecord,
-    FaultCrashOp, PctPolicyRecord, RunMetadata, SchedulePolicyRecord, StarvationPolicyRecord,
-    SwarmConfigRecord, TornGranularity, WatchdogConfigRecord,
+    AddressLayout, BuggifyConfigRecord, ComputeStop, CrashPointRecord, DnsConfigRecord,
+    FaultConfigRecord, FaultCrashOp, PctPolicyRecord, RunMetadata, SchedulePolicyRecord,
+    StarvationPolicyRecord, SwarmConfigRecord, TornGranularity, WatchdogConfigRecord,
 };
 pub use recorder::{PrefixWriteError, Recorder};
 pub use replay::Replayer;

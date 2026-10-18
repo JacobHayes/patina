@@ -3,8 +3,11 @@
 //! twice, and whatever does not reproduce is NONDETERMINISM.
 //!
 //! The planted guest (`testbeds/native-boundary/address_leak_probe.rs`) reads
-//! its own host-randomized stack address, a source patina does not control and
-//! the audit cannot see. Linux-only: that is where the stack address is
+//! its own stack address, which the audit cannot see. Patina fixes the native
+//! layout by default, so these campaigns pass `--allow-randomized-address-layout`
+//! to keep the host's randomization: the address is then a source patina does
+//! not control, and the opt-out reaches every generation, verification replay
+//! and rerun the campaign makes. Linux-only: that is where the stack address is
 //! measured to differ between runs.
 
 #[cfg(all(test, target_os = "linux"))]
@@ -35,9 +38,10 @@ mod tests {
             "json",
         ];
         args.extend_from_slice(extra);
-        // A WASI module takes no `--` guest arguments: its mode is "".
+        // A WASI module takes no `--` guest arguments: its mode is "". A native
+        // guest keeps the host's randomized layout (see the module docs).
         if !mode.is_empty() {
-            args.extend(["--", mode]);
+            args.extend(["--allow-randomized-address-layout", "--", mode]);
         }
         let output = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),

@@ -120,6 +120,10 @@ const REFUSAL_CLASSES: &[(&str, &str)] = &[
     // the crash (recovering or exporting the durable image failed). The
     // supervisor names it; the shim's abort that follows is not the guest's.
     ("PATINA_INFRA fs_crash_failed", "fs_crash_failed"),
+    // The host could not give the guest what the virtual process granted it
+    // (a stack limit above the host's hard limit, a refused host `prlimit64`):
+    // the shim aborts, and the abort is the host's, not the guest's.
+    ("PATINA_INFRA host_limit", "host_limit"),
 ];
 
 /// Patina's own refusal for this run, or `None` when patina did not fail closed.

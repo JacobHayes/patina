@@ -79,6 +79,7 @@ pub extern "C" fn patina_init_crash(seed: u64) -> c_int {
 
 pub(crate) fn init_from_env() -> c_int {
     let context = runtime_config_from_control_plane().and_then(|(config, trace_fd)| {
+        layout::verify()?;
         watchdog::configure()?;
         let mut builder = RuntimeBuilder::new(config)
             .with_default_drivers()

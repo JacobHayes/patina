@@ -477,6 +477,11 @@ pub unsafe extern "C" fn patina_thread_create(
         routine: start,
         arg,
     }));
+    // The watchdog's host threads map their stacks before the new thread
+    // exists: a thread maps its private signal stack as it starts, and two
+    // host threads mapping at once would leave the address space in an order
+    // no seed decides.
+    crate::watchdog::start();
     let mut handle: *mut c_void = core::ptr::null_mut();
     // SAFETY: `spawn_host_thread` creates a real, non-interposed host OS
     // thread; `payload` is consumed exactly once by the trampoline.
@@ -487,7 +492,6 @@ pub unsafe extern "C" fn patina_thread_create(
         fatal(&format!("host thread creation failed with code {rc}"));
     }
     state.handles.insert(handle as usize, task);
-    crate::watchdog::start();
     drop(state);
     // The new thread takes over its host registrations off the baton;
     // wait for that before the guest can ask about them.

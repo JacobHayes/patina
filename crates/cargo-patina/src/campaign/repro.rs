@@ -245,6 +245,7 @@ mod tests {
         let spec = CampaignSpec {
             harness: true,
             allow_unsupported_symbols: Some("all".into()),
+            address_layout: Some(patina_dst_trace::AddressLayout::Randomized),
             ..CampaignSpec::default()
         };
         let invocation = invocation_flags(&spec, "native");
@@ -264,7 +265,7 @@ mod tests {
         assert_eq!(
             replay,
             "cargo patina replay guest-bin out/failures/generation-0.patina --harness \
-             --allow-unsupported-symbols all"
+             --allow-unsupported-symbols all --allow-randomized-address-layout"
         );
         // The traceless form re-runs, and its flag list already contains them.
         let rerun = reproduce_command(
@@ -277,7 +278,9 @@ mod tests {
             "generation-0.patina",
         );
         assert!(
-            rerun.contains("--harness") && rerun.contains("--allow-unsupported-symbols all"),
+            rerun.contains("--harness")
+                && rerun.contains("--allow-unsupported-symbols all")
+                && rerun.contains("--allow-randomized-address-layout"),
             "the re-run repro dropped the invocation shape: {rerun}"
         );
         // `--record` is part of the experiment the campaign actually ran: without

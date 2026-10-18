@@ -747,6 +747,9 @@ fn append_native_harness_run_flags(args: &mut Vec<OsString>, invocation: &Native
         "--heal-after",
         invocation.liveness.heal_after.as_deref(),
     );
+    if invocation.allow_randomized_layout {
+        args.push(OsString::from("--allow-randomized-address-layout"));
+    }
 }
 
 fn push_optional_arg(args: &mut Vec<OsString>, flag: &str, value: Option<&str>) {
@@ -783,9 +786,14 @@ fn native_harness_failure_block(failure: NativeHarnessFailure<'_>) -> String {
         Some(trace) => (
             trace.path.clone(),
             format!(
-                "\n    cargo patina replay {} {}",
+                "\n    cargo patina replay {} {}{}",
                 shell_quote(failure.built.guest.as_os_str()),
-                shell_quote(OsStr::new(&trace.path))
+                shell_quote(OsStr::new(&trace.path)),
+                if failure.invocation.allow_randomized_layout {
+                    " --allow-randomized-address-layout"
+                } else {
+                    ""
+                }
             ),
         ),
         None => ("not produced".to_string(), String::new()),
@@ -1075,6 +1083,7 @@ mod tests {
             OsString::from("--compute-watchdog-ms"),
             OsString::from("5000"),
         ]);
+        tokens.push(OsString::from("--allow-randomized-address-layout"));
 
         let args = cli::parse("test", help::Family::Harness, tokens).expect("harness parse");
         let invocation = NativeHarnessInvocation {
@@ -1097,6 +1106,7 @@ mod tests {
                 compute_watchdog_ms: args.string("--compute-watchdog-ms"),
                 ..NativeLiveness::default()
             },
+            allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
         };
         let mut emitted: Vec<OsString> = Vec::new();
         append_native_harness_run_flags(&mut emitted, &invocation);
@@ -1116,6 +1126,12 @@ mod tests {
             );
         }
         assert!(emitted.iter().any(|token| token == "--budget"));
+        assert!(
+            emitted
+                .iter()
+                .any(|token| token == "--allow-randomized-address-layout"),
+            "native harness dropped --allow-randomized-address-layout: {emitted:?}"
+        );
         for (flag, value) in [
             ("--realtime-epoch", "2001-09-09T01:46:40Z"),
             ("--hostname", "db-1"),

@@ -8,11 +8,11 @@ use crate::liveness::{Escalation, LivenessWatchdog, resolve_heal_after};
 use crate::recording::{Execution, RecordReservation, RecordSink, TraceTransport};
 use crate::replay::{
     buggify_record, dns_record, fault_record, guest_env_record, installed_clock_epoch,
-    reconcile_replay_boot_origin, reconcile_replay_buggify, reconcile_replay_dns,
-    reconcile_replay_faults, reconcile_replay_guest_cwd, reconcile_replay_guest_env,
-    reconcile_replay_hostname, reconcile_replay_realtime_epoch, reconcile_replay_schedule_policy,
-    reconcile_replay_sud, reconcile_replay_tsc, schedule_policy_record,
-    validate_buggify_fingerprint_contract, watchdog_record,
+    reconcile_replay_address_layout, reconcile_replay_boot_origin, reconcile_replay_buggify,
+    reconcile_replay_dns, reconcile_replay_faults, reconcile_replay_guest_cwd,
+    reconcile_replay_guest_env, reconcile_replay_hostname, reconcile_replay_realtime_epoch,
+    reconcile_replay_schedule_policy, reconcile_replay_sud, reconcile_replay_tsc,
+    schedule_policy_record, validate_buggify_fingerprint_contract, watchdog_record,
 };
 use crate::schedule::ScheduleTracker;
 use crate::swarm::apply_swarm_mask;
@@ -285,7 +285,8 @@ impl RuntimeBuilder {
                         .with_guest_cwd(self.config.guest_cwd.clone())
                         .with_dns(dns_record(&self.config))
                         .with_sud(self.config.sud)
-                        .with_tsc(self.config.tsc),
+                        .with_tsc(self.config.tsc)
+                        .with_address_layout(self.config.address_layout),
                     )
                     .with_incarnation(self.config.incarnation.id()),
                     sink: RecordSink::Path {
@@ -315,7 +316,8 @@ impl RuntimeBuilder {
                         .with_guest_cwd(self.config.guest_cwd.clone())
                         .with_dns(dns_record(&self.config))
                         .with_sud(self.config.sud)
-                        .with_tsc(self.config.tsc),
+                        .with_tsc(self.config.tsc)
+                        .with_address_layout(self.config.address_layout),
                     )
                     .with_incarnation(self.config.incarnation.id()),
                     sink: RecordSink::Transport(
@@ -355,6 +357,7 @@ impl RuntimeBuilder {
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
                 reconcile_replay_sud(&self.config, replayer.sud())?;
                 reconcile_replay_tsc(&self.config, replayer.tsc())?;
+                reconcile_replay_address_layout(&self.config, replayer.address_layout())?;
                 // The recording's swarm decision is authoritative and purely
                 // descriptive on replay (the trace's already-masked fault/buggify
                 // records drive the drivers). Adopting it makes a replay emit the
@@ -398,6 +401,7 @@ impl RuntimeBuilder {
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
                 reconcile_replay_sud(&self.config, replayer.sud())?;
                 reconcile_replay_tsc(&self.config, replayer.tsc())?;
+                reconcile_replay_address_layout(&self.config, replayer.address_layout())?;
                 swarm_record = replayer.swarm_config().cloned();
                 (Execution::Replay(replayer), root_seed)
             }

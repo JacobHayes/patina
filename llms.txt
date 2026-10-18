@@ -61,6 +61,20 @@ unknown option.
   `PATINA_COVERAGE_REPORT`; `--coverage-out PATH` writes a `patina.covmap/v1`
   edge-counter map and refuses plain native binaries with a
   `build --yield-points`/`--coverage-points` hint.
+  Native runs execute with address-space randomization off; a host that
+  forbids it (Docker's default seccomp profile) refuses the run unless
+  `--allow-randomized-address-layout` is passed (also on native `test`,
+  `explore run` and `campaign`, which forwards it to every generation and
+  reproduce command). It keeps the host's layout, pads nothing, qualifies the
+  run (stderr warning, envelope `qualifications[]`) and records
+  `address_layout: "randomized"` in the trace, where a fixed run records
+  `"fixed"`. Its replay needs the flag too, as does a trace with no
+  `address_layout` (recorded before layout control, so randomized); a
+  fixed-layout trace's replay must not pass it, and a standalone (unsupervised)
+  replay of a fixed trace is refused. A native campaign's state records its
+  layout policy; one without it predates layout control and is not continued.
+  A guest stack limit the host
+  cannot apply stops the run with the `host_limit` refusal.
   WASI runs emit `PATINA_DEPTH_REPORT` (fuel + per-import hostcall counts).
 - `cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [CARGO OPTIONS]`
   The Cargo package family under Patina.
@@ -97,7 +111,7 @@ unknown option.
   first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E repro="cargo patina run ... --seed S"`;
   the JSON envelope's `message` carries the same repro. Otherwise
   `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
-- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--dns-entry NAME=ADDR] [--no-verify] [--harness] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...]`
+- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--dns-entry NAME=ADDR] [--no-verify] [--harness] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number. `--faults` bands the
   fs error/short/latency rates, the crash PLACEMENT (op class + ordinal, plus
@@ -317,7 +331,7 @@ ABSENT means "did not fire", never zero.
   (`vacuous_schedule` with the unschedulable `tasks[]`, `vacuous_starvation`
   with the forced `decisions` count).
 - `refusal` = `{class, message}` — present only when PATINA failed closed
-  (`fingerprint_mismatch`, `trace_operation_mismatch`, `runtime_init_failure`,
+  (`host_limit`, `fingerprint_mismatch`, `trace_operation_mismatch`, `runtime_init_failure`,
   `no_runtime_installed`, `buggify_duplicate_label`,
   `buggify_setup_never_called`, `harness_before_install`,
   `preinit_interposed_call`, `shim_fatal`, `unsupported_import`,
@@ -327,6 +341,11 @@ ABSENT means "did not fire", never zero.
   Other classes are constructed by the
   supervising process from what the dying child printed and exited with. Its
   ABSENCE is meaningful: an abort with no `refusal` is the guest's own doing.
+- `qualifications[]` = `{kind, detail}` — what the operator relaxed for a
+  native run, each a reason its determinism is not guaranteed:
+  `randomized_address_layout` (`--allow-randomized-address-layout`) and
+  `unsupported_symbols` (`--allow-unsupported-symbols` downgrades, `detail`
+  naming them). Absent on an unqualified run.
 - `guest_exit` = `{code, signal?, signal_name?, core?}` — how the guest process ended.
   `core` is the observed wait-status core flag, present only on signal death.
   `code` is the shell-style `128 + signal` on a signal death, which cannot be
