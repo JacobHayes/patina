@@ -951,7 +951,7 @@ run_gen() {
   # Accumulate this gen's cooperative-SUT coverage and, once per sweep, prove the
   # runtime rows join the testbed's static sites inventory.
   local sdk_line; sdk_line="$(sdk_report_line "$err")"
-  campaign_accumulate "$CAMPAIGN_STATE" "$sdk_line"
+  campaign_observe "$CAMPAIGN_STATE" "$err" || exit 3
   if (( SITES_JOIN_CHECKED == 0 )) && [[ -n "$sdk_line" ]]; then
     buggify_sites_join_assert "$PATINA" "$here" "$err" || exit 3
     SITES_JOIN_CHECKED=1
@@ -1094,7 +1094,8 @@ Environment:
 Runtime: the nightly CI campaign sweeps 1..200; a full 200-gen run is minutes,
 far longer than the per-push budget. Exit status: 0 = no failure classes; 1 =
 one or more findings (or infrastructure errors); 2 = usage error; 3 =
-build/environment failure; 4 = another sweep holds the lock.
+build/environment failure, or a generation's SDK report was refused (its
+evidence is kept); 4 = another sweep holds the lock.
 EOF
 }
 is_num() { [[ "$1" =~ ^[0-9]+$ ]]; }

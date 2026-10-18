@@ -1252,7 +1252,7 @@ complete\"\n",
     match malformed.observe_generation(
         0,
         1,
-        "PATINA_SDK_REPORT enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-",
+        "PATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-",
     ) {
         Ok(()) => {
             println!("  FAIL malformed-coverage-row-rejected       -> parsed");
@@ -1334,13 +1334,13 @@ fn coverage_fixture(satisfied: bool) -> Result<CoverageTally, String> {
         0,
         100,
         &format!(
-            "PATINA_SDK_REPORT enabled=1 site=oracle|sometimes|a0|e4|f0|r1|s{bit}|v0|k-|@src/main.rs:10"
+            "PATINA_SDK_REPORT encoding=escaped enabled=1 site=oracle|sometimes|a0|e4|f0|r1|s{bit}|v0|k-|@src/main.rs:10"
         ),
     )?;
     tally.observe_generation(
         1,
         101,
-        "PATINA_SDK_REPORT enabled=1 site=faulty|fault|a1|e1|f1|r1|s0|v0|k-|@src/main.rs:11",
+        "PATINA_SDK_REPORT encoding=escaped enabled=1 site=faulty|fault|a1|e1|f1|r1|s0|v0|k-|@src/main.rs:11",
     )?;
     Ok(tally)
 }
@@ -1350,7 +1350,7 @@ fn declared_reachable_fixture() -> Result<CoverageTally, String> {
     tally.observe_generation(
         0,
         200,
-        "PATINA_SDK_REPORT enabled=1 sites_declared=1 declared_site=never|reachable|@src/main.rs:12",
+        "PATINA_SDK_REPORT encoding=escaped enabled=1 sites_declared=1 declared_site=never|reachable|@src/main.rs:12",
     )?;
     Ok(tally)
 }

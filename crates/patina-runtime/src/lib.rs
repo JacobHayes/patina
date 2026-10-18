@@ -136,7 +136,7 @@ pub use reports::{
     ENV_CLOCK_FAULT_REPORT, ENV_COVERAGE_REPORT, ENV_CUSTOMOP_FAULT_REPORT, ENV_DEPTH_REPORT,
     ENV_DNS_FAULT_REPORT, ENV_ENTROPY_FAULT_REPORT, ENV_FS_FAULT_REPORT, ENV_LIVENESS_REPORT,
     ENV_NET_FAULT_REPORT, ENV_SCHEDULE_POLICY_REPORT, ENV_SCHEDULE_REPORT, ENV_SDK_REPORT,
-    ENV_SWARM_REPORT, Report, ReportConfig, set_diagnostic_writer,
+    ENV_SWARM_REPORT, Report, ReportConfig, sdk_report_line, set_diagnostic_writer,
 };
 
 pub use patina_dst_abi::VerdictKind;

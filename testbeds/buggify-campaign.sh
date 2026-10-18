@@ -66,14 +66,43 @@ sdk_field() {
 # sites — whether the assertion was ever satisfied across the whole campaign.
 # Creates the state file if absent. A gen with no SDK_REPORT line only bumps the
 # generation counter, so a mixed or buggify-free campaign is handled cleanly.
+#
+# Labels and site identities are decoded with the runtime's report-token
+# escaping (`patina_dst_abi::report_token`); the header must carry
+# `encoding=escaped` before any site row, as `cargo patina` requires, and a line
+# without it or with a malformed escape fails the accumulation loudly.
 campaign_accumulate() {
   # args: state_file sdk_report_line
   local state_file="$1" sdk_line="$2"
   BUGGIFY_STATE_FILE="$state_file" BUGGIFY_SDK_LINE="$sdk_line" python3 - <<'PY'
-import json, os
+import json, os, re
 
 state_file = os.environ["BUGGIFY_STATE_FILE"]
 line = os.environ["BUGGIFY_SDK_LINE"].strip()
+
+NAMED_ESCAPES = {"\\": "\\", "s": " ", "t": "\t", "r": "\r", "n": "\n", "p": "|"}
+
+def unescape(value):
+    """Mirror of patina_dst_abi::report_token::unescape; exits on a bad escape."""
+    out, i = [], 0
+    while i < len(value):
+        ch = value[i]
+        i += 1
+        if ch != "\\":
+            out.append(ch)
+            continue
+        code = value[i] if i < len(value) else ""
+        i += 1
+        if code in NAMED_ESCAPES:
+            out.append(NAMED_ESCAPES[code])
+            continue
+        match = re.match(r"\{([0-9a-fA-F]+)\}", value[i:]) if code == "u" else None
+        point = int(match.group(1), 16) if match else -1
+        if not (0 <= point <= 0x10FFFF) or 0xD800 <= point <= 0xDFFF:
+            raise SystemExit(f"malformed escape in PATINA_SDK_REPORT field: {value!r}")
+        out.append(chr(point))
+        i += match.end()
+    return "".join(out)
 
 try:
     with open(state_file) as fh:
@@ -86,7 +115,15 @@ sites = state.setdefault("sites", {})
 
 if line.startswith("PATINA_SDK_REPORT"):
     state["gens_with_report"] = state.get("gens_with_report", 0) + 1
-    for token in line.split():
+    encoded = False
+    for token in filter(None, line.split(" ")):
+        if token.startswith("encoding="):
+            if token != "encoding=escaped":
+                raise SystemExit(f"unknown PATINA_SDK_REPORT encoding: {token}")
+            encoded = True
+            continue
+        if token.startswith(("site=", "declared_site=")) and not encoded:
+            raise SystemExit("PATINA_SDK_REPORT lacks encoding=escaped before its site rows")
         if not token.startswith("site="):
             continue
         # site=<label>|<kind>|a<0|1>|e<n>|f<n>|r<0|1>|s<0|1>|v<0|1>|k<v|->|@<file:line>
@@ -94,14 +131,16 @@ if line.startswith("PATINA_SDK_REPORT"):
         parts = body.split("|")
         if len(parts) != 10 or not parts[9].startswith("@") or len(parts[9]) == 1:
             raise SystemExit(f"malformed PATINA_SDK_REPORT site token (expected Wave 2 @file:line): {token}")
-        label, kind = parts[0], parts[1]
+        label, kind = unescape(parts[0]), parts[1]
+        if not label:
+            raise SystemExit(f"PATINA_SDK_REPORT site token has an empty label: {token}")
         active = parts[2] == "a1"
         evals = int(parts[3][1:]) if parts[3][1:].isdigit() else 0
         fires = int(parts[4][1:]) if parts[4][1:].isdigit() else 0
         reached = parts[5] == "r1"
         satisfied = parts[6] == "s1"
         violated = parts[7] == "v1"
-        site = parts[9][1:]
+        site = unescape(parts[9][1:])
         rec = sites.setdefault(label, {
             "kind": kind, "site": site, "reached": False, "activated_gens": 0,
             "fired_gens": 0, "total_fires": 0, "sometimes_satisfied": False,
@@ -119,6 +158,8 @@ if line.startswith("PATINA_SDK_REPORT"):
             rec["sometimes_satisfied"] = True
         if violated:
             rec["always_violated"] = True
+    if not encoded:
+        raise SystemExit("PATINA_SDK_REPORT lacks its encoding=escaped header")
 
 tmp = state_file + ".tmp"
 with open(tmp, "w") as fh:
@@ -128,8 +169,10 @@ PY
 }
 
 # Print the labels of `sometimes` sites that were reached during the campaign but
-# never satisfied — the SOMETIMES_UNMET set. Empty output means every reached
-# sometimes-site was satisfied at least once. This legacy shell helper tracks the
+# never satisfied — the SOMETIMES_UNMET set — one per line, in the report's own
+# escaped form, so a label holding a newline (or any whitespace) is still exactly
+# one non-empty line for a caller's `read -r` loop. Empty output means every
+# reached sometimes-site was satisfied at least once. This legacy shell helper tracks the
 # SOMETIMES_UNMET class only; first-class `cargo patina campaign` consumes
 # `declared_site=` rows and gates never-reached `reachable!` sites too.
 campaign_sometimes_unmet() {
@@ -137,12 +180,37 @@ campaign_sometimes_unmet() {
   [[ -f "$1" ]] || return 0
   BUGGIFY_STATE_FILE="$1" python3 - <<'PY'
 import json, os
+
+# Unicode White_Space, the set Rust's char::is_whitespace (and so
+# patina_dst_abi::report_token::escape) escapes as \u{hex}.
+WHITE_SPACE = set("\t\n\x0b\x0c\r \x85\xa0\u1680\u2028\u2029\u202f\u205f\u3000")
+WHITE_SPACE |= {chr(c) for c in range(0x2000, 0x200B)}
+NAMED = {"\\": "\\\\", " ": "\\s", "\t": "\\t", "\r": "\\r", "\n": "\\n", "|": "\\p"}
+
+def escape(value):
+    """Mirror of patina_dst_abi::report_token::escape."""
+    return "".join(
+        NAMED.get(ch) or (f"\\u{{{ord(ch):x}}}" if ch in WHITE_SPACE else ch) for ch in value
+    )
+
 with open(os.environ["BUGGIFY_STATE_FILE"]) as fh:
     state = json.load(fh)
 for label, rec in sorted(state.get("sites", {}).items()):
     if rec.get("kind") == "sometimes" and rec.get("reached") and not rec.get("sometimes_satisfied"):
-        print(label)
+        print(escape(label))
 PY
+}
+
+# Fold one generation's stderr report into the campaign state. A report the
+# accumulator refuses (no encoding marker, a malformed row or escape) is a loud
+# failure naming the evidence file; every caller must stop on it and keep that
+# file, never count the generation as clean.
+campaign_observe() {
+  # args: state_file stderr_file
+  if ! campaign_accumulate "$1" "$(sdk_report_line "$2")"; then
+    echo "FATAL: the PATINA_SDK_REPORT in $2 was refused; that generation's evidence is kept" >&2
+    return 1
+  fi
 }
 
 # Assert that a raw run stderr joins cleanly against the testbed's static sites.
@@ -214,16 +282,16 @@ PATINA_SDK_REPORT enabled=1 sites_registered=3' 'PATINA_VERDICT seq=0 kind=viola
   # Gen 1: the "torn-page" sometimes site is reached (r1) but unsatisfied (s0);
   # the "recovery" sometimes site is satisfied (s1).
   campaign_accumulate "$tmp" \
-    'PATINA_SDK_REPORT enabled=1 fire_permille=250 activation_permille=250 cutoff_nanos=0 cutoff_reached=0 sites_registered=3 sites_activated=1 total_firings=2 cutoff_suppressed=0 after_setup=0 setup_complete=1 site=torn-page-rejected|sometimes|a0|e5|f0|r1|s0|v0|k-|@src/main.rs:10 site=recovery-exercised|sometimes|a0|e3|f0|r1|s1|v0|k-|@src/main.rs:11 site=commit-early|fault|a1|e5|f2|r1|s0|v0|k-|@src/main.rs:12'
+    'PATINA_SDK_REPORT encoding=escaped enabled=1 fire_permille=250 activation_permille=250 cutoff_nanos=0 cutoff_reached=0 sites_registered=3 sites_activated=1 total_firings=2 cutoff_suppressed=0 after_setup=0 setup_complete=1 site=torn-page-rejected|sometimes|a0|e5|f0|r1|s0|v0|k-|@src/main.rs:10 site=recovery-exercised|sometimes|a0|e3|f0|r1|s1|v0|k-|@src/main.rs:11 site=commit-early|fault|a1|e5|f2|r1|s0|v0|k-|@src/main.rs:12'
   # Gen 2: torn-page reached again, still unsatisfied.
   campaign_accumulate "$tmp" \
-    'PATINA_SDK_REPORT enabled=1 sites_registered=3 site=torn-page-rejected|sometimes|a0|e4|f0|r1|s0|v0|k-|@src/main.rs:10'
+    'PATINA_SDK_REPORT encoding=escaped enabled=1 sites_registered=3 site=torn-page-rejected|sometimes|a0|e4|f0|r1|s0|v0|k-|@src/main.rs:10'
   local unmet; unmet="$(campaign_sometimes_unmet "$tmp")"
   _bc_expect "torn-page-rejected" "$unmet" "sometimes-unmet-fires"
 
   # Once the site is satisfied in a later gen, it drops out of the unmet set.
   campaign_accumulate "$tmp" \
-    'PATINA_SDK_REPORT enabled=1 sites_registered=3 site=torn-page-rejected|sometimes|a0|e4|f1|r1|s1|v0|k-|@src/main.rs:10'
+    'PATINA_SDK_REPORT encoding=escaped enabled=1 sites_registered=3 site=torn-page-rejected|sometimes|a0|e4|f1|r1|s1|v0|k-|@src/main.rs:10'
   _bc_expect "" "$(campaign_sometimes_unmet "$tmp")" "sometimes-unmet-clears-when-satisfied"
 
   # The accumulator counts generations and fault fires correctly.
@@ -233,6 +301,54 @@ PATINA_SDK_REPORT enabled=1 sites_registered=3' 'PATINA_VERDICT seq=0 kind=viola
   _bc_expect 3 "$gens" "campaign-generation-count"
   _bc_expect 2 "$fires" "campaign-fault-fire-count"
   rm -f "$tmp"
+
+  # Labels and site identities arrive escaped: `retry\\site` encodes the label
+  # `retry\site`, so its unsatisfied and satisfied reports are ONE site, keyed
+  # by its decoded label (and reported, like every unmet label, escaped).
+  tmp="$(mktemp)"
+  campaign_accumulate "$tmp" \
+    'PATINA_SDK_REPORT encoding=escaped enabled=1 site=retry\\site|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/a\sb.rs:1'
+  _bc_expect 'retry\\site' "$(campaign_sometimes_unmet "$tmp")" "unmet-label-reported-escaped"
+  _bc_expect 'src/a b.rs:1' \
+    "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['sites']['retry\\\\site']['site'])" "$tmp")" \
+    "escaped-site-identity-decodes"
+  campaign_accumulate "$tmp" \
+    'PATINA_SDK_REPORT encoding=escaped enabled=1 site=retry\\site|sometimes|a0|e1|f0|r1|s1|v0|k-|@src/a\sb.rs:1'
+  _bc_expect "" "$(campaign_sometimes_unmet "$tmp")" "escaped-label-satisfied-once-clears"
+  # A report without the encoding marker (written before escaping) or with a
+  # malformed escape is refused rather than decoded under a guess.
+  local refused
+  for refused in \
+    'PATINA_SDK_REPORT enabled=1 site=retry\site|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:1' \
+    'PATINA_SDK_REPORT encoding=escaped enabled=1 site=retry\q|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:1'; do
+    if campaign_accumulate "$tmp" "$refused" 2>/dev/null; then
+      _bc_expect refused accepted "undecodable-report-refused"
+    else
+      _bc_expect refused refused "undecodable-report-refused"
+    fi
+  done
+  rm -f "$tmp"
+
+  # A label that decodes to a newline is still ONE unmet site through the
+  # callers' own `read -r` loop, which drops empty lines.
+  tmp="$(mktemp)"
+  campaign_accumulate "$tmp" \
+    'PATINA_SDK_REPORT encoding=escaped enabled=1 site=\n|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:1'
+  local unmet_sites=() line
+  while IFS= read -r line; do [[ -n "$line" ]] && unmet_sites+=("$line"); done < <(campaign_sometimes_unmet "$tmp")
+  _bc_expect 1 "${#unmet_sites[@]}" "newline-label-counts-as-one-unmet-site"
+  _bc_expect '\n' "${unmet_sites[0]:-}" "newline-label-reported-escaped"
+  rm -f "$tmp"
+
+  # campaign_observe, the callers' entry point, fails on a refused report.
+  tmp="$(mktemp)"; local err; err="$(mktemp)"
+  echo 'PATINA_SDK_REPORT enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:1' > "$err"
+  if campaign_observe "$tmp" "$err" 2>/dev/null; then
+    _bc_expect failed observed "observe-fails-on-a-refused-report"
+  else
+    _bc_expect failed failed "observe-fails-on-a-refused-report"
+  fi
+  rm -f "$tmp" "$err"
 
   echo
   if (( fail )); then echo "BUGGIFY CAMPAIGN SELFTEST FAILED"; return 1; fi

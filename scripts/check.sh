@@ -243,6 +243,7 @@ run_full() {
   run_rung 'crate packaging' cargo package --workspace --no-verify --locked --allow-dirty || return $?
   run_rung 'multiproc classifier selftest' testbeds/multiproc/run-patina.sh --selftest || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
+  run_rung 'wasi buggify sweep selftest' testbeds/buggify-wasi/wasi-buggify-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
 
   # The cargo-patina end_to_end binary dominates the pinned workspace suite and
@@ -285,6 +286,7 @@ run_fast() {
   run_rung 'CLI flag drift' scripts/check-flag-drift.sh || return $?
   run_rung 'multiproc classifier selftest' testbeds/multiproc/run-patina.sh --selftest || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
+  run_rung 'wasi buggify sweep selftest' testbeds/buggify-wasi/wasi-buggify-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
 
   run_rung 'native ecosystem receipt selftest' scripts/check-native-testbeds.sh --selftest || return $?

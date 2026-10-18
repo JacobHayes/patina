@@ -150,6 +150,7 @@ jobs:
       # CLI-level gate against the shipped subcommand.
       - run: testbeds/multiproc/run-patina.sh --selftest
       - run: testbeds/workq/fuzz-sweep.sh --selftest
+      - run: testbeds/buggify-wasi/wasi-buggify-sweep.sh --selftest
       - run: cargo run -p cargo-patina --quiet -- campaign --selftest
       # The flagship durable-work-queue testbed's full self-checking gate
       # (determinism, record/replay, net/fs faults, crash-recovery, buggify

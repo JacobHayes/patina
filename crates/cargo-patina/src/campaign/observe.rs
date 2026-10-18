@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn sites_fold_is_watermark_idempotent() {
-        let stderr = "PATINA_SDK_REPORT enabled=1 \
+        let stderr = "PATINA_SDK_REPORT encoding=escaped enabled=1 \
              site=oracle|sometimes|a1|e3|f2|r1|s1|v0|k-|@src/main.rs:9";
         let mut coverage = CoverageTally::default();
         let first = fold_sites_generation(&mut coverage, 0, 99, stderr).expect("first fold");

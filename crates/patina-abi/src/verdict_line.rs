@@ -1,6 +1,7 @@
 //! Verdict diagnostic marker rendering, escaping, and parsing.
 
 use super::VerdictKind;
+use crate::report_token::{escape, unescape};
 
 /// The marker prefix, including its trailing space.
 pub const PREFIX: &str = "PATINA_VERDICT ";
@@ -37,46 +38,6 @@ pub fn parse(line: &str) -> Option<(u64, VerdictKind, String, String)> {
         }
     }
     Some((seq?, kind?, label?, detail?))
-}
-
-/// Escape one field so it is a single whitespace-free token that round-trips
-/// through [`unescape`]. Backslash is the escape character; space, tab, CR,
-/// and LF get named escapes. Everything else passes through unchanged, so a
-/// label with no special bytes reads exactly as written.
-pub fn escape(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            ' ' => out.push_str("\\s"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\n' => out.push_str("\\n"),
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// Reverse [`escape`]. `None` on a dangling or unknown escape.
-pub fn unescape(value: &str) -> Option<String> {
-    let mut out = String::with_capacity(value.len());
-    let mut chars = value.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        match chars.next()? {
-            '\\' => out.push('\\'),
-            's' => out.push(' '),
-            't' => out.push('\t'),
-            'r' => out.push('\r'),
-            'n' => out.push('\n'),
-            _ => return None,
-        }
-    }
-    Some(out)
 }
 
 #[cfg(test)]

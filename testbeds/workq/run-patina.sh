@@ -259,7 +259,9 @@ for (( G=1; G<=BUGGIFY_GENS; G++ )); do
   elif [[ -n "$class" && "$class" != "OK" ]]; then
     echo "    FAIL: buggify class $class at gen $G"; fail=1; stderr_tail "$err"
   fi
-  campaign_accumulate "$CAMPAIGN_STATE" "$(sdk_report_line "$err")"
+  if ! campaign_observe "$CAMPAIGN_STATE" "$err"; then
+    echo "    FAIL: refused SDK report at buggify gen $G (kept: $err)"; fail=1; stderr_tail "$err"
+  fi
 done
 # Campaign-level SOMETIMES_UNMET: a sometimes! site reached but never satisfied.
 unmet=()

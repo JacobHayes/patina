@@ -252,7 +252,7 @@ fn campaign_extend_reproduces_aux_store_bytes_for_sites_and_coverage() {
     fs::write(
         &source,
         r#"fn main() {
-    eprintln!("PATINA_SDK_REPORT enabled=1 site=aux|sometimes|a1|e3|f1|r1|s1|v0|k-|@src/main.rs:1");
+    eprintln!("PATINA_SDK_REPORT encoding=escaped enabled=1 site=aux|sometimes|a1|e3|f1|r1|s1|v0|k-|@src/main.rs:1");
     let mut sum = 0u64;
     for i in 0..128u64 {
         sum = sum.wrapping_add(i.rotate_left((i % 17) as u32));

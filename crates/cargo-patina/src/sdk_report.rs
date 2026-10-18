@@ -8,7 +8,11 @@
 //! rows from the SDK link-time table; these fold into `<out>/sites.json` with
 //! `registered_gens=0` until a runtime `site=` row evaluates them. Campaigns fold
 //! the same rows into `<out>/sites.json` (`patina.campaign.sites/v1`), which
-//! `cargo patina sites --exercised` also consumes.
+//! `cargo patina sites --exercised` also consumes. Labels and site identities
+//! are escaped by `patina_dst_abi::report_token`, so the line splits on single
+//! spaces and each token on `|` without ambiguity, whatever the label holds. The
+//! header's `encoding=escaped` token marks that encoding; a line without it is
+//! refused, never decoded under a guess.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -18,9 +22,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::CliError;
+use patina_dst_abi::report_token;
 
 pub(crate) const CAMPAIGN_SITES_SCHEMA: &str = "patina.campaign.sites/v1";
 const PREFIX: &str = "PATINA_SDK_REPORT ";
+/// The header token naming the field encoding. Reports written before labels
+/// were escaped lack it, and their literal labels are indistinguishable from
+/// escaped ones (`a\sb` is both), so a line without it is refused rather than
+/// decoded under a guess.
+const ENCODING_MARKER: &str = "encoding=escaped";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SdkReport {
@@ -467,9 +477,23 @@ pub(crate) fn parse_report_line(line: &str) -> Result<SdkReport, String> {
         .strip_prefix(PREFIX)
         .ok_or_else(|| "SDK report line must start with PATINA_SDK_REPORT".to_string())?;
     let mut enabled = None;
+    let mut encoded = false;
     let mut declared_sites = Vec::new();
     let mut sites = Vec::new();
-    for token in rest.split_whitespace() {
+    for token in rest.split(' ').filter(|token| !token.is_empty()) {
+        if let Some(value) = token.strip_prefix("encoding=") {
+            if token != ENCODING_MARKER {
+                return Err(format!("unknown SDK report encoding {value:?}"));
+            }
+            encoded = true;
+            continue;
+        }
+        if !encoded && (token.starts_with("declared_site=") || token.starts_with("site=")) {
+            return Err(format!(
+                "SDK report line lacks {ENCODING_MARKER} before its site rows; it was written \
+                 before site labels were escaped, so its labels cannot be decoded unambiguously"
+            ));
+        }
         if let Some(body) = token.strip_prefix("declared_site=") {
             declared_sites.push(parse_declared_site_token(body)?);
         } else if let Some(body) = token.strip_prefix("site=") {
@@ -477,6 +501,11 @@ pub(crate) fn parse_report_line(line: &str) -> Result<SdkReport, String> {
         } else if let Some(value) = token.strip_prefix("enabled=") {
             enabled = Some(parse_header_bool("enabled", value)?);
         }
+    }
+    if !encoded {
+        return Err(format!(
+            "SDK report line lacks its {ENCODING_MARKER} header"
+        ));
     }
     Ok(SdkReport {
         enabled,
@@ -492,17 +521,13 @@ fn parse_declared_site_token(body: &str) -> Result<SdkDeclaredSiteReport, String
             "malformed SDK declared-site token {body:?}: expected <label>|<kind>|@<file:line>"
         ));
     }
-    let label = required_text("declared label", parts[0])?;
+    let label = escaped_text("declared label", parts[0])?;
     let kind = parse_kind(parts[1])?.to_string();
     let site = parts[2]
         .strip_prefix('@')
         .ok_or_else(|| format!("declared site identity field must start with @ in {body:?}"))?;
-    let site = required_text("declared site identity", site)?;
-    Ok(SdkDeclaredSiteReport {
-        label: label.to_string(),
-        kind,
-        site: site.to_string(),
-    })
+    let site = escaped_text("declared site identity", site)?;
+    Ok(SdkDeclaredSiteReport { label, kind, site })
 }
 
 fn parse_site_token(body: &str) -> Result<SdkSiteReport, String> {
@@ -512,7 +537,7 @@ fn parse_site_token(body: &str) -> Result<SdkSiteReport, String> {
             "malformed SDK site token {body:?}: expected 10 pipe-separated fields including trailing |@<file:line>"
         ));
     }
-    let label = required_text("label", parts[0])?;
+    let label = escaped_text("label", parts[0])?;
     let kind = parse_kind(parts[1])?.to_string();
     let active = parse_prefixed_bool("active", parts[2], 'a')?;
     let evals = parse_prefixed_u64("evals", parts[3], 'e')?;
@@ -524,9 +549,9 @@ fn parse_site_token(body: &str) -> Result<SdkSiteReport, String> {
     let site = parts[9]
         .strip_prefix('@')
         .ok_or_else(|| format!("site identity field must start with @ in {body:?}"))?;
-    let site = required_text("site identity", site)?;
+    let site = escaped_text("site identity", site)?;
     Ok(SdkSiteReport {
-        label: label.to_string(),
+        label,
         kind,
         active,
         evals,
@@ -535,7 +560,7 @@ fn parse_site_token(body: &str) -> Result<SdkSiteReport, String> {
         sometimes_satisfied,
         always_violated,
         knob,
-        site: site.to_string(),
+        site,
     })
 }
 
@@ -545,6 +570,12 @@ fn required_text<'a>(name: &str, value: &'a str) -> Result<&'a str, String> {
     } else {
         Ok(value)
     }
+}
+
+/// A required, `report_token`-escaped field, decoded.
+fn escaped_text(name: &str, value: &str) -> Result<String, String> {
+    report_token::unescape(required_text(name, value)?)
+        .ok_or_else(|| format!("SDK report {name} has a malformed escape: {value:?}"))
 }
 
 fn parse_kind(value: &str) -> Result<&str, String> {
@@ -597,7 +628,7 @@ mod tests {
     #[test]
     fn parses_wave2_site_rows_with_file_line_identity() {
         let parsed = parse_report_line(
-            "PATINA_SDK_REPORT enabled=1 sites_registered=2 \
+            "PATINA_SDK_REPORT encoding=escaped enabled=1 sites_registered=2 \
              site=commit|fault|a1|e3|f2|r1|s0|v0|k-|@src/main.rs:9 \
              site=batch|knob|a1|e0|f0|r1|s0|v0|k42|@src/main.rs:4",
         )
@@ -612,7 +643,7 @@ mod tests {
 
     #[test]
     fn declared_sites_round_trip_as_zero_registered_rows() {
-        let line = "PATINA_SDK_REPORT enabled=1 sites_declared=2 \
+        let line = "PATINA_SDK_REPORT encoding=escaped enabled=1 sites_declared=2 \
              declared_site=never|reachable|@src/main.rs:9 \
              declared_site=maybe|sometimes|@src/main.rs:10 \
              site=maybe|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:10";
@@ -637,11 +668,130 @@ mod tests {
         assert_eq!(loaded, tally);
     }
 
+    /// Every ordered pair of awkward fragments, so each meets every other at
+    /// both ends of a label.
+    fn awkward_labels() -> Vec<String> {
+        const FRAGMENTS: &[&str] = &[
+            "plain",
+            "a spaced label",
+            " lead",
+            "trail ",
+            "\"quoted\"",
+            "k=v",
+            "declared_site=x",
+            "site=x|fault|@y",
+            "a|b|c",
+            "line\nPATINA_SDK_REPORT enabled=1",
+            "\r\t",
+            "back\\slash \\s",
+            "naïve café 日本語 🦀",
+            "\u{a0}nbsp\u{2003}em",
+            "@src/main.rs:3",
+        ];
+        FRAGMENTS
+            .iter()
+            .flat_map(|a| FRAGMENTS.iter().map(move |b| format!("{a}{b}")))
+            .collect()
+    }
+
+    #[test]
+    fn any_label_round_trips_through_the_runtime_writer() {
+        use patina_dst_runtime::{
+            BuggifyDeclaredSiteReport, BuggifyDiagnostics, BuggifyKind, BuggifySiteReport,
+        };
+        let labels = awkward_labels();
+        let site_of = |index: usize| format!("dir with space/a|b {index}.rs:{index}");
+        let diag = BuggifyDiagnostics {
+            enabled: true,
+            declared_sites: labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| BuggifyDeclaredSiteReport {
+                    label: label.clone(),
+                    site: site_of(index),
+                    kind: BuggifyKind::Reachable,
+                })
+                .collect(),
+            sites: labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| BuggifySiteReport {
+                    label: label.clone(),
+                    site: site_of(index),
+                    kind: BuggifyKind::Sometimes,
+                    active: true,
+                    evals: 3,
+                    fires: 1,
+                    reachable: true,
+                    sometimes_satisfied: false,
+                    always_violated: false,
+                    knob: Some(-7),
+                })
+                .collect(),
+            ..BuggifyDiagnostics::default()
+        };
+        let line = patina_dst_runtime::sdk_report_line(&diag).unwrap();
+        assert_eq!(line.lines().count(), 1, "the report must stay one line");
+        assert_eq!(last_report_line(&line), Some(line.as_str()));
+
+        let parsed = parse_report_line(&line).unwrap();
+        let declared = parsed
+            .declared_sites
+            .iter()
+            .map(|site| (site.label.clone(), site.site.clone()))
+            .collect::<Vec<_>>();
+        let evaluated = parsed
+            .sites
+            .iter()
+            .map(|site| (site.label.clone(), site.site.clone()))
+            .collect::<Vec<_>>();
+        let expected = labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| (label.clone(), site_of(index)))
+            .collect::<Vec<_>>();
+        assert_eq!(declared, expected);
+        assert_eq!(evaluated, expected);
+        assert!(parsed.sites.iter().all(|site| site.knob == Some(-7)));
+    }
+
+    #[test]
+    fn malformed_label_escapes_fail_loudly() {
+        let well_formed = "PATINA_SDK_REPORT encoding=escaped enabled=1 declared_site=ok|reachable|@src/main.rs:3";
+        assert!(parse_report_line(well_formed).is_ok());
+        for bad_label in ["dangling\\", "unknown\\q"] {
+            let line = well_formed.replace("=ok|", &format!("={bad_label}|"));
+            assert!(parse_report_line(&line).is_err(), "{line:?} must not parse");
+        }
+    }
+
+    #[test]
+    fn reports_without_the_encoding_marker_are_refused_not_guessed() {
+        // Literal labels from a report written before escaping: one is not a
+        // valid escape, one IS a valid escape of a different label. Neither
+        // may decode, in a single line or through `sites --exercised`.
+        let dir = tempfile::tempdir().unwrap();
+        for label in ["retry\\queue", "a\\sb", "plain"] {
+            let unmarked = format!(
+                "PATINA_SDK_REPORT enabled=1 site={label}|sometimes|a0|e1|f0|r1|s1|v0|k-|@src/main.rs:3"
+            );
+            assert!(parse_report_line(&unmarked).is_err(), "{unmarked:?}");
+            let path = dir.path().join("old.stderr");
+            fs::write(&path, format!("{unmarked}\n")).unwrap();
+            assert!(parse_exercised_file(&path).is_err(), "{unmarked:?}");
+            // A marker after the site rows does not vouch for them.
+            let late = format!("{unmarked} encoding=escaped");
+            assert!(parse_report_line(&late).is_err(), "{late:?}");
+        }
+        assert!(parse_report_line("PATINA_SDK_REPORT encoding=literal enabled=1").is_err());
+    }
+
     #[test]
     fn rejects_legacy_site_rows_without_file_line_identity() {
-        let error =
-            parse_report_line("PATINA_SDK_REPORT enabled=1 site=commit|fault|a1|e3|f2|r1|s0|v0|k-")
-                .unwrap_err();
+        let error = parse_report_line(
+            "PATINA_SDK_REPORT encoding=escaped enabled=1 site=commit|fault|a1|e3|f2|r1|s0|v0|k-",
+        )
+        .unwrap_err();
         assert!(
             error.contains("expected 10 pipe-separated fields"),
             "unexpected error: {error}"
@@ -650,7 +800,7 @@ mod tests {
 
     #[test]
     fn last_line_wins_and_absent_line_is_ok_for_campaign_observation() {
-        let stderr = "noise\nPATINA_SDK_REPORT enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:3\nPATINA_SDK_REPORT enabled=1 site=x|sometimes|a0|e2|f0|r1|s1|v0|k-|@src/main.rs:3\n";
+        let stderr = "noise\nPATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:3\nPATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e2|f0|r1|s1|v0|k-|@src/main.rs:3\n";
         assert!(last_report_line("noise only").is_none());
         let mut tally = CoverageTally::default();
         tally.observe_generation(0, 11, "noise only").unwrap();
@@ -670,7 +820,7 @@ mod tests {
         let path = dir.path().join("stderr.log");
         fs::write(
             &path,
-            "noise\nPATINA_SDK_REPORT enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:3\nPATINA_SDK_REPORT enabled=1 site=x|sometimes|a0|e2|f0|r1|s1|v0|k-|@src/main.rs:3\n",
+            "noise\nPATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:3\nPATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e2|f0|r1|s1|v0|k-|@src/main.rs:3\n",
         )
         .unwrap();
         let source = parse_exercised_file(&path).unwrap();
@@ -692,14 +842,14 @@ mod tests {
             .observe_generation(
                 0,
                 123,
-                "PATINA_SDK_REPORT enabled=1 site=x|sometimes|a0|e4|f0|r1|s0|v0|k-|@src/main.rs:3",
+                "PATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e4|f0|r1|s0|v0|k-|@src/main.rs:3",
             )
             .unwrap();
         tally
             .observe_generation(
                 1,
                 456,
-                "PATINA_SDK_REPORT enabled=1 site=x|sometimes|a0|e5|f0|r1|s1|v0|k-|@src/main.rs:3 site=f|fault|a1|e1|f1|r1|s0|v0|k-|@src/main.rs:4",
+                "PATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e5|f0|r1|s1|v0|k-|@src/main.rs:3 site=f|fault|a1|e1|f1|r1|s0|v0|k-|@src/main.rs:4",
             )
             .unwrap();
         let json = tally.to_json();
@@ -726,7 +876,7 @@ mod tests {
             .observe_generation(
                 0,
                 1,
-                "PATINA_SDK_REPORT enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-",
+                "PATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-",
             )
             .unwrap_err();
         assert!(

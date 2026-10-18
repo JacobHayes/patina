@@ -137,7 +137,7 @@ run_gen() {
 
   bump "$class"
   local sdk_line; sdk_line="$(sdk_report_line "$err")"
-  campaign_accumulate "$CAMPAIGN_STATE" "$sdk_line"
+  campaign_observe "$CAMPAIGN_STATE" "$err" || exit 3
   if (( SITES_JOIN_CHECKED == 0 )) && [[ -n "$sdk_line" ]]; then
     buggify_sites_join_assert "$PATINA" "$here" "$err" || exit 3
     SITES_JOIN_CHECKED=1
@@ -191,6 +191,46 @@ PY
   fi
 }
 
+# Caller-level selftest: drive run_gen itself over a stub cargo-patina whose
+# runs print a canned stderr report. A generation whose report is refused must
+# stop the sweep with status 3 and keep its evidence; a clean one is removed.
+wasi_sweep_selftest() {
+  echo "== wasi sweep caller selftest =="
+  local scratch fail=0 status
+  scratch="$(mktemp -d)"
+  cat > "$scratch/cargo-patina" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  run|replay) echo "WASI_BUGGIFY_DIGEST stub"; cat "$STUB_SDK_FILE" >&2 ;;
+  sites) echo '{"unmatched_runtime_labels": 0}' ;;
+esac
+STUB
+  chmod +x "$scratch/cargo-patina"
+  PATINA="$scratch/cargo-patina" WASM="$scratch/stub.wasm" OUTDIR="$scratch/out"
+  CAMPAIGN_STATE="$OUTDIR/campaign-state.json" SWEEP_LOG="$OUTDIR/sweep.log"
+  mkdir -p "$OUTDIR"; : > "$SWEEP_LOG"
+  export STUB_SDK_FILE="$scratch/sdk"
+  _ws_expect() { # want got name
+    if [[ "$1" == "$2" ]]; then printf '  ok   %-40s -> %s\n' "$3" "$2"
+    else printf '  FAIL %-40s -> %s (want %s)\n' "$3" "$2" "$1"; fail=1; fi
+  }
+
+  echo 'PATINA_SDK_REPORT enabled=1 encoding=escaped site=x|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:1' > "$STUB_SDK_FILE"
+  ( run_gen 1 ) >/dev/null 2>&1; status=$?
+  _ws_expect 0 "$status" "marked-report-generation-continues"
+  _ws_expect absent "$([[ -e "$OUTDIR/gen-1" ]] && echo kept || echo absent)" "clean-generation-evidence-removed"
+
+  echo 'PATINA_SDK_REPORT enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:1' > "$STUB_SDK_FILE"
+  ( run_gen 2 ) >/dev/null 2>&1; status=$?
+  _ws_expect 3 "$status" "refused-report-stops-the-sweep"
+  _ws_expect kept "$([[ -s "$OUTDIR/gen-2/stderr" ]] && echo kept || echo absent)" "refused-generation-evidence-kept"
+
+  rm -rf "$scratch"
+  echo
+  if (( fail )); then echo "WASI SWEEP CALLER SELFTEST FAILED"; return 1; fi
+  echo "WASI SWEEP CALLER SELFTEST PASSED"
+}
+
 usage() {
   echo "usage: wasi-buggify-sweep.sh [START [END]]        run gens START..END (default 1 40)" >&2
   echo "       wasi-buggify-sweep.sh --dry-run [START [END]]  print derived config(s), no run" >&2
@@ -227,8 +267,8 @@ Environment:
                          (default <repo>/target/testbeds/buggify-wasi).
 
 Exit status: 0 = campaign clean (or --help/--selftest ok); 1 = one or more
-findings; 2 = usage error; 3 = build/environment failure; 4 = another sweep
-holds the lock; 7 = a sometimes! site was reached but never satisfied.
+findings; 2 = usage error; 3 = build/environment failure, or a generation's SDK
+report was refused (its evidence is kept); 4 = another sweep holds the lock; 7 = a sometimes! site was reached but never satisfied.
 EOF
 }
 is_num() { [[ "$1" =~ ^[0-9]+$ ]]; }
@@ -239,7 +279,7 @@ main() {
     -h|--help) help; exit 0 ;;
     --selftest)
       [[ $# -gt 1 ]] && { echo "wasi-buggify-sweep.sh: --selftest takes no arguments" >&2; usage; exit 2; }
-      buggify_campaign_selftest; exit $? ;;
+      buggify_campaign_selftest && wasi_sweep_selftest; exit $? ;;
     --dry-run) derive_only=1; shift ;;
     -*) echo "wasi-buggify-sweep.sh: unknown option '${1}'" >&2; usage; exit 2 ;;
   esac

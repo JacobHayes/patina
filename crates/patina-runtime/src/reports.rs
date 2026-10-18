@@ -3,6 +3,7 @@
 use crate::buggify::BuggifyDiagnostics;
 use crate::liveness::LivenessWatchdog;
 use crate::schedule::ScheduleDiagnostics;
+use patina_dst_abi::report_token;
 use std::sync::OnceLock;
 
 /// Where the runtime's own diagnostic text goes: std's stderr, unless an
@@ -609,24 +610,36 @@ subset or the interval window.",
     }
 }
 
-/// Emit the machine-readable `PATINA_SDK_REPORT` line for a run that registered
-/// any cooperative-SUT sites (or enabled buggify). One line, same spirit as
-/// `PATINA_SCHEDULE_REPORT`: a campaign parses it to accumulate per-site coverage
-/// across generations. Suppressed by a false-y [`ENV_SDK_REPORT`]. Link-time
-/// declarations use `declared_site=<label>|<kind>|@<file:line>` and do not imply
-/// evaluation. Per-evaluated-site token is
-/// `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->|@<file:line>`.
+/// Emit the machine-readable `PATINA_SDK_REPORT` line ([`sdk_report_line`]).
+/// Suppressed by a false-y [`ENV_SDK_REPORT`].
 pub(super) fn emit_sdk_report(reports: ReportConfig, diag: &BuggifyDiagnostics) {
-    if !diag.enabled && diag.sites_registered == 0 && diag.declared_sites.is_empty() {
-        return;
-    }
     if !reports.enabled(Report::Sdk) {
         return;
+    }
+    if let Some(line) = sdk_report_line(diag) {
+        diagnostic!("{line}");
+    }
+}
+
+/// The `PATINA_SDK_REPORT` line for a run that declared or registered any
+/// cooperative-SUT sites (or enabled buggify); `None` otherwise. One line, same
+/// spirit as `PATINA_SCHEDULE_REPORT`: a campaign parses it to accumulate
+/// per-site coverage across generations. Link-time declarations use
+/// `declared_site=<label>|<kind>|@<file:line>` and do not imply evaluation.
+/// Per-evaluated-site token is
+/// `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->|@<file:line>`.
+/// `<label>` and `<file:line>` are escaped with [`report_token::escape`], so any
+/// label stays one space-separated token with exactly these `|` fields; the
+/// header's `encoding=escaped` token, ahead of every site row, says so to a
+/// reader.
+pub fn sdk_report_line(diag: &BuggifyDiagnostics) -> Option<String> {
+    if !diag.enabled && diag.sites_registered == 0 && diag.declared_sites.is_empty() {
+        return None;
     }
     let mut line = format!(
         "PATINA_SDK_REPORT enabled={} swarm_deselected={} fire_permille={} activation_permille={} \
 cutoff_nanos={} cutoff_reached={} sites_declared={} sites_registered={} sites_activated={} \
-total_firings={} cutoff_suppressed={} after_setup={} setup_complete={}",
+total_firings={} cutoff_suppressed={} after_setup={} setup_complete={} encoding=escaped",
         u8::from(diag.enabled),
         u8::from(diag.swarm_deselected),
         diag.fire_permille,
@@ -644,9 +657,9 @@ total_firings={} cutoff_suppressed={} after_setup={} setup_complete={}",
     for site in &diag.declared_sites {
         line.push_str(&format!(
             " declared_site={}|{}|@{}",
-            site.label,
+            report_token::escape(&site.label),
             site.kind.as_str(),
-            site.site,
+            report_token::escape(&site.site),
         ));
     }
     for site in &diag.sites {
@@ -656,7 +669,7 @@ total_firings={} cutoff_suppressed={} after_setup={} setup_complete={}",
             .unwrap_or_else(|| "-".to_string());
         line.push_str(&format!(
             " site={}|{}|a{}|e{}|f{}|r{}|s{}|v{}|k{}|@{}",
-            site.label,
+            report_token::escape(&site.label),
             site.kind.as_str(),
             u8::from(site.active),
             site.evals,
@@ -665,10 +678,10 @@ total_firings={} cutoff_suppressed={} after_setup={} setup_complete={}",
             u8::from(site.sometimes_satisfied),
             u8::from(site.always_violated),
             knob,
-            site.site,
+            report_token::escape(&site.site),
         ));
     }
-    diagnostic!("{line}");
+    Some(line)
 }
 
 #[cfg(test)]
