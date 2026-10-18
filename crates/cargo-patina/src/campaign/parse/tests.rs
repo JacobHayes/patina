@@ -4,7 +4,10 @@ use super::super::selftest::declared_rules_fixture;
 use super::super::spec::{
     DEFAULT_PLATEAU_AFTER, DEFAULT_PROGRESS_EVERY, classify_rules_to_json, json_classify_rules,
 };
-use super::super::{AllowUnmetSometimes, CampaignSpec, FAULT_SCALE_FULL, STARVE_SCALE_FULL};
+use super::super::{
+    AllowUnmetSometimes, CampaignSpec, FAULT_PLANE_NAMES, FAULT_SCALE_FULL, FaultPlanes,
+    STARVE_SCALE_FULL,
+};
 use super::*;
 use std::ffi::OsString;
 use std::fs;
@@ -175,6 +178,60 @@ fn the_fault_scale_is_bounded_and_the_flag_beats_the_spec_file() {
             .fault_scale_permille,
         FAULT_SCALE_FULL
     );
+}
+
+/// Bare `--faults` is every plane and `--faults=PLANE,...` the named subset,
+/// from the flag or the spec file, with the flag on top. An unknown plane is a
+/// usage error that names the valid ones, and so is a subset naming a plane
+/// the campaign could never draw.
+#[test]
+fn faults_selects_every_plane_bare_or_the_named_subset() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("spec.json");
+    let spec_flag = path.display().to_string();
+    let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+    let faults = |values: &[&str]| parse(args(values)).expect("parses").spec.faults;
+
+    assert_eq!(faults(&["art"]), FaultPlanes::NONE);
+    assert_eq!(faults(&["art", "--faults"]), FaultPlanes::ALL);
+    let net_sleep = FaultPlanes::from_names(["net", "sleep"]).unwrap();
+    assert_eq!(faults(&["art", "--faults=sleep,net"]), net_sleep);
+
+    fs::write(&path, br#"{"faults": ["sleep", "net"]}"#).expect("write");
+    assert_eq!(faults(&["art", "--spec", &spec_flag]), net_sleep);
+    assert_eq!(
+        faults(&["art", "--spec", &spec_flag, "--faults=fs"]),
+        FaultPlanes::from_names(["fs"]).unwrap()
+    );
+    assert_eq!(
+        faults(&["art", "--faults", "--spec", &spec_flag]),
+        FaultPlanes::ALL
+    );
+
+    for refused in [
+        args(&["art", "--faults=net,disk"]),
+        args(&["art", "--faults="]),
+        args(&["art", "--faults=net,"]),
+    ] {
+        let error = parse(refused.clone())
+            .expect_err("an unknown plane is refused")
+            .to_string();
+        for plane in FAULT_PLANE_NAMES {
+            assert!(error.contains(plane), "{refused:?}: {error}");
+        }
+    }
+    fs::write(&path, br#"{"faults": ["disk"]}"#).expect("write");
+    let error = parse(args(&["art", "--spec", &spec_flag]))
+        .expect_err("an unknown spec plane is refused")
+        .to_string();
+    for plane in FAULT_PLANE_NAMES {
+        assert!(error.contains(plane), "{error}");
+    }
+
+    assert!(parse(args(&["art", "--faults=net,dns"])).is_err());
+    assert!(parse(args(&["art", "--faults=dns", "--dns-entry", "db=10.0.0.5"])).is_ok());
+    assert!(parse(args(&["art", "--faults"])).is_ok());
+    assert!(parse(args(&["--extend", "1", "--faults=net"])).is_err());
 }
 
 #[test]

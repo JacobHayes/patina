@@ -70,6 +70,15 @@ pub(crate) fn validate(kind: Kind, name: &str, value: &str) -> Result<(), String
                 ))
             }
         }
+        Kind::EnumList(allowed) => {
+            match value.split(',').find(|member| !allowed.contains(member)) {
+                None => Ok(()),
+                Some(member) => Err(format!(
+                    "{name} takes a comma-separated list of {}; got {member:?} in {value:?}",
+                    allowed.join(", ")
+                )),
+            }
+        }
         Kind::Symbol => {
             if value.is_empty() {
                 Err(format!("{name} must not be empty"))

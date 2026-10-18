@@ -1,7 +1,7 @@
 //! Campaign invocation parsing and continuation controls.
 
 use super::spec::DEFAULT_PROGRESS_EVERY;
-use super::{AllowUnmetSometimes, CampaignSpec, DEFAULT_OUT_DIR};
+use super::{AllowUnmetSometimes, CampaignSpec, DEFAULT_OUT_DIR, FaultPlane, FaultPlanes};
 use crate::{CliError, cli, help};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -126,7 +126,14 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     spec.swarm |= args.flag("--swarm");
     spec.pct |= args.flag("--sched-pct");
     spec.starve |= args.flag("--starve");
-    spec.faults |= args.flag("--faults");
+    // Bare `--faults` is every plane; `--faults=PLANE,...` the named subset.
+    if let Some(planes) = args.text("--faults") {
+        spec.faults = if planes.is_empty() {
+            FaultPlanes::ALL
+        } else {
+            FaultPlanes::from_names(planes.split(',')).expect("validated by the registry grammar")
+        };
+    }
     spec.custom_op_faults |= args.flag("--custom-op-faults");
     // A value flag, so — unlike the switches above — it overrides the spec only
     // when actually supplied; an absent flag leaves the spec's scale alone.
@@ -220,6 +227,17 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     }
     if !guest_args.is_empty() {
         spec.guest_args = guest_args;
+    }
+    // A DNS band rides on the host table, so a subset that names `dns` without
+    // one asked for a plane that could never be drawn.
+    if spec.faults != FaultPlanes::ALL
+        && spec.faults.contains(FaultPlane::Dns)
+        && spec.dns_entries.is_empty()
+    {
+        return Err(CliError::usage(
+            "--faults selects the dns plane, but the campaign has no --dns-entry host table, \
+             so no DNS fault could be drawn; add --dns-entry NAME=ADDR or leave dns out",
+        ));
     }
     Ok(CampaignInvocation {
         artifact: Some(artifact.ok_or_else(|| {

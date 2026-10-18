@@ -114,6 +114,8 @@ pub enum Kind {
     UnsupportedSymbols,
     /// One of a fixed set of string literals.
     Enum(&'static [&'static str]),
+    /// A comma-separated list of one or more of a fixed set of string literals.
+    EnumList(&'static [&'static str]),
     /// A non-empty free-form string (rejected only when empty).
     Symbol,
     /// A filesystem path — any string, accepted verbatim (no value grammar).
@@ -146,6 +148,7 @@ impl Kind {
             Kind::Preopen => "preopen",
             Kind::UnsupportedSymbols => "unsupported-symbols",
             Kind::Enum(_) => "enum",
+            Kind::EnumList(_) => "enum-list",
             Kind::Symbol => "symbol",
             Kind::Path => "path",
             Kind::Str => "string",

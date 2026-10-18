@@ -79,7 +79,7 @@ fn native_only_knobs_are_skipped_for_wasi() {
         buggify: true,
         swarm: true,
         pct: true,
-        faults: true,
+        faults: FaultPlanes::ALL,
         ..CampaignSpec::default()
     };
     let hash = generation_hash(0, 3);
@@ -105,6 +105,85 @@ fn native_only_knobs_are_skipped_for_wasi() {
     }
 }
 
+/// `--faults=PLANE,...` emits exactly the selected planes' knobs, at the values
+/// an every-plane campaign draws for the same generation, and leaves the rest of
+/// the generation alone: the host table and `--swarm` still ride along, so swarm
+/// masks within the subset.
+#[test]
+fn a_plane_subset_draws_exactly_its_planes_at_the_every_plane_values() {
+    let spec = |faults| CampaignSpec {
+        faults,
+        swarm: true,
+        dns_entries: vec!["db.internal=10.0.0.5".into()],
+        ..CampaignSpec::default()
+    };
+    let knob_of = |token: &str| {
+        let name = token.split_once('=').map_or(token, |(name, _)| name);
+        FaultKnob::ALL
+            .iter()
+            .copied()
+            .find(|knob| knob.meta().flag == name)
+    };
+    // A plane is its knobs' flag prefix: the oracle, independent of the
+    // selection logic under test.
+    let in_plane = |knob: FaultKnob, plane: FaultPlane| {
+        knob.meta()
+            .flag
+            .starts_with(&format!("--{}-", plane.name()))
+    };
+    // The every-plane flags with the unselected planes' knobs (and any space-form
+    // value after one) removed. The host table is workload, not a plane's knob.
+    let restrict = |flags: Vec<String>, subset: FaultPlanes| {
+        let mut kept = Vec::new();
+        let mut tokens = flags.into_iter().peekable();
+        while let Some(token) = tokens.next() {
+            let dropped = knob_of(&token).is_some_and(|knob| {
+                knob != FaultKnob::DnsEntry && !subset.planes().any(|plane| in_plane(knob, plane))
+            });
+            let spaced_value =
+                !token.contains('=') && tokens.peek().is_some_and(|next| !next.starts_with("--"));
+            if !dropped {
+                kept.push(token);
+            } else if spaced_value {
+                tokens.next();
+            }
+        }
+        kept
+    };
+    let mut subsets: Vec<FaultPlanes> = FaultPlane::ALL
+        .into_iter()
+        .map(|plane| FaultPlanes::from_names([plane.name()]).unwrap())
+        .collect();
+    subsets.push(FaultPlanes::from_names(["net", "sleep"]).unwrap());
+    for subset in subsets {
+        let mut drawn = BTreeSet::new();
+        for generation in 0..32 {
+            let hash = generation_hash(0, generation);
+            let flags = derive_flags(&spec(subset), &hash, "native");
+            assert_eq!(
+                flags,
+                restrict(
+                    derive_flags(&spec(FaultPlanes::ALL), &hash, "native"),
+                    subset
+                ),
+                "--faults={} generation {generation}",
+                subset.cli_list()
+            );
+            assert!(flags.iter().any(|flag| flag == "--swarm"));
+            drawn.extend(flags.iter().filter_map(|flag| knob_of(flag)));
+        }
+        for plane in subset.planes() {
+            assert!(
+                drawn
+                    .iter()
+                    .any(|knob| *knob != FaultKnob::DnsEntry && in_plane(*knob, plane)),
+                "--faults={} drew nothing from {plane:?}",
+                subset.cli_list()
+            );
+        }
+    }
+}
+
 /// The scale dampens INTENSITY and nothing else. The TCP buffer shape band is
 /// actively wrong to scale: `--net-tcp-buffer-bytes` is a capacity whose SMALL
 /// end is the harsh one, so multiplying it down would make a rare-fault
@@ -115,7 +194,7 @@ fn the_fault_scale_leaves_the_tcp_buffer_shape_band_alone() {
     let at = |permille: u64, generation: u64| {
         derive_flags(
             &CampaignSpec {
-                faults: true,
+                faults: FaultPlanes::ALL,
                 fault_scale_permille: permille,
                 ..CampaignSpec::default()
             },
@@ -239,7 +318,7 @@ fn the_starve_scale_leaves_the_placement_window_alone() {
 #[test]
 fn campaign_fault_bands_do_not_emit_crash_restart() {
     let spec = CampaignSpec {
-        faults: true,
+        faults: FaultPlanes::ALL,
         ..CampaignSpec::default()
     };
     for family in ["native", "wasi", "cargo"] {
@@ -258,7 +337,7 @@ fn campaign_fault_bands_do_not_emit_crash_restart() {
 #[test]
 fn the_dns_band_rides_on_the_host_table_and_never_reaches_wasi() {
     let bare = CampaignSpec {
-        faults: true,
+        faults: FaultPlanes::ALL,
         ..CampaignSpec::default()
     };
     let hash = generation_hash(0, 3);
@@ -296,7 +375,7 @@ fn the_dns_band_rides_on_the_host_table_and_never_reaches_wasi() {
 #[test]
 fn the_dns_band_varies_the_failure_rate_and_latency_across_generations() {
     let spec = CampaignSpec {
-        faults: true,
+        faults: FaultPlanes::ALL,
         dns_entries: vec!["db.internal=10.0.0.5".into()],
         ..CampaignSpec::default()
     };

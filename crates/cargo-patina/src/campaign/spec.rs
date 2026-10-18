@@ -1,5 +1,6 @@
 //! Campaign specification defaults and JSON grammar.
 
+use super::planes::{FAULT_PLANE_NAMES, FaultPlanes};
 use super::{CampaignClass, ClassifyRules, FAULT_SCALE_FULL, STARVE_SCALE_FULL};
 use crate::{CliError, help};
 
@@ -106,8 +107,15 @@ pub struct CampaignSpec {
     ///   `--net-tcp-buffer-bytes` got from the fault dial, for a sharper reason.
     ///   Pinned by `the_starve_scale_leaves_the_placement_window_alone`.
     pub starve_scale_permille: u64,
-    /// Randomize fault knobs (net drop, sleep jitter) per generation.
-    pub faults: bool,
+    /// The fault planes whose knobs are randomized per generation: none (the
+    /// default), every plane (bare `--faults`), or the subset `--faults=PLANE,...`
+    /// names.
+    ///
+    /// A subset exists for the guest that needs one plane always off. A network
+    /// testbed whose store lives on the simulated disk only because it is the
+    /// real store gets nothing from fs faults but failed opens, which end the
+    /// generation before it reaches the network behaviour being swept.
+    pub faults: FaultPlanes,
     /// Band the custom-op failure knob (`--custom-op-fail-permille`) under
     /// [`Self::faults`].
     ///
@@ -226,7 +234,7 @@ impl Default for CampaignSpec {
             pct: false,
             starve: false,
             starve_scale_permille: STARVE_SCALE_FULL,
-            faults: false,
+            faults: FaultPlanes::NONE,
             custom_op_faults: false,
             fault_scale_permille: FAULT_SCALE_FULL,
             dns_entries: Vec::new(),
@@ -291,7 +299,7 @@ impl CampaignSpec {
                     }
                     self.starve_scale_permille = value;
                 }
-                "faults" => self.faults = json_bool(key, val)?,
+                "faults" => self.faults = json_fault_planes(key, val)?,
                 "custom_op_faults" => self.custom_op_faults = json_bool(key, val)?,
                 "fault_scale_permille" => {
                     // A spec file bypasses the CLI value grammar, so hold it to
@@ -415,6 +423,32 @@ fn json_address_layout(
             "campaign spec {key:?} must be \"fixed\" or \"randomized\""
         ))),
     }
+}
+
+/// `"faults"`: `true` for every plane, `false` for none, or an array of plane
+/// names for a subset.
+fn json_fault_planes(key: &str, value: &serde_json::Value) -> Result<FaultPlanes, CliError> {
+    let malformed = || {
+        CliError(format!(
+            "campaign spec {key:?} must be a boolean or an array of fault planes ({})",
+            FAULT_PLANE_NAMES.join(", ")
+        ))
+    };
+    if let Some(all) = value.as_bool() {
+        return Ok(if all {
+            FaultPlanes::ALL
+        } else {
+            FaultPlanes::NONE
+        });
+    }
+    let names = value
+        .as_array()
+        .ok_or_else(malformed)?
+        .iter()
+        .map(|name| name.as_str().ok_or_else(malformed))
+        .collect::<Result<Vec<_>, _>>()?;
+    FaultPlanes::from_names(names)
+        .map_err(|error| CliError(format!("campaign spec {key:?} {error}")))
 }
 
 fn json_bool(key: &str, value: &serde_json::Value) -> Result<bool, CliError> {
@@ -669,7 +703,7 @@ mod tests {
     #[test]
     fn a_dns_host_table_round_trips_through_the_recorded_spec() {
         let spec = CampaignSpec {
-            faults: true,
+            faults: FaultPlanes::ALL,
             dns_entries: vec!["db.internal=10.0.0.5".into(), "cache=10.0.0.6".into()],
             ..CampaignSpec::default()
         };
@@ -730,6 +764,30 @@ mod tests {
                 "expected a loud grammar error for {source}, got {error}"
             );
         }
+    }
+
+    /// A subset records its plane names, so `--extend`/`--resume` keep drawing
+    /// only those planes, while every plane still records as the `true` an
+    /// out-dir written before subsets existed holds.
+    #[test]
+    fn a_fault_plane_subset_round_trips_through_the_recorded_spec() {
+        for faults in [
+            FaultPlanes::NONE,
+            FaultPlanes::ALL,
+            FaultPlanes::from_names(["net", "sleep"]).unwrap(),
+        ] {
+            let spec = CampaignSpec {
+                faults,
+                ..CampaignSpec::default()
+            };
+            assert_eq!(spec_from_state_json(&spec_to_json(&spec)).unwrap(), spec);
+        }
+        let mut legacy = spec_to_json(&CampaignSpec::default());
+        legacy["faults"] = serde_json::json!(true);
+        assert_eq!(
+            spec_from_state_json(&legacy).unwrap().faults,
+            FaultPlanes::ALL
+        );
     }
 
     #[test]

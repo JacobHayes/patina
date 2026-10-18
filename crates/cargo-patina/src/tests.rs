@@ -410,6 +410,13 @@ mod registry {
                 vec!["", ",", " , "],
             ),
             Kind::Enum(choices) => (choices.to_vec(), vec!["bogus", ""]),
+            Kind::EnumList(choices) => {
+                // Samples are `&'static`; the joined list is the one that is not.
+                let pair: &'static str = Box::leak(choices.join(",").into_boxed_str());
+                let mut valid = choices.to_vec();
+                valid.push(pair);
+                (valid, vec!["bogus", "", ",", "bogus,x"])
+            }
             Kind::Symbol => (vec!["memcpy", "foo_bar", "x"], vec![""]),
             Kind::Path => (vec!["/tmp/x", "out.html", "x"], vec![""]),
             Kind::Str => (vec!["x", "hello", ""], vec![]),
@@ -560,12 +567,16 @@ mod registry {
             // A continuation takes no artifact; every other campaign flag needs
             // one. `--spec` reads its file while parsing, so the driver makes
             // whatever path the sample names a readable empty spec — otherwise
-            // the drive would fail for a reason that is not the grammar's.
+            // the drive would fail for a reason that is not the grammar's. A
+            // `--faults` subset naming `dns` needs a host table to draw from.
             ("campaign", _) => {
-                let prefix = if matches!(flag, "--extend" | "--resume") {
-                    none
-                } else {
-                    vec!["art.wasm".to_string()]
+                let prefix = match flag {
+                    "--extend" | "--resume" => none,
+                    "--faults" => vec![
+                        "art.wasm".to_string(),
+                        "--dns-entry=db.internal=10.0.0.5".to_string(),
+                    ],
+                    _ => vec!["art.wasm".to_string()],
                 };
                 let mut argv = with(prefix, &[]);
                 if flag == "--spec" {

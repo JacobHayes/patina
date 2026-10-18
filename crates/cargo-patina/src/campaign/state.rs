@@ -549,7 +549,7 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     map.insert("buggify".into(), spec.buggify.into());
     map.insert("swarm".into(), spec.swarm.into());
     map.insert("pct".into(), spec.pct.into());
-    map.insert("faults".into(), spec.faults.into());
+    map.insert("faults".into(), spec.faults.to_json());
     // Default-omitted for the same reason as the keys below: a spec that does
     // not declare custom-op faults records exactly the JSON it did before this
     // key existed, so an out-dir written by an earlier build still round-trips

@@ -45,12 +45,12 @@ fn flag_json(flag: &Flag, group: &Group) -> serde_json::Value {
         m.insert("placeholder".into(), J::from(placeholder));
     }
     // The typed value grammar: the syntax a value must satisfy, plus the allowed
-    // literals for an `enum` grammar. Omitted entirely for a valueless switch.
+    // literals for an `enum` or `enum-list` grammar. Omitted entirely for a valueless switch.
     // Lets an agent construct a well-formed value without guessing from the
     // placeholder.
     if let Some(kind) = flag.value.grammar() {
         m.insert("value_grammar".into(), J::from(kind.tag()));
-        if let Kind::Enum(choices) = kind {
+        if let Kind::Enum(choices) | Kind::EnumList(choices) = kind {
             m.insert("choices".into(), J::from(choices.to_vec()));
         }
     }

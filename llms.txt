@@ -117,12 +117,18 @@ unknown option.
   first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E repro="cargo patina run ... --seed S"`;
   the JSON envelope's `message` carries the same repro. Otherwise
   `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
-- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--dns-entry NAME=ADDR] [--no-verify] [--harness] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout]`
+- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults[=PLANE,...]] [--dns-entry NAME=ADDR] [--no-verify] [--harness] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
-  and knobs are a pure function of the generation number. `--faults` bands the
-  fs error/short/latency rates, the crash PLACEMENT (op class + ordinal, plus
-  byte-granularity tearing half the time), the net drop/latency, and the sleep
-  jitter, so successive generations explore different fault shapes. `--dns-entry`
+  and knobs are a pure function of the generation number. `--faults` bands every
+  fault plane's knobs — `fs` (error/short/latency; crash placement is not drawn),
+  `net` (drop/latency/jitter/duplicate/connect-refuse/reset/TCP buffer), `dns`,
+  `entropy`, `sleep` (sleep jitter) and `epoch` (realtime-epoch jump) — so
+  successive generations explore different fault shapes. `--faults=net,sleep`
+  (spec key `"faults": ["net", "sleep"]`) draws only the named planes, at the
+  values an every-plane campaign draws, for a guest that needs a plane always
+  off; an unknown plane is a usage error. The subset is recorded in the out-dir
+  spec, so `--extend`/`--resume`, the reproduce commands and
+  `minimize --generation` keep it, and `--swarm` masks within it. `--dns-entry`
   (repeatable) is campaign SHAPE, not a per-generation draw: it records the host
   table in the out-dir spec, forwards it to every generation, and is what enables
   the DNS band (fail per-mille + resolution latency) — with no defined name every

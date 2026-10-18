@@ -44,7 +44,7 @@ pub(super) const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--fault-scale-permille N] [--starve-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [-- GUEST ARGS]",
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults[=PLANE,...]] [--fault-scale-permille N] [--starve-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [-- GUEST ARGS]",
         "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --selftest",
@@ -87,7 +87,10 @@ macro sites are declared through the link-time table, so never-reached oracles \
 appear with registered_gens=0; --allow-unmet-sometimes[=MIN_GENS] reports but \
 waives that gate (unconditionally or only below the observed generation \
 threshold). `--selftest` proves every classifier class and the coverage gate \
-classes. The `--faults` bands are tuned for an aggressive sweep (up to 100 \
+classes. `--faults` draws every fault plane; `--faults=net,sleep` draws only the \
+named planes, for a guest that needs one plane always off (a store that must \
+open on the simulated disk, say), and is recorded and pinned like every spec \
+flag. The `--faults` bands are tuned for an aggressive sweep (up to 100 \
 per-mille of filesystem operations failed, 200 per-mille short); \
 --fault-scale-permille dampens every intensity band uniformly for a workload that \
 needs faults to be RARE enough to run to completion. It is part of the campaign's \
@@ -234,8 +237,11 @@ refused by name.",
                 f(
                     "--faults",
                     None,
-                    Value::None,
-                    "Randomize fault knobs (fs error/short I/O/crash placement, net drop/latency, sleep jitter, and — with --dns-entry — DNS failure/latency) per generation.",
+                    Value::Optional(
+                        "PLANE,...",
+                        Kind::EnumList(crate::campaign::FAULT_PLANE_NAMES),
+                    ),
+                    "Randomize fault knobs per generation over every fault plane (bare) or only the named ones: fs (error, short I/O, latency), net (drop, latency, jitter, duplicate, connect refuse, reset, TCP buffer), dns (failure, latency; needs --dns-entry), entropy (GRND_NONBLOCK failure), sleep (sleep jitter), epoch (realtime-epoch jump). A plane left out draws none of its knobs, and --swarm masks within the planes selected.",
                     false,
                 ),
                 f(

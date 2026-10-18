@@ -44,6 +44,7 @@ mod driver;
 mod generation;
 mod observe;
 mod parse;
+mod planes;
 mod report;
 mod repro;
 mod selftest;
@@ -57,6 +58,8 @@ pub use classify::{
 };
 pub(crate) use generation::{GenerationRun, child_facts, run_envelope};
 pub use parse::{CampaignInvocation, parse};
+pub(crate) use planes::FAULT_PLANE_NAMES;
+pub use planes::{FaultPlane, FaultPlanes};
 pub(crate) use repro::{GenerationRepro, generation_repro, run_reduced_generation};
 pub(crate) use spec::DEFAULT_OUT_DIR;
 pub use spec::{AllowUnmetSometimes, CampaignSpec};
@@ -464,24 +467,42 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
             RunValue::Int(u64::from(activation)),
         );
     }
-    if spec.faults {
+    if !spec.faults.is_empty() {
+        // Every band below passes through here, so a plane the campaign did not
+        // select emits none of its knobs. The values are still drawn: each band
+        // reads its own claimed byte, so a selected plane's draws are the ones
+        // an every-plane campaign makes for the same generation.
+        let planes = spec.faults;
+        let band = |flags: &mut Vec<String>, knob: FaultKnob, value: RunValue| {
+            if planes.draws(knob) {
+                push_run_flag(flags, knob.meta().flag, value);
+            }
+        };
         let fs_error = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::FsErrorPermille, 0)) * 100 / 255, // [0, 100] permille
             scale,
         );
-        push_run_flag(&mut flags, "--fs-error-permille", RunValue::Int(fs_error));
+        band(
+            &mut flags,
+            FaultKnob::FsErrorPermille,
+            RunValue::Int(fs_error),
+        );
         let fs_short = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::FsShortPermille, 0)) * 200 / 255, // [0, 200] permille
             scale,
         );
-        push_run_flag(&mut flags, "--fs-short-permille", RunValue::Int(fs_short));
+        band(
+            &mut flags,
+            FaultKnob::FsShortPermille,
+            RunValue::Int(fs_short),
+        );
         let fs_latency_hi = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::FsLatencyNanos, 0)) * 10_000, // up to 2.55 ms
             scale,
         );
-        push_run_flag(
+        band(
             &mut flags,
-            "--fs-latency-nanos",
+            FaultKnob::FsLatencyNanos,
             RunValue::NanosRange {
                 lo: 0,
                 hi: fs_latency_hi,
@@ -493,23 +514,23 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
             u64::from(band_byte(hash, FaultKnob::NetDropPermille, 0)) * 200 / 255, // [0, 200] permille
             scale,
         );
-        push_run_flag(&mut flags, "--net-drop-permille", RunValue::Int(drop));
+        band(&mut flags, FaultKnob::NetDropPermille, RunValue::Int(drop));
         let net_latency = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::NetLatencyNanos, 0)) * 10_000, // up to 2.55 ms
             scale,
         );
-        push_run_flag(
+        band(
             &mut flags,
-            "--net-latency-nanos",
+            FaultKnob::NetLatencyNanos,
             RunValue::Int(net_latency),
         );
         let net_jitter_hi = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::NetJitterNanos, 0)) * 10_000, // up to 2.55 ms
             scale,
         );
-        push_run_flag(
+        band(
             &mut flags,
-            "--net-jitter-nanos",
+            FaultKnob::NetJitterNanos,
             RunValue::NanosRange {
                 lo: 0,
                 hi: net_jitter_hi,
@@ -519,42 +540,46 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
             u64::from(band_byte(hash, FaultKnob::NetDuplicatePermille, 0)) * 200 / 255, // [0, 200] permille
             scale,
         );
-        push_run_flag(
+        band(
             &mut flags,
-            "--net-duplicate-permille",
+            FaultKnob::NetDuplicatePermille,
             RunValue::Int(net_duplicate),
         );
         let net_connect_refuse = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::NetConnectRefusePermille, 0)) * 200 / 255, // [0, 200] permille
             scale,
         );
-        push_run_flag(
+        band(
             &mut flags,
-            "--net-connect-refuse-permille",
+            FaultKnob::NetConnectRefusePermille,
             RunValue::Int(net_connect_refuse),
         );
         let net_reset = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::NetResetPermille, 0)) * 200 / 255, // [0, 200] permille
             scale,
         );
-        push_run_flag(&mut flags, "--net-reset-permille", RunValue::Int(net_reset));
+        band(
+            &mut flags,
+            FaultKnob::NetResetPermille,
+            RunValue::Int(net_reset),
+        );
         // [64, 4096] bytes: small enough to make would-block/partial-send paths
         // reachable (the flag's own purpose) while staying well clear of 0, which
         // `SimNet::builder().build()` refuses outright.
         let net_tcp_buffer =
             64 + u64::from(band_byte(hash, FaultKnob::NetTcpBufferBytes, 0)) * (4096 - 64) / 255;
-        push_run_flag(
+        band(
             &mut flags,
-            "--net-tcp-buffer-bytes",
+            FaultKnob::NetTcpBufferBytes,
             RunValue::Int(net_tcp_buffer),
         );
         let jitter_hi = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::SleepJitterNanos, 0)) * 10_000, // up to 2.55 ms
             scale,
         );
-        push_run_flag(
+        band(
             &mut flags,
-            "--sleep-jitter-nanos",
+            FaultKnob::SleepJitterNanos,
             RunValue::NanosRange {
                 lo: 0,
                 hi: jitter_hi,
@@ -569,9 +594,9 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
             u64::from(band_byte(hash, FaultKnob::EntropyFailPermille, 0)) * 200 / 255, // [0, 200] permille
             scale,
         );
-        push_run_flag(
+        band(
             &mut flags,
-            "--entropy-fail-permille",
+            FaultKnob::EntropyFailPermille,
             RunValue::Int(entropy_fail),
         );
         // [0, 255e9] ns: up to ~4.25 minutes each direction. Deliberately
@@ -583,9 +608,9 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
             u64::from(band_byte(hash, FaultKnob::EpochJumpNanos, 0)) * 1_000_000_000,
             scale,
         );
-        push_run_flag(
+        band(
             &mut flags,
-            "--epoch-jump-nanos",
+            FaultKnob::EpochJumpNanos,
             RunValue::Int(epoch_jump_hi),
         );
         // Opt-in, on the same reasoning as the DNS band below: whether a custom
@@ -620,14 +645,18 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
                 u64::from(band_byte(hash, FaultKnob::DnsFailPermille, 0)) * 100 / 255, // [0, 100] permille
                 scale,
             );
-            push_run_flag(&mut flags, "--dns-fail-permille", RunValue::Int(dns_fail));
+            band(
+                &mut flags,
+                FaultKnob::DnsFailPermille,
+                RunValue::Int(dns_fail),
+            );
             let dns_latency_hi = scale_intensity(
                 u64::from(band_byte(hash, FaultKnob::DnsLatencyNanos, 0)) * 10_000, // up to 2.55 ms
                 scale,
             );
-            push_run_flag(
+            band(
                 &mut flags,
-                "--dns-latency-nanos",
+                FaultKnob::DnsLatencyNanos,
                 RunValue::NanosRange {
                     lo: 0,
                     hi: dns_latency_hi,

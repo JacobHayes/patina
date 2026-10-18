@@ -3,7 +3,7 @@
 use super::super::repro::reproduce_command;
 use super::super::state::{spec_from_state_json, spec_to_json};
 use super::super::{
-    CampaignSpec, FAULT_SCALE_FULL, STARVE_SCALE_FULL, derive_flags, generation_bands,
+    CampaignSpec, FAULT_SCALE_FULL, FaultPlanes, STARVE_SCALE_FULL, derive_flags, generation_bands,
     generation_hash, parse, scale_intensity, starve_band_fires,
 };
 use std::ffi::OsString;
@@ -22,7 +22,7 @@ use std::path::Path;
 pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
     let mut out: Vec<(&'static str, bool, String)> = Vec::new();
     let scaled = |permille: u64| CampaignSpec {
-        faults: true,
+        faults: FaultPlanes::ALL,
         custom_op_faults: true,
         fault_scale_permille: permille,
         ..CampaignSpec::default()

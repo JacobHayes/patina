@@ -23,6 +23,8 @@ mod audit;
 mod campaign_continuation;
 #[path = "end_to_end/campaign_depth.rs"]
 mod campaign_depth;
+#[path = "end_to_end/campaign_fault_planes.rs"]
+mod campaign_fault_planes;
 #[path = "end_to_end/campaign_forwarding.rs"]
 mod campaign_forwarding;
 #[path = "end_to_end/campaign_guided.rs"]

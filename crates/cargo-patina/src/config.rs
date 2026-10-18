@@ -801,6 +801,7 @@ fn kind_tag(kind: Kind) -> &'static str {
         Kind::Preopen => "preopen",
         Kind::UnsupportedSymbols => "unsupported-symbols",
         Kind::Enum(_) => "enum",
+        Kind::EnumList(_) => "enum-list",
         Kind::Symbol => "symbol",
         Kind::Path => "path",
         Kind::Str => "string",

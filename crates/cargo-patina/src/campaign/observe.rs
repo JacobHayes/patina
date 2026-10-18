@@ -2,7 +2,7 @@
 
 use super::classify::STARVATION_STALL_EXIT;
 use super::state::CampaignState;
-use super::{CampaignSpec, RunFacts};
+use super::{CampaignSpec, FaultPlanes, RunFacts};
 use crate::CliError;
 use crate::aux_store::{AuxFoldDecision, fold_decision};
 use crate::coverage::{CampaignCoverageStore, CoverageArtifact, FoldOutcome};
@@ -157,8 +157,10 @@ fn campaign_depth_fingerprint(spec: &CampaignSpec) -> String {
     if spec.buggify {
         fingerprint.push_str("+buggify");
     }
-    if spec.faults {
-        fingerprint.push_str("+faults");
+    match spec.faults {
+        FaultPlanes::NONE => {}
+        FaultPlanes::ALL => fingerprint.push_str("+faults"),
+        subset => fingerprint.push_str(&format!("+faults={}", subset.cli_list())),
     }
     fingerprint
 }
