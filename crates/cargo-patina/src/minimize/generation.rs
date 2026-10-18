@@ -4,7 +4,13 @@ use super::*;
 
 /// The failure `minimize --generation N` will preserve.
 ///
-/// Explicit wins: a `--marker` the operator typed is what they meant, whatever
+/// A cross-run class has none to offer: every oracle here judges one run, and
+/// a candidate that still reports the generation's verdicts (or a `--marker`)
+/// says nothing about whether it still fails to reproduce. Reducing one would
+/// hand back a reproduction of the single-run failure with the nondeterminism
+/// silently dropped, so it is refused by name, marker or not.
+///
+/// Otherwise explicit wins: a `--marker` the operator typed is what they meant, whatever
 /// the generation reported. Otherwise the campaign's own recognition of the
 /// generation is the target, and a generation with nothing to target is a
 /// refusal that names both ways forward — never a guess, because guessing here
@@ -14,6 +20,18 @@ fn generation_target(
     generation: u64,
     repro: &crate::campaign::GenerationRepro,
 ) -> Result<Target, CliError> {
+    if repro.cross_run {
+        return Err(CliError(format!(
+            "generation {generation} is classed {}: a second run of it did not reproduce the \
+             first, and that is a property of two runs, which `minimize --generation`'s \
+             single-run oracle cannot check. Reducing it against its verdicts or a --marker \
+             would keep a reproduction of one run's failure and drop the nondeterminism. The \
+             campaign report carries both outcomes for this generation (observed and \
+             reproduction): find the input patina does not control first; once the generation \
+             reproduces, its finding can be minimized.",
+            repro.class,
+        )));
+    }
     if let Some(text) = marker {
         return Ok(Target::Marker(Marker::parse(text)?));
     }

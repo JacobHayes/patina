@@ -183,14 +183,20 @@ so could never reproduce the inner operation",
             // declared failure has no error to return, so handing it a fault
             // would leave it to invent a value. Refuse instead.
             Some((_, Outcome::Error(_))) if fault_eligible => Ok(CustomOpMode::Fault),
-            Some((_, Outcome::Error(_))) => Err(RuntimeError::CustomOp {
-                detail: format!(
-                    "custom op {label:?} was recorded as a seeded fault, but this call declares no \
+            Some((_, Outcome::Error(_))) => {
+                // The recording took a fault on a call that declared a failure
+                // shape; this one declares none: the two runs made different
+                // calls here.
+                self.note_replay_divergence(Some("custom_op_fault_shape"));
+                Err(RuntimeError::CustomOp {
+                    detail: format!(
+                        "custom op {label:?} was recorded as a seeded fault, but this call declares no \
 failure shape; the recording cannot be reproduced by a guest that no longer handles the operation \
 failing"
-                ),
-                label: label.to_string(),
-            }),
+                    ),
+                    label: label.to_string(),
+                })
+            }
             Some((_, outcome)) => Err(RuntimeError::InvalidOutcome {
                 operation: Box::new(operation),
                 outcome: Box::new(outcome),

@@ -9,6 +9,7 @@ use super::classify::{
 use super::generation::{SIGKILL, facts_from_envelope};
 use super::report::{CoverageGate, coverage_verdict};
 use super::spec::json_classify_rules;
+use super::verify::{selftest_class_checks, selftest_sampling};
 use super::{
     AllowUnmetSometimes, CampaignClass, ClassifyRules, FindingFacts, GenerationFacts, RunFacts,
     VerdictFacts, classify, signature,
@@ -28,6 +29,8 @@ pub(super) fn planted(facts: RunFacts, output: &str) -> GenerationFacts {
         facts,
         output: output.to_string(),
         result_line: None,
+        exact_verdicts: Vec::new(),
+        native_run_marker: None,
     }
 }
 
@@ -667,9 +670,17 @@ pub(super) fn selftest() -> Result<i32, CliError> {
         ),
     );
 
+    // -- reproduction verification: the cross-run class -----------------------
+    // Reached only by comparing a generation with a second run of it; each
+    // comparison axis has a twin that differs there alone.
+    for (name, want, got) in selftest_class_checks() {
+        check(name, want, got);
+    }
+
     // Non-vacuity: every class the campaign can report must have been fired
-    // above through the structured channel. A class nobody proved reachable is
-    // a class nobody can trust.
+    // above — a single-run class through the structured channel, the cross-run
+    // class through the comparison. A class nobody proved reachable is a class
+    // nobody can trust.
     println!("-- class coverage --");
     for class in CampaignClass::ALL {
         if fired.contains(class.as_str()) {
@@ -791,6 +802,8 @@ pub(super) fn selftest() -> Result<i32, CliError> {
             facts: RunFacts::ok().exit(1),
             output: format!("\nError: AlreadyInstalled\n{supervisor_note}\n"),
             result_line: Some("Error: AlreadyInstalled".to_string()),
+            exact_verdicts: Vec::new(),
+            native_run_marker: None,
         },
     );
     if shadowed.shape == "Error: AlreadyInstalled" {
@@ -849,6 +862,8 @@ fork (process)\n";
                     .lines()
                     .next_back()
                     .map(str::to_string),
+                exact_verdicts: Vec::new(),
+                native_run_marker: None,
             },
         )
     };
@@ -1145,6 +1160,37 @@ complete\"\n",
         );
         failures += 1;
     }
+    // A deterministic fault, observed and then reproduced: the supervisor's
+    // marker names each run's own trace and scratch file, and neither may reach
+    // the evidence. Its red twin is the same line written by the guest: that is
+    // evidence as written, so the two runs read differently.
+    let faulted = |trace: &str, scratch: &str, supervisor: bool| {
+        let marker = format!(
+            "PATINA_INFRA native_run signal=11 trace=incomplete trace_path=\"out/traces/{trace}\" \
+reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
+        );
+        let mut generation = planted(RunFacts::ok().exit(139).signal(11), &format!("{marker}\n"));
+        if supervisor {
+            generation.native_run_marker = Some(marker);
+        }
+        (
+            signature(CampaignClass::Unclassified, &generation).key(),
+            super::classify::primary_finding(CampaignClass::Unclassified, &generation),
+        )
+    };
+    for (name, supervisor, want_equal) in [
+        ("fault-marker-paths-are-not-evidence", true, true),
+        ("guest-written-marker-keeps-its-fields", false, false),
+    ] {
+        let observed = faulted("generation-0.patina", "3f19a522fbd5938d", supervisor);
+        let reproduced = faulted("generation-0.verify.patina", "79f652e981513a58", supervisor);
+        if (observed == reproduced) == want_equal && observed.1.contains("signal=11") {
+            println!("  ok   {name:<40} -> {}", observed.1);
+        } else {
+            println!("  FAIL {name:<40} -> {observed:?} vs {reproduced:?}");
+            failures += 1;
+        }
+    }
     // A cooperative `abort_intent` verdict still wins over any recovered text.
     let claimed = signature(
         CampaignClass::GuestAbort,
@@ -1299,6 +1345,16 @@ complete\"\n",
 
     println!("-- starvation intensity scaling (--starve-scale-permille) --");
     for (name, ok, detail) in starve_scale_selftest() {
+        if ok {
+            println!("  ok   {name:<40} -> {detail}");
+        } else {
+            println!("  FAIL {name:<40} -> {detail}");
+            failures += 1;
+        }
+    }
+
+    println!("-- clean-rerun sampling (reproduction verification) --");
+    for (name, ok, detail) in selftest_sampling() {
         if ok {
             println!("  ok   {name:<40} -> {detail}");
         } else {

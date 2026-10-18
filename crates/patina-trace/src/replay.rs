@@ -201,6 +201,13 @@ impl Replayer {
     }
 
     pub fn finish(self) -> Result<(), TraceError> {
+        self.check_complete()
+    }
+
+    /// Whether every recorded operation has been replayed, without consuming
+    /// the replayer: [`Replayer::finish`]'s check, for a caller that must know
+    /// before it finishes.
+    pub fn check_complete(&self) -> Result<(), TraceError> {
         if self.next != self.decisions.len() {
             return Err(TraceError::UnconsumedEvents {
                 consumed: self.next,

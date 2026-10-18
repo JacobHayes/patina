@@ -751,6 +751,7 @@ impl RuntimeBuilder {
             reports: self.config.reports,
             facts,
             facts_emitted: false,
+            replay_divergence: None,
             spin: Escalation::default(),
             charges: Default::default(),
             alarm: None,

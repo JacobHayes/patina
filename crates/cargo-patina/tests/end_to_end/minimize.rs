@@ -507,6 +507,10 @@ fn main() {
         );
 
         let out = directory.path().join("camp");
+        // Reproduction verification would replay this trace too, see it
+        // diverge, and class the generation NONDETERMINISM, which `minimize`
+        // refuses before its oracle runs. The subject here is that oracle's own
+        // divergence check, so the campaign skips verification.
         let campaign = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),
             workspace,
@@ -519,6 +523,7 @@ fn main() {
                 out.to_str().unwrap(),
                 "--format",
                 "json",
+                "--no-verify",
             ],
         );
         let envelope = campaign_json_stdout(&campaign);

@@ -49,6 +49,7 @@ mod repro;
 mod selftest;
 mod spec;
 mod state;
+mod verify;
 
 pub use classify::{
     CampaignClass, ClassifyRules, FindingFacts, GenerationFacts, RunFacts, VerdictFacts, classify,

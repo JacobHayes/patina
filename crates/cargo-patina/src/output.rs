@@ -29,6 +29,7 @@ mod reports;
 
 pub use capture::Captured;
 pub use capture::capture_active;
+pub use capture::end_guest_line;
 pub use capture::execute_command;
 pub use capture::facts_active;
 pub use capture::parse_facts;

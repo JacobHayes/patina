@@ -936,6 +936,8 @@ integrates the Patina runtime, or record under the native runtime: cargo patina 
             depth: None,
             crash_restart: None,
             facts,
+            native_run_marker: None,
+            guest_exit_code: None,
         },
         captured,
     )

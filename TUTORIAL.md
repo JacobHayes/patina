@@ -298,7 +298,7 @@ draws the DNS knobs per generation alongside the fs and network ones:
 ```
 $ cargo patina campaign ./resolver --gens 20 --faults --dns-entry db.internal=10.0.0.5 \
     --out-dir ./dns-out
-PATINA_CAMPAIGN_GEN generation=7 seed=10045940371587287147 class=VIOLATION NOVEL
+PATINA_CAMPAIGN_GEN generation=7 seed=10045940371587287147 class=VIOLATION NOVEL verify=replay:reproduced
   class OK                 19
   class VIOLATION          1
       reproduce: cargo patina replay ./resolver ./dns-out/failures/generation-7.patina

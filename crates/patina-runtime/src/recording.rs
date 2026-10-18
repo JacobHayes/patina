@@ -420,8 +420,41 @@ impl Context {
         let mut document = facts::document(planes, findings);
         if let serde_json::Value::Object(root) = &mut document {
             root.insert("cpu_charges".into(), self.charges.facts());
+            if let Some(kind) = self.replay_divergence {
+                root.insert("replay_divergence".into(), kind.into());
+            }
         }
         document
+    }
+
+    /// Note that the replay diverged from its trace, as the typed
+    /// [`patina_dst_trace::TraceError::replay_divergence`] kind, and write the
+    /// facts document now: the divergence usually ends the process before
+    /// [`Context::finish`] (a native shim fatal aborts), and the facts channel
+    /// is the one place the supervisor learns of it that the guest cannot
+    /// write. The first divergence is the one reported; a run's facts are its
+    /// state at that point.
+    pub(super) fn note_replay_divergence(&mut self, divergence: Option<&'static str>) {
+        if let Some(kind) = divergence {
+            self.replay_divergence.get_or_insert(kind);
+            self.emit_facts();
+        }
+    }
+
+    /// Hand back a runtime-detected error, first noting it on the facts channel
+    /// when, on a replay, it reports a divergence
+    /// ([`RuntimeError::replay_divergence`]). The route for every replay
+    /// cross-check the runtime makes itself rather than the trace layer (the
+    /// time model, a recorded compute stop); a record or seeded run notes
+    /// nothing, since there is no recording to diverge from.
+    pub(super) fn diverged(&mut self, error: RuntimeError) -> RuntimeError {
+        if matches!(
+            self.execution,
+            Execution::Replay(_) | Execution::Branch { .. }
+        ) {
+            self.note_replay_divergence(error.replay_divergence());
+        }
+        error
     }
 
     /// Write the facts document to the installed channel, at most once per run.
@@ -457,7 +490,10 @@ impl Context {
     /// automatically, on error paths too.
     pub fn finish(mut self) -> Result<(), RuntimeError> {
         if let Some(stop) = self.replay_compute_stop_due() {
-            return Err(self.stop_compute_bound(stop.task));
+            {
+                let error = self.stop_compute_bound(stop.task);
+                return Err(self.diverged(error));
+            }
         }
         // A custom operation still open at the end of the run means its `begin`
         // was never closed out — on the record pass the trace is missing an event
@@ -547,6 +583,17 @@ a recorded result or a replay fetch",
         // set and knob picks.
         let buggify_diag = self.buggify_diagnostics();
         emit_sdk_report(self.reports, &buggify_diag);
+        // A replay that ends with recorded operations left over diverged. The
+        // execution's own finish below refuses it too, but only after the facts
+        // are written, so the divergence is noted here first.
+        let incomplete = match &self.execution {
+            Execution::Replay(replayer) => replayer.check_complete().err(),
+            Execution::Branch { session, .. } => session.check_prefix_complete().err(),
+            _ => None,
+        };
+        if let Some(error) = incomplete {
+            self.note_replay_divergence(error.replay_divergence());
+        }
         // The structured parallel of every line emitted above, from the same
         // structs. Written before the trace so a trace-write failure still
         // leaves the run's facts on the channel.
@@ -663,7 +710,10 @@ a recorded result or a replay fetch",
     ) -> Result<Option<(u64, Outcome)>, RuntimeError> {
         if self.step_budget.is_some_and(|budget| self.steps >= budget) {
             if let Some(stop) = self.replay_compute_stop_due() {
-                return Err(self.stop_compute_bound(stop.task));
+                {
+                    let error = self.stop_compute_bound(stop.task);
+                    return Err(self.diverged(error));
+                }
             }
             // Preserve the artifacts before the stop: the interposed families
             // abort without reaching `finish`, and a budget abort is precisely
@@ -677,19 +727,26 @@ a recorded result or a replay fetch",
         }
         self.steps += 1;
         self.track_begin(operation)?;
-        match &mut self.execution {
+        let expected = match &mut self.execution {
             Execution::Replay(replayer) => {
                 let sequence = replayer.consumed();
                 match replayer.expect(operation) {
                     Ok(outcome) => Ok(Some((sequence, outcome))),
-                    Err(error) => Err(classify_yield_divergence(&self.schedule, replayer, error)),
+                    Err(error) => Err((
+                        error.replay_divergence(),
+                        classify_yield_divergence(&self.schedule, replayer, error),
+                    )),
                 }
             }
-            Execution::Branch { session, .. } => {
-                session.expect_prefix(operation).map_err(Into::into)
-            }
+            Execution::Branch { session, .. } => session
+                .expect_prefix(operation)
+                .map_err(|error| (error.replay_divergence(), error.into())),
             _ => Ok(None),
-        }
+        };
+        expected.map_err(|(divergence, error)| {
+            self.note_replay_divergence(divergence);
+            error
+        })
     }
 
     pub(super) fn complete(&mut self, operation: Operation, actual: Outcome) -> Outcome {
@@ -712,14 +769,18 @@ a recorded result or a replay fetch",
         actual: Outcome,
     ) -> Result<Outcome, RuntimeError> {
         if let Some((sequence, recorded)) = expected {
-            match &self.execution {
+            let compared = match &self.execution {
                 Execution::Replay(replayer) => {
-                    replayer.compare_outcome(sequence, &recorded, &actual)?;
+                    replayer.compare_outcome(sequence, &recorded, &actual)
                 }
                 Execution::Branch { session, .. } => {
-                    session.compare_outcome(sequence, &recorded, &actual)?;
+                    session.compare_outcome(sequence, &recorded, &actual)
                 }
-                _ => {}
+                _ => Ok(()),
+            };
+            if let Err(error) = compared {
+                self.note_replay_divergence(error.replay_divergence());
+                return Err(error.into());
             }
             self.track_outcome(&operation, &recorded)?;
             self.escalate_due()?;

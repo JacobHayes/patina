@@ -70,6 +70,14 @@ pub struct RunReport<'a> {
     /// facts channel was installed and the run produced one. Read from the
     /// channel, never re-derived from the `PATINA_*_REPORT` stderr lines.
     pub facts: Option<serde_json::Value>,
+    /// The `PATINA_INFRA native_run` marker line the native supervisor itself
+    /// appended to the run's stderr, verbatim; `None` for every other family
+    /// and for a native run that appended none.
+    pub native_run_marker: Option<String>,
+    /// The status the guest itself reached, when the run's exit code is
+    /// patina's own instead (a replay that diverged after the guest finished).
+    /// `guest_exit` reports it; `None` means the exit code is the guest's.
+    pub guest_exit_code: Option<i32>,
 }
 
 /// Finalize a run/replay after the guest returns: echo captured output for the
@@ -155,6 +163,7 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
             .clone()
             .or_else(|| depth_report_line(&stdout_text, &stderr_text));
         env.crash_restart = report.crash_restart.clone();
+        env.native_run_marker = report.native_run_marker.clone();
         env.verdicts = extract_verdicts(&stdout_text, &stderr_text);
         // Runtime-owned structured facts, lifted verbatim out of the run's own
         // `patina.runfacts/v1` document. The `PATINA_*_REPORT` lines still print
@@ -168,6 +177,10 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
                 .cloned()
                 .unwrap_or_default();
             env.cpu_charges = facts.get("cpu_charges").cloned();
+            env.replay_divergence = facts
+                .get("replay_divergence")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
         }
         // Refusal attribution is the PARENT's job: a fail-closed abort kills the
         // child before it can write anything structured, so what it already
@@ -175,7 +188,7 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         // is what makes an *unattributed* abort meaningful.
         env.refusal = refusal(captured.exit_code, &stdout_text, &stderr_text);
         env.guest_exit = Some(GuestExit {
-            code: captured.exit_code,
+            code: report.guest_exit_code.unwrap_or(captured.exit_code),
             signal: captured.signal,
             core: captured.core,
         });

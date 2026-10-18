@@ -97,7 +97,7 @@ unknown option.
   first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E repro="cargo patina run ... --seed S"`;
   the JSON envelope's `message` carries the same repro. Otherwise
   `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
-- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--dns-entry NAME=ADDR] [--harness] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...]`
+- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--dns-entry NAME=ADDR] [--no-verify] [--harness] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number. `--faults` bands the
   fs error/short/latency rates, the crash PLACEMENT (op class + ordinal, plus
@@ -123,7 +123,22 @@ unknown option.
   at all is `INFRA`. A guest that never calls the verdict ABI declares its own
   rules in the spec (`classify.patterns` = class -> output substrings,
   `classify.exit_codes` = class -> exit codes); declared rules only ADD a finding
-  where the envelope reached none and can never downgrade one. Novel failure
+  where the envelope reached none and can never downgrade one. Before a novel
+  finding signature is reported its reproduce command runs once (replay of the
+  saved trace, else the seeded re-run), and a seeded one-in-16 sample of clean
+  generations runs twice. The comparison is exact, not by signature (which
+  collapses numbers): a differing signature, exit status, unnormalized finding
+  line (the native supervisor's own `PATINA_INFRA native_run` marker, which the
+  envelope names as `native_run_marker`, loses its trace path and scratch-file
+  reason; a guest line is evidence as written, however much it looks like
+  patina's), verdict row (detail included) or
+  trace digest, or a replay that does not follow its trace (`replay_divergence`
+  in the replay's envelope), is `NONDETERMINISM` — the one cross-run class,
+  ranked above every single-run failure class, reported with both outcomes
+  (`verification` on the signature and notable run, a `verification` summary
+  in the envelope). Any other reproduction that ends in a non-finding failure
+  class counts as `infra` and keeps the observed class; `--no-verify` skips the
+  extra runs. Novel failure
   signatures are deduped with saved
   traces, SDK site coverage is folded into `<out-dir>/sites.json` (schema
   `patina.campaign.sites/v1`), and native yield-point edge coverage is folded
@@ -173,7 +188,9 @@ unknown option.
   that a property held, which is not a failure to preserve — and `detail` is
   never matched. `--marker TEXT` (`A|B` matches either) overrides the target with
   literal output text, for a guest that reports nothing through the verdict ABI;
-  a generation with no failure verdict and no `--marker` is refused by name.
+  a generation with no failure verdict and no `--marker` is refused by name,
+  and so is a `NONDETERMINISM` generation, `--marker` or not: its failure is
+  that two runs disagree, which no single-run oracle can preserve.
   Because that oracle is hermetic by construction, candidates are evaluated in
   parallel by default (`--jobs`, default half the CPUs).
 - `cargo patina minimize <TRACE> --output PATH [--jobs N] -- <ORACLE>` / `minimize --scenario --seed N -- <ORACLE>`
@@ -282,6 +299,18 @@ ABSENT means "did not fire", never zero.
   plane appears only when it saw at least one opportunity. The runtime builds
   these from the report structs the lines are formatted from and hands them over
   as a `patina.runfacts/v1` document, so the two sources cannot drift.
+- `replay_divergence` — present on a replay that did not follow its trace, as a
+  typed kind: the trace layer's (`trace_exhausted`, `operation_mismatch`,
+  `outcome_mismatch`, `unconsumed_events`) or the runtime's own cross-checks
+  (`time_model_mismatch`, `schedule_divergence`, `compute_stop_state`,
+  `custom_op_fault_shape`). Carried on the `patina.runfacts/v1` channel, which
+  the guest cannot write, so no guest output can claim one; a WASI replay whose
+  divergence surfaces as a finalization error still gets a run envelope with it,
+  keeping the guest's output, verdicts and `guest_exit` while `exit_code` stays
+  patina's failure.
+- `native_run_marker` — the `PATINA_INFRA native_run` line the native
+  supervisor appended to `stderr`, verbatim, so a consumer can tell patina's
+  marker from a guest line written to look like it.
 - `runtime_findings[]` — runtime-detected findings, each with a `source`:
   `liveness` (a fired liveness/converge watchdog, carrying
   `kind`/`detail`/`vtime_ns`/`budget_ns`/`last_fault_vtime_ns`) and `schedule`
@@ -302,6 +331,8 @@ ABSENT means "did not fire", never zero.
   `core` is the observed wait-status core flag, present only on signal death.
   `code` is the shell-style `128 + signal` on a signal death, which cannot be
   told apart from a deliberate `exit(134)`; `signal` is what tells them apart.
+  A WASI `code` is the full `proc_exit` status, which the process exit status
+  truncates to eight bits.
 
 ## SDK macros (crate `patina-dst`, default features = dependency-light SDK)
 

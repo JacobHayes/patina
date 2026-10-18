@@ -20,6 +20,15 @@ pub struct Captured {
     pub core: bool,
 }
 
+/// End a guest's unfinished last line of captured output, so the line patina
+/// appends next is a line of its own rather than the tail of a line the guest
+/// left open when it stopped.
+pub fn end_guest_line(stream: &mut Vec<u8>) {
+    if stream.last().is_some_and(|byte| *byte != b'\n') {
+        stream.push(b'\n');
+    }
+}
+
 /// Run a fully-configured child command, capturing its output when the installed
 /// options require it (JSON / render / report) and otherwise inheriting the
 /// caller's streams unchanged (the human default). Signal death maps to a

@@ -36,6 +36,15 @@ pub struct Envelope {
     /// The CPU time the run's guest calls were charged, per task
     /// (`patina.runfacts/v1`'s `cpu_charges`), carried through verbatim.
     pub(super) cpu_charges: Option<serde_json::Value>,
+    /// The kind of replay divergence the trace layer reported
+    /// (`patina.runfacts/v1`'s `replay_divergence`): the replay did not follow
+    /// its trace. Lifted from the facts channel, which the guest cannot write,
+    /// never from the run's text.
+    pub(super) replay_divergence: Option<String>,
+    /// The `PATINA_INFRA native_run` line the supervisor appended to `stderr`,
+    /// verbatim: the one way to tell patina's own marker from a guest line
+    /// written to look like it.
+    pub(super) native_run_marker: Option<String>,
     /// Native crash-restart facts, if the supervisor performed a modeled restart.
     pub(super) crash_restart: Option<serde_json::Value>,
     /// Patina's own fail-closed refusal, when patina refused. Absent on a guest's
@@ -73,6 +82,8 @@ impl Envelope {
             fault_reports: None,
             runtime_findings: Vec::new(),
             cpu_charges: None,
+            replay_divergence: None,
+            native_run_marker: None,
             crash_restart: None,
             refusal: None,
             guest_exit: None,
@@ -189,6 +200,12 @@ impl Envelope {
         }
         if let Some(v) = &self.cpu_charges {
             m.insert("cpu_charges".into(), v.clone());
+        }
+        if let Some(v) = &self.replay_divergence {
+            m.insert("replay_divergence".into(), Value::from(v.clone()));
+        }
+        if let Some(v) = &self.native_run_marker {
+            m.insert("native_run_marker".into(), Value::from(v.clone()));
         }
         if let Some(v) = &self.crash_restart {
             m.insert("crash_restart".into(), v.clone());

@@ -58,9 +58,23 @@ pub enum WasiRunError {
         stdout: Vec<u8>,
         stderr: Vec<u8>,
     },
+    /// The guest's run ended with a status (it returned from `_start` or called
+    /// `proc_exit`), and finalizing the run then failed. The status and the
+    /// output the guest wrote ride along, so a caller that reports the run keeps
+    /// them.
+    FinalizeWithOutput {
+        exit_code: i32,
+        finalize: Box<WasiRunError>,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
+    /// The guest's run failed, and finalizing it failed too. The output the
+    /// guest wrote rides along.
     RunAndFinalize {
         run: Box<WasiRunError>,
         finalize: Box<WasiRunError>,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
     },
 }
 
@@ -112,7 +126,8 @@ impl fmt::Display for WasiRunError {
                 }
                 Ok(())
             }
-            Self::RunAndFinalize { run, finalize } => {
+            Self::FinalizeWithOutput { finalize, .. } => finalize.fmt(f),
+            Self::RunAndFinalize { run, finalize, .. } => {
                 write!(
                     f,
                     "WASI execution failed ({run}) and finalization failed ({finalize})"
@@ -131,6 +146,7 @@ impl std::error::Error for WasiRunError {
             Self::Host(error) => Some(error),
             Self::Depth(_) => None,
             Self::RunWithOutput { run, .. } => Some(run),
+            Self::FinalizeWithOutput { finalize, .. } => Some(finalize),
             Self::RunAndFinalize { run, .. } => Some(run),
         }
     }

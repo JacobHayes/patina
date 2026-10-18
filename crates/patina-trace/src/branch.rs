@@ -195,6 +195,12 @@ impl BranchSession {
         }
     }
 
+    /// Whether the inherited prefix has been replayed in full, without
+    /// consuming the session (see [`crate::Replayer::check_complete`]).
+    pub fn check_prefix_complete(&self) -> Result<(), TraceError> {
+        self.prefix.check_complete()
+    }
+
     pub fn finish(self) -> Result<(), TraceError> {
         // Prefix reconciliation first: a divergence from the parent trace is a
         // real finding and stays loud, ahead of the graceful budget refusal.

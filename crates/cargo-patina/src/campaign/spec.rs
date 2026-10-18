@@ -194,6 +194,13 @@ pub struct CampaignSpec {
     /// Waive the default campaign-level gate for `sometimes!` sites that were
     /// registered but never satisfied.
     pub allow_unmet_sometimes: Option<AllowUnmetSometimes>,
+    /// Verify reproduction: run each novel finding's reproduce path once before
+    /// reporting it, and a seeded sample of clean generations twice, filing a
+    /// mismatch as `NONDETERMINISM` (`campaign/verify.rs`). On by default;
+    /// `--no-verify` trades the check for the extra child runs it costs. Part of
+    /// the campaign's shape, because it decides which class a generation lands
+    /// in.
+    pub verify: bool,
     /// Per-guest classification rules for a guest that never calls the verdict
     /// ABI (outcome-channel arc §4.3). Core patina is guest-agnostic: a guest's
     /// own marker dialect lives here, in its campaign spec, and nowhere else.
@@ -227,6 +234,7 @@ impl Default for CampaignSpec {
             plateau_after: DEFAULT_PLATEAU_AFTER,
             guided: false,
             allow_unmet_sometimes: None,
+            verify: true,
             classify: ClassifyRules::default(),
         }
     }
@@ -363,6 +371,7 @@ impl CampaignSpec {
                     self.allow_unmet_sometimes = Some(json_allow_unmet_sometimes(key, val)?)
                 }
                 "classify" => self.classify = json_classify_rules(val)?,
+                "verify" => self.verify = json_bool(key, val)?,
                 other => {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
@@ -370,7 +379,7 @@ impl CampaignSpec {
                          fault_scale_permille, starve, starve_scale_permille, dns_entries, \
                          harness, allow_symbols, allow_unsupported_symbols, watchdog_nanos, \
                          compute_watchdog_ms, converge_nanos, heal_after_nanos, report, plateau_after, guided, \
-                         allow_unmet_sometimes, or classify"
+                         allow_unmet_sometimes, verify, or classify"
                     )));
                 }
             }
@@ -503,6 +512,12 @@ fn classify_rule_map(
                 class.as_str()
             )));
         }
+        if class.is_cross_run() {
+            return Err(CliError(format!(
+                "campaign spec \"classify.{kind}\" declares {:?}; that class compares two runs of a generation, so no rule over one run's output can assign it",
+                class.as_str()
+            )));
+        }
         let entries = entries.as_array().ok_or_else(|| {
             CliError(format!(
                 "campaign spec \"classify.{kind}\" rules for {:?} must be a JSON array",
@@ -596,6 +611,36 @@ mod tests {
                 .get("classify")
                 .is_none()
         );
+    }
+
+    /// The verification opt-out rides the recorded spec, so a continuation
+    /// classifies the way the fresh campaign did; the default records nothing.
+    #[test]
+    fn the_verification_opt_out_round_trips_through_the_recorded_spec() {
+        let spec = CampaignSpec {
+            verify: false,
+            ..CampaignSpec::default()
+        };
+        let json = spec_to_json(&spec);
+        assert_eq!(json["verify"], serde_json::json!(false));
+        assert_eq!(spec_from_state_json(&json).unwrap(), spec);
+        assert!(CampaignSpec::default().verify);
+        assert!(
+            spec_to_json(&CampaignSpec::default())
+                .get("verify")
+                .is_none()
+        );
+    }
+
+    /// No rule over one run's output can say that run would not reproduce.
+    #[test]
+    fn a_declared_rule_cannot_assign_the_cross_run_class() {
+        let class = CampaignClass::ALL
+            .iter()
+            .find(|class| class.is_cross_run())
+            .unwrap();
+        let rules = serde_json::json!({"patterns": {class.as_str(): ["token"]}});
+        assert!(json_classify_rules(&rules).is_err());
     }
 
     #[test]

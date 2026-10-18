@@ -2,6 +2,7 @@
 
 use super::observe::{DepthState, EdgeCoverageState};
 use super::spec::classify_rules_to_json;
+use super::verify::{CleanReruns, Verification};
 use super::{
     AllowUnmetSometimes, CampaignClass, CampaignSpec, FAULT_SCALE_FULL, STARVE_SCALE_FULL,
     VerdictFacts,
@@ -50,6 +51,9 @@ pub(super) struct SignatureRecord {
     /// above predate this and are still absolute.)
     pub(super) log: Option<String>,
     pub(super) report: Option<String>,
+    /// The reproduction attempt run when the signature was first seen, for a
+    /// novel finding of a verifying campaign.
+    pub(super) verification: Option<Verification>,
 }
 
 impl SignatureRecord {
@@ -73,6 +77,9 @@ impl SignatureRecord {
         }
         if let Some(report) = &self.report {
             map.insert("report".into(), report.clone().into());
+        }
+        if let Some(verification) = &self.verification {
+            map.insert("verification".into(), verification.to_json());
         }
         serde_json::Value::Object(map)
     }
@@ -98,6 +105,10 @@ impl SignatureRecord {
             trace: json_optional_str(object, "trace")?,
             log: json_optional_str(object, "log")?,
             report: json_optional_str(object, "report")?,
+            verification: object
+                .get("verification")
+                .map(Verification::from_json)
+                .transpose()?,
         };
         let expected_key = format!(
             "{}|{}|{}",
@@ -139,6 +150,8 @@ pub(super) struct GenerationOutcome {
     /// contain it, which is what makes an unreproducible target a refusal rather
     /// than a tautology.
     pub(super) verdicts: Vec<VerdictFacts>,
+    /// The reproduction attempt this generation got, when it was verified.
+    pub(super) verification: Option<Verification>,
 }
 
 impl GenerationOutcome {
@@ -147,7 +160,7 @@ impl GenerationOutcome {
     }
 
     pub(super) fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "generation": self.generation,
             "seed": self.seed,
             "class": self.class.as_str(),
@@ -155,7 +168,11 @@ impl GenerationOutcome {
             "signature": self.signature_key.clone(),
             "flags": self.flags.clone(),
             "verdicts": self.verdicts.iter().map(VerdictFacts::to_json).collect::<Vec<_>>(),
-        })
+        });
+        if let (Some(object), Some(verification)) = (value.as_object_mut(), &self.verification) {
+            object.insert("verification".into(), verification.to_json());
+        }
+        value
     }
 
     fn from_json(value: &serde_json::Value) -> Result<Self, String> {
@@ -202,6 +219,10 @@ impl GenerationOutcome {
             novel: json_required_bool(object, "novel")?,
             signature_key,
             verdicts,
+            verification: object
+                .get("verification")
+                .map(Verification::from_json)
+                .transpose()?,
         };
         if outcome.to_json() != *value {
             return Err("notable run is not in canonical lossless form".to_string());
@@ -292,6 +313,10 @@ pub(super) struct CampaignState {
     pub(super) signatures: BTreeMap<String, SignatureRecord>,
     pub(super) notable_runs: Vec<GenerationOutcome>,
     pub(super) invocations: Vec<InvocationRecord>,
+    /// The clean generations run twice. A clean rerun that reproduced leaves
+    /// its generation `OK`, and so out of `notable_runs`; this is its only
+    /// record.
+    pub(super) clean_reruns: CleanReruns,
 }
 
 impl CampaignState {
@@ -304,11 +329,12 @@ impl CampaignState {
             signatures: BTreeMap::new(),
             notable_runs: Vec::new(),
             invocations: Vec::new(),
+            clean_reruns: CleanReruns::default(),
         }
     }
 
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "schema": CAMPAIGN_STATE_SCHEMA,
             "artifact": self.artifact.to_json(),
             "spec": spec_to_json(&self.spec),
@@ -317,7 +343,21 @@ impl CampaignState {
             "signatures": signatures_to_json(&self.signatures),
             "notable_runs": self.notable_runs.iter().map(GenerationOutcome::to_json).collect::<Vec<_>>(),
             "invocations": self.invocations.iter().map(InvocationRecord::to_json).collect::<Vec<_>>(),
-        })
+        });
+        // Default-omit, so a campaign that never re-ran a clean generation — and
+        // an out-dir written before the key existed — records no key at all.
+        if self.clean_reruns != CleanReruns::default()
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert(
+                "clean_reruns".into(),
+                serde_json::json!({
+                    "runs": self.clean_reruns.runs,
+                    "infra": self.clean_reruns.infra,
+                }),
+            );
+        }
+        value
     }
 
     fn from_json(value: &serde_json::Value) -> Result<Self, String> {
@@ -359,6 +399,18 @@ impl CampaignState {
                 .get("invocations")
                 .ok_or_else(|| "campaign state missing invocations".to_string())?,
         )?;
+        let clean_reruns = match object.get("clean_reruns") {
+            None => CleanReruns::default(),
+            Some(value) => {
+                let tally = value
+                    .as_object()
+                    .ok_or_else(|| "clean_reruns must be an object".to_string())?;
+                CleanReruns {
+                    runs: json_required_u64(tally, "runs")?,
+                    infra: json_required_u64(tally, "infra")?,
+                }
+            }
+        };
         let state = CampaignState {
             artifact,
             spec,
@@ -367,6 +419,7 @@ impl CampaignState {
             signatures,
             notable_runs,
             invocations,
+            clean_reruns,
         };
         state.validate()?;
         if state.to_json() != *value {
@@ -394,6 +447,14 @@ impl CampaignState {
         if signature_total != failures {
             return Err(format!(
                 "signature counts {signature_total} failures but class histogram has {failures}"
+            ));
+        }
+        if self.clean_reruns.infra > self.clean_reruns.runs
+            || self.clean_reruns.runs > self.generations_done
+        {
+            return Err(format!(
+                "clean_reruns {:?} is inconsistent with {} generations",
+                self.clean_reruns, self.generations_done
             ));
         }
         for run in &self.notable_runs {
@@ -424,7 +485,7 @@ pub(super) fn json_required_str<'a>(
         .ok_or_else(|| format!("{key} must be a string"))
 }
 
-fn json_optional_str(
+pub(super) fn json_optional_str(
     object: &serde_json::Map<String, serde_json::Value>,
     key: &str,
 ) -> Result<Option<String>, String> {
@@ -544,6 +605,11 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     // written by an earlier build still round-trips on `--resume`.
     if !spec.classify.is_empty() {
         map.insert("classify".into(), classify_rules_to_json(&spec.classify));
+    }
+    // Default-omit: verification is on by default, so only the opt-out is
+    // recorded and an out-dir written before the key existed still round-trips.
+    if !spec.verify {
+        map.insert("verify".into(), false.into());
     }
     serde_json::Value::Object(map)
 }
@@ -1015,6 +1081,7 @@ mod tests {
                 trace: None,
                 log: None,
                 report: None,
+                verification: None,
             },
         );
         state.notable_runs.push(GenerationOutcome {
@@ -1028,6 +1095,7 @@ mod tests {
                 kind: "violation".to_string(),
                 label: "no-loss".to_string(),
             }],
+            verification: None,
         });
         state.invocations.push(InvocationRecord {
             cli: "campaign guest --gens 3".to_string(),

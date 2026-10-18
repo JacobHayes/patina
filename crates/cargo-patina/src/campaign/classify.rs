@@ -9,8 +9,9 @@ use std::collections::BTreeMap;
 // Classifier (pure) + signatures
 // ===========================================================================
 
-/// The per-generation outcome classes, in descending severity. An explicit
-/// finding is never downgraded, and a nonzero exit is never silently OK.
+/// The per-generation outcome classes: `OK`, then the failure classes in
+/// descending severity. An explicit finding is never downgraded, and a nonzero
+/// exit is never silently OK.
 ///
 /// The declaration order is the severity order: [`ClassifyRules`] iterates its
 /// declared classes through it, so two matching declarations always resolve to
@@ -19,6 +20,14 @@ use std::collections::BTreeMap;
 pub enum CampaignClass {
     /// The run completed clean (exit 0, no finding).
     Ok,
+    /// Running the generation again did not reproduce it: the campaign ran a
+    /// novel finding's reproduce path, or a sampled clean generation a second
+    /// time, and the class, signature, verdicts or trace digest differed. The
+    /// only cross-run class — [`classify`] never returns it, reproduction
+    /// verification does — and the most severe failure, because every other
+    /// class's reproduce command rests on the run being deterministic. The
+    /// observed outcome and the reproduction both travel with it.
+    Nondeterminism,
     /// A system-under-test safety/assertion violation: a `VerdictKind::Violation`
     /// the guest reported through the verdict ABI (which `always!` lowers to), or
     /// a class a campaign spec declared for this guest ([`ClassifyRules`]).
@@ -115,6 +124,7 @@ impl CampaignClass {
     /// [`every_class_round_trips_its_token`].
     pub const ALL: &'static [CampaignClass] = &[
         CampaignClass::Ok,
+        CampaignClass::Nondeterminism,
         CampaignClass::Violation,
         CampaignClass::Liveness,
         CampaignClass::VacuousFsFault,
@@ -134,6 +144,7 @@ impl CampaignClass {
     pub const fn as_str(&self) -> &'static str {
         match self {
             CampaignClass::Ok => "OK",
+            CampaignClass::Nondeterminism => "NONDETERMINISM",
             CampaignClass::Violation => "VIOLATION",
             CampaignClass::Liveness => "LIVENESS",
             CampaignClass::VacuousFsFault => "VACUOUS_FS_FAULT",
@@ -171,6 +182,12 @@ impl CampaignClass {
             CampaignClass::VacuousSwarm => Some("swarm"),
             _ => None,
         }
+    }
+
+    /// Whether only comparing two runs of a generation can reach this class, so
+    /// no single run's facts — and no spec-declared rule — can.
+    pub const fn is_cross_run(&self) -> bool {
+        matches!(self, CampaignClass::Nondeterminism)
     }
 
     /// Whether this class is a failure the campaign must surface (everything but
@@ -361,6 +378,11 @@ pub struct FindingFacts {
 pub struct RunFacts {
     /// The child process's exit status.
     pub exit_code: i32,
+    /// `guest_exit.code` — the status the guest's run reported in full. A
+    /// process status keeps only its low eight bits, and a WASI guest's
+    /// `proc_exit` status is a full 32-bit value, so two runs can share a
+    /// process status and still have exited differently.
+    pub guest_exit_code: Option<i32>,
     /// The signal the guest died on, from `guest_exit.signal`. `exit_code` alone
     /// cannot express this (it is `128 + signal` there, the same value a guest
     /// could have returned deliberately).
@@ -379,6 +401,12 @@ pub struct RunFacts {
     /// than the guest; only this field can say whether the guest had already
     /// failed on its own. `None` when the refusal did not record one.
     pub refusal_guest_exit_code: Option<i32>,
+    /// `replay_divergence` — a `replay` that ran but did not follow its trace
+    /// (an operation past its end, a mismatched operation or outcome, recorded
+    /// operations left over), as the runtime reported it on the facts channel.
+    /// Classification does not read it: only reproduction verification, which
+    /// replays a generation's own trace, does.
+    pub replay_diverged: bool,
     /// `verdicts[]`, in call order.
     pub verdicts: Vec<VerdictFacts>,
     /// The `fault_reports{}` planes whose `vacuous` bit is set.
@@ -447,6 +475,16 @@ pub struct GenerationFacts {
     /// finished (the deny-trap-armed symbol note, a trace-finalization line)
     /// cannot shadow the guest's finding. Absent without an envelope.
     pub result_line: Option<String>,
+    /// The envelope's `verdicts[]` rows exactly as reported, sequence and detail
+    /// included, one JSON object each. Read ONLY by reproduction verification:
+    /// [`VerdictFacts`] drops `detail` because it varies between generations,
+    /// but two runs of ONE generation must agree on it.
+    pub exact_verdicts: Vec<String>,
+    /// The envelope's `native_run_marker`: the `PATINA_INFRA native_run` line
+    /// the native supervisor appended to the run's stderr. It rides the
+    /// guest's stream, so this is how [`primary_finding`] tells patina's own
+    /// marker from a guest line written to look like it.
+    pub native_run_marker: Option<String>,
 }
 
 /// Per-guest classification rules a campaign spec declares (`classify` in the
@@ -688,8 +726,11 @@ pub fn signature(class: CampaignClass, generation: &GenerationFacts) -> Signatur
 }
 
 /// The most representative description of the finding for the class, from the
-/// structured facts where they carry one.
-fn primary_finding(class: CampaignClass, generation: &GenerationFacts) -> String {
+/// structured facts where they carry one: the exact line a signature's shape is
+/// cut from, before [`normalize_shape`] collapses its numbers. Reproduction
+/// verification compares it exactly, since a number that varies between two
+/// runs of one generation is the leak the shape hides.
+pub(super) fn primary_finding(class: CampaignClass, generation: &GenerationFacts) -> String {
     let shape = primary_finding_shape(class, generation);
     // A generation whose class came from the GUEST while patina's own recorder
     // also gave out is reproducible only up to a point: the finding stands, but
@@ -794,7 +835,7 @@ fn primary_finding_shape(class: CampaignClass, generation: &GenerationFacts) -> 
         .map(str::trim)
         .filter(|line| !line.is_empty() && !is_runtime_diagnostic(line))
     {
-        return line.to_string();
+        return patina_marker_evidence(line, generation);
     }
     let mut lines = generation
         .output
@@ -806,12 +847,12 @@ fn primary_finding_shape(class: CampaignClass, generation: &GenerationFacts) -> 
     for line in &mut lines {
         last_nonempty.get_or_insert(line);
         if !is_runtime_diagnostic(line) {
-            return line.to_string();
+            return patina_marker_evidence(line, generation);
         }
     }
     // Every line was a diagnostic: a shape with no evidence in it still beats an
     // empty shape, which would collapse unrelated failures into one signature.
-    last_nonempty.unwrap_or_default().to_string()
+    patina_marker_evidence(last_nonempty.unwrap_or_default(), generation)
 }
 
 /// Whether `line` is patina's OWN diagnostic — a summary, a progress marker, or
@@ -957,7 +998,32 @@ fn death_attribution(generation: &GenerationFacts) -> Option<String> {
         .iter()
         .rev()
         .find(|line| !line.is_empty() && !is_runtime_diagnostic(line))
-        .map(|line| line.to_string())
+        .map(|line| patina_marker_evidence(line, generation))
+}
+
+/// A line as finding evidence: the line itself, unless it is the native
+/// supervisor's own `PATINA_INFRA native_run` marker for this run, which
+/// loses its trace fields.
+///
+/// The supervisor writes `trace=incomplete trace_path="…" reason="…"` when the
+/// trace could not be finalized (`append_native_infra_marker`): the path is
+/// the generation's own trace, and the reason names its random scratch file.
+/// Kept, they make one deterministic fault read differently on every run and
+/// under every reproduction: a novel signature each generation, and a false
+/// nondeterminism finding. `trace=incomplete` and the signal stay.
+///
+/// Only the line the supervisor reports having appended
+/// ([`GenerationFacts::native_run_marker`]) is reduced. A guest line is
+/// evidence as written, however much it looks like patina's.
+fn patina_marker_evidence(line: &str, generation: &GenerationFacts) -> String {
+    let line = line.trim();
+    match &generation.native_run_marker {
+        Some(marker) if marker.trim() == line => line
+            .split_once(" trace_path=")
+            .map_or(line, |(stable, _)| stable)
+            .to_string(),
+        _ => line.to_string(),
+    }
 }
 
 /// Collapse run-specific values (digit and hex runs) so a signature captures the
@@ -1077,7 +1143,14 @@ mod tests {
             classify(&planted(RunFacts::ok().timed_out(), ""), &rules),
             classify(&planted(RunFacts::ok().exit(3), ""), &rules),
         ];
-        assert_eq!(fired, CampaignClass::ALL.to_vec());
+        // The cross-run class is reached by comparing two runs, never from one
+        // run's facts; the selftest proves it fires through the comparison.
+        let single_run: Vec<CampaignClass> = CampaignClass::ALL
+            .iter()
+            .copied()
+            .filter(|class| !class.is_cross_run())
+            .collect();
+        assert_eq!(fired, single_run);
     }
 
     /// The structural half of the guest-agnostic doctrine: no built-in class may

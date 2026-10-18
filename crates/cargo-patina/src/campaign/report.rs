@@ -7,6 +7,7 @@ use super::state::{
     CampaignState, GenerationOutcome, InvocationRecord, SignatureRecord, allow_unmet_to_json,
     class_counts_failures, signatures_to_json,
 };
+use super::verify::{VerificationSummary, VerifyStatus};
 use crate::coverage::top_uncovered_crates;
 use crate::guided::GuidanceTally;
 use crate::sdk_report::{CoverageTally, ExercisedSite};
@@ -363,6 +364,7 @@ pub(super) struct CampaignSummaryInput<'a> {
     pub(super) edge_coverage: &'a EdgeCoverageState,
     pub(super) depth: &'a DepthState,
     pub(super) guidance: Option<GuidanceTally>,
+    pub(super) verification: VerificationSummary,
     pub(super) artifact_path: &'a Path,
     pub(super) failures: u64,
     pub(super) novel: u64,
@@ -433,8 +435,23 @@ the run — the trace resource limit, an unwritable trace; not findings)"
                 };
                 println!("      log:       {shown}");
             }
+            if let Some(verification) = &record.verification {
+                let path = verification.path.as_str();
+                println!("      verify:    {path} {}", verification.status.as_str());
+                // Both outcomes, whenever they did not agree.
+                if verification.status != VerifyStatus::Reproduced {
+                    println!("      observed:  {}", verification.observed.describe());
+                    println!(
+                        "      {:<10} {}",
+                        format!("{path}:"),
+                        verification.reproduction.describe()
+                    );
+                }
+            }
         }
     }
+    println!("-- reproduction verification --");
+    println!("{}", input.verification.line());
     print_coverage_summary(input.coverage, input.coverage_verdict, input.sites_path);
     print_edge_coverage_summary(input.edge_coverage, input.artifact_path);
     print_depth_summary(input.depth);
@@ -673,6 +690,7 @@ pub(super) fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde
         "coverage": coverage_json,
         "depth": depth_json(input.depth),
         "guidance": guidance_json(input.guidance),
+        "verification": VerificationSummary::of(state).to_json(),
         "artifacts": artifacts,
     });
     if let (Some(object), Some(config)) =
@@ -844,6 +862,7 @@ mod tests {
             novel,
             signature_key: class.is_failure().then(|| "LIVENESS|shape|".to_string()),
             verdicts: Vec::new(),
+            verification: None,
         };
         let outcomes = vec![
             mk(0, CampaignClass::Ok, false),

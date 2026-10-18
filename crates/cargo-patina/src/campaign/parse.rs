@@ -137,6 +137,9 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
         spec.starve_scale_permille = value;
     }
     spec.report |= args.flag("--report-failures");
+    if args.flag("--no-verify") {
+        spec.verify = false;
+    }
     let dns_entries = args.texts("--dns-entry");
     if !dns_entries.is_empty() {
         spec.dns_entries = dns_entries.into_iter().map(str::to_string).collect();

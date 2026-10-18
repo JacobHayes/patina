@@ -152,12 +152,9 @@ pub fn execute_preview1_with_fuel(
             .expect("fuel metering was enabled on the Wasmi engine"),
     );
     let hostcalls = store.data().hostcalls().clone();
-    let output_result = store
-        .into_data()
-        .finish_with_output()
-        .map_err(WasiRunError::Host);
-    match (run_result, output_result) {
-        (Ok(exit_code), Ok((stdout, stderr))) => {
+    let (stdout, stderr, finished) = store.into_data().finish_with_output();
+    match (run_result, finished.map_err(WasiRunError::Host)) {
+        (Ok(exit_code), Ok(())) => {
             check_depth_available(fuel_consumed)?;
             Ok(WasiExecution {
                 exit_code,
@@ -167,16 +164,23 @@ pub fn execute_preview1_with_fuel(
                 hostcalls,
             })
         }
-        (Err(run), Ok((stdout, stderr))) if stdout.is_empty() && stderr.is_empty() => Err(run),
-        (Err(run), Ok((stdout, stderr))) => Err(WasiRunError::RunWithOutput {
+        (Err(run), Ok(())) if stdout.is_empty() && stderr.is_empty() => Err(run),
+        (Err(run), Ok(())) => Err(WasiRunError::RunWithOutput {
             run: Box::new(run),
             stdout,
             stderr,
         }),
-        (Ok(_), Err(finalize)) => Err(finalize),
+        (Ok(exit_code), Err(finalize)) => Err(WasiRunError::FinalizeWithOutput {
+            exit_code,
+            finalize: Box::new(finalize),
+            stdout,
+            stderr,
+        }),
         (Err(run), Err(finalize)) => Err(WasiRunError::RunAndFinalize {
             run: Box::new(run),
             finalize: Box::new(finalize),
+            stdout,
+            stderr,
         }),
     }
 }

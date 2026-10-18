@@ -20,8 +20,12 @@ use super::state::{
     absolute_out_dir, artifact_identity, class_counts_failures, load_campaign_state,
     load_coverage_tally, verify_artifact_identity, write_campaign_checkpoint,
 };
+use super::verify::{
+    Attempt, Observation, VerificationSummary, Verifier, VerifyStatus, nondeterminism_signature,
+    samples_clean_rerun, trace_digest,
+};
 use super::{
-    CampaignInvocation, classify, derive_flags, generation_hash, invocation_flags,
+    CampaignClass, CampaignInvocation, classify, derive_flags, generation_hash, invocation_flags,
     non_native_invocation_flag, signature,
 };
 use crate::CliError;
@@ -210,6 +214,21 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
     let mut failures_so_far = class_counts_failures(&state.classes);
     let mut novel_so_far = novel_findings(&state.signatures);
 
+    // The invocation shape a trace cannot carry, and everything else a
+    // reproduction attempt shares across generations.
+    let invocation = invocation_flags(&state.spec, state.artifact.family);
+    let rules = state.spec.classify.clone();
+    let guest_args = state.spec.guest_args.clone();
+    let verifier = Verifier {
+        self_exe: &self_exe,
+        artifact: &artifact_path,
+        invocation: &invocation,
+        guest_args: &guest_args,
+        timeout_secs: effective_timeout_secs,
+        rules: &rules,
+        traces_dir: &traces_dir,
+    };
+
     for generation in from_gen..state.spec.generations {
         // Unguided: the pure per-generation hash. Guided: possibly a mutation of
         // a previously productive generation's hash. Either way ONE 32-byte value
@@ -252,7 +271,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
         let timed_out = run.facts.facts.timed_out;
         let stderr = run.stderr;
         let _sites_fold = fold_sites_generation(&mut coverage, generation, seed, &stderr)?;
-        let class = classify(&run.facts, &state.spec.classify);
+        let observed_class = classify(&run.facts, &state.spec.classify);
         // Edge coverage folds AFTER classification, for the same reason depth does
         // below: the shim writes the coverage map at SHUTDOWN, so whether a missing
         // map is a tolerable "this generation never got there" or a loud plumbing
@@ -263,23 +282,77 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             coverage_map_path.as_deref(),
             generation_reached_shutdown(&run.facts.facts),
         )?;
-        *state.classes.entry(class.as_str().to_string()).or_insert(0) += 1;
         // Depth folds AFTER classification: whether a missing depth line is a
         // tolerable "the guest never finished" or a loud plumbing failure depends
         // on how the generation ended.
         let _depth_fold = fold_depth_generation(&mut depth, generation, exit, timed_out, &stderr)?;
 
+        // A failure that ran to a clean finish left a valid trace; a mid-run
+        // abort (a liveness violation, an always-violation trap) left none. The
+        // reproduce command is `replay <trace>` when a valid trace exists, else
+        // a deterministic re-run from the recorded seed and knobs. Saved before
+        // verification, so verification replays the trace the store names.
+        let observed_signature = observed_class
+            .is_failure()
+            .then(|| signature(observed_class, &run.facts));
+        let mut saved_trace = observed_class
+            .is_failure()
+            .then(|| save_failure_trace(&out_dir, &trace_path, generation))
+            .flatten();
+        let filed_nondeterministic = nondeterminism_signature(observed_signature.as_ref());
+        let attempt = Attempt {
+            generation,
+            seed,
+            flags: &flags,
+            coverage: coverage_map_path.is_some(),
+        };
+        let (class, verification) = match &observed_signature {
+            // A repeat of a signature already found not to reproduce is that
+            // nondeterminism again, not the finding it pretends to be.
+            Some(_) if state.signatures.contains_key(&filed_nondeterministic.key()) => {
+                (CampaignClass::Nondeterminism, None)
+            }
+            // A novel finding: run its reproduce path once before reporting it.
+            Some(seen)
+                if state.spec.verify
+                    && observed_class.is_finding()
+                    && !state.signatures.contains_key(&seen.key()) =>
+            {
+                let observed = Observation::new(observed_class, &run.facts, None);
+                let verification =
+                    verifier.reproduce(&attempt, observed, saved_trace.as_deref())?;
+                (verification.class(), Some(verification))
+            }
+            // A sampled clean generation: run it twice and compare the traces.
+            None if state.spec.verify
+                && observed_class == CampaignClass::Ok
+                && samples_clean_rerun(state.spec.seed_base, generation) =>
+            {
+                let observed =
+                    Observation::new(observed_class, &run.facts, trace_digest(&trace_path));
+                let verification = verifier.rerun(&attempt, observed)?;
+                state.clean_reruns.runs += 1;
+                if verification.status == VerifyStatus::Infra {
+                    state.clean_reruns.infra += 1;
+                }
+                if verification.class().is_failure() {
+                    saved_trace = save_failure_trace(&out_dir, &trace_path, generation);
+                }
+                (verification.class(), Some(verification))
+            }
+            _ => (observed_class, None),
+        };
+        *state.classes.entry(class.as_str().to_string()).or_insert(0) += 1;
+
         let mut novel = false;
         let mut signature_key = None;
         if class.is_failure() {
-            let sig = signature(class, &run.facts);
+            let sig = match class {
+                CampaignClass::Nondeterminism => filed_nondeterministic,
+                _ => observed_signature.expect("a failing class was observed as a failure"),
+            };
             let key = sig.key();
             signature_key = Some(key.clone());
-            // A failure that ran to a clean finish left a valid trace; a mid-run
-            // abort (a liveness violation, an always-violation trap) left none. The
-            // reproduce command is `replay <trace>` when a valid trace exists, else
-            // a deterministic re-run from the recorded seed and knobs.
-            let saved_trace = save_failure_trace(&out_dir, &trace_path, generation);
             // A failure with no valid bundle leaves no `failures/` trace and no
             // `reports/` HTML, and the child's streams are dropped right after
             // this — so the generation used to leave NOTHING on disk, even when
@@ -290,13 +363,18 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                 Some(_) => None,
                 None => save_failure_log(&out_dir, generation, &run.stdout, &stderr),
             };
+            // A clean generation that did not reproduce has no failing trace to
+            // replay: its reproduce command is the run it was verified by.
+            let replayable = saved_trace
+                .as_deref()
+                .filter(|_| observed_class.is_failure());
             let reproduce = reproduce_command(
                 &artifact_path,
                 seed,
                 &flags,
-                &invocation_flags(&state.spec, state.artifact.family),
+                &invocation,
                 &state.spec.guest_args,
-                saved_trace.as_deref(),
+                replayable,
                 &format!("generation-{generation}.patina"),
             );
             let report = if state.spec.report {
@@ -329,6 +407,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                         trace: saved_trace,
                         log: saved_log,
                         report,
+                        verification: verification.clone(),
                     }
                 });
         }
@@ -353,6 +432,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             novel,
             signature_key,
             verdicts: run.facts.facts.verdicts.clone(),
+            verification,
         };
         if outcome.is_notable() {
             state.notable_runs.push(outcome.clone());
@@ -380,8 +460,22 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                     (true, GuidanceDecision::Explore) => " guided=explore".to_string(),
                     (true, GuidanceDecision::NoAncestors) => " guided=none".to_string(),
                 };
+                // Which run a nondeterministic generation was observed as, and
+                // how a verified one was checked — so the line that names the
+                // class also says what it rests on.
+                let mut verified = String::new();
+                if class == CampaignClass::Nondeterminism {
+                    verified.push_str(&format!(" observed={}", observed_class.as_str()));
+                }
+                if let Some(verification) = &outcome.verification {
+                    verified.push_str(&format!(
+                        " verify={}:{}",
+                        verification.path.as_str(),
+                        verification.status.as_str()
+                    ));
+                }
                 println!(
-                    "PATINA_CAMPAIGN_GEN generation={generation} seed={seed} class={}{tag}{steer}",
+                    "PATINA_CAMPAIGN_GEN generation={generation} seed={seed} class={}{tag}{steer}{verified}",
                     class.as_str()
                 );
             }
@@ -453,6 +547,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             edge_coverage: &edge_coverage,
             depth: &depth,
             guidance: state.spec.guided.then_some(guidance),
+            verification: VerificationSummary::of(&state),
             artifact_path: &artifact_path,
             failures,
             novel: novel_count,

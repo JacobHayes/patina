@@ -13,7 +13,7 @@ use crate::{
 use patina_dst_runtime::{Context, FaultKnob, RuntimeConfig};
 use patina_dst_target::{WASI_PREVIEW1_TARGET, WasiAudit};
 use patina_dst_trace::TraceBundle;
-use patina_dst_wasi_host::{MountPolicy, Preview1Host, execute_preview1_with_fuel};
+use patina_dst_wasi_host::{MountPolicy, Preview1Host, WasiRunError, execute_preview1_with_fuel};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -180,14 +180,78 @@ pub(super) fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliErr
             // instead of filing it as harness noise (docs/arcs/outcome-channel.md,
             // Wave B residue). Every OTHER failure — an audit refusal, an
             // engine/link error, a host finalization error — is patina or the
-            // module failing and stays a `CliError`.
+            // module failing and stays a `CliError`, with one exception: a
+            // replay the runtime reported, on its facts channel, as diverged
+            // from its trace. That run happened and did not follow its
+            // recording (the finalization error is only how the divergence
+            // surfaced), so it is reported as a run, carrying the facts.
             let (trap, stdout, mut stderr) = match error.guest_trap() {
                 Ok(trap) => trap,
-                Err(other) => return Err(CliError(other.to_string())),
+                Err(other) => {
+                    let facts =
+                        read_facts_channel(facts_file.as_ref().map(tempfile::NamedTempFile::path))?;
+                    if !facts
+                        .as_ref()
+                        .is_some_and(|facts| facts.get("replay_divergence").is_some())
+                    {
+                        return Err(CliError(other.to_string()));
+                    }
+                    // The guest's output and the status it reached are kept:
+                    // its verdicts ride its stderr, and they are what a replay
+                    // is compared on.
+                    let message = match &other {
+                        WasiRunError::RunWithOutput { run, .. } => run.to_string(),
+                        other => other.to_string(),
+                    };
+                    let (guest_exit_code, stdout, mut stderr) = match other {
+                        WasiRunError::RunWithOutput { stdout, stderr, .. } => {
+                            (None, stdout, stderr)
+                        }
+                        WasiRunError::FinalizeWithOutput {
+                            exit_code,
+                            stdout,
+                            stderr,
+                            ..
+                        } => (Some(exit_code), stdout, stderr),
+                        WasiRunError::RunAndFinalize {
+                            run,
+                            stdout,
+                            stderr,
+                            ..
+                        } => {
+                            let trapped = matches!(*run, WasiRunError::GuestTrap(_));
+                            (trapped.then_some(WASI_TRAP_EXIT), stdout, stderr)
+                        }
+                        _ => (None, Vec::new(), Vec::new()),
+                    };
+                    output::end_guest_line(&mut stderr);
+                    stderr.extend_from_slice(format!("patina: {message}\n").as_bytes());
+                    return output::finalize_inprocess(
+                        output::RunReport {
+                            verb: "run",
+                            family: "wasi",
+                            artifact: &artifact,
+                            trace_path,
+                            timeline: &timeline,
+                            fingerprint: Some(fingerprint),
+                            seed,
+                            coverage: None,
+                            depth: None,
+                            crash_restart: None,
+                            facts,
+                            native_run_marker: None,
+                            guest_exit_code,
+                        },
+                        WASI_DIVERGED_EXIT,
+                        stdout,
+                        stderr,
+                    );
+                }
             };
             // The trap itself stays loud: it rides the run's own stderr, so it
             // reaches the human stream, the envelope's `stderr`, and a campaign's
             // captured output through one channel.
+            output::end_guest_line(&mut stderr);
             stderr.extend_from_slice(format!("patina: wasm trap: {trap}\n").as_bytes());
             // No `depth`: the engine's fuel meter and hostcall counters are only
             // available from a finished `WasiExecution`, and an absent report must
@@ -207,6 +271,8 @@ pub(super) fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliErr
                     depth: None,
                     crash_restart: None,
                     facts,
+                    native_run_marker: None,
+                    guest_exit_code: None,
                 },
                 WASI_TRAP_EXIT,
                 stdout,
@@ -221,6 +287,7 @@ pub(super) fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliErr
     // trace are finalized, so no recorded byte or fingerprint is affected.
     let depth = wasi_depth_report(&execution);
     if reports.enabled(patina_dst_runtime::Report::Depth) {
+        output::end_guest_line(&mut execution.stderr);
         execution
             .stderr
             .extend_from_slice(depth.marker_line().as_bytes());
@@ -240,6 +307,8 @@ pub(super) fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliErr
             depth: Some(depth),
             crash_restart: None,
             facts,
+            native_run_marker: None,
+            guest_exit_code: None,
         },
         execution.exit_code,
         execution.stdout,
@@ -546,6 +615,12 @@ pub(super) fn execute_wasi_audit(artifact: ArtifactRef) -> Result<i32, CliError>
 /// than borrowing a signal-death code (`134`) it did not die from — the envelope's
 /// `verdicts[]` and `stderr` carry what actually happened.
 const WASI_TRAP_EXIT: i32 = 1;
+
+/// Exit code for a WASI replay that diverged from its trace and surfaced it as
+/// a finalization error: the code the same failure has as a CLI error, so only
+/// the envelope changes, gaining the run's facts. The status the guest itself
+/// reached is the envelope's `guest_exit`.
+const WASI_DIVERGED_EXIT: i32 = 2;
 
 #[cfg(test)]
 mod tests {

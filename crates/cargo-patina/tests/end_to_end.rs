@@ -29,6 +29,8 @@ mod campaign_forwarding;
 mod campaign_guided;
 #[path = "end_to_end/campaign_outcomes.rs"]
 mod campaign_outcomes;
+#[path = "end_to_end/campaign_verify.rs"]
+mod campaign_verify;
 #[path = "end_to_end/cargo_replay.rs"]
 mod cargo_replay;
 #[path = "end_to_end/config.rs"]

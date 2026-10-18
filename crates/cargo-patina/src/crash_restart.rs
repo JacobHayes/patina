@@ -563,6 +563,7 @@ fn read_scratch_file(file: &fs::File, purpose: &str) -> Result<Vec<u8>, CliError
 #[cfg(unix)]
 fn append_supervisor_line(captured: &mut output::Captured, line: &str) {
     if captured.captured {
+        output::end_guest_line(&mut captured.stderr);
         captured.stderr.extend_from_slice(line.as_bytes());
         captured.stderr.push(b'\n');
     } else {
@@ -590,15 +591,19 @@ fn selector_json(selector: CrashPoint) -> serde_json::Value {
     })
 }
 
+/// Append the supervisor's `PATINA_INFRA native_run` marker to the run's
+/// stderr, and return the marker line so the envelope can name it
+/// (`native_run_marker`): the line rides the guest's stream, and only this
+/// record tells it apart from a guest line that looks the same.
 #[cfg(unix)]
 pub(super) fn append_native_infra_marker(
     captured: &mut output::Captured,
     signal: Option<i32>,
     trace_error: Option<(&Path, &str)>,
     channel_unavailable: Option<i32>,
-) {
+) -> Option<String> {
     if signal.is_none() && trace_error.is_none() {
-        return;
+        return None;
     }
     let mut line = String::from("PATINA_INFRA native_run");
     if let Some(signal) = signal {
@@ -611,6 +616,7 @@ pub(super) fn append_native_infra_marker(
             reason
         ));
     }
+    let marker = line.clone();
     line.push('\n');
     // A channel failure is patina's own operational condition, not a finding, so
     // it says so in the attributable form the envelope reads: one stable
@@ -624,10 +630,12 @@ not be written, so this generation has no replay artifact; the guest's own verdi
         ));
     }
     if captured.captured {
+        output::end_guest_line(&mut captured.stderr);
         captured.stderr.extend_from_slice(line.as_bytes());
     } else {
         eprint!("{line}");
     }
+    Some(marker)
 }
 
 #[cfg(test)]

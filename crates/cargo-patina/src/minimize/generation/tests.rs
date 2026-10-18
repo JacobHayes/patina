@@ -13,8 +13,20 @@ fn repro_with(class: &str, verdicts: Vec<VerdictFacts>) -> crate::campaign::Gene
         guest_args: Vec::new(),
         timeout_secs: 30,
         class: class.to_string(),
+        cross_run: crate::campaign::CampaignClass::ALL
+            .iter()
+            .any(|known| known.as_str() == class && known.is_cross_run()),
         verdicts,
     }
+}
+
+/// A cross-run class is refused whatever target a single run could offer:
+/// its own recorded verdicts, or a marker the operator typed.
+#[test]
+fn a_cross_run_generation_is_refused_even_with_a_target() {
+    let repro = repro_with("NONDETERMINISM", vec![verdict("violation", "durability")]);
+    assert!(generation_target(None, 14, &repro).is_err());
+    assert!(generation_target(Some("GUEST_TORN"), 14, &repro).is_err());
 }
 
 #[test]

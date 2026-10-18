@@ -626,7 +626,7 @@ liveness-safe."
         }
     }
     let native_signal = captured.signal;
-    append_native_infra_marker(
+    let native_run_marker = append_native_infra_marker(
         &mut captured,
         native_signal,
         trace_finalization_error
@@ -690,6 +690,8 @@ liveness-safe."
             depth: None,
             crash_restart,
             facts,
+            native_run_marker,
+            guest_exit_code: None,
         },
         captured,
     )?;

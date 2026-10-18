@@ -141,6 +141,9 @@ pub(crate) struct GenerationRepro {
     pub(crate) guest_args: Vec<String>,
     pub(crate) timeout_secs: u64,
     pub(crate) class: String,
+    /// The class is a property of two runs (`NONDETERMINISM`), which no oracle
+    /// judging one run can preserve.
+    pub(crate) cross_run: bool,
     /// The verdicts the campaign recognized in this generation, in call order.
     /// `minimize --generation` targets these when no `--marker` is given.
     pub(crate) verdicts: Vec<VerdictFacts>,
@@ -194,6 +197,7 @@ pub(crate) fn generation_repro(
         guest_args: state.spec.guest_args.clone(),
         timeout_secs: state.spec.timeout_secs,
         class: outcome.class.as_str().to_string(),
+        cross_run: outcome.class.is_cross_run(),
         verdicts: outcome.verdicts.clone(),
     })
 }

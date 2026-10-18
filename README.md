@@ -131,7 +131,7 @@ source-first native libtest harness mode for one exact test target.
 | `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `cargo patina replay ./app run.patina` |
 | `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `cargo patina trace info run.patina` |
 | `explore` | Sweep a seed range, reporting per-seed outcomes. | `cargo patina explore run ./app --seeds 500` |
-| `campaign` | Config-driven fault-and-schedule sweep with failure dedup, SDK oracle coverage gate, and native edge-coverage accumulation for yield-point binaries. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
+| `campaign` | Config-driven fault-and-schedule sweep with failure dedup, reproduction-verified findings (a failure that does not reproduce is `NONDETERMINISM`), SDK oracle coverage gate, and native edge-coverage accumulation for yield-point binaries. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
 | `coverage` | Symbolize and roll up a `patina.covmap/v1` map or campaign coverage store. | `cargo patina coverage ./app out/` |
 | `sites` | Inventory assertion/oracle instrumentation; optionally join a run or campaign SDK report. | `cargo patina sites --exercised out/` |
 | `minimize` | Reduce a failing campaign generation (fault knobs first, then its trace), a failing trace, or the seed/params. A generation needs no oracle: the campaign already recorded which verdicts it reported, and those are what the reduction preserves. | `cargo patina minimize --generation 14 --out-dir out/` |

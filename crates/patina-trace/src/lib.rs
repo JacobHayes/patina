@@ -228,6 +228,21 @@ pub enum TraceError {
 }
 
 impl TraceError {
+    /// The kind of replay divergence this error reports, or `None` when it is
+    /// not one: the replay asked for an operation past the trace's end, met a
+    /// different operation or outcome than the one recorded, or finished with
+    /// recorded operations left over. Each says the replayed run is not the
+    /// recorded one. A stable token, so it can travel as a structured fact.
+    pub const fn replay_divergence(&self) -> Option<&'static str> {
+        match self {
+            Self::ReplayExhausted { .. } => Some("trace_exhausted"),
+            Self::OperationMismatch { .. } => Some("operation_mismatch"),
+            Self::OutcomeMismatch { .. } => Some("outcome_mismatch"),
+            Self::UnconsumedEvents { .. } => Some("unconsumed_events"),
+            _ => None,
+        }
+    }
+
     /// Whether this refusal is a budget refusal (see
     /// [`TraceError::ResourceLimit`]) rather than a broken, corrupt, or
     /// unwritable trace. Callers that must keep failing closed on a genuine

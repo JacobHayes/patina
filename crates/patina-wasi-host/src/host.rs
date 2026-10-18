@@ -520,7 +520,10 @@ impl Preview1Host {
         self.context.finish().map_err(Into::into)
     }
 
-    pub(super) fn finish_with_output(self) -> Result<(Vec<u8>, Vec<u8>), WasiHostError> {
+    /// Finalize the run, and hand back the guest's output whether or not
+    /// finalization succeeded: a run that fails to finalize still happened, and
+    /// what it wrote is evidence of what it did.
+    pub(super) fn finish_with_output(self) -> (Vec<u8>, Vec<u8>, Result<(), WasiHostError>) {
         let Self {
             context,
             stdout,
@@ -533,15 +536,20 @@ impl Preview1Host {
         // `PATINA_SDK_REPORT` line; then the run fails loudly rather than passing as
         // a silent no-fault run.
         let setup_violation = context.buggify_setup_violation();
-        context.finish()?;
-        if setup_violation {
-            // Emit the marker to the real process stderr, as the native shim writes
-            // it to fd 2, so the campaign classifier sees the same token regardless
-            // of how the caller surfaces the returned error.
-            eprintln!("{BUGGIFY_SETUP_NEVER_CALLED_MARKER}");
-            return Err(WasiHostError::BuggifySetupNeverCalled);
-        }
-        Ok((stdout, stderr))
+        let finished = context
+            .finish()
+            .map_err(WasiHostError::from)
+            .and_then(|()| {
+                if setup_violation {
+                    // Emit the marker to the real process stderr, as the native shim
+                    // writes it to fd 2, so the campaign classifier sees the same token
+                    // regardless of how the caller surfaces the returned error.
+                    eprintln!("{BUGGIFY_SETUP_NEVER_CALLED_MARKER}");
+                    return Err(WasiHostError::BuggifySetupNeverCalled);
+                }
+                Ok(())
+            });
+        (stdout, stderr, finished)
     }
 }
 

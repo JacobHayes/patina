@@ -439,3 +439,67 @@ fn replay_compares_deterministic_driver_outcomes() {
         Err(RuntimeError::Trace(TraceError::OutcomeMismatch { .. }))
     ));
 }
+
+/// A replay that leaves its trace says so on the facts channel, as the trace
+/// layer's typed divergence kind; a replay that follows its trace does not.
+/// The channel is the supervisor's evidence of divergence because the guest
+/// cannot write it, unlike any line of the run's text.
+#[test]
+fn a_replay_divergence_reaches_the_facts_channel_as_its_kind() {
+    let directory = tempdir().unwrap();
+    let trace = directory.path().join("run.patina");
+    let mut record = Context::from_config(RuntimeConfig::record(4, &trace, "fp")).unwrap();
+    record.write_file("/a", b"payload").unwrap();
+    record.write_file("/b", b"payload").unwrap();
+    record.finish().unwrap();
+
+    let replay = |name: &str, paths: &[&str]| -> serde_json::Value {
+        let facts = directory.path().join(name);
+        let config = RuntimeConfig::replay(&trace, "fp").with_facts_path(&facts);
+        let mut replay = Context::from_config(config).unwrap();
+        for path in paths {
+            let _ = replay.write_file(path, b"payload");
+        }
+        let _ = replay.finish();
+        serde_json::from_slice(&fs::read(&facts).unwrap()).unwrap()
+    };
+    assert!(
+        replay("followed.json", &["/a", "/b"])
+            .get("replay_divergence")
+            .is_none()
+    );
+    for (paths, kind) in [
+        (&["/a"][..], "unconsumed_events"),
+        (&["/a", "/c"][..], "operation_mismatch"),
+        (&["/a", "/b", "/c"][..], "trace_exhausted"),
+    ] {
+        let name = format!("{kind}.json");
+        assert_eq!(replay(&name, paths)["replay_divergence"], kind, "{paths:?}");
+    }
+}
+
+/// A divergence the runtime finds itself, outside the trace layer, reaches the
+/// facts channel the same way: here the time model, where the replay charged a
+/// call the recording did not and so derives a different monotonic time.
+#[test]
+fn a_time_model_divergence_reaches_the_facts_channel() {
+    use patina_dst_abi::{ChargeClass, ChargeCounts};
+    let directory = tempdir().unwrap();
+    let trace = directory.path().join("clock.patina");
+    let mut record = Context::from_config(RuntimeConfig::record(4, &trace, "fp")).unwrap();
+    record.now(ClockKind::Monotonic).unwrap();
+    record.finish().unwrap();
+
+    let facts = directory.path().join("facts.json");
+    let config = RuntimeConfig::replay(&trace, "fp").with_facts_path(&facts);
+    let mut replay = Context::from_config(config).unwrap();
+    let mut counts = ChargeCounts::new();
+    counts.count(ChargeClass::Clock);
+    replay.charge_calls(None, counts).unwrap();
+    assert!(matches!(
+        replay.now(ClockKind::Monotonic),
+        Err(RuntimeError::TimeModel { .. })
+    ));
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&facts).unwrap()).unwrap();
+    assert_eq!(document["replay_divergence"], "time_model_mismatch");
+}

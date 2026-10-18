@@ -54,6 +54,9 @@
 //! `classify.patterns` play for the classifier (arc §4.3). A generation with no
 //! failure verdict and no `--marker` is refused by name rather than reduced
 //! against a guessed target.
+//!
+//! A `NONDETERMINISM` generation is refused by name too, `--marker` or not:
+//! its failure is that two runs disagree, and every oracle here judges one.
 
 use std::ffi::OsString;
 use std::io;

@@ -44,7 +44,7 @@ pub(super) const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--fault-scale-permille N] [--starve-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [-- GUEST ARGS]",
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--fault-scale-permille N] [--starve-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [-- GUEST ARGS]",
         "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --selftest",
@@ -65,7 +65,14 @@ FAIL_CLOSED_ABORT. A guest that never calls the verdict ABI declares its own \
 rules in the spec (\"classify\": {\"patterns\": {CLASS: [substring, ...]}, \
 \"exit_codes\": {CLASS: [code, ...]}}), which may only ADD a finding where the \
 envelope reached none. Novel failure \
-signatures are deduped and their traces saved with a reproduce command. A --spec \
+signatures are deduped and their traces saved with a reproduce command. Before a \
+novel finding is reported the campaign runs that reproduce command once — replay \
+of the saved trace, or the seeded re-run for a traceless failure — and a seeded \
+sample of clean generations (one in 16, chosen from --seed-start) runs twice; a \
+differing class, signature, verdict set or trace digest is NONDETERMINISM, the \
+most severe class, reported with both outcomes. A second run patina could not \
+finish (a timeout, a host kill) is counted as infra and leaves the class as \
+observed. --no-verify skips these runs for cost. A --spec \
 FILE.json supplies overrides and individual flags override the spec. Campaigns \
 checkpoint their state in --out-dir; `--extend N` adds N generations to the recorded \
 target, and `--resume` finishes an interrupted campaign from the recorded out-dir \
@@ -250,6 +257,13 @@ refused by name.",
                     None,
                     Value::None,
                     "Also write a --report HTML for each failing generation.",
+                    false,
+                ),
+                f(
+                    "--no-verify",
+                    None,
+                    Value::None,
+                    "Skip reproduction verification: by default each novel finding's reproduce command runs once and a seeded one-in-16 sample of clean generations runs twice, and a differing outcome is NONDETERMINISM.",
                     false,
                 ),
                 COMPUTE_WATCHDOG_FLAG,
@@ -627,7 +641,9 @@ campaign recorded for that generation, and a candidate still fails only when it 
 reports every one of them AND the replay did not diverge — so candidates are \
 hermetic and evaluated in parallel by default. --marker overrides the target with \
 literal failure text, for a guest that reports nothing through the verdict ABI; a \
-generation with neither is refused rather than reduced against a guess.\n\
+generation with neither is refused rather than reduced against a guess. A \
+NONDETERMINISM generation is refused, --marker or not: its failure is that two runs \
+disagree, which no single-run oracle can preserve.\n\
 \n\
 `minimize <TRACE>` shrinks a recorded trace: an unbranched main timeline or a leaf \
 --timeline ID is delta-debugged directly, while a branched bundle is shrunk under a \

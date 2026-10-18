@@ -657,7 +657,7 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    `SHA-256("patina-campaign-<seed_base>-<gen>")` — no wall clock, no `$RANDOM`,
    exactly the fuzz-sweep scheme — so a re-run reproduces identical outcomes and
    signatures. The spec is a JSON file (`--spec`, `deny`-unknown-keys) and/or flags.
-   A pure classifier assigns one outcome class (`CampaignClass`) — `OK` /
+   A pure classifier assigns one single-run outcome class (`CampaignClass`) — `OK` /
    `VIOLATION` / `LIVENESS` / `GUEST_ABORT` / `FAIL_CLOSED_ABORT` /
    `STARVATION_STALL` / `INFRA` / `UNCLASSIFIED`, plus one `VACUOUS_<PLANE>`
    coverage class per fault or exploration plane — from each generation's
@@ -679,7 +679,52 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    accumulated into `signatures.json` in the output dir: repeats dedup, novel
    signatures are flagged with their first-seen generation and a reproduce command
    (`cargo patina replay <trace>` when a valid trace exists, else a deterministic
-   re-run). A per-generation wall-clock
+   re-run). Reproduction is verified, not assumed (`campaign/verify.rs`): before
+   a novel finding signature is reported, the campaign runs its reproduce path
+   once — replay of the saved trace, or the seeded re-run for a traceless
+   failure — and a seeded one-in-16 sample of clean generations (the stride
+   offset derived from `--seed-start`) runs twice. The comparison is exact
+   rather than by signature, which is a dedup key that collapses numbers and
+   drops verdict details: the signature, the exit status (process code, the
+   guest's full `guest_exit.code`, which a WASI `proc_exit` status keeps past
+   the process status's eight bits, signal, refusal), the unnormalized finding line the shape is cut from, the verdict
+   rows with their details and, when both runs left one, the trace content
+   digest. Each is reproduced byte for byte by a deterministic replay, and none
+   reads patina's own per-run diagnostics: when the native supervisor's
+   `PATINA_INFRA native_run` marker becomes the finding line, it loses its
+   `trace_path` and `reason` fields, the run's own trace and scratch file. Only
+   the exact line the supervisor reports having appended (`native_run_marker`
+   in the envelope) is reduced; a guest line is evidence as written. A difference
+   on any of them, or a replay that does not follow its trace, is the
+   cross-run class `NONDETERMINISM`. The divergence is typed at its source:
+   the runtime notes the trace layer's divergence kind
+   (`TraceError::replay_divergence`) where the replayer reports it, at an
+   operation, an outcome or the end of the run, and writes it to the
+   `patina.runfacts/v1` channel at once (a shim fatal aborts before
+   `finish`), from which the envelope lifts `replay_divergence`. The runtime's
+   own replay cross-checks route through the same note
+   (`Context::diverged`, keyed by `RuntimeError::replay_divergence`, an
+   exhaustive match a new variant must join): the time model, a recorded
+   compute stop, a recorded custom-op fault the call cannot take. Refusing to
+   start a replay (fingerprint, identity) is not a divergence. A WASI replay
+   whose divergence surfaces as a finalization error is reported as a run
+   with its facts, not as a CLI error, keeping the guest's output, its
+   verdicts and, in `guest_exit`, the status it reached. The supervisor's
+   marker starts a line of its own, so a guest that dies mid-line leaves its
+   evidence unjoined. The channel is
+   a supervisor descriptor the guest cannot write, so a guest that prints the
+   token or names a custom op after a divergence message claims nothing. No
+   single run's facts and no declared rule
+   can reach it, it ranks above every single-run failure class, its signature is
+   keyed by the observed outcome so repeats dedup onto it, and the notable run
+   and signature record carry both outcomes. Any other reproduction attempt
+   that ends in a non-finding failure class (a timeout, a host kill, a recorder
+   failure) is counted as `infra` and leaves the observed class standing.
+   `minimize --generation` refuses a `NONDETERMINISM` generation by name: every
+   oracle it has judges one run, so a reduction would keep the single-run
+   failure and drop the nondeterminism. Each novel
+   signature is verified once, never its repeats; `--no-verify` (spec
+   `"verify": false`, recorded campaign shape) skips the extra runs. A per-generation wall-clock
    `--timeout-secs` backstop kills a generation that neither liveness detector
    can stop (for example a lone call-free infinite loop), classifying it
    INFRA so one hung generation cannot wedge the whole campaign. The kill takes

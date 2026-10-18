@@ -90,6 +90,11 @@ pub(super) fn facts_from_envelope(envelope: &serde_json::Value) -> RunFacts {
             .get("exit_code")
             .and_then(serde_json::Value::as_i64)
             .unwrap_or_default() as i32,
+        guest_exit_code: envelope
+            .get("guest_exit")
+            .and_then(|exit| exit.get("code"))
+            .and_then(serde_json::Value::as_i64)
+            .map(|code| code as i32),
         signal: envelope
             .get("guest_exit")
             .and_then(|exit| exit.get("signal"))
@@ -107,6 +112,9 @@ pub(super) fn facts_from_envelope(envelope: &serde_json::Value) -> RunFacts {
             .and_then(|refusal| refusal.get("guest_exit_code"))
             .and_then(serde_json::Value::as_i64)
             .map(|code| code as i32),
+        replay_diverged: envelope
+            .get("replay_divergence")
+            .is_some_and(serde_json::Value::is_string),
         verdicts,
         vacuous_planes,
         findings,
@@ -166,23 +174,8 @@ pub(super) fn run_generation(
     guest_args: &[String],
     timeout_secs: u64,
 ) -> Result<GenerationRun, CliError> {
-    use std::process::Stdio;
-    use std::time::{Duration, Instant};
-
-    let mut command = Command::new(self_exe);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    let mut command = child_command(self_exe, "run");
     command
-        .arg("run")
-        .arg("--no-config")
-        // The structured outcome channel: the child reports its result as a
-        // `patina.result/v1` envelope rather than as diagnostics the campaign
-        // would have to grep. This is the classifier's ONLY input.
-        .arg("--format")
-        .arg("json")
         .arg(artifact)
         .arg("--seed")
         .arg(seed.to_string())
@@ -200,16 +193,65 @@ pub(super) fn run_generation(
             command.arg(arg);
         }
     }
+    collect_child(command, timeout_secs)
+}
+
+/// Replay one recorded generation as a child `cargo patina replay --format json`
+/// process: the reproduce command a campaign prints for a failure that left a
+/// valid trace, run with the same child shape, environment and timeout backstop
+/// as the generation it replays. `invocation` is the shape the trace cannot carry
+/// (`--harness`, the pre-run gate surface, the host-time bound).
+pub(super) fn run_replay(
+    self_exe: &Path,
+    artifact: &Path,
+    trace: &Path,
+    invocation: &[String],
+    timeout_secs: u64,
+) -> Result<GenerationRun, CliError> {
+    let mut command = child_command(self_exe, "replay");
+    command.arg(artifact).arg(trace);
+    for flag in invocation {
+        command.arg(flag);
+    }
+    collect_child(command, timeout_secs)
+}
+
+/// The child `cargo patina <verb> --no-config --format json` command every
+/// campaign child shares, in its own process group.
+fn child_command(self_exe: &Path, verb: &str) -> Command {
+    let mut command = Command::new(self_exe);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+        .arg(verb)
+        .arg("--no-config")
+        // The structured outcome channel: the child reports its result as a
+        // `patina.result/v1` envelope rather than as diagnostics the campaign
+        // would have to grep. This is the classifier's ONLY input.
+        .arg("--format")
+        .arg("json");
     // Keep the child's diagnostics deterministic and machine-parseable. For a
     // campaign these lines are not cosmetic: they are the measurement channel and
     // the only input the vacuity classifiers have, so an inherited
     // `PATINA_*_REPORT=0` must never reach a generation and turn a blind run into
     // a clean one. Pin every report on, from the same table the families forward,
     // so a report added to the runtime is protected the day it exists.
-    crate::config::scrub_child_config_env(&mut command, "run");
+    crate::config::scrub_child_config_env(&mut command, verb);
     for report in patina_dst_runtime::Report::ALL {
         command.env(report.env(), "1");
     }
+    command
+}
+
+/// Spawn a campaign child, enforce the wall-clock backstop, and reduce what it
+/// reported to the classifier's facts.
+fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRun, CliError> {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = command
@@ -320,12 +362,21 @@ pub(super) fn run_generation(
             .map(str::to_string)
     };
     let result_line = envelope_stream("result_line");
+    let exact_verdicts = envelope
+        .as_ref()
+        .and_then(|envelope| envelope.get("verdicts"))
+        .and_then(serde_json::Value::as_array)
+        .map(|rows| rows.iter().map(serde_json::Value::to_string).collect())
+        .unwrap_or_default();
     let stdout = envelope_stream("stdout").unwrap_or(child_stdout);
     let mut stderr = envelope_stream("stderr").unwrap_or(child_stderr.clone());
     if envelope.is_some() {
         // A supervisor diagnostic (a trace-finalization note, a build line) rides
         // the child's own stderr rather than the guest's; keep both, so nothing a
-        // declared pattern might match is dropped.
+        // declared pattern might match is dropped, and each on its own line.
+        if !child_stderr.is_empty() && !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
         stderr.push_str(&child_stderr);
     }
     if timed_out {
@@ -339,6 +390,8 @@ pub(super) fn run_generation(
             facts,
             output: format!("{stdout}\n{stderr}"),
             result_line,
+            exact_verdicts,
+            native_run_marker: envelope_stream("native_run_marker"),
         },
         stdout,
         stderr,

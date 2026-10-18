@@ -760,6 +760,10 @@ pub struct Context {
     /// watchdog aborts the process before `finish` on the interposed families,
     /// so that path emits it early — this flag keeps it at exactly one write.
     facts_emitted: bool,
+    /// The first replay divergence the trace layer reported, as its typed kind
+    /// ([`patina_dst_trace::TraceError::replay_divergence`]). Carried on the
+    /// facts channel, never on a guest-writable stream.
+    replay_divergence: Option<&'static str>,
     /// Poll escalation state. See [`Escalation`]; inert until a guest polls
     /// without progress, so a run that never does is unchanged by it.
     spin: Escalation,
@@ -897,6 +901,55 @@ pub enum RuntimeError {
     ComputeStopOverflow,
     /// Terminal metadata disagrees with the strictly replayed scheduler state.
     ComputeStopState,
+}
+
+impl RuntimeError {
+    /// The kind of replay divergence this error reports, or `None` when it is
+    /// not one. Exhaustive by design: a new variant does not compile until it
+    /// is classified here.
+    ///
+    /// A divergence says the replayed run is not the recorded one. Patina
+    /// refusing to start a replay (a fingerprint or identity mismatch, a bad
+    /// configuration) is not one: no replayed run exists to differ. Neither is a
+    /// guest misusing an ABI the same way on every pass, nor patina's own
+    /// failure (I/O, a trace it cannot decode, a budget, a stop it cannot
+    /// export).
+    pub fn replay_divergence(&self) -> Option<&'static str> {
+        match self {
+            Self::Trace(error) => error.replay_divergence(),
+            // The replay derived a different monotonic time than the recording
+            // read: the two runs were charged differently.
+            Self::TimeModel { .. } => Some("time_model_mismatch"),
+            // Built from a trace divergence at a `TaskYield`, whose own kind is
+            // noted where the replayer reported it; classified here too so the
+            // wrapper never reads as something else.
+            Self::ScheduleDivergence { .. } => Some("schedule_divergence"),
+            // A recorded compute stop the strictly replayed scheduler state does
+            // not reach.
+            Self::ComputeStopState => Some("compute_stop_state"),
+            Self::RunAndFinalize { run, finalize } => run
+                .replay_divergence()
+                .or_else(|| finalize.replay_divergence()),
+            // A changed label or key, or an op past the trace, is a trace
+            // divergence noted where the replayer reports it; a recorded fault
+            // this call cannot take is noted where it is refused
+            // (`custom_op_begin`). What is left is the ABI misused on one pass.
+            Self::CustomOp { .. } => None,
+            Self::Config(_)
+            | Self::Io { .. }
+            | Self::Effect(_)
+            | Self::InjectedFsCrash(_)
+            | Self::FsCrashFailed { .. }
+            | Self::CrashSelectorUnreached { .. }
+            | Self::StepBudgetExceeded { .. }
+            | Self::Liveness { .. }
+            | Self::InvalidOutcome { .. }
+            | Self::FrozenClockChurn { .. }
+            | Self::ComputeBound { .. }
+            | Self::ComputeStopExport
+            | Self::ComputeStopOverflow => None,
+        }
+    }
 }
 
 impl fmt::Display for RuntimeError {

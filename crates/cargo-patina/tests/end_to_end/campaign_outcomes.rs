@@ -204,6 +204,15 @@ mod tests {
         assert_eq!(state["signatures"], store["signatures"]);
         assert_eq!(state["invocations"].as_array().unwrap().len(), 1);
 
+        // The campaign ran that traceless failure's seeded re-run itself before
+        // reporting it, and it reproduced: the deterministic twin of the
+        // planted address leak in `campaign_verify`.
+        assert_eq!(signature["verification"]["path"], "rerun", "{signature:#}");
+        assert_eq!(
+            signature["verification"]["status"], "reproduced",
+            "{signature:#}"
+        );
+
         // The recorded reproduce command deterministically re-triggers the violation.
         let reproduce = signature["reproduce"].as_str().unwrap();
         let repro_args: Vec<&str> = reproduce

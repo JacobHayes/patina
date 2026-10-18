@@ -110,13 +110,13 @@ impl Context {
             Some((sequence, recorded)) if clock == ClockKind::Monotonic => {
                 let derived = self.current_monotonic()?;
                 if recorded != Outcome::U64(derived) {
-                    return Err(RuntimeError::TimeModel {
+                    return Err(self.diverged(RuntimeError::TimeModel {
                         detail: format!(
                             "replay diverged from the time model at operation {sequence}: the \
 recording read the monotonic clock as {recorded:?}, the replay's charges and idle advances derive \
 {derived}"
                         ),
-                    });
+                    }));
                 }
                 recorded
             }
