@@ -9,45 +9,10 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
     // Class pairing: exported-boundary ownership is enforced by ast-grep;
     // real C calls detect operand-decoding errors through model behavior.
     // Failpoints are explicitly armed after startup, never source patches.
-    for strategy in ["unwind", "abort"] {
+    // Ownership is inspected in a debug and an optimized build.
+    for (strategy, opt_level) in [("unwind", 0), ("abort", 3)] {
         let dir = tempfile::tempdir().unwrap();
-        let output = assert_success(
-            Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-                .current_dir(common::native_workspace())
-                .args([
-                    "rustc",
-                    "--lib",
-                    "--locked",
-                    "--message-format=json",
-                    "-p",
-                    "patina-dst-native-shim",
-                    "--features",
-                    "test-panic",
-                    "--target-dir",
-                ])
-                .arg(dir.path().join("build"))
-                .arg("--")
-                .args(patina_dst_native_shim::POSIX_RUST_FLAGS)
-                .arg("-C")
-                .arg(format!("panic={strategy}"))
-                .arg("-C")
-                .arg(if strategy == "abort" {
-                    "opt-level=3"
-                } else {
-                    "opt-level=0"
-                })
-                .output()
-                .unwrap(),
-        );
-        let archives: Vec<_> = text(&output.stdout)
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .filter(|message| message["reason"] == "compiler-artifact")
-            .flat_map(|message| message["filenames"].as_array().unwrap().clone())
-            .filter_map(|name| name.as_str().map(str::to_owned))
-            .filter(|name| name.ends_with("/libpatina_dst_native_shim.a"))
-            .collect();
-        assert_eq!(archives.len(), 1, "one built guest archive");
+        let archive = common::test_panic_shim("variadic", strategy, opt_level).archive;
         let object = common::compile_posix_object(dir.path());
         let mut cases = vec![
             (7, 0, "printf"),
@@ -73,7 +38,7 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
                 (3, 5, "__open64"),
             ]);
         }
-        assert_symbol_ownership(Path::new(&archives[0]), &object, &cases, strategy);
+        assert_symbol_ownership(&archive, &object, &cases, strategy);
         let c_source = dir.path().join("variadic-call.c");
         let c_object = dir.path().join("variadic-call.o");
         std::fs::write(&c_source, C_CALLS).unwrap();
@@ -119,7 +84,7 @@ fn main() {
             .arg("-C")
             .arg(format!("link-arg={}", object.display()))
             .arg("-C")
-            .arg(format!("link-arg={}", archives[0]))
+            .arg(format!("link-arg={}", archive.display()))
             .arg("-o")
             .arg(&binary);
         if cfg!(target_os = "linux") {
@@ -192,34 +157,24 @@ fn assert_symbol_ownership(
             .unwrap(),
     );
     let c_nm = assert_success(Command::new("nm").arg("-A").arg(object).output().unwrap());
-    let definitions = |output: &[u8], symbol: &str| -> Vec<(String, String)> {
+    let rust_definitions = definitions_by_name(&archive_nm.stdout);
+    let c_definitions = definitions_by_name(&c_nm.stdout);
+    let definitions = |index: &Definitions, symbol: &str| -> Vec<(String, String)> {
         let spelling = if cfg!(target_os = "macos") {
             format!("_{symbol}")
         } else {
             symbol.to_owned()
         };
-        text(output)
-            .lines()
-            .filter_map(|line| {
-                let words: Vec<_> = line.split_whitespace().collect();
-                if words.len() >= 3
-                    && words[words.len() - 1] == spelling
-                    && matches!(words[words.len() - 2], "T" | "t" | "W" | "w")
-                {
-                    Some((
-                        words[..words.len() - 2].join(" "),
-                        words[words.len() - 2].to_owned(),
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect()
+        index.get(&spelling).cloned().unwrap_or_default()
     };
     // Discover the Rust-owned surface from compiled definitions. The existing
     // registry identifies libc spellings; strong prefixed definitions are private
     // ABI. Weak bootstrap hooks intentionally receive strong C definitions.
     // Behavioral cases above still exercise operand decoding, not ownership data.
+    let registry: std::collections::HashSet<&str> = patina_dst_native_shim::registry::SYMBOLS
+        .iter()
+        .map(|row| row.name)
+        .collect();
     let symbols: std::collections::BTreeSet<String> = text(&archive_nm.stdout)
         .lines()
         .filter_map(|line| {
@@ -234,9 +189,7 @@ fn assert_symbol_ownership(
                 && matches!(words[words.len() - 2], "T" | "W")
                 && !name.starts_with("patina_route_")
                 && ((name.starts_with("patina_") && words[words.len() - 2] == "T")
-                    || patina_dst_native_shim::registry::SYMBOLS
-                        .iter()
-                        .any(|row| row.name == name)))
+                    || registry.contains(name)))
             .then(|| name.to_owned())
         })
         .collect();
@@ -253,7 +206,7 @@ fn assert_symbol_ownership(
     #[cfg(target_os = "linux")]
     assert_hidden_routes(&members, &symbols);
     for symbol in &symbols {
-        let rust = definitions(&archive_nm.stdout, symbol);
+        let rust = definitions(&rust_definitions, symbol);
         assert_eq!(
             rust.len(),
             1,
@@ -261,11 +214,11 @@ fn assert_symbol_ownership(
         );
         assert_eq!(rust[0].1, "T", "{symbol} must be strong");
         assert!(
-            definitions(&c_nm.stdout, symbol).is_empty(),
+            definitions(&c_definitions, symbol).is_empty(),
             "C still defines {symbol}"
         );
         if cfg!(target_os = "linux") && routed(symbol) {
-            let route = definitions(&archive_nm.stdout, &route_name(symbol));
+            let route = definitions(&rust_definitions, &route_name(symbol));
             assert_eq!(
                 route, rust,
                 "hidden route shares {symbol}'s object and address"
@@ -273,6 +226,26 @@ fn assert_symbol_ownership(
         }
         eprintln!("nm {strategy}: {symbol}: one strong Rust definition, zero C definitions");
     }
+}
+
+/// Each name's text (`T`/`t`) and weak (`W`/`w`) definitions in `nm -A`
+/// output, as (object, type) pairs in output order.
+type Definitions = std::collections::HashMap<String, Vec<(String, String)>>;
+
+fn definitions_by_name(output: &[u8]) -> Definitions {
+    let mut index = Definitions::new();
+    for line in text(output).lines() {
+        let words: Vec<_> = line.split_whitespace().collect();
+        if let [object @ .., kind @ ("T" | "t" | "W" | "w"), name] = words.as_slice()
+            && !object.is_empty()
+        {
+            index
+                .entry((*name).to_owned())
+                .or_default()
+                .push((object.join(" "), (*kind).to_owned()));
+        }
+    }
+    index
 }
 
 /// Shim control-plane rows (startup, weak-hook stubs) carry no hidden route.

@@ -85,7 +85,9 @@ fn sdk_fixtures_with_shared_cargo_target_dir_do_not_reuse_stale_binary() {
     );
 
     let workspace = native_workspace();
-    let shared_target = directory.path().join("shared-target");
+    // Persistent: both fixtures are new packages on every run, so a reused
+    // target still holds the other fixture's binary under the same name.
+    let shared_target = common::guest_target_dir("sdk-shared-target");
     let shared_target = shared_target.to_str().unwrap();
     let first_bin = directory.path().join("first-bin");
     let second_bin = directory.path().join("second-bin");

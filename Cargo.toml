@@ -44,12 +44,19 @@ debug = "line-tables-only"
 # third-party code: `object` parses it, `memchr` searches it for markers, and a
 # `build` hashes the shim archive (over 100 MB in debug) with `sha2`.
 # Unoptimized, those dependencies cost about 2 s of CPU per `build` and 0.5 s
-# per `run`. Only third-party dependencies are optimized: they change only with
-# Cargo.lock, so the dependency cache absorbs their compile time. Workspace
-# crates, including the test harnesses, stay at opt-level 0; debug assertions
-# and overflow checks stay on; `cargo build` and `cargo run` (the dev profile)
-# are unaffected.
+# per `run`. Third-party dependencies are optimized: they change only with
+# Cargo.lock, so the dependency cache absorbs their compile time. `"*"` covers
+# no workspace member, and one member is on that path too: patina-dst-target
+# scans the guest binary before every `run`, `replay` and `audit`, which
+# unoptimized costs about 0.5 s per call. With it optimized a call costs what
+# it does with every workspace crate optimized. The other workspace crates,
+# including the test harnesses, stay at opt-level 0; debug assertions and
+# overflow checks stay on; `cargo build` and `cargo run` (the dev profile) are
+# unaffected.
 [profile.test.package."*"]
+opt-level = 3
+
+[profile.test.package.patina-dst-target]
 opt-level = 3
 
 [workspace.package]

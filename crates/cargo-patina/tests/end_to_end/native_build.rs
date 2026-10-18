@@ -619,7 +619,9 @@ exit "$status"
         let directory = tempdir().unwrap();
         let workspace = native_workspace();
         let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-        let shim_target = directory.path().join("shim-target");
+        // Persistent: Cargo republishes its copy on every build, fresh or not, so
+        // a fresh shim build still exposes the link to the rewrite.
+        let shim_target = common::guest_target_dir("shim-rewrite");
         let package = directory.path().join("guest-pkg");
         write_plain_package(
             &package,

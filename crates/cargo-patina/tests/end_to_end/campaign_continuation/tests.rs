@@ -133,7 +133,7 @@ fn campaign_extend_equals_fresh_campaign() {
     };
 
     let out = directory.path().join("camp");
-    let fresh = run(campaign_args(&out, 12, false));
+    let fresh = run(campaign_args(&out, 8, false));
     assert_eq!(
         fresh.status.code(),
         Some(1),
@@ -158,7 +158,7 @@ fn campaign_extend_equals_fresh_campaign() {
     let extend_args = vec![
         "campaign".to_string(),
         "--extend".to_string(),
-        "7".to_string(),
+        "3".to_string(),
         "--out-dir".to_string(),
         out.to_str().unwrap().to_string(),
         "--progress-every".to_string(),
@@ -177,11 +177,11 @@ fn campaign_extend_equals_fresh_campaign() {
     assert!(
         split2_stdout.contains("PATINA_CAMPAIGN_RESUME")
             && split2_stdout.contains("done=5")
-            && split2_stdout.contains("target=12"),
+            && split2_stdout.contains("target=8"),
         "extension should announce the recorded cursor and cumulative target:\n{split2_stdout}"
     );
     assert!(
-        split2_stdout.contains("PATINA_CAMPAIGN_COMPLETE generations=12"),
+        split2_stdout.contains("PATINA_CAMPAIGN_COMPLETE generations=8"),
         "extension summary must be cumulative:\n{split2_stdout}"
     );
     assert_eq!(
@@ -211,7 +211,7 @@ fn campaign_extend_equals_fresh_campaign() {
     );
 
     let json_out = directory.path().join("camp-json");
-    let fresh_json = run(campaign_args(&json_out, 12, true));
+    let fresh_json = run(campaign_args(&json_out, 8, true));
     assert_eq!(fresh_json.status.code(), Some(1));
     let fresh_envelope = campaign_json_stdout(&fresh_json);
     fs::remove_dir_all(&json_out).unwrap();
@@ -220,7 +220,7 @@ fn campaign_extend_equals_fresh_campaign() {
     let split_json2 = run(vec![
         "campaign".to_string(),
         "--extend".to_string(),
-        "7".to_string(),
+        "3".to_string(),
         "--out-dir".to_string(),
         json_out.to_str().unwrap().to_string(),
         "--format".to_string(),

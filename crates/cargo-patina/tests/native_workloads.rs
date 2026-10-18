@@ -1078,18 +1078,19 @@ fn a_blocking_receive_that_earns_an_escalation_reaches_its_cpu_timer() {
     // Some count of nonblocking receives (each makes two polls, near 512 of
     // them to a streak) makes the blocking receive's poll the streak's last:
     // a smaller one leaves it short of the streak, a larger one fires the
-    // one-shot timer during the polls.
-    let interrupted: Vec<u32> = (480..560)
-        .filter(|polls| {
+    // one-shot timer during the polls. At seed 5 the hits sit near 510; the
+    // search starts a little below them, so small drift in the per-poll charge
+    // still lands inside the range, and stops at the first hit.
+    let polls = (496..560)
+        .find(|polls| {
             let output = g.command("run", &["--seed", "5", "--", &polls.to_string()]);
             output.status.success()
                 && text(&output.stdout)
                     .contains("PROF_PARK fired_before=false interrupted=true fired=true")
         })
-        .collect();
-    assert!(!interrupted.is_empty());
+        .expect("some poll count interrupts the blocking receive")
+        .to_string();
     // Recorded and replayed alike.
-    let polls = interrupted[0].to_string();
     let trace = g.dir.path().join("prof-park.patina");
     let record = g.command(
         "run",

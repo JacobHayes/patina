@@ -792,59 +792,12 @@ mod raw {
 fn internal_rust_panic_never_finalizes_an_invalid_trace() {
     use patina_dst_trace::TraceBundle;
     use std::os::unix::process::ExitStatusExt;
-    use std::path::Path;
     use std::process::Command;
+    // Debug builds, as a guest's dev profile links the shim.
     for strategy in ["unwind", "abort"] {
         let dir = tempfile::tempdir().unwrap();
-        let workspace = common::native_workspace();
-        let shim = workspace.join("crates/patina-native-shim");
-        let target = dir.path().join("build");
-        let built = assert_success(
-            Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-                .args([
-                    "rustc",
-                    "--lib",
-                    "--offline",
-                    "--message-format=json",
-                    "-p",
-                    "patina-dst-native-shim",
-                    "--manifest-path",
-                ])
-                .arg(shim.join("Cargo.toml"))
-                .args(["--features", "test-panic"])
-                .arg("--target-dir")
-                .arg(&target)
-                .arg("--")
-                .args(patina_dst_native_shim::POSIX_RUST_FLAGS)
-                .args(["-C", &format!("panic={strategy}")])
-                .output()
-                .unwrap(),
-        );
-        // Cargo can redirect intermediates separately from target-dir. Consume
-        // its artifact messages rather than guessing where dependency rlibs live.
-        let dependency_dirs: std::collections::BTreeSet<std::path::PathBuf> = text(&built.stdout)
-            .lines()
-            .map(|line| {
-                serde_json::from_str::<serde_json::Value>(line).expect("Cargo artifact JSON")
-            })
-            .filter(|message| message["reason"] == "compiler-artifact")
-            .flat_map(|message| {
-                message["filenames"]
-                    .as_array()
-                    .expect("artifact filenames")
-                    .iter()
-                    .filter_map(|name| {
-                        let path = Path::new(name.as_str().expect("artifact path"));
-                        (path.extension().is_some_and(|ext| ext == "rlib"))
-                            .then(|| path.parent().unwrap().to_owned())
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        assert!(
-            !dependency_dirs.is_empty(),
-            "non-vacuous dependency artifacts"
-        );
+        let shim = common::native_workspace().join("crates/patina-native-shim");
+        let built = common::test_panic_shim("signals", strategy, 0);
         let binary = dir.path().join("panic-guest");
         let posix = common::compile_posix_object(dir.path());
         let mut cc = common::c_compiler();
@@ -852,7 +805,7 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
             .arg(shim.join("include"))
             .arg(guest_source("signals/internal_panic.c"))
             .arg(posix)
-            .arg(target.join("debug/libpatina_dst_native_shim.a"));
+            .arg(&built.archive);
         if cfg!(target_os = "linux") {
             cc.arg("-Wl,--wrap=dlsym");
         }
@@ -901,18 +854,13 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
             .args(["-C", &format!("panic={strategy}")])
             .arg(&vehicle)
             .arg("--extern")
-            .arg(format!(
-                "patina_dst_native_shim={}",
-                target
-                    .join("debug/libpatina_dst_native_shim.rlib")
-                    .display()
-            ))
+            .arg(format!("patina_dst_native_shim={}", built.rlib.display()))
             .arg("-L")
             .arg(format!("native={}", guest.dir.path().display()))
             .args(["-l", "static=patina_test_posix"])
             .arg("-o")
             .arg(&binary);
-        for directory in dependency_dirs {
+        for directory in &built.dependency_dirs {
             rustc
                 .arg("-L")
                 .arg(format!("dependency={}", directory.display()));

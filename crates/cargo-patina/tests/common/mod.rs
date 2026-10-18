@@ -67,6 +67,86 @@ pub fn prefixed_shim_archive() -> PathBuf {
     build_shim_archive(&[], false)
 }
 
+/// The POSIX shim built with its `test-panic` failpoints, `panic=<strategy>`
+/// and `opt-level=<opt_level>`, for tests that link the boundary's panic paths.
+pub struct TestPanicShim {
+    pub archive: PathBuf,
+    pub rlib: PathBuf,
+    /// The directories of every rlib Cargo produced, for `-L dependency=`.
+    pub dependency_dirs: BTreeSet<PathBuf>,
+}
+
+/// Build (idempotently) the test-panic shim into a persistent target per
+/// `consumer` and variant. Test binaries run concurrently, and a build Cargo
+/// finds fresh can still republish its outputs, so a target shared across
+/// binaries could swap an archive out from under another binary's `nm` or
+/// link. Each consumer keys its own target; its callers run one at a time.
+pub fn test_panic_shim(consumer: &str, strategy: &str, opt_level: u8) -> TestPanicShim {
+    let target_dir = guest_target_dir(&format!(
+        "shim-test-panic-{consumer}-{strategy}-o{opt_level}"
+    ));
+    let output = assert_success(
+        Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+            .current_dir(native_workspace())
+            .args([
+                "rustc",
+                "--lib",
+                "--locked",
+                "--offline",
+                "--message-format=json",
+                "-p",
+                "patina-dst-native-shim",
+                "--features",
+                "test-panic",
+                "--target-dir",
+            ])
+            .arg(&target_dir)
+            .arg("--")
+            .args(patina_dst_native_shim::POSIX_RUST_FLAGS)
+            .args(["-C", &format!("panic={strategy}")])
+            .args(["-C", &format!("opt-level={opt_level}")])
+            .output()
+            .expect("cargo rustc -p patina-dst-native-shim runs"),
+    );
+    // Cargo can redirect intermediates separately from target-dir. Consume
+    // its artifact messages rather than guessing where the outputs live.
+    let filenames: Vec<PathBuf> = native::text(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("Cargo artifact JSON"))
+        .filter(|message| message["reason"] == "compiler-artifact")
+        .flat_map(|message| {
+            message["filenames"]
+                .as_array()
+                .expect("artifact filenames")
+                .iter()
+                .map(|name| PathBuf::from(name.as_str().expect("artifact path")))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let named = |file: &str| -> PathBuf {
+        let matches: Vec<_> = filenames
+            .iter()
+            .filter(|path| path.file_name().is_some_and(|name| name == file))
+            .collect();
+        assert_eq!(matches.len(), 1, "one built {file}: {filenames:?}");
+        matches[0].clone()
+    };
+    let dependency_dirs: BTreeSet<PathBuf> = filenames
+        .iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rlib"))
+        .map(|path| path.parent().unwrap().to_owned())
+        .collect();
+    assert!(
+        !dependency_dirs.is_empty(),
+        "non-vacuous dependency artifacts"
+    );
+    TestPanicShim {
+        archive: named("libpatina_dst_native_shim.a"),
+        rlib: named("libpatina_dst_native_shim.rlib"),
+        dependency_dirs,
+    }
+}
+
 fn build_shim_archive(features: &[&str], posix: bool) -> PathBuf {
     let mut profile = profile_dir();
     let mut target_dir = profile
