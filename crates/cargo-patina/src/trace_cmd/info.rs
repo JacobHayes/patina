@@ -96,13 +96,7 @@ fn vtime_span(events: &[&Value]) -> (Option<u64>, Option<u64>) {
     for event in events {
         let op = event.get("operation").unwrap_or(&Value::Null);
         let out = event.get("outcome").unwrap_or(&Value::Null);
-        let kind = op.get("kind").and_then(Value::as_str);
-        if kind == Some("clock_now")
-            && let Some(value) = outcome_u64(out)
-        {
-            current = Some(value);
-        }
-        if let Some(value) = op.get("now_nanos").and_then(Value::as_u64) {
+        if let Some(value) = trace_view::virtual_time_reading(op, out) {
             current = Some(value);
         }
         if let Some(value) = current {
@@ -111,13 +105,6 @@ fn vtime_span(events: &[&Value]) -> (Option<u64>, Option<u64>) {
         }
     }
     (min, max)
-}
-
-fn outcome_u64(out: &Value) -> Option<u64> {
-    match out.get("kind").and_then(Value::as_str)? {
-        "u64" | "usize" => out.get("value").and_then(Value::as_u64),
-        _ => None,
-    }
 }
 
 pub(super) fn print_info_human(facts: &Value) {

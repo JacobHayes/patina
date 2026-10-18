@@ -226,3 +226,44 @@ fn flatten_merges_lifecycle_and_operations_by_global_order() {
             .any(|event| event.kind == "lifecycle_restart")
     );
 }
+
+/// A monotonic read, a realtime read (epoch-scale), then another monotonic
+/// read: the guest's elapsed virtual time is the monotonic span alone.
+fn events_with_a_realtime_read() -> Vec<(Operation, Outcome)> {
+    use patina_dst_abi::ClockKind;
+    vec![
+        (
+            Operation::ClockNow {
+                clock: ClockKind::Monotonic,
+            },
+            Outcome::U64(1_000),
+        ),
+        (
+            Operation::ClockNow {
+                clock: ClockKind::Realtime,
+            },
+            Outcome::U64(patina_dst_abi::DEFAULT_REALTIME_EPOCH_NANOS + 1_500),
+        ),
+        (
+            Operation::ClockNow {
+                clock: ClockKind::Monotonic,
+            },
+            Outcome::U64(20_000_000),
+        ),
+    ]
+}
+
+#[test]
+fn realtime_clock_reads_never_move_the_virtual_time_cursor() {
+    let bundle = bundle_with(events_with_a_realtime_read());
+    let raw = serde_json::to_value(&bundle).unwrap();
+    let flat = flatten(&bundle, &raw, "main").unwrap();
+    assert_eq!((flat.vt_min, flat.vt_max), (Some(1_000), Some(20_000_000)));
+    let stamps: Vec<_> = flat
+        .events
+        .iter()
+        .filter(|event| event.source == FlatEventSource::Operation)
+        .map(|event| event.vtime)
+        .collect();
+    assert_eq!(stamps, [Some(1_000), Some(1_000), Some(20_000_000)]);
+}

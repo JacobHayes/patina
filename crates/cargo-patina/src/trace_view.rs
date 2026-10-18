@@ -268,13 +268,7 @@ pub fn flatten(
                 debug_assert_eq!(operation_kind(&event.operation), kind.as_str());
                 let category = Category::of_kind(&kind);
 
-                // Advance the virtual-time cursor from any absolute reading on this event.
-                if kind == "clock_now"
-                    && let Some(n) = outcome_u64(&out)
-                {
-                    vtime = Some(n);
-                }
-                if let Some(n) = op.get("now_nanos").and_then(Value::as_u64) {
+                if let Some(n) = virtual_time_reading(&op, &out) {
                     vtime = Some(n);
                 }
                 if let Some(n) = vtime {
@@ -421,6 +415,21 @@ fn lifecycle_summary(marker: &LifecycleEvent) -> (String, Option<u64>, String, O
             None,
         ),
     }
+}
+
+/// The virtual time an event pins, in monotonic nanoseconds, or `None` when it
+/// carries no reading. A monotonic `clock_now` and a network op's `now_nanos`
+/// read the virtual clock directly. A realtime `clock_now` is not one: it reads
+/// the configured epoch plus any clock-fault offset, so it never moves the
+/// cursor. Every trace view that reconstructs virtual time goes through here.
+pub(crate) fn virtual_time_reading(op: &Value, out: &Value) -> Option<u64> {
+    if op.get("kind").and_then(Value::as_str) == Some("clock_now") {
+        return match op.get("clock").and_then(Value::as_str) {
+            Some("monotonic") => outcome_u64(out),
+            _ => None,
+        };
+    }
+    op.get("now_nanos").and_then(Value::as_u64)
 }
 
 fn outcome_u64(out: &Value) -> Option<u64> {
