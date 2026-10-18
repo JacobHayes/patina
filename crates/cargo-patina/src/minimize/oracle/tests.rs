@@ -14,7 +14,7 @@ fn reported(verdicts: &[VerdictFacts]) -> CandidateOutcome<'_> {
 }
 
 #[test]
-fn a_marker_matches_any_alternative_and_needs_a_clean_replay() {
+fn a_marker_matches_any_alternative() {
     let target = Target::Marker(
         Marker::parse("GUEST_VIOLATION|GUEST_ABORT final-wal wal corruption").unwrap(),
     );
@@ -28,11 +28,18 @@ fn a_marker_matches_any_alternative_and_needs_a_clean_replay() {
     assert!(saw("boom: GUEST_VIOLATION no-loss"));
     assert!(saw("GUEST_ABORT final-wal wal corruption"));
     assert!(!saw("clean run"));
-    // The fail-open direction the probe named: the marker is present, but
-    // the replay diverged after printing it.
-    assert!(!saw(
-        "GUEST_VIOLATION no-loss\npatina native shim fatal: trace operation mismatch"
-    ));
+}
+
+#[test]
+fn a_guests_unfinished_line_does_not_run_into_the_supervisors() {
+    let target = Target::Marker(Marker::parse("MRE_FAILURE").unwrap());
+    let stderr = candidate_stderr("guest stopped at MRE", b"_FAILURE is the supervisor's\n");
+    assert!(stderr.lines().any(|line| line == "guest stopped at MRE"));
+    assert!(!target.preserved(&CandidateOutcome {
+        stdout: "",
+        stderr: &stderr,
+        verdicts: &[],
+    }));
 }
 
 #[test]
@@ -104,17 +111,61 @@ fn a_verdict_target_is_containment_on_kind_and_label_not_equality() {
 }
 
 #[test]
-fn a_verdict_target_still_needs_a_clean_replay() {
-    let target =
-        Target::Verdicts(VerdictTarget::capture(&[verdict("violation", "no-loss")]).unwrap());
-    let verdicts = [verdict("violation", "no-loss")];
-    assert!(target.preserved(&reported(&verdicts)));
-    // The same fail-open direction the marker path closes: the guest reported
-    // the violation, then the replay diverged, so the candidate never
-    // actually reproduced the failure.
-    assert!(!target.preserved(&CandidateOutcome {
-        stdout: "",
-        stderr: "patina native shim fatal: trace operation mismatch",
-        verdicts: &verdicts,
-    }));
+fn a_replay_counts_only_when_it_followed_the_recording() {
+    use crate::campaign::RunFacts;
+    let recorded = RunFacts {
+        exit_code: 3,
+        guest_exit_code: Some(3),
+        envelope: true,
+        ..RunFacts::default()
+    };
+    let recorded_exit = recorded.exit_status();
+    assert!(replay_followed(&recorded, &recorded_exit));
+    // The guest exited as recorded, but the trace says the replay strayed.
+    let diverged = RunFacts {
+        replay_diverged: true,
+        ..recorded.clone()
+    };
+    assert!(!replay_followed(&diverged, &recorded_exit));
+    // No divergence was typed, but the run ended elsewhere.
+    let elsewhere = RunFacts {
+        exit_code: 134,
+        signal: Some(6),
+        refusal: Some("shutdown_failure".into()),
+        refusal_guest_exit_code: Some(3),
+        ..recorded.clone()
+    };
+    assert!(!replay_followed(&elsewhere, &recorded_exit));
+}
+
+/// A crash-restart replay that departs from its recording at the crash names
+/// the divergence in `crash_restart.terminal_outcome`, not at the top level,
+/// and can still end with the recording's exit status.
+#[cfg(unix)]
+#[test]
+fn a_crash_restart_replay_that_diverged_at_the_crash_did_not_follow() {
+    use std::os::unix::process::ExitStatusExt;
+    let ended = |kind: &str, restarts: u64| {
+        serde_json::json!({
+            "schema": "patina.result/v1",
+            "verb": "run",
+            "exit_code": 2,
+            "guest_exit": {"code": 2},
+            "crash_restart": {
+                "restart_count": restarts,
+                "terminal_outcome": {"kind": kind, "exit_code": 2, "signal": null},
+            },
+        })
+    };
+    let exited_2 = std::process::ExitStatus::from_raw(2 << 8);
+    let facts = |envelope| crate::campaign::child_facts(Some(&envelope), exited_2);
+    let recorded_exit = facts(ended("restart_child_failed", 1)).exit_status();
+    assert!(replay_followed(
+        &facts(ended("restart_child_failed", 1)),
+        &recorded_exit
+    ));
+    assert!(!replay_followed(
+        &facts(ended(crate::output::CRASH_REPLAY_DIVERGED, 0)),
+        &recorded_exit
+    ));
 }

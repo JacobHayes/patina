@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// The `crash_restart.terminal_outcome.kind` of a crash-restart replay that
+/// departed from its recording at or before the crash, so incarnation 1 never
+/// ran.
+pub const CRASH_REPLAY_DIVERGED: &str = "replay_diverged";
+
 /// A machine-readable result envelope. Fields absent for a given verb are
 /// omitted from the JSON. Documented in `llms.txt` and `TUTORIAL.md`.
 pub struct Envelope {
@@ -45,7 +50,9 @@ pub struct Envelope {
     /// verbatim: the one way to tell patina's own marker from a guest line
     /// written to look like it.
     pub(super) native_run_marker: Option<String>,
-    /// Native crash-restart facts, if the supervisor performed a modeled restart.
+    /// Native crash-restart facts, if the supervisor performed a modeled
+    /// restart. `terminal_outcome.kind` is [`CRASH_REPLAY_DIVERGED`] for a
+    /// replay that departed from its recording at or before the crash.
     pub(super) crash_restart: Option<serde_json::Value>,
     /// Operator-accepted relaxations that qualify the run's determinism.
     pub(super) qualifications: Vec<Qualification>,

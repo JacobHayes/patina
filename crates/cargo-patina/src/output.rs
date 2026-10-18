@@ -33,6 +33,7 @@ pub use capture::end_guest_line;
 pub use capture::execute_command;
 pub use capture::facts_active;
 pub use capture::parse_facts;
+pub use envelope::CRASH_REPLAY_DIVERGED;
 pub use envelope::Envelope;
 use markers::coverage_report_line;
 use markers::depth_report_line;

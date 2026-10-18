@@ -58,7 +58,8 @@ pub(super) fn split_knobs(flags: &[String]) -> Result<Vec<Knob>, CliError> {
 pub(super) type KnobMemo = std::collections::HashMap<Vec<String>, bool>;
 
 /// Patina's knob oracle: run the candidate flag vector as a fresh seeded child
-/// and require the target.
+/// and require the target, under the refusal the unreduced vector's run ended
+/// under, if any.
 ///
 /// The child is spelled by the campaign's own generation runner, so a candidate
 /// is judged by the same execution the campaign judged: same scrubbed
@@ -74,8 +75,38 @@ pub(super) struct KnobOracle {
     pub(super) guest_args: Vec<String>,
     pub(super) timeout_secs: u64,
     pub(super) target: Target,
+    /// How the unreduced vector's run ended, once [`KnobOracle::establish`]
+    /// has run it ([`candidate_counts`] says what a candidate is held to).
+    pub(super) original: Option<RunEnd>,
     pub(super) jobs: usize,
     pub(super) runs: AtomicU64,
+}
+
+/// How a knob candidate's run ended.
+#[derive(Clone, Debug)]
+pub(super) struct RunEnd {
+    /// [`crate::campaign::RunFacts::exit_status`].
+    pub(super) exit: String,
+    /// Patina's refusal class from the result envelope, when it refused.
+    pub(super) refusal: Option<String>,
+}
+
+/// Whether a knob candidate still shows the generation's failure: it finished
+/// (a killed candidate never reached its own verdict, whatever it announced on
+/// the way to hanging), it shows the target, and it ended under the refusal
+/// class the unreduced run ended under (`original`; none to match before that
+/// run is established). A candidate that shows the target and then ends under
+/// another refusal — the guest, no longer steered by a fault, reaching
+/// something patina refuses — reached a different failure. The guest's own exit code is
+/// free: a fresh seeded run that keeps the target may legitimately exit
+/// differently once a fault is gone.
+pub(super) fn candidate_counts(
+    end: &RunEnd,
+    timed_out: bool,
+    shows_target: bool,
+    original: Option<&RunEnd>,
+) -> bool {
+    !timed_out && shows_target && original.is_none_or(|original| original.refusal == end.refusal)
 }
 
 impl KnobOracle {
@@ -88,9 +119,41 @@ impl KnobOracle {
         flags
     }
 
-    /// Run one candidate, optionally keeping its trace, and report whether the
-    /// target survived.
-    pub(super) fn run(&self, knobs: &[Knob], record: Option<&Path>) -> Result<bool, CliError> {
+    /// Run the unreduced knob vector, the evidence every reduction rests on,
+    /// and report whether it shows the target. When it does, the refusal it
+    /// ended under is the one every candidate must end under.
+    pub(super) fn establish(
+        &mut self,
+        knobs: &[Knob],
+        memo: &mut KnobMemo,
+    ) -> Result<bool, CliError> {
+        // The unreduced run is held to no run of its own.
+        self.original = None;
+        self.original = self.run_keeping(knobs, None)?;
+        let shown = self.original.is_some();
+        memo.insert(self.flags(knobs), shown);
+        Ok(shown)
+    }
+
+    /// Run one candidate and report whether the target survived.
+    fn run(&self, knobs: &[Knob]) -> Result<bool, CliError> {
+        Ok(self.run_keeping(knobs, None)?.is_some())
+    }
+
+    /// Run a knob subset into `trace`, the recording a trace reduction starts
+    /// from: how the run ended, when the target survived it.
+    pub(super) fn record(&self, knobs: &[Knob], trace: &Path) -> Result<Option<String>, CliError> {
+        Ok(self.run_keeping(knobs, Some(trace))?.map(|end| end.exit))
+    }
+
+    /// Run one candidate, optionally keeping its trace: how it ended, or
+    /// `None` when the target did not survive or the run ended under another
+    /// refusal than the unreduced one.
+    fn run_keeping(
+        &self,
+        knobs: &[Knob],
+        record: Option<&Path>,
+    ) -> Result<Option<RunEnd>, CliError> {
         self.runs.fetch_add(1, Ordering::Relaxed);
         let scratch = tempfile::tempdir().map_err(|error| {
             CliError(format!("failed to create a candidate directory: {error}"))
@@ -107,15 +170,17 @@ impl KnobOracle {
             self.timeout_secs,
         )?;
         let (stdout, stderr) = run.streams();
-        // A candidate that had to be killed never reached its own verdict, so it
-        // is rejected rather than read for a failure it may have announced on the
-        // way to hanging.
-        Ok(!run.timed_out()
-            && self.target.preserved(&CandidateOutcome {
-                stdout,
-                stderr,
-                verdicts: run.verdicts(),
-            }))
+        let end = RunEnd {
+            exit: run.exit_status(),
+            refusal: run.refusal().map(str::to_string),
+        };
+        let shows_target = self.target.preserved(&CandidateOutcome {
+            stdout,
+            stderr,
+            verdicts: run.verdicts(),
+        });
+        let counts = candidate_counts(&end, run.timed_out(), shows_target, self.original.as_ref());
+        Ok(counts.then_some(end))
     }
 
     /// The verdict for one knob vector, from the memo when it has been run
@@ -125,7 +190,7 @@ impl KnobOracle {
         if let Some(verdict) = memo.get(&key) {
             return Ok(*verdict);
         }
-        let verdict = self.run(knobs, None)?;
+        let verdict = self.run(knobs)?;
         memo.insert(key, verdict);
         Ok(verdict)
     }
@@ -147,8 +212,7 @@ impl KnobOracle {
         for window in pending.chunks(self.jobs.max(1)) {
             let bundle: Vec<&Vec<Knob>> = window.iter().map(|index| &candidates[*index]).collect();
             let observed = judge_concurrently(&bundle, |knobs| {
-                self.run(knobs, None)
-                    .map_err(|error| io::Error::other(error.0))
+                self.run(knobs).map_err(|error| io::Error::other(error.0))
             })
             .map_err(|error| CliError(format!("knob candidate run failed: {error}")))?;
             for (index, verdict) in window.iter().zip(observed) {

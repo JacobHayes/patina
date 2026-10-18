@@ -84,7 +84,7 @@ pub(super) fn execute_generation(invocation: GenerationMinimize) -> Result<i32, 
         .filter(|knob| !pinned.contains(knob))
         .cloned()
         .collect();
-    let oracle = KnobOracle {
+    let mut oracle = KnobOracle {
         self_exe: self_exe.clone(),
         artifact: repro.artifact.clone(),
         seed: repro.seed,
@@ -92,6 +92,7 @@ pub(super) fn execute_generation(invocation: GenerationMinimize) -> Result<i32, 
         guest_args: repro.guest_args.clone(),
         timeout_secs: repro.timeout_secs,
         target: target.clone(),
+        original: None,
         jobs,
         runs: AtomicU64::new(0),
     };
@@ -103,7 +104,7 @@ pub(super) fn execute_generation(invocation: GenerationMinimize) -> Result<i32, 
     // shape one level up — an auto-derived target is no more trustworthy than a
     // typed one until a run has actually exhibited it, and a target that never
     // reproduces would let the search "reduce" every knob away.
-    if !oracle.judge(&knobs, &mut memo)? {
+    if !oracle.establish(&knobs, &mut memo)? {
         let advice = match &target {
             Target::Marker(..) => {
                 "check the marker text against that generation's output, and re-run the printed \
@@ -149,14 +150,14 @@ pub(super) fn execute_generation(invocation: GenerationMinimize) -> Result<i32, 
     let recording = tempfile::tempdir()
         .map_err(|error| CliError(format!("failed to create a recording directory: {error}")))?;
     let recorded_trace = recording.path().join("minimal.patina");
-    if !oracle.run(&minimal, Some(&recorded_trace))? {
+    let Some(recorded_exit) = oracle.record(&minimal, &recorded_trace)? else {
         return Err(CliError(format!(
             "the reduced fault knobs stopped reproducing {} when re-run for recording; this \
              generation's failure is not a function of its seed and knobs alone, so it cannot be \
              reduced to a standalone command:\n  {command}",
             target.render()
         )));
-    }
+    };
     let recorded_bundle = TraceBundle::load(&recorded_trace).map_err(|error| {
         CliError(format!(
             "failed to load the trace recorded from the reduced knobs: {error}"
@@ -172,6 +173,7 @@ pub(super) fn execute_generation(invocation: GenerationMinimize) -> Result<i32, 
             artifact: repro.artifact.clone(),
             invocation: repro.pinned.clone(),
             target: target.clone(),
+            recorded_exit,
             jobs,
             calls: AtomicU64::new(0),
         };

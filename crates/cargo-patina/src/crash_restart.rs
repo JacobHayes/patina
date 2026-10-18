@@ -165,7 +165,7 @@ fn crash_replay_divergence(
         "crash_count": u8::from(reached),
         "restart_count": 0,
         "incarnations": [{"id": 0, "host_pid": first_host_pid}],
-        "terminal_outcome": {"kind": "replay_diverged", "exit_code": first.exit_code, "signal": first.signal},
+        "terminal_outcome": {"kind": output::CRASH_REPLAY_DIVERGED, "exit_code": first.exit_code, "signal": first.signal},
     });
     CrashRestartRun {
         captured: first,

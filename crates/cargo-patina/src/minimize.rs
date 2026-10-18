@@ -35,9 +35,10 @@
 //! the same ports, write the same paths, and read the same clock without
 //! interacting — so patina parallelizes its own oracle by default. It also fails
 //! closed where a hand-written oracle usually does not: a candidate counts as
-//! still-failing only when the target is present AND the replay did not diverge,
-//! so a candidate whose replay aborts after the guest already announced the
-//! failure is rejected rather than accepted.
+//! still-failing only when the target is present AND the replay followed it —
+//! no divergence on the typed facts channel, and the exit the recording reached
+//! — so a candidate whose replay diverges after the guest already announced the
+//! failure, or stops before its trace does, is rejected rather than accepted.
 //!
 //! # What the oracle targets
 //!

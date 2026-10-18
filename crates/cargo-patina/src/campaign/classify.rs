@@ -407,9 +407,11 @@ pub struct RunFacts {
     pub refusal_guest_exit_code: Option<i32>,
     /// `replay_divergence` — a `replay` that ran but did not follow its trace
     /// (an operation past its end, a mismatched operation or outcome, recorded
-    /// operations left over), as the runtime reported it on the facts channel.
-    /// Classification does not read it: only reproduction verification, which
-    /// replays a generation's own trace, does.
+    /// operations left over), as the runtime reported it on the facts channel;
+    /// or a crash-restart replay that departed from its recording at the crash,
+    /// as the supervisor reports it (`crash_restart.terminal_outcome.kind`).
+    /// Classification does not read it: only the replays of a generation's own
+    /// trace, reproduction verification and `minimize`'s oracle, do.
     pub replay_diverged: bool,
     /// `verdicts[]`, in call order.
     pub verdicts: Vec<VerdictFacts>,
@@ -420,6 +422,26 @@ pub struct RunFacts {
 }
 
 impl RunFacts {
+    /// The run's exit facts as one comparable string: the process's code, the
+    /// guest's full code, the signal, and patina's refusal class with the
+    /// status the guest reached under it.
+    pub(crate) fn exit_status(&self) -> String {
+        let mut exit = format!("exit={}", self.exit_code);
+        if let Some(code) = self.guest_exit_code {
+            exit.push_str(&format!(" guest_exit={code}"));
+        }
+        if let Some(signal) = self.signal {
+            exit.push_str(&format!(" signal={signal}"));
+        }
+        if let Some(refusal) = &self.refusal {
+            exit.push_str(&format!(" refusal={refusal}"));
+        }
+        if let Some(code) = self.refusal_guest_exit_code {
+            exit.push_str(&format!(" refusal_guest_exit={code}"));
+        }
+        exit
+    }
+
     fn has_verdict(&self, kind: &str) -> Option<&VerdictFacts> {
         self.verdicts.iter().find(|verdict| verdict.kind == kind)
     }

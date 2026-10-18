@@ -34,6 +34,16 @@ impl GenerationRun {
         (&self.stdout, &self.stderr)
     }
 
+    /// Patina's refusal class, from the result envelope, when it refused.
+    pub(crate) fn refusal(&self) -> Option<&str> {
+        self.facts.facts.refusal.as_deref()
+    }
+
+    /// How the run ended ([`RunFacts::exit_status`]).
+    pub(crate) fn exit_status(&self) -> String {
+        self.facts.facts.exit_status()
+    }
+
     /// What the run reported through the verdict ABI. Read off the child's own
     /// envelope by [`recognize_verdicts`], so a reducer judging a candidate asks
     /// the same question of it the classifier asked of the seed generation.
@@ -114,11 +124,41 @@ pub(super) fn facts_from_envelope(envelope: &serde_json::Value) -> RunFacts {
             .map(|code| code as i32),
         replay_diverged: envelope
             .get("replay_divergence")
-            .is_some_and(serde_json::Value::is_string),
+            .is_some_and(serde_json::Value::is_string)
+            || envelope
+                .pointer("/crash_restart/terminal_outcome/kind")
+                .and_then(serde_json::Value::as_str)
+                == Some(crate::output::CRASH_REPLAY_DIVERGED),
         verdicts,
         vacuous_planes,
         findings,
     }
+}
+
+/// The facts of a finished child: its envelope's, when it left one, beside
+/// the caller's own observation of how the child process ended.
+pub(crate) fn child_facts(
+    envelope: Option<&serde_json::Value>,
+    status: std::process::ExitStatus,
+) -> RunFacts {
+    let mut facts = envelope.map(facts_from_envelope).unwrap_or_default();
+    // The process exit status is the caller's own observation and stays
+    // authoritative: a child killed after it printed its envelope did not exit
+    // with the code that envelope reported.
+    facts.exit_code = status.code().unwrap_or(-1);
+    // The signal the CHILD itself died on. `code()` is `None` for a signalled
+    // child, and `-1` says nothing about why — so a `cargo patina run` the OOM
+    // killer took out (it dies alongside its guest under memory pressure) would
+    // otherwise be indistinguishable from any other envelope-less failure. The
+    // envelope's `guest_exit.signal` is the authority when there is one (it is
+    // the GUEST's death, one process further in); the child's fills in when
+    // there is not.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        facts.signal = facts.signal.or(status.signal());
+    }
+    facts
 }
 
 /// A child's own `patina.result/v1` run envelope, if it produced one. The
@@ -322,18 +362,6 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
     }
     let stdout_bytes = stdout_reader.join().unwrap_or_default();
     let stderr_bytes = stderr_reader.join().unwrap_or_default();
-    let exit = status.code().unwrap_or(-1);
-    // The signal the CHILD itself died on. `code()` is `None` for a signalled
-    // child, and `-1` says nothing about why — so a `cargo patina run` the OOM
-    // killer took out (it dies alongside its guest under memory pressure) would
-    // otherwise be indistinguishable from any other envelope-less failure.
-    #[cfg(unix)]
-    let child_signal = {
-        use std::os::unix::process::ExitStatusExt;
-        status.signal()
-    };
-    #[cfg(not(unix))]
-    let child_signal: Option<i32> = None;
     let child_stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
     let child_stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
     // A child that is another cargo-patina build (the executable was replaced
@@ -352,21 +380,7 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
     // one (a build failure, a pre-run refusal, a timeout kill) the child's raw
     // streams are all there is.
     let envelope = run_envelope(&child_stdout);
-    let mut facts = match &envelope {
-        Some(envelope) => facts_from_envelope(envelope),
-        None => RunFacts {
-            exit_code: exit,
-            ..RunFacts::default()
-        },
-    };
-    // The process exit status is the campaign's own observation and stays
-    // authoritative: a child killed after it printed its envelope did not exit
-    // with the code that envelope reported.
-    facts.exit_code = exit;
-    // The envelope's `guest_exit.signal` is the authority when there is one (it
-    // is the GUEST's death, one process further in); the campaign's own
-    // observation of the child fills in when there is not.
-    facts.signal = facts.signal.or(child_signal);
+    let mut facts = child_facts(envelope.as_ref(), status);
     facts.timed_out = timed_out;
     let envelope_stream = |key: &str| {
         envelope

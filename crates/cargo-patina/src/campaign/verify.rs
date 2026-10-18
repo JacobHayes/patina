@@ -27,7 +27,7 @@
 use super::classify::primary_finding;
 use super::generation::{GenerationFiles, facts_from_envelope, run_generation, run_replay};
 use super::state::{CampaignState, json_optional_str, json_required_str};
-use super::{CampaignClass, ClassifyRules, GenerationFacts, GenerationRun, RunFacts, Signature};
+use super::{CampaignClass, ClassifyRules, GenerationFacts, GenerationRun, Signature};
 use super::{classify, signature};
 use crate::CliError;
 use sha2::{Digest, Sha256};
@@ -111,24 +111,6 @@ pub(super) struct Observation {
     pub(super) replay_diverged: bool,
 }
 
-/// The exit facts of one run, as one comparable string.
-fn exit_status(facts: &RunFacts) -> String {
-    let mut exit = format!("exit={}", facts.exit_code);
-    if let Some(code) = facts.guest_exit_code {
-        exit.push_str(&format!(" guest_exit={code}"));
-    }
-    if let Some(signal) = facts.signal {
-        exit.push_str(&format!(" signal={signal}"));
-    }
-    if let Some(refusal) = &facts.refusal {
-        exit.push_str(&format!(" refusal={refusal}"));
-    }
-    if let Some(code) = facts.refusal_guest_exit_code {
-        exit.push_str(&format!(" refusal_guest_exit={code}"));
-    }
-    exit
-}
-
 impl Observation {
     pub(super) fn new(
         class: CampaignClass,
@@ -140,7 +122,7 @@ impl Observation {
             class,
             signature: failure.as_ref().map(Signature::outcome_key),
             policy: failure.map(|failure| failure.policy).unwrap_or_default(),
-            exit: exit_status(&facts.facts),
+            exit: facts.facts.exit_status(),
             finding: class.is_failure().then(|| primary_finding(class, facts)),
             verdicts: facts.exact_verdicts.clone(),
             trace,

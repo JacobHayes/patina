@@ -576,6 +576,268 @@ fn main() {
         );
     }
 
+    /// A replay that stops before its trace does has diverged even though the
+    /// guest exits on its own with its failure printed: the leftover event
+    /// surfaces at shutdown, with no shim-fatal line on any stream. The guest
+    /// records a trailing custom operation that its replay never asks for, so
+    /// `minimize`'s trace phase must refuse the recording rather than reduce
+    /// it on the strength of a replay that never followed it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn minimize_refuses_a_replay_that_exits_before_its_trace_ends() {
+        let workspace = native_workspace();
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("trailing_event.rs");
+        fs::write(
+            &source,
+            r#"
+unsafe extern "C" {
+    fn patina_custom_op_begin(
+        label: *const u8,
+        label_len: usize,
+        key: *const u8,
+        key_len: usize,
+        fault_eligible: i32,
+        out_len: *mut usize,
+    ) -> i32;
+    fn patina_custom_op_record(result: *const u8, result_len: usize) -> i32;
+    fn patina_custom_op_replay_result(out: *mut u8, out_cap: usize) -> isize;
+}
+
+/// One custom operation answered "ok"; whether this pass is a replay.
+fn lookup(label: &str) -> bool {
+    let mut len = 0usize;
+    unsafe {
+        let mode = patina_custom_op_begin(label.as_ptr(), label.len(), [].as_ptr(), 0, 0, &mut len);
+        if mode == 0 {
+            patina_custom_op_record(b"ok".as_ptr(), 2);
+        } else {
+            let mut answer = [0u8; 2];
+            patina_custom_op_replay_result(answer.as_mut_ptr(), answer.len());
+        }
+        mode != 0
+    }
+}
+
+fn main() {
+    if !lookup("first") {
+        lookup("trailing");
+    }
+    println!("MRE_FAILURE trailing");
+    std::process::exit(3);
+}
+"#,
+        )
+        .unwrap();
+        let guest = directory.path().join("trailing-event");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                guest.to_str().unwrap(),
+            ],
+        );
+
+        // Verification would replay the trace, see it diverge and class the
+        // generation NONDETERMINISM, which `minimize` refuses before its oracle
+        // runs; the subject here is that oracle.
+        let out = directory.path().join("camp");
+        let campaign = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "campaign",
+                guest.to_str().unwrap(),
+                "--gens",
+                "1",
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--format",
+                "json",
+                "--no-verify",
+            ],
+        );
+        let envelope = campaign_json_stdout(&campaign);
+        assert_eq!(envelope["classes"]["UNCLASSIFIED"], 1, "{envelope:#}");
+
+        let saved = out.join("failures/generation-0.patina");
+        let replayed = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "replay",
+                guest.to_str().unwrap(),
+                saved.to_str().unwrap(),
+                "--format",
+                "json",
+            ],
+        );
+        let replay = campaign_json_stdout(&replayed);
+        assert!(replay["replay_divergence"].is_string(), "{replay:#}");
+        assert_ne!(replay["refusal"]["class"], "shim_fatal", "{replay:#}");
+
+        let output = directory.path().join("minimized.patina");
+        let minimized = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "minimize",
+                "--generation",
+                "0",
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--marker",
+                "MRE_FAILURE",
+                "--output",
+                output.to_str().unwrap(),
+                "--jobs",
+                "1",
+            ],
+        );
+        assert!(
+            !minimized.status.success(),
+            "minimize reduced a trace whose replay diverges:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&minimized.stdout),
+            String::from_utf8_lossy(&minimized.stderr)
+        );
+        assert!(!output.exists());
+    }
+
+    /// A knob candidate that still prints the marker but ends in a patina
+    /// refusal is not the generation's failure. The guest prints its marker,
+    /// exits 3 when a filesystem fault reaches it, and otherwise leaves a
+    /// custom operation open at exit, which the runtime refuses at shutdown on
+    /// every platform: dropping the fault knob must not be accepted on the
+    /// strength of the marker alone.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn minimize_keeps_the_knob_whose_removal_ends_in_a_refusal() {
+        let workspace = native_workspace();
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("fault_or_refusal.rs");
+        fs::write(
+            &source,
+            r#"
+use std::io::Write;
+
+unsafe extern "C" {
+    fn patina_custom_op_begin(
+        label: *const u8,
+        label_len: usize,
+        key: *const u8,
+        key_len: usize,
+        fault_eligible: i32,
+        out_len: *mut usize,
+    ) -> i32;
+}
+
+fn main() {
+    println!("FAIL_MARK");
+    let faulted = match std::fs::File::create("/x") {
+        Ok(mut file) => !matches!(file.write(&[0; 64]), Ok(64)),
+        Err(_) => true,
+    };
+    if faulted {
+        std::process::exit(3);
+    }
+    let (label, mut len) = ("lookup", 0usize);
+    unsafe { patina_custom_op_begin(label.as_ptr(), label.len(), [].as_ptr(), 0, 0, &mut len) };
+}
+"#,
+        )
+        .unwrap();
+        let guest = directory.path().join("fault-or-refusal");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                guest.to_str().unwrap(),
+            ],
+        );
+
+        // Campaign seeds and knobs are a pure function of `--seed-start` and
+        // the generation, and generation 0 of this seed start draws a fault
+        // that reaches the guest.
+        let out = directory.path().join("camp");
+        let campaign = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "campaign",
+                guest.to_str().unwrap(),
+                "--gens",
+                "1",
+                "--seed-start",
+                "2",
+                "--faults",
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--format",
+                "json",
+            ],
+        );
+        let envelope = campaign_json_stdout(&campaign);
+        assert_eq!(envelope["classes"]["UNCLASSIFIED"], 1, "{envelope:#}");
+        let generation = "0";
+
+        let output = directory.path().join("minimized.patina");
+        let minimized = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "minimize",
+                "--generation",
+                generation,
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--marker",
+                "FAIL_MARK",
+                "--output",
+                output.to_str().unwrap(),
+                "--jobs",
+                "1",
+            ],
+        );
+        let report = format!(
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&minimized.stdout),
+            String::from_utf8_lossy(&minimized.stderr)
+        );
+        assert!(minimized.status.success(), "{report}");
+        // Both the reduced command and the trace it recorded still end the
+        // way the generation did: the guest's own exit 3, with no refusal.
+        let repro = fs::read_to_string(
+            out.join("minimized")
+                .join(format!("generation-{generation}.repro")),
+        )
+        .unwrap();
+        let mut rerun: Vec<&str> = repro
+            .split_whitespace()
+            .skip_while(|word| *word != "run")
+            .collect();
+        rerun.extend(["--format", "json"]);
+        let replay_args = [
+            "replay",
+            guest.to_str().unwrap(),
+            output.to_str().unwrap(),
+            "--format",
+            "json",
+        ];
+        for args in [&rerun[..], &replay_args[..]] {
+            let ran = invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, args);
+            let ended = campaign_json_stdout(&ran);
+            assert_eq!(
+                ended["guest_exit"]["code"], 3,
+                "{args:?}: {ended:#}\n{report}"
+            );
+            assert!(ended.get("refusal").is_none(), "{args:?}: {ended:#}");
+        }
+    }
+
     /// `minimize --generation` end to end: a campaign catches the planted
     /// short-write bug under a wide fault vector, and the reducer must strip that
     /// vector down to the knob that matters, hand back a standalone command that
