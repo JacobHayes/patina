@@ -347,8 +347,9 @@ then `run` the resulting artifact.
 - **WASI Preview 1**: the entire 46-function audited import surface, with
   read-only/read-write preopens, resource limits, fuel, sockets via configured
   descriptors, record/replay, and branching.
-- **Campaigns**: deterministic multi-generation sweeps with a seven-class
-  outcome classifier, failure-signature dedup, and per-failure repro commands.
+- **Campaigns**: deterministic multi-generation sweeps with an outcome
+  classifier (finding, harness and catch-all classes, plus one vacuity class per
+  fault plane), failure-signature dedup, and per-failure repro commands.
 - **Three adoption modes** (see [USAGE-MODES.md](./USAGE-MODES.md)): SDK-only
   (`patina-dst`), a configure-then-run harness (`patina-dst-harness`), and the
   explicit-context simulator API (`patina-dst-runtime`, with deterministic

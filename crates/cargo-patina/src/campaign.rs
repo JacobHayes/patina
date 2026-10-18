@@ -18,7 +18,10 @@
 //!     the existing per-testbed result/violation and `PATINA_SDK_REPORT`
 //!     conventions), plus the runtime's own `PATINA_VIOLATION liveness` /
 //!     `PATINA_SCHEDULE_POLICY` diagnostics;
-//!   * the [`classify`] pure classifier assigns one of eight outcome classes with
+//!   * the [`classify`] pure classifier assigns each generation one
+//!     [`CampaignClass`] — a finding, harness or catch-all class, or the
+//!     `VACUOUS_*` coverage class of one fault or exploration plane, one class
+//!     per plane — in the precedence `built_in_class` encodes, with
 //!     the same strictness discipline as fuzz-sweep (an explicit finding is never
 //!     downgraded, a nonzero exit is never silently OK, and an unrecognized outcome
 //!     lands loudly in `UNCLASSIFIED`);

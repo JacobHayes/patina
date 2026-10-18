@@ -115,8 +115,8 @@ unknown option.
   hatch can be swept at all instead of being refused identically in every
   generation. They also ride on the reproduce commands, since a trace cannot
   carry them; a non-native campaign carrying one is refused by name. Outcomes are
-  classified into fourteen classes from each generation's `patina.result/v1`
-  envelope ALONE — verdicts, per-plane `fault_reports` vacuity,
+  classified (finding, harness and catch-all classes, plus one vacuity class per
+  fault plane) from each generation's `patina.result/v1` envelope ALONE — verdicts, per-plane `fault_reports` vacuity,
   `runtime_findings`, `refusal`, `guest_exit` — never from guest output text: an
   unattributed SIGABRT is `GUEST_ABORT` (the guest's own doing), the same abort
   with a `refusal` is `FAIL_CLOSED_ABORT`, and a child that produced no envelope

@@ -157,7 +157,7 @@ oracles is what arms the gate.
 The gate applies to every campaign regardless of `--buggify` (oracles are unconditional in
 the runtime, so their rows flow with or without fault injection).
 
-**Not a per-generation class.** The seven `CampaignClass` values classify one child run;
+**Not a per-generation class.** The `CampaignClass` values classify one child run;
 "never satisfied across N runs" is only decidable at campaign end, has no generation, no
 seed, no trace, and therefore no `Signature`. It is a new **campaign-level verdict**:
 

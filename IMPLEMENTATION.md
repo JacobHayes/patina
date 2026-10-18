@@ -655,13 +655,12 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    `SHA-256("patina-campaign-<seed_base>-<gen>")` — no wall clock, no `$RANDOM`,
    exactly the fuzz-sweep scheme — so a re-run reproduces identical outcomes and
    signatures. The spec is a JSON file (`--spec`, `deny`-unknown-keys) and/or flags.
-   A pure classifier assigns one of fourteen outcome classes — `OK` / `VIOLATION` /
-   `LIVENESS` / `VACUOUS_FS_FAULT` / `VACUOUS_DNS_FAULT` / `VACUOUS_NET_FAULT` /
-   `VACUOUS_ENTROPY_FAULT` / `VACUOUS_CLOCK_FAULT` / `VACUOUS_SWARM` /
-   `GUEST_ABORT` / `FAIL_CLOSED_ABORT` / `STARVATION_STALL` / `INFRA` /
-   `UNCLASSIFIED` — from each generation's `patina.result/v1` envelope alone
-   (the child runs `--format json`), with fuzz-sweep's strictness: an explicit
-   finding is never downgraded, exit 111 is `STARVATION_STALL`, a generation that
+   A pure classifier assigns one outcome class (`CampaignClass`) — `OK` /
+   `VIOLATION` / `LIVENESS` / `GUEST_ABORT` / `FAIL_CLOSED_ABORT` /
+   `STARVATION_STALL` / `INFRA` / `UNCLASSIFIED`, plus one `VACUOUS_<PLANE>`
+   coverage class per fault or exploration plane — from each generation's
+   `patina.result/v1` envelope alone (the child runs `--format json`), with
+   fuzz-sweep's strictness: an explicit finding is never downgraded, exit 111 is `STARVATION_STALL`, a generation that
    asked for `--swarm` with no fault class to select from is `VACUOUS_SWARM` (an
    inert exploration knob is a coverage failure, not a clean run), a Patina
    fail-closed refusal (the envelope's `refusal` record) is its own class distinct
