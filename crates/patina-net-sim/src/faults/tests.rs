@@ -390,6 +390,34 @@ fn duplicated_datagrams_arrive_twice_with_independent_delivery_times() {
 }
 
 #[test]
+fn stream_sends_are_no_opportunity_for_the_datagram_only_duplicate_class() {
+    let mut net = SimNet::builder()
+        .fault_seed(5)
+        .duplicate_permille(1000)
+        .build()
+        .unwrap();
+    let payloads = [b"segment".as_slice(); 64];
+    tcp_stream_delivered(&mut net, &payloads);
+    let tcp_only = net.fault_report().unwrap();
+    assert!(tcp_only.send_ops >= 64);
+    assert_eq!(tcp_only.duplicates_applied, 0);
+    assert!(
+        !tcp_only.duplicate_vacuity_diagnosable,
+        "a TCP-only run offers duplication nothing to copy"
+    );
+    assert!(!tcp_only.is_vacuous());
+
+    let tx = net.bind("tx").unwrap();
+    net.bind("rx").unwrap();
+    for _ in 0..5 {
+        net.send(tx, "rx", b"datagram", 0).unwrap();
+    }
+    let with_datagrams = net.fault_report().unwrap();
+    assert!(with_datagrams.duplicate_vacuity_diagnosable);
+    assert_eq!(with_datagrams.duplicates_applied, 5);
+}
+
+#[test]
 fn duplication_is_seed_deterministic_and_varies_across_seeds() {
     fn duplicated(seed: u64) -> Vec<usize> {
         let mut net = SimNet::builder()

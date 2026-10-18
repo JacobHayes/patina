@@ -568,19 +568,7 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
     if facts.has_verdict("violation").is_some() {
         return CampaignClass::Violation;
     }
-    // 7. Fault- and exploration-plane coverage failures, one class per plane so a
-    //    campaign report names WHICH plane went inert. Each plane's `vacuous` bit
-    //    is its own field of `fault_reports{}`, so one plane's vacuity can never
-    //    be filed under another's class. Checked in a fixed order, so a generation
-    //    with two vacuous planes always gets the same one class.
-    for class in CampaignClass::ALL {
-        if let Some(plane) = class.vacuous_plane()
-            && facts.plane_vacuous(plane)
-        {
-            return *class;
-        }
-    }
-    // 8. Patina fail-closed refusal: the envelope attributed the failure to
+    // 7. Patina fail-closed refusal: the envelope attributed the failure to
     //    patina itself. Checked after the SUT findings above, so an `always!`
     //    abort stays a VIOLATION.
     if let Some(class) = &facts.refusal {
@@ -635,7 +623,7 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
                 None | Some(0) => return CampaignClass::Infra,
                 // The guest's own class. It cannot have aborted (an `abort()`
                 // skips atexit and never reaches finalization), so what is left
-                // is a panic or a deliberate nonzero exit: rule 11's bucket,
+                // is a panic or a deliberate nonzero exit: rule 10's bucket,
                 // reached directly because `exit_code`/`signal` here describe
                 // patina's abort and would otherwise misfile it as GUEST_ABORT.
                 Some(_) => return CampaignClass::Unclassified,
@@ -644,18 +632,34 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
             return CampaignClass::FailClosedAbort;
         }
     }
-    // 9. An abort patina did NOT attribute to itself is the guest's own doing.
+    // 8. An abort patina did NOT attribute to itself is the guest's own doing.
     //    This is §4.4's inversion: before the envelope carried `refusal`, every
     //    unattributed SIGABRT was blamed on patina and buried in an infra-looking
     //    bucket; now it is a finding in its own right.
     if facts.aborted() {
         return CampaignClass::GuestAbort;
     }
-    // 10. A clean exit with no finding is OK.
+    // 9. A clean exit with no finding is OK, unless a fault or exploration plane
+    //    went inert: then it is that plane's coverage failure, one class per
+    //    plane so a campaign report names WHICH plane went inert. Each plane's
+    //    `vacuous` bit is its own field of `fault_reports{}`, so one plane's
+    //    vacuity can never be filed under another's class. Checked in a fixed
+    //    order, so a generation with two vacuous planes always gets the same one
+    //    class. Vacuity is judged only here, on a run that otherwise passed: a
+    //    run that failed on its own (every rule above, and the nonzero exit
+    //    below) keeps that failure as its headline, exactly as it would without
+    //    the fault knobs that went inert.
     if facts.exit_code == 0 {
+        for class in CampaignClass::ALL {
+            if let Some(plane) = class.vacuous_plane()
+                && facts.plane_vacuous(plane)
+            {
+                return *class;
+            }
+        }
         return CampaignClass::Ok;
     }
-    // 11. A nonzero exit that matched no class above is UNCLASSIFIED — surfaced
+    // 10. A nonzero exit that matched no class above is UNCLASSIFIED — surfaced
     //    loudly for triage, never silently dropped as OK or mislabeled. A guest
     //    that fails in a way patina cannot see structurally declares a
     //    `classify` rule for it in its campaign spec (arc §4.3).

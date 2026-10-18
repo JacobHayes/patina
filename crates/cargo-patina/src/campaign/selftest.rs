@@ -281,6 +281,31 @@ pub(super) fn selftest() -> Result<i32, CliError> {
             &no_rules,
         ),
     );
+    // Nor does it hide the guest's own failure: a guest that gave up (nonzero
+    // exit, no verdict) or aborted is classed exactly as it would be with the
+    // inert knob absent.
+    check(
+        "unverdicted-nonzero-exit-beats-vacuous-net",
+        CampaignClass::Unclassified,
+        classify(
+            &planted(RunFacts::ok().exit(4).vacuous("net"), ""),
+            &no_rules,
+        ),
+    );
+    check(
+        "guest-abort-beats-vacuous-net",
+        CampaignClass::GuestAbort,
+        classify(
+            &planted(
+                RunFacts::ok()
+                    .exit(SIGABRT_EXIT)
+                    .signal(SIGABRT)
+                    .vacuous("net"),
+                "",
+            ),
+            &no_rules,
+        ),
+    );
 
     // Patina's own end-of-run recorder failure (an unwritable trace, a bundle
     // that would not serialize) aborts the guest with a SIGABRT the guest never

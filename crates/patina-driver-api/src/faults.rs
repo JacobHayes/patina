@@ -426,8 +426,8 @@ impl ClockFaultReport {
 pub struct NetFaultReport {
     /// Fault-eligible send operations observed: datagram `send`s that reached
     /// the fault-decision point plus TCP `tcp_send`s that enqueued bytes. The
-    /// opportunity denominator for the drop, jitter, latency and duplication
-    /// classes.
+    /// opportunity denominator for the drop, jitter and latency classes;
+    /// duplication, which copies datagrams only, counts the datagram share.
     pub send_ops: u64,
     /// The drop knob was live over enough sends to expect repeated firing.
     pub drop_vacuity_diagnosable: bool,
@@ -446,7 +446,9 @@ pub struct NetFaultReport {
     /// latency. Zero here with the knob set is the defect-2 signature: a send
     /// path that ignores the configured latency entirely.
     pub latency_applied: u64,
-    /// The duplication knob was live over enough sends to expect repeated firing.
+    /// The duplication knob was live over enough datagram sends to expect
+    /// repeated firing. TCP sends never count: a stream segment is never
+    /// duplicated, so a TCP-only run leaves this false.
     pub duplicate_vacuity_diagnosable: bool,
     /// Datagrams that were actually delivered twice.
     pub duplicates_applied: u64,

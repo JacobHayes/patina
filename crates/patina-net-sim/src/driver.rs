@@ -21,6 +21,9 @@ pub(super) struct FaultCounts {
     /// Datagram sends that reached the fault-decision point (not pre-empted by a
     /// partition) plus `tcp_send`s that enqueued a segment.
     pub(super) send_ops: u64,
+    /// The datagram share of `send_ops`: the only sends duplication applies to,
+    /// so the duplicate class's vacuity is judged against these alone.
+    datagram_send_ops: u64,
     pub(super) drops_applied: u64,
     pub(super) jitter_applied: u64,
     pub(super) latency_applied: u64,
@@ -165,6 +168,7 @@ impl NetDriver for SimNet {
         // reached the knob-decision point rather than being pre-empted by a
         // partition. Counting does not consume the fault RNG or alter outcomes.
         self.counts.send_ops += 1;
+        self.counts.datagram_send_ops += 1;
         if self.decide_drop() {
             self.counts.drops_applied += 1;
             return Ok(SendReport {
@@ -748,8 +752,10 @@ impl NetDriver for SimNet {
             latency_vacuity_diagnosable: self.base_latency_nanos > 0
                 && vacuity_is_diagnosable(counts.send_ops, 1000),
             latency_applied: counts.latency_applied,
+            // Duplication copies datagrams only; a TCP segment is never
+            // duplicated, so stream sends are no opportunity for it.
             duplicate_vacuity_diagnosable: vacuity_is_diagnosable(
-                counts.send_ops,
+                counts.datagram_send_ops,
                 self.duplicate_permille,
             ),
             duplicates_applied: counts.duplicates_applied,
