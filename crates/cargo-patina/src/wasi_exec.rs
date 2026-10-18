@@ -1,7 +1,8 @@
 //! WASI run, build, audit, and compatibility fingerprints.
 
 use crate::native_build::{
-    native_build_executable, resolve_artifact, select_native_package_bin, trace_has_buggify,
+    create_output_parent, native_build_executable, resolve_artifact, select_native_package_bin,
+    trace_has_buggify,
 };
 use crate::parse::{buggify_env_pairs, knob_env_pairs, liveness_env_pairs};
 use crate::shim_build::lock_target_dir;
@@ -461,6 +462,10 @@ pub(super) fn run_wasi_build(
         invocation.bin.as_deref(),
         None,
     )?;
+    let destination = forced_output.or(invocation.output.as_deref());
+    if let Some(destination) = destination {
+        create_output_parent(destination)?;
+    }
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut command = Command::new(&cargo);
     command
@@ -491,7 +496,7 @@ pub(super) fn run_wasi_build(
         )));
     }
     let module = native_build_executable(&built.stdout, &selected.bin)?;
-    match forced_output.or(invocation.output.as_deref()) {
+    match destination {
         Some(destination) => {
             fs::copy(&module, destination).map_err(|error| {
                 CliError(format!(

@@ -220,6 +220,9 @@ pub(super) fn execute_native_build(invocation: NativeBuildInvocation) -> Result<
 /// by the `build` verb and build-on-the-fly (`run`/`audit`/`replay` of a
 /// source): both go through exactly this code.
 fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliError> {
+    if let Some(output) = &invocation.output {
+        create_output_parent(output)?;
+    }
     let shim = prepare_shim_sources()?;
     let rustc = check_native_toolchain_agreement(&shim.dir)?;
     let built_shim = build_native_shim(
@@ -607,6 +610,23 @@ pub(super) fn select_native_package_bin(
         bin: chosen,
         target_dir: metadata_target_dir(&metadata)?,
     })
+}
+
+/// Create the directory a build's `--output` names, as `--record` does for a
+/// trace, so the build can put its artifact there.
+pub(super) fn create_output_parent(output: &Path) -> Result<(), CliError> {
+    match output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(parent) => fs::create_dir_all(parent).map_err(|error| {
+            CliError(format!(
+                "failed to create output directory {}: {error}",
+                parent.display()
+            ))
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Locate the executable Cargo emitted for `bin` from its JSON build output.

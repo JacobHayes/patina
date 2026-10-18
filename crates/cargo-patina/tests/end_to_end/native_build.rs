@@ -153,6 +153,34 @@ mod tests {
         );
     }
 
+    // `--output` names a file whose directory need not exist yet: the build
+    // creates it, as `--record` does for a trace, and the binary it puts there
+    // runs.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_build_output_creates_its_parent_directory() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("nested.rs");
+        fs::write(&source, "fn main() { println!(\"NESTED_OUTPUT\"); }\n").unwrap();
+        let workspace = native_workspace();
+        let binary = directory.path().join("out/deeper/nested");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                binary.to_str().unwrap(),
+            ],
+        );
+        let ran = invoke(workspace, &["run", binary.to_str().unwrap(), "--seed", "1"]);
+        assert!(
+            String::from_utf8_lossy(&ran.stdout).contains("NESTED_OUTPUT"),
+            "the binary built into a new directory did not run:\n{}",
+            String::from_utf8_lossy(&ran.stdout)
+        );
+    }
+
     // Cargo may rewrite an unchanged executable during uplift. Its typed
     // compiler-artifact receipts expose freshness independently of file times.
     #[cfg(any(target_os = "linux", target_os = "macos"))]

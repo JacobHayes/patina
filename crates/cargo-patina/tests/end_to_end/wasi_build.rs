@@ -57,6 +57,45 @@ wasm32-wasip1 target not installed"
         );
     }
 
+    // A WASI `--output` whose directory does not exist yet: the build creates
+    // it, as the native build does, and the module it puts there runs.
+    #[test]
+    fn build_target_wasi_output_creates_its_parent_directory() {
+        if !wasm32_wasip1_installed() {
+            eprintln!(
+                "skipping build_target_wasi_output_creates_its_parent_directory: \
+wasm32-wasip1 target not installed"
+            );
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let package = directory.path().join("wasi-nested");
+        write_plain_package(
+            &package,
+            "wasi-nested",
+            "fn main() { println!(\"WASI_NESTED\"); }\n",
+        );
+        let workspace = native_workspace();
+        let module = directory.path().join("out/deeper/nested.wasm");
+        invoke(
+            workspace,
+            &[
+                "build",
+                package.to_str().unwrap(),
+                "--target",
+                "wasi",
+                "--output",
+                module.to_str().unwrap(),
+            ],
+        );
+        let ran = invoke(workspace, &["run", module.to_str().unwrap(), "--seed", "1"]);
+        assert!(
+            String::from_utf8_lossy(&ran.stdout).contains("WASI_NESTED"),
+            "the module built into a new directory did not run:\n{}",
+            String::from_utf8_lossy(&ran.stdout)
+        );
+    }
+
     // `run <pkg> --target wasi` builds the package for wasip1 on the fly and runs the
     // produced module, inferred by the shared resolution step.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
